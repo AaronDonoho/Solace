@@ -17,6 +17,14 @@ Roadmap: PROPOSAL.md §18 table. Phases are sequential; a phase ships only when 
 - [x] Spec 4 accepted: `specs/04-language-core.md` (Phase 1 subset; everything else listed as deferred).
 
 ## Current: Phase 1a — Store and protocol over Gleam (the central experiment)
+
+- [x] Large pilot (D-7): `pilot-large/`, 22 modules, 29.5k tokens of source, 98 tests. Plan and as-built notes: `bench/pilot-large-plan.md`.
+- [x] 10 large tasks `bench/tasks/L01-*`…`L10-*`, all validated.
+- [x] Large baseline `bench/results/20260927-221107-claude-sonnet-5/`: Sonnet 5, 5 tasks (L01, L03, L05, L06, L07), 1 run each, **5/5 pass**, median 1.6M tokens per task (1.13M work, 71%), 113k before first edit, $3.63 total. L02, L04, L08, L09 and L10 stay available for later.
+- [x] Comparison design (D-8): the Solace arm uses the protocol only, with no file tools.
+- [x] `solace-cli/` (Rust): import, session, view, inspect --context, refs, find, submit (symbol, --new, --imports, whole module), delete, check, test, work records, and `solace mcp` (D-9). Byte-exact round trip on pilot-large; inspect about 6 ms, submit plus type check about 0.5 s.
+- [ ] Solace arm run: Sonnet 5, the same 5 tasks, 1 run each (in progress).
+- **Phase 1a gaps against the specs** (add if the checkpoint passes): no changes/commit/base revisions (Spec 3 §4); no rename, copy, merge or extract (Spec 1 §5); no decision requests; doc comments stay in symbol text (Spec 2 §1); revisions hash comment-free text rather than identity-resolved content (Spec 1 §3); no export/import format (Spec 2 §4); unused imports are never removed.
 - SQLite store: symbol identities, revisions, references, work records, decisions.
 - Import Gleam modules into symbols; canonical projection via `gleam format`; export per §7.5.
 - Protocol CLI: `session start`, `inspect --context`, symbol-scoped submit, transactions (§14.5), work records, decision requests.
@@ -28,5 +36,5 @@ Roadmap: PROPOSAL.md §18 table. Phases are sequential; a phase ships only when 
 - **Gate 1:** agents build and maintain the pilot through the protocol alone; export round-trips losslessly.
 
 ## Open work records
-- **Before the Phase 1a checkpoint:** the pilot is ~300 lines, too small for the protocol to show an orientation win. Grow it, or add tasks spread across more code, before comparing.
+- **Benchmark metric:** tokens (see `bench.py report`: total, work = total minus fixed per-call prompt, tokens before first edit, uncached). Tool calls only explain token counts.
 - **Pilot has no HTTP layer.** Add one only if a benchmark task needs it.

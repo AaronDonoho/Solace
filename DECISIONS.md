@@ -48,3 +48,25 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
 - **Local variable names:** excluded from the revision hash, since renaming a local changes nothing semantically. Bindings are hashed by position. (Spec 1 §3, Spec 2 §1)
 - **State machines:** stay narrowed in Phase 1 (no data on states, no guards). Whether to widen them is revisited during Phase 1b. (Spec 4 §5)
 - **Who/when:** Aaron, 2026-09-27, in the spec walkthrough. Specs 1–4 accepted with these changes and D-4, D-5.
+
+## D-7 Benchmark sizes — decided
+- **Question:** The pilot is about 2.5k tokens, too small for the protocol to show a token saving. How big should the benchmark codebase be?
+- **Answer:** Build a second, larger pilot (`pilot-large/`) at about **30k tokens of source**, measured as source bytes ÷ 4. Keep the current pilot and its 10 tasks frozen as the small size point. The two sizes give a scaling curve.
+- **Rationale:** Efficiency is measured in tokens. In the small pilot, 75% of a run's tokens are fixed per-call overhead and reading the code costs almost nothing, so there's nothing for the protocol to save. Tasks are written before the code, so the code isn't tuned to them.
+- **Who/when:** Aaron (size), 2026-09-27
+- **Affects:** bench/, Phase 1a checkpoint
+
+## D-8 What the agent may use in the Solace arm — decided
+- **Question:** In the Phase 1a comparison, does the agent work through the Solace protocol only, or get the protocol on top of its normal file tools?
+- **Options:** (A) protocol only: no Read, Edit, Write, Glob or Grep on source files; reading and editing go through `solace` commands, and the agent can still run `gleam test`; (B) protocol plus the normal file tools.
+- **Answer:** (A).
+- **Rationale:** The proposal claims agents should work through the semantic model *instead of* files, and Gate 1 requires building and maintaining the pilot "through the protocol alone". (B) would largely measure the file workflow again if the agent falls back on familiar tools. Under (A), a run where the agent gets stuck shows a gap in the protocol.
+- **Who/when:** Aaron, 2026-09-27
+- **Affects:** bench harness (a second arm), Spec 3 (the protocol must cover everything the tasks need, including running tests)
+
+## D-9 Agents reach the protocol through MCP, not the shell — decided
+- **Question:** Spec 3 §1 has agents run `solace` through their shell, with an MCP wrapper only "if the benchmark shows it matters". Does it?
+- **Answer:** Yes. The Solace arm gives the agent one MCP tool, `solace` (`command` plus optional `text` for new code), served by `solace mcp`, and no built-in tools at all. The CLI stays for humans and scripts.
+- **Rationale:** In the first smoke run through the shell, (1) Claude Code auto-approved read-only commands such as `git status` and `git diff`, so the agent could see files despite D-8, and (2) Claude Code's shell safety check rejected heredocs containing ordinary Gleam (braces next to string quotes), forcing awkward `printf` workarounds. An MCP tool removes shell quoting and file access in one step.
+- **Who/when:** Claude, 2026-09-27, under D-8 (Aaron's choice of protocol-only). Reopen if it causes problems.
+- **Affects:** Spec 3 §1, bench harness

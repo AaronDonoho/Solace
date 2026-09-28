@@ -1,0 +1,109 @@
+diff --git a/src/pilot/reporting.gleam b/src/pilot/reporting.gleam
+index 69ae861..708e133 100644
+--- a/src/pilot/reporting.gleam
++++ b/src/pilot/reporting.gleam
+@@ -37,6 +37,15 @@ pub type ReturnsByReason {
+   ReturnsByReason(reason: String, returns: Int, refunded_cents: Int)
+ }
+ 
++pub type MonthlyRefunds {
++  MonthlyRefunds(
++    month: String,
++    reason: String,
++    returns: Int,
++    refunded_cents: Int,
++  )
++}
++
+ pub type RegionTax {
+   RegionTax(region: String, orders: Int, tax_cents: Int)
+ }
+@@ -139,6 +148,39 @@ pub fn returns_by_reason(db: Store) -> List(ReturnsByReason) {
+   })
+ }
+ 
++/// Refunded returns per month of refund (`"2026-03"`) and reason, sorted by
++/// month and then reason.
++pub fn refunds_by_month(db: Store) -> List(MonthlyRefunds) {
++  db.returns
++  |> dict.values
++  |> list.filter_map(fn(r) {
++    case r.status, r.refunded_at {
++      return_policy.Refunded, Some(at) -> {
++        let d = date.from_unix_ms(at)
++        let month = string.slice(date.to_iso(d), 0, 7)
++        Ok(#(#(month, return_policy.reason_name(r.reason)), r))
++      }
++      _, _ -> Error(Nil)
++    }
++  })
++  |> list.group(fn(pair) { pair.0 })
++  |> dict.to_list
++  |> list.map(fn(group) {
++    let #(#(month, reason), rows) = group
++    MonthlyRefunds(
++      month:,
++      reason:,
++      returns: list.length(rows),
++      refunded_cents: money.sum(
++        list.map(rows, fn(p) { { p.1 }.refund.total_cents }),
++      ),
++    )
++  })
++  |> list.sort(fn(a, b) {
++    string.compare(a.month <> a.reason, b.month <> b.reason)
++  })
++}
++
+ /// Everything refunded through payments, from returns and goodwill refunds.
+ pub fn total_refunded_cents(db: Store) -> Int {
+   db.payments
+diff --git a/src/pilot/return_policy.gleam b/src/pilot/return_policy.gleam
+index 683c71c..b2516fa 100644
+--- a/src/pilot/return_policy.gleam
++++ b/src/pilot/return_policy.gleam
+@@ -9,7 +9,7 @@
+ import gleam/bool
+ import gleam/dict.{type Dict}
+ import gleam/list
+-import gleam/option.{None, Some}
++import gleam/option.{type Option, None, Some}
+ import gleam/result
+ import gleam/string
+ import pilot/catalog.{type Category, Electronics}
+@@ -57,6 +57,7 @@ pub type ReturnRequest {
+     status: Status,
+     refund: RefundBreakdown,
+     requested_at: Int,
++    refunded_at: Option(Int),
+   )
+ }
+ 
+diff --git a/src/pilot/returns.gleam b/src/pilot/returns.gleam
+index 1bd2ed3..ecae362 100644
+--- a/src/pilot/returns.gleam
++++ b/src/pilot/returns.gleam
+@@ -2,6 +2,7 @@
+ 
+ import gleam/dict
+ import gleam/list
++import gleam/option.{None, Some}
+ import gleam/result
+ import pilot/audit
+ import pilot/catalog
+@@ -75,6 +76,7 @@ pub fn request(
+       status: return_policy.Requested,
+       refund:,
+       requested_at: now,
++      refunded_at: None,
+     )
+   let db =
+     db
+@@ -153,6 +155,7 @@ pub fn refund(
+   use refunded <- result.try(
+     return_policy.mark_refunded(request) |> result.map_error(Policy),
+   )
++  let refunded = return_policy.ReturnRequest(..refunded, refunded_at: Some(now))
+   use customer <- result.try(customer_for(db, request.order_id))
+   use payment <- result.try(
+     store.payment_for_order(db, request.order_id)

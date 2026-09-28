@@ -1,0 +1,68 @@
+diff --git a/src/pilot/pricing.gleam b/src/pilot/pricing.gleam
+index ebe66c5..852c985 100644
+--- a/src/pilot/pricing.gleam
++++ b/src/pilot/pricing.gleam
+@@ -62,14 +62,18 @@ pub fn quote(
+     Some(c) -> c.stacks_with_loyalty
+     None -> True
+   }
+-  let loyalty = case loyalty_applies {
+-    True -> money.percent(subtotal, customer.loyalty_discount_percent(tier))
+-    False -> 0
+-  }
+   let coupon_discount = case coupon {
+-    Some(c) -> promotions.discount(c, lines, subtotal - loyalty)
++    Some(c) -> promotions.discount(c, lines, subtotal)
+     None -> 0
+   }
++  let loyalty = case loyalty_applies {
++    True ->
++      money.percent(
++        subtotal - coupon_discount,
++        customer.loyalty_discount_percent(tier),
++      )
++    False -> 0
++  }
+   let units = list.fold(lines, 0, fn(sum, l) { sum + l.quantity })
+   let after_coupon = subtotal - loyalty - coupon_discount
+   let volume = case units >= volume_min_units {
+diff --git a/test/pilot/pricing_test.gleam b/test/pilot/pricing_test.gleam
+index cebebb4..66182f0 100644
+--- a/test/pilot/pricing_test.gleam
++++ b/test/pilot/pricing_test.gleam
+@@ -2,7 +2,7 @@ import gleam/option.{None, Some}
+ import pilot/customer.{Domestic, Gold, Standard}
+ import pilot/order.{Line}
+ import pilot/pricing
+-import pilot/promotions.{Coupon, FixedOff, FreeShipping, PercentOff}
++import pilot/promotions.{Coupon, FreeShipping, PercentOff}
+ import pilot/shipping
+ 
+ fn ship(cost) {
+@@ -28,21 +28,18 @@ pub fn plain_order_test() {
+   assert q.total_cents == 5824
+ }
+ 
+-pub fn loyalty_then_fixed_coupon_test() {
+-  // Gold: 5% of 7400 = 370, then $10 off the remaining 7030
++pub fn loyalty_and_coupon_test() {
++  // Gold 5% and 10% off: 7400 * 0.95 * 0.9 = 6327
+   let q =
+     pricing.quote(
+       [Line("L", 1, 7400)],
+       Gold,
+-      Some(coupon(FixedOff(1000), True)),
++      Some(coupon(PercentOff(10), True)),
+       ship(600),
+       Domestic("CA"),
+     )
+-  assert q.loyalty_discount_cents == 370
+-  assert q.coupon_discount_cents == 1000
+-  assert pricing.goods_cents(q) == 6030
+-  assert q.tax_cents == 437
+-  assert q.total_cents == 6030 + 600 + 437
++  assert pricing.goods_cents(q) == 6327
++  assert q.total_cents == 6327 + 600 + 459
+ }
+ 
+ pub fn non_stacking_coupon_skips_loyalty_test() {

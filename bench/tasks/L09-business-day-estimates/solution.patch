@@ -1,0 +1,16 @@
+diff --git a/src/pilot/date.gleam b/src/pilot/date.gleam
+index eb788e7..acacd6f 100644
+--- a/src/pilot/date.gleam
++++ b/src/pilot/date.gleam
+@@ -112,7 +112,10 @@ pub fn add_business_days(date: Date, days: Int) -> Date {
+     True -> date
+     False -> {
+       let next = add_days(date, 1)
+-      add_business_days(next, days - 1)
++      case is_weekend(next) {
++        True -> add_business_days(next, days)
++        False -> add_business_days(next, days - 1)
++      }
+     }
+   }
+ }

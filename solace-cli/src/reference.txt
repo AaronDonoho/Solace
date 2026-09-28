@@ -1,0 +1,41 @@
+Solace: this project's code lives in a semantic store. You read and change it
+one symbol (a function, type or constant) at a time. You cannot open files.
+
+Names: a symbol is `module.name`, e.g. `pilot/checkout.pay`. Any unambiguous
+suffix works: `checkout.pay`, or just `pay` if only one symbol has that name.
+Modules: `pilot/checkout`, or just `checkout`. Tests are symbols too, in test
+modules such as `pilot/checkout_test`.
+
+Reading (inspect --context usually answers more, for fewer tokens, than
+viewing whole modules)
+  solace session start            this overview
+  solace view <module>...         whole modules' source
+  solace view <name>...           symbols' source
+  solace inspect <name> --context the symbol, plus the signatures of everything
+                                  it uses, everything that uses it, and tests
+                                  that mention it
+  solace refs <name>              everything that uses a symbol
+  solace find <text>              case-insensitive search of all code, showing
+                                  matching lines per symbol
+
+Changing (the new code is the tool's `text` argument; from a shell, stdin)
+  solace submit <name>            replace a symbol with new code (may rename it)
+  solace submit --new <module>    add a symbol to a module
+  solace submit <module>          replace a whole module, as `view` shows it;
+                                  it must still contain every existing symbol
+  solace submit --imports <module>
+                                  replace a module's imports and module comment
+  solace delete <name>            remove a symbol (refused while anything uses it)
+
+  Each submit is type-checked. If the submitted symbol has errors, nothing is
+  saved. If it breaks other symbols (e.g. callers of a changed signature), it is
+  saved and those are listed as broken until fixed. Imports needed for
+  `module.name` references are added automatically; imports in submitted text
+  are added to the module.
+
+Checking
+  solace check                    type-check everything; lists broken symbols
+  solace test                     run all tests; shows failures only
+
+Work records (persist between sessions)
+  solace work add <text> | solace work list | solace work done <id>

@@ -1,0 +1,1 @@
+/home/aaron/Documents/Projects/solace/solace-cli/target/release/solace: /home/aaron/Documents/Projects/solace/solace-cli/src/gleam.rs /home/aaron/Documents/Projects/solace/solace-cli/src/main.rs /home/aaron/Documents/Projects/solace/solace-cli/src/reference.txt

@@ -1,0 +1,206 @@
+diff --git a/src/pilot/api.gleam b/src/pilot/api.gleam
+index 279da39..b6fa763 100644
+--- a/src/pilot/api.gleam
++++ b/src/pilot/api.gleam
+@@ -81,8 +81,10 @@ pub fn handle(db: Store, env: Env, request: Request) -> #(Store, Response) {
+     SubmitOrder(order_id) ->
+       checkout.submit(db, clock, order_id) |> order_result(db, 200)
+     PayOrder(order_id, token, method) ->
+-      checkout.pay(db, clock, env.gateway, order_id, token, method)
+-      |> order_result(db, 200)
++      case checkout.pay(db, clock, env.gateway, order_id, token, method) {
++        #(db, Ok(o)) -> #(db, Response(200, order_json(o)))
++        #(db, Error(e)) -> #(db, checkout_error(e))
++      }
+     CancelOrder(order_id, reason) ->
+       checkout.cancel(db, clock, order_id, reason) |> order_result(db, 200)
+     GetOrder(order_id) ->
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 41bcc69..3cd8078 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -184,7 +184,10 @@ pub fn submit(
+ }
+ 
+ /// Pays for a submitted order: re-checks the coupon, reserves stock and
+-/// authorizes the card. Nothing is stored unless every step succeeds.
++/// authorizes the card. Nothing about the order changes unless every step
++/// succeeds. When the card is declined or the payment provider is
++/// unavailable, the customer is emailed and the failure is audited: the
++/// returned store has those records even though the payment failed.
+ pub fn pay(
+   db: Store,
+   clock: Clock,
+@@ -192,6 +195,71 @@ pub fn pay(
+   order_id: Int,
+   card_token: String,
+   method: Method,
++) -> #(Store, Result(Order, CheckoutError)) {
++  case attempt_payment(db, clock, gateway, order_id, card_token, method) {
++    Ok(#(db, paid)) -> #(db, Ok(paid))
++    Error(Payment(payments.PaymentDeclined(reason, attempts)) as e) -> #(
++      payment_failed(db, clock, order_id, reason, attempts),
++      Error(e),
++    )
++    Error(Payment(payments.GatewayUnavailable(attempts)) as e) -> #(
++      payment_failed(
++        db,
++        clock,
++        order_id,
++        "payment provider unavailable",
++        attempts,
++      ),
++      Error(e),
++    )
++    Error(e) -> #(db, Error(e))
++  }
++}
++
++fn payment_failed(
++  db: Store,
++  clock: Clock,
++  order_id: Int,
++  reason: String,
++  attempts: Int,
++) -> Store {
++  let now = clock()
++  let db =
++    store.record(
++      db,
++      now,
++      actor,
++      "payment failed",
++      audit.order_subject(order_id),
++      reason,
++    )
++  case store.get_order(db, order_id) {
++    Ok(existing) ->
++      case store.get_customer(db, existing.customer_id) {
++        Ok(customer) ->
++          store.send(
++            db,
++            notifications.payment_failed(
++              customer,
++              order_id,
++              reason,
++              attempts,
++              now,
++            ),
++          )
++        Error(Nil) -> db
++      }
++    Error(Nil) -> db
++  }
++}
++
++fn attempt_payment(
++  db: Store,
++  clock: Clock,
++  gateway: Gateway,
++  order_id: Int,
++  card_token: String,
++  method: Method,
+ ) -> Result(#(Store, Order), CheckoutError) {
+   let now = clock()
+   use existing <- result.try(get_order(db, order_id))
+diff --git a/src/pilot/notifications.gleam b/src/pilot/notifications.gleam
+index 3ade00b..e364240 100644
+--- a/src/pilot/notifications.gleam
++++ b/src/pilot/notifications.gleam
+@@ -17,6 +17,7 @@ pub type Kind {
+   OrderShipped
+   OrderDelivered
+   OrderCancelled
++  PaymentFailed
+   RefundIssued
+   ReturnReceived
+ }
+@@ -136,6 +137,28 @@ pub fn cancelled(
+   )
+ }
+ 
++pub fn payment_failed(
++  customer: Customer,
++  order_id: Int,
++  reason: String,
++  attempts: Int,
++  now: Int,
++) -> Message {
++  Message(
++    to: customer.email,
++    subject: "Payment problem with your " <> order_ref(order_id),
++    body: greeting(customer)
++      <> "We couldn't take payment for your order: "
++      <> reason
++      <> ".\nAttempts: "
++      <> int.to_string(attempts)
++      <> "\nPlease check your card details and try again.\n",
++    kind: PaymentFailed,
++    order_id:,
++    created_at: now,
++  )
++}
++
+ pub fn refund_issued(
+   customer: Customer,
+   order_id: Int,
+diff --git a/test/pilot/checkout_test.gleam b/test/pilot/checkout_test.gleam
+index a9a0fa4..6a5e752 100644
+--- a/test/pilot/checkout_test.gleam
++++ b/test/pilot/checkout_test.gleam
+@@ -105,16 +105,13 @@ pub fn failed_payment_changes_nothing_test() {
+     support.draft(seed.demo_store(), seed.ada, [#("PHONES-BLK", 1)])
+   let c = support.on_day(0)
+   let assert Ok(#(db, _)) = checkout.submit(db, c, o.id)
+-  assert checkout.pay(
+-      db,
+-      c,
+-      payments.fake_gateway(),
+-      o.id,
+-      "tok_decline",
+-      Standard,
+-    )
++  let #(db, result) =
++    checkout.pay(db, c, payments.fake_gateway(), o.id, "tok_decline", Standard)
++  assert result
+     == Error(checkout.Payment(payments.PaymentDeclined("card declined", 1)))
+   assert inventory.available(db.stock, "WH-EAST", "PHONES-BLK") == 5
++  let assert [message] = store.sent_messages(db)
++  assert message.kind == notifications.PaymentFailed
+ }
+ 
+ pub fn pay_fails_when_out_of_stock_test() {
+@@ -122,7 +119,10 @@ pub fn pay_fails_when_out_of_stock_test() {
+   let c = support.on_day(0)
+   let assert Ok(#(db, _)) = checkout.submit(db, c, o.id)
+   assert checkout.pay(db, c, payments.fake_gateway(), o.id, "tok_ok", Standard)
+-    == Error(checkout.Inventory(inventory.InsufficientStock("LAMP-OAK", 7, 6)))
++    == #(
++      db,
++      Error(checkout.Inventory(inventory.InsufficientStock("LAMP-OAK", 7, 6))),
++    )
+ }
+ 
+ pub fn one_use_coupon_test() {
+@@ -130,7 +130,7 @@ pub fn one_use_coupon_test() {
+   let c = support.on_day(0)
+   let assert Ok(#(db, _)) = checkout.apply_coupon(db, c, o.id, "WELCOME15")
+   let assert Ok(#(db, _)) = checkout.submit(db, c, o.id)
+-  let assert Ok(#(db, _)) =
++  let assert #(db, Ok(_)) =
+     checkout.pay(db, c, payments.fake_gateway(), o.id, "tok_ok", Standard)
+   assert store.coupon_uses(db, "welcome15", seed.ada) == 1
+   let #(db, second) = support.draft(db, seed.ada, [#("MUG-BLUE", 1)])
+diff --git a/test/support.gleam b/test/support.gleam
+index 340163e..9567fe6 100644
+--- a/test/support.gleam
++++ b/test/support.gleam
+@@ -43,7 +43,7 @@ pub fn paid(
+   let #(db, o) = draft(db, customer_id, lines)
+   let c = on_day(0)
+   let assert Ok(#(db, _)) = checkout.submit(db, c, o.id)
+-  let assert Ok(#(db, o)) =
++  let assert #(db, Ok(o)) =
+     checkout.pay(
+       db,
+       c,

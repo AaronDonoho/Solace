@@ -1,0 +1,30 @@
+diff --git a/src/pilot/api.gleam b/src/pilot/api.gleam
+index 279da39..0239e12 100644
+--- a/src/pilot/api.gleam
++++ b/src/pilot/api.gleam
+@@ -35,6 +35,8 @@ pub type Request {
+   ApplyCoupon(order_id: Int, code: String)
+   RemoveCoupon(order_id: Int)
+   GetQuote(order_id: Int, method: Method)
++  /// The quote a draft order would get with a coupon, without applying it.
++  PreviewCoupon(order_id: Int, code: String, method: Method)
+   SubmitOrder(order_id: Int)
+   PayOrder(order_id: Int, card_token: String, method: Method)
+   CancelOrder(order_id: Int, reason: String)
+@@ -78,6 +80,16 @@ pub fn handle(db: Store, env: Env, request: Request) -> #(Store, Response) {
+         Ok(quote) -> #(db, Response(200, quote_json(quote)))
+         Error(e) -> #(db, checkout_error(e))
+       }
++    PreviewCoupon(order_id, code, method) -> {
++      let preview = case checkout.apply_coupon(db, clock, order_id, code) {
++        Ok(#(with_coupon, _)) -> checkout.quote(with_coupon, order_id, method)
++        Error(e) -> Error(e)
++      }
++      case preview {
++        Ok(quote) -> #(db, Response(200, quote_json(quote)))
++        Error(e) -> #(db, checkout_error(e))
++      }
++    }
+     SubmitOrder(order_id) ->
+       checkout.submit(db, clock, order_id) |> order_result(db, 200)
+     PayOrder(order_id, token, method) ->

@@ -18,5 +18,6 @@ A semantic programming system: programs are a store of identified, typed, verifi
 - `PROPOSAL.md`: design proposal
 - `DECISIONS.md`: decision records (§9.4 format)
 - `WORK.md`: roadmap and work records (§9.3 format)
-- `pilot/`: order service in plain Gleam, the benchmark baseline
-- `bench/`: benchmark tasks and harness (`python3 bench/bench.py validate|run`)
+- `pilot/`: small order service in plain Gleam (~2.5k tokens), the small benchmark size point
+- `pilot-large/`: large order service in plain Gleam (~30k tokens), the main benchmark baseline
+- `bench/`: benchmark tasks and harness (`python3 bench/bench.py validate|run|report`; tasks `0*` small, `L*` large)

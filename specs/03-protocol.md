@@ -7,7 +7,8 @@ The protocol is the agent's environment. It has few, rich commands that return c
 ## 1. Transport
 
 - A CLI, `solace <command>`, run through the agent's shell. Output is plain text by default; `--json` gives the same content as structured data.
-- **One process per call, no daemon**, as long as the latency budget (§7) holds. An MCP wrapper is added only if the benchmark shows per-call overhead matters.
+- **One process per call, no daemon**, as long as the latency budget (§7) holds.
+- **Agents use MCP** (D-9): `solace mcp` serves the same commands as one tool, `solace(command, text)`, so code is passed without shell quoting and the agent needs no shell.
 - The store lives at `.solace/store.db` in the project root. `solace` finds it by walking up from the working directory.
 - Exit codes: `0` success; `1` diagnostics (the command ran and reported problems); `2` usage error.
 
