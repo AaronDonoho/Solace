@@ -1,0 +1,44 @@
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 98e1630..72001cf 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -49,11 +49,18 @@ pub fn add_line(
+   )
+   use <- bool.guard(quantity <= 0, Error(InvalidQuantity(quantity)))
+   use _ <- result.try(get_product(db, sku))
++  let current =
++    existing.lines
++    |> list.find(fn(l) { l.sku == sku })
++    |> result.map(fn(l) { l.quantity })
++    |> result.unwrap(0)
++  let new_quantity = current + quantity
++  use <- bool.guard(new_quantity > 10, Error(InvalidQuantity(new_quantity)))
+   let lines = case list.any(existing.lines, fn(l) { l.sku == sku }) {
+     True ->
+       list.map(existing.lines, fn(l) {
+         case l.sku == sku {
+-          True -> Line(..l, quantity: l.quantity + quantity)
++          True -> Line(..l, quantity: new_quantity)
+           False -> l
+         }
+       })
+diff --git a/test/pilot/checkout_test.gleam b/test/pilot/checkout_test.gleam
+index 1cd067f..1cb57e0 100644
+--- a/test/pilot/checkout_test.gleam
++++ b/test/pilot/checkout_test.gleam
+@@ -51,6 +51,15 @@ pub fn add_line_validation_test() {
+     == Error(OrderNotEditable(Submitted))
+ }
+ 
++pub fn add_line_max_quantity_test() {
++  let c = clock.fixed(now)
++  let assert Ok(#(db, o)) = checkout.create_order(setup(), c, 1)
++  let assert Ok(#(db, _)) = checkout.add_line(db, c, o.id, "A", 6)
++  assert checkout.add_line(db, c, o.id, "A", 5) == Error(InvalidQuantity(11))
++  let assert Ok(o) = store.get_order(db, o.id)
++  assert o.lines == [Line("A", 6)]
++}
++
+ pub fn approve_fails_when_out_of_stock_and_reserves_nothing_test() {
+   let c = clock.fixed(now)
+   let assert Ok(#(db, o)) = checkout.create_order(setup(), c, 1)

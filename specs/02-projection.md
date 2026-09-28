@@ -1,12 +1,12 @@
 # Spec 2: Text Projection and Export Format
 
-**Status:** proposed · **Implements:** PROPOSAL.md §7, §16.4 · **Needed by:** Phase 1a
+**Status:** accepted 2026-09-27 · **Implements:** PROPOSAL.md §7, §16.4 · **Needed by:** Phase 1a
 
 Every revision has exactly one canonical text form. Agents read and write that text one symbol at a time; the store handles identities, references and bookkeeping.
 
 ## 1. Canonical form
 
-- One formatter, no options: Phase 1a uses `gleam format`, Phase 1b the Solace formatter. `projection(revision)` is a pure function; the same revision is always byte-identical.
+- One formatter, no options: Phase 1a uses `gleam format`, Phase 1b the Solace formatter. Projection is a pure function of the revision plus the names that the revision excludes: the symbol's own name, local names and the names of referenced symbols. The same inputs always give byte-identical text.
 - **Names in text.** A reference renders as the shortest name that is unambiguous from the symbol's own namespace: a bare name within the namespace, otherwise the fully qualified name. Input may use any unambiguous suffix (Spec 1 §4); the formatter canonicalizes it.
   - One consequence: adding a symbol elsewhere can make a bare name ambiguous and change how an unedited symbol renders. That changes the projection, never the revision (references are stored as identities).
 - **Prose is not in the text.** Descriptions and rationale are metadata, shown alongside the text by `inspect` (Spec 3). A doc comment in submitted text is split out into the description.
@@ -17,8 +17,9 @@ Every revision has exactly one canonical text form. Agents read and write that t
 
 1. parses the text; the text must contain exactly one top-level definition (`E0101` otherwise);
 2. resolves names to identities;
-3. runs the fast check (Spec 3 §6) on the symbol and its dependents;
-4. records the new revision if there are no errors; otherwise changes nothing and returns diagnostics.
+3. runs the fast check (Spec 3 §6) on the symbol itself;
+4. if the symbol has errors, changes nothing and returns the diagnostics;
+5. otherwise records the new revision, rechecks the symbol's dependents, and lists any it broke as **broken dependents** of the open change (Spec 3 §4).
 
 There is no find-and-replace, no line numbers across symbols, and no partial-text edit. Line numbers exist only within a symbol's text.
 

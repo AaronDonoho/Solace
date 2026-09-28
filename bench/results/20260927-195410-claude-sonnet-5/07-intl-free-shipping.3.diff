@@ -1,0 +1,39 @@
+diff --git a/src/pilot/pricing.gleam b/src/pilot/pricing.gleam
+index 84a0900..790a031 100644
+--- a/src/pilot/pricing.gleam
++++ b/src/pilot/pricing.gleam
+@@ -18,6 +18,8 @@ const discount_threshold_cents = 10_000
+ 
+ const free_shipping_threshold_cents = 5000
+ 
++const international_free_shipping_threshold_cents = 20_000
++
+ const domestic_shipping_cents = 500
+ 
+ const international_shipping_cents = 2000
+@@ -38,6 +40,8 @@ pub fn quote(lines: List(#(Line, Product)), region: Region) -> Quote {
+   let shipping = case region {
+     Domestic if taxable >= free_shipping_threshold_cents -> 0
+     Domestic -> domestic_shipping_cents
++    International if taxable >= international_free_shipping_threshold_cents ->
++      0
+     International -> international_shipping_cents
+   }
+   let tax = case region {
+diff --git a/test/pilot/pricing_test.gleam b/test/pilot/pricing_test.gleam
+index 9a44937..cd5f853 100644
+--- a/test/pilot/pricing_test.gleam
++++ b/test/pilot/pricing_test.gleam
+@@ -43,3 +43,12 @@ pub fn international_flat_shipping_no_tax_test() {
+       total_cents: 20_000,
+     )
+ }
++
++pub fn international_free_shipping_at_threshold_test() {
++  let q = pricing.quote(lines(22_222, 1), International)
++  assert q.discount_cents == 2222
++  assert q.shipping_cents == 0
++  let q = pricing.quote(lines(22_221, 1), International)
++  assert q.discount_cents == 2222
++  assert q.shipping_cents == 2000
++}

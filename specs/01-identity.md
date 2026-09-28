@@ -1,6 +1,6 @@
 # Spec 1: Identity and Revision Model
 
-**Status:** proposed · **Implements:** PROPOSAL.md §6 · **Needed by:** Phase 1a
+**Status:** accepted 2026-09-27 · **Implements:** PROPOSAL.md §6 · **Needed by:** Phase 1a
 
 Every symbol has one stable identity and a sequence of revisions. Identity follows the operation performed, never textual similarity.
 
@@ -32,8 +32,8 @@ Examples, contracts and effects are part of their function's content, not separa
 
 A revision is `sha256:` + the hex SHA-256 of the symbol's **normalized content**:
 
-- **Included:** the canonical text (Spec 2) of the signature, effects, contracts, examples and body, with every reference to another symbol replaced by that symbol's identity. Parameter labels and local variable names are included (labels are API; renaming a local is a real edit, and treating it as one keeps the rule simple).
-- **Excluded:** the symbol's own name and namespace, formatting (canonical anyway), and all prose metadata.
+- **Included:** the canonical text (Spec 2) of the signature, effects, contracts, examples and body, with every reference to another symbol replaced by that symbol's identity. Parameter labels are included, because labels are API. **Local names are not** (D-6): each local binding is hashed by its binding position (like de Bruijn indices), so renaming a local has no semantic effect and creates no new revision.
+- **Excluded:** the symbol's own name and namespace, local variable names, formatting (canonical anyway), and all prose metadata.
 
 Consequences, each a test:
 
@@ -42,6 +42,7 @@ Consequences, each a test:
 - R3. Editing only a description or rationale leaves the revision unchanged.
 - R4. Two symbols with identical normalized content have identical revisions (duplicate detection, §6.3).
 - R5. Reformatting submitted text leaves the revision unchanged.
+- R6. Renaming a local variable leaves the revision unchanged; the new name is stored and shown in the projection.
 
 Verification evidence attaches to `(identity, revision)`. When a revision changes, evidence for it becomes stale. So does evidence for any dependent that relied on something the change touched: its signature, effects or contracts. A body-only change leaves dependents' evidence fresh.
 

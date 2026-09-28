@@ -1,0 +1,147 @@
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 98e1630..fa441d2 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -48,7 +48,7 @@ pub fn add_line(
+     Error(OrderNotEditable(existing.status)),
+   )
+   use <- bool.guard(quantity <= 0, Error(InvalidQuantity(quantity)))
+-  use _ <- result.try(get_product(db, sku))
++  use product <- result.try(get_product(db, sku))
+   let lines = case list.any(existing.lines, fn(l) { l.sku == sku }) {
+     True ->
+       list.map(existing.lines, fn(l) {
+@@ -57,7 +57,10 @@ pub fn add_line(
+           False -> l
+         }
+       })
+-    False -> list.append(existing.lines, [Line(sku:, quantity:)])
++    False ->
++      list.append(existing.lines, [
++        Line(sku:, quantity:, unit_price_cents: product.price_cents),
++      ])
+   }
+   let updated = order.Order(..existing, lines:, updated_at: clock())
+   Ok(#(store.put_order(db, updated), updated))
+@@ -121,13 +124,7 @@ pub fn quote(db: Store, order_id: Int) -> Result(Quote, CheckoutError) {
+     store.get_customer(db, existing.customer_id)
+     |> result.replace_error(UnknownCustomer(existing.customer_id)),
+   )
+-  use priced <- result.try(
+-    list.try_map(existing.lines, fn(line) {
+-      use product <- result.map(get_product(db, line.sku))
+-      #(line, product)
+-    }),
+-  )
+-  Ok(pricing.quote(priced, customer.region))
++  Ok(pricing.quote(existing.lines, customer.region))
+ }
+ 
+ fn apply(
+diff --git a/src/pilot/order.gleam b/src/pilot/order.gleam
+index 3d2f286..e071898 100644
+--- a/src/pilot/order.gleam
++++ b/src/pilot/order.gleam
+@@ -14,7 +14,7 @@ pub type Status {
+ }
+ 
+ pub type Line {
+-  Line(sku: String, quantity: Int)
++  Line(sku: String, quantity: Int, unit_price_cents: Int)
+ }
+ 
+ pub type Order {
+diff --git a/src/pilot/pricing.gleam b/src/pilot/pricing.gleam
+index 84a0900..ead7532 100644
+--- a/src/pilot/pricing.gleam
++++ b/src/pilot/pricing.gleam
+@@ -2,7 +2,6 @@ import gleam/int
+ import gleam/list
+ import pilot/customer.{type Region, Domestic, International}
+ import pilot/order.{type Line}
+-import pilot/product.{type Product}
+ 
+ pub type Quote {
+   Quote(
+@@ -24,11 +23,11 @@ const international_shipping_cents = 2000
+ 
+ const domestic_tax_percent = 8
+ 
+-/// Prices lines whose products have already been looked up.
+-pub fn quote(lines: List(#(Line, Product)), region: Region) -> Quote {
++/// Prices lines using their own locked-in unit price, with no product lookup.
++pub fn quote(lines: List(Line), region: Region) -> Quote {
+   let subtotal =
+     lines
+-    |> list.map(fn(pair) { { pair.0 }.quantity * { pair.1 }.price_cents })
++    |> list.map(fn(line) { line.quantity * line.unit_price_cents })
+     |> int.sum
+   let discount = case subtotal >= discount_threshold_cents {
+     True -> subtotal / 10
+diff --git a/test/pilot/checkout_test.gleam b/test/pilot/checkout_test.gleam
+index 1cd067f..699c66a 100644
+--- a/test/pilot/checkout_test.gleam
++++ b/test/pilot/checkout_test.gleam
+@@ -23,7 +23,7 @@ pub fn full_checkout_test() {
+   let assert Ok(#(db, _)) = checkout.add_line(db, c, o.id, "A", 2)
+   let assert Ok(#(db, _)) = checkout.add_line(db, c, o.id, "A", 1)
+   let assert Ok(#(db, o)) = checkout.add_line(db, c, o.id, "B", 1)
+-  assert o.lines == [Line("A", 3), Line("B", 1)]
++  assert o.lines == [Line("A", 3, 1000), Line("B", 1, 2500)]
+   let assert Ok(q) = checkout.quote(db, o.id)
+   assert q.total_cents == 5500 + 0 + 440
+   let assert Ok(#(db, _)) = checkout.submit(db, c, o.id)
+@@ -51,6 +51,24 @@ pub fn add_line_validation_test() {
+     == Error(OrderNotEditable(Submitted))
+ }
+ 
++pub fn price_is_locked_in_when_line_is_added_test() {
++  let c = clock.fixed(now)
++  let assert Ok(#(db, o)) = checkout.create_order(setup(), c, 1)
++  let assert Ok(#(db, _)) = checkout.add_line(db, c, o.id, "A", 1)
++  // Catalog price changes after the line was added.
++  let db = store.put_product(db, Product("A", "Widget", 2000, 5))
++  // Merging more quantity into the existing line keeps the original price.
++  let assert Ok(#(db, o)) = checkout.add_line(db, c, o.id, "A", 1)
++  assert o.lines == [Line("A", 2, 1000)]
++  let assert Ok(q) = checkout.quote(db, o.id)
++  assert q.subtotal_cents == 2000
++  // A brand new line locks in the current (changed) catalog price.
++  let assert Ok(#(db, o)) = checkout.add_line(db, c, o.id, "B", 1)
++  assert o.lines == [Line("A", 2, 1000), Line("B", 1, 2500)]
++  let assert Ok(q) = checkout.quote(db, o.id)
++  assert q.subtotal_cents == 4500
++}
++
+ pub fn approve_fails_when_out_of_stock_and_reserves_nothing_test() {
+   let c = clock.fixed(now)
+   let assert Ok(#(db, o)) = checkout.create_order(setup(), c, 1)
+diff --git a/test/pilot/order_test.gleam b/test/pilot/order_test.gleam
+index bb1ba1b..494baa5 100644
+--- a/test/pilot/order_test.gleam
++++ b/test/pilot/order_test.gleam
+@@ -4,7 +4,7 @@ import pilot/order.{
+ }
+ 
+ fn with_line() {
+-  order.Order(..order.new(1, 1, 0), lines: [Line("A", 1)])
++  order.Order(..order.new(1, 1, 0), lines: [Line("A", 1, 1000)])
+ }
+ 
+ pub fn happy_path_test() {
+diff --git a/test/pilot/pricing_test.gleam b/test/pilot/pricing_test.gleam
+index 9a44937..0491010 100644
+--- a/test/pilot/pricing_test.gleam
++++ b/test/pilot/pricing_test.gleam
+@@ -1,10 +1,9 @@
+ import pilot/customer.{Domestic, International}
+ import pilot/order.{Line}
+ import pilot/pricing.{Quote}
+-import pilot/product.{Product}
+ 
+ fn lines(price: Int, quantity: Int) {
+-  [#(Line("A", quantity), Product("A", "Widget", price, 100))]
++  [Line("A", quantity, price)]
+ }
+ 
+ pub fn small_domestic_order_pays_shipping_and_tax_test() {

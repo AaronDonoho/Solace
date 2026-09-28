@@ -1,6 +1,6 @@
 # Spec 4: Language Core (Phase 1 subset)
 
-**Status:** proposed · **Implements:** PROPOSAL.md §8, limited to the §18.3 list · **Needed by:** Phase 1b
+**Status:** accepted 2026-09-27 · **Implements:** PROPOSAL.md §8, limited to the §18.3 list · **Needed by:** Phase 1b
 
 This spec defines only what Phase 1 builds. Anything else from §8 is listed under Deferred and is a compile error (`E0001 not yet supported`) until a later spec adds it. This file doubles as the draft of the language reference an agent reads at session start, so it must stay short.
 
@@ -55,17 +55,27 @@ fn quote(lines: List<Line>, region: Region) -> Quote
 
 - **Signatures are always written**: parameter types, return type and the `effects:` line. Types inside bodies are inferred (Hindley-Milner with let-generalization).
 - **Argument labels are required** at call sites. The label may be omitted only when the argument is a variable with the same name (`quote(lines, region: r)`). The parameter name is the label.
-- `requires:` and `ensures:` are boolean expressions, with `result` bound in `ensures`. In Phase 1 they are **checked at run time** on every call and fail with a contract violation that names the clause. Static proof is Phase 2.
+- `requires:` and `ensures:` are boolean expressions, with `result` bound in `ensures`. A clause the checker can decide at compile time (for example, one over constants or literal arguments) is checked then: a clause that is always false is an error (`E4001`), and one that is always true is dropped. Every other clause is **checked at run time** on every call and fails with a contract violation that names the clause (D-6). Phase 2's solver moves more clauses to compile time.
 - `examples:` lines are `call => expected value`. Each runs as a test (§7).
 - **Expressions:** `let` (immutable), `if … { } else { }`, `match`, blocks where the last expression is the value, field access, record update, lambdas `fn(x) { … }`, and the pipe `|>`, which fills the first parameter.
 - **`match` is exhaustive** (`E2030` lists the missing patterns). Patterns: constructors, literals, lists `[a, ..rest]`, `_`, bindings, and `if` guards.
-- **Failure:** `fail("message")` is the only way to crash on purpose, and a function that can reach it declares the `Fail` effect. Failure otherwise goes through `Result`; there is no `try`/`catch`. A `?` suffix on a `Result` expression returns early on `Err`, and the error types must match exactly.
+- **Failure:** `fail("message")` is the only way to crash on purpose, and a function that can reach it declares the `Fail` effect. Failure otherwise goes through `Result`; there are no exceptions and no `catch`.
+- **Propagation and fallback** (D-5):
+  ```
+  let n    = try parse(text: s)          // Err(e): return Err(e) from this function
+  let name = lookup(id: i) else "guest"  // Err or None: use the fallback
+  ```
+  - `try <expr>` works on `Result` (the error type must match the function's exactly; there is no implicit conversion) and on `Option` (in a function returning `Option`).
+  - `<expr> else <fallback>` works on `Result` and `Option` only; the fallback has the success type. Nothing is truthy or falsey: using `else` on any other type is `E2040`.
+  - An `else` directly after an `if` block always belongs to the `if`. To apply a fallback to an `if` expression, wrap it in parentheses.
+  - To use the error value itself, write a `match`.
+  - Each `else` is a branch like any other: it gets an expression id, appears in the decision tree, and is targeted by test generation.
 
 ## 4. Effects as capabilities
 
 - Phase 1 capabilities: `Clock` (`now() -> Int`, in Unix ms), `Random` (`int(min:, max:)`, `float()`), `Log` (`info(message:)`, `error(message:)`).
 - A function uses a capability only through a parameter of that type. `effects:` lists the operations it and its callees use, for example `effects: Clock.read, Log.write`. Operation groups: `Clock.read`, `Random.read`, `Log.write`, plus `Fail`.
-- The checker computes the exact effect set. A mismatch in either direction is an error (`E3001` undeclared, `E3002` declared but unused), with a fix.
+- The checker computes the exact effect set. An undeclared effect is an error (`E3001`), with a fix. A declared but unused effect is a warning (`W3002`) and is compiled out: callers are charged only with the effects actually used (D-6).
 - **Test fakes:** `Clock.fixed(at:)`, `Clock.stepping(start:, step:)`, `Random.seeded(seed:)`, `Log.capture()` together with `Log.lines(log:)`.
 - **Entry points** are functions called from Erlang or the test runner. The runtime builds the real capabilities; nothing else can.
 
@@ -86,7 +96,7 @@ machine OrderStatus {
 
 - A machine defines a type whose values are its states, and one function per transition: `OrderStatus.submit(state:) -> Result<OrderStatus, InvalidTransition>`.
 - The checker reports states unreachable from `initial` (`E4010`), transitions out of a terminal state (`E4011`), and non-terminal states with no outgoing transition (`W4012`).
-- Phase 1 states carry no data, and transitions have no guards. Keep data in the enclosing record, and put guards in the calling function's `requires:`.
+- Phase 1 states carry no data, and transitions have no guards. Keep data in the enclosing record, and put guards in the calling function's `requires:`. Widening this is revisited during Phase 1b, once the pilot port shows whether it's needed (D-6).
 
 ## 6. Typed holes
 

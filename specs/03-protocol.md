@@ -1,6 +1,6 @@
 # Spec 3: Agent Protocol and Diagnostics
 
-**Status:** proposed · **Implements:** PROPOSAL.md §14 · **Needed by:** Phase 1a
+**Status:** accepted 2026-09-27 · **Implements:** PROPOSAL.md §14 · **Needed by:** Phase 1a
 
 The protocol is the agent's environment. It has few, rich commands that return compact text. Anything a human can see or do is available here (parity).
 
@@ -47,7 +47,9 @@ The target size is under 2,000 tokens for a typical pilot function. Nothing in a
 
 ## 4. Changes and transactions
 
-- Each session has one **open change**. `submit` and the structural commands apply to it immediately. Each command is atomic, and the fast check must pass, so the change is always in a checked state.
+- Each session has one **open change**. `submit` and the structural commands apply to it immediately, and each is atomic.
+- A submitted symbol must pass its own fast check. Dependents it breaks, such as callers of a changed signature, are tracked as the change's **broken dependents**. They are shown after every submit and in `diff`, and they clear as each one is fixed. This allows refactors one step at a time.
+- `commit` is refused (`E5103`) while the change has broken dependents.
 - A change records its **base revisions**: the revision of each symbol it touched, as first read.
 - `commit` publishes the change to the main line. If another commit changed any base revision in the meantime, the commit is rejected with `E5101`, listing the symbols and a semantic diff of what changed. Nothing is merged silently.
 - **Semantic conflicts:** if another commit changed the signature, effects or contracts of a symbol this change *uses*, even one it didn't edit, `commit` re-runs the fast check on the change and rejects it on failure (`E5102`).
@@ -97,3 +99,4 @@ Over Gleam, the fast check calls `gleam check` on a generated project materializ
 - A4. A work record opened in one session appears in the next session's `session start`.
 - A5. A single type error in a type used by 5 functions yields one root diagnostic with `caused by above: 5 more`, not 6 separate ones.
 - A6. The latency budgets in §7 are met on the pilot, measured in CI.
+- A7. Changing a signature records the new revision and lists its callers as broken dependents; `commit` is refused with `E5103` until they are fixed.

@@ -1,0 +1,66 @@
+diff --git a/src/pilot/pricing.gleam b/src/pilot/pricing.gleam
+index 84a0900..525230a 100644
+--- a/src/pilot/pricing.gleam
++++ b/src/pilot/pricing.gleam
+@@ -14,7 +14,13 @@ pub type Quote {
+   )
+ }
+ 
+-const discount_threshold_cents = 10_000
++const mid_discount_threshold_cents = 10_000
++
++const mid_discount_percent = 10
++
++const high_discount_threshold_cents = 20_000
++
++const high_discount_percent = 15
+ 
+ const free_shipping_threshold_cents = 5000
+ 
+@@ -30,9 +36,12 @@ pub fn quote(lines: List(#(Line, Product)), region: Region) -> Quote {
+     lines
+     |> list.map(fn(pair) { { pair.0 }.quantity * { pair.1 }.price_cents })
+     |> int.sum
+-  let discount = case subtotal >= discount_threshold_cents {
+-    True -> subtotal / 10
+-    False -> 0
++  let discount = case subtotal {
++    _ if subtotal >= high_discount_threshold_cents ->
++      subtotal * high_discount_percent / 100
++    _ if subtotal >= mid_discount_threshold_cents ->
++      subtotal * mid_discount_percent / 100
++    _ -> 0
+   }
+   let taxable = subtotal - discount
+   let shipping = case region {
+diff --git a/test/pilot/pricing_test.gleam b/test/pilot/pricing_test.gleam
+index 9a44937..c2703f8 100644
+--- a/test/pilot/pricing_test.gleam
++++ b/test/pilot/pricing_test.gleam
+@@ -33,13 +33,22 @@ pub fn discount_at_threshold_test() {
+   assert q.discount_cents == 0
+ }
+ 
++pub fn discount_at_high_threshold_test() {
++  let q = pricing.quote(lines(20_000, 1), Domestic)
++  assert q.discount_cents == 3000
++  let q = pricing.quote(lines(19_999, 1), Domestic)
++  assert q.discount_cents == 1999
++  let q = pricing.quote(lines(20_007, 1), Domestic)
++  assert q.discount_cents == 3001
++}
++
+ pub fn international_flat_shipping_no_tax_test() {
+-  assert pricing.quote(lines(20_000, 1), International)
++  assert pricing.quote(lines(15_000, 1), International)
+     == Quote(
+-      subtotal_cents: 20_000,
+-      discount_cents: 2000,
++      subtotal_cents: 15_000,
++      discount_cents: 1500,
+       shipping_cents: 2000,
+       tax_cents: 0,
+-      total_cents: 20_000,
++      total_cents: 15_500,
+     )
+ }
