@@ -648,7 +648,7 @@ This returns:
 
 - The language reference version.
 - The policy rules that apply to the scope.
-- A symbol index: every symbol in scope on one line, with its name, signature and one-line description. At about 15–25 tokens per symbol, a 300-symbol project costs about 6k tokens once, far less than the search-and-read turns it replaces. For large projects, `--scope` narrows the index, and each namespace shows "N more" beyond a cap.
+- A symbol index: the names of every symbol in scope, grouped by namespace with its one-line description. Agents re-send their whole context on every turn, so nothing here is paid once: the index must stay small. Names only cost about 3 tokens per symbol (about 1k for a 300-symbol project); signatures come from `inspect`, or from a namespace outline. For large projects, `--scope` narrows the index, and each namespace shows "N more" beyond a cap.
 - Open work records for the symbols in scope, each expanded with the context bundles of the symbols it names (section 9.3).
 - Decisions made since the last session touched the scope.
 

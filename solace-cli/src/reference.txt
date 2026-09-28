@@ -25,6 +25,10 @@ several symbols in one call rather than one at a time)
 Changing (the new code is the tool's `text` argument; from a shell, stdin)
   solace submit <name>            replace a symbol with new code (may rename it)
   solace submit --new <module>    add a symbol to a module
+  solace submit                   several symbols at once, checked together
+                                  (e.g. a type and its callers): blocks each
+                                  headed `// ── <module>.<name> ──`, as view
+                                  and inspect print them; a new name adds it
   solace submit <module>          replace a whole module, as `view --bodies`
                                   shows it; it must still contain every
                                   existing symbol
@@ -34,9 +38,10 @@ Changing (the new code is the tool's `text` argument; from a shell, stdin)
 
   Each submit is type-checked. If the submitted symbol has errors, nothing is
   saved. If it breaks other symbols (e.g. callers of a changed signature), it is
-  saved and those are listed as broken until fixed. Imports needed for
-  `module.name` references are added automatically; imports in submitted text
-  are added to the module.
+  saved and those are listed as broken until fixed. Missing imports are added
+  automatically (for `module.name` references and for unqualified types and
+  constructors such as `Option` or `None`); imports in submitted text are
+  merged into the module's imports.
 
 Checking
   solace check                    type-check everything; lists broken symbols

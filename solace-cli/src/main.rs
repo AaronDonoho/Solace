@@ -77,10 +77,11 @@ fn run(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>) -> O
         ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context")),
         ["refs", name] => store.refs(name),
         ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
-        ["submit", "--new", module] => store.submit(Target::New(module), &input()?),
+        ["submit"] => store.submit_symbols(None, None, &input()?),
+        ["submit", "--new", module] => store.submit_symbols(None, Some(module), &input()?),
         ["submit", "--imports", module] => store.submit(Target::Imports(module), &input()?),
         ["submit", name] if !name.contains('.') && store.is_module(name)? => store.submit(Target::Module(name), &input()?),
-        ["submit", name] => store.submit(Target::Existing(name), &input()?),
+        ["submit", name] => store.submit_symbols(Some(name), None, &input()?),
         ["delete", name] => store.delete(name),
         ["check"] => store.check(),
         ["test"] => store.test(),
@@ -206,8 +207,6 @@ struct Index {
 }
 
 enum Target<'a> {
-    Existing(&'a str),
-    New(&'a str),
     Imports(&'a str),
     /// A whole module's text, as `view <module>` shows it.
     Module(&'a str),
@@ -474,12 +473,15 @@ impl Store {
     /// The symbol index (one line per source symbol), test modules, and open
     /// work records expanded with the context of the symbols they name.
     fn session(&self, scopes: &[&str]) -> Out {
-        const CAP: usize = 40;
+        const CAP: usize = 80;
         let ix = self.index()?;
         let in_scope = |m: &ModuleRow| {
             scopes.is_empty() || scopes.iter().any(|s| self.resolve_module(&ix, s).is_some_and(|r| r.path == m.path))
         };
-        let mut out = String::from("Symbols (signature, description). Tests are listed per module after them.\n");
+        let mut out = String::from(
+            "Symbols per module (types are capitalized). `inspect <name>...` gives signatures and context; \
+             `view <module>` an outline.\n",
+        );
         let mut tests = vec![];
         for m in ix.modules.iter().filter(|m| in_scope(m)) {
             let syms: Vec<&Sym> = ix.syms.iter().filter(|s| s.module == m.path).collect();
@@ -487,13 +489,10 @@ impl Store {
                 tests.push(format!("{} ({})", m.path, syms.len()));
                 continue;
             }
-            out += &format!("\n{} — {}\n", m.path, module_doc(m));
-            for s in syms.iter().take(CAP) {
-                out += &format!("  {}\n", index_line(s));
-            }
-            if syms.len() > CAP {
-                out += &format!("  …{} more (solace view {})\n", syms.len() - CAP, m.path);
-            }
+            // Names only: this is re-sent on every turn, so it must stay small (D-12).
+            let names: Vec<&str> = syms.iter().take(CAP).map(|s| s.name.as_str()).collect();
+            let more = if syms.len() > CAP { format!(", …{} more", syms.len() - CAP) } else { String::new() };
+            out += &format!("{} — {}\n  {}{more}\n", m.path, module_doc(m), names.join(", "));
         }
         out += &format!("\nTest modules (tests): {}\n", tests.join(", "));
         out += &self.status()?;
@@ -577,8 +576,12 @@ impl Store {
         let ix = self.index()?;
         let mut out = String::new();
         for name in names {
-            let i = self.resolve(&ix, name)?;
-            out += &self.bundle(&ix, i, context)?;
+            match self.resolve(&ix, name) {
+                Ok(i) => out += &self.bundle(&ix, i, context)?,
+                // a module name gets its outline rather than an error
+                Err(_) if self.resolve_module(&ix, name).is_some() => out += &self.view(&[name], false)?,
+                Err(e) => return Err(e),
+            }
             out += "\n";
         }
         Ok(out)
@@ -673,17 +676,14 @@ impl Store {
         let ix = self.index()?;
         let (module, mut notes) = match target {
             Target::Imports(m) => (self.resolve_module(&ix, m).ok_or_else(|| Failure(format!("E1003 unknown module: {m}"), 1))?.path.clone(), vec![]),
-            Target::New(m) | Target::Module(m) => {
+            Target::Module(m) => {
                 (self.resolve_module(&ix, m).ok_or_else(|| Failure(format!("E1003 unknown module: {m}"), 1))?.path.clone(), vec![])
             }
-            Target::Existing(name) => (ix.syms[self.resolve(&ix, name)?].module.clone(), vec![]),
         };
         let header = &ix.modules.iter().find(|m| m.path == module).unwrap().header;
-        let ix_before = &ix;
-
         self.db.execute_batch("BEGIN")?;
         let result = (|| -> Result<(Option<String>, String), Failure> {
-            let target_name = match target {
+            let target_name: Option<String> = match target {
                 Target::Module(_) => {
                     let existing: Vec<&Sym> = ix.syms.iter().filter(|s| s.module == module).collect();
                     let key = |name: &str, kind: Kind| (name.to_string(), kind == Kind::Type);
@@ -740,59 +740,6 @@ impl Store {
                     self.set_header(&module, &parsed.header)?;
                     None
                 }
-                Target::New(_) | Target::Existing(_) => {
-                    let [item] = parsed.items.as_slice() else {
-                        return fail(format!(
-                            "E0101 submit one symbol at a time: the text defines {} ({}).",
-                            parsed.items.len(),
-                            parsed.items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>().join(", ")
-                        ));
-                    };
-                    let existing = match target {
-                        Target::Existing(name) => Some(&ix.syms[self.resolve(&ix, name)?]),
-                        _ => None,
-                    };
-                    let clash = ix.syms.iter().find(|s| {
-                        s.module == module
-                            && s.name == item.name
-                            && (s.kind == Kind::Type) == (item.kind == Kind::Type)
-                            && existing.is_none_or(|e| e.id != s.id)
-                    });
-                    if let Some(c) = clash {
-                        return fail(format!("E1004 {} already exists; submit to it instead.", c.qname()));
-                    }
-                    let mut header = header.clone();
-                    for line in parsed.header.lines().filter(|l| l.starts_with("import ")) {
-                        if !header.lines().any(|h| h == line) {
-                            header = add_import(&header, line);
-                            notes.push(format!("added `{line}` to {module}"));
-                        }
-                    }
-                    for path in missing_imports(&ix, &header, &item.text) {
-                        header = add_import(&header, &format!("import {path}"));
-                        notes.push(format!("added `import {path}` to {module}"));
-                    }
-                    self.set_header(&module, &header)?;
-                    match existing {
-                        Some(e) => {
-                            self.db.execute(
-                                "UPDATE symbols SET name = ?2, kind = ?3, text = ?4, revision = ?5 WHERE id = ?1",
-                                params![e.id, item.name, item.kind.as_str(), item.text, revision(&item.text)],
-                            )?;
-                            self.history(&e.id, "edit", &item.name)?;
-                        }
-                        None => {
-                            let id = new_id(item.kind, &module, &item.name);
-                            let ord: i64 = self.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [&module], |r| r.get(0))?;
-                            self.db.execute(
-                                "INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                                params![id, module, item.name, item.kind.as_str(), item.text, ord, revision(&item.text)],
-                            )?;
-                            self.history(&id, "create", &item.name)?;
-                        }
-                    }
-                    Some(format!("{module}.{}", item.name))
-                }
             };
             let ix = self.index()?;
             let diags = self.check_all(&ix)?;
@@ -813,28 +760,6 @@ impl Store {
                 out += &format!("\n{}\n", d.text);
             }
             out += &broken_report(&diags);
-            // The compiler stops at the first module with errors, so list
-            // every user of a changed signature from the reference graph.
-            if let (Target::Existing(name), Some(q)) = (&target, &target_name) {
-                let before = &ix_before.syms[self.resolve(&ix_before, name)?];
-                let after_ix = self.index()?;
-                if let Some(a) = after_ix.syms.iter().position(|s| s.qname() == *q)
-                    && gleam::signature(&before.item()) != gleam::signature(&after_ix.syms[a].item())
-                {
-                    let broken: HashSet<&str> = diags.iter().filter_map(|d| d.symbol.as_deref()).collect();
-                    let unchecked: Vec<String> = (0..after_ix.syms.len())
-                        .filter(|&j| after_ix.uses[j].contains(&a))
-                        .map(|j| after_ix.syms[j].qname())
-                        .filter(|n| !broken.contains(n.as_str()))
-                        .collect();
-                    if !unchecked.is_empty() && diags.iter().any(|d| d.error) {
-                        out += &format!(
-                            "\nThe signature changed. These other users of it are not checked until the errors above are fixed:\n  {}\n",
-                            unchecked.join("\n  ")
-                        );
-                    }
-                }
-            }
             Ok((target_name, out))
         })();
         match result {
@@ -849,6 +774,198 @@ impl Store {
                 Err(e)
             }
         }
+    }
+
+    /// Replaces or adds symbols in one transaction, type-checked together, so a
+    /// type change and its callers can land at once (PROPOSAL.md §7.4).
+    /// `name`: the one symbol the text replaces. `new_in`: the module the text
+    /// adds a symbol to. Neither: the text is blocks headed `// ── <name> ──`,
+    /// as `view` and `inspect` print them; a name that doesn't exist yet adds
+    /// a symbol to the module its prefix names.
+    fn submit_symbols(&self, name: Option<&str>, new_in: Option<&str>, raw: &str) -> Out {
+        let ix = self.index()?;
+        let is_header = |l: &str| l.starts_with("// ── ");
+        let blocks: Vec<(Option<String>, String)> = if raw.lines().filter(|l| is_header(l)).count() > 1 || (name.is_none() && new_in.is_none()) {
+            let mut blocks: Vec<(Option<String>, String)> = vec![];
+            for line in raw.lines() {
+                if let Some(h) = line.strip_prefix("// ── ") {
+                    if h.starts_with("module ") {
+                        return fail("E0101 a whole module goes through `submit <module>`.");
+                    }
+                    let n = h.split([' ', '(']).next().unwrap_or("").to_string();
+                    blocks.push((Some(n), String::new()));
+                } else if let Some((_, text)) = blocks.last_mut() {
+                    text.push_str(line);
+                    text.push('\n');
+                } else if !line.trim().is_empty() {
+                    return fail("E0101 text for `submit` with no name must be blocks, each headed `// ── <module>.<name> ──`.");
+                }
+            }
+            blocks
+        } else {
+            vec![(name.map(str::to_string), raw.lines().filter(|l| !is_header(l)).collect::<Vec<_>>().join("\n"))]
+        };
+        if blocks.is_empty() {
+            return fail("E0101 nothing to submit.");
+        }
+        // (module, the symbol replaced, the new item, imports in the text)
+        let mut plan: Vec<(String, Option<usize>, Item, String)> = vec![];
+        for (block_name, text) in &blocks {
+            let parsed = gleam::split(&format_gleam(text)?);
+            let [item] = parsed.items.as_slice() else {
+                return fail(format!(
+                    "E0101 each block holds one symbol; {} defines {} ({}).",
+                    block_name.as_deref().unwrap_or("the text"),
+                    parsed.items.len(),
+                    parsed.items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>().join(", ")
+                ));
+            };
+            let module_of = |m: &str| {
+                self.resolve_module(&ix, m)
+                    .or_else(|| m.rsplit_once('.').and_then(|(p, _)| self.resolve_module(&ix, p)))
+                    .map(|r| r.path.clone())
+                    .ok_or_else(|| Failure(format!("E1003 unknown module: {m}"), 1))
+            };
+            let (module, existing) = match (new_in, block_name) {
+                (Some(m), _) => (module_of(m)?, None),
+                (None, Some(n)) => match self.resolve(&ix, n) {
+                    Ok(i) => (ix.syms[i].module.clone(), Some(i)),
+                    Err(e) => match n.rsplit_once('.') {
+                        Some((m, _)) if self.resolve_module(&ix, m).is_some() => (module_of(m)?, None),
+                        _ => return Err(e),
+                    },
+                },
+                (None, None) => unreachable!(),
+            };
+            let clash = ix.syms.iter().position(|s| {
+                s.module == module && s.name == item.name && (s.kind == Kind::Type) == (item.kind == Kind::Type) && existing != Some(ix.syms.iter().position(|x| x.id == s.id).unwrap())
+            });
+            if let Some(c) = clash {
+                return fail(format!("E1004 {} already exists; submit to it instead.", ix.syms[c].qname()));
+            }
+            plan.push((module, existing, item.clone(), parsed.header));
+        }
+
+        let mut notes: Vec<String> = vec![];
+        self.db.execute_batch("BEGIN")?;
+        let result = (|| -> Out {
+            let mut saved: Vec<String> = vec![];
+            for (module, existing, item, imports) in &plan {
+                let mut header = self.header(module)?;
+                for (path, items, _) in import_statements(imports) {
+                    let merged = merge_import(&header, &path, &items);
+                    if merged != header {
+                        notes.push(format!("imported {path} in {module}"));
+                        header = merged;
+                    }
+                }
+                for path in missing_imports(&ix, &header, &item.text) {
+                    header = merge_import(&header, &path, &[]);
+                    notes.push(format!("added `import {path}` to {module}"));
+                }
+                self.set_header(module, &header)?;
+                match existing {
+                    Some(e) => {
+                        let e = &ix.syms[*e];
+                        self.db.execute(
+                            "UPDATE symbols SET name = ?2, kind = ?3, text = ?4, revision = ?5 WHERE id = ?1",
+                            params![e.id, item.name, item.kind.as_str(), item.text, revision(&item.text)],
+                        )?;
+                        self.history(&e.id, "edit", &item.name)?;
+                    }
+                    None => {
+                        let id = new_id(item.kind, module, &item.name);
+                        let ord: i64 = self.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [module], |r| r.get(0))?;
+                        self.db.execute(
+                            "INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![id, module, item.name, item.kind.as_str(), item.text, ord, revision(&item.text)],
+                        )?;
+                        self.history(&id, "create", &item.name)?;
+                    }
+                }
+                saved.push(format!("{module}.{}", item.name));
+            }
+            let modules: HashSet<&str> = plan.iter().map(|p| p.0.as_str()).collect();
+            let own = |d: &Diag| match &d.symbol {
+                Some(s) => saved.contains(s),
+                None => d.module.as_deref().is_some_and(|m| modules.contains(m)),
+            };
+            let mut diags = self.check_all(&self.index()?)?;
+            // Unqualified types and constructors (`Option`, `None`, a project
+            // type) that aren't imported: import them and check once more.
+            // The compiler stops at the first module with errors, so repeat.
+            for _ in 0..plan.len() + 2 {
+                let mut fixed = false;
+                for d in diags.iter().filter(|d| d.error && own(d)) {
+                    if let (Some(m), Some((path, item))) = (&d.module, unimported_name(&ix, &d.text)) {
+                        let header = self.header(m)?;
+                        let merged = merge_import(&header, &path, std::slice::from_ref(&item));
+                        if merged != header && path != *m {
+                            self.set_header(m, &merged)?;
+                            notes.push(format!("imported `{item}` from {path} in {m}"));
+                            fixed = true;
+                        }
+                    }
+                }
+                if !fixed {
+                    break;
+                }
+                diags = self.check_all(&self.index()?)?;
+            }
+            let own_errors: Vec<&str> = diags.iter().filter(|d| d.error && own(d)).map(|d| d.text.as_str()).collect();
+            if !own_errors.is_empty() {
+                return fail(format!("Not saved: the submitted text has errors.\n\n{}", own_errors.join("\n\n")));
+            }
+            let mut out = format!("Saved {}.\n", saved.join(", "));
+            for d in diags.iter().filter(|d| !d.error && own(d)) {
+                out += &format!("\n{}\n", d.text);
+            }
+            out += &broken_report(&diags);
+            // The compiler stops at the first module with errors, so list
+            // every user of a changed signature from the reference graph.
+            if diags.iter().any(|d| d.error) {
+                let after = self.index()?;
+                let broken: HashSet<&str> = diags.iter().filter_map(|d| d.symbol.as_deref()).collect();
+                let mut unchecked: Vec<String> = vec![];
+                for (_, existing, item, _) in &plan {
+                    let Some(e) = existing else { continue };
+                    let before = &ix.syms[*e];
+                    let Some(a) = after.syms.iter().position(|s| s.id == before.id) else { continue };
+                    if gleam::signature(&before.item()) == gleam::signature(&item.clone()) {
+                        continue;
+                    }
+                    for j in (0..after.syms.len()).filter(|&j| after.uses[j].contains(&a)) {
+                        let n = after.syms[j].qname();
+                        if !broken.contains(n.as_str()) && !saved.contains(&n) && !unchecked.contains(&n) {
+                            unchecked.push(n);
+                        }
+                    }
+                }
+                if !unchecked.is_empty() {
+                    out += &format!(
+                        "\nA signature changed. These other users of it are not checked until the errors above are fixed:\n  {}\n",
+                        unchecked.join("\n  ")
+                    );
+                }
+            }
+            Ok(out)
+        })();
+        match result {
+            Ok(out) => {
+                self.db.execute_batch("COMMIT")?;
+                let notes: String = notes.iter().map(|n| format!("Note: {n}\n")).collect();
+                Ok(notes + &out)
+            }
+            Err(e) => {
+                self.db.execute_batch("ROLLBACK")?;
+                self.materialize(&self.index()?)?;
+                Err(e)
+            }
+        }
+    }
+
+    fn header(&self, module: &str) -> Result<String, Failure> {
+        Ok(self.db.query_row("SELECT header FROM modules WHERE path = ?1", [module], |r| r.get(0))?)
     }
 
     fn set_header(&self, module: &str, header: &str) -> Result<(), Failure> {
@@ -929,24 +1046,6 @@ fn module_doc(m: &ModuleRow) -> &str {
     m.header.lines().find(|l| l.starts_with("////")).map_or("", |l| l.trim_start_matches('/').trim())
 }
 
-/// One line for the session index: the declaration with whitespace
-/// collapsed (long ones cut), then the first doc line.
-fn index_line(s: &Sym) -> String {
-    const MAX: usize = 160;
-    let sig = gleam::signature(&s.item());
-    let doc = sig.lines().next().filter(|l| l.starts_with("///")).map(|l| l.trim_start_matches('/').trim());
-    let decl: String = sig.lines().filter(|l| !l.starts_with("///")).collect::<Vec<_>>().join(" ");
-    let mut decl = decl.split_whitespace().collect::<Vec<_>>().join(" ").replace("( ", "(").replace(" )", ")").replace(",)", ")");
-    if decl.len() > MAX {
-        let cut = (0..=MAX).rev().find(|&i| decl.is_char_boundary(i)).unwrap_or(0);
-        decl = format!("{}…", &decl[..cut]);
-    }
-    match doc {
-        Some(d) => format!("{decl}  — {d}"),
-        None => decl,
-    }
-}
-
 fn is_test(ix: &Index, i: usize) -> bool {
     ix.modules.iter().any(|m| m.path == ix.syms[i].module && m.dir == "test")
 }
@@ -988,6 +1087,89 @@ fn missing_imports(ix: &Index, header: &str, text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Each import in a header: (module, unqualified items as written, e.g.
+/// `type Option` or `None`, and the line range it spans).
+fn import_statements(header: &str) -> Vec<(String, Vec<String>, (usize, usize))> {
+    let lines: Vec<&str> = header.lines().collect();
+    let mut out = vec![];
+    let mut i = 0;
+    while i < lines.len() {
+        let Some(rest) = lines[i].strip_prefix("import ") else {
+            i += 1;
+            continue;
+        };
+        let start = i;
+        while !lines[i].contains('}') && lines[start].contains(".{") && i + 1 < lines.len() {
+            i += 1;
+        }
+        let stmt = lines[start..=i].join(" ");
+        let module: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '/').collect();
+        let items = match (stmt.find(".{"), stmt.find('}')) {
+            (Some(a), Some(b)) => stmt[a + 2..b].split(',').map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|s| !s.is_empty()).collect(),
+            _ => vec![],
+        };
+        out.push((module, items, (start, i)));
+        i += 1;
+    }
+    out
+}
+
+/// Adds unqualified `items` to the header's import of `module`, or adds the
+/// import. The result is formatted.
+fn merge_import(header: &str, module: &str, items: &[String]) -> String {
+    let lines: Vec<&str> = header.lines().collect();
+    let Some((_, existing, (start, end))) = import_statements(header).into_iter().find(|(m, _, _)| m == module) else {
+        let line = if items.is_empty() { format!("import {module}") } else { format!("import {module}.{{{}}}", items.join(", ")) };
+        let added = add_import(header, &line);
+        return format_gleam(&added).map_or(added, |f| f.trim().to_string());
+    };
+    if items.iter().all(|i| existing.contains(i)) {
+        return header.to_string();
+    }
+    let stmt = lines[start..=end].join(" ");
+    let suffix = stmt.rfind('}').map_or_else(|| stmt[format!("import {module}").len()..].to_string(), |b| stmt[b + 1..].to_string());
+    let mut all = existing;
+    all.extend(items.iter().filter(|i| !all.contains(i)).cloned().collect::<Vec<_>>());
+    let line = format!("import {module}.{{{}}}{}", all.join(", "), suffix.trim_end());
+    let mut out: Vec<String> = lines[..start].iter().map(|s| s.to_string()).collect();
+    out.push(line);
+    out.extend(lines[end + 1..].iter().map(|s| s.to_string()));
+    let joined = out.join("\n");
+    format_gleam(&joined).map_or(joined, |f| f.trim().to_string())
+}
+
+/// From a compiler error about an unknown type or constructor, the import
+/// that provides it: (module, item), when exactly one module does.
+fn unimported_name(ix: &Index, error: &str) -> Option<(String, String)> {
+    let between = |pre: &str, post: &str| error.find(pre).and_then(|a| error[a + pre.len()..].find(post).map(|b| error[a + pre.len()..a + pre.len() + b].to_string()));
+    let (name, is_type) = match (between("The type `", "` is not defined"), between("constructor `", "` is not in scope")) {
+        (Some(t), _) => (t, true),
+        (None, Some(c)) => (c, false),
+        _ => return None,
+    };
+    const STD: &[(&str, &str, bool)] = &[
+        ("Option", "gleam/option", true), ("Some", "gleam/option", false), ("None", "gleam/option", false),
+        ("Dict", "gleam/dict", true), ("Set", "gleam/set", true), ("Order", "gleam/order", true),
+        ("Lt", "gleam/order", false), ("Eq", "gleam/order", false), ("Gt", "gleam/order", false),
+    ];
+    let item = if is_type { format!("type {name}") } else { name.clone() };
+    if let Some((_, m, _)) = STD.iter().find(|(n, _, t)| *n == name && *t == is_type) {
+        return Some((m.to_string(), item));
+    }
+    let mut found: Vec<&str> = ix
+        .syms
+        .iter()
+        .filter(|s| s.kind == Kind::Type && gleam::signature(&s.item()).contains("pub type"))
+        .filter(|s| if is_type { s.name == name } else { gleam::constructors(&s.text).contains(&name) })
+        .map(|s| s.module.as_str())
+        .collect();
+    found.dedup();
+    match found.as_slice() {
+        [m] => Some((m.to_string(), item)),
+        _ => None,
+    }
 }
 
 /// Adds an import line after the existing imports (or after the module doc).

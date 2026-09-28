@@ -1,0 +1,3 @@
+{
+	printf "%-24s %-28s tok=%-8s turns\342\206\222edit=%-3s tok<edit=%s\n", d, $1, $3, $5, $6
+}

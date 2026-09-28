@@ -53,9 +53,10 @@ CODEX_OFF = ["multi_agent", "apps", "plugins", "goals", "image_generation", "vie
              "computer_use", "in_app_browser", "hooks", "memories", "tool_suggest"]
 CODEX_SOLACE_HINT = ("The tool is the MCP tool `solace`; from `exec`, call it as "
                      "`await tools.mcp__solace__solace({command: \"session start\"})`, "
-                     "with the new code in `text` for submit commands.\n\n")
+                     "with the new code in `text` for submit commands. One `exec` script can make "
+                     "several solace calls, so read everything you need in one step.\n\n")
 # In Codex code mode every tool call is a JavaScript snippet; these mark the ones that change code.
-CODEX_EDIT = re.compile(r"tools\.apply_patch|command\s*:\s*[\"'`]\s*(?:solace\s+)?(?:submit|delete)\b"
+CODEX_EDIT = re.compile(r"tools\.apply_patch|[\"'`]\s*(?:solace\s+)?(?:submit|delete)\b"
                         r"|sed\s+-i|perl\s+-pi|\btee\s|>\s*[\w./-]+\.gleam")
 SOLACE_PREAMBLE = (
     "You are working on a Gleam project: an order-management service. Its code lives in a "
@@ -320,7 +321,7 @@ def report(run_dir: Path):
     rows = [json.loads(l) for l in (run_dir / "summary.jsonl").read_text().splitlines()]
     for r in rows:  # older runs: derive newer metrics from the saved stream
         stream = run_dir / f"{r['task']}.{r.get('rep', 1)}.stream.jsonl"
-        if "turns_to_first_edit" not in r and stream.exists():
+        if (r.get("agent") == "codex" or "turns_to_first_edit" not in r) and stream.exists():
             parse = parse_codex if r.get("agent") == "codex" else parse_stream
             r.update({k: v for k, v in parse(stream.read_text().splitlines()).items() if k != "init"})
     cols = ["tokens", "work_tokens", "turns_to_first_edit", "tokens_before_first_edit", "uncached_tokens", "cost_usd"]

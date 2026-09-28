@@ -92,3 +92,9 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
 - **Consequence:** arms compared with each other must use the same agent, so the D-10 rerun needs a fresh files baseline on Codex as well.
 - **Who/when:** Aaron (agent and model), 2026-09-27; harness details by Claude.
 - **Affects:** bench/bench.py
+
+## D-12 The session index lists names only — decided
+- **Question:** The D-10 index (one line per symbol with its signature, about 8k tokens on pilot-large) is re-sent on every turn. In the first Codex comparison that came to about 600k tokens over 67 Solace turns, more than Solace's whole deficit. Keep it?
+- **Answer:** No. `session start` lists symbol names per module (about 1k tokens for pilot-large), and signatures come from `inspect` or `view <module>`. No separate command for the full index: agents re-send their context every turn, so none pays for it only once, and `view <module>` already gives signatures per module.
+- **Who/when:** Aaron, 2026-09-28
+- **Affects:** D-10 point 2, PROPOSAL.md §14.2, Spec 3 §2

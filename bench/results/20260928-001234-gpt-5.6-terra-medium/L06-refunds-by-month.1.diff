@@ -1,0 +1,217 @@
+diff --git a/src/pilot/reporting.gleam b/src/pilot/reporting.gleam
+index 69ae861..7d71641 100644
+--- a/src/pilot/reporting.gleam
++++ b/src/pilot/reporting.gleam
+@@ -37,6 +37,15 @@ pub type ReturnsByReason {
+   ReturnsByReason(reason: String, returns: Int, refunded_cents: Int)
+ }
+ 
++pub type MonthlyRefunds {
++  MonthlyRefunds(
++    month: String,
++    reason: String,
++    returns: Int,
++    refunded_cents: Int,
++  )
++}
++
+ pub type RegionTax {
+   RegionTax(region: String, orders: Int, tax_cents: Int)
+ }
+@@ -139,6 +148,44 @@ pub fn returns_by_reason(db: Store) -> List(ReturnsByReason) {
+   })
+ }
+ 
++/// Refunded returns grouped by the UTC month of their refund and reason.
++pub fn refunds_by_month(db: Store) -> List(MonthlyRefunds) {
++  db.returns
++  |> dict.values
++  |> list.filter_map(fn(r) {
++    case r.status, r.refunded_at {
++      return_policy.Refunded, Some(refunded_at) ->
++        Ok(#(refund_month(refunded_at), r))
++      _, _ -> Error(Nil)
++    }
++  })
++  |> list.group(fn(r) { #(r.0, return_policy.reason_name(r.1.reason)) })
++  |> dict.to_list
++  |> list.map(fn(pair) {
++    MonthlyRefunds(
++      month: pair.0.0,
++      reason: pair.0.1,
++      returns: list.length(pair.1),
++      refunded_cents: money.sum(
++        list.map(pair.1, fn(r) { r.1.refund.total_cents }),
++      ),
++    )
++  })
++  |> list.sort(fn(a, b) {
++    case string.compare(a.month, b.month) {
++      ordering.Eq -> string.compare(a.reason, b.reason)
++      other -> other
++    }
++  })
++}
++
++fn refund_month(refunded_at: Int) -> String {
++  let refunded_on = date.from_unix_ms(refunded_at)
++  string.pad_start(int.to_string(refunded_on.year), 4, "0")
++  <> "-"
++  <> string.pad_start(int.to_string(refunded_on.month), 2, "0")
++}
++
+ /// Everything refunded through payments, from returns and goodwill refunds.
+ pub fn total_refunded_cents(db: Store) -> Int {
+   db.payments
+diff --git a/src/pilot/return_policy.gleam b/src/pilot/return_policy.gleam
+index 683c71c..b2516fa 100644
+--- a/src/pilot/return_policy.gleam
++++ b/src/pilot/return_policy.gleam
+@@ -9,7 +9,7 @@
+ import gleam/bool
+ import gleam/dict.{type Dict}
+ import gleam/list
+-import gleam/option.{None, Some}
++import gleam/option.{type Option, None, Some}
+ import gleam/result
+ import gleam/string
+ import pilot/catalog.{type Category, Electronics}
+@@ -57,6 +57,7 @@ pub type ReturnRequest {
+     status: Status,
+     refund: RefundBreakdown,
+     requested_at: Int,
++    refunded_at: Option(Int),
+   )
+ }
+ 
+diff --git a/src/pilot/returns.gleam b/src/pilot/returns.gleam
+index 1bd2ed3..6482f6e 100644
+--- a/src/pilot/returns.gleam
++++ b/src/pilot/returns.gleam
+@@ -2,6 +2,7 @@
+ 
+ import gleam/dict
+ import gleam/list
++import gleam/option.{None, Some}
+ import gleam/result
+ import pilot/audit
+ import pilot/catalog
+@@ -75,6 +76,7 @@ pub fn request(
+       status: return_policy.Requested,
+       refund:,
+       requested_at: now,
++      refunded_at: None,
+     )
+   let db =
+     db
+@@ -162,6 +164,7 @@ pub fn refund(
+   use #(payment, refund_id) <- result.try(
+     payments.refund(gateway, payment, amount) |> result.map_error(RefundFailed),
+   )
++  let refunded = return_policy.ReturnRequest(..refunded, refunded_at: Some(now))
+   let db =
+     db
+     |> store.put_payment(payment)
+diff --git a/test/pilot/reporting_test.gleam b/test/pilot/reporting_test.gleam
+index a77fcc0..e54e2f2 100644
+--- a/test/pilot/reporting_test.gleam
++++ b/test/pilot/reporting_test.gleam
+@@ -1,8 +1,10 @@
+ import pilot/checkout
+ import pilot/date.{Date}
+ import pilot/payments
+-import pilot/reporting.{DailySales, ProductSales, RegionTax, ReturnsByReason}
+-import pilot/return_policy.{Item, NoLongerNeeded}
++import pilot/reporting.{
++  DailySales, MonthlyRefunds, ProductSales, RegionTax, ReturnsByReason,
++}
++import pilot/return_policy.{Damaged, Item, NoLongerNeeded}
+ import pilot/returns
+ import pilot/seed
+ import support
+@@ -71,6 +73,51 @@ pub fn returns_by_reason_test() {
+   assert reporting.total_refunded_cents(db) == 1880
+ }
+ 
++pub fn refunds_by_month_test() {
++  let #(db, o, _) =
++    support.delivered(
++      seed.demo_store(),
++      seed.ada,
++      [#("TEE-M-BLK", 2), #("MUG-BLUE", 1)],
++      3,
++    )
++  let march = support.on_day(5)
++  let april = support.on_day(31)
++  let assert Ok(#(db, damaged)) =
++    returns.request(db, march, o.id, [Item("MUG-BLUE", 1)], Damaged)
++  let assert Ok(#(db, damaged_tee)) =
++    returns.request(db, march, o.id, [Item("TEE-M-BLK", 1)], Damaged)
++  let assert Ok(#(db, unwanted_april)) =
++    returns.request(db, march, o.id, [Item("TEE-M-BLK", 1)], NoLongerNeeded)
++  let assert Ok(#(db, _)) = returns.approve(db, march, damaged.id)
++  let assert Ok(#(db, _)) = returns.receive(db, march, damaged.id)
++  let assert Ok(#(db, damaged)) =
++    returns.refund(db, march, payments.fake_gateway(), damaged.id)
++  let assert Ok(#(db, _)) = returns.approve(db, march, damaged_tee.id)
++  let assert Ok(#(db, _)) = returns.receive(db, march, damaged_tee.id)
++  let assert Ok(#(db, damaged_tee)) =
++    returns.refund(db, march, payments.fake_gateway(), damaged_tee.id)
++  let assert Ok(#(db, _)) = returns.approve(db, april, unwanted_april.id)
++  let assert Ok(#(db, _)) = returns.receive(db, april, unwanted_april.id)
++  let assert Ok(#(db, unwanted_april)) =
++    returns.refund(db, april, payments.fake_gateway(), unwanted_april.id)
++  assert reporting.refunds_by_month(db)
++    == [
++      MonthlyRefunds(
++        "2026-03",
++        "damaged",
++        2,
++        damaged.refund.total_cents + damaged_tee.refund.total_cents,
++      ),
++      MonthlyRefunds(
++        "2026-04",
++        "no longer needed",
++        1,
++        unwanted_april.refund.total_cents,
++      ),
++    ]
++}
++
+ pub fn inventory_reports_test() {
+   let db = seed.demo_store()
+   assert reporting.inventory_valuation_cents(db) > 0
+diff --git a/test/pilot/returns_test.gleam b/test/pilot/returns_test.gleam
+index 2cdfd68..9e9e783 100644
+--- a/test/pilot/returns_test.gleam
++++ b/test/pilot/returns_test.gleam
+@@ -1,5 +1,6 @@
+ import gleam/dict
+ import gleam/list
++import gleam/option.{None, Some}
+ import pilot/inventory
+ import pilot/notifications
+ import pilot/payments
+@@ -30,6 +31,7 @@ pub fn full_return_flow_test() {
+   assert dict.get(db.stock.on_hand, #("WH-EAST", "TEE-M-BLK")) == Ok(19)
+   let assert Ok(#(db, r)) = returns.refund(db, c, gateway(), r.id)
+   assert r.status == return_policy.Refunded
++  assert r.refunded_at == Some(seed.epoch + 5 * seed.day)
+   let assert Ok(p) = store.payment_for_order(db, o.id)
+   assert p.refunded_cents == 1880
+   let kinds =
+@@ -40,6 +42,14 @@ pub fn full_return_flow_test() {
+   assert kinds == [notifications.RefundIssued, notifications.ReturnReceived]
+ }
+ 
++pub fn requested_return_has_no_refund_time_test() {
++  let #(db, o, _) =
++    support.delivered(seed.demo_store(), seed.ada, [#("MUG-BLUE", 1)], 3)
++  let assert Ok(#(_, r)) =
++    returns.request(db, support.on_day(5), o.id, [Item("MUG-BLUE", 1)], Damaged)
++  assert r.refunded_at == None
++}
++
+ pub fn returning_everything_refunds_shipping_test() {
+   let #(db, o, _) =
+     support.delivered(

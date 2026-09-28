@@ -16,7 +16,7 @@ The protocol is the agent's environment. It has few, rich commands that return c
 
 | Command | Purpose |
 | --- | --- |
-| `session start [--scope <ns>…]` | Orientation: language reference version, policy for the scope, pending and recent decisions, and a symbol index: every symbol in scope on one line (name, signature, one-line description), with "N more" beyond a per-namespace cap. Open work records are expanded with the context bundles of the symbols they name (D-10) |
+| `session start [--scope <ns>…]` | Orientation: language reference version, policy for the scope, pending and recent decisions, and a symbol index: the names of every symbol in scope, grouped by namespace with its one-line description, with "N more" beyond a per-namespace cap (D-12). Open work records are expanded with the context bundles of the symbols they name (D-10) |
 | `inspect <name>… [--context]` | Each symbol's text, signature, effects, description, verification status. `--context` adds the bundle in §3. Several names return several bundles in one document (D-10) |
 | `view <ns> \| <name>… \| --callers <name> \| --callees <name>` | Multi-symbol document (Spec 2 §3). A namespace is shown as an outline (signature, effects, one-line description, verification status per symbol); `--bodies` gives full text (D-10) |
 | `find <query>` | Search names, signatures and descriptions. Ranked, at most 20 hits, one line each |
