@@ -6,4 +6,5 @@ src/main.rs:
 src/gleam.rs:
 src/reference.txt:
 
+# env-dep:CARGO_MANIFEST_DIR=/home/aaron/Documents/Projects/solace/solace-cli
 # env-dep:CARGO_PKG_VERSION=0.1.0

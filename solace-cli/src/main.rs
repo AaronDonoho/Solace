@@ -17,6 +17,11 @@ use std::process::{Command, Stdio};
 use std::{env, fs};
 
 const REFERENCE: &str = include_str!("reference.txt");
+/// The largest reply, in bytes (about 8k tokens). Agents cut longer tool
+/// output (Codex at about 10k tokens), so `inspect` and `view` trim by
+/// priority to fit rather than being cut mid-document (D-14). `solace mcp
+/// --budget <bytes>` sets it per agent.
+const BUDGET: usize = 32_000;
 const STDLIB: &[&str] = &[
     "bool", "bit_array", "bytes_tree", "dict", "dynamic", "float", "function", "int", "io", "list", "option",
     "order", "pair", "result", "set", "string", "string_tree", "uri",
@@ -46,9 +51,13 @@ impl From<std::io::Error> for Failure {
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("mcp") {
-        return mcp();
+        let budget = match args.get(1..) {
+            Some([flag, n]) if flag == "--budget" => n.parse().unwrap_or_else(|_| panic!("--budget takes a number of bytes, got {n}")),
+            _ => BUDGET,
+        };
+        return mcp(budget);
     }
-    let code = match run(&args, &mut stdin, None) {
+    let code = match run(&args, &mut stdin, None, BUDGET) {
         Ok(out) => {
             print!("{out}");
             0
@@ -62,8 +71,9 @@ fn main() {
 }
 
 /// `input` supplies the new code for submit commands; `old`, the text that
-/// `submit <name> --replace` replaces (MCP only).
-fn run(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>, old: Option<&str>) -> Out {
+/// `submit <name> --replace` replaces (MCP only); `budget`, the bytes left
+/// for this reply.
+fn run(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>, old: Option<&str>, budget: usize) -> Out {
     let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     if matches!(a.as_slice(), [] | ["help"] | ["--help"]) {
         return Ok(REFERENCE.to_string());
@@ -81,8 +91,8 @@ fn run(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>, old:
             None => usage("`submit <name> --replace` needs the exact text to replace in `old` and its replacement in `text`."),
         },
         ["session", rest @ ..] => store.session(&operands(rest.strip_prefix(&["start"]).unwrap_or(rest))),
-        ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies")),
-        ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context")),
+        ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
+        ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
         ["refs", name] => store.refs(name),
         ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
         ["submit"] => store.submit_symbols(None, None, &input()?),
@@ -117,7 +127,7 @@ fn stdin() -> Result<String, Failure> {
 
 /// `solace mcp`: the same commands as one MCP tool over stdio, so an agent
 /// can pass code without shell quoting and needs no shell at all.
-fn mcp() {
+fn mcp(budget: usize) {
     use serde_json::{Value, json};
     let description = "Run a Solace command against this project's semantic store. `command` is what \
         follows `solace` on a command line, e.g. `session start`, `inspect checkout.pay tax.quote --context`, \
@@ -166,7 +176,8 @@ fn mcp() {
                     if commands.len() > 1 {
                         out += &format!("==== solace {command} ====\n");
                     }
-                    match run(&words, &mut input, args["old"].as_str()) {
+                    // commands in one call share the budget, since the agent cuts the reply as a whole
+                    match run(&words, &mut input, args["old"].as_str(), budget.saturating_sub(out.len())) {
                         Ok(o) => out += &o,
                         Err(Failure(msg, _)) => {
                             out += &msg;
@@ -545,8 +556,9 @@ impl Store {
             }
             if !named.is_empty() {
                 out += "\n== Context of the symbols the work record names ==\n";
-                for i in named {
-                    out += &self.bundle(ix, i, true)?;
+                let (full, mut shown) = (named.iter().copied().collect(), HashSet::new());
+                for &i in &named {
+                    out += &self.bundle(ix, i, true, 0, &full, &mut shown)?;
                     out += "\n";
                 }
             }
@@ -706,74 +718,147 @@ impl Store {
         Ok(out)
     }
 
-    /// A module is shown as an outline unless `bodies` is set.
-    fn view(&self, names: &[&str], bodies: bool) -> Out {
+    /// A module is shown as an outline unless `bodies` is set. Past `budget`,
+    /// module bodies fall back to outlines, and what still doesn't fit is
+    /// listed to view separately (D-14).
+    fn view(&self, names: &[&str], bodies: bool, budget: usize) -> Out {
         let ix = self.index()?;
-        let mut out = String::new();
-        for name in names {
-            if let Some(m) = self.resolve_module(&ix, name) {
-                if bodies {
-                    out += &format!("// ── module {} ({}) ──\n", m.path, m.dir);
-                    if !m.header.is_empty() {
-                        out += &format!("{}\n\n", m.header);
-                    }
-                    for s in ix.syms.iter().filter(|s| s.module == m.path) {
-                        out += &format!("{}\n\n", s.text);
-                    }
-                    continue;
-                }
-                out += &format!("// ── module {} ({}), outline: `view <name>` for a body, `--bodies` for all ──\n", m.path, m.dir);
-                let doc: Vec<&str> = m.header.lines().filter(|l| l.starts_with("////")).collect();
-                if !doc.is_empty() {
-                    out += &format!("{}\n\n", doc.join("\n"));
+        let (mut out, mut left) = (String::new(), vec![]);
+        let fits = |out: &str, text: &str| out.is_empty() || out.len() + text.len() <= budget;
+        for &name in names {
+            let text = if let Some(m) = self.resolve_module(&ix, name) {
+                let mut body = format!("// ── module {} ({}) ──\n", m.path, m.dir);
+                if !m.header.is_empty() {
+                    body += &format!("{}\n\n", m.header);
                 }
                 for s in ix.syms.iter().filter(|s| s.module == m.path) {
-                    let broken = self.db.query_row("SELECT 1 FROM broken WHERE symbol = ?1", [s.qname()], |_| Ok(())).optional()?;
-                    out += &format!("{}{}\n\n", gleam::signature(&s.item()), if broken.is_some() { "  // BROKEN" } else { "" });
+                    body += &format!("{}\n\n", s.text);
+                }
+                if bodies && fits(&out, &body) {
+                    body
+                } else {
+                    let mut text = format!("// ── module {} ({}), outline: `view <name>` for a body, `--bodies` for all ──\n", m.path, m.dir);
+                    if bodies {
+                        text += &format!("// bodies left out to fit the size limit; `view {} --bodies` alone shows them\n", m.path);
+                    }
+                    let doc: Vec<&str> = m.header.lines().filter(|l| l.starts_with("////")).collect();
+                    if !doc.is_empty() {
+                        text += &format!("{}\n\n", doc.join("\n"));
+                    }
+                    for s in ix.syms.iter().filter(|s| s.module == m.path) {
+                        let broken = self.db.query_row("SELECT 1 FROM broken WHERE symbol = ?1", [s.qname()], |_| Ok(())).optional()?;
+                        text += &format!("{}{}\n\n", gleam::signature(&s.item()), if broken.is_some() { "  // BROKEN" } else { "" });
+                    }
+                    text
                 }
             } else {
                 let s = &ix.syms[self.resolve(&ix, name)?];
-                out += &format!("// ── {} ({}) ──\n{}\n\n", s.qname(), s.kind.as_str(), s.text);
+                format!("// ── {} ({}) ──\n{}\n\n", s.qname(), s.kind.as_str(), s.text)
+            };
+            if left.is_empty() && fits(&out, &text) {
+                out += &text;
+            } else {
+                left.push(name);
             }
+        }
+        if !left.is_empty() {
+            out += &format!("Not shown, to fit the size limit: `solace view {}{}`\n", left.join(" "), if bodies { " --bodies" } else { "" });
         }
         Ok(out)
     }
 
-    fn inspect(&self, names: &[&str], context: bool) -> Out {
+    /// Several names give one document: each signature is printed once, and
+    /// symbols asked for are printed in full only once (D-10, D-14). Over
+    /// `budget`, the bundles are trimmed in priority order (callers, then the
+    /// test example, then the signatures of what each uses); if that is not
+    /// enough, the names that don't fit are listed to inspect separately.
+    fn inspect(&self, names: &[&str], context: bool, budget: usize) -> Out {
         let ix = self.index()?;
-        let mut out = String::new();
-        for name in names {
+        let mut targets: Vec<(&str, Option<usize>)> = vec![];
+        for &name in names {
             match self.resolve(&ix, name) {
-                Ok(i) => out += &self.bundle(&ix, i, context)?,
+                Ok(i) => targets.push((name, Some(i))),
                 // a module name gets its outline rather than an error
-                Err(_) if self.resolve_module(&ix, name).is_some() => out += &self.view(&[name], false)?,
+                Err(_) if self.resolve_module(&ix, name).is_some() => targets.push((name, None)),
                 Err(e) => return Err(e),
             }
-            out += "\n";
         }
-        Ok(out)
+        let full: HashSet<usize> = targets.iter().filter_map(|t| t.1).collect();
+        const LAST: u8 = 3;
+        for level in 0..=LAST {
+            if level > 0 && !context {
+                break;
+            }
+            let (mut out, mut shown, mut left) = (String::new(), HashSet::new(), vec![]);
+            for &(name, i) in &targets {
+                let before = shown.clone();
+                let part = match i {
+                    Some(i) => self.bundle(&ix, i, context, level, &full, &mut shown)?,
+                    None => self.view(&[name], false, budget)?,
+                } + "\n";
+                let last = level == LAST || !context;
+                if last && (!left.is_empty() || (!out.is_empty() && out.len() + part.len() > budget)) {
+                    shown = before;
+                    left.push(ix.syms.get(i.unwrap_or(usize::MAX)).map_or(name.to_string(), |s| s.qname()));
+                    continue;
+                }
+                out += &part;
+            }
+            if out.len() > budget && level < LAST && context {
+                continue;
+            }
+            let trimmed = ["", "callers as a count only (`solace refs <name>` lists them)", "tests by name only", "what each uses by name only (`view <name>` for its source)"];
+            if level > 0 {
+                out += &format!("Trimmed to fit the size limit: {}.\n", trimmed[1..=level as usize].join("; "));
+            }
+            if !left.is_empty() {
+                out += &format!("Not shown, to fit the size limit: `solace inspect {}{}`\n", left.join(" "), if context { " --context" } else { "" });
+            }
+            return Ok(out);
+        }
+        unreachable!()
     }
 
-    fn bundle(&self, ix: &Index, i: usize, context: bool) -> Out {
+    /// `level` is how far the context is trimmed (see `inspect`); `full` holds
+    /// the symbols printed in full in this reply, `shown` the signatures
+    /// printed so far.
+    fn bundle(&self, ix: &Index, i: usize, context: bool, level: u8, full: &HashSet<usize>, shown: &mut HashSet<usize>) -> Out {
         let s = &ix.syms[i];
         let mut out = format!("// ── {} ({}) ──\n{}\n", s.qname(), s.kind.as_str(), s.text);
         if !context {
             return Ok(out);
         }
+        let mut entry = |u: usize| {
+            let q = ix.syms[u].qname();
+            if full.contains(&u) {
+                format!("-- {q} (in full in this reply)\n")
+            } else if !shown.insert(u) {
+                format!("-- {q} (above)\n")
+            } else {
+                format!("-- {q}\n{}\n", gleam::signature(&ix.syms[u].item()))
+            }
+        };
         let used_by: Vec<usize> = (0..ix.syms.len()).filter(|&j| ix.uses[j].contains(&i)).collect();
-        let (tests, callers): (Vec<usize>, Vec<usize>) = used_by.into_iter().partition(|&j| is_test(&ix, j));
+        let (tests, callers): (Vec<usize>, Vec<usize>) = used_by.into_iter().partition(|&j| is_test(ix, j));
         if !ix.uses[i].is_empty() {
-            out += "\n== Uses ==\n";
             let mut uses = ix.uses[i].clone();
             uses.sort_by_key(|&u| (ix.syms[u].kind != Kind::Type, ix.syms[u].kind != Kind::Const, ix.syms[u].qname()));
-            for u in uses {
-                out += &format!("-- {}\n{}\n", ix.syms[u].qname(), gleam::signature(&ix.syms[u].item()));
+            if level >= 3 {
+                let names: Vec<String> = uses.iter().map(|&u| ix.syms[u].qname()).collect();
+                out += &format!("\n== Uses ==\n  {}\n", names.join(", "));
+            } else {
+                out += "\n== Uses ==\n";
+                for u in uses {
+                    out += &entry(u);
+                }
             }
         }
-        if !callers.is_empty() {
+        if !callers.is_empty() && level >= 1 {
+            out += &format!("\n== Used by ({}): solace refs {} ==\n", callers.len(), s.qname());
+        } else if !callers.is_empty() {
             out += &format!("\n== Used by ({}) ==\n", callers.len());
             for &c in callers.iter().take(20) {
-                out += &format!("-- {}\n{}\n", ix.syms[c].qname(), gleam::signature(&ix.syms[c].item()));
+                out += &entry(c);
             }
             if callers.len() > 20 {
                 out += &format!("…and {} more (solace refs {})\n", callers.len() - 20, s.qname());
@@ -783,7 +868,12 @@ impl Store {
             // The smallest test in full, as a worked example (saves a turn of
             // browsing test modules); the rest by name.
             const EXAMPLE_CAP: usize = 1600; // bytes, about 400 tokens
-            let example = tests.iter().copied().min_by_key(|&t| ix.syms[t].text.len()).filter(|&t| ix.syms[t].text.len() <= EXAMPLE_CAP);
+            let example = tests
+                .iter()
+                .copied()
+                .filter(|t| level < 2 && !full.contains(t))
+                .min_by_key(|&t| ix.syms[t].text.len())
+                .filter(|&t| ix.syms[t].text.len() <= EXAMPLE_CAP);
             out += &format!("\n== Tests that use it ({}) ==\n", tests.len());
             if let Some(t) = example {
                 out += &format!("-- {} (example)\n{}\n", ix.syms[t].qname(), ix.syms[t].text);
@@ -1546,7 +1636,36 @@ fn broken_report(diags: &[Diag]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::words;
+    use super::*;
+
+    /// D-14: a multi-name inspect prints each signature once, and trims, then
+    /// defers names, to stay within the budget.
+    #[test]
+    fn inspect_dedups_and_fits_budget() {
+        let root = env::temp_dir().join(format!("solace-inspect-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pilot-large");
+        assert!(Command::new("cp").arg("-r").arg(&src).arg(&root).status().unwrap().success());
+        let _ = fs::remove_dir_all(root.join(".solace"));
+        import(&root).ok().unwrap();
+        let store = Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root: root.clone() };
+        let names = ["store.put_shipment", "shipments.dispatch", "shipments.deliver", "fulfillment.ship"];
+        let ok = |r: Out| r.ok().unwrap();
+
+        let out = ok(store.inspect(&names, true, usize::MAX));
+        assert_eq!(out.matches("-- pilot/shipments.Shipment\n").count(), 1);
+        assert!(out.contains("-- pilot/shipments.Shipment (above)"));
+        assert!(!out.contains("Trimmed") && !out.contains("Not shown"));
+
+        let small = ok(store.inspect(&names, true, 3_000));
+        assert!(small.contains("Trimmed to fit the size limit"));
+        assert!(small.contains("Not shown, to fit the size limit: `solace inspect "));
+        assert!(small.len() < out.len());
+        for n in names {
+            assert!(small.contains(&format!("// ── pilot/{n} ")) || small.lines().last().unwrap().contains(&format!("pilot/{n}")), "{n} lost");
+        }
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn task_words() {

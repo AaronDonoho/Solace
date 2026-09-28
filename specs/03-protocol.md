@@ -46,6 +46,8 @@ Every command that takes a name resolves it per Spec 1 §4 and fails with the ca
 
 The target size is under 2,000 tokens for a typical pilot function. Nothing in a bundle requires a second call to interpret.
 
+Several names give one document (D-14): each signature appears once, and later bundles refer to it as `(above)`. A requested symbol appears in full once. A reply stays within a byte budget set per agent (`solace mcp --budget`, default 32,000, about 8k tokens), shared by all commands in one call. Over that, sections are trimmed in order: Used by (to a count), the test example (to names), Uses (to names). The requested symbols' text is never trimmed. Names that still don't fit are listed at the end with the command that shows them. `view` falls back from bodies to outlines the same way.
+
 ## 4. Changes and transactions
 
 - Each session has one **open change**. `submit` and the structural commands apply to it immediately, and each is atomic.

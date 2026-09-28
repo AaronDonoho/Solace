@@ -12,7 +12,9 @@ Reading (the symbol list above usually tells you what to inspect; ask for
 several symbols in one call rather than one at a time). Read symbols, not
 modules: `inspect a b c --context`. Use `--bodies` only for a module you will
 rewrite most of. `--context` includes a test that uses each symbol, as an
-example.
+example. Replies stay under a size limit: a signature is printed once per
+reply, and a reply that would be larger says what it left out and the command
+that shows it.
   solace session start --task     (the task in `text`) the symbols most likely
                                   relevant to it, the modules, open work
   solace session start [--scope <module>...]

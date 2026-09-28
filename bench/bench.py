@@ -48,6 +48,10 @@ ALLOWED_TOOLS = [  # and what runs without a permission prompt
     "Bash(gleam:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(find:*)", "Bash(grep:*)",
 ]
 SOLACE_BIN = ROOT.parent / "solace-cli" / "target" / "release"
+# D-14: the solace reply budget in bytes, under each agent's tool-output cut at
+# about 3.9 bytes per token: Codex's code-mode exec cuts at about 10k tokens,
+# Claude Code's MCP results at 25k.
+MCP_BUDGET = {"codex": 32_000, "claude": 80_000}
 DEFAULT_MODEL = {"codex": "gpt-5.6-terra", "claude": "claude-sonnet-5"}
 # Codex features that aren't part of the task environment, turned off in both arms.
 CODEX_OFF = ["multi_agent", "apps", "plugins", "goals", "image_generation", "view_image", "browser_use",
@@ -349,7 +353,7 @@ def codex_cmd(arm, model, effort):
     # solace MCP server runs outside the sandbox.
     return cmd + ["-s", "read-only", "--disable", "shell_tool", "--disable", "unified_exec",
                   "-c", f'mcp_servers.solace.command="{SOLACE_BIN / "solace"}"',
-                  "-c", 'mcp_servers.solace.args=["mcp"]',
+                  "-c", f'mcp_servers.solace.args=["mcp", "--budget", "{MCP_BUDGET["codex"]}"]',
                   "-c", 'mcp_servers.solace.default_tools_approval_mode="approve"', "-"]
 
 
@@ -367,7 +371,8 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort="medium"):
         cmd += ["--tools", TOOLS, "--allowedTools", *ALLOWED_TOOLS]
     else:  # D-8: the protocol only, as one MCP tool; no built-in tools at all
         preamble = SOLACE_PREAMBLE
-        server = {"mcpServers": {"solace": {"command": str(SOLACE_BIN / "solace"), "args": ["mcp"]}}}
+        server = {"mcpServers": {"solace": {"command": str(SOLACE_BIN / "solace"),
+                                            "args": ["mcp", "--budget", str(MCP_BUDGET["claude"])]}}}
         cmd += ["--tools", "", "--mcp-config", json.dumps(server), "--allowedTools", "mcp__solace__solace"]
     # Keep the user's own plugins, hooks and settings out of the measurement.
     cmd += ["--bare"] if os.environ.get("ANTHROPIC_API_KEY") else ["--setting-sources", "project"]

@@ -1,0 +1,71 @@
+diff --git a/src/pilot/pricing.gleam b/src/pilot/pricing.gleam
+index 852c985..921979a 100644
+--- a/src/pilot/pricing.gleam
++++ b/src/pilot/pricing.gleam
+@@ -62,20 +62,17 @@ pub fn quote(
+     Some(c) -> c.stacks_with_loyalty
+     None -> True
+   }
+-  let coupon_discount = case coupon {
+-    Some(c) -> promotions.discount(c, lines, subtotal)
+-    None -> 0
+-  }
+   let loyalty = case loyalty_applies {
+-    True ->
+-      money.percent(
+-        subtotal - coupon_discount,
+-        customer.loyalty_discount_percent(tier),
+-      )
++    True -> money.percent(subtotal, customer.loyalty_discount_percent(tier))
+     False -> 0
+   }
++  let after_loyalty = subtotal - loyalty
++  let coupon_discount = case coupon {
++    Some(c) -> promotions.discount(c, lines, after_loyalty)
++    None -> 0
++  }
+   let units = list.fold(lines, 0, fn(sum, l) { sum + l.quantity })
+-  let after_coupon = subtotal - loyalty - coupon_discount
++  let after_coupon = after_loyalty - coupon_discount
+   let volume = case units >= volume_min_units {
+     True -> money.percent(after_coupon, volume_percent)
+     False -> 0
+diff --git a/test/pilot/checkout_test.gleam b/test/pilot/checkout_test.gleam
+index a9a0fa4..ad47e07 100644
+--- a/test/pilot/checkout_test.gleam
++++ b/test/pilot/checkout_test.gleam
+@@ -56,6 +56,12 @@ pub fn quote_test() {
+   assert q.loyalty_discount_cents == 370
+   assert q.shipping_cents == 600
+   assert q.total_cents == 8140
++  let assert Ok(#(db, o)) =
++    checkout.apply_coupon(db, support.on_day(0), o.id, "TENOFF")
++  let assert Ok(q) = checkout.quote(db, o.id, Standard)
++  assert q.loyalty_discount_cents == 370
++  assert q.coupon_discount_cents == 1000
++  assert q.total_cents == 7067
+ }
+ 
+ pub fn coupons_test() {
+diff --git a/test/pilot/pricing_test.gleam b/test/pilot/pricing_test.gleam
+index 66182f0..ff4e42c 100644
+--- a/test/pilot/pricing_test.gleam
++++ b/test/pilot/pricing_test.gleam
+@@ -29,7 +29,7 @@ pub fn plain_order_test() {
+ }
+ 
+ pub fn loyalty_and_coupon_test() {
+-  // Gold 5% and 10% off: 7400 * 0.95 * 0.9 = 6327
++  // Gold 5% applies to the full subtotal; the coupon then takes 10% off the remainder.
+   let q =
+     pricing.quote(
+       [Line("L", 1, 7400)],
+@@ -38,6 +38,8 @@ pub fn loyalty_and_coupon_test() {
+       ship(600),
+       Domestic("CA"),
+     )
++  assert q.loyalty_discount_cents == 370
++  assert q.coupon_discount_cents == 703
+   assert pricing.goods_cents(q) == 6327
+   assert q.total_cents == 6327 + 600 + 459
+ }
