@@ -1,0 +1,42 @@
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 98e1630..8996e56 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -2,7 +2,10 @@
+ //// Store and returns the updated Store alongside its result.
+ 
+ import gleam/bool
++import gleam/dict
++import gleam/int
+ import gleam/list
++import gleam/order as ordering
+ import gleam/result
+ import pilot/clock.{type Clock}
+ import pilot/order.{type Order, type OrderError, Line}
+@@ -115,6 +118,26 @@ pub fn cancel(
+   apply(db, clock, order_id, order.Cancel(reason))
+ }
+ 
++/// A customer's orders, newest first (ties broken by id, highest first).
++pub fn orders_for(
++  db: Store,
++  customer_id: Int,
++) -> Result(List(Order), CheckoutError) {
++  use _ <- result.try(
++    store.get_customer(db, customer_id)
++    |> result.replace_error(UnknownCustomer(customer_id)),
++  )
++  dict.values(db.orders)
++  |> list.filter(fn(o) { o.customer_id == customer_id })
++  |> list.sort(fn(a, b) {
++    case int.compare(b.created_at, a.created_at) {
++      ordering.Eq -> int.compare(b.id, a.id)
++      other -> other
++    }
++  })
++  |> Ok
++}
++
+ pub fn quote(db: Store, order_id: Int) -> Result(Quote, CheckoutError) {
+   use existing <- result.try(get_order(db, order_id))
+   use customer <- result.try(

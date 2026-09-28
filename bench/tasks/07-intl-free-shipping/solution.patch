@@ -1,0 +1,21 @@
+diff --git a/src/pilot/pricing.gleam b/src/pilot/pricing.gleam
+index 84a0900..5765b88 100644
+--- a/src/pilot/pricing.gleam
++++ b/src/pilot/pricing.gleam
+@@ -20,6 +20,8 @@ const free_shipping_threshold_cents = 5000
+ 
+ const domestic_shipping_cents = 500
+ 
++const international_free_shipping_threshold_cents = 20_000
++
+ const international_shipping_cents = 2000
+ 
+ const domestic_tax_percent = 8
+@@ -38,6 +40,7 @@ pub fn quote(lines: List(#(Line, Product)), region: Region) -> Quote {
+   let shipping = case region {
+     Domestic if taxable >= free_shipping_threshold_cents -> 0
+     Domestic -> domestic_shipping_cents
++    International if taxable >= international_free_shipping_threshold_cents -> 0
+     International -> international_shipping_cents
+   }
+   let tax = case region {

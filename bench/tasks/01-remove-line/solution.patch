@@ -1,0 +1,57 @@
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 98e1630..15d0421 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -18,6 +18,7 @@ pub type CheckoutError {
+   OrderNotEditable(status: order.Status)
+   OutOfStock(sku: String, requested: Int, available: Int)
+   Rejected(OrderError)
++  LineNotFound(sku: String)
+ }
+ 
+ pub fn create_order(
+@@ -63,6 +64,27 @@ pub fn add_line(
+   Ok(#(store.put_order(db, updated), updated))
+ }
+ 
++/// Removes the line for a product from a draft order.
++pub fn remove_line(
++  db: Store,
++  clock: Clock,
++  order_id: Int,
++  sku: String,
++) -> Result(#(Store, Order), CheckoutError) {
++  use existing <- result.try(get_order(db, order_id))
++  use <- bool.guard(
++    !order.is_editable(existing),
++    Error(OrderNotEditable(existing.status)),
++  )
++  use <- bool.guard(
++    !list.any(existing.lines, fn(l) { l.sku == sku }),
++    Error(LineNotFound(sku)),
++  )
++  let lines = list.filter(existing.lines, fn(l) { l.sku != sku })
++  let updated = order.Order(..existing, lines:, updated_at: clock())
++  Ok(#(store.put_order(db, updated), updated))
++}
++
+ pub fn submit(
+   db: Store,
+   clock: Clock,
+diff --git a/test/pilot/checkout_test.gleam b/test/pilot/checkout_test.gleam
+index 1cd067f..d8dac44 100644
+--- a/test/pilot/checkout_test.gleam
++++ b/test/pilot/checkout_test.gleam
+@@ -59,3 +59,12 @@ pub fn approve_fails_when_out_of_stock_and_reserves_nothing_test() {
+   let assert Ok(#(db, _)) = checkout.submit(db, c, o.id)
+   assert checkout.approve(db, c, o.id) == Error(OutOfStock("B", 2, 1))
+ }
++
++pub fn remove_line_test() {
++  let c = clock.fixed(now)
++  let assert Ok(#(db, o)) = checkout.create_order(setup(), c, 1)
++  let assert Ok(#(db, _)) = checkout.add_line(db, c, o.id, "A", 1)
++  let assert Ok(#(db, _)) = checkout.add_line(db, c, o.id, "B", 1)
++  let assert Ok(#(_, o)) = checkout.remove_line(db, c, o.id, "A")
++  assert o.lines == [Line("B", 1)]
++}

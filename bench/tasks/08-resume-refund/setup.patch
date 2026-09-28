@@ -1,0 +1,60 @@
+diff --git a/src/pilot/order.gleam b/src/pilot/order.gleam
+index 3d2f286..08f9968 100644
+--- a/src/pilot/order.gleam
++++ b/src/pilot/order.gleam
+@@ -4,6 +4,7 @@
+ ////   approve: Submitted -> Approved
+ ////   ship:    Approved -> Shipped
+ ////   cancel:  Draft | Submitted -> Cancelled
++////   refund:  Shipped -> Refunded
+ 
+ pub type Status {
+   Draft
+@@ -11,6 +12,7 @@ pub type Status {
+   Approved
+   Shipped
+   Cancelled(reason: String)
++  Refunded
+ }
+ 
+ pub type Line {
+@@ -33,6 +35,7 @@ pub type Action {
+   Approve
+   Ship
+   Cancel(reason: String)
++  Refund
+ }
+ 
+ pub type OrderError {
+@@ -64,6 +67,7 @@ pub fn transition(
+       }
+     Submitted, Approve -> Ok(Order(..order, status: Approved, updated_at: now))
+     Approved, Ship -> Ok(Order(..order, status: Shipped, updated_at: now))
++    Shipped, Refund -> Ok(Order(..order, status: Refunded, updated_at: now))
+     Draft, Cancel(reason) | Submitted, Cancel(reason) ->
+       Ok(Order(..order, status: Cancelled(reason), updated_at: now))
+     from, action -> Error(InvalidTransition(from:, action:))
+diff --git a/test/pilot/order_test.gleam b/test/pilot/order_test.gleam
+index bb1ba1b..909094e 100644
+--- a/test/pilot/order_test.gleam
++++ b/test/pilot/order_test.gleam
+@@ -1,6 +1,6 @@
+ import pilot/order.{
+   Approve, Approved, Cancel, Cancelled, Draft, EmptyOrder, InvalidTransition,
+-  Line, Ship, Shipped, Submit, Submitted,
++  Line, Refund, Refunded, Ship, Shipped, Submit, Submitted,
+ }
+ 
+ fn with_line() {
+@@ -37,3 +37,11 @@ pub fn invalid_transitions_test() {
+   assert order.transition(shipped, Cancel("late"), 1)
+     == Error(InvalidTransition(from: Shipped, action: Cancel("late")))
+ }
++
++pub fn refund_shipped_test() {
++  let shipped = order.Order(..with_line(), status: Shipped)
++  let assert Ok(o) = order.transition(shipped, Refund, 5)
++  assert o.status == Refunded
++  assert order.transition(with_line(), Refund, 5)
++    == Error(InvalidTransition(from: Draft, action: Refund))
++}

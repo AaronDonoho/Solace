@@ -1,0 +1,27 @@
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 98e1630..9afa2db 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -53,7 +53,7 @@ pub fn add_line(
+     True ->
+       list.map(existing.lines, fn(l) {
+         case l.sku == sku {
+-          True -> Line(..l, quantity: l.quantity + quantity)
++          True -> Line(..l, quantity:)
+           False -> l
+         }
+       })
+diff --git a/test/pilot/checkout_test.gleam b/test/pilot/checkout_test.gleam
+index 1cd067f..a4321fa 100644
+--- a/test/pilot/checkout_test.gleam
++++ b/test/pilot/checkout_test.gleam
+@@ -20,8 +20,7 @@ fn setup() {
+ pub fn full_checkout_test() {
+   let c = clock.fixed(now)
+   let assert Ok(#(db, o)) = checkout.create_order(setup(), c, 1)
+-  let assert Ok(#(db, _)) = checkout.add_line(db, c, o.id, "A", 2)
+-  let assert Ok(#(db, _)) = checkout.add_line(db, c, o.id, "A", 1)
++  let assert Ok(#(db, _)) = checkout.add_line(db, c, o.id, "A", 3)
+   let assert Ok(#(db, o)) = checkout.add_line(db, c, o.id, "B", 1)
+   assert o.lines == [Line("A", 3), Line("B", 1)]
+   let assert Ok(q) = checkout.quote(db, o.id)

@@ -1,0 +1,28 @@
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 98e1630..33c2648 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -10,6 +10,8 @@ import pilot/pricing.{type Quote}
+ import pilot/product.{type Product, Product}
+ import pilot/store.{type Store}
+ 
++const max_line_quantity = 10
++
+ pub type CheckoutError {
+   UnknownCustomer(id: Int)
+   UnknownOrder(id: Int)
+@@ -49,6 +51,14 @@ pub fn add_line(
+   )
+   use <- bool.guard(quantity <= 0, Error(InvalidQuantity(quantity)))
+   use _ <- result.try(get_product(db, sku))
++  let total =
++    list.fold(existing.lines, quantity, fn(sum, l) {
++      case l.sku == sku {
++        True -> sum + l.quantity
++        False -> sum
++      }
++    })
++  use <- bool.guard(total > max_line_quantity, Error(InvalidQuantity(total)))
+   let lines = case list.any(existing.lines, fn(l) { l.sku == sku }) {
+     True ->
+       list.map(existing.lines, fn(l) {

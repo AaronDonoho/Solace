@@ -8,8 +8,9 @@ Roadmap: PROPOSAL.md §18 table. Phases are sequential; a phase ships only when 
 
 - [x] Install toolchain: Gleam 1.18.1, OTP 29, Rust 1.98.1.
 - [x] Pilot baseline (`pilot/`, 12 tests passing): the order-management service (§18.4) in plain Gleam. Stored data, checkout state machine, database and clock passed in explicitly. Small, with tests.
-- [ ] Benchmark: about 10 tasks against the pilot (new feature, defect fix, cross-caller refactor, resume half-finished work from a work record, maintain unfamiliar code). Each task has hidden tests.
-- [ ] Benchmark harness: runs an agent on a task, records success, tool calls, tokens, and tokens before the first edit (§19.1). Runs end to end on the baseline.
+- [x] Benchmark tasks: 10 in `bench/tasks/` (features, seeded defects, cross-caller refactor, state-machine change, rule changes that force test updates, resume from a work record). `bench.py validate` confirms each: hidden tests fail before, pass with the reference solution.
+- [x] Benchmark harness: `bench/bench.py run` drives headless Claude Code in an isolated copy (six tools, no user settings/plugins/MCP), grades with hidden tests, records tokens, tool calls, tokens and calls before first edit, cost. Smoke-tested on task 02 with Haiku (pass, $0.06).
+- [ ] Baseline run: all 10 tasks, repeated (single runs are noisy: the same task took 9 and then 15 tool calls). Needs the model, the repeat count and the spend agreed first.
 - [ ] Spec 1: identity and revision model (§6), including answers to §6.5.
 - [ ] Spec 2: text projection and export format (§7).
 - [ ] Spec 3: agent protocol and diagnostics (§14).
@@ -27,5 +28,6 @@ Roadmap: PROPOSAL.md §18 table. Phases are sequential; a phase ships only when 
 - **Gate 1:** agents build and maintain the pilot through the protocol alone; export round-trips losslessly.
 
 ## Open work records
-- **Benchmark tasks (next):** design ~10 tasks against `pilot/`, each with hidden tests kept outside the pilot tree (e.g. `bench/tasks/<n>/`). Decide the harness driver (probably headless Claude Code, which reports tokens and tool calls) when writing the harness.
+- **Next:** Spec 1 (identity and revision model). Specs 1–3 are what's left for Gate 0, besides the baseline run.
+- **Harness gap:** no `--repeat` yet. Add it with the baseline run.
 - **Pilot has no HTTP layer.** Add one only if a benchmark task needs it.

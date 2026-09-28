@@ -1,0 +1,37 @@
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 98e1630..787a351 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -115,6 +115,18 @@ pub fn cancel(
+   apply(db, clock, order_id, order.Cancel(reason))
+ }
+ 
++/// Refunds a shipped order, returning its stock to inventory.
++pub fn refund(
++  db: Store,
++  clock: Clock,
++  order_id: Int,
++) -> Result(#(Store, Order), CheckoutError) {
++  use existing <- result.try(get_order(db, order_id))
++  use #(db, refunded) <- result.try(apply(db, clock, order_id, order.Refund))
++  use db <- result.try(restock(db, existing))
++  Ok(#(db, refunded))
++}
++
+ pub fn quote(db: Store, order_id: Int) -> Result(Quote, CheckoutError) {
+   use existing <- result.try(get_order(db, order_id))
+   use customer <- result.try(
+@@ -151,3 +163,13 @@ fn get_order(db: Store, id: Int) -> Result(Order, CheckoutError) {
+ fn get_product(db: Store, sku: String) -> Result(Product, CheckoutError) {
+   store.get_product(db, sku) |> result.replace_error(UnknownProduct(sku))
+ }
++
++fn restock(db: Store, existing: Order) -> Result(Store, CheckoutError) {
++  list.try_fold(existing.lines, db, fn(db, line) {
++    use product <- result.try(get_product(db, line.sku))
++    Ok(store.put_product(
++      db,
++      Product(..product, stock: product.stock + line.quantity),
++    ))
++  })
++}

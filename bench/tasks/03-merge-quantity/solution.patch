@@ -1,0 +1,13 @@
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 9afa2db..98e1630 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -53,7 +53,7 @@ pub fn add_line(
+     True ->
+       list.map(existing.lines, fn(l) {
+         case l.sku == sku {
+-          True -> Line(..l, quantity:)
++          True -> Line(..l, quantity: l.quantity + quantity)
+           False -> l
+         }
+       })

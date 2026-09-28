@@ -1,0 +1,1 @@
+New shipping promotion: international orders ship free when the subtotal after discount is at least $200.00. Below that, international shipping stays at the flat rate. Domestic shipping rules don't change.

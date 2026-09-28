@@ -1,0 +1,31 @@
+diff --git a/src/pilot/pricing.gleam b/src/pilot/pricing.gleam
+index 84a0900..ac38d8e 100644
+--- a/src/pilot/pricing.gleam
++++ b/src/pilot/pricing.gleam
+@@ -30,7 +30,7 @@ pub fn quote(lines: List(#(Line, Product)), region: Region) -> Quote {
+     lines
+     |> list.map(fn(pair) { { pair.0 }.quantity * { pair.1 }.price_cents })
+     |> int.sum
+-  let discount = case subtotal >= discount_threshold_cents {
++  let discount = case subtotal > discount_threshold_cents {
+     True -> subtotal / 10
+     False -> 0
+   }
+diff --git a/test/pilot/pricing_test.gleam b/test/pilot/pricing_test.gleam
+index 9a44937..fbd7bec 100644
+--- a/test/pilot/pricing_test.gleam
++++ b/test/pilot/pricing_test.gleam
+@@ -25,10 +25,9 @@ pub fn free_shipping_at_threshold_test() {
+   assert q.shipping_cents == 500
+ }
+ 
+-pub fn discount_at_threshold_test() {
+-  let q = pricing.quote(lines(10_000, 1), Domestic)
+-  assert q.discount_cents == 1000
+-  assert q.total_cents == 9000 + 720
++pub fn discount_test() {
++  let q = pricing.quote(lines(20_000, 1), Domestic)
++  assert q.discount_cents == 2000
+   let q = pricing.quote(lines(9999, 1), Domestic)
+   assert q.discount_cents == 0
+ }

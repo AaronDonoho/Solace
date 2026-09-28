@@ -1,0 +1,13 @@
+diff --git a/src/pilot/pricing.gleam b/src/pilot/pricing.gleam
+index ac38d8e..84a0900 100644
+--- a/src/pilot/pricing.gleam
++++ b/src/pilot/pricing.gleam
+@@ -30,7 +30,7 @@ pub fn quote(lines: List(#(Line, Product)), region: Region) -> Quote {
+     lines
+     |> list.map(fn(pair) { { pair.0 }.quantity * { pair.1 }.price_cents })
+     |> int.sum
+-  let discount = case subtotal > discount_threshold_cents {
++  let discount = case subtotal >= discount_threshold_cents {
+     True -> subtotal / 10
+     False -> 0
+   }
