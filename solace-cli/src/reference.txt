@@ -7,7 +7,10 @@ Modules: `pilot/checkout`, or just `checkout`. Tests are symbols too, in test
 modules such as `pilot/checkout_test`.
 
 Reading (the symbol index above usually tells you what to inspect; ask for
-several symbols in one call rather than one at a time)
+several symbols in one call rather than one at a time). Read symbols, not
+modules: `inspect a b c --context`. Use `--bodies` only for a module you will
+rewrite most of. For tests, `view <test module>` lists the tests; view one or
+two as examples.
   solace session start [--scope <module>...]
                                   this overview: every symbol, open work
                                   records with the context they need

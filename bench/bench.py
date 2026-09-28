@@ -237,7 +237,9 @@ def parse_codex(lines):
 
 def codex_cmd(arm, model, effort):
     cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "-m", model,
-           "-c", f'model_reasoning_effort="{effort}"', "-c", 'web_search="disabled"']
+           "-c", f'model_reasoning_effort="{effort}"', "-c", 'web_search="disabled"',
+           # Codex cuts tool results over 10k tokens by default; batched reads overshoot it.
+           "-c", "tool_output_token_limit=30000"]
     for f in CODEX_OFF:
         cmd += ["--disable", f]
     if arm == "files":
