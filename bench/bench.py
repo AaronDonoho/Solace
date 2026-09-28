@@ -2,7 +2,8 @@
 """Solace benchmark harness (PROPOSAL.md §19.1).
 
   bench.py validate [TASK...]   check each task: hidden tests fail before, pass with the reference solution
-  bench.py run [--arm files|solace] [--model M] [--budget USD] [--repeat N] [TASK...]
+  bench.py run [--arm files|solace] [--agent codex|claude] [--model M] [--effort E]
+               [--budget USD] [--repeat N] [TASK...]
                                 run an agent on each task and grade it
   bench.py report RUN_DIR       per-task pass rate and medians for a run
 
@@ -17,6 +18,7 @@ import argparse
 import fnmatch
 import json
 import os
+import re
 import shutil
 import statistics
 import subprocess
@@ -45,6 +47,16 @@ ALLOWED_TOOLS = [  # and what runs without a permission prompt
     "Bash(gleam:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(find:*)", "Bash(grep:*)",
 ]
 SOLACE_BIN = ROOT.parent / "solace-cli" / "target" / "release"
+DEFAULT_MODEL = {"codex": "gpt-5.6-terra", "claude": "claude-sonnet-5"}
+# Codex features that aren't part of the task environment, turned off in both arms.
+CODEX_OFF = ["multi_agent", "apps", "plugins", "goals", "image_generation", "view_image", "browser_use",
+             "computer_use", "in_app_browser", "hooks", "memories", "tool_suggest"]
+CODEX_SOLACE_HINT = ("The tool is the MCP tool `solace`; from `exec`, call it as "
+                     "`await tools.mcp__solace__solace({command: \"session start\"})`, "
+                     "with the new code in `text` for submit commands.\n\n")
+# In Codex code mode every tool call is a JavaScript snippet; these mark the ones that change code.
+CODEX_EDIT = re.compile(r"tools\.apply_patch|command\s*:\s*[\"'`]\s*(?:solace\s+)?(?:submit|delete)\b"
+                        r"|sed\s+-i|perl\s+-pi|\btee\s|>\s*[\w./-]+\.gleam")
 SOLACE_PREAMBLE = (
     "You are working on a Gleam project: an order-management service. Its code lives in a "
     "Solace semantic store, and you work on it only through the `solace` tool. You cannot "
@@ -173,9 +185,74 @@ def parse_stream(lines):
     }
 
 
-def run(tasks, model, budget, repeat, arm):
-    run_dir = RESULTS / f"{time.strftime('%Y%m%d-%H%M%S')}-{model}" if arm == "files" \
-        else RESULTS / f"{time.strftime('%Y%m%d-%H%M%S')}-{model}-{arm}"
+def parse_codex(lines):
+    """Metrics from Codex session logs (`$CODEX_HOME/sessions/**.jsonl`).
+
+    Each model call writes one token_usage_record, after the tool calls it made.
+    OpenAI usage counts cached input inside input_tokens.
+    """
+    calls = turns = context = 0
+    first_context = None
+    first_edit = None  # (tokens, tool calls, turns) spent before the first edit
+    edit_pending = None  # tool calls before the first edit, until its turn's usage arrives
+    tokens = uncached = output = 0
+    for line in lines:
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        p = ev.get("payload") or {}
+        if ev.get("type") == "response_item" and p.get("type") in ("custom_tool_call", "function_call"):
+            calls += 1
+            if CODEX_EDIT.search(str(p.get("input") or p.get("arguments") or "")) and edit_pending is None:
+                edit_pending = calls - 1
+        elif ev.get("type") == "token_usage_record":
+            u = p.get("usage", {})
+            size = u.get("input_tokens", 0)
+            turns += 1
+            if edit_pending is not None and first_edit is None:
+                first_edit = (context, edit_pending, turns)
+            context += size
+            first_context = size if first_context is None else first_context
+            tokens += size + u.get("output_tokens", 0)
+            uncached += size - u.get("cached_input_tokens", 0) + u.get("output_tokens", 0)
+            output += u.get("output_tokens", 0)
+    return {
+        "tokens": tokens,
+        "work_tokens": tokens - (first_context or 0) * turns,
+        "uncached_tokens": uncached,
+        "output_tokens": output,
+        "tool_calls": calls,
+        "tokens_before_first_edit": first_edit[0] if first_edit else None,
+        "tool_calls_before_first_edit": first_edit[1] if first_edit else None,
+        "turns_to_first_edit": first_edit[2] if first_edit else None,
+        "turns": turns,
+        "cost_usd": None,  # ChatGPT sign-in: no per-token price
+        "duration_ms": None,
+        "agent_error": first_edit is None and turns == 0,
+        "init": {},
+    }
+
+
+def codex_cmd(arm, model, effort):
+    cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "-m", model,
+           "-c", f'model_reasoning_effort="{effort}"', "-c", 'web_search="disabled"']
+    for f in CODEX_OFF:
+        cmd += ["--disable", f]
+    if arm == "files":
+        return cmd + ["-s", "workspace-write", "-"]
+    # D-8: no shell, and a read-only sandbox so apply_patch can't write; the
+    # solace MCP server runs outside the sandbox.
+    return cmd + ["-s", "read-only", "--disable", "shell_tool", "--disable", "unified_exec",
+                  "-c", f'mcp_servers.solace.command="{SOLACE_BIN / "solace"}"',
+                  "-c", 'mcp_servers.solace.args=["mcp"]',
+                  "-c", 'mcp_servers.solace.default_tools_approval_mode="approve"', "-"]
+
+
+def run(tasks, model, budget, repeat, arm, agent="codex", effort="medium"):
+    label = model if agent == "claude" else f"{model}-{effort}"
+    run_dir = RESULTS / f"{time.strftime('%Y%m%d-%H%M%S')}-{label}" if arm == "files" \
+        else RESULTS / f"{time.strftime('%Y%m%d-%H%M%S')}-{label}-{arm}"
     run_dir.mkdir(parents=True)
     env = {**os.environ, "PATH": f"{SOLACE_BIN}:{os.environ['PATH']}"}
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
@@ -200,14 +277,33 @@ def run(tasks, model, budget, repeat, arm):
             (work / ".git" / "info" / "exclude").write_text(".solace/\n")
             if (task / "work.md").exists():
                 sh(["solace", "work", "add"], work, env=env, input=(task / "work.md").read_text())
+        if agent == "codex" and arm == "solace":
+            preamble = SOLACE_PREAMBLE + CODEX_SOLACE_HINT
         prompt = preamble + (task / "prompt.md").read_text()
-        try:
-            proc = sh(cmd, work, input=prompt, timeout=1800, env=env)
-            stream = proc.stdout
-        except subprocess.TimeoutExpired as e:
-            stream = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+        if agent == "codex":
+            # A fresh CODEX_HOME keeps the user's config, plugins, hooks and memories out.
+            home = Path(tempfile.mkdtemp(prefix="codex-home-"))
+            (home / "auth.json").symlink_to(Path.home() / ".codex" / "auth.json")
+            try:
+                sh(codex_cmd(arm, model, effort), work, input=prompt, timeout=1800, env={**env, "CODEX_HOME": str(home)})
+            except subprocess.TimeoutExpired:
+                pass
+            logs = sorted(home.glob("sessions/**/*.jsonl"), key=lambda f: f.stat().st_mtime)
+            if len(logs) > 1:
+                print(f"  note: {len(logs)} session logs (sub-agents?); metrics use all of them")
+            stream = "".join(f.read_text() for f in logs)
+            shutil.rmtree(home)
+            metrics = parse_codex(stream.splitlines())
+        else:
+            try:
+                proc = sh(cmd, work, input=prompt, timeout=1800, env=env)
+                stream = proc.stdout
+            except subprocess.TimeoutExpired as e:
+                stream = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+            metrics = parse_stream(stream.splitlines())
         (run_dir / f"{name}.stream.jsonl").write_text(stream)
-        row = {"task": task.name, "rep": rep, "model": model, "arm": arm, **parse_stream(stream.splitlines()), **grade(task, work)}
+        row = {"task": task.name, "rep": rep, "agent": agent, "model": model, "effort": effort if agent == "codex" else None,
+               "arm": arm, **metrics, **grade(task, work)}
         sh(["git", "add", "-A"], work)
         (run_dir / f"{name}.diff").write_text(sh(["git", "diff", "--cached", "HEAD"], work).stdout)
         init = row.pop("init")
@@ -215,7 +311,7 @@ def run(tasks, model, budget, repeat, arm):
         with open(run_dir / "summary.jsonl", "a") as f:
             f.write(json.dumps(row) + "\n")
         print(f"{'PASS' if row['hidden_pass'] else 'fail'} {name}  tokens={row['tokens']} "
-              f"turns_to_edit={row['turns_to_first_edit']} before_edit={row['tokens_before_first_edit']} cost=${row['cost_usd']}")
+              f"turns_to_edit={row['turns_to_first_edit']} before_edit={row['tokens_before_first_edit']}")
         shutil.rmtree(work)
     print(f"results: {run_dir}")
 
@@ -225,7 +321,8 @@ def report(run_dir: Path):
     for r in rows:  # older runs: derive newer metrics from the saved stream
         stream = run_dir / f"{r['task']}.{r.get('rep', 1)}.stream.jsonl"
         if "turns_to_first_edit" not in r and stream.exists():
-            r.update({k: v for k, v in parse_stream(stream.read_text().splitlines()).items() if k != "init"})
+            parse = parse_codex if r.get("agent") == "codex" else parse_stream
+            r.update({k: v for k, v in parse(stream.read_text().splitlines()).items() if k != "init"})
     cols = ["tokens", "work_tokens", "turns_to_first_edit", "tokens_before_first_edit", "uncached_tokens", "cost_usd"]
 
     def med(rs, c):
@@ -239,7 +336,8 @@ def report(run_dir: Path):
         cells = [med(rs, c) for c in cols]
         print(f"{name:<28} {passed:>2}/{len(rs):<2} " + " ".join(
             f"{'-' if v is None else round(v, 3) if c == 'cost_usd' else int(v):>12}" for c, v in zip(cols, cells)))
-    print(f"total cost ${sum(r['cost_usd'] or 0 for r in rows):.2f}  (medians per run; ALL = median over every run)")
+    cost = sum(r['cost_usd'] or 0 for r in rows)
+    print((f"total cost ${cost:.2f}  " if cost else "") + "(medians per run; ALL = median over every run)")
     print("tokens: all input+output; work: tokens minus the fixed prompt re-sent each call; "
           "turns→edit: model turns up to the first edit; tok<edit: tokens before it; uncached: fresh input+output")
 
@@ -248,8 +346,10 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["validate", "run", "report"])
     ap.add_argument("tasks", nargs="*", help="task directory names (default: all); for report, the run directory")
-    ap.add_argument("--model", default="claude-sonnet-5")
-    ap.add_argument("--budget", type=float, default=2.0, help="max USD per task")
+    ap.add_argument("--agent", choices=["codex", "claude"], default="codex")
+    ap.add_argument("--model", help="default: gpt-5.6-terra (codex), claude-sonnet-5 (claude)")
+    ap.add_argument("--effort", default="medium", help="codex reasoning effort")
+    ap.add_argument("--budget", type=float, default=2.0, help="max USD per task (claude only)")
     ap.add_argument("--repeat", type=int, default=1, help="runs per task")
     ap.add_argument("--arm", choices=["files", "solace"], default="files",
                     help="files: normal file tools; solace: the solace protocol only (D-8)")
@@ -265,7 +365,7 @@ def main():
         r = subprocess.run(["cargo", "build", "--release", "--quiet"], cwd=ROOT.parent / "solace-cli")
         if r.returncode:
             sys.exit("could not build solace-cli")
-    run(tasks, a.model, a.budget, a.repeat, a.arm)
+    run(tasks, a.model or DEFAULT_MODEL[a.agent], a.budget, a.repeat, a.arm, a.agent, a.effort)
 
 
 if __name__ == "__main__":

@@ -83,3 +83,12 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
 - **Rationale:** Change what the command agents already use returns, rather than asking them to use a different one. Every turn re-sends the whole context. L07's −41% came from symbol-level editing and diagnostics, not from work records, because the record was never in the store.
 - **Who/when:** Aaron, 2026-09-27. The 3-turn figure is Claude's pick for "a turn target"; adjust if needed.
 - **Affects:** PROPOSAL.md §7.4, §9.3, §14.1–14.3, §18 (Gate 1), §19.1, §19.3; Spec 3 (session start, view, inspect); bench (L07, turn metric)
+
+## D-11 Benchmark agent: Codex with GPT-5.6-Terra at medium effort — decided
+- **Question:** Which agent runs benchmark tasks from now on?
+- **Answer:** The Codex CLI (`codex exec`), model `gpt-5.6-terra`, reasoning effort medium, is `bench.py run`'s default. Earlier runs stay as Sonnet 5 results; that mix is accepted. Every run needs Aaron's go-ahead first.
+- **How the arms map:** each run gets a fresh `CODEX_HOME` holding only the sign-in, so user config, plugins, hooks and memories stay out. Both arms turn off Codex features that aren't part of the task (sub-agents, apps, plugins, goals, images, browser, web search). Files arm: the shell and `apply_patch` in a workspace-write sandbox. Solace arm (D-8): no shell, a read-only sandbox so `apply_patch` can't write, and the `solace` MCP server, which runs outside the sandbox. Codex runs this model in "code mode": one `exec` tool that runs JavaScript calling the other tools, so edits are detected by scanning that code.
+- **Metrics:** taken from Codex's session log, which has one usage record per model call. Sign-in is through ChatGPT, so there's no dollar cost; tokens are the metric anyway.
+- **Consequence:** arms compared with each other must use the same agent, so the D-10 rerun needs a fresh files baseline on Codex as well.
+- **Who/when:** Aaron (agent and model), 2026-09-27; harness details by Claude.
+- **Affects:** bench/bench.py
