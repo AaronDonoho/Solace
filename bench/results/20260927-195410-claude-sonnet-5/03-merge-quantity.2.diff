@@ -1,0 +1,32 @@
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 9afa2db..98e1630 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -53,7 +53,7 @@ pub fn add_line(
+     True ->
+       list.map(existing.lines, fn(l) {
+         case l.sku == sku {
+-          True -> Line(..l, quantity:)
++          True -> Line(..l, quantity: l.quantity + quantity)
+           False -> l
+         }
+       })
+diff --git a/test/pilot/checkout_test.gleam b/test/pilot/checkout_test.gleam
+index a4321fa..942b2d0 100644
+--- a/test/pilot/checkout_test.gleam
++++ b/test/pilot/checkout_test.gleam
+@@ -33,6 +33,14 @@ pub fn full_checkout_test() {
+   assert o.status == order.Shipped
+ }
+ 
++pub fn add_line_merges_quantity_for_same_sku_test() {
++  let c = clock.fixed(now)
++  let assert Ok(#(db, o)) = checkout.create_order(setup(), c, 1)
++  let assert Ok(#(db, _)) = checkout.add_line(db, c, o.id, "A", 2)
++  let assert Ok(#(_, o)) = checkout.add_line(db, c, o.id, "A", 1)
++  assert o.lines == [Line("A", 3)]
++}
++
+ pub fn unknown_customer_test() {
+   assert checkout.create_order(setup(), clock.fixed(now), 99)
+     == Error(UnknownCustomer(99))

@@ -11,10 +11,10 @@ Roadmap: PROPOSAL.md §18 table. Phases are sequential; a phase ships only when 
 - [x] Benchmark tasks: 10 in `bench/tasks/` (features, seeded defects, cross-caller refactor, state-machine change, rule changes that force test updates, resume from a work record). `bench.py validate` confirms each: hidden tests fail before, pass with the reference solution.
 - [x] Benchmark harness: `bench/bench.py run` drives headless Claude Code in an isolated copy (six tools, no user settings/plugins/MCP), grades with hidden tests, records tokens, tool calls, tokens and calls before first edit, cost. Smoke-tested on task 02 with Haiku (pass, $0.06).
 - [ ] Baseline run: all 10 tasks, repeated (single runs are noisy: the same task took 9 and then 15 tool calls). Needs the model, the repeat count and the spend agreed first.
-- [ ] Spec 1: identity and revision model (§6), including answers to §6.5.
-- [ ] Spec 2: text projection and export format (§7).
-- [ ] Spec 3: agent protocol and diagnostics (§14).
-- [ ] Spec 4: language core (§8, Phase 1 subset only: §18.3 list). Can wait until Phase 1b starts, as long as it's accepted before the gate.
+- [x] Spec 1 drafted: `specs/01-identity.md` (answers both §6.5 questions). **Awaiting acceptance.**
+- [x] Spec 2 drafted: `specs/02-projection.md`. **Awaiting acceptance.**
+- [x] Spec 3 drafted: `specs/03-protocol.md`. **Awaiting acceptance.**
+- [x] Spec 4 drafted: `specs/04-language-core.md` (Phase 1 subset; everything else listed as deferred). **Awaiting acceptance.**
 
 ## Next: Phase 1a — Store and protocol over Gleam (the central experiment)
 - SQLite store: symbol identities, revisions, references, work records, decisions.
@@ -28,6 +28,6 @@ Roadmap: PROPOSAL.md §18 table. Phases are sequential; a phase ships only when 
 - **Gate 1:** agents build and maintain the pilot through the protocol alone; export round-trips losslessly.
 
 ## Open work records
-- **Next:** Spec 1 (identity and revision model). Specs 1–3 are what's left for Gate 0, besides the baseline run.
-- **Harness gap:** no `--repeat` yet. Add it with the baseline run.
+- **Gate 0 blocker:** Aaron to review and accept specs 1–4 (or return them with changes). Accepting a spec means changing its status to `accepted`.
+- **Before the Phase 1a checkpoint:** the pilot is ~300 lines, too small for the protocol to show an orientation win. Grow it, or add tasks spread across more code, before comparing.
 - **Pilot has no HTTP layer.** Add one only if a benchmark task needs it.

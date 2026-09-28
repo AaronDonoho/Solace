@@ -1,0 +1,25 @@
+{
+  "model": "claude-sonnet-5",
+  "tools": [
+    "Bash",
+    "Edit",
+    "Glob",
+    "Grep",
+    "Read",
+    "Write"
+  ],
+  "mcp_servers": [],
+  "plugins": [
+    {
+      "name": "agents-md",
+      "path": "builtin",
+      "source": "agents-md@builtin"
+    },
+    {
+      "name": "telemetry",
+      "path": "builtin",
+      "source": "telemetry@builtin"
+    }
+  ],
+  "slash_commands": []
+}

@@ -2,7 +2,8 @@
 """Solace benchmark harness (PROPOSAL.md §19.1).
 
   bench.py validate [TASK...]   check each task: hidden tests fail before, pass with the reference solution
-  bench.py run [--model M] [--budget USD] [TASK...]   run an agent on each task and grade it
+  bench.py run [--model M] [--budget USD] [--repeat N] [TASK...]   run an agent on each task and grade it
+  bench.py report RUN_DIR       per-task pass rate and medians for a run
 
 A task is a directory in bench/tasks/ holding prompt.md, hidden_test.gleam,
 solution.patch and optionally setup.patch. Every run works on a fresh copy of pilot/.
@@ -12,6 +13,7 @@ import argparse
 import json
 import os
 import shutil
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -133,7 +135,7 @@ def parse_stream(lines):
     }
 
 
-def run(tasks, model, budget):
+def run(tasks, model, budget, repeat):
     run_dir = RESULTS / f"{time.strftime('%Y%m%d-%H%M%S')}-{model}"
     run_dir.mkdir(parents=True)
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
@@ -141,7 +143,8 @@ def run(tasks, model, budget):
            "--tools", TOOLS, "--allowedTools", *ALLOWED_TOOLS, "--max-budget-usd", str(budget)]
     # Keep the user's own plugins, hooks and settings out of the measurement.
     cmd += ["--bare"] if os.environ.get("ANTHROPIC_API_KEY") else ["--setting-sources", "project"]
-    for task in tasks:
+    for task, rep in [(t, r) for r in range(1, repeat + 1) for t in tasks]:
+        name = f"{task.name}.{rep}"
         work = prepare(task)
         prompt = PREAMBLE + (task / "prompt.md").read_text()
         try:
@@ -149,32 +152,53 @@ def run(tasks, model, budget):
             stream = proc.stdout
         except subprocess.TimeoutExpired as e:
             stream = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
-        (run_dir / f"{task.name}.stream.jsonl").write_text(stream)
-        row = {"task": task.name, "model": model, **parse_stream(stream.splitlines()), **grade(task, work)}
+        (run_dir / f"{name}.stream.jsonl").write_text(stream)
+        row = {"task": task.name, "rep": rep, "model": model, **parse_stream(stream.splitlines()), **grade(task, work)}
         sh(["git", "add", "-A"], work)
-        (run_dir / f"{task.name}.diff").write_text(sh(["git", "diff", "--cached", "HEAD"], work).stdout)
+        (run_dir / f"{name}.diff").write_text(sh(["git", "diff", "--cached", "HEAD"], work).stdout)
         init = row.pop("init")
         (run_dir / "init.json").write_text(json.dumps(init, indent=2))
         with open(run_dir / "summary.jsonl", "a") as f:
             f.write(json.dumps(row) + "\n")
-        print(f"{'PASS' if row['hidden_pass'] else 'fail'} {task.name}  tokens={row['tokens']} "
+        print(f"{'PASS' if row['hidden_pass'] else 'fail'} {name}  tokens={row['tokens']} "
               f"calls={row['tool_calls']} before_edit={row['tokens_before_first_edit']} cost=${row['cost_usd']}")
         shutil.rmtree(work)
     print(f"results: {run_dir}")
 
 
+def report(run_dir: Path):
+    rows = [json.loads(l) for l in (run_dir / "summary.jsonl").read_text().splitlines()]
+    cols = ["tokens", "tool_calls", "tokens_before_first_edit", "tool_calls_before_first_edit", "cost_usd"]
+
+    def med(rs, c):
+        vals = [r[c] for r in rs if r[c] is not None]
+        return statistics.median(vals) if vals else None
+
+    print(f"{'task':<24} {'pass':>5} " + " ".join(f"{c:>12}" for c in ["tokens", "calls", "tok<edit", "calls<edit", "cost"]))
+    for name in sorted({r["task"] for r in rows}) + ["ALL"]:
+        rs = rows if name == "ALL" else [r for r in rows if r["task"] == name]
+        passed = sum(r["hidden_pass"] for r in rs)
+        cells = [med(rs, c) for c in cols]
+        print(f"{name:<24} {passed:>2}/{len(rs):<2} " + " ".join(
+            f"{'-' if v is None else round(v, 3) if c == 'cost_usd' else int(v):>12}" for c, v in zip(cols, cells)))
+    print(f"total cost ${sum(r['cost_usd'] or 0 for r in rows):.2f}  (medians per run; ALL = median over every run)")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("command", choices=["validate", "run"])
-    ap.add_argument("tasks", nargs="*", help="task directory names (default: all)")
+    ap.add_argument("command", choices=["validate", "run", "report"])
+    ap.add_argument("tasks", nargs="*", help="task directory names (default: all); for report, the run directory")
     ap.add_argument("--model", default="claude-sonnet-5")
     ap.add_argument("--budget", type=float, default=2.0, help="max USD per task")
+    ap.add_argument("--repeat", type=int, default=1, help="runs per task")
     a = ap.parse_args()
+    if a.command == "report":
+        return report(Path(a.tasks[0]))
     names = a.tasks or sorted(p.name for p in TASKS.iterdir() if p.is_dir())
     tasks = [TASKS / n for n in names]
     if a.command == "validate":
         sys.exit(0 if validate(tasks) else 1)
-    run(tasks, a.model, a.budget)
+    run(tasks, a.model, a.budget, a.repeat)
 
 
 if __name__ == "__main__":
