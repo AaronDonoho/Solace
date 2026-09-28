@@ -188,16 +188,71 @@ def parse_stream(lines):
     }
 
 
+SOLACE_CMD = re.compile(r"command:\s*([\"'`])(.*?)\1", re.S)
+GLEAM_COMPILE = re.compile(r"\bgleam\s+(?:check|build|test|run)\b")
+SHELL_READ = re.compile(r"^\s*(cat|sed\s+-n|head|tail|nl)\b")
+
+
+def solace_commands(src):
+    """The solace command lines in one Codex tool call (a JS snippet)."""
+    return [c.strip() for _, cmds in SOLACE_CMD.findall(src) for c in re.split(r"\\n|\n", cmds) if c.strip()]
+
+
+def call_facts(src):
+    """(compile runs, things read) in one Codex tool call.
+
+    Compile runs: solace submit/delete/check/test (submit type-checks), or gleam
+    check/build/test/run. Things read: symbol or module names in solace
+    inspect/view, or .gleam files in cat/sed -n/head/tail/nl, keyed with their
+    line range so reading another part of a file is not a repeat.
+    """
+    cmds = solace_commands(src)
+    if cmds:
+        compiles = sum(c.split()[0] in ("submit", "delete", "check", "test") for c in cmds)
+        reads = [w for c in cmds if c.split()[0] in ("inspect", "view") for w in c.split()[1:] if not w.startswith("-")]
+        return compiles, reads
+    reads = []
+    for seg in re.split(r"&&|;|\|\||\||\\n|\n", src):
+        if SHELL_READ.match(seg):
+            rng = re.search(r"'(\d+,\d+p)'", seg)
+            reads += [(f, rng and rng.group(1)) for f in re.findall(r"[\w./-]+\.gleam", seg)]
+    return len(GLEAM_COMPILE.findall(src)), reads
+
+
+def output_text(p):
+    o = p.get("output")
+    return "".join(x.get("text", "") for x in o) if isinstance(o, list) else str(o or "")
+
+
+def failed(out):
+    """A tool result that reports a rejected edit or a compile error."""
+    return bool(re.search(r"Not saved|apply_patch verification failed|^\s*error:|\\nerror:|\"isError\":\s*true",
+                          out, re.M))
+
+
 def parse_codex(lines):
     """Metrics from Codex session logs (`$CODEX_HOME/sessions/**.jsonl`).
 
     Each model call writes one token_usage_record, after the tool calls it made.
     OpenAI usage counts cached input inside input_tokens.
+
+    A verified edit is the first point where a landed edit has been type-checked
+    cleanly: a solace submit that reports "The project type-checks", or a gleam
+    compile with no errors after an edit that applied. Wall time splits into model
+    (waiting for the model after its input is ready), tool (from a call to its
+    result) and other (start-up, shutdown).
     """
     calls = turns = context = 0
     first_context = None
     first_edit = None  # (tokens, tool calls, turns) spent before the first edit
     edit_pending = None  # tool calls before the first edit, until its turn's usage arrives
+    verified = None  # (tokens, turns) spent before the call that verified the first edit
+    landed = False  # an edit has applied (solace: saved; files: patch applied)
+    pending = {}  # call_id -> (source, is edit, context, turn, started)
+    compiles = failed_compiles = failed_edits = failed_tests = rereads = 0
+    read = set()
+    model_ms = tool_ms = 0.0
+    ready = None  # when the model's input was last complete
     tokens = uncached = output = 0
     stamps = []
     for line in lines:
@@ -205,13 +260,43 @@ def parse_codex(lines):
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
+        ts = None
         if ev.get("timestamp"):
-            stamps.append(datetime.fromisoformat(ev["timestamp"].replace("Z", "+00:00")))
+            ts = datetime.fromisoformat(ev["timestamp"].replace("Z", "+00:00"))
+            stamps.append(ts)
         p = ev.get("payload") or {}
-        if ev.get("type") == "response_item" and p.get("type") in ("custom_tool_call", "function_call"):
+        kind = p.get("type") if ev.get("type") == "response_item" else None
+        if kind == "message" and p.get("role") == "user" and ready is None:
+            ready = ts
+        elif kind in ("reasoning", "message", "custom_tool_call", "function_call") and ready and ts:
+            model_ms += (ts - ready).total_seconds() * 1000
+            ready = ts
+        if kind in ("custom_tool_call", "function_call"):
             calls += 1
-            if CODEX_EDIT.search(str(p.get("input") or p.get("arguments") or "")) and edit_pending is None:
+            src = str(p.get("input") or p.get("arguments") or "")
+            is_edit = bool(CODEX_EDIT.search(src))
+            if is_edit and edit_pending is None:
                 edit_pending = calls - 1
+            n, names = call_facts(src)
+            compiles += n
+            rereads += sum(x in read for x in names)
+            read.update(names)
+            pending[p.get("call_id")] = (src, is_edit, context, turns + 1, ts)
+        elif kind in ("custom_tool_call_output", "function_call_output") and p.get("call_id") in pending:
+            src, is_edit, ctx, turn, started = pending.pop(p["call_id"])
+            out = output_text(p)
+            bad = failed(out)
+            if started and ts:
+                tool_ms += (ts - started).total_seconds() * 1000
+                ready = ts
+            compiled = call_facts(src)[0] > 0
+            failed_compiles += compiled and bad
+            failed_edits += is_edit and bad
+            failed_tests += bool(re.search(r", [1-9]\d* failures?\b", out))
+            landed = landed or (is_edit and not bad)
+            clean = "The project type-checks" in out if solace_commands(src) else compiled and not bad
+            if landed and clean and verified is None:
+                verified = (ctx, turn)
         elif ev.get("type") == "token_usage_record":
             u = p.get("usage", {})
             size = u.get("input_tokens", 0)
@@ -232,6 +317,17 @@ def parse_codex(lines):
         "tokens_before_first_edit": first_edit[0] if first_edit else None,
         "tool_calls_before_first_edit": first_edit[1] if first_edit else None,
         "turns_to_first_edit": first_edit[2] if first_edit else None,
+        "tokens_before_verified_edit": verified[0] if verified else None,
+        "turns_to_verified_edit": verified[1] if verified else None,
+        "tokens_after_verified_edit": tokens - verified[0] if verified else None,
+        "compile_runs": compiles,
+        "failed_compiles": failed_compiles,
+        "failed_edits": failed_edits,
+        "failed_test_runs": failed_tests,
+        "repeat_reads": rereads,
+        "model_ms": int(model_ms),
+        "tool_ms": int(tool_ms),
+        "other_ms": int((max(stamps) - min(stamps)).total_seconds() * 1000 - model_ms - tool_ms) if stamps else None,
         "turns": turns,
         "cost_usd": None,  # ChatGPT sign-in: no per-token price
         "duration_ms": int((max(stamps) - min(stamps)).total_seconds() * 1000) if stamps else None,
@@ -334,20 +430,38 @@ def report(run_dir: Path):
     cols = ["tokens", "work_tokens", "turns_to_first_edit", "tokens_before_first_edit", "uncached_tokens", "duration_ms", "cost_usd"]
 
     def med(rs, c):
-        vals = [r[c] for r in rs if r[c] is not None]
+        vals = [r[c] for r in rs if r.get(c) is not None]
         return statistics.median(vals) if vals else None
 
     print(f"{'task':<28} {'pass':>5} " + " ".join(f"{c:>12}" for c in ["tokens", "work", "turns→edit", "tok<edit", "uncached", "ms", "cost"]))
-    for name in sorted({r["task"] for r in rows}) + ["ALL"]:
-        rs = rows if name == "ALL" else [r for r in rows if r["task"] == name]
+    for name in sorted({r["task"] for r in rows}) + ["ALL", "SUM"]:
+        rs = rows if name in ("ALL", "SUM") else [r for r in rows if r["task"] == name]
         passed = sum(r["hidden_pass"] for r in rs)
-        cells = [med(rs, c) for c in cols]
+        cells = [sum(r.get(c) or 0 for r in rs) if name == "SUM" else med(rs, c) for c in cols]
         print(f"{name:<28} {passed:>2}/{len(rs):<2} " + " ".join(
             f"{'-' if v is None else round(v, 3) if c == 'cost_usd' else int(v):>12}" for c, v in zip(cols, cells)))
     cost = sum(r['cost_usd'] or 0 for r in rows)
-    print((f"total cost ${cost:.2f}  " if cost else "") + "(medians per run; ALL = median over every run)")
+    passed = sum(r["hidden_pass"] for r in rows)
+    print(f"tokens per passed task: {sum(r['tokens'] for r in rows) // passed if passed else '-'} "
+          "(all tokens, failed runs included, over hidden-test passes)")
+    print((f"total cost ${cost:.2f}  " if cost else "") + "(medians per run; ALL = median over every run; SUM = totals)")
     print("tokens: all input+output; work: tokens minus the fixed prompt re-sent each call; "
           "turns→edit: model turns up to the first edit; tok<edit: tokens before it; uncached: fresh input+output")
+    if not any("compile_runs" in r for r in rows):
+        return  # Claude Code streams: no per-call timing or verification yet
+    cols = ["tokens_before_verified_edit", "turns_to_verified_edit", "tokens_after_verified_edit", "compile_runs",
+            "failed_compiles", "failed_edits", "failed_test_runs", "repeat_reads", "model_ms", "tool_ms", "other_ms"]
+    print(f"\n{'task':<28} " + " ".join(f"{c:>10}" for c in
+          ["tok<verif", "turns→ver", "tok>verif", "compiles", "fail comp", "fail edit", "fail test", "rereads", "model ms", "tool ms", "other ms"]))
+    for name in sorted({r["task"] for r in rows}) + ["ALL", "SUM"]:
+        rs = rows if name in ("ALL", "SUM") else [r for r in rows if r["task"] == name]
+        cells = [sum(r.get(c) or 0 for r in rs) if name == "SUM" else med(rs, c) for c in cols]
+        print(f"{name:<28} " + " ".join(f"{'-' if v is None else int(v):>10}" for v in cells))
+    print("verif: first edit that applied and type-checked cleanly; tok<verif / turns→ver: spent before the call "
+          "that verified it; tok>verif: tokens after; compiles: solace submit/delete/check/test or gleam "
+          "check/build/test/run; fail comp: those reporting errors; fail edit: edits rejected or not applied; fail test: test runs with failing tests; "
+          "rereads: symbols (solace) or file ranges (files) read again; ms: model, tool, other wall time; "
+          "SUM: totals over every run")
 
 
 def main():

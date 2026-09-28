@@ -1,0 +1,65 @@
+diff --git a/src/pilot/return_policy.gleam b/src/pilot/return_policy.gleam
+index cd15ae9..d9ffc44 100644
+--- a/src/pilot/return_policy.gleam
++++ b/src/pilot/return_policy.gleam
+@@ -144,13 +144,19 @@ pub fn completes_order(
+   items: List(Item),
+   already_returned: Dict(String, Int),
+ ) -> Bool {
+-  list.all(items, fn(item) {
+-    let before = dict.get(already_returned, item.sku) |> result.unwrap(0)
+-    let bought = case order.find_line(order, item.sku) {
+-      Ok(line) -> line.quantity
+-      Error(Nil) -> 0
+-    }
+-    before + item.quantity >= bought
++  let returning =
++    list.fold(items, dict.new(), fn(acc, item) {
++      dict.upsert(acc, item.sku, fn(quantity) {
++        case quantity {
++          Some(quantity) -> quantity + item.quantity
++          None -> item.quantity
++        }
++      })
++    })
++  list.all(order.lines, fn(line) {
++    let before = dict.get(already_returned, line.sku) |> result.unwrap(0)
++    let now = dict.get(returning, line.sku) |> result.unwrap(0)
++    before + now >= line.quantity
+   })
+ }
+ 
+diff --git a/test/pilot/return_policy_test.gleam b/test/pilot/return_policy_test.gleam
+index d524f34..b567855 100644
+--- a/test/pilot/return_policy_test.gleam
++++ b/test/pilot/return_policy_test.gleam
+@@ -97,6 +97,14 @@ pub fn whole_order_refund_includes_shipping_test() {
+   assert r.total_cents == 5824
+ }
+ 
++pub fn returning_a_complete_line_is_not_a_whole_order_test() {
++  assert !return_policy.completes_order(
++    delivered_on(0),
++    [Item("TEE", 2)],
++    dict.new(),
++  )
++}
++
+ pub fn restocking_fee_test() {
+   assert return_policy.restocking_fee_percent(Electronics, NoLongerNeeded) == 15
+   assert return_policy.restocking_fee_percent(Electronics, Damaged) == 0
+diff --git a/test/pilot/returns_test.gleam b/test/pilot/returns_test.gleam
+index 5cf865d..2cdfd68 100644
+--- a/test/pilot/returns_test.gleam
++++ b/test/pilot/returns_test.gleam
+@@ -49,8 +49,9 @@ pub fn returning_everything_refunds_shipping_test() {
+       3,
+     )
+   let c = support.on_day(5)
+-  let assert Ok(#(db, _)) =
++  let assert Ok(#(db, first)) =
+     returns.request(db, c, o.id, [Item("TEE-M-BLK", 2)], Damaged)
++  assert first.refund.shipping_cents == 0
+   let assert Ok(#(_, last)) =
+     returns.request(db, c, o.id, [Item("MUG-BLUE", 1)], Damaged)
+   assert last.refund.shipping_cents == 600

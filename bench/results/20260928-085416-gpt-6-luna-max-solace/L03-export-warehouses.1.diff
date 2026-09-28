@@ -1,0 +1,344 @@
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 41bcc69..674b6e0 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -350,13 +350,7 @@ fn reserve_all(
+ ) -> Result(#(inventory.Stock, List(Allocation)), CheckoutError) {
+   list.try_fold(lines, #(db.stock, []), fn(acc, line) {
+     let #(stock, allocations) = acc
+-    inventory.reserve(
+-      stock,
+-      db.warehouses,
+-      line.sku,
+-      line.quantity,
+-      destination_state(region),
+-    )
++    inventory.reserve(stock, db.warehouses, line.sku, line.quantity, region)
+     |> result.map(fn(r) { #(r.0, list.append(allocations, r.1)) })
+     |> result.map_error(Inventory)
+   })
+diff --git a/src/pilot/fulfillment.gleam b/src/pilot/fulfillment.gleam
+index 9242d10..6aa71db 100644
+--- a/src/pilot/fulfillment.gleam
++++ b/src/pilot/fulfillment.gleam
+@@ -5,8 +5,8 @@ import gleam/int
+ import gleam/list
+ import gleam/result
+ import pilot/audit
+-import pilot/checkout
+ import pilot/clock.{type Clock}
++import pilot/customer
+ import pilot/date
+ import pilot/inventory.{type Allocation, type InventoryError}
+ import pilot/notifications
+@@ -30,9 +30,6 @@ pub type FulfillmentError {
+ 
+ const actor = "fulfillment"
+ 
+-/// Starts picking a paid order and creates its shipment. Orders ship from a
+-/// single warehouse: if the order's stock is reserved across several, it is
+-/// moved to one warehouse that can supply everything, when there is one.
+ pub fn start_picking(
+   db: Store,
+   clock: Clock,
+@@ -49,7 +46,7 @@ pub fn start_picking(
+   use #(db, allocations) <- result.try(
+     case shipments.from_allocations(0, order_id, allocations, method) {
+       Error(shipments.MultipleWarehouses(_)) ->
+-        consolidate(db, order_id, allocations)
++        consolidate(db, order_id, allocations, existing.shipping_address.region)
+       _ -> Ok(#(db, allocations))
+     },
+   )
+@@ -78,6 +75,7 @@ fn consolidate(
+   db: Store,
+   order_id: Int,
+   allocations: List(Allocation),
++  region: customer.Region,
+ ) -> Result(#(Store, List(Allocation)), FulfillmentError) {
+   let needed =
+     inventory.merge_allocations(
+@@ -88,7 +86,12 @@ fn consolidate(
+   let released = inventory.release(db.stock, allocations)
+   let candidate =
+     list.find(db.warehouses, fn(w) {
+-      list.all(needed, fn(n) {
++      let eligible = case region {
++        customer.Domestic(_) -> True
++        customer.International(_) -> w.exports
++      }
++      eligible
++      && list.all(needed, fn(n) {
+         inventory.available(released, w.id, n.sku) >= n.quantity
+       })
+     })
+@@ -275,7 +278,7 @@ pub fn report_shortage(
+           db.warehouses,
+           sku,
+           quantity,
+-          checkout.destination_state(existing.shipping_address.region),
++          existing.shipping_address.region,
+         )
+         |> result.map_error(InventoryFailed),
+       )
+diff --git a/src/pilot/inventory.gleam b/src/pilot/inventory.gleam
+index a3b0152..728844f 100644
+--- a/src/pilot/inventory.gleam
++++ b/src/pilot/inventory.gleam
+@@ -9,9 +9,10 @@ import gleam/list
+ import gleam/order as ordering
+ import gleam/result
+ import gleam/string
++import pilot/customer
+ 
+ pub type Warehouse {
+-  Warehouse(id: String, name: String, state: String)
++  Warehouse(id: String, name: String, state: String, exports: Bool)
+ }
+ 
+ pub type Stock {
+@@ -72,20 +73,33 @@ pub fn total_available(stock: Stock, sku: String) -> Int {
+ }
+ 
+ /// Reserves units of a SKU, preferring warehouses in the destination state,
+-/// then the warehouses with the most units available. A reservation may be
+-/// split across warehouses.
++/// then the warehouses with the most units available. International orders
++/// use only warehouses that export. A reservation may be split across warehouses.
+ pub fn reserve(
+   stock: Stock,
+   warehouses: List(Warehouse),
+   sku: String,
+   quantity: Int,
+-  destination_state: String,
++  destination: customer.Region,
+ ) -> Result(#(Stock, List(Allocation)), InventoryError) {
+-  let total = total_available(stock, sku)
++  let eligible = case destination {
++    customer.Domestic(_) -> warehouses
++    customer.International(_) -> list.filter(warehouses, fn(w) { w.exports })
++  }
++  let total = case destination {
++    customer.Domestic(_) -> total_available(stock, sku)
++    customer.International(_) ->
++      list.fold(eligible, 0, fn(sum, w) { sum + available(stock, w.id, sku) })
++  }
+   use <- guard(total >= quantity, InsufficientStock(sku, quantity, total))
+   let ranked =
+-    list.sort(warehouses, fn(a, b) {
+-      let local = fn(w: Warehouse) { w.state == destination_state }
++    list.sort(eligible, fn(a, b) {
++      let local = fn(w: Warehouse) {
++        case destination {
++          customer.Domestic(state) -> w.state == state
++          customer.International(_) -> False
++        }
++      }
+       case local(a), local(b) {
+         True, False -> ordering.Lt
+         False, True -> ordering.Gt
+diff --git a/src/pilot/seed.gleam b/src/pilot/seed.gleam
+index 7f64764..9e8d2ce 100644
+--- a/src/pilot/seed.gleam
++++ b/src/pilot/seed.gleam
+@@ -36,9 +36,9 @@ pub fn demo_store() -> Store {
+ 
+ pub fn warehouses() -> List(inventory.Warehouse) {
+   [
+-    Warehouse(id: "WH-EAST", name: "Newark", state: "NJ"),
+-    Warehouse(id: "WH-WEST", name: "Oakland", state: "CA"),
+-    Warehouse(id: "WH-SOUTH", name: "Dallas", state: "TX"),
++    Warehouse(id: "WH-EAST", name: "Newark", state: "NJ", exports: True),
++    Warehouse(id: "WH-WEST", name: "Oakland", state: "CA", exports: False),
++    Warehouse(id: "WH-SOUTH", name: "Dallas", state: "TX", exports: False),
+   ]
+ }
+ 
+diff --git a/test/pilot/checkout_test.gleam b/test/pilot/checkout_test.gleam
+index a9a0fa4..93714fa 100644
+--- a/test/pilot/checkout_test.gleam
++++ b/test/pilot/checkout_test.gleam
+@@ -174,3 +174,24 @@ pub fn origin_warehouse_test() {
+   assert checkout.origin_warehouse([], customer.Domestic("CA"))
+     == Error(checkout.NoWarehouse)
+ }
++
++pub fn pay_international_requires_export_stock_test() {
++  let db = seed.demo_store()
++  let assert Ok(ada) = store.get_customer(db, seed.ada)
++  let ada =
++    customer.Customer(
++      ..ada,
++      shipping_address: customer.Address(
++        ..ada.shipping_address,
++        region: customer.International("DE"),
++      ),
++    )
++  let db = store.put_customer(db, ada)
++  let #(db, o) = support.draft(db, seed.ada, [#("PHONES-BLK", 6)])
++  let c = support.on_day(0)
++  let assert Ok(#(db, _)) = checkout.submit(db, c, o.id)
++  assert checkout.pay(db, c, payments.fake_gateway(), o.id, "tok_ok", Standard)
++    == Error(
++      checkout.Inventory(inventory.InsufficientStock("PHONES-BLK", 6, 5)),
++    )
++}
+diff --git a/test/pilot/fulfillment_test.gleam b/test/pilot/fulfillment_test.gleam
+index d631238..6c16605 100644
+--- a/test/pilot/fulfillment_test.gleam
++++ b/test/pilot/fulfillment_test.gleam
+@@ -2,6 +2,7 @@ import gleam/dict
+ import gleam/list
+ import gleam/option.{Some}
+ import gleam/string
++import pilot/customer
+ import pilot/fulfillment
+ import pilot/inventory.{Allocation}
+ import pilot/notifications
+@@ -120,3 +121,58 @@ pub fn must_be_paid_to_pick_test() {
+   let assert Error(fulfillment.OrderRejected(_)) =
+     fulfillment.start_picking(db, support.on_day(1), o.id, Standard)
+ }
++
++pub fn report_shortage_international_uses_exporters_test() {
++  let db = seed.demo_store()
++  let assert Ok(ada) = store.get_customer(db, seed.ada)
++  let ada =
++    customer.Customer(
++      ..ada,
++      shipping_address: customer.Address(
++        ..ada.shipping_address,
++        region: customer.International("DE"),
++      ),
++    )
++  let db = store.put_customer(db, ada)
++  let #(db, o) = support.paid(db, seed.ada, [#("LAMP-OAK", 4)])
++  assert store.allocations_for(db, o.id)
++    == [inventory.Allocation("WH-EAST", "LAMP-OAK", 4)]
++  assert fulfillment.report_shortage(
++      db,
++      support.on_day(1),
++      o.id,
++      "WH-EAST",
++      "LAMP-OAK",
++      1,
++    )
++    == Error(
++      fulfillment.InventoryFailed(inventory.InsufficientStock("LAMP-OAK", 1, 0)),
++    )
++}
++
++pub fn international_consolidation_uses_exporters_test() {
++  let #(db, o) =
++    support.paid(seed.demo_store(), seed.grace, [
++      #("PHONES-BLK", 1),
++      #("TEE-L-BLK", 1),
++    ])
++  let o =
++    order.Order(
++      ..o,
++      shipping_address: customer.Address(
++        ..o.shipping_address,
++        region: customer.International("DE"),
++      ),
++    )
++  let db = store.put_order(db, o)
++  let assert Ok(stock) =
++    inventory.write_off(db.stock, "WH-EAST", "PHONES-BLK", 5)
++  let stock = inventory.receive(stock, "WH-WEST", "TEE-L-BLK", 1)
++  let db = store.set_stock(db, stock)
++  assert fulfillment.start_picking(db, support.on_day(1), o.id, Standard)
++    == Error(
++      fulfillment.ShipmentFailed(
++        shipments.MultipleWarehouses(["WH-WEST", "WH-EAST"]),
++      ),
++    )
++}
+diff --git a/test/pilot/inventory_test.gleam b/test/pilot/inventory_test.gleam
+index b8fc284..e02b09c 100644
+--- a/test/pilot/inventory_test.gleam
++++ b/test/pilot/inventory_test.gleam
+@@ -1,10 +1,11 @@
++import pilot/customer
+ import pilot/inventory.{Allocation, InsufficientStock, Warehouse}
+ 
+ fn warehouses() {
+   [
+-    Warehouse("E", "East", "NJ"),
+-    Warehouse("W", "West", "CA"),
+-    Warehouse("S", "South", "TX"),
++    Warehouse("E", "East", "NJ", True),
++    Warehouse("W", "West", "CA", False),
++    Warehouse("S", "South", "TX", False),
+   ]
+ }
+ 
+@@ -23,28 +24,34 @@ pub fn available_test() {
+ 
+ pub fn reserve_prefers_destination_state_test() {
+   let assert Ok(#(s, allocations)) =
+-    inventory.reserve(stock(), warehouses(), "A", 2, "CA")
++    inventory.reserve(stock(), warehouses(), "A", 2, customer.Domestic("CA"))
+   assert allocations == [Allocation("W", "A", 2)]
+   assert inventory.available(s, "W", "A") == 1
+ }
+ 
+ pub fn reserve_then_most_stock_and_splits_test() {
+   let assert Ok(#(_, allocations)) =
+-    inventory.reserve(stock(), warehouses(), "A", 10, "NY")
++    inventory.reserve(stock(), warehouses(), "A", 10, customer.Domestic("NY"))
+   assert allocations == [Allocation("S", "A", 8), Allocation("E", "A", 2)]
+   let assert Ok(#(_, allocations)) =
+-    inventory.reserve(stock(), warehouses(), "A", 5, "CA")
++    inventory.reserve(stock(), warehouses(), "A", 5, customer.Domestic("CA"))
+   assert allocations == [Allocation("W", "A", 3), Allocation("S", "A", 2)]
+ }
+ 
+ pub fn reserve_insufficient_test() {
+-  assert inventory.reserve(stock(), warehouses(), "A", 17, "CA")
++  assert inventory.reserve(
++      stock(),
++      warehouses(),
++      "A",
++      17,
++      customer.Domestic("CA"),
++    )
+     == Error(InsufficientStock("A", 17, 16))
+ }
+ 
+ pub fn release_and_commit_test() {
+   let assert Ok(#(s, allocations)) =
+-    inventory.reserve(stock(), warehouses(), "A", 4, "NJ")
++    inventory.reserve(stock(), warehouses(), "A", 4, customer.Domestic("NJ"))
+   assert inventory.available(inventory.release(s, allocations), "E", "A") == 5
+   let shipped = inventory.commit(s, allocations)
+   assert inventory.available(shipped, "E", "A") == 1
+@@ -74,3 +81,28 @@ pub fn merge_and_low_stock_test() {
+     == [Allocation("E", "A", 4), Allocation("W", "B", 2)]
+   assert inventory.low_stock(stock(), 5) == [#("W", "A", 3), #("E", "A", 5)]
+ }
++
++pub fn reserve_international_uses_exporters_test() {
++  let assert Ok(#(s, allocations)) =
++    inventory.reserve(
++      stock(),
++      warehouses(),
++      "A",
++      5,
++      customer.International("DE"),
++    )
++  assert allocations == [Allocation("E", "A", 5)]
++  assert inventory.available(s, "W", "A") == 3
++  assert inventory.available(s, "S", "A") == 8
++}
++
++pub fn reserve_international_insufficient_counts_exporters_test() {
++  assert inventory.reserve(
++      stock(),
++      warehouses(),
++      "A",
++      6,
++      customer.International("DE"),
++    )
++    == Error(InsufficientStock("A", 6, 5))
++}

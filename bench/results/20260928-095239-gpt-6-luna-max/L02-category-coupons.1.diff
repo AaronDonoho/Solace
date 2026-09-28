@@ -1,0 +1,455 @@
+diff --git a/src/pilot/api.gleam b/src/pilot/api.gleam
+index 279da39..4ff7d87 100644
+--- a/src/pilot/api.gleam
++++ b/src/pilot/api.gleam
+@@ -241,9 +241,9 @@ fn coupon_error(e: promotions.CouponError) -> Response {
+         422,
+         "coupon_minimum",
+         code
+-          <> " needs a subtotal of at least "
++          <> " needs at least "
+           <> int.to_string(min)
+-          <> " cents",
++          <> " cents of eligible items",
+       )
+     promotions.UsageLimitReached(code) ->
+       error(422, "coupon_used", code <> " has already been used")
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 41bcc69..7548399 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -2,6 +2,7 @@
+ //// it. Each operation takes the current Store and returns the updated one.
+ 
+ import gleam/bool
++import gleam/dict.{type Dict}
+ import gleam/list
+ import gleam/option.{None, Some}
+ import gleam/result
+@@ -152,12 +153,14 @@ pub fn quote(
+   let region = existing.shipping_address.region
+   let shipping_quote =
+     shipping.quote(method, origin.state, region, weight, goods)
+-  Ok(pricing.quote(
++  let category_subtotals = category_subtotals(db.products, existing.lines)
++  Ok(pricing.quote_with_category_subtotals(
+     existing.lines,
+     customer.tier(customer),
+     coupon,
+     shipping_quote,
+     region,
++    category_subtotals,
+   ))
+ }
+ 
+@@ -375,6 +378,7 @@ fn check_coupon(
+     promotions.CouponContext(
+       lines: existing.lines,
+       subtotal_cents: order.subtotal_cents(existing.lines),
++      category_subtotals: category_subtotals(db.products, existing.lines),
+       now:,
+       customer_uses: store.coupon_uses(db, code, existing.customer_id),
+     )
+@@ -383,6 +387,40 @@ fn check_coupon(
+   |> result.map_error(CouponRejected)
+ }
+ 
++fn category_subtotals(
++  products: Dict(String, catalog.Product),
++  lines: List(order.Line),
++) -> List(#(catalog.Category, Int)) {
++  list.fold(lines, [], fn(subtotals, line) {
++    case catalog.category_of(products, line.sku) {
++      Ok(category) ->
++        add_category_subtotal(
++          subtotals,
++          category,
++          line.quantity * line.unit_price_cents,
++        )
++      Error(_) -> subtotals
++    }
++  })
++}
++
++fn add_category_subtotal(
++  subtotals: List(#(catalog.Category, Int)),
++  category: catalog.Category,
++  amount_cents: Int,
++) -> List(#(catalog.Category, Int)) {
++  case list.find(subtotals, fn(entry) { entry.0 == category }) {
++    Ok(_) ->
++      list.map(subtotals, fn(entry) {
++        case entry.0 == category {
++          True -> #(category, entry.1 + amount_cents)
++          False -> entry
++        }
++      })
++    Error(_) -> [#(category, amount_cents), ..subtotals]
++  }
++}
++
+ fn save(
+   order: Order,
+   db: Store,
+diff --git a/src/pilot/pricing.gleam b/src/pilot/pricing.gleam
+index ebe66c5..53fc2e3 100644
+--- a/src/pilot/pricing.gleam
++++ b/src/pilot/pricing.gleam
+@@ -13,6 +13,7 @@
+ 
+ import gleam/list
+ import gleam/option.{type Option, None, Some}
++import pilot/catalog.{type Category}
+ import pilot/customer.{type LoyaltyTier, type Region}
+ import pilot/money
+ import pilot/order.{type Line}
+@@ -47,6 +48,18 @@ pub fn quote(
+   coupon: Option(Coupon),
+   shipping: ShippingQuote,
+   destination: Region,
++) -> Quote {
++  quote_with_category_subtotals(lines, tier, coupon, shipping, destination, [])
++}
++
++/// Prices an order when its line categories are available from the catalog.
++pub fn quote_with_category_subtotals(
++  lines: List(Line),
++  tier: LoyaltyTier,
++  coupon: Option(Coupon),
++  shipping: ShippingQuote,
++  destination: Region,
++  category_subtotals: List(#(Category, Int)),
+ ) -> Quote {
+   let line_quotes =
+     list.map(lines, fn(l) {
+@@ -67,7 +80,20 @@ pub fn quote(
+     False -> 0
+   }
+   let coupon_discount = case coupon {
+-    Some(c) -> promotions.discount(c, lines, subtotal - loyalty)
++    Some(c) -> {
++      let category_total = case c.category {
++        Some(category) ->
++          promotions.category_subtotal(category_subtotals, category)
++          |> option.unwrap(0)
++        None -> subtotal - loyalty
++      }
++      promotions.discount_with_category_total(
++        c,
++        lines,
++        subtotal - loyalty,
++        category_total,
++      )
++    }
+     None -> 0
+   }
+   let units = list.fold(lines, 0, fn(sum, l) { sum + l.quantity })
+diff --git a/src/pilot/promotions.gleam b/src/pilot/promotions.gleam
+index a07f76a..e337a73 100644
+--- a/src/pilot/promotions.gleam
++++ b/src/pilot/promotions.gleam
+@@ -4,6 +4,7 @@ import gleam/int
+ import gleam/list
+ import gleam/option.{type Option, None, Some}
+ import gleam/string
++import pilot/catalog.{type Category}
+ import pilot/money
+ import pilot/order.{type Line}
+ 
+@@ -22,6 +23,7 @@ pub type Coupon {
+     min_spend_cents: Int,
+     expires_at: Option(Int),
+     max_uses_per_customer: Option(Int),
++    category: Option(Category),
+     stacks_with_loyalty: Bool,
+     active: Bool,
+   )
+@@ -32,6 +34,7 @@ pub type CouponContext {
+   CouponContext(
+     lines: List(Line),
+     subtotal_cents: Int,
++    category_subtotals: List(#(Category, Int)),
+     now: Int,
+     customer_uses: Int,
+   )
+@@ -63,11 +66,25 @@ pub fn validate(
+     Some(max) -> context.customer_uses >= max
+     None -> False
+   }
++  let category_spend = case coupon.category {
++    Some(category) -> category_subtotal(context.category_subtotals, category)
++    None -> Some(context.subtotal_cents)
++  }
++  let spend_amount = option.unwrap(category_spend, 0)
+   case coupon.kind {
+     _ if !coupon.active -> Error(CouponInactive(code))
+     _ if expired -> Error(CouponExpired(code))
+     _ if used_up -> Error(UsageLimitReached(code))
+-    _ if context.subtotal_cents < coupon.min_spend_cents ->
++    _ if category_spend == None ->
++      case coupon.category {
++        Some(category) ->
++          Error(NotApplicable(
++            code,
++            "requires at least one item in " <> catalog.category_name(category),
++          ))
++        None -> Error(NotApplicable(code, "is not applicable"))
++      }
++    _ if spend_amount < coupon.min_spend_cents ->
+       Error(BelowMinimumSpend(code, coupon.min_spend_cents))
+     BuyXGetY(sku:, buy:, get:) ->
+       case list.find(context.lines, fn(l) { l.sku == sku }) {
+@@ -82,11 +99,27 @@ pub fn validate(
+   }
+ }
+ 
+-/// The amount a coupon takes off `base_cents`, the order value it applies
+-/// to after any earlier discounts. Never more than `base_cents`.
++/// The amount an unscoped coupon takes off `base_cents`, the order value it
++/// applies to after any earlier discounts. Never more than `base_cents`.
++/// For category-scoped coupons, use `discount_with_category_total`.
+ pub fn discount(coupon: Coupon, lines: List(Line), base_cents: Int) -> Int {
++  discount_with_category_total(coupon, lines, base_cents, base_cents)
++}
++
++/// The amount a coupon takes off the order, using the target category's full
++/// subtotal as the base when the coupon is category-specific.
++pub fn discount_with_category_total(
++  coupon: Coupon,
++  lines: List(Line),
++  base_cents: Int,
++  category_total_cents: Int,
++) -> Int {
++  let discount_base = case coupon.category {
++    Some(_) -> category_total_cents
++    None -> base_cents
++  }
+   let amount = case coupon.kind {
+-    PercentOff(percent) -> money.percent(base_cents, percent)
++    PercentOff(percent) -> money.percent(discount_base, percent)
+     FixedOff(cents) -> cents
+     FreeShipping -> 0
+     BuyXGetY(sku:, buy:, get:) ->
+@@ -95,7 +128,18 @@ pub fn discount(coupon: Coupon, lines: List(Line), base_cents: Int) -> Int {
+         Error(_) -> 0
+       }
+   }
+-  int.clamp(amount, 0, base_cents)
++  int.clamp(amount, 0, int.min(discount_base, base_cents))
++}
++
++/// The subtotal for a category, if the order has any lines in it.
++pub fn category_subtotal(
++  category_subtotals: List(#(Category, Int)),
++  category: Category,
++) -> Option(Int) {
++  case list.find(category_subtotals, fn(entry) { entry.0 == category }) {
++    Ok(entry) -> Some(entry.1)
++    Error(_) -> None
++  }
+ }
+ 
+ pub fn gives_free_shipping(coupon: Coupon) -> Bool {
+diff --git a/src/pilot/seed.gleam b/src/pilot/seed.gleam
+index 7f64764..4d3005f 100644
+--- a/src/pilot/seed.gleam
++++ b/src/pilot/seed.gleam
+@@ -173,6 +173,7 @@ pub fn coupons() -> List(promotions.Coupon) {
+       min_spend_cents: 0,
+       expires_at: None,
+       max_uses_per_customer: None,
++      category: None,
+       stacks_with_loyalty: True,
+       active: True,
+     )
+diff --git a/test/pilot/checkout_test.gleam b/test/pilot/checkout_test.gleam
+index a9a0fa4..bbaa120 100644
+--- a/test/pilot/checkout_test.gleam
++++ b/test/pilot/checkout_test.gleam
+@@ -75,6 +75,54 @@ pub fn coupons_test() {
+   assert o.coupon_code == None
+ }
+ 
++pub fn category_coupon_test() {
++  let book_coupon =
++    promotions.Coupon(
++      "BOOK20",
++      promotions.PercentOff(20),
++      2000,
++      None,
++      None,
++      Some(catalog.Books),
++      True,
++      True,
++    )
++  let minimum_coupon =
++    promotions.Coupon(
++      "BOOKMIN",
++      promotions.FixedOff(500),
++      2500,
++      None,
++      None,
++      Some(catalog.Books),
++      True,
++      True,
++    )
++  let db = seed.demo_store() |> store.put_coupon(book_coupon)
++  let db = store.put_coupon(db, minimum_coupon)
++  let #(db, order) =
++    support.draft(db, seed.ada, [
++      #("BOOK-NOVEL", 2),
++      #("MUG-BLUE", 1),
++    ])
++  let c = support.on_day(0)
++  let assert Ok(#(db, _)) = checkout.apply_coupon(db, c, order.id, "BOOK20")
++  let assert Ok(q) = checkout.quote(db, order.id, Standard)
++  // The two books total $24; the $14 mug is excluded from the coupon base.
++  assert q.coupon_discount_cents == 480
++  assert checkout.apply_coupon(db, c, order.id, "BOOKMIN")
++    == Error(CouponRejected(promotions.BelowMinimumSpend("BOOKMIN", 2500)))
++
++  let #(db, other_order) = support.draft(db, seed.grace, [#("MUG-BLUE", 1)])
++  assert checkout.apply_coupon(db, c, other_order.id, "BOOK20")
++    == Error(
++      CouponRejected(promotions.NotApplicable(
++        "BOOK20",
++        "requires at least one item in Books",
++      )),
++    )
++}
++
+ pub fn pay_test() {
+   let #(db, o) =
+     support.paid(seed.demo_store(), seed.ada, [
+diff --git a/test/pilot/pricing_test.gleam b/test/pilot/pricing_test.gleam
+index cebebb4..8f895f7 100644
+--- a/test/pilot/pricing_test.gleam
++++ b/test/pilot/pricing_test.gleam
+@@ -1,4 +1,5 @@
+ import gleam/option.{None, Some}
++import pilot/catalog.{Books}
+ import pilot/customer.{Domestic, Gold, Standard}
+ import pilot/order.{Line}
+ import pilot/pricing
+@@ -10,7 +11,7 @@ fn ship(cost) {
+ }
+ 
+ fn coupon(kind, stacks) {
+-  Coupon("C", kind, 0, None, None, stacks, True)
++  Coupon("C", kind, 0, None, None, None, stacks, True)
+ }
+ 
+ pub fn plain_order_test() {
+@@ -59,6 +60,37 @@ pub fn non_stacking_coupon_skips_loyalty_test() {
+   assert q.total_cents == 8500
+ }
+ 
++pub fn category_coupon_preserves_loyalty_stacking_test() {
++  let lines = [Line("BOOK", 1, 4000), Line("OTHER", 1, 6000)]
++  let totals = [#(Books, 4000)]
++  let stacking = Coupon(..coupon(PercentOff(10), True), category: Some(Books))
++  let q =
++    pricing.quote_with_category_subtotals(
++      lines,
++      Gold,
++      Some(stacking),
++      ship(0),
++      Domestic("OR"),
++      totals,
++    )
++  assert q.loyalty_discount_cents == 500
++  assert q.coupon_discount_cents == 400
++
++  let non_stacking =
++    Coupon(..coupon(PercentOff(10), False), category: Some(Books))
++  let q =
++    pricing.quote_with_category_subtotals(
++      lines,
++      Gold,
++      Some(non_stacking),
++      ship(0),
++      Domestic("OR"),
++      totals,
++    )
++  assert q.loyalty_discount_cents == 0
++  assert q.coupon_discount_cents == 400
++}
++
+ pub fn volume_discount_test() {
+   let q =
+     pricing.quote([Line("A", 20, 100)], Standard, None, ship(0), Domestic("OR"))
+diff --git a/test/pilot/promotions_test.gleam b/test/pilot/promotions_test.gleam
+index df7deb8..d8b0ec7 100644
+--- a/test/pilot/promotions_test.gleam
++++ b/test/pilot/promotions_test.gleam
+@@ -1,4 +1,5 @@
+ import gleam/option.{None, Some}
++import pilot/catalog.{Books, HomeGoods}
+ import pilot/order.{Line}
+ import pilot/promotions.{
+   BelowMinimumSpend, BuyXGetY, Coupon, CouponContext, CouponExpired,
+@@ -7,13 +8,14 @@ import pilot/promotions.{
+ }
+ 
+ fn coupon(kind) {
+-  Coupon("C", kind, 0, None, None, True, True)
++  Coupon("C", kind, 0, None, None, None, True, True)
+ }
+ 
+ fn context(lines, uses) {
+   CouponContext(
+     lines:,
+     subtotal_cents: order.subtotal_cents(lines),
++    category_subtotals: [],
+     now: 100,
+     customer_uses: uses,
+   )
+@@ -51,6 +53,32 @@ pub fn buy_x_get_y_needs_enough_units_test() {
+   let assert Ok(_) = promotions.validate(c, context([Line("A", 3, 100)], 0))
+ }
+ 
++pub fn category_coupon_validation_test() {
++  let lines = [Line("BOOK", 1, 4000), Line("MUG", 1, 3000)]
++  let context =
++    CouponContext(..context(lines, 0), category_subtotals: [
++      #(Books, 4000),
++      #(HomeGoods, 3000),
++    ])
++  let books_coupon =
++    Coupon(
++      ..coupon(PercentOff(20)),
++      category: Some(Books),
++      min_spend_cents: 3500,
++    )
++  assert promotions.validate(books_coupon, context) == Ok(books_coupon)
++
++  let too_small = Coupon(..books_coupon, min_spend_cents: 4500)
++  assert promotions.validate(too_small, context)
++    == Error(BelowMinimumSpend("C", 4500))
++
++  let no_books =
++    CouponContext(..context, category_subtotals: [#(HomeGoods, 3000)])
++  let assert Error(NotApplicable("C", reason)) =
++    promotions.validate(books_coupon, no_books)
++  assert reason == "requires at least one item in Books"
++}
++
+ pub fn discount_test() {
+   let lines = [Line("A", 7, 100), Line("B", 1, 1000)]
+   assert promotions.discount(coupon(PercentOff(10)), lines, 1700) == 170
+@@ -61,6 +89,15 @@ pub fn discount_test() {
+   assert promotions.discount(coupon(BuyXGetY("A", 2, 1)), lines, 1700) == 200
+ }
+ 
++pub fn category_coupon_discount_test() {
++  let lines = [Line("BOOK", 1, 700), Line("MUG", 1, 1000)]
++  let percent = Coupon(..coupon(PercentOff(20)), category: Some(Books))
++  let fixed = Coupon(..coupon(FixedOff(900)), category: Some(Books))
++  assert promotions.discount_with_category_total(percent, lines, 1700, 700)
++    == 140
++  assert promotions.discount_with_category_total(fixed, lines, 1700, 700) == 700
++}
++
+ pub fn normalize_and_describe_test() {
+   assert promotions.normalize_code("  save10 ") == "SAVE10"
+   assert promotions.describe(coupon(FixedOff(1000))) == "$10.00 off"

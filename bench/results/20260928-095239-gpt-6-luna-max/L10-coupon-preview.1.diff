@@ -1,0 +1,129 @@
+diff --git a/src/pilot/api.gleam b/src/pilot/api.gleam
+index 279da39..f4ead85 100644
+--- a/src/pilot/api.gleam
++++ b/src/pilot/api.gleam
+@@ -33,6 +33,7 @@ pub type Request {
+   RemoveItem(order_id: Int, sku: String)
+   ChangeQuantity(order_id: Int, sku: String, quantity: Int)
+   ApplyCoupon(order_id: Int, code: String)
++  PreviewCoupon(order_id: Int, code: String, method: Method)
+   RemoveCoupon(order_id: Int)
+   GetQuote(order_id: Int, method: Method)
+   SubmitOrder(order_id: Int)
+@@ -71,6 +72,11 @@ pub fn handle(db: Store, env: Env, request: Request) -> #(Store, Response) {
+       |> order_result(db, 200)
+     ApplyCoupon(order_id, code) ->
+       checkout.apply_coupon(db, clock, order_id, code) |> order_result(db, 200)
++    PreviewCoupon(order_id, code, method) ->
++      case checkout.preview_coupon(db, clock, order_id, code, method) {
++        Ok(quote) -> #(db, Response(200, quote_json(quote)))
++        Error(e) -> #(db, checkout_error(e))
++      }
+     RemoveCoupon(order_id) ->
+       checkout.remove_coupon(db, clock, order_id) |> order_result(db, 200)
+     GetQuote(order_id, method) ->
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 41bcc69..3b946a7 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -113,6 +113,26 @@ pub fn apply_coupon(
+   order.Order(..existing, coupon_code: Some(coupon.code)) |> save(db, clock)
+ }
+ 
++/// Prices a draft order with a coupon without saving the coupon or order.
++pub fn preview_coupon(
++  db: Store,
++  clock: Clock,
++  order_id: Int,
++  code: String,
++  method: Method,
++) -> Result(Quote, CheckoutError) {
++  use existing <- result.try(get_editable(db, order_id))
++  use coupon <- result.try(
++    store.get_coupon(db, code) |> result.replace_error(UnknownCoupon(code)),
++  )
++  use _ <- result.try(check_coupon(db, existing, coupon.code, clock()))
++  quote_order(
++    db,
++    order.Order(..existing, coupon_code: Some(coupon.code)),
++    method,
++  )
++}
++
+ pub fn remove_coupon(
+   db: Store,
+   clock: Clock,
+@@ -130,6 +150,14 @@ pub fn quote(
+   method: Method,
+ ) -> Result(Quote, CheckoutError) {
+   use existing <- result.try(get_order(db, order_id))
++  quote_order(db, existing, method)
++}
++
++fn quote_order(
++  db: Store,
++  existing: Order,
++  method: Method,
++) -> Result(Quote, CheckoutError) {
+   use customer <- result.try(get_customer(db, existing.customer_id))
+   use origin <- result.try(origin_warehouse(
+     db.warehouses,
+diff --git a/test/pilot/api_test.gleam b/test/pilot/api_test.gleam
+index d6c8db6..bfccb98 100644
+--- a/test/pilot/api_test.gleam
++++ b/test/pilot/api_test.gleam
+@@ -1,12 +1,13 @@
+ import gleam/string
+ import pilot/api.{
+   AddItem, ApplyCoupon, CreateOrder, Env, GetOrder, GetQuote, ListOrders,
+-  PayOrder, Response, SalesReport, SearchProducts, SubmitOrder,
++  PayOrder, PreviewCoupon, Response, SalesReport, SearchProducts, SubmitOrder,
+ }
+ import pilot/date.{Date}
+ import pilot/payments
+ import pilot/seed
+ import pilot/shipping.{Standard}
++import pilot/store
+ import support
+ 
+ fn env() {
+@@ -48,6 +49,39 @@ pub fn errors_test() {
+     == 503
+ }
+ 
++pub fn preview_coupon_test() {
++  let db = seed.demo_store()
++  let #(db, _) = api.handle(db, env(), CreateOrder(seed.ada))
++  let #(db, _) = api.handle(db, env(), AddItem(100, "MUG-BLUE", 2))
++  let #(db, _) = api.handle(db, env(), ApplyCoupon(100, "SHIPFREE"))
++
++  let assert Ok(order_before) = store.get_order(db, 100)
++  let #(preview_db, preview) =
++    api.handle(db, env(), PreviewCoupon(100, "TENOFF", Standard))
++  let #(applied_db, applied) = api.handle(db, env(), ApplyCoupon(100, "TENOFF"))
++  let #(_, applied_quote) =
++    api.handle(applied_db, env(), GetQuote(100, Standard))
++
++  assert preview.status == 200
++  assert preview.body == applied_quote.body
++  assert preview_db == db
++  assert store.get_order(preview_db, 100) == Ok(order_before)
++  assert applied.status == 200
++}
++
++pub fn preview_coupon_error_test() {
++  let db = seed.demo_store()
++  let #(db, _) = api.handle(db, env(), CreateOrder(seed.ada))
++  let #(db, _) = api.handle(db, env(), AddItem(100, "MUG-BLUE", 1))
++
++  let #(preview_db, preview) =
++    api.handle(db, env(), PreviewCoupon(100, "SPRING", Standard))
++  let #(_, applied) = api.handle(db, env(), ApplyCoupon(100, "SPRING"))
++
++  assert preview == applied
++  assert preview_db == db
++}
++
+ pub fn search_and_report_test() {
+   let db = seed.demo_store()
+   assert { api.handle(db, env(), SearchProducts("mug")).1 }.body

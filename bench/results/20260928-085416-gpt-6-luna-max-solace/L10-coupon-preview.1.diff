@@ -1,0 +1,81 @@
+diff --git a/src/pilot/api.gleam b/src/pilot/api.gleam
+index 279da39..4dd357f 100644
+--- a/src/pilot/api.gleam
++++ b/src/pilot/api.gleam
+@@ -33,6 +33,7 @@ pub type Request {
+   RemoveItem(order_id: Int, sku: String)
+   ChangeQuantity(order_id: Int, sku: String, quantity: Int)
+   ApplyCoupon(order_id: Int, code: String)
++  PreviewCoupon(order_id: Int, code: String, method: Method)
+   RemoveCoupon(order_id: Int)
+   GetQuote(order_id: Int, method: Method)
+   SubmitOrder(order_id: Int)
+@@ -71,6 +72,16 @@ pub fn handle(db: Store, env: Env, request: Request) -> #(Store, Response) {
+       |> order_result(db, 200)
+     ApplyCoupon(order_id, code) ->
+       checkout.apply_coupon(db, clock, order_id, code) |> order_result(db, 200)
++    PreviewCoupon(order_id, code, method) -> {
++      case checkout.apply_coupon(db, clock, order_id, code) {
++        Ok(#(preview_db, _)) ->
++          case checkout.quote(preview_db, order_id, method) {
++            Ok(quote) -> #(db, Response(200, quote_json(quote)))
++            Error(e) -> #(db, checkout_error(e))
++          }
++        Error(e) -> #(db, checkout_error(e))
++      }
++    }
+     RemoveCoupon(order_id) ->
+       checkout.remove_coupon(db, clock, order_id) |> order_result(db, 200)
+     GetQuote(order_id, method) ->
+@@ -146,8 +157,6 @@ pub fn handle(db: Store, env: Env, request: Request) -> #(Store, Response) {
+   }
+ }
+ 
+-// --- results and errors ---------------------------------------------------
+-
+ fn order_result(
+   result: Result(#(Store, Order), CheckoutError),
+   db: Store,
+diff --git a/test/pilot/api_test.gleam b/test/pilot/api_test.gleam
+index d6c8db6..8c10114 100644
+--- a/test/pilot/api_test.gleam
++++ b/test/pilot/api_test.gleam
+@@ -7,6 +7,7 @@ import pilot/date.{Date}
+ import pilot/payments
+ import pilot/seed
+ import pilot/shipping.{Standard}
++import pilot/store
+ import support
+ 
+ fn env() {
+@@ -63,3 +64,30 @@ pub fn parsing_test() {
+   assert api.parse_date("2026-13-02") == Error(Nil)
+   assert api.parse_reason(" Damaged ") == api.parse_reason("damaged")
+ }
++
++pub fn preview_coupon_test() {
++  let #(db, draft) =
++    support.draft(seed.demo_store(), seed.ada, [#("TEE-M-BLK", 1)])
++  let test_env = env()
++  let #(db, _) = api.handle(db, test_env, ApplyCoupon(draft.id, "TENOFF"))
++  let assert Ok(original_order) = store.get_order(db, draft.id)
++
++  let #(preview_db, preview) =
++    api.handle(db, test_env, api.PreviewCoupon(draft.id, "WELCOME15", Standard))
++  assert preview.status == 200
++  assert preview_db == db
++  assert store.get_order(preview_db, draft.id) == Ok(original_order)
++
++  let #(applied_db, _) =
++    api.handle(db, test_env, ApplyCoupon(draft.id, "WELCOME15"))
++  let #(_, expected_quote) =
++    api.handle(applied_db, test_env, GetQuote(draft.id, Standard))
++  assert preview.body == expected_quote.body
++
++  let #(_, apply_error) =
++    api.handle(db, test_env, ApplyCoupon(draft.id, "SPRING"))
++  let #(error_db, preview_error) =
++    api.handle(db, test_env, api.PreviewCoupon(draft.id, "SPRING", Standard))
++  assert error_db == db
++  assert preview_error == apply_error
++}

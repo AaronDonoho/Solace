@@ -1,0 +1,415 @@
+diff --git a/HANDOFF.md b/HANDOFF.md
+index 3860af2..fc18a67 100644
+--- a/HANDOFF.md
++++ b/HANDOFF.md
+@@ -2,11 +2,4 @@
+ 
+ **Goal:** orders whose stock is reserved across several warehouses, and can't be consolidated into one, should ship as one shipment per warehouse instead of failing with `MultipleWarehouses`.
+ 
+-**Done:** `shipments.split_by_warehouse(first_id, order_id, allocations, method)` builds one shipment per warehouse, with consecutive ids starting at `first_id`, in warehouse id order. It has tests.
+-
+-**Remaining:**
+-1. `fulfillment.start_picking` returns `Result(#(Store, List(Shipment)), FulfillmentError)`: one shipment when the order can ship from one warehouse (after consolidation, as today), otherwise one per warehouse. Shipment ids must not collide with other ids in the store.
+-2. `fulfillment.ship`: the payment is captured on the first shipment; each shipment commits only its own stock, and the order's remaining allocations shrink accordingly. The order becomes `Shipped` only when its last shipment ships; until then it stays `Picking`.
+-3. `fulfillment.deliver`: the order becomes `Delivered` only when all its shipments are delivered.
+-4. The API's `StartPicking` responds 201 with a JSON array of the shipments.
+-5. Tests for all of the above.
++**Completed:** `shipments.split_by_warehouse(first_id, order_id, allocations, method)` builds one shipment per warehouse, with consecutive ids in warehouse id order. Picking consolidates reservations when one warehouse can fill the whole order, and otherwise starts one shipment per warehouse using ids from the store's shared sequence. Shipping captures payment once, commits only each shipment's stock and reservations, and changes the order to `Shipped` after its final shipment leaves. Delivery changes the order to `Delivered` after its final shipment arrives. The API's `StartPicking` responds with a 201 JSON array. Tests cover split creation, unique sequential ids, partial stock commits, payment capture, lifecycle status changes, and the API response.
+diff --git a/src/pilot/api.gleam b/src/pilot/api.gleam
+index 279da39..595d39e 100644
+--- a/src/pilot/api.gleam
++++ b/src/pilot/api.gleam
+@@ -100,7 +100,7 @@ pub fn handle(db: Store, env: Env, request: Request) -> #(Store, Response) {
+       }
+     StartPicking(order_id, method) ->
+       fulfillment.start_picking(db, clock, order_id, method)
+-      |> shipment_result(db, 201)
++      |> shipment_list_result(db, 201)
+     PackShipment(id) ->
+       fulfillment.pack(db, clock, id) |> shipment_result(db, 200)
+     ShipShipment(id) ->
+@@ -170,6 +170,20 @@ fn shipment_result(
+   }
+ }
+ 
++fn shipment_list_result(
++  result: Result(#(Store, List(Shipment)), FulfillmentError),
++  db: Store,
++  status: Int,
++) -> #(Store, Response) {
++  case result {
++    Ok(#(db, shipments)) -> #(
++      db,
++      Response(status, array(list.map(shipments, shipment_json))),
++    )
++    Error(e) -> #(db, fulfillment_error(e))
++  }
++}
++
+ fn return_result(
+   result: Result(#(Store, return_policy.ReturnRequest), ReturnsError),
+   db: Store,
+diff --git a/src/pilot/fulfillment.gleam b/src/pilot/fulfillment.gleam
+index 9242d10..6b26977 100644
+--- a/src/pilot/fulfillment.gleam
++++ b/src/pilot/fulfillment.gleam
+@@ -30,15 +30,15 @@ pub type FulfillmentError {
+ 
+ const actor = "fulfillment"
+ 
+-/// Starts picking a paid order and creates its shipment. Orders ship from a
+-/// single warehouse: if the order's stock is reserved across several, it is
+-/// moved to one warehouse that can supply everything, when there is one.
++/// Starts picking a paid order and creates its shipment or shipments. If the
++/// order's stock is reserved across several warehouses, it is moved to one
++/// warehouse that can supply everything, when there is one.
+ pub fn start_picking(
+   db: Store,
+   clock: Clock,
+   order_id: Int,
+   method: Method,
+-) -> Result(#(Store, Shipment), FulfillmentError) {
++) -> Result(#(Store, List(Shipment)), FulfillmentError) {
+   let now = clock()
+   use existing <- result.try(get_order(db, order_id))
+   use picking <- result.try(
+@@ -46,30 +46,85 @@ pub fn start_picking(
+     |> result.map_error(OrderRejected),
+   )
+   let allocations = store.allocations_for(db, order_id)
+-  use #(db, allocations) <- result.try(
+-    case shipments.from_allocations(0, order_id, allocations, method) {
+-      Error(shipments.MultipleWarehouses(_)) ->
+-        consolidate(db, order_id, allocations)
+-      _ -> Ok(#(db, allocations))
+-    },
+-  )
+-  let #(db, shipment_id) = store.next_id(db)
+-  use shipment <- result.try(
+-    shipments.from_allocations(shipment_id, order_id, allocations, method)
+-    |> result.map_error(ShipmentFailed),
+-  )
++  use #(db, allocations, split) <- result.try(resolve_allocations(
++    db,
++    order_id,
++    allocations,
++    method,
++  ))
++  let shipment_count = case split {
++    True ->
++      allocations
++      |> list.map(fn(a) { a.warehouse_id })
++      |> list.unique
++      |> list.length
++    False -> 1
++  }
++  let #(db, shipment_ids) = allocate_ids(db, shipment_count)
++  let assert [first_id, ..] = shipment_ids
++  let new_shipments = case split {
++    True ->
++      Ok(shipments.split_by_warehouse(first_id, order_id, allocations, method))
++    False ->
++      shipments.from_allocations(first_id, order_id, allocations, method)
++      |> result.map(fn(shipment) { [shipment] })
++      |> result.map_error(ShipmentFailed)
++  }
++  use new_shipments <- result.try(new_shipments)
+   let db =
+     db
+     |> store.put_order(picking)
+-    |> store.put_shipment(shipment)
+-    |> store.record(
+-      now,
+-      actor,
+-      "start picking",
+-      audit.order_subject(order_id),
+-      audit.shipment_subject(shipment_id) <> " from " <> shipment.warehouse_id,
+-    )
+-  Ok(#(db, shipment))
++    |> fn(db) {
++      list.fold(new_shipments, db, fn(db, shipment) {
++        db
++        |> store.put_shipment(shipment)
++        |> store.record(
++          now,
++          actor,
++          "start picking",
++          audit.order_subject(order_id),
++          audit.shipment_subject(shipment.id)
++            <> " from "
++            <> shipment.warehouse_id,
++        )
++      })
++    }
++  Ok(#(db, new_shipments))
++}
++
++/// Consolidates a multi-warehouse reservation when possible. Otherwise the
++/// caller creates one shipment for each warehouse.
++fn resolve_allocations(
++  db: Store,
++  order_id: Int,
++  allocations: List(Allocation),
++  method: Method,
++) -> Result(#(Store, List(Allocation), Bool), FulfillmentError) {
++  case shipments.from_allocations(0, order_id, allocations, method) {
++    Ok(_) -> Ok(#(db, allocations, False))
++    Error(shipments.NothingToShip) ->
++      Error(ShipmentFailed(shipments.NothingToShip))
++    Error(shipments.MultipleWarehouses(_)) ->
++      case consolidate(db, order_id, allocations) {
++        Ok(#(db, consolidated)) -> Ok(#(db, consolidated, False))
++        Error(ShipmentFailed(shipments.MultipleWarehouses(_))) ->
++          Ok(#(db, allocations, True))
++        Error(error) -> Error(error)
++      }
++    Error(error) -> Error(ShipmentFailed(error))
++  }
++}
++
++/// Reserves consecutive ids from the shared store id sequence.
++fn allocate_ids(db: Store, count: Int) -> #(Store, List(Int)) {
++  case count {
++    0 -> #(db, [])
++    _ -> {
++      let #(db, id) = store.next_id(db)
++      let #(db, rest) = allocate_ids(db, count - 1)
++      #(db, [id, ..rest])
++    }
++  }
+ }
+ 
+ /// Moves an order's reservations to a single warehouse that has enough of
+@@ -138,8 +193,8 @@ pub fn pack(
+   Ok(#(db, packed))
+ }
+ 
+-/// Sends a packed shipment: stock leaves the warehouse, the payment is
+-/// captured, the order is marked shipped and the customer is told.
++/// Sends a packed shipment: its stock leaves the warehouse, the payment is
++/// captured if this is the first shipment, and the customer is told.
+ pub fn ship(
+   db: Store,
+   clock: Clock,
+@@ -165,10 +220,18 @@ pub fn ship(
+       payments.capture(gateway, payment) |> result.map_error(PaymentFailed)
+     _ -> Ok(payment)
+   })
+-  use shipped <- result.try(
+-    order.transition(existing, order.Ship, now)
+-    |> result.map_error(OrderRejected),
+-  )
++  let db_with_shipment = store.put_shipment(db, sent)
++  let all_shipped =
++    store.shipments_for_order(db_with_shipment, existing.id)
++    |> list.all(fn(s) {
++      s.status == shipments.InTransit || s.status == shipments.Delivered
++    })
++  use shipped <- result.try(case all_shipped {
++    True ->
++      order.transition(existing, order.Ship, now)
++      |> result.map_error(OrderRejected)
++    False -> Ok(existing)
++  })
+   let origin = case
+     inventory.find_warehouse(db.warehouses, shipment.warehouse_id)
+   {
+@@ -186,13 +249,26 @@ pub fn ship(
+         0,
+       ),
+     )
++  let remaining_allocations =
++    list.fold(
++      shipments.allocations(shipment),
++      store.allocations_for(db, existing.id),
++      fn(allocations, shipped_allocation) {
++        subtract(allocations, shipped_allocation)
++      },
++    )
+   let db =
+     db
+     |> store.set_stock(inventory.commit(
+       db.stock,
+       shipments.allocations(shipment),
+     ))
+-    |> store.clear_allocations(existing.id)
++    |> fn(db) {
++      case remaining_allocations {
++        [] -> store.clear_allocations(db, existing.id)
++        remaining -> store.set_allocations(db, existing.id, remaining)
++      }
++    }
+     |> store.put_payment(payment)
+     |> store.put_shipment(sent)
+     |> store.put_order(shipped)
+@@ -207,7 +283,8 @@ pub fn ship(
+   Ok(#(db, sent))
+ }
+ 
+-/// Records delivery of a shipment and of its order.
++/// Records delivery of a shipment. The order is delivered after its last
++/// shipment is delivered.
+ pub fn deliver(
+   db: Store,
+   clock: Clock,
+@@ -223,15 +300,29 @@ pub fn deliver(
+   use delivered <- result.try(
+     shipments.deliver(shipment, now) |> result.map_error(ShipmentFailed),
+   )
+-  use delivered_order <- result.try(
+-    order.transition(existing, order.Deliver, now)
+-    |> result.map_error(OrderRejected),
+-  )
++  let db_with_shipment = store.put_shipment(db, delivered)
++  let all_delivered =
++    store.shipments_for_order(db_with_shipment, existing.id)
++    |> list.all(fn(s) { s.status == shipments.Delivered })
++  use delivered_order <- result.try(case all_delivered {
++    True ->
++      order.transition(existing, order.Deliver, now)
++      |> result.map_error(OrderRejected)
++    False -> Ok(existing)
++  })
+   let db =
+-    db
+-    |> store.put_shipment(delivered)
++    db_with_shipment
+     |> store.put_order(delivered_order)
+-    |> store.send(notifications.delivered(customer, delivered_order, now))
++    |> fn(db) {
++      case all_delivered {
++        True ->
++          store.send(
++            db,
++            notifications.delivered(customer, delivered_order, now),
++          )
++        False -> db
++      }
++    }
+     |> store.record(
+       now,
+       actor,
+diff --git a/test/pilot/api_test.gleam b/test/pilot/api_test.gleam
+index d6c8db6..0adbee0 100644
+--- a/test/pilot/api_test.gleam
++++ b/test/pilot/api_test.gleam
+@@ -1,12 +1,14 @@
++import gleam/list
+ import gleam/string
+ import pilot/api.{
+   AddItem, ApplyCoupon, CreateOrder, Env, GetOrder, GetQuote, ListOrders,
+-  PayOrder, Response, SalesReport, SearchProducts, SubmitOrder,
++  PayOrder, Response, SalesReport, SearchProducts, StartPicking, SubmitOrder,
+ }
+ import pilot/date.{Date}
+ import pilot/payments
+ import pilot/seed
+ import pilot/shipping.{Standard}
++import pilot/store
+ import support
+ 
+ fn env() {
+@@ -63,3 +65,14 @@ pub fn parsing_test() {
+   assert api.parse_date("2026-13-02") == Error(Nil)
+   assert api.parse_reason(" Damaged ") == api.parse_reason("damaged")
+ }
++
++pub fn start_picking_returns_shipment_array_test() {
++  let #(db, o) =
++    support.paid(seed.demo_store(), seed.ada, [#("HOOD-M-GRY", 10)])
++  let #(db, response) = api.handle(db, env(), StartPicking(o.id, Standard))
++  assert response.status == 201
++  assert response.body
++    == "[{\"id\":102,\"order_id\":100,\"warehouse\":\"WH-EAST\",\"method\":\"standard\",\"tracking_number\":null},{\"id\":103,\"order_id\":100,\"warehouse\":\"WH-WEST\",\"method\":\"standard\",\"tracking_number\":null}]"
++  let ids = store.shipments_for_order(db, o.id) |> list.map(fn(s) { s.id })
++  assert ids == [102, 103]
++}
+diff --git a/test/pilot/fulfillment_test.gleam b/test/pilot/fulfillment_test.gleam
+index d631238..4eb2bf6 100644
+--- a/test/pilot/fulfillment_test.gleam
++++ b/test/pilot/fulfillment_test.gleam
+@@ -65,23 +65,63 @@ pub fn consolidates_split_reservations_test() {
+       Allocation("WH-WEST", "PHONES-BLK", 1),
+       Allocation("WH-EAST", "TEE-L-BLK", 1),
+     ]
+-  let assert Ok(#(db, s)) =
++  let assert Ok(#(db, [s])) =
+     fulfillment.start_picking(db, support.on_day(1), o.id, Standard)
+   assert s.warehouse_id == "WH-EAST"
+   assert inventory.available(db.stock, "WH-WEST", "PHONES-BLK") == 3
+   assert inventory.available(db.stock, "WH-EAST", "PHONES-BLK") == 4
+ }
+ 
+-pub fn cannot_consolidate_test() {
++pub fn splits_shipments_when_no_warehouse_can_consolidate_test() {
+   // 10 hoodies: 8 at WH-EAST, 5 at WH-WEST, so no single warehouse has them all
+   let #(db, o) =
+     support.paid(seed.demo_store(), seed.ada, [#("HOOD-M-GRY", 10)])
+-  assert fulfillment.start_picking(db, support.on_day(1), o.id, Standard)
+-    == Error(
+-      fulfillment.ShipmentFailed(
+-        shipments.MultipleWarehouses(["WH-EAST", "WH-WEST"]),
+-      ),
+-    )
++  let assert Ok(#(db, [east, west])) =
++    fulfillment.start_picking(db, support.on_day(1), o.id, Standard)
++  assert #(east.id, east.warehouse_id, east.items)
++    == #(o.id + 2, "WH-EAST", [shipments.Item("HOOD-M-GRY", 8)])
++  assert #(west.id, west.warehouse_id, west.items)
++    == #(o.id + 3, "WH-WEST", [shipments.Item("HOOD-M-GRY", 2)])
++  assert east.id != o.id
++  assert west.id != o.id + 1
++
++  let assert Ok(#(db, _)) = fulfillment.pack(db, support.on_day(1), east.id)
++  let assert Ok(#(db, _)) = fulfillment.pack(db, support.on_day(1), west.id)
++  let assert Ok(#(db, _)) =
++    fulfillment.ship(db, support.on_day(1), payments.fake_gateway(), east.id)
++  let assert Ok(picking) = store.get_order(db, o.id)
++  assert picking.status == order.Picking
++  assert store.allocations_for(db, o.id)
++    == [Allocation("WH-WEST", "HOOD-M-GRY", 2)]
++  assert dict.get(db.stock.on_hand, #("WH-EAST", "HOOD-M-GRY")) == Ok(0)
++  assert dict.get(db.stock.on_hand, #("WH-WEST", "HOOD-M-GRY")) == Ok(5)
++  let assert Ok(payment) = store.payment_for_order(db, o.id)
++  assert payment.status == payments.Captured
++
++  let assert Ok(#(db, _)) =
++    fulfillment.ship(db, support.on_day(1), payments.fake_gateway(), west.id)
++  let assert Ok(shipped) = store.get_order(db, o.id)
++  assert shipped.status == order.Shipped
++  assert store.allocations_for(db, o.id) == []
++  assert dict.get(db.stock.on_hand, #("WH-EAST", "HOOD-M-GRY")) == Ok(0)
++  assert dict.get(db.stock.on_hand, #("WH-WEST", "HOOD-M-GRY")) == Ok(3)
++  let assert Ok(payment) = store.payment_for_order(db, o.id)
++  assert payment.status == payments.Captured
++
++  let assert Ok(#(db, _)) = fulfillment.deliver(db, support.on_day(4), east.id)
++  let assert Ok(still_shipped) = store.get_order(db, o.id)
++  assert still_shipped.status == order.Shipped
++  assert list.count(store.sent_messages(db), fn(m) {
++      m.kind == notifications.OrderDelivered
++    })
++    == 0
++  let assert Ok(#(db, _)) = fulfillment.deliver(db, support.on_day(4), west.id)
++  let assert Ok(delivered) = store.get_order(db, o.id)
++  assert delivered.status == order.Delivered
++  assert list.count(store.sent_messages(db), fn(m) {
++      m.kind == notifications.OrderDelivered
++    })
++    == 1
+ }
+ 
+ pub fn report_shortage_moves_reservation_test() {
+diff --git a/test/support.gleam b/test/support.gleam
+index 340163e..8d99b11 100644
+--- a/test/support.gleam
++++ b/test/support.gleam
+@@ -72,7 +72,7 @@ pub fn delivered(
+ /// Picks, packs and ships a paid order on day 1.
+ pub fn shipped(db: Store, order_id: Int) -> #(Store, Shipment) {
+   let c = on_day(1)
+-  let assert Ok(#(db, s)) =
++  let assert Ok(#(db, [s])) =
+     fulfillment.start_picking(db, c, order_id, shipping.Standard)
+   let assert Ok(#(db, s)) = fulfillment.pack(db, c, s.id)
+   let assert Ok(#(db, s)) =

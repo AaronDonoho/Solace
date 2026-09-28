@@ -1,0 +1,70 @@
+diff --git a/src/pilot/date.gleam b/src/pilot/date.gleam
+index eb788e7..acacd6f 100644
+--- a/src/pilot/date.gleam
++++ b/src/pilot/date.gleam
+@@ -112,7 +112,10 @@ pub fn add_business_days(date: Date, days: Int) -> Date {
+     True -> date
+     False -> {
+       let next = add_days(date, 1)
+-      add_business_days(next, days - 1)
++      case is_weekend(next) {
++        True -> add_business_days(next, days)
++        False -> add_business_days(next, days - 1)
++      }
+     }
+   }
+ }
+diff --git a/test/pilot/date_test.gleam b/test/pilot/date_test.gleam
+index 7cb0319..8dfe60b 100644
+--- a/test/pilot/date_test.gleam
++++ b/test/pilot/date_test.gleam
+@@ -25,6 +25,14 @@ pub fn business_days_test() {
+   assert date.add_business_days(Date(2026, 3, 2), 0) == Date(2026, 3, 2)
+ }
+ 
++pub fn business_days_skip_weekends_test() {
++  // Thursday + 4 business days = Wednesday, skipping Saturday and Sunday.
++  assert date.add_business_days(Date(2026, 3, 5), 4) == Date(2026, 3, 11)
++  assert date.add_business_days(Date(2026, 3, 6), 1) == Date(2026, 3, 9)
++  // A weekend start counts from the following Monday.
++  assert date.add_business_days(Date(2026, 3, 7), 1) == Date(2026, 3, 9)
++}
++
+ pub fn days_between_and_iso_test() {
+   assert date.days_between(Date(2026, 2, 27), Date(2026, 3, 2)) == 3
+   assert date.to_iso(Date(2026, 3, 2)) == "2026-03-02"
+diff --git a/test/pilot/fulfillment_test.gleam b/test/pilot/fulfillment_test.gleam
+index 7566fce..b337653 100644
+--- a/test/pilot/fulfillment_test.gleam
++++ b/test/pilot/fulfillment_test.gleam
+@@ -2,6 +2,8 @@ import gleam/dict
+ import gleam/list
+ import gleam/option.{Some}
+ import gleam/string
++import pilot/clock
++import pilot/date.{Date}
+ import pilot/fulfillment
+ import pilot/inventory.{Allocation}
+ import pilot/notifications
+@@ -52,6 +54,21 @@ pub fn shipped_email_has_estimate_test() {
+   assert string.contains(message.body, "should arrive by 2026-03-")
+ }
+ 
++pub fn thursday_shipment_email_skips_weekends_test() {
++  let #(db, o) = support.paid(seed.demo_store(), seed.ada, [#("MUG-BLUE", 1)])
++  let shipped_on = date.to_unix_ms(Date(2026, 3, 5))
++  let c = clock.fixed(shipped_on)
++  let assert Ok(#(db, s)) = fulfillment.start_picking(db, c, o.id, Standard)
++  let assert Ok(#(db, s)) = fulfillment.pack(db, c, s.id)
++  let assert Ok(#(db, _)) =
++    fulfillment.ship(db, c, payments.fake_gateway(), s.id)
++  let assert Ok(message) =
++    list.find(store.sent_messages(db), fn(m) {
++      m.kind == notifications.OrderShipped
++    })
++  assert string.contains(message.body, "should arrive by 2026-03-11")
++}
++
+ pub fn consolidates_split_reservations_test() {
+   // Grace is in CA: headphones reserve at WH-WEST, the large tee only exists at WH-EAST
+   let #(db, o) =
