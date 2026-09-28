@@ -186,6 +186,8 @@ Text refers to other symbols by name. On submission, names resolve to identities
 
 For reading, the store can project several symbols as one text document: a namespace, a feature, a call path, or the symbols touched by a change. Edits to such a view are split into per-symbol transactions and applied atomically.
 
+A namespace view is an outline by default. Each symbol gets one entry: its signature, effects, one-line description and verification status, with no body. Bodies come with an explicit flag (`--bodies`) or from symbol views. Agents habitually open whole units, so the view they reach for first should return a table of contents, not the implementation. From the outline they go straight to the few symbols they need.
+
 ### 7.5 Export format
 
 The whole program serializes to plain text: one block per symbol, each with an identity header, in a deterministic order. The export is readable without Solace, stores cleanly in Git, and re-imports without loss.
@@ -423,7 +425,7 @@ Prose cannot be verified mechanically, so Solace tracks it instead. When a revis
 
 ### 9.3 Work records
 
-A work record is an agent's plan written to the store rather than lost in a conversation transcript. For example: "Migrating callers of `pricing.quote` to the new signature; 3 of 5 done; `checkout.summary` blocked on decision D-12." Open work records appear in both views. A new session, possibly a different agent, starts by reading the open records for the symbols it is about to touch.
+A work record is an agent's plan written to the store rather than lost in a conversation transcript. For example: "Migrating callers of `pricing.quote` to the new signature; 3 of 5 done; `checkout.summary` blocked on decision D-12." Open work records appear in both views. A new session, possibly a different agent, starts with the open records for the symbols it is about to touch. Session start shows each open record expanded: the record itself plus the context bundle of every symbol it names (section 14.2). A resumed task begins with everything the previous session knew, in one call.
 
 ### 9.4 Decisions
 
@@ -630,7 +632,8 @@ Agents work through a protocol of few, rich operations that return compact text;
 
 ### 14.1 Protocol design rules
 
-- **Fewer, richer calls.** Every round trip costs time and context, so one call should answer a whole question.
+- **Fewer, richer calls.** Every round trip costs time and context, so one call should answer a whole question. Commands that take a symbol accept several, and return all the answers together.
+- **Cheap defaults.** The views agents reach for by habit return outlines, and bodies are shown on request. Changing what the familiar command returns works; asking agents in the reference to use a different command doesn't reliably break the habit.
 - **Text by default.** Output is compact, readable text; structured JSON is available for tools.
 - **Names in, identities internal.** Agents never need to type an identity (section 6.2).
 - **Parity.** Anything a human can do or see in their view is available through the protocol.
@@ -641,15 +644,24 @@ Agents work through a protocol of few, rich operations that return compact text;
 solace session start --scope pricing
 ```
 
-This returns the language reference version, the policy rules that apply to the scope, open work records for its symbols, and decisions made since the last session touched it. A new agent picks up the thread where the last one stopped.
+This returns:
+
+- The language reference version.
+- The policy rules that apply to the scope.
+- A symbol index: every symbol in scope on one line, with its name, signature and one-line description. At about 15–25 tokens per symbol, a 300-symbol project costs about 6k tokens once, far less than the search-and-read turns it replaces. For large projects, `--scope` narrows the index, and each namespace shows "N more" beyond a cap.
+- Open work records for the symbols in scope, each expanded with the context bundles of the symbols it names (section 9.3).
+- Decisions made since the last session touched the scope.
+
+From the index alone, an agent can choose which symbols to inspect without opening anything. A new agent picks up the thread where the last one stopped.
 
 ### 14.3 Context in one call
 
 ```
 solace inspect pricing.quote --context
+solace inspect pricing.quote checkout.pay tax.quote --context
 ```
 
-This returns, as one text document: the symbol's full text with contracts and effects; its description and rationale; direct callers and callees with their signatures; the types it uses; its verification status and debt; relevant decisions; and open work records. Orientation that takes a dozen searches and file reads today becomes one call.
+This returns, as one text document: the symbol's full text with contracts and effects; its description and rationale; direct callers and callees with their signatures; the types it uses; its verification status and debt; relevant decisions; and open work records. Given several names, it returns all their bundles in one document, because every turn re-sends the agent's growing context, and turns, not the size of answers, dominate orientation cost. Orientation that takes a dozen searches and file reads today becomes one call after session start.
 
 ### 14.4 Workflow
 
@@ -796,7 +808,7 @@ Agents build Solace in seven gated phases, and the project adopts its own princi
 | Phase | Scope | Gate |
 | --- | --- | --- |
 | 0 Specify | Identity, text projection, agent protocol and language core specs; benchmark suite and baselines | Specs accepted; benchmark runs end to end on conventional tooling |
-| 1 Core system | Store, identities, projection, language core, fast checker, BEAM backend, agent protocol, export | Agents build and maintain the pilot through the protocol alone; export round-trips losslessly |
+| 1 Core system | Store, identities, projection, language core, fast checker, BEAM backend, agent protocol, export | Agents build and maintain the pilot through the protocol alone; typical tasks reach their first edit within 3 model turns (median); export round-trips losslessly |
 | 2 Verification and replay | Solver-backed contracts, test generation, properties, mutation, verification debt, check protection, recording and replay | Seeded pilot defects caught before acceptance; replay reproduces recorded failures |
 | 3 Human view | Overview, guarantees, decision trees, scenario replay, decision queue, behavioral review | A human traces an injected failure to its cause without navigating files |
 | 4 Browser interfaces | JavaScript backend, state-plus-message runtime, semantic layout, interface validation | Pilot interface passes validation; recorded design decisions are enforced |
@@ -859,13 +871,13 @@ The benchmark suite is built in Phase 0 and runs at every gate. It compares Sola
 | --- | --- |
 | Functional correctness | Hidden-test and contract satisfaction rates |
 | Agent autonomy | Human interventions per successful task |
-| Development efficiency | Time, tool calls and tokens per completed task |
-| Orientation cost | Tool calls and tokens spent before the first edit |
+| Development efficiency | Tokens, time and model turns per completed task |
+| Orientation cost | Model turns before the first edit (primary), and tokens before the first edit |
 | Debugging efficiency | Time from failure report to verified fix |
 | Regression frequency | Previously working behavior broken by later changes |
 | Refactoring reliability | Successful changes across dependent symbols |
 | Verification effectiveness | Defects caught before acceptance; weakened checks caught |
-| Continuity | Work correctly resumed by a new session from work records |
+| Continuity | Work correctly resumed by a new session from work records. The baseline gets the same information as a handoff note in the repository, so the comparison tests where the information lives and how it is surfaced, not whether it exists |
 | Documentation consistency | Prose left stale by changes |
 | Performance stability | Undetected resource regressions |
 | Interface correctness | Layout, accessibility and interaction defects |
@@ -878,7 +890,7 @@ Controlled ablations isolate the contribution of individual features: stable ide
 
 ### 19.3 Gate decisions
 
-Each gate in section 18 is judged against the benchmark. If a gate is missed, the phase is revised; the next phase does not start on an unvalidated foundation.
+Each gate in section 18 is judged against the benchmark. Orientation is judged in model turns before the first edit, since every turn re-sends the whole context and tokens mostly follow turns. That makes the claim of orientation in one call something the benchmark can confirm or refute. If a gate is missed, the phase is revised; the next phase does not start on an unvalidated foundation.
 
 ## 20. Risks and Tradeoffs
 

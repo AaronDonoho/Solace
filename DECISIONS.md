@@ -70,3 +70,16 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
 - **Rationale:** In the first smoke run through the shell, (1) Claude Code auto-approved read-only commands such as `git status` and `git diff`, so the agent could see files despite D-8, and (2) Claude Code's shell safety check rejected heredocs containing ordinary Gleam (braces next to string quotes), forcing awkward `printf` workarounds. An MCP tool removes shell quoting and file access in one step.
 - **Who/when:** Claude, 2026-09-27, under D-8 (Aaron's choice of protocol-only). Reopen if it causes problems.
 - **Affects:** Spec 3 §1, bench harness
+
+## D-10 Orientation: outline views, symbol index, batched inspect, turns as the metric — decided
+- **Question:** The first Phase 1a comparison saved 32% of work tokens, but not on orientation. Agents called `session start` and some `inspect --context`, then viewed whole modules anyway (L07: 13 modules before the first edit). Tool results before the first edit came to only 3k–23k tokens, while 124k–410k was spent before it, so turns, not answer size, drive orientation cost. What changes?
+- **Answer:**
+  1. A module view returns an outline by default (signature, effects, one-line description, verification status). Bodies need `--bodies`.
+  2. `session start` includes a one-line-per-symbol index (name, signature, description), narrowed with `--scope`, with "N more" beyond a per-module cap.
+  3. `inspect a b c --context` returns several bundles in one call.
+  4. `session start` expands open work records with the context bundles of the symbols they name.
+  5. L07 is made fair: the work record goes in the store, the prompt says only to resume the work, and the files arm gets the same record as a handoff note in the repository.
+  6. Orientation is measured in model turns before the first edit (primary), with tokens before the first edit secondary. Gate 1 gets a turn target: typical tasks reach their first edit within 3 model turns (median). Tokens remain the overall efficiency metric.
+- **Rationale:** Change what the command agents already use returns, rather than asking them to use a different one. Every turn re-sends the whole context. L07's −41% came from symbol-level editing and diagnostics, not from work records, because the record was never in the store.
+- **Who/when:** Aaron, 2026-09-27. The 3-turn figure is Claude's pick for "a turn target"; adjust if needed.
+- **Affects:** PROPOSAL.md §7.4, §9.3, §14.1–14.3, §18 (Gate 1), §19.1, §19.3; Spec 3 (session start, view, inspect); bench (L07, turn metric)
