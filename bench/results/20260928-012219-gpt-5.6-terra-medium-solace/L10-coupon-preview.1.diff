@@ -1,0 +1,71 @@
+diff --git a/src/pilot/api.gleam b/src/pilot/api.gleam
+index 279da39..472168e 100644
+--- a/src/pilot/api.gleam
++++ b/src/pilot/api.gleam
+@@ -33,6 +33,7 @@ pub type Request {
+   RemoveItem(order_id: Int, sku: String)
+   ChangeQuantity(order_id: Int, sku: String, quantity: Int)
+   ApplyCoupon(order_id: Int, code: String)
++  PreviewCoupon(order_id: Int, code: String, method: Method)
+   RemoveCoupon(order_id: Int)
+   GetQuote(order_id: Int, method: Method)
+   SubmitOrder(order_id: Int)
+@@ -71,6 +72,15 @@ pub fn handle(db: Store, env: Env, request: Request) -> #(Store, Response) {
+       |> order_result(db, 200)
+     ApplyCoupon(order_id, code) ->
+       checkout.apply_coupon(db, clock, order_id, code) |> order_result(db, 200)
++    PreviewCoupon(order_id, code, method) ->
++      case checkout.apply_coupon(db, clock, order_id, code) {
++        Ok(#(preview_db, _)) ->
++          case checkout.quote(preview_db, order_id, method) {
++            Ok(quote) -> #(db, Response(200, quote_json(quote)))
++            Error(e) -> #(db, checkout_error(e))
++          }
++        Error(e) -> #(db, checkout_error(e))
++      }
+     RemoveCoupon(order_id) ->
+       checkout.remove_coupon(db, clock, order_id) |> order_result(db, 200)
+     GetQuote(order_id, method) ->
+@@ -146,8 +156,6 @@ pub fn handle(db: Store, env: Env, request: Request) -> #(Store, Response) {
+   }
+ }
+ 
+-// --- results and errors ---------------------------------------------------
+-
+ fn order_result(
+   result: Result(#(Store, Order), CheckoutError),
+   db: Store,
+diff --git a/test/pilot/api_test.gleam b/test/pilot/api_test.gleam
+index d6c8db6..95e4919 100644
+--- a/test/pilot/api_test.gleam
++++ b/test/pilot/api_test.gleam
+@@ -1,7 +1,7 @@
+ import gleam/string
+ import pilot/api.{
+   AddItem, ApplyCoupon, CreateOrder, Env, GetOrder, GetQuote, ListOrders,
+-  PayOrder, Response, SalesReport, SearchProducts, SubmitOrder,
++  PayOrder, PreviewCoupon, Response, SalesReport, SearchProducts, SubmitOrder,
+ }
+ import pilot/date.{Date}
+ import pilot/payments
+@@ -63,3 +63,20 @@ pub fn parsing_test() {
+   assert api.parse_date("2026-13-02") == Error(Nil)
+   assert api.parse_reason(" Damaged ") == api.parse_reason("damaged")
+ }
++
++pub fn preview_coupon_test() {
++  let #(db, _) = api.handle(seed.demo_store(), env(), CreateOrder(seed.ada))
++  let #(db, _) = api.handle(db, env(), AddItem(100, "MUG-BLUE", 2))
++
++  let #(previewed_db, preview) =
++    api.handle(db, env(), PreviewCoupon(100, "TENOFF", Standard))
++  assert preview.status == 200
++  assert preview.body
++    == "{\"subtotal_cents\":2800,\"discount_cents\":1000,\"shipping_cents\":600,\"tax_cents\":96,\"total_cents\":2496}"
++
++  assert { api.handle(previewed_db, env(), GetOrder(100)).1 }.body
++    == "{\"id\":100,\"customer_id\":1,\"status\":\"draft\",\"coupon\":null,\"lines\":[{\"sku\":\"MUG-BLUE\",\"quantity\":2,\"unit_price_cents\":1400}]}"
++
++  assert api.handle(db, env(), PreviewCoupon(100, "SPRING", Standard)).1
++    == api.handle(db, env(), ApplyCoupon(100, "SPRING")).1
++}

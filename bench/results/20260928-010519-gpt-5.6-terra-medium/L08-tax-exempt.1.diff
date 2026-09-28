@@ -1,0 +1,293 @@
+diff --git a/src/pilot/accounts.gleam b/src/pilot/accounts.gleam
+index 9beb695..3756d27 100644
+--- a/src/pilot/accounts.gleam
++++ b/src/pilot/accounts.gleam
+@@ -33,6 +33,7 @@ pub fn register(
+       shipping_address: address,
+       lifetime_spend_cents: 0,
+       created_at: now,
++      tax_exempt: False,
+     )
+     |> customer.validate
+     |> result.map_error(Invalid),
+diff --git a/src/pilot/checkout.gleam b/src/pilot/checkout.gleam
+index 41bcc69..2a14fdc 100644
+--- a/src/pilot/checkout.gleam
++++ b/src/pilot/checkout.gleam
+@@ -158,6 +158,7 @@ pub fn quote(
+     coupon,
+     shipping_quote,
+     region,
++    customer.tax_exempt,
+   ))
+ }
+ 
+diff --git a/src/pilot/customer.gleam b/src/pilot/customer.gleam
+index 39ec682..2c41c8e 100644
+--- a/src/pilot/customer.gleam
++++ b/src/pilot/customer.gleam
+@@ -27,6 +27,7 @@ pub type Customer {
+     shipping_address: Address,
+     lifetime_spend_cents: Int,
+     created_at: Int,
++    tax_exempt: Bool,
+   )
+ }
+ 
+diff --git a/src/pilot/pricing.gleam b/src/pilot/pricing.gleam
+index ebe66c5..a484a12 100644
+--- a/src/pilot/pricing.gleam
++++ b/src/pilot/pricing.gleam
+@@ -47,6 +47,7 @@ pub fn quote(
+   coupon: Option(Coupon),
+   shipping: ShippingQuote,
+   destination: Region,
++  tax_exempt: Bool,
+ ) -> Quote {
+   let line_quotes =
+     list.map(lines, fn(l) {
+@@ -85,7 +86,10 @@ pub fn quote(
+       }
+     None -> shipping.cost_cents
+   }
+-  let tax = tax.quote(destination, goods, shipping_cents)
++  let tax = case tax_exempt {
++    True -> tax.TaxQuote(0, 0, 0)
++    False -> tax.quote(destination, goods, shipping_cents)
++  }
+   Quote(
+     lines: line_quotes,
+     subtotal_cents: subtotal,
+diff --git a/src/pilot/reporting.gleam b/src/pilot/reporting.gleam
+index 69ae861..4364383 100644
+--- a/src/pilot/reporting.gleam
++++ b/src/pilot/reporting.gleam
+@@ -38,7 +38,7 @@ pub type ReturnsByReason {
+ }
+ 
+ pub type RegionTax {
+-  RegionTax(region: String, orders: Int, tax_cents: Int)
++  RegionTax(region: String, orders: Int, tax_cents: Int, exempt_orders: Int)
+ }
+ 
+ /// Paid orders that were not cancelled, with the quote they were paid at
+@@ -172,6 +172,12 @@ pub fn tax_by_region(db: Store, from: Date, to: Date) -> List(RegionTax) {
+       region: pair.0,
+       orders: list.length(pair.1),
+       tax_cents: money.sum(list.map(pair.1, fn(s) { { s.1 }.tax_cents })),
++      exempt_orders: list.count(pair.1, fn(s) {
++        case store.get_customer(db, { s.0 }.customer_id) {
++          Ok(customer) -> customer.tax_exempt
++          Error(_) -> False
++        }
++      }),
+     )
+   })
+   |> list.sort(fn(a, b) { string.compare(a.region, b.region) })
+diff --git a/src/pilot/seed.gleam b/src/pilot/seed.gleam
+index 7f64764..b663463 100644
+--- a/src/pilot/seed.gleam
++++ b/src/pilot/seed.gleam
+@@ -127,6 +127,7 @@ pub fn customers() -> List(customer.Customer) {
+       shipping_address: Address("1 Main St", "Albany", "12207", Domestic("NY")),
+       lifetime_spend_cents: 0,
+       created_at: epoch,
++      tax_exempt: False,
+     ),
+     Customer(
+       id: grace,
+@@ -135,6 +136,7 @@ pub fn customers() -> List(customer.Customer) {
+       shipping_address: Address("9 Bay Rd", "San Jose", "95112", Domestic("CA")),
+       lifetime_spend_cents: 150_000,
+       created_at: epoch,
++      tax_exempt: False,
+     ),
+     Customer(
+       id: linus,
+@@ -148,6 +150,7 @@ pub fn customers() -> List(customer.Customer) {
+       ),
+       lifetime_spend_cents: 30_000,
+       created_at: epoch,
++      tax_exempt: False,
+     ),
+     Customer(
+       id: barbara,
+@@ -161,6 +164,7 @@ pub fn customers() -> List(customer.Customer) {
+       ),
+       lifetime_spend_cents: 0,
+       created_at: epoch,
++      tax_exempt: False,
+     ),
+   ]
+ }
+diff --git a/test/pilot/accounts_test.gleam b/test/pilot/accounts_test.gleam
+index e77a8ba..72c0512 100644
+--- a/test/pilot/accounts_test.gleam
++++ b/test/pilot/accounts_test.gleam
+@@ -19,6 +19,7 @@ pub fn register_test() {
+     )
+   assert c.email == "hedy@example.com"
+   assert c.id == 100
++  assert !c.tax_exempt
+   assert accounts.find_by_email(db, "HEDY@example.com") == Ok(c)
+   let assert [entry, ..] = db.audit_log
+   assert entry.subject == "customer:100"
+diff --git a/test/pilot/checkout_test.gleam b/test/pilot/checkout_test.gleam
+index a9a0fa4..ca79f38 100644
+--- a/test/pilot/checkout_test.gleam
++++ b/test/pilot/checkout_test.gleam
+@@ -58,6 +58,16 @@ pub fn quote_test() {
+   assert q.total_cents == 8140
+ }
+ 
++pub fn exempt_customer_quote_test() {
++  let db = seed.demo_store()
++  let assert Ok(ada) = store.get_customer(db, seed.ada)
++  let db = store.put_customer(db, customer.Customer(..ada, tax_exempt: True))
++  let #(db, o) = support.draft(db, seed.ada, [#("TEE-M-BLK", 2)])
++  let assert Ok(q) = checkout.quote(db, o.id, Standard)
++  assert q.tax_cents == 0
++  assert q.total_cents == 4200
++}
++
+ pub fn coupons_test() {
+   let #(db, o) = support.draft(seed.demo_store(), seed.ada, [#("TEE-M-BLK", 1)])
+   let c = support.on_day(0)
+diff --git a/test/pilot/customer_test.gleam b/test/pilot/customer_test.gleam
+index 22277c2..f08105d 100644
+--- a/test/pilot/customer_test.gleam
++++ b/test/pilot/customer_test.gleam
+@@ -8,6 +8,7 @@ fn customer(spend: Int) {
+     Address("1 Main", "Albany", "12207", Domestic("NY")),
+     spend,
+     0,
++    False,
+   )
+ }
+ 
+diff --git a/test/pilot/pricing_test.gleam b/test/pilot/pricing_test.gleam
+index cebebb4..0be73eb 100644
+--- a/test/pilot/pricing_test.gleam
++++ b/test/pilot/pricing_test.gleam
+@@ -21,6 +21,7 @@ pub fn plain_order_test() {
+       None,
+       ship(600),
+       Domestic("NY"),
++      False,
+     )
+   assert q.subtotal_cents == 5000
+   assert pricing.discounts_cents(q) == 0
+@@ -28,6 +29,20 @@ pub fn plain_order_test() {
+   assert q.total_cents == 5824
+ }
+ 
++pub fn tax_exempt_order_test() {
++  let q =
++    pricing.quote(
++      [Line("A", 2, 1800), Line("B", 1, 1400)],
++      Standard,
++      None,
++      ship(600),
++      Domestic("NY"),
++      True,
++    )
++  assert q.tax_cents == 0
++  assert q.total_cents == 5600
++}
++
+ pub fn loyalty_then_fixed_coupon_test() {
+   // Gold: 5% of 7400 = 370, then $10 off the remaining 7030
+   let q =
+@@ -37,6 +52,7 @@ pub fn loyalty_then_fixed_coupon_test() {
+       Some(coupon(FixedOff(1000), True)),
+       ship(600),
+       Domestic("CA"),
++      False,
+     )
+   assert q.loyalty_discount_cents == 370
+   assert q.coupon_discount_cents == 1000
+@@ -53,6 +69,7 @@ pub fn non_stacking_coupon_skips_loyalty_test() {
+       Some(coupon(PercentOff(15), False)),
+       ship(0),
+       Domestic("OR"),
++      False,
+     )
+   assert q.loyalty_discount_cents == 0
+   assert q.coupon_discount_cents == 1500
+@@ -61,10 +78,24 @@ pub fn non_stacking_coupon_skips_loyalty_test() {
+ 
+ pub fn volume_discount_test() {
+   let q =
+-    pricing.quote([Line("A", 20, 100)], Standard, None, ship(0), Domestic("OR"))
++    pricing.quote(
++      [Line("A", 20, 100)],
++      Standard,
++      None,
++      ship(0),
++      Domestic("OR"),
++      False,
++    )
+   assert q.volume_discount_cents == 100
+   let q =
+-    pricing.quote([Line("A", 19, 100)], Standard, None, ship(0), Domestic("OR"))
++    pricing.quote(
++      [Line("A", 19, 100)],
++      Standard,
++      None,
++      ship(0),
++      Domestic("OR"),
++      False,
++    )
+   assert q.volume_discount_cents == 0
+ }
+ 
+@@ -76,6 +107,7 @@ pub fn free_shipping_coupon_test() {
+       Some(coupon(FreeShipping, True)),
+       ship(600),
+       Domestic("NY"),
++      False,
+     )
+   assert q.shipping_cents == 0
+   assert q.tax_cents == 40
+diff --git a/test/pilot/reporting_test.gleam b/test/pilot/reporting_test.gleam
+index a77fcc0..3aa3211 100644
+--- a/test/pilot/reporting_test.gleam
++++ b/test/pilot/reporting_test.gleam
+@@ -1,10 +1,12 @@
+ import pilot/checkout
++import pilot/customer
+ import pilot/date.{Date}
+ import pilot/payments
+ import pilot/reporting.{DailySales, ProductSales, RegionTax, ReturnsByReason}
+ import pilot/return_policy.{Item, NoLongerNeeded}
+ import pilot/returns
+ import pilot/seed
++import pilot/store
+ import support
+ 
+ pub fn daily_sales_test() {
+@@ -46,12 +48,21 @@ pub fn tax_by_region_test() {
+   let #(db, _) = support.paid(db, seed.linus, [#("MUG-BLUE", 1)])
+   assert reporting.tax_by_region(db, Date(2026, 3, 2), Date(2026, 3, 2))
+     == [
+-      RegionTax("DE", 1, 0),
+-      RegionTax("US-CA", 1, 510),
+-      RegionTax("US-NY", 1, 224),
++      RegionTax("DE", 1, 0, 0),
++      RegionTax("US-CA", 1, 510, 0),
++      RegionTax("US-NY", 1, 224, 0),
+     ]
+ }
+ 
++pub fn tax_by_region_counts_exempt_orders_test() {
++  let db = seed.demo_store()
++  let assert Ok(ada) = store.get_customer(db, seed.ada)
++  let db = store.put_customer(db, customer.Customer(..ada, tax_exempt: True))
++  let #(db, _) = support.paid(db, seed.ada, [#("MUG-BLUE", 1)])
++  assert reporting.tax_by_region(db, Date(2026, 3, 2), Date(2026, 3, 2))
++    == [RegionTax("US-NY", 1, 0, 1)]
++}
++
+ pub fn returns_by_reason_test() {
+   let #(db, o, _) =
+     support.delivered(

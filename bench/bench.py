@@ -25,6 +25,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -197,11 +198,14 @@ def parse_codex(lines):
     first_edit = None  # (tokens, tool calls, turns) spent before the first edit
     edit_pending = None  # tool calls before the first edit, until its turn's usage arrives
     tokens = uncached = output = 0
+    stamps = []
     for line in lines:
         try:
             ev = json.loads(line)
         except json.JSONDecodeError:
             continue
+        if ev.get("timestamp"):
+            stamps.append(datetime.fromisoformat(ev["timestamp"].replace("Z", "+00:00")))
         p = ev.get("payload") or {}
         if ev.get("type") == "response_item" and p.get("type") in ("custom_tool_call", "function_call"):
             calls += 1
@@ -229,7 +233,7 @@ def parse_codex(lines):
         "turns_to_first_edit": first_edit[2] if first_edit else None,
         "turns": turns,
         "cost_usd": None,  # ChatGPT sign-in: no per-token price
-        "duration_ms": None,
+        "duration_ms": int((max(stamps) - min(stamps)).total_seconds() * 1000) if stamps else None,
         "agent_error": first_edit is None and turns == 0,
         "init": {},
     }
@@ -326,13 +330,13 @@ def report(run_dir: Path):
         if (r.get("agent") == "codex" or "turns_to_first_edit" not in r) and stream.exists():
             parse = parse_codex if r.get("agent") == "codex" else parse_stream
             r.update({k: v for k, v in parse(stream.read_text().splitlines()).items() if k != "init"})
-    cols = ["tokens", "work_tokens", "turns_to_first_edit", "tokens_before_first_edit", "uncached_tokens", "cost_usd"]
+    cols = ["tokens", "work_tokens", "turns_to_first_edit", "tokens_before_first_edit", "uncached_tokens", "duration_ms", "cost_usd"]
 
     def med(rs, c):
         vals = [r[c] for r in rs if r[c] is not None]
         return statistics.median(vals) if vals else None
 
-    print(f"{'task':<28} {'pass':>5} " + " ".join(f"{c:>12}" for c in ["tokens", "work", "turns→edit", "tok<edit", "uncached", "cost"]))
+    print(f"{'task':<28} {'pass':>5} " + " ".join(f"{c:>12}" for c in ["tokens", "work", "turns→edit", "tok<edit", "uncached", "ms", "cost"]))
     for name in sorted({r["task"] for r in rows}) + ["ALL"]:
         rs = rows if name == "ALL" else [r for r in rows if r["task"] == name]
         passed = sum(r["hidden_pass"] for r in rs)
