@@ -98,3 +98,12 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
 - **Answer:** No. `session start` lists symbol names per module (about 1k tokens for pilot-large), and signatures come from `inspect` or `view <module>`. No separate command for the full index: agents re-send their context every turn, so none pays for it only once, and `view <module>` already gives signatures per module.
 - **Who/when:** Aaron, 2026-09-28
 - **Affects:** D-10 point 2, PROPOSAL.md §14.2, Spec 3 §2
+
+## D-13 Task-directed session start; exact-replacement submit — decided
+- **Question:** Orientation still takes 5–6 turns, as the agent follows code → tests → fixtures one step per turn. Solace turns are slower than files turns because submit re-sends whole symbols (about 59% of Solace output tokens vs 39% for apply_patch diffs). What changes?
+- **Answer:**
+  1. `session start --task` (the task in `text`) replaces the full symbol index with a task packet: name, signature, doc line and the reason each symbol was chosen, never bodies. Ranking is deterministic: task words (identifiers split at `_` and case changes, lowercased, common English words dropped) are weighted by rarity and by field (name 3, doc 2, code 1, which includes string literals such as fixture data); symbols the task names as `module.name` come first; one hop from the best matches adds callers, callees and covering tests, plus the non-test symbols (fixtures) that the top covering tests use. Entries are never truncated. The module list is reserved first, then entries are added in rank order until about 2k tokens are used. The Solace arm's prompt starts with it. Plain `session start` stays.
+  2. `submit <name> --replace`: one exact old → new replacement (`old` and `text`) within one symbol; zero or several matches are refused; the whole resulting symbol is then formatted and checked in one transaction as usual. No line numbers, fuzzy matching or patch language. Whole-symbol submit stays the default.
+- **Rationale:** (1) targets the general orientation problem rather than one missing fixture. (2) was made conditional on measurement, and the measurement showed submitted source is a large share of output. There are no revision or conflict checks to preserve yet (Spec 3 §4 is not built).
+- **Who/when:** Aaron, 2026-09-28; weights (squared rarity, neighbours ¼ of the seed's score, fixtures ⅛) tuned by Claude against which symbols the ten L solutions change.
+- **Affects:** Spec 3 §2 (session start), PROPOSAL.md §14.2; bench (Solace preamble)

@@ -53,7 +53,7 @@ DEFAULT_MODEL = {"codex": "gpt-5.6-terra", "claude": "claude-sonnet-5"}
 CODEX_OFF = ["multi_agent", "apps", "plugins", "goals", "image_generation", "view_image", "browser_use",
              "computer_use", "in_app_browser", "hooks", "memories", "tool_suggest"]
 CODEX_SOLACE_HINT = ("The tool is the MCP tool `solace`; from `exec`, call it as "
-                     "`await tools.mcp__solace__solace({command: \"session start\"})`, "
+                     "`await tools.mcp__solace__solace({command: \"session start --task\", text: \"<the task>\"})`, "
                      "with the new code in `text` for submit commands. One `exec` script can make "
                      "several solace calls, so read everything you need in one step.\n\n")
 # In Codex code mode every tool call is a JavaScript snippet; these mark the ones that change code.
@@ -62,8 +62,9 @@ CODEX_EDIT = re.compile(r"tools\.apply_patch|[\"'`]\s*(?:solace\s+)?(?:submit|de
 SOLACE_PREAMBLE = (
     "You are working on a Gleam project: an order-management service. Its code lives in a "
     "Solace semantic store, and you work on it only through the `solace` tool. You cannot "
-    "read or edit files or run shell commands. Start with the command `session start`: it "
-    "lists every symbol, open work and the commands. Complete the task below. Keep existing behavior and tests working unless the "
+    "read or edit files or run shell commands. Start with the command `session start --task`, "
+    "with the task below as its `text`: it lists the symbols most likely relevant to it, the "
+    "modules, open work and the commands. Complete the task below. Keep existing behavior and tests working unless the "
     "task says otherwise, and add or update tests as appropriate (tests are symbols in the "
     "test modules).\n\n"
 )

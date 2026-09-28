@@ -6,18 +6,22 @@ suffix works: `checkout.pay`, or just `pay` if only one symbol has that name.
 Modules: `pilot/checkout`, or just `checkout`. Tests are symbols too, in test
 modules such as `pilot/checkout_test`.
 
-Reading (the symbol index above usually tells you what to inspect; ask for
+Several commands can go in one tool call, one per line; they run in order.
+
+Reading (the symbol list above usually tells you what to inspect; ask for
 several symbols in one call rather than one at a time). Read symbols, not
 modules: `inspect a b c --context`. Use `--bodies` only for a module you will
-rewrite most of. For tests, `view <test module>` lists the tests; view one or
-two as examples.
+rewrite most of. `--context` includes a test that uses each symbol, as an
+example.
+  solace session start --task     (the task in `text`) the symbols most likely
+                                  relevant to it, the modules, open work
   solace session start [--scope <module>...]
-                                  this overview: every symbol, open work
-                                  records with the context they need
+                                  every symbol, open work records with the
+                                  context they need
   solace inspect <name>... --context
                                   each symbol, plus the signatures of everything
-                                  it uses, everything that uses it, and tests
-                                  that mention it
+                                  it uses, everything that uses it, and the
+                                  tests that use it (the smallest in full)
   solace view <name>...           symbols' source
   solace view <module>...         module outlines: signatures and doc lines
   solace view <module> --bodies   whole modules' source
@@ -27,6 +31,9 @@ two as examples.
 
 Changing (the new code is the tool's `text` argument; from a shell, stdin)
   solace submit <name>            replace a symbol with new code (may rename it)
+  solace submit <name> --replace  change one part of a symbol: `old` is the
+                                  exact current text (must occur once), `text`
+                                  its replacement; the whole symbol is checked
   solace submit --new <module>    add a symbol to a module
   solace submit                   several symbols at once, checked together
                                   (e.g. a type and its callers): blocks each

@@ -48,7 +48,7 @@ fn main() {
     if args.first().map(String::as_str) == Some("mcp") {
         return mcp();
     }
-    let code = match run(&args, &mut stdin) {
+    let code = match run(&args, &mut stdin, None) {
         Ok(out) => {
             print!("{out}");
             0
@@ -61,8 +61,9 @@ fn main() {
     std::process::exit(code);
 }
 
-/// `input` supplies the new code for submit commands.
-fn run(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>) -> Out {
+/// `input` supplies the new code for submit commands; `old`, the text that
+/// `submit <name> --replace` replaces (MCP only).
+fn run(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>, old: Option<&str>) -> Out {
     let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     if matches!(a.as_slice(), [] | ["help"] | ["--help"]) {
         return Ok(REFERENCE.to_string());
@@ -72,6 +73,13 @@ fn run(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>) -> O
     }
     let store = Store::open()?;
     match a.as_slice() {
+        ["session", "start", "--task"] => store.session_task(&input()?),
+        ["session", "start", "--task", task @ ..] => store.session_task(&task.join(" ")),
+        ["submit", name, "--replace"] => match old {
+            // an empty replacement deletes the old text
+            Some(old) => store.submit_replace(name, old, &input().unwrap_or_default()),
+            None => usage("`submit <name> --replace` needs the exact text to replace in `old` and its replacement in `text`."),
+        },
         ["session", rest @ ..] => store.session(&operands(rest.strip_prefix(&["start"]).unwrap_or(rest))),
         ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies")),
         ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context")),
@@ -114,7 +122,8 @@ fn mcp() {
     let description = "Run a Solace command against this project's semantic store. `command` is what \
         follows `solace` on a command line, e.g. `session start`, `inspect checkout.pay tax.quote --context`, \
         `submit checkout.pay`. For submit commands, put the new code in `text`. Start with \
-        `session start`: it lists every symbol, open work, and every command.";
+        `session start --task` with the task as `text`: it lists the symbols most likely relevant, \
+        open work, and every command.";
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lines() {
@@ -134,25 +143,43 @@ fn mcp() {
                     "type": "object",
                     "properties": {
                         "command": {"type": "string", "description": "e.g. `view checkout` or `submit --new pilot/checkout`"},
-                        "text": {"type": "string", "description": "New code, for submit commands (or a work record, for `work add`)"}
+                        "text": {"type": "string", "description": "New code, for submit commands (or a work record, for `work add`, or the task, for `session start --task`)"},
+                        "old": {"type": "string", "description": "For `submit <name> --replace`: the exact text in the symbol that `text` replaces"}
                     },
                     "required": ["command"]
                 }
             }]}),
             "tools/call" => {
                 let args = &msg["params"]["arguments"];
-                let command = args["command"].as_str().unwrap_or("");
-                let command = command.trim().strip_prefix("solace").map_or(command, |c| c.trim_start());
-                let words: Vec<String> = command.split_whitespace().map(String::from).collect();
                 let text = args["text"].as_str().map(String::from);
                 let mut input = || match &text {
                     Some(t) if !t.trim().is_empty() => Ok(t.clone()),
                     _ => usage("This command needs the new code in the `text` argument."),
                 };
-                let (out, is_error) = match run(&words, &mut input) {
-                    Ok(out) => (out, false),
-                    Err(Failure(msg, _)) => (msg, true),
-                };
+                // Several commands, one per line, run in order in one call.
+                let commands: Vec<&str> =
+                    args["command"].as_str().unwrap_or("").lines().map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
+                let (mut out, mut is_error) = (String::new(), false);
+                for command in &commands {
+                    let command = command.strip_prefix("solace").map_or(*command, |c| c.trim_start());
+                    let words: Vec<String> = command.split_whitespace().map(String::from).collect();
+                    if commands.len() > 1 {
+                        out += &format!("==== solace {command} ====\n");
+                    }
+                    match run(&words, &mut input, args["old"].as_str()) {
+                        Ok(o) => out += &o,
+                        Err(Failure(msg, _)) => {
+                            out += &msg;
+                            is_error = true;
+                        }
+                    }
+                    if commands.len() > 1 && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                }
+                if commands.is_empty() {
+                    (out, is_error) = (format!("No command given.\n\n{REFERENCE}"), true);
+                }
                 json!({"content": [{"type": "text", "text": out}], "isError": is_error})
             }
             "ping" => json!({}),
@@ -496,12 +523,21 @@ impl Store {
         }
         out += &format!("\nTest modules (tests): {}\n", tests.join(", "));
         out += &self.status()?;
+        out += &self.work_context(&ix)?;
+        out += "\n";
+        out += REFERENCE;
+        Ok(out)
+    }
+
+    /// Open work records expanded with the context of the symbols they name.
+    fn work_context(&self, ix: &Index) -> Out {
+        let mut out = String::new();
         for (_, text) in self.open_work()? {
             let mut named = vec![];
             for word in text.split(|c: char| !(c.is_alphanumeric() || "_./".contains(c))) {
                 let word = word.trim_matches(|c| c == '.' || c == '/');
                 if word.contains('.')
-                    && let Ok(i) = self.resolve(&ix, word)
+                    && let Ok(i) = self.resolve(ix, word)
                     && !named.contains(&i)
                 {
                     named.push(i);
@@ -510,11 +546,142 @@ impl Store {
             if !named.is_empty() {
                 out += "\n== Context of the symbols the work record names ==\n";
                 for i in named {
-                    out += &self.bundle(&ix, i, true)?;
+                    out += &self.bundle(ix, i, true)?;
                     out += "\n";
                 }
             }
         }
+        Ok(out)
+    }
+
+    /// `session start --task`: instead of the full index, the symbols most
+    /// likely relevant to the task (signature and why each was picked),
+    /// within a fixed budget, plus the module list.
+    fn session_task(&self, task: &str) -> Out {
+        const BUDGET: usize = 8000; // bytes, about 2k tokens
+        let ix = self.index()?;
+        let n = ix.syms.len();
+        let mut modules = String::from("Modules (`view <module>` for an outline):\n");
+        let mut tests = vec![];
+        for m in &ix.modules {
+            if m.dir == "test" {
+                tests.push(m.path.as_str());
+            } else {
+                modules += &format!("  {} — {}\n", m.path, module_doc(m));
+            }
+        }
+        modules += &format!("Test modules: {}\n", tests.join(", "));
+
+        // Direct matches: rare task words weigh more; a word in the name
+        // counts 3, in the doc line 2, anywhere else in the code 1.
+        let fields: Vec<[HashSet<String>; 3]> = ix
+            .syms
+            .iter()
+            .map(|s| {
+                let doc: String = s.text.lines().filter(|l| l.trim_start().starts_with("///")).collect::<Vec<_>>().join(" ");
+                [words(&s.name).into_iter().collect(), words(&doc).into_iter().collect(), words(&s.text).into_iter().collect()]
+            })
+            .collect();
+        let mut terms = words(task);
+        terms.sort();
+        terms.dedup();
+        let mut score = vec![0.0f64; n];
+        let mut why: Vec<Vec<(f64, String)>> = vec![vec![]; n];
+        for t in &terms {
+            let df = fields.iter().filter(|f| f.iter().any(|w| w.contains(t))).count();
+            if df == 0 {
+                continue;
+            }
+            // squared, so one rare word (a code, a name) outweighs several common ones
+            let idf = (1.0 + n as f64 / df as f64).ln().powi(2);
+            for (i, f) in fields.iter().enumerate() {
+                if let Some(k) = f.iter().position(|w| w.contains(t)) {
+                    let w = idf * [3.0, 2.0, 1.0][k];
+                    score[i] += w;
+                    why[i].push((w, t.clone()));
+                }
+            }
+        }
+        let direct = score.clone();
+        let matched: Vec<String> = why
+            .into_iter()
+            .map(|mut w| {
+                w.sort_by(|a, b| b.0.total_cmp(&a.0));
+                let top: Vec<&str> = w.iter().take(4).map(|(_, t)| t.as_str()).collect();
+                if top.is_empty() { String::new() } else { format!("matches {}", top.join(", ")) }
+            })
+            .collect();
+        let mut why = matched.clone();
+
+        // One hop from the best matches: callers, callees and covering tests;
+        // then the non-test symbols (fixtures) the top covering tests use.
+        let mut seeds: Vec<usize> = (0..n).filter(|&i| direct[i] > 0.0).collect();
+        seeds.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]));
+        seeds.truncate(10);
+        let boost = |j: usize, s: f64, reason: String, score: &mut Vec<f64>, why: &mut Vec<String>| {
+            if direct[j] + s > score[j] {
+                score[j] = direct[j] + s;
+                why[j] = if matched[j].is_empty() { reason } else { format!("{}; {reason}", matched[j]) };
+            }
+        };
+        for &s in &seeds {
+            let q = ix.syms[s].qname();
+            for &j in &ix.uses[s] {
+                boost(j, direct[s] / 4.0, format!("used by {q}"), &mut score, &mut why);
+            }
+            let mut covering = vec![];
+            for j in (0..n).filter(|&j| ix.uses[j].contains(&s)) {
+                if is_test(&ix, j) {
+                    covering.push(j);
+                    boost(j, direct[s] / 4.0, format!("tests {q}"), &mut score, &mut why);
+                } else {
+                    boost(j, direct[s] / 4.0, format!("uses {q}"), &mut score, &mut why);
+                }
+            }
+            covering.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]).then(ix.syms[a].text.len().cmp(&ix.syms[b].text.len())));
+            for &t in covering.iter().take(2) {
+                for &j in ix.uses[t].iter().filter(|&&j| !is_test(&ix, j)) {
+                    boost(j, direct[s] / 8.0, format!("used by the test {}", ix.syms[t].qname()), &mut score, &mut why);
+                }
+            }
+        }
+
+        // Symbols the task names (`module.name`) are listed first.
+        let mut named = vec![];
+        for word in task.split(|c: char| !(c.is_alphanumeric() || "_./".contains(c))) {
+            let word = word.trim_matches(|c| c == '.' || c == '/');
+            if word.contains('.')
+                && let Ok(i) = self.resolve(&ix, word)
+                && !named.contains(&i)
+            {
+                named.push(i);
+            }
+        }
+        for &i in &named {
+            score[i] = f64::MAX;
+            why[i] = "named in the task".to_string();
+        }
+        let mut ranked: Vec<usize> = (0..n).filter(|&i| score[i] > 0.0).collect();
+        ranked.sort_by(|&a, &b| score[b].total_cmp(&score[a]).then(ix.syms[a].text.len().cmp(&ix.syms[b].text.len())));
+        let mut packet = String::new();
+        let mut room = BUDGET.saturating_sub(modules.len());
+        let mut shown = 0;
+        for &i in &ranked {
+            // whole entries only: skip one that doesn't fit, try smaller ones
+            let entry = format!("-- {}  ({})\n{}\n", ix.syms[i].qname(), why[i], gleam::signature(&ix.syms[i].item()));
+            if entry.len() <= room {
+                room -= entry.len();
+                packet += &entry;
+                shown += 1;
+            }
+        }
+        let mut out = format!(
+            "Symbols most likely relevant to the task, best first ({shown} of {} candidates; signatures only). \
+             `inspect <name>... --context` gives bodies and context.\n{packet}\n{modules}",
+            ranked.len()
+        );
+        out += &self.status()?;
+        out += &self.work_context(&ix)?;
         out += "\n";
         out += REFERENCE;
         Ok(out)
@@ -613,8 +780,18 @@ impl Store {
             }
         }
         if !tests.is_empty() {
-            let names: Vec<String> = tests.iter().map(|&t| ix.syms[t].qname()).collect();
-            out += &format!("\n== Tests that mention it ({}) ==\n  {}\n", tests.len(), names.join("\n  "));
+            // The smallest test in full, as a worked example (saves a turn of
+            // browsing test modules); the rest by name.
+            const EXAMPLE_CAP: usize = 1600; // bytes, about 400 tokens
+            let example = tests.iter().copied().min_by_key(|&t| ix.syms[t].text.len()).filter(|&t| ix.syms[t].text.len() <= EXAMPLE_CAP);
+            out += &format!("\n== Tests that use it ({}) ==\n", tests.len());
+            if let Some(t) = example {
+                out += &format!("-- {} (example)\n{}\n", ix.syms[t].qname(), ix.syms[t].text);
+            }
+            let names: Vec<String> = tests.iter().filter(|&&t| Some(t) != example).map(|&t| ix.syms[t].qname()).collect();
+            if !names.is_empty() {
+                out += &format!("  {}\n", names.join("\n  "));
+            }
         }
         if let Some(diag) = self.db.query_row("SELECT diagnostic FROM broken WHERE symbol = ?1", [s.qname()], |r| r.get::<_, String>(0)).optional()? {
             out += &format!("\n== Broken ==\n{diag}\n");
@@ -964,6 +1141,25 @@ impl Store {
         }
     }
 
+    /// Replaces one exact piece of a symbol's text, then submits the whole
+    /// symbol as usual (formatted, checked, one transaction).
+    fn submit_replace(&self, name: &str, old: &str, new: &str) -> Out {
+        let ix = self.index()?;
+        let s = &ix.syms[self.resolve(&ix, name)?];
+        if old.is_empty() {
+            return usage("`old` is empty; give the exact text to replace.");
+        }
+        match s.text.matches(old).count() {
+            1 => self.submit_symbols(Some(&s.qname()), None, &s.text.replacen(old, new, 1)),
+            0 => fail(format!(
+                "Not saved: E0104 `old` does not occur in {}. It must match the current text exactly (`view {}` shows it).",
+                s.qname(),
+                s.qname()
+            )),
+            k => fail(format!("Not saved: E0105 `old` occurs {k} times in {}; include more of the surrounding text so it occurs once.", s.qname())),
+        }
+    }
+
     fn header(&self, module: &str) -> Result<String, Failure> {
         Ok(self.db.query_row("SELECT header FROM modules WHERE path = ?1", [module], |r| r.get(0))?)
     }
@@ -1040,6 +1236,34 @@ impl Store {
             _ => Ok(format!("Work record #{id} closed.\n")),
         }
     }
+}
+
+/// Search terms: identifiers split at `_` and case changes, lowercased, a
+/// plural `s` dropped; short words, numbers and common English words skipped.
+fn words(text: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "the", "and", "for", "with", "that", "this", "from", "when", "should", "must", "into", "are", "was", "were",
+        "been", "has", "have", "not", "but", "any", "all", "its", "also", "each", "only", "than", "then", "there",
+        "their", "they", "which", "will", "would", "can", "could", "does", "did", "you", "your", "new", "add", "make",
+        "use", "using", "test", "tests", "existing", "keep", "one", "other", "what", "how", "may", "per", "such",
+    ];
+    let mut out = vec![];
+    for tok in text.split(|c: char| !c.is_alphanumeric()) {
+        let mut cur = String::new();
+        let mut prev_lower = false;
+        for c in tok.chars() {
+            if c.is_uppercase() && prev_lower {
+                out.push(std::mem::take(&mut cur));
+            }
+            prev_lower = c.is_lowercase() || c.is_ascii_digit();
+            cur.extend(c.to_lowercase());
+        }
+        out.push(cur);
+    }
+    out.into_iter()
+        .map(|w| if w.len() > 4 && w.ends_with('s') && !w.ends_with("ss") { w[..w.len() - 1].to_string() } else { w })
+        .filter(|w| w.len() >= 3 && !w.chars().all(|c| c.is_ascii_digit()) && !STOP.contains(&w.as_str()))
+        .collect()
 }
 
 fn module_doc(m: &ModuleRow) -> &str {
@@ -1318,4 +1542,14 @@ fn broken_report(diags: &[Diag]) -> String {
         out += &format!("\n… {} more errors (solace check)\n", errors.len() - 5);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::words;
+
+    #[test]
+    fn task_words() {
+        assert_eq!(words("Add the TENOFF coupon to refundsByMonth in order_totals, 10 tests"), ["tenoff", "coupon", "refund", "month", "order", "total"]);
+    }
 }
