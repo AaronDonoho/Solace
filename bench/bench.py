@@ -7,8 +7,9 @@
   bench.py report RUN_DIR       per-task pass rate and medians for a run
 
 A task is a directory in bench/tasks/ holding prompt.md, hidden_test.gleam,
-solution.patch, and optionally setup.patch and `project` (the project directory
-it runs against; default pilot). Every run works on a fresh copy of that project.
+solution.patch, and optionally setup.patch, `project` (the project directory
+it runs against; default pilot) and work.md (a work record left by an earlier
+developer: HANDOFF.md in the files arm, a store work record in the solace arm). Every run works on a fresh copy of that project.
 TASK arguments may be shell-style patterns, e.g. 'L*'.
 """
 
@@ -48,7 +49,7 @@ SOLACE_PREAMBLE = (
     "You are working on a Gleam project: an order-management service. Its code lives in a "
     "Solace semantic store, and you work on it only through the `solace` tool. You cannot "
     "read or edit files or run shell commands. Start with the command `session start`: it "
-    "lists the modules and the commands. Complete the task below. Keep existing behavior and tests working unless the "
+    "lists every symbol, open work and the commands. Complete the task below. Keep existing behavior and tests working unless the "
     "task says otherwise, and add or update tests as appropriate (tests are symbols in the "
     "test modules).\n\n"
 )
@@ -64,7 +65,7 @@ def sh(cmd, cwd, **kw):
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, **kw)
 
 
-def prepare(task: Path) -> Path:
+def prepare(task: Path, arm: str = "files") -> Path:
     """Fresh git copy of the pilot with the task's setup applied and committed."""
     work = Path(tempfile.mkdtemp(prefix=f"solace-{task.name}-"))
     project = (task / "project").read_text().strip() if (task / "project").exists() else "pilot"
@@ -75,6 +76,8 @@ def prepare(task: Path) -> Path:
         r = sh(["git", "apply", str(task / "setup.patch")], work)
         if r.returncode:
             sys.exit(f"{task.name}: setup.patch does not apply\n{r.stderr}")
+    if arm == "files" and (task / "work.md").exists():
+        shutil.copy(task / "work.md", work / "HANDOFF.md")
     sh(git + ["add", "-A"], work)
     sh(git + ["commit", "-qm", "base"], work)
     return work
@@ -120,7 +123,7 @@ def parse_stream(lines):
     seen, blocks = set(), set()
     context = calls = 0
     first_context = None
-    first_edit = None  # (tokens, tool calls) spent before the first edit
+    first_edit = None  # (tokens, tool calls, turns) spent before the first edit
     result, init = {}, {}
     for line in lines:
         try:
@@ -142,7 +145,7 @@ def parse_stream(lines):
                 if b.get("type") == "tool_use" and b.get("id") not in blocks:
                     blocks.add(b.get("id"))
                     if is_edit(b) and first_edit is None:
-                        first_edit = (spent_before, calls)
+                        first_edit = (spent_before, calls, len(seen))
                     calls += 1
         elif ev.get("type") == "result":
             result = ev
@@ -160,6 +163,8 @@ def parse_stream(lines):
         "tool_calls": calls,
         "tokens_before_first_edit": first_edit[0] if first_edit else None,
         "tool_calls_before_first_edit": first_edit[1] if first_edit else None,
+        # model turns up to and including the one that makes the first edit
+        "turns_to_first_edit": first_edit[2] if first_edit else None,
         "turns": result.get("num_turns"),
         "cost_usd": result.get("total_cost_usd"),
         "duration_ms": result.get("duration_ms"),
@@ -187,12 +192,14 @@ def run(tasks, model, budget, repeat, arm):
     cmd += ["--bare"] if os.environ.get("ANTHROPIC_API_KEY") else ["--setting-sources", "project"]
     for task, rep in [(t, r) for r in range(1, repeat + 1) for t in tasks]:
         name = f"{task.name}.{rep}"
-        work = prepare(task)
+        work = prepare(task, arm)
         if arm == "solace":
             r = sh(["solace", "import"], work, env=env)
             if r.returncode:
                 sys.exit(f"{task.name}: solace import failed\n{r.stdout}")
             (work / ".git" / "info" / "exclude").write_text(".solace/\n")
+            if (task / "work.md").exists():
+                sh(["solace", "work", "add"], work, env=env, input=(task / "work.md").read_text())
         prompt = preamble + (task / "prompt.md").read_text()
         try:
             proc = sh(cmd, work, input=prompt, timeout=1800, env=env)
@@ -208,7 +215,7 @@ def run(tasks, model, budget, repeat, arm):
         with open(run_dir / "summary.jsonl", "a") as f:
             f.write(json.dumps(row) + "\n")
         print(f"{'PASS' if row['hidden_pass'] else 'fail'} {name}  tokens={row['tokens']} "
-              f"calls={row['tool_calls']} before_edit={row['tokens_before_first_edit']} cost=${row['cost_usd']}")
+              f"turns_to_edit={row['turns_to_first_edit']} before_edit={row['tokens_before_first_edit']} cost=${row['cost_usd']}")
         shutil.rmtree(work)
     print(f"results: {run_dir}")
 
@@ -217,15 +224,15 @@ def report(run_dir: Path):
     rows = [json.loads(l) for l in (run_dir / "summary.jsonl").read_text().splitlines()]
     for r in rows:  # older runs: derive newer metrics from the saved stream
         stream = run_dir / f"{r['task']}.{r.get('rep', 1)}.stream.jsonl"
-        if "work_tokens" not in r and stream.exists():
+        if "turns_to_first_edit" not in r and stream.exists():
             r.update({k: v for k, v in parse_stream(stream.read_text().splitlines()).items() if k != "init"})
-    cols = ["tokens", "work_tokens", "tokens_before_first_edit", "uncached_tokens", "cost_usd", "tool_calls"]
+    cols = ["tokens", "work_tokens", "turns_to_first_edit", "tokens_before_first_edit", "uncached_tokens", "cost_usd"]
 
     def med(rs, c):
         vals = [r[c] for r in rs if r[c] is not None]
         return statistics.median(vals) if vals else None
 
-    print(f"{'task':<28} {'pass':>5} " + " ".join(f"{c:>12}" for c in ["tokens", "work", "tok<edit", "uncached", "cost", "calls"]))
+    print(f"{'task':<28} {'pass':>5} " + " ".join(f"{c:>12}" for c in ["tokens", "work", "turns→edit", "tok<edit", "uncached", "cost"]))
     for name in sorted({r["task"] for r in rows}) + ["ALL"]:
         rs = rows if name == "ALL" else [r for r in rows if r["task"] == name]
         passed = sum(r["hidden_pass"] for r in rs)
@@ -234,7 +241,7 @@ def report(run_dir: Path):
             f"{'-' if v is None else round(v, 3) if c == 'cost_usd' else int(v):>12}" for c, v in zip(cols, cells)))
     print(f"total cost ${sum(r['cost_usd'] or 0 for r in rows):.2f}  (medians per run; ALL = median over every run)")
     print("tokens: all input+output; work: tokens minus the fixed prompt re-sent each call; "
-          "tok<edit: tokens before the first edit; uncached: fresh input+output")
+          "turns→edit: model turns up to the first edit; tok<edit: tokens before it; uncached: fresh input+output")
 
 
 def main():

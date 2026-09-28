@@ -72,11 +72,9 @@ fn run(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>) -> O
     }
     let store = Store::open()?;
     match a.as_slice() {
-        ["session", ..] => store.session(),
-        ["view", names @ ..] if names.iter().any(|n| !n.starts_with("--")) => {
-            store.view(&names.iter().copied().filter(|n| !n.starts_with("--")).collect::<Vec<_>>())
-        }
-        ["inspect", name, rest @ ..] => store.inspect(name, rest.contains(&"--context")),
+        ["session", rest @ ..] => store.session(&operands(rest.strip_prefix(&["start"]).unwrap_or(rest))),
+        ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies")),
+        ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context")),
         ["refs", name] => store.refs(name),
         ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
         ["submit", "--new", module] => store.submit(Target::New(module), &input()?),
@@ -86,11 +84,17 @@ fn run(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>) -> O
         ["delete", name] => store.delete(name),
         ["check"] => store.check(),
         ["test"] => store.test(),
-        ["work", "add", text @ ..] if !text.is_empty() => store.work_add(&text.join(" ")),
+        ["work", "add"] => store.work_add(&input()?),
+        ["work", "add", text @ ..] => store.work_add(&text.join(" ")),
         ["work", "list"] | ["work"] => store.work_list(),
         ["work", "done", id] => store.work_done(id),
         _ => usage(format!("Unknown command: solace {}", a.join(" "))),
     }
+}
+
+/// Arguments that aren't flags (`--scope` just introduces them).
+fn operands<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    args.iter().copied().filter(|a| !a.starts_with("--")).collect()
 }
 
 fn stdin() -> Result<String, Failure> {
@@ -107,9 +111,9 @@ fn stdin() -> Result<String, Failure> {
 fn mcp() {
     use serde_json::{Value, json};
     let description = "Run a Solace command against this project's semantic store. `command` is what \
-        follows `solace` on a command line, e.g. `session start`, `inspect checkout.pay --context`, \
+        follows `solace` on a command line, e.g. `session start`, `inspect checkout.pay tax.quote --context`, \
         `submit checkout.pay`. For submit commands, put the new code in `text`. Start with \
-        `session start`: it lists the modules and every command.";
+        `session start`: it lists every symbol, open work, and every command.";
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lines() {
@@ -129,7 +133,7 @@ fn mcp() {
                     "type": "object",
                     "properties": {
                         "command": {"type": "string", "description": "e.g. `view checkout` or `submit --new pilot/checkout`"},
-                        "text": {"type": "string", "description": "New code, for submit commands"}
+                        "text": {"type": "string", "description": "New code, for submit commands (or a work record, for `work add`)"}
                     },
                     "required": ["command"]
                 }
@@ -467,45 +471,99 @@ impl Store {
         exact.or(if suffix.len() == 1 { Some(suffix[0]) } else { None })
     }
 
-    fn session(&self) -> Out {
+    /// The symbol index (one line per source symbol), test modules, and open
+    /// work records expanded with the context of the symbols they name.
+    fn session(&self, scopes: &[&str]) -> Out {
+        const CAP: usize = 40;
         let ix = self.index()?;
-        let mut out = String::from("Modules (symbols, description):\n");
-        for m in &ix.modules {
-            let count = ix.syms.iter().filter(|s| s.module == m.path).count();
-            let doc = m.header.lines().find(|l| l.starts_with("////")).map_or("", |l| l.trim_start_matches('/').trim());
-            out += &format!("  {:<4} {:<28} {:>3}  {}\n", m.dir, m.path, count, doc);
+        let in_scope = |m: &ModuleRow| {
+            scopes.is_empty() || scopes.iter().any(|s| self.resolve_module(&ix, s).is_some_and(|r| r.path == m.path))
+        };
+        let mut out = String::from("Symbols (signature, description). Tests are listed per module after them.\n");
+        let mut tests = vec![];
+        for m in ix.modules.iter().filter(|m| in_scope(m)) {
+            let syms: Vec<&Sym> = ix.syms.iter().filter(|s| s.module == m.path).collect();
+            if m.dir == "test" {
+                tests.push(format!("{} ({})", m.path, syms.len()));
+                continue;
+            }
+            out += &format!("\n{} — {}\n", m.path, module_doc(m));
+            for s in syms.iter().take(CAP) {
+                out += &format!("  {}\n", index_line(s));
+            }
+            if syms.len() > CAP {
+                out += &format!("  …{} more (solace view {})\n", syms.len() - CAP, m.path);
+            }
         }
+        out += &format!("\nTest modules (tests): {}\n", tests.join(", "));
         out += &self.status()?;
+        for (_, text) in self.open_work()? {
+            let mut named = vec![];
+            for word in text.split(|c: char| !(c.is_alphanumeric() || "_./".contains(c))) {
+                let word = word.trim_matches(|c| c == '.' || c == '/');
+                if word.contains('.')
+                    && let Ok(i) = self.resolve(&ix, word)
+                    && !named.contains(&i)
+                {
+                    named.push(i);
+                }
+            }
+            if !named.is_empty() {
+                out += "\n== Context of the symbols the work record names ==\n";
+                for i in named {
+                    out += &self.bundle(&ix, i, true)?;
+                    out += "\n";
+                }
+            }
+        }
         out += "\n";
         out += REFERENCE;
         Ok(out)
     }
 
+    fn open_work(&self) -> Result<Vec<(i64, String)>, Failure> {
+        let mut stmt = self.db.prepare("SELECT id, text FROM work WHERE open = 1")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// Open work records and broken symbols.
     fn status(&self) -> Result<String, Failure> {
         let mut out = String::new();
-        let work: Vec<(i64, String)> =
-            self.db.prepare("SELECT id, text FROM work WHERE open = 1")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+        let work = self.open_work()?;
         out += &format!("\nOpen work records: {}\n", if work.is_empty() { "none" } else { "" });
         for (id, text) in work {
-            out += &format!("  #{id} {text}\n");
+            out += &format!("#{id}\n{}\n", text.trim_end());
         }
         let broken: Vec<String> = self.db.prepare("SELECT symbol FROM broken ORDER BY symbol")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
         out += &format!("Broken symbols: {}\n", if broken.is_empty() { "none".to_string() } else { broken.join(", ") });
         Ok(out)
     }
 
-    fn view(&self, names: &[&str]) -> Out {
+    /// A module is shown as an outline unless `bodies` is set.
+    fn view(&self, names: &[&str], bodies: bool) -> Out {
         let ix = self.index()?;
         let mut out = String::new();
         for name in names {
             if let Some(m) = self.resolve_module(&ix, name) {
-                out += &format!("// ── module {} ({}) ──\n", m.path, m.dir);
-                if !m.header.is_empty() {
-                    out += &format!("{}\n\n", m.header);
+                if bodies {
+                    out += &format!("// ── module {} ({}) ──\n", m.path, m.dir);
+                    if !m.header.is_empty() {
+                        out += &format!("{}\n\n", m.header);
+                    }
+                    for s in ix.syms.iter().filter(|s| s.module == m.path) {
+                        out += &format!("{}\n\n", s.text);
+                    }
+                    continue;
+                }
+                out += &format!("// ── module {} ({}), outline: `view <name>` for a body, `--bodies` for all ──\n", m.path, m.dir);
+                let doc: Vec<&str> = m.header.lines().filter(|l| l.starts_with("////")).collect();
+                if !doc.is_empty() {
+                    out += &format!("{}\n\n", doc.join("\n"));
                 }
                 for s in ix.syms.iter().filter(|s| s.module == m.path) {
-                    out += &format!("{}\n\n", s.text);
+                    let broken = self.db.query_row("SELECT 1 FROM broken WHERE symbol = ?1", [s.qname()], |_| Ok(())).optional()?;
+                    out += &format!("{}{}\n\n", gleam::signature(&s.item()), if broken.is_some() { "  // BROKEN" } else { "" });
                 }
             } else {
                 let s = &ix.syms[self.resolve(&ix, name)?];
@@ -515,9 +573,18 @@ impl Store {
         Ok(out)
     }
 
-    fn inspect(&self, name: &str, context: bool) -> Out {
+    fn inspect(&self, names: &[&str], context: bool) -> Out {
         let ix = self.index()?;
-        let i = self.resolve(&ix, name)?;
+        let mut out = String::new();
+        for name in names {
+            let i = self.resolve(&ix, name)?;
+            out += &self.bundle(&ix, i, context)?;
+            out += "\n";
+        }
+        Ok(out)
+    }
+
+    fn bundle(&self, ix: &Index, i: usize, context: bool) -> Out {
         let s = &ix.syms[i];
         let mut out = format!("// ── {} ({}) ──\n{}\n", s.qname(), s.kind.as_str(), s.text);
         if !context {
@@ -855,6 +922,28 @@ impl Store {
             0 => fail(format!("No work record #{id}.")),
             _ => Ok(format!("Work record #{id} closed.\n")),
         }
+    }
+}
+
+fn module_doc(m: &ModuleRow) -> &str {
+    m.header.lines().find(|l| l.starts_with("////")).map_or("", |l| l.trim_start_matches('/').trim())
+}
+
+/// One line for the session index: the declaration with whitespace
+/// collapsed (long ones cut), then the first doc line.
+fn index_line(s: &Sym) -> String {
+    const MAX: usize = 160;
+    let sig = gleam::signature(&s.item());
+    let doc = sig.lines().next().filter(|l| l.starts_with("///")).map(|l| l.trim_start_matches('/').trim());
+    let decl: String = sig.lines().filter(|l| !l.starts_with("///")).collect::<Vec<_>>().join(" ");
+    let mut decl = decl.split_whitespace().collect::<Vec<_>>().join(" ").replace("( ", "(").replace(" )", ")").replace(",)", ")");
+    if decl.len() > MAX {
+        let cut = (0..=MAX).rev().find(|&i| decl.is_char_boundary(i)).unwrap_or(0);
+        decl = format!("{}…", &decl[..cut]);
+    }
+    match doc {
+        Some(d) => format!("{decl}  — {d}"),
+        None => decl,
     }
 }
 

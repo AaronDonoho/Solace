@@ -23,7 +23,9 @@ Roadmap: PROPOSAL.md §18 table. Phases are sequential; a phase ships only when 
 - [x] Large baseline `bench/results/20260927-221107-claude-sonnet-5/`: Sonnet 5, 5 tasks (L01, L03, L05, L06, L07), 1 run each, **5/5 pass**, median 1.6M tokens per task (1.13M work, 71%), 113k before first edit, $3.63 total. L02, L04, L08, L09 and L10 stay available for later.
 - [x] Comparison design (D-8): the Solace arm uses the protocol only, with no file tools.
 - [x] `solace-cli/` (Rust): import, session, view, inspect --context, refs, find, submit (symbol, --new, --imports, whole module), delete, check, test, work records, and `solace mcp` (D-9). Byte-exact round trip on pilot-large; inspect about 6 ms, submit plus type check about 0.5 s.
-- [ ] Solace arm run: Sonnet 5, the same 5 tasks, 1 run each (in progress).
+- [x] Solace arm run `bench/results/20260927-230127-claude-sonnet-5-solace/`: same 5 tasks, 1 run each, **5/5 pass**. Total tokens −42% (8.79M → 5.07M), work tokens −32% (6.20M → 4.21M), cost $3.63 → $2.92. Part of the total is the smaller fixed prompt (7.4k vs 15k). No orientation win: median 9 turns to the first edit vs 6 for files. Agents viewed whole modules instead of inspecting (L07: 13 modules before the first edit). The L07 work record was only in the prompt, so work records went untested.
+- [x] D-10 built: module views are outlines (`--bodies` for full text); `session start` has a symbol index (about 7.3k tokens on pilot-large) and `--scope`; `inspect` takes several names; open work records are expanded with the context of the symbols they name; `work add` reads the record from the tool's `text`. Bench: `turns→edit` metric; a task's `work.md` becomes HANDOFF.md (files) or a store work record (solace); L07 now uses it.
+- [ ] Rerun after D-10: Solace arm on the same 5 tasks, plus the files arm on L07 only (its prompt changed). About $4.50. Main number: turns to the first edit (Gate 1 target: median ≤ 3).
 - **Phase 1a gaps against the specs** (add if the checkpoint passes): no changes/commit/base revisions (Spec 3 §4); no rename, copy, merge or extract (Spec 1 §5); no decision requests; doc comments stay in symbol text (Spec 2 §1); revisions hash comment-free text rather than identity-resolved content (Spec 1 §3); no export/import format (Spec 2 §4); unused imports are never removed.
 - SQLite store: symbol identities, revisions, references, work records, decisions.
 - Import Gleam modules into symbols; canonical projection via `gleam format`; export per §7.5.
@@ -33,8 +35,8 @@ Roadmap: PROPOSAL.md §18 table. Phases are sequential; a phase ships only when 
 ## Then: Phase 1b — Solace language core (Rust)
 - Parser → canonical formatter → type and effect checker (holes, refinements checked at runtime, state machines, examples run as tests) → Erlang source (D-2).
 - Golden-file tests throughout. Plug into the Phase 1a store in place of Gleam.
-- **Gate 1:** agents build and maintain the pilot through the protocol alone; export round-trips losslessly.
+- **Gate 1:** agents build and maintain the pilot through the protocol alone; typical tasks reach their first edit within 3 model turns (median); export round-trips losslessly.
 
 ## Open work records
-- **Benchmark metric:** tokens (see `bench.py report`: total, work = total minus fixed per-call prompt, tokens before first edit, uncached). Tool calls only explain token counts.
+- **Benchmark metric:** tokens (see `bench.py report`: total, work = total minus fixed per-call prompt, tokens before first edit, uncached). Orientation is measured in model turns to the first edit (D-10). Tool calls only explain token counts.
 - **Pilot has no HTTP layer.** Add one only if a benchmark task needs it.
