@@ -1,5 +1,9 @@
 # Work
 
+## Bench result visualizer
+
+- [x] Lustre/Gleam web UI with an Ewe/Gleam backend for renameable comparison groups, recursive result-folder refresh, a result table, and row-selected comparison graphs (`cd bench/visualizer && gleam run`). Rebuild the client from `bench/visualizer/frontend` with `gleam build --target javascript && bun build build/dev/javascript/bench_visualizer_frontend/bench_visualizer_frontend.mjs --outfile ../priv/app.js --minify-syntax --minify-whitespace --target browser`.
+
 Roadmap: PROPOSAL.md §18 table. Phases are sequential; a phase ships only when its gate is met. Per D-1, Phase 1 is split so the central experiment runs before the language exists.
 
 ## Done: Phase 0 — Specify (Gate 0 met 2026-09-27)
@@ -54,4 +58,3 @@ Roadmap: PROPOSAL.md §18 table. Phases are sequential; a phase ships only when 
 
 ## Open work records
 - **Benchmark metric:** tokens (see `bench.py report`: total, work = total minus fixed per-call prompt, tokens before first edit, uncached). Orientation is measured in model turns to the first edit (D-10). Tool calls only explain token counts.
-- **Pilot has no HTTP layer.** Add one only if a benchmark task needs it.
