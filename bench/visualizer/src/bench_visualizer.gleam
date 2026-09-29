@@ -192,7 +192,7 @@ fn load_file(
   }
 }
 
-fn result_files(path: String) -> Result(List(String), String) {
+pub fn result_files(path: String) -> Result(List(String), String) {
   case simplifile.is_directory(path) {
     Error(error) -> Error(simplifile.describe_error(error))
     Ok(False) -> Ok([path])

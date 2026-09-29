@@ -1,0 +1,59 @@
+diff --git a/src/pilot/return_policy.gleam b/src/pilot/return_policy.gleam
+index cd15ae9..a315c5c 100644
+--- a/src/pilot/return_policy.gleam
++++ b/src/pilot/return_policy.gleam
+@@ -138,19 +138,19 @@ pub fn restocking_fee_percent(category: Category, reason: Reason) -> Int {
+   }
+ }
+ 
+-/// True when, after this return, every unit of the order has been returned.
+ pub fn completes_order(
+   order: Order,
+   items: List(Item),
+   already_returned: Dict(String, Int),
+ ) -> Bool {
+-  list.all(items, fn(item) {
+-    let before = dict.get(already_returned, item.sku) |> result.unwrap(0)
+-    let bought = case order.find_line(order, item.sku) {
+-      Ok(line) -> line.quantity
+-      Error(Nil) -> 0
+-    }
+-    before + item.quantity >= bought
++  list.all(order.lines, fn(line) {
++    let before = dict.get(already_returned, line.sku) |> result.unwrap(0)
++    let returning =
++      items
++      |> list.find(fn(item) { item.sku == line.sku })
++      |> result.map(fn(item) { item.quantity })
++      |> result.unwrap(0)
++    before + returning >= line.quantity
+   })
+ }
+ 
+diff --git a/test/pilot/returns_test.gleam b/test/pilot/returns_test.gleam
+index 5cf865d..30c814c 100644
+--- a/test/pilot/returns_test.gleam
++++ b/test/pilot/returns_test.gleam
+@@ -102,3 +102,22 @@ pub fn must_receive_before_refund_test() {
+     returns.refund(db, c, gateway(), r.id)
+   assert inventory.available(db.stock, "WH-EAST", "MUG-BLUE") == 29
+ }
++
++pub fn returning_one_complete_line_excludes_shipping_test() {
++  let #(db, o, _) =
++    support.delivered(
++      seed.demo_store(),
++      seed.ada,
++      [#("TEE-M-BLK", 2), #("MUG-BLUE", 1)],
++      3,
++    )
++  let assert Ok(#(_, request)) =
++    returns.request(
++      db,
++      support.on_day(5),
++      o.id,
++      [Item("TEE-M-BLK", 2)],
++      Damaged,
++    )
++  assert request.refund.shipping_cents == 0
++}

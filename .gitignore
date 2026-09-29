@@ -1,5 +1,5 @@
 # Benchmark raw agent logs (large; diffs and summaries are kept)
-bench/results/*/*.stream.jsonl
+bench/results/**/*.stream.jsonl
 
 # Python
 __pycache__/

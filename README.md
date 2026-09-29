@@ -76,4 +76,4 @@ python3 bench/bench.py run --arm solace L01-loyalty-coupon-order
 python3 bench/bench.py report bench/results/RUN_DIRECTORY
 ```
 
-Replace `RUN_DIRECTORY` with the directory name printed by the run. Use `--arm files` for the conventional file-editing comparison, `--agent claude` for Claude Code, or omit task names to run all tasks. `python3 bench/bench.py --help` lists all options. Saved runs are under `bench/results/`.
+Replace `RUN_DIRECTORY` with the number printed by the run. Each run automatically uses the next numbered directory under `bench/results/`. Use `--run-number 2` to save both arms under `bench/results/2/`; repeating an arm there appends the next repetition number. Use `--agent claude` for Claude Code, or omit task names to run all tasks. `python3 bench/bench.py --help` lists all options. The visualizer can load a run directory or an individual scenario.

@@ -12,8 +12,13 @@ pub fn result_row_context_test() {
   |> should.be_true
   bench_visualizer.is_result_row("{\"task\":broken}")
   |> should.be_false
-  bench_visualizer.contextualize(row, "a", "Files", "bench/results/run")
+  bench_visualizer.contextualize(row, "a", "Files", "bench/results/run/L01")
   |> should.equal(
-    "{\"group_id\":\"a\",\"group\":\"Files\",\"source\":\"bench/results/run\",\"task\":\"L01\",\"tokens\":12}",
+    "{\"group_id\":\"a\",\"group\":\"Files\",\"source\":\"bench/results/run/L01\",\"task\":\"L01\",\"tokens\":12}",
   )
+}
+
+pub fn nested_scenario_results_test() {
+  bench_visualizer.result_files("test/fixtures/results/run")
+  |> should.equal(Ok(["test/fixtures/results/run/scenario/summary.jsonl"]))
 }
