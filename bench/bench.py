@@ -2,7 +2,7 @@
 """Solace benchmark harness (PROPOSAL.md §19.1).
 
   bench.py validate [TASK...]   check each task: hidden tests fail before, pass with the reference solution
-  bench.py run [--arm files|solace] [--agent codex|claude] [--model M] [--effort E]
+  bench.py run [--arm files|solace] [--run-number N] [--agent codex|claude] [--model M] [--effort E]
                [--budget USD] [--repeat N] [TASK...]
                                 run an agent on each task and grade it
   bench.py report RUN_DIR       per-task pass rate and medians for a run
@@ -24,7 +24,6 @@ import statistics
 import subprocess
 import sys
 import tempfile
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -357,11 +356,24 @@ def codex_cmd(arm, model, effort):
                   "-c", 'mcp_servers.solace.default_tools_approval_mode="approve"', "-"]
 
 
-def run(tasks, model, budget, repeat, arm, agent="codex", effort="medium"):
-    label = model if agent == "claude" else f"{model}-{effort}"
-    run_dir = RESULTS / f"{time.strftime('%Y%m%d-%H%M%S')}-{label}" if arm == "files" \
-        else RESULTS / f"{time.strftime('%Y%m%d-%H%M%S')}-{label}-{arm}"
-    run_dir.mkdir(parents=True)
+def next_run_number(results_dir):
+    return max((int(p.name) for p in results_dir.iterdir() if p.is_dir() and p.name.isdecimal()), default=0) + 1
+
+
+def next_rep(scenario_dir, task_name):
+    summary = scenario_dir / "summary.jsonl"
+    if not summary.exists():
+        return 1
+    rows = map(json.loads, summary.read_text().splitlines())
+    return max((row.get("rep", 1) for row in rows if row["task"] == task_name), default=0) + 1
+
+
+def run(tasks, model, budget, repeat, arm, agent="codex", effort="medium", run_number=None):
+    RESULTS.mkdir(parents=True, exist_ok=True)
+    run_dir = RESULTS / str(run_number if run_number is not None else next_run_number(RESULTS))
+    scenario_dir = run_dir / arm
+    scenario_dir.mkdir(parents=True, exist_ok=True)
+    first_reps = {task.name: next_rep(scenario_dir, task.name) for task in tasks}
     env = {**os.environ, "PATH": f"{SOLACE_BIN}:{os.environ['PATH']}"}
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
            "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands",
@@ -376,7 +388,8 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort="medium"):
         cmd += ["--tools", "", "--mcp-config", json.dumps(server), "--allowedTools", "mcp__solace__solace"]
     # Keep the user's own plugins, hooks and settings out of the measurement.
     cmd += ["--bare"] if os.environ.get("ANTHROPIC_API_KEY") else ["--setting-sources", "project"]
-    for task, rep in [(t, r) for r in range(1, repeat + 1) for t in tasks]:
+    for task, offset in [(t, r) for r in range(repeat) for t in tasks]:
+        rep = first_reps[task.name] + offset
         name = f"{task.name}.{rep}"
         work = prepare(task, arm)
         if arm == "solace":
@@ -410,14 +423,14 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort="medium"):
             except subprocess.TimeoutExpired as e:
                 stream = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
             metrics = parse_stream(stream.splitlines())
-        (run_dir / f"{name}.stream.jsonl").write_text(stream)
+        (scenario_dir / f"{name}.stream.jsonl").write_text(stream)
         row = {"task": task.name, "rep": rep, "agent": agent, "model": model, "effort": effort if agent == "codex" else None,
                "arm": arm, **metrics, **grade(task, work)}
         sh(["git", "add", "-A"], work)
-        (run_dir / f"{name}.diff").write_text(sh(["git", "diff", "--cached", "HEAD"], work).stdout)
+        (scenario_dir / f"{name}.diff").write_text(sh(["git", "diff", "--cached", "HEAD"], work).stdout)
         init = row.pop("init")
-        (run_dir / "init.json").write_text(json.dumps(init, indent=2))
-        with open(run_dir / "summary.jsonl", "a") as f:
+        (scenario_dir / f"{name}.init.json").write_text(json.dumps(init, indent=2))
+        with open(scenario_dir / "summary.jsonl", "a") as f:
             f.write(json.dumps(row) + "\n")
         print(f"{'PASS' if row['hidden_pass'] else 'fail'} {name}  tokens={row['tokens']} "
               f"turns_to_edit={row['turns_to_first_edit']} before_edit={row['tokens_before_first_edit']}")
@@ -426,12 +439,19 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort="medium"):
 
 
 def report(run_dir: Path):
-    rows = [json.loads(l) for l in (run_dir / "summary.jsonl").read_text().splitlines()]
-    for r in rows:  # older runs: derive newer metrics from the saved stream
-        stream = run_dir / f"{r['task']}.{r.get('rep', 1)}.stream.jsonl"
-        if (r.get("agent") == "codex" or "turns_to_first_edit" not in r) and stream.exists():
-            parse = parse_codex if r.get("agent") == "codex" else parse_stream
-            r.update({k: v for k, v in parse(stream.read_text().splitlines()).items() if k != "init"})
+    rows = []
+    summaries = [run_dir / "summary.jsonl"] if (run_dir / "summary.jsonl").exists() else sorted(run_dir.glob("*/summary.jsonl"))
+    if not summaries:
+        raise FileNotFoundError(f"No summaries under {run_dir}")
+    for summary in summaries:
+        for line in summary.read_text().splitlines():
+            r = json.loads(line)
+            rows.append(r)
+            # Older runs kept all task streams directly in the run directory.
+            stream = summary.parent / f"{r['task']}.{r.get('rep', 1)}.stream.jsonl"
+            if (r.get("agent") == "codex" or "turns_to_first_edit" not in r) and stream.exists():
+                parse = parse_codex if r.get("agent") == "codex" else parse_stream
+                r.update({k: v for k, v in parse(stream.read_text().splitlines()).items() if k != "init"})
     cols = ["tokens", "work_tokens", "turns_to_first_edit", "tokens_before_first_edit", "uncached_tokens", "duration_ms", "cost_usd"]
 
     def med(rs, c):
@@ -478,6 +498,7 @@ def main():
     ap.add_argument("--effort", default="medium", help="codex reasoning effort")
     ap.add_argument("--budget", type=float, default=2.0, help="max USD per task (claude only)")
     ap.add_argument("--repeat", type=int, default=1, help="runs per task")
+    ap.add_argument("--run-number", type=int, help="override the next run number, e.g. to pair both arms")
     ap.add_argument("--arm", choices=["files", "solace"], default="files",
                     help="files: normal file tools; solace: the solace protocol only (D-8)")
     a = ap.parse_args()
@@ -492,7 +513,7 @@ def main():
         r = subprocess.run(["cargo", "build", "--release", "--quiet"], cwd=ROOT.parent / "solace-cli")
         if r.returncode:
             sys.exit("could not build solace-cli")
-    run(tasks, a.model or DEFAULT_MODEL[a.agent], a.budget, a.repeat, a.arm, a.agent, a.effort)
+    run(tasks, a.model or DEFAULT_MODEL[a.agent], a.budget, a.repeat, a.arm, a.agent, a.effort, a.run_number)
 
 
 if __name__ == "__main__":
