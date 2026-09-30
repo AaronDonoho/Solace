@@ -849,12 +849,13 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Fai
 fn brief(t: &Value, review: bool, writes: bool) -> String {
     let start = "Start with `session start --task`, with the task's title and description as `text`.";
     let ask = "If you need a decision from the human, ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer.";
+    let read_only = "This run is read-only: reading, `check`, `test` and `build` work; `submit`, `delete`, `write`, `remove`, `format` and `run` are refused.";
     let role = if review {
-        "Review the changes this task made (listed below) and give feedback. You can't change the project in this run. Finish with `task note <feedback>`.".to_string()
+        format!("Review the changes this task made (listed below) and give feedback. {read_only} Finish with `task note`, the feedback in `text`.")
     } else if writes {
-        format!("Make the change this task describes. {start} {ask} Finish with `task done <summary>`: what you changed and how you checked it.")
+        format!("Make the change this task describes. {start} {ask} Finish with `task done`, a summary in `text`: what you changed and how you checked it.")
     } else {
-        format!("This task is an investigation: find out what it asks and report. Don't change the project; changes are refused in this run. {start} {ask} Finish with `task done <report>`.")
+        format!("This task is an investigation: find out what it asks and report. {read_only} {start} {ask} Finish with `task done`, the report in `text`.")
     };
     let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
     let mut out = format!(
@@ -1109,7 +1110,7 @@ pub fn task_command(
                 }
             }
         }
-        _ => return usage("task note <text> | task ask | task done <summary>"),
+        _ => return usage("task note | task ask | task done, with the text in `text`"),
     }
     if column(&w, &t)["final"] == true {
         drop_before(s, tid)?;
@@ -1332,7 +1333,7 @@ mod tests {
             "links":[{"name":"spec","url":"http://x"}],"notes":[{"author":"human","text":"Keep it small","time":1,"run":null}],
             "questions":[{"id":"q","text":"Syntax?","options":["a","b"],"answer":"b"}],"runs":[{"id":"r1"}],"changes":[{"entity":"symbol:x","name":"calc.add","run":"r1"}]});
         let b = brief(&t, false, true);
-        for part in ["Make the change", "`task done <summary>`", "Task: Add coolcalc\n\nA CLI calculator.\n", "- spec: http://x", "- human: Keep it small", "- Syntax?\n  Answer: b"] {
+        for part in ["Make the change", "`task done`, a summary in `text`", "Task: Add coolcalc\n\nA CLI calculator.\n", "- spec: http://x", "- human: Keep it small", "- Syntax?\n  Answer: b"] {
             assert!(b.contains(part), "{part} missing from:\n{b}");
         }
         for noise in ["{", "r1", "rank", "calc.add"] {
@@ -1340,7 +1341,7 @@ mod tests {
         }
         assert!(brief(&t, false, false).contains("This task is an investigation"));
         let r = brief(&t, true, true);
-        assert!(r.contains("Changes to review:\n- calc.add") && r.contains("`task note <feedback>`") && !r.contains("task done"));
+        assert!(r.contains("Changes to review:\n- calc.add") && r.contains("`task note`, the feedback in `text`") && r.contains("`run` are refused") && !r.contains("task done"));
     }
 
     #[test]

@@ -260,7 +260,7 @@ fn mcp(budget: usize) {
                     "type": "object",
                     "properties": {
                         "command": {"type": "string", "description": "e.g. `view checkout` or `submit --new pilot/checkout`"},
-                        "text": {"type": "string", "description": "New code, for submit commands (or a work record, for `work add`, or the task, for `session start --task`)"},
+                        "text": {"type": "string", "description": "New code, for submit commands (or a work record, for `work add`; the task, for `session start --task`; the note, summary or question, for `task note|done|ask`)"},
                         "options": {"type": "array", "items": {"type": "string"}, "description": "2–4 options for task ask"},
                         "old": {"type": "string", "description": "For `submit <name> --replace`: the exact text in the symbol that `text` replaces"}
                     },
