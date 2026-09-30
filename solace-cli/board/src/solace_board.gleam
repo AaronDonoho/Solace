@@ -353,7 +353,28 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             "" -> fields
             text -> [#("text", json.string(text)), ..fields]
           }
-          #(model, send("/tasks/" <> t.id <> "/actions", "POST", fields))
+          let proceed = case name {
+            "cancel" ->
+              confirm(
+                "Cancel task \""
+                <> t.title
+                <> "\"? This stops its agents and reverts its changes. This cannot be undone.",
+              )
+            "complete" ->
+              confirm(
+                "Complete task \""
+                <> t.title
+                <> "\"? This keeps its changes and closes the task. Its undo records will be removed, so it cannot be reopened or reverted through the board.",
+              )
+            _ -> True
+          }
+          case proceed {
+            True -> #(
+              model,
+              send("/tasks/" <> t.id <> "/actions", "POST", fields),
+            )
+            False -> #(model, effect.none())
+          }
         }
       }
     AddNote ->

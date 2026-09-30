@@ -68,7 +68,7 @@ actions = ["unblock", "new_agent", "review", "cancel"]
 
 [[board.columns]]
 id = "needs_review"
-actions = ["approve", "complete", "review", "start_over", "cancel"]
+actions = ["approve", "complete", "review", "reassign", "start_over", "cancel"]
 next = "done"
 requires = ["approved"]                # an agent's result is on the task: a human signs it off
 
@@ -90,9 +90,12 @@ unblock    = { to = "assigned", run = "work" }         # the waiting agent conti
 new_agent  = { to = "assigned", run = "new_work" }     # a fresh agent, with the notes so far
 approve    = { stamp = "approved" }
 complete   = { to = "done" }
+reassign   = { unstamp = "approved", to = "assigned", run = "work" } # preserve work and address feedback
 start_over = { revert = true, unstamp = "approved", to = "assigned", run = "new_work" }
 cancel     = { revert = true, to = "cancelled" }
 ```
+
+`reassign` moves a task from needs review to assigned, preserves its code and change records, removes approval, and starts a work run with the notes and review feedback. It uses the previous work model unless the human selects another. It is refused while a review run is still active. `start_over` additionally reverts the task before starting again.
 
 `revert` also ends the task's agent, if it has one.
 
@@ -115,7 +118,7 @@ Two rules hold for every workflow:
 | `POST /tasks/{id}/actions` `{action, model?, text?}` | §2. Returns 200 with the task, or 409 with `E7001` (not allowed here; `allowed` lists what is) or `E7002`–`E7008` (`E7007`, `E7008`: a revert blocked by a later task) |
 | `POST /tasks/{id}/notes` `{text}` | Adds a human note |
 | `DELETE /tasks/{id}/notes/{i}` | Deletes the note at position `i` (0 is the oldest), whoever wrote it. Notes are only ever appended, so a position stays valid until a note before it is deleted |
-| `POST /tasks/{id}/questions/{qid}` `{option?, text?}` | Answers a question |
+| `POST /tasks/{id}/questions/{qid}` `{option?, text?}` | Saves the answer and continues the same waiting run once all questions are answered, unless paused; uses its allowed workflow continuation (§6) |
 | `GET /models` | The models this Solace install knows, each with `agent`, `available` and, when unavailable, `reason` (§6) |
 | `GET /events` | Server-sent events: `{task}` in full after every change, and `{workflow}` after a configuration change, in order. A client that reconnects with `Last-Event-ID` gets what it missed |
 
@@ -146,13 +149,16 @@ When a task reaches a final column, the records of the state before it are dropp
 - **Attention.** Solace sets `attention` when a task needs a human: an agent asked a question, a run failed (the note includes the agent's last message, or else the end of its output), or the server restarted while an agent was working. It is cleared by the next successful action request on the task.
 - A **work run** starts the agent with Spec 14 §5's configuration. Its prompt is plain text, not the task's JSON: what the run is for and how to start, ask and finish, then the task's title, body, links, notes and questions with their answers. The run's kind decides the role line, and a read-only run's brief says which commands are refused. On top of Spec 14, the agent's Solace tool gets:
   - `task note <text>`: adds an agent note;
-  - `task ask` (`text`, 2–4 `options`): adds a question and fires `asked`. **The agent waits:** the call returns only when a human continues the task with `unblock`, and its result is the answers and any `text`. The run keeps its context. `new_agent` instead ends it and starts a fresh one, which gets the notes and answers in its prompt;
+  - `task ask` (`text`, 2–4 `options`): adds a question and fires `asked`. **The agent waits:** answering the last pending question automatically continues the same run through its allowed workflow action (`unblock` by default for work). The call returns the answers and any continuation `text`. Explicit `unblock` with `text` still works. The run keeps its context. `new_agent` instead ends it and starts a fresh one, which gets the notes and answers in its prompt;
   - `task done <summary>`: adds the summary as a note, fires `finished`, and ends the run.
-- An **investigate run** gets the same prompt, with a role line asking for findings or a plan. It is read-only like a review run: `write`, `submit`, `delete`, `remove`, `format` and `run` are refused (`E7010`). Its `task done` report is added as a note and ends the run, and fires no event: the task stays where it is. Its `task ask` fires no event either. The task stays in its column, marked as needing attention, and `investigate` continues the waiting agent with the answers. A later work run gets the report in its prompt with the other notes.
+- An **investigate run** gets the same prompt, with a role line asking for findings or a plan. It is read-only like a review run: `write`, `submit`, `delete`, `remove`, `format` and `run` are refused (`E7010`). Its `task done` report is added as a note and ends the run, and fires no event: the task stays where it is. Its `task ask` fires no event either. The task stays in its column, marked as needing attention, and answering its pending questions automatically continues the waiting agent. Explicit `investigate` with an answer still works. A later work run gets the report in its prompt with the other notes.
 - A **review run** gets the same prompt plus the names of the task's `changes`. It is read-only (`E7010`), ends by adding its feedback with `task note`, and fires no event.
 - A run past the task timeout (a system setting; default 60 min) is stopped and fires `failed`. Time spent waiting on a question or paused doesn't count.
+- **Pause and continuation:** answering a paused run saves the answers without continuing it; `resume` continues it once all questions are answered. Answer submission never starts a new agent, replaces a run, grants a stamp or reverts work. A custom workflow without an allowed continuation keeps the answers and flags the missing action. Repeated answer submissions do not start another run.
 - **Keeping an agent waiting** depends on the agent's tool-call timeout. `agent-config` (Spec 14 §5) sets it to the task timeout or more (Codex: the MCP server's `tool_timeout_sec`; Claude Code: `MCP_TOOL_TIMEOUT`). If the agent gives up anyway, the run fires `failed`, and the task continues with a new agent.
 - Each run records `log`, the path of the agent's own session log. `GET /tasks/{id}/runs/{rid}` reads it (Codex `exec --json` or Claude Code `stream-json`) into a transcript, so a human can follow the agent's work live or read it afterwards. The view is read only (D-19, D-24).
+
+The bundled board confirms `cancel` and `complete` before sending an action request (D-32). Dialogs name the task and explain reverting changes versus keeping changes and removing undo records. Dismissing sends no request and preserves the form. Confirmation does not bypass API gates.
 
 ## 7. Out of scope
 
@@ -164,7 +170,7 @@ Several projects on one server, several people, remote access and authentication
 - A2. No action moves a task to an event's target column except through that column's actions. `asked`, `finished` and `failed` move it only as configured.
 - A3. A custom workflow with an extra column and action works end to end. The invalid workflows in §2 each give `E6020`.
 - A4. `complete` from `needs_review` without `approved` is refused (`E7006`). After `approve`, `complete` moves the task to `done`. `start_over` and `cancel` from `needs_review` are not gated, and `start_over` removes the stamp. The stamp records who gave it and when. A task approved and then moved back with `start_over` or `new_agent` no longer holds `approved`.
-- A5. With a fake agent: `task ask` blocks the task, and the question appears on it and in `/events`, while the agent's call stays open. `unblock` is refused until the question is answered or a `text` is given. After `unblock`, the same agent process (same run id) receives the answer and continues. `new_agent` instead ends it and starts a run with a new id whose prompt has the answer. `task done` moves the task to `needs_review`.
+- A5. With a fake agent: `task ask` blocks the task, and the question appears on it and in `/events`, while the agent's call stays open. `unblock` is refused until the question is answered or a `text` is given. After the last answer is submitted, the same agent process (same run id) receives the answer and continues without an extra `unblock` request. A paused run waits for `resume`. Custom continuation action names work, and repeated answers never launch a replacement run. `new_agent` instead ends it and starts a run with a new id whose prompt has the answer. `task done` moves the task to `needs_review`.
 - A6. A fake agent's run edits two symbols, creates one, deletes one, writes a resource and creates a new one. `cancel` restores the store and those files byte-for-byte to how they were before the task.
 - A7. Task B changes a symbol after task A did. Cancelling A is refused with `E7007`, naming the symbol and B, and nothing changes. After B is cancelled, cancelling A succeeds.
 - A7c. Task B adds a caller of a function task A added, without editing any of A's symbols. Cancelling A is refused with `E7008`, naming B's caller, and the store and files are unchanged.
@@ -175,3 +181,5 @@ Several projects on one server, several people, remote access and authentication
 - A9. A review run's `write` or `submit` returns `E7010`, and the task stays in its column. So does an investigate run's. An investigate run's question keeps the task in planning, and `investigate` with an answer continues the same run. Its `task done` report appears on the task, which stays in planning and can be completed from there.
 - A10. `/events` delivers every change in order, and a reconnect with `Last-Event-ID` returns the missed ones.
 - A11. The default board's only connection to Solace is this API: it runs against a stub server implementing §4 and passes its own tests there. Every file command on `.solace/board/` returns `E6006`.
+
+- A14. Reassigning after review retains existing symbol/resource edits and before-state records, passes review feedback and human instructions to the new work run, and clears approval. The revised result requires fresh approval, and cancelling restores the state before the original work run.

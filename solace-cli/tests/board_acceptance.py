@@ -110,6 +110,39 @@ class Board(unittest.TestCase):
         self.assertIn('without finishing',crashed['attention']['reason'])
         self.assertIsNone(self.action(crashed,'cancel')['attention'])
         timed=self.assign([{'sleep':3}]);timed=self.wait(timed,lambda x:x['column']=='blocked');self.assertIn('timeout',timed['notes'][-1]['text'])
+    def test_reassign_preserves_work_and_review_feedback(self):
+        original=self.cli('view','app.one')
+        t=self.completed([
+            {'command':'submit app.one','text':'pub fn one() { 10 }'},
+            {'command':'read priv/a'}, {'command':'write priv/a','text':'keep this'},
+        ])
+        changes=t['changes']
+        self.api('PATCH','/tasks/'+t['id'],{'body':json.dumps([{'command':'task note','text':'Review: handle the edge case.'}])})
+        self.action(t,'review',model='fake');t=self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        review=t['runs'][-1]['id']
+        self.api('PATCH','/tasks/'+t['id'],{'body':json.dumps([
+            {'command':'view app.one'},
+            {'command':'submit app.one','text':'pub fn one() { 20 }'},
+            {'command':'task done fixed'},
+        ])})
+        self.action(t,'approve')
+        t=self.action(t,'reassign',text='Please address the review.')
+        self.assertEqual(t['column'],'assigned');self.assertEqual(t['stamps'],{})
+        self.assertEqual(t['changes'],changes);self.assertNotEqual(t['runs'][-1]['id'],review)
+        rid=t['runs'][-1]['id'];self.assertEqual(t['runs'][-1]['kind'],'work')
+        self.assertEqual(t['runs'][-1]['model'],'fake')
+        t=self.wait(t,lambda x:x['column']=='needs_review')
+        prompt=(self.root/'.solace'/(rid+'.prompt')).read_text()
+        self.assertIn('Review: handle the edge case.',prompt);self.assertIn('Please address the review.',prompt)
+        first=json.loads((self.root/'.solace'/(rid+'.responses')).read_text().splitlines()[0])
+        self.assertIn('10',first['result']['content'][0]['text'])
+        self.assertIn('20',self.cli('view','app.one'))
+        self.assertEqual((self.root/'priv/a').read_text(),'keep this')
+        self.action(t,'complete','E7006')
+        self.action(t,'cancel')
+        self.assertEqual(self.cli('view','app.one'),original)
+        self.assertEqual((self.root/'priv/a').read_text(),'original')
+
     def test_a3_custom_workflow_and_invalid(self):
         original=(self.root/'solace.toml').read_text()
         default=Path(__file__).parents[1].joinpath('src/default-board.toml').read_text()
@@ -135,13 +168,37 @@ class Board(unittest.TestCase):
         self.api('PATCH','/tasks/'+t['id'],{'title':'blocked edit'},'E7003')
         self.action(t,'unblock','E7002')
         self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][0]["id"]}',{'option':'a'})
-        self.action(t,'unblock');t=self.wait(t,lambda x:x['column']=='needs_review');self.assertEqual(t['runs'][-1]['id'],rid)
+        t=self.wait(t,lambda x:x['column']=='needs_review');self.assertEqual(t['runs'][-1]['id'],rid)
+        self.assertIsNone(t['attention'])
+        self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][0]["id"]}',{'option':'a'})
+        self.assertEqual(len(self.get(t)['runs']),1)  # Retried answers never launch a new agent.
         response=json.loads((self.root/'.solace'/(rid+'.responses')).read_text().splitlines()[0]);self.assertEqual(json.loads(response['result']['content'][0]['text'])['questions'][0]['answer'],'a')
         t=self.assign([{'command':'task ask','text':'Again?','options':['a','b']},{'command':'task done answered'}]);t=self.wait(t,lambda x:x['column']=='blocked');old=t['runs'][-1]['id']
         t=self.action(t,'new_agent',text='b');new=t['runs'][-1]['id'];self.assertNotEqual(old,new)
         self.wait(t,lambda x:len(x['questions'])==2)
         prompt=(self.root/'.solace'/(new+'.prompt')).read_text();self.assertIn("Answer: b",prompt);self.assertNotIn('"runs"',prompt)
         self.action(t,'unblock',text='b');self.wait(t,lambda x:x['column']=='needs_review')
+    def test_answers_respect_pause_and_all_questions(self):
+        config=self.root/'solace.toml'
+        workflow=Path(__file__).parents[1].joinpath('src/default-board.toml').read_text()
+        config.write_text(config.read_text()+workflow.replace('unblock','continue_work'))
+        t=self.assign([{'command':'task ask','text':'First?','options':['a','b']},{'command':'task done answered'}])
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting');rid=t['runs'][-1]['id']
+        # Seed a second pending question to exercise the all-answers condition.
+        t['questions'].append({'id':'second','text':'Second?','options':['a','b']})
+        (self.root/'.solace/board'/f'{t["id"]}.json').write_text(json.dumps(t))
+        t=self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][0]["id"]}',{'option':'a'})
+        self.assertEqual(t['runs'][-1]['state'],'waiting')
+        self.action(t,'pause')
+        t=self.api('POST',f'/tasks/{t["id"]}/questions/second',{'text':'custom answer'})
+        self.assertEqual(t['runs'][-1]['state'],'waiting');self.assertEqual(t['paused_from'],'blocked')
+        self.assertFalse((self.root/'.solace'/(rid+'.responses')).exists())
+        t=self.action(t,'resume')
+        self.assertEqual(t['column'],'assigned');self.assertEqual(t['runs'][-1]['state'],'running')
+        t=self.wait(t,lambda x:x['column']=='needs_review');self.assertEqual(t['runs'][-1]['id'],rid)
+        response=json.loads((self.root/'.solace'/(rid+'.responses')).read_text().splitlines()[0])
+        self.assertEqual(json.loads(response['result']['content'][0]['text'])['questions'][1]['answer'],'custom answer')
+
     def test_a6_revert_a7b_invisible(self):
         self.cli('build') # canonical projection before comparing byte for byte
         before=(self.root/'src/app.gleam').read_bytes()
@@ -191,7 +248,8 @@ class Board(unittest.TestCase):
         t=self.create([*steps,{'command':'task ask','text':'Which?','options':['a','b']},{'command':'task done report'}]);self.action(t,'plan')
         self.action(t,'investigate',model='fake');t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting')
         self.assertEqual(t['column'],'planning');self.assertIn('question',t['attention']['reason']);rid=t['runs'][-1]['id']
-        self.action(t,'investigate','E7002');self.action(t,'investigate',text='a')
+        self.action(t,'investigate','E7002')
+        self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][0]["id"]}',{'text':'a'})
         t=self.wait(t,lambda x:x['runs'][-1]['state']=='ended');self.assertEqual(t['runs'][-1]['id'],rid);self.assertEqual(t['runs'][-1]['outcome'],'reported')
         self.assertEqual(t['column'],'planning');self.assertEqual(t['notes'][-1]['text'],'report');self.assertFalse(t['changes'])
         prompt=(self.root/'.solace'/(rid+'.prompt')).read_text()

@@ -519,6 +519,27 @@ fn drop_before(s: &Store, tid: &str) -> Result<(), Failure> {
     Ok(())
 }
 
+fn continue_answered(s: &Store, w: &Value, t: &mut Value) -> Result<(), Failure> {
+    if !t["paused_from"].is_null() || t["questions"].as_array().unwrap().iter().any(|q| q["answer"].is_null()) {
+        return Ok(());
+    }
+    let Some(run) = t["runs"].as_array().unwrap().iter().find(|r| r["state"] == "waiting") else {
+        return Ok(());
+    };
+    // Use the configured continuation, never a replacement run or a human stamp.
+    let next = allowed(w, t).into_iter().find(|name| {
+        let a = &w["actions"][name];
+        a["run"] == run["kind"] && a["revert"] != true && a["stamp"].is_null() && a["unstamp"].is_null()
+    });
+    if let Some(name) = next {
+        action(s, w, t, &json!({"action":name}))?;
+        t["attention"] = Value::Null;
+    } else {
+        flag(t, "answers saved; no continuation action is available in this column");
+    }
+    Ok(())
+}
+
 fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(String, Value)>, Failure> {
     let name = body["action"].as_str().unwrap_or("");
     let allowed = allowed(w, t);
@@ -536,6 +557,7 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
             t["column"] = t["paused_from"].clone();
             t["paused_from"] = Value::Null;
         }
+        continue_answered(s, w, t)?;
         return Ok(None);
     }
     let a = &w["actions"][name];
@@ -712,6 +734,7 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
                         return err("E7001", "option is not offered");
                     }
                     q["answer"] = json!(answer);
+                    continue_answered(&s, &w, &mut t)?;
                 }
                 ("POST", ["actions"]) => {
                     let launch = action(&s, &w, &mut t, &body)?;

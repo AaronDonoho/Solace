@@ -25,6 +25,10 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     return Response.json(task);
   }});
   const fetchOriginal = globalThis.fetch;
+  const confirmOriginal = globalThis.confirm;
+  const confirmations = [];
+  let acceptConfirmation = false;
+  globalThis.confirm = question => { confirmations.push(question); return acceptConfirmation; };
   const controllers = [];
   globalThis.fetch = (path, options) => fetchOriginal(new URL(path, server.url), options);
   // EventSource is a browser primitive absent from Bun; consume real SSE here.
@@ -63,6 +67,24 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     dispatch(new board.Text('Human note')); dispatch(new board.AddNote());
     await until(() => to_string(board.view(model)).includes('Human note'));
     dispatch(new board.Action('plan')); await until(() => task.column === 'planning');
+    expect(confirmations).toHaveLength(0);
+    dispatch(new board.Text('Keep these instructions'));
+    for (const action of ['cancel', 'complete']) {
+      const before = requests.length;
+      const beforeModel = model;
+      dispatch(new board.Action(action));
+      await Bun.sleep(30);
+      expect(requests.length).toBe(before);
+      expect(model).toBe(beforeModel);
+      expect(confirmations.at(-1)).toContain(task.title);
+    }
+    expect(confirmations[0]).toContain('reverts its changes');
+    expect(confirmations[1]).toContain('keeps its changes');
+    acceptConfirmation = true;
+    const beforeCancel = requests.filter(([method, path]) => method === 'POST' && path.endsWith('/actions')).length;
+    dispatch(new board.Action('cancel'));
+    await until(() => model.text === '');
+    expect(requests.filter(([method, path]) => method === 'POST' && path.endsWith('/actions')).length).toBe(beforeCancel + 1);
     dispatch(new board.Action('complete')); await until(() => model.error === 'Approval required');
     task.questions = [{ id: 'q1', text: 'Choose', options: ['yes', 'no'] }];
     task.runs = [{ id: 'r1', kind: 'work', state: 'waiting', model: 'fake', log: '/logs/r1' }];
@@ -75,6 +97,8 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     for (const pair of [['GET', '/workflow'], ['GET', '/tasks'], ['GET', '/tasks/t1'], ['GET', '/models'], ['GET', '/events'], ['POST', '/tasks'], ['PATCH', '/tasks/t1'], ['POST', '/tasks/t1/notes'], ['POST', '/tasks/t1/actions'], ['POST', '/tasks/t1/questions/q1']]) expect(requests).toContainEqual(pair);
     expect(to_string(board.view(model))).toContain('/logs/r1');
   } finally {
+    if (confirmOriginal === undefined) delete globalThis.confirm;
+    else globalThis.confirm = confirmOriginal;
     controllers.forEach(c => c.abort()); server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
   }
 });

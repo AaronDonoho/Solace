@@ -269,3 +269,21 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
 - **Answer:** Yes. The board deletes any note, whoever wrote it, after the human confirms. Deletion is permanent and isn't recorded. Notes are addressed by position, because they have no ids and are only ever appended.
 - **Who/when:** Aaron, 2026-09-30.
 - **Affects:** Spec 15 §4 (`DELETE /tasks/{id}/notes/{i}`), `board.rs`, the default board
+
+## D-30 Answer submission continues the waiting agent — decided
+- **Problem:** Aaron selected an option in Questions, but the answer was only saved; the investigation continued to wait for a separate Investigate action.
+- **Behavior:** submitting the last pending answer continues the same waiting agent through its allowed workflow continuation. Work and investigation both use this behavior. Paused runs retain the answer until Resume. No answer submission starts a new agent, replaces a run, gives approval or reverts changes. Custom workflows without a continuation retain the answer and show an actionable attention reason.
+- **Who/when:** Aaron reported the unmet interaction expectation, 2026-09-30; continuation behavior and pause handling implemented by Codex. Supersedes the separate answer-then-continue interaction in D-19/D-25.
+- **Affects:** Spec 15 §4/§6/A5; question and resume endpoints; guide.
+
+## D-31 Reassign from review without reverting — decided
+- **Request:** Aaron wants to move a story from review back to assigned to address failed review, without starting over.
+- **Answer:** Add `reassign` to Needs review in the default workflow. Preserve code, resources and original before-state records; clear approval; start a work run with the task notes, review feedback and optional human instructions. Use the existing work model unless another is selected. An active review must finish first. `start_over` keeps its existing revert behavior.
+- **Who/when:** Aaron, 2026-09-30; action name and workflow configuration by Codex.
+- **Affects:** default workflow, Spec 15, guide, README and board acceptance tests. Custom workflows can declare the same action explicitly.
+
+## D-32 Confirm cancellation and completion — decided
+- **Request:** Aaron wants confirmation dialogs for Cancel and Complete.
+- **Answer:** The bundled board asks before sending either action. Cancel explains that agents stop and task changes are reverted; Complete explains that changes stay, the task closes, and undo records are removed. Both identify the task. Dismissing the dialog sends no request and preserves entered instructions. Use the existing browser confirmation, as for note deletion. API gates remain enforced after confirmation.
+- **Who/when:** Aaron, 2026-09-30; dialog wording and implementation by Codex.
+- **Affects:** bundled board, Spec 15, guide and client API test.

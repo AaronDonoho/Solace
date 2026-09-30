@@ -34,16 +34,18 @@ table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid 
 <tr><td>Planning</td><td>You're shaping the task</td><td>Ask an agent to investigate it, assign it to a model, complete it (when it only needed an answer), send it back, or cancel it</td></tr>
 <tr><td>Assigned</td><td>An agent is working</td><td>Start a new agent on it, or cancel it</td></tr>
 <tr><td>Blocked</td><td>The agent needs an answer, or couldn't continue</td><td>Answer and unblock it, start a new agent, ask for a review, or cancel it</td></tr>
-<tr><td>Needs review</td><td>The agent says it's finished</td><td>Approve it, then complete it; ask for an agent review; start over; or cancel it</td></tr>
+<tr><td>Needs review</td><td>The agent says it's finished</td><td>Approve it, then complete it; ask for an agent review; reassign it for fixes; start over; or cancel it</td></tr>
 <tr><td>Done, Cancelled</td><td>Finished either way</td><td>Nothing</td></tr>
 </table>
 <p>A task with an agent on it says so on its card: <em>Agent investigating</em>, <em>Agent working</em>, <em>Agent reviewing</em>, <em>Waiting for your answer</em> or <em>Agent paused</em>.</p>
+<p>If a review finds problems, enter any additional instructions in <em>Note / answer / instructions</em> and choose <em>reassign</em>. The task returns to Assigned and a work agent gets the review feedback and notes. Existing changes are kept, and any approval is cleared. You can select another model first. Wait for an active review to finish before reassigning. <em>Start over</em> instead undoes the task's changes before starting another agent.</p>
 <p>You can pause any task that isn't finished, and resume it later. A paused agent stops at its next step and keeps what it knows.</p>
 <p>A task can't be completed until you approve it. If you move an approved task anywhere else, for example by starting over, it loses the approval.</p>
+<p><strong>Cancel</strong> and <strong>Complete</strong> ask for confirmation. Cancel stops the task's agents and reverts its changes. Complete keeps the changes and closes the task, removing its undo records; the board cannot reopen or revert it afterwards. Dismissing either dialog leaves the task and your entered instructions unchanged.</p>
 <p>You can change the columns and what's allowed in each in the project's <code>solace.toml</code> (see Settings below).</p>
 
 <h3>Questions and attention</h3>
-<p>When an agent needs a decision, it asks a question with a few options, and the task moves to Blocked. The agent waits, keeping everything it has learned so far. Pick an option or type an answer, then <em>unblock</em> the task, and the same agent carries on. An investigating agent's question keeps the task in Planning: answer it, then choose <em>investigate</em> again to let the agent continue. If you'd rather start fresh, <em>new agent</em> starts another one, which gets the task's notes and your answers.</p>
+<p>When an agent needs a decision, it asks a question with a few options, and the task moves to Blocked. The agent waits, keeping everything it has learned so far. Pick an option or submit a written answer. Once every pending question is answered, the same agent automatically carries on. An investigating agent stays in Planning and continues the same way. If you paused the task, answers are saved and it stays paused until you choose <em>resume</em>. If you'd rather start fresh, <em>new agent</em> starts another one, which gets the task's notes and your answers.</p>
 <p>A task marked <strong>Needs attention</strong> is waiting on you. That happens when an agent asks a question, when an agent stops unexpectedly (it crashed, ran out of time, lost its connection, or its model became unavailable), or when Solace was restarted while an agent was working. The reason is shown on the task, together with the agent's last message when there is one. The run's activity shows everything that led up to it. The mark goes away when you next act on the task. To continue, unblock it or start a new agent, and choose a different model if the first one isn't working.</p>
 
 <h3>Following an agent</h3>

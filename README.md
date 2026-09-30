@@ -62,6 +62,8 @@ solace serve         # start the task board on http://127.0.0.1:3030 (--port to 
 
 Open the board, create a task and move it to planning. There you can have an agent *investigate* it first, which changes nothing and reports findings or a plan (complete the task there if it only needed an answer), then assign it to a model to do the work. Solace starts the agent, puts the agent's notes and questions on the task, and moves the task to *blocked* when the agent needs an answer or to *needs review* when it has finished. A task that is waiting on you is marked *Needs attention*, with the reason. Cards show which tasks have an agent working, and each run on a task can be followed live: the agent's messages, and each command it runs with its result. The board's **Guide** link (`/guide`) explains the whole workflow for humans. The guide is built into the binary.
 
+From Needs review, choose **reassign** to return a task to Assigned for fixes while preserving its changes. The next work run receives the review feedback and any new instructions; approval must be given again after the fixes. **Start over** instead reverts the task's changes.
+
 ### Models
 
 Solace runs models through agent programs you already have installed and signed in to: the Codex CLI for OpenAI models, and Claude Code for Claude models. It stores no credentials. The current major models are built in, so the board has a list with no configuration. A model that can't start (its program is missing, isn't signed in, or its key variable isn't set) is greyed out with the reason, and assigning it is refused.
