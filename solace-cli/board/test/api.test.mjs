@@ -8,7 +8,7 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
   const requests = [];
   let task = { id: 't1', title: 'Initial', body: 'Description', column: 'backlog', rank: 1,
     type: 'implementation', paused_from: null, notes: [], questions: [], runs: [], changes: [], stamps: {}, links: [] };
-  let workflow = { columns: [{ id: 'backlog', label: 'Backlog', actions: ['plan'], final: false }], types: { implementation: { writes: true } } };
+  let workflow = { columns: [{ id: 'backlog', label: 'Backlog', actions: ['plan'], final: false }]};
   let events;
   const server = Bun.serve({ port: 0, fetch: async req => {
     const path = new URL(req.url).pathname;

@@ -1,6 +1,5 @@
 [board]
 events = { asked = "blocked", finished = "needs_review", failed = "blocked" }
-types  = { implementation = { writes = true }, investigation = { writes = false } }
 
 [[board.columns]]
 id = "backlog"
@@ -8,7 +7,7 @@ actions = ["plan", "cancel"]
 
 [[board.columns]]
 id = "planning"
-actions = ["review", "assign", "to_backlog", "cancel"]
+actions = ["investigate", "assign", "complete", "to_backlog", "cancel"]
 
 [[board.columns]]
 id = "assigned"
@@ -35,6 +34,7 @@ final = true
 [board.actions]
 plan       = { to = "planning" }
 to_backlog = { to = "backlog" }
+investigate = { run = "investigate", model = true }     # read-only; stays in its column
 review     = { run = "review" }                         # stays in its column
 assign     = { to = "assigned", run = "work", model = true }
 unblock    = { to = "assigned", run = "work" }         # the waiting agent continues

@@ -24,29 +24,26 @@ table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid 
 <p>The drawbacks: an agent is limited to what Solace provides, so some tasks that are easy with a shell (a quick throwaway script, for example) need a command you declare for it. And you shouldn't edit the source files by hand either, because Solace rewrites them from its store.</p>
 
 <h2>Tasks</h2>
-<p>A task is a piece of work you write for an agent: a title and a description. The description can refer to existing behavior, ask for changes, or suggest something new. There are two kinds:</p>
-<ul>
-<li><strong>Implementation</strong> tasks change the project.</li>
-<li><strong>Investigation</strong> tasks change nothing. The agent looks into something and reports back on the task.</li>
-</ul>
+<p>A task is a piece of work you write for an agent: a title and a description. The description can refer to existing behavior, ask for changes, suggest something new, or just ask a question.</p>
+<p>Each column says what an agent may do there. In <strong>Planning</strong>, <em>investigate</em> starts an agent that looks into the task and reports back: an answer to a question, or a plan for the change. It changes nothing. If the task was only a question, complete it once you have the answer. Otherwise assign it, and the agent that does the work gets the report with the task's other notes. An agent changes the project only once the task is <strong>Assigned</strong>. A review agent, in Needs review or Blocked, looks at what the task changed and gives feedback.</p>
 
 <h3>The default columns</h3>
 <table>
 <tr><th>Column</th><th>What it means</th><th>What you can do</th></tr>
 <tr><td>Backlog</td><td>Written, not yet being planned</td><td>Plan it, or cancel it</td></tr>
-<tr><td>Planning</td><td>You're shaping the task</td><td>Ask an agent to review it and give feedback, assign it to a model, send it back, or cancel it</td></tr>
+<tr><td>Planning</td><td>You're shaping the task</td><td>Ask an agent to investigate it, assign it to a model, complete it (when it only needed an answer), send it back, or cancel it</td></tr>
 <tr><td>Assigned</td><td>An agent is working</td><td>Start a new agent on it, or cancel it</td></tr>
 <tr><td>Blocked</td><td>The agent needs an answer, or couldn't continue</td><td>Answer and unblock it, start a new agent, ask for a review, or cancel it</td></tr>
 <tr><td>Needs review</td><td>The agent says it's finished</td><td>Approve it, then complete it; ask for an agent review; start over; or cancel it</td></tr>
 <tr><td>Done, Cancelled</td><td>Finished either way</td><td>Nothing</td></tr>
 </table>
-<p>A task with an agent on it says so on its card: <em>Agent working</em>, <em>Waiting for your answer</em> or <em>Agent paused</em>.</p>
+<p>A task with an agent on it says so on its card: <em>Agent investigating</em>, <em>Agent working</em>, <em>Agent reviewing</em>, <em>Waiting for your answer</em> or <em>Agent paused</em>.</p>
 <p>You can pause any task that isn't finished, and resume it later. A paused agent stops at its next step and keeps what it knows.</p>
 <p>A task can't be completed until you approve it. If you move an approved task anywhere else, for example by starting over, it loses the approval.</p>
 <p>You can change the columns and what's allowed in each in the project's <code>solace.toml</code> (see Settings below).</p>
 
 <h3>Questions and attention</h3>
-<p>When an agent needs a decision, it asks a question with a few options, and the task moves to Blocked. The agent waits, keeping everything it has learned so far. Pick an option or type an answer, then <em>unblock</em> the task, and the same agent carries on. If you'd rather start fresh, <em>new agent</em> starts another one, which gets the task's notes and your answers.</p>
+<p>When an agent needs a decision, it asks a question with a few options, and the task moves to Blocked. The agent waits, keeping everything it has learned so far. Pick an option or type an answer, then <em>unblock</em> the task, and the same agent carries on. An investigating agent's question keeps the task in Planning: answer it, then choose <em>investigate</em> again to let the agent continue. If you'd rather start fresh, <em>new agent</em> starts another one, which gets the task's notes and your answers.</p>
 <p>A task marked <strong>Needs attention</strong> is waiting on you. That happens when an agent asks a question, when an agent stops unexpectedly (it crashed, ran out of time, lost its connection, or its model became unavailable), or when Solace was restarted while an agent was working. The reason is shown on the task, together with the agent's last message when there is one. The run's activity shows everything that led up to it. The mark goes away when you next act on the task. To continue, unblock it or start a new agent, and choose a different model if the first one isn't working.</p>
 
 <h3>Following an agent</h3>

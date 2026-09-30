@@ -17,11 +17,11 @@ pub fn workflow_and_live_task_test() {
     board.update(
       model,
       board.WorkflowLoaded(
-        "{\"columns\":[{\"id\":\"triage\",\"label\":\"Triage\",\"actions\":[\"assign\"]},{\"id\":\"done\",\"final\":true}],\"types\":{\"implementation\":{\"writes\":true}}}",
+        "{\"columns\":[{\"id\":\"triage\",\"label\":\"Triage\",\"actions\":[\"assign\"]},{\"id\":\"done\",\"final\":true}]}",
       ),
     )
   let text =
-    "{\"id\":\"1\",\"title\":\"Fix checkout\",\"body\":\"Details\",\"column\":\"triage\",\"rank\":1,\"type\":\"implementation\",\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[]}"
+    "{\"id\":\"1\",\"title\":\"Fix checkout\",\"body\":\"Details\",\"column\":\"triage\",\"rank\":1,\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[]}"
   let assert Ok(task) = json.parse(text, board.task_decoder())
   board.actions(model.workflow, task) |> should.equal(["assign", "pause"])
   let #(model, _) = board.update(model, board.TaskLoaded(text))
@@ -53,7 +53,7 @@ pub fn attention_and_unavailable_models_test() {
     board.update(
       model,
       board.TaskLoaded(
-        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"blocked\",\"rank\":1,\"type\":\"implementation\",\"attention\":{\"reason\":\"task timeout\",\"time\":1}}",
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"blocked\",\"rank\":1,\"attention\":{\"reason\":\"task timeout\",\"time\":1}}",
       ),
     )
   let rendered = board.view(model) |> element.to_string
@@ -70,7 +70,7 @@ pub fn working_status_notes_and_transcript_test() {
     board.update(
       model,
       board.TaskLoaded(
-        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"type\":\"implementation\",\"notes\":[{\"author\":\"agent\",\"text\":\"Done: **five** tests <b>pass</b>\",\"time\":1}],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\",\"started\":1}]}",
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"notes\":[{\"author\":\"agent\",\"text\":\"Done: **five** tests <b>pass</b>\",\"time\":1}],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\",\"started\":1}]}",
       ),
     )
   let assert Some(task) = model.selected

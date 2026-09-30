@@ -225,3 +225,14 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
   3. **Agent text is formatted:** notes, messages and the attention reason are shown as markdown. A failed run's attention note gives the agent's last message rather than raw log lines.
 - **Who/when:** Aaron, 2026-09-30; the transcript route and its entry format are by Claude.
 - **Affects:** Spec 15 §4, §6, §7 and A13; solace-cli (`board.rs`), the board client and the guide
+
+## D-25 Phases replace task types — decided
+- **Question:** With task types (D-19.4), an investigation task could be "reviewed" in planning and then assigned for more investigation. The phases of a task already separate looking from changing, so is a type needed?
+- **Answer:**
+  1. **Tasks have no type.** What a run may do comes from its kind: an **investigate** run (planning) explores the task, asks questions and reports findings or a plan, and changes nothing; a **work** run (assigned) makes the change; a **review** run (needs review, blocked) assesses the task's changes. Only work runs write.
+  2. **A task that only needs an answer ends after planning:** planning allows `complete`, and the investigation's report is the result.
+  3. **An investigation's report goes to the work run**, in its brief with the other notes.
+  4. **An investigate run that asks stays in planning** and waits, marked as needing attention. Starting `investigate` again continues it with the answers, as `unblock` does for a work run.
+  5. **Later (not decided):** reviews that give a verdict and structured findings a human can turn into subtasks.
+- **Who/when:** Aaron, 2026-09-30; points 3 and 4 are by Claude.
+- **Affects:** D-19.4; Spec 15 §1, §2, §3, §4, §6, A9; solace-cli (`board.rs`, `default-board.toml`, `reference.txt`), the board client and the guide

@@ -113,7 +113,7 @@ pub fn workflow(settings: &toml::Value) -> Result<Value, Failure> {
         if a.get("to").is_some_and(|x| !ids.contains(x.as_str().unwrap_or(""))) {
             return Err(invalid("unknown action column"));
         }
-        if a.get("run").is_some_and(|x| !matches!(x.as_str(), Some("work" | "new_work" | "review"))) {
+        if a.get("run").is_some_and(|x| !matches!(x.as_str(), Some("investigate" | "work" | "new_work" | "review"))) {
             return Err(invalid("unknown run step"));
         }
     }
@@ -122,12 +122,6 @@ pub fn workflow(settings: &toml::Value) -> Result<Value, Failure> {
             return Err(invalid("event has no target"));
         }
     }
-    let types = w["types"].as_object().ok_or_else(|| invalid("types missing"))?;
-    if types.is_empty() || types.values().any(|x| x["writes"].as_bool().is_none()) {
-        return Err(invalid("invalid types"));
-    }
-    let default_type = b["types"].as_table().unwrap().keys().next().unwrap();
-    w["default_type"] = json!(default_type);
     for c in w["columns"].as_array_mut().unwrap() {
         if c.get("label").is_none() {
             c["label"] = c["id"].clone();
@@ -546,14 +540,15 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     }
     let a = &w["actions"][name];
     let run = a["run"].as_str().unwrap_or("");
-    if matches!(run, "work" | "new_work")
+    if matches!(run, "investigate" | "work" | "new_work")
         && body["text"].as_str().is_none_or(|s| s.is_empty())
         && t["questions"].as_array().unwrap().iter().any(|q| q["answer"].is_null())
     {
         return err("E7002", "answer the questions or supply text");
     }
-    let waiting = t["runs"].as_array().unwrap().iter().position(|r| r["state"] == "waiting" && r["kind"] == "work");
-    let resume = run == "work" && waiting.is_some();
+    // `work` and `investigate` continue a waiting agent of their kind.
+    let waiting = t["runs"].as_array().unwrap().iter().position(|r| r["state"] == "waiting" && r["kind"] == run);
+    let resume = waiting.is_some();
     if !run.is_empty() && active(t) && !resume && run != "new_work" && a["revert"] != true {
         return err("E7003", "task already has a run");
     }
@@ -566,7 +561,7 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     }
     let config = system()?;
     let chosen = body.get("model").unwrap_or(&t["model"]);
-    if a["model"] == true && body["model"].as_str().is_none() {
+    if a["model"] == true && !resume && body["model"].as_str().is_none() {
         return err("E7001", "this action requires a model");
     }
     let selected = if !run.is_empty() && !resume { Some(model(&config, chosen.as_str().unwrap_or(""))?) } else { None };
@@ -612,7 +607,7 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     }
     if let Some(m) = selected {
         let rid = id();
-        let kind = if run == "review" { "review" } else { "work" };
+        let kind = if run == "new_work" { "work" } else { run };
         let log = s.root.join(".solace/board").join(t["id"].as_str().unwrap()).join(format!("{rid}.jsonl"));
         t["runs"].as_array_mut().unwrap().push(json!({"id":rid,"kind":kind,"model":m["id"],"state":"running","started":now(),"log":log}));
         if kind == "work" {
@@ -655,15 +650,11 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
         }
         ("POST", ["tasks"]) => {
             let title = body["title"].as_str().filter(|s| !s.trim().is_empty()).ok_or_else(|| Failure("E7001 title required".into(), 1))?;
-            let kind = body.get("type").unwrap_or(&w["default_type"]);
-            if w["types"].get(kind.as_str().unwrap_or("")).is_none() {
-                return err("E7001", "unknown task type");
-            }
             if body.get("body").is_some_and(|x| !x.is_string()) || body.get("links").is_some_and(|x| !x.is_array()) {
                 return err("E7001", "invalid task fields");
             }
             let rank = tasks(root)?.iter().filter_map(|t| t["rank"].as_f64()).fold(0., f64::max) + 1.;
-            let t = json!({"id":id(),"title":title,"body":body["body"].as_str().unwrap_or(""),"links":body.get("links").cloned().unwrap_or(json!([])),"column":w["columns"][0]["id"],"rank":rank,"paused_from":null,"attention":null,"type":kind,"stamps":{},"model":null,"notes":[],"questions":[],"runs":[],"changes":[]});
+            let t = json!({"id":id(),"title":title,"body":body["body"].as_str().unwrap_or(""),"links":body.get("links").cloned().unwrap_or(json!([])),"column":w["columns"][0]["id"],"rank":rank,"paused_from":null,"attention":null,"stamps":{},"model":null,"notes":[],"questions":[],"runs":[],"changes":[]});
             save(&s, &t)?;
             Ok(t)
         }
@@ -749,7 +740,6 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Fai
     let binary = env::current_exe()?;
     let config = system()?;
     let timeout = config["task_timeout"].as_u64().unwrap_or(3600);
-    let w = workflow(&lockdown::settings(root)?)?;
     let agent = m["agent"].as_str().unwrap_or("codex");
     let launch: Value = serde_json::from_str(&lockdown::agent_config(agent, &dir, &binary, timeout)?).unwrap();
     let custom = m["run"].as_array();
@@ -812,8 +802,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Fai
     }
     cmd.env("SOLACE_TASK", tid).env("SOLACE_RUN", rid).env("SOLACE_SESSION", rid).env("SOLACE_BIN", &binary);
     let mut child = cmd.spawn()?;
-    let writes = w["types"][t["type"].as_str().unwrap()]["writes"] != false;
-    writeln!(child.stdin.take().unwrap(), "{}", brief(t, run["kind"] == "review", writes))?;
+    writeln!(child.stdin.take().unwrap(), "{}", brief(t, run["kind"].as_str().unwrap_or("")))?;
     let mut elapsed = Duration::ZERO;
     let mut last = Instant::now();
     loop {
@@ -846,16 +835,14 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Fai
 }
 /// An agent's prompt: what its run is for, how to start, ask and finish, then
 /// what it needs from the task (Spec 15 §6), as plain text.
-fn brief(t: &Value, review: bool, writes: bool) -> String {
+fn brief(t: &Value, kind: &str) -> String {
     let start = "Start with `session start --task`, with the task's title and description as `text`.";
     let ask = "If you need a decision from the human, ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer.";
     let read_only = "This run is read-only: reading, `check`, `test` and `build` work; `submit`, `delete`, `write`, `remove`, `format` and `run` are refused.";
-    let role = if review {
-        format!("Review the changes this task made (listed below) and give feedback. {read_only} Finish with `task note`, the feedback in `text`.")
-    } else if writes {
-        format!("Make the change this task describes. {start} {ask} Finish with `task done`, a summary in `text`: what you changed and how you checked it.")
-    } else {
-        format!("This task is an investigation: find out what it asks and report. {read_only} {start} {ask} Finish with `task done`, the report in `text`.")
+    let role = match kind {
+        "review" => format!("Review the changes this task made (listed below) and give feedback. {read_only} Finish with `task note`, the feedback in `text`."),
+        "work" => format!("Make the change this task describes. {start} {ask} Finish with `task done`, a summary in `text`: what you changed and how you checked it."),
+        _ => format!("Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work."),
     };
     let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
     let mut out = format!(
@@ -883,7 +870,7 @@ fn brief(t: &Value, review: bool, writes: bool) -> String {
             })
             .collect(),
     );
-    if review {
+    if kind == "review" {
         section("Changes to review", list("changes").iter().map(|c| format!("- {}", text(&c["name"]))).collect());
     }
     out
@@ -1041,9 +1028,7 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str]) -> Result<fs::
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
-        let w = workflow(&lockdown::settings(root)?)?;
-        let read_only = r["kind"] == "review" || w["types"][t["type"].as_str().unwrap()]["writes"] == false;
-        if read_only && matches!(a[0], "write" | "submit" | "remove" | "run" | "delete" | "import" | "format" | "agent-config") {
+        if r["kind"] != "work" && matches!(a[0], "write" | "submit" | "remove" | "run" | "delete" | "import" | "format" | "agent-config") {
             return err("E7010", "this run is read-only");
         }
         if matches!(a[0], "agent-config" | "serve" | "import") {
@@ -1081,8 +1066,13 @@ pub fn task_command(
             note(&mut t, "agent", Some(rid), &text);
             t["runs"][i]["state"] = json!("ended");
             t["runs"][i]["ended"] = json!(now());
-            t["runs"][i]["outcome"] = json!("finished");
-            move_to(&w, &mut t, &w["events"]["finished"])?;
+            if t["runs"][i]["kind"] == "investigate" {
+                // The report is the result; the task stays in planning.
+                t["runs"][i]["outcome"] = json!("reported");
+            } else {
+                t["runs"][i]["outcome"] = json!("finished");
+                move_to(&w, &mut t, &w["events"]["finished"])?;
+            }
         }
         Some("ask") => {
             if !(2..=4).contains(&options.len()) {
@@ -1095,7 +1085,10 @@ pub fn task_command(
             t["questions"].as_array_mut().unwrap().push(json!({"id":qid,"text":text,"options":options}));
             t["runs"][i]["state"] = json!("waiting");
             flag(&mut t, "an agent asked a question");
-            move_to(&w, &mut t, &w["events"]["asked"])?;
+            // An investigation waits in planning; `investigate` continues it.
+            if t["runs"][i]["kind"] == "work" {
+                move_to(&w, &mut t, &w["events"]["asked"])?;
+            }
             save(s, &t)?;
             drop(guard);
             loop {
@@ -1329,18 +1322,18 @@ mod tests {
 
     #[test]
     fn briefs_hold_what_the_agent_needs_as_text() {
-        let t = json!({"id":"t1","title":"Add coolcalc","body":"A CLI calculator.","type":"implementation","rank":3,"stamps":{},
+        let t = json!({"id":"t1","title":"Add coolcalc","body":"A CLI calculator.","rank":3,"stamps":{},
             "links":[{"name":"spec","url":"http://x"}],"notes":[{"author":"human","text":"Keep it small","time":1,"run":null}],
             "questions":[{"id":"q","text":"Syntax?","options":["a","b"],"answer":"b"}],"runs":[{"id":"r1"}],"changes":[{"entity":"symbol:x","name":"calc.add","run":"r1"}]});
-        let b = brief(&t, false, true);
+        let b = brief(&t, "work");
         for part in ["Make the change", "`task done`, a summary in `text`", "Task: Add coolcalc\n\nA CLI calculator.\n", "- spec: http://x", "- human: Keep it small", "- Syntax?\n  Answer: b"] {
             assert!(b.contains(part), "{part} missing from:\n{b}");
         }
         for noise in ["{", "r1", "rank", "calc.add"] {
             assert!(!b.contains(noise), "{noise} in:\n{b}");
         }
-        assert!(brief(&t, false, false).contains("This task is an investigation"));
-        let r = brief(&t, true, true);
+        assert!(brief(&t, "investigate").contains("Investigate this task"));
+        let r = brief(&t, "review");
         assert!(r.contains("Changes to review:\n- calc.add") && r.contains("`task note`, the feedback in `text`") && r.contains("`run` are refused") && !r.contains("task done"));
     }
 

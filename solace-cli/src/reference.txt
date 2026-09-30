@@ -88,7 +88,9 @@ Task runs (put the note, summary or question in `text`)
   task ask                            question in `text`, 2–4 `options`; waits
                                       for the human's answer
                                       CLI: --option <label> repeated, question on stdin
-  task done                           report completion for human review
+  task done                           finish: a work run's summary goes to human
+                                      review; an investigation's report stays on
+                                      the task
 
 Host commands (humans only, refused in a run)
   serve [--port N]                    local task board (default 3030)

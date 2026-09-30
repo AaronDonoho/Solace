@@ -56,8 +56,8 @@ class Board(unittest.TestCase):
         if code:self.assertEqual(v.get('code'),code,v);self.assertEqual(r.status,409)
         else:self.assertEqual(r.status,200,v)
         return v
-    def create(self,steps=None,kind='implementation'):
-        return self.api('POST','/tasks',{'title':'Fixture','body':json.dumps(steps or []),'type':kind})
+    def create(self,steps=None):
+        return self.api('POST','/tasks',{'title':'Fixture','body':json.dumps(steps or [])})
     def action(self,t,name,code=None,**kw):
         return self.api('POST','/tasks/'+t['id']+'/actions',{'action':name,**kw},code)
     def get(self,t):return self.api('GET','/tasks/'+t['id'])
@@ -68,8 +68,8 @@ class Board(unittest.TestCase):
             if predicate(value):return value
             time.sleep(.03)
         self.fail('timed out: '+json.dumps(value))
-    def assign(self,steps,kind='implementation'):
-        t=self.create(steps,kind);self.action(t,'plan');return self.action(t,'assign',model='fake')
+    def assign(self,steps):
+        t=self.create(steps);self.action(t,'plan');return self.action(t,'assign',model='fake')
     def completed(self,steps):
         t=self.assign([*steps,{'command':'task done done'}]);return self.wait(t,lambda t:t['column']=='needs_review')
     def stream(self,seq=0):
@@ -92,7 +92,7 @@ class Board(unittest.TestCase):
                 allowed=[] if col['final'] else [*col['actions'],'pause','resume']
                 if name not in allowed:
                     e=self.action(t,name,'E7001',model='fake');self.assertEqual(e['allowed'],allowed)
-                elif name=='complete':self.action(t,name,'E7006')
+                elif name=='complete' and col.get('requires'):self.action(t,name,'E7006')
                 else:
                     result=self.action(t,name,model='fake')
                     if result['runs'] and result['runs'][-1]['state']!='ended':
@@ -179,14 +179,21 @@ class Board(unittest.TestCase):
         current=self.get(t);self.assertEqual(current['runs'][-1]['state'],'running');self.assertFalse(current['notes']);self.assertEqual(current['paused_from'],'assigned')
         self.action(t,'resume');self.wait(t,lambda x:x['column']=='needs_review')
         before=self.cli('view','app.one')
-        steps=[{'command':'write priv/new','text':'no'},{'command':'submit app.one','text':'pub fn one() { 100 }'},{'command':'task done report'}]
-        t=self.assign(steps,'investigation');t=self.wait(t,lambda x:x['column']=='needs_review');self.assertEqual(t['notes'][-1]['text'],'report');self.assertFalse(t['changes'])
-        prompt=(self.root/'.solace'/(t['runs'][-1]['id']+'.prompt')).read_text()
-        self.assertIn('This task is an investigation',prompt)
+        steps=[{'command':'write priv/new','text':'no'},{'command':'submit app.one','text':'pub fn one() { 100 }'}]
+        t=self.create([*steps,{'command':'task ask','text':'Which?','options':['a','b']},{'command':'task done report'}]);self.action(t,'plan')
+        self.action(t,'investigate',model='fake');t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting')
+        self.assertEqual(t['column'],'planning');self.assertIn('question',t['attention']['reason']);rid=t['runs'][-1]['id']
+        self.action(t,'investigate','E7002');self.action(t,'investigate',text='a')
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='ended');self.assertEqual(t['runs'][-1]['id'],rid);self.assertEqual(t['runs'][-1]['outcome'],'reported')
+        self.assertEqual(t['column'],'planning');self.assertEqual(t['notes'][-1]['text'],'report');self.assertFalse(t['changes'])
+        prompt=(self.root/'.solace'/(rid+'.prompt')).read_text()
+        self.assertIn('Investigate this task',prompt)
         self.assertIn('This run is read-only',prompt)
         self.assertEqual(before,self.cli('view','app.one'));self.assertFalse((self.root/'priv/new').exists())
-        responses=(self.root/'.solace'/(t['runs'][-1]['id']+'.responses')).read_text();self.assertEqual(responses.count('E7010'),2)
-        review=self.create([*steps[:2],{'command':'task note review report'}]);self.action(review,'plan');self.action(review,'review',model='fake');review=self.wait(review,lambda x:x['runs'] and x['runs'][-1]['state']=='ended');self.assertEqual(review['column'],'planning')
+        responses=(self.root/'.solace'/(rid+'.responses')).read_text();self.assertEqual(responses.count('E7010'),2)
+        self.assertEqual(self.action(t,'complete')['column'],'done')  # an answered question ends after planning
+        review=self.completed([]);self.api('PATCH','/tasks/'+review['id'],{'body':json.dumps([*steps,{'command':'task note review report'}])})
+        self.action(review,'review',model='fake');review=self.wait(review,lambda x:x['runs'][-1]['state']=='ended');self.assertEqual(review['column'],'needs_review')
         self.assertEqual(review['notes'][-1]['text'],'review report')
     def test_declared_run_resources_revert(self):
         config=self.root/'solace.toml'

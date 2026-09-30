@@ -82,7 +82,6 @@ pub type Task {
     body: String,
     column: String,
     rank: Float,
-    kind: String,
     paused: String,
     notes: List(Note),
     questions: List(Question),
@@ -99,7 +98,7 @@ pub type Agent {
 }
 
 pub type Workflow {
-  Workflow(columns: List(Column), types: List(String))
+  Workflow(columns: List(Column))
 }
 
 pub type Model {
@@ -112,7 +111,6 @@ pub type Model {
     text: String,
     title: String,
     body: String,
-    kind: String,
     error: String,
     rank: String,
     watching: String,
@@ -132,7 +130,6 @@ pub type Msg {
   Text(String)
   Title(String)
   Body(String)
-  Kind(String)
   Rank(String)
   Create
   Save
@@ -175,7 +172,7 @@ fn send(
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   #(
     Model(
-      Workflow([], []),
+      Workflow([]),
       [],
       None,
       [],
@@ -183,7 +180,6 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       "",
       "",
       "",
-      "implementation",
       "",
       "0",
       "",
@@ -221,7 +217,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           Model(
             ..model,
             workflow: w,
-            kind: list.first(w.types) |> result.unwrap("implementation"),
             error: "",
           ),
           effect.none(),
@@ -334,13 +329,11 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     Title(text) -> #(Model(..model, title: text), effect.none())
     Body(text) -> #(Model(..model, body: text), effect.none())
     Rank(rank) -> #(Model(..model, rank: rank), effect.none())
-    Kind(kind) -> #(Model(..model, kind: kind), effect.none())
     Create -> #(
       model,
       send("/tasks", "POST", [
         #("title", json.string(model.title)),
         #("body", json.string(model.body)),
-        #("type", json.string(model.kind)),
       ]),
     )
     Save ->
@@ -411,7 +404,6 @@ pub fn task_decoder() -> decode.Decoder(Task) {
   use body <- decode.field("body", decode.string)
   use column <- decode.field("column", decode.string)
   use rank <- decode.field("rank", decode.float)
-  use kind <- decode.field("type", decode.string)
   use paused <- decode.optional_field(
     "paused_from",
     "",
@@ -446,7 +438,6 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     body,
     column,
     rank,
-    kind,
     paused,
     notes,
     questions,
@@ -523,13 +514,7 @@ fn agent_decoder() -> decode.Decoder(Agent) {
 
 pub fn workflow_decoder() -> decode.Decoder(Workflow) {
   use columns <- decode.field("columns", decode.list(column_decoder()))
-  use types <- decode.field("types", decode.dict(decode.string, decode.dynamic))
-  use default <- decode.optional_field("default_type", "", decode.string)
-  let types = case default {
-    "" -> dict.keys(types)
-    _ -> [default, ..list.filter(dict.keys(types), fn(t) { t != default })]
-  }
-  decode.success(Workflow(columns, types))
+  decode.success(Workflow(columns))
 }
 
 fn column_decoder() -> decode.Decoder(Column) {
@@ -575,13 +560,6 @@ pub fn view(model: Model) -> Element(Msg) {
         h.textarea([a.value(model.body), e.on_input(Body)], model.body),
       ]),
       h.label([], [
-        h.text("Task type"),
-        h.select(
-          [a.value(model.kind), e.on_input(Kind)],
-          list.map(model.workflow.types, fn(t) { h.option([a.value(t)], t) }),
-        ),
-      ]),
-      h.label([], [
         h.text("Rank (selected task)"),
         h.input([a.type_("number"), a.value(model.rank), e.on_input(Rank)]),
       ]),
@@ -611,7 +589,6 @@ pub fn view(model: Model) -> Element(Msg) {
               },
               h.text(t.title),
               status_badge(t),
-              h.small([], [h.text(t.kind)]),
             ])
           })
         ])
@@ -628,7 +605,7 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
   h.section([a.class("detail")], [
     h.h2([], [h.text(t.title)]),
     h.pre([], [h.text(t.body)]),
-    h.p([], [h.text(t.column <> " · " <> t.kind)]),
+    h.p([], [h.text(t.column)]),
     case t.attention {
       "" -> h.text("")
       reason ->
@@ -721,6 +698,7 @@ pub fn status(t: Task) -> String {
     _, Error(_) -> ""
     "", Ok(r) if r.state == "waiting" -> "Waiting for your answer"
     "", Ok(r) if r.kind == "review" -> "Agent reviewing"
+    "", Ok(r) if r.kind == "investigate" -> "Agent investigating"
     "", Ok(_) -> "Agent working"
     _, Ok(_) -> "Agent paused"
   }
@@ -731,7 +709,8 @@ fn status_badge(t: Task) -> Element(Msg) {
     "" -> h.text("")
     s -> {
       let class = case s {
-        "Agent working" | "Agent reviewing" -> "status working"
+        "Agent working" | "Agent reviewing" | "Agent investigating" ->
+          "status working"
         _ -> "status"
       }
       h.span([a.class(class), a.role("status")], [h.text(s)])
