@@ -5,7 +5,9 @@
 //! it writes the Gleam files back out so `gleam` can check, test and build
 //! them; agents never touch those files.
 
+mod board;
 mod gleam;
+mod lockdown;
 
 use gleam::{Item, Kind, Ref};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -23,11 +25,28 @@ const REFERENCE: &str = include_str!("reference.txt");
 /// --budget <bytes>` sets it per agent.
 const BUDGET: usize = 32_000;
 const STDLIB: &[&str] = &[
-    "bool", "bit_array", "bytes_tree", "dict", "dynamic", "float", "function", "int", "io", "list", "option",
-    "order", "pair", "result", "set", "string", "string_tree", "uri",
+    "bool",
+    "bit_array",
+    "bytes_tree",
+    "dict",
+    "dynamic",
+    "float",
+    "function",
+    "int",
+    "io",
+    "list",
+    "option",
+    "order",
+    "pair",
+    "result",
+    "set",
+    "string",
+    "string_tree",
+    "uri",
 ];
 
 /// A command's failure: its message and exit code (1 diagnostics, 2 usage).
+#[derive(Debug)]
 struct Failure(String, i32);
 type Out = Result<String, Failure>;
 
@@ -49,7 +68,22 @@ impl From<std::io::Error> for Failure {
 }
 
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let mut args: Vec<String> = env::args().skip(1).collect();
+    let mut options = Vec::new();
+    while let Some(i) = args.iter().position(|a| a == "--option") {
+        if i + 1 >= args.len() {
+            break;
+        }
+        args.remove(i);
+        options.push(args.remove(i));
+    }
+    let old = args.iter().position(|a| a == "--old").and_then(|i| {
+        if i + 1 >= args.len() {
+            return None;
+        }
+        args.remove(i);
+        Some(args.remove(i))
+    });
     if args.first().map(String::as_str) == Some("mcp") {
         let budget = match args.get(1..) {
             Some([flag, n]) if flag == "--budget" => n.parse().unwrap_or_else(|_| panic!("--budget takes a number of bytes, got {n}")),
@@ -57,7 +91,7 @@ fn main() {
         };
         return mcp(budget);
     }
-    let code = match run(&args, &mut stdin, None, BUDGET) {
+    let code = match run_options(&args, &mut stdin, old.as_deref(), BUDGET, &options) {
         Ok(out) => {
             print!("{out}");
             0
@@ -73,15 +107,78 @@ fn main() {
 /// `input` supplies the new code for submit commands; `old`, the text that
 /// `submit <name> --replace` replaces (MCP only); `budget`, the bytes left
 /// for this reply.
-fn run(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>, old: Option<&str>, budget: usize) -> Out {
+fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str>, budget: usize, options: &[String]) -> Out {
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    if a.first() == Some(&"serve") {
+        if board::context().is_some() {
+            return lockdown::error("E7010", "serve", "host command");
+        }
+        let s = Store::open()?;
+        let port = match a.as_slice() {
+            ["serve"] => 3030,
+            ["serve", "--port", p] => p.parse().map_err(|_| Failure("invalid port".into(), 2))?,
+            _ => return usage("serve [--port N]"),
+        };
+        return board::serve(&s.root, port);
+    }
+    let Ok(store) = Store::open() else {
+        board::workflow(&lockdown::settings(&env::current_dir()?)?)?;
+        return run_inner(args, input, old, budget);
+    };
+    let context = board::context();
+    let guard = if let Some((tid, rid)) = &context {
+        board::agent_guard(&store.root, tid, rid, if a.is_empty() { &["help"] } else { &a })?
+    } else {
+        board::lock(&store.root)?
+    };
+    let store = board::open(&store.root)?;
+    lockdown::recover(&store.root)?;
+    board::workflow(&lockdown::settings(&store.root)?)?;
+    if let Some((tid, rid)) = &context {
+        if a.first() == Some(&"task") {
+            return board::task_command(&store, tid, rid, &a, input, options, guard);
+        }
+    }
+    let changing = a.first().is_some_and(|a| matches!(*a, "submit" | "delete" | "write" | "remove" | "run"));
+    let before = if changing && context.is_some() {
+        let mut v = board::snapshot(&store)?;
+        v.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
+        Some(v)
+    } else {
+        None
+    };
+    let result = run_inner(args, input, old, budget);
+    if let (Some(before), Some((tid, rid))) = (before, context) {
+        let mut after = board::snapshot(&store)?;
+        after.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
+        board::record(&store, &tid, &rid, &before, &after)?;
+    }
+    result
+}
+
+fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>, old: Option<&str>, budget: usize) -> Out {
     let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     if matches!(a.as_slice(), [] | ["help"] | ["--help"]) {
         return Ok(REFERENCE.to_string());
     }
+    if let ["agent-config", agent, dir] = a.as_slice() {
+        return lockdown::agent_config(
+            agent,
+            Path::new(dir),
+            &env::current_exe()?,
+            board::system()?["task_timeout"].as_u64().unwrap_or(3600),
+        );
+    }
     if a[0] == "import" {
+        lockdown::settings(&env::current_dir()?)?;
         return import(&env::current_dir()?);
     }
     let store = Store::open()?;
+    let settings = lockdown::settings(&store.root)?;
+    lockdown::recover(&store.root)?;
+    if let Some(out) = lockdown::dispatch(&store, &settings, &a, input, old, budget) {
+        return out;
+    }
     match a.as_slice() {
         ["session", "start", "--task"] => store.session_task(&input()?),
         ["session", "start", "--task", task @ ..] => store.session_task(&task.join(" ")),
@@ -101,13 +198,20 @@ fn run(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>, old:
         ["submit", name] if !name.contains('.') && store.is_module(name)? => store.submit(Target::Module(name), &input()?),
         ["submit", name] => store.submit_symbols(Some(name), None, &input()?),
         ["delete", name] => store.delete(name),
-        ["check"] => store.check(),
-        ["test"] => store.test(),
+        ["check"] => command_report(store.check(), budget),
+        ["test"] => command_report(store.test(), budget),
         ["work", "add"] => store.work_add(&input()?),
         ["work", "add", text @ ..] => store.work_add(&text.join(" ")),
         ["work", "list"] | ["work"] => store.work_list(),
         ["work", "done", id] => store.work_done(id),
         _ => usage(format!("Unknown command: solace {}", a.join(" "))),
+    }
+}
+
+fn command_report(result: Out, budget: usize) -> Out {
+    match result {
+        Ok(text) => Ok(lockdown::trim_output(&("exit code: 0\n".to_string() + &text), budget)),
+        Err(Failure(text, code)) => Err(Failure(lockdown::trim_output(&format!("exit code: {code}\n{text}"), budget), code)),
     }
 }
 
@@ -119,9 +223,6 @@ fn operands<'a>(args: &[&'a str]) -> Vec<&'a str> {
 fn stdin() -> Result<String, Failure> {
     let mut text = String::new();
     std::io::stdin().read_to_string(&mut text)?;
-    if text.trim().is_empty() {
-        return usage("Expected the new code on stdin, e.g.  solace submit checkout.pay <<'EOF' ... EOF");
-    }
     Ok(text)
 }
 
@@ -154,6 +255,7 @@ fn mcp(budget: usize) {
                     "properties": {
                         "command": {"type": "string", "description": "e.g. `view checkout` or `submit --new pilot/checkout`"},
                         "text": {"type": "string", "description": "New code, for submit commands (or a work record, for `work add`, or the task, for `session start --task`)"},
+                        "options": {"type": "array", "items": {"type": "string"}, "description": "2–4 options for task ask"},
                         "old": {"type": "string", "description": "For `submit <name> --replace`: the exact text in the symbol that `text` replaces"}
                     },
                     "required": ["command"]
@@ -163,7 +265,7 @@ fn mcp(budget: usize) {
                 let args = &msg["params"]["arguments"];
                 let text = args["text"].as_str().map(String::from);
                 let mut input = || match &text {
-                    Some(t) if !t.trim().is_empty() => Ok(t.clone()),
+                    Some(t) => Ok(t.clone()),
                     _ => usage("This command needs the new code in the `text` argument."),
                 };
                 // Several commands, one per line, run in order in one call.
@@ -177,7 +279,16 @@ fn mcp(budget: usize) {
                         out += &format!("==== solace {command} ====\n");
                     }
                     // commands in one call share the budget, since the agent cuts the reply as a whole
-                    match run(&words, &mut input, args["old"].as_str(), budget.saturating_sub(out.len())) {
+                    match run_options(
+                        &words,
+                        &mut input,
+                        args["old"].as_str(),
+                        budget.saturating_sub(out.len()),
+                        &args["options"]
+                            .as_array()
+                            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>())
+                            .unwrap_or_default(),
+                    ) {
                         Ok(o) => out += &o,
                         Err(Failure(msg, _)) => {
                             out += &msg;
@@ -378,8 +489,7 @@ impl Store {
         for (m, c, i) in &ctors {
             names.entry((m, c)).or_insert(*i);
         }
-        let imports: HashMap<&str, Vec<gleam::Import>> =
-            modules.iter().map(|m| (m.path.as_str(), gleam::imports(&m.header))).collect();
+        let imports: HashMap<&str, Vec<gleam::Import>> = modules.iter().map(|m| (m.path.as_str(), gleam::imports(&m.header))).collect();
         let uses = syms
             .iter()
             .enumerate()
@@ -388,10 +498,9 @@ impl Store {
                 let mut found = vec![];
                 for r in gleam::references(&s.text) {
                     let target = match &r {
-                        Ref::Qualified(alias, member) => imps
-                            .iter()
-                            .find(|imp| &imp.alias == alias)
-                            .and_then(|imp| names.get(&(imp.module.as_str(), member.as_str()))),
+                        Ref::Qualified(alias, member) => {
+                            imps.iter().find(|imp| &imp.alias == alias).and_then(|imp| names.get(&(imp.module.as_str(), member.as_str())))
+                        }
                         Ref::Bare(name) => names.get(&(s.module.as_str(), name.as_str())).or_else(|| {
                             imps.iter().find_map(|imp| {
                                 imp.unqualified
@@ -448,9 +557,10 @@ impl Store {
     }
 
     fn gleam(&self, args: &[&str]) -> Result<(bool, String), Failure> {
-        let out = Command::new("gleam").args(args).current_dir(&self.root).output()?;
-        let text = String::from_utf8_lossy(&out.stderr).to_string() + &String::from_utf8_lossy(&out.stdout);
-        Ok((out.status.success(), strip_ansi(&text)))
+        let mut argv = vec!["gleam".to_string()];
+        argv.extend(args.iter().map(|s| s.to_string()));
+        let text = lockdown::command(&self.root, &argv, 120, BUDGET)?;
+        Ok((text.starts_with("exit code: 0\n"), strip_ansi(text.split_once('\n').map_or("", |(_, s)| s))))
     }
 
     /// Type-checks the project and records which symbols are broken.
@@ -490,8 +600,7 @@ impl Store {
                 fail(format!("E1001 unknown name: {input}{hint}"))
             }
             many => {
-                let list: Vec<String> =
-                    many.iter().map(|&i| format!("  {} ({})", ix.syms[i].qname(), ix.syms[i].kind.as_str())).collect();
+                let list: Vec<String> = many.iter().map(|&i| format!("  {} ({})", ix.syms[i].qname(), ix.syms[i].kind.as_str())).collect();
                 fail(format!("E1002 ambiguous name: {input} could be\n{}", list.join("\n")))
             }
         }
@@ -513,9 +622,8 @@ impl Store {
     fn session(&self, scopes: &[&str]) -> Out {
         const CAP: usize = 80;
         let ix = self.index()?;
-        let in_scope = |m: &ModuleRow| {
-            scopes.is_empty() || scopes.iter().any(|s| self.resolve_module(&ix, s).is_some_and(|r| r.path == m.path))
-        };
+        let in_scope =
+            |m: &ModuleRow| scopes.is_empty() || scopes.iter().any(|s| self.resolve_module(&ix, s).is_some_and(|r| r.path == m.path));
         let mut out = String::from(
             "Symbols per module (types are capitalized). `inspect <name>...` gives signatures and context; \
              `view <module>` an outline.\n",
@@ -713,7 +821,8 @@ impl Store {
         for (id, text) in work {
             out += &format!("#{id}\n{}\n", text.trim_end());
         }
-        let broken: Vec<String> = self.db.prepare("SELECT symbol FROM broken ORDER BY symbol")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        let broken: Vec<String> =
+            self.db.prepare("SELECT symbol FROM broken ORDER BY symbol")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
         out += &format!("Broken symbols: {}\n", if broken.is_empty() { "none".to_string() } else { broken.join(", ") });
         Ok(out)
     }
@@ -737,7 +846,8 @@ impl Store {
                 if bodies && fits(&out, &body) {
                     body
                 } else {
-                    let mut text = format!("// ── module {} ({}), outline: `view <name>` for a body, `--bodies` for all ──\n", m.path, m.dir);
+                    let mut text =
+                        format!("// ── module {} ({}), outline: `view <name>` for a body, `--bodies` for all ──\n", m.path, m.dir);
                     if bodies {
                         text += &format!("// bodies left out to fit the size limit; `view {} --bodies` alone shows them\n", m.path);
                     }
@@ -762,7 +872,8 @@ impl Store {
             }
         }
         if !left.is_empty() {
-            out += &format!("Not shown, to fit the size limit: `solace view {}{}`\n", left.join(" "), if bodies { " --bodies" } else { "" });
+            out +=
+                &format!("Not shown, to fit the size limit: `solace view {}{}`\n", left.join(" "), if bodies { " --bodies" } else { "" });
         }
         Ok(out)
     }
@@ -807,12 +918,21 @@ impl Store {
             if out.len() > budget && level < LAST && context {
                 continue;
             }
-            let trimmed = ["", "callers as a count only (`solace refs <name>` lists them)", "tests by name only", "what each uses by name only (`view <name>` for its source)"];
+            let trimmed = [
+                "",
+                "callers as a count only (`solace refs <name>` lists them)",
+                "tests by name only",
+                "what each uses by name only (`view <name>` for its source)",
+            ];
             if level > 0 {
                 out += &format!("Trimmed to fit the size limit: {}.\n", trimmed[1..=level as usize].join("; "));
             }
             if !left.is_empty() {
-                out += &format!("Not shown, to fit the size limit: `solace inspect {}{}`\n", left.join(" "), if context { " --context" } else { "" });
+                out += &format!(
+                    "Not shown, to fit the size limit: `solace inspect {}{}`\n",
+                    left.join(" "),
+                    if context { " --context" } else { "" }
+                );
             }
             return Ok(out);
         }
@@ -883,7 +1003,9 @@ impl Store {
                 out += &format!("  {}\n", names.join("\n  "));
             }
         }
-        if let Some(diag) = self.db.query_row("SELECT diagnostic FROM broken WHERE symbol = ?1", [s.qname()], |r| r.get::<_, String>(0)).optional()? {
+        if let Some(diag) =
+            self.db.query_row("SELECT diagnostic FROM broken WHERE symbol = ?1", [s.qname()], |r| r.get::<_, String>(0)).optional()?
+        {
             out += &format!("\n== Broken ==\n{diag}\n");
         }
         Ok(out)
@@ -942,7 +1064,9 @@ impl Store {
         let parsed = gleam::split(&formatted);
         let ix = self.index()?;
         let (module, mut notes) = match target {
-            Target::Imports(m) => (self.resolve_module(&ix, m).ok_or_else(|| Failure(format!("E1003 unknown module: {m}"), 1))?.path.clone(), vec![]),
+            Target::Imports(m) => {
+                (self.resolve_module(&ix, m).ok_or_else(|| Failure(format!("E1003 unknown module: {m}"), 1))?.path.clone(), vec![])
+            }
             Target::Module(m) => {
                 (self.resolve_module(&ix, m).ok_or_else(|| Failure(format!("E1003 unknown module: {m}"), 1))?.path.clone(), vec![])
             }
@@ -985,7 +1109,11 @@ impl Store {
                             }
                             None => {
                                 let id = new_id(item.kind, &module, &item.name);
-                                let ord: i64 = self.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [&module], |r| r.get(0))?;
+                                let ord: i64 = self.db.query_row(
+                                    "SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1",
+                                    [&module],
+                                    |r| r.get(0),
+                                )?;
                                 self.db.execute(
                                     "INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                                     params![id, module, item.name, item.kind.as_str(), item.text, ord, revision(&item.text)],
@@ -1052,26 +1180,27 @@ impl Store {
     fn submit_symbols(&self, name: Option<&str>, new_in: Option<&str>, raw: &str) -> Out {
         let ix = self.index()?;
         let is_header = |l: &str| l.starts_with("// ── ");
-        let blocks: Vec<(Option<String>, String)> = if raw.lines().filter(|l| is_header(l)).count() > 1 || (name.is_none() && new_in.is_none()) {
-            let mut blocks: Vec<(Option<String>, String)> = vec![];
-            for line in raw.lines() {
-                if let Some(h) = line.strip_prefix("// ── ") {
-                    if h.starts_with("module ") {
-                        return fail("E0101 a whole module goes through `submit <module>`.");
+        let blocks: Vec<(Option<String>, String)> =
+            if raw.lines().filter(|l| is_header(l)).count() > 1 || (name.is_none() && new_in.is_none()) {
+                let mut blocks: Vec<(Option<String>, String)> = vec![];
+                for line in raw.lines() {
+                    if let Some(h) = line.strip_prefix("// ── ") {
+                        if h.starts_with("module ") {
+                            return fail("E0101 a whole module goes through `submit <module>`.");
+                        }
+                        let n = h.split([' ', '(']).next().unwrap_or("").to_string();
+                        blocks.push((Some(n), String::new()));
+                    } else if let Some((_, text)) = blocks.last_mut() {
+                        text.push_str(line);
+                        text.push('\n');
+                    } else if !line.trim().is_empty() {
+                        return fail("E0101 text for `submit` with no name must be blocks, each headed `// ── <module>.<name> ──`.");
                     }
-                    let n = h.split([' ', '(']).next().unwrap_or("").to_string();
-                    blocks.push((Some(n), String::new()));
-                } else if let Some((_, text)) = blocks.last_mut() {
-                    text.push_str(line);
-                    text.push('\n');
-                } else if !line.trim().is_empty() {
-                    return fail("E0101 text for `submit` with no name must be blocks, each headed `// ── <module>.<name> ──`.");
                 }
-            }
-            blocks
-        } else {
-            vec![(name.map(str::to_string), raw.lines().filter(|l| !is_header(l)).collect::<Vec<_>>().join("\n"))]
-        };
+                blocks
+            } else {
+                vec![(name.map(str::to_string), raw.lines().filter(|l| !is_header(l)).collect::<Vec<_>>().join("\n"))]
+            };
         if blocks.is_empty() {
             return fail("E0101 nothing to submit.");
         }
@@ -1105,7 +1234,10 @@ impl Store {
                 (None, None) => unreachable!(),
             };
             let clash = ix.syms.iter().position(|s| {
-                s.module == module && s.name == item.name && (s.kind == Kind::Type) == (item.kind == Kind::Type) && existing != Some(ix.syms.iter().position(|x| x.id == s.id).unwrap())
+                s.module == module
+                    && s.name == item.name
+                    && (s.kind == Kind::Type) == (item.kind == Kind::Type)
+                    && existing != Some(ix.syms.iter().position(|x| x.id == s.id).unwrap())
             });
             if let Some(c) = clash {
                 return fail(format!("E1004 {} already exists; submit to it instead.", ix.syms[c].qname()));
@@ -1142,7 +1274,8 @@ impl Store {
                     }
                     None => {
                         let id = new_id(item.kind, module, &item.name);
-                        let ord: i64 = self.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [module], |r| r.get(0))?;
+                        let ord: i64 =
+                            self.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [module], |r| r.get(0))?;
                         self.db.execute(
                             "INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                             params![id, module, item.name, item.kind.as_str(), item.text, ord, revision(&item.text)],
@@ -1246,7 +1379,10 @@ impl Store {
                 s.qname(),
                 s.qname()
             )),
-            k => fail(format!("Not saved: E0105 `old` occurs {k} times in {}; include more of the surrounding text so it occurs once.", s.qname())),
+            k => fail(format!(
+                "Not saved: E0105 `old` occurs {k} times in {}; include more of the surrounding text so it occurs once.",
+                s.qname()
+            )),
         }
     }
 
@@ -1260,7 +1396,10 @@ impl Store {
     }
 
     fn history(&self, id: &str, action: &str, detail: &str) -> Result<(), Failure> {
-        self.db.execute("INSERT INTO history(at, symbol, action, detail) VALUES (?1, ?2, ?3, ?4)", params![now() as i64, id, action, detail])?;
+        self.db.execute(
+            "INSERT INTO history(at, symbol, action, detail) VALUES (?1, ?2, ?3, ?4)",
+            params![now() as i64, id, action, detail],
+        )?;
         Ok(())
     }
 
@@ -1332,10 +1471,10 @@ impl Store {
 /// plural `s` dropped; short words, numbers and common English words skipped.
 fn words(text: &str) -> Vec<String> {
     const STOP: &[&str] = &[
-        "the", "and", "for", "with", "that", "this", "from", "when", "should", "must", "into", "are", "was", "were",
-        "been", "has", "have", "not", "but", "any", "all", "its", "also", "each", "only", "than", "then", "there",
-        "their", "they", "which", "will", "would", "can", "could", "does", "did", "you", "your", "new", "add", "make",
-        "use", "using", "test", "tests", "existing", "keep", "one", "other", "what", "how", "may", "per", "such",
+        "the", "and", "for", "with", "that", "this", "from", "when", "should", "must", "into", "are", "was", "were", "been", "has", "have",
+        "not", "but", "any", "all", "its", "also", "each", "only", "than", "then", "there", "their", "they", "which", "will", "would",
+        "can", "could", "does", "did", "you", "your", "new", "add", "make", "use", "using", "test", "tests", "existing", "keep", "one",
+        "other", "what", "how", "may", "per", "such",
     ];
     let mut out = vec![];
     for tok in text.split(|c: char| !c.is_alphanumeric()) {
@@ -1366,7 +1505,8 @@ fn is_test(ix: &Index, i: usize) -> bool {
 
 /// Formats Gleam source, which doubles as the syntax check.
 fn format_gleam(source: &str) -> Result<String, Failure> {
-    let mut child = Command::new("gleam").args(["format", "--stdin"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let mut child =
+        Command::new("gleam").args(["format", "--stdin"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     child.stdin.take().unwrap().write_all(source.as_bytes())?;
     let out = child.wait_with_output()?;
     if out.status.success() {
@@ -1421,7 +1561,9 @@ fn import_statements(header: &str) -> Vec<(String, Vec<String>, (usize, usize))>
         let stmt = lines[start..=i].join(" ");
         let module: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '/').collect();
         let items = match (stmt.find(".{"), stmt.find('}')) {
-            (Some(a), Some(b)) => stmt[a + 2..b].split(',').map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|s| !s.is_empty()).collect(),
+            (Some(a), Some(b)) => {
+                stmt[a + 2..b].split(',').map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|s| !s.is_empty()).collect()
+            }
             _ => vec![],
         };
         out.push((module, items, (start, i)));
@@ -1457,16 +1599,24 @@ fn merge_import(header: &str, module: &str, items: &[String]) -> String {
 /// From a compiler error about an unknown type or constructor, the import
 /// that provides it: (module, item), when exactly one module does.
 fn unimported_name(ix: &Index, error: &str) -> Option<(String, String)> {
-    let between = |pre: &str, post: &str| error.find(pre).and_then(|a| error[a + pre.len()..].find(post).map(|b| error[a + pre.len()..a + pre.len() + b].to_string()));
+    let between = |pre: &str, post: &str| {
+        error.find(pre).and_then(|a| error[a + pre.len()..].find(post).map(|b| error[a + pre.len()..a + pre.len() + b].to_string()))
+    };
     let (name, is_type) = match (between("The type `", "` is not defined"), between("constructor `", "` is not in scope")) {
         (Some(t), _) => (t, true),
         (None, Some(c)) => (c, false),
         _ => return None,
     };
     const STD: &[(&str, &str, bool)] = &[
-        ("Option", "gleam/option", true), ("Some", "gleam/option", false), ("None", "gleam/option", false),
-        ("Dict", "gleam/dict", true), ("Set", "gleam/set", true), ("Order", "gleam/order", true),
-        ("Lt", "gleam/order", false), ("Eq", "gleam/order", false), ("Gt", "gleam/order", false),
+        ("Option", "gleam/option", true),
+        ("Some", "gleam/option", false),
+        ("None", "gleam/option", false),
+        ("Dict", "gleam/dict", true),
+        ("Set", "gleam/set", true),
+        ("Order", "gleam/order", true),
+        ("Lt", "gleam/order", false),
+        ("Eq", "gleam/order", false),
+        ("Gt", "gleam/order", false),
     ];
     let item = if is_type { format!("type {name}") } else { name.clone() };
     if let Some((_, m, _)) = STD.iter().find(|(n, _, t)| *n == name && *t == is_type) {
@@ -1491,7 +1641,11 @@ fn add_import(header: &str, line: &str) -> String {
     let lines: Vec<&str> = header.lines().collect();
     let at = lines.iter().rposition(|l| l.starts_with("import ") || l.starts_with("////")).map_or(0, |i| i + 1);
     // a multi-line import ends at its closing brace
-    let at = if at > 0 && lines[at - 1].ends_with('{') { lines[at..].iter().position(|l| l.starts_with('}')).map_or(at, |p| at + p + 1) } else { at };
+    let at = if at > 0 && lines[at - 1].ends_with('{') {
+        lines[at..].iter().position(|l| l.starts_with('}')).map_or(at, |p| at + p + 1)
+    } else {
+        at
+    };
     let mut out: Vec<&str> = lines[..at].to_vec();
     if at > 0 && lines[at - 1].starts_with("////") {
         out.push("");
@@ -1603,7 +1757,9 @@ fn diagnostics(output: &str, files: &[FileMap]) -> Vec<Diag> {
                 // renumber the code excerpt to lines within the symbol
                 let t = line.trim_start();
                 let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if offset > 0 && !digits.is_empty() && t[digits.len()..].starts_with(" │")
+                if offset > 0
+                    && !digits.is_empty()
+                    && t[digits.len()..].starts_with(" │")
                     && let Ok(n) = digits.parse::<usize>()
                     && n > offset
                 {
@@ -1622,7 +1778,8 @@ fn broken_report(diags: &[Diag]) -> String {
     if errors.is_empty() {
         return "The project type-checks.\n".to_string();
     }
-    let mut names: Vec<String> = errors.iter().map(|d| d.symbol.clone().or(d.module.clone().map(|m| m + " imports")).unwrap_or("?".into())).collect();
+    let mut names: Vec<String> =
+        errors.iter().map(|d| d.symbol.clone().or(d.module.clone().map(|m| m + " imports")).unwrap_or("?".into())).collect();
     names.dedup();
     let mut out = format!("\nBroken symbols ({}): {}\n", names.len(), names.join(", "));
     for d in errors.iter().take(5) {
@@ -1662,13 +1819,19 @@ mod tests {
         assert!(small.contains("Not shown, to fit the size limit: `solace inspect "));
         assert!(small.len() < out.len());
         for n in names {
-            assert!(small.contains(&format!("// ── pilot/{n} ")) || small.lines().last().unwrap().contains(&format!("pilot/{n}")), "{n} lost");
+            assert!(
+                small.contains(&format!("// ── pilot/{n} ")) || small.lines().last().unwrap().contains(&format!("pilot/{n}")),
+                "{n} lost"
+            );
         }
         fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn task_words() {
-        assert_eq!(words("Add the TENOFF coupon to refundsByMonth in order_totals, 10 tests"), ["tenoff", "coupon", "refund", "month", "order", "total"]);
+        assert_eq!(
+            words("Add the TENOFF coupon to refundsByMonth in order_totals, 10 tests"),
+            ["tenoff", "coupon", "refund", "month", "order", "total"]
+        );
     }
 }

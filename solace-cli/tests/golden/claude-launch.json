@@ -1,0 +1,1 @@
+{"args":["--strict-mcp-config","--mcp-config","/agent/mcp.json","--settings","/agent/settings.json","--setting-sources","","--disable-slash-commands","--tools","WebFetch,WebSearch","--allowedTools","mcp__solace__solace","WebFetch","WebSearch"],"config":"settings.json","env":{"MCP_TOOL_TIMEOUT":"3600000"}}

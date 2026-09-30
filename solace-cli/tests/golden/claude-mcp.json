@@ -1,0 +1,1 @@
+{"mcpServers":{"solace":{"args":["mcp","--budget","80000"],"command":"/bin/solace"}}}

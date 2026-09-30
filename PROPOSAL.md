@@ -24,6 +24,13 @@ The environment combines a small functional language with effects as capabilitie
 
 The objective is not to eliminate human engineering or guarantee perfect software. It is to substantially increase how much software agents can build, verify and maintain reliably, while keeping humans in control of intent at the speed agents work.
 
+Two goals come first, because they decide whether humans and agents can work together at all, each doing what they are best at:
+
+1. **Guardrails for agents.** An agent works on a project only through Solace. It has no shell and no direct file access, so every change it makes is checked, recorded and reversible, and it cannot get around the checks.
+2. **The human interface.** A human directs agents through tasks, sees the system's behavior and footprint (its APIs, logic, infrastructure and side effects), and answers agents' questions without reading their code.
+
+Efficiency, such as the tokens and time an agent spends on a task, is a secondary goal. It is measured and improved, but it does not come ahead of these two.
+
 ## 2. Roles: Humans and Agents
 
 Agents do the building; humans supply requirements, perception and discernment. Every part of Solace is designed around that division, and around eliminating the time each side currently wastes.
@@ -861,7 +868,7 @@ The pilot is a small order-management web service: stored data, a checkout state
 
 ## 19. Evaluation
 
-Solace's value must be shown by measurement, starting in Phase 0 and repeated at every gate. The principal measure is not first-attempt code generation accuracy; it is how reliably and efficiently agents deliver, verify, modify and maintain working software over time, and how well humans keep up with them.
+Solace's value must be shown by measurement, starting in Phase 0 and repeated at every gate. Measurement serves the priorities in section 1: guardrails and the human interface first, efficiency second. The principal measure is not first-attempt code generation accuracy; it is how reliably and efficiently agents deliver, verify, modify and maintain working software over time, and how well humans keep up with them.
 
 ### 19.1 Benchmark
 

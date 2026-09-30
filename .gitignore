@@ -32,3 +32,6 @@ Thumbs.db
 
 # Claude Code per-user settings
 .claude/settings.local.json
+
+# Rust build output
+target/

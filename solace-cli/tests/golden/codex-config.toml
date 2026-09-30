@@ -1,0 +1,24 @@
+sandbox_mode = "read-only"
+approval_policy = "never"
+web_search = "live"
+[features]
+shell_tool = false
+unified_exec = false
+apply_patch_freeform = false
+multi_agent = false
+apps = false
+plugins = false
+goals = false
+image_generation = false
+view_image = false
+browser_use = false
+computer_use = false
+in_app_browser = false
+hooks = false
+memories = false
+tool_suggest = false
+[mcp_servers.solace]
+command = "/bin/solace"
+args = ["mcp", "--budget", "32000"]
+default_tools_approval_mode = "approve"
+tool_timeout_sec = 3600

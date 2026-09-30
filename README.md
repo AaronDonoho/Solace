@@ -1,79 +1,168 @@
 # Solace
 
-Solace is an experimental symbol-based programming tool. The current prototype stores Gleam functions, types, and constants in a local semantic store, exposes them through a CLI and MCP server, and checks edits with Gleam. The repository also contains two order-management pilots, a benchmark harness, and a browser-based benchmark visualizer. See [PROPOSAL.md](PROPOSAL.md) for the design and [WORK.md](WORK.md) for progress.
+Solace is an experimental system in which agents build and maintain a software project and humans direct them. It wraps a project: the project's code lives in a semantic store as individual symbols (functions, types, constants), and agents read and change it only through Solace, one symbol at a time, with every change type-checked before it is saved. Humans hand work to agents through a local task board. Today Gleam is the only supported project language.
 
-## Prerequisites
+See [PROPOSAL.md](PROPOSAL.md) for the design, [DECISIONS.md](DECISIONS.md) for settled questions, and [WORK.md](WORK.md) for progress.
 
-- Gleam and Erlang/OTP for the pilots and visualizer (Gleam 1.18.1 and OTP 29 are the versions used here).
-- Rust and Cargo for the Solace CLI (Rust 1.98.1 is the version used here).
-- Python 3 for the benchmark harness.
-- Git for the benchmark harness's temporary project copies.
-- Bun to rebuild the visualizer's browser bundle.
-- Codex or Claude Code, configured with credentials, only if you want to run agent benchmarks. Benchmark runs use those services and may incur charges.
+## What ships
 
-Start each section's commands from the repository root unless noted otherwise.
+One executable, `solace`, which contains:
 
-## Solace CLI and MCP server
+- the store and the command-line interface;
+- the MCP server that agents use (`solace mcp`);
+- the task board server and its web client (`solace serve`);
+- the generator for locked-down agent configurations (`solace agent-config`).
+
+The benchmark harness (`bench/`), the pilots (`pilot/`, `pilot-large/`) and the benchmark visualizer are development tools for this repository and are not part of Solace.
+
+## Requirements
+
+- **To build:** Rust and Cargo (1.98.1 is used here).
+- **To use on a project:** Gleam and Erlang/OTP (Gleam 1.18.1 and OTP 29 are used here). Solace runs `gleam` to format, check, test and build the project.
+- **To run agents:** the Codex CLI or Claude Code, signed in. Agent runs use those services and may cost money.
+
+Nothing else is needed at run time: the board's web client is built into the binary.
+
+## Install
 
 ```sh
-cargo build --release --manifest-path solace-cli/Cargo.toml
-export PATH="$(pwd)/solace-cli/target/release:$PATH"
+cargo install --path solace-cli
 ```
 
-Solace works from a Gleam project directory, not the repository root. Import a project once if it does not already have a `.solace/store.db`:
+This puts `solace` in `~/.cargo/bin`. Use `cargo install --path solace-cli --root <dir>` to install elsewhere.
+
+## Use it on a project
+
+In the Gleam project's directory:
 
 ```sh
-cd pilot-large
-solace import
-solace session start --task "change order pricing"
-solace inspect pilot/pricing.quote --context
-solace check
-solace test
+solace import        # once: loads the project's Gleam code into .solace/store.db
+solace check         # type-check the project from the store
+solace serve         # start the task board on http://127.0.0.1:3030 (--port to change it)
 ```
 
-`solace help` lists the symbol-level read and edit commands. Submissions are type-checked before they are saved. The store is project-specific; run `solace import` separately in another Gleam project that has no store. To connect an MCP client, have it launch `solace mcp` with its working directory set to that project; this is a stdio server, not a web server. The benchmark harness sets up this MCP connection automatically for its Solace arm.
+Open the board, create a task, move it to planning, and assign it to a model. Solace starts the agent, puts the agent's notes and questions on the task, and moves the task to *blocked* when the agent needs an answer or to *needs review* when it has finished. A task that is waiting on you is marked *Needs attention*, with the reason. The board's **Guide** link (`/guide`) explains the whole workflow for humans. The guide is built into the binary.
 
-## Pilots
+### Models
 
-The small and large pilots are Gleam order-management models, exercised through their tests rather than standalone servers:
+Solace runs models through agent programs you already have installed and signed in to: the Codex CLI for OpenAI models, and Claude Code for Claude models. It stores no credentials. The current major models are built in, so the board has a list with no configuration. A model that can't start (its program is missing, isn't signed in, or its key variable isn't set) is greyed out with the reason, and assigning it is refused.
+
+To add models or change the built-in ones, edit `~/.config/solace/config.toml` (or the file named by `SOLACE_CONFIG`):
+
+```toml
+task_timeout = 3600          # seconds an agent may work on a task; waiting for an answer doesn't count
+# presets = false            # hide the built-in models
+
+[[models]]                   # an OpenAI-compatible endpoint, through Codex
+id = "local-qwen"
+label = "Qwen3 Coder (local)"
+agent = "codex"
+model = "qwen3-coder"
+endpoint = { kind = "openai", base_url = "http://localhost:11434/v1", key_env = "LOCAL_LLM_KEY" }
+
+[[models]]                   # a Claude-compatible endpoint, through Claude Code
+id = "proxy-sonnet"
+label = "Sonnet via our proxy"
+agent = "claude"
+model = "claude-sonnet-5-5"
+endpoint = { kind = "anthropic", base_url = "https://llm-proxy.example.com", key_env = "PROXY_KEY" }
+```
+
+An entry with the same `id` as a built-in model replaces it. `key_env` names the environment variable that holds the endpoint's key, which Solace reads when it starts the agent. Codex reaches OpenAI-compatible endpoints through the Responses API, so the endpoint has to support it. The built-in list is in [solace-cli/src/default-models.toml](solace-cli/src/default-models.toml).
+
+### Project settings
+
+A `solace.toml` in the project root holds the project's Solace settings. Only humans edit it; agents can read it but not change it. Everything in it is optional.
+
+```toml
+resource_limit = 262144                   # bytes; larger files can't be resources
+resources = ["priv/**/*.html", "docs/**/*.md"]
+ignore    = ["priv/generated/"]
+
+[validators]                              # checked before a resource change is kept
+"priv/**/*.html" = ["tidy", "-q", "-e", "{file}"]
+
+[commands]                                # commands agents may run
+smoke = { run = ["gleam", "run", "-m", "smoke"], timeout = 60 }
+```
+
+The `[board]` section changes the task workflow: its columns, the actions allowed in each, and approval gates. The default is in [solace-cli/src/default-board.toml](solace-cli/src/default-board.toml), and [specs/15-board-api.md](specs/15-board-api.md) describes the format.
+
+### What agents can touch
+
+Every file in the project falls into one tier (details in [specs/14-lockdown.md](specs/14-lockdown.md)):
+
+| Tier | Files | Agents |
+| --- | --- | --- |
+| 1 Source | Gleam files under `src/` and `test/` | read and change symbols through Solace, never as files |
+| 2 Manifest | `gleam.toml` | read and write through Solace |
+| 3 Resources | files matching `resources` in `solace.toml` | read and write through Solace, checked by any validator |
+| 4 Ignored | everything else, including build output, logs and `.gitignore`d files | read only |
+| Internal | `.solace/` (store, board data) | no access |
+
+Agents get no shell and no file tools, only the Solace MCP tool and web access. Humans shouldn't edit source files directly either. Solace rewrites them from the store and doesn't keep edits made on disk.
+
+### Running an agent yourself
+
+`solace agent-config codex|claude <dir>` writes a locked-down configuration for an agent into `<dir>`, plus a `launch.json` with the arguments and environment to start it with. The board uses the same configuration. To connect some other MCP client, have it start `solace mcp` in the project directory.
+
+## Current limitations
+
+- Gleam is the only project language.
+- One agent works on a project at a time: assigning a second task is refused while one is running. The work of open tasks isn't isolated either, so a later task sees the unapproved changes of earlier ones.
+- The board is local only, for one person, with no authentication.
+- The contract view (the graph of the system's behavior and footprint) is not built yet.
+- Starting real agents from the board is not yet tested end to end. The tests use a fake agent.
+- There are no prebuilt releases. Solace is built from source with Cargo, and needs several tools installed besides it: Gleam and Erlang/OTP for the project, and Codex or Claude Code for agents. Making setup easier is planned.
+
+## Development
+
+Tests (from the repository root unless noted):
+
+```sh
+cargo test --manifest-path solace-cli/Cargo.toml       # unit tests plus the board acceptance scenarios (needs python3)
+python3 -m unittest bench.test_bench                   # benchmark harness
+cd solace-cli/board && gleam test --target javascript && bun test test/api.test.mjs
+```
+
+The board's web client is in `solace-cli/board/` (Gleam and Lustre). After changing it, rebuild the bundle that is built into the binary, as described in [solace-cli/board/README.md](solace-cli/board/README.md). Bun is needed only for that.
+
+### Pilots
+
+The small and large pilots are Gleam order-management services used as benchmark projects:
 
 ```sh
 cd pilot && gleam test
 cd ../pilot-large && gleam test
 ```
 
-## Benchmark visualizer
+### Benchmarks
 
-Build the Lustre frontend after changing it:
-
-```sh
-cd bench/visualizer/frontend
-gleam build --target javascript
-bun build build/dev/javascript/bench_visualizer_frontend/bench_visualizer_frontend.mjs --outfile ../priv/app.js --minify-syntax --minify-whitespace --target browser
-```
-
-Then start the Ewe backend:
-
-```sh
-cd ..
-gleam run
-```
-
-Open the URL printed by `gleam run`. It normally uses `http://127.0.0.1:8765` and picks a free port if 8765 is occupied. Use **Select files / folders** in the page to choose directories under this repository, such as `bench/results`, then refresh to load results. The frontend and backend each have their own `gleam.toml` and tests (`gleam test` from each directory).
-
-## Benchmarks
-
-The harness runs tasks in temporary copies of the pilots. Validate that a task's hidden test fails before its reference solution and passes afterward:
+Benchmark runs start real agents and may cost money. The harness runs tasks in temporary copies of the pilots. To check that a task's hidden test fails before its reference solution and passes after it:
 
 ```sh
 python3 bench/bench.py validate L01-loyalty-coupon-order
 ```
 
-Run one task with the Solace MCP-only agent setup, then report the result using the directory printed by the run:
+To run one task through Solace and then report the result:
 
 ```sh
 python3 bench/bench.py run --arm solace L01-loyalty-coupon-order
 python3 bench/bench.py report bench/results/RUN_DIRECTORY
 ```
 
-Replace `RUN_DIRECTORY` with the number printed by the run. Each run automatically uses the next numbered directory under `bench/results/`. Use `--run-number 2` to save both arms under `bench/results/2/`; repeating an arm there appends the next repetition number. Use `--agent claude` for Claude Code, or omit task names to run all tasks. `python3 bench/bench.py --help` lists all options. The visualizer can load a run directory or an individual scenario.
+Each run uses the next numbered directory under `bench/results/`. `--run-number 2` saves both setups under `bench/results/2/`. `--agent claude` uses Claude Code. `python3 bench/bench.py --help` lists every option.
+
+### Benchmark visualizer
+
+```sh
+cd bench/visualizer && gleam run
+```
+
+Open the printed URL (normally `http://127.0.0.1:8765`) and load a directory such as `bench/results`. To rebuild its frontend after a change:
+
+```sh
+cd bench/visualizer/frontend
+gleam build --target javascript
+bun build build/dev/javascript/bench_visualizer_frontend/bench_visualizer_frontend.mjs --outfile ../priv/app.js --minify-syntax --minify-whitespace --target browser
+```

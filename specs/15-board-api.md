@@ -1,0 +1,175 @@
+# Spec 15: Task Board
+
+**Status:** accepted 2026-09-29 · **Implements:** D-16 (points 5, 6), D-17, D-19, D-23 · **Needed by:** the D-16 work. Not in the PROPOSAL.md §18.2 table; numbered after it.
+
+Humans direct agents through tasks on a board. Solace owns each task's state, starts and stops agents, and enforces the workflow. A board only shows tasks and passes on what the human asks for. The API is the smallest one a Solace-compatible board needs. Solace ships a default board built only on this API; any other board, or an adapter for one, can replace it.
+
+The workflow (columns, and the actions allowed in each) comes from configuration. Solace ships a default workflow (§3). Everything is local: one project, one machine.
+
+## 1. Task
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Assigned by Solace |
+| `title`, `body` | Written by the human. The body is Markdown and may name contracts and symbols |
+| `links` | Contracts and symbols the task refers to, as `{id, name, url}`; `url` opens it in the Solace UX |
+| `column`, `rank` | Where the task is, and its order within the column (lower first) |
+| `paused_from` | Set while paused: the column the task returns to |
+| `attention` | `{reason, time}` while the task needs a human, otherwise null (§6) |
+| `type` | `implementation` or `investigation` by default; types are configured (§2) |
+| `stamps` | Stamps the task holds, such as `approved`, each with who gave it and when (§2) |
+| `model` | The agent chosen by the last action that started a work run |
+| `notes` | `{author: human\|agent\|solace, run?, time, text}`, oldest first |
+| `questions` | Raised by agents: `{id, text, options[], answer?}`. An answer is one option or free text |
+| `runs` | Agent runs: `{id, kind: work\|review, model, state: running\|waiting\|ended, started, ended?, outcome?, log}`. `log` is where the agent's own session log is, for a later view of the run (§6) |
+| `changes` | What the task's work runs changed (§5) |
+
+Tasks are stored as one JSON file per task in `.solace/board/`, inside the project. Agents have no access to it (Spec 14 §1 rule 4). Boards read and change tasks only through the API (§4), never through the files.
+
+## 2. Workflow configuration
+
+The `[board]` section of `solace.toml` (humans only, Spec 14 §2) defines the workflow from a fixed set of building blocks:
+
+- **Columns**, each with an `id`, a `label`, the `actions` allowed there, whether it is `final`, and optionally a gate: a `next` column and the stamps it `requires` before a task may move on to `next`. Moves to other columns, such as back to work or to `cancelled`, are not gated. They do remove the stamps the gate requires: a task moved anywhere but `next` after approval loses its approval.
+- **Actions**, each a combination of these steps, applied in this order:
+  1. `revert`: undo the task's changes (§5);
+  2. `stamp` / `unstamp`: add or remove a stamp. Stamps are only ever given by a human request;
+  3. `to`: move to a column. Refused (`E7006`) if this is the current column's `next` and the task lacks a stamp it `requires`;
+  4. `run`: `work` hands the task back to its waiting agent if there is one, and otherwise starts a work run. `new_work` ends any run and starts a fresh agent. `review` starts a review run (§6). With `model = true`, the request must name a model; any request may name one.
+- **Task types**, each saying whether its work runs may change the project (`writes`). The default types are `implementation` (writes) and `investigation` (read-only: the result is the agent's report on the task).
+- **Events**, the moves Solace makes by itself: `asked` (an agent asked a question), `finished` (an agent reported it was done) and `failed` (a run crashed, timed out, or exited without finishing). Each names a target column. No action can make these moves.
+
+Two actions are built in and allowed in every column that isn't final:
+- `pause` records `paused_from`. The task's agent is held at its next Solace call until `resume`, so it keeps its context. The only actions that end an agent are those with `new_work`, and `revert`.
+- `resume` returns the task to `paused_from`. A paused task also allows the actions of `paused_from`.
+
+Solace checks the configuration at start and on every change. An invalid workflow is `E6020` (Spec 14 §6): an unknown column, an action that is never allowed anywhere, an event with no target, a gate whose `next` is unknown, or a final column with actions.
+
+## 3. Default workflow
+
+```toml
+[board]
+events = { asked = "blocked", finished = "needs_review", failed = "blocked" }
+types  = { implementation = { writes = true }, investigation = { writes = false } }
+
+[[board.columns]]
+id = "backlog"
+actions = ["plan", "cancel"]
+
+[[board.columns]]
+id = "planning"
+actions = ["review", "assign", "to_backlog", "cancel"]
+
+[[board.columns]]
+id = "assigned"
+actions = ["new_agent", "cancel"]
+
+[[board.columns]]
+id = "blocked"
+actions = ["unblock", "new_agent", "review", "cancel"]
+
+[[board.columns]]
+id = "needs_review"
+actions = ["approve", "complete", "review", "start_over", "cancel"]
+next = "done"
+requires = ["approved"]                # an agent's result is on the task: a human signs it off
+
+[[board.columns]]
+id = "done"
+final = true
+
+[[board.columns]]
+id = "cancelled"
+final = true
+
+[board.actions]
+plan       = { to = "planning" }
+to_backlog = { to = "backlog" }
+review     = { run = "review" }                         # stays in its column
+assign     = { to = "assigned", run = "work", model = true }
+unblock    = { to = "assigned", run = "work" }         # the waiting agent continues
+new_agent  = { to = "assigned", run = "new_work" }     # a fresh agent, with the notes so far
+approve    = { stamp = "approved" }
+complete   = { to = "done" }
+start_over = { revert = true, unstamp = "approved", to = "assigned", run = "new_work" }
+cancel     = { revert = true, to = "cancelled" }
+```
+
+`revert` also ends the task's agent, if it has one.
+
+Two rules hold for every workflow:
+- A `work` or `new_work` step is refused while any question is unanswered, unless the request has a `text` (`E7002`). The answers, or the `text`, go to the agent.
+- A second run is refused while the task has one going (`E7003`). A work run is refused while another task in the project has a work run going (`E7005`).
+
+## 4. HTTP
+
+`solace serve` serves the API on `127.0.0.1` (local only; there is no authentication). Bodies are JSON. Errors are `{code, message, allowed?}`.
+
+| Request | Effect |
+| --- | --- |
+| `GET /workflow` | Columns and their actions, as configured, so a board can draw itself |
+| `GET /tasks` | All tasks, without `notes`, `runs` and `changes` |
+| `GET /tasks/{id}` | One task, in full |
+| `POST /tasks` `{title, body, type?, links?}` | Creates a task at the end of the first column. `type` defaults to the first configured type |
+| `PATCH /tasks/{id}` `{title?, body?, links?, rank?}` | Edits a task. Refused while a run is going (`E7003`) or in a final column (`E7004`) |
+| `POST /tasks/{id}/actions` `{action, model?, text?}` | §2. Returns 200 with the task, or 409 with `E7001` (not allowed here; `allowed` lists what is) or `E7002`–`E7008` (`E7007`, `E7008`: a revert blocked by a later task) |
+| `POST /tasks/{id}/notes` `{text}` | Adds a human note |
+| `POST /tasks/{id}/questions/{qid}` `{option?, text?}` | Answers a question |
+| `GET /models` | The models this Solace install knows, each with `agent`, `available` and, when unavailable, `reason` (§6) |
+| `GET /events` | Server-sent events: `{task}` in full after every change, and `{workflow}` after a configuration change, in order. A client that reconnects with `Last-Event-ID` gets what it missed |
+
+A `text` sent with an action is added as a human note before the action runs.
+
+`solace serve` also serves the default board at `/` and a guide for humans at `/guide`.
+
+## 5. A task's changes and `revert`
+
+**What is guaranteed** (the contract, whatever the mechanism): `revert` returns everything a task changed to how it was before the task, or refuses and changes nothing. It never leaves the project half-reverted or failing to type-check because of the revert. `approve` stamps the task. Nothing else in this spec depends on where a task's work lives.
+
+**How it is done for now** (D-17, D-18: one work run at a time): the work goes straight into the project as it is made. There is no branch and no copy. What makes `revert` possible is that Solace records, per task, the state **before the task first changed it**:
+
+- **Symbols (tier 1):** the text and revision before the task's first change to each symbol, including symbols it created (so they can be removed) and deleted (so they can be restored). Every submit is tied to its run, and every run to its task.
+- **Manifest and resources (tiers 2, 3):** the bytes before the task's first write, or a note that the file didn't exist yet. They are kept in `.solace/board/<id>/before/`.
+
+`revert` puts all of it back and clears `changes`. If a **later task** has changed any of the same symbols or files since, `revert` is refused (`E7007`) and nothing changes. The reply lists each of them and the task that changed it. The human can revert that task first, or leave things as they are. After restoring, Solace type-checks the project. If the revert breaks code that another open task changed (for example, a caller of a function this task added), Solace puts everything back as it was before the revert and refuses it (`E7008`), naming the broken symbols and their tasks.
+
+**Agents never see these records.** They sit in their own table and folder, read only by `revert`, the review run's `changes` and the UX. `find`, `inspect`, `view`, `refs`, `session start` (including the task packet) and every count or index leave them out. A symbol deleted by a task is gone from all of these, even though its earlier text is kept for undo.
+
+When a task reaches a final column, the records of the state before it are dropped. They are there so a task can be undone, not as history (D-16.8).
+
+## 6. Runs
+
+- **Models** come from the Solace system configuration, not the project: built-in presets for the current major Codex and Claude models (`src/default-models.toml`), plus entries in `~/.config/solace/config.toml` (or `$SOLACE_CONFIG`). An entry with a preset's `id` replaces it, and `presets = false` hides the presets. Each has an `id`, a `label`, an `agent` (`codex` or `claude`), and a `model`, with an optional Codex `effort`. An action that doesn't name a model uses the task's `model`.
+- **Endpoints.** A model may name an `endpoint = {kind, base_url, key_env?}`. `kind = "openai"` goes with `agent = "codex"` and is passed to Codex as a custom provider using the Responses API. `kind = "anthropic"` goes with `agent = "claude"` and is passed to Claude Code as `ANTHROPIC_BASE_URL`, plus `ANTHROPIC_AUTH_TOKEN` taken from `key_env`. Solace stores no credentials: agents use their own sign-in, and endpoint keys are read from the named environment variable when the agent starts. A mismatched kind is `E6020`.
+- **Availability.** `/models` marks a model unavailable, with the reason, when its agent program isn't on `PATH`, when the agent isn't signed in, or when the endpoint's `key_env` isn't set. Only local things are checked, so the check costs nothing. Starting a run on an unavailable model is refused (`E7011`), and the task stays where it is.
+- **Attention.** Solace sets `attention` when a task needs a human: an agent asked a question, a run failed (the note includes the last lines of the agent's output), or the server restarted while an agent was working. It is cleared by the next successful action request on the task.
+- A **work run** starts the agent with Spec 14 §5's configuration. Its prompt holds the task's title, body, type, links, notes and answered questions. On top of Spec 14, the agent's Solace tool gets:
+  - `task note <text>`: adds an agent note;
+  - `task ask` (`text`, 2–4 `options`): adds a question and fires `asked`. **The agent waits:** the call returns only when a human continues the task with `unblock`, and its result is the answers and any `text`. The run keeps its context. `new_agent` instead ends it and starts a fresh one, which gets the notes and answers in its prompt;
+  - `task done <summary>`: adds the summary as a note, fires `finished`, and ends the run.
+- A work run on a task whose type doesn't write is read-only like a review run: `write`, `submit`, `remove` and `run` are refused (`E7010`), and its `task done` summary is the result.
+- A **review run** gets the same prompt plus the task's `changes`. It is read-only (`E7010`), ends by adding its feedback with `task note`, and fires no event.
+- A run past the task timeout (a system setting; default 60 min) is stopped and fires `failed`. Time spent waiting on a question or paused doesn't count.
+- **Keeping an agent waiting** depends on the agent's tool-call timeout. `agent-config` (Spec 14 §5) sets it to the task timeout or more (Codex: the MCP server's `tool_timeout_sec`; Claude Code: `MCP_TOOL_TIMEOUT`). If the agent gives up anyway, the run fires `failed`, and the task continues with a new agent.
+- Each run records `log`, the path of the agent's own session log. A view that lets a human go from a task to watching its agent work or reading its context is planned but out of scope here (D-19).
+
+## 7. Out of scope
+
+Several projects on one server, several people, remote access and authentication, and more than one work run per project at a time. The view of a running agent, and asking it side questions that don't disturb its work (D-19).
+
+## Tests (acceptance)
+
+- A1. With the default workflow, every configured action is tested from each of its columns, and every other column and action pair returns `E7001` with the right `allowed`.
+- A2. No action moves a task to an event's target column except through that column's actions. `asked`, `finished` and `failed` move it only as configured.
+- A3. A custom workflow with an extra column and action works end to end. The invalid workflows in §2 each give `E6020`.
+- A4. `complete` from `needs_review` without `approved` is refused (`E7006`). After `approve`, `complete` moves the task to `done`. `start_over` and `cancel` from `needs_review` are not gated, and `start_over` removes the stamp. The stamp records who gave it and when. A task approved and then moved back with `start_over` or `new_agent` no longer holds `approved`.
+- A5. With a fake agent: `task ask` blocks the task, and the question appears on it and in `/events`, while the agent's call stays open. `unblock` is refused until the question is answered or a `text` is given. After `unblock`, the same agent process (same run id) receives the answer and continues. `new_agent` instead ends it and starts a run with a new id whose prompt has the answer. `task done` moves the task to `needs_review`.
+- A6. A fake agent's run edits two symbols, creates one, deletes one, writes a resource and creates a new one. `cancel` restores the store and those files byte-for-byte to how they were before the task.
+- A7. Task B changes a symbol after task A did. Cancelling A is refused with `E7007`, naming the symbol and B, and nothing changes. After B is cancelled, cancelling A succeeds.
+- A7c. Task B adds a caller of a function task A added, without editing any of A's symbols. Cancelling A is refused with `E7008`, naming B's caller, and the store and files are unchanged.
+- A7b. After a task deletes a symbol and edits another, `find`, `inspect`, `view`, `refs` and `session start --task` show no trace of the deleted symbol's earlier text or of the edited symbol's old text, and give the same output as a store with no before-state records.
+- A8. After `pause`, the agent's next Solace call is held and its process stays alive. `resume` releases the call and returns the task to `paused_from`. Time paused doesn't count toward the task timeout.
+- A12. `/models` includes the presets and reports a model whose program is missing as unavailable, with a reason. Assigning it returns `E7011` and leaves the task in its column. A failed run and an agent's question each set `attention`, and the next action clears it.
+- A9. A review run's `write` or `submit` returns `E7010`, and the task stays in its column. So does a work run on an `investigation` task, whose `task done` summary appears on the task.
+- A10. `/events` delivers every change in order, and a reconnect with `Last-Event-ID` returns the missed ones.
+- A11. The default board's only connection to Solace is this API: it runs against a stub server implementing §4 and passes its own tests there. Every file command on `.solace/board/` returns `E6006`.

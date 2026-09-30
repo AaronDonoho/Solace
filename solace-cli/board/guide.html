@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Solace guide</title>
+<style>
+:root{--text:#20252b;--muted:#56606b;--bg:#fafafa;--line:#ccd0d5;--code:#edf0f4;--link:#1f5fbf}
+@media (prefers-color-scheme:dark){:root{--text:#e4e7eb;--muted:#a3abb5;--bg:#16191d;--line:#3a4048;--code:#23282e;--link:#7fb0ff}}
+body{font:16px/1.55 system-ui,sans-serif;margin:0 auto;padding:24px 16px 64px;max-width:760px;color:var(--text);background:var(--bg)}
+h1{font-size:28px}h2{font-size:21px;margin-top:36px;border-top:1px solid var(--line);padding-top:20px}h3{font-size:17px}
+a{color:var(--link)}code,pre{font:14px ui-monospace,monospace;background:var(--code);border-radius:4px}code{padding:1px 4px}pre{padding:12px;overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+.muted{color:var(--muted)}
+</style></head><body>
+<p class="muted"><a href="/">← Back to the board</a></p>
+<h1>Using Solace</h1>
+<p>Solace lets AI coding agents build and change your project while you direct the work. You describe tasks on this board, choose which model works on each one, answer the agents' questions, and approve or reject what they did. The agents do all their work through Solace, which checks and records every change they make.</p>
+
+<h2>How it works</h2>
+<p>Your project's code is kept in a store inside the project, in the <code>.solace/</code> folder, where each function, type and constant is a separate entry. The source files on disk are written from that store. Agents never edit files directly. They read and change code one entry at a time through Solace, and every change is type-checked before it is kept.</p>
+<p>Agents have no shell and no general file access. They get one tool, Solace, plus web access for looking things up. That means:</p>
+<ul>
+<li>every change an agent makes goes through Solace's checks, and can be undone;</li>
+<li>an agent can't delete files, run arbitrary programs or change Solace's own settings;</li>
+<li>anything an agent needs that Solace doesn't offer, it has to ask you for.</li>
+</ul>
+<p>The drawbacks: an agent is limited to what Solace provides, so some tasks that are easy with a shell (a quick throwaway script, for example) need a command you declare for it. And you shouldn't edit the source files by hand either, because Solace rewrites them from its store.</p>
+
+<h2>Tasks</h2>
+<p>A task is a piece of work you write for an agent: a title and a description. The description can refer to existing behavior, ask for changes, or suggest something new. There are two kinds:</p>
+<ul>
+<li><strong>Implementation</strong> tasks change the project.</li>
+<li><strong>Investigation</strong> tasks change nothing. The agent looks into something and reports back on the task.</li>
+</ul>
+
+<h3>The default columns</h3>
+<table>
+<tr><th>Column</th><th>What it means</th><th>What you can do</th></tr>
+<tr><td>Backlog</td><td>Written, not yet being planned</td><td>Plan it, or cancel it</td></tr>
+<tr><td>Planning</td><td>You're shaping the task</td><td>Ask an agent to review it and give feedback, assign it to a model, send it back, or cancel it</td></tr>
+<tr><td>Assigned</td><td>An agent is working</td><td>Start a new agent on it, or cancel it</td></tr>
+<tr><td>Blocked</td><td>The agent needs an answer, or couldn't continue</td><td>Answer and unblock it, start a new agent, ask for a review, or cancel it</td></tr>
+<tr><td>Needs review</td><td>The agent says it's finished</td><td>Approve it, then complete it; ask for an agent review; start over; or cancel it</td></tr>
+<tr><td>Done, Cancelled</td><td>Finished either way</td><td>Nothing</td></tr>
+</table>
+<p>You can pause any task that isn't finished, and resume it later. A paused agent stops at its next step and keeps what it knows.</p>
+<p>A task can't be completed until you approve it. If you move an approved task anywhere else, for example by starting over, it loses the approval.</p>
+<p>You can change the columns and what's allowed in each in the project's <code>solace.toml</code> (see Settings below).</p>
+
+<h3>Questions and attention</h3>
+<p>When an agent needs a decision, it asks a question with a few options, and the task moves to Blocked. The agent waits, keeping everything it has learned so far. Pick an option or type an answer, then <em>unblock</em> the task, and the same agent carries on. If you'd rather start fresh, <em>new agent</em> starts another one, which gets the task's notes and your answers.</p>
+<p>A task marked <strong>Needs attention</strong> is waiting on you. That happens when an agent asks a question, when an agent stops unexpectedly (it crashed, ran out of time, lost its connection, or its model became unavailable), or when Solace was restarted while an agent was working. The reason is shown on the task, together with the agent's last output when there is some. The mark goes away when you next act on the task. To continue, unblock it or start a new agent, and choose a different model if the first one isn't working.</p>
+
+<h3>Undoing a task</h3>
+<p><em>Cancel</em> and <em>start over</em> undo everything the task changed, bringing the code and resource files back to how they were before it started. Solace refuses to undo a task when that would affect another open task: if a later task changed the same code, or depends on something this task added. The refusal names the other task, so you can undo that one first or leave things as they are.</p>
+<p>Solace doesn't keep a history beyond that. Use your own version control (such as git) for history.</p>
+
+<h2>Models</h2>
+<p>You choose a model each time you assign a task or start a new agent. Solace runs the model through an agent program you already have installed and signed in to: the <strong>Codex CLI</strong> for OpenAI models, or <strong>Claude Code</strong> for Claude models. Solace doesn't store any credentials itself.</p>
+<p>A list of current major models is built in. A model that can't be started right now is greyed out in the list, with the reason: the agent program isn't installed, it isn't signed in, or a key it needs isn't set.</p>
+<p>Add your own models, or change the built-in ones, in <code>~/.config/solace/config.toml</code>:</p>
+<pre>task_timeout = 3600            # seconds an agent may work; time spent waiting for you doesn't count
+
+[[models]]                     # a model through the normal Codex sign-in
+id = "codex-terra-high"
+label = "Codex · Terra (high effort)"
+agent = "codex"
+model = "gpt-5.6-terra"
+effort = "high"
+
+[[models]]                     # any OpenAI-compatible endpoint, through Codex
+id = "local-qwen"
+label = "Qwen3 Coder (local)"
+agent = "codex"
+model = "qwen3-coder"
+endpoint = { kind = "openai", base_url = "http://localhost:11434/v1", key_env = "LOCAL_LLM_KEY" }
+
+[[models]]                     # any Claude-compatible endpoint, through Claude Code
+id = "proxy-sonnet"
+label = "Sonnet via our proxy"
+agent = "claude"
+model = "claude-sonnet-5-5"
+endpoint = { kind = "anthropic", base_url = "https://llm-proxy.example.com", key_env = "PROXY_KEY" }</pre>
+<ul>
+<li>An entry with the same <code>id</code> as a built-in model replaces it. Add <code>presets = false</code> at the top to hide the built-in list.</li>
+<li>An endpoint's key is never written in the file. <code>key_env</code> names an environment variable that holds it, and Solace reads that variable when it starts the agent. Leave <code>key_env</code> out for an endpoint that needs no key.</li>
+<li>Codex talks to OpenAI-compatible endpoints through the Responses API, so the endpoint has to support it.</li>
+</ul>
+
+<h2>What agents can touch</h2>
+<p>Every file in the project is in one of these groups:</p>
+<table>
+<tr><th>Group</th><th>Files</th><th>What agents can do</th></tr>
+<tr><td>Source</td><td>Gleam files in <code>src/</code> and <code>test/</code></td><td>Read and change code through Solace, one entry at a time</td></tr>
+<tr><td>Manifest</td><td><code>gleam.toml</code></td><td>Read and write</td></tr>
+<tr><td>Resources</td><td>Files you list under <code>resources</code> in <code>solace.toml</code></td><td>Read and write, checked by any validator you declare</td></tr>
+<tr><td>Ignored</td><td>Everything else: build output, logs, anything <code>.gitignore</code> ignores</td><td>Read only</td></tr>
+<tr><td>Solace's own</td><td><code>.solace/</code> and <code>solace.toml</code></td><td>Nothing, except reading <code>solace.toml</code></td></tr>
+</table>
+<p>A file is a resource only if you list it, so large or generated files never get pulled in by accident. A resource can't be larger than the size limit (256 KiB unless you change it).</p>
+
+<h2>Settings</h2>
+<p><code>solace.toml</code> in the project's root holds the project's settings. Only you edit it; agents can read it, and an agent that needs a change has to ask you. Every part is optional.</p>
+<pre>resource_limit = 262144                    # bytes
+resources = ["priv/**/*.html", "docs/**/*.md"]
+ignore    = ["priv/generated/"]
+
+[validators]                               # must pass before a resource change is kept
+"priv/**/*.html" = ["tidy", "-q", "-e", "{file}"]
+
+[commands]                                 # extra commands agents may run
+smoke = { run = ["gleam", "run", "-m", "smoke"], timeout = 60 }</pre>
+<p>Agents can always check, test, format and build the project. Under <code>[commands]</code> you add anything else they may run. Commands run without a shell, so agents can't chain or alter them, and they can pass extra arguments only to a command that sets <code>args = true</code>.</p>
+<p>A <code>[board]</code> section replaces the default columns and actions. It's described in the Solace repository's board specification.</p>
+
+<h2>Limits for now</h2>
+<ul>
+<li>Projects must be written in Gleam.</li>
+<li>One agent works on a project at a time. While one is working, assigning another task is refused.</li>
+<li>Tasks that are still open aren't kept apart: a later task sees the unapproved changes of earlier ones.</li>
+<li>The board runs on your machine only, for one person, with no sign-in.</li>
+<li>There's no view yet for watching an agent work. Each run records where the agent's own log is.</li>
+</ul>
+</body></html>

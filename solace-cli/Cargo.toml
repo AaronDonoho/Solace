@@ -7,3 +7,7 @@ edition = "2024"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+toml = { version = "0.8", features = ["preserve_order"] }
+ignore = "0.4"
+globset = "0.4"
+tiny_http = "0.12"

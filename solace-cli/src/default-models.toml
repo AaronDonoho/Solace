@@ -1,0 +1,48 @@
+# Built-in model presets. Entries in the system configuration with the same id
+# replace these; other entries are added after them.
+
+[[models]]
+id = "codex-gpt-6-sol"
+label = "Codex · GPT-6 Sol (medium)"
+agent = "codex"
+model = "gpt-6-sol"
+effort = "medium"
+
+[[models]]
+id = "codex-gpt-6-luna"
+label = "Codex · GPT-6 Luna (medium)"
+agent = "codex"
+model = "gpt-6-luna"
+effort = "medium"
+
+[[models]]
+id = "codex-gpt-6-astra"
+label = "Codex · GPT-6 Astra (medium)"
+agent = "codex"
+model = "gpt-6-astra"
+effort = "medium"
+
+[[models]]
+id = "codex-gpt-5.6-terra"
+label = "Codex · GPT-5.6 Terra (medium)"
+agent = "codex"
+model = "gpt-5.6-terra"
+effort = "medium"
+
+[[models]]
+id = "claude-opus-5-5"
+label = "Claude Code · Opus 5.5"
+agent = "claude"
+model = "claude-opus-5-5"
+
+[[models]]
+id = "claude-sonnet-5-5"
+label = "Claude Code · Sonnet 5.5"
+agent = "claude"
+model = "claude-sonnet-5-5"
+
+[[models]]
+id = "claude-haiku-4-5"
+label = "Claude Code · Haiku 4.5"
+agent = "claude"
+model = "claude-haiku-4-5-20251001"

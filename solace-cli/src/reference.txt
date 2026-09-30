@@ -61,3 +61,20 @@ Checking
 
 Work records (persist between sessions)
   solace work add <text> (or the tool's `text`) | solace work list | solace work done <id>
+
+Files and declared commands (solace.toml is human-owned):
+  files [dir]                         tree with tiers; internal files have no access
+  read path [--lines a..b | --tail n]  read manifest/resources/ignored files/settings
+  write path                         whole text (read an existing file first)
+  write path --replace               exact `old` -> `text`; CLI: --old <text>
+  remove path                        remove a declared resource
+  build | format                     project-local Gleam commands
+  run name [args...]                  only commands declared in solace.toml
+  agent-config codex|claude dir       isolated settings and launch.json for a runner
+
+Task runs:
+  task note <text>                    add a note; completes a review run
+  task ask                           `text` and 2–4 `options`; waits for human continuation
+                                     CLI: --option <label> repeated, question on stdin
+  task done <summary>                 report completion for human review
+  serve [--port N]                    human host command; local board/API (default 3030)

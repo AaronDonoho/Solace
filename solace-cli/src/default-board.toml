@@ -1,0 +1,45 @@
+[board]
+events = { asked = "blocked", finished = "needs_review", failed = "blocked" }
+types  = { implementation = { writes = true }, investigation = { writes = false } }
+
+[[board.columns]]
+id = "backlog"
+actions = ["plan", "cancel"]
+
+[[board.columns]]
+id = "planning"
+actions = ["review", "assign", "to_backlog", "cancel"]
+
+[[board.columns]]
+id = "assigned"
+actions = ["new_agent", "cancel"]
+
+[[board.columns]]
+id = "blocked"
+actions = ["unblock", "new_agent", "review", "cancel"]
+
+[[board.columns]]
+id = "needs_review"
+actions = ["approve", "complete", "review", "start_over", "cancel"]
+next = "done"
+requires = ["approved"]                # an agent's result is on the task: a human signs it off
+
+[[board.columns]]
+id = "done"
+final = true
+
+[[board.columns]]
+id = "cancelled"
+final = true
+
+[board.actions]
+plan       = { to = "planning" }
+to_backlog = { to = "backlog" }
+review     = { run = "review" }                         # stays in its column
+assign     = { to = "assigned", run = "work", model = true }
+unblock    = { to = "assigned", run = "work" }         # the waiting agent continues
+new_agent  = { to = "assigned", run = "new_work" }     # a fresh agent, with the notes so far
+approve    = { stamp = "approved" }
+complete   = { to = "done" }
+start_over = { revert = true, unstamp = "approved", to = "assigned", run = "new_work" }
+cancel     = { revert = true, to = "cancelled" }

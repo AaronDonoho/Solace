@@ -130,3 +130,90 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
 - **Rationale:** With MCP only, an agent has no scratch file and cannot read package source, so a server-held draft and dependency signatures are the gaps that push it off the protocol. The feedback sessions were not MCP-only (the agent used the CLI and file tools), so their friction over filesystem divergence largely disappears under D-8. Gleam-specific project management would mostly be thrown away in Phase 1b.
 - **Who/when:** Aaron, 2026-09-28; the ranking was proposed by Claude.
 - **Affects:** bench (new build task); solace-cli (`submit` drafts and `--check-only`, dependency index for `inspect`/`find`, `materialize`); Spec 3 §2 and §6
+
+## D-16 Pause measurement; build lockdown, agent tooling and the human UX — decided
+- **Question:** What does the project work on next?
+- **Answer (decided):**
+  1. Benchmark measurement is paused for a while. Gates are not judged until it resumes. The D-15 build task and before/after runs wait.
+  2. Three priorities: (a) **lockdown**: agents do all code-related work through Solace and have no other way to change source; (b) **agent tooling** that makes that work effective (the D-15 drafts, `--check-only` and dependency signatures come under this); (c) **human UX**: the contract view and the channel to agents.
+  3. Gleam is a target, not necessarily the final language. What gets built must not depend on Gleam where a language-neutral form is possible.
+  4. **Contract** means the behavior and footprint of the system: side effects, APIs, infrastructure as code, and the logic that drives each. The human sees a high-level view, descends into each behavior, submits test data and watches it flow through each decision point to its output or side effect.
+  5. **Channel to agents is asynchronous, through a task board.** Columns: backlog (prioritized) → planning (the human can ask agents to review and give feedback) → assigned (the human picks a model; Solace starts the agent and updates the status; the agent's notes go on the task) → blocked (can't finish or needs help) or needs review (finished). From blocked: unblock, or ask for more review. From needs review: approve to done, ask for more agent review, start over, or cancel. Any task can be paused at any time, and then any of these actions taken. A question an agent raises goes to Solace, which puts it on the task and blocks the task. A task may refer to existing contracts, ask for changes to them, or suggest new behavior.
+  6. **The board and Solace are decoupled** and talk only through an API, so the board can be swapped for another. Solace ships with its own board as the default. The API is minimal and defined by Solace: only what a Solace-compatible board needs, not modeled on Jira or any other tracker. Adapting another board to it is that adapter's job.
+  7. **The UX is a web app,** not native.
+  8. **Files come in four tiers.** (1) Source: symbols, as now. (2) Project manifest: a typed record changed through commands (`solace deps add …`); the manifest file is generated from it. (3) Resources (HTML, YAML, SQL, IaC, fixtures…): edited through Solace, checked only by a validator declared for the file kind, shown in the contract view as unverified footprint; **no revisions stored**, since history is source control's job. (4) Ignored (generated code, logs, build output…): not tracked or reported; Solace only lists them in the file tree.
+  9. **Sorting and access.** Tier 3 is the files matching patterns declared in the Solace project settings. Files and folders are made tier 4 by registering them in the project settings; `build/`, `.git/`, dependency caches and whatever `.gitignore` ignores are tier 4 anyway. A tier 3 file must stay under a size limit, which is a per-project setting that can be edited. Solace keeps one content hash per tier 3 file, to refuse edits made on top of a change it didn't see, but no history. A file in no tier is tier 4; it becomes tier 3 only by matching a declared pattern. The UI shows which tier every file is in.
+  10. **No shell for agents (D-8 kept).** Agents get the Solace MCP tool (plus their own web access) and no shell or file tools. Through Solace: tier 1 only through the symbol protocol, never as files; tiers 2 and 3 read and written directly as files; tier 4 read only; a limited set of commands (such as check, test, build and run) that Solace runs for the agent.
+  11. **Humans don't edit tier 1 files on disk.** Solace rewrites them from the store whenever it needs to and doesn't guard against human edits. This replaces D-15 point 4.
+- **Who/when (8–11):** Aaron, 2026-09-29; tier layout proposed by Claude.
+- **Rationale:** Aaron wants Solace usable end to end by a human directing agents before more measurement.
+- **Who/when:** Aaron, 2026-09-29
+- **Affects:** WORK.md (roadmap order; §18 puts the human view in Phase 3); D-15 (deferred packages and run commands are reopened by lockdown); PROPOSAL.md §9.4, §14.7, §15
+
+## D-17 The board's workflow and where a task's work lives — decided
+- **Question:** How fixed is the board workflow, where is task data kept, and where does a task's work live until it's accepted, so that `start_over` and `cancel` can undo it?
+- **Answer:**
+  1. **The workflow comes from configuration.** Columns, the actions allowed in each, and the stamps a column requires are set in `solace.toml`, and Solace ships a default. It is expected to change.
+  2. **Task data is local files in the project** (`.solace/board/`), with no agent access. Boards still go through the API.
+  3. **Solace is not tied to git.** Version control is the humans' job. The work stays in the project as it is made. To undo it, Solace records what each task changed and the state before the task first changed it: symbol text and revisions in the store, and the earlier bytes of tier 2 and 3 files. `revert` restores these. It is refused, with nothing changed, if a later task has changed any of the same symbols or files since. The records are invisible to agents: no search, view, index or count includes them. These records are dropped when the task reaches a final column, so they aren't history.
+  4. **`approve` is a stamp.** A column can require a stamp before a task may enter it. In the default workflow, `done` requires `approved`.
+- **Options considered:** a git branch and worktree per task (Claude's first recommendation); Spec 3 §4's staged changes in the store.
+- **Rationale:** Keep Solace independent of the version control humans choose. The store already sees every symbol edit, so tying edits to a task costs a run id per submit. The store kept only a hash of each revision, not its text, so the earlier text has to be recorded for this.
+- **Who/when:** Aaron, 2026-09-29; the building blocks for configuration, the rule for later tasks and the before-state records are by Claude.
+- **Affects:** Spec 15; Spec 14 §1 (`.solace/` is internal); solace-cli (runs tied to submits, before-state records)
+
+## D-18 Parallel work on tasks — decided for now
+- **Question:** How will several agents work on tasks at once? D-17 lands a task's work straight into the project, so Spec 15 allows one work run per project at a time. The decision here is which direction to keep open.
+- **Options:**
+  (a) **Serial only:** one work run at a time (Spec 15 today).
+  (b) **Shared tree with claims:** tasks claim the symbols and files they write. Each task's checks still see the others' unfinished work, so one task's compile errors break another's checks.
+  (c) **Isolation in the store:** each task has its own open change (Spec 3 §4) and its own copy of any resource files it writes, and is checked in its own compile directory. `approve`, or an action step such as `merge`, merges the change symbol by symbol. The conflict checks Spec 3 already has (E5101, E5102) catch cases such as one task changing a signature while another adds a caller. It doesn't need git. D-17's before-state records are this design's base revisions.
+  (d) **Git worktrees per task:** isolation comes from git. The main store has to be rebuilt from merged files while keeping symbol identities, and Solace becomes tied to git.
+  (e) **(c) plus git as an output:** when a task is approved, Solace can also commit it to a branch or open a pull request, as an optional integration.
+- **Claude's recommendation:** aim for (c), with (e) as an optional integration later; stay with (a) until parallel runs are needed. To keep the way open, Spec 15 describes what `revert` and `approve` mean, not how they are done. Moving from (a) to (c) then changes no API and no workflow configuration.
+- **Answer:** (a) for now: one work run per project, with the revertible before-state records of D-17. To be revisited. Spec 15 §5 states what `revert` and `approve` guarantee separately from how it's done, so a later move to (c) or (e) changes no API or workflow configuration.
+- **Who/when:** Aaron, 2026-09-29
+- **Affects:** Spec 15 §5; Spec 3 §4; PROPOSAL.md §14.5, Phase 6
+
+## D-19 Board refinements: agents wait, gates, task types; defaults accepted — decided
+- **Question:** Aaron's review of the choices Claude made in Specs 14 and 15.
+- **Answer:**
+  1. **An agent that asks a question waits** for the answer instead of ending, so its context isn't lost. A human can choose to start a new agent on the task instead (`new_agent`). `pause` also holds the agent without ending it.
+  2. **Later, a view of the agent:** from a task, a human can watch its agent work or read its context. The view is read-only, not a terminal. Asking the agent side questions without disturbing its work is a possible future decision. For now, runs only record where their session log is.
+  3. **Approval gates:** any column can require a human's stamp (such as approval) before a task moves on to the next column. The default puts the gate where an agent's result shows up on the task (`needs_review`). `approve` only stamps; moving on is a separate action.
+  4. **Task types:** tasks come in types. By default these are implementation, which changes the project, and investigation, which changes nothing and whose result is the agent's report.
+  5. **Leaving a gated column any way but forward removes the stamp:** a task moved anywhere else after approval loses its approval. If an agent can't keep waiting, Solace starts a new one when the task continues.
+  6. **Claude's other defaults in Specs 14 and 15 are accepted** (listed in the session of 2026-09-29): sizes, timeouts, `.solace/` internal, `.gitignore`d files in tier 4, command rules, JSON task files, local HTTP with no authentication, the model list in the system configuration, read-only review runs, dropping before-states in final columns, and spec numbers 14 and 15.
+- **Who/when:** Aaron, 2026-09-29
+- **Affects:** Spec 15 §1, §2, §3, §6; Spec 14 §5 (tool-call timeout in `agent-config`)
+
+## D-20 Guardrails and the human interface come first; Solace ships as a product — decided
+- **Answer:**
+  1. **Priorities:** the primary goals are guardrails that keep agents working through Solace, and the human interface. Efficiency (tokens, speed) is a secondary goal. PROPOSAL.md says so in §1 and §19.
+  2. **Order of the D-16 work:** lockdown → task board → contract view.
+  3. **Contract view, basic version** until it has its own spec: an interactive graph of the system's behavior and footprint. Nodes are colored by type (API, system logic, infrastructure, side effects, …). The human can search, follow connections, submit test data and watch it flow through the decision points (D-16.4).
+  4. **Solace is a deliverable:** the Solace system is built and shipped as a product that wraps a user's project. The benchmark (`bench/`) and the pilots are development tools and don't ship with it.
+- **Who/when:** Aaron, 2026-09-29
+- **Affects:** PROPOSAL.md §1, §19; WORK.md; packaging of solace-cli, the UX and the default board
+
+## D-21 Lockdown session and launch configuration details — pending
+- **Question:** Spec 14 does not define CLI session identity, the `agent-config` directory layout, or how a CLI caller supplies `old`.
+- **Options:** explicit session handles everywhere; MCP process sessions and an optional CLI environment handle. Launch scripts or configuration plus a machine-readable launch descriptor.
+- **Implementation reading:** MCP process identity; CLI `SOLACE_SESSION` (default `cli`), with one hash per file per session. `agent-config` writes isolated agent settings plus `launch.json` containing arguments/environment. CLI replacement accepts `--old <text>`. Bench keeps its existing web-disabled override.
+- **Status:** pending human confirmation; accepted specs unchanged.
+
+## D-22 Board system settings and pause representation — pending
+- **Question:** Spec 15 leaves the system configuration schema, listen port, paused column, and default type ordering unspecified. A4 mentions `new_agent` from `needs_review`, though the default column does not allow it; review runs end with `task note`, whereas other notes do not end work.
+- **Options:** a dedicated paused column versus retaining the configured column and setting `paused_from`; allow extra default actions versus follow the literal default table.
+- **Implementation reading:** retain column while paused, expose `paused_from`; follow the literal default action table. Default type is implementation, custom types use TOML declaration order. System settings live at `$SOLACE_CONFIG` or `~/.config/solace/config.toml`, with `task_timeout` and `[[models]]` (`id`, `label`, `agent`, `model`, optional `effort`, or a test/custom `run` argv). Serve on loopback port 8080, overridable with `--port`. (Aaron, 2026-09-29: the default port is 3030.) Review `task note` completes that review. Missing models are an actionable error, never guessed.
+- **Status:** pending human confirmation; accepted specs unchanged.
+
+## D-23 Models, endpoints and tasks that need attention — decided
+- **Answer:**
+  1. **Solace runs models through external agent programs** (the Codex CLI, Claude Code) and stores no credentials. Agents use their own sign-in.
+  2. **Built-in presets** for the current major models ship in the binary. The system configuration can add models, replace presets by `id`, or hide them.
+  3. **Custom endpoints:** an OpenAI-compatible endpoint through Codex, or a Claude-compatible endpoint through Claude Code. An endpoint's key is read from an environment variable when the agent starts. An operating-system keychain is the accepted alternative, if environment variables prove insufficient.
+  4. **The model is chosen when a task is assigned** (or a new agent started).
+  5. **Unavailable agents:** a model whose program, sign-in or key is missing is shown as unavailable with the reason, and assigning it is refused. A task whose agent fails, or which needs an answer, is marked as needing attention, with the reason, until a human next acts on it.
+- **Who/when:** Aaron, 2026-09-29; the attention field and the local-only availability check are by Claude.
+- **Affects:** Spec 15 §1, §4, §6; solace-cli (`board.rs`, `default-models.toml`), the board client
