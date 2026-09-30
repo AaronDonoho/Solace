@@ -121,6 +121,9 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         };
         return board::serve(&s.root, port);
     }
+    if a.first() == Some(&"task") && board::context().is_none() {
+        return lockdown::error("E7010", "task", "task commands work only in a run started from the task board; this session has no task");
+    }
     let Ok(store) = Store::open() else {
         board::workflow(&lockdown::settings(&env::current_dir()?)?)?;
         return run_inner(args, input, old, budget);
@@ -204,7 +207,10 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
         ["work", "add", text @ ..] => store.work_add(&text.join(" ")),
         ["work", "list"] | ["work"] => store.work_list(),
         ["work", "done", id] => store.work_done(id),
-        _ => usage(format!("Unknown command: solace {}", a.join(" "))),
+        _ => usage(format!(
+            "Unknown command: {}\nCommands: session, inspect, view, refs, find, submit, delete, check, test, work, files, read, write, remove, build, format, run, task.",
+            a.join(" ")
+        )),
     }
 }
 
@@ -431,6 +437,11 @@ fn import(root: &Path) -> Out {
         }
     }
     Ok(format!("Imported {modules} modules, {symbols} symbols into .solace/store.db\n"))
+}
+
+/// A Gleam module path: lowercase names of letters, digits and `_`, joined by `/`.
+fn valid_module_path(m: &str) -> bool {
+    m.split('/').all(|p| p.starts_with(|c: char| c.is_ascii_lowercase()) && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
 }
 
 fn collect_gleam_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -1206,6 +1217,8 @@ impl Store {
         }
         // (module, the symbol replaced, the new item, imports in the text)
         let mut plan: Vec<(String, Option<usize>, Item, String)> = vec![];
+        // `submit --new` to a module that doesn't exist yet creates it.
+        let mut created: Option<(String, &str)> = None;
         for (block_name, text) in &blocks {
             let parsed = gleam::split(&format_gleam(text)?);
             let [item] = parsed.items.as_slice() else {
@@ -1223,7 +1236,15 @@ impl Store {
                     .ok_or_else(|| Failure(format!("E1003 unknown module: {m}"), 1))
             };
             let (module, existing) = match (new_in, block_name) {
-                (Some(m), _) => (module_of(m)?, None),
+                (Some(m), _) => match module_of(m) {
+                    Ok(path) => (path, None),
+                    Err(_) if valid_module_path(m) => {
+                        let dir = if m.rsplit('/').next().unwrap().ends_with("_test") { "test" } else { "src" };
+                        created = Some((m.to_string(), dir));
+                        (m.to_string(), None)
+                    }
+                    Err(e) => return Err(e),
+                },
                 (None, Some(n)) => match self.resolve(&ix, n) {
                     Ok(i) => (ix.syms[i].module.clone(), Some(i)),
                     Err(e) => match n.rsplit_once('.') {
@@ -1248,6 +1269,10 @@ impl Store {
         let mut notes: Vec<String> = vec![];
         self.db.execute_batch("BEGIN")?;
         let result = (|| -> Out {
+            if let Some((path, dir)) = &created {
+                self.db.execute("INSERT INTO modules VALUES (?1, ?2, '')", params![path, dir])?;
+                notes.push(format!("created module {path} ({dir}/{path}.gleam)"));
+            }
             let mut saved: Vec<String> = vec![];
             for (module, existing, item, imports) in &plan {
                 let mut header = self.header(module)?;
@@ -1824,6 +1849,27 @@ mod tests {
                 "{n} lost"
             );
         }
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn submit_new_creates_a_module() {
+        let root = env::temp_dir().join(format!("solace-new-module-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("gleam.toml"), "name = \"app\"\nversion = \"1.0.0\"\n").unwrap();
+        fs::write(root.join("src/app.gleam"), "pub fn main() { 1 }\n").unwrap();
+        import(&root).unwrap();
+        let store = Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root: root.clone() };
+        // Code with errors creates nothing.
+        assert!(store.submit_symbols(None, Some("calc"), "pub fn add(a: Int) -> Int { a <> 1 }").is_err());
+        assert!(!store.is_module("calc").unwrap());
+        let out = store.submit_symbols(None, Some("calc"), "pub fn add(a: Int, b: Int) -> Int { a + b }").unwrap();
+        assert!(out.contains("created module calc (src/calc.gleam)"), "{out}");
+        assert!(store.is_module("calc").unwrap());
+        let out = store.submit_symbols(None, Some("calc_test"), "pub fn add_test() { assert calc.add(1, 2) == 3 }").unwrap();
+        assert!(out.contains("(test/calc_test.gleam)"), "{out}");
+        assert!(store.submit_symbols(None, Some("Bad"), "pub fn x() { 1 }").unwrap_err().0.starts_with("E1003"));
         fs::remove_dir_all(&root).unwrap();
     }
 

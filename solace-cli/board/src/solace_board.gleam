@@ -24,12 +24,34 @@ fn request(
 @external(javascript, "./api.mjs", "events")
 fn events(receive: fn(String) -> Nil) -> Nil
 
+@external(javascript, "./api.mjs", "after")
+fn after(ms: Int, callback: fn() -> Nil) -> Nil
+
+@external(javascript, "./api.mjs", "clock")
+fn clock(seconds: Int) -> String
+
+@external(javascript, "./api.mjs", "markdown")
+fn markdown(text: String) -> String
+
 pub type Column {
   Column(id: String, label: String, actions: List(String), final: Bool)
 }
 
 pub type Note {
-  Note(author: String, text: String)
+  Note(author: String, text: String, time: Int)
+}
+
+/// One step of a run's transcript: a message, thinking, a tool call, token
+/// usage, an error or raw output.
+pub type Entry {
+  Entry(
+    kind: String,
+    text: String,
+    title: String,
+    input: String,
+    output: String,
+    status: String,
+  )
 }
 
 pub type Question {
@@ -44,6 +66,8 @@ pub type Run {
     model: String,
     log: String,
     outcome: String,
+    started: Int,
+    ended: Int,
   )
 }
 
@@ -91,6 +115,8 @@ pub type Model {
     kind: String,
     error: String,
     rank: String,
+    watching: String,
+    entries: List(Entry),
   )
 }
 
@@ -113,7 +139,14 @@ pub type Msg {
   Action(String)
   AddNote
   Answer(String, String)
+  Watch(String)
+  Unwatch
+  TranscriptLoaded(String, String)
+  Refresh(String)
 }
+
+/// While a watched run is going, its transcript is fetched again this often.
+const refresh_ms = 1500
 
 pub fn main() {
   let assert Ok(_) =
@@ -153,6 +186,8 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       "implementation",
       "",
       "0",
+      "",
+      [],
     ),
     effect.batch([
       get("/workflow", WorkflowLoaded),
@@ -166,6 +201,16 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
 fn error(text: String) -> String {
   json.parse(text, decode.at(["message"], decode.string))
   |> result.unwrap("Invalid API response")
+}
+
+fn transcript(model: Model, rid: String) -> Effect(Msg) {
+  case model.selected {
+    Some(t) ->
+      get("/tasks/" <> t.id <> "/runs/" <> rid, fn(text) {
+        TranscriptLoaded(rid, text)
+      })
+    None -> effect.none()
+  }
 }
 
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
@@ -252,7 +297,38 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             Error(_) -> #(model, effect.none())
           }
       }
-    Select(id) -> #(Model(..model, text: ""), get("/tasks/" <> id, TaskLoaded))
+    Select(id) -> #(
+      Model(..model, text: "", watching: "", entries: []),
+      get("/tasks/" <> id, TaskLoaded),
+    )
+    Watch(rid) -> #(
+      Model(..model, watching: rid, entries: []),
+      transcript(model, rid),
+    )
+    Unwatch -> #(Model(..model, watching: "", entries: []), effect.none())
+    Refresh(rid) if rid == model.watching -> #(model, transcript(model, rid))
+    Refresh(_) -> #(model, effect.none())
+    TranscriptLoaded(rid, text) if rid == model.watching -> {
+      let decoder = {
+        use state <- decode.field("state", decode.string)
+        use entries <- decode.field("transcript", decode.list(entry_decoder()))
+        decode.success(#(state, entries))
+      }
+      case json.parse(text, decoder) {
+        Ok(#(state, entries)) -> #(
+          Model(..model, entries: entries),
+          case state {
+            "ended" -> effect.none()
+            _ ->
+              effect.from(fn(send) {
+                after(refresh_ms, fn() { send(Refresh(rid)) })
+              })
+          },
+        )
+        Error(_) -> #(Model(..model, error: error(text)), effect.none())
+      }
+    }
+    TranscriptLoaded(_, _) -> #(model, effect.none())
     AgentSelected(id) -> #(Model(..model, model: id), effect.none())
     Text(text) -> #(Model(..model, text: text), effect.none())
     Title(text) -> #(Model(..model, title: text), effect.none())
@@ -385,7 +461,26 @@ pub fn task_decoder() -> decode.Decoder(Task) {
 fn note_decoder() -> decode.Decoder(Note) {
   use author <- decode.field("author", decode.string)
   use text <- decode.field("text", decode.string)
-  decode.success(Note(author, text))
+  use time <- decode.optional_field("time", 0, decode.int)
+  decode.success(Note(author, text, time))
+}
+
+fn entry_decoder() -> decode.Decoder(Entry) {
+  let text = fn(name, next) {
+    decode.optional_field(
+      name,
+      "",
+      decode.one_of(decode.string, [decode.success("")]),
+      next,
+    )
+  }
+  use kind <- decode.field("kind", decode.string)
+  use body <- text("text")
+  use title <- text("title")
+  use input <- text("input")
+  use output <- text("output")
+  use status <- text("status")
+  decode.success(Entry(kind, body, title, input, output, status))
 }
 
 fn question_decoder() -> decode.Decoder(Question) {
@@ -403,7 +498,9 @@ fn run_decoder() -> decode.Decoder(Run) {
   use model <- decode.field("model", decode.string)
   use log <- decode.field("log", decode.string)
   use outcome <- decode.optional_field("outcome", "", decode.string)
-  decode.success(Run(id, kind, state, model, log, outcome))
+  use started <- decode.optional_field("started", 0, decode.int)
+  use ended <- decode.optional_field("ended", 0, decode.int)
+  decode.success(Run(id, kind, state, model, log, outcome, started, ended))
 }
 
 fn link_decoder() -> decode.Decoder(Link) {
@@ -509,18 +606,12 @@ pub fn view(model: Model) -> Element(Msg) {
             h.button([a.class("card"), e.on_click(Select(t.id))], [
               case t.attention {
                 "" -> h.text("")
-                _ -> h.strong([a.class("attention")], [h.text("Needs attention ")])
+                _ ->
+                  h.strong([a.class("attention")], [h.text("Needs attention ")])
               },
               h.text(t.title),
-              h.small([], [
-                h.text(
-                  t.kind
-                  <> case t.paused {
-                    "" -> ""
-                    _ -> " · paused"
-                  },
-                ),
-              ]),
+              status_badge(t),
+              h.small([], [h.text(t.kind)]),
             ])
           })
         ])
@@ -541,10 +632,12 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
     case t.attention {
       "" -> h.text("")
       reason ->
-        h.p([a.class("attention"), a.role("status")], [
-          h.text("Needs attention: " <> reason),
+        h.div([a.class("attention"), a.role("status")], [
+          h.strong([], [h.text("Needs attention")]),
+          md(reason),
         ])
     },
+    status_badge(t),
     h.div(
       [],
       list.map(t.links, fn(link) {
@@ -603,25 +696,132 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
       }),
     ),
     h.h3([], [h.text("Notes")]),
-    h.ol(
+    h.div(
       [],
       list.map(t.notes, fn(n) {
-        h.li([], [h.strong([], [h.text(n.author <> ": ")]), h.text(n.text)])
-      }),
-    ),
-    h.h3([], [h.text("Runs")]),
-    h.ul(
-      [],
-      list.map(t.runs, fn(r) {
-        h.li([], [
-          h.text(
-            r.kind <> " · " <> r.model <> " · " <> r.state <> " " <> r.outcome,
-          ),
-          h.small([], [h.text(r.log)]),
+        h.article([a.class("note")], [
+          h.header([], [
+            h.strong([], [h.text(n.author)]),
+            h.small([], [h.text(clock(n.time))]),
+          ]),
+          md(n.text),
         ])
       }),
     ),
+    h.h3([], [h.text("Runs")]),
+    h.div([], list.map(list.reverse(t.runs), fn(r) { run_view(model, r) })),
     h.h3([], [h.text("Changes")]),
     h.ul([], list.map(t.changes, fn(c) { h.li([], [h.text(c)]) })),
   ])
+}
+
+/// What the task's agent is doing right now, if one is on it.
+pub fn status(t: Task) -> String {
+  case t.paused, list.find(t.runs, fn(r) { r.state != "ended" }) {
+    _, Error(_) -> ""
+    "", Ok(r) if r.state == "waiting" -> "Waiting for your answer"
+    "", Ok(r) if r.kind == "review" -> "Agent reviewing"
+    "", Ok(_) -> "Agent working"
+    _, Ok(_) -> "Agent paused"
+  }
+}
+
+fn status_badge(t: Task) -> Element(Msg) {
+  case status(t) {
+    "" -> h.text("")
+    s -> {
+      let class = case s {
+        "Agent working" | "Agent reviewing" -> "status working"
+        _ -> "status"
+      }
+      h.span([a.class(class), a.role("status")], [h.text(s)])
+    }
+  }
+}
+
+fn md(text: String) -> Element(Msg) {
+  element.unsafe_raw_html("", "div", [a.class("md")], markdown(text))
+}
+
+fn run_view(model: Model, r: Run) -> Element(Msg) {
+  let watching = model.watching == r.id
+  let when = case r.ended {
+    0 -> "started " <> clock(r.started)
+    ended -> clock(r.started) <> " – " <> clock(ended)
+  }
+  h.article([a.class("run")], [
+    h.header([], [
+      h.strong([], [h.text(r.kind <> " · " <> r.model)]),
+      h.span([a.class("state " <> r.state)], [
+        h.text(case r.state, r.outcome {
+          "ended", "" -> "ended"
+          "ended", outcome -> "ended: " <> outcome
+          state, _ -> state
+        }),
+      ]),
+      case watching {
+        True -> button("Hide activity", Unwatch)
+        False ->
+          button(
+            case r.state {
+              "ended" -> "Show activity"
+              _ -> "Follow live"
+            },
+            Watch(r.id),
+          )
+      },
+    ]),
+    h.small([], [h.text(when <> " · log: " <> r.log)]),
+    case watching {
+      False -> h.text("")
+      True ->
+        case model.entries {
+          [] -> h.p([a.class("muted")], [h.text("No activity yet.")])
+          entries ->
+            h.div([a.class("transcript")], list.map(entries, entry_view))
+        }
+    },
+  ])
+}
+
+fn entry_view(e: Entry) -> Element(Msg) {
+  case e.kind {
+    "message" -> h.div([a.class("entry message")], [md(e.text)])
+    "thinking" ->
+      h.details([a.class("entry thinking")], [
+        h.summary([], [h.text("Thinking")]),
+        md(e.text),
+      ])
+    "tool" ->
+      h.details([a.class("entry tool " <> e.status)], [
+        h.summary([], [
+          h.span([a.class("icon")], [
+            h.text(case e.status {
+              "ok" -> "✓"
+              "failed" -> "✗"
+              _ -> "…"
+            }),
+          ]),
+          h.code([], [h.text(e.title)]),
+        ]),
+        case e.input {
+          "" -> h.text("")
+          input -> h.pre([a.class("input")], [h.text(input)])
+        },
+        h.pre([], [
+          h.text(case e.status, e.output {
+            "running", _ -> "Running…"
+            _, "" -> "(no output)"
+            _, output -> output
+          }),
+        ]),
+      ])
+    "usage" -> h.small([a.class("entry")], [h.text(e.text)])
+    "error" -> h.p([a.class("entry"), a.role("alert")], [h.text(e.text)])
+    _ ->
+      h.details([a.class("entry")], [
+        h.summary([], [h.text("Output")]),
+        h.pre([], [h.text(e.text)]),
+      ])
+  }
 }

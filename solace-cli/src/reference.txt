@@ -8,6 +8,10 @@ modules such as `pilot/checkout_test`.
 
 Several commands can go in one tool call, one per line; they run in order.
 
+Solace is your only way to work on the project. When it can't do something the
+task needs (a file you may not write, a command that isn't declared), don't
+work around it: ask with `task ask`, or say so in your summary.
+
 Reading (the symbol list above usually tells you what to inspect; ask for
 several symbols in one call rather than one at a time). Read symbols, not
 modules: `inspect a b c --context`. Use `--bodies` only for a module you will
@@ -36,7 +40,9 @@ Changing (the new code is the tool's `text` argument; from a shell, stdin)
   solace submit <name> --replace  change one part of a symbol: `old` is the
                                   exact current text (must occur once), `text`
                                   its replacement; the whole symbol is checked
-  solace submit --new <module>    add a symbol to a module
+  solace submit --new <module>    add a symbol to a module; a module that doesn't
+                                  exist yet is created (under test/ if its name
+                                  ends in `_test`, otherwise src/)
   solace submit                   several symbols at once, checked together
                                   (e.g. a type and its callers): blocks each
                                   headed `// ── <module>.<name> ──`, as view

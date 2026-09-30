@@ -108,8 +108,9 @@ Two rules hold for every workflow:
 | Request | Effect |
 | --- | --- |
 | `GET /workflow` | Columns and their actions, as configured, so a board can draw itself |
-| `GET /tasks` | All tasks, without `notes`, `runs` and `changes` |
+| `GET /tasks` | All tasks, without `notes` and `changes`. `runs` are included so a board can show which tasks have an agent working |
 | `GET /tasks/{id}` | One task, in full |
+| `GET /tasks/{id}/runs/{rid}` | The run, plus `transcript`: the agent's log read into entries `{kind, text?, title?, input?, output?, status?}`. `kind` is `message`, `thinking`, `tool` (with `status` `running`, `ok` or `failed`), `usage`, `error` or `output` (lines that aren't agent events). A board fetches it again while the run is going (§6) |
 | `POST /tasks` `{title, body, type?, links?}` | Creates a task at the end of the first column. `type` defaults to the first configured type |
 | `PATCH /tasks/{id}` `{title?, body?, links?, rank?}` | Edits a task. Refused while a run is going (`E7003`) or in a final column (`E7004`) |
 | `POST /tasks/{id}/actions` `{action, model?, text?}` | §2. Returns 200 with the task, or 409 with `E7001` (not allowed here; `allowed` lists what is) or `E7002`–`E7008` (`E7007`, `E7008`: a revert blocked by a later task) |
@@ -142,20 +143,20 @@ When a task reaches a final column, the records of the state before it are dropp
 - **Models** come from the Solace system configuration, not the project: built-in presets for the current major Codex and Claude models (`src/default-models.toml`), plus entries in `~/.config/solace/config.toml` (or `$SOLACE_CONFIG`). An entry with a preset's `id` replaces it, and `presets = false` hides the presets. Each has an `id`, a `label`, an `agent` (`codex` or `claude`), and a `model`, with an optional Codex `effort`. An action that doesn't name a model uses the task's `model`.
 - **Endpoints.** A model may name an `endpoint = {kind, base_url, key_env?}`. `kind = "openai"` goes with `agent = "codex"` and is passed to Codex as a custom provider using the Responses API. `kind = "anthropic"` goes with `agent = "claude"` and is passed to Claude Code as `ANTHROPIC_BASE_URL`, plus `ANTHROPIC_AUTH_TOKEN` taken from `key_env`. Solace stores no credentials: agents use their own sign-in, and endpoint keys are read from the named environment variable when the agent starts. A mismatched kind is `E6020`.
 - **Availability.** `/models` marks a model unavailable, with the reason, when its agent program isn't on `PATH`, when the agent isn't signed in, or when the endpoint's `key_env` isn't set. Only local things are checked, so the check costs nothing. Starting a run on an unavailable model is refused (`E7011`), and the task stays where it is.
-- **Attention.** Solace sets `attention` when a task needs a human: an agent asked a question, a run failed (the note includes the last lines of the agent's output), or the server restarted while an agent was working. It is cleared by the next successful action request on the task.
-- A **work run** starts the agent with Spec 14 §5's configuration. Its prompt holds the task's title, body, type, links, notes and answered questions. On top of Spec 14, the agent's Solace tool gets:
+- **Attention.** Solace sets `attention` when a task needs a human: an agent asked a question, a run failed (the note includes the agent's last message, or else the end of its output), or the server restarted while an agent was working. It is cleared by the next successful action request on the task.
+- A **work run** starts the agent with Spec 14 §5's configuration. Its prompt is plain text, not the task's JSON: what the run is for and how to start, ask and finish, then the task's title, body, links, notes and questions with their answers. The task's type decides the role line (read-only for a type that doesn't write). On top of Spec 14, the agent's Solace tool gets:
   - `task note <text>`: adds an agent note;
   - `task ask` (`text`, 2–4 `options`): adds a question and fires `asked`. **The agent waits:** the call returns only when a human continues the task with `unblock`, and its result is the answers and any `text`. The run keeps its context. `new_agent` instead ends it and starts a fresh one, which gets the notes and answers in its prompt;
   - `task done <summary>`: adds the summary as a note, fires `finished`, and ends the run.
 - A work run on a task whose type doesn't write is read-only like a review run: `write`, `submit`, `remove` and `run` are refused (`E7010`), and its `task done` summary is the result.
-- A **review run** gets the same prompt plus the task's `changes`. It is read-only (`E7010`), ends by adding its feedback with `task note`, and fires no event.
+- A **review run** gets the same prompt plus the names of the task's `changes`. It is read-only (`E7010`), ends by adding its feedback with `task note`, and fires no event.
 - A run past the task timeout (a system setting; default 60 min) is stopped and fires `failed`. Time spent waiting on a question or paused doesn't count.
 - **Keeping an agent waiting** depends on the agent's tool-call timeout. `agent-config` (Spec 14 §5) sets it to the task timeout or more (Codex: the MCP server's `tool_timeout_sec`; Claude Code: `MCP_TOOL_TIMEOUT`). If the agent gives up anyway, the run fires `failed`, and the task continues with a new agent.
-- Each run records `log`, the path of the agent's own session log. A view that lets a human go from a task to watching its agent work or reading its context is planned but out of scope here (D-19).
+- Each run records `log`, the path of the agent's own session log. `GET /tasks/{id}/runs/{rid}` reads it (Codex `exec --json` or Claude Code `stream-json`) into a transcript, so a human can follow the agent's work live or read it afterwards. The view is read only (D-19, D-24).
 
 ## 7. Out of scope
 
-Several projects on one server, several people, remote access and authentication, and more than one work run per project at a time. The view of a running agent, and asking it side questions that don't disturb its work (D-19).
+Several projects on one server, several people, remote access and authentication, and more than one work run per project at a time. Asking a running agent side questions that don't disturb its work (D-19).
 
 ## Tests (acceptance)
 
@@ -170,6 +171,7 @@ Several projects on one server, several people, remote access and authentication
 - A7b. After a task deletes a symbol and edits another, `find`, `inspect`, `view`, `refs` and `session start --task` show no trace of the deleted symbol's earlier text or of the edited symbol's old text, and give the same output as a store with no before-state records.
 - A8. After `pause`, the agent's next Solace call is held and its process stays alive. `resume` releases the call and returns the task to `paused_from`. Time paused doesn't count toward the task timeout.
 - A12. `/models` includes the presets and reports a model whose program is missing as unavailable, with a reason. Assigning it returns `E7011` and leaves the task in its column. A failed run and an agent's question each set `attention`, and the next action clears it.
+- A13. A Codex log and a Claude Code log each give a transcript with the agent's messages in order and each tool call's command, output and status. A run that exits without finishing sets `attention` with the agent's last message rather than raw log lines. The default board shows which tasks have an agent working, formats notes and messages as markdown with any HTML escaped, and refreshes a followed run's transcript until it ends.
 - A9. A review run's `write` or `submit` returns `E7010`, and the task stays in its column. So does a work run on an `investigation` task, whose `task done` summary appears on the task.
 - A10. `/events` delivers every change in order, and a reconnect with `Last-Event-ID` returns the missed ones.
 - A11. The default board's only connection to Solace is this API: it runs against a stub server implementing §4 and passes its own tests there. Every file command on `.solace/board/` returns `E6006`.

@@ -23,7 +23,19 @@ The benchmark harness (`bench/`), the pilots (`pilot/`, `pilot-large/`) and the 
 
 Nothing else is needed at run time: the board's web client is built into the binary.
 
+## Build
+
+From the repository root:
+
+```sh
+cargo build --release --manifest-path solace-cli/Cargo.toml
+```
+
+The deliverable is the single file `solace-cli/target/release/solace`. The store (SQLite), the board's web client and the guide are all built into it, and it links only to the system C library. Copy it anywhere on the target machine's `PATH`. It runs on the platform it was built for, so build on (or for) each platform you ship to. Building needs only Cargo: the board's web client is committed prebuilt, so Gleam and Bun aren't needed unless you change the board.
+
 ## Install
+
+To build and install in one step:
 
 ```sh
 cargo install --path solace-cli
@@ -33,7 +45,14 @@ This puts `solace` in `~/.cargo/bin`. Use `cargo install --path solace-cli --roo
 
 ## Use it on a project
 
-In the Gleam project's directory:
+Solace wraps an existing Gleam project, and doesn't create one. It needs the project's `gleam.toml` because it runs `gleam` to check, test and build the code, and that file names the project and its dependencies. To start a new project, create it with Gleam first:
+
+```sh
+gleam new my_app
+cd my_app
+```
+
+Then, in the Gleam project's directory:
 
 ```sh
 solace import        # once: loads the project's Gleam code into .solace/store.db
@@ -41,7 +60,7 @@ solace check         # type-check the project from the store
 solace serve         # start the task board on http://127.0.0.1:3030 (--port to change it)
 ```
 
-Open the board, create a task, move it to planning, and assign it to a model. Solace starts the agent, puts the agent's notes and questions on the task, and moves the task to *blocked* when the agent needs an answer or to *needs review* when it has finished. A task that is waiting on you is marked *Needs attention*, with the reason. The board's **Guide** link (`/guide`) explains the whole workflow for humans. The guide is built into the binary.
+Open the board, create a task, move it to planning, and assign it to a model. Solace starts the agent, puts the agent's notes and questions on the task, and moves the task to *blocked* when the agent needs an answer or to *needs review* when it has finished. A task that is waiting on you is marked *Needs attention*, with the reason. Cards show which tasks have an agent working, and each run on a task can be followed live: the agent's messages, and each command it runs with its result. The board's **Guide** link (`/guide`) explains the whole workflow for humans. The guide is built into the binary.
 
 ### Models
 

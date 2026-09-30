@@ -647,7 +647,7 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
         ("GET", ["tasks"]) => {
             let mut ts = tasks(root)?;
             for t in &mut ts {
-                for k in ["notes", "runs", "changes"] {
+                for k in ["notes", "changes"] {
                     t.as_object_mut().unwrap().remove(k);
                 }
             }
@@ -671,6 +671,11 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
             let mut t = task(root, tid)?;
             match (method, rest) {
                 ("GET", []) => return Ok(t),
+                ("GET", ["runs", rid]) => {
+                    let mut run = t["runs"].as_array().unwrap().iter().find(|r| r["id"] == *rid).cloned().ok_or_else(|| Failure("E7001 unknown run".into(), 1))?;
+                    run["transcript"] = json!(transcript(Path::new(run["log"].as_str().unwrap_or(""))));
+                    return Ok(run);
+                }
                 ("PATCH", []) => {
                     if active(&t) {
                         return err("E7003", "run going");
@@ -744,6 +749,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Fai
     let binary = env::current_exe()?;
     let config = system()?;
     let timeout = config["task_timeout"].as_u64().unwrap_or(3600);
+    let w = workflow(&lockdown::settings(root)?)?;
     let agent = m["agent"].as_str().unwrap_or("codex");
     let launch: Value = serde_json::from_str(&lockdown::agent_config(agent, &dir, &binary, timeout)?).unwrap();
     let custom = m["run"].as_array();
@@ -806,16 +812,8 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Fai
     }
     cmd.env("SOLACE_TASK", tid).env("SOLACE_RUN", rid).env("SOLACE_SESSION", rid).env("SOLACE_BIN", &binary);
     let mut child = cmd.spawn()?;
-    let mut prompt = t.clone();
-    if run["kind"] != "review" {
-        prompt.as_object_mut().unwrap().remove("changes");
-    }
-    let instruction = if run["kind"] == "review" {
-        "Read-only review. Finish with task note <feedback>."
-    } else {
-        "Use only the Solace MCP tool. Ask with task ask (text and 2–4 options); finish with task done <summary>."
-    };
-    writeln!(child.stdin.take().unwrap(), "{instruction}\n{prompt}")?;
+    let writes = w["types"][t["type"].as_str().unwrap()]["writes"] != false;
+    writeln!(child.stdin.take().unwrap(), "{}", brief(t, run["kind"] == "review", writes))?;
     let mut elapsed = Duration::ZERO;
     let mut last = Instant::now();
     loop {
@@ -837,22 +835,174 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Fai
             return Ok(());
         }
         if let Some(status) = child.try_wait()? {
-            let output = fs::read_to_string(&log).unwrap_or_default();
-            let lines: Vec<&str> = output.lines().rev().take(5).collect();
-            let mut tail: String = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
-            if tail.len() > 1000 {
-                let cut = (tail.len() - 1000..tail.len()).find(|&i| tail.is_char_boundary(i)).unwrap();
-                tail = tail[cut..].to_string();
-            }
-            let message = if tail.trim().is_empty() {
-                format!("agent exited without finishing ({status})")
-            } else {
-                format!("agent exited without finishing ({status}). Last output:\n{tail}")
+            let message = match last_words(&transcript(&log)) {
+                Some(said) => format!("agent exited without finishing ({status}). Its last message:\n\n{said}"),
+                None => format!("agent exited without finishing ({status})"),
             };
             finish(root, tid, rid, Some(&message))?;
             return Ok(());
         }
     }
+}
+/// An agent's prompt: what its run is for, how to start, ask and finish, then
+/// what it needs from the task (Spec 15 §6), as plain text.
+fn brief(t: &Value, review: bool, writes: bool) -> String {
+    let start = "Start with `session start --task`, with the task's title and description as `text`.";
+    let ask = "If you need a decision from the human, ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer.";
+    let role = if review {
+        "Review the changes this task made (listed below) and give feedback. You can't change the project in this run. Finish with `task note <feedback>`.".to_string()
+    } else if writes {
+        format!("Make the change this task describes. {start} {ask} Finish with `task done <summary>`: what you changed and how you checked it.")
+    } else {
+        format!("This task is an investigation: find out what it asks and report. Don't change the project; changes are refused in this run. {start} {ask} Finish with `task done <report>`.")
+    };
+    let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
+    let mut out = format!(
+        "You are working on a task from this project's task board. You work only through the Solace tool: there is no shell and no file access.\n{role}\n\nTask: {}\n",
+        text(&t["title"])
+    );
+    if !text(&t["body"]).is_empty() {
+        out += &format!("\n{}\n", text(&t["body"]));
+    }
+    let mut section = |title: &str, lines: Vec<String>| {
+        if !lines.is_empty() {
+            out += &format!("\n{title}:\n{}\n", lines.join("\n"));
+        }
+    };
+    let list = |k: &str| t[k].as_array().cloned().unwrap_or_default();
+    section("Links", list("links").iter().map(|l| format!("- {}: {}", text(&l["name"]), text(&l["url"]))).collect());
+    section("Notes so far", list("notes").iter().map(|n| format!("- {}: {}", text(&n["author"]), text(&n["text"]))).collect());
+    section(
+        "Questions",
+        list("questions")
+            .iter()
+            .map(|q| match q["answer"].as_str() {
+                Some(a) => format!("- {}\n  Answer: {a}", text(&q["text"])),
+                None => format!("- {}\n  (not answered yet)", text(&q["text"])),
+            })
+            .collect(),
+    );
+    if review {
+        section("Changes to review", list("changes").iter().map(|c| format!("- {}", text(&c["name"]))).collect());
+    }
+    out
+}
+/// The agent's last message, else its last error or output, cut to 1000 bytes.
+fn last_words(entries: &[Value]) -> Option<String> {
+    let last = |kind: &str| entries.iter().rev().find(|e| e["kind"] == kind).and_then(|e| e["text"].as_str());
+    let text = last("message").or_else(|| last("error")).or_else(|| last("output"))?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let cut = (text.len().saturating_sub(1000)..=text.len()).find(|&i| text.is_char_boundary(i)).unwrap();
+    Some(if cut > 0 { format!("…{}", &text[cut..]) } else { text.to_string() })
+}
+fn text_of(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a.iter().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n"),
+        Value::Null => String::new(),
+        v => v.to_string(),
+    }
+}
+/// A tool call's input for display: the command first, then any other arguments.
+fn tool_input(args: &Value) -> (String, String) {
+    let command = args["command"].as_str().unwrap_or("").to_string();
+    let rest = match args {
+        Value::Object(m) => m
+            .iter()
+            .filter(|(k, _)| *k != "command")
+            .map(|(k, v)| format!("{k}:\n{}", v.as_str().map(String::from).unwrap_or_else(|| v.to_string())))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        _ => String::new(),
+    };
+    (command, rest)
+}
+/// Reads an agent's log (Codex `exec --json` or Claude Code `stream-json`) into
+/// entries a board can show: message, thinking, tool, usage, error or output.
+// ponytail: rereads the whole log per request; keep an offset if logs get large.
+pub fn transcript(log: &Path) -> Vec<Value> {
+    let mut out: Vec<Value> = vec![];
+    let mut tools: HashMap<String, usize> = HashMap::new();
+    let text = fs::read_to_string(log).unwrap_or_default();
+    for line in text.lines() {
+        let Ok(e) = serde_json::from_str::<Value>(line) else {
+            if line.trim().is_empty() {
+                continue;
+            }
+            match out.last_mut() {
+                Some(last) if last["kind"] == "output" => last["text"] = json!(format!("{}\n{line}", last["text"].as_str().unwrap())),
+                _ => out.push(json!({"kind":"output","text":line})),
+            }
+            continue;
+        };
+        let item = &e["item"];
+        match (e["type"].as_str().unwrap_or(""), item["type"].as_str().unwrap_or("")) {
+            // Codex
+            ("item.started" | "item.updated" | "item.completed", "mcp_tool_call") => {
+                let (command, input) = tool_input(&item["arguments"]);
+                let status = match item["status"].as_str() {
+                    Some("completed") => "ok",
+                    Some("failed") => "failed",
+                    _ => "running",
+                };
+                let output = if item["error"].is_null() { text_of(&item["result"]["content"]) } else { text_of(&item["error"]["message"]) };
+                let entry = json!({"kind":"tool","title":format!("{} {command}", item["tool"].as_str().unwrap_or("tool")),"input":input,"output":output,"status":status});
+                let id = item["id"].as_str().unwrap_or("").to_string();
+                match tools.get(&id) {
+                    Some(&i) => out[i] = entry,
+                    None => {
+                        tools.insert(id, out.len());
+                        out.push(entry);
+                    }
+                }
+            }
+            ("item.completed", "agent_message") => out.push(json!({"kind":"message","text":item["text"]})),
+            ("item.completed", "reasoning") => out.push(json!({"kind":"thinking","text":item["text"]})),
+            ("item.completed", "web_search") => out.push(json!({"kind":"tool","title":format!("web search {}", item["query"].as_str().unwrap_or("")),"input":"","output":"","status":"ok"})),
+            ("item.completed", "error") => out.push(json!({"kind":"error","text":item["message"]})),
+            ("turn.completed", _) => {
+                let u = &e["usage"];
+                out.push(json!({"kind":"usage","text":format!("{} input tokens ({} cached), {} output tokens", u["input_tokens"], u["cached_input_tokens"], u["output_tokens"])}));
+            }
+            ("error", _) => out.push(json!({"kind":"error","text":e["message"]})),
+            ("turn.failed", _) => out.push(json!({"kind":"error","text":e["error"]["message"]})),
+            // Claude Code
+            ("assistant", _) => {
+                for c in e["message"]["content"].as_array().unwrap_or(&vec![]) {
+                    match c["type"].as_str() {
+                        Some("text") => out.push(json!({"kind":"message","text":c["text"]})),
+                        Some("thinking") => out.push(json!({"kind":"thinking","text":c["thinking"]})),
+                        Some("tool_use") => {
+                            let (command, input) = tool_input(&c["input"]);
+                            let name = c["name"].as_str().unwrap_or("tool").trim_start_matches("mcp__solace__");
+                            tools.insert(c["id"].as_str().unwrap_or("").to_string(), out.len());
+                            out.push(json!({"kind":"tool","title":format!("{name} {command}"),"input":input,"output":"","status":"running"}));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            ("user", _) => {
+                for c in e["message"]["content"].as_array().unwrap_or(&vec![]) {
+                    if let Some(&i) = c["tool_use_id"].as_str().and_then(|id| tools.get(id)) {
+                        out[i]["output"] = json!(text_of(&c["content"]));
+                        out[i]["status"] = json!(if c["is_error"] == true { "failed" } else { "ok" });
+                    }
+                }
+            }
+            ("result", _) => {
+                let u = &e["usage"];
+                out.push(json!({"kind":"usage","text":format!("{} input tokens ({} cached), {} output tokens", u["input_tokens"], u["cache_read_input_tokens"], u["output_tokens"])}));
+                if e["is_error"] == true {
+                    out.push(json!({"kind":"error","text":text_of(&e["result"])}));
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 fn finish(root: &Path, tid: &str, rid: &str, failure: Option<&str>) -> Result<(), Failure> {
     let _guard = lock(root)?;
@@ -1145,6 +1295,52 @@ mod tests {
         assert_eq!(provider["p"]["env_key"].as_str(), Some("SOLACE_TEST_UNSET_KEY"));
         assert_eq!(provider["p"]["wire_api"].as_str(), Some("responses"));
         assert!(endpoint_args(&json!({"label":"No endpoint"})).is_empty());
+    }
+
+    #[test]
+    fn transcripts_read_codex_and_claude_logs() {
+        let log = env::temp_dir().join(format!("{}.jsonl", id()));
+        let codex = [
+            json!({"type":"item.started","item":{"id":"i1","type":"mcp_tool_call","tool":"solace","arguments":{"command":"view a"},"status":"in_progress"}}),
+            json!({"type":"item.completed","item":{"id":"i1","type":"mcp_tool_call","tool":"solace","arguments":{"command":"view a","text":"x"},"result":{"content":[{"type":"text","text":"pub fn a()"}]},"status":"completed"}}),
+            json!({"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"All **done**."}}),
+            json!({"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}),
+        ];
+        let text = codex.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n") + "\nnot json\nstill not\n";
+        fs::write(&log, text).unwrap();
+        let t = transcript(&log);
+        let kinds: Vec<&str> = t.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["tool", "message", "usage", "output"]);
+        assert_eq!((t[0]["title"].as_str(), t[0]["status"].as_str(), t[0]["output"].as_str()), (Some("solace view a"), Some("ok"), Some("pub fn a()")));
+        assert_eq!(t[0]["input"], "text:\nx");
+        assert_eq!(t[3]["text"], "not json\nstill not");
+        assert_eq!(last_words(&t).unwrap(), "All **done**.");
+        let claude = [
+            json!({"type":"assistant","message":{"content":[{"type":"text","text":"Looking."},{"type":"tool_use","id":"u1","name":"mcp__solace__solace","input":{"command":"test"}}]}}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"u1","content":[{"type":"text","text":"E1 failed"}],"is_error":true}]}}),
+        ];
+        fs::write(&log, claude.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+        let t = transcript(&log);
+        assert_eq!((t[1]["title"].as_str(), t[1]["status"].as_str(), t[1]["output"].as_str()), (Some("solace test"), Some("failed"), Some("E1 failed")));
+        assert_eq!(last_words(&[json!({"kind":"message","text":"é".repeat(600)})]).unwrap().chars().count(), 501);
+        fs::remove_file(log).unwrap();
+    }
+
+    #[test]
+    fn briefs_hold_what_the_agent_needs_as_text() {
+        let t = json!({"id":"t1","title":"Add coolcalc","body":"A CLI calculator.","type":"implementation","rank":3,"stamps":{},
+            "links":[{"name":"spec","url":"http://x"}],"notes":[{"author":"human","text":"Keep it small","time":1,"run":null}],
+            "questions":[{"id":"q","text":"Syntax?","options":["a","b"],"answer":"b"}],"runs":[{"id":"r1"}],"changes":[{"entity":"symbol:x","name":"calc.add","run":"r1"}]});
+        let b = brief(&t, false, true);
+        for part in ["Make the change", "`task done <summary>`", "Task: Add coolcalc\n\nA CLI calculator.\n", "- spec: http://x", "- human: Keep it small", "- Syntax?\n  Answer: b"] {
+            assert!(b.contains(part), "{part} missing from:\n{b}");
+        }
+        for noise in ["{", "r1", "rank", "calc.add"] {
+            assert!(!b.contains(noise), "{noise} in:\n{b}");
+        }
+        assert!(brief(&t, false, false).contains("This task is an investigation"));
+        let r = brief(&t, true, true);
+        assert!(r.contains("Changes to review:\n- calc.add") && r.contains("`task note <feedback>`") && !r.contains("task done"));
     }
 
     #[test]

@@ -440,11 +440,12 @@ pub fn dispatch(
             let t = tier(root, v, &name, None);
             if a[0] != "files" && t.starts_with('1') {
                 let module = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/")).unwrap().trim_end_matches(".gleam");
-                return error(
-                    "E6001",
-                    &name,
-                    format!("source is held as symbols; fix: inspect {module}, view {module}, or submit {module}"),
-                );
+                let fix = if p.exists() {
+                    format!("inspect {module}, view {module}, or submit {module}")
+                } else {
+                    format!("create the module by adding a symbol to it: submit --new {module}")
+                };
+                return error("E6001", &name, format!("source is held as symbols; fix: {fix}"));
             }
             match a[0] {
                 "files" => {
@@ -459,7 +460,11 @@ pub fn dispatch(
                 "read" => read(root, &name, &a[2.min(a.len())..], budget),
                 "write" => {
                     if p.exists() && t.starts_with('4') {
-                        return error("E6002", &name, format!("tier 4 is read-only: {t}"));
+                        return error(
+                            "E6002",
+                            &name,
+                            format!("tier {t}: agents can read this file but not write it. A human can make it writable by listing it under `resources` in solace.toml; ask with `task ask` if the task needs it changed"),
+                        );
                     }
                     if t == "settings" {
                         return error("E6002", &name, "settings are human-only; request a decision");
@@ -535,7 +540,7 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
                 config += &format!("{f} = false\n");
             }
             config += &format!(
-                "[mcp_servers.solace]\ncommand = {}\nargs = [\"mcp\", \"--budget\", \"32000\"]\ndefault_tools_approval_mode = \"approve\"\ntool_timeout_sec = {}\n",
+                "[mcp_servers.solace]\ncommand = {}\nargs = [\"mcp\", \"--budget\", \"32000\"]\nenv_vars = [\"SOLACE_TASK\", \"SOLACE_RUN\", \"SOLACE_SESSION\", \"SOLACE_CONFIG\"]\ndefault_tools_approval_mode = \"approve\"\ntool_timeout_sec = {}\n",
                 json!(binary),
                 timeout.max(3600)
             );

@@ -217,3 +217,11 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
   5. **Unavailable agents:** a model whose program, sign-in or key is missing is shown as unavailable with the reason, and assigning it is refused. A task whose agent fails, or which needs an answer, is marked as needing attention, with the reason, until a human next acts on it.
 - **Who/when:** Aaron, 2026-09-29; the attention field and the local-only availability check are by Claude.
 - **Affects:** Spec 15 §1, §4, §6; solace-cli (`board.rs`, `default-models.toml`), the board client
+
+## D-24 Following an agent's work on the board — decided
+- **Answer:**
+  1. **The board shows when an agent is working** on a task, on its card and in its detail.
+  2. **A human can follow a run** as it happens, or read it afterwards: the agent's messages, thinking, and each tool call with its input, output and status, the calls collapsed until opened. It is a view only (D-19).
+  3. **Agent text is formatted:** notes, messages and the attention reason are shown as markdown. A failed run's attention note gives the agent's last message rather than raw log lines.
+- **Who/when:** Aaron, 2026-09-30; the transcript route and its entry format are by Claude.
+- **Affects:** Spec 15 §4, §6, §7 and A13; solace-cli (`board.rs`), the board client and the guide

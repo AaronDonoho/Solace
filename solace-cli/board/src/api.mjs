@@ -11,3 +11,30 @@ export function events(receive) {
   // Native EventSource reconnects with Last-Event-ID.
   source.onerror = () => {};
 }
+export function after(ms, callback) {
+  setTimeout(callback, ms);
+}
+export function clock(seconds) {
+  return seconds ? new Date(seconds * 1000).toLocaleString() : '';
+}
+// Agent text is untrusted: everything is escaped before the few markdown forms
+// (code blocks, headings, lists, `code`, **bold**) are turned into HTML.
+export function markdown(text) {
+  const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const inline = s => escape(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  const out = [];
+  const parts = text.split(/^```[^\n]*\n?/m);
+  parts.forEach((part, i) => {
+    if (i % 2) { out.push(`<pre><code>${escape(part.replace(/\n$/, ''))}</code></pre>`); return; }
+    for (const block of part.split(/\n\s*\n/)) {
+      const lines = block.split('\n').filter(l => l.trim());
+      if (!lines.length) continue;
+      const heading = lines.length === 1 && lines[0].match(/^(#{1,4})\s+(.*)/);
+      if (heading) out.push(`<h4>${inline(heading[2])}</h4>`);
+      else if (lines.every(l => /^\s*[-*]\s+/.test(l))) out.push(`<ul>${lines.map(l => `<li>${inline(l.replace(/^\s*[-*]\s+/, ''))}</li>`).join('')}</ul>`);
+      else if (lines.every(l => /^\s*\d+[.)]\s+/.test(l))) out.push(`<ol>${lines.map(l => `<li>${inline(l.replace(/^\s*\d+[.)]\s+/, ''))}</li>`).join('')}</ol>`);
+      else out.push(`<p>${lines.map(inline).join('<br>')}</p>`);
+    }
+  });
+  return out.join('');
+}

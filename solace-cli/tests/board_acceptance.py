@@ -140,7 +140,7 @@ class Board(unittest.TestCase):
         t=self.assign([{'command':'task ask','text':'Again?','options':['a','b']},{'command':'task done answered'}]);t=self.wait(t,lambda x:x['column']=='blocked');old=t['runs'][-1]['id']
         t=self.action(t,'new_agent',text='b');new=t['runs'][-1]['id'];self.assertNotEqual(old,new)
         self.wait(t,lambda x:len(x['questions'])==2)
-        prompt=(self.root/'.solace'/(new+'.prompt')).read_text();self.assertEqual(json.loads(prompt.split("\n",1)[1])["questions"][0]["answer"],"b")
+        prompt=(self.root/'.solace'/(new+'.prompt')).read_text();self.assertIn("Answer: b",prompt);self.assertNotIn('"runs"',prompt)
         self.action(t,'unblock',text='b');self.wait(t,lambda x:x['column']=='needs_review')
     def test_a6_revert_a7b_invisible(self):
         self.cli('build') # canonical projection before comparing byte for byte
@@ -178,8 +178,13 @@ class Board(unittest.TestCase):
         t=self.assign([{'sleep':.4},{'command':'task note alive'},{'command':'task done done'}]);self.action(t,'pause');time.sleep(2.3)
         current=self.get(t);self.assertEqual(current['runs'][-1]['state'],'running');self.assertFalse(current['notes']);self.assertEqual(current['paused_from'],'assigned')
         self.action(t,'resume');self.wait(t,lambda x:x['column']=='needs_review')
+        before=self.cli('view','app.one')
         steps=[{'command':'write priv/new','text':'no'},{'command':'submit app.one','text':'pub fn one() { 100 }'},{'command':'task done report'}]
         t=self.assign(steps,'investigation');t=self.wait(t,lambda x:x['column']=='needs_review');self.assertEqual(t['notes'][-1]['text'],'report');self.assertFalse(t['changes'])
+        prompt=(self.root/'.solace'/(t['runs'][-1]['id']+'.prompt')).read_text()
+        self.assertIn('This task is an investigation',prompt)
+        self.assertIn("Don't change the project",prompt)
+        self.assertEqual(before,self.cli('view','app.one'));self.assertFalse((self.root/'priv/new').exists())
         responses=(self.root/'.solace'/(t['runs'][-1]['id']+'.responses')).read_text();self.assertEqual(responses.count('E7010'),2)
         review=self.create([*steps[:2],{'command':'task note review report'}]);self.action(review,'plan');self.action(review,'review',model='fake');review=self.wait(review,lambda x:x['runs'] and x['runs'][-1]['state']=='ended');self.assertEqual(review['column'],'planning')
         self.assertEqual(review['notes'][-1]['text'],'review report')

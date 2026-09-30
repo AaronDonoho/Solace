@@ -40,13 +40,17 @@ table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid 
 <tr><td>Needs review</td><td>The agent says it's finished</td><td>Approve it, then complete it; ask for an agent review; start over; or cancel it</td></tr>
 <tr><td>Done, Cancelled</td><td>Finished either way</td><td>Nothing</td></tr>
 </table>
+<p>A task with an agent on it says so on its card: <em>Agent working</em>, <em>Waiting for your answer</em> or <em>Agent paused</em>.</p>
 <p>You can pause any task that isn't finished, and resume it later. A paused agent stops at its next step and keeps what it knows.</p>
 <p>A task can't be completed until you approve it. If you move an approved task anywhere else, for example by starting over, it loses the approval.</p>
 <p>You can change the columns and what's allowed in each in the project's <code>solace.toml</code> (see Settings below).</p>
 
 <h3>Questions and attention</h3>
 <p>When an agent needs a decision, it asks a question with a few options, and the task moves to Blocked. The agent waits, keeping everything it has learned so far. Pick an option or type an answer, then <em>unblock</em> the task, and the same agent carries on. If you'd rather start fresh, <em>new agent</em> starts another one, which gets the task's notes and your answers.</p>
-<p>A task marked <strong>Needs attention</strong> is waiting on you. That happens when an agent asks a question, when an agent stops unexpectedly (it crashed, ran out of time, lost its connection, or its model became unavailable), or when Solace was restarted while an agent was working. The reason is shown on the task, together with the agent's last output when there is some. The mark goes away when you next act on the task. To continue, unblock it or start a new agent, and choose a different model if the first one isn't working.</p>
+<p>A task marked <strong>Needs attention</strong> is waiting on you. That happens when an agent asks a question, when an agent stops unexpectedly (it crashed, ran out of time, lost its connection, or its model became unavailable), or when Solace was restarted while an agent was working. The reason is shown on the task, together with the agent's last message when there is one. The run's activity shows everything that led up to it. The mark goes away when you next act on the task. To continue, unblock it or start a new agent, and choose a different model if the first one isn't working.</p>
+
+<h3>Following an agent</h3>
+<p>Every run of an agent is listed under <em>Runs</em> on the task, newest first. <em>Follow live</em> shows what the agent is doing as it happens: its messages, its thinking, and each Solace command it runs. Open a command to see what it sent and what came back; a ✗ marks a command that failed. <em>Show activity</em> does the same for a run that has ended. It's a view only, so you can't interrupt or talk to the agent from it. Use a note, an answer or pause for that.</p>
 
 <h3>Undoing a task</h3>
 <p><em>Cancel</em> and <em>start over</em> undo everything the task changed, bringing the code and resource files back to how they were before it started. Solace refuses to undo a task when that would affect another open task: if a later task changed the same code, or depends on something this task added. The refusal names the other task, so you can undo that one first or leave things as they are.</p>
@@ -116,6 +120,5 @@ smoke = { run = ["gleam", "run", "-m", "smoke"], timeout = 60 }</pre>
 <li>One agent works on a project at a time. While one is working, assigning another task is refused.</li>
 <li>Tasks that are still open aren't kept apart: a later task sees the unapproved changes of earlier ones.</li>
 <li>The board runs on your machine only, for one person, with no sign-in.</li>
-<li>There's no view yet for watching an agent work. Each run records where the agent's own log is.</li>
 </ul>
 </body></html>
