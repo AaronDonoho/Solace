@@ -91,7 +91,7 @@ An entry with the same `id` as a built-in model replaces it. `key_env` names the
 
 ### Project settings
 
-A `solace.toml` in the project root holds the project's Solace settings. `solace import` creates a starter file if absent and preserves existing settings. Only humans edit it; agents can read it but not change it. Everything in it is optional.
+A `solace.toml` in the project root holds the project's Solace settings. `solace import` creates a starter file if absent and preserves existing settings. Rerunning it on an imported project creates missing settings without reimporting or replacing stored symbols. Only humans edit it; agents can read it but not change it. Everything in it is optional.
 
 ```toml
 resource_limit = 262144                   # bytes; larger files can't be resources

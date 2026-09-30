@@ -408,9 +408,30 @@ fn import(root: &Path) -> Out {
     if !root.join("gleam.toml").exists() {
         return usage("Run `solace import` in a Gleam project (no gleam.toml here).");
     }
+    let mut out = String::new();
+    match fs::OpenOptions::new().write(true).create_new(true).open(root.join("solace.toml")) {
+        Ok(mut file) => {
+            file.write_all(b"# Solace project settings. Human-owned; agents may read this file.\n\
+# File writes are limited to this many bytes.\n\
+resource_limit = 262144\n\
+# Classification only: unlisted files are also readable and writable.\n\
+resources = []\n\
+ignore = []\n\n\
+[validators]\n\
+# Optional checks, for example:\n\
+# \"docs/**/*.json\" = [\"python3\", \"-m\", \"json.tool\", \"{file}\"]\n\n\
+[commands]\n\
+# Optional commands agents may run, for example:\n\
+# app = { run = [\"gleam\", \"run\", \"--\"], args = true }\n")?;
+            out += "Created solace.toml with default settings.\n";
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.into()),
+    }
     let dir = root.join(".solace");
     if dir.join("store.db").exists() {
-        return fail("This project already has a store (.solace/store.db).");
+        out += "This project already has a store (.solace/store.db); existing symbols were preserved.\n";
+        return Ok(out);
     }
     fs::create_dir_all(&dir)?;
     let db = Connection::open(dir.join("store.db"))?;
@@ -436,26 +457,7 @@ fn import(root: &Path) -> Out {
             modules += 1;
         }
     }
-    let mut out = format!("Imported {modules} modules, {symbols} symbols into .solace/store.db\n");
-    match fs::OpenOptions::new().write(true).create_new(true).open(root.join("solace.toml")) {
-        Ok(mut file) => {
-            file.write_all(b"# Solace project settings. Human-owned; agents may read this file.\n\
-# File writes are limited to this many bytes.\n\
-resource_limit = 262144\n\
-# Classification only: unlisted files are also readable and writable.\n\
-resources = []\n\
-ignore = []\n\n\
-[validators]\n\
-# Optional checks, for example:\n\
-# \"docs/**/*.json\" = [\"python3\", \"-m\", \"json.tool\", \"{file}\"]\n\n\
-[commands]\n\
-# Optional commands agents may run, for example:\n\
-# app = { run = [\"gleam\", \"run\", \"--\"], args = true }\n")?;
-            out += "Created solace.toml with default settings.\n";
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e.into()),
-    }
+    out += &format!("Imported {modules} modules, {symbols} symbols into .solace/store.db\n");
     Ok(out)
 }
 
@@ -1892,6 +1894,14 @@ mod tests {
                 assert_eq!(lockdown::settings(&root).unwrap()["resource_limit"].as_integer(), Some(262144));
                 assert!(lockdown::settings(&root).unwrap()["commands"].as_table().unwrap().is_empty());
             }
+            let store = fs::read(root.join(".solace/store.db")).unwrap();
+            assert!(import(&root).unwrap().contains("existing symbols were preserved"));
+            assert_eq!(fs::read_to_string(root.join("solace.toml")).unwrap(), text);
+            fs::remove_file(root.join("solace.toml")).unwrap();
+            fs::write(root.join("src/app.gleam"), "pub fn changed_on_disk() { 2 }\n").unwrap();
+            assert!(import(&root).unwrap().contains("Created solace.toml"));
+            assert!(lockdown::settings(&root).is_ok());
+            assert_eq!(fs::read(root.join(".solace/store.db")).unwrap(), store);
             fs::remove_dir_all(root).unwrap();
         }
     }

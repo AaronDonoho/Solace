@@ -239,6 +239,27 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
 
 ## D-26 Tier 4 is writable; import creates project settings — decided
 - **Answer:** Tier 4 files are readable and writable through Solace; being ignored excludes them from symbol search, not file editing. `README.md` and new files such as `bin/coolcalc` require no `resources` entry. This supersedes the tier-4 read-only rule in D-16.10 and Spec 14. Source still uses the symbol protocol; `.solace/` remains inaccessible and `solace.toml` remains human-owned. The existing text-write size limit, stale-write checks, matching validators and task undo apply to direct tier-4 edits as well. Text replacement refuses non-UTF-8 input rather than silently changing its bytes.
-- **Import:** Create a starter `solace.toml` when absent, preserving any existing configuration. Its examples explain classification and optional validators/commands; they grant no additional command execution by default.
+- **Import:** Create a starter `solace.toml` when absent, preserving any existing configuration. Rerunning import on an existing store succeeds and creates missing settings without reimporting source or changing stored symbols. Its examples explain classification and optional validators/commands; they grant no additional command execution by default.
 - **Who/when:** Aaron, 2026-09-30; implementation details by Codex.
 - **Affects:** Spec 14 §1–3 and A4; Spec 15 §5; import, file commands, reference, README and guide. Running a script remains subject to declared-command rules; writing it does not set executable permissions.
+
+## D-27 Agent memory and skills — decided
+- **Question:** Agent runs are isolated (D-16, D-21): no user settings, skills, plugins, extra MCP servers or memory carry over. How does an agent get skills and memories that last beyond one task?
+- **Answer:**
+  1. **Memories are tier 4 files** in a project directory named in `solace.toml`. Agents read and write them with the ordinary file commands (D-26); no new command is needed.
+  2. **The brief lists a memory index, not the contents:** one line per file (its name and first line), plus an instruction to read what is relevant and to record durable lessons before finishing.
+  3. **Skills use the same mechanism** with a human-owned directory: the brief lists them, and an agent reads one when it needs it.
+  4. **Any run may write memory,** including read-only investigate and review runs; the memory directory is the one exception to their write refusal.
+  5. **Memory edits are not task changes:** they do not appear in a task's review and are not undone when a task is reverted.
+  6. **Review results are files in the memory directory,** written through Solace, and the board shows the file on the task. How the file is named and linked to its task and run is open.
+  7. **Later (not decided):** extra MCP servers, possibly as a Solace passthrough command (not named `mcp`, which starts Solace's own server) that logs each call and refuses it in read-only runs unless the human marks the server safe.
+- **Who/when:** Aaron, 2026-09-30; points 3–5 and the brief's wording are by Claude.
+- **Affects:** Spec 14 (settings key), Spec 15 (brief, read-only runs, task changes); `board.rs`, `lockdown.rs`, `reference.txt`, README and guide
+
+## D-28 Unlisted files are tier 3 — decided
+- **Question:** Spec 14 §1 rule 8 puts every file no rule names in tier 4, so ordinary project files such as `README.md`, `bin/` and `docs/` are labelled ignored, `files` collapses their directories, and a `run`'s changes to them cannot be undone. Should unlisted files start in tier 3 instead?
+- **Answer:** Yes. A file no earlier rule matches is tier 3 when it is text within `resource_limit`, and tier 4 when binary or over the limit. Tier 4 then means only noise: `.git`, build and dependency output, anything `.gitignore` ignores, `ignore` patterns, and binary or oversized files.
+- **Humans must see the tiers:** the human view of the project (D-16's human UX) shows each file's tier and what that tier lets agents do.
+- **Open (pending):** whether `resources` is still needed, since it no longer changes a text file's tier; validators keep their own patterns.
+- **Who/when:** Aaron, 2026-09-30.
+- **Affects:** Spec 14 §1–3 and A1; `lockdown.rs` (`tier`, `files`), the starter `solace.toml`, reference, README and guide
