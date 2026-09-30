@@ -92,13 +92,13 @@ endpoint = { kind = "anthropic", base_url = "https://llm-proxy.example.com", key
 <tr><td>Source</td><td>Gleam files in <code>src/</code> and <code>test/</code></td><td>Read and change code through Solace, one entry at a time</td></tr>
 <tr><td>Manifest</td><td><code>gleam.toml</code></td><td>Read and write</td></tr>
 <tr><td>Resources</td><td>Files you list under <code>resources</code> in <code>solace.toml</code></td><td>Read and write, checked by any validator you declare</td></tr>
-<tr><td>Ignored</td><td>Everything else: build output, logs, anything <code>.gitignore</code> ignores</td><td>Read only</td></tr>
+<tr><td>Ignored</td><td>Everything else: build output, logs, anything <code>.gitignore</code> ignores</td><td>Read and write; excluded from symbol searches</td></tr>
 <tr><td>Solace's own</td><td><code>.solace/</code> and <code>solace.toml</code></td><td>Nothing, except reading <code>solace.toml</code></td></tr>
 </table>
-<p>A file is a resource only if you list it, so large or generated files never get pulled in by accident. A resource can't be larger than the size limit (256 KiB unless you change it).</p>
+<p>Resource patterns classify files; they do not grant write access. Agents can also update ignored files such as <code>README.md</code> or create <code>bin/coolcalc</code> without changing the patterns. File writes are limited to 256 KiB unless you change the limit, and require a current read or an exact replacement. Resource and ignored file contents never appear in symbol searches.</p>
 
 <h2>Settings</h2>
-<p><code>solace.toml</code> in the project's root holds the project's settings. Only you edit it; agents can read it, and an agent that needs a change has to ask you. Every part is optional.</p>
+<p><code>solace.toml</code> in the project's root holds the project's settings. Import creates a starter file if it is missing and preserves an existing one. Only you edit it; agents can read it, and an agent that needs a change has to ask you. Every part is optional.</p>
 <pre>resource_limit = 262144                    # bytes
 resources = ["priv/**/*.html", "docs/**/*.md"]
 ignore    = ["priv/generated/"]

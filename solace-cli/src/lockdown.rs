@@ -309,7 +309,8 @@ fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, old
     let before = fs::read(&p).ok();
     let text = if replace {
         let old = old.filter(|s| !s.is_empty()).ok_or_else(|| Failure("E0104 expected nonempty old text".into(), 1))?;
-        let current = String::from_utf8_lossy(before.as_deref().unwrap_or_default());
+        let current = std::str::from_utf8(before.as_deref().unwrap_or_default())
+            .map_err(|_| Failure("E6002 text replacement requires a UTF-8 file".into(), 1))?;
         match current.matches(old).count() {
             1 => current.replacen(old, new, 1),
             0 => return fail("E0104 old text not found"),
@@ -322,8 +323,8 @@ fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, old
         return error("E6004", name, "proposed text exceeds resource_limit");
     }
     let t = tier(root, v, name, Some(text.as_bytes()));
-    if !t.starts_with('2') && !t.starts_with('3') {
-        return error("E6002", name, format!("caught by tier rule: {t}; declare a text resource in solace.toml"));
+    if !matches!(t.chars().next(), Some('2' | '3' | '4')) {
+        return error("E6002", name, format!("caught by tier rule: {t}"));
     }
     if !replace
         && let Some(ref b) = before
@@ -459,21 +460,14 @@ pub fn dispatch(
                 }
                 "read" => read(root, &name, &a[2.min(a.len())..], budget),
                 "write" => {
-                    if p.exists() && t.starts_with('4') {
-                        return error(
-                            "E6002",
-                            &name,
-                            format!("tier {t}: agents can read this file but not write it. A human can make it writable by listing it under `resources` in solace.toml; ask with `task ask` if the task needs it changed"),
-                        );
-                    }
                     if t == "settings" {
                         return error("E6002", &name, "settings are human-only; request a decision");
                     }
                     write(root, v, &name, &input()?, a.contains(&"--replace"), old)
                 }
                 "remove" => {
-                    if !t.starts_with('3') {
-                        return error("E6002", &name, format!("only resources can be removed; {t}"));
+                    if !matches!(t.chars().next(), Some('3' | '4')) {
+                        return error("E6002", &name, format!("only resource or ignored files can be removed; {t}"));
                     }
                     fs::remove_file(p)?;
                     Ok(format!("Removed {name}\n"))
@@ -631,7 +625,23 @@ mod tests {
     #[test]
     fn a4_new_resource_and_size() {
         let (s, v) = fixture();
-        assert!(call(&s, &v, &["write", "nope"], "x", None).unwrap_err().0.contains("E6002"));
+        call(&s, &v, &["write", "README.md"], "usage", None).unwrap();
+        call(&s, &v, &["write", "bin/coolcalc"], "#!/bin/sh\ngleam run -- \"$@\"\n", None).unwrap();
+        assert!(call(&s, &v, &["files", "README.md"], "", None).unwrap().contains("4 ignored"));
+        assert!(s.find("usage").unwrap().contains("No matches"));
+        call(&s, &v, &["read", "README.md"], "", None).unwrap();
+        fs::write(s.root.join("README.md"), "usage changed").unwrap();
+        assert!(call(&s, &v, &["write", "README.md"], "new", None).unwrap_err().0.contains("E6005"));
+        call(&s, &v, &["write", "README.md", "--replace"], "new", Some("usage")).unwrap();
+        assert_eq!(fs::read_to_string(s.root.join("README.md")).unwrap(), "new changed");
+        call(&s, &v, &["read", "README.md"], "", None).unwrap();
+        call(&s, &v, &["write", "README.md"], "replacement", None).unwrap();
+        call(&s, &v, &["remove", "bin/coolcalc"], "", None).unwrap();
+        assert!(!s.root.join("bin/coolcalc").exists());
+        fs::write(s.root.join("binary"), b"x\xff").unwrap();
+        assert!(call(&s, &v, &["write", "binary", "--replace"], "y", Some("x")).unwrap_err().0.contains("UTF-8"));
+        assert_eq!(fs::read(s.root.join("binary")).unwrap(), b"x\xff");
+        assert!(call(&s, &v, &["write", "README.md"], &"x".repeat(101), None).unwrap_err().0.contains("E6004"));
         call(&s, &v, &["write", "priv/new"], "x", None).unwrap();
         assert!(call(&s, &v, &["write", "priv/large"], &"x".repeat(101), None).unwrap_err().0.contains("E6004"));
         fs::remove_dir_all(s.root).unwrap();

@@ -236,3 +236,9 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
   5. **Later (not decided):** reviews that give a verdict and structured findings a human can turn into subtasks.
 - **Who/when:** Aaron, 2026-09-30; points 3 and 4 are by Claude.
 - **Affects:** D-19.4; Spec 15 §1, §2, §3, §4, §6, A9; solace-cli (`board.rs`, `default-board.toml`, `reference.txt`), the board client and the guide
+
+## D-26 Tier 4 is writable; import creates project settings — decided
+- **Answer:** Tier 4 files are readable and writable through Solace; being ignored excludes them from symbol search, not file editing. `README.md` and new files such as `bin/coolcalc` require no `resources` entry. This supersedes the tier-4 read-only rule in D-16.10 and Spec 14. Source still uses the symbol protocol; `.solace/` remains inaccessible and `solace.toml` remains human-owned. The existing text-write size limit, stale-write checks, matching validators and task undo apply to direct tier-4 edits as well. Text replacement refuses non-UTF-8 input rather than silently changing its bytes.
+- **Import:** Create a starter `solace.toml` when absent, preserving any existing configuration. Its examples explain classification and optional validators/commands; they grant no additional command execution by default.
+- **Who/when:** Aaron, 2026-09-30; implementation details by Codex.
+- **Affects:** Spec 14 §1–3 and A4; Spec 15 §5; import, file commands, reference, README and guide. Running a script remains subject to declared-command rules; writing it does not set executable permissions.

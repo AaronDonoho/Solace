@@ -22,11 +22,11 @@ Every file under the project root is in exactly one tier. The first rule that ma
 | 8 | Everything else, including resources over the limit or binary | 4 ignored |
 
 - A file caught by rule 8 despite matching a `resources` pattern is marked `over limit` or `binary` wherever tiers are shown.
-- Tiers 3 and 4 are never copied into the store. Solace keeps no history of any file (source control does). For tier 3 it keeps only the content hash last read or written in each session (§3), and, while a task is open, the file as it was before the task first changed it (Spec 15 §5).
+- Tiers 3 and 4 are readable and writable through file commands and never enter the symbol index (D-26). Solace keeps no permanent file history (source control does). It keeps the content hash last read or written in each session (§3), and, for direct task edits, the file as it was before the task first changed it (Spec 15 §5).
 
 ## 2. Project settings
 
-`solace.toml` in the project root, versioned with the project. **Humans write it**, through the UX or an editor. Agents can read it (`read solace.toml`) but not write it. An agent that needs a change raises a decision request.
+`solace.toml` in the project root, versioned with the project. Import creates a starter file if absent and never overwrites existing settings (D-26). **Humans write it**, through the UX or an editor. Agents can read it (`read solace.toml`) but not write it. An agent that needs a change raises a decision request. Resource patterns classify files; they are not a file-write allowlist.
 
 ```toml
 resource_limit = 262144          # bytes; default 256 KiB
@@ -50,12 +50,12 @@ Solace rereads the file whenever a command starts, so a change takes effect with
 | --- | --- | --- |
 | `files [<dir>]` | all | Tree with each entry's tier. A tier 4 directory is one line with a file count; it is not expanded |
 | `read <path> [--lines a..b \| --tail n]` | 2, 3, 4, settings | File text, with line numbers when a range is asked for. Stays within the reply budget: over it, the reply stops at a whole line and says which `--lines` range comes next |
-| `write <path>` (`text`) | 2, 3 | Creates or replaces the whole file |
-| `write <path> --replace` (`old`, `text`) | 2, 3 | One exact replacement, the same rules as `submit --replace`: zero or several matches are refused |
-| `remove <path>` | 3 | Deletes the file |
+| `write <path>` (`text`) | 2, 3, 4 | Creates or replaces the whole file |
+| `write <path> --replace` (`old`, `text`) | 2, 3, 4 | One exact replacement in UTF-8 text, the same rules as `submit --replace`: zero or several matches are refused |
+| `remove <path>` | 3, 4 | Deletes the file |
 
 - **Tier 1 is refused** by `read`, `write` and `remove` (`E6001`), with the `inspect`, `view` or `submit` command that does the same thing.
-- **A new file** must land in tier 3 by the rules in §1, or `write` is refused (`E6002`, naming the rule that caught it).
+- **A new file** may land in tier 3 or 4 by the rules in §1. `README.md` and `bin/coolcalc` need no resource declaration. Source, settings and internal-file restrictions still apply. File writes do not set executable permissions; execution remains subject to §4.
 - **Validation is reversible, in place.** Solace saves the file's current bytes to `.solace/pending/`, writes the proposed text to the real path, and runs the validator in the project root with `{file}` set to that path. This way a validator that needs the whole directory, such as `terraform validate`, sees the project as it would be. If the validator fails, Solace restores the saved bytes (or removes a new file), and the validator's output is the diagnostic (`E6003`). If Solace stops mid-write, it restores anything left in `.solace/pending/` on its next start. A file with no validator is accepted as plain text.
 - **Tier 2's validator only checks that the manifest is well-formed** (Gleam: `gleam.toml` parses and has the fields Gleam requires). Resolving dependencies and type-checking happen at `check` and `build`, and breakage is reported there (as D-4 allows broken dependents).
 - **Size.** A `write` whose result exceeds `resource_limit` is refused (`E6004`).
@@ -97,7 +97,7 @@ The range `E60xx` is files, settings and commands, in Spec 3 §6's format. `E600
 - A1. A fixture project covering all eight rules in §1 gives a golden `files` output. A `resources` match over `resource_limit` is shown as `over limit`, and one that `.gitignore` ignores is tier 4.
 - A2. `read` or `write` on a tier 1 file returns `E6001` and names the matching `inspect`/`submit` command. Any file command on `.solace/` returns `E6006`.
 - A3. `read --tail 10` on a 100 MB tier 4 log returns 10 lines within the budget. A plain `read` of it stops within the budget and names the next range.
-- A4. `write` of a new path that no `resources` pattern matches returns `E6002`. A matching path is created.
+- A4. `write` creates a new resource or ignored file. Tier-4 files can be read, replaced and removed, never appear in symbol searches, enforce stale-write and size checks, and direct task edits can be reverted. Text replacement of non-UTF-8 bytes is refused unchanged. Import creates valid default settings if absent and preserves existing settings byte for byte.
 - A5. A failing validator leaves the file byte-for-byte unchanged (a new file is removed) and returns `E6003` with its output. A passing one leaves the new text. A validator that reads a second file in the directory sees the proposed text in place. A file left in `.solace/pending/` is restored at the next start.
 - A6. `write gleam.toml` with a syntax error returns `E6003`, and `gleam.toml` is unchanged. A well-formed `gleam.toml` naming a dependency that doesn't exist is written, and the following `check` reports the failed resolution.
 - A7. A file changed on disk after the session read it: a whole-file `write` returns `E6005`, while a `--replace` whose `old` still matches succeeds.

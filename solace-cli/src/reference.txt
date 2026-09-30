@@ -69,11 +69,14 @@ Work records (persist between sessions)
   solace work add <text> (or the tool's `text`) | solace work list | solace work done <id>
 
 Files (solace.toml is human-owned)
+  Resource and ignored files (tiers 3 and 4) are readable and writable, but
+  never appear in symbol searches. No resources entry is needed to write
+  README.md or bin/coolcalc. Writes are bounded by resource_limit.
   files [dir]                         tree with tiers; internal files have no access
   read path [--lines a..b | --tail n]  read manifest/resources/ignored files/settings
   write path                         whole text (read an existing file first)
   write path --replace               exact `old` -> `text`; CLI: --old <text>
-  remove path                        remove a declared resource
+  remove path                        remove a resource or ignored file
 
 Project commands
   build                               compile the project

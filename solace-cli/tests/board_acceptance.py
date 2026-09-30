@@ -145,6 +145,8 @@ class Board(unittest.TestCase):
     def test_a6_revert_a7b_invisible(self):
         self.cli('build') # canonical projection before comparing byte for byte
         before=(self.root/'src/app.gleam').read_bytes()
+        (self.root/'README.md').write_text('original docs')
+        (self.root/'obsolete.txt').write_text('restore me')
         t=self.completed([
             {'command':'submit app.one','text':'pub fn one() { 10 }'},
             {'command':'submit app.two','text':'pub fn two() { 20 }'},
@@ -152,8 +154,11 @@ class Board(unittest.TestCase):
             {'command':'delete app.removed'},
             {'command':'read priv/a'}, {'command':'write priv/a','text':'edited'},
             {'command':'write priv/new','text':'created'},
+            {'command':'read README.md'}, {'command':'write README.md','text':'updated docs'},
+            {'command':'write bin/coolcalc','text':'#!/bin/sh\ngleam run -- "$@"\n'},
+            {'command':'remove obsolete.txt'},
         ])
-        self.assertEqual(len(t['changes']),6) # five symbols/header rows plus two files
+        self.assertEqual(len(t['changes']),9)
         for command in [('find','removed'),('view','app','--bodies'),('session','start','--task','removed')]:
             text=self.cli(*command);self.assertNotIn('pub fn removed()',text);self.assertNotIn('pub fn one() {\n  1\n}',text)
         # Every semantic read is identical with and without the private before rows.
@@ -167,6 +172,9 @@ class Board(unittest.TestCase):
         self.action(t,'cancel')
         self.assertEqual((self.root/'src/app.gleam').read_bytes(),before)
         self.assertEqual((self.root/'priv/a').read_bytes(),b'original');self.assertFalse((self.root/'priv/new').exists())
+        self.assertEqual((self.root/'README.md').read_text(),'original docs')
+        self.assertEqual((self.root/'obsolete.txt').read_text(),'restore me')
+        self.assertFalse((self.root/'bin/coolcalc').exists())
     def test_a7_overlap_and_a7c_dependent_refusal(self):
         a=self.completed([{'command':'submit app.one','text':'pub fn one() { 10 }'}]);b=self.completed([{'command':'submit app.one','text':'pub fn one() { 20 }'}])
         e=self.action(a,'cancel','E7007');self.assertIn(b['id'],e['message']);self.assertIn('app.one',e['message'])

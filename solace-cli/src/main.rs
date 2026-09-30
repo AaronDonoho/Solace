@@ -436,7 +436,27 @@ fn import(root: &Path) -> Out {
             modules += 1;
         }
     }
-    Ok(format!("Imported {modules} modules, {symbols} symbols into .solace/store.db\n"))
+    let mut out = format!("Imported {modules} modules, {symbols} symbols into .solace/store.db\n");
+    match fs::OpenOptions::new().write(true).create_new(true).open(root.join("solace.toml")) {
+        Ok(mut file) => {
+            file.write_all(b"# Solace project settings. Human-owned; agents may read this file.\n\
+# File writes are limited to this many bytes.\n\
+resource_limit = 262144\n\
+# Classification only: unlisted files are also readable and writable.\n\
+resources = []\n\
+ignore = []\n\n\
+[validators]\n\
+# Optional checks, for example:\n\
+# \"docs/**/*.json\" = [\"python3\", \"-m\", \"json.tool\", \"{file}\"]\n\n\
+[commands]\n\
+# Optional commands agents may run, for example:\n\
+# app = { run = [\"gleam\", \"run\", \"--\"], args = true }\n")?;
+            out += "Created solace.toml with default settings.\n";
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(out)
 }
 
 /// A Gleam module path: lowercase names of letters, digits and `_`, joined by `/`.
@@ -1850,6 +1870,30 @@ mod tests {
             );
         }
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn import_creates_settings_without_overwriting() {
+        for existing in [None, Some("# custom\nresources = [\"docs/**\"]\n")] {
+            let root = env::temp_dir().join(new_id(Kind::Fn, "import", "settings"));
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::write(root.join("gleam.toml"), "name = \"app\"\nversion = \"1.0.0\"\n").unwrap();
+            fs::write(root.join("src/app.gleam"), "pub fn main() { 1 }\n").unwrap();
+            if let Some(text) = existing {
+                fs::write(root.join("solace.toml"), text).unwrap();
+            }
+            let out = import(&root).unwrap();
+            let text = fs::read_to_string(root.join("solace.toml")).unwrap();
+            if let Some(existing) = existing {
+                assert_eq!(text, existing);
+                assert!(!out.contains("Created solace.toml"));
+            } else {
+                assert!(out.contains("Created solace.toml"));
+                assert_eq!(lockdown::settings(&root).unwrap()["resource_limit"].as_integer(), Some(262144));
+                assert!(lockdown::settings(&root).unwrap()["commands"].as_table().unwrap().is_empty());
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

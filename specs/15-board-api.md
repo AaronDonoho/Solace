@@ -129,7 +129,7 @@ A `text` sent with an action is added as a human note before the action runs.
 **How it is done for now** (D-17, D-18: one work run at a time): the work goes straight into the project as it is made. There is no branch and no copy. What makes `revert` possible is that Solace records, per task, the state **before the task first changed it**:
 
 - **Symbols (tier 1):** the text and revision before the task's first change to each symbol, including symbols it created (so they can be removed) and deleted (so they can be restored). Every submit is tied to its run, and every run to its task.
-- **Manifest and resources (tiers 2, 3):** the bytes before the task's first write, or a note that the file didn't exist yet. They are kept in `.solace/board/<id>/before/`.
+- **Direct file edits (tiers 2, 3, 4):** the bytes before the task's first write or removal, or a note that the file didn't exist yet. They are kept in `.solace/board/<id>/before/`. Declared commands continue to snapshot manifests and declared resources; arbitrary generated/ignored command outputs are not tracked automatically.
 
 `revert` puts all of it back and clears `changes`. If a **later task** has changed any of the same symbols or files since, `revert` is refused (`E7007`) and nothing changes. The reply lists each of them and the task that changed it. The human can revert that task first, or leave things as they are. After restoring, Solace type-checks the project. If the revert breaks code that another open task changed (for example, a caller of a function this task added), Solace puts everything back as it was before the revert and refuses it (`E7008`), naming the broken symbols and their tasks.
 

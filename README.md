@@ -55,7 +55,7 @@ cd my_app
 Then, in the Gleam project's directory:
 
 ```sh
-solace import        # once: loads the project's Gleam code into .solace/store.db
+solace import        # loads Gleam code and creates solace.toml if absent
 solace check         # type-check the project from the store
 solace serve         # start the task board on http://127.0.0.1:3030 (--port to change it)
 ```
@@ -91,7 +91,7 @@ An entry with the same `id` as a built-in model replaces it. `key_env` names the
 
 ### Project settings
 
-A `solace.toml` in the project root holds the project's Solace settings. Only humans edit it; agents can read it but not change it. Everything in it is optional.
+A `solace.toml` in the project root holds the project's Solace settings. `solace import` creates a starter file if absent and preserves existing settings. Only humans edit it; agents can read it but not change it. Everything in it is optional.
 
 ```toml
 resource_limit = 262144                   # bytes; larger files can't be resources
@@ -116,8 +116,10 @@ Every file in the project falls into one tier (details in [specs/14-lockdown.md]
 | 1 Source | Gleam files under `src/` and `test/` | read and change symbols through Solace, never as files |
 | 2 Manifest | `gleam.toml` | read and write through Solace |
 | 3 Resources | files matching `resources` in `solace.toml` | read and write through Solace, checked by any validator |
-| 4 Ignored | everything else, including build output, logs and `.gitignore`d files | read only |
+| 4 Ignored | everything else, including build output, logs and `.gitignore`d files | read and write through Solace; excluded from symbol searches |
 | Internal | `.solace/` (store, board data) | no access |
+
+Files such as `README.md` and `bin/coolcalc` need no `resources` entry to be writable. File writes still enforce `resource_limit`, stale-write checks and any matching validators. Both resource and ignored file contents stay out of symbol searches. Running a launcher still requires a declared command; writing a script does not set its executable bit.
 
 Agents get no shell and no file tools, only the Solace MCP tool and web access. Humans shouldn't edit source files directly either. Solace rewrites them from the store and doesn't keep edits made on disk.
 
