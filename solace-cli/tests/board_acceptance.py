@@ -241,4 +241,10 @@ class Board(unittest.TestCase):
         resumed=self.stream(seq);s1,e1=self.next_event(resumed);s2,e2=self.next_event(resumed)
         self.assertEqual(s2,s1+1);self.assertEqual(e1['task']['notes'][-1]['text'],'first');self.assertEqual(e2['task']['notes'][-1]['text'],'second')
 
+    def test_delete_note(self):
+        t=self.create()
+        for text in ['a','b','c']:self.api('POST','/tasks/'+t['id']+'/notes',{'text':text})
+        t=self.api('DELETE','/tasks/'+t['id']+'/notes/1');self.assertEqual([n['text'] for n in t['notes']],['a','c'])
+        self.api('DELETE','/tasks/'+t['id']+'/notes/2',code='E7001')
+
 if __name__=='__main__':unittest.main()

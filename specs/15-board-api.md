@@ -114,6 +114,7 @@ Two rules hold for every workflow:
 | `PATCH /tasks/{id}` `{title?, body?, links?, rank?}` | Edits a task. Refused while a run is going (`E7003`) or in a final column (`E7004`) |
 | `POST /tasks/{id}/actions` `{action, model?, text?}` | §2. Returns 200 with the task, or 409 with `E7001` (not allowed here; `allowed` lists what is) or `E7002`–`E7008` (`E7007`, `E7008`: a revert blocked by a later task) |
 | `POST /tasks/{id}/notes` `{text}` | Adds a human note |
+| `DELETE /tasks/{id}/notes/{i}` | Deletes the note at position `i` (0 is the oldest), whoever wrote it. Notes are only ever appended, so a position stays valid until a note before it is deleted |
 | `POST /tasks/{id}/questions/{qid}` `{option?, text?}` | Answers a question |
 | `GET /models` | The models this Solace install knows, each with `agent`, `available` and, when unavailable, `reason` (§6) |
 | `GET /events` | Server-sent events: `{task}` in full after every change, and `{workflow}` after a configuration change, in order. A client that reconnects with `Last-Event-ID` gets what it missed |

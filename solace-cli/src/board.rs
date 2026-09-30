@@ -690,6 +690,12 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
                     let text = body["text"].as_str().ok_or_else(|| Failure("E7001 text required".into(), 1))?;
                     note(&mut t, "human", None, text);
                 }
+                // Notes are only appended, so a note's position names it.
+                ("DELETE", ["notes", i]) => {
+                    let notes = t["notes"].as_array_mut().unwrap();
+                    let i = i.parse().ok().filter(|i| *i < notes.len()).ok_or_else(|| Failure("E7001 unknown note".into(), 1))?;
+                    notes.remove(i);
+                }
                 ("POST", ["questions", qid]) => {
                     let q = t["questions"]
                         .as_array_mut()
@@ -726,7 +732,13 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
 }
 fn start(root: PathBuf, t: Value, rid: String, m: Value) {
     std::thread::spawn(move || {
-        if let Err(e) = agent_process(&root, &t, &rid, &m) {
+        let result = agent_process(&root, &t, &rid, &m);
+        // The agent's home (its settings, caches and state) is needed only while
+        // it runs; the run's log beside it is what the board keeps.
+        if let Some(log) = t["runs"].as_array().unwrap().iter().find(|r| r["id"] == rid.as_str()).and_then(|r| r["log"].as_str()) {
+            let _ = fs::remove_dir_all(Path::new(log).parent().unwrap().join(&rid));
+        }
+        if let Err(e) = result {
             let _ = finish(&root, t["id"].as_str().unwrap(), &rid, Some(&e.0));
         }
     });

@@ -38,3 +38,7 @@ export function markdown(text) {
   });
   return out.join('');
 }
+
+export function confirm(question) {
+  return globalThis.confirm(question);
+}

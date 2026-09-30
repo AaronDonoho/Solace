@@ -247,13 +247,13 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
 - **Question:** Agent runs are isolated (D-16, D-21): no user settings, skills, plugins, extra MCP servers or memory carry over. How does an agent get skills and memories that last beyond one task?
 - **Answer:**
   1. **Memories are tier 4 files** in a project directory named in `solace.toml`. Agents read and write them with the ordinary file commands (D-26); no new command is needed.
-  2. **The brief lists a memory index, not the contents:** one line per file (its name and first line), plus an instruction to read what is relevant and to record durable lessons before finishing.
+  2. **The brief lists a memory index, not the contents:** one line per file (its name and first line), plus an instruction to read what is relevant. An agent writes a memory when a human tells it to remember something, not on its own at the end of each run.
   3. **Skills use the same mechanism** with a human-owned directory: the brief lists them, and an agent reads one when it needs it.
-  4. **Any run may write memory,** including read-only investigate and review runs; the memory directory is the one exception to their write refusal.
+  4. **Any run may write memory,** including read-only investigate and review runs; the memory directory is the only exception to their write refusal.
   5. **Memory edits are not task changes:** they do not appear in a task's review and are not undone when a task is reverted.
-  6. **Review results are files in the memory directory,** written through Solace, and the board shows the file on the task. How the file is named and linked to its task and run is open.
+  6. **Review and investigation results are files,** written through Solace, and the board shows the file on the task. They are not memory and do not go in the memory directory. Solace writes the report to `.solace/board/`, beside the run's log, from the text of the run's finishing command; agents keep no access to `.solace/`. Reports, like the rest of the board, are not versioned for now; versioning the board may come later.
   7. **Later (not decided):** extra MCP servers, possibly as a Solace passthrough command (not named `mcp`, which starts Solace's own server) that logs each call and refuses it in read-only runs unless the human marks the server safe.
-- **Who/when:** Aaron, 2026-09-30; points 3–5 and the brief's wording are by Claude.
+- **Who/when:** Aaron, 2026-09-30; points 3–5 are by Claude.
 - **Affects:** Spec 14 (settings key), Spec 15 (brief, read-only runs, task changes); `board.rs`, `lockdown.rs`, `reference.txt`, README and guide
 
 ## D-28 Unlisted files are tier 3 — decided
@@ -263,3 +263,9 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
 - **Open (pending):** whether `resources` is still needed, since it no longer changes a text file's tier; validators keep their own patterns.
 - **Who/when:** Aaron, 2026-09-30.
 - **Affects:** Spec 14 §1–3 and A1; `lockdown.rs` (`tier`, `files`), the starter `solace.toml`, reference, README and guide
+
+## D-29 Humans can delete notes — decided
+- **Question:** Notes are append-only, so a wrong or stale note stays on the task and goes into every later agent's brief. Can a human remove one?
+- **Answer:** Yes. The board deletes any note, whoever wrote it, after the human confirms. Deletion is permanent and isn't recorded. Notes are addressed by position, because they have no ids and are only ever appended.
+- **Who/when:** Aaron, 2026-09-30.
+- **Affects:** Spec 15 §4 (`DELETE /tasks/{id}/notes/{i}`), `board.rs`, the default board

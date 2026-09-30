@@ -1,6 +1,7 @@
 import gleam/dict
 import gleam/dynamic/decode
 import gleam/float
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -29,6 +30,9 @@ fn after(ms: Int, callback: fn() -> Nil) -> Nil
 
 @external(javascript, "./api.mjs", "clock")
 fn clock(seconds: Int) -> String
+
+@external(javascript, "./api.mjs", "confirm")
+fn confirm(question: String) -> Bool
 
 @external(javascript, "./api.mjs", "markdown")
 fn markdown(text: String) -> String
@@ -135,6 +139,7 @@ pub type Msg {
   Save
   Action(String)
   AddNote
+  DeleteNote(Int)
   Answer(String, String)
   Watch(String)
   Unwatch
@@ -171,20 +176,7 @@ fn send(
 
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   #(
-    Model(
-      Workflow([]),
-      [],
-      None,
-      [],
-      "",
-      "",
-      "",
-      "",
-      "",
-      "0",
-      "",
-      [],
-    ),
+    Model(Workflow([]), [], None, [], "", "", "", "", "", "0", "", []),
     effect.batch([
       get("/workflow", WorkflowLoaded),
       get("/tasks", TasksLoaded),
@@ -213,14 +205,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
     WorkflowLoaded(text) ->
       case json.parse(text, workflow_decoder()) {
-        Ok(w) -> #(
-          Model(
-            ..model,
-            workflow: w,
-            error: "",
-          ),
-          effect.none(),
-        )
+        Ok(w) -> #(Model(..model, workflow: w, error: ""), effect.none())
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
     TasksLoaded(text) ->
@@ -380,6 +365,22 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             #("text", json.string(model.text)),
           ]),
         )
+      }
+    DeleteNote(i) ->
+      case model.selected {
+        None -> #(model, effect.none())
+        Some(t) ->
+          case confirm("Delete this note? It can't be restored.") {
+            False -> #(model, effect.none())
+            True -> #(
+              model,
+              send(
+                "/tasks/" <> t.id <> "/notes/" <> int.to_string(i),
+                "DELETE",
+                [],
+              ),
+            )
+          }
       }
     Answer(qid, option) ->
       case model.selected {
@@ -675,11 +676,19 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
     h.h3([], [h.text("Notes")]),
     h.div(
       [],
-      list.map(t.notes, fn(n) {
+      list.index_map(t.notes, fn(n, i) {
         h.article([a.class("note")], [
           h.header([], [
             h.strong([], [h.text(n.author)]),
             h.small([], [h.text(clock(n.time))]),
+            h.button(
+              [
+                a.class("delete"),
+                a.attribute("aria-label", "Delete note"),
+                e.on_click(DeleteNote(i)),
+              ],
+              [h.text("Delete")],
+            ),
           ]),
           md(n.text),
         ])
