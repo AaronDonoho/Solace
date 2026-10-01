@@ -160,6 +160,14 @@ When a task reaches a final column, the records of the state before it are dropp
 
 The bundled board confirms `cancel` and `complete` before sending an action request (D-32). Dialogs name the task and explain reverting changes versus keeping changes and removing undo records. Dismissing sends no request and preserves the form. Confirmation does not bypass API gates.
 
+### Conversation continuity (D-33)
+
+Investigation, work and reassigned fixes resume the author's compatible native conversation. Reviews always start fresh. Compatibility requires matching provider, model, endpoint and effort; explicit `new_work` and revert actions start fresh. Missing/incompatible state and custom runners receive a handoff automatically. A session-load failure retries once with a fresh conversation only before tools execute. Other failures, including usage limits, still require human action.
+
+Finishing tools end the board run immediately, then allow up to 30 seconds for graceful process exit. Further tool calls from the ended run are refused. Follow-up launches wait for that exit. Author state lasts until finalization or replacement; review state is deleted after exit. Only an exited process yields reusable state. Claude keychain-only authentication on macOS uses fresh nonpersistent conversations to preserve sign-in.
+
+Briefs contain changed entities, feedback, answers, recent outcomes/activity, drafts and recorded check/test/build results. Results are marked stale when source or tracked resource/manifest contents change. Resumed authors receive new notes and skip broad orientation; deleting older notes must not hide newer feedback. Fresh handoffs include all retained notes.
+
 ## 7. Out of scope
 
 Several projects on one server, several people, remote access and authentication, and more than one work run per project at a time. Asking a running agent side questions that don't disturb its work (D-19).
@@ -183,3 +191,4 @@ Several projects on one server, several people, remote access and authentication
 - A11. The default board's only connection to Solace is this API: it runs against a stub server implementing §4 and passes its own tests there. Every file command on `.solace/board/` returns `E6006`.
 
 - A14. Reassigning after review retains existing symbol/resource edits and before-state records, passes review feedback and human instructions to the new work run, and clears approval. The revised result requires fresh approval, and cancelling restores the state before the original work run.
+- A15. Fake native Codex and Claude launchers retain author conversations through investigate/work/reassign, use fresh reviewers, fall back on lost sessions, enforce current run permissions, and clean up on completion/cancellation. Model changes and start-over create fresh conversations; quota errors are not retried. Graceful exit persists state after the finishing tool returns; hung shutdown is bounded. Deleted notes do not swallow later feedback; intervening edits mark previous checks stale.

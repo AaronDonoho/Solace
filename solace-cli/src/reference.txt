@@ -52,6 +52,12 @@ Changing (the new code is the tool's `text` argument; from a shell, stdin)
                                   existing symbol
   solace submit --imports <module>
                                   replace a module's imports and module comment
+  solace drafts                   list this task's rejected submissions
+  solace view --draft <id>         read retained submission text, even invalid syntax
+  solace submit --draft <id> --replace
+                                  patch the draft with exact `old` and replacement
+                                  `text`, then retry its original submission
+  solace submit --draft <id>       retry unchanged draft text
   solace delete <name>            remove a symbol (refused while anything uses it)
 
   Each submit is type-checked. If the submitted symbol has errors, nothing is
@@ -61,8 +67,17 @@ Changing (the new code is the tool's `text` argument; from a shell, stdin)
   constructors such as `Option` or `None`); imports in submitted text are
   merged into the module's imports.
 
+  Rejected text is retained as a draft; the error gives its id. Patch it instead
+  of resending a large batch. A successful retry removes the draft. Drafts are
+  scoped to the task (or `cli` outside the board) and survive agent replacement.
+  If source changed meanwhile, the retry refuses with E0107: read the draft and
+  current source, then make a new submission. Starting over, cancelling or
+  completing the task removes its drafts. Drafts never enter symbol search.
+  Successful submissions summarize warnings; errors retain full diagnostics.
+
 Checking
   solace check                    type-check everything; lists broken symbols
+  solace check --warnings         also show full compiler warnings
   solace test                     run all tests; shows failures only
 
 Work records (persist between sessions)

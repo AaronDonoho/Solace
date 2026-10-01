@@ -127,6 +127,10 @@ Agents get no shell and no file tools, only the Solace MCP tool and web access. 
 
 ### Running an agent yourself
 
+The task board resumes the author's compatible conversation through investigation, implementation and review fixes. Reviews start fresh. If resumption is unavailable, Solace supplies a handoff automatically. Conversations are cleaned up after graceful shutdown: reviewers after review, authors when the task is completed or cancelled. Explicit new-agent/start-over actions start fresh.
+
+Rejected submissions are retained as editable drafts. Agents use `drafts`, `view --draft <id>` and `submit --draft <id> --replace` to repair them without resending the whole submission. Stale drafts refuse to overwrite newer source. Submission warnings are concise; `check --warnings` shows full details.
+
 `solace agent-config codex|claude <dir>` writes a locked-down configuration for an agent into `<dir>`, plus a `launch.json` with the arguments and environment to start it with. The board uses the same configuration. To connect some other MCP client, have it start `solace mcp` in the project directory.
 
 ## Current limitations

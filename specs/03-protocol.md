@@ -6,6 +6,8 @@ The protocol is the agent's environment. It has few, rich commands that return c
 
 ## 1. Transport
 
+**Phase 1a addition (D-34):** Rejected submissions retain their raw text, command and source-store fingerprint outside the symbol index. `drafts` lists the current task's drafts (or `cli` scope outside a board run); `view --draft <id>` reads one. `submit --draft <id> --replace` applies an exact `old` → `text` edit and retries the original submission; `submit --draft <id>` retries unchanged. A successful retry removes the draft. A stale source fingerprint refuses the retry (`E0107`) while preserving its text; an unavailable or differently owned draft is `E0106`. Finalization or start-over clears task drafts. Syntax errors are retained too, and rejected new modules must not leave projected files behind. Successful submissions summarize warnings by symbol; `check --warnings` exposes full warning details. Errors remain detailed.
+
 - A CLI, `solace <command>`, run through the agent's shell. Output is plain text by default; `--json` gives the same content as structured data.
 - **One process per call, no daemon**, as long as the latency budget (§7) holds.
 - **Agents use MCP** (D-9): `solace mcp` serves the same commands as one tool, `solace(command, text)`, so code is passed without shell quoting and the agent needs no shell.

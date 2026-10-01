@@ -6,6 +6,7 @@
 //! them; agents never touch those files.
 
 mod board;
+mod drafts;
 mod gleam;
 mod lockdown;
 
@@ -151,6 +152,11 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         None
     };
     let result = run_inner(args, input, old, budget);
+    if let Some((tid, _)) = &context {
+        if a.first().is_some_and(|c| matches!(*c, "check" | "test" | "build")) {
+            board::record_verification(&store, tid, a[0], &result)?;
+        }
+    }
     if let (Some(before), Some((tid, rid))) = (before, context) {
         let mut after = board::snapshot(&store)?;
         after.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
@@ -185,30 +191,24 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
     match a.as_slice() {
         ["session", "start", "--task"] => store.session_task(&input()?),
         ["session", "start", "--task", task @ ..] => store.session_task(&task.join(" ")),
-        ["submit", name, "--replace"] => match old {
-            // an empty replacement deletes the old text
-            Some(old) => store.submit_replace(name, old, &input().unwrap_or_default()),
-            None => usage("`submit <name> --replace` needs the exact text to replace in `old` and its replacement in `text`."),
-        },
+        ["submit", ..] => drafts::submit(&store, &a, input, old),
+        ["drafts"] => drafts::list(&store),
+        ["view", "--draft", id] => drafts::view(&store, id),
         ["session", rest @ ..] => store.session(&operands(rest.strip_prefix(&["start"]).unwrap_or(rest))),
         ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
         ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
         ["refs", name] => store.refs(name),
         ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
-        ["submit"] => store.submit_symbols(None, None, &input()?),
-        ["submit", "--new", module] => store.submit_symbols(None, Some(module), &input()?),
-        ["submit", "--imports", module] => store.submit(Target::Imports(module), &input()?),
-        ["submit", name] if !name.contains('.') && store.is_module(name)? => store.submit(Target::Module(name), &input()?),
-        ["submit", name] => store.submit_symbols(Some(name), None, &input()?),
         ["delete", name] => store.delete(name),
         ["check"] => command_report(store.check(), budget),
+        ["check", "--warnings"] => command_report(store.check_report(true), budget),
         ["test"] => command_report(store.test(), budget),
         ["work", "add"] => store.work_add(&input()?),
         ["work", "add", text @ ..] => store.work_add(&text.join(" ")),
         ["work", "list"] | ["work"] => store.work_list(),
         ["work", "done", id] => store.work_done(id),
         _ => usage(format!(
-            "Unknown command: {}\nCommands: session, inspect, view, refs, find, submit, delete, check, test, work, files, read, write, remove, build, format, run, task.",
+                "Unknown command: {}\nCommands: session, inspect, view, refs, find, submit, drafts, delete, check, test, work, files, read, write, remove, build, format, run, task.",
             a.join(" ")
         )),
     }
@@ -245,8 +245,12 @@ fn mcp(budget: usize) {
     let mut stdout = std::io::stdout();
     for line in stdin.lines() {
         let Ok(line) = line else { break };
-        let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
-        let Some(id) = msg.get("id").cloned() else { continue }; // notifications need no reply
+        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let Some(id) = msg.get("id").cloned() else {
+            continue;
+        }; // notifications need no reply
         let result = match msg["method"].as_str().unwrap_or("") {
             "initialize" => json!({
                 "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
@@ -411,7 +415,8 @@ fn import(root: &Path) -> Out {
     let mut out = String::new();
     match fs::OpenOptions::new().write(true).create_new(true).open(root.join("solace.toml")) {
         Ok(mut file) => {
-            file.write_all(b"# Solace project settings. Human-owned; agents may read this file.\n\
+            file.write_all(
+                b"# Solace project settings. Human-owned; agents may read this file.\n\
 # File writes are limited to this many bytes.\n\
 resource_limit = 262144\n\
 # Classification only: unlisted files are also readable and writable.\n\
@@ -422,7 +427,8 @@ ignore = []\n\n\
 # \"docs/**/*.json\" = [\"python3\", \"-m\", \"json.tool\", \"{file}\"]\n\n\
 [commands]\n\
 # Optional commands agents may run, for example:\n\
-# app = { run = [\"gleam\", \"run\", \"--\"], args = true }\n")?;
+# app = { run = [\"gleam\", \"run\", \"--\"], args = true }\n",
+            )?;
             out += "Created solace.toml with default settings.\n";
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -463,7 +469,9 @@ ignore = []\n\n\
 
 /// A Gleam module path: lowercase names of letters, digits and `_`, joined by `/`.
 fn valid_module_path(m: &str) -> bool {
-    m.split('/').all(|p| p.starts_with(|c: char| c.is_ascii_lowercase()) && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
+    m.split('/').all(|p| {
+        p.starts_with(|c: char| c.is_ascii_lowercase()) && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    })
 }
 
 fn collect_gleam_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -1157,7 +1165,9 @@ impl Store {
                         }
                     }
                     self.set_header(&module, &header)?;
-                    let list = |v: &Vec<String>| if v.is_empty() { "none".to_string() } else { v.join(", ") };
+                    let list = |v: &Vec<String>| {
+                        if v.is_empty() { "none".to_string() } else { v.join(", ") }
+                    };
                     notes.push(format!("{module}: changed {}; added {}", list(&changed), list(&added)));
                     None
                 }
@@ -1184,9 +1194,7 @@ impl Store {
             }
             let what = if whole_module { module.clone() } else { format!("{module} imports") };
             let mut out = format!("Saved {}.\n", target_name.as_deref().unwrap_or(&what));
-            for d in diags.iter().filter(|d| !d.error).filter(own) {
-                out += &format!("\n{}\n", d.text);
-            }
+            out += &warning_summary(diags.iter().filter(|d| !d.error).filter(own));
             out += &broken_report(&diags);
             Ok((target_name, out))
         })();
@@ -1288,6 +1296,10 @@ impl Store {
             plan.push((module, existing, item.clone(), parsed.header));
         }
 
+        let created_file = created.as_ref().map(|(module, dir)| self.root.join(dir).join(format!("{module}.gleam")));
+        if created_file.as_ref().is_some_and(|p| p.exists()) {
+            return fail("E0101 the new module's file already exists outside the store; import or resolve it before creating this module");
+        }
         let mut notes: Vec<String> = vec![];
         self.db.execute_batch("BEGIN")?;
         let result = (|| -> Out {
@@ -1364,9 +1376,7 @@ impl Store {
                 return fail(format!("Not saved: the submitted text has errors.\n\n{}", own_errors.join("\n\n")));
             }
             let mut out = format!("Saved {}.\n", saved.join(", "));
-            for d in diags.iter().filter(|d| !d.error && own(d)) {
-                out += &format!("\n{}\n", d.text);
-            }
+            out += &warning_summary(diags.iter().filter(|d| !d.error && own(d)));
             out += &broken_report(&diags);
             // The compiler stops at the first module with errors, so list
             // every user of a changed signature from the reference graph.
@@ -1377,7 +1387,9 @@ impl Store {
                 for (_, existing, item, _) in &plan {
                     let Some(e) = existing else { continue };
                     let before = &ix.syms[*e];
-                    let Some(a) = after.syms.iter().position(|s| s.id == before.id) else { continue };
+                    let Some(a) = after.syms.iter().position(|s| s.id == before.id) else {
+                        continue;
+                    };
                     if gleam::signature(&before.item()) == gleam::signature(&item.clone()) {
                         continue;
                     }
@@ -1405,31 +1417,12 @@ impl Store {
             }
             Err(e) => {
                 self.db.execute_batch("ROLLBACK")?;
+                if let Some(path) = &created_file {
+                    if path.exists() { fs::remove_file(path)?; }
+                }
                 self.materialize(&self.index()?)?;
                 Err(e)
             }
-        }
-    }
-
-    /// Replaces one exact piece of a symbol's text, then submits the whole
-    /// symbol as usual (formatted, checked, one transaction).
-    fn submit_replace(&self, name: &str, old: &str, new: &str) -> Out {
-        let ix = self.index()?;
-        let s = &ix.syms[self.resolve(&ix, name)?];
-        if old.is_empty() {
-            return usage("`old` is empty; give the exact text to replace.");
-        }
-        match s.text.matches(old).count() {
-            1 => self.submit_symbols(Some(&s.qname()), None, &s.text.replacen(old, new, 1)),
-            0 => fail(format!(
-                "Not saved: E0104 `old` does not occur in {}. It must match the current text exactly (`view {}` shows it).",
-                s.qname(),
-                s.qname()
-            )),
-            k => fail(format!(
-                "Not saved: E0105 `old` occurs {k} times in {}; include more of the surrounding text so it occurs once.",
-                s.qname()
-            )),
         }
     }
 
@@ -1464,13 +1457,20 @@ impl Store {
     }
 
     fn check(&self) -> Out {
+        self.check_report(false)
+    }
+
+    fn check_report(&self, show_warnings: bool) -> Out {
         let diags = self.check_all(&self.index()?)?;
         let errors: Vec<&str> = diags.iter().filter(|d| d.error).map(|d| d.text.as_str()).collect();
         let warnings = diags.len() - errors.len();
+        let details = if show_warnings {
+            diags.iter().filter(|d| !d.error).map(|d| d.text.as_str()).collect::<Vec<_>>().join("\n\n")
+        } else { String::new() };
         if errors.is_empty() {
-            Ok(format!("No errors ({warnings} warnings).\n"))
+            Ok(format!("No errors ({warnings} warnings).\n{details}"))
         } else {
-            fail(format!("{} errors, {warnings} warnings:\n\n{}", errors.len(), errors.join("\n\n")))
+            fail(format!("{} errors, {warnings} warnings:\n\n{}\n{details}", errors.len(), errors.join("\n\n")))
         }
     }
 
@@ -1570,7 +1570,9 @@ fn missing_imports(ix: &Index, header: &str, text: &str) -> Vec<String> {
     let aliases: HashSet<String> = gleam::imports(header).into_iter().map(|i| i.alias).collect();
     let mut out = vec![];
     for r in gleam::references(text) {
-        let Ref::Qualified(alias, _) = r else { continue };
+        let Ref::Qualified(alias, _) = r else {
+            continue;
+        };
         if aliases.contains(&alias) {
             continue;
         }
@@ -1744,7 +1746,9 @@ fn locate<'a>(files: &'a [FileMap], path: &str, line: usize) -> Option<(&'a str,
 
 /// Rewrites `path/to/file.gleam:LINE` references in a line to symbol positions.
 fn relocate(line: &str, files: &[FileMap]) -> String {
-    let Some(end) = line.find(".gleam:") else { return line.to_string() };
+    let Some(end) = line.find(".gleam:") else {
+        return line.to_string();
+    };
     let start = line[..end].rfind(|c: char| c.is_whitespace()).map_or(0, |i| i + 1);
     let path = &line[start..end + 6];
     let rest = &line[end + 7..];
@@ -1818,6 +1822,19 @@ fn diagnostics(output: &str, files: &[FileMap]) -> Vec<Diag> {
             Diag { error, module, symbol, text: text.join("\n").trim_end().to_string() }
         })
         .collect()
+}
+
+fn warning_summary<'a>(diags: impl Iterator<Item = &'a Diag>) -> String {
+    let lines: Vec<String> = diags
+        .map(|d| {
+            format!(
+                "  {}: {}",
+                d.symbol.as_deref().or(d.module.as_deref()).unwrap_or("project"),
+                d.text.lines().find(|l| l.trim_start().starts_with("warning:")).unwrap_or("compiler warning").trim()
+            )
+        })
+        .collect();
+    if lines.is_empty() { String::new() } else { format!("\nWarnings:\n{}\nUse `check --warnings` for full diagnostics.\n", lines.join("\n")) }
 }
 
 fn broken_report(diags: &[Diag]) -> String {

@@ -24,6 +24,18 @@ class Board(unittest.TestCase):
         config=self.root/'system.toml'
         config.write_text('task_timeout=2\n[[models]]\nid="fake"\nlabel="Fake agent"\nagent="codex"\nrun=["python3",'+json.dumps(FAKE)+']\n[[models]]\nid="missing"\nlabel="Missing agent"\nagent="codex"\nrun=["solace-no-such-program"]\n')
         self.env={**os.environ,'SOLACE_CONFIG':str(config)}
+        # Exercise native CLI launch/resume flags without contacting a provider.
+        programs = self.root/'fake-bin'
+        programs.mkdir()
+        for name in ['codex', 'claude']:
+            program = programs/name
+            program.write_text('#!/usr/bin/env python3\n' + Path(FAKE).read_text())
+            program.chmod(0o755)
+        self.env['PATH'] = str(programs) + os.pathsep + os.environ['PATH']
+        with config.open('a') as f:
+            for name, agent, model in [('native', 'codex', 'fixture'), ('native-other', 'codex', 'other'), ('native-claude', 'claude', 'fixture')]:
+                kind = 'openai' if agent == 'codex' else 'anthropic'
+                f.write(f'\n[[models]]\nid="{name}"\nlabel="Fixture"\nagent="{agent}"\nmodel="{model}"\nendpoint={{kind="{kind}",base_url="http://localhost:1"}}\n')
         self.cli('import')
         self.server=subprocess.Popen([BIN,'serve','--port','0'],cwd=self.root,env=self.env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         line=self.server.stdout.readline()
@@ -61,8 +73,8 @@ class Board(unittest.TestCase):
     def action(self,t,name,code=None,**kw):
         return self.api('POST','/tasks/'+t['id']+'/actions',{'action':name,**kw},code)
     def get(self,t):return self.api('GET','/tasks/'+t['id'])
-    def wait(self,t,predicate):
-        end=time.monotonic()+10
+    def wait(self,t,predicate,timeout=10):
+        end=time.monotonic()+timeout
         while time.monotonic()<end:
             value=self.get(t)
             if predicate(value):return value
@@ -81,6 +93,111 @@ class Board(unittest.TestCase):
             line=r.readline().decode().strip()
             if line.startswith('id:'):seq=int(line[3:])
             if line.startswith('data:'):return seq,json.loads(line[5:])
+
+    def test_author_conversations_reviews_handoffs_and_cleanup(self):
+        for model in ['native', 'native-claude']:
+            t = self.create([{'command':'submit app.one','text':'pub fn one() { 99 }'}, {'command':'check'}, {'command':'task done investigation plan'}])
+            self.action(t, 'plan')
+            self.action(t, 'investigate', model=model)
+            t = self.wait(t, lambda x: x.get('conversation', {}).get('session') and x['runs'][-1]['state']=='ended')
+            original = t['conversation'].copy()
+            first = t['runs'][-1]['id']
+            self.assertTrue((self.root/'.solace'/(first+'.exited')).exists())
+            self.assertIn('E7010', (self.root/'.solace'/(first+'.responses')).read_text())
+            self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([{'command':'submit app.one','text':'pub fn one() { 10 }'}, {'command':'check'}, {'command':'task done work complete'}])})
+            t = self.action(t, 'assign', model=model)
+            work = t['runs'][-1]['id']
+            t = self.wait(t, lambda x: x['column']=='needs_review' and x.get('conversation', {}).get('notes_seen'))
+            launch = json.loads((self.root/'.solace'/(work+'.launch')).read_text())
+            self.assertEqual(launch['session'], original['session'])
+            self.assertEqual(launch['home'], str(self.root/'.solace/board'/t['id']/original['home']))
+            prompt = (self.root/'.solace'/(work+'.prompt')).read_text()
+            self.assertIn("Continue the author's conversation", prompt)
+            self.assertNotIn('Start with `session start', prompt)
+            self.assertIn('10', self.cli('view', 'app.one'))
+
+            self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([{'command':'submit app.one','text':'pub fn one() { 99 }'}, {'command':'task note please fix rounding'}])})
+            t = self.action(t, 'review', model=model)
+            reviewer = t['runs'][-1]['id']
+            review_home = self.root/'.solace/board'/t['id']/reviewer
+            t = self.wait(t, lambda x: (self.root/'.solace'/(reviewer+'.exited')).exists() and not review_home.exists())
+            launch = json.loads((self.root/'.solace'/(reviewer+'.launch')).read_text())
+            self.assertEqual(launch['session'], reviewer)
+            self.assertIn('E7010', (self.root/'.solace'/(reviewer+'.responses')).read_text())
+            self.assertEqual(t['conversation']['session'], original['session'])
+
+            # Removing earlier notes must not hide subsequently added feedback.
+            self.api('DELETE', '/tasks/'+t['id']+'/notes/0')
+
+            steps = [{'command':'check'}, {'command':'submit app.one','text':'pub fn one() { 20 }'}, {'command':'task done fixed rounding'}]
+            self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps(steps)})
+            t = self.action(t, 'reassign', model=model, text='Please address review')
+            repair = t['runs'][-1]['id']
+            t = self.wait(t, lambda x: x['column']=='needs_review' and x.get('conversation', {}).get('notes_seen'))
+            self.assertEqual(t['conversation']['session'], original['session'])
+            prompt = (self.root/'.solace'/(repair+'.prompt')).read_text()
+            self.assertIn('please fix rounding', prompt)
+            self.assertIn('Please address review', prompt)
+            self.assertNotIn('- agent: investigation plan', prompt)
+
+            # A lost provider session transparently falls back once to a fresh handoff.
+            home = self.root/'.solace/board'/t['id']/t['conversation']['home']
+            (home/('session-'+original['session'])).unlink()
+            self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([{'command':'task done recovered'}])})
+            t = self.action(t, 'reassign', model=model)
+            fallback = t['runs'][-1]['id']
+            t = self.wait(t, lambda x: x['column']=='needs_review' and x.get('conversation', {}).get('notes_seen'))
+            self.assertNotEqual(t['conversation']['session'], original['session'])
+            self.assertFalse(home.exists())
+            prompt = (self.root/'.solace'/(fallback+'.prompt')).read_text()
+            self.assertIn('Fresh conversation', prompt)
+            self.assertIn('please fix rounding', prompt)
+            self.assertIn('app.one', prompt)
+            self.assertIn('stale: project changed', prompt)
+            home = self.root/'.solace/board'/t['id']/t['conversation']['home']
+            self.action(t, 'approve')
+            self.action(t, 'complete')
+            self.wait(t, lambda x: x.get('conversation') is None and not home.exists())
+
+    def test_model_change_and_start_over_get_fresh_conversations(self):
+        t = self.create([{'command':'task done done'}])
+        self.action(t, 'plan'); self.action(t, 'assign', model='native')
+        t = self.wait(t, lambda x: x.get('conversation', {}).get('notes_seen'))
+        original = t['conversation']['session']
+        t = self.action(t, 'reassign', model='native-other')
+        t = self.wait(t, lambda x: x.get('conversation', {}).get('notes_seen') and x['conversation']['session'] != original)
+        original = t['conversation']['session']
+        t = self.action(t, 'start_over')
+        t = self.wait(t, lambda x: x.get('conversation', {}).get('notes_seen') and x['conversation']['session'] != original)
+        home = self.root/'.solace/board'/t['id']/t['conversation']['home']
+        self.action(t, 'cancel')
+        self.wait(t, lambda x: x.get('conversation') is None and not home.exists())
+
+    def test_resume_does_not_retry_provider_failure(self):
+        t = self.create([{'command':'task done done'}])
+        self.action(t, 'plan'); self.action(t, 'assign', model='native')
+        t = self.wait(t, lambda x: x.get('conversation', {}).get('notes_seen'))
+        original = t['conversation']['session']
+        self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([{'exit':1, 'error':'usage limit reached'}])})
+        t = self.action(t, 'reassign')
+        rid = t['runs'][-1]['id']
+        t = self.wait(t, lambda x: x['column']=='blocked')
+        launch = json.loads((self.root/'.solace'/(rid+'.launch')).read_text())
+        self.assertEqual(launch['session'], original)
+        self.assertIn('usage limit reached', t['attention']['reason'])
+        self.assertFalse((self.root/'.solace/board'/t['id']/(rid+'-fallback')).exists())
+
+    def test_done_allows_graceful_exit_and_bounds_hung_shutdown(self):
+        t = self.completed([])
+        rid = t['runs'][-1]['id']
+        self.wait(t, lambda x: (self.root/'.solace'/(rid+'.exited')).exists())
+        t = self.assign([{'command':'task done done'}, {'sleep':45}])
+        t = self.wait(t, lambda x: x['column']=='needs_review')
+        rid = t['runs'][-1]['id']
+        home = self.root/'.solace/board'/t['id']/rid
+        self.assertTrue(home.exists())
+        self.wait(t, lambda x: not home.exists(), timeout=40)
+        self.assertFalse((self.root/'.solace'/(rid+'.exited')).exists())
     def test_a1_default_action_matrix(self):
         w=self.api('GET','/workflow')
         # Seed column positions through the human-owned JSON fixture, then use only HTTP actions.

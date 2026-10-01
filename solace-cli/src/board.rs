@@ -236,7 +236,10 @@ fn parse_system(text: &str) -> Result<Value, Failure> {
                 return Err(invalid());
             }
             if let Some(e) = m.get("endpoint") {
-                let kind_matches = matches!((e["kind"].as_str(), m["agent"].as_str()), (Some("openai"), Some("codex")) | (Some("anthropic"), Some("claude")));
+                let kind_matches = matches!(
+                    (e["kind"].as_str(), m["agent"].as_str()),
+                    (Some("openai"), Some("codex")) | (Some("anthropic"), Some("claude"))
+                );
                 if !kind_matches || !e["base_url"].is_string() || e.get("key_env").is_some_and(|k| !k.is_string()) {
                     return Err(invalid());
                 }
@@ -250,7 +253,9 @@ fn parse_system(text: &str) -> Result<Value, Failure> {
 /// key stays in the variable the endpoint names; Codex reads it at launch.
 /// Current Codex speaks only the Responses API, so the endpoint must serve it.
 fn endpoint_args(m: &Value) -> Vec<String> {
-    let Some(e) = m.get("endpoint") else { return vec![] };
+    let Some(e) = m.get("endpoint") else {
+        return vec![];
+    };
     let mut provider = json!({"name": m["label"], "base_url": e["base_url"], "wire_api": "responses"});
     if let Some(k) = e["key_env"].as_str() {
         provider["env_key"] = json!(k);
@@ -505,6 +510,7 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
         s.db.execute_batch("RELEASE revert_task")?;
     }
     s.db.execute("DELETE FROM board_touches WHERE task=?", [tid])?;
+    drafts::clear(s, tid)?;
     drop_before(s, tid)?;
     t["changes"] = json!([]);
     end_runs(t, "reverted");
@@ -631,13 +637,14 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
         let rid = id();
         let kind = if run == "new_work" { "work" } else { run };
         let log = s.root.join(".solace/board").join(t["id"].as_str().unwrap()).join(format!("{rid}.jsonl"));
-        t["runs"].as_array_mut().unwrap().push(json!({"id":rid,"kind":kind,"model":m["id"],"state":"running","started":now(),"log":log}));
+        t["runs"].as_array_mut().unwrap().push(json!({"id":rid,"kind":kind,"model":m["id"],"state":"running","started":now(),"log":log,"fresh":run == "new_work" || a["revert"] == true}));
         if kind == "work" {
             t["model"] = m["id"].clone();
         }
         return Ok(Some((rid, m)));
     }
     if column(w, t)["final"] == true {
+        end_runs(t, "completed");
         drop_before(s, t["id"].as_str().unwrap())?;
     }
     Ok(None)
@@ -685,7 +692,13 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
             match (method, rest) {
                 ("GET", []) => return Ok(t),
                 ("GET", ["runs", rid]) => {
-                    let mut run = t["runs"].as_array().unwrap().iter().find(|r| r["id"] == *rid).cloned().ok_or_else(|| Failure("E7001 unknown run".into(), 1))?;
+                    let mut run = t["runs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|r| r["id"] == *rid)
+                        .cloned()
+                        .ok_or_else(|| Failure("E7001 unknown run".into(), 1))?;
                     run["transcript"] = json!(transcript(Path::new(run["log"].as_str().unwrap_or(""))));
                     return Ok(run);
                 }
@@ -742,6 +755,14 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
                     save(&s, &t)?;
                     if let Some((rid, m)) = launch {
                         start(root.to_path_buf(), t.clone(), rid, m);
+                    } else if column(&w, &t)["final"] == true {
+                        let root = root.to_path_buf();
+                        let tid = t["id"].as_str().unwrap().to_string();
+                        std::thread::spawn(move || {
+                            if let Ok(_guard) = conversation_lock(&root, &tid) {
+                                let _ = clean_conversation(&root, &tid);
+                            }
+                        });
                     }
                     return Ok(t);
                 }
@@ -755,23 +776,120 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
 }
 fn start(root: PathBuf, t: Value, rid: String, m: Value) {
     std::thread::spawn(move || {
-        let result = agent_process(&root, &t, &rid, &m);
-        // The agent's home (its settings, caches and state) is needed only while
-        // it runs; the run's log beside it is what the board keeps.
-        if let Some(log) = t["runs"].as_array().unwrap().iter().find(|r| r["id"] == rid.as_str()).and_then(|r| r["log"].as_str()) {
-            let _ = fs::remove_dir_all(Path::new(log).parent().unwrap().join(&rid));
-        }
+        let tid = t["id"].as_str().unwrap();
+        let result = (|| {
+            // A follow-up may be queued while the previous agent is exiting.
+            // Never open one provider conversation in two processes.
+            let _guard = conversation_lock(&root, tid)?;
+            let result = agent_process(&root, &task(&root, tid)?, &rid, &m, true);
+            let result = match result {
+                Err(Failure(_, 3)) => agent_process(&root, &task(&root, tid)?, &rid, &m, false),
+                other => other,
+            };
+            let current = task(&root, tid)?;
+            if t["runs"].as_array().unwrap().iter().any(|r| r["id"] == rid && r["kind"] == "review") || m["run"].is_array() {
+                let dir = conversation_dir(&root, tid, &rid)?;
+                if dir.exists() { fs::remove_dir_all(dir)?; }
+            }
+            if column(&workflow(&lockdown::settings(&root)?)?, &current)["final"] == true {
+                clean_conversation(&root, tid)?;
+            }
+            result
+        })();
         if let Err(e) = result {
-            let _ = finish(&root, t["id"].as_str().unwrap(), &rid, Some(&e.0));
+            let _ = finish(&root, tid, &rid, Some(&e.0));
         }
     });
 }
-fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Failure> {
+
+fn conversation_lock(root: &Path, tid: &str) -> Result<fs::File, Failure> {
+    let dir = task_path(root, tid)?.with_extension("");
+    fs::create_dir_all(&dir)?;
+    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("agent.lock"))?;
+    f.lock()?;
+    Ok(f)
+}
+
+fn conversation_dir(root: &Path, tid: &str, home: &str) -> Result<PathBuf, Failure> {
+    // Reuse the id validator before allowing any deletion or launch path.
+    let _ = task_path(root, home)?;
+    Ok(task_path(root, tid)?.with_extension("").join(home))
+}
+
+fn clean_conversation(root: &Path, tid: &str) -> Result<(), Failure> {
+    let _guard = lock(root)?;
+    let s = open(root)?;
+    let mut t = task(root, tid)?;
+    if let Some(home) = t["conversation"]["home"].as_str() {
+        let p = conversation_dir(root, tid, home)?;
+        if p.exists() {
+            fs::remove_dir_all(p)?;
+        }
+    }
+    t["conversation"] = Value::Null;
+    drafts::clear(&s, tid)?;
+    save(&s, &t)
+}
+
+fn session_id(log: &Path, agent: &str) -> Option<String> {
+    fs::read_to_string(log).ok()?.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|e| {
+        let id = if agent == "codex" && e["type"] == "thread.started" {
+            e["thread_id"].as_str()
+        } else if agent == "claude" && e["type"] == "system" && e["subtype"] == "init" {
+            e["session_id"].as_str()
+        } else {
+            None
+        }?;
+        (!id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')).then(|| id.to_string())
+    })
+}
+
+fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: bool) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap();
     let run = t["runs"].as_array().unwrap().iter().find(|r| r["id"] == rid).unwrap();
     let log = PathBuf::from(run["log"].as_str().unwrap());
     fs::create_dir_all(log.parent().unwrap())?;
-    let dir = log.parent().unwrap().join(rid);
+    if run["state"] == "ended" {
+        return Ok(());
+    }
+    let author = run["kind"] != "review";
+    let native = m["run"].is_null();
+    let claude_home = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".claude"));
+    // macOS keychain entries are keyed to CLAUDE_CONFIG_DIR. Keep that sign-in
+    // working without copying credentials: use a fresh, nonpersistent handoff.
+    let persistent = native && !(m["agent"] == "claude" && cfg!(target_os = "macos")
+        && !claude_home.join(".credentials.json").exists() && m["endpoint"].is_null()
+        && env::var_os("ANTHROPIC_API_KEY").is_none() && env::var_os("ANTHROPIC_AUTH_TOKEN").is_none());
+    let previous = &t["conversation"];
+    // Compare launch-relevant configuration, not labels. A changed model or endpoint gets a handoff.
+    let compatibility = json!({"agent":m["agent"],"model":m["model"],"endpoint":m["endpoint"],"effort":m["effort"],"run":m["run"]});
+    let resume = if allow_resume && author && persistent && run["fresh"] != true && previous["config"] == compatibility {
+        previous["home"]
+            .as_str()
+            .and_then(|home| conversation_dir(root, tid, home).ok())
+            .filter(|p| p.is_dir())
+            .and_then(|_| previous["session"].as_str())
+            .map(str::to_string)
+    } else {
+        None
+    };
+    let home = if resume.is_some() {
+        previous["home"].as_str().unwrap().to_string()
+    } else if allow_resume {
+        rid.to_string()
+    } else {
+        format!("{rid}-fallback")
+    };
+    let dir = conversation_dir(root, tid, &home)?;
+    if author && resume.is_none() {
+        if let Some(old) = previous["home"].as_str() {
+            let old = conversation_dir(root, tid, old)?;
+            if old != dir && old.exists() {
+                fs::remove_dir_all(old)?;
+            }
+        }
+    }
     let binary = env::current_exe()?;
     let config = system()?;
     let timeout = config["task_timeout"].as_u64().unwrap_or(3600);
@@ -801,6 +919,15 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Fai
         ]
     };
     if custom.is_none() {
+        if agent == "claude" && !persistent { argv.push("--no-session-persistence".into()); }
+        if let Some(session) = &resume {
+            if agent == "codex" {
+                argv.insert(2, "resume".into());
+                argv.push(session.clone());
+            } else {
+                argv.extend(["--resume".into(), session.clone()]);
+            }
+        }
         argv.extend(launch["args"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().into()));
         if agent == "codex" {
             if let Some(e) = m["effort"].as_str() {
@@ -816,9 +943,23 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Fai
     // Authentication is shared; settings, plugins and hooks are isolated.
     if agent == "codex" && custom.is_none() {
         let auth = PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".codex/auth.json");
-        if auth.exists() {
+        if auth.exists() && !dir.join("auth.json").exists() {
             std::os::unix::fs::symlink(auth, dir.join("auth.json"))?;
         }
+    }
+    if agent == "claude" && native {
+        let auth = claude_home.join(".credentials.json");
+        if auth.exists() && !dir.join(".credentials.json").exists() {
+            std::os::unix::fs::symlink(auth, dir.join(".credentials.json"))?;
+        }
+    }
+    if author {
+        let _guard = lock(root)?;
+        let mut current = task(root, tid)?;
+        // Only an exited process has a reusable session; a server crash during
+        // a turn falls back instead of resuming a possibly orphaned process.
+        current["conversation"] = if persistent { json!({"home":home,"config":compatibility,"session":null}) } else { Value::Null };
+        save(&open(root)?, &current)?;
     }
     let file = fs::File::create(&log)?;
     let mut cmd = Command::new(&argv[0]);
@@ -827,6 +968,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Fai
         cmd.env(k, v.as_str().unwrap());
     }
     if agent == "claude" && custom.is_none() {
+        if persistent { cmd.env("CLAUDE_CONFIG_DIR", &dir); }
         if let Some(e) = m.get("endpoint") {
             cmd.env("ANTHROPIC_BASE_URL", e["base_url"].as_str().unwrap_or(""));
             // The key is read from the named variable at launch and never stored.
@@ -837,9 +979,12 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Fai
     }
     cmd.env("SOLACE_TASK", tid).env("SOLACE_RUN", rid).env("SOLACE_SESSION", rid).env("SOLACE_BIN", &binary);
     let mut child = cmd.spawn()?;
-    writeln!(child.stdin.take().unwrap(), "{}", brief(t, run["kind"].as_str().unwrap_or("")))?;
+    let prompt = continuation_brief(t, run, resume.is_some(), root);
+    writeln!(child.stdin.take().unwrap(), "{prompt}")?;
     let mut elapsed = Duration::ZERO;
     let mut last = Instant::now();
+    let mut ending = None;
+    let mut forced = false;
     loop {
         std::thread::sleep(Duration::from_millis(50));
         let current = task(root, tid)?;
@@ -848,25 +993,122 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value) -> Result<(), Fai
             elapsed += last.elapsed();
         }
         last = Instant::now();
-        let expired = elapsed >= Duration::from_secs(timeout);
-        if r["state"] == "ended" || expired {
+        let expired = r["state"] != "ended" && elapsed >= Duration::from_secs(timeout);
+        let ended = r["state"] == "ended";
+        if ended && matches!(r["outcome"].as_str(), Some("finished" | "reported" | "reviewed")) {
+            ending.get_or_insert_with(Instant::now);
+        }
+        if let Some(status) = child.try_wait()? {
+            if !ended {
+                let entries = transcript(&log);
+                let error = entries.iter().rev().find(|e| e["kind"] == "error").and_then(|e| e["text"].as_str()).unwrap_or("");
+                let raw = fs::read_to_string(&log).unwrap_or_default().to_lowercase();
+                // Retry only a failed session load, before any tool execution. Never retry quota or work failures.
+                if resume.is_some()
+                    && !status.success()
+                    && !entries.iter().any(|e| e["kind"] == "tool")
+                    && ["session not found", "no session found", "failed to resume", "could not find session", "unable to find session"]
+                        .iter()
+                        .any(|s| raw.contains(s))
+                {
+                    return Err(Failure("session unavailable; using a fresh handoff".into(), 3));
+                }
+                let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
+                let message = format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
+                finish(root, tid, rid, Some(&message))?;
+            }
+            break;
+        }
+        if expired || (ended && ending.is_none()) || ending.is_some_and(|at| at.elapsed() >= Duration::from_secs(30)) {
             let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).status();
             let _ = child.kill();
             let _ = child.wait();
             if expired {
                 finish(root, tid, rid, Some("task timeout"))?;
             }
-            return Ok(());
-        }
-        if let Some(status) = child.try_wait()? {
-            let message = match last_words(&transcript(&log)) {
-                Some(said) => format!("agent exited without finishing ({status}). Its last message:\n\n{said}"),
-                None => format!("agent exited without finishing ({status})"),
-            };
-            finish(root, tid, rid, Some(&message))?;
-            return Ok(());
+            forced = true;
+            break;
         }
     }
+    if author && persistent {
+        let _guard = lock(root)?;
+        let mut current = task(root, tid)?;
+        current["conversation"]["session"] = if forced { Value::Null } else { json!(session_id(&log, agent)) };
+        // Only notes actually briefed, plus the agent's own notes, are known to
+        // this conversation. A human may add feedback during graceful exit.
+        current["conversation"]["notes_seen"] = json!(t["notes"].as_array().unwrap().iter()
+            .chain(current["notes"].as_array().unwrap().iter().filter(|n| n["run"] == rid && n["author"] == "agent"))
+            .map(note_fingerprint).collect::<Vec<_>>());
+        save(&open(root)?, &current)?;
+    } else {
+        fs::remove_dir_all(&dir)?;
+    }
+    Ok(())
+}
+
+fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path) -> String {
+    let kind = run["kind"].as_str().unwrap_or("");
+    let mut packet = t.clone();
+    if resumed {
+        let seen: HashSet<&str> = t["conversation"]["notes_seen"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        packet["notes"] = json!(t["notes"].as_array().unwrap().iter().filter(|n| !seen.contains(note_fingerprint(n).as_str())).collect::<Vec<_>>());
+    }
+    let mut out = brief(&packet, kind);
+    if resumed {
+        out = out.replace(
+            "Start with `session start --task`, with the task's title and description as `text`.",
+            "Use the continuation context below.",
+        );
+    }
+    if kind != "review" && t["runs"].as_array().is_some_and(|r| r.len() > 1) {
+        if resumed {
+            out += "\nContinue the author's conversation. The role and permissions above replace those of earlier runs. Skip broad orientation; inspect current versions of symbols you need before editing.\n";
+        } else {
+            out += "\nFresh conversation: use this handoff and the notes above to continue existing work. Reconcile partial edits before proceeding.\n";
+        }
+        for r in t["runs"].as_array().unwrap().iter().rev().filter(|r| r["id"] != run["id"]).take(3) {
+            out += &format!("Previous {}: {}\n", r["kind"].as_str().unwrap_or("run"), r["outcome"].as_str().unwrap_or("unfinished"));
+            if let Some(log) = r["log"].as_str() {
+                if let Some(said) = last_words(&transcript(Path::new(log))) {
+                    out += &format!("Last activity: {said}\n");
+                }
+            }
+        }
+    }
+    if let Ok(s) = open(root) {
+        if let Some(checks) = t["verification"].as_object() {
+            let current = verification_base(&s).ok();
+            out += "\nLast recorded verification (rerun stale checks before claiming success):\n";
+            for (command, v) in checks {
+                let stale = current.as_deref() != v["base"].as_str();
+                out += &format!("- {command}: {}{}\n{}\n", if v["passed"] == true { "passed" } else { "failed" }, if stale { " (stale: project changed)" } else { "" }, v["summary"].as_str().unwrap_or(""));
+            }
+        }
+        if let Ok(drafts) = drafts::list_for(&s, t["id"].as_str().unwrap_or("")) {
+            if !drafts.is_empty() {
+                out += &format!("\nRetained drafts (view with `view --draft <id>`):\n{drafts}\n");
+            }
+        }
+    }
+    out += "\nAfter the finishing tool returns, give a short final response and exit normally.\n";
+    out
+}
+
+fn note_fingerprint(note: &Value) -> String {
+    hex(&Sha256::digest(note.to_string().as_bytes()))
+}
+
+fn verification_base(s: &Store) -> Out {
+    let state = json!([snapshot(s)?, file_snapshot(&s.root, &["run"])?]);
+    Ok(hex(&Sha256::digest(state.to_string().as_bytes())))
+}
+
+pub fn record_verification(s: &Store, tid: &str, command: &str, result: &Out) -> Result<(), Failure> {
+    let mut t = task(&s.root, tid)?;
+    if !t["verification"].is_object() { t["verification"] = json!({}); }
+    let summary = match result { Ok(out) => out, Err(e) => &e.0 };
+    t["verification"][command] = json!({"passed":result.is_ok(),"base":verification_base(s)?,"summary":summary.chars().take(1000).collect::<String>()});
+    save(s, &t)
 }
 /// An agent's prompt: what its run is for, how to start, ask and finish, then
 /// what it needs from the task (Spec 15 §6), as plain text.
@@ -875,9 +1117,15 @@ fn brief(t: &Value, kind: &str) -> String {
     let ask = "If you need a decision from the human, ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer.";
     let read_only = "This run is read-only: reading, `check`, `test` and `build` work; `submit`, `delete`, `write`, `remove`, `format` and `run` are refused.";
     let role = match kind {
-        "review" => format!("Review the changes this task made (listed below) and give feedback. {read_only} Finish with `task note`, the feedback in `text`."),
-        "work" => format!("Make the change this task describes. {start} {ask} Finish with `task done`, a summary in `text`: what you changed and how you checked it."),
-        _ => format!("Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work."),
+        "review" => format!(
+            "Review the changes this task made (listed below) and give feedback. {read_only} Finish with `task note`, the feedback in `text`."
+        ),
+        "work" => format!(
+            "Make the change this task describes. {start} {ask} Finish with `task done`, a summary in `text`: what you changed and how you checked it."
+        ),
+        _ => format!(
+            "Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work."
+        ),
     };
     let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
     let mut out = format!(
@@ -905,9 +1153,7 @@ fn brief(t: &Value, kind: &str) -> String {
             })
             .collect(),
     );
-    if kind == "review" {
-        section("Changes to review", list("changes").iter().map(|c| format!("- {}", text(&c["name"]))).collect());
-    }
+    section("Task changes", list("changes").iter().map(|c| format!("- {}", text(&c["name"]))).collect());
     out
 }
 /// The agent's last message, else its last error or output, cut to 1000 bytes.
@@ -1316,7 +1562,8 @@ mod tests {
         // An endpoint's kind must match its agent.
         let wrong = "[[models]]\nid = \"x\"\nlabel = \"X\"\nagent = \"claude\"\nmodel = \"m\"\nendpoint = { kind = \"openai\", base_url = \"http://h\" }\n";
         assert!(parse_system(wrong).unwrap_err().0.starts_with("E6020"));
-        let m = json!({"label":"Local","endpoint":{"kind":"openai","base_url":"http://localhost:11434/v1","key_env":"SOLACE_TEST_UNSET_KEY"}});
+        let m =
+            json!({"label":"Local","endpoint":{"kind":"openai","base_url":"http://localhost:11434/v1","key_env":"SOLACE_TEST_UNSET_KEY"}});
         let args = endpoint_args(&m);
         assert_eq!(args[1], "model_provider=\"solace_endpoint\"");
         let provider: toml::Value = format!("p = {}", args[3].split_once('=').unwrap().1).parse().unwrap();
@@ -1340,7 +1587,10 @@ mod tests {
         let t = transcript(&log);
         let kinds: Vec<&str> = t.iter().map(|e| e["kind"].as_str().unwrap()).collect();
         assert_eq!(kinds, ["tool", "message", "usage", "output"]);
-        assert_eq!((t[0]["title"].as_str(), t[0]["status"].as_str(), t[0]["output"].as_str()), (Some("solace view a"), Some("ok"), Some("pub fn a()")));
+        assert_eq!(
+            (t[0]["title"].as_str(), t[0]["status"].as_str(), t[0]["output"].as_str()),
+            (Some("solace view a"), Some("ok"), Some("pub fn a()"))
+        );
         assert_eq!(t[0]["input"], "text:\nx");
         assert_eq!(t[3]["text"], "not json\nstill not");
         assert_eq!(last_words(&t).unwrap(), "All **done**.");
@@ -1350,7 +1600,10 @@ mod tests {
         ];
         fs::write(&log, claude.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
         let t = transcript(&log);
-        assert_eq!((t[1]["title"].as_str(), t[1]["status"].as_str(), t[1]["output"].as_str()), (Some("solace test"), Some("failed"), Some("E1 failed")));
+        assert_eq!(
+            (t[1]["title"].as_str(), t[1]["status"].as_str(), t[1]["output"].as_str()),
+            (Some("solace test"), Some("failed"), Some("E1 failed"))
+        );
         assert_eq!(last_words(&[json!({"kind":"message","text":"é".repeat(600)})]).unwrap().chars().count(), 501);
         fs::remove_file(log).unwrap();
     }
@@ -1361,15 +1614,27 @@ mod tests {
             "links":[{"name":"spec","url":"http://x"}],"notes":[{"author":"human","text":"Keep it small","time":1,"run":null}],
             "questions":[{"id":"q","text":"Syntax?","options":["a","b"],"answer":"b"}],"runs":[{"id":"r1"}],"changes":[{"entity":"symbol:x","name":"calc.add","run":"r1"}]});
         let b = brief(&t, "work");
-        for part in ["Make the change", "`task done`, a summary in `text`", "Task: Add coolcalc\n\nA CLI calculator.\n", "- spec: http://x", "- human: Keep it small", "- Syntax?\n  Answer: b"] {
+        for part in [
+            "Make the change",
+            "`task done`, a summary in `text`",
+            "Task: Add coolcalc\n\nA CLI calculator.\n",
+            "- spec: http://x",
+            "- human: Keep it small",
+            "- Syntax?\n  Answer: b",
+        ] {
             assert!(b.contains(part), "{part} missing from:\n{b}");
         }
-        for noise in ["{", "r1", "rank", "calc.add"] {
+        for noise in ["{", "r1", "rank"] {
             assert!(!b.contains(noise), "{noise} in:\n{b}");
         }
         assert!(brief(&t, "investigate").contains("Investigate this task"));
         let r = brief(&t, "review");
-        assert!(r.contains("Changes to review:\n- calc.add") && r.contains("`task note`, the feedback in `text`") && r.contains("`run` are refused") && !r.contains("task done"));
+        assert!(
+            r.contains("Task changes:\n- calc.add")
+                && r.contains("`task note`, the feedback in `text`")
+                && r.contains("`run` are refused")
+                && !r.contains("task done")
+        );
     }
 
     #[test]

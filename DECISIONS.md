@@ -287,3 +287,18 @@ Format (PROPOSAL.md §9.4): question, options, answer, rationale, who/when, affe
 - **Answer:** The bundled board asks before sending either action. Cancel explains that agents stop and task changes are reverted; Complete explains that changes stay, the task closes, and undo records are removed. Both identify the task. Dismissing the dialog sends no request and preserves entered instructions. Use the existing browser confirmation, as for note deletion. API gates remain enforced after confirmation.
 - **Who/when:** Aaron, 2026-09-30; dialog wording and implementation by Codex.
 - **Affects:** bundled board, Spec 15, guide and client API test.
+
+## D-33 Conversations follow the author through the task — decided
+- **Answer:** Resume the author's conversation across investigation, implementation, and review fixes when compatible. Each review starts fresh. If resumption is unavailable, automatically provide a handoff. Humans use existing board actions; no session controls or additional accountability features.
+- **Lifecycle:** Finishing tools allow graceful process exit before cleanup, with a 30-second ceiling. Keep author state while the task can return to work; clean it when completed/cancelled or explicitly replaced. Clean reviewers after exit. Follow-ups wait for the preceding process to exit. Only an exited process yields reusable state.
+- **Compatibility:** Native Codex and Claude use explicit session ids with matching agent/model/endpoint/effort. Changed launch configuration, new-agent/start-over, custom runners, missing state and forced shutdown get a fresh handoff. A failed session load retries once before any tool execution; quota/work failures are not retried. Claude macOS keychain-only sign-in uses fresh nonpersistent conversations because changing its config directory changes its keychain entry.
+- **Context:** Changed entities, new notes and answers, recent outcomes/activity, retained drafts, and last check/test/build results. Verification is marked stale after tracked project contents change. Resumed authors skip broad orientation. Note deletion must not hide later feedback.
+- **Who/when:** Aaron, 2026-09-30; compatibility checks, fallback boundaries and grace duration by Codex.
+- **Affects:** Spec 15 §6; process lifecycle, briefs, guide and native-runner tests. Capabilities checked against installed CLI help and [Claude authentication documentation](https://code.claude.com/docs/en/authentication#credential-management).
+
+## D-34 Editable rejected submissions and concise warnings — decided
+- **Answer:** Implement the retained-draft part of D-15: save rejected text, including syntax errors and batches, with its original command. Return a draft id; `view --draft`, `submit --draft <id> --replace`, and `submit --draft <id>` inspect, patch and retry without regenerating the batch. `drafts` lists this task's drafts (or the local CLI scope). Successful retries remove drafts; completion/cancellation/start-over clears task drafts. Drafts stay outside symbol search.
+- **Safety:** A source-store fingerprint prevents stale retries from overwriting intervening work. Initially any source-store change invalidates a draft; its text remains readable for a fresh submission. Rejected new modules must leave no projected source behind; creation refuses existing unmanaged files.
+- **Diagnostics:** Successful submissions summarize warnings by symbol; `check --warnings` returns full details. Errors remain detailed. The separate D-15 temporary-projection/check-only work remains outstanding.
+- **Who/when:** Aaron, 2026-09-30; command spelling and conservative stale check by Codex.
+- **Affects:** Spec 3, submit dispatch, compiler diagnostics, protocol reference and draft tests.
