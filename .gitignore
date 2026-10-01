@@ -35,3 +35,6 @@ Thumbs.db
 
 # Rust build output
 target/
+
+# JS dependencies
+node_modules/

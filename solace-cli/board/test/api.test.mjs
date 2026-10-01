@@ -14,7 +14,7 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     const path = new URL(req.url).pathname;
     requests.push([req.method, path]);
     if (path === '/events') return new Response(new ReadableStream({ start(c) { events = c; } }), { headers: { 'Content-Type': 'text/event-stream' } });
-    if (req.method === 'GET') return Response.json(path === '/workflow' ? workflow : path === '/models' ? [{ id: 'fake', label: 'Fake' }] : path === '/tasks' ? [task] : task);
+    if (req.method === 'GET') return Response.json(path === '/graph' ? { review: { summary: '1 effects added, 0 signature changed, 0 test unfinished' } } : path === '/workflow' ? workflow : path === '/models' ? [{ id: 'fake', label: 'Fake' }] : path === '/tasks' ? [task] : task);
     const body = await req.json();
     if (path.endsWith('/actions')) {
       if (body.action === 'complete') return Response.json({ code: 'E7006', message: 'Approval required' }, { status: 409 });
@@ -96,6 +96,11 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     await until(() => to_string(board.view(model)).includes('Custom planning'));
     for (const pair of [['GET', '/workflow'], ['GET', '/tasks'], ['GET', '/tasks/t1'], ['GET', '/models'], ['GET', '/events'], ['POST', '/tasks'], ['PATCH', '/tasks/t1'], ['POST', '/tasks/t1/notes'], ['POST', '/tasks/t1/actions'], ['POST', '/tasks/t1/questions/q1']]) expect(requests).toContainEqual(pair);
     expect(to_string(board.view(model))).toContain('/logs/r1');
+    task.changes = [{ name: 'app.main' }];
+    dispatch(new board.Select('t1'));
+    await until(() => to_string(board.view(model)).includes('1 effects added'));
+    expect(to_string(board.view(model))).toContain('/view?task=t1');
+    expect(requests).toContainEqual(['GET', '/graph']);
   } finally {
     if (confirmOriginal === undefined) delete globalThis.confirm;
     else globalThis.confirm = confirmOriginal;

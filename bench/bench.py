@@ -434,7 +434,8 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort="medium", run_n
             if launch:
                 shutil.rmtree(config_dir)
         (scenario_dir / f"{name}.stream.jsonl").write_text(stream)
-        row = {"task": task.name, "rep": rep, "agent": agent, "model": model, "effort": effort if agent == "codex" else None,
+        row = {"task": task.name, "rep": rep, "agent": agent,
+               "model": f"{model} ({effort})" if agent == "codex" else model, "effort": effort if agent == "codex" else None,
                "arm": arm, **metrics, **grade(task, work)}
         sh(["git", "add", "-A"], work)
         (scenario_dir / f"{name}.diff").write_text(sh(["git", "diff", "--cached", "HEAD"], work).stdout)

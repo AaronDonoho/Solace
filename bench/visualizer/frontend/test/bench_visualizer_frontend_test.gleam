@@ -11,10 +11,11 @@ pub fn main() {
 
 pub fn results_decoder_test() {
   let body =
-    "{\"rows\":[{\"group\":\"A\",\"source\":\"bench/results/run/sample\",\"task\":\"sample\",\"rep\":1,\"model\":\"test\",\"hidden_pass\":true,\"tokens\":7,\"work_tokens\":6,\"uncached_tokens\":5,\"output_tokens\":4,\"duration_ms\":12,\"cost_usd\":0.5}],\"errors\":[]}"
+    "{\"rows\":[{\"group\":\"A\",\"source\":\"bench/results/run/sample\",\"task\":\"sample\",\"rep\":1,\"model\":\"test\",\"effort\":\"medium\",\"hidden_pass\":true,\"tokens\":7,\"work_tokens\":6,\"uncached_tokens\":5,\"output_tokens\":4,\"duration_ms\":12,\"cost_usd\":0.5}],\"errors\":[]}"
   let assert Ok(results) =
     json.parse(from: body, using: bench_visualizer_frontend.results_decoder())
   let assert [row] = results.rows
+  row.model |> should.equal("test (medium)")
   row.tokens |> should.equal(Some(7))
   row.work_tokens |> should.equal(Some(6))
   row.uncached_tokens |> should.equal(Some(5))

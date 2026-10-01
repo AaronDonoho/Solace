@@ -9,6 +9,7 @@ mod board;
 mod drafts;
 mod gleam;
 mod lockdown;
+mod view;
 
 use gleam::{Item, Kind, Ref};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -365,6 +366,59 @@ struct Index {
     uses: Vec<Vec<usize>>,
 }
 
+impl Index {
+    fn build(syms: Vec<Sym>, modules: Vec<ModuleRow>) -> Index {
+        // (module, name) -> symbol, for names and for type constructors
+        let mut names: HashMap<(&str, &str), usize> = HashMap::new();
+        for (i, s) in syms.iter().enumerate() {
+            names.insert((&s.module, &s.name), i);
+        }
+        let mut ctors: Vec<(String, String, usize)> = vec![];
+        for (i, s) in syms.iter().enumerate() {
+            if s.kind == Kind::Type {
+                for c in gleam::constructors(&s.text) {
+                    ctors.push((s.module.clone(), c, i));
+                }
+            }
+        }
+        for (m, c, i) in &ctors {
+            names.entry((m, c)).or_insert(*i);
+        }
+        let imports: HashMap<&str, Vec<gleam::Import>> = modules.iter().map(|m| (m.path.as_str(), gleam::imports(&m.header))).collect();
+        let uses = syms
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let imps = &imports[s.module.as_str()];
+                let mut found = vec![];
+                for r in gleam::references(&s.text) {
+                    let target = match &r {
+                        Ref::Qualified(alias, member) => {
+                            imps.iter().find(|imp| &imp.alias == alias).and_then(|imp| names.get(&(imp.module.as_str(), member.as_str())))
+                        }
+                        Ref::Bare(name) => names.get(&(s.module.as_str(), name.as_str())).or_else(|| {
+                            imps.iter().find_map(|imp| {
+                                imp.unqualified
+                                    .iter()
+                                    .find(|(_, local)| local == name)
+                                    .and_then(|(orig, _)| names.get(&(imp.module.as_str(), orig.as_str())))
+                            })
+                        }),
+                    };
+                    if let Some(&t) = target
+                        && t != i
+                        && !found.contains(&t)
+                    {
+                        found.push(t);
+                    }
+                }
+                found
+            })
+            .collect();
+        Index { syms, modules, uses }
+    }
+}
+
 enum Target<'a> {
     Imports(&'a str),
     /// A whole module's text, as `view <module>` shows it.
@@ -514,54 +568,7 @@ impl Store {
         let modules: Vec<ModuleRow> =
             stmt.query_map([], |r| Ok(ModuleRow { path: r.get(0)?, dir: r.get(1)?, header: r.get(2)? }))?.collect::<Result<_, _>>()?;
 
-        // (module, name) -> symbol, for names and for type constructors
-        let mut names: HashMap<(&str, &str), usize> = HashMap::new();
-        for (i, s) in syms.iter().enumerate() {
-            names.insert((&s.module, &s.name), i);
-        }
-        let mut ctors: Vec<(String, String, usize)> = vec![];
-        for (i, s) in syms.iter().enumerate() {
-            if s.kind == Kind::Type {
-                for c in gleam::constructors(&s.text) {
-                    ctors.push((s.module.clone(), c, i));
-                }
-            }
-        }
-        for (m, c, i) in &ctors {
-            names.entry((m, c)).or_insert(*i);
-        }
-        let imports: HashMap<&str, Vec<gleam::Import>> = modules.iter().map(|m| (m.path.as_str(), gleam::imports(&m.header))).collect();
-        let uses = syms
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let imps = &imports[s.module.as_str()];
-                let mut found = vec![];
-                for r in gleam::references(&s.text) {
-                    let target = match &r {
-                        Ref::Qualified(alias, member) => {
-                            imps.iter().find(|imp| &imp.alias == alias).and_then(|imp| names.get(&(imp.module.as_str(), member.as_str())))
-                        }
-                        Ref::Bare(name) => names.get(&(s.module.as_str(), name.as_str())).or_else(|| {
-                            imps.iter().find_map(|imp| {
-                                imp.unqualified
-                                    .iter()
-                                    .find(|(_, local)| local == name)
-                                    .and_then(|(orig, _)| names.get(&(imp.module.as_str(), orig.as_str())))
-                            })
-                        }),
-                    };
-                    if let Some(&t) = target
-                        && t != i
-                        && !found.contains(&t)
-                    {
-                        found.push(t);
-                    }
-                }
-                found
-            })
-            .collect();
-        Ok(Index { syms, modules, uses })
+        Ok(Index::build(syms, modules))
     }
 
     // --- writing files --------------------------------------------------------
@@ -569,6 +576,10 @@ impl Store {
     /// Writes every module's file from the store. Returns, per file, the line
     /// range of each symbol, for mapping compiler output back to symbols.
     fn materialize(&self, ix: &Index) -> Result<Vec<FileMap>, Failure> {
+        self.materialize_to(ix, &self.root)
+    }
+
+    fn materialize_to(&self, ix: &Index, target: &Path) -> Result<Vec<FileMap>, Failure> {
         let mut maps = vec![];
         for m in &ix.modules {
             let mut content = String::new();
@@ -587,7 +598,7 @@ impl Store {
                 line += n + 1;
             }
             let content = content.trim_end().to_string() + "\n";
-            let path = self.root.join(&m.dir).join(format!("{}.gleam", m.path));
+            let path = target.join(&m.dir).join(format!("{}.gleam", m.path));
             if fs::read_to_string(&path).ok().as_deref() != Some(content.as_str()) {
                 fs::create_dir_all(path.parent().unwrap())?;
                 fs::write(&path, content)?;

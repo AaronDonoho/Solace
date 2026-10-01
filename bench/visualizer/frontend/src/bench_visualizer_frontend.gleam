@@ -454,6 +454,20 @@ fn row_decoder() -> decode.Decoder(Row) {
   use task <- decode.field("task", decode.string)
   use rep <- decode.field("rep", decode.int)
   use model <- decode.field("model", decode.string)
+  use effort <- decode.optional_field(
+    "effort",
+    None,
+    decode.optional(decode.string),
+  )
+  // older rows keep effort apart from the model name
+  let model = case effort {
+    Some(effort) ->
+      case string.ends_with(model, " (" <> effort <> ")") {
+        True -> model
+        False -> model <> " (" <> effort <> ")"
+      }
+    None -> model
+  }
   use arm <- decode.optional_field("arm", "", decode.string)
   use hidden_pass <- decode.field("hidden_pass", decode.bool)
   use tokens <- decode.optional_field(

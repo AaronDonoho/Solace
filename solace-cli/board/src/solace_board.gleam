@@ -119,6 +119,7 @@ pub type Model {
     rank: String,
     watching: String,
     entries: List(Entry),
+    review_summary: String,
   )
 }
 
@@ -145,6 +146,7 @@ pub type Msg {
   Unwatch
   TranscriptLoaded(String, String)
   Refresh(String)
+  ReviewLoaded(String)
 }
 
 /// While a watched run is going, its transcript is fetched again this often.
@@ -176,7 +178,7 @@ fn send(
 
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   #(
-    Model(Workflow([]), [], None, [], "", "", "", "", "", "0", "", []),
+    Model(Workflow([]), [], None, [], "", "", "", "", "", "0", "", [], ""),
     effect.batch([
       get("/workflow", WorkflowLoaded),
       get("/tasks", TasksLoaded),
@@ -238,7 +240,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             rank: float.to_string(task.rank),
             error: "",
           ),
-          effect.none(),
+          case task.changes {
+            [] -> effect.none()
+            _ -> get("/graph?task=" <> task.id, ReviewLoaded)
+          },
         )
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
@@ -254,7 +259,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             text: "",
             error: "",
           ),
-          get("/tasks", TasksLoaded),
+          effect.batch([get("/tasks", TasksLoaded), case task.changes { [] -> effect.none() _ -> get("/graph?task=" <> task.id, ReviewLoaded) }]),
         )
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
@@ -277,8 +282,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             Error(_) -> #(model, effect.none())
           }
       }
+    ReviewLoaded(text) -> {
+      let summary = json.parse(text, decode.at(["review", "summary"], decode.string)) |> result.unwrap("")
+      #(Model(..model, review_summary: summary), effect.none())
+    }
     Select(id) -> #(
-      Model(..model, text: "", watching: "", entries: []),
+      Model(..model, text: "", watching: "", entries: [], review_summary: ""),
       get("/tasks/" <> id, TaskLoaded),
     )
     Watch(rid) -> #(
@@ -637,6 +646,10 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
         ])
     },
     status_badge(t),
+    case t.changes {
+      [] -> h.text("")
+      _ -> h.p([], [h.text(model.review_summary <> " "), h.a([a.href("/view?task=" <> t.id)], [h.text("Contract view")])])
+    },
     h.div(
       [],
       list.map(t.links, fn(link) {

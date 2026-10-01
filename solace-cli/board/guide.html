@@ -88,6 +88,9 @@ endpoint = { kind = "anthropic", base_url = "https://llm-proxy.example.com", key
 <li>Codex talks to OpenAI-compatible endpoints through the Responses API, so the endpoint has to support it.</li>
 </ul>
 
+<h2>Contract view</h2>
+<p>When a task changes the project, its detail panel shows a review summary and a link to the contract view. The graph reports entry points, logic, derived effects, tests and project files. Effects are inferred from known calls and external declarations; they are not guarantees. Review compares the current project with its state before the task, and you can run the task's tests from the view API. Open <a href="/view">Contract view</a> to explore the drawing sheet. Search by name or summary, select a box to expand its connections and read its detail, or open Files for each file’s tier. Overview fits the whole drawing; disconnected entries fill rows. The title block identifies the project and store version. A note says when no effects were found. On a phone, open Legend for kind colours and connector meanings. Drag the sheet or use the zoom buttons; keyboard users can focus a box and press Enter. A task’s review link marks additions, changes and removals and runs its tests when needed. Use Show source only when you want the source text. Run forms and replay come later.</p>
+<p>File tiers in the graph describe how Solace treats each file. Tier 2 is the managed manifest. Tier 3 resources can be changed by agents and are restored when a task is undone. Tier 4 files are outside Solace's tracked resources. Project settings are for the human to change.</p>
 <h2>What agents can touch</h2>
 <p>Every file in the project is in one of these groups:</p>
 <table>

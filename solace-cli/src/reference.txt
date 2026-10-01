@@ -87,6 +87,8 @@ Files (solace.toml is human-owned)
   Resource and ignored files (tiers 3 and 4) are readable and writable, but
   never appear in symbol searches. No resources entry is needed to write
   README.md or bin/coolcalc. Writes are bounded by resource_limit.
+  gleam.toml (manifest) is writable; invalid writes are refused. New
+  dependencies are fetched by check, test and build.
   files [dir]                         tree with tiers; internal files have no access
   read path [--lines a..b | --tail n]  read manifest/resources/ignored files/settings
   write path                         whole text (read an existing file first)

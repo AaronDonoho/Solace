@@ -20,10 +20,10 @@ pub fn open(root: &Path) -> Result<Store, Failure> {
     fs::create_dir_all(root.join(".solace/board"))?;
     Ok(Store { root: root.into(), db })
 }
-fn err<T>(code: &str, message: impl std::fmt::Display) -> Result<T, Failure> {
+pub(super) fn err<T>(code: &str, message: impl std::fmt::Display) -> Result<T, Failure> {
     lockdown::error(code, "task", message)
 }
-fn id() -> String {
+pub(super) fn id() -> String {
     new_id(Kind::Fn, "board", "").replace("fn:", "")
 }
 fn task_path(root: &Path, id: &str) -> Result<PathBuf, Failure> {
@@ -32,10 +32,12 @@ fn task_path(root: &Path, id: &str) -> Result<PathBuf, Failure> {
     }
     Ok(root.join(".solace/board").join(format!("{id}.json")))
 }
-fn task(root: &Path, id: &str) -> Result<Value, Failure> {
-    serde_json::from_slice(&fs::read(task_path(root, id)?)?).map_err(|e| Failure(e.to_string(), 1))
+pub(super) fn task(root: &Path, id: &str) -> Result<Value, Failure> {
+    let path = task_path(root, id)?;
+    if !path.exists() { return err("E7001", "unknown task"); }
+    serde_json::from_slice(&fs::read(path)?).map_err(|e| Failure(e.to_string(), 1))
 }
-fn tasks(root: &Path) -> Result<Vec<Value>, Failure> {
+pub(super) fn tasks(root: &Path) -> Result<Vec<Value>, Failure> {
     let mut out = vec![];
     for entry in fs::read_dir(root.join(".solace/board"))? {
         let p = entry?.path();
@@ -50,7 +52,7 @@ fn event(s: &Store, v: Value) -> Result<(), Failure> {
     s.db.execute("INSERT INTO board_events(data) VALUES (?)", [v.to_string()])?;
     Ok(())
 }
-fn save(s: &Store, t: &Value) -> Result<(), Failure> {
+pub(super) fn save(s: &Store, t: &Value) -> Result<(), Failure> {
     let p = task_path(&s.root, t["id"].as_str().unwrap())?;
     let tmp = p.with_extension("tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(t).unwrap())?;
@@ -654,7 +656,12 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
     let _guard = lock(root)?;
     let s = open(root)?;
     let w = workflow(&lockdown::settings(root)?)?;
-    let parts: Vec<_> = url.trim_matches('/').split('/').collect();
+    let (path, query_text) = url.split_once('?').unwrap_or((url, ""));
+    let query: HashMap<String,String> = query_text.split('&').filter_map(|pair| pair.split_once('=')).map(|(k,v)|(k.to_string(),v.to_string())).collect();
+    let parts: Vec<_> = path.trim_matches('/').split('/').collect();
+    if matches!(parts.first(), Some(&"graph" | &"nodes" | &"tests")) {
+        return view::api(&s, method, &parts, &query, &body);
+    }
     match (method, parts.as_slice()) {
         ("GET", ["workflow"]) => Ok(w),
         ("GET", ["models"]) => Ok(json!(
@@ -1456,10 +1463,11 @@ pub fn serve(root: &Path, port: u16) -> Out {
                 }
                 return;
             }
-            if req.method().as_str() == "GET" && matches!(url.as_str(), "/" | "/app.js" | "/guide") {
-                let (data, kind) = match url.as_str() {
-                    "/" => (include_bytes!("../board/index.html").as_slice(), "text/html"),
+            if req.method().as_str() == "GET" && matches!(url.split('?').next().unwrap_or(""), "/" | "/view" | "/app.js" | "/guide" | "/drawing.woff") {
+                let (data, kind) = match url.split('?').next().unwrap_or("") {
+                    "/" | "/view" => (include_bytes!("../board/index.html").as_slice(), "text/html"),
                     "/guide" => (include_bytes!("../board/guide.html").as_slice(), "text/html"),
+                    "/drawing.woff" => (include_bytes!("../board/priv/drawing.woff").as_slice(), "font/woff"),
                     _ => (include_bytes!("../board/priv/app.js").as_slice(), "text/javascript"),
                 };
                 let _ = req.respond(

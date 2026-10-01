@@ -375,34 +375,66 @@ fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, old
     }
     result
 }
-fn tree(root: &Path, v: &toml::Value, dir: &Path, out: &mut String) -> Result<(), Failure> {
+fn tree_rows(
+    root: &Path,
+    v: &toml::Value,
+    dir: &Path,
+    out: &mut Vec<(String, String)>,
+) -> Result<(), Failure> {
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let p = e.path();
-        let name = p.strip_prefix(root).unwrap().to_string_lossy();
+        let name = p.strip_prefix(root).unwrap().to_string_lossy().to_string();
         let t = tier(root, v, &name, None);
         if e.file_type()?.is_symlink() {
-            *out += &format!("{name} [4 ignored (symlink)]\n");
+            out.push((name, "4 ignored (symlink)".into()));
         } else if e.file_type()?.is_dir() {
             if t == "internal" {
-                *out += &format!("{name}/ [internal]\n");
-            } else if name == "build" || name == ".git" || patterns(v, "ignore", &name) || gitignored(root, &name) {
-                *out += &format!("{name}/ [4 ignored; {} files]\n", count_files(&p)?);
+                out.push((format!("{name}/"), "internal".into()));
+            } else if name == "build"
+                || name == ".git"
+                || patterns(v, "ignore", &name)
+                || gitignored(root, &name)
+            {
+                out.push((
+                    format!("{name}/"),
+                    format!("4 ignored; {} files", count_files(&p)?),
+                ));
             } else {
-                let mut children = String::new();
-                tree(root, v, &p, &mut children)?;
-                if ["[1 source]", "[2 manifest]", "[3 resource]", "(over limit)", "(binary)", "[settings]"]
-                    .iter()
-                    .any(|s| children.contains(s))
-                {
-                    *out += &format!("{name}/\n{children}");
+                let mut children = vec![];
+                tree_rows(root, v, &p, &mut children)?;
+                if children.iter().any(|(_, tier): &(String, String)| {
+                    tier.starts_with('1')
+                        || tier.starts_with('2')
+                        || tier.starts_with('3')
+                        || tier.contains("over limit")
+                        || tier.contains("binary")
+                        || tier == "settings"
+                }) {
+                    out.push((format!("{name}/"), String::new()));
+                    out.extend(children);
                 } else {
-                    *out += &format!("{name}/ [4 ignored; {} files]\n", count_files(&p)?);
+                    out.push((
+                        format!("{name}/"),
+                        format!("4 ignored; {} files", count_files(&p)?),
+                    ));
                 }
             }
         } else {
-            *out += &format!("{name} [{t}]\n");
+            out.push((name, t));
+        }
+    }
+    Ok(())
+}
+fn tree(root: &Path, v: &toml::Value, dir: &Path, out: &mut String) -> Result<(), Failure> {
+    let mut rows = vec![];
+    tree_rows(root, v, dir, &mut rows)?;
+    for (name, tier) in rows {
+        if tier.is_empty() {
+            *out += &format!("{name}\n");
+        } else {
+            *out += &format!("{name} [{tier}]\n");
         }
     }
     Ok(())
@@ -756,4 +788,12 @@ mod edge_tests {
         assert!(!out.contains("index.html"));
         fs::remove_dir_all(root).unwrap();
     }
+}
+pub fn tree_files(root: &Path, settings: &toml::Value) -> Result<Vec<(String, String)>, Failure> {
+    let mut rows = vec![];
+    tree_rows(root, settings, root, &mut rows)?;
+    Ok(rows
+        .into_iter()
+        .filter(|(_, tier)| !tier.is_empty() && tier != "internal" && !tier.starts_with('1'))
+        .collect())
 }
