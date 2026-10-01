@@ -337,3 +337,25 @@ Affects:** Spec 16 (accepted), Spec 15 (the task's summary line and link; tasks 
 - **Rationale:** For an agent, TDD's value is that tests written before the code can't be fitted to it. Point 4 protects that directly, so no second agent, write scopes or dispute path are needed. Typed holes make red buildable while every submit still type-checks. A blind reviewer can't anchor on the coder's number. Testing before fixing costs turns; D-20 puts the guardrail first.
 - **Who/when:** Aaron, 2026-09-30, from PROPOSAL.md §8.6 and §16 brought forward; the Gleam mapping and the skill's wording by Claude.
 - **Affects:** Spec 3 (test results, submit order), Spec 15 (acceptance gate, flags in a task's changes, blind review, refactor declaration, ticket link), D-35 Q4 (where tests come from), `reference.txt`, bench tasks.
+
+## D-37 Board usability, effort and note images — decided
+- **Question:** The default board shows everything at once: an always-visible create/edit form, a long detail page and a plain note box. Effort is part of a model preset, so changing it means a different model entry. A task shows when an agent needs help but not when it has finished. How should the board change?
+- **Answer:**
+  1. **Create area** sits behind a "New task" button, keeps its draft in the browser across reloads, and clears after a task is created. Editing a task moves to an Edit button in its Details tab.
+  2. **Task details are tabs** under the title: Details, Notes, Questions, Runs, Changes. Lists show the newest first. Each note collapses, and an agent's note names its run's kind and model, as runs do. "Add note" sits in the action row.
+  3. **Effort is chosen separately from the model.** `/models` lists each model's `efforts` (Codex: low, medium, high, xhigh; Claude: low, medium, high, xhigh, max; none for custom runners). An action may send `effort`; the model's configured `effort` is the default. The run records it, a work run records it on the task, and a changed effort starts a fresh conversation (D-33 already compares effort).
+  4. **Finished.** When a run ends successfully, the task gets `finished = {kind, outcome, time}`. The board shows it as "Agent finished", "Report ready" or "Review ready". The next action, a new run or `attention` clears it.
+  5. **Note images.** The board uploads PNG, JPEG, GIF or WebP images (5 MB each, content-checked; no SVG) to `POST /tasks/{id}/files` (raw bytes) and puts them in notes as markdown images. The board renders images only from that route. Images are stored inside `.solace/board/`, which agents can't reach, and Solace attaches the images referenced by briefed notes to the agent's prompt (Codex `-i`, Claude a stream-json image block); the brief names them `[image N]`.
+  6. **Markdown editor** is built in: a toolbar, Write/Preview, and paste or drop to upload an image. No editor library.
+- **Who/when:** Aaron, 2026-10-01 (agents see images; a lightweight built-in editor; editing in the Details tab). Routes, limits and effort lists by Claude.
+- **Affects:** Spec 15 §1, §4, §6 and tests; `board.rs`, `default-models.toml`, the board client, guide and READMEs.
+
+## D-38 Agents propose settings changes — decided
+- **Question:** Agents can't write `solace.toml`, so an agent that needs a declared command (e.g. a Lustre `build`) stops and asks the human to edit a file by hand. How can an agent request a settings change that only a human approves?
+- **Answer:**
+  1. In a **work run**, `write solace.toml` (whole text or `--replace`) proposes the change instead of writing it. An invalid proposal is refused at once (`E6020`). A valid one becomes a task question "Change solace.toml" with options Approve and Reject, carrying `settings: {base, proposed}`, and the run waits as for `task ask`.
+  2. **Approve on the board applies it**, only if `solace.toml` still equals `base` and is still valid; otherwise the answer says it was not applied. Any other answer rejects it. The agent continues with the answer.
+  3. Read-only runs and the CLI outside a run are still refused.
+- **Rationale:** Runs can't reach the board's routes (Codex has only the Solace tool; Claude adds read-only web tools) and host commands are refused in runs, so a board answer is a human's. An agent outside Solace running as the same user could post to the board, but it could edit the file directly anyway; proving a human clicked needs authentication, which Spec 15 defers.
+- **Who/when:** Aaron, 2026-10-01; the question-based flow by Claude.
+- **Affects:** Spec 14 §2 and A8, Spec 15 §1, §4, §6 and tests; `main.rs`, `lockdown.rs`, `board.rs`, the board client, `reference.txt`, guide.

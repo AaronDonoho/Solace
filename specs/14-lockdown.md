@@ -26,7 +26,7 @@ Every file under the project root is in exactly one tier. The first rule that ma
 
 ## 2. Project settings
 
-`solace.toml` in the project root, versioned with the project. Import creates a starter file if absent and never overwrites existing settings (D-26). **Humans write it**, through the UX or an editor. Agents can read it (`read solace.toml`) but not write it. An agent that needs a change raises a decision request. Resource patterns classify files; they are not a file-write allowlist.
+`solace.toml` in the project root, versioned with the project. Import creates a starter file if absent and never overwrites existing settings (D-26). **Humans write it**, through the UX or an editor. Agents can read it (`read solace.toml`) but not write it. In a work run, `write solace.toml` proposes the change for a human to approve on the task board (D-38, Spec 15 §6). Resource patterns classify files; they are not a file-write allowlist.
 
 ```toml
 resource_limit = 262144          # bytes; default 256 KiB
@@ -101,6 +101,6 @@ The range `E60xx` is files, settings and commands, in Spec 3 §6's format. `E600
 - A5. A failing validator leaves the file byte-for-byte unchanged (a new file is removed) and returns `E6003` with its output. A passing one leaves the new text. A validator that reads a second file in the directory sees the proposed text in place. A file left in `.solace/pending/` is restored at the next start.
 - A6. `write gleam.toml` with a syntax error returns `E6003`, and `gleam.toml` is unchanged. A well-formed `gleam.toml` naming a dependency that doesn't exist is written, and the following `check` reports the failed resolution.
 - A7. A file changed on disk after the session read it: a whole-file `write` returns `E6005`, while a `--replace` whose `old` still matches succeeds.
-- A8. `write solace.toml` is refused. A human's edit to `solace.toml` applies to the next command.
+- A8. `write solace.toml` outside a work run is refused. A human's edit to `solace.toml` applies to the next command.
 - A9. `run smoke extra` without `args = true` returns `E6011`, and `run nope` returns `E6010`, listing the declared commands. A declared command that sleeps past its timeout is killed and returns `E6012`.
 - A10. The `agent-config` output for both agents matches golden files, and has no shell or file tool enabled.

@@ -60,7 +60,7 @@ solace check         # type-check the project from the store
 solace serve         # start the task board on http://127.0.0.1:3030 (--port to change it)
 ```
 
-Open the board, create a task and move it to planning. There you can have an agent *investigate* it first, which changes nothing and reports findings or a plan (complete the task there if it only needed an answer), then assign it to a model to do the work. Solace starts the agent, puts the agent's notes and questions on the task, and moves the task to *blocked* when the agent needs an answer or to *needs review* when it has finished. A task that is waiting on you is marked *Needs attention*, with the reason. Cards show which tasks have an agent working, and each run on a task can be followed live: the agent's messages, and each command it runs with its result. The board's **Guide** link (`/guide`) explains the whole workflow for humans. The guide is built into the binary.
+Open the board, create a task and move it to planning. There you can have an agent *investigate* it first, which changes nothing and reports findings or a plan (complete the task there if it only needed an answer), then assign it to a model to do the work. Solace starts the agent, puts the agent's notes and questions on the task, and moves the task to *blocked* when the agent needs an answer or to *needs review* when it has finished. A task that is waiting on you is marked *Needs attention*, with the reason, and one whose agent has finished is marked as such. Effort is chosen separately from the model. Notes are written in a markdown editor and can include images, which agents also see. Cards show which tasks have an agent working, and each run on a task can be followed live: the agent's messages, and each command it runs with its result. The board's **Guide** link (`/guide`) explains the whole workflow for humans. The guide is built into the binary.
 
 From Needs review, choose **reassign** to return a task to Assigned for fixes while preserving its changes. The next work run receives the review feedback and any new instructions; approval must be given again after the fixes. **Start over** instead reverts the task's changes.
 
@@ -120,6 +120,7 @@ Every file in the project falls into one tier (details in [specs/14-lockdown.md]
 | 3 Resources | files matching `resources` in `solace.toml` | read and write through Solace, checked by any validator |
 | 4 Ignored | everything else, including build output, logs and `.gitignore`d files | read and write through Solace; excluded from symbol searches |
 | Internal | `.solace/` (store, board data) | no access |
+| Settings | `solace.toml` | read; in a board work run, propose a change that you approve or reject on the task |
 
 Files such as `README.md` and `bin/coolcalc` need no `resources` entry to be writable. File writes still enforce `resource_limit`, stale-write checks and any matching validators. Both resource and ignored file contents stay out of symbol searches. Running a launcher still requires a declared command; writing a script does not set its executable bit.
 

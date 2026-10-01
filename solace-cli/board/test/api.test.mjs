@@ -61,9 +61,9 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     await until(() => model.model === 'fake' && to_string(board.view(model)).includes('Initial') && events);
     dispatch(new board.Select('t1'));
     await until(() => to_string(board.view(model)).includes('Questions'));
-    dispatch(new board.Title('New task')); dispatch(new board.Body('Human description')); dispatch(new board.Create());
-    await until(() => task.title === 'New task');
-    dispatch(new board.Title('Edited')); dispatch(new board.Save()); await until(() => task.title === 'Edited');
+    dispatch(new board.NewTask()); dispatch(new board.DraftTitle('New task')); dispatch(new board.DraftBody('Human description')); dispatch(new board.Create());
+    await until(() => task.title === 'New task' && !model.creating && model.draft_title === '');
+    dispatch(new board.Edit(true)); dispatch(new board.Title('Edited')); dispatch(new board.Save()); await until(() => task.title === 'Edited');
     dispatch(new board.Text('Human note')); dispatch(new board.AddNote());
     await until(() => to_string(board.view(model)).includes('Human note'));
     dispatch(new board.Action('plan')); await until(() => task.column === 'planning');
@@ -89,15 +89,15 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     task.questions = [{ id: 'q1', text: 'Choose', options: ['yes', 'no'] }];
     task.runs = [{ id: 'r1', kind: 'work', state: 'waiting', model: 'fake', log: '/logs/r1' }];
     events.enqueue(new TextEncoder().encode('id: 1\ndata: ' + JSON.stringify({ task }) + '\n\n'));
-    await until(() => to_string(board.view(model)).includes('Choose'));
+    dispatch(new board.Tab('questions')); await until(() => to_string(board.view(model)).includes('Choose'));
     dispatch(new board.Answer('q1', 'yes')); await until(() => task.questions[0].answer === 'yes');
     workflow.columns.push({ id: 'planning', label: 'Custom planning', actions: ['review'], final: false });
     events.enqueue(new TextEncoder().encode('id: 2\ndata: ' + JSON.stringify({ workflow }) + '\n\n'));
     await until(() => to_string(board.view(model)).includes('Custom planning'));
     for (const pair of [['GET', '/workflow'], ['GET', '/tasks'], ['GET', '/tasks/t1'], ['GET', '/models'], ['GET', '/events'], ['POST', '/tasks'], ['PATCH', '/tasks/t1'], ['POST', '/tasks/t1/notes'], ['POST', '/tasks/t1/actions'], ['POST', '/tasks/t1/questions/q1']]) expect(requests).toContainEqual(pair);
-    expect(to_string(board.view(model))).toContain('/logs/r1');
+    dispatch(new board.Tab('runs')); expect(to_string(board.view(model))).toContain('/logs/r1');
     task.changes = [{ name: 'app.main' }];
-    dispatch(new board.Select('t1'));
+    dispatch(new board.Select('t1')); dispatch(new board.Tab('details'));
     await until(() => to_string(board.view(model)).includes('1 effects added'));
     expect(to_string(board.view(model))).toContain('/view?task=t1');
     expect(requests).toContainEqual(['GET', '/graph']);
@@ -105,5 +105,32 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     if (confirmOriginal === undefined) delete globalThis.confirm;
     else globalThis.confirm = confirmOriginal;
     controllers.forEach(c => c.abort()); server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
+  }
+});
+
+test('markdown renders only images uploaded to the board, and http(s) links', async () => {
+  const { markdown } = await import('../src/api.mjs');
+  const url = '/tasks/t-1/files/0123456789abcdef.png';
+  expect(markdown(`![shot](${url})`)).toBe(`<p><img alt="shot" src="${url}"></p>`);
+  for (const bad of ['![x](https://evil/x.png)', '![x](javascript:alert(1))', '![x](/tasks/t/files/../../solace.toml)'])
+    expect(markdown(bad)).not.toContain('<img');
+  expect(markdown('![x" onerror="alert(1)](' + url + ')')).not.toContain('" onerror="');
+  expect(markdown('[docs](https://example.com/a?b=1&c=2)')).toBe('<p><a href="https://example.com/a?b=1&amp;c=2" rel="noopener noreferrer">docs</a></p>');
+  expect(markdown('[x](javascript:alert(1))')).not.toContain('<a');
+});
+
+test('draft storage survives missing or throwing storage', async () => {
+  const { load, store } = await import('../src/api.mjs');
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  try {
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, get() { throw new Error('blocked'); } });
+    expect(load('k')).toBe('');
+    expect(() => store('k', 'v')).not.toThrow();
+    const values = new Map();
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: k => values.get(k) ?? null, setItem: (k, v) => values.set(k, v), removeItem: k => values.delete(k) } });
+    store('k', 'draft'); expect(load('k')).toBe('draft');
+    store('k', ''); expect(load('k')).toBe('');
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'localStorage', original); else delete globalThis.localStorage;
   }
 });

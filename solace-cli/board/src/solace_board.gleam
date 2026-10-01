@@ -7,6 +7,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/order
 import gleam/result
+import gleam/string
 import lustre
 import lustre/attribute as a
 import lustre/effect.{type Effect}
@@ -37,12 +38,24 @@ fn confirm(question: String) -> Bool
 @external(javascript, "./api.mjs", "markdown")
 fn markdown(text: String) -> String
 
+@external(javascript, "./api.mjs", "load")
+fn load(key: String) -> String
+
+@external(javascript, "./api.mjs", "store")
+fn store(key: String, value: String) -> Nil
+
+@external(javascript, "./api.mjs", "wrap")
+fn wrap(text: String, before: String, after: String) -> String
+
+@external(javascript, "./api.mjs", "images")
+fn images(insert: fn(String) -> Nil, fail: fn(String) -> Nil) -> Nil
+
 pub type Column {
   Column(id: String, label: String, actions: List(String), final: Bool)
 }
 
 pub type Note {
-  Note(author: String, text: String, time: Int)
+  Note(author: String, run: String, text: String, time: Int)
 }
 
 /// One step of a run's transcript: a message, thinking, a tool call, token
@@ -59,7 +72,13 @@ pub type Entry {
 }
 
 pub type Question {
-  Question(id: String, text: String, options: List(String), answer: String)
+  Question(
+    id: String,
+    text: String,
+    options: List(String),
+    answer: String,
+    settings: Option(#(String, String)),
+  )
 }
 
 pub type Run {
@@ -68,6 +87,7 @@ pub type Run {
     kind: String,
     state: String,
     model: String,
+    effort: String,
     log: String,
     outcome: String,
     started: Int,
@@ -94,11 +114,19 @@ pub type Task {
     changes: List(String),
     stamps: List(String),
     attention: String,
+    finished: String,
   )
 }
 
 pub type Agent {
-  Agent(id: String, label: String, available: Bool, reason: String)
+  Agent(
+    id: String,
+    label: String,
+    available: Bool,
+    reason: String,
+    effort: String,
+    efforts: List(String),
+  )
 }
 
 pub type Workflow {
@@ -112,6 +140,7 @@ pub type Model {
     selected: Option(Task),
     models: List(Agent),
     model: String,
+    effort: String,
     text: String,
     title: String,
     body: String,
@@ -120,6 +149,12 @@ pub type Model {
     watching: String,
     entries: List(Entry),
     review_summary: String,
+    creating: Bool,
+    draft_title: String,
+    draft_body: String,
+    editing: Bool,
+    tab: String,
+    preview: Bool,
   )
 }
 
@@ -132,11 +167,21 @@ pub type Msg {
   Live(String)
   Select(String)
   AgentSelected(String)
+  EffortSelected(String)
   Text(String)
   Title(String)
   Body(String)
   Rank(String)
+  NewTask
+  DraftTitle(String)
+  DraftBody(String)
   Create
+  Created(String)
+  Edit(Bool)
+  Tab(String)
+  Preview(Bool)
+  Format(String, String)
+  Failed(String)
   Save
   Action(String)
   AddNote
@@ -176,14 +221,47 @@ fn send(
   })
 }
 
+/// Browser storage keys for the unsent new-task draft.
+const draft_title_key = "solace-board-draft-title"
+
+const draft_body_key = "solace-board-draft-body"
+
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
+  let draft_title = load(draft_title_key)
+  let draft_body = load(draft_body_key)
   #(
-    Model(Workflow([]), [], None, [], "", "", "", "", "", "0", "", [], ""),
+    Model(
+      workflow: Workflow([]),
+      tasks: [],
+      selected: None,
+      models: [],
+      model: "",
+      effort: "",
+      text: "",
+      title: "",
+      body: "",
+      error: "",
+      rank: "0",
+      watching: "",
+      entries: [],
+      review_summary: "",
+      creating: draft_title != "" || draft_body != "",
+      draft_title: draft_title,
+      draft_body: draft_body,
+      editing: False,
+      tab: "details",
+      preview: False,
+    ),
     effect.batch([
       get("/workflow", WorkflowLoaded),
       get("/tasks", TasksLoaded),
       get("/models", ModelsLoaded),
       effect.from(fn(send) { events(fn(text) { send(Live(text)) }) }),
+      effect.from(fn(send) {
+        images(fn(image) { send(Format(image, "")) }, fn(text) {
+          send(Failed(text))
+        })
+      }),
     ]),
   )
 }
@@ -258,8 +336,16 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             rank: float.to_string(task.rank),
             text: "",
             error: "",
+            editing: False,
+            preview: False,
           ),
-          effect.batch([get("/tasks", TasksLoaded), case task.changes { [] -> effect.none() _ -> get("/graph?task=" <> task.id, ReviewLoaded) }]),
+          effect.batch([
+            get("/tasks", TasksLoaded),
+            case task.changes {
+              [] -> effect.none()
+              _ -> get("/graph?task=" <> task.id, ReviewLoaded)
+            },
+          ]),
         )
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
@@ -283,11 +369,21 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           }
       }
     ReviewLoaded(text) -> {
-      let summary = json.parse(text, decode.at(["review", "summary"], decode.string)) |> result.unwrap("")
+      let summary =
+        json.parse(text, decode.at(["review", "summary"], decode.string))
+        |> result.unwrap("")
       #(Model(..model, review_summary: summary), effect.none())
     }
     Select(id) -> #(
-      Model(..model, text: "", watching: "", entries: [], review_summary: ""),
+      Model(
+        ..model,
+        text: "",
+        watching: "",
+        entries: [],
+        review_summary: "",
+        editing: False,
+        preview: False,
+      ),
       get("/tasks/" <> id, TaskLoaded),
     )
     Watch(rid) -> #(
@@ -318,18 +414,69 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
     }
     TranscriptLoaded(_, _) -> #(model, effect.none())
-    AgentSelected(id) -> #(Model(..model, model: id), effect.none())
+    // Efforts differ between models, so a new model starts at its default.
+    AgentSelected(id) -> #(Model(..model, model: id, effort: ""), effect.none())
+    EffortSelected(effort) -> #(Model(..model, effort: effort), effect.none())
     Text(text) -> #(Model(..model, text: text), effect.none())
     Title(text) -> #(Model(..model, title: text), effect.none())
     Body(text) -> #(Model(..model, body: text), effect.none())
     Rank(rank) -> #(Model(..model, rank: rank), effect.none())
+    NewTask -> #(Model(..model, creating: !model.creating), effect.none())
+    DraftTitle(text) -> {
+      store(draft_title_key, text)
+      #(Model(..model, draft_title: text), effect.none())
+    }
+    DraftBody(text) -> {
+      store(draft_body_key, text)
+      #(Model(..model, draft_body: text), effect.none())
+    }
     Create -> #(
       model,
-      send("/tasks", "POST", [
-        #("title", json.string(model.title)),
-        #("body", json.string(model.body)),
-      ]),
+      effect.from(fn(dispatch) {
+        let body =
+          json.object([
+            #("title", json.string(model.draft_title)),
+            #("body", json.string(model.draft_body)),
+          ])
+        request("/tasks", "POST", json.to_string(body), fn(text) {
+          dispatch(Created(text))
+        })
+      }),
     )
+    // Only a task that was really created clears the draft.
+    Created(text) ->
+      case json.parse(text, task_decoder()) {
+        Ok(_) -> {
+          store(draft_title_key, "")
+          store(draft_body_key, "")
+          update(
+            Model(..model, creating: False, draft_title: "", draft_body: ""),
+            Changed(text),
+          )
+        }
+        Error(_) -> #(Model(..model, error: error(text)), effect.none())
+      }
+    Edit(editing) ->
+      case model.selected {
+        Some(t) -> #(
+          Model(
+            ..model,
+            editing: editing,
+            title: t.title,
+            body: t.body,
+            rank: float.to_string(t.rank),
+          ),
+          effect.none(),
+        )
+        None -> #(model, effect.none())
+      }
+    Tab(tab) -> #(Model(..model, tab: tab), effect.none())
+    Preview(preview) -> #(Model(..model, preview: preview), effect.none())
+    Format(before, after) -> #(
+      model,
+      effect.from(fn(send) { send(Text(wrap(model.text, before, after))) }),
+    )
+    Failed(message) -> #(Model(..model, error: message), effect.none())
     Save ->
       case model.selected {
         None -> #(model, effect.none())
@@ -357,6 +504,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           let fields = case model.model {
             "" -> fields
             id -> [#("model", json.string(id)), ..fields]
+          }
+          let fields = case model.effort {
+            "" -> fields
+            effort -> [#("effort", json.string(effort)), ..fields]
           }
           let fields = case model.text {
             "" -> fields
@@ -390,7 +541,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       case model.selected {
         None -> #(model, effect.none())
         Some(t) -> #(
-          model,
+          Model(..model, tab: "notes"),
           send("/tasks/" <> t.id <> "/notes", "POST", [
             #("text", json.string(model.text)),
           ]),
@@ -463,6 +614,11 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     "",
     decode.one_of(decode.at(["reason"], decode.string), [decode.success("")]),
   )
+  use finished <- decode.optional_field(
+    "finished",
+    "",
+    decode.one_of(decode.at(["outcome"], decode.string), [decode.success("")]),
+  )
   decode.success(Task(
     id,
     title,
@@ -477,14 +633,20 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     changes,
     stamps,
     attention,
+    finished,
   ))
 }
 
 fn note_decoder() -> decode.Decoder(Note) {
   use author <- decode.field("author", decode.string)
+  use run <- decode.optional_field(
+    "run",
+    "",
+    decode.one_of(decode.string, [decode.success("")]),
+  )
   use text <- decode.field("text", decode.string)
   use time <- decode.optional_field("time", 0, decode.int)
-  decode.success(Note(author, text, time))
+  decode.success(Note(author, run, text, time))
 }
 
 fn entry_decoder() -> decode.Decoder(Entry) {
@@ -510,7 +672,16 @@ fn question_decoder() -> decode.Decoder(Question) {
   use text <- decode.field("text", decode.string)
   use options <- decode.field("options", decode.list(decode.string))
   use answer <- decode.optional_field("answer", "", decode.string)
-  decode.success(Question(id, text, options, answer))
+  use settings <- decode.optional_field(
+    "settings",
+    None,
+    decode.optional({
+      use base <- decode.field("base", decode.string)
+      use proposed <- decode.field("proposed", decode.string)
+      decode.success(#(base, proposed))
+    }),
+  )
+  decode.success(Question(id, text, options, answer, settings))
 }
 
 fn run_decoder() -> decode.Decoder(Run) {
@@ -518,11 +689,26 @@ fn run_decoder() -> decode.Decoder(Run) {
   use kind <- decode.field("kind", decode.string)
   use state <- decode.field("state", decode.string)
   use model <- decode.field("model", decode.string)
+  use effort <- decode.optional_field(
+    "effort",
+    "",
+    decode.one_of(decode.string, [decode.success("")]),
+  )
   use log <- decode.field("log", decode.string)
   use outcome <- decode.optional_field("outcome", "", decode.string)
   use started <- decode.optional_field("started", 0, decode.int)
   use ended <- decode.optional_field("ended", 0, decode.int)
-  decode.success(Run(id, kind, state, model, log, outcome, started, ended))
+  decode.success(Run(
+    id,
+    kind,
+    state,
+    model,
+    effort,
+    log,
+    outcome,
+    started,
+    ended,
+  ))
 }
 
 fn link_decoder() -> decode.Decoder(Link) {
@@ -540,7 +726,17 @@ fn agent_decoder() -> decode.Decoder(Agent) {
     "",
     decode.one_of(decode.string, [decode.success("")]),
   )
-  decode.success(Agent(id, label, available, reason))
+  use effort <- decode.optional_field(
+    "effort",
+    "",
+    decode.one_of(decode.string, [decode.success("")]),
+  )
+  use efforts <- decode.optional_field(
+    "efforts",
+    [],
+    decode.list(decode.string),
+  )
+  decode.success(Agent(id, label, available, reason, effort, efforts))
 }
 
 pub fn workflow_decoder() -> decode.Decoder(Workflow) {
@@ -578,25 +774,36 @@ fn button(label: String, msg: Msg) -> Element(Msg) {
 
 pub fn view(model: Model) -> Element(Msg) {
   h.main([], [
-    h.h1([], [h.text("Solace tasks")]),
-    h.p([], [h.a([a.href("/guide")], [h.text("Guide")])]),
-    h.p([a.role("alert")], [h.text(model.error)]),
-    h.section([a.class("editor")], [
-      h.label([], [
-        h.text("Title"),
-        h.input([a.value(model.title), e.on_input(Title)]),
+    h.header([a.class("top")], [
+      h.h1([], [h.text("Solace tasks")]),
+      h.a([a.href("/guide")], [h.text("Guide")]),
+      h.button([a.class("primary"), e.on_click(NewTask)], [
+        h.text(case model.creating {
+          True -> "Close new task"
+          False -> "New task"
+        }),
       ]),
-      h.label([], [
-        h.text("Description"),
-        h.textarea([a.value(model.body), e.on_input(Body)], model.body),
-      ]),
-      h.label([], [
-        h.text("Rank (selected task)"),
-        h.input([a.type_("number"), a.value(model.rank), e.on_input(Rank)]),
-      ]),
-      button("Create task", Create),
-      button("Save selected task", Save),
     ]),
+    h.p([a.role("alert")], [h.text(model.error)]),
+    case model.creating {
+      False -> h.text("")
+      True ->
+        h.section([a.class("editor")], [
+          h.label([], [
+            h.text("Title"),
+            h.input([a.value(model.draft_title), e.on_input(DraftTitle)]),
+          ]),
+          h.label([], [
+            h.text("Description"),
+            h.textarea(
+              [a.value(model.draft_body), e.on_input(DraftBody)],
+              model.draft_body,
+            ),
+          ]),
+          button("Create task", Create),
+          button("Cancel", NewTask),
+        ])
+    },
     h.div(
       [a.class("board")],
       list.map(model.workflow.columns, fn(c) {
@@ -633,10 +840,26 @@ pub fn view(model: Model) -> Element(Msg) {
 }
 
 fn detail(model: Model, t: Task) -> Element(Msg) {
+  let open_questions = list.any(t.questions, fn(q) { q.answer == "" })
+  let tabs = [
+    #("details", "Details"),
+    #("notes", "Notes (" <> int.to_string(list.length(t.notes)) <> ")"),
+    #(
+      "questions",
+      "Questions ("
+        <> int.to_string(list.length(t.questions))
+        <> ")"
+        <> case open_questions {
+        True -> " •"
+        False -> ""
+      },
+    ),
+    #("runs", "Runs (" <> int.to_string(list.length(t.runs)) <> ")"),
+    #("changes", "Changes (" <> int.to_string(list.length(t.changes)) <> ")"),
+  ]
   h.section([a.class("detail")], [
     h.h2([], [h.text(t.title)]),
-    h.pre([], [h.text(t.body)]),
-    h.p([], [h.text(t.column)]),
+    h.p([a.class("meta")], [h.text(t.column), status_badge(t)]),
     case t.attention {
       "" -> h.text("")
       reason ->
@@ -645,21 +868,88 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
           md(reason),
         ])
     },
-    status_badge(t),
-    case t.changes {
-      [] -> h.text("")
-      _ -> h.p([], [h.text(model.review_summary <> " "), h.a([a.href("/view?task=" <> t.id)], [h.text("Contract view")])])
-    },
+    agent_choice(model),
+    composer(model, t),
     h.div(
-      [],
-      list.map(t.links, fn(link) {
-        h.a([a.href(link.url)], [h.text(link.name)])
+      [a.class("actions")],
+      list.append(
+        list.map(actions(model.workflow, t), fn(name) {
+          button(name, Action(name))
+        }),
+        [button("Add note", AddNote)],
+      ),
+    ),
+    h.div(
+      [a.class("tabs"), a.role("tablist")],
+      list.map(tabs, fn(tab) {
+        h.button(
+          [
+            a.role("tab"),
+            a.aria_selected(model.tab == tab.0),
+            e.on_click(Tab(tab.0)),
+          ],
+          [h.text(tab.1)],
+        )
       }),
     ),
-    h.p(
-      [],
-      list.map(t.stamps, fn(s) { h.span([], [h.text("Stamp: " <> s <> " ")]) }),
-    ),
+    h.div([a.class("panel"), a.role("tabpanel")], case model.tab {
+      "notes" -> notes_view(t)
+      "questions" -> questions_view(t)
+      "runs" -> list.map(list.reverse(t.runs), fn(r) { run_view(model, r) })
+      "changes" -> [
+        h.ul([], list.map(t.changes, fn(c) { h.li([], [h.text(c)]) })),
+      ]
+      _ -> details_view(model, t)
+    }),
+  ])
+}
+
+fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
+  case model.editing {
+    True -> [
+      h.label([], [
+        h.text("Title"),
+        h.input([a.value(model.title), e.on_input(Title)]),
+      ]),
+      h.label([], [
+        h.text("Description"),
+        h.textarea([a.value(model.body), e.on_input(Body)], model.body),
+      ]),
+      h.label([], [
+        h.text("Rank (lower comes first)"),
+        h.input([a.type_("number"), a.value(model.rank), e.on_input(Rank)]),
+      ]),
+      button("Save", Save),
+      button("Cancel", Edit(False)),
+    ]
+    False -> [
+      md(t.body),
+      case t.changes {
+        [] -> h.text("")
+        _ ->
+          h.p([], [
+            h.text(model.review_summary <> " "),
+            h.a([a.href("/view?task=" <> t.id)], [h.text("Contract view")]),
+          ])
+      },
+      h.div(
+        [],
+        list.map(t.links, fn(link) {
+          h.a([a.href(link.url)], [h.text(link.name)])
+        }),
+      ),
+      h.p(
+        [],
+        list.map(t.stamps, fn(s) { h.span([], [h.text("Stamp: " <> s <> " ")]) }),
+      ),
+      button("Edit", Edit(True)),
+    ]
+  }
+}
+
+fn agent_choice(model: Model) -> Element(Msg) {
+  let chosen = list.find(model.models, fn(m) { m.id == model.model })
+  h.div([a.class("agent")], [
     h.label([], [
       h.text("Agent model"),
       h.select(
@@ -676,69 +966,196 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
         }),
       ),
     ]),
-    h.label([], [
-      h.text("Note / answer / instructions"),
-      h.textarea([a.value(model.text), e.on_input(Text)], model.text),
-    ]),
-    button("Add note", AddNote),
-    h.div(
-      [a.class("actions")],
-      list.map(actions(model.workflow, t), fn(name) {
-        button(name, Action(name))
-      }),
-    ),
-    h.h3([], [h.text("Questions")]),
-    h.div(
-      [],
-      list.map(t.questions, fn(q) {
-        h.article([], [
-          h.p([], [h.text(q.text)]),
-          case q.answer {
-            "" ->
-              h.div(
-                [],
-                list.append(
-                  list.map(q.options, fn(o) { button(o, Answer(q.id, o)) }),
-                  [button("Answer with text above", Answer(q.id, ""))],
-                ),
-              )
-            answer -> h.p([], [h.text("Answer: " <> answer)])
-          },
-        ])
-      }),
-    ),
-    h.h3([], [h.text("Notes")]),
-    h.div(
-      [],
-      list.index_map(t.notes, fn(n, i) {
-        h.article([a.class("note")], [
-          h.header([], [
-            h.strong([], [h.text(n.author)]),
-            h.small([], [h.text(clock(n.time))]),
-            h.button(
-              [
-                a.class("delete"),
-                a.attribute("aria-label", "Delete note"),
-                e.on_click(DeleteNote(i)),
-              ],
-              [h.text("Delete")],
-            ),
+    case chosen {
+      Ok(m) if m.efforts != [] ->
+        h.label([], [
+          h.text("Effort"),
+          h.select([a.value(model.effort), e.on_input(EffortSelected)], [
+            h.option([a.value("")], case m.effort {
+              "" -> "Default"
+              effort -> "Default (" <> effort <> ")"
+            }),
+            ..list.map(m.efforts, fn(effort) {
+              h.option([a.value(effort)], effort)
+            })
           ]),
-          md(n.text),
         ])
-      }),
-    ),
-    h.h3([], [h.text("Runs")]),
-    h.div([], list.map(list.reverse(t.runs), fn(r) { run_view(model, r) })),
-    h.h3([], [h.text("Changes")]),
-    h.ul([], list.map(t.changes, fn(c) { h.li([], [h.text(c)]) })),
+      _ -> h.text("")
+    },
   ])
 }
 
-/// What the task's agent is doing right now, if one is on it.
+/// The note, answer and instructions editor. Images pasted, dropped or picked
+/// here are uploaded by `api.mjs` and inserted as markdown.
+fn composer(model: Model, t: Task) -> Element(Msg) {
+  let tool = fn(label, title, before, after) {
+    h.button(
+      [a.type_("button"), a.title(title), e.on_click(Format(before, after))],
+      [h.text(label)],
+    )
+  }
+  h.div([a.class("composer")], [
+    h.div([a.class("toolbar")], [
+      h.button(
+        [
+          a.type_("button"),
+          a.aria_pressed(bool_text(!model.preview)),
+          e.on_click(Preview(False)),
+        ],
+        [h.text("Write")],
+      ),
+      h.button(
+        [
+          a.type_("button"),
+          a.aria_pressed(bool_text(model.preview)),
+          e.on_click(Preview(True)),
+        ],
+        [h.text("Preview")],
+      ),
+      h.span([a.class("separator")], []),
+      tool("B", "Bold", "**", "**"),
+      tool("`code`", "Code", "`", "`"),
+      tool("• List", "List", "\n- ", ""),
+      tool("Link", "Link", "[", "](https://)"),
+      h.label([a.class("button"), a.title("Add an image")], [
+        h.text("Image"),
+        h.input([
+          a.type_("file"),
+          a.id("note-image"),
+          a.attribute("data-task", t.id),
+          a.accept(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+          a.class("sr-only"),
+        ]),
+      ]),
+    ]),
+    case model.preview {
+      True ->
+        h.div([a.class("preview")], [
+          case model.text {
+            "" -> h.p([a.class("muted")], [h.text("Nothing to preview.")])
+            text -> md(text)
+          },
+        ])
+      False ->
+        h.textarea(
+          [
+            a.id("note-text"),
+            a.attribute("data-task", t.id),
+            a.attribute("aria-label", "Note, answer or instructions"),
+            a.placeholder(
+              "Note, answer or instructions (markdown). Paste or drop images here.",
+            ),
+            a.value(model.text),
+            e.on_input(Text),
+          ],
+          model.text,
+        )
+    },
+  ])
+}
+
+fn bool_text(value: Bool) -> String {
+  case value {
+    True -> "true"
+    False -> "false"
+  }
+}
+
+fn questions_view(t: Task) -> List(Element(Msg)) {
+  list.map(list.reverse(t.questions), fn(q) {
+    let #(diff, other) = case q.settings {
+      Some(#(base, proposed)) -> #(
+        [h.pre([a.class("diff")], [h.text(settings_diff(base, proposed))])],
+        "Reject with the editor's text",
+      )
+      None -> #([], "Answer with the editor's text")
+    }
+    h.article([], [
+      h.p([], [h.text(q.text)]),
+      ..list.append(diff, [
+        case q.answer {
+          "" ->
+            h.div(
+              [],
+              list.append(
+                list.map(q.options, fn(o) { button(o, Answer(q.id, o)) }),
+                [button(other, Answer(q.id, ""))],
+              ),
+            )
+          answer -> h.p([], [h.text("Answer: " <> answer)])
+        },
+      ])
+    ])
+  })
+}
+
+/// Lines only in the old settings, then lines only in the proposed ones.
+/// ponytail: a line-set diff, not an LCS; fine for a short solace.toml.
+pub fn settings_diff(base: String, proposed: String) -> String {
+  let old = string.split(base, "\n")
+  let new = string.split(proposed, "\n")
+  list.append(
+    list.filter(old, fn(l) { !list.contains(new, l) })
+      |> list.map(fn(l) { "- " <> l }),
+    list.filter(new, fn(l) { !list.contains(old, l) })
+      |> list.map(fn(l) { "+ " <> l }),
+  )
+  |> string.join("\n")
+}
+
+/// Newest first. Each keeps its position, which names it to the API.
+fn notes_view(t: Task) -> List(Element(Msg)) {
+  t.notes
+  |> list.index_map(fn(n, i) { #(n, i) })
+  |> list.reverse
+  |> list.map(fn(pair) {
+    let #(n, i) = pair
+    h.details([a.class("note"), a.open(True)], [
+      h.summary([], [
+        h.strong([], [h.text(author(t, n))]),
+        h.small([], [h.text(clock(n.time))]),
+        h.button(
+          [
+            a.class("delete"),
+            a.attribute("aria-label", "Delete note"),
+            e.on_click(DeleteNote(i)) |> e.prevent_default,
+          ],
+          [h.text("Delete")],
+        ),
+      ]),
+      md(n.text),
+    ])
+  })
+}
+
+/// An agent note names its run, as the run list does.
+pub fn author(t: Task, n: Note) -> String {
+  case n.author, list.find(t.runs, fn(r) { r.id == n.run }) {
+    "agent", Ok(r) -> "agent · " <> run_label(r)
+    who, _ -> who
+  }
+}
+
+fn run_label(r: Run) -> String {
+  r.kind
+  <> " · "
+  <> r.model
+  <> case r.effort {
+    "" -> ""
+    effort -> " · " <> effort
+  }
+}
+
+/// What the task's agent is doing right now, or what it finished.
 pub fn status(t: Task) -> String {
   case t.paused, list.find(t.runs, fn(r) { r.state != "ended" }) {
-    _, Error(_) -> ""
+    _, Error(_) ->
+      case t.finished {
+        "finished" -> "Agent finished"
+        "reported" -> "Report ready"
+        "reviewed" -> "Review ready"
+        _ -> ""
+      }
     "", Ok(r) if r.state == "waiting" -> "Waiting for your answer"
     "", Ok(r) if r.kind == "review" -> "Agent reviewing"
     "", Ok(r) if r.kind == "investigate" -> "Agent investigating"
@@ -754,6 +1171,7 @@ fn status_badge(t: Task) -> Element(Msg) {
       let class = case s {
         "Agent working" | "Agent reviewing" | "Agent investigating" ->
           "status working"
+        "Agent finished" | "Report ready" | "Review ready" -> "status finished"
         _ -> "status"
       }
       h.span([a.class(class), a.role("status")], [h.text(s)])
@@ -773,7 +1191,7 @@ fn run_view(model: Model, r: Run) -> Element(Msg) {
   }
   h.article([a.class("run")], [
     h.header([], [
-      h.strong([], [h.text(r.kind <> " · " <> r.model)]),
+      h.strong([], [h.text(run_label(r))]),
       h.span([a.class("state " <> r.state)], [
         h.text(case r.state, r.outcome {
           "ended", "" -> "ended"

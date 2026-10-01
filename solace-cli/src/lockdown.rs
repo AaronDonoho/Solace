@@ -9,43 +9,45 @@ pub fn error<T>(code: &str, at: &str, message: impl std::fmt::Display) -> Result
 
 pub fn settings(root: &Path) -> Result<toml::Value, Failure> {
     match fs::read_to_string(root.join("solace.toml")) {
-        Ok(s) => {
-            let v: toml::Value = s.parse().map_err(|e| Failure(format!("E6020 invalid solace.toml\n  {e}"), 1))?;
-            let invalid = |s: &str| Failure(format!("E6020 invalid solace.toml\n  {s}"), 1);
-            for key in ["resources", "ignore"] {
-                if let Some(a) = v.get(key) {
-                    for p in a.as_array().ok_or_else(|| invalid(key))? {
-                        let p = p.as_str().ok_or_else(|| invalid(key))?;
-                        globset::Glob::new(p).map_err(|_| invalid(p))?;
-                    }
-                }
-            }
-            if v.get("resource_limit").is_some_and(|x| x.as_integer().is_none_or(|n| n < 0)) {
-                return Err(invalid("resource_limit"));
-            }
-            for key in ["commands", "validators"] {
-                if let Some(t) = v.get(key) {
-                    for (name, c) in t.as_table().ok_or_else(|| invalid(key))? {
-                        let argv = if key == "commands" { c.get("run") } else { Some(c) };
-                        if argv.and_then(|a| a.as_array()).is_none_or(|a| a.is_empty() || a.iter().any(|x| x.as_str().is_none())) {
-                            return Err(invalid(name));
-                        }
-                        if key == "validators" {
-                            globset::Glob::new(name).map_err(|_| invalid(name))?;
-                        }
-                        if c.get("timeout").is_some_and(|x| x.as_integer().is_none_or(|n| n <= 0))
-                            || c.get("args").is_some_and(|x| x.as_bool().is_none())
-                        {
-                            return Err(invalid(name));
-                        }
-                    }
-                }
-            }
-            Ok(v)
-        }
+        Ok(s) => parse_settings(&s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Value::Table(Default::default())),
         Err(e) => Err(e.into()),
     }
+}
+/// Checks settings text without reading or writing the file.
+pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
+    let v: toml::Value = s.parse().map_err(|e| Failure(format!("E6020 invalid solace.toml\n  {e}"), 1))?;
+    let invalid = |s: &str| Failure(format!("E6020 invalid solace.toml\n  {s}"), 1);
+    for key in ["resources", "ignore"] {
+        if let Some(a) = v.get(key) {
+            for p in a.as_array().ok_or_else(|| invalid(key))? {
+                let p = p.as_str().ok_or_else(|| invalid(key))?;
+                globset::Glob::new(p).map_err(|_| invalid(p))?;
+            }
+        }
+    }
+    if v.get("resource_limit").is_some_and(|x| x.as_integer().is_none_or(|n| n < 0)) {
+        return Err(invalid("resource_limit"));
+    }
+    for key in ["commands", "validators"] {
+        if let Some(t) = v.get(key) {
+            for (name, c) in t.as_table().ok_or_else(|| invalid(key))? {
+                let argv = if key == "commands" { c.get("run") } else { Some(c) };
+                if argv.and_then(|a| a.as_array()).is_none_or(|a| a.is_empty() || a.iter().any(|x| x.as_str().is_none())) {
+                    return Err(invalid(name));
+                }
+                if key == "validators" {
+                    globset::Glob::new(name).map_err(|_| invalid(name))?;
+                }
+                if c.get("timeout").is_some_and(|x| x.as_integer().is_none_or(|n| n <= 0))
+                    || c.get("args").is_some_and(|x| x.as_bool().is_none())
+                {
+                    return Err(invalid(name));
+                }
+            }
+        }
+    }
+    Ok(v)
 }
 fn limit(v: &toml::Value) -> usize {
     v.get("resource_limit").and_then(|x| x.as_integer()).unwrap_or(262144) as usize
@@ -304,21 +306,23 @@ pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize) -> Out
         Err(Failure(message, code)) => Err(Failure(message + &trim_output(&output, budget), code)),
     }
 }
+/// The file's new text: `new` whole, or with `old` replaced by `new`.
+pub fn edited(current: &[u8], new: &str, replace: bool, old: Option<&str>) -> Out {
+    if !replace {
+        return Ok(new.to_string());
+    }
+    let old = old.filter(|s| !s.is_empty()).ok_or_else(|| Failure("E0104 expected nonempty old text".into(), 1))?;
+    let current = std::str::from_utf8(current).map_err(|_| Failure("E6002 text replacement requires a UTF-8 file".into(), 1))?;
+    match current.matches(old).count() {
+        1 => Ok(current.replacen(old, new, 1)),
+        0 => fail("E0104 old text not found"),
+        _ => fail("E0105 old text occurs more than once"),
+    }
+}
 fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, old: Option<&str>) -> Out {
     let p = path(root, name)?;
     let before = fs::read(&p).ok();
-    let text = if replace {
-        let old = old.filter(|s| !s.is_empty()).ok_or_else(|| Failure("E0104 expected nonempty old text".into(), 1))?;
-        let current = std::str::from_utf8(before.as_deref().unwrap_or_default())
-            .map_err(|_| Failure("E6002 text replacement requires a UTF-8 file".into(), 1))?;
-        match current.matches(old).count() {
-            1 => current.replacen(old, new, 1),
-            0 => return fail("E0104 old text not found"),
-            _ => return fail("E0105 old text occurs more than once"),
-        }
-    } else {
-        new.to_string()
-    };
+    let text = edited(before.as_deref().unwrap_or_default(), new, replace, old)?;
     if text.len() > limit(v) {
         return error("E6004", name, "proposed text exceeds resource_limit");
     }

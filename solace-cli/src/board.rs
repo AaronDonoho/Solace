@@ -158,6 +158,7 @@ fn note(t: &mut Value, author: &str, run: Option<&str>, text: &str) {
 /// Marks a task as needing a human. The next action a human takes on it clears the mark.
 fn flag(t: &mut Value, reason: &str) {
     t["attention"] = json!({"reason":reason,"time":now()});
+    t["finished"] = Value::Null;
 }
 fn move_to(w: &Value, t: &mut Value, to: &Value) -> Result<(), Failure> {
     let c = column(w, t);
@@ -308,6 +309,14 @@ fn model(config: &Value, name: &str) -> Result<Value, Failure> {
         .and_then(|a| a.iter().find(|x| x["id"] == name))
         .cloned()
         .ok_or_else(|| Failure(format!("E7001 unknown model {name}; configure system [[models]]"), 1))
+}
+/// Efforts an action may choose for a model. Custom runners take none.
+fn efforts(m: &Value) -> &'static [&'static str] {
+    match (m["run"].is_null(), m["agent"].as_str()) {
+        (true, Some("codex")) => &["low", "medium", "high", "xhigh"],
+        (true, Some("claude")) => &["low", "medium", "high", "xhigh", "max"],
+        _ => &[],
+    }
 }
 
 // Snapshot live rows only. Before-state rows never enter the semantic index.
@@ -542,6 +551,7 @@ fn continue_answered(s: &Store, w: &Value, t: &mut Value) -> Result<(), Failure>
     if let Some(name) = next {
         action(s, w, t, &json!({"action":name}))?;
         t["attention"] = Value::Null;
+        t["finished"] = Value::Null;
     } else {
         flag(t, "answers saved; no continuation action is available in this column");
     }
@@ -594,7 +604,18 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     if a["model"] == true && !resume && body["model"].as_str().is_none() {
         return err("E7001", "this action requires a model");
     }
-    let selected = if !run.is_empty() && !resume { Some(model(&config, chosen.as_str().unwrap_or(""))?) } else { None };
+    let mut selected = if !run.is_empty() && !resume { Some(model(&config, chosen.as_str().unwrap_or(""))?) } else { None };
+    if let Some(m) = selected.as_mut() {
+        // A chosen effort must be offered; the task's remembered one applies only when still offered.
+        if let Some(e) = body.get("effort").filter(|e| !e.is_null()) {
+            let e = e.as_str().filter(|e| efforts(m).contains(e)).ok_or_else(|| {
+                Failure(format!("E7001 effort not offered by {}; offered: {}", m["id"].as_str().unwrap_or(""), efforts(m).join(", ")), 1)
+            })?;
+            m["effort"] = json!(e);
+        } else if body.get("model").is_none() && t["effort"].as_str().is_some_and(|e| efforts(m).contains(&e)) {
+            m["effort"] = t["effort"].clone();
+        }
+    }
     if let Some(reason) = selected.as_ref().and_then(unavailable) {
         return err("E7011", format!("model {} is unavailable: {reason}", selected.unwrap()["id"].as_str().unwrap_or("")));
     }
@@ -639,9 +660,11 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
         let rid = id();
         let kind = if run == "new_work" { "work" } else { run };
         let log = s.root.join(".solace/board").join(t["id"].as_str().unwrap()).join(format!("{rid}.jsonl"));
-        t["runs"].as_array_mut().unwrap().push(json!({"id":rid,"kind":kind,"model":m["id"],"state":"running","started":now(),"log":log,"fresh":run == "new_work" || a["revert"] == true}));
+        t["runs"].as_array_mut().unwrap().push(json!({"id":rid,"kind":kind,"model":m["id"],"effort":m["effort"],"state":"running","started":now(),"log":log,"fresh":run == "new_work" || a["revert"] == true}));
+        t["finished"] = Value::Null;
         if kind == "work" {
             t["model"] = m["id"].clone();
+            t["effort"] = m["effort"].clone();
         }
         return Ok(Some((rid, m)));
     }
@@ -671,7 +694,7 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
                 .iter()
                 .map(|m| {
                     let reason = unavailable(m);
-                    json!({"id":m["id"],"label":m["label"],"agent":m["agent"],"available":reason.is_none(),"reason":reason})
+                    json!({"id":m["id"],"label":m["label"],"agent":m["agent"],"effort":m["effort"],"efforts":efforts(m),"available":reason.is_none(),"reason":reason})
                 })
                 .collect::<Vec<_>>()
         )),
@@ -754,11 +777,15 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
                         return err("E7001", "option is not offered");
                     }
                     q["answer"] = json!(answer);
+                    if !q["settings"].is_null() && answer == "Approve" {
+                        apply_settings(root, q)?;
+                    }
                     continue_answered(&s, &w, &mut t)?;
                 }
                 ("POST", ["actions"]) => {
                     let launch = action(&s, &w, &mut t, &body)?;
                     t["attention"] = Value::Null;
+                    t["finished"] = Value::Null;
                     save(&s, &t)?;
                     if let Some((rid, m)) = launch {
                         start(root.to_path_buf(), t.clone(), rid, m);
@@ -897,12 +924,13 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
             }
         }
     }
+    let custom = m["run"].as_array();
+    let (prompt, images) = continuation_brief(t, run, resume.is_some(), root, custom.is_some());
     let binary = env::current_exe()?;
     let config = system()?;
     let timeout = config["task_timeout"].as_u64().unwrap_or(3600);
     let agent = m["agent"].as_str().unwrap_or("codex");
     let launch: Value = serde_json::from_str(&lockdown::agent_config(agent, &dir, &binary, timeout)?).unwrap();
-    let custom = m["run"].as_array();
     let mut argv: Vec<String> = if let Some(a) = custom {
         a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
     } else if agent == "codex" {
@@ -935,10 +963,23 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
                 argv.extend(["--resume".into(), session.clone()]);
             }
         }
+        if agent == "claude" {
+            if let Some(e) = m["effort"].as_str() {
+                argv.extend(["--effort".into(), e.into()]);
+            }
+            if !images.is_empty() {
+                argv.extend(["--input-format".into(), "stream-json".into()]);
+            }
+        }
         argv.extend(launch["args"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().into()));
         if agent == "codex" {
             if let Some(e) = m["effort"].as_str() {
                 argv.extend(["-c".into(), format!("model_reasoning_effort={}", json!(e))]);
+            }
+            // `--image` takes several values, so each goes before `--json`, never before `-`.
+            let at = if resume.is_some() { 3 } else { 2 };
+            for image in images.iter().rev() {
+                argv.splice(at..at, ["--image".into(), image.to_string_lossy().into_owned()]);
             }
             argv.extend(endpoint_args(m));
             argv.push("-".into());
@@ -986,8 +1027,19 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     }
     cmd.env("SOLACE_TASK", tid).env("SOLACE_RUN", rid).env("SOLACE_SESSION", rid).env("SOLACE_BIN", &binary);
     let mut child = cmd.spawn()?;
-    let prompt = continuation_brief(t, run, resume.is_some(), root);
-    writeln!(child.stdin.take().unwrap(), "{prompt}")?;
+    let mut stdin = child.stdin.take().unwrap();
+    if agent == "claude" && custom.is_none() && !images.is_empty() {
+        // Claude Code takes images only inside a stream-json user message.
+        let mut content = vec![json!({"type":"text","text":prompt})];
+        for image in &images {
+            let media = image_type(&image.to_string_lossy()).unwrap_or("image/png");
+            content.push(json!({"type":"image","source":{"type":"base64","media_type":media,"data":base64(&fs::read(image)?)}}));
+        }
+        writeln!(stdin, "{}", json!({"type":"user","message":{"role":"user","content":content}}))?;
+    } else {
+        writeln!(stdin, "{prompt}")?;
+    }
+    drop(stdin);
     let mut elapsed = Duration::ZERO;
     let mut last = Instant::now();
     let mut ending = None;
@@ -1053,13 +1105,21 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     Ok(())
 }
 
-fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path) -> String {
+/// The brief, plus the images its notes reference, which are attached to the prompt.
+fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom: bool) -> (String, Vec<PathBuf>) {
     let kind = run["kind"].as_str().unwrap_or("");
     let mut packet = t.clone();
     if resumed {
         let seen: HashSet<&str> = t["conversation"]["notes_seen"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
         packet["notes"] = json!(t["notes"].as_array().unwrap().iter().filter(|n| !seen.contains(note_fingerprint(n).as_str())).collect::<Vec<_>>());
     }
+    let tid = t["id"].as_str().unwrap_or("");
+    let mut images = vec![];
+    for n in packet["notes"].as_array_mut().into_iter().flatten() {
+        let text = note_images(n["text"].as_str().unwrap_or(""), &format!("/tasks/{tid}/files/"), &mut images);
+        n["text"] = json!(text);
+    }
+    let images: Vec<PathBuf> = images.iter().filter_map(|name| image_path(root, tid, name).ok()).collect();
     let mut out = brief(&packet, kind);
     if resumed {
         out = out.replace(
@@ -1097,7 +1157,100 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path) -> Str
             }
         }
     }
+    if !images.is_empty() {
+        out += "\nImages in the notes are attached to this message as [image 1], [image 2], ... in order.\n";
+        if custom {
+            for (i, p) in images.iter().enumerate() {
+                out += &format!("[image {}: {}]\n", i + 1, p.display());
+            }
+        }
+    }
     out += "\nAfter the finishing tool returns, give a short final response and exit normally.\n";
+    (out, images)
+}
+
+/// Replaces each markdown image of an uploaded file with `[image N]`, numbering
+/// files in first-seen order. Other images and text are left as written.
+fn note_images(text: &str, prefix: &str, found: &mut Vec<String>) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find("![") {
+        let after = &rest[i..];
+        let Some(open) = after.find("](") else { break };
+        let Some(close) = after[open..].find(')').map(|c| open + c) else { break };
+        out += &rest[..i];
+        match after[open + 2..close].strip_prefix(prefix).filter(|n| image_type(n).is_some()) {
+            Some(name) => {
+                let n = found.iter().position(|x| x == name).unwrap_or_else(|| {
+                    found.push(name.to_string());
+                    found.len() - 1
+                });
+                out += &format!("[image {}]", n + 1);
+            }
+            None => out += &after[..=close],
+        }
+        rest = &after[close + 1..];
+    }
+    out + rest
+}
+
+/// Note images: content-checked raster formats only (SVG can carry script).
+const IMAGE_LIMIT: usize = 5 * 1024 * 1024;
+fn image_kind(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if b.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else if b.starts_with(b"GIF87a") || b.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if b.len() > 12 && b.starts_with(b"RIFF") && &b[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+/// The media type of a stored image's name, which is `<16 hex>.<ext>`.
+fn image_type(name: &str) -> Option<&'static str> {
+    let (stem, ext) = name.rsplit_once('.')?;
+    if stem.len() != 16 || !stem.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    match ext {
+        "png" => Some("image/png"),
+        "jpg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+fn image_path(root: &Path, tid: &str, name: &str) -> Result<PathBuf, Failure> {
+    let p = task_path(root, tid)?.with_extension("").join("files").join(name);
+    if image_type(name).is_none() || !p.exists() {
+        return err("E7001", "unknown image");
+    }
+    Ok(p)
+}
+pub fn upload(root: &Path, tid: &str, bytes: &[u8]) -> Result<Value, Failure> {
+    task(root, tid)?;
+    if bytes.len() > IMAGE_LIMIT {
+        return err("E7001", "image over 5 MB");
+    }
+    let ext = image_kind(bytes).ok_or_else(|| Failure("E7001 only PNG, JPEG, GIF or WebP images".into(), 1))?;
+    let name = format!("{}.{ext}", &hex(&Sha256::digest(bytes))[..16]);
+    let dir = task_path(root, tid)?.with_extension("").join("files");
+    fs::create_dir_all(&dir)?;
+    fs::write(dir.join(&name), bytes)?;
+    Ok(json!({"name":name,"url":format!("/tasks/{tid}/files/{name}")}))
+}
+fn base64(bytes: &[u8]) -> String {
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        for i in 0..4 {
+            out.push(if i <= c.len() { A[(n >> (18 - 6 * i) & 63) as usize] as char } else { '=' });
+        }
+    }
     out
 }
 
@@ -1345,6 +1498,7 @@ pub fn task_command(
                 t["runs"][i]["state"] = json!("ended");
                 t["runs"][i]["ended"] = json!(now());
                 t["runs"][i]["outcome"] = json!("reviewed");
+                t["finished"] = json!({"kind":"review","outcome":"reviewed","time":now()});
             }
         }
         Some("done") => {
@@ -1361,6 +1515,7 @@ pub fn task_command(
                 t["runs"][i]["outcome"] = json!("finished");
                 move_to(&w, &mut t, &w["events"]["finished"])?;
             }
+            t["finished"] = json!({"kind":t["runs"][i]["kind"],"outcome":t["runs"][i]["outcome"],"time":now()});
         }
         Some("ask") => {
             if !(2..=4).contains(&options.len()) {
@@ -1379,17 +1534,7 @@ pub fn task_command(
             }
             save(s, &t)?;
             drop(guard);
-            loop {
-                std::thread::sleep(Duration::from_millis(50));
-                let _guard = lock(&s.root)?;
-                let t = task(&s.root, tid)?;
-                if t["runs"][i]["state"] == "ended" {
-                    return err("E7003", "run ended while waiting");
-                }
-                if t["runs"][i]["state"] == "running" && t["paused_from"].is_null() {
-                    return Ok(format!("{}\n", t["runs"][i]["reply"]));
-                }
-            }
+            return wait_reply(s, tid, i);
         }
         _ => return usage("task note | task ask | task done, with the text in `text`"),
     }
@@ -1398,6 +1543,54 @@ pub fn task_command(
     }
     save(s, &t)?;
     Ok("Recorded.\n".into())
+}
+
+/// Holds the agent's call until its answers arrive and the run continues.
+fn wait_reply(s: &Store, tid: &str, i: usize) -> Out {
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        let _guard = lock(&s.root)?;
+        let t = task(&s.root, tid)?;
+        if t["runs"][i]["state"] == "ended" {
+            return err("E7003", "run ended while waiting");
+        }
+        if t["runs"][i]["state"] == "running" && t["paused_from"].is_null() {
+            return Ok(format!("{}\n", t["runs"][i]["reply"]));
+        }
+    }
+}
+/// A work run's `write solace.toml`: checked now, written only when a human
+/// approves it on the board (D-38).
+pub fn propose_settings(s: &Store, tid: &str, rid: &str, base: &[u8], proposed: &str, guard: fs::File) -> Out {
+    workflow(&lockdown::parse_settings(proposed)?)?;
+    let base = std::str::from_utf8(base).map_err(|_| Failure("E6020 solace.toml is not UTF-8".into(), 1))?;
+    if base == proposed {
+        return Ok("solace.toml is unchanged.\n".into());
+    }
+    let mut t = task(&s.root, tid)?;
+    let w = workflow(&lockdown::settings(&s.root)?)?;
+    let i = t["runs"].as_array().unwrap().iter().position(|r| r["id"] == rid).unwrap();
+    t["questions"].as_array_mut().unwrap().push(json!({"id":id(),"text":"Change solace.toml","options":["Approve","Reject"],
+        "settings":{"base":base,"proposed":proposed}}));
+    t["runs"][i]["state"] = json!("waiting");
+    flag(&mut t, "an agent proposed a settings change");
+    move_to(&w, &mut t, &w["events"]["asked"])?;
+    save(s, &t)?;
+    drop(guard);
+    wait_reply(s, tid, i)
+}
+/// Applies an approved settings question, unless the file changed since.
+fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
+    let p = root.join("solace.toml");
+    let current = fs::read_to_string(&p).unwrap_or_default();
+    let proposed = q["settings"]["proposed"].as_str().unwrap();
+    if current != q["settings"]["base"] || lockdown::parse_settings(proposed).and_then(|v| workflow(&v)).is_err() {
+        q["answer"] = json!("Not applied: solace.toml changed since the proposal; read it and propose again");
+        return Ok(());
+    }
+    fs::write(p, proposed)?;
+    q["answer"] = json!("Approved and written");
+    Ok(())
 }
 
 pub fn serve(root: &Path, port: u16) -> Out {
@@ -1475,10 +1668,30 @@ pub fn serve(root: &Path, port: u16) -> Out {
                 );
                 return;
             }
+            let parts: Vec<String> = url.split('?').next().unwrap_or("").trim_matches('/').split('/').map(String::from).collect();
+            let file = match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+                ["tasks", tid, "files", rest @ ..] => Some((tid.to_string(), rest.join("/"))),
+                _ => None,
+            };
+            if let (Some((tid, name)), "GET") = (&file, req.method().as_str()) {
+                if let Ok(data) = image_path(&root, tid, name).and_then(|p| Ok(fs::read(p)?)) {
+                    let kind = image_type(name).unwrap();
+                    let _ = req.respond(
+                        tiny_http::Response::from_data(data).with_header(tiny_http::Header::from_bytes("Content-Type", kind).unwrap()),
+                    );
+                } else {
+                    let _ = req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
+                }
+                return;
+            }
+            let upload_to = file.filter(|(_, name)| name.is_empty() && req.method().as_str() == "POST").map(|(tid, _)| tid);
+            let limit = if upload_to.is_some() { IMAGE_LIMIT } else { 1_048_576 };
             let mut bytes = Vec::new();
-            let parsed = req.as_reader().take(1_048_577).read_to_end(&mut bytes);
-            let result = if parsed.is_err() || bytes.len() > 1_048_576 {
-                err("E7001", "request body too large")
+            let parsed = req.as_reader().take(limit as u64 + 1).read_to_end(&mut bytes);
+            let result = if parsed.is_err() || bytes.len() > limit {
+                err("E7001", if upload_to.is_some() { "image over 5 MB" } else { "request body too large" })
+            } else if let Some(tid) = upload_to {
+                upload(&root, &tid, &bytes)
             } else {
                 let body = if bytes.is_empty() { Ok(json!({})) } else { serde_json::from_slice(&bytes) };
                 match body {
@@ -1546,6 +1759,24 @@ impl Read for Events {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn note_images_are_checked_numbered_and_encoded() {
+        assert_eq!(base64(b"Man"), "TWFu");
+        assert_eq!(base64(b"Ma"), "TWE=");
+        assert_eq!(base64(b"M"), "TQ==");
+        assert_eq!(image_kind(b"\x89PNG\r\n\x1a\nrest"), Some("png"));
+        assert_eq!(image_kind(b"<svg onload=alert(1)>"), None);
+        assert_eq!(image_type("0123456789abcdef.png"), Some("image/png"));
+        for bad in ["../x.png", "0123456789abcdef.svg", "x.png"] {
+            assert_eq!(image_type(bad), None);
+        }
+        let a = "/tasks/t1/files/0123456789abcdef.png";
+        let mut found = vec![];
+        let text = note_images(&format!("see ![one]({a}) and ![x](http://e/x.png) ![again]({a}) ![broken"), "/tasks/t1/files/", &mut found);
+        assert_eq!(text, "see [image 1] and ![x](http://e/x.png) [image 1] ![broken");
+        assert_eq!(found, ["0123456789abcdef.png"]);
+    }
 
     #[test]
     fn presets_merge_with_configured_models() {

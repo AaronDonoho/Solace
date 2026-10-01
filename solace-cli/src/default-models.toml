@@ -3,28 +3,28 @@
 
 [[models]]
 id = "codex-gpt-6-sol"
-label = "Codex · GPT-6 Sol (medium)"
+label = "Codex · GPT-6 Sol"
 agent = "codex"
 model = "gpt-6-sol"
 effort = "medium"
 
 [[models]]
 id = "codex-gpt-6-luna"
-label = "Codex · GPT-6 Luna (medium)"
+label = "Codex · GPT-6 Luna"
 agent = "codex"
 model = "gpt-6-luna"
 effort = "medium"
 
 [[models]]
 id = "codex-gpt-6-astra"
-label = "Codex · GPT-6 Astra (medium)"
+label = "Codex · GPT-6 Astra"
 agent = "codex"
 model = "gpt-6-astra"
 effort = "medium"
 
 [[models]]
 id = "codex-gpt-5.6-terra"
-label = "Codex · GPT-5.6 Terra (medium)"
+label = "Codex · GPT-5.6 Terra"
 agent = "codex"
 model = "gpt-5.6-terra"
 effort = "medium"

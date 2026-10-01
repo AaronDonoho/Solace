@@ -18,10 +18,13 @@ export function clock(seconds) {
   return seconds ? new Date(seconds * 1000).toLocaleString() : '';
 }
 // Agent text is untrusted: everything is escaped before the few markdown forms
-// (code blocks, headings, lists, `code`, **bold**) are turned into HTML.
+// (code blocks, headings, lists, `code`, **bold**, images uploaded to this task
+// board, and http(s) links) are turned into HTML.
 export function markdown(text) {
   const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  const inline = s => escape(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  const inline = s => escape(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/!\[([^\]]*)\]\((\/tasks\/[\w-]+\/files\/[0-9a-f]{16}\.(?:png|jpg|gif|webp))\)/g, '<img alt="$1" src="$2">')
+    .replace(/(^|[^!])\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1<a href="$3" rel="noopener noreferrer">$2</a>');
   const out = [];
   const parts = text.split(/^```[^\n]*\n?/m);
   parts.forEach((part, i) => {
@@ -41,4 +44,49 @@ export function markdown(text) {
 
 export function confirm(question) {
   return globalThis.confirm(question);
+}
+
+// Browser storage may be missing or blocked; the board works without it.
+export function load(key) {
+  try { return globalThis.localStorage?.getItem(key) ?? ''; } catch { return ''; }
+}
+export function store(key, value) {
+  try { value ? localStorage.setItem(key, value) : localStorage.removeItem(key); } catch {}
+}
+
+// Wraps the note editor's selection (or appends, without one).
+export function wrap(text, before, after) {
+  const el = globalThis.document?.getElementById('note-text');
+  const start = el?.selectionStart ?? text.length, end = el?.selectionEnd ?? text.length;
+  return text.slice(0, start) + before + text.slice(start, end) + after + text.slice(end);
+}
+
+// Images pasted, dropped or picked into the note editor are uploaded; `insert`
+// gets each one's markdown.
+export function images(insert, fail) {
+  if (!globalThis.document) return;
+  const take = (event, files, task) => {
+    const list = [...(files || [])].filter(f => f.type.startsWith('image/'));
+    if (!list.length || !task) return;
+    event.preventDefault();
+    for (const file of list) {
+      fetch(`/tasks/${task}/files`, { method: 'POST', body: file })
+        .then(async response => {
+          const v = await response.json();
+          if (!v.url) return fail(v.message || 'Image upload failed');
+          const alt = file.name.replace(/\.[^.]*$/, '').replace(/[[\]]/g, '') || 'image';
+          insert(`![${alt}](${v.url})`);
+        })
+        .catch(error => fail(String(error)));
+    }
+  };
+  const inEditor = e => e.target?.id === 'note-text';
+  document.addEventListener('paste', e => inEditor(e) && take(e, e.clipboardData?.files, e.target.dataset.task));
+  document.addEventListener('dragover', e => inEditor(e) && e.preventDefault());
+  document.addEventListener('drop', e => inEditor(e) && take(e, e.dataTransfer?.files, e.target.dataset.task));
+  document.addEventListener('change', e => {
+    if (e.target?.id !== 'note-image') return;
+    take(e, e.target.files, e.target.dataset.task);
+    e.target.value = '';
+  });
 }

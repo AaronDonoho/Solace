@@ -1,3 +1,4 @@
+import base64
 import http.client
 import json
 import os
@@ -159,6 +160,59 @@ class Board(unittest.TestCase):
             self.action(t, 'complete')
             self.wait(t, lambda x: x.get('conversation') is None and not home.exists())
 
+    def raw(self,method,url,data=b''):
+        c=http.client.HTTPConnection('127.0.0.1',self.port,timeout=8)
+        c.request(method,url,data)
+        r=c.getresponse();out=(r.status,r.getheader('Content-Type'),r.read());c.close()
+        return out
+
+    def test_a16_effort_finished_and_note_images(self):
+        models={m['id']:m for m in self.api('GET','/models')}
+        self.assertEqual(models['native-claude']['efforts'],['low','medium','high','xhigh','max'])
+        self.assertEqual(models['native']['efforts'],['low','medium','high','xhigh'])
+        self.assertEqual(models['fake']['efforts'],[])
+        t=self.create([{'command':'task done done'}])
+        png=b'\x89PNG\r\n\x1a\n'+bytes(range(40))
+        status,_,body=self.raw('POST','/tasks/'+t['id']+'/files',png)
+        self.assertEqual(status,200,body)
+        url=json.loads(body)['url']
+        self.assertEqual(self.raw('GET',url),(200,'image/png',png))
+        for bad in [b'<svg onload="alert(1)"/>', b'\x89PNG\r\n\x1a\n'+bytes(5*1024*1024)]:
+            status,_,body=self.raw('POST','/tasks/'+t['id']+'/files',bad)
+            self.assertEqual((status,json.loads(body)['code']),(409,'E7001'))
+        self.assertEqual(self.raw('GET','/tasks/'+t['id']+'/files/../../solace.toml')[0],404)
+        self.api('POST','/tasks/'+t['id']+'/notes',{'text':'Look: ![shot]('+url+')'})
+        self.action(t,'plan')
+        self.action(t,'assign',code='E7001',model='native-claude',effort='turbo')
+        t=self.action(t,'assign',model='native-claude',effort='high')
+        self.assertEqual((t['runs'][-1]['effort'],t['effort']),('high','high'))
+        rid=t['runs'][-1]['id']
+        t=self.wait(t,lambda x:x['column']=='needs_review' and x.get('finished'))
+        self.assertEqual(t['finished']['outcome'],'finished')
+        argv=json.loads((self.root/'.solace'/(rid+'.launch')).read_text())['argv']
+        self.assertEqual(argv[argv.index('--effort')+1],'high')
+        self.assertIn('stream-json',argv[argv.index('--input-format')+1])
+        message=json.loads((self.root/'.solace'/(rid+'.prompt')).read_text())['message']['content']
+        self.assertIn('Look: [image 1]',message[0]['text'])
+        self.assertEqual((message[1]['source']['media_type'],message[1]['source']['data']),('image/png',base64.b64encode(png).decode()))
+        # Changing model and effort starts a fresh Codex conversation with the image attached.
+        t=self.wait(t,lambda x:(self.root/'.solace'/(rid+'.exited')).exists())
+        t=self.action(t,'reassign',model='native',effort='low')
+        self.assertIsNone(t['finished'])
+        rid=t['runs'][-1]['id']
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        argv=json.loads((self.root/'.solace'/(rid+'.launch')).read_text())['argv']
+        self.assertTrue(argv[argv.index('--image')+1].endswith(url.rsplit('/',1)[1]))
+        self.assertIn('model_reasoning_effort="low"',argv)
+        self.assertLess(argv.index('--image'),argv.index('--json'))
+        # Custom runners get the image's path in the text.
+        t=self.create([{'command':'task done done'}])
+        url=json.loads(self.raw('POST','/tasks/'+t['id']+'/files',png)[2])['url']
+        self.api('POST','/tasks/'+t['id']+'/notes',{'text':'![a]('+url+')'})
+        self.action(t,'plan')
+        t=self.wait(self.action(t,'assign',model='fake'),lambda x:x['column']=='needs_review')
+        self.assertIn('[image 1: ',(self.root/'.solace'/(t['runs'][-1]['id']+'.prompt')).read_text())
+
     def test_model_change_and_start_over_get_fresh_conversations(self):
         t = self.create([{'command':'task done done'}])
         self.action(t, 'plan'); self.action(t, 'assign', model='native')
@@ -295,6 +349,28 @@ class Board(unittest.TestCase):
         self.wait(t,lambda x:len(x['questions'])==2)
         prompt=(self.root/'.solace'/(new+'.prompt')).read_text();self.assertIn("Answer: b",prompt);self.assertNotIn('"runs"',prompt)
         self.action(t,'unblock',text='b');self.wait(t,lambda x:x['column']=='needs_review')
+    def test_a17_settings_proposals(self):
+        settings=self.root/'solace.toml';original=settings.read_text()
+        add={'command':'write solace.toml --replace','old':'resources=["priv/**"]','text':'resources=["priv/**"]\n[commands]\nbuild={run=["true"]}'}
+        t=self.assign([{'command':'write solace.toml','text':'resource_limit=-1'},add,add,{'command':'run build'},
+                       {'command':'write solace.toml --replace','old':'resources','text':'ignore=["x"]\nresources'},{'command':'task done done'}])
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting');rid=t['runs'][-1]['id']
+        self.assertEqual(len(t['questions']),1);q=t['questions'][0]  # the invalid proposal added none
+        self.assertEqual(q['options'],['Approve','Reject']);self.assertEqual(q['settings']['base'],original);self.assertIn('build',q['settings']['proposed'])
+        self.assertIn('settings change',t['attention']['reason'])
+        self.api('POST',f'/tasks/{t["id"]}/questions/{q["id"]}',{'option':'Reject'})
+        t=self.wait(t,lambda x:len(x['questions'])==2 and x['runs'][-1]['state']=='waiting');self.assertEqual(settings.read_text(),original)
+        self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][1]["id"]}',{'option':'Approve'})
+        t=self.wait(t,lambda x:len(x['questions'])==3 and x['runs'][-1]['state']=='waiting');approved=settings.read_text();self.assertIn('build',approved)
+        settings.write_text(approved+'# human edit\n')
+        self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][2]["id"]}',{'option':'Approve'})
+        t=self.wait(t,lambda x:x['column']=='needs_review');self.assertNotIn('ignore',settings.read_text())
+        self.assertTrue(t['questions'][2]['answer'].startswith('Not applied'));self.assertEqual(t['runs'][-1]['id'],rid)
+        responses=[json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(rid+'.responses')).read_text().splitlines()]
+        self.assertIn('E6020',responses[0]);self.assertIn('Reject',responses[1]);self.assertIn('Approved',responses[2]);self.assertIn('exit code: 0',responses[3])
+        review=self.completed([]);self.api('PATCH','/tasks/'+review['id'],{'body':json.dumps([add,{'command':'task note r'}])})
+        self.action(review,'review',model='fake');review=self.wait(review,lambda x:x['runs'][-1]['state']=='ended')
+        self.assertIn('E7010',(self.root/'.solace'/(review['runs'][-1]['id']+'.responses')).read_text());self.assertFalse(review['questions'])
     def test_answers_respect_pause_and_all_questions(self):
         config=self.root/'solace.toml'
         workflow=Path(__file__).parents[1].joinpath('src/default-board.toml').read_text()

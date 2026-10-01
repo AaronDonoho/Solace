@@ -75,12 +75,17 @@ pub fn working_status_notes_and_transcript_test() {
     )
   let assert Some(task) = model.selected
   board.status(task) |> should.equal("Agent working")
+  let #(model, _) = board.update(model, board.Tab("notes"))
   let rendered = board.view(model) |> element.to_string
   rendered |> string.contains("status working") |> should.be_true
   // Markdown is formatted, and agent HTML is escaped.
   rendered |> string.contains("<strong>five</strong>") |> should.be_true
   rendered |> string.contains("&lt;b&gt;pass") |> should.be_true
-  rendered |> string.contains("Follow live") |> should.be_true
+  let #(model, _) = board.update(model, board.Tab("runs"))
+  board.view(model)
+  |> element.to_string
+  |> string.contains("Follow live")
+  |> should.be_true
   let #(model, _) = board.update(model, board.Watch("r1"))
   let #(model, _) =
     board.update(
@@ -101,4 +106,85 @@ pub fn working_status_notes_and_transcript_test() {
       board.TranscriptLoaded("r1", "{\"state\":\"running\",\"transcript\":[]}"),
     )
   model.entries |> should.equal([])
+}
+
+pub fn notes_newest_first_with_agent_and_finished_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.TaskLoaded(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"needs_review\",\"rank\":1,\"finished\":{\"kind\":\"work\",\"outcome\":\"finished\",\"time\":3},\"notes\":[{\"author\":\"human\",\"run\":null,\"text\":\"older\",\"time\":1},{\"author\":\"agent\",\"run\":\"r1\",\"text\":\"newer\",\"time\":2}],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"claude-opus\",\"effort\":\"high\",\"log\":\"/l\",\"outcome\":\"finished\"}]}",
+      ),
+    )
+  let assert Some(task) = model.selected
+  board.status(task) |> should.equal("Agent finished")
+  let #(model, _) = board.update(model, board.Tab("notes"))
+  let rendered = board.view(model) |> element.to_string
+  rendered |> string.contains("status finished") |> should.be_true
+  rendered
+  |> string.contains("agent · work · claude-opus · high")
+  |> should.be_true
+  let assert [_, after] = string.split(rendered, "newer")
+  after |> string.contains("older") |> should.be_true
+}
+
+pub fn effort_and_create_draft_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ModelsLoaded(
+        "[{\"id\":\"c\",\"label\":\"Claude\",\"effort\":\"medium\",\"efforts\":[\"low\",\"max\"]}]",
+      ),
+    )
+  let #(model, _) =
+    board.update(
+      model,
+      board.TaskLoaded(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
+      ),
+    )
+  let rendered = board.view(model) |> element.to_string
+  rendered |> string.contains("Default (medium)") |> should.be_true
+  rendered |> string.contains(">max</option>") |> should.be_true
+  let #(model, _) = board.update(model, board.EffortSelected("max"))
+  model.effort |> should.equal("max")
+  let #(model, _) = board.update(model, board.AgentSelected("c"))
+  model.effort |> should.equal("")
+  // A failed create keeps the draft; a created task clears it.
+  let #(model, _) = board.update(model, board.NewTask)
+  let #(model, _) = board.update(model, board.DraftTitle("Draft"))
+  let #(model, _) =
+    board.update(
+      model,
+      board.Created("{\"code\":\"E7001\",\"message\":\"title required\"}"),
+    )
+  #(model.draft_title, model.creating) |> should.equal(#("Draft", True))
+  let #(model, _) =
+    board.update(
+      model,
+      board.Created(
+        "{\"id\":\"2\",\"title\":\"Draft\",\"body\":\"\",\"column\":\"backlog\",\"rank\":2}",
+      ),
+    )
+  #(model.draft_title, model.creating) |> should.equal(#("", False))
+}
+
+pub fn settings_question_shows_diff_and_approve_test() {
+  board.settings_diff("a=1\nb=2", "a=1\nb=3")
+  |> should.equal("- b=2\n+ b=3")
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.TaskLoaded(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"blocked\",\"rank\":1,\"questions\":[{\"id\":\"q\",\"text\":\"Change solace.toml\",\"options\":[\"Approve\",\"Reject\"],\"settings\":{\"base\":\"x=1\",\"proposed\":\"x=1\\n[commands]\"}}]}",
+      ),
+    )
+  let #(model, _) = board.update(model, board.Tab("questions"))
+  let rendered = board.view(model) |> element.to_string
+  rendered |> string.contains("+ [commands]") |> should.be_true
+  rendered |> string.contains(">Approve</button>") |> should.be_true
+  rendered |> string.contains("Reject with the editor") |> should.be_true
 }

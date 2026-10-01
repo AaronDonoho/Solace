@@ -143,6 +143,13 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         if a.first() == Some(&"task") {
             return board::task_command(&store, tid, rid, &a, input, options, guard);
         }
+        // A run's settings write is a proposal the human approves (D-38).
+        let target = a.get(1).map(|p| Path::new(p).components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect::<PathBuf>());
+        if a.first() == Some(&"write") && target.is_some_and(|p| p == Path::new("solace.toml")) {
+            let current = fs::read(store.root.join("solace.toml")).unwrap_or_default();
+            let proposed = lockdown::edited(&current, &input()?, a.contains(&"--replace"), old)?;
+            return board::propose_settings(&store, tid, rid, &current, &proposed, guard);
+        }
     }
     let changing = a.first().is_some_and(|a| matches!(*a, "submit" | "delete" | "write" | "remove" | "run"));
     let before = if changing && context.is_some() {

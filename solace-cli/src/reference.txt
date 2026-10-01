@@ -83,12 +83,15 @@ Checking
 Work records (persist between sessions)
   solace work add <text> (or the tool's `text`) | solace work list | solace work done <id>
 
-Files (solace.toml is human-owned)
+Files
   Resource and ignored files (tiers 3 and 4) are readable and writable, but
   never appear in symbol searches. No resources entry is needed to write
   README.md or bin/coolcalc. Writes are bounded by resource_limit.
   gleam.toml (manifest) is writable; invalid writes are refused. New
   dependencies are fetched by check, test and build.
+  solace.toml (settings) is human-owned. In a work run, `write solace.toml`
+  proposes the change and waits for the human to approve or reject it; say
+  why in a `task note` first.
   files [dir]                         tree with tiers; internal files have no access
   read path [--lines a..b | --tail n]  read manifest/resources/ignored files/settings
   write path                         whole text (read an existing file first)
