@@ -1,5 +1,6 @@
-Solace: this project's code lives in a semantic store. You read and change it
-one symbol (a function, type or constant) at a time. You cannot open files.
+Solace: this project's code lives in a semantic store of symbols (functions,
+types and constants). You read and change it by symbol, one or many per call.
+You cannot open files.
 
 Names: a symbol is `module.name`, e.g. `pilot/checkout.pay`. Any unambiguous
 suffix works: `checkout.pay`, or just `pay` if only one symbol has that name.
@@ -40,19 +41,23 @@ Changing (the new code is the tool's `text` argument; from a shell, stdin)
   solace submit <name> --replace  change one part of a symbol: `old` is the
                                   exact current text (must occur once), `text`
                                   its replacement; the whole symbol is checked
-  solace submit --new <module>    add a symbol to a module; a module that doesn't
-                                  exist yet is created (under test/ if its name
-                                  ends in `_test`, otherwise src/)
+  solace submit --new <module>    add symbols to a module, as many as the text
+                                  defines; a module that doesn't exist yet is
+                                  created, whole (module comment, imports,
+                                  symbols), under test/ if its name ends in
+                                  `_test`, otherwise src/
   solace submit                   several symbols at once, checked together
                                   (e.g. a type and its callers): blocks each
                                   headed `// ── <module>.<name> ──`, as view
-                                  and inspect print them; a new name adds it
+                                  and inspect print them; a new name adds it,
+                                  creating its module if needed
   solace submit <module>          replace a whole module, as `view --bodies`
                                   shows it; it must still contain every
                                   existing symbol
   solace submit --imports <module>
                                   replace a module's imports and module comment
-  solace drafts                   list this task's rejected submissions
+  solace drafts                   list this task's rejected submissions; stale
+                                  ones predate a later source change
   solace view --draft <id>         read retained submission text, even invalid syntax
   solace submit --draft <id> --replace
                                   patch the draft with exact `old` and replacement
@@ -79,6 +84,12 @@ Checking
   solace check                    type-check everything; lists broken symbols
   solace check --warnings         also show full compiler warnings
   solace test                     run all tests; shows failures only
+  solace probe                    run throwaway code (`text`) against the
+                                  project and show its output; nothing is
+                                  saved. Statements become `main`'s body, or
+                                  give a module with `pub fn main()`; project
+                                  imports are added. `echo value` prints a
+                                  value with its line. Works in read-only runs
 
 Work records (persist between sessions)
   solace work add <text> (or the tool's `text`) | solace work list | solace work done <id>
@@ -107,6 +118,9 @@ Read-only runs (reviews, investigations) can read, check, test and build;
 submit, delete, write, remove, format and run are refused.
 
 Task runs (put the note, summary or question in `text`)
+  task diff [name ...]                what this task changed, each entity against
+                                      its state before the task (whole task, all
+                                      runs)
   task note                           add a note; completes a review run
   task ask                            question in `text`, 2–4 `options`; waits
                                       for the human's answer

@@ -140,6 +140,9 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     lockdown::recover(&store.root)?;
     board::workflow(&lockdown::settings(&store.root)?)?;
     if let Some((tid, rid)) = &context {
+        if a.starts_with(&["task", "diff"]) {
+            return board::task_diff(&store, tid, &a[2..], budget);
+        }
         if a.first() == Some(&"task") {
             return board::task_command(&store, tid, rid, &a, input, options, guard);
         }
@@ -211,16 +214,20 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
         ["check"] => command_report(store.check(), budget),
         ["check", "--warnings"] => command_report(store.check_report(true), budget),
         ["test"] => command_report(store.test(), budget),
+        ["probe"] => command_report(store.probe(&input()?), budget),
         ["work", "add"] => store.work_add(&input()?),
         ["work", "add", text @ ..] => store.work_add(&text.join(" ")),
         ["work", "list"] | ["work"] => store.work_list(),
         ["work", "done", id] => store.work_done(id),
         _ => usage(format!(
-                "Unknown command: {}\nCommands: session, inspect, view, refs, find, submit, drafts, delete, check, test, work, files, read, write, remove, build, format, run, task.",
+                "Unknown command: {}\nCommands: session, inspect, view, refs, find, submit, drafts, delete, check, test, probe, work, files, read, write, remove, build, format, run, task.",
             a.join(" ")
         )),
     }
 }
+
+/// The module name a probe runs as.
+const PROBE: &str = "solace_probe";
 
 fn command_report(result: Out, budget: usize) -> Out {
     match result {
@@ -667,6 +674,10 @@ impl Store {
 
     fn is_module(&self, input: &str) -> Result<bool, Failure> {
         Ok(self.resolve_module(&self.index()?, input).is_some())
+    }
+
+    fn is_symbol(&self, input: &str) -> Result<bool, Failure> {
+        Ok(self.resolve(&self.index()?, input).is_ok())
     }
 
     fn resolve_module<'a>(&self, ix: &'a Index, input: &str) -> Option<&'a ModuleRow> {
@@ -1265,17 +1276,26 @@ impl Store {
         }
         // (module, the symbol replaced, the new item, imports in the text)
         let mut plan: Vec<(String, Option<usize>, Item, String)> = vec![];
-        // `submit --new` to a module that doesn't exist yet creates it.
-        let mut created: Option<(String, &str)> = None;
+        // Modules that don't exist yet are created, with the module comment and
+        // imports of their first block: (path, dir, header).
+        let mut created: Vec<(String, &str, String)> = vec![];
         for (block_name, text) in &blocks {
             let parsed = gleam::split(&format_gleam(text)?);
-            let [item] = parsed.items.as_slice() else {
+            // `--new` adds every symbol in the text; a named block holds one.
+            if parsed.items.is_empty() || (new_in.is_none() && parsed.items.len() > 1) {
                 return fail(format!(
-                    "E0101 each block holds one symbol; {} defines {} ({}).",
+                    "E0101 each block holds one symbol; {} defines {} ({}). To add several to one module, use `submit --new <module>`.",
                     block_name.as_deref().unwrap_or("the text"),
                     parsed.items.len(),
                     parsed.items.iter().map(|i| i.name.as_str()).collect::<Vec<_>>().join(", ")
                 ));
+            }
+            let mut create = |m: &str| {
+                if !created.iter().any(|c| c.0 == m) {
+                    let dir = if m.rsplit('/').next().unwrap().ends_with("_test") { "test" } else { "src" };
+                    created.push((m.to_string(), dir, parsed.header.clone()));
+                }
+                m.to_string()
             };
             let module_of = |m: &str| {
                 self.resolve_module(&ix, m)
@@ -1286,43 +1306,46 @@ impl Store {
             let (module, existing) = match (new_in, block_name) {
                 (Some(m), _) => match module_of(m) {
                     Ok(path) => (path, None),
-                    Err(_) if valid_module_path(m) => {
-                        let dir = if m.rsplit('/').next().unwrap().ends_with("_test") { "test" } else { "src" };
-                        created = Some((m.to_string(), dir));
-                        (m.to_string(), None)
-                    }
+                    Err(_) if valid_module_path(m) => (create(m), None),
                     Err(e) => return Err(e),
                 },
                 (None, Some(n)) => match self.resolve(&ix, n) {
                     Ok(i) => (ix.syms[i].module.clone(), Some(i)),
                     Err(e) => match n.rsplit_once('.') {
                         Some((m, _)) if self.resolve_module(&ix, m).is_some() => (module_of(m)?, None),
+                        Some((m, _)) if valid_module_path(m) => (create(m), None),
                         _ => return Err(e),
                     },
                 },
                 (None, None) => unreachable!(),
             };
-            let clash = ix.syms.iter().position(|s| {
-                s.module == module
-                    && s.name == item.name
-                    && (s.kind == Kind::Type) == (item.kind == Kind::Type)
-                    && existing != Some(ix.syms.iter().position(|x| x.id == s.id).unwrap())
-            });
-            if let Some(c) = clash {
-                return fail(format!("E1004 {} already exists; submit to it instead.", ix.syms[c].qname()));
+            for item in &parsed.items {
+                let clash = ix.syms.iter().position(|s| {
+                    s.module == module
+                        && s.name == item.name
+                        && (s.kind == Kind::Type) == (item.kind == Kind::Type)
+                        && existing != Some(ix.syms.iter().position(|x| x.id == s.id).unwrap())
+                });
+                if let Some(c) = clash {
+                    return fail(format!("E1004 {} already exists; submit to it instead.", ix.syms[c].qname()));
+                }
+                let key = |i: &Item| (i.name.clone(), i.kind == Kind::Type);
+                if plan.iter().any(|p| p.0 == module && p.1.is_none() && key(&p.2) == key(item)) {
+                    return fail(format!("E0103 the text defines {module}.{} twice.", item.name));
+                }
+                plan.push((module.clone(), existing, item.clone(), parsed.header.clone()));
             }
-            plan.push((module, existing, item.clone(), parsed.header));
         }
 
-        let created_file = created.as_ref().map(|(module, dir)| self.root.join(dir).join(format!("{module}.gleam")));
-        if created_file.as_ref().is_some_and(|p| p.exists()) {
+        let created_files: Vec<PathBuf> = created.iter().map(|(module, dir, _)| self.root.join(dir).join(format!("{module}.gleam"))).collect();
+        if created_files.iter().any(|p| p.exists()) {
             return fail("E0101 the new module's file already exists outside the store; import or resolve it before creating this module");
         }
         let mut notes: Vec<String> = vec![];
         self.db.execute_batch("BEGIN")?;
         let result = (|| -> Out {
-            if let Some((path, dir)) = &created {
-                self.db.execute("INSERT INTO modules VALUES (?1, ?2, '')", params![path, dir])?;
+            for (path, dir, header) in &created {
+                self.db.execute("INSERT INTO modules VALUES (?1, ?2, ?3)", params![path, dir, header])?;
                 notes.push(format!("created module {path} ({dir}/{path}.gleam)"));
             }
             let mut saved: Vec<String> = vec![];
@@ -1435,8 +1458,8 @@ impl Store {
             }
             Err(e) => {
                 self.db.execute_batch("ROLLBACK")?;
-                if let Some(path) = &created_file {
-                    if path.exists() { fs::remove_file(path)?; }
+                for path in created_files.iter().filter(|p| p.exists()) {
+                    fs::remove_file(path)?;
                 }
                 self.materialize(&self.index()?)?;
                 Err(e)
@@ -1510,6 +1533,42 @@ impl Store {
             }
             out += &relocate(line, &files);
             out.push('\n');
+        }
+        if ok { Ok(out) } else { fail(out) }
+    }
+
+    /// Runs throwaway code against the current project and returns its output.
+    /// The text is a module with `pub fn main()`, or statements that become
+    /// its body; project imports it uses are added. Nothing is saved: the file
+    /// exists only while it runs.
+    fn probe(&self, text: &str) -> Out {
+        let ix = self.index()?;
+        if ix.modules.iter().any(|m| m.path == PROBE) {
+            return fail(format!("E0101 a project module is named {PROBE}; probe can't run."));
+        }
+        self.materialize(&ix)?;
+        let mut code = if text.contains("fn main(") {
+            text.to_string()
+        } else {
+            let (imports, body): (Vec<&str>, Vec<&str>) = text.lines().partition(|l| l.starts_with("import "));
+            format!("{}\n\npub fn main() {{\n{}\n}}\n", imports.join("\n"), body.join("\n"))
+        };
+        for path in missing_imports(&ix, &code, &code) {
+            code = format!("import {path}\n{code}");
+        }
+        let file = self.root.join("test").join(format!("{PROBE}.gleam"));
+        fs::create_dir_all(file.parent().unwrap())?;
+        fs::write(&file, &code)?;
+        let result = self.gleam(&["run", "-m", PROBE]);
+        fs::remove_file(&file)?;
+        let (ok, output) = result?;
+        let mut out: String = output
+            .lines()
+            .filter(|l| !["Compiling ", "Compiled ", "Running ", "Downloading ", "Downloaded "].iter().any(|p| l.trim().starts_with(p)))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        if !ok {
+            out += &format!("\nThe probe ran as test/{PROBE}.gleam:\n{code}");
         }
         if ok { Ok(out) } else { fail(out) }
     }
@@ -1959,6 +2018,24 @@ mod tests {
         let out = store.submit_symbols(None, Some("calc_test"), "pub fn add_test() { assert calc.add(1, 2) == 3 }").unwrap();
         assert!(out.contains("(test/calc_test.gleam)"), "{out}");
         assert!(store.submit_symbols(None, Some("Bad"), "pub fn x() { 1 }").unwrap_err().0.starts_with("E1003"));
+        // A probe runs statements against the project and leaves nothing behind.
+        let out = store.probe("echo calc.add(2, 3)").unwrap();
+        assert!(out.contains("5"), "{out}");
+        assert!(!root.join("test/solace_probe.gleam").exists());
+        let err = store.probe("echo calc.nope()").unwrap_err().0;
+        assert!(err.contains("The probe ran as") && err.contains("import calc"), "{err}");
+        assert!(!root.join("test/solace_probe.gleam").exists());
+        // A whole new module in one submit: module comment, imports and several symbols.
+        let module = "//// Geometry helpers.\nimport calc\n\npub const unit = 1\n\npub type Shape {\n  Square(Int)\n}\n\npub fn area(s: Shape) -> Int {\n  let Square(n) = s\n  calc.add(n * n, unit)\n}\n";
+        let out = store.submit_symbols(None, Some("geo"), module).unwrap();
+        assert!(out.contains("created module geo") && out.contains("geo.unit, geo.Shape, geo.area"), "{out}");
+        let file = fs::read_to_string(root.join("src/geo.gleam")).unwrap();
+        assert!(file.starts_with("//// Geometry helpers.\n") && file.contains("import calc\n"), "{file}");
+        assert!(store.submit_symbols(None, Some("geo2"), "pub fn a() { 1 }\npub fn a() { 2 }").unwrap_err().0.starts_with("E0103"));
+        // Blocks may name a module that doesn't exist yet; a named block still holds one symbol.
+        let out = store.submit_symbols(None, None, "// ── shapes.side ──\npub fn side() { 2 }\n// ── shapes.twice ──\npub fn twice() { side() * 2 }\n").unwrap();
+        assert!(out.contains("created module shapes"), "{out}");
+        assert!(store.submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int) -> Int { a + b }\npub fn sub() { 1 }").unwrap_err().0.starts_with("E0101"));
         fs::remove_dir_all(&root).unwrap();
     }
 

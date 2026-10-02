@@ -18,7 +18,7 @@ Solace is built on one premise:
 
 > A program should be a structured, verifiable semantic model, rather than a collection of source files.
 
-Its components have persistent identities, explicit relationships, mechanically enforced contracts and discoverable metadata. Source text is one projection of that model, not its organizing structure. Agents read and write that text one symbol at a time; humans see contracts, behavior, decision trees and replayed scenarios, and can drop into any definition when they need to.
+Its components have persistent identities, explicit relationships, mechanically enforced contracts and discoverable metadata. Source text is one projection of that model, not its organizing structure. Agents read and write that text by symbol, one or many per call; humans see contracts, behavior, decision trees and replayed scenarios, and can drop into any definition when they need to.
 
 The environment combines a small functional language with effects as capabilities, typed holes and first-class state machines; semantic navigation; transactional editing; integrated verification; deterministic record and replay; and a declarative interface system. It compiles to the BEAM for services and to JavaScript for browser interfaces.
 
@@ -175,7 +175,7 @@ Verification evidence attaches to revisions. When a revision changes, evidence f
 
 ## 7. Text Projection
 
-Every symbol has exactly one canonical text form; agents read and write that text one symbol at a time, and the store handles identity, references and bookkeeping. Text is the agent's native medium and the human's emergency medium, so it stays first-class even though it is not the source of truth.
+Every symbol has exactly one canonical text form; agents read and write that text by symbol, one or many per call, and the store handles identity, references and bookkeeping. Text is the agent's native medium and the human's emergency medium, so it stays first-class even though it is not the source of truth.
 
 ### 7.1 One canonical form
 

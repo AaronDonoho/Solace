@@ -2,7 +2,7 @@
 
 **Status:** accepted 2026-09-27 · **Implements:** PROPOSAL.md §7, §16.4 · **Needed by:** Phase 1a
 
-Every revision has exactly one canonical text form. Agents read and write that text one symbol at a time; the store handles identities, references and bookkeeping.
+Every revision has exactly one canonical text form. Agents read and write that text by symbol, one or many per call; the store handles identities, references and bookkeeping.
 
 ## 1. Canonical form
 

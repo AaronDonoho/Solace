@@ -1,6 +1,6 @@
 # Solace
 
-Solace is an experimental system in which agents build and maintain a software project and humans direct them. It wraps a project: the project's code lives in a semantic store as individual symbols (functions, types, constants), and agents read and change it only through Solace, one symbol at a time, with every change type-checked before it is saved. Humans hand work to agents through a local task board. Today Gleam is the only supported project language.
+Solace is an experimental system in which agents build and maintain a software project and humans direct them. It wraps a project: the project's code lives in a semantic store as individual symbols (functions, types, constants), and agents read and change it only through Solace, by symbol, with every change type-checked before it is saved. Humans hand work to agents through a local task board. Today Gleam is the only supported project language.
 
 See [PROPOSAL.md](PROPOSAL.md) for the design, [DECISIONS.md](DECISIONS.md) for settled questions, and [WORK.md](WORK.md) for progress.
 
@@ -130,7 +130,7 @@ Agents get no shell and no file tools, only the Solace MCP tool and web access. 
 
 The task board resumes the author's compatible conversation through investigation, implementation and review fixes. Reviews start fresh. If resumption is unavailable, Solace supplies a handoff automatically. Conversations are cleaned up after graceful shutdown: reviewers after review, authors when the task is completed or cancelled. Explicit new-agent/start-over actions start fresh.
 
-Rejected submissions are retained as editable drafts. Agents use `drafts`, `view --draft <id>` and `submit --draft <id> --replace` to repair them without resending the whole submission. Stale drafts refuse to overwrite newer source. Submission warnings are concise; `check --warnings` shows full details.
+Rejected submissions are retained as editable drafts. Agents use `drafts`, `view --draft <id>` and `submit --draft <id> --replace` to repair them without resending the whole submission. `drafts` marks each one current or stale, and stale drafts refuse to overwrite newer source. Reviewers start with `task diff`, which shows each change the task made against its state before the task. Submission warnings are concise; `check --warnings` shows full details.
 
 `solace agent-config codex|claude <dir>` writes a locked-down configuration for an agent into `<dir>`, plus a `launch.json` with the arguments and environment to start it with. The board uses the same configuration. To connect some other MCP client, have it start `solace mcp` in the project directory.
 

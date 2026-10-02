@@ -12,6 +12,7 @@ pub fn lock(root: &Path) -> Result<fs::File, Failure> {
 }
 pub fn open(root: &Path) -> Result<Store, Failure> {
     let db = Connection::open(root.join(".solace/store.db"))?;
+    db.busy_timeout(Duration::from_secs(5))?;
     db.execute_batch(
         "CREATE TABLE IF NOT EXISTS board_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS board_before(task TEXT, entity TEXT, data TEXT NOT NULL, PRIMARY KEY(task,entity));
@@ -383,6 +384,103 @@ pub fn record(s: &Store, tid: &str, rid: &str, before: &Value, after: &Value) ->
     }
     save(s, &t)
 }
+/// `task diff`: what each entity this task changed looked like before the task,
+/// against now. `names` narrows it; past `budget`, the rest are listed by name.
+pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
+    let t = task(&s.root, tid)?;
+    let current = snapshot(s)?;
+    let mut st = s.db.prepare("SELECT entity,data FROM board_before WHERE task=?")?;
+    let before: HashMap<String, Value> = st
+        .query_map([tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .map(|r| r.map(|(k, v)| (k, serde_json::from_str(&v).unwrap())))
+        .collect::<Result<_, _>>()?;
+    let text = |key: &str, v: &Value| -> Option<String> {
+        if key.starts_with("symbol:") {
+            (v[7].as_i64() == Some(1)).then(|| v[4].as_str().unwrap_or("").to_string())
+        } else if key.starts_with("module:") {
+            v[2].as_str().map(|h| h.to_string())
+        } else {
+            let bytes: Vec<u8> = v.as_array()?.iter().map(|b| b.as_u64().unwrap() as u8).collect();
+            Some(String::from_utf8(bytes).unwrap_or_else(|e| format!("(binary, {} bytes)", e.as_bytes().len())))
+        }
+    };
+    let (mut out, mut left) = (String::new(), vec![]);
+    for c in t["changes"].as_array().unwrap() {
+        let (key, name) = (c["entity"].as_str().unwrap(), c["name"].as_str().unwrap_or(""));
+        let Some(old) = before.get(key) else { continue };
+        if !names.is_empty() && !names.iter().any(|n| *n == name || key.split_once(':').is_some_and(|(_, k)| k == *n)) {
+            continue;
+        }
+        let new = match key.strip_prefix("file:") {
+            Some(f) => json!(fs::read(lockdown::path(&s.root, f)?).ok()),
+            None => current[key].clone(),
+        };
+        let part = match (text(key, old), text(key, &new)) {
+            (a, b) if a == b => format!("## {name} (back to its state before the task)\n"),
+            (None, Some(b)) => format!("## {name} (added)\n{}", line_diff("", &b)),
+            (Some(a), None) => format!("## {name} (deleted)\n{}", line_diff(&a, "")),
+            (a, b) => format!("## {name} (changed)\n{}", line_diff(&a.unwrap_or_default(), &b.unwrap_or_default())),
+        };
+        if !out.is_empty() && out.len() + part.len() > budget {
+            left.push(name.to_string());
+        } else {
+            out += &part;
+            out.push('\n');
+        }
+    }
+    if out.is_empty() {
+        return Ok(if names.is_empty() { "This task has no changes.\n".into() } else { "No change of this task matches.\n".into() });
+    }
+    if !left.is_empty() {
+        out += &format!("Left out to fit the reply; read with `task diff <name>`: {}\n", left.join(", "));
+    }
+    Ok(out)
+}
+/// Line diff with two lines of context; `…` marks skipped lines.
+fn line_diff(a: &str, b: &str) -> String {
+    let (a, b): (Vec<_>, Vec<_>) = (a.lines().collect(), b.lines().collect());
+    let pre = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let suf = a[pre..].iter().rev().zip(b[pre..].iter().rev()).take_while(|(x, y)| x == y).count();
+    let (x, y) = (&a[pre..a.len() - suf], &b[pre..b.len() - suf]);
+    // ponytail: O(n·m) LCS table over the changed middle; use Myers if whole-file rewrites get large.
+    let mut l = vec![vec![0u32; y.len() + 1]; x.len() + 1];
+    for i in (0..x.len()).rev() {
+        for j in (0..y.len()).rev() {
+            l[i][j] = if x[i] == y[j] { l[i + 1][j + 1] + 1 } else { l[i + 1][j].max(l[i][j + 1]) };
+        }
+    }
+    let mut ops: Vec<(char, &str)> = a[..pre].iter().map(|s| (' ', *s)).collect();
+    let (mut i, mut j) = (0, 0);
+    while i < x.len() || j < y.len() {
+        if i < x.len() && j < y.len() && x[i] == y[j] {
+            ops.push((' ', x[i]));
+            (i, j) = (i + 1, j + 1);
+        } else if i < x.len() && (j == y.len() || l[i + 1][j] >= l[i][j + 1]) {
+            ops.push(('-', x[i]));
+            i += 1;
+        } else {
+            ops.push(('+', y[j]));
+            j += 1;
+        }
+    }
+    ops.extend(a[a.len() - suf..].iter().map(|s| (' ', *s)));
+    let (mut out, mut gap) = (String::new(), false);
+    for k in 0..ops.len() {
+        if ops[k.saturating_sub(2)..(k + 3).min(ops.len())].iter().any(|o| o.0 != ' ') {
+            if gap {
+                out += "  …\n";
+            }
+            gap = false;
+            out += &format!("{} {}\n", ops[k].0, ops[k].1);
+        } else {
+            gap = true;
+        }
+    }
+    if gap {
+        out += "  …\n";
+    }
+    out
+}
 pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
     let mut v = json!({});
     if matches!(a[0], "write" | "remove")
@@ -644,7 +742,8 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
             }
         }
     }
-    if a.get("to").is_some() {
+    // Moving the task, or starting or continuing a run, ends a pause; a paused run would hang.
+    if a.get("to").is_some() || resume || selected.is_some() {
         t["paused_from"] = Value::Null;
     }
     if resume {
@@ -676,7 +775,9 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
 }
 
 pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, Failure> {
-    let _guard = lock(root)?;
+    // Reads skip the project lock, so the board stays responsive while an agent command holds it.
+    // Task files are replaced by rename and the store waits out commits, so a read sees whole states.
+    let _guard = if method == "GET" { None } else { Some(lock(root)?) };
     let s = open(root)?;
     let w = workflow(&lockdown::settings(root)?)?;
     let (path, query_text) = url.split_once('?').unwrap_or((url, ""));
@@ -1275,10 +1376,10 @@ pub fn record_verification(s: &Store, tid: &str, command: &str, result: &Out) ->
 fn brief(t: &Value, kind: &str) -> String {
     let start = "Start with `session start --task`, with the task's title and description as `text`.";
     let ask = "If you need a decision from the human, ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer.";
-    let read_only = "This run is read-only: reading, `check`, `test` and `build` work; `submit`, `delete`, `write`, `remove`, `format` and `run` are refused.";
+    let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `write`, `remove`, `format` and `run` are refused.";
     let role = match kind {
         "review" => format!(
-            "Review the changes this task made (listed below) and give feedback. {read_only} Finish with `task note`, the feedback in `text`."
+            "Review the changes this task made (listed below) and give feedback. Start with `task diff`: each change against its state before the task. Then read what you need in small batches, one concern at a time. {read_only} Finish with `task note`, the feedback in `text`."
         ),
         "work" => format!(
             "Make the change this task describes. {start} {ask} Finish with `task done`, a summary in `text`: what you changed and how you checked it."
@@ -1354,6 +1455,8 @@ fn tool_input(args: &Value) -> (String, String) {
 pub fn transcript(log: &Path) -> Vec<Value> {
     let mut out: Vec<Value> = vec![];
     let mut tools: HashMap<String, usize> = HashMap::new();
+    // Claude Code: the context of its latest API call, and output per call (events repeat per content block).
+    let (mut context, mut output, mut ended) = (None, HashMap::new(), false);
     let text = fs::read_to_string(log).unwrap_or_default();
     for line in text.lines() {
         let Ok(e) = serde_json::from_str::<Value>(line) else {
@@ -1399,6 +1502,11 @@ pub fn transcript(log: &Path) -> Vec<Value> {
             ("turn.failed", _) => out.push(json!({"kind":"error","text":e["error"]["message"]})),
             // Claude Code
             ("assistant", _) => {
+                let u = &e["message"]["usage"];
+                if u.is_object() {
+                    context = Some(context_tokens(u));
+                    output.insert(e["message"]["id"].to_string(), u["output_tokens"].as_u64().unwrap_or(0));
+                }
                 for c in e["message"]["content"].as_array().unwrap_or(&vec![]) {
                     match c["type"].as_str() {
                         Some("text") => out.push(json!({"kind":"message","text":c["text"]})),
@@ -1422,8 +1530,10 @@ pub fn transcript(log: &Path) -> Vec<Value> {
                 }
             }
             ("result", _) => {
+                ended = true;
                 let u = &e["usage"];
-                out.push(json!({"kind":"usage","text":format!("{} input tokens ({} cached), {} output tokens", u["input_tokens"], u["cache_read_input_tokens"], u["output_tokens"])}));
+                let last = context.map(|c| format!("; last context {c} tokens")).unwrap_or_default();
+                out.push(json!({"kind":"usage","text":format!("{} input tokens ({} cached), {} output tokens{last}", u["input_tokens"], u["cache_read_input_tokens"], u["output_tokens"])}));
                 if e["is_error"] == true {
                     out.push(json!({"kind":"error","text":text_of(&e["result"])}));
                 }
@@ -1431,7 +1541,21 @@ pub fn transcript(log: &Path) -> Vec<Value> {
             _ => {}
         }
     }
+    if let (Some(c), false) = (context, ended) {
+        // Live, until the run's totals arrive. Some endpoints report output only at the end.
+        out.push(json!({"kind":"usage","text":format!("Context {c} tokens; {} output tokens so far", output.values().sum::<u64>())}));
+    }
     out
+}
+/// Tokens an API call sent. Anthropic counts cached input separately and always
+/// reports cache creation; endpoints that omit it (LM Studio) include cache in `input_tokens`.
+fn context_tokens(u: &Value) -> u64 {
+    let n = |k: &str| u[k].as_u64().unwrap_or(0);
+    if u.get("cache_creation_input_tokens").is_some() {
+        n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens")
+    } else {
+        n("input_tokens")
+    }
 }
 fn finish(root: &Path, tid: &str, rid: &str, failure: Option<&str>) -> Result<(), Failure> {
     let _guard = lock(root)?;
@@ -1445,10 +1569,14 @@ fn finish(root: &Path, tid: &str, rid: &str, failure: Option<&str>) -> Result<()
     r["state"] = json!("ended");
     r["ended"] = json!(now());
     r["outcome"] = json!(failure.unwrap_or("finished"));
+    // Only a failed work run moves the task; a failed review or investigation stays in its column.
+    let work = r["kind"] == "work";
     if let Some(message) = failure {
         note(&mut t, "solace", Some(rid), message);
         flag(&mut t, message);
-        move_to(&w, &mut t, &w["events"]["failed"])?;
+        if work {
+            move_to(&w, &mut t, &w["events"]["failed"])?;
+        }
     }
     save(&s, &t)
 }
@@ -1536,7 +1664,7 @@ pub fn task_command(
             drop(guard);
             return wait_reply(s, tid, i);
         }
-        _ => return usage("task note | task ask | task done, with the text in `text`"),
+        _ => return usage("task note | task ask | task done, with the text in `text`; task diff [name ...]"),
     }
     if column(&w, &t)["final"] == true {
         drop_before(s, tid)?;
@@ -1602,9 +1730,12 @@ pub fn serve(root: &Path, port: u16) -> Out {
         event(&s, json!({"workflow":w}))?;
         for mut t in tasks(root)? {
             if active(&t) {
+                let work = t["runs"].as_array().unwrap().iter().any(|r| r["state"] != "ended" && r["kind"] == "work");
                 end_runs(&mut t, "server restarted");
                 flag(&mut t, "the Solace server restarted while an agent was working");
-                move_to(&w, &mut t, &w["events"]["failed"])?;
+                if work {
+                    move_to(&w, &mut t, &w["events"]["failed"])?;
+                }
                 save(&s, &t)?;
             }
         }
@@ -1843,6 +1974,17 @@ mod tests {
             (t[1]["title"].as_str(), t[1]["status"].as_str(), t[1]["output"].as_str()),
             (Some("solace test"), Some("failed"), Some("E1 failed"))
         );
+        // Live usage: the latest call's context and output per call; Anthropic adds cache, LM Studio includes it.
+        let call = |id: &str, u: Value| json!({"type":"assistant","message":{"id":id,"usage":u,"content":[]}}).to_string();
+        let anthropic = json!({"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":5,"output_tokens":7});
+        let lines = [call("m1", anthropic.clone()), call("m1", anthropic), call("m2", json!({"input_tokens":300,"cache_read_input_tokens":250,"output_tokens":2}))];
+        fs::write(&log, lines.join("\n")).unwrap();
+        assert_eq!(transcript(&log).last().unwrap()["text"], "Context 300 tokens; 9 output tokens so far");
+        let result = json!({"type":"result","usage":{"input_tokens":310,"cache_read_input_tokens":350,"output_tokens":9}}).to_string();
+        fs::write(&log, [lines.join("\n"), result].join("\n")).unwrap();
+        let usage: Vec<Value> = transcript(&log).into_iter().filter(|e| e["kind"] == "usage").collect();
+        assert_eq!(usage.len(), 1);
+        assert!(usage[0]["text"].as_str().unwrap().ends_with("; last context 300 tokens"));
         assert_eq!(last_words(&[json!({"kind":"message","text":"é".repeat(600)})]).unwrap().chars().count(), 501);
         fs::remove_file(log).unwrap();
     }

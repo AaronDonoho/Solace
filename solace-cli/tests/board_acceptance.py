@@ -280,7 +280,34 @@ class Board(unittest.TestCase):
         crashed=self.assign([{'exit':7}]);crashed=self.wait(crashed,lambda x:x['column']=='blocked');self.assertIn('without finishing',crashed['notes'][-1]['text'])
         self.assertIn('without finishing',crashed['attention']['reason'])
         self.assertIsNone(self.action(crashed,'cancel')['attention'])
+        # A failed review is flagged but leaves the task where it was.
+        reviewed=self.completed([]);self.api('PATCH','/tasks/'+reviewed['id'],{'body':json.dumps([{'exit':7}])})
+        self.action(reviewed,'review',model='fake');reviewed=self.wait(reviewed,lambda x:x['runs'][-1]['state']=='ended')
+        self.assertEqual(reviewed['column'],'needs_review');self.assertIn('without finishing',reviewed['attention']['reason'])
         timed=self.assign([{'sleep':3}]);timed=self.wait(timed,lambda x:x['column']=='blocked');self.assertIn('timeout',timed['notes'][-1]['text'])
+    def test_a18_review_reads_task_diff(self):
+        (self.root/'priv/b').write_text('one\ntwo\nthree\nfour\nfive\nsix\n')
+        t=self.completed([
+            {'command':'submit app.one','text':'pub fn one() { 10 }'},
+            {'command':'delete app.removed'},
+            {'command':'read priv/a'},{'command':'write priv/a','text':'changed'},
+            {'command':'read priv/a'},{'command':'write priv/a','text':'original'},
+            {'command':'read priv/b'},{'command':'write priv/b','text':'one\ntwo\nthree\nfour\nfive\nSIX\n'},
+        ])
+        self.api('PATCH','/tasks/'+t['id'],{'body':json.dumps([
+            {'command':'task diff'},{'command':'task diff app.one'},{'command':'probe','text':'echo app.one() * 3'},{'command':'task note fine'}])})
+        self.action(t,'review',model='fake');t=self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        rid=t['runs'][-1]['id']
+        self.assertIn('task diff',(self.root/'.solace'/(rid+'.prompt')).read_text())
+        whole,one,probe=[json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(rid+'.responses')).read_text().splitlines()[:3]]
+        # A read-only review can probe; nothing it runs is saved or counted as a change.
+        self.assertIn('30',probe);self.assertFalse((self.root/'test/solace_probe.gleam').exists())
+        self.assertFalse([c for c in t['changes'] if 'probe' in c['entity']])
+        self.assertIn('## app.one (changed)\n- pub fn one() { 1 }\n+ pub fn one() {\n+   10\n+ }\n',whole)
+        self.assertIn('## app.removed (deleted)\n- pub fn removed() { 3 }\n',whole)
+        self.assertIn('## file:priv/a (back to its state before the task)\n',whole)
+        self.assertIn('## file:priv/b (changed)\n  …\n  four\n  five\n- six\n+ SIX\n',whole)
+        self.assertTrue(one.startswith('## app.one'),one);self.assertNotIn('app.removed',one)
     def test_reassign_preserves_work_and_review_feedback(self):
         original=self.cli('view','app.one')
         t=self.completed([
@@ -452,8 +479,18 @@ class Board(unittest.TestCase):
         responses=(self.root/'.solace'/(rid+'.responses')).read_text();self.assertEqual(responses.count('E7010'),2)
         self.assertEqual(self.action(t,'complete')['column'],'done')  # an answered question ends after planning
         review=self.completed([]);self.api('PATCH','/tasks/'+review['id'],{'body':json.dumps([*steps,{'command':'task note review report'}])})
-        self.action(review,'review',model='fake');review=self.wait(review,lambda x:x['runs'][-1]['state']=='ended');self.assertEqual(review['column'],'needs_review')
+        # Starting a run on a paused task ends the pause instead of leaving the run hung.
+        self.action(review,'pause');self.assertIsNone(self.action(review,'review',model='fake')['paused_from'])
+        review=self.wait(review,lambda x:x['runs'][-1]['state']=='ended');self.assertEqual(review['column'],'needs_review')
         self.assertEqual(review['notes'][-1]['text'],'review report')
+    def test_board_reads_while_agent_command_runs(self):
+        config=self.root/'solace.toml'
+        config.write_text(config.read_text()+'\n[commands]\nslow={run=["sleep","3"]}\n')
+        t=self.assign([{'command':'run slow'},{'command':'task done done'}])
+        time.sleep(1)  # the agent's command now holds the project lock
+        start=time.monotonic();self.api('GET','/tasks');self.get(t)
+        self.assertLess(time.monotonic()-start,1)
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')  # the fixture's 2-second timeout ends it
     def test_declared_run_resources_revert(self):
         config=self.root/'solace.toml'
         config.write_text(config.read_text()+'\n[commands]\nedit={run=["python3","-c",'+json.dumps("from pathlib import Path; Path('priv/a').write_text('changed'); Path('priv/created').write_text('new')")+']}\n')

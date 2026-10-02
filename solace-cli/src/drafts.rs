@@ -11,14 +11,23 @@ fn setup(s: &Store) -> Result<(), Failure> {
     Ok(())
 }
 
+// ponytail: fingerprint the whole source store; narrow to touched modules if unrelated edits frequently invalidate drafts.
+fn base(s: &Store) -> Out {
+    Ok(hex(&Sha256::digest(board::snapshot(s)?.to_string().as_bytes())))
+}
+
 pub fn list(s: &Store) -> Out {
     list_for(s, &owner())
 }
 
 pub fn list_for(s: &Store, task: &str) -> Out {
     setup(s)?;
-    let mut q = s.db.prepare("SELECT id, args FROM drafts WHERE owner=? ORDER BY rowid")?;
-    let rows = q.query_map([task], |r| Ok(format!("{}: {}", r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let current = base(s)?;
+    let mut q = s.db.prepare("SELECT id, args, base FROM drafts WHERE owner=? ORDER BY rowid")?;
+    let rows = q.query_map([task], |r| {
+        let status = if r.get::<_, String>(2)? == current { "current" } else { "stale: source changed since; check it isn't superseded" };
+        Ok(format!("{}: {} ({status})", r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?.join("\n"))
 }
 
@@ -48,8 +57,7 @@ fn replace(text: &str, old: Option<&str>, new: &str) -> Out {
 
 pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option<&str>) -> Out {
     setup(s)?;
-    // ponytail: fingerprint the whole source store; narrow to touched modules if unrelated edits frequently invalidate drafts.
-    let base = hex(&Sha256::digest(board::snapshot(s)?.to_string().as_bytes()));
+    let base = base(s)?;
     let (id, args, raw) = match a {
         ["submit", "--draft", id] | ["submit", "--draft", id, "--replace"] => {
             let (args, text, expected) = load(s, id)?;
@@ -80,6 +88,8 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
         ["submit", "--new", module] => s.submit_symbols(None, Some(module), &raw),
         ["submit", "--imports", module] => s.submit(Target::Imports(module), &raw),
         ["submit", name] if !name.contains('.') && s.is_module(name)? => s.submit(Target::Module(name), &raw),
+        // A whole module for a module that doesn't exist yet creates it.
+        ["submit", name] if !name.contains('.') && !s.is_symbol(name)? => s.submit_symbols(None, Some(name), &raw),
         ["submit", name] => s.submit_symbols(Some(name), None, &raw),
         _ => return fail("E0106 invalid draft command"),
     };
@@ -130,7 +140,7 @@ mod tests {
         // A second failed attempt replaces the same draft, including invalid syntax.
         assert!(submit(&s, &["submit", "--draft", &id, "--replace"], &mut || Ok("unknown()".into()), Some("-. 2")).is_err());
         assert!(view(&s, &id).unwrap().contains("unknown()"));
-        assert_eq!(list(&s).unwrap().lines().count(), 1);
+        assert!(list(&s).unwrap().ends_with("(current)"));
         assert_eq!(board::snapshot(&s).unwrap(), original);
         let out = submit(&s, &["submit", "--draft", &id, "--replace"], &mut || Ok("2".into()), Some("unknown()")).unwrap();
         assert!(out.contains("Saved"));
@@ -143,6 +153,7 @@ mod tests {
         assert!(!root.join("src/other.gleam").exists(), "rejected modules must leave no compiler input behind");
         let stale: String = s.db.query_row("SELECT id FROM drafts ORDER BY rowid LIMIT 1", [], |r| r.get(0)).unwrap();
         s.submit_symbols(Some("app.helper"), None, "fn helper() { 3 }").unwrap();
+        assert!(list(&s).unwrap().lines().all(|l| l.contains("(stale")));
         assert!(submit(&s, &["submit", "--draft", &stale], &mut || Ok(String::new()), None).unwrap_err().0.contains("E0107"));
         assert!(view(&s, &stale).unwrap().contains("absent()"));
         s.db.execute("UPDATE drafts SET owner='another-task' WHERE id=?", [&stale]).unwrap();

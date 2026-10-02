@@ -359,3 +359,27 @@ Affects:** Spec 16 (accepted), Spec 15 (the task's summary line and link; tasks 
 - **Rationale:** Runs can't reach the board's routes (Codex has only the Solace tool; Claude adds read-only web tools) and host commands are refused in runs, so a board answer is a human's. An agent outside Solace running as the same user could post to the board, but it could edit the file directly anyway; proving a human clicked needs authentication, which Spec 15 defers.
 - **Who/when:** Aaron, 2026-10-01; the question-based flow by Claude.
 - **Affects:** Spec 14 §2 and A8, Spec 15 §1, §4, §6 and tests; `main.rs`, `lockdown.rs`, `board.rs`, the board client, `reference.txt`, guide.
+
+## D-39 Task diff and draft status for reviewers — decided
+- **Question:** A reviewer gets the names of changed symbols but no way to see what changed, and `drafts` lists IDs without saying whether later edits supersede them. What should agents get?
+- **Answer:**
+  1. `task diff [name ...]` (any task run, read-only included) shows each entity the task changed, against its state before the task (the before-states kept for revert): line diff with two lines of context, marked added, deleted, changed, or back to its state before the task. It covers the whole task, not single runs (before-states aren't kept per run). Past the reply budget, the remaining entities are listed by name.
+  2. `drafts` marks each draft `current` or `stale` (source changed since it was made). No timestamps.
+  3. The review brief tells the reviewer to start with `task diff`, then read in small batches, one concern at a time.
+- **Rationale:** From a real review run's feedback. The data already existed; reviewers missed omissions without a diff. A shorter session start and a browser preview were also suggested and deferred: tokens are secondary (D-20), and a preview needs its own spec.
+- **Who/when:** Aaron, 2026-10-01; details by Claude.
+- **Affects:** `board.rs`, `main.rs`, `drafts.rs`, `reference.txt`, README; acceptance A18.
+
+## D-40 Submissions may hold many symbols; new modules in one call — decided
+- **Question:** A work run on redline (`606a6184`) spent about 14 of its 62 tool calls creating five new modules. `submit --new` took one symbol and whole-module and block submits refused modules that didn't exist yet, so each module took three calls (one symbol, the rest, then `--imports` for the module comment), plus four errors on the first. What is the point of "one symbol at a time"?
+- **Answer:** The symbol is the unit of identity (ids, revisions, references, task changes, diffs), not a limit per call. `submit --new <module>` adds every symbol its text defines; when the module doesn't exist yet it is created whole, keeping the text's module comment and imports. `submit <module>` for a module that doesn't exist routes to the same path. Multi-block `submit` creates modules its block headers name. A block for a named symbol still holds one symbol, since it replaces that one. Defining a name twice is refused (E0103).
+- **Rationale:** Each tool call re-sends the agent's whole context (over 100k tokens late in that run), so calls, not reply size, drive cost. Splitting the text into symbols is the store's job, not the agent's.
+- **Who/when:** Aaron, 2026-10-02.
+- **Affects:** PROPOSAL.md §1 and §7 and Spec 2 wording ("one symbol at a time" describes identity, not batch size); `main.rs` (`submit_symbols`, `is_symbol`), `drafts.rs` routing, `reference.txt`, README; unit test `submit_new_creates_a_module`.
+
+## D-41 `probe`: run throwaway code against the project — decided
+- **Question:** In redline run `606a6184` the agent wanted actual numbers, so it submitted a deliberately failing test, read the assertion values and deleted it: three calls, and a project change in a work run. Reviewers can't do even that. Should agents run code without saving it?
+- **Answer:** Yes. `probe` takes code as `text`: statements (wrapped as `pub fn main()`, with `import` lines kept at the top) or a module with `pub fn main()`. Project imports it uses are added. It runs as `test/solace_probe.gleam` via `gleam run -m`, in the project so the build cache is reused, under the project lock, and the file is removed in every case. Output is returned with build noise removed; on failure the module as run is shown, so compiler line numbers can be matched. It works in read-only runs, saves nothing and records no task change. A project module named `solace_probe` blocks it.
+- **Rationale:** Agents already run arbitrary project code through `test`, so this adds no new risk. Gleam's `echo` prints values with their line, which replaces the failing-assert trick.
+- **Who/when:** Aaron, 2026-10-02.
+- **Affects:** `main.rs` (`probe`, `PROBE`), `board.rs` read-only brief, `reference.txt`; unit test `submit_new_creates_a_module`; acceptance A18 (a review probes).
