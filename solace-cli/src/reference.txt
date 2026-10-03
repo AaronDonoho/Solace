@@ -1,41 +1,54 @@
 Solace: this project's code lives in a store of symbols (functions, types and
 constants). You read and change it by symbol through this tool; you cannot open
-files or run a shell. When Solace can't do something the task needs (a file you
-may not write, a command that isn't declared), don't work around it: ask with
-`task ask`, or say so in your summary.
-
-Names: a symbol is `module.name`, e.g. `pilot/checkout.pay`; any unambiguous
-suffix works: `checkout.pay`, or `pay`. Modules: `pilot/checkout` or `checkout`.
-Tests are symbols in test modules such as `pilot/checkout_test`.
+files or run a shell. When Solace can't do something the task needs, don't work
+around it: ask with `task ask`, or say so in your summary.
+Names: `module.name`, e.g. `pilot/checkout.pay`, or any unambiguous suffix
+(`checkout.pay`). Tests are symbols in test modules such as `checkout_test`.
 
 Several commands go in one call, one per line, and run in order. Each call is a
 turn, and every turn re-reads the whole conversation, so work in few calls:
-1. Read once: inspect every symbol you need in one call, e.g.
-     inspect checkout.pay payments.capture seed.orders --context
-   Each symbol comes with the signatures it uses, its callers and a test that
-   uses it. Don't ask again for anything a reply already showed.
-   To reproduce a reported case, run a test's setup and watch the calls:
-     probe --from checkout_test.pay_test --trace checkout.pay payments.capture
-   shows each call to those functions with its arguments and result.
-2. Change and test in one call: `command` is two lines,
-     submit
-     test
-   and `text` holds a block per symbol, the code and its tests together:
-     // ── pilot/checkout.pay ──
-     pub fn pay(...) { ... }
-     // ── pilot/checkout_test.pay_declined_test ──
-     pub fn pay_declined_test() { ... }
-   For one small edit, `submit <name> --replace` with `old` and `text`.
-   Work out expected values from the task's numbers and the rules the code
-   documents, rounding included (a one-line `probe` such as
-   `money.format(123456)` evaluates a helper). Never take them from running the
-   code under test.
-3. Fix only what the reply reports, again with `test` on the line after.
-   The submit reply lists what else the change reaches and which of those no
-   test checks; look at those before you finish.
-4. Once `test` passes, the code is done: `test` type-checks everything first,
-   so no `check` is needed.
+1. Read once: `inspect checkout.pay payments.capture --context` gives each
+   symbol with the signatures it uses, its callers and a test. Don't ask again
+   for anything a reply showed. To reproduce a reported case:
+   `probe --from checkout_test.pay_test --trace checkout.pay`.
+2. Change and test in one call: `command` is `submit`, then `test` on the next
+   line. To edit code, `text` is a patch as `apply_patch` takes, naming a
+   symbol or module instead of a file; send only what changes:
+     *** Begin Patch
+     *** Update: pilot/checkout.pay
+     @@
+     -  let total = sum(lines)
+     +  let total = sum(lines) + fee
+     *** Add: pilot/checkout_test.fee_test
+     +pub fn fee_test() { ... }
+     *** End Patch
+   Imports are added automatically. Work out expected values from the task's
+   numbers and the rules the code documents, never from running the code.
+3. Fix only what the reply reports, again with `test` after. The reply lists
+   what else the change reaches that no test checks; look at those.
+4. Once `test` passes, the code is done (it type-checks first; no `check`).
+Changing a signature or adding a field: `inspect <type or fn> --context` lists
+every construction or call site; patch the type or function and every site in
+one `submit` (`*** Update: <module>` holds several symbols' hunks), then `test`.
+Writing a new test: `inspect <a similar test> --context` shows the helpers it
+uses with their signatures; don't read whole test modules.
 
+Commands (`help` gives every option, `help <command>` one command's):
+  inspect <name>... --context   symbols with what they use, callers and tests
+  view <name|module>...         source, or a module's outline
+  refs <name>                   what uses a symbol
+  impact [name...]              what a change reaches, with its tests
+  find <text>                   search all code
+  submit                        save a patch or blocks from `text`, type-checked
+  delete <name>                 remove an unused symbol
+  test [<name>... | --all]      run the tests a change can affect
+  check [--warnings]            type-check everything
+  probe                         run throwaway code from `text`
+  drafts                        rejected submits, kept to fix and retry
+  files | read | write          project files outside the store
+  work add | list | done        work records, kept between sessions
+
+Commands in full
 Reading
   inspect <name>... --context   symbols, the signatures of what they use, their
                                 callers, and the tests that use them (the
@@ -61,9 +74,18 @@ Changing (the new code is in `text`)
                                 headed `// ── <module>.<name> ──` as view prints
                                 them; a new name adds the symbol, and its module
                                 if needed
+  submit (a patch)              edit existing code: `*** Begin Patch`, then per
+                                symbol or module `*** Update: <name>` with `@@`
+                                hunks (` ` context, `-` removed, `+` added),
+                                applied in order like `apply_patch`; `*** Add:
+                                <module>.<name>` with `+` lines adds a symbol.
+                                Checked together; a hunk that doesn't match
+                                changes nothing (E0108)
   submit <name>                 replace one symbol (may rename it)
-  submit <name> --replace       one exact change: `old` (must occur once) becomes
-                                `text`; the whole symbol is checked
+  submit <name> --replace [--all]
+                                one exact change: `old` (must occur once, or
+                                every occurrence with --all) becomes `text`;
+                                the whole symbol is checked
   submit --new <module>         add symbols, or create the module whole (module
                                 comment, imports, symbols; under test/ if the
                                 name ends in `_test`)
@@ -77,8 +99,10 @@ listed as broken until fixed.
 Rejected text is kept as a draft; the error gives its id. Fix it rather than
 resending it: `submit --draft <id> --replace` (`old` and `text`) patches and
 retries it, `submit --draft <id>` retries it as is, `view --draft <id>` reads it,
-`drafts` lists them. A draft older than a later source change is stale; its
-retry is refused (E0107): read the current source and submit again.
+`drafts` lists them. A draft is stale once a symbol it replaces, or its module's
+imports, changed; its retry is refused (E0107): read the current source and
+submit again. A block equal to the stored symbol is reported unchanged. A
+rejected patch's draft holds the symbols it changed, as blocks.
 
 Checking
   test                          run the tests that can see a change since they

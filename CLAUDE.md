@@ -20,4 +20,4 @@ A semantic programming system: programs are a store of identified, typed, verifi
 - `WORK.md`: roadmap and work records (§9.3 format)
 - `pilot/`: small order service in plain Gleam (~2.5k tokens), the small benchmark size point
 - `pilot-large/`: large order service in plain Gleam (~30k tokens), the main benchmark baseline
-- `bench/`: benchmark tasks and harness (`python3 bench/bench.py validate|run|report`; tasks `0*` small, `L*` large)
+- `bench/`: benchmark tasks and harness (`python3 bench/bench.py validate|run|report`; tasks `0*` small, `L*` large); `python3 bench/analyze.py RUN[/ARM]... --task L08 [--turns | --show L08.2:5]` breaks Codex runs down by turn (output, reasoning, time, writing vs reading turns, reply sizes): use it rather than ad hoc scripts

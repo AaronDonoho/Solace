@@ -23,12 +23,34 @@ use std::{env, fs};
 
 const REFERENCE: &str = include_str!("reference.txt");
 
-/// The reference as agents get it: host commands left out, and task commands
-/// only in a board run.
+/// The reference as agents get it at session start: the workflow and one line
+/// per command (`help` has every option, D-46), and task commands only in a
+/// board run.
 fn agent_reference() -> String {
-    let (common, rest) = REFERENCE.split_once("\nTask runs").unwrap();
+    let (workflow, rest) = REFERENCE.split_once("\nCommands in full").unwrap();
+    let (_, rest) = rest.split_once("\nTask runs").unwrap();
     let (task, _host) = rest.split_once("\nHost commands").unwrap();
-    if board::context().is_some() { format!("{common}\nTask runs{task}") } else { format!("{common}\n") }
+    if board::context().is_some() {
+        format!("{workflow}\nTask runs{task}")
+    } else {
+        // no task to ask or finish outside a board run (run 18)
+        format!("{}\n", workflow.replace("ask with `task ask`, or say so", "say so"))
+    }
+}
+
+/// `help [command]` for agents: every option, without host commands, and
+/// task commands only in a board run; with a command, only the paragraphs
+/// that list it (D-46).
+fn agent_help(topic: Option<&str>) -> String {
+    let (_, full) = REFERENCE.split_once("Commands in full\n").unwrap();
+    let (full, _host) = full.split_once("\nHost commands").unwrap();
+    let full = if board::context().is_some() { full } else { full.split_once("\nTask runs").unwrap().0 };
+    let Some(topic) = topic else { return format!("{full}\n") };
+    let paragraphs: Vec<&str> = full.split("\n\n").collect();
+    let word = |p: &str, f: &dyn Fn(&str) -> bool| p.lines().any(|l| f(l) && l.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == topic));
+    let hits: Vec<&str> = paragraphs.iter().copied().filter(|p| word(p, &|l| l.starts_with("  ") && l.trim_start().starts_with(topic))).collect();
+    let hits = if hits.is_empty() { paragraphs.into_iter().filter(|p| word(p, &|_| true)).collect() } else { hits };
+    if hits.is_empty() { format!("No command `{topic}`. Every command:\n{full}\n") } else { hits.join("\n\n") + "\n" }
 }
 /// The largest reply, in bytes (about 8k tokens). Agents cut longer tool
 /// output (Codex at about 10k tokens), so `inspect` and `view` trim by
@@ -311,7 +333,7 @@ fn stdin() -> Result<String, Failure> {
 fn mcp(budget: usize) {
     use serde_json::{Value, json};
     let description = "Read, change and test this project's code. Start with `session start --task`, \
-        the task in `text`: it lists the symbols most likely relevant and every command. Several commands \
+        the task in `text`: it lists the symbols most likely relevant, the workflow and the commands. Several commands \
         go in one call, one per line, and run in order: read everything you need in one call, and put \
         `test` on the line after a `submit`.";
     let stdin = std::io::stdin();
@@ -337,7 +359,7 @@ fn mcp(budget: usize) {
                     "type": "object",
                     "properties": {
                         "command": {"type": "string", "description": "One or more commands, one per line, e.g. `inspect checkout.pay tax.quote --context`, or `submit` then `test`"},
-                        "text": {"type": "string", "description": "The new code for submit; the task for `session start --task`; the record, note, summary or question for `work add` and `task note|done|ask`"},
+                        "text": {"type": "string", "description": "For submit: a patch (`*** Begin Patch` / `*** Update: <symbol or module>` / `@@` hunks) or new code; the task for `session start --task`; the record, note, summary or question for `work add` and `task note|done|ask`"},
                         "options": {"type": "array", "items": {"type": "string"}, "description": "2–4 options, for `task ask`"},
                         "old": {"type": "string", "description": "For `--replace`: the exact text that `text` replaces"}
                     },
@@ -355,6 +377,7 @@ fn mcp(budget: usize) {
                 let commands: Vec<&str> =
                     args["command"].as_str().unwrap_or("").lines().map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
                 let (mut out, mut is_error) = (String::new(), false);
+                SHOWN.with(|s| *s.borrow_mut() = Some(HashSet::new()));
                 // Code sent as command lines rather than in `text` (run 11): one
                 // error for the call, and nothing runs.
                 if let Some(code) = commands.iter().find(|c| looks_like_code(c)) {
@@ -368,6 +391,10 @@ fn mcp(budget: usize) {
                     let words: Vec<String> = command.split_whitespace().map(String::from).collect();
                     if commands.len() > 1 {
                         out += &format!("==== solace {command} ====\n");
+                    }
+                    if words.first().is_some_and(|w| w == "help") {
+                        out += &agent_help(words.get(1).map(|w| w.as_str()));
+                        continue;
                     }
                     // commands in one call share the budget, since the agent cuts the reply as a whole
                     match run_options(
@@ -708,7 +735,8 @@ impl Store {
         Ok((text.starts_with("exit code: 0\n"), strip_ansi(text.split_once('\n').map_or("", |(_, s)| s))))
     }
 
-    /// Type-checks the project and records which symbols are broken.
+    /// Type-checks the project and records which symbols are broken, with
+    /// their errors, so the next reply can report only what changed (D-46).
     fn check_all(&self, ix: &Index) -> Result<Vec<Diag>, Failure> {
         let files = self.materialize(ix)?;
         let (_, output) = self.gleam(&["check"])?;
@@ -716,10 +744,18 @@ impl Store {
         self.db.execute("DELETE FROM broken", [])?;
         for d in diags.iter().filter(|d| d.error) {
             if let Some(sym) = &d.symbol {
-                self.db.execute("INSERT OR IGNORE INTO broken VALUES (?1, ?2)", params![sym, d.text])?;
+                self.db.execute(
+                    "INSERT INTO broken VALUES (?1, ?2) ON CONFLICT(symbol) DO UPDATE SET diagnostic = diagnostic || char(10, 10) || excluded.diagnostic",
+                    params![sym, d.text],
+                )?;
             }
         }
         Ok(diags)
+    }
+
+    /// The broken symbols as last checked, each with its errors.
+    fn broken(&self) -> Result<HashMap<String, String>, Failure> {
+        Ok(self.db.prepare("SELECT symbol, diagnostic FROM broken")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?)
     }
 
     // --- reading ---------------------------------------------------------------
@@ -1073,6 +1109,11 @@ impl Store {
             };
             if left.is_empty() && fits(&out, &text) {
                 out += &text;
+                let printed: Vec<String> = match self.resolve_module(&ix, name) {
+                    Some(m) => ix.syms.iter().filter(|s| s.module == m.path).map(Sym::qname).collect(),
+                    None => self.resolve(&ix, name).map(|i| vec![ix.syms[i].qname()]).unwrap_or_default(),
+                };
+                printed.into_iter().for_each(mark_shown);
             } else {
                 left.push(name);
             }
@@ -1111,7 +1152,9 @@ impl Store {
             if level > 0 && !context {
                 break;
             }
-            let (mut out, mut shown, mut left) = (String::new(), HashSet::new(), vec![]);
+            // signatures an earlier command in this call printed count as shown
+            let earlier: HashSet<usize> = (0..ix.syms.len()).filter(|&j| shown_earlier(&ix.syms[j].qname())).collect();
+            let (mut out, mut shown, mut left) = (String::new(), earlier, vec![]);
             for &(name, i) in &targets {
                 let before = shown.clone();
                 let part = match i {
@@ -1137,6 +1180,9 @@ impl Store {
             ];
             if level > 0 {
                 out += &format!("Trimmed to fit the size limit: {}.\n", trimmed[1..=level as usize].join("; "));
+            }
+            for &j in shown.iter().chain(full.iter().filter(|&&j| !left.contains(&ix.syms[j].qname()))) {
+                mark_shown(ix.syms[j].qname());
             }
             if !left.is_empty() {
                 out += &format!(
@@ -1186,10 +1232,14 @@ impl Store {
         }
         if !callers.is_empty() && level >= 1 {
             out += &format!("\n== Used by ({}): solace refs {} ==\n", callers.len(), s.qname());
+        } else if s.kind == Kind::Type {
+            // the sites a new field breaks, then the other users by name (D-46)
+            out += &type_users(ix, i, &callers, &tests, 20);
         } else if !callers.is_empty() {
             out += &format!("\n== Used by ({}) ==\n", callers.len());
             for &c in callers.iter().take(20) {
                 out += &entry(c);
+                out += &call_lines(ix, c, i);
             }
             if callers.len() > 20 {
                 out += &format!("…and {} more (solace refs {})\n", callers.len() - 20, s.qname());
@@ -1242,8 +1292,16 @@ impl Store {
             return Ok(format!("Nothing uses {}.\n", ix.syms[i].qname()));
         }
         let mut out = format!("{} is used by {}:\n", ix.syms[i].qname(), users.len());
+        if ix.syms[i].kind == Kind::Type {
+            let (tests, users): (Vec<usize>, Vec<usize>) = users.into_iter().partition(|&j| is_test(&ix, j));
+            out += &type_users(&ix, i, &users, &tests, usize::MAX);
+            return Ok(out);
+        }
         for u in users {
-            out += &format!("-- {}\n{}\n", ix.syms[u].qname(), gleam::signature(&ix.syms[u].item()));
+            let q = ix.syms[u].qname();
+            out += &if shown_earlier(&q) { format!("-- {q} (above)\n") } else { format!("-- {q}\n{}\n", gleam::signature(&ix.syms[u].item())) };
+            out += &call_lines(&ix, u, i);
+            mark_shown(q);
         }
         Ok(out)
     }
@@ -1299,6 +1357,8 @@ impl Store {
 
     fn find(&self, query: &str) -> Out {
         let ix = self.index()?;
+        // `find "Customer(.."`: the quotes delimit the query (run 18)
+        let query = ['"', '\'', '`'].iter().find_map(|&c| query.strip_prefix(c)?.strip_suffix(c)).filter(|q| !q.is_empty()).unwrap_or(query);
         let q = query.to_lowercase();
         let mut hits: Vec<(bool, String)> = vec![];
         for s in &ix.syms {
@@ -1415,6 +1475,7 @@ impl Store {
                 }
             };
             let ix = self.index()?;
+            let before_broken = self.broken()?;
             let diags = self.check_all(&ix)?;
             let whole_module = matches!(target, Target::Module(_));
             let own = |d: &&Diag| match &target_name {
@@ -1425,7 +1486,9 @@ impl Store {
             let own_errors: Vec<&Diag> = diags.iter().filter(|d| d.error).filter(own).collect();
             if !own_errors.is_empty() {
                 let text: Vec<&str> = own_errors.iter().map(|d| d.text.as_str()).collect();
-                return fail(format!("Not saved: the submitted text has errors.\n\n{}", text.join("\n\n")));
+                let module_syms: Vec<String> = self.index()?.syms.iter().filter(|s| s.module == module).map(Sym::qname).collect();
+                let hint = self.callee_hint(&own_errors, &module_syms)?;
+                return fail(format!("Not saved: the submitted text has errors.\n\n{}{hint}", text.join("\n\n")));
             }
             if whole_module {
                 let after = self.index()?;
@@ -1444,7 +1507,7 @@ impl Store {
             let what = if whole_module { module.clone() } else { format!("{module} imports") };
             let mut out = format!("Saved {}.\n", target_name.as_deref().unwrap_or(&what));
             out += &warning_summary(diags.iter().filter(|d| !d.error).filter(own));
-            out += &broken_report(&diags);
+            out += &broken_report(&before_broken, &diags);
             Ok((target_name, out))
         })();
         match result {
@@ -1493,6 +1556,10 @@ impl Store {
             };
         if blocks.is_empty() {
             return fail("E0101 nothing to submit.");
+        }
+        let mut notes: Vec<String> = vec![];
+        if let Some(name) = name.filter(|_| blocks.len() > 1) {
+            notes.push(format!("`submit {name}` submitted every block; plain `submit` does the same"));
         }
         // (module, the symbol replaced, the new item, imports in the text)
         let mut plan: Vec<(String, Option<usize>, Item, String)> = vec![];
@@ -1561,16 +1628,17 @@ impl Store {
         if created_files.iter().any(|p| p.exists()) {
             return fail("E0101 the new module's file already exists outside the store; import or resolve it before creating this module");
         }
-        let mut notes: Vec<String> = vec![];
         self.db.execute_batch("BEGIN")?;
         let result = (|| -> Out {
             for (path, dir, header) in &created {
                 self.db.execute("INSERT INTO modules VALUES (?1, ?2, ?3)", params![path, dir, header])?;
                 notes.push(format!("created module {path} ({dir}/{path}.gleam)"));
             }
-            let mut saved: Vec<String> = vec![];
+            let (mut saved, mut unchanged): (Vec<String>, Vec<String>) = (vec![], vec![]);
+            let mut changed = !created.is_empty();
             for (module, existing, item, imports) in &plan {
                 let mut header = self.header(module)?;
+                let was = header.clone();
                 for (path, items, _) in import_statements(imports) {
                     let merged = merge_import(&header, &path, &items);
                     if merged != header {
@@ -1588,7 +1656,13 @@ impl Store {
                     notes.extend(weak_asserts(&item.text, &aliases(&header)).into_iter().map(|w| format!("{module}.{}: {w}", item.name)));
                 }
                 self.set_header(module, &header)?;
+                changed |= header != was;
                 match existing {
+                    // the same text as stored: not saved again (D-46)
+                    Some(e) if ix.syms[*e].text == item.text && ix.syms[*e].name == item.name && ix.syms[*e].kind == item.kind => {
+                        unchanged.push(format!("{module}.{}", item.name));
+                        continue;
+                    }
                     Some(e) => {
                         let e = &ix.syms[*e];
                         self.db.execute(
@@ -1609,12 +1683,20 @@ impl Store {
                     }
                 }
                 saved.push(format!("{module}.{}", item.name));
+                changed = true;
+            }
+            if !changed {
+                let broken = self.broken()?;
+                let still: Vec<&String> = unchanged.iter().filter(|u| broken.contains_key(*u)).collect();
+                let still = if still.is_empty() { String::new() } else { format!("Still broken: {} (`check` shows why).\n", still.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")) };
+                return Ok(format!("Unchanged: {}. The text equals the stored symbols, so nothing was saved or checked.\n{still}", unchanged.join(", ")));
             }
             let modules: HashSet<&str> = plan.iter().map(|p| p.0.as_str()).collect();
             let own = |d: &Diag| match &d.symbol {
                 Some(s) => saved.contains(s),
                 None => d.module.as_deref().is_some_and(|m| modules.contains(m)),
             };
+            let before_broken = self.broken()?;
             let mut diags = self.check_all(&self.index()?)?;
             // Unqualified types and constructors (`Option`, `None`, a project
             // type) that aren't imported: import them and check once more.
@@ -1637,9 +1719,11 @@ impl Store {
                 }
                 diags = self.check_all(&self.index()?)?;
             }
-            let own_errors: Vec<&str> = diags.iter().filter(|d| d.error && own(d)).map(|d| d.text.as_str()).collect();
+            let own_errors: Vec<&Diag> = diags.iter().filter(|d| d.error && own(d)).collect();
             if !own_errors.is_empty() {
-                return fail(format!("Not saved: the submitted text has errors.\n\n{}", own_errors.join("\n\n")));
+                let text: Vec<&str> = own_errors.iter().map(|d| d.text.as_str()).collect();
+                let hint = self.callee_hint(&own_errors, &saved)?;
+                return fail(format!("Not saved: the submitted text has errors.\n\n{}{hint}", text.join("\n\n")));
             }
             let after = self.index()?;
             let before: Vec<(String, Option<String>)> = plan
@@ -1651,10 +1735,14 @@ impl Store {
                 .collect();
             notes.extend(self.impact_note(&after, &before)?);
             let mut out = format!("Saved {}.\n", saved.join(", "));
+            if !unchanged.is_empty() {
+                out += &format!("Unchanged (the same as stored): {}.\n", unchanged.join(", "));
+            }
             out += &warning_summary(diags.iter().filter(|d| !d.error && own(d)));
-            out += &broken_report(&diags);
-            // The compiler stops at the first module with errors, so list
-            // every user of a changed signature from the reference graph.
+            out += &broken_report(&before_broken, &diags);
+            // The compiler stops at the first module with errors, so name the
+            // other callers of a changed function, or the sites that construct a
+            // changed type, from the reference graph (D-46).
             if diags.iter().any(|d| d.error) {
                 let after = self.index()?;
                 let broken: HashSet<&str> = diags.iter().filter_map(|d| d.symbol.as_deref()).collect();
@@ -1670,16 +1758,14 @@ impl Store {
                     }
                     for j in (0..after.syms.len()).filter(|&j| after.uses[j].contains(&a)) {
                         let n = after.syms[j].qname();
-                        if !broken.contains(n.as_str()) && !saved.contains(&n) && !unchecked.contains(&n) {
+                        let site = item.kind != Kind::Type || !sites(&after, j, a, false).is_empty();
+                        if site && !broken.contains(n.as_str()) && !saved.contains(&n) && !unchecked.contains(&n) {
                             unchecked.push(n);
                         }
                     }
                 }
                 if !unchecked.is_empty() {
-                    out += &format!(
-                        "\nA signature changed. These other users of it are not checked until the errors above are fixed:\n  {}\n",
-                        unchecked.join("\n  ")
-                    );
+                    out += &format!("\nNot checked until the errors above are fixed, and may need the same change: {}\n", unchecked.join(", "));
                 }
             }
             Ok(out)
@@ -1699,6 +1785,32 @@ impl Store {
                 Err(e)
             }
         }
+    }
+
+    /// For a rejected submit whose every error is a call, with the wrong arity
+    /// or argument types, to a project function the submission leaves out: the
+    /// advice to submit that function too, in the same `submit` (D-46).
+    fn callee_hint(&self, errors: &[&Diag], submitted: &[String]) -> Result<String, Failure> {
+        let ix = self.index()?;
+        let mut callees: Vec<String> = vec![];
+        for d in errors {
+            let title = d.text.lines().next().unwrap_or("");
+            let place = place(d);
+            let Some((sym, line)) = place.rsplit_once(", line ") else { return Ok(String::new()) };
+            let Some(j) = ix.syms.iter().position(|s| s.qname() == sym) else { return Ok(String::new()) };
+            let called: Vec<String> = ix.at[j]
+                .iter()
+                .filter(|(t, l)| line == (l + 1).to_string() && ix.syms[*t].kind == Kind::Fn)
+                .map(|(t, _)| ix.syms[*t].qname())
+                .filter(|q| !submitted.contains(q))
+                .collect();
+            if !(title.contains("Incorrect arity") || title.contains("Type mismatch")) || called.is_empty() {
+                return Ok(String::new());
+            }
+            callees.extend(called.into_iter().filter(|c| !callees.contains(c)).collect::<Vec<_>>());
+        }
+        let names: Vec<String> = callees.iter().map(|c| format!("`{c}`")).collect();
+        Ok(format!("\n\nIf you are changing {} too, submit both in one `submit`, a block each.", names.join(", ")))
     }
 
     fn header(&self, module: &str) -> Result<String, Failure> {
@@ -1721,6 +1833,7 @@ impl Store {
     fn delete(&self, name: &str) -> Out {
         let ix = self.index()?;
         let i = self.resolve(&ix, name)?;
+        let before = self.broken()?;
         let users: Vec<String> = (0..ix.syms.len()).filter(|&j| ix.uses[j].contains(&i)).map(|j| ix.syms[j].qname()).collect();
         if !users.is_empty() {
             return fail(format!("E5001 {} is still used by:\n  {}", ix.syms[i].qname(), users.join("\n  ")));
@@ -1728,7 +1841,7 @@ impl Store {
         self.db.execute("UPDATE symbols SET live = 0 WHERE id = ?1", [&ix.syms[i].id])?;
         self.history(&ix.syms[i].id, "retire", "")?;
         let diags = self.check_all(&self.index()?)?;
-        Ok(format!("Deleted {}.\n{}", ix.syms[i].qname(), broken_report(&diags)))
+        Ok(format!("Deleted {}.\n{}", ix.syms[i].qname(), broken_report(&before, &diags)))
     }
 
     fn check(&self) -> Out {
@@ -2181,6 +2294,95 @@ fn is_test(ix: &Index, i: usize) -> bool {
     ix.modules.iter().any(|m| m.path == ix.syms[i].module && m.dir == "test")
 }
 
+/// A type's users for `inspect --context` and `refs`: the sites that
+/// construct or match it with every field, one line each, then the other
+/// non-test users by name (at most `cap`).
+fn type_users(ix: &Index, ty: usize, users: &[usize], tests: &[usize], cap: usize) -> String {
+    let mut out = String::new();
+    let (mut built, mut others, mut updates) = (vec![], vec![], 0);
+    for &j in users.iter().chain(tests) {
+        updates += sites(ix, j, ty, true).len();
+        let at = sites(ix, j, ty, false);
+        if at.is_empty() && !tests.contains(&j) {
+            others.push(ix.syms[j].qname());
+        }
+        built.extend(at.into_iter().map(|(n, line)| format!("-- {}, line {n}: {line}\n", ix.syms[j].qname())));
+    }
+    let q = ix.syms[ty].qname();
+    if !built.is_empty() {
+        out += &format!("\n== Constructed by ({}): every field listed, so a new field breaks these ==\n{}", built.len(), built.concat());
+        if updates > 0 {
+            out += &format!("Record updates and patterns with `..` need no change; {updates} not listed.\n");
+        }
+    }
+    if !others.is_empty() {
+        let more = if others.len() > cap { format!(", …and {} more (solace refs {q})", others.len() - cap) } else { String::new() };
+        out += &format!(
+            "\n== Other users ({}); `refs {q}.<field>` lists a field's readers ==\n  {}{more}\n",
+            others.len(),
+            others.iter().take(cap).cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    out
+}
+
+/// The lines where `caller` calls function `f`, quoted under its entry.
+fn call_lines(ix: &Index, caller: usize, f: usize) -> String {
+    if ix.syms[f].kind != Kind::Fn {
+        return String::new();
+    }
+    ref_lines(ix, caller, f).iter().map(|(n, line)| format!("  > line {n}: {line}\n")).collect()
+}
+
+/// The lines where symbol `j` refers to `i`: (line from 1, that source line).
+fn ref_lines(ix: &Index, j: usize, i: usize) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = ix.syms[j].text.lines().collect();
+    let mut at: Vec<usize> = ix.at[j].iter().filter(|r| r.0 == i).map(|r| r.1).collect();
+    at.dedup();
+    at.into_iter().filter_map(|n| Some((n + 1, lines.get(n)?.trim().to_string()))).collect()
+}
+
+/// Where `j` constructs or matches type `ty` listing every field (no `..`):
+/// the places that break when a field is added (D-46). With `updates`, the
+/// record updates and patterns with `..` instead, which don't.
+// ponytail: a generic type's annotation such as `Box(Int)` also matches; check the position if that misleads.
+fn sites(ix: &Index, j: usize, ty: usize, updates: bool) -> Vec<(usize, String)> {
+    let ctors = gleam::constructors(&ix.syms[ty].text);
+    let text = &ix.syms[j].text;
+    let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(k, _)| k + 1)).collect();
+    ref_lines(ix, j, ty)
+        .into_iter()
+        .filter(|(n, line)| {
+            let at = starts[n - 1] + text[starts[n - 1]..].len() - text[starts[n - 1]..].trim_start().len();
+            ctors.iter().any(|c| {
+                line.match_indices(&format!("{c}(")).any(|(k, _)| {
+                    let whole = !line[..k].ends_with(|ch: char| ch.is_alphanumeric() || ch == '_');
+                    whole && updates == gleam::split_args(&text[at + k + c.len() + 1..]).iter().any(|(_, a)| a.trim().starts_with(".."))
+                })
+            })
+        })
+        .collect()
+}
+
+thread_local! {
+    /// The symbols whose signature or text an earlier command in this MCP call
+    /// printed, so `inspect` and `refs` can say `(above)` (D-46); `None`
+    /// outside a call.
+    static SHOWN: std::cell::RefCell<Option<HashSet<String>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn shown_earlier(q: &str) -> bool {
+    SHOWN.with(|s| s.borrow().as_ref().is_some_and(|s| s.contains(q)))
+}
+
+fn mark_shown(q: String) {
+    SHOWN.with(|s| {
+        if let Some(s) = s.borrow_mut().as_mut() {
+            s.insert(q);
+        }
+    })
+}
+
 /// Formats Gleam source, which doubles as the syntax check.
 fn format_gleam(source: &str) -> Result<String, Failure> {
     let mut child =
@@ -2609,22 +2811,77 @@ fn warning_summary<'a>(diags: impl Iterator<Item = &'a Diag>) -> String {
     if lines.is_empty() { String::new() } else { format!("\nWarnings:\n{}\nUse `check --warnings` for full diagnostics.\n", lines.join("\n")) }
 }
 
-fn broken_report(diags: &[Diag]) -> String {
+/// What a change did to the broken set (D-46): `before` is the broken table
+/// as it was. Fixed symbols are named; a symbol broken with the same errors as
+/// before gets one line; new errors are printed in full, once per message, and
+/// the other errors with that message as one line each (Spec 3 §6).
+fn broken_report(before: &HashMap<String, String>, diags: &[Diag]) -> String {
     let errors: Vec<&Diag> = diags.iter().filter(|d| d.error).collect();
-    if errors.is_empty() {
-        return "The project type-checks.\n".to_string();
-    }
     let mut names: Vec<String> =
         errors.iter().map(|d| d.symbol.clone().or(d.module.clone().map(|m| m + " imports")).unwrap_or("?".into())).collect();
     names.dedup();
-    let mut out = format!("\nBroken symbols ({}): {}\n", names.len(), names.join(", "));
-    for d in errors.iter().take(5) {
-        out += &format!("\n{}\n", d.text);
+    let mut fixed: Vec<&str> = before.keys().map(String::as_str).filter(|k| !names.iter().any(|n| n == k)).collect();
+    fixed.sort();
+    let fixed = if fixed.is_empty() { String::new() } else { format!("Fixed: {}.\n", fixed.join(", ")) };
+    if errors.is_empty() {
+        return format!("{fixed}The project type-checks.\n");
     }
-    if errors.len() > 5 {
-        out += &format!("\n… {} more errors (solace check)\n", errors.len() - 5);
+    let mut out = format!("\nBroken symbols ({}): {}\n{fixed}", names.len(), names.join(", "));
+    let own = |sym: &str| errors.iter().filter(|d| d.symbol.as_deref() == Some(sym)).map(|d| d.text.as_str()).collect::<Vec<_>>().join("\n\n");
+    let same: Vec<&String> = names.iter().filter(|n| before.get(*n).is_some_and(|t| *t == own(n))).collect();
+    if !same.is_empty() {
+        out += "Still broken, with the errors shown before (`check` shows them again):\n";
+        for n in &same {
+            let all: Vec<&&Diag> = errors.iter().filter(|d| d.symbol.as_ref() == Some(n)).collect();
+            let more = if all.len() > 1 { format!(" (and {} more errors in it)", all.len() - 1) } else { String::new() };
+            out += &format!("  {}: {}{more}\n", place(all[0]), error_message(all[0]));
+        }
+    }
+    // new errors, grouped by message: (message, first in full, the rest)
+    let mut groups: Vec<(String, &Diag, Vec<&Diag>)> = vec![];
+    for d in errors.iter().filter(|d| !d.symbol.as_ref().is_some_and(|s| same.contains(&s))) {
+        let m = error_message(d);
+        match groups.iter_mut().find(|g| g.0 == m) {
+            Some(g) => g.2.push(d),
+            None => groups.push((m, d, vec![])),
+        }
+    }
+    for (_, first, rest) in groups.iter().take(5) {
+        out += &format!("\n{}\n", first.text);
+        if !rest.is_empty() {
+            out += &format!("same error: {} more\n", rest.len());
+            for d in rest {
+                out += &format!("  at {}: {}\n", place(d), error_line(d));
+            }
+        }
+    }
+    let more: usize = groups.iter().skip(5).map(|g| 1 + g.2.len()).sum();
+    if more > 0 {
+        out += &format!("\n… {more} more errors (`check`)\n");
     }
     out
+}
+
+/// `<symbol>, line N` from a diagnostic's `at` line.
+fn place(d: &Diag) -> String {
+    d.text.lines().find_map(|l| l.trim_start().strip_prefix("at ")).unwrap_or("?").to_string()
+}
+
+/// An error's title and the compiler's note at its caret, e.g. "Incorrect
+/// arity: Expected 6 arguments, got 5".
+fn error_message(d: &Diag) -> String {
+    let title = d.text.lines().next().unwrap_or("").trim_start_matches("error:").trim();
+    let note = d.text.lines().rev().find_map(|l| l.rsplit_once('^')).map_or("", |(_, n)| n.trim());
+    if note.is_empty() { title.to_string() } else { format!("{title}: {note}") }
+}
+
+/// The source line an error is at, from its excerpt.
+fn error_line(d: &Diag) -> String {
+    let n = place(d).rsplit_once("line ").map_or(String::new(), |(_, n)| n.to_string());
+    d.text
+        .lines()
+        .find_map(|l| l.trim_start().strip_prefix(n.as_str()).and_then(|r| r.strip_prefix(" │")))
+        .map_or(String::new(), |r| r.trim_start_matches(|c: char| " │╭╰─·".contains(c)).trim_end().to_string())
 }
 
 /// An index built from (dir, module, source) triples, for tests.
@@ -2651,9 +2908,21 @@ mod tests {
     fn agent_reference_leaves_out_host_and_task_commands() {
         // Tests run outside a board run; `help` keeps everything.
         let r = agent_reference();
-        assert!(r.contains("Several commands go in one call") && r.contains("Work records"));
+        assert!(r.contains("Several commands go in one call") && r.contains("work records"));
         assert!(!r.contains("task done") && !r.contains("Host commands"));
         assert!(REFERENCE.contains("task done") && REFERENCE.contains("agent-config"));
+        // D-46: session start gets the workflow, with the signature-change and
+        // new-test examples, in under 3k bytes; `help` keeps every option.
+        assert!(r.len() < 3000, "{}", r.len());
+        assert!(r.contains("Changing a signature or adding a field") && r.contains("Writing a new test") && r.contains("`help`"));
+        assert!(!r.contains("probe --from <fn>") && REFERENCE.contains("probe --from <fn>") && REFERENCE.contains("--replace [--all]"));
+        assert!(r.contains("Imports are added") && !r.contains("task ask"));
+        // `help` for agents: every option, but no host or task commands here.
+        let h = agent_help(None);
+        assert!(h.contains("probe --from <fn>") && !h.contains("task diff") && !h.contains("agent-config"));
+        let s = agent_help(Some("submit"));
+        assert!(s.contains("--replace [--all]") && s.contains("draft") && !s.contains("probe --from"), "{s}");
+        assert!(agent_help(Some("work")).contains("work done") && agent_help(Some("nope")).starts_with("No command"));
     }
 
     #[test]
@@ -2696,6 +2965,20 @@ mod tests {
         assert!(mixed.contains("// ── pilot/shipments.deliver ") && mixed.contains("E1001 unknown name: shipping.standard_cost_cents"));
         assert!(store.inspect(&["shipping.nope"], false, usize::MAX).is_err());
         assert!(looks_like_code("let assert Ok(q) = checkout.quote(db, o.id, Standard)") && looks_like_code("echo q"));
+        // D-46: a type's users split into the sites that list every field and
+        // the rest by name; a function's callers show the call line.
+        let ty = ok(store.inspect(&["customer.Customer"], true, usize::MAX));
+        assert!(ty.contains("== Constructed by (") && ty.contains("-- pilot/seed.customers, line 3: Customer("), "{ty}");
+        assert!(ty.contains("-- pilot/accounts.register, line 11: customer.Customer(\n"), "{ty}");
+        assert!(ty.contains("== Other users (") && !ty.contains("== Used by"), "{ty}");
+        // commands in one MCP call share what was printed: `refs` says (above)
+        SHOWN.with(|s| *s.borrow_mut() = Some(HashSet::new()));
+        let f = ok(store.inspect(&["pricing.quote"], true, usize::MAX));
+        assert!(f.contains("-- pilot/checkout.quote\n") && f.contains("  > line "), "{f}");
+        let r = ok(store.refs("pricing.quote"));
+        assert!(r.contains("-- pilot/checkout.quote (above)\n  > line "), "{r}");
+        SHOWN.with(|s| *s.borrow_mut() = None);
+        assert!(ok(store.refs("pricing.quote")).contains("-- pilot/checkout.quote\n"));
         assert!(!looks_like_code("probe --from checkout_test.quote_test --trace pricing.quote"));
         fs::remove_dir_all(&root).unwrap();
     }
@@ -2796,6 +3079,54 @@ mod tests {
         assert!(out.contains("created module shapes"), "{out}");
         assert!(store.submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int) -> Int { a + b }\npub fn sub() { 1 }").unwrap_err().0.starts_with("E0101"));
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A small project: `calc.add` and three callers.
+    fn calc_project(name: &str) -> Store {
+        let root = env::temp_dir().join(new_id(Kind::Fn, name, ""));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("gleam.toml"), "name = \"app\"\nversion = \"1.0.0\"\n").unwrap();
+        let callers = "pub fn one() -> Int {\n  add(0, 1)\n}\n\npub fn two() -> Int {\n  add(1, 1)\n}\n\npub fn three() -> Int {\n  add(1, 2)\n}\n";
+        fs::write(root.join("src/calc.gleam"), format!("pub fn add(a: Int, b: Int) -> Int {{\n  a + b\n}}\n\n{callers}")).unwrap();
+        import(&root).unwrap();
+        Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root }
+    }
+
+    /// D-46: a submit reports what changed in the broken set; an error seen
+    /// before is one line, and errors with one message are printed in full once.
+    #[test]
+    fn signature_change_reports_changes_once() {
+        let store = calc_project("signature-change");
+        let out = store.submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int, c: Int) -> Int { a + b + c }").unwrap();
+        assert!(out.contains("Broken symbols (3)") && out.contains("same error: 2 more"), "{out}");
+        assert_eq!(out.matches("Expected 3 arguments, got 2").count(), 1, "{out}");
+        assert!(out.contains("  at calc.three, line 2: add(1, 2)"), "{out}");
+        let out = store.submit_symbols(Some("calc.one"), None, "pub fn one() -> Int { add(0, 1, 0) }").unwrap();
+        assert!(out.contains("Fixed: calc.one.") && out.contains("Still broken, with the errors shown before"), "{out}");
+        assert!(out.contains("  calc.two, line 2: Incorrect arity: Expected 3 arguments, got 2\n"), "{out}");
+        assert!(!out.contains("│"), "{out}");
+        // `check` stays complete.
+        let full = store.check().unwrap_err().0;
+        assert_eq!(full.matches("Expected 3 arguments, got 2").count(), 2, "{full}");
+        let out = store.submit_symbols(None, None, "// ── calc.two ──\npub fn two() -> Int { add(1, 1, 0) }\n// ── calc.three ──\npub fn three() -> Int { add(1, 2, 0) }\n").unwrap();
+        assert!(out.contains("Fixed: calc.three, calc.two.\nThe project type-checks."), "{out}");
+        fs::remove_dir_all(&store.root).unwrap();
+    }
+
+    /// D-46: text equal to what is stored is reported unchanged, and when
+    /// nothing changed the type check is skipped.
+    #[test]
+    fn unchanged_submit_skips_check() {
+        let store = calc_project("unchanged");
+        let blocks = "// ── calc.one ──\npub fn one() -> Int { add(0, 2) }\n// ── calc.two ──\npub fn two() -> Int { add(1, 1) }\n";
+        let out = store.submit_symbols(Some("calc.one"), None, blocks).unwrap();
+        assert!(out.contains("plain `submit` does the same") && out.contains("Saved calc.one.\nUnchanged (the same as stored): calc.two."), "{out}");
+        // A source change on disk would show if the project were checked again.
+        fs::write(store.root.join("src/calc.gleam"), "not gleam").unwrap();
+        let out = store.submit_symbols(Some("calc.two"), None, blocks).unwrap();
+        assert!(out.contains("Unchanged: calc.one, calc.two.") && out.contains("nothing was saved or checked"), "{out}");
+        assert_eq!(fs::read_to_string(store.root.join("src/calc.gleam")).unwrap(), "not gleam");
+        fs::remove_dir_all(&store.root).unwrap();
     }
 
     /// D-44: `test` runs the tests whose reach changed since they passed, those

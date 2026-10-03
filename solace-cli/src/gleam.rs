@@ -400,8 +400,11 @@ fn local_bindings(chars: &[char], line_end: &dyn Fn(usize) -> usize) -> Vec<(Str
             // drop type annotations: `let x: Int =`
             let pattern: String = pattern.split(':').next().unwrap_or("").to_string();
             let at_char = char_pos(at);
-            let bound_from = line_end(char_pos(from + stop_at));
             let level = indent(line_start(at_char));
+            // bound after the whole right-hand side, which may run over several
+            // lines: `use customer <- result.try(\n  customer.Customer(..` still
+            // refers to the module
+            let bound_from = line_end(char_pos(from + stop_at)).max(dedent(at_char, level, true));
             let bound_to = dedent(at_char, level, false);
             for w in pattern_names(&pattern) {
                 // the pattern itself names the binding, not a symbol
@@ -605,5 +608,9 @@ mod tests {
             .filter_map(|r| if let Ref::Bare(b) = r { Some(b.clone()) } else { None })
             .collect();
         assert!(bare.contains(&"g".to_string()) && !bare.contains(&"request".to_string()) && !bare.contains(&"tax".to_string()), "{bare:?}");
+        // a binding starts after its whole right-hand side, however many lines it takes
+        let code = "pub fn f() {\n  use customer <- result.try(\n    customer.Customer(id: 1)\n    |> customer.validate,\n  )\n  customer.email\n}";
+        let q: Vec<String> = references(code).iter().filter_map(|r| if let Ref::Qualified(a, b) = r { Some(format!("{a}.{b}")) } else { None }).collect();
+        assert_eq!(q, ["result.try", "customer.Customer", "customer.validate"]);
     }
 }

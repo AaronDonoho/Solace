@@ -6,7 +6,9 @@ The protocol is the agent's environment. It has few, rich commands that return c
 
 ## 1. Transport
 
-**Phase 1a addition (D-34):** Rejected submissions retain their raw text, command and source-store fingerprint outside the symbol index. `drafts` lists the current task's drafts (or `cli` scope outside a board run); `view --draft <id>` reads one. `submit --draft <id> --replace` applies an exact `old` → `text` edit and retries the original submission; `submit --draft <id>` retries unchanged. A successful retry removes the draft. A stale source fingerprint refuses the retry (`E0107`) while preserving its text; an unavailable or differently owned draft is `E0106`. Finalization or start-over clears task drafts. Syntax errors are retained too, and rejected new modules must not leave projected files behind. Successful submissions summarize warnings by symbol; `check --warnings` exposes full warning details. Errors remain detailed.
+**Phase 1a addition (D-34):** Rejected submissions retain their raw text, command and source-store fingerprint outside the symbol index. `drafts` lists the current task's drafts (or `cli` scope outside a board run); `view --draft <id>` reads one. `submit --draft <id> --replace` applies an exact `old` → `text` edit and retries the original submission; `submit --draft <id>` retries unchanged. A successful retry removes the draft. A stale fingerprint refuses the retry (`E0107`) while preserving its text; since D-46 the fingerprint covers only the symbols the draft replaces and the headers of their modules (or of the module it adds to), so a caller's draft still retries after its callee changed; an unavailable or differently owned draft is `E0106`. Finalization or start-over clears task drafts. Syntax errors are retained too, and rejected new modules must not leave projected files behind. Successful submissions summarize warnings by symbol; `check --warnings` exposes full warning details. Errors remain detailed.
+
+**D-46 additions:** `submit <name> --replace --all` replaces every occurrence of `old` and replies "Replaced N occurrences"; without `--all`, several occurrences are refused (`E0105`) with the line of each. A block whose text equals the stored symbol is reported unchanged and not saved; when nothing changed, the type check is skipped. A rejected submit whose every error is a call with the wrong arity or argument types to a project function it doesn't include says to submit that function in the same `submit`.
 
 - A CLI, `solace <command>`, run through the agent's shell. Output is plain text by default; `--json` gives the same content as structured data.
 - **One process per call, no daemon**, as long as the latency budget (§7) holds.
@@ -21,8 +23,9 @@ The protocol is the agent's environment. It has few, rich commands that return c
 | `session start [--scope <ns>…]` | Orientation: the project's `AGENTS.md` first, if there is one (D-45; cut at a whole line past 8,000 bytes, with the `read` range for the rest), then language reference version, policy for the scope, pending and recent decisions, and a symbol index: the names of every symbol in scope, grouped by namespace with its one-line description, with "N more" beyond a per-namespace cap (D-12). Open work records are expanded with the context bundles of the symbols they name (D-10) |
 | `inspect <name>… [--context]` | Each symbol's text, signature, effects, description, verification status. `--context` adds the bundle in §3. Several names return several bundles in one document (D-10) |
 | `view <ns> \| <name>… \| --callers <name> \| --callees <name>` | Multi-symbol document (Spec 2 §3). A namespace is shown as an outline (signature, effects, one-line description, verification status per symbol); `--bodies` gives full text (D-10) |
+| `help [<command>]` | Over MCP (D-46): the full reference without host commands, and task commands only in a board run; with a command, the reference paragraphs that list it |
 | `find <query>` | Search names, signatures and descriptions. Ranked, at most 20 hits, one line each |
-| `submit <name>` / `submit --new <ns>` / `submit --view` | Text on stdin (Spec 2 §2, §3) |
+| `submit <name>` / `submit --new <ns>` / `submit --view` | Text on stdin (Spec 2 §2, §3). Since D-47 a plain `submit` also takes a patch in `apply_patch` form (`*** Update: <symbol or module>` hunks, `*** Add: <module>.<name>`), applied to the stored text and submitted as the blocks it changes; a hunk that doesn't match refuses the whole patch (`E0108`) |
 | `rename`, `copy`, `merge`, `delete`, `extract` | Spec 1 §5 |
 | `check [<name>…]` | Fast check; the default is everything changed in the current change |
 | `test [<name>…] [--all]` | The focused plan (D-44): the tests whose reach (everything they can run, with its revisions, module headers and the project and dependency manifests) changed since they last passed, plus those that failed or never ran and those that reach other processes, the network or foreign code. With names, the tests that reach those symbols; `--all`, every test. The reply says how many ran of how many, and names declared suites (Spec 14 §2) that reach a change |
@@ -43,19 +46,19 @@ Every command that takes a name resolves it per Spec 1 §4 and fails with the ca
 1. **Symbol:** canonical text, with its kind, qualified name and short identity
 2. **About:** description and rationale; possibly-stale prose is marked `[stale]`
 3. **Uses:** signatures (not bodies) of every symbol it references, grouped types → constants → functions
-4. **Used by:** direct callers with their signatures; at most 20, then `…and N more`
+4. **Used by:** direct callers with their signatures, each with its call line (`  > line N: …`); at most 20, then `…and N more`. For a type (D-46): **Constructed by**, each construction or pattern that lists every field (no `..`) as `-- <symbol>, line N: <source line>`, then a count of record updates and patterns with `..` (which need no change), then **Other users** by name
 5. **Verification:** examples and tests covering it, last results, verification debt, holes
 6. **Decisions:** decision records attached to it or its namespace
 7. **Work:** open work records that touch it
 
 The target size is under 2,000 tokens for a typical pilot function. Nothing in a bundle requires a second call to interpret.
 
-Several names give one document (D-14): each signature appears once, and later bundles refer to it as `(above)`. A requested symbol appears in full once. A reply stays within a byte budget set per agent (`solace mcp --budget`, default 32,000, about 8k tokens), shared by all commands in one call. Over that, sections are trimmed in order: Used by (to a count), the test example (to names), Uses (to names). The requested symbols' text is never trimmed. Names that still don't fit are listed at the end with the command that shows them. `view` falls back from bodies to outlines the same way.
+Several names give one document (D-14): each signature appears once, and later bundles refer to it as `(above)`. Since D-46 this holds across the commands of one MCP call: `inspect`, `view` and `refs` share what was printed, and `refs` gives the same Constructed by / Other users split for a type. A requested symbol appears in full once. A reply stays within a byte budget set per agent (`solace mcp --budget`, default 32,000, about 8k tokens), shared by all commands in one call. Over that, sections are trimmed in order: Used by (to a count), the test example (to names), Uses (to names). The requested symbols' text is never trimmed. Names that still don't fit are listed at the end with the command that shows them. `view` falls back from bodies to outlines the same way.
 
 ## 4. Changes and transactions
 
 - Each session has one **open change**. `submit` and the structural commands apply to it immediately, and each is atomic.
-- A submitted symbol must pass its own fast check. Dependents it breaks, such as callers of a changed signature, are tracked as the change's **broken dependents**. They are shown after every submit and in `diff`, and they clear as each one is fixed. This allows refactors one step at a time.
+- A submitted symbol must pass its own fast check. Dependents it breaks, such as callers of a changed signature, are tracked as the change's **broken dependents**. They are listed in `diff`, and each submit reports the changes in that set (D-46): the symbols fixed, one line per symbol still broken with the errors already shown, and new errors grouped as in §6. `check` lists every error in full. They clear as each one is fixed. This allows refactors one step at a time.
 - `commit` is refused (`E5103`) while the change has broken dependents.
 - A change records its **base revisions**: the revision of each symbol it touched, as first read.
 - `commit` publishes the change to the main line. If another commit changed any base revision in the meantime, the commit is rejected with `E5101`, listing the symbols and a semantic diff of what changed. Nothing is merged silently.
@@ -80,7 +83,7 @@ Every diagnostic has:
 ```
 
 - **Stable codes**, never reused. Ranges: `E00xx` parse and projection, `E10xx` names, `E20xx` types, `E30xx` effects, `E40xx` contracts, examples and holes, `E50xx` store and transactions, `W` prefix for warnings.
-- **Root cause first.** Diagnostics caused by an earlier one (for example, a failed type that makes every caller fail) are grouped under it as `caused by above: N more`, not listed separately.
+- **Root cause first.** Diagnostics caused by an earlier one (for example, a failed type that makes every caller fail) are grouped under it as `caused by above: N more`, not listed separately. Phase 1a (D-46): errors with the same message are printed in full once, followed by `same error: N more` and one line each, `at <symbol>, line N: <source line>`.
 - **Fixes** are either replacement text for the symbol or a command. The agent applies them explicitly; the store never auto-applies.
 - `--json` gives the same fields.
 

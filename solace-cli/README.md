@@ -3,6 +3,9 @@
 The source of the `solace` executable. Installing and using it are described in the [repository README](../README.md).
 
 - `src/main.rs`: the store, the symbol commands and the MCP server.
+- `src/drafts.rs`: rejected submissions kept as drafts, `submit --replace`, and patches (`apply_patch` form) turned into submit blocks.
+- `src/reach.rs`: test reach and impact analysis (D-44).
+- `src/reference.txt`: the agent reference; the part before "Commands in full" is what `session start` shows.
 - `src/gleam.rs`: splitting Gleam source into symbols.
 - `src/lockdown.rs`: file tiers, `solace.toml`, file and run commands, `agent-config` (Spec 14).
 - `src/board.rs`, `src/default-board.toml`: the task board server and the default workflow (Spec 15).
