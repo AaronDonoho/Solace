@@ -339,11 +339,14 @@ def parse_codex(lines):
     }
 
 
-def codex_cmd(arm, model, effort):
+def codex_cmd(arm, model, effort, base_url=None):
     cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "-m", model,
            "-c", f'model_reasoning_effort="{effort}"', "-c", 'web_search="disabled"',
            # Codex cuts tool results over 10k tokens by default; batched reads overshoot it.
            "-c", "tool_output_token_limit=30000"]
+    if base_url:  # a local OpenAI-compatible server, e.g. LM Studio
+        cmd += ["-c", f'model_providers.local={{name="local",base_url="{base_url}",wire_api="responses"}}',
+                "-c", "model_provider=local"]
     for f in CODEX_OFF:
         cmd += ["--disable", f]
     if arm == "files":
@@ -364,7 +367,7 @@ def next_rep(scenario_dir, task_name):
     return max((row.get("rep", 1) for row in rows if row["task"] == task_name), default=0) + 1
 
 
-def run(tasks, model, budget, repeat, arm, agent="codex", effort="medium", run_number=None):
+def run(tasks, model, budget, repeat, arm, agent="codex", effort=None, run_number=None, base_url=None, followup=None):
     RESULTS.mkdir(parents=True, exist_ok=True)
     run_dir = RESULTS / str(run_number if run_number is not None else next_run_number(RESULTS))
     scenario_dir = run_dir / arm
@@ -372,8 +375,13 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort="medium", run_n
     first_reps = {task.name: next_rep(scenario_dir, task.name) for task in tasks}
     env = {**os.environ, "PATH": f"{SOLACE_BIN}:{os.environ['PATH']}"}
     cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--model", model,
-           "--no-session-persistence", "--strict-mcp-config", "--disable-slash-commands",
+           "--strict-mcp-config", "--disable-slash-commands",
            "--max-budget-usd", str(budget)]
+    if not followup:  # a follow-up resumes the session, so it must be kept
+        cmd.append("--no-session-persistence")
+    if effort:
+        cmd += ["--effort", effort]
+    effort = effort or "medium" if agent == "codex" else effort
     if arm == "files":
         preamble = PREAMBLE
         cmd += ["--tools", TOOLS, "--allowedTools", *ALLOWED_TOOLS]
@@ -415,7 +423,7 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort="medium", run_n
             home = config_dir if launch else Path(tempfile.mkdtemp(prefix="codex-home-"))
             (home / "auth.json").symlink_to(Path.home() / ".codex" / "auth.json")
             try:
-                sh(codex_cmd(arm, model, effort), work, input=prompt, timeout=1800, env={**env, "CODEX_HOME": str(home)})
+                sh(codex_cmd(arm, model, effort, base_url), work, input=prompt, timeout=1800, env={**env, "CODEX_HOME": str(home)})
             except subprocess.TimeoutExpired:
                 pass
             logs = sorted(home.glob("sessions/**/*.jsonl"), key=lambda f: f.stat().st_mtime)
@@ -431,12 +439,23 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort="medium", run_n
             except subprocess.TimeoutExpired as e:
                 stream = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
             metrics = parse_stream(stream.splitlines())
-            if launch:
-                shutil.rmtree(config_dir)
         (scenario_dir / f"{name}.stream.jsonl").write_text(stream)
         row = {"task": task.name, "rep": rep, "agent": agent,
-               "model": f"{model} ({effort})" if agent == "codex" else model, "effort": effort if agent == "codex" else None,
+               "model": f"{model} ({effort})" if effort else model, "effort": effort,
                "arm": arm, **metrics, **grade(task, work)}
+        if followup and agent == "claude":
+            # Asked after grading and kept out of the metrics: the agent's own view of the run.
+            session = next((json.loads(l)["session_id"] for l in stream.splitlines()
+                            if '"subtype":"init"' in l.replace(" ", "")), None)
+            if session:
+                env2 = {**env, **(launch["env"] if launch else {})}
+                proc = sh(cmd + (launch["args"] if launch else []) + ["--resume", session], work,
+                          input=followup, timeout=1800, env=env2)
+                (scenario_dir / f"{name}.followup.stream.jsonl").write_text(proc.stdout)
+                answer = [json.loads(l).get("result", "") for l in proc.stdout.splitlines() if '"type":"result"' in l]
+                (scenario_dir / f"{name}.followup.md").write_text((answer[-1] if answer else "(no answer)") + "\n")
+        if agent == "claude" and launch:
+            shutil.rmtree(config_dir)
         sh(["git", "add", "-A"], work)
         (scenario_dir / f"{name}.diff").write_text(sh(["git", "diff", "--cached", "HEAD"], work).stdout)
         init = row.pop("init")
@@ -506,10 +525,12 @@ def main():
     ap.add_argument("tasks", nargs="*", help="task directory names (default: all); for report, the run directory")
     ap.add_argument("--agent", choices=["codex", "claude"], default="codex")
     ap.add_argument("--model", help="default: gpt-5.6-terra (codex), claude-sonnet-5 (claude)")
-    ap.add_argument("--effort", default="medium", help="codex reasoning effort")
+    ap.add_argument("--effort", help="reasoning effort (codex default: medium; claude: its own default)")
+    ap.add_argument("--followup", type=Path, help="claude only: a question asked in the same session after grading")
     ap.add_argument("--budget", type=float, default=2.0, help="max USD per task (claude only)")
     ap.add_argument("--repeat", type=int, default=1, help="runs per task")
     ap.add_argument("--run-number", type=int, help="override the next run number, e.g. to pair both arms")
+    ap.add_argument("--base-url", help="codex only: OpenAI-compatible server for a local model, e.g. http://127.0.0.1:1234/v1")
     ap.add_argument("--arm", choices=["files", "solace"], default="files",
                     help="files: normal file tools; solace: the solace protocol only (D-8)")
     a = ap.parse_args()
@@ -524,7 +545,7 @@ def main():
         r = subprocess.run(["cargo", "build", "--release", "--quiet"], cwd=ROOT.parent / "solace-cli")
         if r.returncode:
             sys.exit("could not build solace-cli")
-    run(tasks, a.model or DEFAULT_MODEL[a.agent], a.budget, a.repeat, a.arm, a.agent, a.effort, a.run_number)
+    run(tasks, a.model or DEFAULT_MODEL[a.agent], a.budget, a.repeat, a.arm, a.agent, a.effort, a.run_number, a.base_url, a.followup.read_text() if a.followup else None)
 
 
 if __name__ == "__main__":

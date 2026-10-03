@@ -376,6 +376,14 @@ class Board(unittest.TestCase):
         self.wait(t,lambda x:len(x['questions'])==2)
         prompt=(self.root/'.solace'/(new+'.prompt')).read_text();self.assertIn("Answer: b",prompt);self.assertNotIn('"runs"',prompt)
         self.action(t,'unblock',text='b');self.wait(t,lambda x:x['column']=='needs_review')
+    def test_a17_agents_md_proposal(self):  # D-45: AGENTS.md is human-owned like solace.toml
+        agents=self.root/'AGENTS.md'
+        t=self.assign([{'command':'write AGENTS.md','text':'Prices are in cents.\n'},{'command':'task done done'}])
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting');q=t['questions'][0]
+        self.assertEqual(q['text'],'Change AGENTS.md');self.assertFalse(agents.exists())
+        self.api('POST',f'/tasks/{t["id"]}/questions/{q["id"]}',{'option':'Approve'})
+        self.wait(t,lambda x:x['column']=='needs_review');self.assertEqual(agents.read_text(),'Prices are in cents.\n')
+        agents.unlink()
     def test_a17_settings_proposals(self):
         settings=self.root/'solace.toml';original=settings.read_text()
         add={'command':'write solace.toml --replace','old':'resources=["priv/**"]','text':'resources=["priv/**"]\n[commands]\nbuild={run=["true"]}'}

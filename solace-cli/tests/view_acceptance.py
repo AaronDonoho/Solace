@@ -98,6 +98,8 @@ pub fn main_test() {
         review = self.api('GET', '/graph?task=' + task['id'])['review']
         self.assertTrue(any(e['id'].startswith('fn:') and e['effects_added'] == ['effect:prints'] for e in review['entries']))
         self.assertIn('1 effects added', review['summary'])
+        self.assertIn('untested uses', review['summary'])
+        self.assertIn('untested', review)
 
 
 if __name__ == '__main__':

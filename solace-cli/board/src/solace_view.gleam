@@ -1,5 +1,6 @@
 import gleam/dynamic/decode
 import gleam/float
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -108,6 +109,8 @@ pub type Review {
     files: List(Item),
     added: List(String),
     removed: List(String),
+    untested: List(#(String, String)),
+    reaches: List(String),
   )
 }
 
@@ -271,6 +274,24 @@ fn review_decoder() -> decode.Decoder(Review) {
     "effects",
     decode.at(["removed"], decode.list(decode.string)),
   )
+  use untested <- decode.optional_field(
+    "untested",
+    [],
+    decode.list(untested_decoder()),
+  )
+  use suites <- decode.optional_field("suites", [], decode.list(decode.string))
+  use leaves <- decode.optional_field("leaves", [], decode.list(decode.string))
+  let reaches =
+    list.append(
+      case suites {
+        [] -> []
+        _ -> ["Also reached: " <> string.join(suites, ", ")]
+      },
+      case leaves {
+        [] -> []
+        _ -> ["Leaves the program: " <> string.join(leaves, ", ")]
+      },
+    )
   decode.success(Review(
     summary,
     entries,
@@ -279,6 +300,29 @@ fn review_decoder() -> decode.Decoder(Review) {
     files,
     added,
     removed,
+    untested,
+    reaches,
+  ))
+}
+
+/// A use the change reaches that no test checks: (node id, line to show).
+fn untested_decoder() -> decode.Decoder(#(String, String)) {
+  use id <- decode.field("id", decode.string)
+  use name <- decode.field("name", decode.string)
+  use steps <- decode.field("steps", decode.int)
+  use via <- decode.field("via", decode.string)
+  use certain <- decode.field("certain", decode.bool)
+  let unit = case steps {
+    1 -> " step"
+    _ -> " steps"
+  }
+  let possible = case certain {
+    True -> ""
+    False -> " (possible)"
+  }
+  decode.success(#(
+    id,
+    name <> " · " <> int.to_string(steps) <> unit <> " · " <> via <> possible,
   ))
 }
 
@@ -986,6 +1030,12 @@ fn review_panel(review: Review) -> Element(Msg) {
     list.map(review.files, fn(item) {
       h.p([], [h.text(item.change <> " · " <> item.id <> " · " <> item.tier)])
     })
+  let untested =
+    list.map(review.untested, fn(item) {
+      h.button([a.class("view-row"), e.on_click(Select(item.0))], [
+        h.text(item.1),
+      ])
+    })
   h.aside(
     [a.class("view-panel view-review"), a.aria_label("Task review")],
     list.flatten([
@@ -1015,6 +1065,9 @@ fn review_panel(review: Review) -> Element(Msg) {
         h.button([e.on_click(RunTests)], [h.text("Run tests again")]),
       ],
       tests,
+      [h.h3([], [h.text("Untested uses the change reaches")])],
+      untested,
+      list.map(review.reaches, fn(line) { h.p([], [h.text(line)]) }),
       [h.h3([], [h.text("Files touched")])],
       files,
     ]),

@@ -14,7 +14,7 @@ Every file under the project root is in exactly one tier. The first rule that ma
 | --- | --- | --- |
 | 1 | Source the store holds as symbols (Gleam: `src/**/*.gleam`, `test/**/*.gleam`) | 1 source |
 | 2 | The target's manifest (Gleam: `gleam.toml`) | 2 manifest |
-| 3 | `solace.toml` (§2) | settings |
+| 3 | `solace.toml` (§2) and `AGENTS.md` (D-45) | settings |
 | 4 | `.solace/`: the store, the task board's data (Spec 15), and Solace's working files | internal: no agent access at all (`E6006`) |
 | 5 | `.git/`, the target's build and dependency output (Gleam: `build/`, `manifest.toml`), anything `.gitignore` ignores | 4 ignored |
 | 6 | A path registered in `ignore` (§2) | 4 ignored |
@@ -28,6 +28,8 @@ Every file under the project root is in exactly one tier. The first rule that ma
 
 `solace.toml` in the project root, versioned with the project. Import creates a starter file if absent and never overwrites existing settings (D-26). **Humans write it**, through the UX or an editor. Agents can read it (`read solace.toml`) but not write it. In a work run, `write solace.toml` proposes the change for a human to approve on the task board (D-38, Spec 15 §6). Resource patterns classify files; they are not a file-write allowlist.
 
+`AGENTS.md` in the project root holds the project's instructions for agents and is shown first in `session start` (Spec 3). It follows the same rule as `solace.toml`: humans write it, agents read it, and a work run's `write AGENTS.md` is a proposal the human approves (D-45).
+
 ```toml
 resource_limit = 262144          # bytes; default 256 KiB
 
@@ -38,9 +40,12 @@ ignore    = ["priv/generated/", "data/dumps/"]
 "priv/**/*.html" = ["tidy", "-q", "-e", "{file}"]
 
 [commands]                       # beyond the built-ins in §4
-smoke   = { run = ["gleam", "run", "-m", "smoke"], timeout = 60 }
+smoke   = { run = ["gleam", "run", "-m", "smoke"], timeout = 60, checks = [] }
 migrate = { run = ["gleam", "run", "-m", "migrate"], args = true }
+e2e     = { run = ["npx", "playwright", "test"], timeout = 600, checks = ["api.handle"] }
 ```
+
+`checks` (optional, D-44) marks a command as a test suite outside `gleam test` and lists the entry points it drives, by symbol name, or `"*"` for all. For `gleam run -m <module>`, that module's `main` is added, so `checks = []` is enough. A suite's reach is everything its entry points can run. `test`, `impact` and a submit's note name a suite that reaches a change ("Also reached: e2e (`run e2e`)"); Solace never runs a suite unasked. `checks` that isn't an array of strings is invalid (`E6020`).
 
 Solace rereads the file whenever a command starts, so a change takes effect with no restart.
 

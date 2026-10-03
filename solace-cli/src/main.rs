@@ -9,6 +9,7 @@ mod board;
 mod drafts;
 mod gleam;
 mod lockdown;
+mod reach;
 mod view;
 
 use gleam::{Item, Kind, Ref};
@@ -21,6 +22,14 @@ use std::process::{Command, Stdio};
 use std::{env, fs};
 
 const REFERENCE: &str = include_str!("reference.txt");
+
+/// The reference as agents get it: host commands left out, and task commands
+/// only in a board run.
+fn agent_reference() -> String {
+    let (common, rest) = REFERENCE.split_once("\nTask runs").unwrap();
+    let (task, _host) = rest.split_once("\nHost commands").unwrap();
+    if board::context().is_some() { format!("{common}\nTask runs{task}") } else { format!("{common}\n") }
+}
 /// The largest reply, in bytes (about 8k tokens). Agents cut longer tool
 /// output (Codex at about 10k tokens), so `inspect` and `view` trim by
 /// priority to fit rather than being cut mid-document (D-14). `solace mcp
@@ -148,10 +157,12 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         }
         // A run's settings write is a proposal the human approves (D-38).
         let target = a.get(1).map(|p| Path::new(p).components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect::<PathBuf>());
-        if a.first() == Some(&"write") && target.is_some_and(|p| p == Path::new("solace.toml")) {
-            let current = fs::read(store.root.join("solace.toml")).unwrap_or_default();
+        if a.first() == Some(&"write")
+            && let Some(file) = target.and_then(|p| p.to_str().map(String::from)).filter(|p| p == "solace.toml" || p == "AGENTS.md")
+        {
+            let current = fs::read(store.root.join(&file)).unwrap_or_default();
             let proposed = lockdown::edited(&current, &input()?, a.contains(&"--replace"), old)?;
-            return board::propose_settings(&store, tid, rid, &current, &proposed, guard);
+            return board::propose_settings(&store, tid, rid, &file, &current, &proposed, guard);
         }
     }
     let changing = a.first().is_some_and(|a| matches!(*a, "submit" | "delete" | "write" | "remove" | "run"));
@@ -209,25 +220,67 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
         ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
         ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
         ["refs", name] => store.refs(name),
+        ["impact", names @ ..] => store.impact(names, budget),
         ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
         ["delete", name] => store.delete(name),
         ["check"] => command_report(store.check(), budget),
         ["check", "--warnings"] => command_report(store.check_report(true), budget),
-        ["test"] => command_report(store.test(), budget),
-        ["probe"] => command_report(store.probe(&input()?), budget),
+        ["test", rest @ ..] => command_report(store.test(rest), budget),
+        ["probe", rest @ ..] => {
+            let (from, trace) = probe_args(rest)?;
+            // with --from the test's body is the probe; `text` only adds to it
+            let text = if from.is_some() { input().unwrap_or_default() } else { input()? };
+            command_report(store.probe(&text, from, &trace), budget)
+        }
         ["work", "add"] => store.work_add(&input()?),
         ["work", "add", text @ ..] => store.work_add(&text.join(" ")),
         ["work", "list"] | ["work"] => store.work_list(),
         ["work", "done", id] => store.work_done(id),
         _ => usage(format!(
-                "Unknown command: {}\nCommands: session, inspect, view, refs, find, submit, drafts, delete, check, test, probe, work, files, read, write, remove, build, format, run, task.",
+                "Unknown command: {}\nCommands: session, inspect, view, refs, impact, find, submit, drafts, delete, check, test, probe, work, files, read, write, remove, build, format, run, task.",
             a.join(" ")
         )),
     }
 }
 
+/// Per-test results and the source as of the last full pass (D-44).
+const TEST_TABLES: &str = "CREATE TABLE IF NOT EXISTS test_runs(test TEXT PRIMARY KEY, reach TEXT NOT NULL, result TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS test_base(id TEXT PRIMARY KEY, text TEXT NOT NULL);";
+
+/// Command output without build progress and compiler warnings (a warning
+/// runs until the next error or until the program starts).
+fn quiet(output: &str) -> String {
+    let (mut out, mut warning) = (String::new(), false);
+    for l in output.lines() {
+        let t = l.trim();
+        warning = (warning || l.starts_with("warning")) && !l.starts_with("error") && !t.starts_with("Running ");
+        if !warning && !["Compiling ", "Compiled ", "Running ", "Downloading ", "Downloaded "].iter().any(|p| t.starts_with(p)) {
+            out += &format!("{l}\n");
+        }
+    }
+    out
+}
+
 /// The module name a probe runs as.
 const PROBE: &str = "solace_probe";
+
+/// `probe [--from <fn>] [--trace <fn>...]`
+fn probe_args<'a>(args: &[&'a str]) -> Result<(Option<&'a str>, Vec<&'a str>), Failure> {
+    let (mut from, mut trace, mut tracing) = (None, vec![], false);
+    let mut it = args.iter();
+    while let Some(&a) = it.next() {
+        match a {
+            "--from" => from = Some(*it.next().ok_or_else(|| Failure("--from needs a function name.".into(), 2))?),
+            "--trace" => tracing = true,
+            _ if tracing && !a.starts_with("--") => trace.push(a),
+            _ => return usage("probe [--from <fn>] [--trace <fn>...]; the code is the tool's `text`"),
+        }
+    }
+    if tracing && trace.is_empty() {
+        return usage("--trace needs the functions to trace, e.g. `probe --trace pricing.quote`");
+    }
+    Ok((from, trace))
+}
 
 fn command_report(result: Out, budget: usize) -> Out {
     match result {
@@ -241,6 +294,12 @@ fn operands<'a>(args: &[&'a str]) -> Vec<&'a str> {
     args.iter().copied().filter(|a| !a.starts_with("--")).collect()
 }
 
+/// A `command` line that is Gleam code, not a Solace command.
+fn looks_like_code(line: &str) -> bool {
+    let first = line.split_whitespace().next().unwrap_or("");
+    matches!(first, "let" | "echo" | "assert" | "use" | "case" | "pub" | "fn" | "import" | "}" | "//") || first.contains('(')
+}
+
 fn stdin() -> Result<String, Failure> {
     let mut text = String::new();
     std::io::stdin().read_to_string(&mut text)?;
@@ -251,11 +310,10 @@ fn stdin() -> Result<String, Failure> {
 /// can pass code without shell quoting and needs no shell at all.
 fn mcp(budget: usize) {
     use serde_json::{Value, json};
-    let description = "Run a Solace command against this project's semantic store. `command` is what \
-        follows `solace` on a command line, e.g. `session start`, `inspect checkout.pay tax.quote --context`, \
-        `submit checkout.pay`. For submit commands, put the new code in `text`. Start with \
-        `session start --task` with the task as `text`: it lists the symbols most likely relevant, \
-        open work, and every command.";
+    let description = "Read, change and test this project's code. Start with `session start --task`, \
+        the task in `text`: it lists the symbols most likely relevant and every command. Several commands \
+        go in one call, one per line, and run in order: read everything you need in one call, and put \
+        `test` on the line after a `submit`.";
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lines() {
@@ -278,10 +336,10 @@ fn mcp(budget: usize) {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "command": {"type": "string", "description": "e.g. `view checkout` or `submit --new pilot/checkout`"},
-                        "text": {"type": "string", "description": "New code, for submit commands (or a work record, for `work add`; the task, for `session start --task`; the note, summary or question, for `task note|done|ask`)"},
-                        "options": {"type": "array", "items": {"type": "string"}, "description": "2–4 options for task ask"},
-                        "old": {"type": "string", "description": "For `submit <name> --replace`: the exact text in the symbol that `text` replaces"}
+                        "command": {"type": "string", "description": "One or more commands, one per line, e.g. `inspect checkout.pay tax.quote --context`, or `submit` then `test`"},
+                        "text": {"type": "string", "description": "The new code for submit; the task for `session start --task`; the record, note, summary or question for `work add` and `task note|done|ask`"},
+                        "options": {"type": "array", "items": {"type": "string"}, "description": "2–4 options, for `task ask`"},
+                        "old": {"type": "string", "description": "For `--replace`: the exact text that `text` replaces"}
                     },
                     "required": ["command"]
                 }
@@ -297,7 +355,15 @@ fn mcp(budget: usize) {
                 let commands: Vec<&str> =
                     args["command"].as_str().unwrap_or("").lines().map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
                 let (mut out, mut is_error) = (String::new(), false);
-                for command in &commands {
+                // Code sent as command lines rather than in `text` (run 11): one
+                // error for the call, and nothing runs.
+                if let Some(code) = commands.iter().find(|c| looks_like_code(c)) {
+                    out = format!("Not a command: {code}\nThis looks like code. Code (for probe, submit) goes in `text`, \
+                        not in `command`; nothing in this call ran.\n");
+                    is_error = true;
+                }
+                let refused = is_error;
+                for command in commands.iter().filter(|_| !refused) {
                     let command = command.strip_prefix("solace").map_or(*command, |c| c.trim_start());
                     let words: Vec<String> = command.split_whitespace().map(String::from).collect();
                     if commands.len() > 1 {
@@ -325,7 +391,7 @@ fn mcp(budget: usize) {
                     }
                 }
                 if commands.is_empty() {
-                    (out, is_error) = (format!("No command given.\n\n{REFERENCE}"), true);
+                    (out, is_error) = (format!("No command given.\n\n{}", agent_reference()), true);
                 }
                 json!({"content": [{"type": "text", "text": out}], "isError": is_error})
             }
@@ -378,6 +444,8 @@ struct Index {
     syms: Vec<Sym>,
     modules: Vec<ModuleRow>,
     uses: Vec<Vec<usize>>,
+    /// Every resolved reference: (symbol, line in the user's text).
+    at: Vec<Vec<(usize, usize)>>,
 }
 
 impl Index {
@@ -399,13 +467,13 @@ impl Index {
             names.entry((m, c)).or_insert(*i);
         }
         let imports: HashMap<&str, Vec<gleam::Import>> = modules.iter().map(|m| (m.path.as_str(), gleam::imports(&m.header))).collect();
-        let uses = syms
+        let at: Vec<Vec<(usize, usize)>> = syms
             .iter()
             .enumerate()
             .map(|(i, s)| {
                 let imps = &imports[s.module.as_str()];
                 let mut found = vec![];
-                for r in gleam::references(&s.text) {
+                for (r, line) in gleam::references_at(&s.text) {
                     let target = match &r {
                         Ref::Qualified(alias, member) => {
                             imps.iter().find(|imp| &imp.alias == alias).and_then(|imp| names.get(&(imp.module.as_str(), member.as_str())))
@@ -421,15 +489,26 @@ impl Index {
                     };
                     if let Some(&t) = target
                         && t != i
-                        && !found.contains(&t)
                     {
-                        found.push(t);
+                        found.push((t, line));
                     }
                 }
                 found
             })
             .collect();
-        Index { syms, modules, uses }
+        let uses = at
+            .iter()
+            .map(|found| {
+                let mut uses: Vec<usize> = vec![];
+                for &(t, _) in found {
+                    if !uses.contains(&t) {
+                        uses.push(t);
+                    }
+                }
+                uses
+            })
+            .collect();
+        Index { syms, modules, uses, at }
     }
 }
 
@@ -694,7 +773,8 @@ impl Store {
         let ix = self.index()?;
         let in_scope =
             |m: &ModuleRow| scopes.is_empty() || scopes.iter().any(|s| self.resolve_module(&ix, s).is_some_and(|r| r.path == m.path));
-        let mut out = String::from(
+        let mut out = self.project_instructions();
+        out += &String::from(
             "Symbols per module (types are capitalized). `inspect <name>...` gives signatures and context; \
              `view <module>` an outline.\n",
         );
@@ -714,8 +794,32 @@ impl Store {
         out += &self.status()?;
         out += &self.work_context(&ix)?;
         out += "\n";
-        out += REFERENCE;
+        out += &agent_reference();
         Ok(out)
+    }
+
+    /// The project's AGENTS.md, which its humans write for agents (D-45), cut
+    /// at a whole line past 8,000 bytes; empty when there is none.
+    fn project_instructions(&self) -> String {
+        const CAP: usize = 8000;
+        let text = fs::read_to_string(self.root.join("AGENTS.md")).unwrap_or_default();
+        if text.trim().is_empty() {
+            return String::new();
+        }
+        let mut shown = String::new();
+        let mut lines = text.lines().enumerate();
+        for (n, line) in lines.by_ref() {
+            if shown.len() + line.len() + 1 > CAP {
+                shown += &format!("… `read AGENTS.md --lines {}..` for the rest\n", n + 1);
+                break;
+            }
+            shown += line;
+            shown += "\n";
+        }
+        format!(
+            "Project instructions (AGENTS.md, from the project's maintainers; where they name files or shell commands, \
+             use the matching Solace command):\n{shown}\n"
+        )
     }
 
     /// Open work records expanded with the context of the symbols they name.
@@ -748,7 +852,7 @@ impl Store {
     /// likely relevant to the task (signature and why each was picked),
     /// within a fixed budget, plus the module list.
     fn session_task(&self, task: &str) -> Out {
-        const BUDGET: usize = 8000; // bytes, about 2k tokens
+        const BUDGET: usize = 6500; // bytes, about 1.6k tokens
         let ix = self.index()?;
         let n = ix.syms.len();
         let mut modules = String::from("Modules (`view <module>` for an outline):\n");
@@ -776,7 +880,7 @@ impl Store {
         terms.sort();
         terms.dedup();
         let mut score = vec![0.0f64; n];
-        let mut why: Vec<Vec<(f64, String)>> = vec![vec![]; n];
+        let mut rare: Vec<(f64, String)> = vec![];
         for t in &terms {
             let df = fields.iter().filter(|f| f.iter().any(|w| w.contains(t))).count();
             if df == 0 {
@@ -784,54 +888,41 @@ impl Store {
             }
             // squared, so one rare word (a code, a name) outweighs several common ones
             let idf = (1.0 + n as f64 / df as f64).ln().powi(2);
+            rare.push((idf, t.clone()));
             for (i, f) in fields.iter().enumerate() {
                 if let Some(k) = f.iter().position(|w| w.contains(t)) {
                     let w = idf * [3.0, 2.0, 1.0][k];
                     score[i] += w;
-                    why[i].push((w, t.clone()));
                 }
             }
         }
         let direct = score.clone();
-        let matched: Vec<String> = why
-            .into_iter()
-            .map(|mut w| {
-                w.sort_by(|a, b| b.0.total_cmp(&a.0));
-                let top: Vec<&str> = w.iter().take(4).map(|(_, t)| t.as_str()).collect();
-                if top.is_empty() { String::new() } else { format!("matches {}", top.join(", ")) }
-            })
-            .collect();
-        let mut why = matched.clone();
 
         // One hop from the best matches: callers, callees and covering tests;
         // then the non-test symbols (fixtures) the top covering tests use.
         let mut seeds: Vec<usize> = (0..n).filter(|&i| direct[i] > 0.0).collect();
         seeds.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]));
         seeds.truncate(10);
-        let boost = |j: usize, s: f64, reason: String, score: &mut Vec<f64>, why: &mut Vec<String>| {
+        let boost = |j: usize, s: f64, score: &mut Vec<f64>| {
             if direct[j] + s > score[j] {
                 score[j] = direct[j] + s;
-                why[j] = if matched[j].is_empty() { reason } else { format!("{}; {reason}", matched[j]) };
             }
         };
         for &s in &seeds {
-            let q = ix.syms[s].qname();
             for &j in &ix.uses[s] {
-                boost(j, direct[s] / 4.0, format!("used by {q}"), &mut score, &mut why);
+                boost(j, direct[s] / 4.0, &mut score);
             }
             let mut covering = vec![];
             for j in (0..n).filter(|&j| ix.uses[j].contains(&s)) {
                 if is_test(&ix, j) {
                     covering.push(j);
-                    boost(j, direct[s] / 4.0, format!("tests {q}"), &mut score, &mut why);
-                } else {
-                    boost(j, direct[s] / 4.0, format!("uses {q}"), &mut score, &mut why);
                 }
+                boost(j, direct[s] / 4.0, &mut score);
             }
             covering.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]).then(ix.syms[a].text.len().cmp(&ix.syms[b].text.len())));
             for &t in covering.iter().take(2) {
                 for &j in ix.uses[t].iter().filter(|&&j| !is_test(&ix, j)) {
-                    boost(j, direct[s] / 8.0, format!("used by the test {}", ix.syms[t].qname()), &mut score, &mut why);
+                    boost(j, direct[s] / 8.0, &mut score);
                 }
             }
         }
@@ -849,31 +940,72 @@ impl Store {
         }
         for &i in &named {
             score[i] = f64::MAX;
-            why[i] = "named in the task".to_string();
         }
         let mut ranked: Vec<usize> = (0..n).filter(|&i| score[i] > 0.0).collect();
         ranked.sort_by(|&a, &b| score[b].total_cmp(&score[a]).then(ix.syms[a].text.len().cmp(&ix.syms[b].text.len())));
+
+        // The task's own terms in string literals are evidence (D-44): its rarest
+        // words, quoted phrases and capitalized names such as "Desk Lamp".
+        rare.sort_by(|a, b| b.0.total_cmp(&a.0));
+        let mut evidence_terms: Vec<String> = rare.into_iter().take(5).map(|r| r.1).collect();
+        evidence_terms.extend(task.split('"').skip(1).step_by(2).filter(|p| (3..=40).contains(&p.len())).map(str::to_lowercase));
+        evidence_terms.extend(capitalized_runs(task));
+        // A test that reaches the top code symbols reproduces the task's case.
+        let code: Vec<usize> =
+            ranked.iter().copied().filter(|&i| !is_test(&ix, i) && ix.syms[i].kind == Kind::Fn && !ix.syms[i].text.contains("@external")).take(2).collect();
+        let name = |i: usize| {
+            let short = reach::short(&ix, i);
+            if self.resolve(&ix, &short).ok() == Some(i) { short } else { ix.syms[i].qname() }
+        };
+        let repro = code
+            .first()
+            .and_then(|_| {
+                reach::tests(&ix)
+                    .into_iter()
+                    .map(|t| (t, reach::closure(&ix, t)))
+                    .filter(|(_, r)| r.contains(&code[0]))
+                    .max_by(|a, b| {
+                        let reached = |r: &HashSet<usize>| code.iter().filter(|c| r.contains(c)).count();
+                        reached(&a.1).cmp(&reached(&b.1)).then(score[a.0].total_cmp(&score[b.0])).then(ix.syms[b.0].text.len().cmp(&ix.syms[a.0].text.len()))
+                    })
+            })
+            .map(|(t, r)| {
+                let traced: Vec<String> = code.iter().filter(|c| r.contains(c)).map(|&c| name(c)).collect();
+                format!(
+                    "To reproduce the task's case: `probe --from {} --trace {}`, with statements for the case in `text`.\n",
+                    name(t),
+                    traced.join(" ")
+                )
+            })
+            .unwrap_or_default();
         let mut packet = String::new();
-        let mut room = BUDGET.saturating_sub(modules.len());
-        let mut shown = 0;
+        let mut room = BUDGET.saturating_sub(modules.len() + repro.len());
         for &i in &ranked {
             // whole entries only: skip one that doesn't fit, try smaller ones
-            let entry = format!("-- {}  ({})\n{}\n", ix.syms[i].qname(), why[i], gleam::signature(&ix.syms[i].item()));
-            if entry.len() <= room {
-                room -= entry.len();
-                packet += &entry;
-                shown += 1;
+            let entry = format!("-- {}\n{}\n", ix.syms[i].qname(), gleam::signature(&ix.syms[i].item()));
+            let mut quoted = String::new();
+            for e in evidence(&ix.syms[i].text, &evidence_terms) {
+                let line = format!("  > {e}\n");
+                if quoted.len() + line.len() <= 300 {
+                    quoted += &line;
+                }
+            }
+            for entry in [entry.clone() + &quoted, entry] {
+                if entry.len() <= room {
+                    room -= entry.len();
+                    packet += &entry;
+                    break;
+                }
             }
         }
-        let mut out = format!(
-            "Symbols most likely relevant to the task, best first ({shown} of {} candidates; signatures only). \
-             `inspect <name>... --context` gives bodies and context.\n{packet}\n{modules}",
-            ranked.len()
+        let mut out = self.project_instructions();
+        out += &format!(
+            "Symbols most likely relevant to the task, best first (signatures; `>` lines quote code that names the task's terms; `inspect` for code):\n{packet}{repro}\n{modules}"
         );
         out += &self.status()?;
         out += &self.work_context(&ix)?;
         out += "\n";
-        out += REFERENCE;
+        out += &agent_reference();
         Ok(out)
     }
 
@@ -887,13 +1019,17 @@ impl Store {
     fn status(&self) -> Result<String, Failure> {
         let mut out = String::new();
         let work = self.open_work()?;
-        out += &format!("\nOpen work records: {}\n", if work.is_empty() { "none" } else { "" });
+        if !work.is_empty() {
+            out += "\nOpen work records:\n";
+        }
         for (id, text) in work {
             out += &format!("#{id}\n{}\n", text.trim_end());
         }
         let broken: Vec<String> =
             self.db.prepare("SELECT symbol FROM broken ORDER BY symbol")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
-        out += &format!("Broken symbols: {}\n", if broken.is_empty() { "none".to_string() } else { broken.join(", ") });
+        if !broken.is_empty() {
+            out += &format!("\nBroken symbols: {}\n", broken.join(", "));
+        }
         Ok(out)
     }
 
@@ -955,15 +1091,20 @@ impl Store {
     /// enough, the names that don't fit are listed to inspect separately.
     fn inspect(&self, names: &[&str], context: bool, budget: usize) -> Out {
         let ix = self.index()?;
-        let mut targets: Vec<(&str, Option<usize>)> = vec![];
+        let (mut targets, mut unknown): (Vec<(&str, Option<usize>)>, Vec<String>) = (vec![], vec![]);
         for &name in names {
             match self.resolve(&ix, name) {
                 Ok(i) => targets.push((name, Some(i))),
                 // a module name gets its outline rather than an error
                 Err(_) if self.resolve_module(&ix, name).is_some() => targets.push((name, None)),
-                Err(e) => return Err(e),
+                // one bad name doesn't cost the others (run 11)
+                Err(e) => unknown.push(e.0),
             }
         }
+        if targets.is_empty() {
+            return fail(unknown.join("\n"));
+        }
+        let unknown = if unknown.is_empty() { String::new() } else { unknown.join("\n") + "\n" };
         let full: HashSet<usize> = targets.iter().filter_map(|t| t.1).collect();
         const LAST: u8 = 3;
         for level in 0..=LAST {
@@ -1004,7 +1145,7 @@ impl Store {
                     if context { " --context" } else { "" }
                 );
             }
-            return Ok(out);
+            return Ok(out + &unknown);
         }
         unreachable!()
     }
@@ -1067,6 +1208,10 @@ impl Store {
             out += &format!("\n== Tests that use it ({}) ==\n", tests.len());
             if let Some(t) = example {
                 out += &format!("-- {} (example)\n{}\n", ix.syms[t].qname(), ix.syms[t].text);
+                // the test helpers it uses, so a new test can call them without guessing
+                for &h in ix.uses[t].iter().filter(|&&h| is_test(ix, h) && !ix.syms[h].name.ends_with("_test")) {
+                    out += &entry(h);
+                }
             }
             let names: Vec<String> = tests.iter().filter(|&&t| Some(t) != example).map(|&t| ix.syms[t].qname()).collect();
             if !names.is_empty() {
@@ -1083,6 +1228,14 @@ impl Store {
 
     fn refs(&self, name: &str) -> Out {
         let ix = self.index()?;
+        // `refs <module>.<Type>.<field>`: the readers of one field (D-44)
+        if let Some((ty, field)) = name.rsplit_once('.')
+            && field.starts_with(|c: char| c.is_lowercase())
+            && let Ok(t) = self.resolve(&ix, ty)
+            && ix.syms[t].kind == Kind::Type
+        {
+            return Ok(reach::field_refs(&ix, t, field));
+        }
         let i = self.resolve(&ix, name)?;
         let users: Vec<usize> = (0..ix.syms.len()).filter(|&j| ix.uses[j].contains(&i)).collect();
         if users.is_empty() {
@@ -1093,6 +1246,55 @@ impl Store {
             out += &format!("-- {}\n{}\n", ix.syms[u].qname(), gleam::signature(&ix.syms[u].item()));
         }
         Ok(out)
+    }
+
+    /// `impact [name...]`: what changed code reaches (D-44). With no names, the
+    /// task's changes in a board run, otherwise the changes since `test` last
+    /// passed; a name that hasn't changed counts as changed throughout.
+    fn impact(&self, names: &[&str], budget: usize) -> Out {
+        let ix = self.index()?;
+        let before = match board::context() {
+            Some((tid, _)) => {
+                let mut st = self.db.prepare("SELECT entity, data FROM board_before WHERE task = ?1 AND entity LIKE 'symbol:%'")?;
+                let rows: Vec<(String, String)> = st.query_map([&tid], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
+                let old = |data: &str| serde_json::from_str::<serde_json::Value>(data).ok().filter(|v| v[7] == 1).and_then(|v| v[4].as_str().map(String::from));
+                Some(rows.iter().map(|(k, d)| (k["symbol:".len()..].to_string(), old(d))).collect::<Vec<_>>())
+            }
+            None => self.since_pass()?,
+        };
+        let origins = if names.is_empty() {
+            let Some(before) = before else {
+                return Ok("Tests haven't passed in full yet, so there is no earlier state to compare with. Name the symbols: `impact <name>...`.\n".into());
+            };
+            reach::origins(&ix, &before)
+        } else {
+            let mut out = vec![];
+            for name in names {
+                let i = self.resolve(&ix, name)?;
+                let then: Vec<(String, Option<String>)> =
+                    before.iter().flatten().filter(|(id, _)| *id == ix.syms[i].id).cloned().collect();
+                out.extend(Some(reach::origins(&ix, &then)).filter(|o| !o.is_empty()).unwrap_or_else(|| vec![(i, (0..ix.syms[i].text.lines().count()).collect())]));
+            }
+            out
+        };
+        if origins.is_empty() {
+            return Ok("No source changed since tests last passed.\n".into());
+        }
+        let impact = reach::flow(&ix, &origins);
+        let syms: Vec<usize> = impact.uses.iter().map(|u| u.sym).collect();
+        Ok(reach::report(&ix, &impact, &reach::reached(&reach::suites(self, &ix)?, &syms), budget))
+    }
+
+    /// The submit reply's note on what the saved change reaches (D-44).
+    /// `before`: (id, text before the submit; `None` if new).
+    fn impact_note(&self, ix: &Index, before: &[(String, Option<String>)]) -> Result<Vec<String>, Failure> {
+        let origins = reach::origins(ix, before);
+        if origins.is_empty() {
+            return Ok(vec![]);
+        }
+        let impact = reach::flow(ix, &origins);
+        let syms: Vec<usize> = impact.uses.iter().map(|u| u.sym).collect();
+        Ok(reach::note(ix, &impact, &reach::reached(&reach::suites(self, ix)?, &syms)))
     }
 
     fn find(&self, query: &str) -> Out {
@@ -1163,9 +1365,13 @@ impl Store {
                     let mut header = if parsed.header.is_empty() { header.clone() } else { parsed.header.clone() };
                     let (mut changed, mut added) = (vec![], vec![]);
                     for item in &parsed.items {
-                        for path in missing_imports(&ix, &header, &item.text) {
+                        let test = ix.modules.iter().any(|m| m.path == module && m.dir == "test");
+                        for path in missing_imports(&ix, &header, &item.text, test) {
                             header = add_import(&header, &format!("import {path}"));
                             notes.push(format!("added `import {path}` to {module}"));
+                        }
+                        if test {
+                            notes.extend(weak_asserts(&item.text, &aliases(&header)).into_iter().map(|w| format!("{module}.{}: {w}", item.name)));
                         }
                         match existing.iter().find(|s| key(&s.name, s.kind) == key(&item.name, item.kind)) {
                             Some(e) if e.text == item.text => {}
@@ -1220,6 +1426,20 @@ impl Store {
             if !own_errors.is_empty() {
                 let text: Vec<&str> = own_errors.iter().map(|d| d.text.as_str()).collect();
                 return fail(format!("Not saved: the submitted text has errors.\n\n{}", text.join("\n\n")));
+            }
+            if whole_module {
+                let after = self.index()?;
+                let key = |name: &str, kind: Kind| (name.to_string(), kind == Kind::Type);
+                let before: Vec<(String, Option<String>)> = after
+                    .syms
+                    .iter()
+                    .filter(|s| s.module == module)
+                    .map(|s| {
+                        let old = ix.syms.iter().find(|o| o.module == module && key(&o.name, o.kind) == key(&s.name, s.kind));
+                        (s.id.clone(), old.map(|o| o.text.clone()))
+                    })
+                    .collect();
+                notes.extend(self.impact_note(&after, &before)?);
             }
             let what = if whole_module { module.clone() } else { format!("{module} imports") };
             let mut out = format!("Saved {}.\n", target_name.as_deref().unwrap_or(&what));
@@ -1358,9 +1578,14 @@ impl Store {
                         header = merged;
                     }
                 }
-                for path in missing_imports(&ix, &header, &item.text) {
+                let test = ix.modules.iter().any(|m| &m.path == module && m.dir == "test")
+                    || created.iter().any(|(p, d, _)| p == module && *d == "test");
+                for path in missing_imports(&ix, &header, &item.text, test) {
                     header = merge_import(&header, &path, &[]);
                     notes.push(format!("added `import {path}` to {module}"));
+                }
+                if test {
+                    notes.extend(weak_asserts(&item.text, &aliases(&header)).into_iter().map(|w| format!("{module}.{}: {w}", item.name)));
                 }
                 self.set_header(module, &header)?;
                 match existing {
@@ -1416,6 +1641,15 @@ impl Store {
             if !own_errors.is_empty() {
                 return fail(format!("Not saved: the submitted text has errors.\n\n{}", own_errors.join("\n\n")));
             }
+            let after = self.index()?;
+            let before: Vec<(String, Option<String>)> = plan
+                .iter()
+                .filter_map(|(module, existing, item, _)| {
+                    let s = after.syms.iter().find(|s| &s.module == module && s.name == item.name && s.kind == item.kind)?;
+                    Some((s.id.clone(), existing.map(|e| ix.syms[e].text.clone())))
+                })
+                .collect();
+            notes.extend(self.impact_note(&after, &before)?);
             let mut out = format!("Saved {}.\n", saved.join(", "));
             out += &warning_summary(diags.iter().filter(|d| !d.error && own(d)));
             out += &broken_report(&diags);
@@ -1515,62 +1749,254 @@ impl Store {
         }
     }
 
-    fn test(&self) -> Out {
+    /// `test [--all | <name>...]`: the tests that can see a change since they
+    /// last passed, that failed or were never run, or that reach other
+    /// processes, the network or foreign code; with names, those that reach
+    /// them; `--all`, every test (D-44). Tests left out are made private in the
+    /// projected files for the run, so gleeunit skips them on either target.
+    fn test(&self, args: &[&str]) -> Out {
+        self.db.execute_batch(TEST_TABLES)?;
         let ix = self.index()?;
+        let named: Vec<usize> = operands(args).iter().map(|n| self.resolve(&ix, n)).collect::<Result<_, _>>()?;
+        let all = args.contains(&"--all");
+        let tests = reach::tests(&ix);
+        let revisions: Vec<String> = ix.syms.iter().map(|s| revision(&s.text)).collect();
+        let outside = reach::outside(&ix);
+        let mut rows: HashMap<String, (String, String)> = self
+            .db
+            .prepare("SELECT test, reach, result FROM test_runs")?
+            .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
+            .collect::<Result<_, _>>()?;
+        let (mut run, mut hashes) = (vec![], HashMap::new());
+        for &t in &tests {
+            let reach = reach::closure(&ix, t);
+            let hash = reach::hash(&ix, &reach, &revisions, &self.root);
+            let due = if all {
+                true
+            } else if !named.is_empty() {
+                named.iter().any(|n| reach.contains(n))
+            } else {
+                rows.get(&ix.syms[t].qname()).is_none_or(|(h, r)| *h != hash || r != "pass") || reach.iter().any(|j| outside.contains(j))
+            };
+            // a test other code calls can't be made private
+            if due || ix.uses.iter().enumerate().any(|(j, u)| j != t && u.contains(&t)) {
+                run.push(t);
+            }
+            hashes.insert(t, hash);
+        }
+        // Suites outside `gleam test` that reach a change since tests last passed.
+        let changed: Vec<usize> = self
+            .since_pass()?
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|(id, _)| ix.syms.iter().position(|s| &s.id == id))
+            .collect();
+        let suites = reach::reached(&reach::suites(self, &ix)?, &changed);
+        let head = if run.len() == tests.len() {
+            format!("Ran all {} tests.\n", tests.len())
+        } else if !named.is_empty() {
+            format!("Ran {} of {} tests: those that reach {}.\n", run.len(), tests.len(), operands(args).join(", "))
+        } else {
+            format!(
+                "Ran {} of {} tests; the other {} reach nothing changed since they passed (`test --all` runs every test).\n",
+                run.len(),
+                tests.len(),
+                tests.len() - run.len()
+            )
+        };
+        let also = if suites.is_empty() { String::new() } else { format!("Also reached: {}.\n", suites.join(", ")) };
+        if run.is_empty() {
+            // gleeunit fails when it finds no tests; type-check instead
+            let errors: Vec<String> = self.check_all(&ix)?.into_iter().filter(|d| d.error).map(|d| d.text).collect();
+            if !errors.is_empty() {
+                return fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
+            }
+            return Ok(head + &also);
+        }
         let files = self.materialize(&ix)?;
-        let (ok, output) = self.gleam(&["test"])?;
+        let skipped: Vec<(usize, String)> = tests
+            .iter()
+            .filter(|t| !run.contains(t))
+            .map(|&t| (t, ix.syms[t].text.replacen(&format!("pub fn {}(", ix.syms[t].name), &format!("fn {}(", ix.syms[t].name), 1)))
+            .collect();
+        let rewritten = self.rewritten(&ix, &skipped)?;
+        let result = (|| {
+            for (path, content) in &rewritten {
+                fs::write(path, content)?;
+            }
+            self.gleam(&["test"])
+        })();
+        if !rewritten.is_empty() {
+            self.materialize(&ix)?;
+        }
+        let (ok, output) = result?;
         let diags = diagnostics(&output, &files);
         let errors: Vec<&str> = diags.iter().filter(|d| d.error).map(|d| d.text.as_str()).collect();
         if !errors.is_empty() {
             return fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
         }
-        let mut out = String::new();
-        for line in output.lines() {
+        // Record results only from a run that finished; passes only when every
+        // failure it counted was attributed to a test.
+        let failed = failures(&output);
+        let summary = output.lines().find(|l| l.contains(" passed, ")).map(|l| {
+            let number = |word: &str| l.split(word).next().and_then(|p| p.split_whitespace().last()).and_then(|n| n.parse::<usize>().ok());
+            if l.contains("no failures") { Some(0) } else { number(" failure") }
+        });
+        if let Some(count) = summary {
+            let complete = ok || count == Some(failed.len());
+            for &t in &run {
+                let q = ix.syms[t].qname();
+                let result = match failed.get(&q) {
+                    Some(_) => "fail",
+                    None if complete => "pass",
+                    None => continue,
+                };
+                self.db.execute("INSERT OR REPLACE INTO test_runs VALUES (?1, ?2, ?3)", params![q, hashes[&t], result])?;
+                rows.insert(q, (hashes[&t].clone(), result.to_string()));
+            }
+            if tests.iter().all(|t| rows.get(&ix.syms[*t].qname()).is_some_and(|(h, r)| *h == hashes[t] && r == "pass")) {
+                self.db.execute_batch("DELETE FROM test_base; INSERT INTO test_base SELECT id, text FROM symbols WHERE live = 1;")?;
+            }
+        }
+        let mut out = head;
+        for line in quiet(&output).lines() {
             let line = line.trim_start_matches('.');
-            let t = line.trim();
-            if t.is_empty() || ["Compiling ", "Compiled ", "Running ", "Checking "].iter().any(|p| t.starts_with(p)) {
+            if line.trim().is_empty() || line.trim().starts_with("Checking ") {
                 continue;
             }
             out += &relocate(line, &files);
             out.push('\n');
         }
+        out += &also;
         if ok { Ok(out) } else { fail(out) }
+    }
+
+    /// Symbols changed since `test` last passed in full: (id, text then, `None`
+    /// if new). `None` if it never has.
+    fn since_pass(&self) -> Result<Option<Vec<(String, Option<String>)>>, Failure> {
+        self.db.execute_batch(TEST_TABLES)?;
+        if !self.db.query_row("SELECT EXISTS(SELECT 1 FROM test_base)", [], |r| r.get::<_, bool>(0))? {
+            return Ok(None);
+        }
+        let rows = self
+            .db
+            .prepare("SELECT s.id, b.text FROM symbols s LEFT JOIN test_base b ON b.id = s.id WHERE s.live = 1 AND (b.text IS NULL OR b.text != s.text)")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(Some(rows))
     }
 
     /// Runs throwaway code against the current project and returns its output.
     /// The text is a module with `pub fn main()`, or statements that become
     /// its body; project imports it uses are added. Nothing is saved: the file
     /// exists only while it runs.
-    fn probe(&self, text: &str) -> Out {
+    fn probe(&self, text: &str, from: Option<&str>, trace: &[&str]) -> Out {
         let ix = self.index()?;
         if ix.modules.iter().any(|m| m.path == PROBE) {
             return fail(format!("E0101 a project module is named {PROBE}; probe can't run."));
         }
-        self.materialize(&ix)?;
-        let mut code = if text.contains("fn main(") {
+        let (prelude, setup) = match from {
+            Some(name) => self.probe_from(&ix, name)?,
+            None => (String::new(), String::new()),
+        };
+        // A single expression is printed: `probe` with `money.percent(7400, 5)` shows 370.
+        let one = text.trim();
+        let text = if !one.is_empty()
+            && !one.contains('\n')
+            && !["echo ", "let ", "assert ", "import ", "use ", "panic", "todo"].iter().any(|k| one.starts_with(k))
+        {
+            format!("echo {one}")
+        } else {
             text.to_string()
+        };
+        let mut code = if text.contains("fn main(") {
+            if from.is_some() {
+                return fail("E1005 --from adds statements to a test's body; give statements, not a module.");
+            }
+            text
         } else {
             let (imports, body): (Vec<&str>, Vec<&str>) = text.lines().partition(|l| l.starts_with("import "));
-            format!("{}\n\npub fn main() {{\n{}\n}}\n", imports.join("\n"), body.join("\n"))
+            format!("{prelude}{}\n\npub fn main() {{\n{setup}{}\n}}\n", imports.join("\n"), body.join("\n"))
         };
-        for path in missing_imports(&ix, &code, &code) {
+        // the probe lives in test/, so test helpers such as `support` are importable
+        for path in missing_imports(&ix, &code, &code, true) {
             code = format!("import {path}\n{code}");
         }
+        self.materialize(&ix)?;
+        let traced = self.trace_sources(&ix, trace)?;
         let file = self.root.join("test").join(format!("{PROBE}.gleam"));
-        fs::create_dir_all(file.parent().unwrap())?;
-        fs::write(&file, &code)?;
-        let result = self.gleam(&["run", "-m", PROBE]);
-        fs::remove_file(&file)?;
+        let result = (|| -> Result<(bool, String), Failure> {
+            for (path, content) in &traced {
+                fs::write(path, content)?;
+            }
+            fs::create_dir_all(file.parent().unwrap())?;
+            fs::write(&file, &code)?;
+            self.gleam(&["run", "-m", PROBE])
+        })();
+        // Remove the probe and put traced modules back in every case.
+        let _ = fs::remove_file(&file);
+        if !traced.is_empty() {
+            self.materialize(&ix)?;
+        }
         let (ok, output) = result?;
-        let mut out: String = output
-            .lines()
-            .filter(|l| !["Compiling ", "Compiled ", "Running ", "Downloading ", "Downloaded "].iter().any(|p| l.trim().starts_with(p)))
-            .map(|l| format!("{l}\n"))
-            .collect();
+        // Compiler warnings (mostly the probe's unused imports) are noise here.
+        let mut out = quiet(&output);
+        if !trace.is_empty() {
+            out = trace_report(&out);
+        }
         if !ok {
             out += &format!("\nThe probe ran as test/{PROBE}.gleam:\n{code}");
         }
         if ok { Ok(out) } else { fail(out) }
+    }
+
+    /// `probe --from <fn>`: the imports of its module and its body, so a
+    /// probe can start from a test's setup and use its local variables.
+    fn probe_from(&self, ix: &Index, name: &str) -> Result<(String, String), Failure> {
+        let s = &ix.syms[self.resolve(ix, name)?];
+        let open = fn_body_start(s).filter(|_| s.kind == Kind::Fn);
+        let Some(open) = open else {
+            return fail(format!("E1005 {} isn't a function; --from takes a test or another function without arguments.", s.qname()));
+        };
+        if !params(&gleam::signature(&s.item()), &s.name).is_empty() {
+            return fail(format!("E1005 {} takes arguments; --from takes a test or another function without arguments.", s.qname()));
+        }
+        let body = &s.text[open + 1..s.text.rfind('}').unwrap_or(s.text.len())];
+        let imports: String = self.header(&s.module)?.lines().filter(|l| !l.trim_start().starts_with("//")).map(|l| format!("{l}\n")).collect();
+        Ok((imports, format!("{}\n", body.trim_matches('\n'))))
+    }
+
+    /// The materialized module files with each traced function wrapped so
+    /// that its arguments and result are echoed (D-43). Nothing is written here.
+    fn trace_sources(&self, ix: &Index, names: &[&str]) -> Result<Vec<(PathBuf, String)>, Failure> {
+        let mut edits = vec![];
+        for name in names {
+            let i = self.resolve(ix, name)?;
+            let s = &ix.syms[i];
+            if s.kind != Kind::Fn || s.text.contains("@external") {
+                return fail(format!("E1006 {} can't be traced: only functions written in Gleam can.", s.qname()));
+            }
+            edits.push((i, trace_wrap(s)));
+        }
+        self.rewritten(ix, &edits)
+    }
+
+    /// The materialized files of the modules holding `edits` (symbol, new
+    /// text), with those symbols' text replaced. Nothing is written here.
+    fn rewritten(&self, ix: &Index, edits: &[(usize, String)]) -> Result<Vec<(PathBuf, String)>, Failure> {
+        let mut files: Vec<(String, PathBuf, String)> = vec![];
+        for (i, text) in edits {
+            let s = &ix.syms[*i];
+            let Some(m) = ix.modules.iter().find(|m| m.path == s.module) else { continue };
+            if !files.iter().any(|f| f.0 == m.path) {
+                let path = self.root.join(&m.dir).join(format!("{}.gleam", m.path));
+                let content = fs::read_to_string(&path)?;
+                files.push((m.path.clone(), path, content));
+            }
+            let f = files.iter_mut().find(|f| f.0 == m.path).unwrap();
+            f.2 = f.2.replacen(&s.text, text, 1);
+        }
+        Ok(files.into_iter().map(|(_, p, c)| (p, c)).collect())
     }
 
     fn work_add(&self, text: &str) -> Out {
@@ -1589,6 +2015,26 @@ impl Store {
             _ => Ok(format!("Work record #{id} closed.\n")),
         }
     }
+}
+
+/// Failing tests in `gleam test` output: `module.function` -> (unfinished or
+/// wrong, the line naming it). Erlang prints modules as `pilot@x_test`.
+fn failures(output: &str) -> std::collections::BTreeMap<String, (String, String)> {
+    let clean = strip_ansi(output);
+    let mut out = std::collections::BTreeMap::new();
+    let mut kind = "";
+    for line in clean.lines() {
+        let line = line.trim();
+        if ["todo ", "assert ", "let assert ", "panic "].iter().any(|p| line.starts_with(p)) {
+            kind = if line.starts_with("todo ") { "unfinished" } else { "wrong" };
+        } else if let Some(name) = line.strip_prefix("test: ")
+            && !kind.is_empty()
+        {
+            out.insert(name.replace('@', "/"), (kind.into(), line.into()));
+            kind = "";
+        }
+    }
+    out
 }
 
 /// Search terms: identifiers split at `_` and case changes, lowercased, a
@@ -1619,6 +2065,114 @@ fn words(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Runs of capitalized words in the task, lowercased ("Desk Lamp", "TENOFF"),
+/// leaving out a single word that starts a sentence.
+fn capitalized_runs(task: &str) -> Vec<String> {
+    let (mut out, mut run, mut start) = (vec![], vec![], true);
+    for token in task.split_whitespace() {
+        let word = token.trim_matches(|c: char| !c.is_alphanumeric());
+        let capital = word.starts_with(|c: char| c.is_uppercase());
+        if capital {
+            run.push((word, start));
+        }
+        if !capital || token.ends_with(|c: char| !c.is_alphanumeric()) {
+            if run.len() > 1 || run.first().is_some_and(|(w, s)| !s && w.len() >= 3) {
+                out.push(run.iter().map(|r| r.0).collect::<Vec<_>>().join(" ").to_lowercase());
+            }
+            run.clear();
+        }
+        start = token.trim_end_matches(['"', '\'', ')']).ends_with(['.', '!', '?']);
+    }
+    out
+}
+
+/// String literals in `text` holding one of `terms` (lowercase) at a word's
+/// start, each shown as
+/// the smallest bracketed expression around it, on one line:
+/// `coupon("TENOFF", FixedOff(1000))`. A block or a long expression gives the
+/// literal's line instead.
+fn evidence(text: &str, terms: &[String]) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    // chars inside string literals and comments, and the literals' spans
+    let (mut inside, mut literals, mut k) = (vec![false; chars.len()], vec![], 0);
+    while k < chars.len() {
+        let start = k;
+        if chars[k] == '"' {
+            k += 1;
+            while k < chars.len() && chars[k] != '"' {
+                k += if chars[k] == '\\' { 2 } else { 1 };
+            }
+            literals.push((start, k.min(chars.len() - 1)));
+        } else if chars[k] == '/' && chars.get(k + 1) == Some(&'/') {
+            while k < chars.len() && chars[k] != '\n' {
+                k += 1;
+            }
+        } else {
+            k += 1;
+            continue;
+        }
+        for c in inside.iter_mut().take((k + 1).min(chars.len())).skip(start) {
+            *c = true;
+        }
+        k += 1;
+    }
+    let one_line = |cs: &[char]| -> String {
+        let s: String = cs.iter().collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ");
+        s.replace(", )", ")").replace(", ]", "]").replace("( ", "(").replace(" )", ")").replace("[ ", "[").replace(" ]", "]")
+    };
+    let mut out: Vec<String> = vec![];
+    for (s, e) in literals {
+        let literal = chars[s..=e].iter().collect::<String>().to_lowercase();
+        // at a word's start: "lamp" in "LAMP-OAK", not "come" in "WELCOME15"
+        let starts_word = |t: &String| literal.match_indices(t.as_str()).any(|(p, _)| !literal[..p].ends_with(char::is_alphanumeric));
+        if !terms.iter().any(starts_word) {
+            continue;
+        }
+        let mut depth = 0;
+        let open = (0..s).rev().filter(|&j| !inside[j]).find(|&j| match chars[j] {
+            ')' | ']' | '}' => {
+                depth += 1;
+                false
+            }
+            '(' | '[' | '{' if depth == 0 => true,
+            '(' | '[' | '{' => {
+                depth -= 1;
+                false
+            }
+            _ => false,
+        });
+        let expression = open.filter(|&o| chars[o] != '{').and_then(|o| {
+            let mut depth = 0;
+            let close = (o..chars.len()).filter(|&j| !inside[j]).find(|&j| match chars[j] {
+                '(' | '[' | '{' => {
+                    depth += 1;
+                    false
+                }
+                ')' | ']' | '}' => {
+                    depth -= 1;
+                    depth == 0
+                }
+                _ => false,
+            })?;
+            let mut from = o;
+            while from > 0 && (chars[from - 1].is_alphanumeric() || "_.".contains(chars[from - 1])) {
+                from -= 1;
+            }
+            Some(one_line(&chars[from..=close])).filter(|x| x.len() <= 200)
+        });
+        let line = || {
+            let a = chars[..s].iter().rposition(|&c| c == '\n').map_or(0, |p| p + 1);
+            let b = chars[s..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| s + p);
+            one_line(&chars[a..b]).chars().take(200).collect()
+        };
+        let shown = expression.unwrap_or_else(line);
+        if !out.contains(&shown) {
+            out.push(shown);
+        }
+    }
+    out
+}
+
 fn module_doc(m: &ModuleRow) -> &str {
     m.header.lines().find(|l| l.starts_with("////")).map_or("", |l| l.trim_start_matches('/').trim())
 }
@@ -1643,7 +2197,148 @@ fn format_gleam(source: &str) -> Result<String, Failure> {
 
 /// `import` paths needed for `alias.name` references to modules the header
 /// doesn't import yet: project modules by last path segment, or the stdlib.
-fn missing_imports(ix: &Index, header: &str, text: &str) -> Vec<String> {
+/// Where a function's body opens: the first `{` outside parentheses after
+/// its `fn name(`.
+fn fn_body_start(s: &Sym) -> Option<usize> {
+    let at = s.text.find(&format!("fn {}(", s.name))?;
+    let mut depth = 0i32;
+    for (i, c) in s.text[at..].char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '{' if depth == 0 => return Some(at + i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A function's parameters from its signature: (label if any, name).
+fn params(signature: &str, name: &str) -> Vec<(Option<String>, String)> {
+    let Some(at) = signature.find(&format!("fn {name}(")) else { return vec![] };
+    gleam::split_args(&signature[at + name.len() + 4..])
+        .iter()
+        .map(|(_, p)| p.split(':').next().unwrap_or("").split_whitespace().collect::<Vec<_>>())
+        .filter(|words| !words.is_empty())
+        .map(|words| (if words.len() > 1 { Some(words[0].to_string()) } else { None }, words[words.len() - 1].to_string()))
+        .collect()
+}
+
+/// A traced function: the original renamed and private, and a wrapper with
+/// its name, visibility and labels that echoes the arguments and the result.
+fn trace_wrap(s: &Sym) -> String {
+    let inner = format!("{}__solace_traced", s.name);
+    let decl = format!("fn {}(", s.name);
+    let public = s.text.lines().any(|l| l.trim_start().starts_with(&format!("pub {decl}")));
+    let renamed = s.text.replacen(&format!("pub {decl}"), &decl, 1).replacen(&decl, &format!("fn {inner}("), 1);
+    let ps = params(&gleam::signature(&s.item()), &s.name);
+    let names: Vec<String> = (0..ps.len()).map(|i| format!("p{i}")).collect();
+    let decls: Vec<String> =
+        ps.iter().zip(&names).map(|((label, _), n)| label.as_ref().map_or(n.clone(), |l| format!("{l} {n}"))).collect();
+    let q = s.qname();
+    let args: String = names.iter().map(|n| format!(", {n}")).collect();
+    format!(
+        "{renamed}\n\n{}fn {}({}) {{\n  echo #(\"solace-call\", \"{q}\"{args})\n  let r = {inner}({})\n  echo #(\"solace-return\", \"{q}\", r)\n  r\n}}",
+        if public { "pub " } else { "" },
+        s.name,
+        decls.join(", "),
+        names.join(", ")
+    )
+}
+
+/// The probe's output with the trace's echoes shown as nested calls and
+/// results, values cut short, and at most `MAX` calls.
+fn trace_report(output: &str) -> String {
+    const MAX: usize = 60;
+    const WIDTH: usize = 300;
+    let cut = |v: &str| if v.chars().count() > WIDTH { v.chars().take(WIDTH).collect::<String>() + "…" } else { v.to_string() };
+    let lines: Vec<&str> = output.lines().collect();
+    let (mut out, mut depth, mut calls) = (String::new(), 0usize, 0usize);
+    for (i, line) in lines.iter().enumerate() {
+        // echo prints its location on the line before the value
+        if lines.get(i + 1).is_some_and(|n| n.starts_with("#(\"solace-")) && line.contains(".gleam:") {
+            continue;
+        }
+        let event = line.strip_prefix("#(\"solace-call\", \"").map(|r| (true, r)).or(line.strip_prefix("#(\"solace-return\", \"").map(|r| (false, r)));
+        let Some((call, rest)) = event else {
+            out += &format!("{line}\n");
+            continue;
+        };
+        let (name, rest) = rest.split_once('"').unwrap_or((rest, ""));
+        let value = rest.strip_prefix(", ").unwrap_or(rest).strip_suffix(')').unwrap_or("");
+        if call {
+            calls += 1;
+        }
+        if calls <= MAX {
+            let indent = "  ".repeat(if call { depth } else { depth.saturating_sub(1) });
+            out += &if call { format!("{indent}→ {name}({})\n", cut(value)) } else { format!("{indent}← {name} = {}\n", cut(value)) };
+        }
+        depth = if call { depth + 1 } else { depth.saturating_sub(1) };
+    }
+    if calls > MAX {
+        out += &format!("… {} more calls not shown\n", calls - MAX);
+    }
+    if calls == 0 {
+        out += "(no traced function was called)\n";
+    }
+    out
+}
+
+/// The names a module header imports modules as.
+fn aliases(header: &str) -> HashSet<String> {
+    gleam::imports(header).into_iter().map(|i| i.alias).collect()
+}
+
+/// Single-line `assert a == b` in a test that read the same local variable on
+/// both sides: the expected value is taken from the result it checks (D-43).
+fn weak_asserts(text: &str, aliases: &HashSet<String>) -> Vec<String> {
+    // root identifiers outside string literals: `q` in `q.total`, not `total`
+    let roots = |code: &str| -> HashSet<String> {
+        let (mut out, mut word, mut in_str, mut prev) = (HashSet::new(), String::new(), false, ' ');
+        let mut after_dot = false;
+        for c in code.chars().chain([' ']) {
+            if in_str {
+                in_str = !(c == '"' && prev != '\\');
+            } else if c.is_alphanumeric() || c == '_' {
+                if word.is_empty() {
+                    after_dot = prev == '.';
+                }
+                word.push(c);
+            } else {
+                if word.starts_with(|w: char| w.is_lowercase()) && !after_dot {
+                    out.insert(std::mem::take(&mut word));
+                }
+                word.clear();
+                in_str = c == '"';
+            }
+            prev = c;
+        }
+        out
+    };
+    let mut locals = HashSet::new();
+    for line in text.lines() {
+        if let Some(rest) = line.trim_start().strip_prefix("let ") {
+            locals.extend(roots(rest.split_once('=').map_or(rest, |p| p.0)).into_iter().filter(|w| w != "assert"));
+        }
+    }
+    let mut out = vec![];
+    for line in text.lines() {
+        let Some((l, r)) = line.trim().strip_prefix("assert ").and_then(|a| a.split_once(" == ")) else { continue };
+        let both: Vec<String> =
+            roots(l).intersection(&roots(r)).filter(|w| locals.contains(*w) && !aliases.contains(*w)).cloned().collect();
+        if let Some(v) = both.first() {
+            out.push(format!(
+                "`{}` reads `{v}` on both sides: an expected value taken from the result can't catch a wrong result; \
+                 work it out from the task's numbers and the rules.",
+                line.trim()
+            ));
+        }
+    }
+    out
+}
+
+/// `test`: the code is in a test module, which may also import test modules.
+fn missing_imports(ix: &Index, header: &str, text: &str, test: bool) -> Vec<String> {
     let aliases: HashSet<String> = gleam::imports(header).into_iter().map(|i| i.alias).collect();
     let mut out = vec![];
     for r in gleam::references(text) {
@@ -1654,7 +2349,7 @@ fn missing_imports(ix: &Index, header: &str, text: &str) -> Vec<String> {
             continue;
         }
         let project: Vec<&ModuleRow> =
-            ix.modules.iter().filter(|m| m.dir == "src" && m.path.rsplit('/').next() == Some(alias.as_str())).collect();
+            ix.modules.iter().filter(|m| (m.dir == "src" || test) && m.path.rsplit('/').next() == Some(alias.as_str())).collect();
         let path = match project.as_slice() {
             [m] => Some(m.path.clone()),
             _ if STDLIB.contains(&alias.as_str()) => Some(format!("gleam/{alias}")),
@@ -1932,12 +2627,42 @@ fn broken_report(diags: &[Diag]) -> String {
     out
 }
 
+/// An index built from (dir, module, source) triples, for tests.
+#[cfg(test)]
+fn test_index(sources: &[(&str, &str, &str)]) -> Index {
+    let (mut syms, mut modules) = (vec![], vec![]);
+    for (dir, path, text) in sources {
+        let m = gleam::split(text);
+        modules.push(ModuleRow { path: (*path).into(), dir: (*dir).into(), header: m.header });
+        for item in m.items {
+            syms.push(Sym { id: format!("fn:{path}.{}", item.name), module: (*path).into(), name: item.name, kind: item.kind, text: item.text });
+        }
+    }
+    Index::build(syms, modules)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// D-14: a multi-name inspect prints each signature once, and trims, then
     /// defers names, to stay within the budget.
+    #[test]
+    fn agent_reference_leaves_out_host_and_task_commands() {
+        // Tests run outside a board run; `help` keeps everything.
+        let r = agent_reference();
+        assert!(r.contains("Several commands go in one call") && r.contains("Work records"));
+        assert!(!r.contains("task done") && !r.contains("Host commands"));
+        assert!(REFERENCE.contains("task done") && REFERENCE.contains("agent-config"));
+    }
+
+    #[test]
+    fn probe_args_parse() {
+        assert_eq!(probe_args(&["--from", "t", "--trace", "a.b", "c"]).unwrap(), (Some("t"), vec!["a.b", "c"]));
+        assert_eq!(probe_args(&[]).unwrap(), (None, vec![]));
+        assert!(probe_args(&["--trace"]).is_err() && probe_args(&["--from"]).is_err() && probe_args(&["x"]).is_err());
+    }
+
     #[test]
     fn inspect_dedups_and_fits_budget() {
         let root = env::temp_dir().join(format!("solace-inspect-test-{}", std::process::id()));
@@ -1965,6 +2690,13 @@ mod tests {
                 "{n} lost"
             );
         }
+
+        // an unknown name is reported after the others, not instead of them
+        let mixed = ok(store.inspect(&["shipments.deliver", "shipping.standard_cost_cents"], false, usize::MAX));
+        assert!(mixed.contains("// ── pilot/shipments.deliver ") && mixed.contains("E1001 unknown name: shipping.standard_cost_cents"));
+        assert!(store.inspect(&["shipping.nope"], false, usize::MAX).is_err());
+        assert!(looks_like_code("let assert Ok(q) = checkout.quote(db, o.id, Standard)") && looks_like_code("echo q"));
+        assert!(!looks_like_code("probe --from checkout_test.quote_test --trace pricing.quote"));
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -2007,6 +2739,8 @@ mod tests {
         fs::create_dir_all(root.join("src")).unwrap();
         fs::write(root.join("gleam.toml"), "name = \"app\"\nversion = \"1.0.0\"\n").unwrap();
         fs::write(root.join("src/app.gleam"), "pub fn main() { 1 }\n").unwrap();
+        fs::create_dir_all(root.join("test")).unwrap();
+        fs::write(root.join("test/helper.gleam"), "pub fn two() { 2 }\n").unwrap();
         import(&root).unwrap();
         let store = Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root: root.clone() };
         // Code with errors creates nothing.
@@ -2019,12 +2753,37 @@ mod tests {
         assert!(out.contains("(test/calc_test.gleam)"), "{out}");
         assert!(store.submit_symbols(None, Some("Bad"), "pub fn x() { 1 }").unwrap_err().0.starts_with("E1003"));
         // A probe runs statements against the project and leaves nothing behind.
-        let out = store.probe("echo calc.add(2, 3)").unwrap();
+        let out = store.probe("echo calc.add(2, 3)", None, &[]).unwrap();
         assert!(out.contains("5"), "{out}");
         assert!(!root.join("test/solace_probe.gleam").exists());
-        let err = store.probe("echo calc.nope()").unwrap_err().0;
+        let err = store.probe("echo calc.nope()", None, &[]).unwrap_err().0;
         assert!(err.contains("The probe ran as") && err.contains("import calc"), "{err}");
         assert!(!root.join("test/solace_probe.gleam").exists());
+        // Test-side code (probes, tests) imports test helpers automatically; source code doesn't.
+        let out = store.probe("echo helper.two()", None, &[]).unwrap();
+        assert!(out.contains("2"), "{out}");
+        let out = store.submit_symbols(None, Some("calc_test"), "pub fn two_test() { assert helper.two() == 2 }").unwrap();
+        assert!(out.contains("import helper"), "{out}");
+        assert!(store.submit_symbols(None, Some("calc"), "pub fn four() { helper.two() * 2 }").is_err());
+        // `--from` starts from a function's body; a single expression is printed (D-43).
+        store.submit_symbols(None, Some("calc_test"), "pub fn sum_test() {\n  let x = calc.add(1, 2)\n  assert x == 3\n}").unwrap();
+        let out = store.probe("echo x + 10", Some("calc_test.sum_test"), &[]).unwrap();
+        assert!(out.contains("13"), "{out}");
+        assert!(store.probe("", Some("calc.add"), &[]).unwrap_err().0.starts_with("E1005"));
+        let out = store.probe("calc.add(20, 3)", None, &[]).unwrap();
+        assert!(out.contains("23") && !out.contains("warning"), "{out}");
+        // `--trace` shows each call and result, then puts the module back.
+        let before = fs::read_to_string(root.join("src/calc.gleam")).unwrap();
+        let out = store.probe("calc.add(2, 3)", None, &["calc.add"]).unwrap();
+        assert!(out.contains("→ calc.add(2, 3)") && out.contains("← calc.add = 5"), "{out}");
+        assert_eq!(fs::read_to_string(root.join("src/calc.gleam")).unwrap(), before);
+        store.submit_symbols(None, Some("calc"), "pub fn scale(x: Int, by factor: Int) -> Int { factor * x }").unwrap();
+        let out = store.probe("calc.scale(3, by: 2)", None, &["calc.scale"]).unwrap();
+        assert!(out.contains("← calc.scale = 6"), "{out}");
+        assert!(store.probe("1", None, &["calc_test"]).is_err());
+        // An assert whose expected side reads the value it checks gets a note.
+        let out = store.submit_symbols(None, Some("calc_test"), "pub fn weak_test() {\n  let q = #(1, 2)\n  assert q.0 == q.1 - 1\n  assert q.1 == 2\n}").unwrap();
+        assert!(out.contains("`assert q.0 == q.1 - 1` reads `q` on both sides") && !out.contains("assert q.1 == 2`"), "{out}");
         // A whole new module in one submit: module comment, imports and several symbols.
         let module = "//// Geometry helpers.\nimport calc\n\npub const unit = 1\n\npub type Shape {\n  Square(Int)\n}\n\npub fn area(s: Shape) -> Int {\n  let Square(n) = s\n  calc.add(n * n, unit)\n}\n";
         let out = store.submit_symbols(None, Some("geo"), module).unwrap();
@@ -2036,6 +2795,89 @@ mod tests {
         let out = store.submit_symbols(None, None, "// ── shapes.side ──\npub fn side() { 2 }\n// ── shapes.twice ──\npub fn twice() { side() * 2 }\n").unwrap();
         assert!(out.contains("created module shapes"), "{out}");
         assert!(store.submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int) -> Int { a + b }\npub fn sub() { 1 }").unwrap_err().0.starts_with("E0101"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// D-44: `test` runs the tests whose reach changed since they passed, those
+    /// that failed, and those reaching foreign code; the rest are skipped.
+    #[test]
+    fn test_runs_what_reaches_a_change() {
+        let root = env::temp_dir().join(format!("solace-test-select-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let pilot = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pilot-large");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("test")).unwrap();
+        for f in ["gleam.toml", "manifest.toml", "test/pilot_test.gleam"] {
+            fs::copy(pilot.join(f), root.join(f)).unwrap();
+        }
+        assert!(Command::new("cp").arg("-r").arg(pilot.join("build")).arg(root.join("build")).status().unwrap().success());
+        fs::write(
+            root.join("src/calc.gleam"),
+            "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn double(a: Int) -> Int {\n  add(a, a)\n}\n\npub fn sub(a: Int, b: Int) -> Int {\n  a - b\n}\n\n@external(erlang, \"erlang\", \"abs\")\npub fn abs(x: Int) -> Int\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("test/calc_test.gleam"),
+            "import calc\n\npub fn add_test() {\n  assert calc.add(1, 2) == 3\n}\n\npub fn double_test() {\n  assert calc.double(2) == 4\n}\n\npub fn sub_test() {\n  assert calc.sub(3, 1) == 3\n}\n\npub fn abs_test() {\n  assert calc.abs(-2) == 2\n}\n",
+        )
+        .unwrap();
+        import(&root).unwrap();
+        let store = Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root: root.clone() };
+        let first = |out: Out| out.unwrap_or_else(|e| e.0).lines().next().unwrap_or("").to_string();
+        // First run: everything; sub_test fails.
+        let err = store.test(&[]).unwrap_err().0;
+        assert!(err.starts_with("Ran all 4 tests.") && err.contains("sub_test"), "{err}");
+        // The failing test runs again, as does the one reaching foreign code.
+        store.submit_symbols(Some("calc_test.sub_test"), None, "pub fn sub_test() {\n  assert calc.sub(3, 1) == 2\n}").unwrap();
+        assert_eq!(first(store.test(&[])), "Ran 2 of 4 tests; the other 2 reach nothing changed since they passed (`test --all` runs every test).");
+        // A change reaches only the tests that can see it, and the files match the store afterwards.
+        store.submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int) -> Int {\n  b + a\n}").unwrap();
+        let out = store.test(&[]).unwrap();
+        assert!(out.starts_with("Ran 3 of 4 tests;") && out.contains("3 passed"), "{out}");
+        let file = fs::read_to_string(root.join("test/calc_test.gleam")).unwrap();
+        assert_eq!(file.matches("pub fn ").count(), 4, "{file}");
+        assert_eq!(first(store.test(&["--all"])), "Ran all 4 tests.");
+        assert_eq!(first(store.test(&["calc.double"])), "Ran 1 of 4 tests: those that reach calc.double.");
+        assert!(store.test(&["calc.nope"]).unwrap_err().0.starts_with("E1001"));
+        // With nothing changed, only the test reaching foreign code runs.
+        assert!(first(store.test(&[])).starts_with("Ran 1 of 4 tests;"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// D-44: the packet quotes code that names the task's terms, and names a
+    /// test that reaches the top symbols to reproduce the case with.
+    #[test]
+    fn packet_quotes_evidence_and_reproduction() {
+        let root = env::temp_dir().join(format!("solace-packet-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("test")).unwrap();
+        fs::write(root.join("gleam.toml"), "name = \"shop\"\nversion = \"1.0.0\"\n").unwrap();
+        fs::write(
+            root.join("src/shop.gleam"),
+            "pub type Customer {\n  Customer(name: String, tier: Int)\n}\n\npub const customers = [Customer(\"Grace\", 2), Customer(\"Ada\", 1)]\n\n/// The price after the tier discount.\npub fn price(c: Customer, cents: Int) -> Int {\n  cents - c.tier * 100\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("test/shop_test.gleam"),
+            "import shop\n\npub fn price_test() {\n  let assert [grace, ..] = shop.customers\n  assert shop.price(grace, 1000) == 800\n}\n",
+        )
+        .unwrap();
+        import(&root).unwrap();
+        let store = Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root: root.clone() };
+        let out = store.session_task("Grace (tier 2) was charged the wrong price.").unwrap();
+        assert!(out.contains("-- shop.customers\npub const customers = [Customer(\"Grace\", 2), Customer(\"Ada\", 1)]\n  > Customer(\"Grace\", 2)\n"), "{out}");
+        assert!(out.contains("To reproduce the task's case: `probe --from shop_test.price_test --trace shop.price`"), "{out}");
+        assert!(!out.contains("Project instructions"));
+        // The project's AGENTS.md comes first in both orientations, cut at a whole line (D-45).
+        fs::write(root.join("AGENTS.md"), "Prices are in cents.\n").unwrap();
+        for out in [store.session_task("Grace").unwrap(), store.session(&[]).unwrap()] {
+            assert!(out.starts_with("Project instructions (AGENTS.md") && out.contains("):\nPrices are in cents.\n\n"), "{out}");
+        }
+        fs::write(root.join("AGENTS.md"), "a line of forty bytes, give or take ok.\n".repeat(250)).unwrap();
+        let out = store.session(&[]).unwrap();
+        assert!(out.contains("ok.\n… `read AGENTS.md --lines 201..` for the rest\n"), "{out}");
+        assert_eq!(lockdown::tier(&root, &toml::Value::Table(Default::default()), "AGENTS.md", None), "settings");
         fs::remove_dir_all(&root).unwrap();
     }
 

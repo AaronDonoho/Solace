@@ -95,6 +95,8 @@ An entry with the same `id` as a built-in model replaces it. `key_env` names the
 
 A `solace.toml` in the project root holds the project's Solace settings. `solace import` creates a starter file if absent and preserves existing settings. Rerunning it on an imported project creates missing settings without reimporting or replacing stored symbols. Only humans edit it; agents can read it but not change it. Everything in it is optional.
 
+An `AGENTS.md` in the project root holds your instructions for agents: conventions, domain rules, things to avoid. Every agent gets it first when its session starts, through Solace, whichever agent you run. Like `solace.toml`, only humans change it; an agent can propose a change, which you approve or reject on the task.
+
 ```toml
 resource_limit = 262144                   # bytes; larger files can't be resources
 resources = ["priv/**/*.html", "docs/**/*.md"]
@@ -105,7 +107,10 @@ ignore    = ["priv/generated/"]
 
 [commands]                                # commands agents may run
 smoke = { run = ["gleam", "run", "-m", "smoke"], timeout = 60 }
+e2e   = { run = ["npx", "playwright", "test"], timeout = 600, checks = ["api.handle"] }
 ```
+
+A command with `checks` is a test suite outside `gleam test`; `checks` names the entry points it drives (`"*"` for all; a `gleam run -m <module>` command adds that module's `main`). Solace tells agents when a change reaches a suite, and never runs it unasked.
 
 The `[board]` section changes the task workflow: its columns, the actions allowed in each, and approval gates. The default is in [solace-cli/src/default-board.toml](solace-cli/src/default-board.toml), and [specs/15-board-api.md](specs/15-board-api.md) describes the format.
 
@@ -120,7 +125,7 @@ Every file in the project falls into one tier (details in [specs/14-lockdown.md]
 | 3 Resources | files matching `resources` in `solace.toml` | read and write through Solace, checked by any validator |
 | 4 Ignored | everything else, including build output, logs and `.gitignore`d files | read and write through Solace; excluded from symbol searches |
 | Internal | `.solace/` (store, board data) | no access |
-| Settings | `solace.toml` | read; in a board work run, propose a change that you approve or reject on the task |
+| Settings | `solace.toml`, `AGENTS.md` | read; in a board work run, propose a change that you approve or reject on the task |
 
 Files such as `README.md` and `bin/coolcalc` need no `resources` entry to be writable. File writes still enforce `resource_limit`, stale-write checks and any matching validators. Both resource and ignored file contents stay out of symbol searches. Running a launcher still requires a declared command; writing a script does not set its executable bit.
 
@@ -129,6 +134,8 @@ Agents get no shell and no file tools, only the Solace MCP tool and web access. 
 ### Running an agent yourself
 
 The task board resumes the author's compatible conversation through investigation, implementation and review fixes. Reviews start fresh. If resumption is unavailable, Solace supplies a handoff automatically. Conversations are cleaned up after graceful shutdown: reviewers after review, authors when the task is completed or cancelled. Explicit new-agent/start-over actions start fresh.
+
+Agents' `test` runs only the tests that can see a change since they last passed (and any that failed, or that reach other processes, the network or foreign code); `test --all` runs every test. After each submit, Solace tells the agent what else the change reaches and which of those no test checks (`impact` lists them all), and the review lists the same for you.
 
 Rejected submissions are retained as editable drafts. Agents use `drafts`, `view --draft <id>` and `submit --draft <id> --replace` to repair them without resending the whole submission. `drafts` marks each one current or stale, and stale drafts refuse to overwrite newer source. Reviewers start with `task diff`, which shows each change the task made against its state before the task. Submission warnings are concise; `check --warnings` shows full details.
 
@@ -179,7 +186,7 @@ python3 bench/bench.py run --arm solace L01-loyalty-coupon-order
 python3 bench/bench.py report bench/results/RUN_DIRECTORY
 ```
 
-Each run uses the next numbered directory under `bench/results/`. `--run-number 2` saves both setups under `bench/results/2/`. `--agent claude` uses Claude Code. `python3 bench/bench.py --help` lists every option.
+Each run uses the next numbered directory under `bench/results/`. `--run-number 2` saves both setups under `bench/results/2/`. `--agent claude` uses Claude Code. For a local model, `--base-url http://127.0.0.1:1234/v1` points Codex at an OpenAI-compatible server, but Codex gives MCP tools only to models it knows, so the Solace setup fails there; use `--agent claude` with `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` set in the environment, and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` set to the context the model is loaded with. `python3 bench/bench.py --help` lists every option.
 
 ### Benchmark visualizer
 

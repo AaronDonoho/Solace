@@ -1,0 +1,33 @@
+{
+  "model": "ista-daslab-qwen3.8-27b-gsq-rco-unsloth-mtp",
+  "tools": [
+    "Bash",
+    "Edit",
+    "Read"
+  ],
+  "mcp_servers": [],
+  "plugins": [
+    {
+      "name": "ponytail",
+      "path": "/home/aaron/.claude/plugins/cache/ponytail/ponytail/4.10.0",
+      "source": "ponytail@ponytail",
+      "version": "4.10.0"
+    },
+    {
+      "name": "cc-plugin-agents-md",
+      "path": "builtin",
+      "source": "cc-plugin-agents-md@builtin"
+    },
+    {
+      "name": "cc-plugin-telemetry",
+      "path": "builtin",
+      "source": "cc-plugin-telemetry@builtin"
+    },
+    {
+      "name": "cc-plugin-plugin-authoring",
+      "path": "builtin",
+      "source": "cc-plugin-plugin-authoring@builtin"
+    }
+  ],
+  "slash_commands": []
+}

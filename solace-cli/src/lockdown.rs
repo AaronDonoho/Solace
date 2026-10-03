@@ -39,8 +39,10 @@ pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
                 if key == "validators" {
                     globset::Glob::new(name).map_err(|_| invalid(name))?;
                 }
+                // `checks`: the entry points a test suite drives (D-44), `"*"` for all
                 if c.get("timeout").is_some_and(|x| x.as_integer().is_none_or(|n| n <= 0))
                     || c.get("args").is_some_and(|x| x.as_bool().is_none())
+                    || c.get("checks").is_some_and(|x| x.as_array().is_none_or(|a| a.iter().any(|e| e.as_str().is_none())))
                 {
                     return Err(invalid(name));
                 }
@@ -97,7 +99,7 @@ pub fn tier(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -
     if name == "gleam.toml" {
         return "2 manifest".into();
     }
-    if name == "solace.toml" {
+    if name == "solace.toml" || name == "AGENTS.md" {
         return "settings".into();
     }
     if internal(name) {
@@ -746,6 +748,8 @@ mod tests {
     #[test]
     fn a9_declared_args_unknown_timeout() {
         let (s, _) = fixture();
+        assert!(parse_settings("[commands]\ne2e={run=[\"x\"],checks=\"*\"}").unwrap_err().0.contains("E6020"));
+        assert!(parse_settings("[commands]\ne2e={run=[\"x\"],checks=[\"*\"]}").is_ok());
         let v: toml::Value = "[commands]\nsmoke={run=[\"sleep\",\"5\"],timeout=1}".parse().unwrap();
         assert!(call(&s, &v, &["run", "smoke", "extra"], "", None).unwrap_err().0.contains("E6011"));
         let e = call(&s, &v, &["run", "nope"], "", None).unwrap_err();

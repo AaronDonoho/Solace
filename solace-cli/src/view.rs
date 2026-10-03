@@ -36,7 +36,7 @@ fn category(module: &str, name: &str) -> Option<&'static str> {
         })
         .map(|(_, _, c)| *c)
 }
-fn direct_effects(ix: &Index, i: usize) -> BTreeMap<String, Vec<String>> {
+pub(super) fn direct_effects(ix: &Index, i: usize) -> BTreeMap<String, Vec<String>> {
     let s = &ix.syms[i];
     let imports = ix
         .modules
@@ -315,10 +315,41 @@ fn version(s: &Store, v: Version<'_>) -> Result<Index, Failure> {
     syms.sort_by(|a, b| a.module.cmp(&b.module).then(a.name.cmp(&b.name)));
     Ok(Index::build(syms, modules))
 }
+/// What the task's changes reach (D-44): its tests (those it changed, and
+/// those that reach a symbol it changed or read a field the change reaches),
+/// and the uses no test checks, with declared suites and where data leaves.
+fn task_reach(s: &Store, old: &Index, now: &Index, task: &Value) -> Result<Value, Failure> {
+    let ids: Vec<String> = task["changes"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|c| c["entity"].as_str().and_then(|x| x.strip_prefix("symbol:")).map(String::from))
+        .collect();
+    let before: Vec<(String, Option<String>)> =
+        ids.iter().map(|id| (id.clone(), old.syms.iter().find(|s| &s.id == id).map(|s| s.text.clone()))).collect();
+    let impact = reach::flow(now, &reach::origins(now, &before));
+    let changed: Vec<usize> = (0..now.syms.len()).filter(|&i| ids.contains(&now.syms[i].id)).collect();
+    let readers = reach::readers(now, &impact.fields);
+    let tests: Vec<&str> = reach::tests(now)
+        .into_iter()
+        .filter(|&t| changed.contains(&t) || readers.contains(&t) || !reach::closure(now, t).is_disjoint(&changed.iter().copied().collect()))
+        .map(|t| now.syms[t].id.as_str())
+        .collect();
+    let untested: Vec<Value> = reach::ranked(now, &impact)
+        .into_iter()
+        .filter(|(_, t)| t.is_empty())
+        .map(|(u, _)| json!({"id":now.syms[u.sym].id,"name":reach::short(now,u.sym),"steps":u.steps,"via":u.via,"certain":u.certain}))
+        .collect();
+    let syms: Vec<usize> = impact.uses.iter().map(|u| u.sym).collect();
+    let suites = reach::reached(&reach::suites(s, now)?, &syms);
+    let leaves: Vec<String> = impact.leaves.iter().map(|(i, e)| format!("{} ({e})", reach::short(now, *i))).collect();
+    Ok(json!({"tests":tests,"untested":untested,"suites":suites,"leaves":leaves}))
+}
 fn review_graphs(
     before: &Value,
     after: &Value,
     task: &Value,
+    reach: &Value,
     settings: &toml::Value,
     root: &Path,
 ) -> Value {
@@ -415,12 +446,11 @@ fn review_graphs(
                 .map(String::from)
         })
         .collect();
-    let tested: HashSet<_> = after["edges"]
+    let tested: HashSet<_> = reach["tests"]
         .as_array()
-        .unwrap()
+        .unwrap_or(&vec![])
         .iter()
-        .filter(|e| e["kind"] == "tests" && e["to"].as_str().is_some_and(|id| changed.contains(id)))
-        .filter_map(|e| e["from"].as_str().map(String::from))
+        .filter_map(|id| id.as_str().map(String::from))
         .chain(changed.iter().cloned())
         .collect();
     let stored = &task["review_tests"];
@@ -439,24 +469,29 @@ fn review_graphs(
         .iter()
         .map(|e: &Value| e["effects_added"].as_array().map_or(0, Vec::len))
         .sum();
+    let untested = reach["untested"].as_array().map_or(0, Vec::len);
     let summary = format!(
-        "{} effects added, {} signature changed, {} test unfinished{}",
+        "{} effects added, {} signature changed, {} test unfinished, {} untested uses{}",
         added_count,
         signatures.len(),
         unfinished,
+        untested,
         if stored["state"].is_null() {
             ", tests not run yet"
         } else {
             ""
         }
     );
-    json!({"entries":entries,"effects":{"added":effects_added,"removed":effects_removed},"signatures":signatures,"tests":tests,"files":files,"summary":summary})
+    json!({"entries":entries,"effects":{"added":effects_added,"removed":effects_removed},"signatures":signatures,"tests":tests,"files":files,
+        "untested":reach["untested"],"suites":reach["suites"],"leaves":reach["leaves"],"summary":summary})
 }
 pub fn review(s: &Store, task: &Value) -> Result<Value, Failure> {
     let tid = task["id"].as_str().unwrap();
     let files = lockdown::tree_files(&s.root, &lockdown::settings(&s.root)?)?;
-    let before = graph_index(&version(s, Version::Before(tid))?, &files, &HashSet::new());
-    let after = graph_index(&version(s, Version::Current)?, &files, &HashSet::new());
+    let (old, now) = (version(s, Version::Before(tid))?, version(s, Version::Current)?);
+    let before = graph_index(&old, &files, &HashSet::new());
+    let after = graph_index(&now, &files, &HashSet::new());
+    let reach = task_reach(s, &old, &now, task)?;
     let mut t = task.clone();
     let base = hex(&Sha256::digest(board::snapshot(s)?.to_string().as_bytes()));
     if t["review_tests"]["base"] != base {
@@ -466,6 +501,7 @@ pub fn review(s: &Store, task: &Value) -> Result<Value, Failure> {
         &before,
         &after,
         &t,
+        &reach,
         &lockdown::settings(&s.root)?,
         &s.root,
     ))
@@ -534,30 +570,6 @@ fn scratch(s: &Store, v: Version<'_>, dir: &Path) -> Result<(), Failure> {
     copy_dir(&s.root.join("build/packages"), &dir.join("build/packages"))?;
     copy_dir(&s.root.join("build/dev"), &dir.join("build/dev"))?;
     Ok(())
-}
-fn failures(output: &str) -> BTreeMap<String, (String, String)> {
-    let clean = strip_ansi(output);
-    let mut out = BTreeMap::new();
-    let mut kind = "";
-    for line in clean.lines() {
-        let line = line.trim();
-        if ["todo ", "assert ", "let assert ", "panic "]
-            .iter()
-            .any(|p| line.starts_with(p))
-        {
-            kind = if line.starts_with("todo ") {
-                "unfinished"
-            } else {
-                "wrong"
-            };
-        } else if let Some(name) = line.strip_prefix("test: ") {
-            if !kind.is_empty() {
-                out.insert(name.to_string(), (kind.into(), line.into()));
-                kind = "";
-            }
-        }
-    }
-    out
 }
 pub fn run_tests(root: PathBuf, tid: String) {
     std::thread::spawn(move || {
@@ -678,31 +690,9 @@ pub fn api(
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn index(sources: &[(&str, &str, &str)]) -> Index {
-        let mut syms = vec![];
-        let mut modules = vec![];
-        for (dir, path, text) in sources {
-            let m = gleam::split(text);
-            modules.push(ModuleRow {
-                path: (*path).into(),
-                dir: (*dir).into(),
-                header: m.header,
-            });
-            for item in m.items {
-                syms.push(Sym {
-                    id: format!("fn:{path}.{}", item.name),
-                    module: (*path).into(),
-                    name: item.name,
-                    kind: item.kind,
-                    text: item.text,
-                });
-            }
-        }
-        Index::build(syms, modules)
-    }
     #[test]
     fn c1_cli_graph_and_checks() {
-        let ix = index(&[
+        let ix = test_index(&[
             (
                 "src",
                 "app",
@@ -772,7 +762,7 @@ pub fn main_test() {
         for (dir, path, text) in &owned {
             sources.push((dir.as_str(), path.as_str(), text.as_str()));
         }
-        let g = graph_index(&index(&sources), &[], &HashSet::new());
+        let g = graph_index(&test_index(&sources), &[], &HashSet::new());
         assert!(
             g["nodes"]
                 .as_array()
@@ -832,12 +822,12 @@ pub fn main_test() {
     #[test]
     fn c3_reachable_write_diff() {
         let before = graph_index(
-            &index(&[("src", "app", "pub fn main() { work() }\nfn work() { 1 }")]),
+            &test_index(&[("src", "app", "pub fn main() { work() }\nfn work() { 1 }")]),
             &[],
             &HashSet::new(),
         );
         let after = graph_index(
-            &index(&[(
+            &test_index(&[(
                 "src",
                 "app",
                 "import simplifile\npub fn main() { work() }\nfn work() { simplifile.write(\"a\", \"b\") }",
@@ -851,10 +841,12 @@ pub fn main_test() {
             &before,
             &after,
             &task,
+            &json!({"tests":[],"untested":[{"id":"fn:app.main"}]}),
             &"".parse().unwrap(),
             Path::new("/tmp"),
         );
         assert_eq!(r["effects"]["added"], json!(["effect:writes files"]));
+        assert!(r["summary"].as_str().unwrap().contains("1 untested uses"), "{}", r["summary"]);
         assert!(
             r["entries"]
                 .as_array()

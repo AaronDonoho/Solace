@@ -18,14 +18,16 @@ The protocol is the agent's environment. It has few, rich commands that return c
 
 | Command | Purpose |
 | --- | --- |
-| `session start [--scope <ns>…]` | Orientation: language reference version, policy for the scope, pending and recent decisions, and a symbol index: the names of every symbol in scope, grouped by namespace with its one-line description, with "N more" beyond a per-namespace cap (D-12). Open work records are expanded with the context bundles of the symbols they name (D-10) |
+| `session start [--scope <ns>…]` | Orientation: the project's `AGENTS.md` first, if there is one (D-45; cut at a whole line past 8,000 bytes, with the `read` range for the rest), then language reference version, policy for the scope, pending and recent decisions, and a symbol index: the names of every symbol in scope, grouped by namespace with its one-line description, with "N more" beyond a per-namespace cap (D-12). Open work records are expanded with the context bundles of the symbols they name (D-10) |
 | `inspect <name>… [--context]` | Each symbol's text, signature, effects, description, verification status. `--context` adds the bundle in §3. Several names return several bundles in one document (D-10) |
 | `view <ns> \| <name>… \| --callers <name> \| --callees <name>` | Multi-symbol document (Spec 2 §3). A namespace is shown as an outline (signature, effects, one-line description, verification status per symbol); `--bodies` gives full text (D-10) |
 | `find <query>` | Search names, signatures and descriptions. Ranked, at most 20 hits, one line each |
 | `submit <name>` / `submit --new <ns>` / `submit --view` | Text on stdin (Spec 2 §2, §3) |
 | `rename`, `copy`, `merge`, `delete`, `extract` | Spec 1 §5 |
 | `check [<name>…]` | Fast check; the default is everything changed in the current change |
-| `test [<name>…]` | Examples and tests for the named symbols and their dependents (focused plan) |
+| `test [<name>…] [--all]` | The focused plan (D-44): the tests whose reach (everything they can run, with its revisions, module headers and the project and dependency manifests) changed since they last passed, plus those that failed or never ran and those that reach other processes, the network or foreign code. With names, the tests that reach those symbols; `--all`, every test. The reply says how many ran of how many, and names declared suites (Spec 14 §2) that reach a change |
+| `impact [<name>…]` | What a change reaches (D-44): callers, and readers of the record fields its data flows into, nearest first, each certain or possible, with its own tests (D-36.3 coverage) and where the data leaves the program. No names: the changes since tests last passed, or the task's changes in a board run. A successful submit gives the first three lines of it |
+| `refs <ns>.<Type>.<field>` | The code that reads one record field, certain or possible (D-44) |
 | `diff` | Semantic diff of the current change: symbols added, modified, renamed and retired; signature, effect and contract changes listed first |
 | `commit -m <msg>` | Publish the current change (§4) |
 | `work open\|update\|close\|list` | Work records (§5) |

@@ -1,134 +1,127 @@
-Solace: this project's code lives in a semantic store of symbols (functions,
-types and constants). You read and change it by symbol, one or many per call.
-You cannot open files.
+Solace: this project's code lives in a store of symbols (functions, types and
+constants). You read and change it by symbol through this tool; you cannot open
+files or run a shell. When Solace can't do something the task needs (a file you
+may not write, a command that isn't declared), don't work around it: ask with
+`task ask`, or say so in your summary.
 
-Names: a symbol is `module.name`, e.g. `pilot/checkout.pay`. Any unambiguous
-suffix works: `checkout.pay`, or just `pay` if only one symbol has that name.
-Modules: `pilot/checkout`, or just `checkout`. Tests are symbols too, in test
-modules such as `pilot/checkout_test`.
+Names: a symbol is `module.name`, e.g. `pilot/checkout.pay`; any unambiguous
+suffix works: `checkout.pay`, or `pay`. Modules: `pilot/checkout` or `checkout`.
+Tests are symbols in test modules such as `pilot/checkout_test`.
 
-Several commands can go in one tool call, one per line; they run in order.
+Several commands go in one call, one per line, and run in order. Each call is a
+turn, and every turn re-reads the whole conversation, so work in few calls:
+1. Read once: inspect every symbol you need in one call, e.g.
+     inspect checkout.pay payments.capture seed.orders --context
+   Each symbol comes with the signatures it uses, its callers and a test that
+   uses it. Don't ask again for anything a reply already showed.
+   To reproduce a reported case, run a test's setup and watch the calls:
+     probe --from checkout_test.pay_test --trace checkout.pay payments.capture
+   shows each call to those functions with its arguments and result.
+2. Change and test in one call: `command` is two lines,
+     submit
+     test
+   and `text` holds a block per symbol, the code and its tests together:
+     // ── pilot/checkout.pay ──
+     pub fn pay(...) { ... }
+     // ── pilot/checkout_test.pay_declined_test ──
+     pub fn pay_declined_test() { ... }
+   For one small edit, `submit <name> --replace` with `old` and `text`.
+   Work out expected values from the task's numbers and the rules the code
+   documents, rounding included (a one-line `probe` such as
+   `money.format(123456)` evaluates a helper). Never take them from running the
+   code under test.
+3. Fix only what the reply reports, again with `test` on the line after.
+   The submit reply lists what else the change reaches and which of those no
+   test checks; look at those before you finish.
+4. Once `test` passes, the code is done: `test` type-checks everything first,
+   so no `check` is needed.
 
-Solace is your only way to work on the project. When it can't do something the
-task needs (a file you may not write, a command that isn't declared), don't
-work around it: ask with `task ask`, or say so in your summary.
+Reading
+  inspect <name>... --context   symbols, the signatures of what they use, their
+                                callers, and the tests that use them (the
+                                smallest in full)
+  view <name>...                symbols' source
+  view <module>...              outlines: signatures and doc lines
+  view <module> --bodies        whole module; only for one you will rewrite
+  refs <name>                   everything that uses a symbol
+  refs <module>.<Type>.<field>  code that reads a record field
+  impact [name...]              what a change reaches: callers and readers of the
+                                fields it changes, nearest first, with their
+                                tests (no name: what changed since tests last
+                                passed, or in this task)
+  find <text>                   case-insensitive search of all code
+  session start [--task]        this overview again (--task: for the task in `text`)
+  session start [--scope <module>...]
+                                every symbol, and open work records with context
+Replies have a size limit: a signature is printed once per reply, and a reply
+that would be larger says what it left out and the command that shows it.
 
-Reading (the symbol list above usually tells you what to inspect; ask for
-several symbols in one call rather than one at a time). Read symbols, not
-modules: `inspect a b c --context`. Use `--bodies` only for a module you will
-rewrite most of. `--context` includes a test that uses each symbol, as an
-example. Replies stay under a size limit: a signature is printed once per
-reply, and a reply that would be larger says what it left out and the command
-that shows it.
-  solace session start --task     (the task in `text`) the symbols most likely
-                                  relevant to it, the modules, open work
-  solace session start [--scope <module>...]
-                                  every symbol, open work records with the
-                                  context they need
-  solace inspect <name>... --context
-                                  each symbol, plus the signatures of everything
-                                  it uses, everything that uses it, and the
-                                  tests that use it (the smallest in full)
-  solace view <name>...           symbols' source
-  solace view <module>...         module outlines: signatures and doc lines
-  solace view <module> --bodies   whole modules' source
-  solace refs <name>              everything that uses a symbol
-  solace find <text>              case-insensitive search of all code, showing
-                                  matching lines per symbol
-
-Changing (the new code is the tool's `text` argument; from a shell, stdin)
-  solace submit <name>            replace a symbol with new code (may rename it)
-  solace submit <name> --replace  change one part of a symbol: `old` is the
-                                  exact current text (must occur once), `text`
-                                  its replacement; the whole symbol is checked
-  solace submit --new <module>    add symbols to a module, as many as the text
-                                  defines; a module that doesn't exist yet is
-                                  created, whole (module comment, imports,
-                                  symbols), under test/ if its name ends in
-                                  `_test`, otherwise src/
-  solace submit                   several symbols at once, checked together
-                                  (e.g. a type and its callers): blocks each
-                                  headed `// ── <module>.<name> ──`, as view
-                                  and inspect print them; a new name adds it,
-                                  creating its module if needed
-  solace submit <module>          replace a whole module, as `view --bodies`
-                                  shows it; it must still contain every
-                                  existing symbol
-  solace submit --imports <module>
-                                  replace a module's imports and module comment
-  solace drafts                   list this task's rejected submissions; stale
-                                  ones predate a later source change
-  solace view --draft <id>         read retained submission text, even invalid syntax
-  solace submit --draft <id> --replace
-                                  patch the draft with exact `old` and replacement
-                                  `text`, then retry its original submission
-  solace submit --draft <id>       retry unchanged draft text
-  solace delete <name>            remove a symbol (refused while anything uses it)
-
-  Each submit is type-checked. If the submitted symbol has errors, nothing is
-  saved. If it breaks other symbols (e.g. callers of a changed signature), it is
-  saved and those are listed as broken until fixed. Missing imports are added
-  automatically (for `module.name` references and for unqualified types and
-  constructors such as `Option` or `None`); imports in submitted text are
-  merged into the module's imports.
-
-  Rejected text is retained as a draft; the error gives its id. Patch it instead
-  of resending a large batch. A successful retry removes the draft. Drafts are
-  scoped to the task (or `cli` outside the board) and survive agent replacement.
-  If source changed meanwhile, the retry refuses with E0107: read the draft and
-  current source, then make a new submission. Starting over, cancelling or
-  completing the task removes its drafts. Drafts never enter symbol search.
-  Successful submissions summarize warnings; errors retain full diagnostics.
+Changing (the new code is in `text`)
+  submit                        several symbols, checked together: a block each,
+                                headed `// ── <module>.<name> ──` as view prints
+                                them; a new name adds the symbol, and its module
+                                if needed
+  submit <name>                 replace one symbol (may rename it)
+  submit <name> --replace       one exact change: `old` (must occur once) becomes
+                                `text`; the whole symbol is checked
+  submit --new <module>         add symbols, or create the module whole (module
+                                comment, imports, symbols; under test/ if the
+                                name ends in `_test`)
+  submit <module>               replace a whole module; it must keep every symbol
+  submit --imports <module>     replace a module's imports and module comment
+  delete <name>                 remove a symbol (refused while anything uses it)
+Every submit is type-checked. Missing imports are added and imports in `text`
+are merged. If the submitted code has errors, nothing is saved. If it breaks
+other symbols (e.g. callers of a changed signature), it is saved and those are
+listed as broken until fixed.
+Rejected text is kept as a draft; the error gives its id. Fix it rather than
+resending it: `submit --draft <id> --replace` (`old` and `text`) patches and
+retries it, `submit --draft <id>` retries it as is, `view --draft <id>` reads it,
+`drafts` lists them. A draft older than a later source change is stale; its
+retry is refused (E0107): read the current source and submit again.
 
 Checking
-  solace check                    type-check everything; lists broken symbols
-  solace check --warnings         also show full compiler warnings
-  solace test                     run all tests; shows failures only
-  solace probe                    run throwaway code (`text`) against the
-                                  project and show its output; nothing is
-                                  saved. Statements become `main`'s body, or
-                                  give a module with `pub fn main()`; project
-                                  imports are added. `echo value` prints a
-                                  value with its line. Works in read-only runs
+  test                          run the tests that can see a change since they
+                                last passed (and any that failed); shows
+                                failures only
+  test <name>...                run the tests that reach these symbols
+  test --all                    run every test
+  check [--warnings]            type-check everything; lists broken symbols
+  probe                         run throwaway code (`text`) and show its output;
+                                nothing is saved. Statements become `main`'s
+                                body, or give a module with `pub fn main()`;
+                                `echo value` prints a value, and a single
+                                expression is printed
+  probe --from <fn>             start from a test's (or any function without
+                                arguments) imports and body; `text` adds
+                                statements that can use its variables
+  probe --trace <fn>...         also show each call to these functions, with
+                                its arguments and result (combines with --from)
 
-Work records (persist between sessions)
-  solace work add <text> (or the tool's `text`) | solace work list | solace work done <id>
+Files: resources and ignored files can be read and written; they never appear
+in symbol searches. gleam.toml can be written (new dependencies are fetched by
+check, test and build). solace.toml and AGENTS.md (the project's instructions
+for agents, shown at session start) are human-owned: in a work run, `write` to
+either proposes a change and waits for the human; say why in a `task note` first.
+  files [dir]                   tree with access tiers
+  read <path> [--lines a..b | --tail n]
+  write <path> [--replace]      whole text, or exact `old` -> `text`
+  remove <path>
+Project: build | format | run <name> [args...] (commands declared in solace.toml)
+Work records, kept between sessions: work add (`text`) | work list | work done <id>
 
-Files
-  Resource and ignored files (tiers 3 and 4) are readable and writable, but
-  never appear in symbol searches. No resources entry is needed to write
-  README.md or bin/coolcalc. Writes are bounded by resource_limit.
-  gleam.toml (manifest) is writable; invalid writes are refused. New
-  dependencies are fetched by check, test and build.
-  solace.toml (settings) is human-owned. In a work run, `write solace.toml`
-  proposes the change and waits for the human to approve or reject it; say
-  why in a `task note` first.
-  files [dir]                         tree with tiers; internal files have no access
-  read path [--lines a..b | --tail n]  read manifest/resources/ignored files/settings
-  write path                         whole text (read an existing file first)
-  write path --replace               exact `old` -> `text`; CLI: --old <text>
-  remove path                        remove a resource or ignored file
-
-Project commands
-  build                               compile the project
-  format                              format the project's code
-  run name [args...]                  only commands declared in solace.toml
-
-Read-only runs (reviews, investigations) can read, check, test and build;
-submit, delete, write, remove, format and run are refused.
-
-Task runs (put the note, summary or question in `text`)
-  task diff [name ...]                what this task changed, each entity against
-                                      its state before the task (whole task, all
-                                      runs)
-  task note                           add a note; completes a review run
-  task ask                            question in `text`, 2–4 `options`; waits
-                                      for the human's answer
-                                      CLI: --option <label> repeated, question on stdin
-  task done                           finish: a work run's summary goes to human
-                                      review; an investigation's report stays on
-                                      the task
+Task runs (the note, summary or question in `text`). Reviews and investigations
+are read-only: submit, delete, write, remove, format and run are refused.
+  task diff [name...]           what this task changed, against its state before
+  task note                     add a note; completes a review run
+  task ask                      a question, with 2–4 `options`; waits for the
+                                human's answer
+  task done                     finish: a work run's summary goes to human
+                                review; an investigation's report stays on the task
 
 Host commands (humans only, refused in a run)
-  serve [--port N]                    local task board (default 3030)
-  agent-config codex|claude dir       isolated settings and launch.json for a runner
+  serve [--port N]              local task board (default 3030)
+  agent-config codex|claude <dir>
+                                isolated settings and launch.json for a runner
+From a shell, `text` is stdin, `old` is `--old <text>` and each option is
+`--option <label>`.

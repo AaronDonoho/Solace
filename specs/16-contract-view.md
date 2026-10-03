@@ -69,14 +69,15 @@ Sound or windows a program produces directly appear on the human's machine, beca
 
 ## 4. Review
 
-A task in *needs review* (or any task with changes) shows a one-line summary on the board, such as "2 effects added, 1 test unfinished", linking to the view filtered to that task. The line sits in the task's detail panel. The filtered view shows:
+A task in *needs review* (or any task with changes) shows a one-line summary on the board, such as "1 effects added, 0 signature changed, 0 test unfinished, 3 untested uses", linking to the view filtered to that task. The line sits in the task's detail panel. The filtered view shows:
 
 1. entry points and effects that were added, removed or changed. A new effect is flagged. Example: "`main` now writes files";
 2. logic whose signature changed;
-3. the task's tests (tests the task changed, plus tests that reference a symbol it changed), run by Solace at review time, each *unfinished*, *wrong* or *passing* (D-36.3). A changed expected value shows as "→ new, was old". D-36's flags and their resolutions appear here once D-36 is built;
-4. remembered runs that reach a changed symbol through `calls` edges, replayed on the version before the task and on the current one. Results that differ are shown side by side for the human to judge; a difference is not a failure;
-5. non-source files the task touched, with their tiers;
-6. source text, only on request.
+3. the task's tests (tests the task changed, plus tests that reach a symbol it changed or read a record field its change flows into, D-44), run by Solace at review time, each *unfinished*, *wrong* or *passing* (D-36.3). A changed expected value shows as "→ new, was old". D-36's flags and their resolutions appear here once D-36 is built;
+4. uses the change reaches that no test checks (D-36.3 coverage: what a test references, also through helpers in its own module), nearest first, each with how it is reached and whether that is certain or possible; plus the declared suites that reach the change (Spec 14 §2) and where its data leaves the program. The summary counts them ("3 untested uses") (D-44);
+5. remembered runs that reach a changed symbol through `calls` edges, replayed on the version before the task and on the current one. Results that differ are shown side by side for the human to judge; a difference is not a failure;
+6. non-source files the task touched, with their tiers;
+7. source text, only on request.
 
 The board's *Changes* list links each entry to its node. Solace computes all of this from the task's before-state (Spec 15 §5) and the current project, so nothing an agent says enters it.
 
@@ -115,7 +116,7 @@ Call tracing and decisions in business terms (D-35.2; the latter with the Solace
 Step 1:
 - C1. For a small CLI project (a `main` that parses arguments, prints and writes a file, with tests), the graph lists `main` as `entry`, every `gleam/io` and `@external` use as a `derived` `effect` reached by `uses` edges, and each test function with `tests` edges to what it references.
 - C2. In `pilot-large`, `api.handle` is an `entry`, and `date_test`'s `assert date.add_business_days(Date(2026, 3, 5), 2) == Date(2026, 3, 9)` shows as `date.add_business_days(Date(2026, 3, 5), 2)` → `Date(2026, 3, 9)`.
-- C3. For a task that adds a call to `simplifile.write`, `GET /graph?task=` flags a new file-writing effect on each entry point that reaches it, and the board's summary line counts it.
+- C3. For a task that adds a call to `simplifile.write`, `GET /graph?task=` flags a new file-writing effect on each entry point that reaches it, and the board's summary line counts it, with its untested uses (D-44).
 - C4. The files panel shows each file's tier and the sentence for that tier, matching `solace files`.
 
 Step 2:

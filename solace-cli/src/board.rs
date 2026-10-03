@@ -438,6 +438,42 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
 }
 /// Line diff with two lines of context; `…` marks skipped lines.
 fn line_diff(a: &str, b: &str) -> String {
+    let ops = diff_ops(a, b);
+    let (mut out, mut gap) = (String::new(), false);
+    for k in 0..ops.len() {
+        if ops[k.saturating_sub(2)..(k + 3).min(ops.len())].iter().any(|o| o.0 != ' ') {
+            if gap {
+                out += "  …\n";
+            }
+            gap = false;
+            out += &format!("{} {}\n", ops[k].0, ops[k].1);
+        } else {
+            gap = true;
+        }
+    }
+    if gap {
+        out += "  …\n";
+    }
+    out
+}
+/// The lines of `b` (from 0) that a line diff from `a` marks: added lines, and
+/// the line where lines were removed.
+pub(super) fn changed_lines(a: &str, b: &str) -> Vec<usize> {
+    let (mut out, mut line) = (vec![], 0);
+    for (op, _) in diff_ops(a, b) {
+        match op {
+            '+' => {
+                out.push(line);
+                line += 1;
+            }
+            '-' => out.push(line.min(b.lines().count().saturating_sub(1))),
+            _ => line += 1,
+        }
+    }
+    out.dedup();
+    out
+}
+fn diff_ops<'a>(a: &'a str, b: &'a str) -> Vec<(char, &'a str)> {
     let (a, b): (Vec<_>, Vec<_>) = (a.lines().collect(), b.lines().collect());
     let pre = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
     let suf = a[pre..].iter().rev().zip(b[pre..].iter().rev()).take_while(|(x, y)| x == y).count();
@@ -464,22 +500,7 @@ fn line_diff(a: &str, b: &str) -> String {
         }
     }
     ops.extend(a[a.len() - suf..].iter().map(|s| (' ', *s)));
-    let (mut out, mut gap) = (String::new(), false);
-    for k in 0..ops.len() {
-        if ops[k.saturating_sub(2)..(k + 3).min(ops.len())].iter().any(|o| o.0 != ' ') {
-            if gap {
-                out += "  …\n";
-            }
-            gap = false;
-            out += &format!("{} {}\n", ops[k].0, ops[k].1);
-        } else {
-            gap = true;
-        }
-    }
-    if gap {
-        out += "  …\n";
-    }
-    out
+    ops
 }
 pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
     let mut v = json!({});
@@ -1687,19 +1708,21 @@ fn wait_reply(s: &Store, tid: &str, i: usize) -> Out {
         }
     }
 }
-/// A work run's `write solace.toml`: checked now, written only when a human
-/// approves it on the board (D-38).
-pub fn propose_settings(s: &Store, tid: &str, rid: &str, base: &[u8], proposed: &str, guard: fs::File) -> Out {
-    workflow(&lockdown::parse_settings(proposed)?)?;
-    let base = std::str::from_utf8(base).map_err(|_| Failure("E6020 solace.toml is not UTF-8".into(), 1))?;
+/// A work run's `write solace.toml` or `write AGENTS.md`: checked now, written
+/// only when a human approves it on the board (D-38, D-45).
+pub fn propose_settings(s: &Store, tid: &str, rid: &str, file: &str, base: &[u8], proposed: &str, guard: fs::File) -> Out {
+    if file == "solace.toml" {
+        workflow(&lockdown::parse_settings(proposed)?)?;
+    }
+    let base = std::str::from_utf8(base).map_err(|_| Failure(format!("E6020 {file} is not UTF-8"), 1))?;
     if base == proposed {
-        return Ok("solace.toml is unchanged.\n".into());
+        return Ok(format!("{file} is unchanged.\n"));
     }
     let mut t = task(&s.root, tid)?;
     let w = workflow(&lockdown::settings(&s.root)?)?;
     let i = t["runs"].as_array().unwrap().iter().position(|r| r["id"] == rid).unwrap();
-    t["questions"].as_array_mut().unwrap().push(json!({"id":id(),"text":"Change solace.toml","options":["Approve","Reject"],
-        "settings":{"base":base,"proposed":proposed}}));
+    t["questions"].as_array_mut().unwrap().push(json!({"id":id(),"text":format!("Change {file}"),"options":["Approve","Reject"],
+        "settings":{"file":file,"base":base,"proposed":proposed}}));
     t["runs"][i]["state"] = json!("waiting");
     flag(&mut t, "an agent proposed a settings change");
     move_to(&w, &mut t, &w["events"]["asked"])?;
@@ -1709,11 +1732,12 @@ pub fn propose_settings(s: &Store, tid: &str, rid: &str, base: &[u8], proposed: 
 }
 /// Applies an approved settings question, unless the file changed since.
 fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
-    let p = root.join("solace.toml");
+    let file = q["settings"]["file"].as_str().unwrap_or("solace.toml").to_string();
+    let p = root.join(&file);
     let current = fs::read_to_string(&p).unwrap_or_default();
     let proposed = q["settings"]["proposed"].as_str().unwrap();
-    if current != q["settings"]["base"] || lockdown::parse_settings(proposed).and_then(|v| workflow(&v)).is_err() {
-        q["answer"] = json!("Not applied: solace.toml changed since the proposal; read it and propose again");
+    if current != q["settings"]["base"] || (file == "solace.toml" && lockdown::parse_settings(proposed).and_then(|v| workflow(&v)).is_err()) {
+        q["answer"] = json!(format!("Not applied: {file} changed since the proposal; read it and propose again"));
         return Ok(());
     }
     fs::write(p, proposed)?;
