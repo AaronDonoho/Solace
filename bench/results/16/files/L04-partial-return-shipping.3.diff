@@ -1,0 +1,56 @@
+diff --git a/src/pilot/return_policy.gleam b/src/pilot/return_policy.gleam
+index cd15ae9..53ef943 100644
+--- a/src/pilot/return_policy.gleam
++++ b/src/pilot/return_policy.gleam
+@@ -144,13 +144,14 @@ pub fn completes_order(
+   items: List(Item),
+   already_returned: Dict(String, Int),
+ ) -> Bool {
+-  list.all(items, fn(item) {
+-    let before = dict.get(already_returned, item.sku) |> result.unwrap(0)
+-    let bought = case order.find_line(order, item.sku) {
+-      Ok(line) -> line.quantity
+-      Error(Nil) -> 0
+-    }
+-    before + item.quantity >= bought
++  list.all(order.lines, fn(line) {
++    let before = dict.get(already_returned, line.sku) |> result.unwrap(0)
++    let returning =
++      items
++      |> list.find(fn(item) { item.sku == line.sku })
++      |> result.map(fn(item) { item.quantity })
++      |> result.unwrap(0)
++    before + returning >= line.quantity
+   })
+ }
+ 
+diff --git a/test/pilot/returns_test.gleam b/test/pilot/returns_test.gleam
+index 5cf865d..da816ae 100644
+--- a/test/pilot/returns_test.gleam
++++ b/test/pilot/returns_test.gleam
+@@ -56,6 +56,25 @@ pub fn returning_everything_refunds_shipping_test() {
+   assert last.refund.shipping_cents == 600
+ }
+ 
++pub fn returning_all_tees_but_keeping_mug_excludes_shipping_test() {
++  let #(db, o, _) =
++    support.delivered(
++      seed.demo_store(),
++      seed.ada,
++      [#("TEE-M-BLK", 2), #("MUG-BLUE", 1)],
++      3,
++    )
++  let assert Ok(#(_, tee_return)) =
++    returns.request(
++      db,
++      support.on_day(5),
++      o.id,
++      [Item("TEE-M-BLK", 2)],
++      Damaged,
++    )
++  assert tee_return.refund.shipping_cents == 0
++}
++
+ pub fn electronics_restocking_fee_test() {
+   let #(db, o, _) =
+     support.delivered(seed.demo_store(), seed.ada, [#("PHONES-BLK", 1)], 3)

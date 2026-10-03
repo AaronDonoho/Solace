@@ -107,7 +107,7 @@ pub fn row_modifier_selection_test() {
   |> should.equal(["first", "third"])
 }
 
-pub fn chart_rows_average_scope_test() {
+pub fn chart_average_counts_every_run_test() {
   let first =
     bench_visualizer_frontend.Row(
       "1",
@@ -133,15 +133,6 @@ pub fn chart_rows_average_scope_test() {
       rep: 2,
       tokens: Some(30),
     )
-  let other_group =
-    bench_visualizer_frontend.Row(
-      ..first,
-      group_id: "2",
-      group: "B",
-      source: "third",
-      task: "L01-other",
-      tokens: Some(50),
-    )
   let other_task =
     bench_visualizer_frontend.Row(
       ..first,
@@ -149,24 +140,28 @@ pub fn chart_rows_average_scope_test() {
       source: "fourth",
       tokens: Some(50),
     )
-  let rows = [first, second, other_group, other_task]
-  let selected = bench_visualizer_frontend.chart_rows(rows, [first])
-  selected
-  |> list.map(fn(row) { row.source })
-  |> should.equal(["first", "second"])
-  bench_visualizer_frontend.average(selected, bench_visualizer_frontend.Tokens)
-  |> should.equal(Some(#(20.0, 2)))
-  bench_visualizer_frontend.chart_rows(rows, [first, other_group])
-  |> list.map(fn(row) { row.source })
-  |> should.equal(["first", "second", "third"])
-  let selected = bench_visualizer_frontend.chart_rows(rows, [first, other_task])
-  bench_visualizer_frontend.average_per_task(
-    selected,
+  // Every selected run counts, including reps of the same task.
+  bench_visualizer_frontend.average(
+    [first, second, other_task],
     bench_visualizer_frontend.Tokens,
   )
-  |> should.equal(Some(#(35.0, 2)))
+  |> should.equal(Some(#(30.0, 3)))
   bench_visualizer_frontend.short_task("L02-other-details")
   |> should.equal("L02")
   bench_visualizer_frontend.short_task("scenario")
   |> should.equal("scenario")
+}
+
+pub fn groups_round_trip_test() {
+  let groups = [
+    bench_visualizer_frontend.Group(1, "A", ["bench/results/15"]),
+    bench_visualizer_frontend.Group(3, "B", []),
+  ]
+  bench_visualizer_frontend.encode_groups(groups)
+  |> bench_visualizer_frontend.decode_groups
+  |> should.equal(Ok(groups))
+  bench_visualizer_frontend.decode_groups("")
+  |> should.equal(Error(Nil))
+  bench_visualizer_frontend.decode_groups("[]")
+  |> should.equal(Error(Nil))
 }

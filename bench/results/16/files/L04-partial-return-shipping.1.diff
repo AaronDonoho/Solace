@@ -1,0 +1,82 @@
+diff --git a/src/pilot/return_policy.gleam b/src/pilot/return_policy.gleam
+index cd15ae9..b11d8ca 100644
+--- a/src/pilot/return_policy.gleam
++++ b/src/pilot/return_policy.gleam
+@@ -144,13 +144,16 @@ pub fn completes_order(
+   items: List(Item),
+   already_returned: Dict(String, Int),
+ ) -> Bool {
+-  list.all(items, fn(item) {
+-    let before = dict.get(already_returned, item.sku) |> result.unwrap(0)
+-    let bought = case order.find_line(order, item.sku) {
+-      Ok(line) -> line.quantity
+-      Error(Nil) -> 0
+-    }
+-    before + item.quantity >= bought
++  list.all(order.lines, fn(line) {
++    let before = dict.get(already_returned, line.sku) |> result.unwrap(0)
++    let returning =
++      list.fold(items, 0, fn(quantity, item) {
++        case item.sku == line.sku {
++          True -> quantity + item.quantity
++          False -> quantity
++        }
++      })
++    before + returning >= line.quantity
+   })
+ }
+ 
+diff --git a/test/pilot/return_policy_test.gleam b/test/pilot/return_policy_test.gleam
+index d524f34..d191fd4 100644
+--- a/test/pilot/return_policy_test.gleam
++++ b/test/pilot/return_policy_test.gleam
+@@ -82,6 +82,28 @@ pub fn partial_refund_excludes_shipping_test() {
+     == RefundBreakdown(1800, 0, 80, 0, 0, 1880)
+ }
+ 
++pub fn all_of_one_line_does_not_complete_order_test() {
++  let o = delivered_on(0)
++  let shirts = [Item("TEE", 2)]
++  assert !return_policy.completes_order(o, shirts, dict.new())
++  let refund =
++    return_policy.refund_amount(
++      o,
++      quote(),
++      shirts,
++      dict.from_list([#("TEE", Apparel)]),
++      NoLongerNeeded,
++      False,
++    )
++  assert refund.shipping_cents == 0
++  assert refund.total_cents == 3761
++  assert return_policy.completes_order(
++    o,
++    [Item("MUG", 1)],
++    dict.from_list([#("TEE", 2)]),
++  )
++}
++
+ pub fn whole_order_refund_includes_shipping_test() {
+   let items = [Item("TEE", 2), Item("MUG", 1)]
+   assert return_policy.completes_order(delivered_on(0), items, dict.new())
+diff --git a/test/pilot/returns_test.gleam b/test/pilot/returns_test.gleam
+index 5cf865d..e10a467 100644
+--- a/test/pilot/returns_test.gleam
++++ b/test/pilot/returns_test.gleam
+@@ -49,8 +49,15 @@ pub fn returning_everything_refunds_shipping_test() {
+       3,
+     )
+   let c = support.on_day(5)
+-  let assert Ok(#(db, _)) =
++  let assert Ok(#(db, shirts)) =
+     returns.request(db, c, o.id, [Item("TEE-M-BLK", 2)], Damaged)
++  assert shirts.refund.shipping_cents == 0
++  assert shirts.refund.total_cents == 3761
++  let assert Ok(#(db, _)) = returns.approve(db, c, shirts.id)
++  let assert Ok(#(db, _)) = returns.receive(db, c, shirts.id)
++  let assert Ok(#(db, _)) = returns.refund(db, c, gateway(), shirts.id)
++  let assert Ok(payment) = store.payment_for_order(db, o.id)
++  assert payment.refunded_cents == 3761
+   let assert Ok(#(_, last)) =
+     returns.request(db, c, o.id, [Item("MUG-BLUE", 1)], Damaged)
+   assert last.refund.shipping_cents == 600

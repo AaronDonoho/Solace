@@ -5,6 +5,7 @@ import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/order.{type Order, Eq, Gt, Lt}
+import gleam/result
 import gleam/string
 import gleam/uri
 import lustre
@@ -107,8 +108,48 @@ type Msg {
   SortBy(String, Bool)
 }
 
+@external(javascript, "./storage_ffi.mjs", "load")
+fn storage_load(key: String) -> String
+
+@external(javascript, "./storage_ffi.mjs", "save")
+fn storage_save(key: String, value: String) -> Nil
+
+const groups_key = "bench-visualizer-groups"
+
+pub fn decode_groups(raw: String) -> Result(List(Group), Nil) {
+  let group = {
+    use id <- decode.field("id", decode.int)
+    use name <- decode.field("name", decode.string)
+    use paths <- decode.field("paths", decode.list(decode.string))
+    decode.success(Group(id:, name:, paths:))
+  }
+  case json.parse(raw, decode.list(group)) {
+    Ok([_, ..] as groups) -> Ok(groups)
+    _ -> Error(Nil)
+  }
+}
+
+pub fn encode_groups(groups: List(Group)) -> String {
+  json.array(groups, fn(group) {
+    json.object([
+      #("id", json.int(group.id)),
+      #("name", json.string(group.name)),
+      #("paths", json.array(group.paths, json.string)),
+    ])
+  })
+  |> json.to_string
+}
+
+fn save_groups(groups: List(Group)) -> Effect(Msg) {
+  effect.from(fn(_) { storage_save(groups_key, encode_groups(groups)) })
+}
+
 fn init(_) -> #(Model, Effect(Msg)) {
-  let groups = [Group(1, "A", [])]
+  let groups =
+    decode_groups(storage_load(groups_key))
+    |> result.unwrap([Group(1, "A", [])])
+  let next_group =
+    list.fold(groups, 0, fn(top, group) { int.max(top, group.id) }) + 1
   #(
     Model(
       groups:,
@@ -122,7 +163,7 @@ fn init(_) -> #(Model, Effect(Msg)) {
       entries: [],
       errors: [],
       loading: True,
-      next_group: 2,
+      next_group:,
     ),
     fetch_results(groups),
   )
@@ -137,7 +178,7 @@ fn update(model: Model, message: Msg) -> #(Model, Effect(Msg)) {
         ])
       #(
         Model(..model, groups:, next_group: model.next_group + 1),
-        effect.none(),
+        save_groups(groups),
       )
     }
     RenameGroup(id, raw) -> {
@@ -427,11 +468,14 @@ fn fetch_results(groups: List(Group)) -> Effect(Msg) {
         }),
       ),
     ])
-  rsvp.post(
-    "/api/results",
-    body,
-    rsvp.expect_json(results_decoder(), ResultsLoaded),
-  )
+  effect.batch([
+    save_groups(groups),
+    rsvp.post(
+      "/api/results",
+      body,
+      rsvp.expect_json(results_decoder(), ResultsLoaded),
+    ),
+  ])
 }
 
 fn fetch_browse(path: String) -> Effect(Msg) {
@@ -819,11 +863,10 @@ fn view_chart(model: Model) -> Element(Msg) {
   case model.selected {
     [] -> html.text("")
     _ -> {
-      let chart_rows = chart_rows(model.rows, model.selected)
       let series =
         list.filter_map(model.groups, fn(group) {
           let rows =
-            list.filter(chart_rows, fn(row) {
+            list.filter(model.selected, fn(row) {
               row.group_id == int.to_string(group.id)
             })
           case rows {
@@ -846,7 +889,7 @@ fn view_chart(model: Model) -> Element(Msg) {
       ]
       html.section([attribute.class("chart")], [
         html.div([attribute.class("chart-head")], [
-          html.h2([], [html.text("Selected tasks — average by group")]),
+          html.h2([], [html.text("Selected runs — average by group")]),
         ]),
         html.div(
           [attribute.class("chart-legend")],
@@ -875,15 +918,6 @@ fn view_chart(model: Model) -> Element(Msg) {
   }
 }
 
-pub fn chart_rows(rows: List(Row), selected: List(Row)) -> List(Row) {
-  list.filter(rows, fn(row) {
-    list.any(selected, fn(chosen) {
-      chosen.group_id == row.group_id
-      && short_task(chosen.task) == short_task(row.task)
-    })
-  })
-}
-
 pub fn short_task(task: String) -> String {
   case string.split(task, "-") {
     [first, ..] -> first
@@ -902,7 +936,7 @@ fn view_metric_chart(
 ) -> Element(Msg) {
   let points =
     list.filter_map(series, fn(item) {
-      case average_per_task(item.rows, metric) {
+      case average(item.rows, metric) {
         Some(#(value, count)) -> Ok(#(item, value, count))
         None -> Error(Nil)
       }
@@ -957,27 +991,6 @@ pub fn average(rows: List(Row), metric: Metric) -> Option(#(Float, Int)) {
   }
 }
 
-pub fn average_per_task(
-  rows: List(Row),
-  metric: Metric,
-) -> Option(#(Float, Int)) {
-  let tasks = rows |> list.map(fn(row) { short_task(row.task) }) |> list.unique
-  let #(sum, count) =
-    list.fold(tasks, #(0.0, 0), fn(state, task) {
-      let #(sum, count) = state
-      let task_rows =
-        list.filter(rows, fn(row) { short_task(row.task) == task })
-      case average(task_rows, metric) {
-        Some(#(value, _)) -> #(sum +. value, count + 1)
-        None -> state
-      }
-    })
-  case count {
-    0 -> None
-    _ -> Some(#(sum /. int.to_float(count), count))
-  }
-}
-
 fn format_metric(value: Float, metric: Metric) -> String {
   case metric {
     Duration ->
@@ -1014,8 +1027,8 @@ fn view_bar(
             "Average of "
             <> int.to_string(count)
             <> case count {
-              1 -> " task"
-              _ -> " tasks"
+              1 -> " run"
+              _ -> " runs"
             },
           ),
         ],
