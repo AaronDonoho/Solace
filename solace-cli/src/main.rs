@@ -2912,9 +2912,10 @@ mod tests {
         assert!(!r.contains("task done") && !r.contains("Host commands"));
         assert!(REFERENCE.contains("task done") && REFERENCE.contains("agent-config"));
         // D-46: session start gets the workflow, with the signature-change and
-        // new-test examples, in under 3k bytes; `help` keeps every option.
+        // test examples (D-48: a test at the level reported, one per shifted
+        // behaviour), in under 3k bytes; `help` keeps every option.
         assert!(r.len() < 3000, "{}", r.len());
-        assert!(r.contains("Changing a signature or adding a field") && r.contains("Writing a new test") && r.contains("`help`"));
+        assert!(r.contains("Changing a signature or adding a field") && r.contains("one at the level the task reports") && r.contains("`help`"));
         assert!(!r.contains("probe --from <fn>") && REFERENCE.contains("probe --from <fn>") && REFERENCE.contains("--replace [--all]"));
         assert!(r.contains("Imports are added") && !r.contains("task ask"));
         // `help` for agents: every option, but no host or task commands here.

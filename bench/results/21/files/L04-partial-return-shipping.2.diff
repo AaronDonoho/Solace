@@ -1,0 +1,93 @@
+diff --git a/src/pilot/return_policy.gleam b/src/pilot/return_policy.gleam
+index cd15ae9..8189a62 100644
+--- a/src/pilot/return_policy.gleam
++++ b/src/pilot/return_policy.gleam
+@@ -139,18 +139,27 @@ pub fn restocking_fee_percent(category: Category, reason: Reason) -> Int {
+ }
+ 
+ /// True when, after this return, every unit of the order has been returned.
++/// Every line of the order must be fully returned, not just the items in
++/// this request.
+ pub fn completes_order(
+   order: Order,
+   items: List(Item),
+   already_returned: Dict(String, Int),
+ ) -> Bool {
+-  list.all(items, fn(item) {
+-    let before = dict.get(already_returned, item.sku) |> result.unwrap(0)
+-    let bought = case order.find_line(order, item.sku) {
+-      Ok(line) -> line.quantity
+-      Error(Nil) -> 0
+-    }
+-    before + item.quantity >= bought
++  let this_return =
++    items
++    |> list.fold(dict.new(), fn(acc, i) {
++      dict.upsert(acc, i.sku, fn(q) {
++        case q {
++          Some(q) -> q + i.quantity
++          None -> i.quantity
++        }
++      })
++    })
++  list.all(order.lines, fn(line) {
++    let before = dict.get(already_returned, line.sku) |> result.unwrap(0)
++    let this = dict.get(this_return, line.sku) |> result.unwrap(0)
++    before + this >= line.quantity
+   })
+ }
+ 
+diff --git a/test/pilot/return_policy_test.gleam b/test/pilot/return_policy_test.gleam
+index d524f34..7148ca4 100644
+--- a/test/pilot/return_policy_test.gleam
++++ b/test/pilot/return_policy_test.gleam
+@@ -82,6 +82,22 @@ pub fn partial_refund_excludes_shipping_test() {
+     == RefundBreakdown(1800, 0, 80, 0, 0, 1880)
+ }
+ 
++pub fn returning_all_of_one_item_keeps_shipping_test() {
++  // The ticket case: 2 T-shirts and a mug; both T-shirts returned, mug kept.
++  let items = [Item("TEE", 2)]
++  assert return_policy.completes_order(delivered_on(0), items, dict.new())
++    == False
++  assert return_policy.refund_amount(
++      delivered_on(0),
++      quote(),
++      items,
++      dict.from_list([#("TEE", Apparel)]),
++      NoLongerNeeded,
++      return_policy.completes_order(delivered_on(0), items, dict.new()),
++    )
++    == RefundBreakdown(3600, 0, 161, 0, 0, 3761)
++}
++
+ pub fn whole_order_refund_includes_shipping_test() {
+   let items = [Item("TEE", 2), Item("MUG", 1)]
+   assert return_policy.completes_order(delivered_on(0), items, dict.new())
+diff --git a/test/pilot/returns_test.gleam b/test/pilot/returns_test.gleam
+index 5cf865d..f2f4105 100644
+--- a/test/pilot/returns_test.gleam
++++ b/test/pilot/returns_test.gleam
+@@ -56,6 +56,22 @@ pub fn returning_everything_refunds_shipping_test() {
+   assert last.refund.shipping_cents == 600
+ }
+ 
++pub fn partial_return_keeps_shipping_test() {
++  // The ticket case: 2 T-shirts and a mug; both T-shirts returned, mug kept.
++  let #(db, o, _) =
++    support.delivered(
++      seed.demo_store(),
++      seed.ada,
++      [#("TEE-M-BLK", 2), #("MUG-BLUE", 1)],
++      3,
++    )
++  let c = support.on_day(5)
++  let assert Ok(#(_, r)) =
++    returns.request(db, c, o.id, [Item("TEE-M-BLK", 2)], NoLongerNeeded)
++  assert r.refund.shipping_cents == 0
++  assert r.refund.total_cents == 3761
++}
++
+ pub fn electronics_restocking_fee_test() {
+   let #(db, o, _) =
+     support.delivered(seed.demo_store(), seed.ada, [#("PHONES-BLK", 1)], 3)

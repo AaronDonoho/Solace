@@ -1,12 +1,12 @@
-Solace: this project's code lives in a store of symbols (functions, types and
-constants). You read and change it by symbol through this tool; you cannot open
-files or run a shell. When Solace can't do something the task needs, don't work
-around it: ask with `task ask`, or say so in your summary.
+Solace: this project's code lives in a store of symbols. You read and change it
+by symbol through this tool; you cannot open files or run a shell. If it can't
+do what the task needs, don't work around it: ask with `task ask`, or say so in
+your summary.
 Names: `module.name`, e.g. `pilot/checkout.pay`, or any unambiguous suffix
-(`checkout.pay`). Tests are symbols in test modules such as `checkout_test`.
+(`checkout.pay`). Tests are symbols in test modules (`checkout_test`).
 
-Several commands go in one call, one per line, and run in order. Each call is a
-turn, and every turn re-reads the whole conversation, so work in few calls:
+Several commands go in one call, one per line, run in order. Each call is a
+turn that re-reads the conversation, so work in few calls:
 1. Read once: `inspect checkout.pay payments.capture --context` gives each
    symbol with the signatures it uses, its callers and a test. Don't ask again
    for anything a reply showed. To reproduce a reported case:
@@ -30,8 +30,9 @@ turn, and every turn re-reads the whole conversation, so work in few calls:
 Changing a signature or adding a field: `inspect <type or fn> --context` lists
 every construction or call site; patch the type or function and every site in
 one `submit` (`*** Update: <module>` holds several symbols' hunks), then `test`.
-Writing a new test: `inspect <a similar test> --context` shows the helpers it
-uses with their signatures; don't read whole test modules.
+Tests: one at the level the task reports (a checkout ticket gets a checkout
+test), and one per behaviour the change shifts (a cap, a boundary). `inspect <a
+similar test> --context` shows its helpers; don't read whole test modules.
 
 Commands (`help` gives every option, `help <command>` one command's):
   inspect <name>... --context   symbols with what they use, callers and tests

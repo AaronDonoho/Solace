@@ -1,0 +1,48 @@
+diff --git a/src/pilot/date.gleam b/src/pilot/date.gleam
+index eb788e7..acacd6f 100644
+--- a/src/pilot/date.gleam
++++ b/src/pilot/date.gleam
+@@ -112,7 +112,10 @@ pub fn add_business_days(date: Date, days: Int) -> Date {
+     True -> date
+     False -> {
+       let next = add_days(date, 1)
+-      add_business_days(next, days - 1)
++      case is_weekend(next) {
++        True -> add_business_days(next, days)
++        False -> add_business_days(next, days - 1)
++      }
+     }
+   }
+ }
+diff --git a/test/pilot/date_test.gleam b/test/pilot/date_test.gleam
+index 7cb0319..2ba4700 100644
+--- a/test/pilot/date_test.gleam
++++ b/test/pilot/date_test.gleam
+@@ -23,6 +23,12 @@ pub fn business_days_test() {
+   // Monday + 3 business days = Thursday
+   assert date.add_business_days(Date(2026, 3, 2), 3) == Date(2026, 3, 5)
+   assert date.add_business_days(Date(2026, 3, 2), 0) == Date(2026, 3, 2)
++  // Thursday + 4 business days skips the weekend: Fri, Mon, Tue, Wed
++  assert date.add_business_days(Date(2026, 3, 5), 4) == Date(2026, 3, 11)
++  // Friday + 1 business day is the following Monday
++  assert date.add_business_days(Date(2026, 3, 6), 1) == Date(2026, 3, 9)
++  // Starting on a weekend counts from the following Monday
++  assert date.add_business_days(Date(2026, 3, 7), 1) == Date(2026, 3, 9)
+ }
+ 
+ pub fn days_between_and_iso_test() {
+diff --git a/test/pilot/tax_shipping_test.gleam b/test/pilot/tax_shipping_test.gleam
+index fd9bee7..6b8ab72 100644
+--- a/test/pilot/tax_shipping_test.gleam
++++ b/test/pilot/tax_shipping_test.gleam
+@@ -47,3 +47,10 @@ pub fn estimate_delivery_test() {
+   let q = shipping.quote(Standard, "NJ", Domestic("NY"), 850, 0)
+   assert shipping.estimate_delivery(Date(2026, 3, 2), q) == Date(2026, 3, 6)
+ }
++
++pub fn estimate_delivery_skips_weekend_test() {
++  // Shipped Thursday 2026-03-05 from NJ to NY, national standard: 4 business
++  // days are Fri, Mon, Tue, Wed — the weekend must not count
++  let q = shipping.quote(Standard, "NJ", Domestic("NY"), 850, 0)
++  assert shipping.estimate_delivery(Date(2026, 3, 5), q) == Date(2026, 3, 11)
++}

@@ -38,9 +38,10 @@ def is_edit(block):
     """A tool call that changes code: a file edit, or a solace submit/delete."""
     if block.get("name") in EDIT_TOOLS:
         return True
-    command = block.get("input", {}).get("command", "").strip()
-    command = command.removeprefix("solace").strip()
-    return block.get("name", "").endswith("solace") and command.startswith(("submit", "delete"))
+    # several commands go one per line (run 21: `view …\nsubmit`)
+    lines = block.get("input", {}).get("command", "").splitlines()
+    return block.get("name", "").endswith("solace") and any(
+        l.strip().removeprefix("solace").strip().startswith(("submit", "delete")) for l in lines)
 TOOLS = "Read,Edit,Write,Glob,Grep,Bash"  # the only tools the agent sees
 ALLOWED_TOOLS = [  # and what runs without a permission prompt
     "Read", "Edit", "Write", "Glob", "Grep",

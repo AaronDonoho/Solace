@@ -583,14 +583,30 @@ fn own_tests(ix: &Index) -> HashMap<usize, Vec<usize>> {
     out
 }
 
-/// The uses (not the changed symbols), nearest first, those without a test of
-/// their own first within a step: (use, its tests).
+/// The uses (not the changed symbols): certain ones nearest first, those
+/// without a test of their own first within a step, then the possible ones
+/// (run 20: these crowded out the callers whose tests reach the change):
+/// (use, its tests).
 pub fn ranked<'a>(ix: &Index, impact: &'a Impact) -> Vec<(&'a Use, Vec<usize>)> {
     let own = own_tests(ix);
     let mut out: Vec<(&Use, Vec<usize>)> =
         impact.uses.iter().filter(|u| u.steps > 0).map(|u| (u, own.get(&u.sym).cloned().unwrap_or_default())).collect();
-    out.sort_by_key(|(u, t)| (u.steps, !t.is_empty(), !u.certain));
+    out.sort_by_key(|(u, t)| (!u.certain, u.steps, !t.is_empty()));
     out
+}
+
+/// "N possible uses: readers of fields another type also declares (…)", or nothing.
+fn possible_text(uses: &[(&Use, Vec<usize>)]) -> Option<String> {
+    let mut fields: Vec<&str> = vec![];
+    for (u, _) in uses.iter().filter(|(u, _)| !u.certain) {
+        let f = u.via.strip_prefix("reads ").unwrap_or(&u.via);
+        if !fields.contains(&f) {
+            fields.push(f);
+        }
+    }
+    let n = uses.iter().filter(|(u, _)| !u.certain).count();
+    let more = if fields.len() > 4 { format!(" and {} more", fields.len() - 4) } else { String::new() };
+    (n > 0).then(|| format!("{n} possible use{}: readers of a field another type also declares ({}{more})", if n == 1 { "" } else { "s" }, fields[..fields.len().min(4)].join(", ")))
 }
 
 fn fields_text(ix: &Index, impact: &Impact) -> String {
@@ -622,13 +638,15 @@ pub fn note(ix: &Index, impact: &Impact, suites: &[String]) -> Vec<String> {
         (true, false) => format!("callers, and readers of {}", fields_text(ix, impact)),
         (false, _) => format!("readers of {}", fields_text(ix, impact)),
     };
-    let mut out = vec![format!("Reaches {} use{}: {kinds}.", uses.len(), if uses.len() == 1 { "" } else { "s" })];
+    let sure = uses.iter().filter(|(u, _)| u.certain).count();
+    let maybe = if sure < uses.len() { format!(" (and {} possible)", uses.len() - sure) } else { String::new() };
+    let mut out = vec![format!("Reaches {sure} use{}{maybe}: {kinds}.", if sure == 1 { "" } else { "s" })];
     let untested: Vec<String> = uses
         .iter()
-        .filter(|(_, t)| t.is_empty())
+        .filter(|(u, t)| u.certain && t.is_empty())
         .map(|(u, _)| {
             let via = u.via.strip_prefix("reads ").map_or(String::new(), |f| format!(", reads {}", f.split_once('.').map_or(f, |p| p.1)));
-            format!("{} ({}{via}{})", short(ix, u.sym), steps(u.steps), if u.certain { "" } else { ", possible" })
+            format!("{} ({}{via})", short(ix, u.sym), steps(u.steps))
         })
         .collect();
     let all = format!("`impact {}` lists all.", origin.join(" "));
@@ -656,8 +674,9 @@ pub fn note(ix: &Index, impact: &Impact, suites: &[String]) -> Vec<String> {
 pub fn report(ix: &Index, impact: &Impact, suites: &[String], budget: usize) -> String {
     let origin: Vec<String> = impact.uses.iter().filter(|u| u.steps == 0).map(|u| short(ix, u.sym)).collect();
     let uses = ranked(ix, impact);
-    let mut out = format!("{} reach{} {} uses, nearest first:\n", origin.join(", "), if origin.len() == 1 { "es" } else { "" }, uses.len());
-    let mut tail = String::new();
+    let sure = uses.iter().filter(|(u, _)| u.certain).count();
+    let mut out = format!("{} reach{} {sure} uses, nearest first:\n", origin.join(", "), if origin.len() == 1 { "es" } else { "" });
+    let mut tail = possible_text(&uses).map_or(String::new(), |p| format!("And {p}; `refs <Type>.<field>` lists them\n"));
     if !impact.fields.is_empty() {
         let fields: Vec<String> = impact.fields.iter().map(|(t, f)| format!("{}.{f}", ix.syms[*t].name)).collect();
         tail += &format!("Fields: {}\n", fields.join(", "));
@@ -669,16 +688,16 @@ pub fn report(ix: &Index, impact: &Impact, suites: &[String], budget: usize) -> 
     if !suites.is_empty() {
         tail += &format!("Also reached: {}\n", suites.join(", "));
     }
-    for (k, (u, t)) in uses.iter().enumerate() {
+    for (k, (u, t)) in uses.iter().take(sure).enumerate() {
         let tests = match t.as_slice() {
             [] => "no test of its own".to_string(),
             [one] => format!("tested by {}", short(ix, *one)),
             [one, rest @ ..] => format!("tested by {} and {} more", short(ix, *one), rest.len()),
         };
         let line =
-            format!("  {} — {}, {}{}; {tests}\n", short(ix, u.sym), steps(u.steps), u.via, if u.certain { "" } else { " (possible)" });
+            format!("  {} — {}, {}; {tests}\n", short(ix, u.sym), steps(u.steps), u.via);
         if out.len() + line.len() + tail.len() + 60 > budget {
-            out += &format!("  … {} more not shown, to fit the size limit\n", uses.len() - k);
+            out += &format!("  … {} more not shown, to fit the size limit\n", sure - k);
             break;
         }
         out += &line;
@@ -724,6 +743,12 @@ mod tests {
         assert_eq!(total("report.totals"), Some(false));
         assert_eq!(total("report.rate"), None);
         assert!(impact.fields.iter().any(|(_, f)| f == "total") && !impact.fields.iter().any(|(_, f)| f == "discount"));
+        // run 20: possible uses come after the certain ones, as a count
+        let r = report(&ix, &impact, &[], 10_000);
+        assert!(r.contains("And 1 possible use: readers of a field another type also declares (Quote.total)"), "{r}");
+        assert!(!r.contains("report.totals"), "{r}");
+        let n = note(&ix, &impact, &[]);
+        assert!(n[0].contains("(and 1 possible)") && !n.iter().any(|l| l.contains("report.totals")), "{n:?}");
         // a record update: a field read from a tainted record counts only if that field is tainted
         let wrap = ix.syms.iter().position(|s| s.name == "wrap").unwrap();
         let fields = |marks: &[&str]| -> Vec<String> {
