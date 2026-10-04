@@ -197,7 +197,7 @@ Format: question, answer, rationale (and a check where one was run); a pending r
 - **Question:** Spec 14 §1 rule 8 puts every file no rule names in tier 4, so ordinary project files such as `README.md`, `bin/` and `docs/` are labelled ignored, `files` collapses their directories, and a `run`'s changes to them cannot be undone. Should unlisted files start in tier 3 instead?
 - **Answer:** Yes. A file no earlier rule matches is tier 3 when it is text within `resource_limit`, and tier 4 when binary or over the limit. Tier 4 then means only noise: `.git`, build and dependency output, anything `.gitignore` ignores, `ignore` patterns, and binary or oversized files.
 - **Humans must see the tiers:** the human view of the project (D-16's human UX) shows each file's tier and what that tier lets agents do.
-- **Open (pending):** whether `resources` is still needed, since it no longer changes a text file's tier; validators keep their own patterns.
+- **Settled by D-52:** `resources` is removed.
 
 ## D-29 Humans can delete notes — decided
 - **Question:** Notes are append-only, so a wrong or stale note stays on the task and goes into every later agent's brief. Can a human remove one?
@@ -373,3 +373,20 @@ Format: question, answer, rationale (and a check where one was run); a pending r
 ## D-51 The final column is `complete`, not `done` — decided
 - **Question:** An agent's `task done` moves a task to needs review, not to the `done` column, so the two meanings of "done" can be confused.
 - **Answer:** The default workflow's `done` column is renamed `complete`, matching the `complete` action that moves a task there. Task files saved in `done` load as `complete` unless the project's workflow still declares a `done` column.
+
+## D-52 File categories are named from Solace's side; `resources` is removed — decided
+- **Question:** Tiers 1–4 plus "settings" and "internal" are numbers and mixed words that say nothing about what Solace does with a file. Tier 2 (`gleam.toml`) differs from tier 3 only by a built-in validator and a refused `remove`. After D-28 makes unlisted text files tier 3, `resources` changes nothing (D-28's open part).
+- **Answer:** Five categories, named for what Solace does with the file, not what an agent may do:
+  1. **graph:** source the store holds as symbols (was tier 1).
+  2. **watched:** every other text file within the size limit, including `gleam.toml` (was tiers 2 and 3). `gleam.toml` keeps its built-in validator and can't be removed.
+  3. **protected:** `solace.toml` and `AGENTS.md` (was settings).
+  4. **unwatched:** `.git/`, build and dependency output, anything `.gitignore` ignores, paths listed in `unwatched`, and binary or oversized files (was tier 4). Agents may still create, read, write and remove them; Solace doesn't search them (D-26 unchanged).
+  5. **internal:** `.solace/`, Solace's own files; no agent access.
+  
+  In `solace.toml`, `resources` is removed, `ignore` is renamed `unwatched`, and `resource_limit` is renamed `watch_limit`. The old keys are an invalid `solace.toml` (`E6020`) whose message says what to do.
+- **Rationale:** the names say what Solace does with a file; tiers 2 and 3 had the same permissions; with D-28, `resources` no longer decides anything.
+
+## D-53 Contract view: no title block, plain revision border, keyboard, source diff — decided
+- **Question:** Aaron's review of the contract view: the title block in the bottom right had no clear purpose and hid nodes; a pan could select or open nodes; opening a node recentred the sheet; there were no keys for moving around; the revision cloud looked odd; Show source gave text, not what changed.
+- **Answer:** The title block is removed; the project name and the task under review are in the header, and the revision key (REV A added, B changed, C removed) is in the legend. A drag pans and never selects or opens. Opening a node moves the sheet only to bring an out-of-view or covered node into view. Keys: arrows/WASD move between nodes, Shift+arrows/WASD pan, Ctrl+Up/Down zoom, Space expands, C collapses, Enter opens. A changed node has a plain border in the revision colour. With a task, Show source gives the symbol's line diff from before the task.
+- **Not done:** Ctrl+W and Ctrl+S for zoom. Browsers don't let a page intercept Ctrl+W (it closes the tab), so neither is mapped.

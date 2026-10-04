@@ -98,11 +98,10 @@ A `solace.toml` in the project root holds the project's Solace settings. `solace
 An `AGENTS.md` in the project root holds your instructions for agents: conventions, domain rules, things to avoid. Every agent gets it first when its session starts, through Solace, whichever agent you run. Like `solace.toml`, only humans change it; an agent can propose a change, which you approve or reject on the task.
 
 ```toml
-resource_limit = 262144                   # bytes; larger files can't be resources
-resources = ["priv/**/*.html", "docs/**/*.md"]
-ignore    = ["priv/generated/"]
+watch_limit = 262144                      # bytes; larger files are unwatched
+unwatched   = ["priv/generated/"]          # files Solace doesn't watch or search
 
-[validators]                              # checked before a resource change is kept
+[validators]                              # checked before a file change is kept
 "priv/**/*.html" = ["tidy", "-q", "-e", "{file}"]
 
 [commands]                                # commands agents may run
@@ -116,18 +115,17 @@ The `[board]` section changes the task workflow: its columns, the actions allowe
 
 ### What agents can touch
 
-Every file in the project falls into one tier (details in [specs/14-lockdown.md](specs/14-lockdown.md)):
+Solace puts every file in the project into one category, named for what Solace does with it (details in [specs/14-lockdown.md](specs/14-lockdown.md)):
 
-| Tier | Files | Agents |
+| Category | Files | Agents |
 | --- | --- | --- |
-| 1 Source | Gleam files under `src/` and `test/` | read and change symbols through Solace, never as files |
-| 2 Manifest | `gleam.toml` | read and write through Solace |
-| 3 Resources | files matching `resources` in `solace.toml` | read and write through Solace, checked by any validator |
-| 4 Ignored | everything else, including build output, logs and `.gitignore`d files | read and write through Solace; excluded from symbol searches |
+| Graph | Gleam files under `src/` and `test/`, held as symbols | read and change symbols through Solace, never as files |
+| Watched | every other text file within `watch_limit`, including `gleam.toml` | read and write through Solace, checked by any validator; a task's changes are undone with it |
+| Protected | `solace.toml`, `AGENTS.md` | read; in a board work run, propose a change that you approve or reject on the task |
+| Unwatched | `.git/`, build output, `.gitignore`d files, paths listed in `unwatched`, binary or oversized files | read and write through Solace |
 | Internal | `.solace/` (store, board data) | no access |
-| Settings | `solace.toml`, `AGENTS.md` | read; in a board work run, propose a change that you approve or reject on the task |
 
-Files such as `README.md` and `bin/coolcalc` need no `resources` entry to be writable. File writes still enforce `resource_limit`, stale-write checks and any matching validators. Both resource and ignored file contents stay out of symbol searches. Running a launcher still requires a declared command; writing a script does not set its executable bit.
+File writes enforce `watch_limit`, stale-write checks and any matching validators. `gleam.toml` must still parse after a write and can't be removed. Watched and unwatched file contents stay out of symbol searches. Running a launcher still requires a declared command; writing a script does not set its executable bit.
 
 Agents get no shell and no file tools, only the Solace MCP tool and web access. Humans shouldn't edit source files directly either. Solace rewrites them from the store and doesn't keep edits made on disk.
 

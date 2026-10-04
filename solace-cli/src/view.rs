@@ -230,14 +230,14 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
         }
     }
     for (name, tier) in files {
-        let sentence = if tier.starts_with('2') {
-            "Tier 2: the project manifest is managed through Solace."
-        } else if tier.starts_with('3') {
-            "Tier 3: agents can read and write it; changes are undone with the task."
-        } else if tier == "settings" {
-            "Settings: only the human can change it."
+        let sentence = if name == "gleam.toml" {
+            "Watched: the project manifest. Agents can change it if it still parses; changes are undone with the task."
+        } else if tier == "watched" {
+            "Watched: agents can read and write it; changes are undone with the task."
+        } else if tier == "protected" {
+            "Protected: agents can read it; their changes wait for your approval."
         } else {
-            "Tier 4: agents can read and write it; it isn't searched as code, and changes are undone with the task."
+            "Unwatched: Solace doesn't search it as code. Agents can read and write it; their direct edits are undone with the task."
         };
         nodes.push(json!({"id":format!("file:{name}"),"kind":"file","name":name,"module":"","summary":"","signature":"","known":"derived","tests":0,"changed":changed.contains(&format!("file:{name}")),"tier":tier,"sentence":sentence}));
     }
@@ -635,6 +635,24 @@ pub fn api(
             }
             Ok(g)
         }
+        ("GET", ["nodes", id]) if query.get("source").is_some_and(|v| v == "1") => {
+            // A symbol's text; with a task, also the line diff from before the task (removed symbols too).
+            let text = |v| -> Result<Option<String>, Failure> { Ok(version(s, v)?.syms.into_iter().find(|sym| sym.id == *id).map(|sym| sym.text)) };
+            let now = text(Version::Current)?;
+            let before = match query.get("task") {
+                Some(tid) => text(Version::Before(tid))?,
+                None => None,
+            };
+            if now.is_none() && before.is_none() {
+                return board::err("E7001", "unknown node");
+            }
+            let mut out = json!({"source": now.clone().unwrap_or_default()});
+            if query.contains_key("task") {
+                let ops = board::diff_ops(before.as_deref().unwrap_or(""), now.as_deref().unwrap_or(""));
+                out["diff"] = json!(ops.iter().map(|(op, line)| [op.to_string(), line.to_string()]).collect::<Vec<_>>());
+            }
+            Ok(out)
+        }
         ("GET", ["nodes", id]) => {
             let g = graph(s)?;
             let mut node = g["nodes"]
@@ -667,11 +685,6 @@ pub fn api(
                         })
                         .collect::<Vec<_>>()
                 );
-            }
-            if query.get("source").is_some_and(|v| v == "1")
-                && let Some(sym) = s.index()?.syms.iter().find(|sym| sym.id == *id)
-            {
-                node["source"] = json!(sym.text);
             }
             Ok(node)
         }
@@ -788,7 +801,7 @@ pub fn main_test() {
         fs::create_dir_all(root.join("src")).unwrap();fs::create_dir_all(root.join("priv")).unwrap();
         fs::write(root.join("src/app.gleam"),"pub fn main() { 1 }\n").unwrap();
         fs::write(root.join("gleam.toml"),"name=\"fixture\"\nversion=\"1.0.0\"\n").unwrap();
-        fs::write(root.join("solace.toml"),"resources=[\"priv/**\"]\n").unwrap();
+        fs::write(root.join("solace.toml"),"unwatched=[\"priv/gen/\"]\n").unwrap();
         fs::write(root.join("priv/a"),"hello").unwrap();
         import(&root).unwrap();
         let settings=lockdown::settings(&root).unwrap();
@@ -813,6 +826,14 @@ pub fn main_test() {
         let id=g["nodes"].as_array().unwrap().iter().find(|n|n["kind"]=="entry").unwrap()["id"].as_str().unwrap();
         let node=board::api(&root,"GET",&format!("/nodes/{id}?source=1"),json!({})).unwrap();
         assert!(node["source"].as_str().unwrap().contains("pub fn main"));
+        // With a task, the source comes with its line diff from before the task.
+        let store=board::open(&root).unwrap();
+        let mut old=board::snapshot(&store).unwrap()[format!("symbol:{id}")].clone();
+        old[4]=json!("pub fn main() {\n  0\n}");
+        store.db.execute("INSERT INTO board_before VALUES ('t1',?1,?2)",[format!("symbol:{id}"),old.to_string()]).unwrap();
+        let diff=board::api(&root,"GET",&format!("/nodes/{id}?source=1&task=t1"),json!({})).unwrap();
+        assert_eq!(diff["diff"],json!([["-","pub fn main() {"],["-","  0"],["-","}"],["+","pub fn main() { 1 }"]]));
+        assert!(board::api(&root,"GET","/nodes/fn:app.nope?source=1&task=t1",json!({})).is_err());
         fs::write(root.join("gleam.toml"), "version=\"1.0.0\"\n").unwrap();
         let fallback=board::api(&root,"GET","/graph",json!({})).unwrap();
         assert_eq!(fallback["project"]["name"], root.file_name().unwrap().to_str().unwrap());

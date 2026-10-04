@@ -56,7 +56,7 @@ table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid 
 <p>Every run of an agent is listed under <em>Runs</em> on the task, newest first. <em>Follow live</em> shows what the agent is doing as it happens: its messages, its thinking, and each Solace command it runs. Open a command to see what it sent and what came back; a ✗ marks a command that failed. <em>Show activity</em> does the same for a run that has ended. It's a view only, so you can't interrupt or talk to the agent from it. Use a note, an answer or pause for that.</p>
 
 <h3>Undoing a task</h3>
-<p><em>Cancel</em> and <em>start over</em> undo everything the task changed, bringing the code and resource files back to how they were before it started. Solace refuses to undo a task when that would affect another open task: if a later task changed the same code, or depends on something this task added. The refusal names the other task, so you can undo that one first or leave things as they are.</p>
+<p><em>Cancel</em> and <em>start over</em> undo everything the task changed, bringing the code and files back to how they were before it started. Solace refuses to undo a task when that would affect another open task: if a later task changed the same code, or depends on something this task added. The refusal names the other task, so you can undo that one first or leave things as they are.</p>
 <p>Solace doesn't keep a history beyond that. Use your own version control (such as git) for history.</p>
 
 <h2>Models</h2>
@@ -93,27 +93,26 @@ endpoint = { kind = "anthropic", base_url = "https://llm-proxy.example.com", key
 </ul>
 
 <h2>Contract view</h2>
-<p>When a task changes the project, its detail panel shows a review summary and a link to the contract view. The graph reports entry points, logic, derived effects, tests and project files. Effects are inferred from known calls and external declarations; they are not guarantees. Review compares the current project with its state before the task, and you can run the task's tests from the view API. Open <a href="/view">Contract view</a> to explore the drawing sheet. Search by name or summary, select a box to expand its connections and read its detail, or open Files for each file’s tier. Overview fits the whole drawing; disconnected entries fill rows. The title block identifies the project and store version. A note says when no effects were found. On a phone, open Legend for kind colours and connector meanings. Drag the sheet or use the zoom buttons; keyboard users can focus a box and press Enter. A task’s review link marks additions, changes and removals and runs its tests when needed. Use Show source only when you want the source text. Run forms and replay come later.</p>
-<p>File tiers in the graph describe how Solace treats each file. Tier 2 is the managed manifest. Tier 3 resources can be changed by agents and are restored when a task is undone. Tier 4 files are outside Solace's tracked resources. Project settings are for the human to change.</p>
+<p>When a task changes the project, its detail panel shows a review summary and a link to the contract view. The graph reports entry points, logic, derived effects, tests and project files. Effects are inferred from known calls and external declarations; they are not guarantees. Review compares the current project with its state before the task, and you can run the task's tests from the view API. Open <a href="/view">Contract view</a> to explore the drawing sheet. Search by name or summary, select a box to expand its connections and read its detail, or open Files for each file’s category. Overview fits the whole drawing; disconnected entries fill rows. The header names the project and the task under review. A note says when no effects were found. On a phone, open Legend for kind colours and connector meanings. Drag the sheet to pan (dragging never selects), or use the zoom buttons. Keys: arrows or WASD move between boxes, Shift with them pans, Ctrl+Up and Ctrl+Down zoom, Space expands a box, C collapses it and Enter opens it. A task’s review link marks additions, changes and removals and runs its tests when needed. Show source gives the source text; for a function the task changed, it shows what changed. Run forms and replay come later.</p>
+<p>Each file in the graph is labelled with how Solace treats it: watched, protected or unwatched, as described below.</p>
 <h2>What agents can touch</h2>
-<p>Every file in the project is in one of these groups:</p>
+<p>Solace puts every file in the project into one category, named for what Solace does with it:</p>
 <table>
-<tr><th>Group</th><th>Files</th><th>What agents can do</th></tr>
-<tr><td>Source</td><td>Gleam files in <code>src/</code> and <code>test/</code></td><td>Read and change code through Solace, one entry at a time</td></tr>
-<tr><td>Manifest</td><td><code>gleam.toml</code></td><td>Read and write</td></tr>
-<tr><td>Resources</td><td>Files you list under <code>resources</code> in <code>solace.toml</code></td><td>Read and write, checked by any validator you declare</td></tr>
-<tr><td>Ignored</td><td>Everything else: build output, logs, anything <code>.gitignore</code> ignores</td><td>Read and write; excluded from symbol searches</td></tr>
-<tr><td>Solace's own</td><td><code>.solace/</code> and <code>solace.toml</code></td><td>Nothing, except reading <code>solace.toml</code></td></tr>
+<tr><th>Category</th><th>Files</th><th>What agents can do</th></tr>
+<tr><td>Graph</td><td>Gleam files in <code>src/</code> and <code>test/</code>, held as symbols</td><td>Read and change code through Solace, one entry at a time</td></tr>
+<tr><td>Watched</td><td>Every other text file up to the size limit, including <code>gleam.toml</code></td><td>Read and write, checked by any validator you declare; undoing a task restores them</td></tr>
+<tr><td>Protected</td><td><code>solace.toml</code> and <code>AGENTS.md</code></td><td>Read; a change they want waits for your approval</td></tr>
+<tr><td>Unwatched</td><td><code>.git/</code>, build output, anything <code>.gitignore</code> ignores, paths you list under <code>unwatched</code>, binary or oversized files</td><td>Read and write</td></tr>
+<tr><td>Internal</td><td><code>.solace/</code>, Solace's own files</td><td>Nothing</td></tr>
 </table>
-<p>Resource patterns classify files; they do not grant write access. Agents can also update ignored files such as <code>README.md</code> or create <code>bin/coolcalc</code> without changing the patterns. File writes are limited to 256 KiB unless you change the limit, and require a current read or an exact replacement. Resource and ignored file contents never appear in symbol searches.</p>
+<p>File writes are limited to 256 KiB unless you change <code>watch_limit</code>, and require a current read or an exact replacement. Watched and unwatched file contents never appear in symbol searches.</p>
 
 <h2>Settings</h2>
 <p><code>solace.toml</code> in the project's root holds the project's settings. Import creates a starter file if it is missing and preserves an existing one. Only you edit it; agents can read it, and an agent that needs a change has to ask you. Every part is optional.</p>
-<pre>resource_limit = 262144                    # bytes
-resources = ["priv/**/*.html", "docs/**/*.md"]
-ignore    = ["priv/generated/"]
+<pre>watch_limit = 262144                       # bytes
+unwatched   = ["priv/generated/"]
 
-[validators]                               # must pass before a resource change is kept
+[validators]                               # must pass before a file change is kept
 "priv/**/*.html" = ["tidy", "-q", "-e", "{file}"]
 
 [commands]                                 # extra commands agents may run

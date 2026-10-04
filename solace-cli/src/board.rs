@@ -481,7 +481,7 @@ pub(super) fn changed_lines(a: &str, b: &str) -> Vec<usize> {
     out.dedup();
     out
 }
-fn diff_ops<'a>(a: &'a str, b: &'a str) -> Vec<(char, &'a str)> {
+pub fn diff_ops<'a>(a: &'a str, b: &'a str) -> Vec<(char, &'a str)> {
     let (a, b): (Vec<_>, Vec<_>) = (a.lines().collect(), b.lines().collect());
     let pre = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
     let suf = a[pre..].iter().rev().zip(b[pre..].iter().rev()).take_while(|(x, y)| x == y).count();
@@ -537,7 +537,7 @@ pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
                 }
                 if entry.file_type()?.is_dir() {
                     collect(root, &p, settings, out)?;
-                } else if matches!(lockdown::tier(root, settings, &name, None).chars().next(), Some('2' | '3')) {
+                } else if lockdown::tier(root, settings, &name, None) == "watched" {
                     out[format!("file:{name}")] = json!(fs::read(&p)?);
                 }
             }

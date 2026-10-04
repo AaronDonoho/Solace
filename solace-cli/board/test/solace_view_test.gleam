@@ -47,3 +47,19 @@ pub fn connectors_meet_the_facing_box_sides_test() {
   solace_view.connector(below, origin)
   |> should.equal("M 110.0 156.0 V 138.0 H 110.0 V 120.0")
 }
+
+pub fn arrow_keys_move_to_the_nearest_box_in_line_test() {
+  let a = solace_view.Point("a", 0.0, 0.0)
+  let points = [
+    a,
+    solace_view.Point("right", 252.0, 0.0),
+    solace_view.Point("far_right", 504.0, 0.0),
+    solace_view.Point("down_right", 252.0, 156.0),
+    solace_view.Point("down", 0.0, 156.0),
+  ]
+  solace_view.nearest(points, a, "right") |> should.equal(Ok("right"))
+  solace_view.nearest(points, a, "down") |> should.equal(Ok("down"))
+  solace_view.nearest(points, a, "left") |> should.equal(Error(Nil))
+  solace_view.nearest(points, solace_view.Point("x", 252.0, 156.0), "up")
+  |> should.equal(Ok("right"))
+}

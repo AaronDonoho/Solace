@@ -103,3 +103,26 @@ export function after_draw(callback) {
   const frame = globalThis.requestAnimationFrame || (fn => setTimeout(fn, 0));
   (globalThis.document?.fonts?.ready || Promise.resolve()).then(() => frame(() => frame(callback)));
 }
+
+// Diagram keys: arrows/WASD move between boxes; with Shift they pan, Ctrl+Up/Down zoom;
+// Space expands, C collapses, Enter opens. Typing in a field or pressing a button is left alone.
+const directions = { ArrowLeft: 'left', a: 'left', ArrowRight: 'right', d: 'right', ArrowUp: 'up', w: 'up', ArrowDown: 'down', s: 'down' };
+export function keys(send) {
+  globalThis.document?.addEventListener('keydown', event => {
+    if (event.altKey || event.metaKey || event.target.closest?.('input,textarea,select,button,a,summary,[contenteditable]')) return;
+    const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+    const direction = directions[key];
+    let action = '';
+    // Ctrl+W and Ctrl+S stay the browser's: Ctrl+W closes the tab and can't be intercepted.
+    if (event.ctrlKey) action = { ArrowUp: 'zoom-in', ArrowDown: 'zoom-out' }[key] || '';
+    else if (direction) action = (event.shiftKey ? 'pan-' : '') + direction;
+    else action = { ' ': 'expand', c: 'collapse', Enter: 'open' }[key] || '';
+    if (!action) return;
+    event.preventDefault();
+    send(action);
+  });
+}
+export function focus_node(id) {
+  const frame = globalThis.requestAnimationFrame || (fn => setTimeout(fn, 0));
+  frame(() => globalThis.document?.querySelector(`[data-node="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }));
+}

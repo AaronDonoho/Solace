@@ -19,7 +19,7 @@ class Board(unittest.TestCase):
         (self.root/'src').mkdir()
         (self.root/'src/app.gleam').write_text('pub fn one() { 1 }\n\npub fn two() { 2 }\n\npub fn removed() { 3 }\n')
         (self.root/'gleam.toml').write_text('name="fixture"\nversion="1.0.0"\ntarget="javascript"\n')
-        (self.root/'solace.toml').write_text('resources=["priv/**"]\n')
+        (self.root/'solace.toml').write_text('unwatched=["priv/gen/"]\n')
         (self.root/'priv').mkdir()
         (self.root/'priv/a').write_text('original')
         config=self.root/'system.toml'
@@ -386,9 +386,9 @@ class Board(unittest.TestCase):
         agents.unlink()
     def test_a17_settings_proposals(self):
         settings=self.root/'solace.toml';original=settings.read_text()
-        add={'command':'write solace.toml --replace','old':'resources=["priv/**"]','text':'resources=["priv/**"]\n[commands]\nbuild={run=["true"]}'}
-        t=self.assign([{'command':'write solace.toml','text':'resource_limit=-1'},add,add,{'command':'run build'},
-                       {'command':'write solace.toml --replace','old':'resources','text':'ignore=["x"]\nresources'},{'command':'task done done'}])
+        add={'command':'write solace.toml --replace','old':'unwatched=["priv/gen/"]','text':'unwatched=["priv/gen/"]\n[commands]\nbuild={run=["true"]}'}
+        t=self.assign([{'command':'write solace.toml','text':'watch_limit=-1'},add,add,{'command':'run build'},
+                       {'command':'write solace.toml --replace','old':'unwatched','text':'watch_limit=1\nunwatched'},{'command':'task done done'}])
         t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting');rid=t['runs'][-1]['id']
         self.assertEqual(len(t['questions']),1);q=t['questions'][0]  # the invalid proposal added none
         self.assertEqual(q['options'],['Approve','Reject']);self.assertEqual(q['settings']['base'],original);self.assertIn('build',q['settings']['proposed'])
@@ -399,7 +399,7 @@ class Board(unittest.TestCase):
         t=self.wait(t,lambda x:len(x['questions'])==3 and x['runs'][-1]['state']=='waiting');approved=settings.read_text();self.assertIn('build',approved)
         settings.write_text(approved+'# human edit\n')
         self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][2]["id"]}',{'option':'Approve'})
-        t=self.wait(t,lambda x:x['column']=='needs_review');self.assertNotIn('ignore',settings.read_text())
+        t=self.wait(t,lambda x:x['column']=='needs_review');self.assertNotIn('watch_limit',settings.read_text())
         self.assertTrue(t['questions'][2]['answer'].startswith('Not applied'));self.assertEqual(t['runs'][-1]['id'],rid)
         responses=[json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(rid+'.responses')).read_text().splitlines()]
         self.assertIn('E6020',responses[0]);self.assertIn('Reject',responses[1]);self.assertIn('Approved',responses[2]);self.assertIn('exit code: 0',responses[3])
@@ -499,7 +499,7 @@ class Board(unittest.TestCase):
         start=time.monotonic();self.api('GET','/tasks');self.get(t)
         self.assertLess(time.monotonic()-start,1)
         self.wait(t,lambda x:x['runs'][-1]['state']=='ended')  # the fixture's 2-second timeout ends it
-    def test_declared_run_resources_revert(self):
+    def test_declared_run_watched_files_revert(self):
         config=self.root/'solace.toml'
         config.write_text(config.read_text()+'\n[commands]\nedit={run=["python3","-c",'+json.dumps("from pathlib import Path; Path('priv/a').write_text('changed'); Path('priv/created').write_text('new')")+']}\n')
         t=self.completed([{'command':'run edit'}])

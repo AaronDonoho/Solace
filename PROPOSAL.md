@@ -344,17 +344,17 @@ Replies report what changed rather than repeating everything. After a submission
 
 Each agent session runs with limited permissions: the namespaces it may change, the side effects its test runs may use, and limits on time and compute. Sessions are isolated from each other and from production. Every operation is recorded in a history tied to the session and its work records.
 
-The lockdown spec builds this for projects in an existing language. Solace sorts the project's files into tiers:
+The lockdown spec builds this for projects in an existing language. Solace sorts the project's files into categories, named for what Solace does with each (D-52):
 
-| Tier | Contents | What an agent may do |
+| Category | Contents | What an agent may do |
 | --- | --- | --- |
-| 1 Source | Code, held as symbols | Read and change through the symbol commands only, never as files |
-| 2 Manifest | The project manifest, such as `gleam.toml` | Read and write through Solace. Later, a typed record changed through commands, with the file generated from it |
-| Settings | `solace.toml` and `AGENTS.md`, owned by humans | Read, and propose changes that a human approves on the board (section 5.4) |
-| 3 Resources | Every other text file under a size limit, such as HTML, YAML, SQL, infrastructure definitions, test fixtures and documentation | Read and write through Solace, checked by any validator declared for that kind of file |
-| 4 Ignored | Version-control data, build and dependency output, files ignored by `.gitignore` or listed in the settings, and binary or oversized files | Read and write through Solace. Left out of search |
+| Graph | Code, held as symbols | Read and change through the symbol commands only, never as files |
+| Watched | Every other text file under a size limit, such as HTML, YAML, SQL, infrastructure definitions, test fixtures, documentation and the project manifest (`gleam.toml`) | Read and write through Solace, checked by any validator declared for that kind of file. The manifest has a built-in validator and can't be removed; later it becomes a typed record changed through commands, with the file generated from it |
+| Protected | `solace.toml` and `AGENTS.md`, owned by humans | Read, and propose changes that a human approves on the board (section 5.4) |
+| Unwatched | Version-control data, build and dependency output, files ignored by `.gitignore` or listed in the settings, and binary or oversized files | Read and write through Solace. Left out of search |
+| Internal | Solace's own data (`.solace/`, including the task board's data) | Nothing; out of reach |
 
-Solace's own data (`.solace/`, including the task board's data) is out of reach. Solace keeps no history for files outside tier 1, since history is version control's job. It does keep a content hash for each file, so it can refuse an edit made on top of a change it has not seen. Agents run only the commands Solace runs for them: check, test, build, format, and any commands humans declare in the settings, each with a timeout. Every edit a task makes is recorded and can be reverted, except memory edits (section 5.5). The same goes for changes a command makes to any tier except ignored files. Humans do not edit tier 1 files on disk, because Solace rewrites them from the store whenever it needs to. The human view shows each file's tier and what that tier lets agents do.
+Solace keeps no history for files outside the graph, since history is version control's job. It does keep a content hash for each file, so it can refuse an edit made on top of a change it has not seen. Agents run only the commands Solace runs for them: check, test, build, format, and any commands humans declare in the settings, each with a timeout. Every edit a task makes is recorded and can be reverted, except memory edits (section 5.5). The same goes for changes a command makes to any tier except ignored files. Humans do not edit tier 1 files on disk, because Solace rewrites them from the store whenever it needs to. The human view shows each file's tier and what that tier lets agents do.
 
 Solace runs models through outside agent programs, such as the Codex CLI and Claude Code, and stores no credentials. For each run it writes a separate configuration for the agent program, with no user settings, plugins, memory or other tools. The configuration includes what that program needs to use the Solace tool well, such as its limit on tool output. Investigation and review runs are read-only: they can read, test and probe, but they cannot change the project.
 

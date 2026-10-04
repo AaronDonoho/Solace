@@ -48,6 +48,12 @@ fn viewport_width() -> Float
 @external(javascript, "./layout.mjs", "viewport_height")
 fn viewport_height() -> Float
 
+@external(javascript, "./layout.mjs", "keys")
+fn keys(receive: fn(String) -> Nil) -> Nil
+
+@external(javascript, "./layout.mjs", "focus_node")
+fn focus_node(id: String) -> Nil
+
 pub type Node {
   Node(
     id: String,
@@ -133,6 +139,7 @@ pub type Model {
     selected: String,
     detail: Option(Node),
     source: String,
+    diff: List(#(String, String)),
     search: String,
     files: Bool,
     zoom: Float,
@@ -141,6 +148,8 @@ pub type Model {
     dragging: Bool,
     drag_x: Float,
     drag_y: Float,
+    travel: Float,
+    focus: String,
     task: String,
     error: String,
     tests_requested: Bool,
@@ -151,6 +160,9 @@ pub type Model {
 pub type Msg {
   Loaded(String)
   Select(String)
+  Click(String)
+  Focused(String)
+  Key(String)
   Detail(String)
   Source(String)
   Search(String)
@@ -508,6 +520,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       "",
       None,
       "",
+      [],
       "",
       False,
       1.0,
@@ -516,6 +529,8 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       False,
       0.0,
       0.0,
+      0.0,
+      "",
       task,
       "",
       False,
@@ -523,6 +538,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     ),
     effect.batch([
       get(path, Loaded),
+      effect.from(fn(send) { keys(fn(key) { send(Key(key)) }) }),
       case task {
         "" -> effect.none()
         _ -> effect.from(fn(send) { events(fn(data) { send(Live(data)) }) })
@@ -616,23 +632,13 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             expanded: expanded,
             files: False,
             source: "",
+            diff: [],
             search: "",
             review_open: False,
+            focus: id,
           ),
         )
-      let Point(_, x, y) = point(next, id)
-      let width = case viewport_width() >. 650.0 {
-        True -> viewport_width() -. 410.0
-        False -> viewport_width()
-      }
-      let next =
-        Model(
-          ..next,
-          zoom: 1.0,
-          pan_x: x -. width /. 2.0 +. 110.0,
-          pan_y: y -. viewport_height() /. 2.0 +. 60.0,
-          detail: n(model, id),
-        )
+      let next = Model(..reveal(next, id, True), detail: n(model, id))
       case n(model, id) {
         Some(node) if node.removed -> #(
           Model(..next, detail: Some(node)),
@@ -652,9 +658,20 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           effect.none(),
         )
       }
+    Click(id) ->
+      case model.travel >. 4.0 {
+        // The click that ends a pan selects nothing.
+        True -> #(model, effect.none())
+        False -> update(model, Select(id))
+      }
+    Focused(id) -> #(Model(..model, focus: id), effect.none())
+    Key(key) -> keyboard(model, key)
     Source(text) ->
-      case json.parse(text, decode.at(["source"], decode.string)) {
-        Ok(source) -> #(Model(..model, source: source), effect.none())
+      case json.parse(text, source_decoder()) {
+        Ok(#(source, diff)) -> #(
+          Model(..model, source: source, diff: diff),
+          effect.none(),
+        )
         Error(_) -> #(
           Model(..model, error: "Source could not be read."),
           effect.none(),
@@ -698,12 +715,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       fit_after_render(),
     )
     Fit -> #(fit(model), effect.none())
-    Zoom(amount) -> #(
-      Model(..model, zoom: float.clamp(model.zoom *. amount, 0.02, 2.5)),
-      effect.none(),
-    )
+    Zoom(amount) -> #(zoom(model, amount), effect.none())
     PanStart(x, y) -> #(
-      Model(..model, dragging: True, drag_x: x, drag_y: y),
+      Model(..model, dragging: True, drag_x: x, drag_y: y, travel: 0.0),
       effect.none(),
     )
     PanMove(x, y) ->
@@ -711,8 +725,19 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         True -> {
           let px = model.pan_x +. { model.drag_x -. x } /. model.zoom
           let py = model.pan_y +. { model.drag_y -. y } /. model.zoom
+          let travel =
+            model.travel
+            +. float.absolute_value(x -. model.drag_x)
+            +. float.absolute_value(y -. model.drag_y)
           #(
-            Model(..model, pan_x: px, pan_y: py, drag_x: x, drag_y: y),
+            Model(
+              ..model,
+              pan_x: px,
+              pan_y: py,
+              drag_x: x,
+              drag_y: y,
+              travel: travel,
+            ),
             effect.none(),
           )
         }
@@ -739,7 +764,19 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
         _ -> #(model, effect.none())
       }
-    SelectSource(id) -> #(model, get("/nodes/" <> id <> "?source=1", Source))
+    SelectSource(id) -> #(
+      model,
+      get(
+        "/nodes/"
+          <> id
+          <> "?source=1"
+          <> case model.task {
+          "" -> ""
+          task -> "&task=" <> task
+        },
+        Source,
+      ),
+    )
     Close -> #(
       Model(
         ..model,
@@ -747,10 +784,142 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         detail: None,
         files: False,
         source: "",
+        diff: [],
         review_open: False,
       ),
       effect.none(),
     )
+  }
+}
+
+fn source_decoder() -> decode.Decoder(#(String, List(#(String, String)))) {
+  let line = {
+    use op <- decode.field(0, decode.string)
+    use text <- decode.field(1, decode.string)
+    decode.success(#(op, text))
+  }
+  use source <- decode.field("source", decode.string)
+  use diff <- decode.optional_field("diff", [], decode.list(line))
+  decode.success(#(source, diff))
+}
+
+/// Zooms about the middle of the drawing, so what is in view stays in view.
+fn zoom(model: Model, amount: Float) -> Model {
+  let zoom = float.clamp(model.zoom *. amount, 0.02, 2.5)
+  let half_w = viewport_width() /. 2.0
+  let half_h = viewport_height() /. 2.0
+  Model(
+    ..model,
+    zoom: zoom,
+    pan_x: model.pan_x +. half_w /. model.zoom -. half_w /. zoom,
+    pan_y: model.pan_y +. half_h /. model.zoom -. half_h /. zoom,
+  )
+}
+
+/// Pans the least distance that brings a node into view; a node already in view
+/// doesn't move. `panel`: the detail panel covers the right of a wide sheet.
+fn reveal(model: Model, id: String, panel: Bool) -> Model {
+  let Point(_, x, y) = point(model, id)
+  let width = case panel && viewport_width() >. 650.0 {
+    True -> viewport_width() -. 410.0
+    False -> viewport_width()
+  }
+  let w = width /. model.zoom
+  let h = viewport_height() /. model.zoom
+  let into = fn(pan, at, size, view) {
+    case at -. 16.0 <. pan, at +. size +. 16.0 >. pan +. view {
+      True, _ -> at -. 16.0
+      _, True -> at +. size +. 16.0 -. view
+      _, _ -> pan
+    }
+  }
+  Model(
+    ..model,
+    pan_x: into(model.pan_x, x, 220.0, w),
+    pan_y: into(model.pan_y, y, 120.0, h),
+  )
+}
+
+/// The nearest node from `from` in a direction, preferring ones in line with it.
+pub fn nearest(
+  points: List(Point),
+  from: Point,
+  direction: String,
+) -> Result(String, Nil) {
+  points
+  |> list.filter_map(fn(p) {
+    let dx = p.x -. from.x
+    let dy = p.y -. from.y
+    let #(ahead, aside) = case direction {
+      "left" -> #(0.0 -. dx, dy)
+      "right" -> #(dx, dy)
+      "up" -> #(0.0 -. dy, dx)
+      _ -> #(dy, dx)
+    }
+    case p.id != from.id && ahead >. 1.0 {
+      True -> Ok(#(ahead +. 2.0 *. float.absolute_value(aside), p.id))
+      False -> Error(Nil)
+    }
+  })
+  |> list.sort(fn(a, b) { float.compare(a.0, b.0) })
+  |> list.first
+  |> result.map(fn(p) { p.1 })
+}
+
+fn keyboard(model: Model, key: String) -> #(Model, Effect(Msg)) {
+  let step = 96.0 /. model.zoom
+  let has_panel = model.detail != None || model.files || model.review_open
+  let focused = list.any(model.positions, fn(p) { p.id == model.focus })
+  let go = fn(model: Model, id) {
+    #(
+      Model(..reveal(model, id, has_panel), focus: id),
+      effect.from(fn(_) { focus_node(id) }),
+    )
+  }
+  case key, focused {
+    "pan-left", _ -> #(Model(..model, pan_x: model.pan_x -. step), effect.none())
+    "pan-right", _ -> #(
+      Model(..model, pan_x: model.pan_x +. step),
+      effect.none(),
+    )
+    "pan-up", _ -> #(Model(..model, pan_y: model.pan_y -. step), effect.none())
+    "pan-down", _ -> #(
+      Model(..model, pan_y: model.pan_y +. step),
+      effect.none(),
+    )
+    "zoom-in", _ -> #(zoom(model, 1.2), effect.none())
+    "zoom-out", _ -> #(zoom(model, 0.833333), effect.none())
+    "left", False | "right", False | "up", False | "down", False ->
+      // Nothing focused yet: start from the node nearest the sheet's top left.
+      case
+        nearest(model.positions, Point("", model.pan_x, model.pan_y -. 2.0), "down")
+      {
+        Ok(id) -> go(model, id)
+        Error(_) -> #(model, effect.none())
+      }
+    "left", True | "right", True | "up", True | "down", True ->
+      case nearest(model.positions, point(model, model.focus), key) {
+        Ok(id) -> go(model, id)
+        Error(_) -> #(model, effect.none())
+      }
+    "expand", True ->
+      case list.contains(model.expanded, model.focus) {
+        True -> #(model, effect.none())
+        False -> {
+          let #(model, _) = update(model, Toggle(model.focus))
+          go(model, model.focus)
+        }
+      }
+    "collapse", True ->
+      case list.contains(model.expanded, model.focus) {
+        True -> {
+          let #(model, _) = update(model, Toggle(model.focus))
+          go(model, model.focus)
+        }
+        False -> #(model, effect.none())
+      }
+    "open", True -> update(model, Select(model.focus))
+    _, _ -> #(model, effect.none())
   }
 }
 
@@ -860,15 +1029,6 @@ fn revision(model: Model, node: Node) -> String {
   }
 }
 
-fn node_key(id: String) -> decode.Decoder(Msg) {
-  use key <- decode.field("key", decode.string)
-  case key {
-    "Enter" -> decode.success(Select(id))
-    " " -> decode.success(Select(id))
-    _ -> decode.failure(Select(id), "Enter or Space")
-  }
-}
-
 fn box(model: Model, node: Node) -> Element(Msg) {
   let Point(_, x, y) = point(model, node.id)
   let label =
@@ -898,20 +1058,13 @@ fn box(model: Model, node: Node) -> Element(Msg) {
       a.tabindex(0),
       a.role("button"),
       a.aria_label(label),
-      e.on_click(Select(node.id)),
-      e.on("keydown", node_key(node.id)),
+      a.data("node", node.id),
+      e.on_click(Click(node.id)),
+      e.on("focus", decode.success(Focused(node.id))),
     ],
     [
       s.title([], [h.text(label)]),
       s.rect([a.class("view-box"), ax("width", "220"), ax("height", "120")]),
-      s.path([
-        a.class("view-cloud"),
-        ax("transform", "scale(1 1.18)"),
-        ax(
-          "d",
-          "M -7 8 Q -11 -7 7 -7 Q 20 -13 32 -7 Q 48 -14 62 -7 Q 79 -13 94 -7 Q 111 -14 126 -7 Q 143 -14 159 -7 Q 178 -13 193 -7 Q 212 -14 227 -3 Q 235 10 227 22 Q 236 36 227 50 Q 235 65 227 79 Q 235 96 222 107 Q 206 114 190 107 Q 173 114 157 107 Q 140 114 124 107 Q 107 114 91 107 Q 74 114 58 107 Q 41 114 25 107 Q 8 114 -6 103 Q -14 88 -7 73 Q -14 58 -7 44 Q -14 27 -7 8 Z",
-        ),
-      ]),
       s.rect([a.class("view-tab"), ax("width", "7"), ax("height", "120")]),
       s.text(
         [a.class("view-kind"), ax("x", "20"), ax("y", "19")],
@@ -1113,15 +1266,34 @@ fn detail_panel(model: Model, node: Node) -> Element(Msg) {
         [] -> []
         _ -> [h.h3([], [h.text("Checks")]), ..checks]
       },
-      case node.removed {
+      case node.removed && model.task == "" {
         True -> []
         False -> [
           h.button([e.on_click(SelectSource(node.id))], [h.text("Show source")]),
-          h.pre([a.class("view-source")], [h.text(model.source)]),
+          source_text(model),
         ]
       },
     ]),
   )
+}
+
+/// The source, or its diff from before the task when the task changed it.
+fn source_text(model: Model) -> Element(Msg) {
+  case list.any(model.diff, fn(line) { line.0 != " " }) {
+    False -> h.pre([a.class("view-source")], [h.text(model.source)])
+    True ->
+      h.pre(
+        [a.class("view-source view-diff"), a.aria_label("Changes by this task")],
+        list.map(model.diff, fn(line) {
+          let #(class, mark) = case line.0 {
+            "+" -> #("added", "+ ")
+            "-" -> #("removed", "− ")
+            _ -> #("same", "  ")
+          }
+          h.span([a.class(class)], [h.text(mark <> line.1)])
+        }),
+      )
+  }
 }
 
 fn files_panel(model: Model) -> Element(Msg) {
@@ -1135,7 +1307,7 @@ fn files_panel(model: Model) -> Element(Msg) {
       fn(node) {
         h.div([a.class("view-file")], [
           h.h3([], [h.text(node.name)]),
-          h.p([], [h.text("Tier " <> node.tier <> " · " <> node.sentence)]),
+          h.p([], [h.text(node.sentence)]),
         ])
       },
     )
@@ -1243,15 +1415,15 @@ fn legend_items() -> Element(Msg) {
       ]),
       h.span([], [
         s.svg([ax("viewBox", "0 0 40 20"), ax("aria-hidden", "true")], [
-          s.path([
+          s.rect([
             a.class("view-revision-sample"),
-            ax(
-              "d",
-              "M 5 5 Q 7 0 13 4 Q 19 0 25 4 Q 34 0 35 7 Q 40 12 34 16 Q 26 21 22 16 Q 14 21 10 16 Q 0 19 5 12 Q 0 8 5 5 Z",
-            ),
+            ax("x", "2"),
+            ax("y", "3"),
+            ax("width", "36"),
+            ax("height", "14"),
           ]),
         ]),
-        h.text("Revision"),
+        h.text("Changed by the task: REV A added, B changed, C removed"),
       ]),
     ]),
   ])
@@ -1294,6 +1466,15 @@ pub fn view(model: Model) -> Element(Msg) {
           h.div([], [
             h.a([ax("href", "/"), a.class("view-back")], [h.text("← Board")]),
             h.h1([], [h.text("Contract view")]),
+            h.p([a.class("view-project")], [
+              h.text(
+                model.graph.project
+                <> case model.task {
+                  "" -> ""
+                  id -> " · reviewing task " <> id
+                },
+              ),
+            ]),
           ]),
           h.div([a.class("view-search")], [
             h.label([ax("for", "view-search")], [
@@ -1348,24 +1529,6 @@ pub fn view(model: Model) -> Element(Msg) {
             ]),
           ]),
           h.div([a.class("view-drawing")], [svg_view(model)]),
-        ]),
-        h.div([a.class("view-titleblock")], [
-          h.p([], [h.text("SOLACE / " <> model.graph.project)]),
-          h.p([ax("title", model.graph.fingerprint)], [
-            h.text("Store " <> string.slice(model.graph.fingerprint, 0, 12)),
-          ]),
-          h.p([], [
-            h.text(case model.task {
-              "" -> ""
-              id -> "Task " <> id
-            }),
-          ]),
-          h.p([], [
-            h.text(case model.graph.review {
-              Some(_) -> "A added · B changed · C removed"
-              None -> "Derived from project store"
-            }),
-          ]),
         ]),
       ],
       list.append(panel, [

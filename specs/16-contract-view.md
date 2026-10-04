@@ -1,6 +1,6 @@
 # Spec 16: Contract View
 
-**Status:** accepted 2026-09-30 (D-35) · **Implements:** D-16 (point 4), D-20 (points 2, 3), D-28 (tier visibility), D-35, PROPOSAL.md §7 · **Needed by:** the D-16 human UX. Not in the PROPOSAL.md §14.4 table; numbered after it.
+**Status:** accepted 2026-09-30 (D-35) · **Implements:** D-16 (point 4), D-20 (points 2, 3), D-28 and D-52 (file categories), D-35, PROPOSAL.md §7 · **Needed by:** the D-16 human UX. Not in the PROPOSAL.md §14.4 table; numbered after it.
 
 The contract view is how a human sees and checks a project in Solace. A human does not read source code there. They see what the system does and what it touches: its entry points, its logic, its side effects, its tests and its files. They can run any part of it with data they choose and see or hear what comes out. When an agent finishes a task, the review starts here: what the task changed in those terms, whether its tests pass, and whether the human's earlier runs now give different results.
 
@@ -18,7 +18,7 @@ This first version covers less than PROPOSAL.md §7. Guarantees with evidence le
 | `logic` | A unit of behavior: a function | Each public or reached function symbol |
 | `effect` | Something the system does to the outside world: files, printing, network, a database, the clock, randomness, the environment, another process | Calls into a table of known effectful functions (`gleam/io`, `simplifile`, `gleam/erlang/os`, …) and every `@external` |
 | `test` | A test, written by an agent | Each `*_test` function in `test/` |
-| `file` | A project file that isn't source, with its tier | Every file from `solace files`, tiers 2–4 |
+| `file` | A project file that isn't source, with its category | Every file from `solace files` except graph and internal ones |
 
 | Edge | Meaning |
 | --- | --- |
@@ -35,7 +35,8 @@ A node's detail panel shows its name, kind, plain-language summary (the symbol's
 
 - **Overview.** The graph is a drawn diagram: a layered layout with pan and zoom, nodes coloured by kind (Aaron, 2026-09-30). It opens on entry points and effects, with the logic between them collapsed. Colours mark node kinds. Badges mark nodes with no tests, and nodes changed by an open task.
 - **Search and follow.** A human can find any node by name or summary, then expand its callers, callees, effects and tests.
-- **Files and tiers.** A files panel lists every non-source file with its tier and, in words, what agents may do with it (D-28). Example: "Tier 3: agents can read and write it; changes are undone with the task."
+- **Moving around (D-53).** Dragging the sheet, from anywhere including a node, pans it and selects nothing. Opening a node doesn't move the sheet unless the node is out of view or under the panel, and then only as far as brings it into view. Keys: arrows or WASD move between nodes, with Shift they pan, Ctrl+Up/Down zoom, Space expands a node, C collapses it, Enter opens it. A changed node has a plain border in the revision colour.
+- **Files and categories.** A files panel lists every non-source file with its category and, in words, what agents may do with it (D-28, D-52). Example: "Watched: agents can read and write it; changes are undone with the task."
 - **Run.** A human runs any public function with data they enter, in one step or several (§3).
 - **Make a task from a run.** When a run is wrong, or right and worth keeping as a test, the human says what it should do, and Solace puts a task on the board (§3).
 - **Review.** A task's changes, test results and replayed runs (§4).
@@ -76,8 +77,8 @@ A task in *needs review* (or any task with changes) shows a one-line summary on 
 3. the task's tests (tests the task changed, plus tests that reach a symbol it changed or read a record field its change flows into, D-44), run by Solace at review time, each *unfinished*, *wrong* or *passing* (D-36.3). A changed expected value shows as "→ new, was old". D-36's flags and their resolutions appear here once D-36 is built;
 4. uses the change reaches that no test checks (D-36.3 coverage: what a test references, also through helpers in its own module), nearest first, each with how it is reached and whether that is certain or possible; plus the declared suites that reach the change (Spec 14 §2) and where its data leaves the program. The summary counts them ("3 untested uses") (D-44);
 5. remembered runs that reach a changed symbol through `calls` edges, replayed on the version before the task and on the current one. Results that differ are shown side by side for the human to judge; a difference is not a failure;
-6. non-source files the task touched, with their tiers;
-7. source text, only on request.
+6. non-source files the task touched, with their categories;
+7. source text, only on request; for a symbol the task changed, added or removed, as a line diff from before the task (D-53).
 
 The board's *Changes* list links each entry to its node. Solace computes all of this from the task's before-state (Spec 15 §5) and the current project, so nothing an agent says enters it.
 
@@ -90,6 +91,7 @@ The board's *Changes* list links each entry to its node. Solace computes all of 
 | `GET /graph` `?task=` | The graph (§1); with `task`, filtered and annotated for that task (§4) |
 | `GET /view` | The view's page |
 | `GET /nodes/{id}` | One node's detail panel, including a function's input forms and a test's lines |
+| `GET /nodes/{id}?source=1[&task=]` | The symbol's source; with a task, also its line diff from before the task, also for a symbol the task removed |
 | `GET /types/{id}` | A type's constructors and the public functions that return it, for forms |
 | `POST /tests` `{task}` | Runs the task's tests for review (§4.3) |
 | `POST /runs` `{version, steps}` | Starts a run (§3) and remembers it; returns its id |
@@ -117,7 +119,8 @@ Step 1:
 - C1. For a small CLI project (a `main` that parses arguments, prints and writes a file, with tests), the graph lists `main` as `entry`, every `gleam/io` and `@external` use as a `derived` `effect` reached by `uses` edges, and each test function with `tests` edges to what it references.
 - C2. In `pilot-large`, `api.handle` is an `entry`, and `date_test`'s `assert date.add_business_days(Date(2026, 3, 5), 2) == Date(2026, 3, 9)` shows as `date.add_business_days(Date(2026, 3, 5), 2)` → `Date(2026, 3, 9)`.
 - C3. For a task that adds a call to `simplifile.write`, `GET /graph?task=` flags a new file-writing effect on each entry point that reaches it, and the board's summary line counts it, with its untested uses (D-44).
-- C4. The files panel shows each file's tier and the sentence for that tier, matching `solace files`.
+- C4. The files panel shows each file's category and the sentence for it, matching `solace files`.
+- C4a. A drag that starts on a node pans and opens nothing; a click opens a node without moving the sheet; the keys in §2 move focus, pan, zoom, expand and collapse. For a symbol a task changed, Show source gives its before/after line diff.
 
 Step 2:
 - C5. `api.handle`'s `Request` form offers each constructor of `Request`, and `AddItem` asks for `order_id: Int`, `sku: String` and `quantity: Int`.

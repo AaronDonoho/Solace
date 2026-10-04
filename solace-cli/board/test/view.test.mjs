@@ -19,7 +19,7 @@ test('contract view renders visible SVG nodes and uses the view API', async () =
   globalThis.fetch = async (path, opts) => {
     requests.push([opts.method, path.split('?')[0]]);
     if (path.startsWith('/graph')) return new Response(JSON.stringify({ nodes, edges, review, project: { name: 'pilot_large', fingerprint: '0123456789abcdef0123456789abcdef' } }));
-    if (path.startsWith('/nodes')) return new Response(JSON.stringify({ ...nodes[0], tests: ['fn:app.work_test'], ...(path.includes('source=1') ? { source: 'pub fn main() { Nil }' } : {}) }));
+    if (path.startsWith('/nodes')) return new Response(JSON.stringify({ ...nodes[0], tests: ['fn:app.work_test'], ...(path.includes('source=1') ? { source: 'pub fn main() { Nil }', diff: [['-', 'pub fn main() { 1 }'], ['+', 'pub fn main() { Nil }']] } : {}) }));
     return new Response(JSON.stringify({ state: 'running' }));
   };
   let source;
@@ -39,15 +39,23 @@ test('contract view renders visible SVG nodes and uses the view API', async () =
     const reviewHtml = to_string(view.view(model));
     expect(reviewHtml).toContain('class="view-panel view-review"');
     expect(reviewHtml).toContain('class="view-node entry changed"');
-    expect(reviewHtml).toContain('class="view-cloud"');
+    expect(reviewHtml).not.toContain('view-cloud');
+    expect(reviewHtml).not.toContain('view-titleblock');
     expect(reviewHtml).toContain('REV B');
     expect(reviewHtml).toContain('REV A');
     expect(reviewHtml).toContain('→ 3, was 2');
-    expect(reviewHtml).toContain('SOLACE / pilot_large');
-    expect(reviewHtml).toContain('Store 0123456789ab');
-    expect(reviewHtml).toContain('Task t1');
+    expect(reviewHtml).toContain('pilot_large · reviewing task t1');
     const originalPositions = Array.from(model.positions);
-    dispatch(new view.Select('fn:app.main'));
+    // The click that ends a pan selects nothing.
+    dispatch(new view.PanStart(100, 100)); dispatch(new view.PanMove(140, 100)); dispatch(new view.PanEnd());
+    dispatch(new view.Click('fn:app.main'));
+    expect(model.selected).toBe('');
+    // A plain click opens the node without moving the sheet (it's already in view).
+    dispatch(new view.PanStart(100, 100)); dispatch(new view.PanEnd());
+    const camera = [model.pan_x, model.pan_y, model.zoom];
+    dispatch(new view.Click('fn:app.main'));
+    expect(model.selected).toBe('fn:app.main');
+    expect([model.pan_x, model.pan_y, model.zoom]).toEqual(camera);
     for (let i = 0; i < 50 && model.detail[0]?.tests !== 1; i++) await Bun.sleep(5);
     expect(model.error).toBe('');
     expect(model.detail[0].tests).toBe(1);
@@ -75,6 +83,25 @@ test('contract view renders visible SVG nodes and uses the view API', async () =
     dispatch(new view.SelectSource('fn:app.main'));
     for (let i = 0; i < 50 && !model.source; i++) await Bun.sleep(5);
     expect(model.source).toContain('pub fn main');
+    const sourceHtml = to_string(view.view(model));
+    expect(sourceHtml).toContain('<span class="removed">− pub fn main() { 1 }');
+    expect(sourceHtml).toContain('<span class="added">+ pub fn main() { Nil }');
+    expect(requests.some(([_, path]) => path === '/nodes/fn:app.main')).toBe(true);
+    // Keys: C collapses the focused node, Space expands it again; arrows move focus; Ctrl+Up zooms.
+    dispatch(new view.Focused('fn:app.main'));
+    dispatch(new view.Key('collapse'));
+    expect(Array.from(model.expanded)).toEqual([]);
+    dispatch(new view.Key('expand'));
+    expect(Array.from(model.expanded)).toEqual(['fn:app.main']);
+    const at = id => Array.from(model.positions).find(p => p.id === id);
+    dispatch(new view.Key('right'));
+    expect(at(model.focus).x).toBeGreaterThan(at('fn:app.main').x);
+    const before = model.zoom;
+    dispatch(new view.Key('zoom-in'));
+    expect(model.zoom).toBeCloseTo(before * 1.2);
+    const panned = model.pan_x;
+    dispatch(new view.Key('pan-right'));
+    expect(model.pan_x).toBeGreaterThan(panned);
     expect(requests).toContainEqual(['GET', '/graph']);
     expect(requests).toContainEqual(['GET', '/nodes/fn:app.main']);
     expect(requests.every(([_, path]) => ['/graph', '/nodes/fn:app.main', '/events', '/tests'].includes(path))).toBe(true);

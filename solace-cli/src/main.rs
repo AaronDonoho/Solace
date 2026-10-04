@@ -590,12 +590,11 @@ fn import(root: &Path) -> Out {
     match fs::OpenOptions::new().write(true).create_new(true).open(root.join("solace.toml")) {
         Ok(mut file) => {
             file.write_all(
-                b"# Solace project settings. Human-owned; agents may read this file.\n\
-# File writes are limited to this many bytes.\n\
-resource_limit = 262144\n\
-# Classification only: unlisted files are also readable and writable.\n\
-resources = []\n\
-ignore = []\n\n\
+                b"# Solace project settings. Protected: agents may read this file.\n\
+# Text files up to this many bytes are watched; file writes are limited to it.\n\
+watch_limit = 262144\n\
+# Files Solace doesn't watch or search (agents can still read and write them).\n\
+unwatched = []\n\n\
 [validators]\n\
 # Optional checks, for example:\n\
 # \"docs/**/*.json\" = [\"python3\", \"-m\", \"json.tool\", \"{file}\"]\n\n\
@@ -3001,7 +3000,7 @@ mod tests {
                 assert!(!out.contains("Created solace.toml"));
             } else {
                 assert!(out.contains("Created solace.toml"));
-                assert_eq!(lockdown::settings(&root).unwrap()["resource_limit"].as_integer(), Some(262144));
+                assert_eq!(lockdown::settings(&root).unwrap()["watch_limit"].as_integer(), Some(262144));
                 assert!(lockdown::settings(&root).unwrap()["commands"].as_table().unwrap().is_empty());
             }
             let store = fs::read(root.join(".solace/store.db")).unwrap();
@@ -3209,7 +3208,7 @@ mod tests {
         fs::write(root.join("AGENTS.md"), "a line of forty bytes, give or take ok.\n".repeat(250)).unwrap();
         let out = store.session(&[]).unwrap();
         assert!(out.contains("ok.\n… `read AGENTS.md --lines 201..` for the rest\n"), "{out}");
-        assert_eq!(lockdown::tier(&root, &toml::Value::Table(Default::default()), "AGENTS.md", None), "settings");
+        assert_eq!(lockdown::tier(&root, &toml::Value::Table(Default::default()), "AGENTS.md", None), "protected");
         fs::remove_dir_all(&root).unwrap();
     }
 

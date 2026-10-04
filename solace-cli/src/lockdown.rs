@@ -18,7 +18,16 @@ pub fn settings(root: &Path) -> Result<toml::Value, Failure> {
 pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
     let v: toml::Value = s.parse().map_err(|e| Failure(format!("E6020 invalid solace.toml\n  {e}"), 1))?;
     let invalid = |s: &str| Failure(format!("E6020 invalid solace.toml\n  {s}"), 1);
-    for key in ["resources", "ignore"] {
+    for (old, fix) in [
+        ("resources", "`resources` was removed: every text file is watched now; delete it"),
+        ("ignore", "`ignore` is now `unwatched`; rename it"),
+        ("resource_limit", "`resource_limit` is now `watch_limit`; rename it"),
+    ] {
+        if v.get(old).is_some() {
+            return Err(invalid(fix));
+        }
+    }
+    for key in ["unwatched"] {
         if let Some(a) = v.get(key) {
             for p in a.as_array().ok_or_else(|| invalid(key))? {
                 let p = p.as_str().ok_or_else(|| invalid(key))?;
@@ -26,8 +35,8 @@ pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
             }
         }
     }
-    if v.get("resource_limit").is_some_and(|x| x.as_integer().is_none_or(|n| n < 0)) {
-        return Err(invalid("resource_limit"));
+    if v.get("watch_limit").is_some_and(|x| x.as_integer().is_none_or(|n| n < 0)) {
+        return Err(invalid("watch_limit"));
     }
     for key in ["commands", "validators"] {
         if let Some(t) = v.get(key) {
@@ -52,7 +61,7 @@ pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
     Ok(v)
 }
 fn limit(v: &toml::Value) -> usize {
-    v.get("resource_limit").and_then(|x| x.as_integer()).unwrap_or(262144) as usize
+    v.get("watch_limit").and_then(|x| x.as_integer()).unwrap_or(262144) as usize
 }
 fn matches(pattern: &str, path: &str) -> bool {
     if pattern.ends_with('/') {
@@ -63,8 +72,8 @@ fn matches(pattern: &str, path: &str) -> bool {
 fn patterns(v: &toml::Value, key: &str, path: &str) -> bool {
     v.get(key).and_then(|a| a.as_array()).is_some_and(|a| a.iter().any(|p| matches(p.as_str().unwrap(), path)))
 }
-// Reject aliases, including symlinks inside the root: a resource alias must
-// never grant file access to source, settings, or Solace's own records.
+// Reject aliases, including symlinks inside the root: an alias must never
+// grant file access to source, protected files, or Solace's own records.
 pub fn path(root: &Path, name: &str) -> Result<PathBuf, Failure> {
     let p = Path::new(name);
     if p.is_absolute() || p.components().any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) {
@@ -94,35 +103,29 @@ fn gitignored(root: &Path, name: &str) -> bool {
 }
 pub fn tier(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -> String {
     if (name.starts_with("src/") || name.starts_with("test/")) && name.ends_with(".gleam") {
-        return "1 source".into();
-    }
-    if name == "gleam.toml" {
-        return "2 manifest".into();
+        return "graph".into();
     }
     if name == "solace.toml" || name == "AGENTS.md" {
-        return "settings".into();
+        return "protected".into();
     }
     if internal(name) {
         return "internal".into();
     }
     if name == ".git" || name.starts_with(".git/") || name == "build" || name.starts_with("build/") || name == "manifest.toml" {
-        return "4 ignored".into();
+        return "unwatched".into();
     }
-    if gitignored(root, name) || patterns(v, "ignore", name) {
-        return "4 ignored".into();
+    if gitignored(root, name) || patterns(v, "unwatched", name) {
+        return "unwatched".into();
     }
-    if patterns(v, "resources", name) {
-        let size = proposed.map(|b| b.len() as u64).unwrap_or_else(|| fs::metadata(root.join(name)).map_or(0, |m| m.len()));
-        if size > limit(v) as u64 {
-            return "4 ignored (over limit)".into();
-        }
-        let bytes = proposed.map(Vec::from).unwrap_or_else(|| fs::read(root.join(name)).unwrap_or_default());
-        if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
-            return "4 ignored (binary)".into();
-        }
-        return "3 resource".into();
+    let size = proposed.map(|b| b.len() as u64).unwrap_or_else(|| fs::metadata(root.join(name)).map_or(0, |m| m.len()));
+    if size > limit(v) as u64 {
+        return "unwatched (over limit)".into();
     }
-    "4 ignored".into()
+    let bytes = proposed.map(Vec::from).unwrap_or_else(|| fs::read(root.join(name)).unwrap_or_default());
+    if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
+        return "unwatched (binary)".into();
+    }
+    "watched".into()
 }
 fn hash(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
@@ -244,7 +247,7 @@ fn read(root: &Path, name: &str, args: &[&str], budget: usize) -> Out {
         }
         out += &text;
     }
-    // Resources are bounded; ignored logs are never hashed or loaded in full.
+    // Watched files are bounded; unwatched logs are never hashed or loaded in full.
     if fs::metadata(root.join(name))?.len() <= 262144 * 16 {
         remember(root, name, &fs::read(root.join(name))?)?;
     }
@@ -326,10 +329,10 @@ fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, old
     let before = fs::read(&p).ok();
     let text = edited(before.as_deref().unwrap_or_default(), new, replace, old)?;
     if text.len() > limit(v) {
-        return error("E6004", name, "proposed text exceeds resource_limit");
+        return error("E6004", name, "proposed text exceeds watch_limit");
     }
     let t = tier(root, v, name, Some(text.as_bytes()));
-    if !matches!(t.chars().next(), Some('2' | '3' | '4')) {
+    if t != "watched" && !t.starts_with("unwatched") {
         return error("E6002", name, format!("caught by tier rule: {t}"));
     }
     if !replace
@@ -394,36 +397,31 @@ fn tree_rows(
         let name = p.strip_prefix(root).unwrap().to_string_lossy().to_string();
         let t = tier(root, v, &name, None);
         if e.file_type()?.is_symlink() {
-            out.push((name, "4 ignored (symlink)".into()));
+            out.push((name, "unwatched (symlink)".into()));
         } else if e.file_type()?.is_dir() {
             if t == "internal" {
                 out.push((format!("{name}/"), "internal".into()));
             } else if name == "build"
                 || name == ".git"
-                || patterns(v, "ignore", &name)
+                || patterns(v, "unwatched", &name)
                 || gitignored(root, &name)
             {
                 out.push((
                     format!("{name}/"),
-                    format!("4 ignored; {} files", count_files(&p)?),
+                    format!("unwatched; {} files", count_files(&p)?),
                 ));
             } else {
                 let mut children = vec![];
                 tree_rows(root, v, &p, &mut children)?;
                 if children.iter().any(|(_, tier): &(String, String)| {
-                    tier.starts_with('1')
-                        || tier.starts_with('2')
-                        || tier.starts_with('3')
-                        || tier.contains("over limit")
-                        || tier.contains("binary")
-                        || tier == "settings"
+                    tier == "graph" || tier == "watched" || tier == "protected"
                 }) {
                     out.push((format!("{name}/"), String::new()));
                     out.extend(children);
                 } else {
                     out.push((
                         format!("{name}/"),
-                        format!("4 ignored; {} files", count_files(&p)?),
+                        format!("unwatched; {} files", count_files(&p)?),
                     ));
                 }
             }
@@ -477,7 +475,7 @@ pub fn dispatch(
             }
             let p = path(root, &name)?;
             let t = tier(root, v, &name, None);
-            if a[0] != "files" && t.starts_with('1') {
+            if a[0] != "files" && t == "graph" {
                 let module = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/")).unwrap().trim_end_matches(".gleam");
                 let fix = if p.exists() {
                     format!("inspect {module}, view {module}, or submit {module}")
@@ -498,14 +496,14 @@ pub fn dispatch(
                 }
                 "read" => read(root, &name, &a[2.min(a.len())..], budget),
                 "write" => {
-                    if t == "settings" {
-                        return error("E6002", &name, "settings are human-only; request a decision");
+                    if t == "protected" {
+                        return error("E6002", &name, "protected files are human-only; request a decision");
                     }
                     write(root, v, &name, &input()?, a.contains(&"--replace"), old)
                 }
                 "remove" => {
-                    if !matches!(t.chars().next(), Some('3' | '4')) {
-                        return error("E6002", &name, format!("only resource or ignored files can be removed; {t}"));
+                    if name == "gleam.toml" || (t != "watched" && !t.starts_with("unwatched")) {
+                        return error("E6002", &name, format!("only watched and unwatched files can be removed, and never gleam.toml; {t}"));
                     }
                     fs::remove_file(p)?;
                     Ok(format!("Removed {name}\n"))
@@ -612,7 +610,7 @@ mod tests {
         fs::write(root.join("gleam.toml"), "name = \"fixture\"\nversion = \"1.0.0\"\n").unwrap();
         fs::write(root.join("src/main.gleam"), "pub fn main() { 1 }\n").unwrap();
         import(&root).unwrap();
-        let v = "resources = [\"priv/**\"]\nresource_limit = 100\nignore = [\"priv/generated/\"]\n".parse().unwrap();
+        let v = "watch_limit = 100\nunwatched = [\"priv/generated/\"]\n".parse().unwrap();
         (Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root }, v)
     }
     fn call(s: &Store, v: &toml::Value, args: &[&str], text: &str, old: Option<&str>) -> Out {
@@ -630,13 +628,16 @@ mod tests {
             ("solace.toml", b""),
             ("misc", b"x"),
             (".gitignore", b"priv/ignored\n"),
+            ("priv/generated/out", b"x"),
+            (".git/config", b"x"),
         ] {
+            fs::create_dir_all(s.root.join(p).parent().unwrap()).unwrap();
             fs::write(s.root.join(p), b).unwrap();
         }
         let got = call(&s, &v, &["files"], "", None).unwrap();
         assert_eq!(
             got,
-            ".gitignore [4 ignored]\n.solace/ [internal]\ngleam.toml [2 manifest]\nmanifest.toml [4 ignored]\nmisc [4 ignored]\npriv/\npriv/a.html [3 resource]\npriv/b.bin [4 ignored (binary)]\npriv/ignored [4 ignored]\npriv/large [4 ignored (over limit)]\nsolace.toml [settings]\nsrc/\nsrc/main.gleam [1 source]\n"
+            ".git/ [unwatched; 1 files]\n.gitignore [watched]\n.solace/ [internal]\ngleam.toml [watched]\nmanifest.toml [unwatched]\nmisc [watched]\npriv/\npriv/a.html [watched]\npriv/b.bin [unwatched (binary)]\npriv/generated/ [unwatched; 1 files]\npriv/ignored [unwatched]\npriv/large [unwatched (over limit)]\nsolace.toml [protected]\nsrc/\nsrc/main.gleam [graph]\n"
         );
         fs::remove_dir_all(s.root).unwrap();
     }
@@ -670,11 +671,11 @@ mod tests {
         fs::remove_dir_all(s.root).unwrap();
     }
     #[test]
-    fn a4_new_resource_and_size() {
+    fn a4_new_watched_file_and_size() {
         let (s, v) = fixture();
         call(&s, &v, &["write", "README.md"], "usage", None).unwrap();
         call(&s, &v, &["write", "bin/coolcalc"], "#!/bin/sh\ngleam run -- \"$@\"\n", None).unwrap();
-        assert!(call(&s, &v, &["files", "README.md"], "", None).unwrap().contains("4 ignored"));
+        assert!(call(&s, &v, &["files", "README.md"], "", None).unwrap().contains("[watched]"));
         assert!(s.find("usage").unwrap().contains("No matches"));
         call(&s, &v, &["read", "README.md"], "", None).unwrap();
         fs::write(s.root.join("README.md"), "usage changed").unwrap();
@@ -684,6 +685,7 @@ mod tests {
         call(&s, &v, &["read", "README.md"], "", None).unwrap();
         call(&s, &v, &["write", "README.md"], "replacement", None).unwrap();
         call(&s, &v, &["remove", "bin/coolcalc"], "", None).unwrap();
+        assert!(call(&s, &v, &["remove", "gleam.toml"], "", None).unwrap_err().0.contains("E6002"));
         assert!(!s.root.join("bin/coolcalc").exists());
         fs::write(s.root.join("binary"), b"x\xff").unwrap();
         assert!(call(&s, &v, &["write", "binary", "--replace"], "y", Some("x")).unwrap_err().0.contains("UTF-8"));
@@ -696,8 +698,7 @@ mod tests {
     #[test]
     fn a5_validation_in_place_and_recovery() {
         let (s, _) = fixture();
-        let v:toml::Value=r#"resources = ["priv/**"]
-[validators]
+        let v:toml::Value=r#"[validators]
 "priv/**" = ["python3", "-c", "import pathlib,sys; p=pathlib.Path(sys.argv[1]); print('validator output'); assert p.read_text() == 'good' and p.with_name('sibling').read_text() == 'yes'", "{file}"]
 "#.parse().unwrap();
         fs::write(s.root.join("priv/sibling"), "yes").unwrap();
@@ -717,7 +718,7 @@ mod tests {
     #[test]
     fn a6_manifest_validation() {
         let (s, mut v) = fixture();
-        v["resource_limit"] = toml::Value::Integer(1000);
+        v["watch_limit"] = toml::Value::Integer(1000);
         let before = fs::read(s.root.join("gleam.toml")).unwrap();
         call(&s, &v, &["read", "gleam.toml"], "", None).unwrap();
         assert!(call(&s, &v, &["write", "gleam.toml"], "=broken", None).unwrap_err().0.contains("E6003"));
@@ -745,13 +746,16 @@ mod tests {
         fs::remove_dir_all(s.root).unwrap();
     }
     #[test]
-    fn a8_settings_human_only_and_reload() {
+    fn a8_protected_human_only_and_reload() {
         let (s, v) = fixture();
         assert!(call(&s, &v, &["write", "solace.toml"], "", None).is_err());
-        fs::write(s.root.join("solace.toml"), "resources=[\"docs/**\"]").unwrap();
+        fs::write(s.root.join("solace.toml"), "unwatched=[\"docs/**\"]").unwrap();
         call(&s, &settings(&s.root).unwrap(), &["write", "docs/new"], "x", None).unwrap();
-        fs::write(s.root.join("solace.toml"), "resources=1").unwrap();
+        fs::write(s.root.join("solace.toml"), "unwatched=1").unwrap();
         assert!(settings(&s.root).unwrap_err().0.contains("E6020"));
+        for (old, fix) in [("resources=[]", "delete it"), ("ignore=[]", "now `unwatched`"), ("resource_limit=1", "now `watch_limit`")] {
+            assert!(parse_settings(old).unwrap_err().0.contains(fix));
+        }
         fs::remove_dir_all(s.root).unwrap();
     }
     #[test]
@@ -794,11 +798,11 @@ mod edge_tests {
         fs::create_dir_all(root.join("priv/nested")).unwrap();
         fs::write(root.join("src/nested/source.gleam"), "pub fn a() { 1 }").unwrap();
         fs::write(root.join("priv/nested/index.html"), "hello").unwrap();
-        let v: toml::Value = "resources=[\"priv/**/*.html\"]".parse().unwrap();
+        let v = toml::Value::Table(Default::default());
         let mut out = String::new();
         tree(&root, &v, &root, &mut out).unwrap();
-        assert!(out.contains("src/nested/source.gleam [1 source]"));
-        assert!(out.contains("priv/nested/index.html [3 resource]"));
+        assert!(out.contains("src/nested/source.gleam [graph]"));
+        assert!(out.contains("priv/nested/index.html [watched]"));
         fs::write(root.join(".gitignore"), "priv/nested/\n").unwrap();
         out.clear();
         tree(&root, &v, &root, &mut out).unwrap();
@@ -811,6 +815,6 @@ pub fn tree_files(root: &Path, settings: &toml::Value) -> Result<Vec<(String, St
     tree_rows(root, settings, root, &mut rows)?;
     Ok(rows
         .into_iter()
-        .filter(|(_, tier)| !tier.is_empty() && tier != "internal" && !tier.starts_with('1'))
+        .filter(|(_, tier)| !tier.is_empty() && tier != "internal" && tier != "graph")
         .collect())
 }

@@ -79,7 +79,7 @@ pub fn main_test() {
         self.assertTrue({'effect:prints', 'effect:writes files', 'effect:environment'} <= effects)
         self.assertTrue(any(e['kind'] == 'tests' and e['to'] == main['id'] for e in graph['edges']))
         files = {n['name']: n['tier'] for n in nodes.values() if n['kind'] == 'file'}
-        listed = dict(line.rsplit(' [', 1) for line in self.cli('files').splitlines() if line.endswith(']') and not line.endswith('[internal]') and not line.endswith('[1 source]') and not line.startswith('src/') and not line.startswith('test/'))
+        listed = dict(line.rsplit(' [', 1) for line in self.cli('files').splitlines() if line.endswith(']') and not line.endswith('[internal]') and not line.endswith('[graph]') and not line.startswith('src/') and not line.startswith('test/'))
         listed = {k: v[:-1] for k, v in listed.items()}
         self.assertEqual(files, listed)
 
