@@ -8,7 +8,7 @@ __pycache__/
 venv/
 .pytest_cache/
 
-# Gleam / Erlang (pilot/ has its own too)
+# Gleam / Erlang (bench/pilot*/ have their own too)
 build/
 *.beam
 *.ez

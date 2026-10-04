@@ -1,6 +1,6 @@
 # Spec 4: Language Core (Phase 1 subset)
 
-**Status:** accepted 2026-09-27 · **Implements:** PROPOSAL.md §8, limited to the §18.3 list · **Needed by:** Phase 1b
+**Status:** accepted 2026-09-27 · **Implements:** PROPOSAL.md §11, limited to the §14.5 list · **Needed by:** Phase 1b
 
 This spec defines only what Phase 1 builds. Anything else from §8 is listed under Deferred and is a compile error (`E0001 not yet supported`) until a later spec adds it. This file doubles as the draft of the language reference an agent reads at session start, so it must stay short.
 

@@ -1,6 +1,6 @@
 # Spec 1: Identity and Revision Model
 
-**Status:** accepted 2026-09-27 · **Implements:** PROPOSAL.md §6 · **Needed by:** Phase 1a
+**Status:** accepted 2026-09-27 · **Implements:** PROPOSAL.md §4 · **Needed by:** Phase 1a
 
 Every symbol has one stable identity and a sequence of revisions. Identity follows the operation performed, never textual similarity.
 

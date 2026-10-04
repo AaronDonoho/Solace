@@ -1,6 +1,6 @@
 # pilot
 
-Order-management service in plain Gleam: the conventional-tooling baseline for the benchmark (PROPOSAL.md §18.4, §19.1). Deliberately ordinary Gleam, so it's a fair comparison.
+Order-management service in plain Gleam: the conventional-tooling baseline for the benchmark (PROPOSAL.md §14.6, §15.1). Deliberately ordinary Gleam, so it's a fair comparison.
 
 - `order`: pure order state machine (Draft → Submitted → Approved → Shipped; cancel from Draft/Submitted)
 - `pricing`: quote with discount, shipping and tax rules

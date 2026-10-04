@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Solace benchmark harness (PROPOSAL.md §19.1).
+"""Solace benchmark harness (PROPOSAL.md §15.1).
 
   bench.py validate [TASK...]   check each task: hidden tests fail before, pass with the reference solution
   bench.py run [--arm files|solace] [--run-number N] [--agent codex|claude] [--model M] [--effort E]
@@ -80,7 +80,7 @@ def prepare(task: Path, arm: str = "files") -> Path:
     """Fresh git copy of the pilot with the task's setup applied and committed."""
     work = Path(tempfile.mkdtemp(prefix=f"solace-{task.name}-"))
     project = (task / "project").read_text().strip() if (task / "project").exists() else "pilot"
-    shutil.copytree(ROOT.parent / project, work, dirs_exist_ok=True, ignore=shutil.ignore_patterns("dev", "prod"))
+    shutil.copytree(ROOT / project, work, dirs_exist_ok=True, ignore=shutil.ignore_patterns("dev", "prod"))
     git = ["git", "-c", "user.email=bench@solace", "-c", "user.name=bench"]
     sh(git + ["init", "-q"], work)
     if (task / "setup.patch").exists():

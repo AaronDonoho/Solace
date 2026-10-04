@@ -10,14 +10,14 @@ A semantic programming system: programs are a store of identified, typed, verifi
 
 ## Rules
 - Specs are written just before the phase that needs them (`specs/`), kept short, with testable claims. A spec changes only through a decision.
-- Every phase ends at its gate (PROPOSAL.md §18 roadmap table). Gates are judged by the benchmark (§19), not by feel.
+- Every phase ends at its gate (PROPOSAL.md §14.1 roadmap table). Gates are judged by the benchmark (§15), not by feel.
 - Prefer tests-as-spec: golden files (`input -> expected output/diagnostics`) for the parser, checker and codegen.
 - Build the smallest thing that can pass the current gate. Defer anything later phases own.
 
 ## Layout (grows as needed)
 - `PROPOSAL.md`: design proposal
-- `DECISIONS.md`: decision records (§9.4 format)
-- `WORK.md`: roadmap and work records (§9.3 format)
-- `pilot/`: small order service in plain Gleam (~2.5k tokens), the small benchmark size point
-- `pilot-large/`: large order service in plain Gleam (~30k tokens), the main benchmark baseline
+- `DECISIONS.md`: decision records (§5.4 format)
+- `WORK.md`: roadmap and work records (§5.3 format)
+- `bench/pilot/`: small order service in plain Gleam (~2.5k tokens), the small benchmark size point
+- `bench/pilot-large/`: large order service in plain Gleam (~30k tokens), the main benchmark baseline
 - `bench/`: benchmark tasks and harness (`python3 bench/bench.py validate|run|report`; tasks `0*` small, `L*` large); `python3 bench/analyze.py RUN[/ARM]... --task L08 [--turns | --show L08.2:5]` breaks Codex runs down by turn (output, reasoning, time, writing vs reading turns, reply sizes): use it rather than ad hoc scripts

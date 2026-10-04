@@ -13,7 +13,7 @@ One executable, `solace`, which contains:
 - the task board server and its web client (`solace serve`);
 - the generator for locked-down agent configurations (`solace agent-config`).
 
-The benchmark harness (`bench/`), the pilots (`pilot/`, `pilot-large/`) and the benchmark visualizer are development tools for this repository and are not part of Solace.
+The benchmark harness (`bench/`), the pilots (`bench/pilot/`, `bench/pilot-large/`) and the benchmark visualizer are development tools for this repository and are not part of Solace.
 
 ## Requirements
 
@@ -169,7 +169,7 @@ The board's web client is in `solace-cli/board/` (Gleam and Lustre). After chang
 The small and large pilots are Gleam order-management services used as benchmark projects:
 
 ```sh
-cd pilot && gleam test
+cd bench/pilot && gleam test
 cd ../pilot-large && gleam test
 ```
 

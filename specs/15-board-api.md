@@ -1,6 +1,6 @@
 # Spec 15: Task Board
 
-**Status:** accepted 2026-09-29 · **Implements:** D-16 (points 5, 6), D-17, D-19, D-23, D-25 · **Needed by:** the D-16 work. Not in the PROPOSAL.md §18.2 table; numbered after it.
+**Status:** accepted 2026-09-29 · **Implements:** D-16 (points 5, 6), D-17, D-19, D-23, D-25 · **Needed by:** the D-16 work. Not in the PROPOSAL.md §14.4 table; numbered after it.
 
 Humans direct agents through tasks on a board. Solace owns each task's state, starts and stops agents, and enforces the workflow. A board only shows tasks and passes on what the human asks for. The API is the smallest one a Solace-compatible board needs. Solace ships a default board built only on this API; any other board, or an adapter for one, can replace it.
 
@@ -70,11 +70,11 @@ actions = ["unblock", "new_agent", "review", "cancel"]
 [[board.columns]]
 id = "needs_review"
 actions = ["approve", "complete", "review", "reassign", "start_over", "cancel"]
-next = "done"
+next = "complete"
 requires = ["approved"]                # an agent's result is on the task: a human signs it off
 
 [[board.columns]]
-id = "done"
+id = "complete"
 final = true
 
 [[board.columns]]
@@ -90,7 +90,7 @@ assign     = { to = "assigned", run = "work", model = true }
 unblock    = { to = "assigned", run = "work" }         # the waiting agent continues
 new_agent  = { to = "assigned", run = "new_work" }     # a fresh agent, with the notes so far
 approve    = { stamp = "approved" }
-complete   = { to = "done" }
+complete   = { to = "complete" }
 reassign   = { unstamp = "approved", to = "assigned", run = "work" } # preserve work and address feedback
 start_over = { revert = true, unstamp = "approved", to = "assigned", run = "new_work" }
 cancel     = { revert = true, to = "cancelled" }
@@ -181,7 +181,7 @@ Several projects on one server, several people, remote access and authentication
 - A1. With the default workflow, every configured action is tested from each of its columns, and every other column and action pair returns `E7001` with the right `allowed`.
 - A2. No action moves a task to an event's target column except through that column's actions. `asked`, `finished` and `failed` move it only as configured.
 - A3. A custom workflow with an extra column and action works end to end. The invalid workflows in §2 each give `E6020`.
-- A4. `complete` from `needs_review` without `approved` is refused (`E7006`). After `approve`, `complete` moves the task to `done`. `start_over` and `cancel` from `needs_review` are not gated, and `start_over` removes the stamp. The stamp records who gave it and when. A task approved and then moved back with `start_over` or `new_agent` no longer holds `approved`.
+- A4. `complete` from `needs_review` without `approved` is refused (`E7006`). After `approve`, `complete` moves the task to the `complete` column. `start_over` and `cancel` from `needs_review` are not gated, and `start_over` removes the stamp. The stamp records who gave it and when. A task approved and then moved back with `start_over` or `new_agent` no longer holds `approved`.
 - A5. With a fake agent: `task ask` blocks the task, and the question appears on it and in `/events`, while the agent's call stays open. `unblock` is refused until the question is answered or a `text` is given. After the last answer is submitted, the same agent process (same run id) receives the answer and continues without an extra `unblock` request. A paused run waits for `resume`. Custom continuation action names work, and repeated answers never launch a replacement run. `new_agent` instead ends it and starts a run with a new id whose prompt has the answer. `task done` moves the task to `needs_review`.
 - A6. A fake agent's run edits two symbols, creates one, deletes one, writes a resource and creates a new one. `cancel` restores the store and those files byte-for-byte to how they were before the task.
 - A7. Task B changes a symbol after task A did. Cancelling A is refused with `E7007`, naming the symbol and B, and nothing changes. After B is cancelled, cancelling A succeeds.

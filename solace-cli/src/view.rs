@@ -743,7 +743,7 @@ pub fn main_test() {
     }
     #[test]
     fn c2_pilot_date_check() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pilot-large");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/pilot-large");
         let mut sources = vec![];
         let mut owned = vec![];
         for dir in ["src", "test"] {
@@ -861,7 +861,7 @@ pub fn main_test() {
         let root = env::temp_dir().join(new_id(Kind::Fn, "view", "tests"));
         fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir_all(root.join("test")).unwrap();
-        let pilot = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pilot-large");
+        let pilot = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/pilot-large");
         fs::copy(pilot.join("gleam.toml"), root.join("gleam.toml")).unwrap();
         fs::copy(pilot.join("manifest.toml"), root.join("manifest.toml")).unwrap();
         copy_dir(&pilot.join("build/packages"), &root.join("build/packages")).unwrap();

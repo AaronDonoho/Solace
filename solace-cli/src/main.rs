@@ -1525,7 +1525,7 @@ impl Store {
     }
 
     /// Replaces or adds symbols in one transaction, type-checked together, so a
-    /// type change and its callers can land at once (PROPOSAL.md §7.4).
+    /// type change and its callers can land at once (PROPOSAL.md §4.6).
     /// `name`: the one symbol the text replaces. `new_in`: the module the text
     /// adds a symbol to. Neither: the text is blocks headed `// ── <name> ──`,
     /// as `view` and `inspect` print them; a name that doesn't exist yet adds
@@ -2937,7 +2937,7 @@ mod tests {
     fn inspect_dedups_and_fits_budget() {
         let root = env::temp_dir().join(format!("solace-inspect-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pilot-large");
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/pilot-large");
         assert!(Command::new("cp").arg("-r").arg(&src).arg(&root).status().unwrap().success());
         let _ = fs::remove_dir_all(root.join(".solace"));
         import(&root).ok().unwrap();
@@ -3136,7 +3136,7 @@ mod tests {
     fn test_runs_what_reaches_a_change() {
         let root = env::temp_dir().join(format!("solace-test-select-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let pilot = Path::new(env!("CARGO_MANIFEST_DIR")).join("../pilot-large");
+        let pilot = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/pilot-large");
         fs::create_dir_all(root.join("src")).unwrap();
         fs::create_dir_all(root.join("test")).unwrap();
         for f in ["gleam.toml", "manifest.toml", "test/pilot_test.gleam"] {

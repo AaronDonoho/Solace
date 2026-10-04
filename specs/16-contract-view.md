@@ -1,12 +1,12 @@
 # Spec 16: Contract View
 
-**Status:** accepted 2026-09-30 (D-35) · **Implements:** D-16 (point 4), D-20 (points 2, 3), D-28 (tier visibility), D-35, PROPOSAL.md §15 · **Needed by:** the D-16 human UX. Not in the PROPOSAL.md §18.2 table; numbered after it.
+**Status:** accepted 2026-09-30 (D-35) · **Implements:** D-16 (point 4), D-20 (points 2, 3), D-28 (tier visibility), D-35, PROPOSAL.md §7 · **Needed by:** the D-16 human UX. Not in the PROPOSAL.md §14.4 table; numbered after it.
 
 The contract view is how a human sees and checks a project in Solace. A human does not read source code there. They see what the system does and what it touches: its entry points, its logic, its side effects, its tests and its files. They can run any part of it with data they choose and see or hear what comes out. When an agent finishes a task, the review starts here: what the task changed in those terms, whether its tests pass, and whether the human's earlier runs now give different results.
 
 Humans give creative input and judgement; agents plan, code, debug and write tests (D-20). So the view shows data in, data out and effects, never how the code got there, and a human's judgement on a run becomes a task for an agent, not test code the human owns.
 
-This first version covers less than PROPOSAL.md §15. Guarantees with evidence levels (§15.2) and the program's decisions in business terms wait for the Solace language, because plain Gleam has no declared contracts or effects. Everything here is either derived from the project or seen in a run, and is marked with how it was obtained.
+This first version covers less than PROPOSAL.md §7. Guarantees with evidence levels (§7.5) and the program's decisions in business terms wait for the Solace language, because plain Gleam has no declared contracts or effects. Everything here is either derived from the project or seen in a run, and is marked with how it was obtained.
 
 "Gleam:" marks what applies to a Gleam project. The view itself is language-neutral (D-16.3): it shows a graph and doesn't parse code. A language adapter produces the graph from Solace's store (D-35.1).
 
@@ -29,7 +29,7 @@ This first version covers less than PROPOSAL.md §15. Guarantees with evidence l
 
 Every node and edge says how it is known: `declared` (written in the code, as the Solace language will allow), `derived` (found by reading the code) or `observed` (seen in a run). A derived effect is a claim the adapter makes, and the view doesn't present it as a guarantee.
 
-A node's detail panel shows its name, kind, plain-language summary (the symbol's description, if any), signature in the target's types and connections. A function also has a **Run** button (§3). A test shows its checks as data in → data out (D-35.5): Gleam: each `assert <call> == <expected>` as one line, "`<call>` → `<expected>`"; any other `assert` as written. Source text is one click further, on request (PROPOSAL.md §15.7, item 5).
+A node's detail panel shows its name, kind, plain-language summary (the symbol's description, if any), signature in the target's types and connections. A function also has a **Run** button (§3). A test shows its checks as data in → data out (D-35.5): Gleam: each `assert <call> == <expected>` as one line, "`<call>` → `<expected>`"; any other `assert` as written. Source text is one click further, on request (PROPOSAL.md §7.3, item 5).
 
 ## 2. What a human can do
 

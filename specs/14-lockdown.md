@@ -1,6 +1,6 @@
 # Spec 14: Lockdown — Tiers, Project Settings and Agent Commands
 
-**Status:** accepted 2026-09-29 · **Implements:** D-16 (points 8–10), PROPOSAL.md §14.7 · **Needed by:** the D-16 work. Not in the PROPOSAL.md §18.2 table; numbered after it.
+**Status:** accepted 2026-09-29 · **Implements:** D-16 (points 8–10), PROPOSAL.md §6.8 · **Needed by:** the D-16 work. Not in the PROPOSAL.md §14.4 table; numbered after it.
 
 Solace is installed once and wraps a user's project. An agent does all of its work in that project through the Solace MCP tool. It has no shell and no file tools, only its own web access. Solace decides what each of the project's files is and what the agent may do with it. "Gleam:" marks what applies to a Gleam project, which is today's only target language.
 

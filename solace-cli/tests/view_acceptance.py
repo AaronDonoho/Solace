@@ -10,7 +10,7 @@ import unittest
 
 BIN = os.environ['SOLACE_TEST_BIN']
 FAKE = Path(__file__).with_name('fake_agent.py')
-PILOT = Path(__file__).parents[2] / 'pilot-large'
+PILOT = Path(__file__).parents[2] / 'bench' / 'pilot-large'
 
 
 class View(unittest.TestCase):

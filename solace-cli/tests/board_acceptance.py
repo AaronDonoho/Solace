@@ -273,7 +273,7 @@ class Board(unittest.TestCase):
         t=self.completed([])
         self.action(t,'complete','E7006')
         t=self.action(t,'approve');self.assertEqual(t['stamps']['approved']['who'],'human');self.assertIsInstance(t['stamps']['approved']['time'],int)
-        self.assertEqual(self.action(t,'complete')['column'],'done')
+        self.assertEqual(self.action(t,'complete')['column'],'complete')
         self.api('PATCH','/tasks/'+t['id'],{'title':'no'},'E7004')
         t=self.completed([]);self.action(t,'approve');t=self.action(t,'start_over');self.assertEqual(t['stamps'],{})
         self.wait(t,lambda x:x['column']=='needs_review');self.action(t,'approve');self.assertEqual(self.action(t,'cancel')['column'],'cancelled')
@@ -347,7 +347,7 @@ class Board(unittest.TestCase):
         custom=default.replace('actions = ["plan", "cancel"]','actions = ["triage", "plan", "cancel"]')+'\ntriage = {to="triage"}\n\n[[board.columns]]\nid="triage"\nlabel="Triage"\nactions=["plan"]\n'
         (self.root/'solace.toml').write_text(original+custom)
         t=self.create();self.assertEqual(self.action(t,'triage')['column'],'triage');self.assertEqual(self.action(t,'plan')['column'],'planning')
-        for broken in [default.replace('to = "planning"','to = "missing"'),default+'\nunused={to="backlog"}\n',default.replace('asked = "blocked",',''),default.replace('next = "done"','next = "missing"'),default.replace('id = "done"','id = "done"\nactions=["plan"]')]:
+        for broken in [default.replace('to = "planning"','to = "missing"'),default+'\nunused={to="backlog"}\n',default.replace('asked = "blocked",',''),default.replace('next = "complete"','next = "missing"'),default.replace('id = "complete"','id = "complete"\nactions=["plan"]')]:
             (self.root/'solace.toml').write_text(original+broken);self.api('GET','/workflow',code='E6020')
         (self.root/'solace.toml').write_text(original)
     def test_a5_question_wait_and_new_agent(self):
@@ -485,7 +485,7 @@ class Board(unittest.TestCase):
         self.assertIn('This run is read-only',prompt)
         self.assertEqual(before,self.cli('view','app.one'));self.assertFalse((self.root/'priv/new').exists())
         responses=(self.root/'.solace'/(rid+'.responses')).read_text();self.assertEqual(responses.count('E7010'),2)
-        self.assertEqual(self.action(t,'complete')['column'],'done')  # an answered question ends after planning
+        self.assertEqual(self.action(t,'complete')['column'],'complete')  # an answered question ends after planning
         review=self.completed([]);self.api('PATCH','/tasks/'+review['id'],{'body':json.dumps([*steps,{'command':'task note review report'}])})
         # Starting a run on a paused task ends the pause instead of leaving the run hung.
         self.action(review,'pause');self.assertIsNone(self.action(review,'review',model='fake')['paused_from'])

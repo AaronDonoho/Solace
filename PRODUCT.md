@@ -33,7 +33,7 @@ The human's view comes from Solace's own store of identified, typed symbols and 
 Name only: Solace. No logo or voice set yet.
 
 ## Evidence on Hand
-Real projects to show: `pilot/`, `pilot-large/`, and benchmark results in `bench/results/`. There are no users, testimonials or external claims; don't invent any.
+Real projects to show: `bench/pilot/`, `bench/pilot-large/`, and benchmark results in `bench/results/`. There are no users, testimonials or external claims; don't invent any.
 
 ## Product Principles
 1. Humans judge; agents implement. The UI asks for judgement, never for code.

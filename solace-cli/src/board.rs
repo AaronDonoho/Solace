@@ -36,18 +36,26 @@ fn task_path(root: &Path, id: &str) -> Result<PathBuf, Failure> {
 pub(super) fn task(root: &Path, id: &str) -> Result<Value, Failure> {
     let path = task_path(root, id)?;
     if !path.exists() { return err("E7001", "unknown task"); }
-    serde_json::from_slice(&fs::read(path)?).map_err(|e| Failure(e.to_string(), 1))
+    read_task(root, &path)
 }
 pub(super) fn tasks(root: &Path) -> Result<Vec<Value>, Failure> {
     let mut out = vec![];
     for entry in fs::read_dir(root.join(".solace/board"))? {
         let p = entry?.path();
         if p.extension().is_some_and(|x| x == "json") {
-            out.push(serde_json::from_slice(&fs::read(p)?).map_err(|e| Failure(e.to_string(), 1))?);
+            out.push(read_task(root, &p)?);
         }
     }
     out.sort_by(|a: &Value, b: &Value| a["rank"].as_f64().unwrap_or(0.).total_cmp(&b["rank"].as_f64().unwrap_or(0.)));
     Ok(out)
+}
+fn read_task(root: &Path, path: &Path) -> Result<Value, Failure> {
+    let mut t: Value = serde_json::from_slice(&fs::read(path)?).map_err(|e| Failure(e.to_string(), 1))?;
+    // The default workflow's `done` column is now `complete`; tasks saved before still say `done`.
+    if t["column"] == "done" && !workflow(&lockdown::settings(root)?)?["columns"].as_array().unwrap().iter().any(|c| c["id"] == "done") {
+        t["column"] = json!("complete");
+    }
+    Ok(t)
 }
 fn event(s: &Store, v: Value) -> Result<(), Failure> {
     s.db.execute("INSERT INTO board_events(data) VALUES (?)", [v.to_string()])?;
@@ -1933,6 +1941,17 @@ mod tests {
         assert_eq!(found, ["0123456789abcdef.png"]);
     }
 
+    #[test]
+    fn tasks_saved_in_done_load_as_complete() {
+        let root = env::temp_dir().join(id());
+        fs::create_dir_all(root.join(".solace/board")).unwrap();
+        fs::write(root.join(".solace/board/t1.json"), r#"{"id":"t1","column":"done"}"#).unwrap();
+        assert_eq!(task(&root, "t1").unwrap()["column"], "complete");
+        // A custom workflow that still has a `done` column keeps it.
+        fs::write(root.join("solace.toml"), include_str!("default-board.toml").replace("= \"complete\"", "= \"done\"")).unwrap();
+        assert_eq!(tasks(&root).unwrap()[0]["column"], "done");
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn presets_merge_with_configured_models() {
         let v = parse_system("").unwrap();

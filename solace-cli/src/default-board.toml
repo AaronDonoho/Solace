@@ -20,11 +20,11 @@ actions = ["unblock", "new_agent", "review", "cancel"]
 [[board.columns]]
 id = "needs_review"
 actions = ["approve", "complete", "review", "reassign", "start_over", "cancel"]
-next = "done"
+next = "complete"
 requires = ["approved"]                # an agent's result is on the task: a human signs it off
 
 [[board.columns]]
-id = "done"
+id = "complete"
 final = true
 
 [[board.columns]]
@@ -40,7 +40,7 @@ assign     = { to = "assigned", run = "work", model = true }
 unblock    = { to = "assigned", run = "work" }         # the waiting agent continues
 new_agent  = { to = "assigned", run = "new_work" }     # a fresh agent, with the notes so far
 approve    = { stamp = "approved" }
-complete   = { to = "done" }
+complete   = { to = "complete" }
 reassign   = { unstamp = "approved", to = "assigned", run = "work" } # keep changes; fix review findings
 start_over = { revert = true, unstamp = "approved", to = "assigned", run = "new_work" }
 cancel     = { revert = true, to = "cancelled" }

@@ -1,6 +1,6 @@
 # Spec 3: Agent Protocol and Diagnostics
 
-**Status:** accepted 2026-09-27 · **Implements:** PROPOSAL.md §14 · **Needed by:** Phase 1a
+**Status:** accepted 2026-09-27 · **Implements:** PROPOSAL.md §6 · **Needed by:** Phase 1a
 
 The protocol is the agent's environment. It has few, rich commands that return compact text. Anything a human can see or do is available here (parity).
 
