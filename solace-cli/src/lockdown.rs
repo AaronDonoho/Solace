@@ -551,7 +551,16 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
     let binary = binary.to_string_lossy();
     let launch = match agent {
         "codex" => {
-            let mut config = format!("sandbox_mode = \"read-only\"\napproval_policy = \"never\"\nweb_search = \"live\"\n[features]\n");
+            // Codex calls tools from JavaScript (`exec`); one script can batch several
+            // solace replies, so its output limit is raised past Codex's default 10k tokens.
+            let hint = "The tool is the MCP tool `solace`; from `exec`, call it as \
+                `await tools.mcp__solace__solace({command: \"session start --task\", text: \"<the task>\"})`, \
+                with the new code in `text` for submit commands. One `exec` script can make several \
+                solace calls, so read everything you need in one step.";
+            let mut config = format!(
+                "sandbox_mode = \"read-only\"\napproval_policy = \"never\"\nweb_search = \"live\"\ntool_output_token_limit = 30000\ndeveloper_instructions = {}\n[features]\n",
+                json!(hint)
+            );
             for f in [
                 "shell_tool",
                 "unified_exec",

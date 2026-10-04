@@ -467,3 +467,11 @@ Affects:** Spec 16 (accepted), Spec 15 (the task's summary line and link; tasks 
 - **Check:** unit tests (`flow_follows_lets_fields_and_helpers` checks the count line and ordering; the workflow test checks the new line); `impact pricing.quote` on L01 after run 19.1's patch: 7 certain uses, `checkout.quote` second, then "And 27 possible uses…", 1.4k characters (4.2k before).
 - **Who/when:** Aaron, 2026-10-03 ("go ahead with your earlier suggestion"); wording by Claude.
 - **Affects:** D-44 (impact ordering), D-46 point 4 (workflow), Spec 3 §2 (`impact`); `reach.rs` (`ranked`, `note`, `report`), `reference.txt`.
+
+## D-49 Solace ships the Codex setup the bench measured — decided
+- **Question:** The bench gave Codex agents in the Solace arm two things Solace itself did not: a tool-output limit of 30k tokens (Codex's default cuts at about 10k, which an `exec` script batching several solace replies overshoots) and a hint on calling the tool from `exec` (`tools.mcp__solace__solace`, code in `text`, batch reads in one script). Task-board Codex runs had neither, so the bench measured a setup that does not ship.
+- **Answer:** `agent-config codex` writes both into `config.toml`: `tool_output_token_limit = 30000` and the hint, unchanged, as `developer_instructions`. The bench drops its copies (`CODEX_SOLACE_HINT`, the solace arm's `-c tool_output_token_limit`) and the unused `MCP_BUDGET`; the files arm keeps its limit flag.
+- **Rationale:** the bench should measure what ships; one config file serves both launchers.
+- **Check:** golden test `a10_agent_config_golden` (updated); `codex mcp list` (codex-cli 0.157.1) loads the generated config; 45 unit tests and acceptance pass. Not checked: a bench run (the hint now arrives as developer instructions instead of in the prompt).
+- **Who/when:** Aaron, 2026-10-03 ("ok, do it"); found and done by Claude.
+- **Affects:** D-14 (reply budgets), D-8 (Solace arm setup); `lockdown.rs` (`agent_config`), `tests/golden/codex-config.toml`, `bench/bench.py`.
