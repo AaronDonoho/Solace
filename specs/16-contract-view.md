@@ -1,6 +1,6 @@
 # Spec 16: Contract View
 
-**Status:** accepted 2026-09-30 (D-35) · **Implements:** D-16 (point 4), D-20 (points 2, 3), D-28 and D-52 (file categories), D-35, PROPOSAL.md §7 · **Needed by:** the D-16 human UX. Not in the PROPOSAL.md §14.4 table; numbered after it.
+**Status:** accepted 2026-09-30 (D-35) · **Implements:** D-16 (point 4), D-20 (points 2, 3), D-28 and D-52 (file categories), D-35, D-55, PROPOSAL.md §7 · **Needed by:** the D-16 human UX. Not in the PROPOSAL.md §14.4 table; numbered after it.
 
 The contract view is how a human sees and checks a project in Solace. A human does not read source code there. They see what the system does and what it touches: its entry points, its logic, its side effects, its tests and its files. They can run any part of it with data they choose and see or hear what comes out. When an agent finishes a task, the review starts here: what the task changed in those terms, whether its tests pass, and whether the human's earlier runs now give different results.
 
@@ -16,7 +16,7 @@ This first version covers less than PROPOSAL.md §7. Guarantees with evidence le
 | --- | --- | --- |
 | `entry` | A way into the system | `pub fn main`, and every public function that no source function calls (in `pilot-large`, `api.handle`) |
 | `logic` | A unit of behavior: a function | Each public or reached function symbol |
-| `effect` | Something the system does to the outside world: files, printing, network, a database, the clock, randomness, the environment, another process | Calls into a table of known effectful functions (`gleam/io`, `simplifile`, `gleam/erlang/os`, …) and every `@external` |
+| `effect` | Something the system does to the outside world: files, printing, network, a database, the clock, randomness, the environment, another process; or to its own state (D-55.3) | Calls into a table of known effectful functions (`gleam/io`, `simplifile`, `gleam/erlang/os`, …) and every `@external`. State: a project type that functions in at least three modules both take and return (`Store` in `pilot-large`); taking and returning it is "changes Store", taking it alone "reads Store", by each function's own signature |
 | `test` | A test, written by an agent | Each `*_test` function in `test/` |
 | `file` | A project file that isn't source, with its category | Every file from `solace files` except graph and internal ones |
 
@@ -29,11 +29,14 @@ This first version covers less than PROPOSAL.md §7. Guarantees with evidence le
 
 Every node and edge says how it is known: `declared` (written in the code, as the Solace language will allow), `derived` (found by reading the code) or `observed` (seen in a run). A derived effect is a claim the adapter makes, and the view doesn't present it as a guarantee.
 
-A node's detail panel shows its name, kind, plain-language summary (the symbol's description, if any), signature in the target's types and connections. A function also has a **Run** button (§3). A test shows its checks as data in → data out (D-35.5): Gleam: each `assert <call> == <expected>` as one line, "`<call>` → `<expected>`"; any other `assert` as written. Source text is one click further, on request (PROPOSAL.md §7.3, item 5).
+The graph also lists its **areas**: each source module with a function in it, named by the module's last path segment, with its module doc comment's first paragraph as the summary (D-55.1). Each function node says what it **takes** and **gives** in words (a project type by name, a primitive by its parameter's name, `List(Order)` as "a list of Order", `Result(A, E)` as "A or an error"), whether it is public, and for an entry point whose parameter is a project type with at least three constructors that carry data, the **requests** it handles, named in words with their fields ("Add item: order id, sku, quantity"; D-55.2).
+
+A node's detail panel shows its name, kind, summary (the symbol's description, if any), what it takes and gives, its requests, **examples** (the checks of the tests that test it and call it, D-55.5), its connections grouped once as Calls, Called by, Effects, Used by, Tests, Tested by, Ways in and Area, and its signature in the target's types. A function also has a **Run** button (§3). A test shows its checks as data in → data out (D-35.5): Gleam: each `assert <call> == <expected>` as one line, "`<call>` → `<expected>`"; any other `assert` as written. Source text is one click further, on request (PROPOSAL.md §7.3, item 5).
 
 ## 2. What a human can do
 
-- **Overview.** The graph is a drawn diagram: a layered layout with pan and zoom, nodes coloured by kind (Aaron, 2026-09-30). It opens on entry points and effects, with the logic between them collapsed. Colours mark node kinds. Badges mark nodes with no tests, and nodes changed by an open task.
+- **Outline (D-55.1).** Without a task, the view opens on an outline of what the project does: its main ways in (entry points with requests, and `main`) with their requests, then each area, folded, with its summary and counts, listing its public functions (entry points first): name, summary, what it takes and gives, the effects it reaches, and "checked by N tests" or "not checked". A line opens the drawing at that function. When public functions have no description, the outline says how many and one button puts a board task on for an agent to describe them (D-55.4). A switch in the header moves between Outline and Drawing; with a task, the view opens on the drawing.
+- **Overview.** The drawing is a layered layout with pan and zoom, nodes coloured by kind (Aaron, 2026-09-30). It opens on entry points and effects, with the logic between them collapsed; with more than 12 entry points it shows one box per area instead, in a grid, each saying how many ways in it has and the effects they reach, and expanding an area draws its entry points in a frame (D-55.6). A box shows its name, summary and what it takes and gives in words; no code and no kind word, which its colour shows (D-55.4, D-55.7). Badges mark nodes with no tests, and nodes changed by an open task (an area when anything in it changed).
 - **Search and follow.** A human can find any node by name or summary, then expand its callers, callees, effects and tests.
 - **Moving around (D-53).** Dragging the sheet, from anywhere including a node, pans it and selects nothing. Opening a node doesn't move the sheet unless the node is out of view or under the panel, and then only as far as brings it into view. Keys: arrows or WASD move between nodes, with Shift they pan, Ctrl+Up/Down zoom, Space expands a node, C collapses it, Shift+Space expands all, Shift+C collapses all (also toolbar buttons), Enter opens a node. A node with no connections doesn't expand. A changed node has a plain border in the revision colour, and the selected node a thick one. A node shows `+N` for connections not yet drawn, or `−` when expanded. A connector points from a function to what it calls, uses or tests, and names that on hover. The side panel is resized by dragging its left edge (or focusing it and pressing Left/Right); the width is kept per browser.
 - **Files and categories.** The side panel has tabs: Review (with a task), Details (an opened node) and Files; closing it folds it to its tabs. The Files tab lists every non-source file grouped by category (watched, protected, unwatched), with one line per group on what agents may do with those files (D-28, D-52, D-54). Clicking a file shows its text, read-only, in place of the drawing. A button with a house icon returns the drawing to its default view.
@@ -88,9 +91,9 @@ The board's *Changes* list links each entry to its node. Solace computes all of 
 
 | Request | Effect |
 | --- | --- |
-| `GET /graph` `?task=` | The graph (§1); with `task`, filtered and annotated for that task (§4) |
+| `GET /graph` `?task=` | The graph (§1) and its areas; with `task`, filtered and annotated for that task (§4) |
 | `GET /view` | The view's page |
-| `GET /nodes/{id}` | One node's detail panel, including a function's input forms and a test's lines |
+| `GET /nodes/{id}` | One node's detail panel, including a function's examples and input forms and a test's lines |
 | `GET /files/{path}` | A file the Files tab lists: its category and text (first 1 MiB; none if not text). Graph, internal and unlisted paths are refused |
 | `GET /nodes/{id}?source=1[&task=]` | The symbol's source; with a task, also its line diff from before the task, also for a symbol the task removed |
 | `GET /types/{id}` | A type's constructors and the public functions that return it, for forms |
@@ -121,6 +124,7 @@ Step 1:
 - C2. In `pilot-large`, `api.handle` is an `entry`, and `date_test`'s `assert date.add_business_days(Date(2026, 3, 5), 2) == Date(2026, 3, 9)` shows as `date.add_business_days(Date(2026, 3, 5), 2)` → `Date(2026, 3, 9)`.
 - C3. For a task that adds a call to `simplifile.write`, `GET /graph?task=` flags a new file-writing effect on each entry point that reaches it, and the board's summary line counts it, with its untested uses (D-44).
 - C4. The Files tab groups the files `solace files` lists by category, and opening one shows its text read-only; `GET /files/` refuses graph, internal and unlisted paths.
+- C4b. In `pilot-large`, `GET /graph` gives 24 areas with their module summaries, `api.handle` taking "Store, Env, Request" and giving "Store and Response" with 22 requests ("Add item: order id, sku, quantity"), and `catalog.in_category` with none; "changes Store" and "reads Store" effects; and `/nodes/` for `date.add_business_days` gives its test checks as examples. The view opens on the outline, with handle under Main ways in, and a line opens the drawing at that function; the drawing's overview shows one box per area.
 - C4a. A drag that starts on a node pans and opens nothing; a click opens a node without moving the sheet; the keys in §2 move focus, pan, zoom, expand and collapse. For a symbol a task changed, Show source gives its before/after line diff.
 
 Step 2:

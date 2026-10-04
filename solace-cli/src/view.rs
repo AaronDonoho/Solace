@@ -140,6 +140,128 @@ fn checks(text: &str) -> Vec<Value> {
     }
     out
 }
+/// Splits at the first top-level `sep` (outside brackets).
+fn split_top<'a>(s: &'a str, sep: &str) -> Option<(&'a str, &'a str)> {
+    let mut depth = 0i32;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ if depth == 0 && s[i..].starts_with(sep) => return Some((&s[..i], &s[i + sep.len()..])),
+            _ => {}
+        }
+    }
+    None
+}
+fn spaced(name: &str) -> String {
+    name.replace('_', " ")
+}
+/// `AddItem` as "Add item".
+fn spoken(constructor: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in constructor.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            out.push(' ');
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+/// A type's name without its module or arguments: `option.Option(Int)` is `Option`.
+fn base(t: &str) -> &str {
+    let t = t.trim();
+    let t = t.split('(').next().unwrap_or(t);
+    t.rsplit('.').next().unwrap_or(t).trim()
+}
+/// A type in words, for people who don't read code (D-55).
+fn words(t: &str) -> String {
+    let t = t.trim();
+    let args = |inner: &str| gleam::split_args(inner).into_iter().map(|(_, a)| words(&a)).collect::<Vec<_>>();
+    let and = |parts: Vec<String>| match parts.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => "nothing".into(),
+    };
+    if let Some(inner) = t.strip_prefix("#(") {
+        return and(args(inner));
+    }
+    if t.starts_with("fn(") {
+        return "a function".into();
+    }
+    let inner = t.split_once('(').map(|(_, rest)| args(rest)).unwrap_or_default();
+    match (base(t), inner.as_slice()) {
+        ("Nil", _) => "nothing".into(),
+        ("Int" | "Float", _) => "a number".into(),
+        ("String", _) => "text".into(),
+        ("Bool", _) => "yes or no".into(),
+        ("List", [x]) => format!("a list of {x}"),
+        ("Set", [x]) => format!("a set of {x}"),
+        ("Option", [x]) => format!("{x} or nothing"),
+        ("Result", [ok, _]) if ok == "nothing" => "success or an error".into(),
+        ("Result", [ok, _]) => format!("{ok} or an error"),
+        ("Dict", [k, v]) => format!("{v} by {k}"),
+        (name, _) => name.into(),
+    }
+}
+/// A signature's parameters as (name, type) and its return type.
+fn parts(sig: &str, name: &str) -> (Vec<(String, String)>, String) {
+    let Some((_, rest)) = sig.split_once(&format!("fn {name}(")) else { return (vec![], String::new()) };
+    let params = gleam::split_args(rest)
+        .into_iter()
+        .map(|(_, p)| match split_top(&p, ":") {
+            Some((names, t)) => (names.split_whitespace().last().unwrap_or("").to_string(), t.trim().to_string()),
+            None => (String::new(), p.trim().to_string()),
+        })
+        .collect::<Vec<_>>();
+    let close = gleam::split_args(rest).last().map_or(0, |(at, p)| at + p.len());
+    let out = rest[close..].trim_start_matches(|c: char| c == ')' || c.is_whitespace());
+    (params, out.strip_prefix("->").unwrap_or("").trim().to_string())
+}
+/// What a function takes, in words: a project type by its name, anything else by its parameter's name.
+fn takes(params: &[(String, String)]) -> Vec<String> {
+    params
+        .iter()
+        .map(|(name, t)| match base(t) {
+            "Int" | "Float" | "String" | "Bool" if !name.is_empty() => spaced(name.trim_start_matches('_')),
+            _ => words(t),
+        })
+        .collect()
+}
+/// Project types that functions in at least three modules both take and
+/// return: the program's state (D-55.3).
+fn state_types(ix: &Index, fns: &[usize]) -> BTreeSet<String> {
+    let project: HashSet<&str> = ix.syms.iter().filter(|s| s.kind == Kind::Type).map(|s| s.name.as_str()).collect();
+    let mut modules: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
+    for &i in fns {
+        let s = &ix.syms[i];
+        let (params, out) = parts(&gleam::signature(&s.item()), &s.name);
+        for (_, t) in params {
+            let b = base(&t);
+            if project.contains(b) && out.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == b) {
+                modules.entry(b.to_string()).or_default().insert(&s.module);
+            }
+        }
+    }
+    modules.into_iter().filter(|(_, m)| m.len() >= 3).map(|(t, _)| t).collect()
+}
+/// The requests an entry handles: the constructors of a project type it takes
+/// that has at least three carrying data (D-55.2), each with its fields in words.
+/// A plain enumeration such as a product category isn't requests.
+fn requests(ix: &Index, i: usize, params: &[(String, String)]) -> Vec<Value> {
+    for (_, t) in params {
+        let Some(&ty) = ix.uses[i].iter().find(|&&j| ix.syms[j].kind == Kind::Type && ix.syms[j].name == base(t)) else { continue };
+        let cons = gleam::record_fields(&ix.syms[ty].text);
+        if cons.iter().filter(|(_, fields)| !fields.is_empty()).count() >= 3 {
+            return cons
+                .into_iter()
+                .map(|(name, labels)| json!({"name":spoken(&name),"fields":labels.into_iter().map(|l| l.map_or("a value".into(), |l| spaced(&l))).collect::<Vec<_>>()}))
+                .collect();
+        }
+    }
+    vec![]
+}
 fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>) -> Value {
     let mut nodes = vec![];
     let mut edges = vec![];
@@ -168,7 +290,11 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
     }
     let direct: Vec<_> = (0..ix.syms.len()).map(|i| direct_effects(ix, i)).collect();
     let mut used_effects: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    for &i in &visible {
+    let mut ordered: Vec<usize> = visible.iter().copied().collect();
+    ordered.sort();
+    let state = state_types(ix, &ordered);
+    let mut areas = BTreeSet::new();
+    for &i in &ordered {
         let s = &ix.syms[i];
         let entry = s.name == "main"
             || (s.text.contains("pub fn ")
@@ -187,7 +313,18 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
             .collect::<Vec<_>>()
             .join(" ");
         let count = tests.iter().filter(|&&t| ix.uses[t].contains(&i)).count();
-        nodes.push(json!({"id":s.id,"kind":if entry {"entry"} else {"logic"},"name":s.name,"module":s.module,"summary":summary,"signature":sig,"known":"derived","tests":count,"changed":changed.contains(&format!("symbol:{}",s.id))}));
+        let (params, out) = parts(&sig, &s.name);
+        let public = s.text.contains(&format!("pub fn {}(", s.name));
+        areas.insert(s.module.clone());
+        nodes.push(json!({"id":s.id,"kind":if entry {"entry"} else {"logic"},"name":s.name,"module":s.module,"summary":summary,"signature":sig,"known":"derived","tests":count,"changed":changed.contains(&format!("symbol:{}",s.id)),
+            "public":public,"takes":takes(&params),"gives":if out.is_empty() {String::new()} else {words(&out)},"requests":if entry {requests(ix, i, &params)} else {vec![]}}));
+        // State (D-55.3): taken and returned is a change, taken alone a read; only the function's own signature counts.
+        for t in params.iter().map(|(_, t)| base(t)).filter(|b| state.contains(*b)).collect::<BTreeSet<_>>() {
+            let returned = out.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == t);
+            let cat = format!("{} {t}", if returned { "changes" } else { "reads" });
+            edges.push(json!({"from":s.id,"to":format!("effect:{cat}"),"kind":"uses","known":"derived","direct":true}));
+            used_effects.entry(cat).or_default();
+        }
         for &j in &ix.uses[i] {
             if visible.contains(&j) {
                 edges.push(json!({"from":s.id,"to":ix.syms[j].id,"kind":"calls","known":"derived","direct":true}));
@@ -218,7 +355,12 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
         }
     }
     for (cat, calls) in used_effects {
-        nodes.push(json!({"id":format!("effect:{cat}"),"kind":"effect","name":cat,"module":"","summary":"","signature":"","known":"derived","tests":0,"changed":false,"calls":calls}));
+        let summary = match cat.split_once(' ') {
+            Some(("changes", t)) if state.contains(t) => format!("Takes the program's {t} and returns a changed one."),
+            Some(("reads", t)) if state.contains(t) => format!("Takes the program's {t} and doesn't return it."),
+            _ => String::new(),
+        };
+        nodes.push(json!({"id":format!("effect:{cat}"),"kind":"effect","name":cat,"module":"","summary":summary,"signature":"","known":"derived","tests":0,"changed":false,"calls":calls}));
     }
     for &i in &tests {
         let s = &ix.syms[i];
@@ -242,7 +384,17 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
         nodes.push(json!({"id":format!("file:{name}"),"kind":"file","name":name,"module":"","summary":"","signature":"","known":"derived","tests":0,"changed":changed.contains(&format!("file:{name}")),"tier":tier,"sentence":sentence}));
     }
     nodes.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
-    json!({"nodes":nodes,"edges":edges})
+    // Areas (D-55.1): each source module with a function in the graph, its doc comment as the summary.
+    let areas: Vec<Value> = areas
+        .into_iter()
+        .map(|m| {
+            let header = ix.modules.iter().find(|r| r.path == m).map_or("", |r| r.header.as_str());
+            let doc: Vec<&str> = header.lines().filter_map(|l| l.strip_prefix("////")).map(str::trim).collect();
+            let summary = doc.split(|l| l.is_empty()).next().unwrap_or(&[]).join(" ");
+            json!({"id":m,"name":spaced(m.rsplit('/').next().unwrap_or(&m)),"summary":summary})
+        })
+        .collect();
+    json!({"nodes":nodes,"edges":edges,"areas":areas})
 }
 pub fn graph(s: &Store) -> Result<Value, Failure> {
     let ix = s.index()?;
@@ -716,6 +868,18 @@ pub fn api(
                         .collect::<Vec<_>>()
                 );
             }
+            // Examples (D-55.5): the checks of the tests that test this function and call it.
+            let call = format!("{}(", node["name"].as_str().unwrap_or(""));
+            let examples: Vec<Value> = node["tests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|t| g["nodes"].as_array().unwrap().iter().find(|n| n["id"] == *t))
+                .flat_map(|t| t["checks"].as_array().cloned().unwrap_or_default())
+                .filter(|c| c["call"].as_str().is_some_and(|c| c.contains(&call)))
+                .take(6)
+                .collect();
+            node["examples"] = json!(examples);
             Ok(node)
         }
         ("POST", ["tests"]) => {
@@ -840,6 +1004,41 @@ pub fn main_test() {
         lockdown::dispatch(&board::open(&root).unwrap(),&settings,&["files"],&mut || Ok(String::new()),None,1000).unwrap().map(|s|listing=s).unwrap();
         for (name,tier) in files {assert!(listing.contains(&format!("{name} [{tier}]\n")));}
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn plain_words_requests_state_and_areas() {
+        assert_eq!(words("Result(List(Order), Error)"), "a list of Order or an error");
+        assert_eq!(words("#(Store, Response)"), "Store and Response");
+        assert_eq!(words("option.Option(Int)"), "a number or nothing");
+        assert_eq!(words("Result(Nil, String)"), "success or an error");
+        assert_eq!(words("Dict(String, Int)"), "a number by text");
+        let changer = |m: &str| format!("import app/db.{{type Db}}\npub fn change(d: Db, order_id: Int) -> Db {{ d }}\npub fn read_{m}(d: Db) -> Int {{ 1 }}");
+        let (a, b) = (changer("a"), changer("b"));
+        let ix = test_index(&[
+            ("src", "app/db", "//// The program's data.\n////\n//// More detail.\npub type Db {\n  Db(n: Int)\n}\npub fn new() -> Db { Db(0) }"),
+            ("src", "app/a", &a),
+            ("src", "app/b", &b),
+            ("src", "app/api", "import app/db.{type Db}\npub type Colour {\n  Red\n  Green\n  Blue\n}\npub fn paint(c: Colour) -> Int { 1 }\npub type Request {\n  CreateOrder(customer_id: Int)\n  AddItem(order_id: Int, sku: String)\n  Cancel(Int)\n}\npub fn handle(d: Db, request: Request) -> #(Db, String) { #(d, \"\") }"),
+        ]);
+        let g = graph_index(&ix, &[], &HashSet::new());
+        let node = |module: &str, name: &str| g["nodes"].as_array().unwrap().iter().find(|n| n["module"] == module && n["name"] == name).unwrap().clone();
+        let handle = node("app/api", "handle");
+        assert_eq!(handle["takes"], json!(["Db", "Request"]));
+        assert_eq!(handle["gives"], "Db and text");
+        assert_eq!(handle["requests"], json!([{"name":"Create order","fields":["customer id"]},{"name":"Add item","fields":["order id","sku"]},{"name":"Cancel","fields":["a value"]}]));
+        assert_eq!(node("app/api", "paint")["requests"], json!([]));
+        assert_eq!(node("app/a", "change")["takes"], json!(["Db", "order id"]));
+        // Db is taken and returned in three modules (a, b, api), so it is state: a change or a read.
+        let effect = |from: &Value, to: &str| g["edges"].as_array().unwrap().iter().any(|e| e["from"] == from["id"] && e["to"] == to && e["kind"] == "uses");
+        assert!(effect(&handle, "effect:changes Db"));
+        assert!(effect(&node("app/a", "change"), "effect:changes Db"));
+        assert!(effect(&node("app/b", "read_b"), "effect:reads Db"));
+        assert!(!effect(&node("app/db", "new"), "effect:changes Db"));
+        assert!(g["nodes"].as_array().unwrap().iter().any(|n| n["id"] == "effect:changes Db" && n["summary"].as_str().unwrap().contains("returns a changed one")));
+        assert_eq!(g["areas"][3], json!({"id":"app/db","name":"db","summary":"The program's data."}));
+        // Two modules aren't enough to call a type state.
+        let ix = test_index(&[("src", "app/db", "pub type Db {\n  Db(n: Int)\n}"), ("src", "app/a", &a), ("src", "app/b", &b)]);
+        assert!(!graph_index(&ix, &[], &HashSet::new())["nodes"].as_array().unwrap().iter().any(|n| n["kind"] == "effect"));
     }
     #[test]
     fn graph_api_routes() {

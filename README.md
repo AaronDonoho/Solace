@@ -146,7 +146,7 @@ Rejected submissions are retained as editable drafts. Agents use `drafts`, `view
 - Gleam is the only project language.
 - One agent works on a project at a time: assigning a second task is refused while one is running. The work of open tasks isn't isolated either, so a later task sees the unapproved changes of earlier ones.
 - The board is local only, for one person, with no authentication.
-- The contract view at `/view` shows entry points, logic, effects, tests and files on an interactive drawing sheet. The overview fits the project drawing, and its title block names the project and store version. A task link opens review with changes and test results. Running functions and replaying prior runs are later packages.
+- The contract view at `/view` opens on an outline of what the project does: its main ways in and the requests they handle, then each area (source module) with every public function described in words, what it reads or changes, and whether tests check it. One button asks an agent to describe functions that have no description. The drawing sheet beside it shows areas, entry points, logic, effects, tests and files. A task link opens review with changes and test results. Running functions and replaying prior runs are later packages.
 - Starting real agents from the board is not yet tested end to end. The tests use a fake agent.
 - There are no prebuilt releases. Solace is built from source with Cargo, and needs several tools installed besides it: Gleam and Erlang/OTP for the project, and Codex or Claude Code for agents. Making setup easier is planned.
 

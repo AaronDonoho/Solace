@@ -1,4 +1,6 @@
+import gleam/int
 import gleam/json
+import gleam/list
 import gleam/option.{None}
 import gleam/result
 import gleeunit/should
@@ -9,7 +11,7 @@ pub fn graph_decoder_and_selection_test() {
     "{\"nodes\":[{\"id\":\"fn:app.main\",\"kind\":\"entry\",\"name\":\"main\",\"summary\":\"Starts the app\",\"signature\":\"main() -> Nil\",\"known\":\"derived\",\"tests\":0},{\"id\":\"fn:app.work\",\"kind\":\"logic\",\"name\":\"work\"},{\"id\":\"effect:prints\",\"kind\":\"effect\",\"name\":\"prints\"}],\"edges\":[{\"from\":\"fn:app.main\",\"to\":\"fn:app.work\",\"kind\":\"calls\"},{\"from\":\"fn:app.main\",\"to\":\"effect:prints\",\"kind\":\"uses\"}]}"
   let graph =
     json.parse(text, solace_view.graph_decoder())
-    |> result.unwrap(solace_view.Graph([], [], None, "", ""))
+    |> result.unwrap(solace_view.Graph([], [], None, "", "", []))
   solace_view.overview(graph) |> should.equal(["fn:app.main", "effect:prints"])
   solace_view.neighbors(graph, "fn:app.main")
   |> should.equal(["fn:app.work", "effect:prints"])
@@ -72,8 +74,88 @@ pub fn nodes_without_connections_do_not_expand_test() {
       None,
       "",
       "",
+      [],
     )
   solace_view.toggle(graph, ["lonely"], [], "lonely")
   |> should.equal(#(["lonely"], []))
-  solace_view.toggle(graph, ["a"], [], "a") |> should.equal(#(["a", "b"], ["a"]))
+  solace_view.toggle(graph, ["a"], [], "a")
+  |> should.equal(#(["a", "b"], ["a"]))
+}
+
+fn entry(i: Int, module: String) -> String {
+  "{\"id\":\"e"
+  <> int.to_string(i)
+  <> "\",\"kind\":\"entry\",\"name\":\"e"
+  <> int.to_string(i)
+  <> "\",\"module\":\""
+  <> module
+  <> "\"}"
+}
+
+/// Many entry points fold into one box per area; an area contains its entry
+/// points and reaches what they reach (D-55.6). Few entry points don't fold.
+pub fn areas_fold_many_entries_test() {
+  let entries =
+    int.range(from: 1, to: 14, with: [], run: list.prepend)
+    |> list.reverse
+    |> list.map(fn(i) {
+      entry(i, case i <= 6 {
+        True -> "app/orders"
+        False -> "app/reports"
+      })
+    })
+  let text =
+    "{\"nodes\":["
+    <> list.fold(
+      entries,
+      "{\"id\":\"effect:changes Store\",\"kind\":\"effect\",\"name\":\"changes Store\"}",
+      fn(acc, x) { acc <> "," <> x },
+    )
+    <> "],\"edges\":[{\"from\":\"e1\",\"to\":\"effect:changes Store\",\"kind\":\"uses\"}],\"areas\":[{\"id\":\"app/orders\",\"name\":\"orders\",\"summary\":\"Orders.\"}]}"
+  let assert Ok(graph) = json.parse(text, solace_view.graph_decoder())
+  let graph = solace_view.with_areas(graph)
+  solace_view.overview(graph)
+  |> should.equal([
+    "area:app/orders",
+    "area:app/reports",
+    "effect:changes Store",
+  ])
+  solace_view.reachability(graph)
+  |> list.map(fn(edge) { edge.from })
+  |> should.equal(["e1", "area:app/orders"])
+  let assert Ok(orders) =
+    list.find(graph.nodes, fn(n) { n.id == "area:app/orders" })
+  #(orders.name, orders.summary) |> should.equal(#("orders", "Orders."))
+  solace_view.connection_groups(graph, "area:app/orders")
+  |> should.equal([
+    #("Effects", ["effect:changes Store"]),
+    #("Ways in", ["e1", "e2", "e3", "e4", "e5", "e6"]),
+  ])
+  solace_view.connection_groups(graph, "e1")
+  |> should.equal([
+    #("Effects", ["effect:changes Store"]),
+    #("Area", ["area:app/orders"]),
+  ])
+  let assert Ok(few) =
+    json.parse(
+      "{\"nodes\":[" <> entry(1, "app/orders") <> "],\"edges\":[]}",
+      solace_view.graph_decoder(),
+    )
+  solace_view.overview(solace_view.with_areas(few)) |> should.equal(["e1"])
+}
+
+pub fn io_line_and_undescribed_test() {
+  let assert Ok(node) =
+    json.parse(
+      "{\"id\":\"f\",\"kind\":\"logic\",\"name\":\"get_payment\",\"public\":true,\"takes\":[\"Store\",\"id\"],\"gives\":\"Payment or an error\",\"requests\":[{\"name\":\"Add item\",\"fields\":[\"order id\"]}]}",
+      solace_view.node_decoder(),
+    )
+  solace_view.io_line(node) |> should.equal("Store, id → Payment or an error")
+  node.requests
+  |> should.equal([solace_view.Capability("Add item", ["order id"])])
+  solace_view.undescribed(node) |> should.be_true
+  solace_view.undescribed(solace_view.Node(..node, summary: "Finds a payment."))
+  |> should.be_false
+  solace_view.io_line(solace_view.Node(..node, takes: []))
+  |> should.equal("→ Payment or an error")
 }

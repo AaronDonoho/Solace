@@ -75,7 +75,22 @@ pub type Node {
     tier: String,
     sentence: String,
     checks: List(Check),
+    public: Bool,
+    takes: List(String),
+    gives: String,
+    requests: List(Capability),
+    examples: List(Check),
   )
+}
+
+/// A request an entry point handles, in words: "Add item" with its fields (D-55.2).
+pub type Capability {
+  Capability(name: String, fields: List(String))
+}
+
+/// A source module, shown as an area of the project (D-55.1).
+pub type Area {
+  Area(id: String, name: String, summary: String)
 }
 
 pub type Check {
@@ -133,6 +148,7 @@ pub type Graph {
     review: Option(Review),
     project: String,
     fingerprint: String,
+    areas: List(Area),
   )
 }
 
@@ -166,6 +182,8 @@ pub type Model {
     tests_requested: Bool,
     pane: Bool,
     file: Option(FileText),
+    outline: Bool,
+    asked: String,
   )
 }
 
@@ -196,6 +214,11 @@ pub type Msg {
   Live(String)
   Close
   SelectSource(String)
+  ShowOutline(Bool)
+  Show(String)
+  Reveal(String)
+  AskForSummaries
+  Asked(String)
 }
 
 pub fn check_decoder() -> decode.Decoder(Check) {
@@ -230,6 +253,23 @@ pub fn node_decoder() -> decode.Decoder(Node) {
     [],
     decode.list(check_decoder()),
   )
+  use public <- decode.optional_field("public", False, decode.bool)
+  use takes <- decode.optional_field("takes", [], decode.list(decode.string))
+  use gives <- decode.optional_field("gives", "", decode.string)
+  use requests <- decode.optional_field(
+    "requests",
+    [],
+    decode.list({
+      use name <- decode.field("name", decode.string)
+      use fields <- decode.field("fields", decode.list(decode.string))
+      decode.success(Capability(name, fields))
+    }),
+  )
+  use examples <- decode.optional_field(
+    "examples",
+    [],
+    decode.list(check_decoder()),
+  )
   decode.success(Node(
     id,
     name,
@@ -244,7 +284,36 @@ pub fn node_decoder() -> decode.Decoder(Node) {
     tier,
     sentence,
     checks,
+    public,
+    takes,
+    gives,
+    requests,
+    examples,
   ))
+}
+
+/// A node the view makes itself, such as an area box.
+fn made(id: String, kind: String, name: String, module: String) -> Node {
+  Node(
+    id,
+    name,
+    kind,
+    module,
+    "",
+    "",
+    "derived",
+    0,
+    False,
+    False,
+    "",
+    "",
+    [],
+    False,
+    [],
+    "",
+    [],
+    [],
+  )
 }
 
 pub fn edge_decoder() -> decode.Decoder(Edge) {
@@ -372,7 +441,61 @@ pub fn graph_decoder() -> decode.Decoder(Graph) {
     "",
     decode.at(["fingerprint"], decode.string),
   )
-  decode.success(Graph(nodes, edges, review, project, fingerprint))
+  use areas <- decode.optional_field(
+    "areas",
+    [],
+    decode.list({
+      use id <- decode.field("id", decode.string)
+      use name <- decode.field("name", decode.string)
+      use summary <- decode.optional_field("summary", "", decode.string)
+      decode.success(Area(id, name, summary))
+    }),
+  )
+  decode.success(Graph(nodes, edges, review, project, fingerprint, areas))
+}
+
+// ponytail: fixed threshold; make it depend on the sheet's size if small projects want areas too.
+/// Above this many entry points, the overview folds them into one box per
+/// area (D-55.6); an area box contains its entry points and reaches what they reach.
+const fold_above = 12
+
+pub fn with_areas(graph: Graph) -> Graph {
+  let entries =
+    list.filter(graph.nodes, fn(n) { n.kind == "entry" && n.module != "" })
+  case list.length(entries) > fold_above {
+    False -> graph
+    True -> {
+      let modules = list.unique(list.map(entries, fn(n) { n.module }))
+      let boxes =
+        list.map(modules, fn(m) {
+          let area =
+            list.find(graph.areas, fn(a) { a.id == m })
+            |> result.unwrap(Area(m, m, ""))
+          Node(
+            ..made("area:" <> m, "area", area.name, m),
+            summary: area.summary,
+          )
+        })
+      let contains =
+        list.map(entries, fn(n) {
+          Edge("area:" <> n.module, n.id, "contains", True, "derived")
+        })
+      let reaches =
+        list.filter_map(graph.edges, fn(edge) {
+          case edge.kind, list.find(entries, fn(n) { n.id == edge.from }) {
+            "uses", Ok(n) ->
+              Ok(Edge("area:" <> n.module, edge.to, "uses", False, "derived"))
+            _, _ -> Error(Nil)
+          }
+        })
+        |> list.unique
+      Graph(
+        ..graph,
+        nodes: list.append(boxes, graph.nodes),
+        edges: list.flatten([graph.edges, contains, reaches]),
+      )
+    }
+  }
 }
 
 fn point_decoder() -> decode.Decoder(Point) {
@@ -383,8 +506,12 @@ fn point_decoder() -> decode.Decoder(Point) {
 }
 
 pub fn overview(graph: Graph) -> List(String) {
+  let front = case list.any(graph.nodes, fn(n) { n.kind == "area" }) {
+    True -> "area"
+    False -> "entry"
+  }
   graph.nodes
-  |> list.filter(fn(n) { n.kind == "entry" || n.kind == "effect" })
+  |> list.filter(fn(n) { n.kind == front || n.kind == "effect" })
   |> list.map(fn(n) { n.id })
 }
 
@@ -392,7 +519,7 @@ pub fn reachability(graph: Graph) -> List(Edge) {
   list.filter(graph.edges, fn(edge) {
     edge.kind == "uses"
     && case list.find(graph.nodes, fn(node) { node.id == edge.from }) {
-      Ok(node) -> node.kind == "entry"
+      Ok(node) -> node.kind == "entry" || node.kind == "area"
       Error(_) -> False
     }
   })
@@ -452,7 +579,10 @@ fn visible_edges(model: Model) -> List(Edge) {
     list.contains(model.visible, edge.from)
     && list.contains(model.visible, edge.to)
   }
+  let folded = list.any(model.graph.nodes, fn(n) { n.kind == "area" })
   case model.expanded {
+    // Area boxes sit in a grid and say what they reach on their face, instead of a fan of connectors.
+    [] if folded -> []
     [] -> list.filter(reachability(model.graph), visible)
     // Only connectors that touch an opened node; the rest are listed in each node's panel.
     opened ->
@@ -531,7 +661,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   }
   #(
     Model(
-      Graph([], [], None, "", ""),
+      Graph([], [], None, "", "", []),
       [],
       [],
       [],
@@ -557,6 +687,9 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       False,
       task != "",
       None,
+      // Without a task the view opens on the outline (D-55.1).
+      task == "",
+      "",
     ),
     effect.batch([
       get(path, Loaded),
@@ -581,6 +714,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     Loaded(text) ->
       case json.parse(text, graph_decoder()) {
         Ok(graph) -> {
+          let graph = with_areas(graph)
           let visible = case model.visible {
             [] -> overview(graph)
             _ -> model.visible
@@ -662,11 +796,13 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             diff: [],
             search: "",
             focus: id,
+            outline: False,
           ),
         )
       let next = Model(..reveal(next, id, True), detail: n(model, id))
       case n(model, id) {
-        Some(node) if node.removed -> #(
+        // Removed nodes and area boxes have no details to fetch.
+        Some(node) if node.removed || node.kind == "area" -> #(
           Model(..next, detail: Some(node)),
           effect.none(),
         )
@@ -823,6 +959,57 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     )
     // Closing folds the pane to its tabs; the selection and its details stay.
     Close -> #(Model(..model, pane: False), effect.none())
+    ShowOutline(on) -> #(Model(..model, outline: on, file: None), case on {
+      True -> effect.none()
+      False -> fit_after_render()
+    })
+    // From the outline: open a function on the drawing, once the drawing is there to reveal it in.
+    Show(id) -> {
+      let #(next, fx) = update(model, Select(id))
+      #(
+        next,
+        effect.batch([
+          fx,
+          effect.from(fn(send) { after_draw(fn() { send(Reveal(id)) }) }),
+        ]),
+      )
+    }
+    Reveal(id) -> #(reveal(model, id, model.pane), effect.none())
+    AskForSummaries -> {
+      let missing =
+        list.filter(model.graph.nodes, undescribed)
+        |> list.map(fn(node) { "- " <> node.module <> "." <> node.name })
+      #(
+        Model(..model, asked: "asking"),
+        effect.from(fn(send) {
+          request(
+            "/tasks",
+            "POST",
+            json.to_string(
+              json.object([
+                #("title", json.string("Describe undocumented functions")),
+                #(
+                  "body",
+                  json.string(
+                    "The contract view shows each public function's doc comment as its summary. These have none. Give each a one-line doc comment saying what it does, in words someone who doesn't read code understands. Don't change any code.\n\n"
+                    <> string.join(missing, "\n"),
+                  ),
+                ),
+              ]),
+            ),
+            fn(response) { send(Asked(response)) },
+          )
+        }),
+      )
+    }
+    Asked(text) ->
+      case json.parse(text, decode.at(["id"], decode.string)) {
+        Ok(_) -> #(Model(..model, asked: "asked"), effect.none())
+        Error(_) -> #(
+          Model(..model, asked: "", error: "The task could not be made."),
+          effect.none(),
+        )
+      }
   }
 }
 
@@ -1097,6 +1284,27 @@ pub fn hidden(model: Model, id: String) -> Int {
 }
 
 fn revision(model: Model, node: Node) -> String {
+  case node.kind, model.graph.review {
+    // An area is changed when anything it contains is.
+    "area", Some(_) ->
+      case
+        list.any(model.graph.edges, fn(edge) {
+          edge.kind == "contains"
+          && edge.from == node.id
+          && case n(model, edge.to) {
+            Some(member) -> revision(model, member) != ""
+            None -> False
+          }
+        })
+      {
+        True -> "B"
+        False -> ""
+      }
+    _, _ -> plain_revision(model, node)
+  }
+}
+
+fn plain_revision(model: Model, node: Node) -> String {
   case model.graph.review {
     Some(review) ->
       case
@@ -1126,7 +1334,7 @@ fn box(model: Model, node: Node) -> Element(Msg) {
     <> ". "
     <> node.summary
     <> ". "
-    <> node.signature
+    <> face_line(model, node)
   let mark = revision(model, node)
   let classes =
     "view-node "
@@ -1184,23 +1392,14 @@ fn box(model: Model, node: Node) -> Element(Msg) {
       ]),
       s.rect([a.class("view-box"), ax("width", "220"), ax("height", "120")]),
       s.rect([a.class("view-tab"), ax("width", "7"), ax("height", "120")]),
-      s.text(
-        [a.class("view-kind"), ax("x", "20"), ax("y", "19")],
-        string.uppercase(node.kind),
-      ),
+      // The kind is the band's colour, not a word on every box (D-55.7).
       s.foreign_object(
-        [ax("x", "20"), ax("y", "29"), ax("width", "188"), ax("height", "84")],
+        [ax("x", "20"), ax("y", "22"), ax("width", "188"), ax("height", "92")],
         [
           h.div([a.class("view-face")], [
             h.p([a.class("view-name")], [h.text(node.name)]),
-            case node.summary {
-              "" ->
-                h.p([a.class("view-summary none")], [
-                  h.text("No summary recorded"),
-                ])
-              text -> h.p([a.class("view-summary")], [h.text(text)])
-            },
-            h.p([a.class("view-signature")], [h.text(node.signature)]),
+            h.p([a.class("view-summary")], [h.text(node.summary)]),
+            h.p([a.class("view-io")], [h.text(face_line(model, node))]),
           ]),
         ],
       ),
@@ -1214,7 +1413,8 @@ fn box(model: Model, node: Node) -> Element(Msg) {
         case mark {
           "" ->
             case
-              node.tests == 0 && node.kind != "effect" && node.kind != "test"
+              node.tests == 0
+              && { node.kind == "entry" || node.kind == "logic" }
             {
               True -> "NO TESTS"
               False -> ""
@@ -1225,6 +1425,100 @@ fn box(model: Model, node: Node) -> Element(Msg) {
       ..expander
     ],
   )
+}
+
+/// What a function takes and gives, in words: "Store, id → Payment or an error".
+pub fn io_line(node: Node) -> String {
+  case node.takes, node.gives {
+    [], "" -> ""
+    [], gives -> "→ " <> gives
+    takes, "" -> string.join(takes, ", ")
+    takes, gives -> string.join(takes, ", ") <> " → " <> gives
+  }
+}
+
+fn plural(count: Int, one: String, many: String) -> String {
+  int.to_string(count)
+  <> " "
+  <> case count {
+    1 -> one
+    _ -> many
+  }
+}
+
+/// A box's last line: an area's ways in, a test's checks, a function's inputs and output.
+fn face_line(model: Model, node: Node) -> String {
+  case node.kind {
+    "area" ->
+      string.join(
+        [
+          plural(
+            list.count(model.graph.edges, fn(edge) {
+              edge.kind == "contains" && edge.from == node.id
+            }),
+            "way in",
+            "ways in",
+          ),
+          ..effects_of(model, node.id)
+        ],
+        " · ",
+      )
+    "test" ->
+      case node.checks {
+        [] -> ""
+        checks -> plural(list.length(checks), "check", "checks")
+      }
+    _ -> io_line(node)
+  }
+}
+
+/// The effects a node reaches, by name.
+fn effects_of(model: Model, id: String) -> List(String) {
+  list.filter_map(model.graph.edges, fn(edge) {
+    case edge.kind == "uses" && edge.from == id, n(model, edge.to) {
+      True, Some(effect) -> Ok(effect.name)
+      _, _ -> Error(Nil)
+    }
+  })
+  |> list.unique
+}
+
+/// A public function without a description, for the agent to describe (D-55.4).
+pub fn undescribed(node: Node) -> Bool {
+  node.public
+  && node.summary == ""
+  && { node.kind == "entry" || node.kind == "logic" }
+}
+
+/// A frame around the entry points an expanded area contains. The area's box stays
+/// outside, joined by its connectors: framing both would take in boxes below the area.
+fn frame(model: Model, area: Node) -> Element(Msg) {
+  let members =
+    list.filter_map(model.graph.edges, fn(edge) {
+      case edge.kind == "contains" && edge.from == area.id {
+        True ->
+          case list.find(model.positions, fn(p) { p.id == edge.to }) {
+            Ok(p) -> Ok(p)
+            Error(_) -> Error(Nil)
+          }
+        False -> Error(Nil)
+      }
+    })
+  let points = members
+  let xs = list.map(points, fn(p) { p.x })
+  let ys = list.map(points, fn(p) { p.y })
+  let low = fn(values) { list.fold(values, 1.0e9, float.min) }
+  let high = fn(values) { list.fold(values, -1.0e9, float.max) }
+  let x = low(xs) -. 12.0
+  let y = low(ys) -. 12.0
+  s.g([a.class("view-frame")], [
+    s.rect([
+      ax("x", num(x)),
+      ax("y", num(y)),
+      ax("width", num(high(xs) +. 232.0 -. x)),
+      ax("height", num(high(ys) +. 144.0 -. y)),
+    ]),
+  ])
 }
 
 /// A tab hanging under a box's bottom-right edge, clear of its border: "−" when
@@ -1270,25 +1564,31 @@ fn check_line(check: Check) -> String {
   }
 }
 
-fn review_panel(review: Review) -> List(Element(Msg)) {
+fn review_panel(model: Model, review: Review) -> List(Element(Msg)) {
+  let name = fn(id) {
+    case n(model, id) {
+      Some(node) -> node.name
+      None -> id
+    }
+  }
   let entries =
     list.map(review.entries, fn(item) {
       h.button([a.class("view-row"), e.on_click(Select(item.id))], [
         h.text(
           item.change
           <> " · "
-          <> item.id
+          <> name(item.id)
           <> " + "
-          <> string.join(item.effects_added, ", ")
+          <> string.join(list.map(item.effects_added, name), ", ")
           <> " − "
-          <> string.join(item.effects_removed, ", "),
+          <> string.join(list.map(item.effects_removed, name), ", "),
         ),
       ])
     })
   let signatures =
     list.map(review.signatures, fn(item) {
       h.button([a.class("view-row"), e.on_click(Select(item.id))], [
-        h.text(item.id <> ": " <> item.before <> " → " <> item.after),
+        h.text(name(item.id) <> ": " <> item.before <> " → " <> item.after),
       ])
     })
   let tests =
@@ -1315,7 +1615,9 @@ fn review_panel(review: Review) -> List(Element(Msg)) {
     })
   let files =
     list.map(review.files, fn(item) {
-      h.p([], [h.text(item.change <> " · " <> item.id <> " · " <> item.tier)])
+      h.p([], [
+        h.text(item.change <> " · " <> name(item.id) <> " · " <> item.tier),
+      ])
     })
   let untested =
     list.map(review.untested, fn(item) {
@@ -1334,9 +1636,9 @@ fn review_panel(review: Review) -> List(Element(Msg)) {
       h.p([], [
         h.text(
           "Effects added: "
-          <> string.join(review.added, ", ")
+          <> string.join(list.map(review.added, name), ", ")
           <> ". Removed: "
-          <> string.join(review.removed, ", "),
+          <> string.join(list.map(review.removed, name), ", "),
         ),
       ]),
       h.h3([], [h.text("Changed signatures")]),
@@ -1355,28 +1657,88 @@ fn review_panel(review: Review) -> List(Element(Msg)) {
   ])
 }
 
+/// A node's connections in groups named once (D-55.5, D-55.7): Calls, Called by, …
+pub fn connection_groups(
+  graph: Graph,
+  id: String,
+) -> List(#(String, List(String))) {
+  [
+    #("calls", True, "Calls"),
+    #("calls", False, "Called by"),
+    #("uses", True, "Effects"),
+    #("uses", False, "Used by"),
+    #("tests", True, "Tests"),
+    #("tests", False, "Tested by"),
+    #("contains", True, "Ways in"),
+    #("contains", False, "Area"),
+  ]
+  |> list.filter_map(fn(group) {
+    let #(kind, out, label) = group
+    let ids =
+      list.filter_map(graph.edges, fn(edge) {
+        case edge.kind == kind, out && edge.from == id, !out && edge.to == id {
+          True, True, _ -> Ok(edge.to)
+          True, _, True -> Ok(edge.from)
+          _, _, _ -> Error(Nil)
+        }
+      })
+      |> list.unique
+    case ids {
+      [] -> Error(Nil)
+      _ -> Ok(#(label, ids))
+    }
+  })
+}
+
 fn detail_panel(model: Model, node: Node) -> List(Element(Msg)) {
-  let related = neighbors(model.graph, node.id)
+  let groups = connection_groups(model.graph, node.id)
   let connections =
-    list.map(related, fn(id) {
-      h.button([a.class("view-row"), e.on_click(Select(id))], [
-        h.text(case n(model, id) {
-          Some(other) -> other.kind <> " · " <> other.name
-          None -> id
-        }),
+    list.map(groups, fn(group) {
+      h.details([a.class("view-group")], [
+        h.summary([], [
+          h.text(group.0 <> " (" <> int.to_string(list.length(group.1)) <> ")"),
+        ]),
+        ..list.map(group.1, fn(id) {
+          h.button(
+            [a.class("view-row"), e.on_click(Select(id))],
+            case n(model, id) {
+              Some(other) -> [
+                h.text(other.name),
+                h.small([], [h.text(other.summary)]),
+              ]
+              None -> [h.text(id)]
+            },
+          )
+        })
       ])
     })
-  let checks =
-    list.map(node.checks, fn(check) { h.p([], [h.text(check_line(check))]) })
+  let lines = fn(title, checks) {
+    case checks {
+      [] -> []
+      _ -> [
+        h.h3([], [h.text(title)]),
+        h.ul(
+          [a.class("view-examples")],
+          list.map(checks, fn(check) { h.li([], [h.text(check_line(check))]) }),
+        ),
+      ]
+    }
+  }
   list.flatten([
     [
       h.h2([], [h.text(node.name)]),
       h.p([a.class("view-detail-kind")], [
         h.text(node.kind <> " · " <> node.known),
       ]),
-      h.p([], [h.text(node.summary)]),
-      h.p([a.class("view-code")], [h.text(node.signature)]),
-      case related {
+      case node.summary {
+        "" -> element.none()
+        summary -> h.p([a.class("view-detail-summary")], [h.text(summary)])
+      },
+      case node.kind, io_line(node) {
+        "area", _ | _, "" -> element.none()
+        _, io -> h.p([a.class("view-detail-io")], [h.text(io)])
+      },
+      case groups {
         [] -> h.p([a.class("view-file-role")], [h.text("No connections.")])
         _ ->
           h.button([e.on_click(Toggle(node.id))], [
@@ -1386,14 +1748,36 @@ fn detail_panel(model: Model, node: Node) -> List(Element(Msg)) {
             }),
           ])
       },
-      h.h3([], [h.text("Connections")]),
     ],
-    connections,
-    case checks {
+    case node.requests {
       [] -> []
-      _ -> [h.h3([], [h.text("Checks")]), ..checks]
+      requests -> [
+        h.h3([], [
+          h.text(
+            "Requests it handles ("
+            <> int.to_string(list.length(requests))
+            <> ")",
+          ),
+        ]),
+        requests_list(requests),
+      ]
     },
-    case node.removed && model.task == "" {
+    lines("Examples", node.examples),
+    lines("Checks", node.checks),
+    connections,
+    case node.signature {
+      "" -> []
+      signature -> [
+        h.h3([], [h.text("Signature")]),
+        h.p([a.class("view-code")], [h.text(signature)]),
+      ]
+    },
+    case
+      node.removed
+      && model.task == ""
+      || node.kind == "area"
+      || node.kind == "effect"
+    {
       True -> []
       False -> [
         h.button([e.on_click(SelectSource(node.id))], [h.text("Show source")]),
@@ -1401,6 +1785,21 @@ fn detail_panel(model: Model, node: Node) -> List(Element(Msg)) {
       ]
     },
   ])
+}
+
+fn requests_list(requests: List(Capability)) -> Element(Msg) {
+  h.ul(
+    [a.class("view-requests")],
+    list.map(requests, fn(request) {
+      h.li([], [
+        h.text(request.name),
+        case request.fields {
+          [] -> element.none()
+          fields -> h.small([], [h.text(" " <> string.join(fields, ", "))])
+        },
+      ])
+    }),
+  )
 }
 
 /// The source, or its diff from before the task when the task changed it.
@@ -1568,7 +1967,7 @@ fn pane(model: Model) -> List(Element(Msg)) {
       h.aside([a.class("view-panel"), a.role("tabpanel")], [
         strip,
         ..case current, model.detail, model.graph.review {
-          "review", _, Some(review) -> review_panel(review)
+          "review", _, Some(review) -> review_panel(model, review)
           "details", Some(node), _ -> detail_panel(model, node)
           _, _, _ -> files_panel(model)
         }
@@ -1618,11 +2017,19 @@ fn svg_view(model: Model) -> Element(Msg) {
       list.contains(model.visible, node.id) && node.kind != "file"
     })
   let edges = visible_edges(model)
+  let frames =
+    list.filter_map(model.expanded, fn(id) {
+      case n(model, id) {
+        Some(node) if node.kind == "area" -> Ok(frame(model, node))
+        _ -> Error(Nil)
+      }
+    })
   let elements =
-    list.append(
+    list.flatten([
+      frames,
       list.map(edges, fn(edge) { line(model, edge, model.expanded == []) }),
       list.map(visible, fn(node) { box(model, node) }),
-    )
+    ])
   s.svg(
     [
       a.class("view-diagram"),
@@ -1678,7 +2085,7 @@ fn legend_items() -> Element(Msg) {
   h.div([a.class("view-legend-content")], [
     h.div(
       [a.class("view-legend-kinds")],
-      list.map(["entry", "logic", "effect", "test", "file"], fn(kind) {
+      list.map(["area", "entry", "logic", "effect", "test", "file"], fn(kind) {
         h.span([a.class("view-legend-kind")], [
           h.span(
             [a.class("view-swatch " <> kind), ax("aria-hidden", "true")],
@@ -1780,18 +2187,35 @@ pub fn view(model: Model) -> Element(Msg) {
               e.on_input(Search),
             ]),
           ]),
+          h.div(
+            [a.class("view-switch"), a.role("group"), a.aria_label("Show")],
+            list.map([#(True, "Outline"), #(False, "Drawing")], fn(choice) {
+              h.button(
+                [
+                  ax("aria-pressed", case model.outline == choice.0 {
+                    True -> "true"
+                    False -> "false"
+                  }),
+                  e.on_click(ShowOutline(choice.0)),
+                ],
+                [h.text(choice.1)],
+              )
+            }),
+          ),
         ]),
         h.div(
           [a.class("view-search-results")],
           list.map(results, fn(node) {
             h.button([e.on_click(Select(node.id))], [
-              h.text(node.kind <> " · " <> node.name <> " — " <> node.summary),
+              h.text(node.name),
+              h.small([], [h.text(" " <> node.summary)]),
             ])
           }),
         ),
-        case model.file {
-          Some(file) -> file_view(file)
-          None -> drawing_sheet(model)
+        case model.file, model.outline {
+          Some(file), _ -> file_view(file)
+          None, True -> outline_view(model)
+          None, False -> drawing_sheet(model)
         },
       ],
       list.append(pane(model), [
@@ -1799,6 +2223,147 @@ pub fn view(model: Model) -> Element(Msg) {
       ]),
     ),
   )
+}
+
+/// What the project does, by area, before any drawing (D-55.1).
+fn outline_view(model: Model) -> Element(Msg) {
+  let functions =
+    list.filter(model.graph.nodes, fn(node) {
+      node.public
+      && !node.removed
+      && { node.kind == "entry" || node.kind == "logic" }
+    })
+  let main =
+    list.filter(functions, fn(node) {
+      node.kind == "entry" && { node.requests != [] || node.name == "main" }
+    })
+  let areas =
+    list.filter_map(model.graph.areas, fn(area) {
+      // Entry points first, then the rest, each in name order.
+      let #(entries, rest) =
+        list.filter(functions, fn(node) { node.module == area.id })
+        |> list.partition(fn(node) { node.kind == "entry" })
+      case list.append(entries, rest) {
+        [] -> Error(Nil)
+        members -> Ok(#(area, members))
+      }
+    })
+  let missing = list.count(model.graph.nodes, undescribed)
+  h.section([a.class("view-outline"), a.aria_label("What the project does")], [
+    h.div(
+      [a.class("view-outline-body")],
+      list.flatten([
+        [
+          h.h2([], [h.text("What " <> model.graph.project <> " does")]),
+          h.p([a.class("view-outline-lead")], [
+            h.text(
+              plural(list.length(functions), "function", "functions")
+              <> " in "
+              <> plural(list.length(areas), "area", "areas")
+              <> ". Open one to see it on the drawing.",
+            ),
+          ]),
+        ],
+        case missing, model.asked {
+          0, _ -> []
+          _, "asked" -> [
+            h.p([a.class("view-outline-notice")], [
+              h.text(
+                "Task added to the board: describe the undocumented functions.",
+              ),
+            ]),
+          ]
+          _, asked -> [
+            h.div([a.class("view-outline-notice")], [
+              h.p([], [
+                h.text(
+                  plural(
+                    missing,
+                    "public function has",
+                    "public functions have",
+                  )
+                  <> " no description yet.",
+                ),
+              ]),
+              h.button(
+                [e.on_click(AskForSummaries), a.disabled(asked == "asking")],
+                [h.text("Ask an agent to describe them")],
+              ),
+            ]),
+          ]
+        },
+        case main {
+          [] -> []
+          _ -> [
+            h.h3([], [h.text("Main ways in")]),
+            ..list.flat_map(main, fn(node) {
+              [
+                outline_row(model, node),
+                case node.requests {
+                  [] -> element.none()
+                  requests ->
+                    h.div([a.class("view-outline-requests")], [
+                      h.p([], [
+                        h.text(
+                          "Requests it handles ("
+                          <> int.to_string(list.length(requests))
+                          <> ")",
+                        ),
+                      ]),
+                      requests_list(requests),
+                    ])
+                },
+              ]
+            })
+          ]
+        },
+        [h.h3([], [h.text("By area")])],
+        list.map(areas, fn(pair) {
+          let #(area, members) = pair
+          let unchecked = list.count(members, fn(node) { node.tests == 0 })
+          h.details([a.class("view-area")], [
+            h.summary([], [
+              h.span([a.class("view-area-name")], [h.text(area.name)]),
+              h.span([a.class("view-area-counts")], [
+                h.text(
+                  plural(list.length(members), "function", "functions")
+                  <> case unchecked {
+                    0 -> ""
+                    _ -> " · " <> int.to_string(unchecked) <> " not checked"
+                  },
+                ),
+              ]),
+              case area.summary {
+                "" -> element.none()
+                summary ->
+                  h.span([a.class("view-area-summary")], [h.text(summary)])
+              },
+            ]),
+            ..list.map(members, fn(node) { outline_row(model, node) })
+          ])
+        }),
+      ]),
+    ),
+  ])
+}
+
+/// One function in the outline: name, summary, then inputs, effects and whether tests check it.
+fn outline_row(model: Model, node: Node) -> Element(Msg) {
+  let tested = case node.tests {
+    0 -> "not checked"
+    count -> "checked by " <> plural(count, "test", "tests")
+  }
+  let meta =
+    [io_line(node), ..list.append(effects_of(model, node.id), [tested])]
+    |> list.filter(fn(part) { part != "" })
+  h.button([a.class("view-outline-row"), e.on_click(Show(node.id))], [
+    h.span([a.class("view-outline-name")], [h.text(node.name)]),
+    case node.summary {
+      "" -> element.none()
+      summary -> h.span([a.class("view-outline-summary")], [h.text(summary)])
+    },
+    h.span([a.class("view-outline-meta")], [h.text(string.join(meta, " · "))]),
+  ])
 }
 
 fn icon_button(msg: Msg, label: String, path: String) -> Element(Msg) {

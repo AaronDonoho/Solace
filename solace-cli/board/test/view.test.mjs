@@ -83,7 +83,12 @@ test('contract view renders visible SVG nodes and uses the view API', async () =
     expect(detailHtml).toContain('<title>entry: main. ' + nodes[0].summary);
     expect(detailHtml).toContain('aria-label="entry: main. ' + nodes[0].summary);
     expect(detailHtml).toContain('class="view-summary">' + nodes[0].summary);
-    expect(detailHtml).toContain('class="view-signature">pub fn main(entries: List(Entry), subject: Subject) -&gt; List(Entry)');
+    // The signature is in the panel, not on the box; no kind word on boxes or connection rows (D-55).
+    expect(detailHtml).toContain('class="view-code">pub fn main(entries: List(Entry), subject: Subject) -&gt; List(Entry)');
+    expect(detailHtml).not.toContain('view-signature');
+    expect(detailHtml).not.toMatch(/class="view-kind"/);
+    expect(detailHtml).toContain('<summary>Calls (1)</summary><button class="view-row">work<small>Does work</small>');
+    expect(detailHtml).not.toContain('logic · ');
     expect((detailHtml.match(/class="view-node /g) || []).length).toBe(3);
     const wires = detailHtml.match(/<path class="view-wire"[^>]+>/g).filter(path => path.includes('marker-end'));
     expect(wires).toHaveLength(2);
@@ -153,6 +158,9 @@ test('33 isolated entries fill the sheet width at a readable size; extra rows pa
       [model] = view.update(model, new view.Loaded(JSON.stringify({ nodes, edges: [], project: { name: 'pilot_large', fingerprint: 'abcdef0123456789' } })));
       const positions = Array.from(model.positions);
       expect(positions).toHaveLength(33);
+      // Without a task the view opens on the outline; the drawing is one switch away.
+      expect(model.outline).toBe(true);
+      [model] = view.update(model, new view.ShowOutline(false));
       expect(new Set(positions.map(p => p.x)).size).toBe(width < 700 ? 1 : Math.floor((width - 48 - 32) / 252));
       const initial = [model.pan_x, model.pan_y, model.zoom];
       const drawingWidth = Math.max(240, width - 48);
@@ -234,8 +242,80 @@ test('files tab groups files by category and opens one read-only in place of the
     expect(html).not.toContain('class="view-diagram"');
     expect(html).toMatch(/aria-current="true"[^>]*>README.md/);
     [model] = view.update(model, new view.CloseFile());
-    expect(to_string(view.view(model))).toContain('class="view-diagram"');
+    expect(to_string(view.view(model))).toContain('class="view-outline"');
     [model] = view.update(model, new view.Close());
     expect(model.pane).toBe(false);
+  } finally { globalThis.location = oldLocation; globalThis.fetch = oldFetch; }
+});
+
+test('outline: areas, requests, a task for missing descriptions, and opening a function on the drawing', async () => {
+  const oldLocation = globalThis.location;
+  const oldFetch = globalThis.fetch;
+  globalThis.location = { pathname: '/view', search: '' };
+  const posts = [];
+  globalThis.fetch = async (path, opts) => {
+    if (opts.method === 'POST') { posts.push([path, JSON.parse(opts.body)]); return new Response(JSON.stringify({ id: 'task1' })); }
+    return new Response(JSON.stringify({ id: 'fn:api.handle', kind: 'entry', name: 'handle', examples: [{ call: 'api.handle(db, env, GetOrder(1))', expected: '#(db, ok)' }] }));
+  };
+  try {
+    const entry = (i, module) => ({ id: `fn:${module}.e${i}`, kind: 'entry', name: `e${i}`, module, public: true, summary: i === 1 ? '' : 'Does a thing', takes: ['Store', 'id'], gives: 'Payment or an error', tests: i % 2 });
+    const nodes = [
+      { id: 'fn:api.handle', kind: 'entry', name: 'handle', module: 'app/api', public: true, summary: 'Handles a request', takes: ['Store', 'Request'], gives: 'Store and Response', tests: 3,
+        requests: [{ name: 'Create order', fields: ['customer id'] }, { name: 'Add item', fields: ['order id', 'sku', 'quantity'] }] },
+      ...Array.from({ length: 13 }, (_, i) => entry(i + 1, i < 7 ? 'app/orders' : 'app/reports')),
+      { id: 'fn:orders.helper', kind: 'logic', name: 'helper', module: 'app/orders', public: false, summary: '' },
+      { id: 'effect:changes Store', kind: 'effect', name: 'changes Store', summary: "Takes the program's Store and returns a changed one." },
+    ];
+    const edges = [{ from: 'fn:api.handle', to: 'effect:changes Store', kind: 'uses', direct: true }, { from: 'fn:app/orders.e3', to: 'effect:changes Store', kind: 'uses', direct: true }];
+    const areas = [{ id: 'app/api', name: 'api', summary: 'The request handler.' }, { id: 'app/orders', name: 'orders', summary: 'Orders and their lines.' }, { id: 'app/reports', name: 'reports', summary: '' }];
+    let [model] = view.init();
+    const dispatch = msg => { let effect; [model, effect] = view.update(model, msg); perform(effect, dispatch, () => {}, () => {}, () => {}, () => {}, () => {}, () => {}); };
+    dispatch(new view.Loaded(JSON.stringify({ nodes, edges, areas, project: { name: 'shop', fingerprint: 'f' } })));
+    let html = to_string(view.view(model));
+    expect(html).toContain('class="view-outline"');
+    expect(html).not.toContain('class="view-diagram"');
+    expect(html).toContain('<h2>What shop does</h2>');
+    expect(html).toContain('14 functions in 3 areas.');
+    // The entry with requests comes first, its requests in words.
+    expect(html.indexOf('Main ways in')).toBeLessThan(html.indexOf('By area'));
+    expect(html).toContain('Requests it handles (2)');
+    expect(html).toContain('<li>Add item<small> order id, sku, quantity</small></li>');
+    // Areas fold, with their doc summary and counts; rows say what goes in and out, effects and tests.
+    expect(html).toContain('<span class="view-area-name">orders</span><span class="view-area-counts">7 functions · 3 not checked</span><span class="view-area-summary">Orders and their lines.</span>');
+    expect(html).toContain('Store, id → Payment or an error · changes Store · checked by 1 test');
+    expect(html).toContain('Store, id → Payment or an error · not checked');
+    expect(html).not.toContain('>helper<');
+    expect(html).not.toContain('No summary recorded');
+    // One button asks an agent to describe what has no description.
+    expect(html).toContain('1 public function has no description yet.');
+    dispatch(new view.AskForSummaries());
+    for (let i = 0; i < 50 && model.asked !== 'asked'; i++) await Bun.sleep(5);
+    expect(posts).toHaveLength(1);
+    expect(posts[0][0]).toBe('/tasks');
+    expect(posts[0][1].title).toBe('Describe undocumented functions');
+    expect(posts[0][1].body).toContain('- app/orders.e1');
+    expect(posts[0][1].body).not.toContain('helper');
+    expect(to_string(view.view(model))).toContain('Task added to the board');
+    // Opening a row shows the drawing with that function selected, with examples from its tests.
+    dispatch(new view.Show('fn:api.handle'));
+    for (let i = 0; i < 50 && !Array.from(model.detail[0]?.examples || []).length; i++) await Bun.sleep(5);
+    expect(model.outline).toBe(false);
+    expect(model.selected).toBe('fn:api.handle');
+    html = to_string(view.view(model));
+    expect(html).toContain('class="view-diagram"');
+    expect(html).toContain('<h3>Examples</h3>');
+    expect(html).toContain('api.handle(db, env, GetOrder(1)) → #(db, ok)');
+    // The drawing's overview folds 14 entry points into 3 area boxes; expanding one frames its entry points.
+    dispatch(new view.CollapseAll());
+    html = to_string(view.view(model));
+    expect((html.match(/class="view-node area/g) || []).length).toBe(3);
+    expect(html).not.toMatch(/class="view-node entry/);
+    expect(html).toContain('7 ways in');
+    expect(html).toContain('7 ways in · changes Store');
+    expect(html).not.toContain('class="view-link"');
+    dispatch(new view.Toggle('area:app/orders'));
+    html = to_string(view.view(model));
+    expect((html.match(/class="view-node entry/g) || []).length).toBe(7);
+    expect(html).toMatch(/<g class="view-frame"><rect[^>]*><\/rect><\/g>/);
   } finally { globalThis.location = oldLocation; globalThis.fetch = oldFetch; }
 });
