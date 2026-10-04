@@ -45,6 +45,10 @@ test('contract view renders visible SVG nodes and uses the view API', async () =
     expect(reviewHtml).toContain('REV A');
     expect(reviewHtml).toContain('→ 3, was 2');
     expect(reviewHtml).toContain('pilot_large · reviewing task t1');
+    // Collapsed main shows how many connections are hidden; connectors read along their arrow.
+    expect(reviewHtml).toMatch(/class="view-expander"[^]*?>\+1<\/text>/);
+    expect(reviewHtml).toContain('<title>main reaches prints</title>');
+    expect(reviewHtml).toContain('points from a function to what it calls, uses or tests');
     const originalPositions = Array.from(model.positions);
     // The click that ends a pan selects nothing.
     dispatch(new view.PanStart(100, 100)); dispatch(new view.PanMove(140, 100)); dispatch(new view.PanEnd());
@@ -62,6 +66,10 @@ test('contract view renders visible SVG nodes and uses the view API', async () =
     const detailHtml = to_string(view.view(model));
     expect(detailHtml).toContain('aria-label="Node detail"');
     expect(detailHtml).toContain('Collapse connections');
+    expect(detailHtml).toContain('class="view-node entry changed selected"');
+    expect(detailHtml).toMatch(/class="view-expander"[^]*?>−<\/text>/);
+    expect(detailHtml).toContain('<title>main calls work</title>');
+    expect(detailHtml).toContain('class="view-panel-grip"');
     expect(detailHtml).toContain('Show source');
     expect(detailHtml).toContain('<title>entry: main. ' + nodes[0].summary);
     expect(detailHtml).toContain('aria-label="entry: main. ' + nodes[0].summary);

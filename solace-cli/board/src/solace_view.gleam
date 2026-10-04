@@ -54,6 +54,12 @@ fn keys(receive: fn(String) -> Nil) -> Nil
 @external(javascript, "./layout.mjs", "focus_node")
 fn focus_node(id: String) -> Nil
 
+@external(javascript, "./layout.mjs", "panel_width")
+fn panel_width() -> Float
+
+@external(javascript, "./layout.mjs", "resizer")
+fn resizer() -> Nil
+
 pub type Node {
   Node(
     id: String,
@@ -538,7 +544,10 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     ),
     effect.batch([
       get(path, Loaded),
-      effect.from(fn(send) { keys(fn(key) { send(Key(key)) }) }),
+      effect.from(fn(send) {
+        keys(fn(key) { send(Key(key)) })
+        resizer()
+      }),
       case task {
         "" -> effect.none()
         _ -> effect.from(fn(send) { events(fn(data) { send(Live(data)) }) })
@@ -821,7 +830,7 @@ fn zoom(model: Model, amount: Float) -> Model {
 fn reveal(model: Model, id: String, panel: Bool) -> Model {
   let Point(_, x, y) = point(model, id)
   let width = case panel && viewport_width() >. 650.0 {
-    True -> viewport_width() -. 410.0
+    True -> viewport_width() -. panel_width()
     False -> viewport_width()
   }
   let w = width /. model.zoom
@@ -877,7 +886,10 @@ fn keyboard(model: Model, key: String) -> #(Model, Effect(Msg)) {
     )
   }
   case key, focused {
-    "pan-left", _ -> #(Model(..model, pan_x: model.pan_x -. step), effect.none())
+    "pan-left", _ -> #(
+      Model(..model, pan_x: model.pan_x -. step),
+      effect.none(),
+    )
     "pan-right", _ -> #(
       Model(..model, pan_x: model.pan_x +. step),
       effect.none(),
@@ -892,7 +904,11 @@ fn keyboard(model: Model, key: String) -> #(Model, Effect(Msg)) {
     "left", False | "right", False | "up", False | "down", False ->
       // Nothing focused yet: start from the node nearest the sheet's top left.
       case
-        nearest(model.positions, Point("", model.pan_x, model.pan_y -. 2.0), "down")
+        nearest(
+          model.positions,
+          Point("", model.pan_x, model.pan_y -. 2.0),
+          "down",
+        )
       {
         Ok(id) -> go(model, id)
         Error(_) -> #(model, effect.none())
@@ -996,16 +1012,46 @@ pub fn connector(from: Point, to: Point) -> String {
   }
 }
 
+/// What a connector says, read along its arrow: "main calls work".
+pub fn wire_text(model: Model, edge: Edge, overview: Bool) -> String {
+  let name = fn(id) {
+    case n(model, id) {
+      Some(node) -> node.name
+      None -> id
+    }
+  }
+  let verb = case edge.kind, overview {
+    "uses", True -> " reaches "
+    "uses", False -> " uses "
+    kind, _ -> " " <> kind <> " "
+  }
+  name(edge.from) <> verb <> name(edge.to)
+}
+
 fn line(model: Model, edge: Edge, overview: Bool) -> Element(Msg) {
-  s.path([
-    a.class("view-wire"),
-    ax("d", connector(point(model, edge.from), point(model, edge.to))),
-    ax("marker-end", "url(#arrow)"),
-    ax("stroke-dasharray", case edge.known != "derived" && !overview {
-      True -> ""
-      False -> "6 5"
-    }),
+  let d = connector(point(model, edge.from), point(model, edge.to))
+  s.g([a.class("view-link")], [
+    s.title([], [h.text(wire_text(model, edge, overview))]),
+    // A wide invisible stroke so the connector is easy to point at.
+    s.path([a.class("view-wire-hit"), ax("d", d)]),
+    s.path([
+      a.class("view-wire"),
+      ax("d", d),
+      ax("marker-end", "url(#arrow)"),
+      ax("stroke-dasharray", case edge.known != "derived" && !overview {
+        True -> ""
+        False -> "6 5"
+      }),
+    ]),
   ])
+}
+
+/// How many of a node's connections aren't drawn yet.
+pub fn hidden(model: Model, id: String) -> Int {
+  neighbors(model.graph, id)
+  |> list.unique
+  |> list.filter(fn(other) { !list.contains(model.visible, other) })
+  |> list.length
 }
 
 fn revision(model: Model, node: Node) -> String {
@@ -1051,6 +1097,21 @@ fn box(model: Model, node: Node) -> Element(Msg) {
       True -> " removed"
       False -> ""
     }
+    <> case model.selected == node.id {
+      True -> " selected"
+      False -> ""
+    }
+  let more = hidden(model, node.id)
+  let expander = case list.contains(model.expanded, node.id), more {
+    True, _ -> [expander_mark("−", "Expanded; press C to collapse")]
+    False, 0 -> []
+    False, _ -> [
+      expander_mark(
+        "+" <> int.to_string(more),
+        int.to_string(more) <> " more connections; press Space to expand",
+      ),
+    ]
+  }
   s.g(
     [
       a.class(classes),
@@ -1104,8 +1165,23 @@ fn box(model: Model, node: Node) -> Element(Msg) {
           _ -> "REV " <> mark
         },
       ),
+      ..expander
     ],
   )
+}
+
+/// A tab on a box's bottom-right corner: "−" when expanded, "+N" for N connections not shown.
+fn expander_mark(text: String, title: String) -> Element(Msg) {
+  s.g([a.class("view-expander"), ax("transform", "translate(220 120)")], [
+    s.title([], [h.text(title)]),
+    s.rect([
+      ax("x", "-20"),
+      ax("y", "-10"),
+      ax("width", "40"),
+      ax("height", "20"),
+    ]),
+    s.text([ax("text-anchor", "middle"), ax("y", "4")], text),
+  ])
 }
 
 fn search_results(model: Model) -> List(Node) {
@@ -1296,6 +1372,20 @@ fn source_text(model: Model) -> Element(Msg) {
   }
 }
 
+/// The panel's left edge: drag it, or focus it and press Left/Right, to resize the panel.
+fn grip() -> Element(Msg) {
+  h.div(
+    [
+      a.class("view-panel-grip"),
+      a.role("separator"),
+      a.tabindex(0),
+      a.aria_label("Resize panel"),
+      ax("aria-orientation", "vertical"),
+    ],
+    [],
+  )
+}
+
 fn files_panel(model: Model) -> Element(Msg) {
   h.aside([a.class("view-panel"), a.aria_label("Project files")], [
     h.div([a.class("view-panel-head")], [
@@ -1425,6 +1515,10 @@ fn legend_items() -> Element(Msg) {
         ]),
         h.text("Changed by the task: REV A added, B changed, C removed"),
       ]),
+      h.span([], [
+        h.text("→ points from a function to what it calls, uses or tests"),
+      ]),
+      h.span([], [h.text("+3: connections not shown · −: expanded")]),
     ]),
   ])
 }
@@ -1531,9 +1625,15 @@ pub fn view(model: Model) -> Element(Msg) {
           h.div([a.class("view-drawing")], [svg_view(model)]),
         ]),
       ],
-      list.append(panel, [
-        h.div([a.class("view-error"), a.role("alert")], [h.text(model.error)]),
-      ]),
+      list.append(
+        case panel {
+          [] -> []
+          _ -> [grip(), ..panel]
+        },
+        [
+          h.div([a.class("view-error"), a.role("alert")], [h.text(model.error)]),
+        ],
+      ),
     ),
   )
 }

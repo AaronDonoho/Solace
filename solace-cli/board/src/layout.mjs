@@ -81,7 +81,7 @@ function beside(saved, anchor, links, ids, valid) {
 }
 export function fit(positions, width = viewport_width(), height = viewport_height(), panel = false) {
   if (!positions.length) return { zoom: 1, x: 0, y: 0 };
-  const available = Math.max(240, width - (panel && (globalThis.innerWidth || 1440) >= 700 ? 410 : 0));
+  const available = Math.max(240, width - (panel && (globalThis.innerWidth || 1440) >= 700 ? panel_width() : 0));
   const left = Math.min(...positions.map(point => point.x)) - 16;
   const top = Math.min(...positions.map(point => point.y)) - 16;
   const right = Math.max(...positions.map(point => point.x)) + nodeWidth + 16;
@@ -109,7 +109,7 @@ export function after_draw(callback) {
 const directions = { ArrowLeft: 'left', a: 'left', ArrowRight: 'right', d: 'right', ArrowUp: 'up', w: 'up', ArrowDown: 'down', s: 'down' };
 export function keys(send) {
   globalThis.document?.addEventListener('keydown', event => {
-    if (event.altKey || event.metaKey || event.target.closest?.('input,textarea,select,button,a,summary,[contenteditable]')) return;
+    if (event.altKey || event.metaKey || event.target.closest?.('input,textarea,select,button,a,summary,[contenteditable],[role=separator]')) return;
     const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
     const direction = directions[key];
     let action = '';
@@ -125,4 +125,38 @@ export function keys(send) {
 export function focus_node(id) {
   const frame = globalThis.requestAnimationFrame || (fn => setTimeout(fn, 0));
   frame(() => globalThis.document?.querySelector(`[data-node="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }));
+}
+
+// The side panel's width: drag its left edge, or focus the edge and press Left/Right. Kept per browser.
+const widthKey = 'solace-view-panel-width';
+export function panel_width() {
+  const value = parseFloat(globalThis.document?.documentElement.style.getPropertyValue('--panel-width'));
+  return Number.isFinite(value) ? value : 410;
+}
+function setPanelWidth(width) {
+  const max = Math.max(320, (globalThis.innerWidth || 1440) - 240);
+  const clamped = Math.round(Math.min(max, Math.max(320, width)));
+  document.documentElement.style.setProperty('--panel-width', clamped + 'px');
+  try { localStorage.setItem(widthKey, String(clamped)); } catch {}
+}
+export function resizer() {
+  const document = globalThis.document;
+  if (!document) return;
+  try { const saved = parseFloat(localStorage.getItem(widthKey)); if (Number.isFinite(saved)) setPanelWidth(saved); } catch {}
+  document.addEventListener('pointerdown', event => {
+    if (!event.target.closest?.('.view-panel-grip')) return;
+    event.preventDefault();
+    const move = e => setPanelWidth(globalThis.innerWidth - e.clientX);
+    const stop = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', stop); document.body.classList.remove('view-resizing'); };
+    document.body.classList.add('view-resizing');
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', stop);
+  });
+  document.addEventListener('keydown', event => {
+    if (!event.target.closest?.('.view-panel-grip')) return;
+    const step = { ArrowLeft: 32, ArrowRight: -32 }[event.key];
+    if (!step) return;
+    event.preventDefault();
+    setPanelWidth(panel_width() + step);
+  });
 }
