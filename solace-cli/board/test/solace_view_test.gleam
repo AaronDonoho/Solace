@@ -63,3 +63,17 @@ pub fn arrow_keys_move_to_the_nearest_box_in_line_test() {
   solace_view.nearest(points, solace_view.Point("x", 252.0, 156.0), "up")
   |> should.equal(Ok("right"))
 }
+
+pub fn nodes_without_connections_do_not_expand_test() {
+  let graph =
+    solace_view.Graph(
+      [],
+      [solace_view.Edge("a", "b", "calls", True, "derived")],
+      None,
+      "",
+      "",
+    )
+  solace_view.toggle(graph, ["lonely"], [], "lonely")
+  |> should.equal(#(["lonely"], []))
+  solace_view.toggle(graph, ["a"], [], "a") |> should.equal(#(["a", "b"], ["a"]))
+}

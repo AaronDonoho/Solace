@@ -35,8 +35,8 @@ A node's detail panel shows its name, kind, plain-language summary (the symbol's
 
 - **Overview.** The graph is a drawn diagram: a layered layout with pan and zoom, nodes coloured by kind (Aaron, 2026-09-30). It opens on entry points and effects, with the logic between them collapsed. Colours mark node kinds. Badges mark nodes with no tests, and nodes changed by an open task.
 - **Search and follow.** A human can find any node by name or summary, then expand its callers, callees, effects and tests.
-- **Moving around (D-53).** Dragging the sheet, from anywhere including a node, pans it and selects nothing. Opening a node doesn't move the sheet unless the node is out of view or under the panel, and then only as far as brings it into view. Keys: arrows or WASD move between nodes, with Shift they pan, Ctrl+Up/Down zoom, Space expands a node, C collapses it, Enter opens it. A changed node has a plain border in the revision colour, and the selected node a thick one. A node shows `+N` for connections not yet drawn, or `−` when expanded. A connector points from a function to what it calls, uses or tests, and names that on hover. The side panel is resized by dragging its left edge (or focusing it and pressing Left/Right); the width is kept per browser.
-- **Files and categories.** A files panel lists every non-source file with its category and, in words, what agents may do with it (D-28, D-52). Example: "Watched: agents can read and write it; changes are undone with the task."
+- **Moving around (D-53).** Dragging the sheet, from anywhere including a node, pans it and selects nothing. Opening a node doesn't move the sheet unless the node is out of view or under the panel, and then only as far as brings it into view. Keys: arrows or WASD move between nodes, with Shift they pan, Ctrl+Up/Down zoom, Space expands a node, C collapses it, Shift+Space expands all, Shift+C collapses all (also toolbar buttons), Enter opens a node. A node with no connections doesn't expand. A changed node has a plain border in the revision colour, and the selected node a thick one. A node shows `+N` for connections not yet drawn, or `−` when expanded. A connector points from a function to what it calls, uses or tests, and names that on hover. The side panel is resized by dragging its left edge (or focusing it and pressing Left/Right); the width is kept per browser.
+- **Files and categories.** The side panel has tabs: Review (with a task), Details (an opened node) and Files; closing it folds it to its tabs. The Files tab lists every non-source file grouped by category (watched, protected, unwatched), with one line per group on what agents may do with those files (D-28, D-52, D-54). Clicking a file shows its text, read-only, in place of the drawing. A button with a house icon returns the drawing to its default view.
 - **Run.** A human runs any public function with data they enter, in one step or several (§3).
 - **Make a task from a run.** When a run is wrong, or right and worth keeping as a test, the human says what it should do, and Solace puts a task on the board (§3).
 - **Review.** A task's changes, test results and replayed runs (§4).
@@ -91,6 +91,7 @@ The board's *Changes* list links each entry to its node. Solace computes all of 
 | `GET /graph` `?task=` | The graph (§1); with `task`, filtered and annotated for that task (§4) |
 | `GET /view` | The view's page |
 | `GET /nodes/{id}` | One node's detail panel, including a function's input forms and a test's lines |
+| `GET /files/{path}` | A file the Files tab lists: its category and text (first 1 MiB; none if not text). Graph, internal and unlisted paths are refused |
 | `GET /nodes/{id}?source=1[&task=]` | The symbol's source; with a task, also its line diff from before the task, also for a symbol the task removed |
 | `GET /types/{id}` | A type's constructors and the public functions that return it, for forms |
 | `POST /tests` `{task}` | Runs the task's tests for review (§4.3) |
@@ -119,7 +120,7 @@ Step 1:
 - C1. For a small CLI project (a `main` that parses arguments, prints and writes a file, with tests), the graph lists `main` as `entry`, every `gleam/io` and `@external` use as a `derived` `effect` reached by `uses` edges, and each test function with `tests` edges to what it references.
 - C2. In `pilot-large`, `api.handle` is an `entry`, and `date_test`'s `assert date.add_business_days(Date(2026, 3, 5), 2) == Date(2026, 3, 9)` shows as `date.add_business_days(Date(2026, 3, 5), 2)` → `Date(2026, 3, 9)`.
 - C3. For a task that adds a call to `simplifile.write`, `GET /graph?task=` flags a new file-writing effect on each entry point that reaches it, and the board's summary line counts it, with its untested uses (D-44).
-- C4. The files panel shows each file's category and the sentence for it, matching `solace files`.
+- C4. The Files tab groups the files `solace files` lists by category, and opening one shows its text read-only; `GET /files/` refuses graph, internal and unlisted paths.
 - C4a. A drag that starts on a node pans and opens nothing; a click opens a node without moving the sheet; the keys in §2 move focus, pan, zoom, expand and collapse. For a symbol a task changed, Show source gives its before/after line diff.
 
 Step 2:

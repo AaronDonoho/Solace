@@ -37,7 +37,8 @@ test('contract view renders visible SVG nodes and uses the view API', async () =
     for (let i = 0; i < 50 && model.graph.review[0]?.tests.head.result !== 'passing'; i++) await Bun.sleep(5);
     expect(model.graph.review[0].tests.head.result).toBe('passing');
     const reviewHtml = to_string(view.view(model));
-    expect(reviewHtml).toContain('class="view-panel view-review"');
+    expect(reviewHtml).toContain('Revision review');
+    expect(reviewHtml).toMatch(/aria-selected="true"[^>]*>Review<\/button>/);
     expect(reviewHtml).toContain('class="view-node entry changed"');
     expect(reviewHtml).not.toContain('view-cloud');
     expect(reviewHtml).not.toContain('view-titleblock');
@@ -64,12 +65,20 @@ test('contract view renders visible SVG nodes and uses the view API', async () =
     expect(model.error).toBe('');
     expect(model.detail[0].tests).toBe(1);
     const detailHtml = to_string(view.view(model));
-    expect(detailHtml).toContain('aria-label="Node detail"');
+    expect(detailHtml).toMatch(/aria-selected="true"[^>]*>Details<\/button>/);
+    expect(detailHtml).toMatch(/>Review<\/button>/);
     expect(detailHtml).toContain('Collapse connections');
     expect(detailHtml).toContain('class="view-node entry changed selected"');
     expect(detailHtml).toMatch(/class="view-expander"[^]*?>−<\/text>/);
     expect(detailHtml).toContain('<title>main calls work</title>');
     expect(detailHtml).toContain('class="view-panel-grip"');
+    // Expand all draws every node and connection; collapse all returns to the overview.
+    dispatch(new view.ExpandAll());
+    expect(Array.from(model.visible).sort()).toEqual(['effect:prints', 'fn:app.main', 'fn:app.work']);
+    expect(to_string(view.view(model))).not.toMatch(/>\+\d*<\/text>/);
+    dispatch(new view.CollapseAll());
+    expect(Array.from(model.expanded)).toEqual([]);
+    dispatch(new view.Select('fn:app.main'));
     expect(detailHtml).toContain('Show source');
     expect(detailHtml).toContain('<title>entry: main. ' + nodes[0].summary);
     expect(detailHtml).toContain('aria-label="entry: main. ' + nodes[0].summary);
@@ -190,4 +199,43 @@ test('opening a node puts callees right, callers left and tests below it, keepin
   expect([at.t.x, at.t.y]).toEqual([b.x, b.y + 156]);
   expect(at.a.x).toBeLessThan(at.caller.x);
   expect(at.c.x).toBeGreaterThan(at.callee1.x);
+});
+
+test('files tab groups files by category and opens one read-only in place of the drawing', async () => {
+  const oldLocation = globalThis.location;
+  const oldFetch = globalThis.fetch;
+  globalThis.location = { pathname: '/view', search: '' };
+  const requests = [];
+  globalThis.fetch = async path => { requests.push(path); return new Response(JSON.stringify({ path: 'README.md', category: 'watched', text: 'line one\nline two', size: 17, truncated: false })); };
+  try {
+    let [model] = view.init();
+    const files = [['README.md', 'watched'], ['gleam.toml', 'watched'], ['solace.toml', 'protected'], ['logo.png', 'unwatched (binary)'], ['build/', 'unwatched; 495 files']]
+      .map(([name, tier]) => ({ id: 'file:' + name, kind: 'file', name, tier, sentence: 'long sentence per file' }));
+    [model] = view.update(model, new view.Loaded(JSON.stringify({ nodes: [{ id: 'fn:a.main', kind: 'entry', name: 'main' }, ...files], edges: [] })));
+    expect(model.pane).toBe(false);
+    let html = to_string(view.view(model));
+    expect(html).toContain('class="view-pane-folded"');
+    [model] = view.update(model, new view.Tab('files'));
+    html = to_string(view.view(model));
+    const order = ['<h3>Watched</h3>', 'README.md', 'gleam.toml', '<h3>Protected</h3>', 'solace.toml', '<h3>Unwatched</h3>', 'logo.png', 'build/'].map(text => html.indexOf(text));
+    expect(order.every(i => i > 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(html).not.toContain('long sentence per file');
+    expect(html).toContain('<small>495 files</small>');
+    expect(html).toContain('<small>binary</small>');
+    const dispatch = msg => { let effect; [model, effect] = view.update(model, msg); perform(effect, dispatch, () => {}, () => {}, () => {}, () => {}, () => {}, () => {}); };
+    dispatch(new view.OpenFile('README.md'));
+    for (let i = 0; i < 50 && model.file[0] === undefined; i++) await Bun.sleep(5);
+    expect(requests).toEqual(['/files/README.md']);
+    html = to_string(view.view(model));
+    expect(html).toContain('class="view-reader"');
+    expect(html).toContain('<span>line two</span>');
+    expect(html).toContain('Watched · read-only');
+    expect(html).not.toContain('class="view-diagram"');
+    expect(html).toMatch(/aria-current="true"[^>]*>README.md/);
+    [model] = view.update(model, new view.CloseFile());
+    expect(to_string(view.view(model))).toContain('class="view-diagram"');
+    [model] = view.update(model, new view.Close());
+    expect(model.pane).toBe(false);
+  } finally { globalThis.location = oldLocation; globalThis.fetch = oldFetch; }
 });

@@ -812,7 +812,7 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
     let (path, query_text) = url.split_once('?').unwrap_or((url, ""));
     let query: HashMap<String,String> = query_text.split('&').filter_map(|pair| pair.split_once('=')).map(|(k,v)|(k.to_string(),v.to_string())).collect();
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
-    if matches!(parts.first(), Some(&"graph" | &"nodes" | &"tests")) {
+    if matches!(parts.first(), Some(&"graph" | &"nodes" | &"tests" | &"files")) {
         return view::api(&s, method, &parts, &query, &body);
     }
     match (method, parts.as_slice()) {

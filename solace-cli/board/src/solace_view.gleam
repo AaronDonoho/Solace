@@ -136,6 +136,11 @@ pub type Graph {
   )
 }
 
+/// A project file opened from the Files tab, read-only, in place of the drawing.
+pub type FileText {
+  FileText(path: String, category: String, text: Option(String), note: String)
+}
+
 pub type Model {
   Model(
     graph: Graph,
@@ -147,7 +152,7 @@ pub type Model {
     source: String,
     diff: List(#(String, String)),
     search: String,
-    files: Bool,
+    tab: String,
     zoom: Float,
     pan_x: Float,
     pan_y: Float,
@@ -159,7 +164,8 @@ pub type Model {
     task: String,
     error: String,
     tests_requested: Bool,
-    review_open: Bool,
+    pane: Bool,
+    file: Option(FileText),
   )
 }
 
@@ -173,8 +179,12 @@ pub type Msg {
   Source(String)
   Search(String)
   Toggle(String)
-  Files
-  ToggleFiles
+  ExpandAll
+  CollapseAll
+  Tab(String)
+  OpenFile(String)
+  FileLoaded(String)
+  CloseFile
   Reset
   Fit
   Zoom(Float)
@@ -416,10 +426,12 @@ pub fn toggle(
         ])
       #(list.filter(visible, fn(x) { list.contains(kept, x) }), expanded)
     }
-    False -> #(list.unique(list.append(visible, neighbors(graph, id))), [
-      id,
-      ..expanded
-    ])
+    // A node with no connections has nothing to expand.
+    False ->
+      case neighbors(graph, id) {
+        [] -> #(visible, expanded)
+        others -> #(list.unique(list.append(visible, others)), [id, ..expanded])
+      }
   }
 }
 
@@ -454,6 +466,11 @@ fn visible_edges(model: Model) -> List(Edge) {
 }
 
 fn layout(model: Model) -> Model {
+  relayout(model, model.expanded == [])
+}
+
+/// `fresh`: lay everything out anew instead of keeping where nodes were drawn.
+fn relayout(model: Model, fresh: Bool) -> Model {
   let nodes =
     list.filter(model.graph.nodes, fn(n) {
       list.contains(model.visible, n.id) && n.kind != "file"
@@ -472,15 +489,10 @@ fn layout(model: Model) -> Model {
     |> json.to_string
   case
     json.parse(
-      placement(
-        node_json,
-        edge_json,
-        model.expanded == [],
-        case model.expanded {
-          [anchor, ..] -> anchor
-          [] -> ""
-        },
-      ),
+      placement(node_json, edge_json, fresh, case model.expanded {
+        [anchor, ..] -> anchor
+        [] -> ""
+      }),
       decode.list(point_decoder()),
     )
   {
@@ -505,7 +517,7 @@ fn fit(model: Model) -> Model {
     use y <- decode.field("y", decode.float)
     decode.success(#(zoom, x, y))
   }
-  case json.parse(fitted(points, model.review_open), decoder) {
+  case json.parse(fitted(points, model.pane), decoder) {
     Ok(#(zoom, x, y)) -> Model(..model, zoom: zoom, pan_x: x, pan_y: y)
     Error(_) -> model
   }
@@ -528,7 +540,10 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       "",
       [],
       "",
-      False,
+      case task {
+        "" -> "files"
+        _ -> "review"
+      },
       1.0,
       0.0,
       0.0,
@@ -541,6 +556,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       "",
       False,
       task != "",
+      None,
     ),
     effect.batch([
       get(path, Loaded),
@@ -639,11 +655,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             selected: id,
             visible: visible,
             expanded: expanded,
-            files: False,
+            tab: "details",
+            pane: True,
+            file: None,
             source: "",
             diff: [],
             search: "",
-            review_open: False,
             focus: id,
           ),
         )
@@ -695,17 +712,36 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         effect.none(),
       )
     }
-    Files -> #(
-      Model(
-        ..model,
-        files: True,
-        selected: "",
-        detail: None,
-        review_open: False,
-      ),
-      effect.none(),
+    Tab(tab) -> #(Model(..model, tab: tab, pane: True), effect.none())
+    ExpandAll -> {
+      let ids =
+        model.graph.nodes
+        |> list.filter(fn(node) { node.kind != "file" })
+        |> list.map(fn(node) { node.id })
+      let expanded =
+        list.filter(ids, fn(id) { neighbors(model.graph, id) != [] })
+      #(
+        fit(relayout(Model(..model, visible: ids, expanded: expanded), True)),
+        fit_after_render(),
+      )
+    }
+    CollapseAll -> #(
+      fit(layout(Model(..model, visible: overview(model.graph), expanded: []))),
+      fit_after_render(),
     )
-    ToggleFiles -> #(Model(..model, files: False), effect.none())
+    OpenFile(path) -> #(model, get("/files/" <> path, FileLoaded))
+    FileLoaded(text) ->
+      case json.parse(text, file_decoder()) {
+        Ok(file) -> #(
+          Model(..model, file: Some(file), error: ""),
+          effect.none(),
+        )
+        Error(_) -> #(
+          Model(..model, error: "That file could not be read."),
+          effect.none(),
+        )
+      }
+    CloseFile -> #(Model(..model, file: None), fit_after_render())
     Reset -> #(
       fit(layout(
         Model(
@@ -714,8 +750,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           expanded: [],
           selected: "",
           detail: None,
-          files: False,
-          review_open: model.task != "",
+          file: None,
           zoom: 1.0,
           pan_x: 0.0,
           pan_y: 0.0,
@@ -786,19 +821,24 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Source,
       ),
     )
-    Close -> #(
-      Model(
-        ..model,
-        selected: "",
-        detail: None,
-        files: False,
-        source: "",
-        diff: [],
-        review_open: False,
-      ),
-      effect.none(),
-    )
+    // Closing folds the pane to its tabs; the selection and its details stay.
+    Close -> #(Model(..model, pane: False), effect.none())
   }
+}
+
+fn file_decoder() -> decode.Decoder(FileText) {
+  use path <- decode.field("path", decode.string)
+  use category <- decode.field("category", decode.string)
+  use text <- decode.field("text", decode.optional(decode.string))
+  use size <- decode.field("size", decode.int)
+  use truncated <- decode.field("truncated", decode.bool)
+  let note = case text, truncated {
+    None, _ ->
+      "Not text (" <> int.to_string(size) <> " bytes), so it isn't shown."
+    _, True -> "Showing the first 1 MiB of " <> int.to_string(size) <> " bytes."
+    _, False -> ""
+  }
+  decode.success(FileText(path, category, text, note))
 }
 
 fn source_decoder() -> decode.Decoder(#(String, List(#(String, String)))) {
@@ -877,7 +917,7 @@ pub fn nearest(
 
 fn keyboard(model: Model, key: String) -> #(Model, Effect(Msg)) {
   let step = 96.0 /. model.zoom
-  let has_panel = model.detail != None || model.files || model.review_open
+  let has_panel = model.pane
   let focused = list.any(model.positions, fn(p) { p.id == model.focus })
   let go = fn(model: Model, id) {
     #(
@@ -899,6 +939,8 @@ fn keyboard(model: Model, key: String) -> #(Model, Effect(Msg)) {
       Model(..model, pan_y: model.pan_y +. step),
       effect.none(),
     )
+    "expand-all", _ -> update(model, ExpandAll)
+    "collapse-all", _ -> update(model, CollapseAll)
     "zoom-in", _ -> #(zoom(model, 1.2), effect.none())
     "zoom-out", _ -> #(zoom(model, 0.833333), effect.none())
     "left", False | "right", False | "up", False | "down", False ->
@@ -1102,10 +1144,17 @@ fn box(model: Model, node: Node) -> Element(Msg) {
       False -> ""
     }
   let more = hidden(model, node.id)
-  let expander = case list.contains(model.expanded, node.id), more {
-    True, _ -> [expander_mark("−", "Expanded; press C to collapse")]
-    False, 0 -> []
-    False, _ -> [
+  let expander = case
+    list.contains(model.expanded, node.id),
+    more,
+    neighbors(model.graph, node.id)
+  {
+    True, _, _ -> [expander_mark("−", "Expanded; press C to collapse")]
+    False, _, [] -> []
+    False, 0, _ -> [
+      expander_mark("+", "Press Space to draw this box's connections"),
+    ]
+    False, _, _ -> [
       expander_mark(
         "+" <> int.to_string(more),
         int.to_string(more) <> " more connections; press Space to expand",
@@ -1125,6 +1174,14 @@ fn box(model: Model, node: Node) -> Element(Msg) {
     ],
     [
       s.title([], [h.text(label)]),
+      // The keyboard focus ring: around the box only, whatever hangs off it.
+      s.rect([
+        a.class("view-ring"),
+        ax("x", "-7"),
+        ax("y", "-7"),
+        ax("width", "234"),
+        ax("height", "134"),
+      ]),
       s.rect([a.class("view-box"), ax("width", "220"), ax("height", "120")]),
       s.rect([a.class("view-tab"), ax("width", "7"), ax("height", "120")]),
       s.text(
@@ -1170,15 +1227,16 @@ fn box(model: Model, node: Node) -> Element(Msg) {
   )
 }
 
-/// A tab on a box's bottom-right corner: "−" when expanded, "+N" for N connections not shown.
+/// A tab hanging under a box's bottom-right edge, clear of its border: "−" when
+/// expanded, "+N" for N connections not shown, "+" when all are shown but not drawn.
 fn expander_mark(text: String, title: String) -> Element(Msg) {
-  s.g([a.class("view-expander"), ax("transform", "translate(220 120)")], [
+  s.g([a.class("view-expander"), ax("transform", "translate(198 133)")], [
     s.title([], [h.text(title)]),
     s.rect([
-      ax("x", "-20"),
-      ax("y", "-10"),
-      ax("width", "40"),
-      ax("height", "20"),
+      ax("x", "-22"),
+      ax("y", "-8"),
+      ax("width", "44"),
+      ax("height", "16"),
     ]),
     s.text([ax("text-anchor", "middle"), ax("y", "4")], text),
   ])
@@ -1212,7 +1270,7 @@ fn check_line(check: Check) -> String {
   }
 }
 
-fn review_panel(review: Review) -> Element(Msg) {
+fn review_panel(review: Review) -> List(Element(Msg)) {
   let entries =
     list.map(review.entries, fn(item) {
       h.button([a.class("view-row"), e.on_click(Select(item.id))], [
@@ -1265,45 +1323,39 @@ fn review_panel(review: Review) -> Element(Msg) {
         h.text(item.1),
       ])
     })
-  h.aside(
-    [a.class("view-panel view-review"), a.aria_label("Task review")],
-    list.flatten([
-      [
-        h.div([a.class("view-panel-head")], [
-          h.h2([], [h.text("Revision review")]),
-          h.button([e.on_click(Close)], [h.text("Close")]),
-        ]),
-        h.p([a.class("view-review-summary")], [h.text(review.summary)]),
-        h.h3([], [h.text("Entry points & effects")]),
-      ],
-      entries,
-      [
-        h.p([], [
-          h.text(
-            "Effects added: "
-            <> string.join(review.added, ", ")
-            <> ". Removed: "
-            <> string.join(review.removed, ", "),
-          ),
-        ]),
-        h.h3([], [h.text("Changed signatures")]),
-      ],
-      signatures,
-      [
-        h.h3([], [h.text("Tests")]),
-        h.button([e.on_click(RunTests)], [h.text("Run tests again")]),
-      ],
-      tests,
-      [h.h3([], [h.text("Untested uses the change reaches")])],
-      untested,
-      list.map(review.reaches, fn(line) { h.p([], [h.text(line)]) }),
-      [h.h3([], [h.text("Files touched")])],
-      files,
-    ]),
-  )
+  list.flatten([
+    [
+      h.h2([], [h.text("Revision review")]),
+      h.p([a.class("view-review-summary")], [h.text(review.summary)]),
+      h.h3([], [h.text("Entry points & effects")]),
+    ],
+    entries,
+    [
+      h.p([], [
+        h.text(
+          "Effects added: "
+          <> string.join(review.added, ", ")
+          <> ". Removed: "
+          <> string.join(review.removed, ", "),
+        ),
+      ]),
+      h.h3([], [h.text("Changed signatures")]),
+    ],
+    signatures,
+    [
+      h.h3([], [h.text("Tests")]),
+      h.button([e.on_click(RunTests)], [h.text("Run tests again")]),
+    ],
+    tests,
+    [h.h3([], [h.text("Untested uses the change reaches")])],
+    untested,
+    list.map(review.reaches, fn(line) { h.p([], [h.text(line)]) }),
+    [h.h3([], [h.text("Files touched")])],
+    files,
+  ])
 }
 
-fn detail_panel(model: Model, node: Node) -> Element(Msg) {
+fn detail_panel(model: Model, node: Node) -> List(Element(Msg)) {
   let related = neighbors(model.graph, node.id)
   let connections =
     list.map(related, fn(id) {
@@ -1316,41 +1368,39 @@ fn detail_panel(model: Model, node: Node) -> Element(Msg) {
     })
   let checks =
     list.map(node.checks, fn(check) { h.p([], [h.text(check_line(check))]) })
-  h.aside(
-    [a.class("view-panel"), a.aria_label("Node detail")],
-    list.flatten([
-      [
-        h.div([a.class("view-panel-head")], [
-          h.h2([], [h.text(node.name)]),
-          h.button([e.on_click(Close)], [h.text("Close")]),
-        ]),
-        h.p([a.class("view-detail-kind")], [
-          h.text(node.kind <> " · " <> node.known),
-        ]),
-        h.p([], [h.text(node.summary)]),
-        h.p([a.class("view-code")], [h.text(node.signature)]),
-        h.button([e.on_click(Toggle(node.id))], [
-          h.text(case list.contains(model.expanded, node.id) {
-            True -> "Collapse connections"
-            False -> "Expand connections"
-          }),
-        ]),
-        h.h3([], [h.text("Connections")]),
-      ],
-      connections,
-      case checks {
-        [] -> []
-        _ -> [h.h3([], [h.text("Checks")]), ..checks]
+  list.flatten([
+    [
+      h.h2([], [h.text(node.name)]),
+      h.p([a.class("view-detail-kind")], [
+        h.text(node.kind <> " · " <> node.known),
+      ]),
+      h.p([], [h.text(node.summary)]),
+      h.p([a.class("view-code")], [h.text(node.signature)]),
+      case related {
+        [] -> h.p([a.class("view-file-role")], [h.text("No connections.")])
+        _ ->
+          h.button([e.on_click(Toggle(node.id))], [
+            h.text(case list.contains(model.expanded, node.id) {
+              True -> "Collapse connections"
+              False -> "Expand connections"
+            }),
+          ])
       },
-      case node.removed && model.task == "" {
-        True -> []
-        False -> [
-          h.button([e.on_click(SelectSource(node.id))], [h.text("Show source")]),
-          source_text(model),
-        ]
-      },
-    ]),
-  )
+      h.h3([], [h.text("Connections")]),
+    ],
+    connections,
+    case checks {
+      [] -> []
+      _ -> [h.h3([], [h.text("Checks")]), ..checks]
+    },
+    case node.removed && model.task == "" {
+      True -> []
+      False -> [
+        h.button([e.on_click(SelectSource(node.id))], [h.text("Show source")]),
+        source_text(model),
+      ]
+    },
+  ])
 }
 
 /// The source, or its diff from before the task when the task changed it.
@@ -1386,21 +1436,173 @@ fn grip() -> Element(Msg) {
   )
 }
 
-fn files_panel(model: Model) -> Element(Msg) {
-  h.aside([a.class("view-panel"), a.aria_label("Project files")], [
-    h.div([a.class("view-panel-head")], [
-      h.h2([], [h.text("Project files")]),
-      h.button([e.on_click(ToggleFiles)], [h.text("Close")]),
-    ]),
-    ..list.map(
-      list.filter(model.graph.nodes, fn(node) { node.kind == "file" }),
-      fn(node) {
-        h.div([a.class("view-file")], [
-          h.h3([], [h.text(node.name)]),
-          h.p([], [h.text(node.sentence)]),
-        ])
+/// Files grouped by what Solace does with them, each group explained once.
+fn files_panel(model: Model) -> List(Element(Msg)) {
+  let files = list.filter(model.graph.nodes, fn(node) { node.kind == "file" })
+  let open = case model.file {
+    Some(file) -> file.path
+    None -> ""
+  }
+  [
+    h.h2([], [h.text("Project files")]),
+    ..list.flat_map(
+      [
+        #(
+          "watched",
+          "Watched",
+          "Agents can change these; undoing a task restores them.",
+        ),
+        #(
+          "protected",
+          "Protected",
+          "Agents can read these; their changes wait for your approval.",
+        ),
+        #(
+          "unwatched",
+          "Unwatched",
+          "Solace doesn't search these or undo commands' changes to them.",
+        ),
+      ],
+      fn(group) {
+        case list.filter(files, fn(node) { category(node.tier) == group.0 }) {
+          [] -> []
+          members -> [
+            h.h3([], [h.text(group.1)]),
+            h.p([a.class("view-file-role")], [h.text(group.2)]),
+            h.ul(
+              [a.class("view-files")],
+              list.map(members, fn(node) { file_row(node, open) }),
+            ),
+          ]
+        }
       },
     )
+  ]
+}
+
+/// "unwatched (binary)" and "unwatched; 495 files" are both unwatched.
+pub fn category(tier: String) -> String {
+  case string.split(tier, " ") {
+    [first, ..] -> string.replace(first, ";", "")
+    [] -> tier
+  }
+}
+
+fn file_row(node: Node, open: String) -> Element(Msg) {
+  let extra = string.drop_start(node.tier, string.length(category(node.tier)))
+  let extra = string.trim(string.replace(extra, ";", ""))
+  let extra = string.replace(string.replace(extra, "(", ""), ")", "")
+  let label = case extra {
+    "" -> [h.text(node.name)]
+    _ -> [h.text(node.name <> " "), h.small([], [h.text(extra)])]
+  }
+  case string.ends_with(node.name, "/") {
+    // A collapsed directory: a count, nothing to open.
+    True -> h.li([a.class("view-files-dir")], label)
+    False ->
+      h.li([], [
+        h.button(
+          [
+            a.class("view-row"),
+            ax("aria-current", case node.name == open {
+              True -> "true"
+              False -> "false"
+            }),
+            e.on_click(OpenFile(node.name)),
+          ],
+          label,
+        ),
+      ])
+  }
+}
+
+/// The pane's tabs; Review only for a task, Details once a node is opened.
+fn pane(model: Model) -> List(Element(Msg)) {
+  let tabs =
+    list.flatten([
+      case model.graph.review {
+        Some(_) -> [#("review", "Review")]
+        None -> []
+      },
+      case model.detail {
+        Some(_) -> [#("details", "Details")]
+        None -> []
+      },
+      [#("files", "Files")],
+    ])
+  let current = case list.any(tabs, fn(tab) { tab.0 == model.tab }) {
+    True -> model.tab
+    False -> "files"
+  }
+  let strip =
+    h.div(
+      [a.class("view-tabs"), a.role("tablist"), a.aria_label("Panel")],
+      list.append(
+        list.map(tabs, fn(tab) {
+          h.button(
+            [
+              a.role("tab"),
+              ax("aria-selected", case model.pane && tab.0 == current {
+                True -> "true"
+                False -> "false"
+              }),
+              e.on_click(Tab(tab.0)),
+            ],
+            [h.text(tab.1)],
+          )
+        }),
+        case model.pane {
+          True -> [
+            h.button([a.class("view-tabs-close"), e.on_click(Close)], [
+              h.text("Close"),
+            ]),
+          ]
+          False -> []
+        },
+      ),
+    )
+  case model.pane {
+    False -> [h.nav([a.class("view-pane-folded")], [strip])]
+    True -> [
+      grip(),
+      h.aside([a.class("view-panel"), a.role("tabpanel")], [
+        strip,
+        ..case current, model.detail, model.graph.review {
+          "review", _, Some(review) -> review_panel(review)
+          "details", Some(node), _ -> detail_panel(model, node)
+          _, _, _ -> files_panel(model)
+        }
+      ]),
+    ]
+  }
+}
+
+/// A file's text, read-only, where the drawing was.
+fn file_view(file: FileText) -> Element(Msg) {
+  h.section([a.class("view-reader"), a.aria_label("File " <> file.path)], [
+    h.div([a.class("view-reader-head")], [
+      h.div([], [
+        h.h2([], [h.text(file.path)]),
+        h.p([], [
+          h.text(string.capitalise(category(file.category)) <> " · read-only"),
+        ]),
+      ]),
+      h.button([e.on_click(CloseFile)], [h.text("Back to the drawing")]),
+    ]),
+    case file.note {
+      "" -> element.none()
+      note -> h.p([a.class("view-reader-note")], [h.text(note)])
+    },
+    case file.text {
+      Some(text) ->
+        h.pre(
+          [a.class("view-reader-text")],
+          list.map(string.split(text, "\n"), fn(line) {
+            h.span([], [h.text(line)])
+          }),
+        )
+      None -> element.none()
+    },
   ])
 }
 
@@ -1518,7 +1720,9 @@ fn legend_items() -> Element(Msg) {
       h.span([], [
         h.text("→ points from a function to what it calls, uses or tests"),
       ]),
-      h.span([], [h.text("+3: connections not shown · −: expanded")]),
+      h.span([], [
+        h.text("+3: expand to show 3 more connections · −: expanded"),
+      ]),
     ]),
   ])
 }
@@ -1538,19 +1742,13 @@ fn legend() -> Element(Msg) {
 
 pub fn view(model: Model) -> Element(Msg) {
   let results = search_results(model)
-  let panel = case model.files, model.detail, model.graph.review {
-    True, _, _ -> [files_panel(model)]
-    _, Some(node), _ -> [detail_panel(model, node)]
-    _, _, Some(review) if model.review_open -> [review_panel(review)]
-    _, _, _ -> []
-  }
   h.main(
     [
       a.class(
         "view-page"
-        <> case panel {
-          [] -> ""
-          _ -> " has-panel"
+        <> case model.pane {
+          True -> " has-panel"
+          False -> ""
         },
       ),
     ],
@@ -1582,7 +1780,6 @@ pub fn view(model: Model) -> Element(Msg) {
               e.on_input(Search),
             ]),
           ]),
-          h.button([e.on_click(Files)], [h.text("Files")]),
         ]),
         h.div(
           [a.class("view-search-results")],
@@ -1592,48 +1789,79 @@ pub fn view(model: Model) -> Element(Msg) {
             ])
           }),
         ),
-        h.div([a.class("view-sheet")], [
-          h.div([a.class("view-sheet-head")], [
-            legend(),
-            h.p([a.class("view-drawing-note")], [
-              h.text(
-                case
-                  list.any(model.graph.nodes, fn(node) {
-                    node.kind == "effect" && !node.removed
-                  })
-                {
-                  True -> ""
-                  False ->
-                    case model.graph.nodes {
-                      [] -> "Loading the project drawing…"
-                      _ ->
-                        "No effects found: nothing here prints, writes files or talks to the network (derived)"
-                    }
-                },
-              ),
-            ]),
-            h.div([a.class("view-tools")], [
-              h.button([e.on_click(Zoom(1.2)), a.aria_label("Zoom in")], [
-                h.text("+"),
-              ]),
-              h.button([e.on_click(Zoom(0.833333)), a.aria_label("Zoom out")], [
-                h.text("−"),
-              ]),
-              h.button([e.on_click(Reset)], [h.text("Overview")]),
-            ]),
-          ]),
-          h.div([a.class("view-drawing")], [svg_view(model)]),
-        ]),
-      ],
-      list.append(
-        case panel {
-          [] -> []
-          _ -> [grip(), ..panel]
+        case model.file {
+          Some(file) -> file_view(file)
+          None -> drawing_sheet(model)
         },
-        [
-          h.div([a.class("view-error"), a.role("alert")], [h.text(model.error)]),
-        ],
-      ),
+      ],
+      list.append(pane(model), [
+        h.div([a.class("view-error"), a.role("alert")], [h.text(model.error)]),
+      ]),
     ),
   )
+}
+
+fn icon_button(msg: Msg, label: String, path: String) -> Element(Msg) {
+  h.button(
+    [
+      e.on_click(msg),
+      a.class("view-icon"),
+      a.aria_label(label),
+      ax("title", label),
+    ],
+    [
+      s.svg([ax("viewBox", "0 0 24 24"), ax("aria-hidden", "true")], [
+        s.path([ax("d", path)]),
+      ]),
+    ],
+  )
+}
+
+fn drawing_sheet(model: Model) -> Element(Msg) {
+  h.div([a.class("view-sheet")], [
+    h.div([a.class("view-sheet-head")], [
+      legend(),
+      h.p([a.class("view-drawing-note")], [
+        h.text(
+          case
+            list.any(model.graph.nodes, fn(node) {
+              node.kind == "effect" && !node.removed
+            })
+          {
+            True -> ""
+            False ->
+              case model.graph.nodes {
+                [] -> "Loading the project drawing…"
+                _ ->
+                  "No effects found: nothing here prints, writes files or talks to the network (derived)"
+              }
+          },
+        ),
+      ]),
+      h.div([a.class("view-tools")], [
+        h.button([e.on_click(Zoom(1.2)), a.aria_label("Zoom in")], [
+          h.text("+"),
+        ]),
+        h.button([e.on_click(Zoom(0.833333)), a.aria_label("Zoom out")], [
+          h.text("−"),
+        ]),
+        icon_button(
+          ExpandAll,
+          "Expand all (Shift+Space)",
+          "M7 9l5-5 5 5M7 15l5 5 5-5",
+        ),
+        icon_button(
+          CollapseAll,
+          "Collapse all (Shift+C)",
+          "M7 4l5 5 5-5M7 20l5-5 5 5",
+        ),
+        icon_button(
+          Reset,
+          "Back to the default view",
+          "M3 11.5 12 4l9 7.5M5.5 9.5V20h5v-6h3v6h5V9.5",
+        ),
+      ]),
+    ]),
+    h.div([a.class("view-drawing")], [svg_view(model)]),
+  ])
 }

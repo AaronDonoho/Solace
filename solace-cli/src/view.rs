@@ -610,6 +610,18 @@ pub fn run_tests(root: PathBuf, tid: String) {
     });
 }
 
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let (mut out, mut i) = (vec![], 0);
+    while i < b.len() {
+        match (b[i], b.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(std::str::from_utf8(h).ok()?, 16).ok())) {
+            (b'%', Some(byte)) => (out.push(byte), i += 3),
+            (c, _) => (out.push(c), i += 1),
+        };
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 pub fn api(
     s: &Store,
     method: &str,
@@ -652,6 +664,24 @@ pub fn api(
                 out["diff"] = json!(ops.iter().map(|(op, line)| [op.to_string(), line.to_string()]).collect::<Vec<_>>());
             }
             Ok(out)
+        }
+        ("GET", ["files", rest @ ..]) => {
+            // Read-only text of a file the files panel lists; never graph or internal files.
+            let name = percent_decode(&rest.join("/"));
+            let files = lockdown::tree_files(&s.root, &lockdown::settings(&s.root)?)?;
+            let Some((_, category)) = files.iter().find(|(f, _)| *f == name && !f.ends_with('/')) else {
+                return board::err("E7001", "unknown file");
+            };
+            let bytes = fs::read(lockdown::path(&s.root, &name)?)?;
+            const SHOWN: usize = 1 << 20;
+            let cut = &bytes[..bytes.len().min(SHOWN)];
+            let text = match std::str::from_utf8(cut) {
+                Ok(t) if !t.contains('\0') => Some(t),
+                // A cut through a multi-byte character at the end isn't binary.
+                Err(e) if cut.len() < bytes.len() && cut.len() - e.valid_up_to() < 4 => std::str::from_utf8(&cut[..e.valid_up_to()]).ok(),
+                _ => None,
+            };
+            Ok(json!({"path": name, "category": category, "text": text, "size": bytes.len(), "truncated": text.is_some() && cut.len() < bytes.len()}))
         }
         ("GET", ["nodes", id]) => {
             let g = graph(s)?;
@@ -834,6 +864,16 @@ pub fn main_test() {
         let diff=board::api(&root,"GET",&format!("/nodes/{id}?source=1&task=t1"),json!({})).unwrap();
         assert_eq!(diff["diff"],json!([["-","pub fn main() {"],["-","  0"],["-","}"],["+","pub fn main() { 1 }"]]));
         assert!(board::api(&root,"GET","/nodes/fn:app.nope?source=1&task=t1",json!({})).is_err());
+        // Files: listed ones only, read-only text; graph, internal and unlisted paths are refused.
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("docs/read me.md"),"hello\n").unwrap();
+        fs::write(root.join("docs/logo.bin"),b"\0\x01").unwrap();
+        let f=board::api(&root,"GET","/files/docs/read%20me.md",json!({})).unwrap();
+        assert_eq!((f["text"].as_str(),f["category"].as_str()),(Some("hello\n"),Some("watched")));
+        assert!(board::api(&root,"GET","/files/docs/logo.bin",json!({})).unwrap()["text"].is_null());
+        for bad in ["/files/src/app.gleam","/files/.solace/store.db","/files/../etc/passwd","/files/docs/"] {
+            assert!(board::api(&root,"GET",bad,json!({})).is_err(),"{bad}");
+        }
         fs::write(root.join("gleam.toml"), "version=\"1.0.0\"\n").unwrap();
         let fallback=board::api(&root,"GET","/graph",json!({})).unwrap();
         assert_eq!(fallback["project"]["name"], root.file_name().unwrap().to_str().unwrap());

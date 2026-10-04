@@ -105,17 +105,19 @@ export function after_draw(callback) {
 }
 
 // Diagram keys: arrows/WASD move between boxes; with Shift they pan, Ctrl+Up/Down zoom;
-// Space expands, C collapses, Enter opens. Typing in a field or pressing a button is left alone.
+// Space expands, C collapses (with Shift: all), Enter opens. Typing in a field or pressing a button is left alone.
 const directions = { ArrowLeft: 'left', a: 'left', ArrowRight: 'right', d: 'right', ArrowUp: 'up', w: 'up', ArrowDown: 'down', s: 'down' };
 export function keys(send) {
   globalThis.document?.addEventListener('keydown', event => {
     if (event.altKey || event.metaKey || event.target.closest?.('input,textarea,select,button,a,summary,[contenteditable],[role=separator]')) return;
+    if (!document.querySelector('.view-diagram')) return; // a file is open in place of the drawing
     const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
     const direction = directions[key];
     let action = '';
     // Ctrl+W and Ctrl+S stay the browser's: Ctrl+W closes the tab and can't be intercepted.
     if (event.ctrlKey) action = { ArrowUp: 'zoom-in', ArrowDown: 'zoom-out' }[key] || '';
     else if (direction) action = (event.shiftKey ? 'pan-' : '') + direction;
+    else if (event.shiftKey) action = { ' ': 'expand-all', c: 'collapse-all' }[key] || '';
     else action = { ' ': 'expand', c: 'collapse', Enter: 'open' }[key] || '';
     if (!action) return;
     event.preventDefault();
