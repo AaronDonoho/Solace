@@ -25,16 +25,16 @@ async function render(migration) {
   }
 }
 
-test('confirm_paths lists what could reach the original, with Continue and Abandon', async () => {
+test('confirm_paths lists what could reach the original, with Continue and Delete the copy', async () => {
   const html = await render({ ...base, state: 'confirm_paths',
     flagged: [{ text: "run.sh mentions the original's path", status: 'not checked' }] });
-  expect(html).toContain('nothing has run yet');
+  expect(html).toContain('Nothing has run yet');
   expect(html).toContain('run.sh mentions the original');
   expect(html).toContain('Continue');
-  expect(html).toContain('Abandon migration');
+  expect(html).toContain('Delete the copy');
 });
 
-test('failed shows the problem and its report; copying offers Abandon', async () => {
+test('failed shows the problem and its report; copying offers Delete the copy', async () => {
   const report = { checked_at: '1', current: true, warnings: ["app: doesn't build, before or after the migration"],
     checks: [{ name: 'Coverage', status: 'failed', summary: "Solace couldn't read in every Gleam file",
       items: [{ text: "app/src/bad.gleam: isn't UTF-8 text", status: 'failed' }] }] };
@@ -42,8 +42,8 @@ test('failed shows the problem and its report; copying offers Abandon', async ()
   expect(html).toContain('The migration stopped: see Coverage');
   expect(html).toContain('bad.gleam');
   expect(html).toContain('before or after the migration');
-  expect(html).toContain('Abandon migration');
+  expect(html).toContain('Delete the copy');
   html = await render({ ...base, state: 'copying' });
-  expect(html).toContain('an earlier one was interrupted');
-  expect(html).toContain('Abandon migration');
+  expect(html).toContain('an earlier attempt was interrupted');
+  expect(html).toContain('Delete the copy');
 });

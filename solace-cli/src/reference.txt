@@ -31,7 +31,7 @@ Changing a signature or adding a field: `inspect <type or fn> --context` lists
 every construction or call site; patch the type or function and every site in
 one `submit` (`*** Update: <module>` holds several symbols' hunks), then `test`.
 Tests: one at the level the task reports (a checkout ticket gets a checkout
-test), and one per behaviour the change shifts (a cap, a boundary). `inspect <a
+test), and one per behavior the change shifts (a cap, a boundary). `inspect <a
 similar test> --context` shows its helpers; don't read whole test modules.
 
 Commands (`help` gives every option, `help <command>` one command's):
@@ -153,14 +153,16 @@ Host commands (humans only, refused in a run)
                                 create a new Gleam project below this folder;
                                 asks for confirmation unless --yes
   migrate [--project DIR]... [--smoke CMD]... [--confirm-paths] [--yes]
-                                copy existing projects to ../solace-migration
-                                and check them; stops first if anything in the
-                                copy could reach the original, until
-                                --confirm-paths; --adopt --yes swaps the copy
-                                into place and keeps <name>.pre-solace
-  migrate --report|--recheck|--confirm-paths|--abandon|--undo [--yes]
-                                inspect, recheck, continue, abandon or undo
-                                migration
+                                copy this folder to ../solace-migration, set
+                                up the chosen projects there and check them;
+                                stops first, until --confirm-paths, if anything
+                                in the copy could change this folder
+  migrate --report              what Solace checked
+  migrate --recheck             build, test and check the copy again
+  migrate --adopt [--yes]       switch to the copy; this folder moves to
+                                <name>.pre-solace
+  migrate --abandon [--yes]     delete the copy
+  migrate --undo [--yes]        switch back to <name>.pre-solace
   serve [--port N]              local task board (default 3030); in a workspace
                                 folder, every project's
   agent-config codex|claude <dir>

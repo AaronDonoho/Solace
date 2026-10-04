@@ -78,8 +78,8 @@ class Migrate(unittest.TestCase):
 
     def test_m1_m3_m7_the_original_is_only_read(self):
         report = self.cli('migrate', '--report')
-        self.assertIn('Migration: available', report)
-        self.assertIn('Can migrate: app (app)', report)
+        self.assertIn('Not migrated yet. Projects you can migrate:', report)
+        self.assertIn('  app (app)', report)
         before = snapshot(self.repo)
         out = self.migrate()
         self.assertEqual(snapshot(self.repo), before)
@@ -89,42 +89,42 @@ class Migrate(unittest.TestCase):
             self.assertIn(rel, copied)
             if v.startswith('link') or v == 'folder' or rel.startswith(('app/src', 'app/test')): continue
             self.assertEqual(copied[rel].split()[0], v.split()[0], rel)
-        self.assertIn('[not checked] run.sh mentions the original\'s path', out)
-        self.assertIn('Commands ran with the original read-only' if BWRAP else 'Commands weren\'t isolated', out)
-        self.assertIn('Preservation: verified', out)
+        self.assertIn('! run.sh contains your original folder\'s path', out)
+        self.assertIn('Your original folder was read-only to every command Solace ran' if BWRAP else 'Solace couldn\'t make your original folder read-only', out)
+        self.assertIn('✓ Your original folder\n  Nothing in it has changed since the copy was made', out)
         # M3: a test that failed before isn't blamed; a layout change is shown and explained.
-        self.assertIn('app_test.broken_test failed before the migration too', out)
-        self.assertIn('[verified] app/src/app.gleam: differs in layout only (final newline, blank lines between definitions)', out)
-        self.assertIn('[verified] smoke check `test -f data.bin` passes', out)
+        self.assertIn('! Test app_test.broken_test fails, as it did before the migration', out)
+        self.assertIn('✓ app/src/app.gleam differs only in spacing: the newline at the end of the file, blank lines between definitions', out)
+        self.assertIn('✓ Your check command `test -f data.bin` works, as before', out)
         # M7: the code builds without Solace.
-        recovery = out[out.index('Recovery:'):]
-        self.assertIn('[verified] app: build passes', recovery)
-        self.assertIn('[verified] lib: build passes', recovery)
-        self.assertIn('Ready to adopt', out)
+        recovery = out[out.index('Your code without Solace'):]
+        self.assertIn('✓ The build of app works, as before', recovery)
+        self.assertIn('✓ The build of lib works, as before', recovery)
+        self.assertIn('Ready to switch', out)
         status = json.loads((self.copy/'.solace/migration.json').read_text())
-        diff = next(i for c in status['report']['checks'] if c['name'] == 'Reconstruction' for i in c['items'] if 'app.gleam' in i['text'])
+        diff = next(i for c in status['report']['checks'] if c['name'] == 'Your code, written back by Solace' for i in c['items'] if 'app.gleam' in i['text'])
         self.assertIn('-\n', diff['detail'])
         # M8: one migration at a time.
-        self.assertIn('already in progress', self.cli('migrate', '--yes', ok=False))
+        self.assertIn('there\'s already a copy', self.cli('migrate', '--yes', ok=False))
 
     def test_m2_a_path_dependency_outside_blocks_adopt(self):
         (self.parent/'shared').mkdir()
         (self.repo/'lib/gleam.toml').write_text('name = "lib"\nversion = "1.0.0"\n[dependencies]\nshared = { path = "../../shared" }\n')
         out = self.migrate('--project', 'lib')
-        self.assertIn('[failed] lib/gleam.toml: dependency shared at ../../shared is outside the migrated folder', out)
-        self.assertIn('Paths failed', self.cli('migrate', '--adopt', '--yes', ok=False))
+        self.assertIn('✗ lib/gleam.toml uses shared from ../../shared, outside the copy', out)
+        self.assertIn('Anything that could reach your original folder: Something in the copy reaches outside it', self.cli('migrate', '--adopt', '--yes', ok=False))
         self.assertFalse((self.parent/'repo.pre-solace').exists())
 
     def test_m4_m6_adopt_undo_and_abandon(self):
         before = snapshot(self.repo)
         self.migrate()
         out = self.cli('migrate', '--adopt', '--yes')
-        self.assertIn('Migration complete', out)
+        self.assertIn('now uses Solace', out)
         self.assertIn(f'run `cd {self.repo}`', out)
         self.assertEqual(snapshot(self.parent/'repo.pre-solace'), before)
         self.assertFalse(self.copy.exists())
         self.assertTrue((self.repo/'app/.solace/store.db').exists())
-        self.assertIn('Migration: adopted', self.cli('migrate', '--report'))
+        self.assertIn('Your project uses Solace', self.cli('migrate', '--report'))
         self.cli('migrate', '--undo', '--yes')
         self.assertEqual(snapshot(self.repo), before)
         self.assertTrue((self.copy/'app/.solace/store.db').exists())
@@ -136,18 +136,18 @@ class Migrate(unittest.TestCase):
         self.migrate()
         # A change in the copy puts the checks out of date.
         (self.copy/'docs/note.md').write_text('new\n')
-        self.assertIn('changed since the checks ran', self.cli('migrate', '--adopt', '--yes', ok=False))
+        self.assertIn('changed after the checks ran', self.cli('migrate', '--adopt', '--yes', ok=False))
         self.cli('migrate', '--recheck', cwd=self.copy)
         # An edit to the original since the copy was taken.
         (self.repo/'docs/later.md').write_text('mine\n')
-        self.assertIn('added: docs/later.md', self.cli('migrate', '--adopt', '--yes', ok=False))
+        self.assertIn('docs/later.md was added', self.cli('migrate', '--adopt', '--yes', ok=False))
         self.cli('migrate', '--abandon', '--yes')
         (self.repo/'docs/later.md').unlink()
         # Passes in the baseline and the copy, fails at the original path: both folders go back.
         before = snapshot(self.repo)
         self.cli('migrate', '--yes', '--confirm-paths', '--smoke', 'test "$(basename "$PWD")" != repo')
         out = self.cli('migrate', '--adopt', '--yes', ok=False)
-        self.assertIn('swapped back', out)
+        self.assertIn('both folders were put back', out)
         self.assertEqual(snapshot(self.repo), before)
         self.assertTrue((self.copy/'.solace/migration.json').exists())
 
@@ -172,14 +172,14 @@ class Migrate(unittest.TestCase):
         self.assertEqual(self.post('/migration/start', {'projects': ['app'], 'smoke': ['true']})['state'], 'running')
         # run.sh names the original: nothing runs until the user has looked.
         v = self.until(lambda v: v['state'] == 'confirm_paths')
-        self.assertIn('run.sh mentions the original\'s path', [i['text'] for i in v['flagged']][0])
+        self.assertIn('run.sh contains your original folder\'s path', [i['text'] for i in v['flagged']][0])
         self.post('/migration/confirm', {})
         v = self.until(lambda v: v['state'] == 'in_progress')
         self.assertEqual(v['top'], str(self.copy))
         self.assertEqual(v['original'], str(self.repo))
         self.assertEqual(v['blockers'], [])
         self.assertTrue(v['report']['current'])
-        self.assertEqual([c['name'] for c in v['report']['checks']], ['Coverage', 'Reconstruction', 'Behaviour', 'Paths', 'Preservation', 'Recovery'])
+        self.assertEqual([c['name'] for c in v['report']['checks']], ['Copying your folder', 'Your code, written back by Solace', 'Builds and tests', 'Anything that could reach your original folder', 'Your original folder', 'Your code without Solace'])
         self.post('/migration/adopt', {})
         v = self.until(lambda v: v['state'] == 'adopted')
         self.assertEqual(v['top'], str(self.repo))
@@ -198,8 +198,8 @@ class Migrate(unittest.TestCase):
         before = snapshot(self.repo)
         out = self.migrate('--project', 'app')
         self.assertEqual(snapshot(self.repo), before)
-        self.assertIn('app/src/shared linked into the original; it now links to the same place in the copy (../../vendor/shared)', out)
-        self.assertIn('app/build linked into the original', out)
+        self.assertIn('app/src/shared linked into your original folder; in the copy it links to the same place in the copy', out)
+        self.assertIn('app/build linked into your original folder', out)
         self.assertEqual(os.readlink(self.copy/'app/build'), '../stash')
 
     def test_compiled_output_linking_outside_is_rebuilt_not_followed(self):
@@ -207,7 +207,7 @@ class Migrate(unittest.TestCase):
         (self.repo/'app/build/dev/javascript/app').mkdir(parents=True)
         os.symlink(self.parent/'elsewhere', self.repo/'app/build/dev/javascript/app/priv')
         out = self.migrate('--project', 'app')
-        self.assertIn('Ready to adopt', out)
+        self.assertIn('Ready to switch', out)
         self.assertNotIn('build/dev', out)
 
     def test_a_link_out_of_a_projects_source_stops_the_migration(self):
@@ -216,9 +216,9 @@ class Migrate(unittest.TestCase):
         os.symlink(self.parent/'elsewhere', self.repo/'app/src/elsewhere')
         out = self.cli('migrate', '--yes', '--confirm-paths', '--project', 'app', ok=False)
         self.assertIn('app/src/elsewhere', out)
-        self.assertIn('is kept so you can see why', out)
+        self.assertIn('is kept so you can see what happened', out)
         self.assertTrue((self.parent/'elsewhere/y.gleam').exists())
-        self.assertIn('Migration: failed', self.cli('migrate', '--report'))
+        self.assertIn('The migration stopped.', self.cli('migrate', '--report'))
         self.cli('migrate', '--abandon', '--yes')
         self.assertFalse(self.copy.exists())
 
@@ -226,14 +226,14 @@ class Migrate(unittest.TestCase):
         before = snapshot(self.repo)
         smoke = f'touch {self.repo}/pwned'
         out = self.cli('migrate', '--yes', '--smoke', smoke)
-        self.assertIn('Migration: confirm_paths', out)
-        self.assertIn(f'smoke check `{smoke}` names the original\'s path', out)
+        self.assertIn('Waiting for you to look at the files below', out)
+        self.assertIn(f'Your check command `{smoke}` uses your original folder\'s path', out)
         self.assertFalse((self.copy/'app/.solace/store.db').exists())
         self.assertEqual(snapshot(self.repo), before)
         if not BWRAP:
             self.skipTest('bubblewrap is not installed')
         out = self.cli('migrate', '--confirm-paths', cwd=self.copy)
-        self.assertIn(f'smoke check `{smoke}` failed before the migration too', out)
+        self.assertIn(f'Your check command `{smoke}` fails, as it did before the migration', out)
         self.assertEqual(snapshot(self.repo), before)
 
     def fail_after(self, point, *args, cwd):
@@ -248,15 +248,15 @@ class Migrate(unittest.TestCase):
         for point, cwd in [('adopt:1', self.copy), ('adopt:2', self.repo)]:
             self.fail_after(point, '--adopt', cwd=self.repo if point == 'adopt:1' else self.repo)
             self.assertTrue((self.parent/'.solace-migration-swap.json').exists())
-            self.assertIn('was put back', self.cli('migrate', '--report', cwd=cwd))
+            self.assertIn('was undone', self.cli('migrate', '--report', cwd=cwd))
             self.assertFalse((self.parent/'.solace-migration-swap.json').exists())
             self.assertFalse(pre.exists())
             self.assertEqual(snapshot(self.repo), before)
-            self.assertIn('Migration: in_progress', self.cli('migrate', '--report'))
+            self.assertIn('You\'re working in a copy', self.cli('migrate', '--report'))
         self.cli('migrate', '--adopt', '--yes')
         self.fail_after('undo:1', '--undo', cwd=self.repo)
-        self.assertIn('was put back', self.cli('migrate', '--report', cwd=pre))
-        self.assertIn('Migration: adopted', self.cli('migrate', '--report'))
+        self.assertIn('was undone', self.cli('migrate', '--report', cwd=pre))
+        self.assertIn('Your project uses Solace', self.cli('migrate', '--report'))
         self.assertEqual(snapshot(pre), before)
         self.cli('migrate', '--undo', '--yes')
         self.assertEqual(snapshot(self.repo), before)
@@ -271,13 +271,13 @@ class Migrate(unittest.TestCase):
         git('update-index', '--index-version', '4')
         git('status', '--short')
         self.assertNotEqual(hashlib.sha256((self.repo/'.git/index').read_bytes()).hexdigest(), index)
-        self.assertIn('Migration complete', self.cli('migrate', '--adopt', '--yes'))
+        self.assertIn('now uses Solace', self.cli('migrate', '--adopt', '--yes'))
         self.cli('migrate', '--undo', '--yes')
         self.cli('migrate', '--abandon', '--yes')
         # Staging something is a change: adoption refuses.
         self.migrate()
         git('add', '-f', 'data.bin')
-        self.assertIn('changed: .git/index', self.cli('migrate', '--adopt', '--yes', ok=False))
+        self.assertIn('.git/index changed', self.cli('migrate', '--adopt', '--yes', ok=False))
 
     def test_one_operation_at_a_time_and_not_while_served(self):
         self.migrate()
@@ -297,17 +297,17 @@ class Migrate(unittest.TestCase):
     def test_errors_in_the_original_carry_over(self):
         (self.repo/'lib/src/lib.gleam').write_text('pub fn one() { 1 + "a" }\n')
         out = self.migrate('--project', 'lib')
-        self.assertIn('lib: doesn\'t build, before or after the migration. Errors in the original carry over', out)
-        self.assertIn('Ready to adopt', out)
+        self.assertIn('lib doesn\'t build, before or after the migration. The copy has the same errors as your original.', out)
+        self.assertIn('Ready to switch', out)
         out = self.cli('migrate', '--adopt', '--yes')
-        self.assertIn('Errors in the original carry over', out)
-        self.assertIn('Behaviour: lib: doesn\'t build, before or after the migration', out)
-        self.assertIn('Migration complete', out)
+        self.assertIn('the copy has the same ones', out)
+        self.assertIn('Builds and tests: lib doesn\'t build, before or after the migration', out)
+        self.assertIn('now uses Solace', out)
 
     def test_a_change_during_the_checks_leaves_them_out_of_date(self):
         out = self.cli('migrate', '--yes', '--confirm-paths', '--smoke', 'echo x >> docs/edited.md')
-        self.assertIn('The copy changed since the checks ran', out)
-        self.assertIn('changed since the checks ran', self.cli('migrate', '--adopt', '--yes', ok=False))
+        self.assertIn('The copy changed after the checks ran', out)
+        self.assertIn('changed after the checks ran', self.cli('migrate', '--adopt', '--yes', ok=False))
 
     def test_paths_resolve_links_and_git_pointers(self):
         (self.parent/'outside').mkdir()
@@ -318,17 +318,17 @@ class Migrate(unittest.TestCase):
         (self.repo/'sub').mkdir()
         (self.repo/'sub/.git').write_text(f'gitdir: {self.repo}/.git/modules/sub\n')
         out = self.migrate('--project', 'app')
-        self.assertIn('[failed] lib/gleam.toml: dependency shared at ../vendor/shared is outside the migrated folder', out)
-        self.assertEqual(out.count('[not checked] vendor/shared links outside the migrated folder'), 1)
-        self.assertIn(f'[failed] sub/.git points git at {self.repo}/.git/modules/sub', out)
+        self.assertIn('✗ lib/gleam.toml uses shared from ../vendor/shared, outside the copy', out)
+        self.assertEqual(out.count('! vendor/shared links to'), 1)
+        self.assertIn(f'✗ sub/.git points git at {self.repo}/.git/modules/sub', out)
 
     def test_work_in_the_copy_doesnt_block_adoption(self):
         self.migrate()
         f = self.copy/'app/src/app.gleam'
         f.write_text(f.read_text().replace('x * 2', 'x + x'))
         out = self.cli('migrate', '--recheck', cwd=self.copy)
-        self.assertIn('Reconstruction: verified', out)
-        self.assertIn('Ready to adopt', out)
+        self.assertIn('✓ Your code, written back by Solace', out)
+        self.assertIn('Ready to switch', out)
 
     def test_permissions_and_entries_that_cant_be_copied(self):
         (self.repo/'private').mkdir(mode=0o700)
@@ -339,7 +339,7 @@ class Migrate(unittest.TestCase):
         out = self.migrate()
         self.assertEqual(snapshot(self.repo), before)
         self.assertEqual(stat.S_IMODE(os.stat(self.copy/'private').st_mode), 0o700)
-        self.assertIn('Not copied (1): sockets, FIFOs and devices', out)
+        self.assertIn('1 special file (a socket, FIFO or device) wasn\'t copied', out)
         self.assertFalse((self.copy/'pipe').exists())
 
     def test_an_unreadable_file_leaves_no_copy(self):
@@ -356,10 +356,10 @@ class Migrate(unittest.TestCase):
     def test_source_that_isnt_utf8_is_reported(self):
         (self.repo/'app/src/bad.gleam').write_bytes(b'pub fn bad() { "\xff" }\n')
         out = self.cli('migrate', '--yes', '--confirm-paths', '--project', 'app', ok=False)
-        self.assertIn('is kept so you can see why', out)
+        self.assertIn('is kept so you can see what happened', out)
         out = self.cli('migrate', '--report')
-        self.assertIn('Migration: failed', out)
-        self.assertIn('[failed] app/src/bad.gleam: isn\'t UTF-8 text', out)
+        self.assertIn('The migration stopped.', out)
+        self.assertIn('✗ app/src/bad.gleam isn\'t UTF-8 text', out)
         self.cli('migrate', '--abandon', '--yes')
         self.assertFalse(self.copy.exists())
 

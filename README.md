@@ -54,16 +54,16 @@ solace check         # type-check the project from the store
 solace serve         # start the task board on http://127.0.0.1:3030 (--port to change it)
 ```
 
-For existing code, run `solace serve` in its folder and choose **Migrate this project**, or use the shell:
+For a project you already have, run `solace serve` in its folder and choose **Migrate this project**. Solace makes a copy next to it, `solace-migration`, sets up the copy to use Solace, and shows what it checked. Your folder isn't changed until you choose **Switch to the copy**, which moves it to `<name>.pre-solace` and puts the copy in its place; **Switch back** undoes that. The same from the shell:
 
 ```sh
-solace migrate --yes         # copy the whole folder to ../solace-migration and check it
-solace migrate --confirm-paths # go on, once you've looked at anything listed that could reach the original
-solace migrate --report      # review the checks
-solace migrate --adopt --yes # put the checked copy at the original path
+solace migrate --yes           # make the copy and check it
+solace migrate --confirm-paths # continue, after looking at any files it lists
+solace migrate --report        # see what Solace checked
+solace migrate --adopt --yes   # switch to the copy
 ```
 
-Migration leaves the original untouched until adoption. Install bubblewrap (`bwrap`) for a guarantee: with it, every command the migration runs sees the original as read-only. Errors in the original carry over: a build or test that fails before migrating fails after it too. Adoption keeps the original beside the copy as `<name>.pre-solace` and refuses if a check failed or the original changed. `solace create` refuses existing names and unmanaged Gleam folders.
+Install bubblewrap (`bwrap`) so your folder is read-only to every command Solace runs during a migration. The copy has the same code as your original, errors included: a build or test that fails before migrating fails in the copy too. Solace won't switch if a check found a problem or your folder changed after the copy was made. `solace create` refuses existing names and unmanaged Gleam folders.
 
 Open the board, create a task and move it to planning. There you can have an agent *investigate* it first, which changes nothing and reports findings or a plan (complete the task there if it only needed an answer), then assign it to a model to do the work. Solace starts the agent, puts the agent's notes and questions on the task, and moves the task to *blocked* when the agent needs an answer or to *needs review* when it has finished. A task that is waiting on you is marked *Needs attention*, with the reason, and one whose agent has finished is marked as such. Effort is chosen separately from the model. Notes are written in a markdown editor and can include images, which agents also see. Cards show which tasks have an agent working, and each run on a task can be followed live: the agent's messages, and each command it runs with its result. The board's **Guide** link (`/guide`) explains the whole workflow for humans. The guide is built into the binary.
 

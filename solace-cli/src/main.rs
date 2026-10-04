@@ -3052,7 +3052,7 @@ mod tests {
         assert!(REFERENCE.contains("task done") && REFERENCE.contains("agent-config"));
         // D-46: session start gets the workflow, with the signature-change and
         // test examples (D-48: a test at the level reported, one per shifted
-        // behaviour), in under 3k bytes; `help` keeps every option.
+        // behavior), in under 3k bytes; `help` keeps every option.
         assert!(r.len() < 3000, "{}", r.len());
         assert!(r.contains("Changing a signature or adding a field") && r.contains("one at the level the task reports") && r.contains("`help`"));
         assert!(!r.contains("probe --from <fn>") && REFERENCE.contains("probe --from <fn>") && REFERENCE.contains("--replace [--all]"));

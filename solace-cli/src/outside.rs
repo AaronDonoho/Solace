@@ -376,7 +376,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         None => {
             let rank = all.iter().filter_map(|t| t["rank"].as_f64()).fold(0., f64::min) - 1.;
             let t = json!({"id":board::id(),"title":TITLE,"unexpected":true,
-                "body":"Code changed outside Solace while no agent was working. Complete this task to keep the changes, or cancel it to restore the code Solace had. No agent starts work until it is completed or cancelled.",
+                "body":"Code changed outside Solace while no agent was working. Complete this task to keep the changes, or cancel it to restore the code Solace had. No agent starts work until it is completed or canceled.",
                 "links":[],"column":flow["events"]["finished"],"rank":rank,"paused_from":null,"attention":null,"stamps":{},"model":null,"notes":[],"questions":[],"runs":[],"changes":[]});
             board::save(s, &t)?;
             t["id"].as_str().unwrap().to_string()

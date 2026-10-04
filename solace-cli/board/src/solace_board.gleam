@@ -1201,44 +1201,37 @@ fn migration_action(model: Model, action: String) -> #(Model, Effect(Msg)) {
         }
       let question = case action {
         "confirm" ->
-          "Continue the migration? You have looked at the files listed."
+          "Continue? Solace will now build and test your code, and run your check commands, in the copy and in a temporary folder."
         "adopt" -> {
           let unchecked = case m.report {
-            None -> ["Migration report not checked"]
+            None -> []
             Some(report) ->
               list.flat_map(report.checks, fn(c) {
-                let items =
-                  list.filter(c.items, fn(i) { i.status == "not checked" })
-                  |> list.map(fn(i) { c.name <> ": " <> i.text })
-                case c.status {
-                  "not checked" -> [c.name <> ": " <> c.summary, ..items]
-                  _ -> items
-                }
+                list.filter(c.items, fn(i) { i.status == "not checked" })
+                |> list.map(fn(i) { i.text })
               })
           }
-          "Adopt this migration? The original will be renamed to "
+          "Switch to the copy?\n\nYour original folder moves to "
           <> m.original
-          <> ".pre-solace and the copy takes its path ("
+          <> ".pre-solace, and the copy takes its place at "
           <> m.original
-          <> ")."
-          <> "\n\nErrors in the original carry over: a build or test that fails before the migration fails after it too."
+          <> ". Solace then builds and tests it there; if anything fails, both folders go back. You can switch back later."
+          <> "\n\nIf your project has build errors or failing tests, the copy has the same ones."
           <> case unchecked {
             [] -> ""
-            _ -> "\n\nNot checked:\n• " <> string.join(unchecked, "\n• ")
+            _ -> "\n\nWorth a look first:\n• " <> string.join(unchecked, "\n• ")
           }
         }
         "abandon" ->
-          "Abandon migration? This deletes the copy at "
+          "Delete the copy at "
           <> m.copy
-          <> ". The original at "
+          <> "? Anything done in it is lost. Your original folder at "
           <> m.original
-          <> " stays untouched."
+          <> " stays as it is."
         "undo" ->
-          "Undo adoption? Restore the original kept at "
+          "Switch back to your original folder? It returns to "
           <> m.original
-          <> ".pre-solace to "
-          <> m.original
-          <> ". Work done after adoption stays in the renamed migration copy."
+          <> ", and the Solace version moves to ../solace-migration with any work done in it since. You can switch again or delete it later."
         _ -> ""
       }
       case allowed && { question == "" || confirm(question) } {
@@ -1513,10 +1506,48 @@ fn button(label: String, msg: Msg) -> Element(Msg) {
   h.button([e.on_click(msg)], [h.text(label)])
 }
 
+/// A button with a sentence beside it saying what it does to the user's folders.
+fn migration_button(
+  label: String,
+  what: String,
+  action: String,
+  disabled: Bool,
+  primary: Bool,
+) -> Element(Msg) {
+  h.div([a.class("migration-action")], [
+    h.button(
+      [
+        a.classes([#("primary", primary)]),
+        a.disabled(disabled),
+        e.on_click(MigrationAction(action)),
+      ],
+      [h.text(label)],
+    ),
+    h.span([], [h.text(what)]),
+  ])
+}
+
 fn migration_view(model: Model) -> Element(Msg) {
   case model.migration {
     None -> h.text("")
-    Some(m) ->
+    Some(m) -> {
+      let busy = model.migration_busy
+      let delete =
+        migration_button(
+          "Delete the copy",
+          "Deletes the copy and anything done in it. Your original folder stays as it is.",
+          "abandon",
+          busy,
+          False,
+        )
+      let folders =
+        h.div([], [
+          h.p([], [
+            h.text("Your original folder: "),
+            h.code([], [h.text(m.original)]),
+          ]),
+          h.p([], [h.text("The copy: "), h.code([], [h.text(m.copy)])]),
+        ])
       h.section([a.class("migration")], [
         case model.migration_error {
           "" -> h.text("")
@@ -1541,16 +1572,16 @@ fn migration_view(model: Model) -> Element(Msg) {
                       ]),
                       h.p([], [
                         h.text(
-                          "Solace copies the whole folder to ../solace-migration/ and never changes the original. Choose at least one project to set up in the copy.",
+                          "Solace makes a copy of this folder next to it, called solace-migration, and sets up the copy to use Solace. Your folder isn't changed. You can try Solace in the copy, then switch to it, or delete it.",
                         ),
                       ]),
                       h.p([], [
                         h.text(
-                          "Errors in the original carry over: a build or test that fails before the migration fails after it too.",
+                          "If your project has build errors or failing tests now, the copy will have the same ones.",
                         ),
                       ]),
-                      h.fieldset([a.disabled(model.migration_busy)], [
-                        h.legend([], [h.text("Projects to migrate")]),
+                      h.fieldset([a.disabled(busy)], [
+                        h.legend([], [h.text("Projects to set up for Solace")]),
                         h.div(
                           [],
                           list.map(m.candidates, fn(c) {
@@ -1563,17 +1594,20 @@ fn migration_view(model: Model) -> Element(Msg) {
                                 )),
                                 e.on_check(MigrationProject(c.0, _)),
                               ]),
-                              h.text(c.1 <> " (" <> c.0 <> ")"),
+                              h.text(case c.0 {
+                                "." -> c.1 <> " (this folder)"
+                                dir -> c.1 <> " (" <> dir <> ")"
+                              }),
                             ])
                           }),
                         ),
                       ]),
                       h.label([], [
-                        h.text("Smoke check commands (optional)"),
+                        h.text("Commands that check your app works (optional)"),
                         h.textarea(
                           [
                             a.value(model.migration_smoke),
-                            a.disabled(model.migration_busy),
+                            a.disabled(busy),
                             a.attribute(
                               "aria-describedby",
                               "migration-smoke-hint",
@@ -1585,19 +1619,16 @@ fn migration_view(model: Model) -> Element(Msg) {
                       ]),
                       h.small([a.id("migration-smoke-hint")], [
                         h.text(
-                          "One shell command per line, run in the root folder. Each must exit 0. Without any, app behaviour is marked not checked.",
+                          "One command per line, run from this folder, such as a script that starts your app and requests a page. Solace runs each one before and after migrating, and compares the results.",
                         ),
                       ]),
                       h.button(
                         [
                           a.class("primary"),
-                          a.disabled(
-                            model.migration_projects == []
-                            || model.migration_busy,
-                          ),
+                          a.disabled(model.migration_projects == [] || busy),
                           e.on_click(MigrationAction("start")),
                         ],
-                        [h.text("Start")],
+                        [h.text("Make the copy")],
                       ),
                       button("Close", ToggleMigration),
                     ],
@@ -1612,154 +1643,147 @@ fn migration_view(model: Model) -> Element(Msg) {
                 a.attribute("aria-live", "polite"),
               ],
               [
-                h.h2([], [h.text("Migration in progress")]),
+                h.h2([], [h.text("Migrating")]),
                 h.p([], [h.text(m.step)]),
-                h.small([], [
-                  h.text(
-                    "This page will reload when the operation finishes. Reconnecting automatically if the server restarts.",
-                  ),
-                ]),
+                h.small([], [h.text("This page reloads when it's done.")]),
               ],
             )
-          "in_progress" | "confirm_paths" | "failed" | "copying" ->
+          "confirm_paths" ->
+            h.div([a.class("editor migration-banner")], [
+              h.h2([], [h.text("Check these files before going on")]),
+              h.p([], [
+                h.text(
+                  "Each one could change your original folder if it runs from the copy, for example a script that uses the folder's full path. Nothing has run yet. Look at each one, then continue.",
+                ),
+              ]),
+              h.ul([], list.map(m.flagged, migration_item)),
+              folders,
+              migration_button(
+                "Continue",
+                "Builds and tests your code, and runs your check commands.",
+                "confirm",
+                busy,
+                True,
+              ),
+              delete,
+            ])
+          "failed" ->
+            h.div([a.class("editor migration-banner")], [
+              h.h2([], [h.text("The migration stopped")]),
+              h.p([a.role("alert")], [h.text(m.problem)]),
+              folders,
+              case m.report {
+                Some(_) -> migration_report(m.report)
+                None -> h.text("")
+              },
+              delete,
+            ])
+          "copying" ->
+            h.div([a.class("editor migration-banner")], [
+              h.h2([], [h.text("Copying your folder")]),
+              h.p([], [
+                h.text(
+                  "A copy of your folder is being made, or an earlier attempt was interrupted.",
+                ),
+              ]),
+              folders,
+              delete,
+            ])
+          "in_progress" ->
             h.div([], [
               h.div([a.class("editor migration-banner")], [
-                h.strong([], [
-                  h.text(case m.state {
-                    "confirm_paths" -> "Look at these paths before continuing"
-                    "failed" -> "Migration stopped"
-                    "copying" -> "Copying the original"
-                    _ -> "Migration in progress"
-                  }),
+                h.h2([], [
+                  h.text("You're trying Solace on a copy of your project"),
                 ]),
-                h.p([], [h.text("Copy: "), h.code([], [h.text(m.copy)])]),
-                h.p([], [h.text("Original: "), h.code([], [h.text(m.original)])]),
-              ]),
-              case m.state {
-                "confirm_paths" ->
-                  h.div([], [
-                    h.p([], [
-                      h.text(
-                        "These could reach your original from inside the copy. Look at each one before continuing; nothing has run yet.",
-                      ),
-                    ]),
-                    h.ul([], list.map(m.flagged, migration_item)),
-                  ])
-                "failed" ->
-                  h.p([a.role("alert")], [h.strong([], [h.text(m.problem)])])
-                "copying" ->
-                  h.p([], [
-                    h.text(
-                      "A copy of the original is being made, or an earlier one was interrupted.",
-                    ),
-                  ])
-                _ -> h.text("")
-              },
-              case m.report, m.state {
-                Some(_), _ | _, "in_progress" -> migration_report(m.report)
-                _, _ -> h.text("")
-              },
-              case m.state {
-                "in_progress" ->
-                  h.div([], [
+                h.p([], [
+                  h.text(
+                    "This board shows the copy. Your original folder hasn't been changed.",
+                  ),
+                ]),
+                folders,
+                case m.blockers {
+                  [] -> h.text("")
+                  _ ->
                     h.div([a.id("migration-blockers")], [
-                      case m.blockers {
-                        [] -> h.text("")
-                        _ -> h.p([], [h.text("Adoption is blocked:")])
-                      },
+                      h.p([], [h.text("Before you can switch to the copy:")]),
                       h.ul(
                         [],
                         list.map(m.blockers, fn(b) { h.li([], [h.text(b)]) }),
                       ),
-                    ]),
-                    h.div([a.class("actions")], [
-                      h.button(
-                        [
-                          a.disabled(model.migration_busy),
-                          e.on_click(MigrationAction("recheck")),
-                        ],
-                        [h.text("Recheck")],
-                      ),
-                      h.button(
-                        [
-                          a.disabled(model.migration_busy || m.blockers != []),
-                          a.attribute("aria-describedby", "migration-blockers"),
-                          e.on_click(MigrationAction("adopt")),
-                        ],
-                        [h.text("Adopt")],
-                      ),
-                    ]),
-                  ])
-                "confirm_paths" ->
-                  h.button(
-                    [
-                      a.class("primary"),
-                      a.disabled(model.migration_busy),
-                      e.on_click(MigrationAction("confirm")),
-                    ],
-                    [h.text("Continue")],
-                  )
-                _ -> h.text("")
-              },
-              h.button(
-                [
-                  a.disabled(model.migration_busy),
-                  e.on_click(MigrationAction("abandon")),
-                ],
-                [h.text("Abandon migration")],
-              ),
+                    ])
+                },
+                migration_button(
+                  "Switch to the copy",
+                  "Moves your original folder to "
+                    <> m.original
+                    <> ".pre-solace and puts the copy in its place, then builds and tests it there. If that fails, both folders go back.",
+                  "adopt",
+                  busy || m.blockers != [],
+                  True,
+                ),
+                migration_button(
+                  "Run the checks again",
+                  "Builds and tests the copy again and compares it with your original folder. Do this after changing the copy.",
+                  "recheck",
+                  busy,
+                  False,
+                ),
+                delete,
+              ]),
+              migration_report(m.report),
             ])
           "adopted" if m.undo && !model.migration_dismissed ->
             h.div([a.class("notice editor")], [
-              h.strong([], [h.text("Migration adopted")]),
+              h.strong([], [h.text("Your project now uses Solace")]),
               h.p([], [
-                h.text("The original is kept at "),
+                h.text("Your old folder is kept at "),
                 h.code([], [h.text(m.original <> ".pre-solace")]),
+                h.text(
+                  ", in case you want to switch back. Delete it yourself once you're sure.",
+                ),
               ]),
-              h.button(
-                [
-                  a.disabled(model.migration_busy),
-                  e.on_click(MigrationAction("undo")),
-                ],
-                [h.text("Undo adoption")],
+              migration_button(
+                "Switch back",
+                "Puts your old folder back, and moves this one to ../solace-migration.",
+                "undo",
+                busy,
+                False,
               ),
               button("Dismiss", DismissMigration),
             ])
           _ -> h.text("")
         },
-        case model.migration_busy {
-          True ->
-            h.p([a.role("status")], [h.text("Starting migration operation…")])
+        case busy {
+          True -> h.p([a.role("status")], [h.text("Starting…")])
           False -> h.text("")
         },
       ])
+    }
   }
 }
 
 fn migration_item(item: MigrationItem) -> Element(Msg) {
   h.li([], [
-    h.text(item.text <> " "),
-    migration_status(item.status),
+    migration_mark(item.status),
+    h.text(item.text),
     case item.detail {
       "" -> h.text("")
       detail ->
         h.details([a.class("entry")], [
-          h.summary([], [h.text("Details")]),
-          h.pre([a.class("diff")], [
-            h.text(detail),
-          ]),
+          h.summary([], [h.text("Show details")]),
+          h.pre([a.class("diff")], [h.text(detail)]),
         ])
     },
   ])
 }
 
 fn migration_report(report: Option(MigrationReport)) -> Element(Msg) {
-  h.details([a.class("editor"), a.attribute("open", "")], [
-    h.summary([], [h.text("Migration report")]),
+  h.section([a.class("editor migration-report")], [
+    h.h2([], [h.text("What Solace checked")]),
     case report {
       None ->
         h.p([], [
-          h.text("No report yet. Recheck to run the checks."),
+          h.text("The checks haven't run yet. Run the checks to see them."),
         ])
       Some(report) ->
         h.div([], [
@@ -1769,9 +1793,52 @@ fn migration_report(report: Option(MigrationReport)) -> Element(Msg) {
               h.p([a.role("alert")], [h.strong([], [h.text(warning)])])
             }),
           ),
+          case report.current {
+            True -> h.text("")
+            False ->
+              h.p([a.role("alert")], [
+                h.text(
+                  "The copy changed after these checks ran. Run the checks again before switching.",
+                ),
+              ])
+          },
+          h.p(
+            [a.class("migration-legend")],
+            list.flat_map(
+              [
+                #("verified", "✓", "fine"),
+                #("failed", "✗", "a problem to fix before switching"),
+                #("not checked", "!", "worth a look"),
+              ],
+              fn(l) {
+                [
+                  h.span(
+                    [
+                      a.class(
+                        "mark migration-" <> string.replace(l.0, " ", "-"),
+                      ),
+                      a.attribute("aria-hidden", "true"),
+                    ],
+                    [h.text(l.1)],
+                  ),
+                  h.text(l.2 <> " "),
+                ]
+              },
+            ),
+          ),
+          h.div(
+            [],
+            list.map(report.checks, fn(c) {
+              h.article([], [
+                h.h3([], [migration_mark(c.status), h.text(c.name)]),
+                h.p([], [h.text(c.summary)]),
+                h.ul([], list.map(c.items, migration_item)),
+              ])
+            }),
+          ),
           h.small([], [
             h.text(
-              "Checked: "
+              "Last checked "
               <> {
                 int.parse(report.checked_at)
                 |> result.map(clock)
@@ -1779,40 +1846,30 @@ fn migration_report(report: Option(MigrationReport)) -> Element(Msg) {
               },
             ),
           ]),
-          case report.current {
-            True -> h.text("")
-            False ->
-              h.p([], [
-                migration_status("out of date"),
-                h.text(" The copy changed. Recheck before adopting."),
-              ])
-          },
-          h.div(
-            [],
-            list.map(report.checks, fn(c) {
-              h.article([], [
-                h.h3([], [
-                  h.text(c.name <> " "),
-                  migration_status(c.status),
-                ]),
-                h.p([], [h.text(c.summary)]),
-                h.ul([], list.map(c.items, migration_item)),
-              ])
-            }),
-          ),
         ])
     },
-    h.p([], [h.text("These checks are evidence, not proof of every behaviour.")]),
   ])
 }
 
-fn migration_status(status: String) -> Element(Msg) {
-  case status {
+/// A result's mark: fine, a problem, or something worth a look. The words
+/// are for screen readers; the legend above the checks explains the marks.
+fn migration_mark(status: String) -> Element(Msg) {
+  let #(mark, words) = case status {
+    "verified" -> #("✓", "fine")
+    "failed" -> #("✗", "a problem")
+    "not checked" -> #("!", "worth a look")
+    _ -> #("", "")
+  }
+  case mark {
     "" -> h.text("")
     _ ->
       h.span(
-        [a.class("status migration-" <> string.replace(status, " ", "-"))],
-        [h.text(status)],
+        [
+          a.class("mark migration-" <> string.replace(status, " ", "-")),
+          a.attribute("aria-label", words),
+          a.attribute("title", words),
+        ],
+        [h.text(mark)],
       )
   }
 }

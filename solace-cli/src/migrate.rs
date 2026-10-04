@@ -48,6 +48,14 @@ fn named(p: &Path, e: impl std::fmt::Display) -> Failure {
 fn strings(v: &Value) -> Vec<String> {
     v.as_array().into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect()
 }
+/// A project as the report names it.
+fn shown(dir: &str) -> &str {
+    if dir == "." { "your project" } else { dir }
+}
+/// A project as the report names it at the start of a sentence; a folder name keeps its case.
+fn subject(dir: &str) -> &str {
+    if dir == "." { "Your project" } else { dir }
+}
 fn project(root: &Path, dir: &str) -> PathBuf {
     if dir == "." { root.to_path_buf() } else { root.join(dir) }
 }
@@ -104,7 +112,7 @@ fn not_served(dir: &Path) -> Result<(), Failure> {
     for r in roots {
         let Ok(f) = fs::OpenOptions::new().write(true).open(r.join(".solace/serve.lock")) else { continue };
         if f.try_lock().is_err() {
-            return refuse("E7003", format!("`solace serve` is serving {}: use the board, or stop the server first", r.display()));
+            return refuse("E7003", format!("`solace serve` is showing {} on a board: use the board, or stop the server first", r.display()));
         }
     }
     Ok(())
@@ -195,9 +203,9 @@ fn changes(original: &Path, recorded: &Value) -> Result<Vec<String>, Failure> {
     let mut out: Vec<String> = now
         .iter()
         .filter(|(k, v)| then.get(*k) != Some(v))
-        .map(|(k, _)| if then.contains_key(k) { format!("changed: {k}") } else { format!("added: {k}") })
+        .map(|(k, _)| if then.contains_key(k) { format!("{k} changed") } else { format!("{k} was added") })
         .collect();
-    out.extend(then.keys().filter(|k| !now.contains_key(*k)).map(|k| format!("removed: {k}")));
+    out.extend(then.keys().filter(|k| !now.contains_key(*k)).map(|k| format!("{k} was removed")));
     Ok(out)
 }
 
@@ -411,70 +419,80 @@ fn flag(mut v: Value) -> Value {
     v
 }
 /// Failed if any item failed, not checked if any wasn't, else verified.
-fn check(name: &str, summary: impl Into<String>, items: Vec<Value>) -> Value {
+fn worst(items: &[Value]) -> &'static str {
     let has = |s: &str| items.iter().any(|i| i["status"] == s);
-    let status = if has("failed") { "failed" } else if has("not checked") { "not checked" } else { "verified" };
-    json!({"name":name,"status":status,"summary":summary.into(),"items":items})
+    if has("failed") { "failed" } else if has("not checked") { "not checked" } else { "verified" }
 }
+/// One check of the report: its title, a sentence on what it found, and the details.
+fn check(name: &str, summary: impl Into<String>, items: Vec<Value>) -> Value {
+    json!({"name":name,"status":worst(&items),"summary":summary.into(),"items":items})
+}
+/// The report's checks, as the user reads them.
+const COPYING: &str = "Copying your folder";
+const CODE: &str = "Your code, written back by Solace";
+const TESTS: &str = "Builds and tests";
+const REACH: &str = "Anything that could reach your original folder";
+const ORIGINAL: &str = "Your original folder";
+const PLAIN: &str = "Your code without Solace";
 
 /// One result against its baseline: a failure the original also had is
 /// not blamed on the migration, but it isn't evidence either.
 fn compare(before: bool, after: bool, what: &str, detail: &str) -> Value {
     match (before, after) {
-        (true, true) => item("verified", format!("{what} passes"), ""),
-        (true, false) => item("failed", format!("{what} fails, and passed before the migration"), detail),
-        (false, false) => item("not checked", format!("{what} failed before the migration too"), detail),
-        (false, true) => item("verified", format!("{what} passes, and failed before the migration"), ""),
+        (true, true) => item("verified", format!("{what} works, as before"), ""),
+        (true, false) => item("failed", format!("{what} fails now, but worked before the migration"), detail),
+        (false, false) => item("not checked", format!("{what} fails, as it did before the migration"), detail),
+        (false, true) => item("verified", format!("{what} works now; it failed before the migration"), ""),
     }
 }
 const UNBUILT: &str = "doesn't build, before or after the migration";
-fn behaviour(base: &Value, now: &Value, smoke: bool) -> Vec<Value> {
+fn behavior(base: &Value, now: &Value, smoke: bool) -> Vec<Value> {
     let mut items = vec![];
-    for (d, c) in now["projects"].as_object().into_iter().flatten() {
-        let b = &base["projects"][d];
+    for (dir, c) in now["projects"].as_object().into_iter().flatten() {
+        let (b, d) = (&base["projects"][dir], shown(dir));
         let out = c["output"].as_str().unwrap_or("");
         let (was, is) = (b["build"] == true, c["build"] == true);
         if !was && !is {
-            items.push(item("not checked", format!("{d}: {UNBUILT}"), out));
+            items.push(item("not checked", format!("{} {UNBUILT}", subject(dir)), out));
             continue;
         }
-        items.push(compare(was, is, &format!("{d}: build"), out));
+        items.push(compare(was, is, &format!("The build of {d}"), out));
         if !is {
             continue;
         }
         if c["test"] == true {
-            items.push(item("verified", format!("{d}: tests pass"), ""));
+            items.push(item("verified", format!("All tests in {d} pass"), ""));
             continue;
         }
         let failing = strings(&c["failing"]);
         if !was {
-            let nothing = "the original didn't build, so there's nothing to compare with";
-            items.extend(failing.iter().map(|t| item("not checked", format!("{d}: {t} fails; {nothing}"), out)));
+            let nothing = format!("{d} didn't build before the migration, so there's nothing to compare it with");
+            items.extend(failing.iter().map(|t| item("not checked", format!("Test {t} fails; {nothing}"), out)));
             if failing.is_empty() {
-                items.push(item("not checked", format!("{d}: gleam test fails; {nothing}"), out));
+                items.push(item("not checked", format!("The tests in {d} fail; {nothing}"), out));
             }
             continue;
         }
         let before = strings(&b["failing"]);
         for t in &failing {
             items.push(if before.contains(t) {
-                item("not checked", format!("{d}: {t} failed before the migration too"), "")
+                item("not checked", format!("Test {t} fails, as it did before the migration"), "")
             } else {
-                item("failed", format!("{d}: {t} fails, and passed before the migration"), out)
+                item("failed", format!("Test {t} fails now, but passed before the migration"), out)
             });
         }
         if failing.is_empty() {
-            items.push(compare(b["test"] == true, false, &format!("{d}: gleam test"), out));
+            items.push(compare(b["test"] == true, false, &format!("Testing {d}"), out));
         }
     }
     if smoke {
         let none = vec![];
         let checks = now["smoke"].as_array().unwrap_or(&none);
         if checks.is_empty() {
-            items.push(item("not checked", "No smoke checks were named, so the app's behaviour isn't checked", ""));
+            items.push(item("not checked", "You didn't give any commands to check that your app runs, so only builds and tests were compared", ""));
         }
         for (i, c) in checks.iter().enumerate() {
-            let what = format!("smoke check `{}`", c["command"].as_str().unwrap_or(""));
+            let what = format!("Your check command `{}`", c["command"].as_str().unwrap_or(""));
             items.push(compare(base["smoke"][i]["ok"] == true, c["ok"] == true, &what, c["output"].as_str().unwrap_or("")));
         }
     }
@@ -487,7 +505,7 @@ fn warnings(base: &Value, now: &Value) -> Vec<String> {
         .into_iter()
         .flatten()
         .filter(|(d, c)| c["build"] != true && base["projects"][d.as_str()]["build"] != true)
-        .map(|(d, _)| format!("{d}: {UNBUILT}. Errors in the original carry over into the migration."))
+        .map(|(d, _)| format!("{} {UNBUILT}. The copy has the same errors as your original.", subject(d)))
         .collect()
 }
 
@@ -512,9 +530,9 @@ fn explain(a: &str, b: &str) -> Vec<&'static str> {
         s.lines().filter(|l| !l.is_empty()).map(|l| format!("{l}\n")).collect()
     }
     let steps: [(&'static str, fn(&str) -> String); 4] = [
-        ("line endings", |s| s.replace("\r\n", "\n")),
-        ("spaces at line ends", ends),
-        ("final newline", |s| s.trim_end().to_string() + "\n"),
+        ("Windows line endings", |s| s.replace("\r\n", "\n")),
+        ("spaces at the ends of lines", ends),
+        ("the newline at the end of the file", |s| s.trim_end().to_string() + "\n"),
         ("blank lines between definitions", blanks),
     ];
     let (mut a, mut b) = (a.to_string(), b.to_string());
@@ -571,7 +589,7 @@ fn changed_pieces(db: &Connection, rel: &str, text: &str) -> Result<Vec<String>,
     let split = gleam::split(text);
     let mut out = vec![];
     if header.as_deref() != Some(split.header.as_str()) {
-        out.push("the module header".to_string());
+        out.push("the top of the file (imports and comments)".to_string());
     }
     for (i, it) in split.items.iter().enumerate() {
         if stored.get(i).is_none_or(|(n, t)| *n != it.name || *t != it.text) {
@@ -584,10 +602,10 @@ fn changed_pieces(db: &Connection, rel: &str, text: &str) -> Result<Vec<String>,
     let lines: Vec<&str> = text.lines().collect();
     let within = string_lines(text);
     if within.iter().any(|&i| lines.get(i).is_some_and(|l| gleam::declaration(l).is_some() || gleam::is_leading(l))) {
-        out.push("a multi-line string holding a line that looks like a definition".into());
+        out.push("a text value spanning several lines, holding a line Solace would take for a new definition".into());
     }
     if !within.is_empty() && text.contains('\r') {
-        out.push("a multi-line string with Windows line endings".into());
+        out.push("a text value spanning several lines, with Windows line endings".into());
     }
     out.dedup();
     Ok(out)
@@ -618,25 +636,36 @@ fn reconstruction(original: &Path, copy: &Path, projects: &[String]) -> Result<V
                 (Ok(a), Ok(b)) => {
                     let (a, b) = (String::from_utf8_lossy(&a), String::from_utf8_lossy(&b));
                     let mut changed = changed_pieces(&db, &rel, &a)?;
-                    changed.extend(changed_pieces(&db, &rel, &b)?.into_iter().map(|p| format!("{p} (regenerated)")));
+                    changed.extend(changed_pieces(&db, &rel, &b)?.into_iter().map(|p| format!("{p} (in the written file)")));
                     let why = explain(&a, &b).join(", ");
                     let (status, text) = if changed.is_empty() {
-                        ("verified", format!("{label}: differs in layout only ({why})"))
+                        ("verified", format!("{label} differs only in spacing: {why}"))
                     } else {
-                        ("failed", format!("{label}: {} differ from the original: review the diff", changed.join(", ")))
+                        ("failed", format!("In {label}, {} came out different", changed.join(", ")))
                     };
                     items.push(item(status, text, &diff(&o.join(&rel), &c.join(&rel), &label)));
                 }
-                (Ok(_), Err(_)) => items.push(item("failed", format!("{label}: not regenerated; the store is missing it"), "")),
-                _ => items.push(item("failed", format!("{label}: regenerated, but not in the original"), "")),
+                (Ok(_), Err(_)) => items.push(item("failed", format!("{label} wasn't written back: it's missing from Solace's store"), "")),
+                _ => items.push(item("failed", format!("{label} was written back, but isn't in your original folder"), "")),
             }
         }
     }
-    let summary = format!("{} byte-identical, {} different; judged once, after the first regeneration", files(same.len()), items.len());
+    let how = "Solace keeps your code in its own store and writes the files from it.";
+    let spaced = items.iter().filter(|i| i["status"] == "verified").count();
+    let summary = match (worst(&items), spaced) {
+        ("failed", _) => format!("{how} Some came out different; look at the differences before switching."),
+        (_, 0) if same.len() == 1 => format!("{how} Your Gleam file came out exactly the same."),
+        (_, 0) => format!("{how} All {} came out exactly the same.", files(same.len())),
+        _ => format!(
+            "{how} {} came out exactly the same, and {} only in the spacing between definitions.",
+            files(same.len()),
+            if spaced == 1 { "1 file differs".to_string() } else { format!("{spaced} files differ") }
+        ),
+    };
     if !same.is_empty() {
-        items.insert(0, item("verified", format!("{} byte-identical", files(same.len())), &same.join("\n")));
+        items.insert(0, item("verified", format!("{} came out exactly the same", files(same.len())), &same.join("\n")));
     }
-    Ok(check("Reconstruction", summary, items))
+    Ok(check(CODE, summary, items))
 }
 
 /// Gleam files Solace can't read in: not UTF-8, or a name defined twice.
@@ -647,13 +676,13 @@ fn unreadable(copy: &Path, projects: &[String]) -> Vec<Value> {
         for rel in gleam_files(&root) {
             let label = if d == "." { rel.clone() } else { format!("{d}/{rel}") };
             match fs::read(root.join(&rel)).map(String::from_utf8) {
-                Err(e) => items.push(item("failed", format!("{label}: couldn't be read ({e})"), "")),
-                Ok(Err(_)) => items.push(item("failed", format!("{label}: isn't UTF-8 text, so it can't be read in"), "")),
+                Err(e) => items.push(item("failed", format!("{label} couldn't be read ({e})"), "")),
+                Ok(Err(_)) => items.push(item("failed", format!("{label} isn't UTF-8 text, so Solace can't read it"), "")),
                 Ok(Ok(text)) => {
                     let mut seen = HashSet::new();
                     for it in gleam::split(&text).items {
                         if !seen.insert(it.name.clone()) {
-                            items.push(item("failed", format!("{label}: {} is defined twice", it.name), ""));
+                            items.push(item("failed", format!("{label} defines {} twice", it.name), ""));
                         }
                     }
                 }
@@ -669,30 +698,33 @@ fn coverage(original: &Path, copy: &Path, projects: &[String]) -> Result<Value, 
         let db = Connection::open(project(copy, d).join(".solace/store.db"))?;
         let count = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0));
         let (m, s) = (count("SELECT count(*) FROM modules")?, count("SELECT count(*) FROM symbols")?);
-        items.push(item("verified", format!("{d}: {m} Gleam modules read in, {s} definitions"), ""));
-        let others = walk(&project(copy, d), &|p| build_output(p) || p.file_name().is_some_and(|n| n == ".solace"))?
+        items.push(item("verified", format!("{} is set up for Solace: {} with {s} functions, types and constants", subject(d), files(m as usize).replace("file", "Gleam file")), ""));
+        // A project nested inside this one has Gleam files of its own.
+        let root = project(copy, d);
+        let others = walk(&root, &|p| build_output(p) || p.file_name().is_some_and(|n| n == ".solace") || (p != root && p.join("gleam.toml").exists()))?
             .into_iter()
             .filter(|(r, m)| m.is_file() && r.ends_with(".gleam") && !r.starts_with("src/") && !r.starts_with("test/"))
             .map(|(r, _)| r)
             .collect::<Vec<_>>();
         if !others.is_empty() {
-            items.push(item("", format!("{d}: {} Gleam files outside src/ and test/ are copied as files, not read in", others.len()), &others.join("\n")));
+            items.push(item("", format!("In {}, {} outside src/ and test/ were copied, but Solace doesn't manage them", shown(d), files(others.len()).replace("file", "Gleam file")), &others.join("\n")));
         }
     }
     let all = walk(original, &|_| false)?;
     let odd: Vec<&str> = all.iter().filter(|(_, m)| !m.is_dir() && !m.is_file() && !m.is_symlink()).map(|(r, _)| r.as_str()).collect();
-    items.push(item("verified", format!("{} files, folders and links copied with their permissions, every subfolder included", all.len() - odd.len()), ""));
+    items.push(item("verified", format!("All {} files, folders and links were copied, with their permissions", all.len() - odd.len()), ""));
     if !odd.is_empty() {
-        items.push(item("not checked", format!("Not copied ({}): sockets, FIFOs and devices", odd.len()), &odd.join("\n")));
+        let what = if odd.len() == 1 { "1 special file (a socket, FIFO or device) wasn't copied".to_string() } else { format!("{} special files (sockets, FIFOs or devices) weren't copied", odd.len()) };
+        items.push(item("not checked", what, &odd.join("\n")));
     }
     for f in workspace::found(original)? {
         let dir = f["dir"].as_str().unwrap_or("");
         if !projects.iter().any(|p| p == dir) {
-            items.push(item("", format!("{dir} ({}): not selected, so copied as files and not read in", f["name"].as_str().unwrap_or("")), ""));
+            items.push(item("", format!("{dir} was copied, but not set up for Solace, since you didn't choose it"), ""));
         }
     }
     let n = projects.len();
-    Ok(check("Coverage", format!("{n} project{} read in", if n == 1 { "" } else { "s" }), items))
+    Ok(check(COPYING, format!("Solace copied your whole folder and set up {n} project{} to use it.", if n == 1 { "" } else { "s" }), items))
 }
 
 /// The links in the copy that lead out of it. With `fix`, a link into the
@@ -715,16 +747,16 @@ fn links(original: &Path, copy: &Path, projects: &[String], fix: bool) -> Result
             let new = relative(link.parent().unwrap(), &copy.join(rest));
             fs::remove_file(&link)?;
             std::os::unix::fs::symlink(&new, &link)?;
-            items.push(item("verified", format!("{rel} linked into the original; it now links to the same place in the copy ({})", new.display()), ""));
+            items.push(item("verified", format!("{rel} linked into your original folder; in the copy it links to the same place in the copy"), &format!("now links to {}", new.display())));
         } else if resolved.starts_with(original) {
-            items.push(flag(item("failed", format!("{rel} links into the original, to {}", target.display()), "")));
+            items.push(flag(item("failed", format!("{rel} links into your original folder, to {}", target.display()), "")));
         } else if !resolved.starts_with(copy) {
             let hit = guarded.iter().any(|g| Path::new(&rel).starts_with(g) || g.starts_with(&rel));
             if hit {
                 fatal.push(rel.clone());
             }
             let status = if hit { "failed" } else { "not checked" };
-            items.push(flag(item(status, format!("{rel} links outside the migrated folder, to {}", target.display()), "")));
+            items.push(flag(item(status, format!("{rel} links to {}, outside the copy", target.display()), "")));
         }
     }
     Ok((items, fatal))
@@ -771,7 +803,7 @@ fn paths(original: &Path, copy: &Path, state: &Value) -> Result<Value, Failure> 
                 if !inside(copy, &dir.join(path)) {
                     items.push(flag(item(
                         "failed",
-                        format!("{rel}: dependency {name} at {path} is outside the migrated folder; move it into the folder first"),
+                        format!("{rel} uses {name} from {path}, outside the copy; move it into your folder first"),
                         "",
                     )));
                 }
@@ -780,7 +812,7 @@ fn paths(original: &Path, copy: &Path, state: &Value) -> Result<Value, Failure> 
     }
     for (rel, t) in git_pointers(copy)? {
         let status = if t.starts_with(original) { "failed" } else { "not checked" };
-        items.push(flag(item(status, format!("{rel} points git at {}, outside the migrated folder", t.display()), "")));
+        items.push(flag(item(status, format!("{rel} points git at {}, outside the copy", t.display()), "")));
     }
     let needle = original.to_string_lossy().into_owned();
     let mut large = vec![];
@@ -791,21 +823,26 @@ fn paths(original: &Path, copy: &Path, state: &Value) -> Result<Value, Failure> 
         if m.len() > 262_144 {
             large.push(rel);
         } else if fs::read_to_string(copy.join(&rel)).is_ok_and(|t| t.contains(&needle)) {
-            items.push(flag(item("not checked", format!("{rel} mentions the original's path; check what it does with it"), "")));
+            items.push(flag(item("not checked", format!("{rel} contains your original folder's path; if it runs from the copy, it could change your original"), "")));
         }
     }
     if !large.is_empty() {
-        items.push(item("not checked", format!("{} over 256 KiB weren't searched for the original's path", files(large.len())), &large.join("\n")));
+        items.push(item("not checked", format!("{} large {} (over 256 KB) weren't searched for your original folder's path", large.len(), if large.len() == 1 { "file" } else { "files" }), &large.join("\n")));
     }
     for c in strings(&state["smoke"]).iter().filter(|c| c.contains(&needle)) {
-        items.push(flag(item("not checked", format!("smoke check `{c}` names the original's path"), "")));
+        items.push(flag(item("not checked", format!("Your check command `{c}` uses your original folder's path"), "")));
     }
     items.push(if bwrap() {
-        item("verified", "Commands ran with the original read-only (bubblewrap)", "")
+        item("verified", "Your original folder was read-only to every command Solace ran (using bubblewrap)", "")
     } else {
-        item("not checked", "Commands weren't isolated from the original: install bubblewrap (bwrap) for a guarantee", "")
+        item("not checked", "Solace couldn't make your original folder read-only while running commands; install bubblewrap (bwrap) to be sure nothing changes it", "")
     });
-    Ok(check("Paths", "What could reach the original from inside the copy", items))
+    let summary = match worst(&items) {
+        "failed" => "Something in the copy reaches outside it. Fix it in your original folder before switching.",
+        "not checked" => "Look at the items below: Solace couldn't rule them out.",
+        _ => "Nothing in the copy points at your original folder.",
+    };
+    Ok(check(REACH, summary, items))
 }
 fn flagged(copy: &Path, state: &Value) -> Result<Vec<Value>, Failure> {
     Ok(paths(&original_of(state), copy, state)?["items"].as_array().into_iter().flatten().filter(|i| i["flag"] == true).cloned().collect())
@@ -815,11 +852,13 @@ fn preservation(original: &Path, recorded: &Value) -> Result<Value, Failure> {
     let ch = changes(original, recorded)?;
     let n = recorded.as_object().map_or(0, |o| o.len());
     Ok(if ch.is_empty() {
-        let s = format!("The original matches its inventory: {n} entries with their permissions, untracked and ignored files included, build output excluded");
-        check("Preservation", s, vec![])
+        let s = format!(
+            "Nothing in it has changed since the copy was made. Solace compared all {n} files and folders, with their contents and permissions, including files git ignores. Build output isn't compared."
+        );
+        check(ORIGINAL, s, vec![])
     } else {
         let items = ch.iter().map(|c| item("failed", c, "")).collect();
-        check("Preservation", format!("The original changed since the copy was taken: {} entries", ch.len()), items)
+        check(ORIGINAL, "It changed after the copy was made. Switching to the copy would lose these changes.", items)
     })
 }
 
@@ -828,13 +867,18 @@ fn recovery(copy: &Path, state: &Value, preserved: bool) -> Result<Value, Failur
     let skip = |p: &Path| build_output(p) || p.file_name().is_some_and(|n| n == ".solace" || n == "solace.toml");
     let original = original_of(state);
     let plain = in_temp(copy, &skip, |t| suite(t, &projects, &[], Some(&original)))?;
-    let mut items = behaviour(&state["baseline"], &plain, false);
+    let mut items = behavior(&state["baseline"], &plain, false);
     items.push(if preserved {
-        item("verified", "Abandoning the copy needs no repair: the original matches its inventory", "")
+        item("verified", "Your original folder is unchanged, so deleting the copy leaves you exactly where you started", "")
     } else {
-        item("failed", "The original changed since the copy was taken (see Preservation)", "")
+        item("failed", format!("Your original folder changed (see {ORIGINAL})"), "")
     });
-    Ok(check("Recovery", "The code built and tested with plain gleam, without .solace/ or solace.toml", items))
+    let how = "Solace removed its own files from a temporary copy, then built and tested it.";
+    let summary = match worst(&items) {
+        "verified" => format!("{how} Your code doesn't depend on Solace, so you can stop using it at any time."),
+        _ => how.to_string(),
+    };
+    Ok(check(PLAIN, summary, items))
 }
 
 /// A summary of the copy's files, to tell when the checks are out of date:
@@ -866,24 +910,27 @@ fn recheck_state(copy: &Path, state: &mut Value, step: &dyn Fn(&str)) -> Result<
     let original = original_of(state);
     let protect = Some(original.as_path());
     let (projects, smoke) = (strings(&state["projects"]), strings(&state["smoke"]));
-    step("Building and testing the regenerated project");
+    step("Building and testing the copy");
     let built = builds(copy, &projects, protect);
     // What the report vouches for: a change from here on leaves it out of date.
     let quick = fingerprint(copy, true)?;
     let before = fingerprint(copy, false)?;
-    step("Running the smoke checks");
+    step("Running your check commands");
     let now = json!({"projects":built,"smoke":smokes(copy, &smoke, protect)});
-    step("Checking paths and the original");
+    step("Checking that your original folder hasn't changed");
     let preserved = preservation(&original, &recorded(copy))?;
     let n = projects.len();
-    let behave = check(
-        "Behaviour",
-        format!("Build, tests and smoke checks of {n} project{}, against the original's", if n == 1 { "" } else { "s" }),
-        behaviour(&state["baseline"], &now, true),
-    );
+    let items = behavior(&state["baseline"], &now, true);
+    let summary = match worst(&items) {
+        "failed" => "Something that worked before the migration fails now.",
+        "not checked" => "Nothing that worked before the migration fails now. Some things below failed before it too, or weren't checked.",
+        _ if n == 1 => "The project builds and its tests pass, the same as before the migration.",
+        _ => "Each project builds and its tests pass, the same as before the migration.",
+    };
+    let behave = check(TESTS, summary, items);
     let rebuilt = state["reconstruction"].clone();
     let mut checks = vec![coverage(&original, copy, &projects)?, rebuilt, behave, paths(&original, copy, state)?];
-    step("Building the code without Solace");
+    step("Building and testing the copy without Solace's files");
     checks.push(preserved.clone());
     checks.push(recovery(copy, state, preserved["status"] == "verified")?);
     state["report"] = json!({"checked_at":now_text(),"checks":checks,"warnings":warnings(&state["baseline"], &now)});
@@ -911,35 +958,35 @@ pub fn start(top: &Path, projects: &[String], smoke: &[String], confirmed: bool,
     let found = candidates(&top)?;
     if projects.is_empty() || projects.iter().any(|p| !found.iter().any(|f| f["dir"] == p.as_str())) {
         let names: Vec<&str> = found.iter().filter_map(|f| f["dir"].as_str()).collect();
-        return fail(format!("Choose at least one project to migrate from: {}", names.join(", ")));
+        return fail(format!("Choose at least one project to migrate: {}", names.join(", ")));
     }
     let parent = top.parent().ok_or_else(|| Failure("The folder has no parent to put the copy in.".into(), 1))?;
     let _lock = exclusive(parent)?;
     recover(parent)?;
     let copy = parent.join(COPY);
     if fs::symlink_metadata(&copy).is_ok() {
-        return refuse("E7020", format!("a migration is already in progress at {}: adopt or abandon it first", copy.display()));
+        return refuse("E7020", format!("there's already a copy at {}: switch to it or delete it first", copy.display()));
     }
     if fs::metadata(&top)?.dev() != fs::metadata(parent)?.dev() {
-        return fail(format!("{} is on another filesystem from {}, so the copy couldn't be swapped in.", top.display(), parent.display()));
+        return fail(format!("{} is on a different drive from {}, so Solace couldn't move the copy into its place later.", top.display(), parent.display()));
     }
-    step("Recording the original's inventory");
+    step("Recording every file in your folder, to tell later if anything changed");
     let inv = inventory(&top)?;
     fs::create_dir(&copy)?;
     let mut state = json!({"original":top,"projects":projects,"smoke":smoke,"adopted":false,"stage":"copying"});
     save(&copy, &state)?;
     let made = (|| {
         write_atomic(&copy.join(INVENTORY), &serde_json::to_vec(&inv).unwrap())?;
-        step("Copying the whole folder to ../solace-migration");
+        step("Copying your folder to ../solace-migration");
         copy_tree(&top, &copy, &|_| false)?;
         clear_compiled(&copy, projects);
-        step("Checking what in the copy could reach the original");
+        step("Looking for anything in the copy that could reach your original folder");
         let (relinked, fatal) = links(&top, &copy, projects, true)?;
         // Only the redirected links: the rest are found again by every Paths check.
         state["relinked"] = json!(relinked.into_iter().filter(|i| i["status"] == "verified").collect::<Vec<_>>());
         if !fatal.is_empty() {
             return fail(format!(
-                "These links lead out of the copy from where Solace writes, so it can't go on safely:\n{}\nPoint them inside the folder in the original, then start again.",
+                "These links lead outside the copy from folders Solace writes to, so it stopped:\n{}\nChange them in your original folder to point inside it, then start again.",
                 fatal.join("\n")
             ));
         }
@@ -961,7 +1008,7 @@ pub fn confirm_paths(copy: &Path, step: &dyn Fn(&str)) -> Result<PathBuf, Failur
     let _lock = exclusive(copy.parent().unwrap_or(copy))?;
     let mut state = record(copy)?;
     if stage(&state) != "confirm_paths" {
-        return fail("This migration isn't waiting for paths to be confirmed.");
+        return fail("This migration isn't waiting for you to look at any files.");
     }
     proceed(copy, &mut state, step)?;
     Ok(copy.to_path_buf())
@@ -973,21 +1020,21 @@ fn proceed(copy: &Path, state: &mut Value, step: &dyn Fn(&str)) -> Result<(), Fa
     let made = (|| {
         let original = original_of(state);
         let (projects, smoke) = (strings(&state["projects"]), strings(&state["smoke"]));
-        step("Building and testing the original, in a throwaway copy");
+        step("Building and testing your original code, in a temporary copy");
         let baseline = in_temp(copy, &build_output, |t| suite(t, &projects, &smoke, Some(&original)))?;
         state["baseline"] = baseline;
         let bad = unreadable(copy, &projects);
         if !bad.is_empty() {
-            state["report"] = json!({"checked_at":now_text(),"warnings":[],"checks":[check("Coverage", "Solace couldn't read in every Gleam file", bad)]});
-            return fail("Solace couldn't read in some of the Gleam files: see Coverage.");
+            state["report"] = json!({"checked_at":now_text(),"warnings":[],"checks":[check(COPYING, "Solace couldn't read some of your Gleam files.", bad)]});
+            return fail("Solace couldn't read some of your Gleam files; the report lists them.");
         }
-        step("Setting up Solace in the copy");
+        step("Setting up the copy for Solace");
         let mut sorted = projects.clone();
         sorted.sort();
         for d in &sorted {
             workspace::setup(copy, d)?;
         }
-        step("Regenerating the source from the store");
+        step("Writing your code back out from Solace's store");
         for d in &projects {
             let root = project(copy, d);
             for rel in gleam_files(&root) {
@@ -1017,13 +1064,16 @@ fn stopped(copy: &Path, state: &mut Value, e: Failure) -> Result<PathBuf, Failur
     state["problem"] = json!(e.0);
     let mut msg = format!("The migration stopped: {}\n", e.0);
     msg += if unchanged {
-        "The original matches its inventory: it's unchanged.\n"
+        "Your original folder is unchanged.\n"
     } else {
-        "The original doesn't match its inventory: look at what changed before going on.\n"
+        "Your original folder has changed since the copy was made; look at what changed before going on.\n"
     };
     msg += &match save(copy, state) {
-        Ok(()) => format!("The copy at {} is kept so you can see why; Abandon (`solace migrate --abandon`) removes it.", copy.display()),
-        Err(s) => format!("Saving the migration's record failed too ({}); remove {} yourself.", s.0, copy.display()),
+        Ok(()) => format!(
+            "The copy at {} is kept so you can see what happened. Delete the copy on the board, or with `solace migrate --abandon`.",
+            copy.display()
+        ),
+        Err(s) => format!("Saving the migration's record failed too ({}); delete {} yourself.", s.0, copy.display()),
     };
     Err(Failure(msg, e.1))
 }
@@ -1036,7 +1086,7 @@ pub fn recheck(copy: &Path, step: &dyn Fn(&str)) -> Result<(), Failure> {
     let _lock = exclusive(copy.parent().unwrap_or(copy))?;
     let mut state = record(copy)?;
     if stage(&state) != "checked" || state["adopted"] == true {
-        return fail("Only a migration in progress, with its checks run, can be rechecked.");
+        return fail("Only a copy whose checks have run can be checked again.");
     }
     let _held = hold(copy)?;
     recheck_state(copy, &mut state, step)
@@ -1044,13 +1094,13 @@ pub fn recheck(copy: &Path, step: &dyn Fn(&str)) -> Result<(), Failure> {
 
 /// Why Adopt isn't offered yet.
 fn blockers(state: &Value, current: bool) -> Vec<String> {
-    let Some(checks) = state["report"]["checks"].as_array() else { return vec!["No checks have run yet".into()] };
+    let Some(checks) = state["report"]["checks"].as_array() else { return vec!["The checks haven't run yet.".into()] };
     let mut out = vec![];
     if !current {
-        out.push("The copy changed since the checks ran: Recheck".into());
+        out.push("The copy changed after the checks ran. Run the checks again.".into());
     }
     for c in checks.iter().filter(|c| c["status"] == "failed") {
-        out.push(format!("{} failed", c["name"].as_str().unwrap_or("")));
+        out.push(format!("{}: {}", c["name"].as_str().unwrap_or(""), c["summary"].as_str().unwrap_or("")));
     }
     out
 }
@@ -1081,11 +1131,11 @@ fn forward(parent: &Path, j: &mut Value) -> Result<(), Failure> {
     for (n, (from, to)) in renames(j).iter().enumerate() {
         if fs::symlink_metadata(to).is_ok() {
             reverse(parent, j)?;
-            return fail(format!("{} exists, so nothing was swapped.", to.display()));
+            return fail(format!("{} exists, so no folder was moved.", to.display()));
         }
         if let Err(e) = fs::rename(from, to) {
             reverse(parent, j)?;
-            return Err(named(from, format!("couldn't move it to {}: {e}; the folders are as they were", to.display())));
+            return Err(named(from, format!("couldn't move it to {}: {e}. The folders are back where they were.", to.display())));
         }
         j["done"] = json!(n + 1);
         write_atomic(&journal(parent), &serde_json::to_vec(j).unwrap())?;
@@ -1103,7 +1153,7 @@ fn reverse(parent: &Path, j: &Value) -> Result<(), Failure> {
         }
         if let Err(e) = fs::rename(to, from) {
             return fail(format!(
-                "Couldn't swap the folders back: {} should go back to {} ({e}). Nothing else was moved. {} is kept, and the next `solace migrate` or `solace serve` here tries again.",
+                "Couldn't put the folders back: {} should move back to {} ({e}). Nothing else was moved. {} is kept, and the next `solace migrate` or `solace serve` here tries again.",
                 to.display(),
                 from.display(),
                 journal(parent).display()
@@ -1125,8 +1175,8 @@ pub fn recover(parent: &Path) -> Result<Option<String>, Failure> {
     reverse(parent, &j)?;
     let (from, _) = renames(&j).into_iter().next().unwrap_or_default();
     Ok(Some(format!(
-        "An interrupted {} was put back: {} is where it was before it started.\n",
-        if j["op"] == "adopt" { "adoption" } else { "undo" },
+        "An interrupted {} was undone: {} is back where it was.\n",
+        if j["op"] == "adopt" { "switch to the copy" } else { "switch back" },
         from.display()
     )))
 }
@@ -1147,36 +1197,36 @@ pub fn adopt(copy: &Path, step: &dyn Fn(&str)) -> Result<PathBuf, Failure> {
     recover(parent)?;
     let mut state = record(copy)?;
     if copy.file_name() != Some(COPY.as_ref()) || state["adopted"] == true {
-        return fail(format!("{} isn't a migration in progress.", copy.display()));
+        return fail(format!("{} isn't a copy you can switch to.", copy.display()));
     }
     if stage(&state) != "checked" {
-        return refuse("E7021", "not ready to adopt: the checks haven't run");
+        return refuse("E7021", "can't switch to the copy yet: the checks haven't run");
     }
     let _held = hold(copy)?;
     let b = blockers(&state, current(copy, &state, false)?);
     if !b.is_empty() {
-        return refuse("E7021", format!("not ready to adopt:\n{}", b.join("\n")));
+        return refuse("E7021", format!("can't switch to the copy yet:\n{}", b.join("\n")));
     }
     let original = original_of(&state);
-    step("Comparing the original with its inventory");
+    step("Checking that your original folder hasn't changed");
     let ch = changes(&original, &recorded(copy))?;
     if !ch.is_empty() {
-        return refuse("E7022", format!("the original changed since the copy was taken, so swapping would lose that work:\n{}", ch.join("\n")));
+        return refuse("E7022", format!("your original folder changed after the copy was made, and switching would lose those changes:\n{}", ch.join("\n")));
     }
     let pre = pre_solace(&original);
     if fs::symlink_metadata(&pre).is_ok() {
         return fail(format!("{} already exists; move it away first.", pre.display()));
     }
-    step("Swapping the folders");
+    step("Moving your original folder aside and the copy into its place");
     let mut j = json!({"op":"adopt","renames":[[original, pre], [copy, original]],"done":0,"home":copy,"adopted":false});
     forward(parent, &mut j)?;
-    step("Building and testing at the original path");
+    step("Building and testing the copy in its new place");
     let now = suite(&original, &strings(&state["projects"]), &strings(&state["smoke"]), Some(&pre));
     let failed: Vec<String> =
-        behaviour(&state["baseline"], &now, true).into_iter().filter(|i| i["status"] == "failed").map(|i| i["text"].as_str().unwrap_or("").to_string()).collect();
+        behavior(&state["baseline"], &now, true).into_iter().filter(|i| i["status"] == "failed").map(|i| i["text"].as_str().unwrap_or("").to_string()).collect();
     if !failed.is_empty() {
         reverse(parent, &j)?;
-        return fail(format!("At the original path these failed, so both folders were swapped back:\n{}", failed.join("\n")));
+        return fail(format!("In its new place these failed, so both folders were put back:\n{}", failed.join("\n")));
     }
     state["adopted"] = json!(true);
     save(&original, &state)?;
@@ -1191,10 +1241,10 @@ pub fn abandon(copy: &Path) -> Result<(PathBuf, bool), Failure> {
     recover(parent)?;
     let state = record(copy)?;
     if copy.file_name() != Some(COPY.as_ref()) {
-        return fail(format!("{} isn't a migration copy, so it isn't deleted.", copy.display()));
+        return fail(format!("{} isn't a migration copy, so Solace won't delete it.", copy.display()));
     }
     if state["adopted"] == true {
-        return fail("This migration was adopted; use Undo adoption instead.");
+        return fail("You've already switched to this copy; switch back first.");
     }
     let _held = hold(copy)?;
     let original = original_of(&state);
@@ -1212,12 +1262,12 @@ pub fn undo(top: &Path) -> Result<PathBuf, Failure> {
     let state = record(top)?;
     let pre = pre_solace(top);
     if state["adopted"] != true || !pre.exists() {
-        return fail(format!("Nothing to undo: {} isn't there.", pre.display()));
+        return fail(format!("There's nothing to switch back to: {} isn't there.", pre.display()));
     }
     let _held = hold(top)?;
     let ch = changes(&pre, &recorded(top))?;
     if !ch.is_empty() {
-        return refuse("E7022", format!("{} changed since it was set aside, so it isn't swapped back:\n{}", pre.display(), ch.join("\n")));
+        return refuse("E7022", format!("{} changed after it was set aside, so Solace won't switch back to it:\n{}", pre.display(), ch.join("\n")));
     }
     let copy = top.with_file_name(COPY);
     if fs::symlink_metadata(&copy).is_ok() {
@@ -1277,11 +1327,6 @@ pub fn status(top: &Path) -> Result<Value, Failure> {
             let now = current(top, &state, true)?;
             if let Some(r) = state.get_mut("report").filter(|r| r.is_object()) {
                 r["current"] = json!(now);
-                if !now {
-                    for c in r["checks"].as_array_mut().into_iter().flatten() {
-                        c["status"] = json!("out of date");
-                    }
-                }
             }
             out["state"] = json!("in_progress");
             out["blockers"] = json!(blockers(&state, now));
@@ -1291,14 +1336,35 @@ pub fn status(top: &Path) -> Result<Value, Failure> {
     Ok(out)
 }
 
-fn text(v: &Value) -> String {
-    let mut out = format!("Migration: {}\n", v["state"].as_str().unwrap_or(""));
-    for c in v["candidates"].as_array().into_iter().flatten() {
-        out += &format!("Can migrate: {} ({})\n", c["dir"].as_str().unwrap_or(""), c["name"].as_str().unwrap_or(""));
+/// A result's mark in the shell: fine, a problem, or something to look at.
+fn mark(status: &Value) -> &'static str {
+    match status.as_str() {
+        Some("verified") => "✓ ",
+        Some("failed") => "✗ ",
+        Some("not checked") => "! ",
+        _ => "",
     }
-    for (k, label) in [("original", "Original"), ("copy", "Copy")] {
-        if let Some(p) = v[k].as_str() {
-            out += &format!("{label}: {p}\n");
+}
+fn text(v: &Value) -> String {
+    let path = |k: &str| v[k].as_str().unwrap_or("").to_string();
+    let mut out = match v["state"].as_str().unwrap_or("") {
+        "available" => "Not migrated yet. Projects you can migrate:\n".to_string(),
+        "copying" => "A copy of your folder is being made, or an earlier attempt was interrupted.\n".into(),
+        "confirm_paths" => "Waiting for you to look at the files below. Nothing has run yet.\n".into(),
+        "failed" => "The migration stopped.\n".into(),
+        "in_progress" => "You're working in a copy of your project.\n".into(),
+        "adopted" => format!("Your project uses Solace. Your old folder is kept at {}.pre-solace.\n", path("original")),
+        _ => "Nothing to migrate here.\n".into(),
+    };
+    for c in v["candidates"].as_array().into_iter().flatten() {
+        let dir = c["dir"].as_str().unwrap_or("");
+        out += &format!("  {} ({})\n", c["name"].as_str().unwrap_or(""), if dir == "." { "this folder" } else { dir });
+    }
+    if v["state"] != "adopted" {
+        for (k, label) in [("original", "Your original folder"), ("copy", "The copy")] {
+            if v[k].is_string() {
+                out += &format!("{label}: {}\n", path(k));
+            }
         }
     }
     if let Some(p) = v["problem"].as_str() {
@@ -1306,20 +1372,25 @@ fn text(v: &Value) -> String {
     }
     let flagged = v["flagged"].as_array().cloned().unwrap_or_default();
     if !flagged.is_empty() {
-        out += "\nThese could reach your original from inside the copy. Look at each one; nothing has run yet:\n";
+        out += "\nEach of these could change your original folder if it runs from the copy:\n";
         for i in &flagged {
-            out += &format!("  - [{}] {}\n", i["status"].as_str().unwrap_or(""), i["text"].as_str().unwrap_or(""));
+            out += &format!("  {}{}\n", mark(&i["status"]), i["text"].as_str().unwrap_or(""));
         }
-        out += "Then `solace migrate --confirm-paths` goes on, or `solace migrate --abandon` deletes the copy.\n";
+        out += "Look at each one. Then `solace migrate --confirm-paths` continues, or `solace migrate --abandon` deletes the copy.\n";
     }
     for w in strings(&v["report"]["warnings"]) {
         out += &format!("\n{w}\n");
     }
+    if v["report"]["checks"].is_array() {
+        out += "\n✓ fine   ✗ a problem to fix before switching   ! worth a look\n";
+    }
+    if v["report"]["current"] == false {
+        out += "\nThe copy changed after these checks ran. Run them again with `solace migrate --recheck`.\n";
+    }
     for c in v["report"]["checks"].as_array().into_iter().flatten() {
-        out += &format!("\n{}: {} ({})\n", c["name"].as_str().unwrap_or(""), c["status"].as_str().unwrap_or(""), c["summary"].as_str().unwrap_or(""));
+        out += &format!("\n{}{}\n  {}\n", mark(&c["status"]), c["name"].as_str().unwrap_or(""), c["summary"].as_str().unwrap_or(""));
         for i in c["items"].as_array().into_iter().flatten() {
-            let s = i["status"].as_str().map_or(String::new(), |s| format!("[{s}] "));
-            out += &format!("  - {s}{}\n", i["text"].as_str().unwrap_or(""));
+            out += &format!("  - {}{}\n", mark(&i["status"]), i["text"].as_str().unwrap_or(""));
             if i["status"] == "failed"
                 && let Some(d) = i["detail"].as_str()
             {
@@ -1329,10 +1400,17 @@ fn text(v: &Value) -> String {
     }
     let b = strings(&v["blockers"]);
     if v["state"] == "in_progress" {
-        out += &if b.is_empty() { "\nReady to adopt: `solace migrate --adopt`.\n".to_string() } else { format!("\nNot ready to adopt:\n  {}\n", b.join("\n  ")) };
+        out += &if b.is_empty() {
+            format!(
+                "\nReady to switch: `solace migrate --adopt` moves your original folder to {}.pre-solace and puts the copy in its place.\n",
+                path("original")
+            )
+        } else {
+            format!("\nBefore you can switch to the copy:\n  - {}\n", b.join("\n  - "))
+        };
     }
     if v["state"] == "failed" || v["state"] == "copying" {
-        out += "\n`solace migrate --abandon` deletes the copy.\n";
+        out += "\n`solace migrate --abandon` deletes the copy, so you can start again.\n";
     }
     out
 }
@@ -1345,7 +1423,7 @@ fn confirm(question: &str, yes: bool) -> Result<bool, Failure> {
     std::io::stdout().flush()?;
     Ok(std::io::stdin().lines().next().and_then(|l| l.ok()).is_some_and(|l| l.trim().to_lowercase().starts_with('y')))
 }
-const CARRIES: &str = "Errors in the original carry over: a build or test that fails before the migration fails after it too.";
+const CARRIES: &str = "If your project has build errors or failing tests, the copy has the same ones.";
 
 /// `solace migrate [--project DIR]... [--smoke CMD]... [--confirm-paths] [--yes]`,
 /// and `--report`, `--recheck`, `--confirm-paths`, `--adopt`, `--abandon`,
@@ -1392,38 +1470,38 @@ pub fn command(args: &[&str]) -> Out {
                 .collect();
             println!("{CARRIES}");
             if !unchecked.is_empty() {
-                println!("Not checked:\n  {}", unchecked.join("\n  "));
+                println!("Solace couldn't check:\n  {}", unchecked.join("\n  "));
             }
-            let q = format!("Rename {original} to {original}.pre-solace and move the copy into its place?");
+            let q = format!("Move {original} to {original}.pre-solace and put the copy in its place?");
             if !confirm(&q, yes)? {
                 return Ok("Nothing was changed.\n".into());
             }
             let at = adopt(&copy, &step)?;
             Ok(format!(
-                "Migration complete: {} is now the Solace project; the original is kept at {}.pre-solace.\nA shell that was in either folder has moved with it: run `cd {}`.\n",
+                "Done: {} now uses Solace. Your old folder is kept at {}.pre-solace; delete it once you're sure.\nA shell that was in either folder moved with it: run `cd {}`.\n",
                 at.display(),
                 at.display(),
                 at.display()
             ))
         }
         Some("--abandon") => {
-            if !confirm(&format!("Delete {}? The original isn't touched.", copy.display()), yes)? {
+            if !confirm(&format!("Delete the copy at {}? Anything done in it is lost; your original folder stays as it is.", copy.display()), yes)? {
                 return Ok("Nothing was changed.\n".into());
             }
             let (original, unchanged) = abandon(&copy)?;
             Ok(if unchanged {
-                format!("Deleted the copy; {} matches its inventory, as it was.\n", original.display())
+                format!("Deleted the copy. Your original folder at {} is unchanged.\n", original.display())
             } else {
-                format!("Deleted the copy. {} doesn't match its inventory: it changed during the migration.\n", original.display())
+                format!("Deleted the copy. Your original folder at {} changed during the migration.\n", original.display())
             })
         }
         Some("--undo") => {
-            if !confirm(&format!("Put the original back at {}, and the migrated project back at ../{COPY}?", top.display()), yes)? {
+            if !confirm(&format!("Switch back: put your original folder back at {}, and move the Solace version to ../{COPY}?", top.display()), yes)? {
                 return Ok("Nothing was changed.\n".into());
             }
             let original = undo(&top)?;
             Ok(format!(
-                "{} is the original again; the migrated project is at ../{COPY}.\nA shell that was in either folder has moved with it: run `cd {}`.\n",
+                "Switched back: {} is your original folder again, and the Solace version is at ../{COPY}.\nA shell that was in either folder moved with it: run `cd {}`.\n",
                 original.display(),
                 original.display()
             ))
@@ -1431,13 +1509,17 @@ pub fn command(args: &[&str]) -> Out {
         _ => {
             let found = candidates(&top)?;
             if found.is_empty() {
-                return fail("Nothing to migrate here: run `solace migrate` in a folder holding Gleam projects that Solace doesn't manage yet.");
+                return fail("Nothing to migrate here: run `solace migrate` in a folder with Gleam projects that don't use Solace yet.");
             }
             let mut projects = values("--project");
             if projects.is_empty() {
                 projects = found.iter().filter_map(|f| f["dir"].as_str().map(String::from)).collect();
             }
-            let q = format!("{CARRIES}\nCopy {} to ../{COPY} and migrate {} there? The original isn't changed.", top.display(), projects.join(", "));
+            let q = format!(
+                "{CARRIES}\nCopy {} to ../{COPY} and set up {} there to use Solace? Your folder isn't changed.",
+                top.display(),
+                projects.join(", ")
+            );
             if !confirm(&q, yes)? {
                 return Ok("Nothing was changed.\n".into());
             }
@@ -1453,8 +1535,11 @@ mod tests {
 
     #[test]
     fn explains_layout_differences() {
-        assert_eq!(explain("a\r\nb\r\n", "a\nb\n"), vec!["line endings"]);
-        assert_eq!(explain("fn a() {}\n\n\n\nfn b() {}", "fn a() {}\n\nfn b() {}\n"), vec!["final newline", "blank lines between definitions"]);
+        assert_eq!(explain("a\r\nb\r\n", "a\nb\n"), vec!["Windows line endings"]);
+        assert_eq!(
+            explain("fn a() {}\n\n\n\nfn b() {}", "fn a() {}\n\nfn b() {}\n"),
+            vec!["the newline at the end of the file", "blank lines between definitions"]
+        );
     }
 
     #[test]
@@ -1474,7 +1559,7 @@ mod tests {
             db.execute("INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES (?1, 'app', ?2, 'fn', ?3, ?4, '')", params![i as i64, it.name, it.text, i as i64])
                 .unwrap();
         }
-        assert_eq!(changed_pieces(&db, "src/app.gleam", src).unwrap(), vec!["a multi-line string holding a line that looks like a definition"]);
+        assert_eq!(changed_pieces(&db, "src/app.gleam", src).unwrap(), vec!["a text value spanning several lines, holding a line Solace would take for a new definition"]);
         assert!(changed_pieces(&db, "src/app.gleam", "pub fn a() {\n  \"\n").unwrap().len() > 0);
     }
 
@@ -1483,20 +1568,20 @@ mod tests {
         let base = json!({"projects":{".":{"build":true,"test":false,"failing":["app_test.old_test"]}},"smoke":[{"ok":true}]});
         let now = json!({"projects":{".":{"build":true,"test":false,"failing":["app_test.old_test","app_test.new_test"],"output":""}},
             "smoke":[{"command":"true","ok":false,"output":""}]});
-        let items = behaviour(&base, &now, true);
+        let items = behavior(&base, &now, true);
         let status = |t: &str| items.iter().find(|i| i["text"].as_str().unwrap().contains(t)).unwrap()["status"].clone();
         assert_eq!(status("old_test"), "not checked");
         assert_eq!(status("new_test"), "failed");
-        assert_eq!(status("smoke"), "failed");
-        assert_eq!(check("Behaviour", "", items)["status"], "failed");
+        assert_eq!(status("check command"), "failed");
+        assert_eq!(check(TESTS, "", items)["status"], "failed");
     }
 
     #[test]
     fn tests_are_reported_when_only_the_migration_builds() {
         let base = json!({"projects":{".":{"build":false,"test":false,"failing":[]}},"smoke":[]});
         let now = json!({"projects":{".":{"build":true,"test":false,"failing":["app_test.t"],"output":""}},"smoke":[]});
-        let items = behaviour(&base, &now, false);
-        assert!(items.iter().any(|i| i["text"].as_str().unwrap().contains("app_test.t fails; the original didn't build")));
+        let items = behavior(&base, &now, false);
+        assert!(items.iter().any(|i| i["text"].as_str().unwrap().contains("app_test.t fails; your project didn't build before the migration")));
         let none = json!({"projects":{".":{"build":false,"test":false,"failing":[],"output":""}},"smoke":[]});
         assert_eq!(warnings(&base, &none).len(), 1);
     }

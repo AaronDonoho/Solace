@@ -10,7 +10,7 @@ const state = (state, extra = {}) => ({ state, top: original, original: null, co
 const report = { checked_at: "2026-10-04T18:00:00Z", current: false, checks: [
   { name: 'Coverage', status: 'verified', summary: 'Both projects copied', items: [{ text: 'app', status: null, detail: null }] },
   { name: 'Reconstruction', status: 'failed', summary: 'Unknown difference', items: [{ text: 'src/app.gleam', status: 'failed', detail: '- old\n+ <script>new</script>' }] },
-  { name: 'Behaviour', status: 'not checked', summary: 'No smoke commands', items: [{ text: 'App behaviour' }] },
+  { name: 'Builds and tests', status: 'not checked', summary: 'No check commands', items: [{ text: 'No commands to check your app', status: 'not checked' }] },
   { name: 'Paths', status: 'out of date', summary: 'Copy changed', items: [{ text: 'Script', status: 'not checked', detail: 'Review manually' }] },
 ] };
 
@@ -64,11 +64,11 @@ test('migration states, report, confirmations and recovery use the root HTTP API
     expect(posts()).toHaveLength(0);
     dispatch(new board.ToggleMigration());
     expect(html().match(/<input(?=[^>]*type="checkbox")(?=[^>]*checked)[^>]*>/g)).toHaveLength(2);
-    expect(html()).toContain('never changes the original');
-    expect(html()).toContain('must exit 0');
+    expect(html()).toContain('Your folder isn&#39;t changed');
+    expect(html()).toContain('compares the results');
     dispatch(new board.MigrationProject('.', false));
     dispatch(new board.MigrationProject('web', false));
-    expect(html()).toMatch(/disabled[^>]*>Start<\/button>/);
+    expect(html()).toMatch(/disabled[^>]*>Make the copy<\/button>/);
     dispatch(new board.MigrationAction('start'));
     expect(posts()).toHaveLength(0);
     dispatch(new board.MigrationProject('web', true));
@@ -90,7 +90,7 @@ test('migration states, report, confirmations and recovery use the root HTTP API
     expect(reloads).toBe(0);
     offline = true; await poll(); await poll();
     expect(reloads).toBe(0);
-    expect(html()).toContain('Migration in progress');
+    expect(html()).toContain('Migrating');
     offline = false;
     migration = state('running', { step: 'Building the baseline', original, copy });
     await poll();
@@ -101,14 +101,15 @@ test('migration states, report, confirmations and recovery use the root HTTP API
     expect(reloads).toBe(1);
     expect(html()).toContain(copy);
     expect(html()).toContain(original);
-    expect(html()).toContain('Migration report');
-    for (const status of ['verified', 'failed', 'not checked', 'out of date']) expect(html()).toContain('>' + status + '</span>');
+    expect(html()).toContain('What Solace checked');
+    for (const words of ['fine', 'a problem', 'worth a look']) expect(html()).toContain('aria-label="' + words + '"');
+    expect(html()).toContain('The copy changed after these checks ran');
     expect(html()).toContain('Both projects copied');
-    expect(html()).toContain(report.checked_at);
-    expect(html()).toContain('<summary>Details</summary><pre');
+    expect(html()).toContain('Last checked ' + report.checked_at);
+    expect(html()).toContain('<summary>Show details</summary><pre');
     expect(html()).toContain('&lt;script&gt;new&lt;/script&gt;');
     expect(html()).toContain('Reconstruction failed');
-    expect(html()).toMatch(/disabled[^>]*>Adopt<\/button>/);
+    expect(html()).toMatch(/disabled[^>]*>Switch to the copy<\/button>/);
     const blockedPosts = posts().length;
     dispatch(new board.MigrationAction('adopt'));
     expect(posts()).toHaveLength(blockedPosts);
@@ -117,9 +118,9 @@ test('migration states, report, confirmations and recovery use the root HTTP API
     await poll();
     dispatch(new board.MigrationAction('adopt'));
     expect(posts()).toHaveLength(blockedPosts);
-    expect(confirmations.at(-1)).toContain('Behaviour: No smoke commands');
+    expect(confirmations.at(-1)).toContain('Worth a look first:\n• No commands to check your app');
     expect(confirmations.at(-1)).toContain(original + '.pre-solace');
-    expect(confirmations.at(-1)).toContain('copy takes its path');
+    expect(confirmations.at(-1)).toContain('the copy takes its place');
     accept = true;
     postReply = { code: 'E7022', message: 'Original changed:\nsrc/app.gleam\nnotes.txt' };
     dispatch(new board.MigrationAction('adopt'));
@@ -136,30 +137,30 @@ test('migration states, report, confirmations and recovery use the root HTTP API
     await poll();
     expect(reloads).toBe(3);
     expect(html()).toContain(original + '.pre-solace');
-    expect(html()).toContain('Undo adoption');
+    expect(html()).toContain('Switch back');
     const adopted = model;
     dispatch(new board.DismissMigration());
-    expect(html()).not.toContain('Undo adoption');
+    expect(html()).not.toContain('Switch back');
     model = adopted;
     accept = false;
     const beforeUndo = posts().length;
     dispatch(new board.MigrationAction('undo'));
     expect(posts()).toHaveLength(beforeUndo);
-    expect(confirmations.at(-1)).toContain('Work done after adoption stays');
+    expect(confirmations.at(-1)).toContain('with any work done in it since');
     accept = true;
     dispatch(new board.MigrationAction('undo'));
     await until(() => !model.migration_busy);
     migration = state('none'); await poll();
     expect(reloads).toBe(4);
-    expect(html()).not.toContain('Migration in progress');
+    expect(html()).not.toContain('trying Solace on a copy');
     migration = state('in_progress', { top: copy, original, copy }); await poll();
-    expect(html()).toContain('No report yet');
+    expect(html()).toContain('The checks haven&#39;t run yet');
     accept = false;
     const beforeAbandon = posts().length;
     dispatch(new board.MigrationAction('abandon'));
     expect(posts()).toHaveLength(beforeAbandon);
-    expect(confirmations.at(-1)).toContain('deletes the copy at ' + copy);
-    expect(confirmations.at(-1)).toContain('original at ' + original + ' stays untouched');
+    expect(confirmations.at(-1)).toContain('Delete the copy at ' + copy);
+    expect(confirmations.at(-1)).toContain('Your original folder at ' + original + ' stays as it is');
     accept = true;
     dispatch(new board.MigrationAction('abandon'));
     await until(() => !model.migration_busy);
@@ -200,7 +201,7 @@ test('migration decodes load-time states and timestamps without a report', () =>
     [state('none'), ''],
     [state('available'), 'Migrate this project'],
     [state('running', { step: 'Copying files' }), 'Copying files'],
-    [state('in_progress', { original, copy }), 'No report yet'],
+    [state('in_progress', { original, copy }), 'The checks haven&#39;t run yet'],
     [state('adopted', { original, undo: false }), ''],
   ]) {
     let [model] = board.init();
@@ -208,13 +209,13 @@ test('migration decodes load-time states and timestamps without a report', () =>
     expect(model.migration[0].state).toBe(value.state);
     const html = to_string(board.view(model));
     if (visible) expect(html).toContain(visible);
-    else expect(html).not.toContain('Migration in progress');
+    else expect(html).not.toContain('trying Solace on a copy');
   }
   for (const checked_at of ['1728000000', 1728000000]) {
     let [model] = board.init();
     [model] = board.update(model, new board.MigrationLoaded(0, JSON.stringify(state('in_progress', {
       original, copy, report: { ...report, checked_at },
     }))));
-    expect(to_string(board.view(model))).toContain('Checked: ' + new Date(1728000000000).toLocaleString());
+    expect(to_string(board.view(model))).toContain('Last checked ' + new Date(1728000000000).toLocaleString());
   }
 });

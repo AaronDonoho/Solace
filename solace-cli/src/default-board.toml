@@ -29,6 +29,7 @@ final = true
 
 [[board.columns]]
 id = "cancelled"
+label = "canceled"   # American spelling shown; the id stays for saved tasks
 final = true
 
 [board.actions]

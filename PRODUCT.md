@@ -7,7 +7,7 @@
 web
 
 ## Users
-Primary: the owner of a software project who directs AI coding agents through Solace. Design for someone who can't read code, without slowing down a technical owner. Either way, they give creative input and judgement, review what agents did, and run the program to see what it does. They do not read source code or use the command line; the browser UI is their whole interface.
+Primary: the owner of a software project who directs AI coding agents through Solace. Design for someone who can't read code, without slowing down a technical owner. Either way, they give creative input and judgment, review what agents did, and run the program to see what it does. They do not read source code or use the command line; the browser UI is their whole interface.
 
 Secondary: Aaron, the developer of Solace, reading benchmark results in the bench visualizer.
 
@@ -26,7 +26,7 @@ The human's view comes from Solace's own store of identified, typed symbols and 
 ## Capabilities and Constraints
 - Local-only, one user: served on localhost by the `solace serve` binary; no accounts.
 - The board and view are Lustre (Gleam on the JavaScript target), bundled by bun into one `app.js` and embedded in the binary.
-- Every derived fact is labelled as `declared`, `derived` or `observed`; the UI never presents a derived fact as a guarantee.
+- Every derived fact is labeled as `declared`, `derived` or `observed`; the UI never presents a derived fact as a guarantee.
 - Source text appears only on request.
 
 ## Brand Commitments
@@ -36,7 +36,7 @@ Name only: Solace. No logo or voice set yet.
 Real projects to show: `bench/pilot/`, `bench/pilot-large/`, and benchmark results in `bench/results/`. There are no users, testimonials or external claims; don't invent any.
 
 ## Product Principles
-1. Humans judge; agents implement. The UI asks for judgement, never for code.
+1. Humans judge; agents implement. The UI asks for judgment, never for code.
 2. Show data in, data out and effects, not how the code got there.
 3. Facts come from the store; label how each one is known.
 4. A difference isn't a failure. Present the evidence and let the human decide.
