@@ -77,6 +77,9 @@ class Migrate(unittest.TestCase):
         return self.cli('migrate', '--yes', '--confirm-paths', '--smoke', 'test -f data.bin', *args)
 
     def test_m1_m3_m7_the_original_is_only_read(self):
+        report = self.cli('migrate', '--report')
+        self.assertIn('Migration: available', report)
+        self.assertIn('Can migrate: app (app)', report)
         before = snapshot(self.repo)
         out = self.migrate()
         self.assertEqual(snapshot(self.repo), before)
@@ -199,6 +202,14 @@ class Migrate(unittest.TestCase):
         self.assertIn('app/build linked into the original', out)
         self.assertEqual(os.readlink(self.copy/'app/build'), '../stash')
 
+    def test_compiled_output_linking_outside_is_rebuilt_not_followed(self):
+        (self.parent/'elsewhere').mkdir()
+        (self.repo/'app/build/dev/javascript/app').mkdir(parents=True)
+        os.symlink(self.parent/'elsewhere', self.repo/'app/build/dev/javascript/app/priv')
+        out = self.migrate('--project', 'app')
+        self.assertIn('Ready to adopt', out)
+        self.assertNotIn('build/dev', out)
+
     def test_a_link_out_of_a_projects_source_stops_the_migration(self):
         (self.parent/'elsewhere').mkdir()
         (self.parent/'elsewhere/y.gleam').write_text('pub fn y() { 1 }\n')
@@ -250,6 +261,24 @@ class Migrate(unittest.TestCase):
         self.cli('migrate', '--undo', '--yes')
         self.assertEqual(snapshot(self.repo), before)
 
+    def test_git_refreshing_its_index_doesnt_block_adoption(self):
+        shutil.rmtree(self.repo/'.git')
+        git = lambda *a: subprocess.run(['git', '-c', 'user.email=t@t', '-c', 'user.name=t', *a], cwd=self.repo, check=True, capture_output=True)
+        git('init', '-q'); git('add', '-A'); git('commit', '-qm', 'start')
+        self.migrate()
+        # Rewrites the index with the same entries, as any git command may when it refreshes cached file times.
+        index = hashlib.sha256((self.repo/'.git/index').read_bytes()).hexdigest()
+        git('update-index', '--index-version', '4')
+        git('status', '--short')
+        self.assertNotEqual(hashlib.sha256((self.repo/'.git/index').read_bytes()).hexdigest(), index)
+        self.assertIn('Migration complete', self.cli('migrate', '--adopt', '--yes'))
+        self.cli('migrate', '--undo', '--yes')
+        self.cli('migrate', '--abandon', '--yes')
+        # Staging something is a change: adoption refuses.
+        self.migrate()
+        git('add', '-f', 'data.bin')
+        self.assertIn('changed: .git/index', self.cli('migrate', '--adopt', '--yes', ok=False))
+
     def test_one_operation_at_a_time_and_not_while_served(self):
         self.migrate()
         with open(self.copy/'app/.solace/lock', 'w') as f:
@@ -290,7 +319,7 @@ class Migrate(unittest.TestCase):
         (self.repo/'sub/.git').write_text(f'gitdir: {self.repo}/.git/modules/sub\n')
         out = self.migrate('--project', 'app')
         self.assertIn('[failed] lib/gleam.toml: dependency shared at ../vendor/shared is outside the migrated folder', out)
-        self.assertIn('[not checked] vendor/shared links outside the migrated folder', out)
+        self.assertEqual(out.count('[not checked] vendor/shared links outside the migrated folder'), 1)
         self.assertIn(f'[failed] sub/.git points git at {self.repo}/.git/modules/sub', out)
 
     def test_work_in_the_copy_doesnt_block_adoption(self):

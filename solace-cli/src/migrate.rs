@@ -165,9 +165,29 @@ fn entry(p: &Path, m: &fs::Metadata, timed: bool) -> Result<String, Failure> {
     })
 }
 
-/// Every entry of the original but its build output, which building it rewrites.
+fn in_git(p: &Path, name: &str) -> bool {
+    p.file_name().is_some_and(|n| n == name) && p.parent().and_then(|d| d.file_name()).is_some_and(|n| n == ".git")
+}
+/// A git index by what it records: each staged path, mode and content.
+/// Any git command may rewrite the file to refresh its cached file times
+/// (Aaron, 2026-10-04: that mustn't stop a migration); staging changes this.
+fn git_index(p: &Path, m: &fs::Metadata) -> Result<String, Failure> {
+    let out = Command::new("git").env("GIT_OPTIONAL_LOCKS", "0").arg("--git-dir").arg(p.parent().unwrap()).args(["ls-files", "--stage", "-z"]).output();
+    match out {
+        Ok(o) if o.status.success() => Ok(format!("git index {}", hex(&Sha256::digest(&o.stdout)))),
+        _ => entry(p, m, true),
+    }
+}
+/// Every entry of the original but its build output, which building it
+/// rewrites, and git's short-lived `index.lock`.
 fn inventory(root: &Path) -> Result<BTreeMap<String, String>, Failure> {
-    walk(root, &build_output)?.into_iter().map(|(rel, m)| Ok((entry(&root.join(&rel), &m, true)?, rel)).map(|(v, k)| (k, v))).collect()
+    let mut out = BTreeMap::new();
+    for (rel, m) in walk(root, &|p| build_output(p) || in_git(p, "index.lock"))? {
+        let p = root.join(&rel);
+        let v = if in_git(&p, "index") && m.is_file() { git_index(&p, &m)? } else { entry(&p, &m, true)? };
+        out.insert(rel, v);
+    }
+    Ok(out)
 }
 fn changes(original: &Path, recorded: &Value) -> Result<Vec<String>, Failure> {
     let now = inventory(original)?;
@@ -334,18 +354,26 @@ fn run(dir: &Path, argv: &[&str], secs: u64, protect: Option<&Path>) -> (bool, S
     result.unwrap_or_else(|Failure(e, _)| (false, e))
 }
 
+/// Deletes each project's compiled output, which holds absolute symlinks
+/// (JavaScript's `priv`) to wherever it was built: the original, or a folder
+/// that has since moved. Downloaded packages are kept.
+fn clear_compiled(root: &Path, projects: &[String]) {
+    for d in projects {
+        let build = project(root, d).join("build");
+        if inside(root, &build) {
+            for out in ["dev", "prod", "lsp"] {
+                let _ = remove_tree(&build.join(out));
+            }
+        }
+    }
+}
+
 /// Build and tests of each project under `root`.
 fn builds(root: &Path, projects: &[String], protect: Option<&Path>) -> Value {
     let mut ps = serde_json::Map::new();
     for d in projects {
         let dir = project(root, d);
-        // Compiled output holds absolute symlinks (JavaScript's `priv`) to wherever it was built,
-        // which may be the original or a folder that has since moved; downloaded packages are kept.
-        if inside(root, &dir.join("build")) {
-            for out in ["dev", "prod", "lsp"] {
-                let _ = remove_tree(&dir.join("build").join(out));
-            }
-        }
+        clear_compiled(root, std::slice::from_ref(d));
         let (build, bout) = run(&dir, &["gleam", "build"], 600, protect);
         let (test, tout) = if build { run(&dir, &["gleam", "test"], 600, protect) } else { (false, String::new()) };
         let failing: Vec<String> = failures(&tout).into_keys().collect();
@@ -904,9 +932,11 @@ pub fn start(top: &Path, projects: &[String], smoke: &[String], confirmed: bool,
         write_atomic(&copy.join(INVENTORY), &serde_json::to_vec(&inv).unwrap())?;
         step("Copying the whole folder to ../solace-migration");
         copy_tree(&top, &copy, &|_| false)?;
+        clear_compiled(&copy, projects);
         step("Checking what in the copy could reach the original");
         let (relinked, fatal) = links(&top, &copy, projects, true)?;
-        state["relinked"] = json!(relinked);
+        // Only the redirected links: the rest are found again by every Paths check.
+        state["relinked"] = json!(relinked.into_iter().filter(|i| i["status"] == "verified").collect::<Vec<_>>());
         if !fatal.is_empty() {
             return fail(format!(
                 "These links lead out of the copy from where Solace writes, so it can't go on safely:\n{}\nPoint them inside the folder in the original, then start again.",
@@ -1263,6 +1293,9 @@ pub fn status(top: &Path) -> Result<Value, Failure> {
 
 fn text(v: &Value) -> String {
     let mut out = format!("Migration: {}\n", v["state"].as_str().unwrap_or(""));
+    for c in v["candidates"].as_array().into_iter().flatten() {
+        out += &format!("Can migrate: {} ({})\n", c["dir"].as_str().unwrap_or(""), c["name"].as_str().unwrap_or(""));
+    }
     for (k, label) in [("original", "Original"), ("copy", "Copy")] {
         if let Some(p) = v[k].as_str() {
             out += &format!("{label}: {p}\n");
@@ -1334,7 +1367,8 @@ pub fn command(args: &[&str]) -> Out {
         not_served(if action == Some("--undo") { &top } else { &copy })?;
     }
     match action {
-        Some("--report") => Ok(text(&status(&copy)?)),
+        // `status` of the folder itself also finds a copy beside it, and lists candidates when there's none.
+        Some("--report") => Ok(text(&status(&top)?)),
         Some("--recheck") => {
             recheck(&copy, &step)?;
             Ok(text(&status(&copy)?))
