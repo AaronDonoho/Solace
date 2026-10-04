@@ -1,12 +1,15 @@
 // Browser transport only: state, decoding and rendering belong to Lustre.
+// A workspace project's contract view is at `/p/<dir>/view` and asks its own
+// project (D-57); the board passes each lane's prefix itself.
+const page = globalThis.location?.pathname.match(/^(.*)\/view$/)?.[1] ?? '';
 export function request(path, method, body, receive) {
-  fetch(path, { method, headers: { 'Content-Type': 'application/json' },
+  fetch((path === '/migration' || path.startsWith('/migration/') ? '' : page) + path, { method, headers: { 'Content-Type': 'application/json' },
     ...(method === 'GET' ? {} : { body }) })
     .then(async response => receive(await response.text()))
     .catch(error => receive(JSON.stringify({ message: String(error) })));
 }
 export function events(receive, ready = () => {}) {
-  const source = new EventSource('/events');
+  const source = new EventSource(page + '/events');
   source.onmessage = event => receive(event.data);
   source.addEventListener('ready', () => ready());
   // Native EventSource reconnects with Last-Event-ID.
@@ -20,11 +23,12 @@ export function clock(seconds) {
 }
 // Agent text is untrusted: everything is escaped before the few markdown forms
 // (code blocks, headings, lists, `code`, **bold**, images uploaded to this task
-// board, and http(s) links) are turned into HTML.
-export function markdown(text) {
+// board, and http(s) links) are turned into HTML. Image URLs are stored
+// relative to their project; `base` is the project's prefix on this server.
+export function markdown(text, base = '') {
   const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const inline = s => escape(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/!\[([^\]]*)\]\((\/tasks\/[\w-]+\/files\/[0-9a-f]{16}\.(?:png|jpg|gif|webp))\)/g, '<img alt="$1" src="$2">')
+    .replace(/!\[([^\]]*)\]\((\/tasks\/[\w-]+\/files\/[0-9a-f]{16}\.(?:png|jpg|gif|webp))\)/g, `<img alt="$1" src="${escape(base)}$2">`)
     .replace(/(^|[^!])\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1<a href="$3" rel="noopener noreferrer">$2</a>');
   const out = [];
   const parts = text.split(/^```[^\n]*\n?/m);
@@ -41,6 +45,10 @@ export function markdown(text) {
     }
   });
   return out.join('');
+}
+
+export function reload() {
+  globalThis.location?.reload();
 }
 
 export function confirm(question) {
@@ -66,12 +74,12 @@ export function wrap(id, text, before, after) {
 // task; `insert` gets the editor's id and each image's markdown.
 export function images(insert, fail) {
   if (!globalThis.document) return;
-  const take = (event, files, task, editor) => {
+  const take = (event, files, task, editor, base = '') => {
     const list = [...(files || [])].filter(f => f.type.startsWith('image/'));
     if (!list.length || !task) return;
     event.preventDefault();
     for (const file of list) {
-      fetch(`/tasks/${task}/files`, { method: 'POST', body: file })
+      fetch(`${base}/tasks/${task}/files`, { method: 'POST', body: file })
         .then(async response => {
           const v = await response.json();
           if (!v.url) return fail(v.message || 'Image upload failed');
@@ -82,12 +90,12 @@ export function images(insert, fail) {
     }
   };
   const inEditor = e => e.target?.classList?.contains('md-editor') && e.target.dataset.task;
-  document.addEventListener('paste', e => inEditor(e) && take(e, e.clipboardData?.files, e.target.dataset.task, e.target.id));
+  document.addEventListener('paste', e => inEditor(e) && take(e, e.clipboardData?.files, e.target.dataset.task, e.target.id, e.target.dataset.base));
   document.addEventListener('dragover', e => inEditor(e) && e.preventDefault());
-  document.addEventListener('drop', e => inEditor(e) && take(e, e.dataTransfer?.files, e.target.dataset.task, e.target.id));
+  document.addEventListener('drop', e => inEditor(e) && take(e, e.dataTransfer?.files, e.target.dataset.task, e.target.id, e.target.dataset.base));
   document.addEventListener('change', e => {
     if (!e.target?.classList?.contains('md-image')) return;
-    take(e, e.target.files, e.target.dataset.task, e.target.dataset.for);
+    take(e, e.target.files, e.target.dataset.task, e.target.dataset.for, e.target.dataset.base);
     e.target.value = '';
   });
 }

@@ -129,6 +129,54 @@ A `text` sent with an action is added as a human note before the action runs.
 
 `solace serve` also serves the default board at `/` and a guide for humans at `/guide`.
 
+### One root, several projects (D-57)
+
+A **Solace root** is one folder; its projects are the root itself (`.`, when it has `gleam.toml`) and folders below it. The root's `solace.toml` lists the folders: `projects = ["bench/pilot", "web"]`, each relative, without `.` or `..`, reached without symlinks, and not itself listing projects. A root without `gleam.toml` holds only that key; a root project's `solace.toml` also holds its own settings. A project with no root above it is its own root, with itself as its only project, which is every project before D-57. Each project keeps its own store, settings, lockdown, tasks and runs.
+
+There is one root: `solace serve` and `solace create` use the root that holds their folder, so they act the same anywhere below it. That is the one folder above that lists projects (or holds only a `solace.toml`), else the outermost project. A root inside another root, or inside a project, is refused (`E6020`). With no root, `serve` makes its folder an empty root, and `create` sets up the project there, or, in a folder without `gleam.toml`, offers each Gleam project below (skipping build output, dependencies, ignored folders and symlinks) and lists the ones confirmed. `create` in a project below a root lists it in that root. A server holds each project it serves (`.solace/serve.lock`); a second server for the same project is refused.
+
+The root's own project answers at `/` as above; every other project's API is under `/p/{dir}`, `dir` percent-encoded (`/p/bench%2Fpilot/tasks`, `/p/bench%2Fpilot/view`). A note's image URL stays project-relative (`/tasks/{id}/files/{name}`); a client prefixes the project's `base`. The root adds:
+
+| Request | Effect |
+| --- | --- |
+| `GET /projects` | `{workspace, projects: [{dir, label, name, base}], found: [{dir, name, imported, member}]}`. `workspace` is true when the root lists projects or has no `gleam.toml`, so a board shows lanes. `label` is the folder (the root's own folder name for `.`), `name` comes from `gleam.toml`, and `base` is the API prefix (`""` for `.`). `found` lists the Gleam projects in the root |
+| `POST /projects` `{dir}` | Lists the project at `dir` again, keeping its store; only a project that already has a store (one removed from the list, D-59). Existing code without a store comes in by migration (below). Refused if `dir` lies in another project's `src/` or `test/`, lists projects of its own, or another server holds it |
+| `POST /projects/new` `{name, dir?, target?}` | `gleam new` at `dir` (default `name`), with `--template javascript` for `target: "javascript"`, without its own git repository inside one; sets it up and lists it. Refused if `dir` exists or `name` isn't a package name |
+| `DELETE /projects/{dir}` | Takes the project off the list; its `.solace` stays. Refused for `.` and while one of its agents is working (`E7003`) |
+| `GET /models` | As above |
+| `GET /events` | When `workspace`: every project's events, each with `project: dir`, and `{projects: [dir...]}` when the list changes. The event id is a JSON object of each project's position, so `Last-Event-ID` resumes all of them. A project added later starts at its latest event. One `ready` follows the replay. Otherwise the root project's stream as above. `/p/{dir}/events` is one project's stream alone |
+
+Reads never take a project's lock, so humans and agents read any number of projects at once; an agent reads other projects with `--project` (Spec 3 §2). A task, its runs and its changes belong to one project, and each project has at most one work run (§6).
+
+**Later: tasks across projects (not built).** A task may cut across several projects. It will take each project's lock and work-run slot as it changes that project, in folder order so two such tasks can't deadlock, and its changes and undo will span those projects.
+
+### Migration (D-59, Spec 17)
+
+The root also answers:
+
+| Request | Effect |
+| --- | --- |
+| `GET /migration` | `{state, top, original, copy, step, candidates, report, blockers, undo, flagged, problem, error}`. `error` is the last step's failure, if it failed (null otherwise). `state`: `none` (nothing to migrate), `available` (Gleam projects with no store and no Solace root: `candidates` lists them as `[{dir, name}]`), `running` (`step` says what Solace is doing), `copying` (a copy was started and not finished: another process is making it, or it was interrupted), `confirm_paths` (the copy is made but nothing has run, because something in it could reach the original: `flagged` lists those items, shaped like report items), `failed` (the migration stopped partway and its copy is kept: `problem` says why, and `report`, if not null, holds what was checked, such as a failed Coverage naming unreadable files), `in_progress` (the board serves the copy), `adopted` (the board serves the adopted project while `<name>.pre-solace` exists). `top` is the folder this server serves, `original` and `copy` full paths (or null). `report` (null before one exists) is `{checked_at, current, checks: [{name, status, summary, items: [{text, status, detail}]}]}`, plus `warnings` (a list of sentences to show first, such as a project that doesn't build before or after the migration), where `status` is `verified`, `failed`, `not checked` or `out of date` (`current` false: the copy changed since the checks ran), an item's `status` is optional, and `detail` (optional) is preformatted text such as a diff or command output. `blockers` lists why Adopt isn't offered (empty when it is). `undo` is true when Undo adoption is possible |
+| `POST /migration/start` `{projects: [dir], smoke: [command]}` | Starts a migration of the projects named (at least one of `candidates`); each smoke check is a shell command line run in the root folder. Returns at once with `state: running`. When it ends, the server restarts itself serving the copy, at the same port, in `confirm_paths`, `failed` or `in_progress`. Refused if `../solace-migration/` exists (`E7020`) |
+| `POST /migration/confirm` | Continues a migration in `confirm_paths`, after the user has looked at `flagged`; the server restarts itself serving the copy when it ends |
+| `POST /migration/recheck` | Runs every check again in the copy (`state: running` until done) |
+| `POST /migration/adopt` | Adopts the copy (Spec 17 §6); refused while `blockers` isn't empty (`E7021`), an agent is working, or the original changed since its inventory (`E7022`, with the changed paths). On success the server restarts itself at the original path |
+| `POST /migration/abandon` | Deletes the copy, in `in_progress`, `confirm_paths`, `failed` or `copying`; the server restarts itself serving the original |
+| `POST /migration/undo` | Swaps the adopted project and `<name>.pre-solace` back; the server restarts itself serving the original |
+
+A client shows the copy's full path and "Migration in progress" while `state` is `in_progress`, polls `GET /migration` while `running`, and reloads once the server answers again after a restart. While a step runs, the server refuses every other request that changes something with `E7003` ("a migration step is running"). One migration step runs at a time, from the board or a shell (`E7003`), and a shell can't act on a migration this server serves.
+
+### Changes made outside Solace (D-58)
+
+Solace never writes over a Gleam file under `src/` or `test/` that differs from what it last wrote there (`.solace/written`). Such a file was changed outside Solace: at the start of every command, and from the board's poll about once a second, Solace reads it into the store as new revisions (a removed file retires its symbols). It compares sizes and modified times and reads only files whose size or time changed. A file that changes while a command runs is left as it is and read at the next command.
+
+- **During a work run** the changes join that task's `changes` and before-state records, so its review shows them and `revert` undoes them. The task gets a note naming them, and so does the agent's reply.
+- **A process a command runs** (`format`, `build`, a declared command) changes code as part of that command: Solace reads it in right after, and in a run records it with the command's other changes.
+- **With no work run going** they go to a task titled `Unexpected Changes` with `"unexpected": true`, created in `events.finished`'s column and joined by later outside changes while it is open. Its note names the changed symbols and gives the compile result. Completing it keeps the changes; `cancel` restores the code Solace had. While it is open, starting or continuing a work run on any other task is refused (`E7012`).
+- **Unreadable files**, such as one defining a name twice, or one that isn't UTF-8, are left untouched, named once in a note, and read again once they change.
+- **Approved code is read in quietly.** `.solace/approved` lists a hash of every symbol (`module.name`) and module header (`module (imports)`) as last approved: all of them when a project is set up, and each entity of a task when it reaches a final column with its changes kept. A changed symbol whose new text matches its listed hash, or a removed one no longer listed, needs no review unless an open task changed it. `create` writes `.solace/.gitignore` so that only `approved` is committed.
+- Only graph files raise these changes. Watched and unwatched files are Solace's to write only when a task writes them.
+
 ## 5. A task's changes and `revert`
 
 **What is guaranteed** (the contract, whatever the mechanism): `revert` returns everything a task changed to how it was before the task, or refuses and changes nothing. It never leaves the project half-reverted or failing to type-check because of the revert. `approve` stamps the task. Nothing else in this spec depends on where a task's work lives.
@@ -198,3 +246,9 @@ Several projects on one server, several people, remote access and authentication
 - A16. `/models` lists each model's `efforts`. An action's `effort` is recorded on the run and reaches the agent; an effort the model doesn't offer is `E7001`. A successful `task done` sets `finished`, and the next action clears it. An uploaded PNG is served back as `image/png`; SVG or over 5 MB is `E7001`. A note referencing an uploaded image reaches the agent's brief as `[image 1: path]`.
 - A15. Fake native Codex and Claude launchers retain author conversations through investigate/work/reassign, use fresh reviewers, fall back on lost sessions, enforce current run permissions, and clean up on completion/cancellation. Model changes and start-over create fresh conversations; quota errors are not retried. Graceful exit persists state after the finishing tool returns; hung shutdown is bounded. Deleted notes do not swallow later feedback; intervening edits mark previous checks stale.
 - A17. With a fake agent in a work run, an invalid `write solace.toml` is `E6020` and adds no question. A valid one waits on a settings question; Reject leaves the file unchanged and the agent receives the answer; Approve writes it; Approve after a human edit to the file leaves it unchanged and says so. A review run's `write solace.toml` is `E7010`.
+- U1. An edit to a module file while no run is going is read in by the board's poll, the file keeps the edit, and an `Unexpected Changes` task with the hazard flag holds the change and its compile result; another task's `assign` is `E7012`; `cancel` restores the file and the store (`outside::tests`, `tests/workspace_acceptance.py`). Only the edited project gets the task.
+- U2. A file changed during a command isn't written over; a file defining a name twice is left as it is and reported once; a store with no record counts what it holds as written.
+- U3. A change whose hash is on `.solace/approved` is read in without a task; completing an `Unexpected Changes` task adds its changes to the list.
+- W1. One root (`tests/workspace_acceptance.py`): `solace create` in a folder offers each Gleam project and adds only those confirmed; lanes are keyed by folder when package names repeat; `/p/{dir}` reaches only its project; merged events carry `project` and resume from a combined id; a second server for a project, started from inside it, is refused; `create` in a project below the root lists it there; a project created from the board has a store; removal keeps it.
+- W2. Nothing leaves the root: symlinked and `..` folders, a project that lists projects, and a root inside a root or a project are refused. A root that is a project serves itself at `/` and its other projects under `/p/`; its settings keep their comments when `projects` is written; it can't be removed.
+- W3. Agents in two projects work at the same time; each reads the other's code with `--project`, and changes there are refused (Spec 3 A8).

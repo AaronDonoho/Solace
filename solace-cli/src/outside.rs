@@ -1,0 +1,522 @@
+//! Changes made outside Solace (D-58). Solace remembers what it last wrote to
+//! each Gleam file (`.solace/written`) and never writes over a file that
+//! differs from that; such a file is read into the store instead, and the
+//! change goes to the running task or to Unexpected Changes for review.
+//! `.solace/approved` holds each symbol's and header's hash as last approved,
+//! so code that came from Solace (a pull, a branch switch) is read in quietly.
+use super::*;
+use serde_json::{Value, json};
+use std::collections::BTreeMap;
+
+pub const TITLE: &str = "Unexpected Changes";
+
+fn digest(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))[..32].to_string()
+}
+
+fn stat(path: &Path) -> Option<(u64, u128)> {
+    let m = fs::metadata(path).ok()?;
+    let t = m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+    Some((m.len(), t))
+}
+
+/// What Solace last wrote to each graph file: `hash size mtime path` lines,
+/// and `! hash path` for a version it couldn't read in and already reported.
+pub struct Written {
+    root: PathBuf,
+    files: BTreeMap<String, (String, u64, u128)>,
+    bad: BTreeMap<String, String>,
+    /// False for a store from before D-58 that has no record yet.
+    pub known: bool,
+    dirty: bool,
+}
+
+impl Written {
+    pub fn load(root: &Path) -> Written {
+        let text = fs::read_to_string(root.join(".solace/written"));
+        let (mut files, mut bad) = (BTreeMap::new(), BTreeMap::new());
+        for line in text.as_deref().unwrap_or("").lines() {
+            if let Some((h, path)) = line.strip_prefix("! ").and_then(|l| l.split_once(' ')) {
+                bad.insert(path.to_string(), h.to_string());
+                continue;
+            }
+            let mut p = line.splitn(4, ' ');
+            if let (Some(h), Some(size), Some(time), Some(path)) = (p.next(), p.next(), p.next(), p.next()) {
+                files.insert(path.to_string(), (h.to_string(), size.parse().unwrap_or(0), time.parse().unwrap_or(0)));
+            }
+        }
+        Written { root: root.into(), files, bad, known: text.is_ok(), dirty: false }
+    }
+
+    pub fn save(&mut self) -> Result<(), Failure> {
+        if self.dirty {
+            let mut text: String = self.files.iter().map(|(p, (h, size, time))| format!("{h} {size} {time} {p}\n")).collect();
+            text.extend(self.bad.iter().map(|(p, h)| format!("! {h} {p}\n")));
+            let path = self.root.join(".solace/written");
+            fs::write(path.with_extension("tmp"), text)?;
+            fs::rename(path.with_extension("tmp"), path)?;
+            self.dirty = false;
+        }
+        Ok(())
+    }
+
+    /// Notes that `rel` now holds `bytes`, as Solace wrote or read it.
+    pub fn record(&mut self, rel: &str, bytes: &[u8]) {
+        let (size, time) = stat(&self.root.join(rel)).unwrap_or((0, 0));
+        let entry = (digest(bytes), size, time);
+        if self.files.get(rel) != Some(&entry) {
+            self.files.insert(rel.to_string(), entry);
+            self.dirty = true;
+        }
+        self.dirty |= self.bad.remove(rel).is_some();
+    }
+
+    pub fn forget(&mut self, rel: &str) {
+        self.dirty |= self.files.remove(rel).is_some();
+    }
+
+    /// Whether `rel` still holds what Solace last wrote (or doesn't exist),
+    /// so writing over it loses nothing. Without a record, anything goes.
+    pub fn unchanged(&self, rel: &str) -> bool {
+        let path = self.root.join(rel);
+        if !self.known || !path.exists() {
+            return true;
+        }
+        let Some((h, size, time)) = self.files.get(rel) else { return false };
+        stat(&path) == Some((*size, *time)) || fs::read(&path).is_ok_and(|b| &digest(&b) == h)
+    }
+}
+
+/// A module's file path relative to the root, as `src/app.gleam`.
+pub fn file_of(dir: &str, module: &str) -> String {
+    format!("{dir}/{module}.gleam")
+}
+
+/// Every Gleam file under `src/` and `test/`, except a probe left behind.
+fn graph_files(root: &Path) -> Result<Vec<String>, Failure> {
+    let mut out = vec![];
+    for top in ["src", "test"] {
+        let mut files = vec![];
+        collect_gleam_files(&root.join(top), &mut files)?;
+        for f in files {
+            let rel = f.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+            if rel != file_of("test", PROBE) {
+                out.push(rel);
+            }
+        }
+    }
+    Ok(out)
+}
+
+// --- approved hashes ------------------------------------------------------------
+
+fn approved(root: &Path) -> BTreeMap<String, String> {
+    let text = fs::read_to_string(root.join(".solace/approved")).unwrap_or_default();
+    // A line git left half-merged simply doesn't match, so its symbol counts as unexpected.
+    text.lines().filter(|l| !l.starts_with('#')).filter_map(|l| l.split_once(' ')).map(|(h, k)| (k.to_string(), h.to_string())).collect()
+}
+
+fn save_approved(root: &Path, map: &BTreeMap<String, String>) -> Result<(), Failure> {
+    let mut text = String::from("# Solace: the code as last approved (D-58). Commit this file; Solace keeps it current.\n");
+    for (k, h) in map {
+        text += &format!("{h} {k}\n");
+    }
+    fs::write(root.join(".solace/approved"), text)?;
+    Ok(())
+}
+
+fn header_key(path: &str) -> String {
+    format!("{path} (imports)")
+}
+
+/// The approved key and hash of a snapshot entry (`symbol:…`, `module:…`).
+fn approval(key: &str, row: &Value) -> Option<(String, String)> {
+    if key.starts_with("symbol:") {
+        Some((format!("{}.{}", row[1].as_str()?, row[2].as_str()?), digest(row[4].as_str()?.as_bytes())))
+    } else if key.starts_with("module:") {
+        Some((header_key(row[0].as_str()?), digest(row[2].as_str()?.as_bytes())))
+    } else {
+        None
+    }
+}
+
+/// The whole store as approved: at `create`, and for a store that has no list yet.
+pub fn approve_all(s: &Store) -> Result<(), Failure> {
+    let snap = board::snapshot(s)?;
+    let map = snap.as_object().unwrap().iter().filter_map(|(k, v)| approval(k, v)).collect();
+    save_approved(&s.root, &map)?;
+    fs::write(s.root.join(".solace/.gitignore"), "# Only the approved list is shared (D-58).\n*\n!.gitignore\n!approved\n")?;
+    Ok(())
+}
+
+/// A completed task's changes become approved: each entity's name before the
+/// task leaves the list, and its current state joins it.
+// ponytail: takes each entity as it is now, even if a later open task also changed it.
+pub fn approve(s: &Store, tid: &str) -> Result<(), Failure> {
+    let mut st = s.db.prepare("SELECT entity,data FROM board_before WHERE task=?")?;
+    let before: Vec<(String, Value)> = st
+        .query_map([tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .map(|r| r.map(|(k, v)| (k, serde_json::from_str(&v).unwrap_or(Value::Null))))
+        .collect::<Result<_, _>>()?;
+    if before.is_empty() {
+        return Ok(());
+    }
+    let now = board::snapshot(s)?;
+    let mut map = approved(&s.root);
+    for (key, old) in &before {
+        if let Some((k, _)) = approval(key, old) {
+            map.remove(&k);
+        }
+        if let Some((k, h)) = approval(key, &now[key]) {
+            map.insert(k, h);
+        }
+    }
+    save_approved(&s.root, &map)
+}
+
+// --- reading changed files in -----------------------------------------------------
+
+/// Reads one changed file into the store, or says why it can't.
+fn read_in(s: &Store, rel: &str, text: Option<&str>) -> Result<Result<(), String>, Failure> {
+    let (dir, file) = rel.split_once('/').unwrap();
+    let module = file.strip_suffix(".gleam").unwrap();
+    if !valid_module_path(module) {
+        return Ok(Err(format!("{rel}: `{module}` isn't a Gleam module name")));
+    }
+    let existing: Vec<(String, String, String, i64, String)> = s
+        .db
+        .prepare("SELECT id, name, text, ord, kind FROM symbols WHERE module = ?1 AND live = 1")?
+        .query_map([module], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?
+        .collect::<Result<_, _>>()?;
+    let Some(text) = text else {
+        for (id, ..) in &existing {
+            s.db.execute("UPDATE symbols SET live = 0 WHERE id = ?1", [id])?;
+            s.history(id, "retire", "outside Solace")?;
+        }
+        s.db.execute("DELETE FROM modules WHERE path = ?1", [module])?;
+        return Ok(Ok(()));
+    };
+    let parsed = gleam::split(text);
+    let mut seen = HashSet::new();
+    if let Some(twice) = parsed.items.iter().find(|i| !seen.insert(&i.name)) {
+        return Ok(Err(format!("{rel} defines `{}` twice; Solace left it as it is and reads it again once fixed", twice.name)));
+    }
+    s.db.execute("INSERT OR REPLACE INTO modules VALUES (?1, ?2, ?3)", params![module, dir, parsed.header])?;
+    for (ord, item) in parsed.items.iter().enumerate() {
+        match existing.iter().find(|e| e.1 == item.name) {
+            Some((id, _, old, old_ord, kind)) => {
+                if *old != item.text || *old_ord != ord as i64 || kind != item.kind.as_str() {
+                    s.db.execute(
+                        "UPDATE symbols SET text = ?2, revision = ?3, ord = ?4, kind = ?5 WHERE id = ?1",
+                        params![id, item.text, revision(&item.text), ord as i64, item.kind.as_str()],
+                    )?;
+                }
+                if *old != item.text {
+                    s.history(id, "edit", "outside Solace")?;
+                }
+            }
+            None => {
+                let id = new_id(item.kind, module, &item.name);
+                s.db.execute(
+                    "INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![id, module, item.name, item.kind.as_str(), item.text, ord as i64, revision(&item.text)],
+                )?;
+                s.history(&id, "add", "outside Solace")?;
+            }
+        }
+    }
+    for (id, name, ..) in &existing {
+        if !parsed.items.iter().any(|i| &i.name == name) {
+            s.db.execute("UPDATE symbols SET live = 0 WHERE id = ?1", [id])?;
+            s.history(id, "retire", "outside Solace")?;
+        }
+    }
+    Ok(Ok(()))
+}
+
+pub enum Mode {
+    /// At the start of a command, or the board's poll: changes go to the
+    /// running task or to Unexpected Changes.
+    Notice,
+    /// Right after a command that ran a process (`format`, `run`): the
+    /// caller records the changes as that command's.
+    Command,
+}
+
+/// Reads in every graph file changed outside Solace. Returns a note for the
+/// command's reply, or "" when nothing changed. The caller holds the lock.
+pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
+    let mut w = Written::load(&s.root);
+    if !w.known {
+        // A store from before D-58: what it holds is what Solace last wrote.
+        let ix = s.index()?;
+        for m in &ix.modules {
+            let (content, _) = projection(&ix, m);
+            w.files.insert(file_of(&m.dir, &m.path), (digest(content.as_bytes()), 0, 0));
+        }
+        w.known = true;
+        w.dirty = true;
+    }
+    if !s.root.join(".solace/approved").exists() {
+        approve_all(s)?;
+    }
+    let disk = graph_files(&s.root)?;
+    let mut changed: Vec<(String, Option<Vec<u8>>)> = vec![];
+    for rel in &disk {
+        let path = s.root.join(rel);
+        let now = stat(&path);
+        match w.files.get(rel) {
+            Some((_, size, time)) if now == Some((*size, *time)) => continue,
+            _ => {}
+        }
+        let bytes = fs::read(&path)?;
+        if w.files.get(rel).is_some_and(|(h, ..)| *h == digest(&bytes)) {
+            w.record(rel, &bytes);
+        } else if w.bad.get(rel) != Some(&digest(&bytes)) {
+            changed.push((rel.clone(), Some(bytes)));
+        }
+    }
+    for rel in w.files.keys() {
+        if !disk.contains(rel) && !w.bad.contains_key(rel) {
+            changed.push((rel.clone(), None));
+        }
+    }
+    if changed.is_empty() {
+        w.save()?;
+        return Ok(String::new());
+    }
+    let before = board::snapshot(s)?;
+    let mut unreadable = vec![];
+    for (rel, bytes) in &changed {
+        let text = match bytes.as_deref().map(std::str::from_utf8) {
+            Some(Err(_)) => {
+                unreadable.push(format!("{rel} isn't UTF-8 text; Solace left it as it is"));
+                w.bad.insert(rel.clone(), digest(bytes.as_deref().unwrap()));
+                w.dirty = true;
+                continue;
+            }
+            Some(Ok(t)) => Some(t),
+            None => None,
+        };
+        match read_in(s, rel, text)? {
+            Ok(()) => match bytes {
+                Some(b) => w.record(rel, b),
+                None => w.forget(rel),
+            },
+            Err(why) => {
+                unreadable.push(why);
+                w.bad.insert(rel.clone(), digest(bytes.as_deref().unwrap_or_default()));
+                w.dirty = true;
+            }
+        }
+    }
+    w.save()?;
+    let after = board::snapshot(s)?;
+    let unreadable_note = unreadable.iter().map(|u| format!("Not read in: {u}.\n")).collect::<String>();
+    if matches!(mode, Mode::Command) {
+        return Ok(unreadable_note);
+    }
+    // What changed, and of that, what wasn't approved elsewhere.
+    let flow = board::workflow(&lockdown::settings(&s.root)?)?;
+    let all = board::tasks(&s.root)?;
+    let open: Vec<&Value> = all.iter().filter(|t| board::column(&flow, t)["final"] != true).collect();
+    let touched: HashSet<&str> =
+        open.iter().flat_map(|t| t["changes"].as_array().unwrap().iter().filter_map(|c| c["entity"].as_str())).collect();
+    let list = approved(&s.root);
+    let keys: HashSet<&String> = before.as_object().unwrap().keys().chain(after.as_object().unwrap().keys()).collect();
+    let mut unexpected = vec![];
+    for key in keys {
+        if before[key] == after[key] {
+            continue;
+        }
+        let quiet = !touched.contains(key.as_str())
+            && match approval(key, &after[key]) {
+                Some((k, h)) => list.get(&k) == Some(&h),
+                None => approval(key, &before[key]).is_some_and(|(k, _)| !list.contains_key(&k)),
+            };
+        if !quiet {
+            unexpected.push(key.clone());
+        }
+    }
+    if unexpected.is_empty() && unreadable.is_empty() {
+        return Ok(String::new());
+    }
+    let pick = |v: &Value| json!(unexpected.iter().map(|k| (k.clone(), v[k].clone())).collect::<serde_json::Map<_, _>>());
+    let (bf, af) = (pick(&before), pick(&after));
+    let names: Vec<String> = {
+        let mut n: Vec<String> = unexpected
+            .iter()
+            .map(|k| match approval(k, if af[k].is_null() { &bf[k] } else { &af[k] }) {
+                Some((name, _)) => name,
+                None => k.clone(),
+            })
+            .collect();
+        n.sort();
+        n
+    };
+    let running = open.iter().find_map(|t| {
+        let r = t["runs"].as_array().unwrap().iter().find(|r| r["kind"] == "work" && r["state"] == "running")?;
+        Some((t["id"].as_str()?.to_string(), r["id"].as_str()?.to_string()))
+    });
+    if let Some((tid, rid)) = running {
+        if !unexpected.is_empty() {
+            board::record(s, &tid, &rid, &bf, &af)?;
+        }
+        let text = format!(
+            "{}{unreadable_note}",
+            if names.is_empty() { String::new() } else { format!("Changed outside Solace during this run and added to this task: {}.\n", names.join(", ")) }
+        );
+        let mut t = board::task(&s.root, &tid)?;
+        board::note(&mut t, "solace", Some(&rid), &text);
+        board::save(s, &t)?;
+        return Ok(format!("Note: {text}"));
+    }
+    let tid = match open.iter().find(|t| t["unexpected"] == true) {
+        Some(t) => t["id"].as_str().unwrap().to_string(),
+        None => {
+            let rank = all.iter().filter_map(|t| t["rank"].as_f64()).fold(0., f64::min) - 1.;
+            let t = json!({"id":board::id(),"title":TITLE,"unexpected":true,
+                "body":"Code changed outside Solace while no agent was working. Complete this task to keep the changes, or cancel it to restore the code Solace had. No agent starts work until it is completed or cancelled.",
+                "links":[],"column":flow["events"]["finished"],"rank":rank,"paused_from":null,"attention":null,"stamps":{},"model":null,"notes":[],"questions":[],"runs":[],"changes":[]});
+            board::save(s, &t)?;
+            t["id"].as_str().unwrap().to_string()
+        }
+    };
+    if !unexpected.is_empty() {
+        board::record(s, &tid, "outside", &bf, &af)?;
+    }
+    let compiled = match s.check() {
+        Ok(out) => out,
+        Err(Failure(out, _)) => out,
+    };
+    let compiled: String = compiled.chars().take(4000).collect();
+    let mut t = board::task(&s.root, &tid)?;
+    let changed_note = if names.is_empty() { String::new() } else { format!("Changed outside Solace: {}.\n", names.join(", ")) };
+    board::note(&mut t, "solace", None, &format!("{changed_note}{unreadable_note}\nCheck: {compiled}"));
+    board::flag(&mut t, "code changed outside Solace");
+    board::save(s, &t)?;
+    Ok(format!("Note: code changed outside Solace with no agent working; review it on the {TITLE} task. {changed_note}{unreadable_note}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const APP: &str = "pub fn one() -> Int {\n  1\n}\n\npub fn two() -> Int {\n  2\n}\n";
+
+    fn project(name: &str) -> Store {
+        let root = env::temp_dir().join(new_id(Kind::Fn, name, ""));
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("gleam.toml"), "name = \"app\"\nversion = \"1.0.0\"\n").unwrap();
+        fs::write(root.join("src/app.gleam"), APP).unwrap();
+        import(&root).unwrap();
+        board::open(&root).unwrap()
+    }
+
+    fn file(s: &Store) -> String {
+        fs::read_to_string(s.root.join("src/app.gleam")).unwrap()
+    }
+
+    fn text(s: &Store, name: &str) -> Option<String> {
+        s.db.query_row("SELECT text FROM symbols WHERE module = 'app' AND name = ?1 AND live = 1", [name], |r| r.get(0)).optional().unwrap()
+    }
+
+    /// D-58.1/4/5: an edit made outside Solace is read in, never written
+    /// over, and waits on Unexpected Changes, which blocks work until a
+    /// human cancels it, restoring Solace's code.
+    #[test]
+    fn outside_edits_are_read_in_and_reviewed() {
+        let s = project("outside-edit");
+        assert!(s.root.join(".solace/approved").exists() && s.root.join(".solace/written").exists());
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let edited = APP.replace("  2", "  22") + "\npub fn three() -> Int {\n  3\n}\n";
+        fs::write(s.root.join("src/app.gleam"), &edited).unwrap();
+        // A write in the middle of a command leaves the changed file alone.
+        s.materialize(&s.index().unwrap()).unwrap();
+        assert_eq!(file(&s), edited);
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains(TITLE) && note.contains("app.three, app.two"), "{note}");
+        assert_eq!(text(&s, "two").as_deref(), Some("pub fn two() -> Int {\n  22\n}"));
+        assert!(text(&s, "three").is_some());
+        s.check().unwrap();
+        assert_eq!(file(&s), edited);
+        let t = board::tasks(&s.root).unwrap().into_iter().find(|t| t["unexpected"] == true).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        assert_eq!(t["column"], "needs_review");
+        assert!(t["notes"][0]["text"].as_str().unwrap().contains("Check: No errors"), "{}", t["notes"]);
+        // Nothing new: no second note.
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        let other = board::api(&s.root, "POST", "/tasks", json!({"title":"Other"})).unwrap();
+        let oid = other["id"].as_str().unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{oid}/actions"), json!({"action":"plan"})).unwrap();
+        let refused = board::api(&s.root, "POST", &format!("/tasks/{oid}/actions"), json!({"action":"assign","model":"x"})).unwrap_err();
+        assert!(refused.0.starts_with("E7012"), "{}", refused.0);
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
+        assert_eq!(file(&s), APP);
+        assert!(text(&s, "three").is_none());
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        // Completing a task cleans up its conversation in the background.
+        let _ = fs::remove_dir_all(&s.root);
+    }
+
+    /// D-58.7: code whose hashes are on the approved list (a pull of work
+    /// done through Solace) is read in without a task; completing a task
+    /// puts its changes on the list.
+    #[test]
+    fn approved_code_is_read_in_quietly() {
+        let s = project("outside-approved");
+        absorb(&s, Mode::Notice).unwrap();
+        let pulled = APP.replace("  1", "  11");
+        let mut list = approved(&s.root);
+        list.insert("app.one".into(), digest(b"pub fn one() -> Int {\n  11\n}"));
+        save_approved(&s.root, &list).unwrap();
+        fs::write(s.root.join("src/app.gleam"), &pulled).unwrap();
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        assert_eq!(text(&s, "one").as_deref(), Some("pub fn one() -> Int {\n  11\n}"));
+        assert!(board::tasks(&s.root).unwrap().is_empty());
+        // A hand edit isn't approved; completing its task approves it.
+        fs::write(s.root.join("src/app.gleam"), pulled.replace("  2", "  5")).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("app.two"));
+        let t = board::tasks(&s.root).unwrap().remove(0);
+        let tid = t["id"].as_str().unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"approve"})).unwrap();
+        board::api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"complete"})).unwrap();
+        assert_eq!(approved(&s.root).get("app.two"), Some(&digest(b"pub fn two() -> Int {\n  5\n}")));
+        // Completing a task cleans up its conversation in the background.
+        let _ = fs::remove_dir_all(&s.root);
+    }
+
+    /// D-58.5: a file Solace can't read into symbols is left as it is and
+    /// reported once; once fixed it is read in.
+    #[test]
+    fn unreadable_files_are_left_alone() {
+        let s = project("outside-unreadable");
+        absorb(&s, Mode::Notice).unwrap();
+        let twice = format!("{APP}\npub fn two() -> Int {{\n  3\n}}\n");
+        fs::write(s.root.join("src/app.gleam"), &twice).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("defines `two` twice"));
+        assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
+        s.materialize(&s.index().unwrap()).unwrap();
+        assert_eq!(file(&s), twice);
+        fs::write(s.root.join("src/app.gleam"), APP.replace("  2", "  3")).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("app.two"));
+        assert_eq!(text(&s, "two").as_deref(), Some("pub fn two() -> Int {\n  3\n}"));
+        // Completing a task cleans up its conversation in the background.
+        let _ = fs::remove_dir_all(&s.root);
+    }
+
+    /// A store from before D-58 has no record: what it holds counts as
+    /// written, so a file edited since is read in rather than overwritten.
+    #[test]
+    fn old_stores_start_from_what_they_hold() {
+        let s = project("outside-old");
+        fs::remove_file(s.root.join(".solace/written")).unwrap();
+        fs::remove_file(s.root.join(".solace/approved")).unwrap();
+        fs::write(s.root.join("src/app.gleam"), APP.replace("  1", "  7")).unwrap();
+        assert!(absorb(&s, Mode::Notice).unwrap().contains("app.one"));
+        assert_eq!(approved(&s.root).get("app.one"), Some(&digest(b"pub fn one() -> Int {\n  1\n}")));
+        assert_eq!(file(&s), APP.replace("  1", "  7"));
+        // Completing a task cleans up its conversation in the background.
+        let _ = fs::remove_dir_all(&s.root);
+    }
+}

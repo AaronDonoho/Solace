@@ -45,24 +45,46 @@ This puts `solace` in `~/.cargo/bin`. Use `cargo install --path solace-cli --roo
 
 ## Use it on a project
 
-Solace wraps an existing Gleam project, and doesn't create one. It needs the project's `gleam.toml` because it runs `gleam` to check, test and build the code, and that file names the project and its dependencies. To start a new project, create it with Gleam first:
+Solace wraps a Gleam project. It needs the project's `gleam.toml` because it runs `gleam` to check, test and build the code, and that file names the project and its dependencies. To start from nothing, create a new project after confirming its name and folder:
 
 ```sh
-gleam new my_app
+solace create my_app # runs gleam new and sets up Solace; --yes skips confirmation
 cd my_app
-```
-
-Then, in the Gleam project's directory:
-
-```sh
-solace import        # loads Gleam code and creates solace.toml if absent
 solace check         # type-check the project from the store
 solace serve         # start the task board on http://127.0.0.1:3030 (--port to change it)
 ```
 
+For existing code, run `solace serve` in its folder and choose **Migrate this project**, or use the shell:
+
+```sh
+solace migrate --yes         # copy the whole folder to ../solace-migration and check it
+solace migrate --confirm-paths # go on, once you've looked at anything listed that could reach the original
+solace migrate --report      # review the checks
+solace migrate --adopt --yes # put the checked copy at the original path
+```
+
+Migration leaves the original untouched until adoption. Install bubblewrap (`bwrap`) for a guarantee: with it, every command the migration runs sees the original as read-only. Errors in the original carry over: a build or test that fails before migrating fails after it too. Adoption keeps the original beside the copy as `<name>.pre-solace` and refuses if a check failed or the original changed. `solace create` refuses existing names and unmanaged Gleam folders.
+
 Open the board, create a task and move it to planning. There you can have an agent *investigate* it first, which changes nothing and reports findings or a plan (complete the task there if it only needed an answer), then assign it to a model to do the work. Solace starts the agent, puts the agent's notes and questions on the task, and moves the task to *blocked* when the agent needs an answer or to *needs review* when it has finished. A task that is waiting on you is marked *Needs attention*, with the reason, and one whose agent has finished is marked as such. Effort is chosen separately from the model. Notes are written in a markdown editor and can include images, which agents also see. Cards show which tasks have an agent working, and each run on a task can be followed live: the agent's messages, and each command it runs with its result. The board's **Guide** link (`/guide`) explains the whole workflow for humans. The guide is built into the binary.
 
 From Needs review, choose **reassign** to return a task to Assigned for fixes while preserving its changes. The next work run receives the review feedback and any new instructions; approval must be given again after the fixes. **Start over** instead reverts the task's changes.
+
+### Several projects on one board
+
+One Solace root can hold several Gleam projects: the root folder itself, if it is a Gleam project, and any folders below it, next to code Solace doesn't manage. In the root folder:
+
+```sh
+solace create my_app # create a new project below this folder after confirmation
+solace serve         # one board, with a lane per project
+```
+
+The board's **Projects** button removes projects, re-lists removed projects that still have a store, and creates new ones: give a package name, and optionally a folder and the target (Erlang or JavaScript), and Solace runs `gleam new` (without a nested git repository inside one) and sets the project up. `solace serve` in an empty folder starts an empty root, so a new project can be made entirely from the board. `solace create <name>` adds a new project to the enclosing root. To migrate several existing projects, run `solace migrate --yes --project api --project web` in their common folder, review the report, then run `solace migrate --adopt --yes`. The whole folder is copied and keeps its original path after adoption. The root's `solace.toml` keeps the list (a root project keeps it beside its own settings):
+
+```toml
+projects = ["bench/pilot", "bench/pilot-large", "solace-cli/board"]
+```
+
+There is one root: `solace serve` and `solace create` find it from anywhere below, and every project stays at it or below it. Folders outside it, reached through `..` or a symlink, are refused, and so is a root inside another root or inside a project. Each project keeps its own store, `solace.toml`, `AGENTS.md`, tasks and agents. Agents in different projects work at the same time. An agent changes only its own project, but reads any project in the root by adding `--project <folder>` to `view`, `inspect`, `refs`, `find`, `files` or `read`. Reads take no locks, so they never wait on another project's agent, and humans can use the same option from a shell. Lanes are named by folder, fold away, and share one row of column headers when every project uses the same workflow. Removing a project keeps its setup. One board serves a project at a time. A Solace project nested inside another is off limits to the outer project's agents, apart from these reads.
 
 ### Models
 
@@ -93,7 +115,7 @@ An entry with the same `id` as a built-in model replaces it. `key_env` names the
 
 ### Project settings
 
-A `solace.toml` in the project root holds the project's Solace settings. `solace import` creates a starter file if absent and preserves existing settings. Rerunning it on an imported project creates missing settings without reimporting or replacing stored symbols. Only humans edit it; agents can read it but not change it. Everything in it is optional.
+A `solace.toml` in the project root holds the project's Solace settings. `solace create <name>` writes a starter file in the new project. Migration preserves existing settings and adds a starter file if absent. Only humans edit it; agents can read it but not change it. Everything in it is optional.
 
 An `AGENTS.md` in the project root holds your instructions for agents: conventions, domain rules, things to avoid. Every agent gets it first when its session starts, through Solace, whichever agent you run. Like `solace.toml`, only humans change it; an agent can propose a change, which you approve or reject on the task.
 
@@ -123,11 +145,11 @@ Solace puts every file in the project into one category, named for what Solace d
 | Watched | every other text file within `watch_limit`, including `gleam.toml` | read and write through Solace, checked by any validator; a task's changes are undone with it |
 | Protected | `solace.toml`, `AGENTS.md` | read; in a board work run, propose a change that you approve or reject on the task |
 | Unwatched | `.git/`, build output, `.gitignore`d files, paths listed in `unwatched`, binary or oversized files | read and write through Solace |
-| Internal | `.solace/` (store, board data) | no access |
+| Internal | `.solace/` (store, board data), and any other Solace project nested inside this one | no access |
 
 File writes enforce `watch_limit`, stale-write checks and any matching validators. `gleam.toml` must still parse after a write and can't be removed. Watched and unwatched file contents stay out of symbol searches. Running a launcher still requires a declared command; writing a script does not set its executable bit.
 
-Agents get no shell and no file tools, only the Solace MCP tool and web access. Humans shouldn't edit source files directly either. Solace rewrites them from the store and doesn't keep edits made on disk.
+Agents get no shell and no file tools, only the Solace MCP tool and web access. Code is meant to change through tasks, but Solace never writes over a source file it didn't write last. An edit made outside Solace (by hand, by another tool, by `git pull` or a branch switch) is read into the store. If an agent is working, the edit joins its task. Otherwise it waits on an **Unexpected Changes** task, marked with a hazard sign, until you complete it (keep the changes) or cancel it (restore Solace's code); no agent starts work meanwhile. Code that was approved in Solace, such as a teammate's pulled work, is read in quietly through `.solace/approved`, which you commit; project setup adds a `.solace/.gitignore` that keeps the rest of `.solace/` out of git. Migration reports source differences before you adopt the copy.
 
 ### Running an agent yourself
 
@@ -144,7 +166,7 @@ Rejected submissions are retained as editable drafts. Agents use `drafts`, `view
 ## Current limitations
 
 - Gleam is the only project language.
-- One agent works on a project at a time: assigning a second task is refused while one is running. The work of open tasks isn't isolated either, so a later task sees the unapproved changes of earlier ones.
+- One agent works on a project at a time: assigning a second task in the same project is refused while one is running. A task belongs to one project: its agent can read other projects in the root, but not change them, even a path dependency of its own. Tasks that span projects are planned. The work of open tasks isn't isolated either, so a later task sees the unapproved changes of earlier ones.
 - The board is local only, for one person, with no authentication.
 - The contract view at `/view` opens on an outline of what the project does: its main ways in and the requests they handle, then each area (source module) with every public function described in words, what it reads or changes, and whether tests check it. One button asks an agent to describe functions that have no description. The drawing sheet beside it shows areas, entry points, logic, effects, tests and files. A task link opens review with changes and test results. Running functions and replaying prior runs are later packages.
 - Starting real agents from the board is not yet tested end to end. The tests use a fake agent.

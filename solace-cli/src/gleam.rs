@@ -42,7 +42,7 @@ pub struct Module {
 }
 
 /// Kind and name when `line` starts a top-level item.
-fn declaration(line: &str) -> Option<(Kind, String)> {
+pub(super) fn declaration(line: &str) -> Option<(Kind, String)> {
     let mut rest = line.strip_prefix("pub ").unwrap_or(line);
     rest = rest.strip_prefix("opaque ").unwrap_or(rest);
     let (kind, rest) = if let Some(r) = rest.strip_prefix("fn ") {
@@ -59,7 +59,7 @@ fn declaration(line: &str) -> Option<(Kind, String)> {
 }
 
 /// Comment or attribute lines that belong to the item below them.
-fn is_leading(line: &str) -> bool {
+pub(super) fn is_leading(line: &str) -> bool {
     (line.starts_with("//") && !line.starts_with("////")) || line.starts_with('@')
 }
 

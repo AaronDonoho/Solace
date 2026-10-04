@@ -9,8 +9,11 @@ mod board;
 mod drafts;
 mod gleam;
 mod lockdown;
+mod migrate;
+mod outside;
 mod reach;
 mod view;
+mod workspace;
 
 use gleam::{Item, Kind, Ref};
 use rusqlite::{Connection, OptionalExtension, params};
@@ -146,16 +149,27 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         if board::context().is_some() {
             return lockdown::error("E7010", "serve", "host command");
         }
-        let s = Store::open()?;
         let port = match a.as_slice() {
             ["serve"] => 3030,
             ["serve", "--port", p] => p.parse().map_err(|_| Failure("invalid port".into(), 2))?,
             _ => return usage("serve [--port N]"),
         };
-        return board::serve(&s.root, port);
+        return board::serve(workspace::find(&env::current_dir()?)?, port);
+    }
+    if a.first() == Some(&"migrate") {
+        if board::context().is_some() {
+            return lockdown::error("E7010", "migrate", "host command");
+        }
+        return migrate::command(&a[1..]);
     }
     if a.first() == Some(&"task") && board::context().is_none() {
         return lockdown::error("E7010", "task", "task commands work only in a run started from the task board; this session has no task");
+    }
+    if let Some(i) = a.iter().position(|x| *x == "--project") {
+        let dir = a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder; session start lists them".into(), 2))?;
+        let mut rest = args.to_vec();
+        rest.drain(i..i + 2);
+        return read_project(dir, &rest, budget);
     }
     let Ok(store) = Store::open() else {
         board::workflow(&lockdown::settings(&env::current_dir()?)?)?;
@@ -170,6 +184,7 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     let store = board::open(&store.root)?;
     lockdown::recover(&store.root)?;
     board::workflow(&lockdown::settings(&store.root)?)?;
+    let noticed = outside::absorb(&store, outside::Mode::Notice)?;
     if let Some((tid, rid)) = &context {
         if a.starts_with(&["task", "diff"]) {
             return board::task_diff(&store, tid, &a[2..], budget);
@@ -187,7 +202,7 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
             return board::propose_settings(&store, tid, rid, &file, &current, &proposed, guard);
         }
     }
-    let changing = a.first().is_some_and(|a| matches!(*a, "submit" | "delete" | "write" | "remove" | "run"));
+    let changing = a.first().is_some_and(|a| matches!(*a, "submit" | "delete" | "write" | "remove" | "run" | "format" | "build"));
     let before = if changing && context.is_some() {
         let mut v = board::snapshot(&store)?;
         v.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
@@ -201,12 +216,72 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
             board::record_verification(&store, tid, a[0], &result)?;
         }
     }
+    // A process the command ran (`format`, a declared command) may have changed source: that's this command's change.
+    let unread = if a.first().is_some_and(|c| matches!(*c, "format" | "build" | "run")) {
+        outside::absorb(&store, outside::Mode::Command)?
+    } else {
+        String::new()
+    };
     if let (Some(before), Some((tid, rid))) = (before, context) {
         let mut after = board::snapshot(&store)?;
         after.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
         board::record(&store, &tid, &rid, &before, &after)?;
     }
-    result
+    match result {
+        Ok(out) => Ok(format!("{noticed}{out}{unread}")),
+        Err(Failure(msg, code)) => Err(Failure(format!("{noticed}{msg}{unread}"), code)),
+    }
+}
+
+/// `--project <dir>`: a read in another project under the same Solace root
+/// (D-57). It takes no lock in that project, so reading never waits on its
+/// agents; a task still changes only its own project.
+fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
+    const READS: &[&str] = &["view", "inspect", "refs", "find", "files", "read"];
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let command = a.first().copied().unwrap_or("");
+    if !READS.contains(&command) || a.contains(&"--draft") {
+        return lockdown::error(
+            "E6007",
+            command,
+            "`--project` only reads (view, inspect, refs, find, files, read); a task changes only its own project",
+        );
+    }
+    // From a project, or from a folder of projects with none at its root.
+    let here = env::current_dir()?;
+    let own = Store::open().ok().map(|s| s.root);
+    let root = match workspace::enclosing(own.as_deref().unwrap_or(&here))? {
+        Some(root) => root,
+        None => own.clone().ok_or_else(|| Failure("No Solace root here: migrate an existing project (`solace serve`, then Migrate this project) or make a new one with `solace create <name>`.".into(), 1))?,
+    };
+    let members = workspace::members(&root)?;
+    let dir = match dir.trim_end_matches('/') {
+        "" => ".",
+        d => d.strip_prefix("./").unwrap_or(d),
+    };
+    if !members.iter().any(|m| m == dir) {
+        return lockdown::error("E6007", dir, format!("not a project under this Solace root; its projects: {}", members.join(", ")));
+    }
+    let target = if dir == "." { root.clone() } else { root.join(dir) };
+    // A board run's agent must still be running, as for any command.
+    let _guard = match (board::context(), &own) {
+        (Some((tid, rid)), Some(own)) => Some(board::agent_guard(own, &tid, &rid, &a)?),
+        _ => None,
+    };
+    let db = Connection::open(target.join(".solace/store.db"))?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    let store = Store { db, root: target };
+    let settings = lockdown::settings(&store.root)?;
+    if let Some(out) = lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
+        return out;
+    }
+    match a.as_slice() {
+        ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
+        ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
+        ["refs", name] => store.refs(name),
+        ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
+        _ => usage(format!("{} --project {dir}: give what to read", a.join(" "))),
+    }
 }
 
 fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>, old: Option<&str>, budget: usize) -> Out {
@@ -222,10 +297,10 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
             board::system()?["task_timeout"].as_u64().unwrap_or(3600),
         );
     }
-    if a[0] == "import" {
-        lockdown::settings(&env::current_dir()?)?;
-        return import(&env::current_dir()?);
+    if a[0] == "create" {
+        return workspace::create(&env::current_dir()?, &a[1..]);
     }
+
     let store = Store::open()?;
     let settings = lockdown::settings(&store.root)?;
     lockdown::recover(&store.root)?;
@@ -584,7 +659,7 @@ fn revision(text: &str) -> String {
 
 fn import(root: &Path) -> Out {
     if !root.join("gleam.toml").exists() {
-        return usage("Run `solace import` in a Gleam project (no gleam.toml here).");
+        return usage(format!("No gleam.toml in {}.", root.display()));
     }
     let mut out = String::new();
     match fs::OpenOptions::new().write(true).create_new(true).open(root.join("solace.toml")) {
@@ -616,6 +691,8 @@ unwatched = []\n\n\
     let db = Connection::open(dir.join("store.db"))?;
     db.execute_batch(SCHEMA)?;
     let (mut modules, mut symbols) = (0, 0);
+    let mut written = outside::Written::load(root);
+    written.known = true;
     for top in ["src", "test"] {
         let mut files = vec![];
         collect_gleam_files(&root.join(top), &mut files)?;
@@ -623,7 +700,9 @@ unwatched = []\n\n\
         for file in files {
             let path = file.strip_prefix(root.join(top)).unwrap().with_extension("");
             let path = path.to_string_lossy().replace('\\', "/");
-            let parsed = gleam::split(&fs::read_to_string(&file)?);
+            let text = fs::read_to_string(&file).map_err(|e| Failure(format!("{}: {e}", file.display()), 1))?;
+            written.record(&outside::file_of(top, &path), text.as_bytes());
+            let parsed = gleam::split(&text);
             db.execute("INSERT INTO modules VALUES (?1, ?2, ?3)", params![path, top, parsed.header])?;
             for (ord, item) in parsed.items.iter().enumerate() {
                 let id = new_id(item.kind, &path, &item.name);
@@ -636,6 +715,9 @@ unwatched = []\n\n\
             modules += 1;
         }
     }
+    written.save()?;
+    let store = Store { db, root: root.to_path_buf() };
+    outside::approve_all(&store)?;
     out += &format!("Imported {modules} modules, {symbols} symbols into .solace/store.db\n");
     Ok(out)
 }
@@ -652,14 +734,36 @@ fn collect_gleam_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()
         return Ok(());
     }
     for entry in fs::read_dir(dir)? {
-        let path = entry?.path();
-        if path.is_dir() {
+        let entry = entry?;
+        let path = entry.path();
+        // A symlinked folder isn't followed: deleting or writing through it could reach outside the project.
+        if entry.file_type()?.is_dir() {
             collect_gleam_files(&path, out)?;
         } else if path.extension().is_some_and(|e| e == "gleam") {
             out.push(path);
         }
     }
     Ok(())
+}
+
+/// A module's file as Solace writes it, with the line range of each symbol.
+fn projection(ix: &Index, m: &ModuleRow) -> (String, Vec<(usize, usize, String)>) {
+    let mut content = String::new();
+    let mut line = 1;
+    let mut ranges = vec![];
+    if !m.header.is_empty() {
+        content.push_str(&m.header);
+        content.push_str("\n\n");
+        line += m.header.lines().count() + 1;
+    }
+    for s in ix.syms.iter().filter(|s| s.module == m.path) {
+        let n = s.text.lines().count();
+        ranges.push((line, line + n - 1, s.qname()));
+        content.push_str(&s.text);
+        content.push_str("\n\n");
+        line += n + 1;
+    }
+    (content.trim_end().to_string() + "\n", ranges)
 }
 
 impl Store {
@@ -671,7 +775,7 @@ impl Store {
                 return Ok(Store { db: Connection::open(db)?, root: dir });
             }
             if !dir.pop() {
-                return fail("No Solace store found (.solace/store.db). Run `solace import` in the project first.");
+                return fail("No Solace store found (.solace/store.db). Bring existing code in by migrating it: run `solace serve` here and choose Migrate this project.");
             }
         }
     }
@@ -699,32 +803,42 @@ impl Store {
     }
 
     fn materialize_to(&self, ix: &Index, target: &Path) -> Result<Vec<FileMap>, Failure> {
+        // A file changed outside Solace is never written over (D-58); the next command reads it in.
+        let mut written = (target == self.root).then(|| outside::Written::load(&self.root));
         let mut maps = vec![];
         for m in &ix.modules {
-            let mut content = String::new();
-            let mut line = 1;
-            let mut ranges = vec![];
-            if !m.header.is_empty() {
-                content.push_str(&m.header);
-                content.push_str("\n\n");
-                line += m.header.lines().count() + 1;
-            }
-            for s in ix.syms.iter().filter(|s| s.module == m.path) {
-                let n = s.text.lines().count();
-                ranges.push((line, line + n - 1, s.qname()));
-                content.push_str(&s.text);
-                content.push_str("\n\n");
-                line += n + 1;
-            }
-            let content = content.trim_end().to_string() + "\n";
-            let path = target.join(&m.dir).join(format!("{}.gleam", m.path));
+            let (content, ranges) = projection(ix, m);
+            let rel = outside::file_of(&m.dir, &m.path);
+            let path = target.join(&rel);
             if fs::read_to_string(&path).ok().as_deref() != Some(content.as_str()) {
+                if written.as_ref().is_some_and(|w| !w.unchanged(&rel)) {
+                    maps.push(FileMap { module: m.path.clone(), file: path, ranges });
+                    continue;
+                }
                 fs::create_dir_all(path.parent().unwrap())?;
-                fs::write(&path, content)?;
+                fs::write(&path, &content)?;
+            }
+            if let Some(w) = written.as_mut() {
+                w.record(&rel, content.as_bytes());
             }
             maps.push(FileMap { module: m.path.clone(), file: path, ranges });
         }
+        if let Some(w) = written.as_mut() {
+            w.save()?;
+        }
         Ok(maps)
+    }
+
+    /// Solace's own short-lived rewrite of a module file (tests made private,
+    /// traced functions), put back by `materialize` afterwards.
+    fn rewrite(&self, path: &Path, content: &str) -> Result<(), Failure> {
+        fs::write(path, content)?;
+        let mut w = outside::Written::load(&self.root);
+        if w.known {
+            w.record(&path.strip_prefix(&self.root).unwrap().to_string_lossy(), content.as_bytes());
+            w.save()?;
+        }
+        Ok(())
     }
 
     fn gleam(&self, args: &[&str]) -> Result<(bool, String), Failure> {
@@ -828,9 +942,34 @@ impl Store {
         out += &format!("\nTest modules (tests): {}\n", tests.join(", "));
         out += &self.status()?;
         out += &self.work_context(&ix)?;
+        out += &self.other_projects();
         out += "\n";
         out += &agent_reference();
         Ok(out)
+    }
+
+    /// The other projects under this project's Solace root, which reads can
+    /// reach with `--project` (D-57).
+    fn other_projects(&self) -> String {
+        let Ok(Some(root)) = workspace::enclosing(&self.root) else { return String::new() };
+        let Ok(members) = workspace::members(&root) else { return String::new() };
+        let me = self.root.strip_prefix(&root).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
+        let me = if me.is_empty() { ".".to_string() } else { me };
+        let others: Vec<String> = members
+            .into_iter()
+            .filter(|m| *m != me)
+            .map(|m| {
+                let name = workspace::name(&if m == "." { root.clone() } else { root.join(&m) });
+                format!("{m} ({name})")
+            })
+            .collect();
+        if others.is_empty() {
+            return String::new();
+        }
+        format!(
+            "\nOther projects under this Solace root (add `--project <folder>` to view, inspect, refs, find, files or read; changes stay in this project): {}\n",
+            others.join(", ")
+        )
     }
 
     /// The project's AGENTS.md, which its humans write for agents (D-45), cut
@@ -1039,6 +1178,7 @@ impl Store {
         );
         out += &self.status()?;
         out += &self.work_context(&ix)?;
+        out += &self.other_projects();
         out += "\n";
         out += &agent_reference();
         Ok(out)
@@ -1934,7 +2074,7 @@ impl Store {
         let rewritten = self.rewritten(&ix, &skipped)?;
         let result = (|| {
             for (path, content) in &rewritten {
-                fs::write(path, content)?;
+                self.rewrite(path, content)?;
             }
             self.gleam(&["test"])
         })();
@@ -2039,7 +2179,7 @@ impl Store {
         let file = self.root.join("test").join(format!("{PROBE}.gleam"));
         let result = (|| -> Result<(bool, String), Failure> {
             for (path, content) in &traced {
-                fs::write(path, content)?;
+                self.rewrite(path, content)?;
             }
             fs::create_dir_all(file.parent().unwrap())?;
             fs::write(&file, &code)?;

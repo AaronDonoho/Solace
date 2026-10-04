@@ -15,7 +15,9 @@ FAKE = str(Path(__file__).with_name('fake_agent.py'))
 class Board(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='solace-board-')
-        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)/'fixture'
+        self.root.mkdir()
         (self.root/'src').mkdir()
         (self.root/'src/app.gleam').write_text('pub fn one() { 1 }\n\npub fn two() { 2 }\n\npub fn removed() { 3 }\n')
         (self.root/'gleam.toml').write_text('name="fixture"\nversion="1.0.0"\ntarget="javascript"\n')
@@ -37,7 +39,8 @@ class Board(unittest.TestCase):
             for name, agent, model in [('native', 'codex', 'fixture'), ('native-other', 'codex', 'other'), ('native-claude', 'claude', 'fixture')]:
                 kind = 'openai' if agent == 'codex' else 'anthropic'
                 f.write(f'\n[[models]]\nid="{name}"\nlabel="Fixture"\nagent="{agent}"\nmodel="{model}"\nendpoint={{kind="{kind}",base_url="http://localhost:1"}}\n')
-        self.cli('import')
+        self.cli('migrate', '--yes')
+        self.cli('migrate', '--adopt', '--yes')
         self.server=subprocess.Popen([BIN,'serve','--port','0'],cwd=self.root,env=self.env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         line=self.server.stdout.readline()
         self.assertIn('listening',line)

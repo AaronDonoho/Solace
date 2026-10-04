@@ -14,7 +14,7 @@ export function viewport_height() {
 }
 export function layout(nodes, edges, overview = false, anchor = '') {
   // v2 retires the old single-column coordinates; viewport width separates phone and desktop sheets.
-  const key = 'solace-view-positions:v2:' + (globalThis.location?.search || '') + ':' + Math.round(viewport_width());
+  const key = 'solace-view-positions:v2:' + (globalThis.location?.pathname.replace(/\/?view$/, '') || '') + (globalThis.location?.search || '') + ':' + Math.round(viewport_width());
   if (key !== memoryKey) {
     memoryKey = key;
     memory = {};

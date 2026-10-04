@@ -9,6 +9,8 @@ pub fn error<T>(code: &str, at: &str, message: impl std::fmt::Display) -> Result
 
 pub fn settings(root: &Path) -> Result<toml::Value, Failure> {
     match fs::read_to_string(root.join("solace.toml")) {
+        // A workspace's solace.toml lists projects (D-57); `workspace` checks it.
+        Ok(s) if !root.join("gleam.toml").exists() => s.parse().map_err(|e| Failure(format!("E6020 invalid solace.toml\n  {e}"), 1)),
         Ok(s) => parse_settings(&s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Value::Table(Default::default())),
         Err(e) => Err(e.into()),
@@ -26,6 +28,10 @@ pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
         if v.get(old).is_some() {
             return Err(invalid(fix));
         }
+    }
+    // `projects`: the folders below this root project (D-57); `workspace` checks them.
+    if v.get("projects").is_some_and(|p| p.as_array().is_none_or(|a| a.iter().any(|d| d.as_str().is_none()))) {
+        return Err(invalid("projects"));
     }
     for key in ["unwatched"] {
         if let Some(a) = v.get(key) {
@@ -88,8 +94,14 @@ pub fn path(root: &Path, name: &str) -> Result<PathBuf, Failure> {
     }
     Ok(out)
 }
-fn internal(name: &str) -> bool {
-    Path::new(name).components().any(|c| c.as_os_str() == ".solace")
+/// Solace's own files, and every file of another Solace project nested in
+/// this one (it has its own store; D-57).
+fn internal(root: &Path, name: &str) -> bool {
+    let mut dir = root.to_path_buf();
+    Path::new(name).components().any(|c| {
+        dir.push(c);
+        c.as_os_str() == ".solace" || dir.join(".solace/store.db").exists()
+    })
 }
 fn gitignored(root: &Path, name: &str) -> bool {
     let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
@@ -108,7 +120,7 @@ pub fn tier(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -
     if name == "solace.toml" || name == "AGENTS.md" {
         return "protected".into();
     }
-    if internal(name) {
+    if internal(root, name) {
         return "internal".into();
     }
     if name == ".git" || name.starts_with(".git/") || name == "build" || name.starts_with("build/") || name == "manifest.toml" {
@@ -289,8 +301,12 @@ pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize) -> Out
     fs::create_dir_all(root.join(".solace"))?;
     let log = root.join(".solace").join(format!("command-{}.log", new_id(Kind::Fn, "", "")));
     let out = fs::File::create(&log)?;
-    let mut child =
-        Command::new(&argv[0]).args(&argv[1..]).current_dir(root).process_group(0).stdout(out.try_clone()?).stderr(out).spawn()?;
+    // During a migration the original is read-only to commands in the copy (Spec 17).
+    let mut child = migrate::sandboxed(argv, root, migrate::protected(root).as_deref())
+        .process_group(0)
+        .stdout(out.try_clone()?)
+        .stderr(out)
+        .spawn()?;
     let start = Instant::now();
     let result = loop {
         if let Some(status) = child.try_wait()? {
@@ -470,7 +486,7 @@ pub fn dispatch(
             .collect::<Vec<_>>()
             .join("/");
         return Some((|| {
-            if internal(&name) {
+            if internal(root, &name) {
                 return error("E6006", &name, "Solace internal files have no agent access");
             }
             let p = path(root, &name)?;

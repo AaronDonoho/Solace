@@ -16,14 +16,19 @@ PILOT = Path(__file__).parents[2] / 'bench' / 'pilot-large'
 class View(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='solace-view-')
-        self.root = Path(self.tmp.name)
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name) / 'fixture'
+        self.root.mkdir()
         (self.root / 'src').mkdir()
         (self.root / 'test').mkdir()
         (self.root / 'src/app.gleam').write_text('''import gleam/io
+
 @external(erlang, "file", "write_file")
 fn write(path: String, text: String) -> Nil
+
 @external(erlang, "init", "get_plain_arguments")
 fn args() -> List(String)
+
 pub fn main() {
   let _ = args()
   io.println("hello")
@@ -31,6 +36,7 @@ pub fn main() {
 }
 ''')
         (self.root / 'test/app_test.gleam').write_text('''import app
+
 pub fn main_test() {
   assert app.main() == Nil
 }
@@ -43,7 +49,8 @@ pub fn main_test() {
         shutil.copytree(PILOT / 'build/dev', self.root / 'build/dev')
         self.env = {**os.environ, 'SOLACE_CONFIG': str(self.root / 'system.toml')}
         (self.root / 'system.toml').write_text('task_timeout=5\n[[models]]\nid="fake"\nlabel="Fake"\nagent="codex"\nrun=["python3",' + json.dumps(str(FAKE)) + ']\n')
-        self.cli('import')
+        self.cli('migrate', '--yes')
+        self.cli('migrate', '--adopt', '--yes')
         self.server = subprocess.Popen([BIN, 'serve', '--port', '0'], cwd=self.root, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         line = self.server.stdout.readline()
         self.assertIn('listening', line)

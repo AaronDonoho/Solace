@@ -23,6 +23,17 @@ table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid 
 </ul>
 <p>The drawbacks: an agent is limited to what Solace provides, so some tasks that are easy with a shell (a quick throwaway script, for example) need a command you declare for it. And you shouldn't edit the source files by hand either, because Solace rewrites them from its store.</p>
 
+<h2>Migrating an existing project</h2>
+<p>Run <code>solace serve</code> in your existing project folder and choose <strong>Migrate this project</strong>. Pick the Gleam projects to bring in and, if you have them, enter smoke check commands, one per line. Each command runs in the root folder and must exit with 0. Without any, app behaviour is marked <em>not checked</em>.</p>
+<p>The migration reproduces your original exactly, errors included. A build or test that fails before migrating fails after it too. The report marks those failures as failing before the migration, and they don't block adoption: fixing them is ordinary work afterwards.</p>
+<p>Solace copies the whole folder to <code>../solace-migration/</code> and leaves your original untouched. A link that points into the original is pointed at the same place in the copy instead. Before running anything, Solace looks in the copy for files, links and smoke checks that could reach the original, such as a script naming its path. If it finds any, it stops and lists them. Look at each one, then choose <strong>Continue</strong>. Where bubblewrap (<code>bwrap</code>) is installed, every command the migration runs sees the original as read-only, and so do agents' commands while the migration is in progress. Without it, the report says the commands weren't isolated. If a migration stops partway, the copy is kept so you can see why, and <strong>Abandon migration</strong> removes it.</p>
+<p>The board then serves the copy; the banner shows both paths. In the <strong>Migration report</strong>, read the checks and expand Details to see diffs or command output. The checks are evidence, not proof of every behaviour. If you change the copy, use <strong>Recheck</strong> to bring the report up to date. Reconstruction, which compares your files with the regenerated ones, is judged once, on the first regeneration, so work you do in the copy doesn't block adoption.</p>
+<p><strong>Adopt</strong> becomes available when no blockers remain. Its confirmation lists anything not checked. Adopting renames the original to <code>&lt;name&gt;.pre-solace</code> and puts the copy at the original path. If you changed the original meanwhile, adoption refuses and names the changed paths. Before adoption, <strong>Abandon migration</strong> deletes only the copy. Afterwards, <strong>Undo adoption</strong> restores the saved original and keeps later work in the renamed copy. The board reconnects automatically while the server restarts.</p>
+
+<h2>Several projects on one board</h2>
+<p>One board can show several Gleam projects: those in one folder, the <em>root</em>. The root's own project, if the folder is a Gleam project, comes first, then any project in a folder below it. Choose <strong>Projects</strong> to add an already set up project back to the board, remove one, or create a new one: give a package name, and optionally a folder and whether it runs on Erlang or JavaScript, and Solace runs <code>gleam new</code> and sets the project up. Every project stays inside the root; a folder outside it, or reached through a link, is refused. The list is kept in the root's <code>solace.toml</code>.</p>
+<p>Each project keeps its own tasks, settings, <code>AGENTS.md</code> and agents, and agents in different projects can work at the same time. An agent changes only its own project, but can read the others, for example to see how a project it depends on works. Reading never waits for another project's agent. A lane names its project's folder, counts its tasks, and has <em>+ Task</em> and its own <em>Contract view</em>; select the folder name to fold the lane away. When every project uses the same columns they share one header row; otherwise each lane names its own. Notices start with the project's folder.</p>
+
 <h2>Tasks</h2>
 <p>A task is a piece of work you write for an agent: a title and a description. The description can refer to existing behavior, ask for changes, suggest something new, or just ask a question.</p>
 <p>Choose <strong>New task</strong> to write one. The board keeps what you've typed if you close the panel or reload the page, and clears it once the task is created. Select a task to see it: under its title are the model and effort to use, an editor, the actions you can take (with <em>Add note</em>), and tabs for its details, notes, questions, runs and changes, newest first. To change a task's title, description or order, use <em>Edit</em> on its Details tab. Descriptions, notes and instructions are markdown, with Write and Preview; images can be added once the task exists. A card shows ✓ once the task is approved. When an agent asks a question or a run ends, a notice appears in the corner of the board.</p>
@@ -58,6 +69,11 @@ table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid 
 <h3>Undoing a task</h3>
 <p><em>Cancel</em> and <em>start over</em> undo everything the task changed, bringing the code and files back to how they were before it started. Solace refuses to undo a task when that would affect another open task: if a later task changed the same code, or depends on something this task added. The refusal names the other task, so you can undo that one first or leave things as they are.</p>
 <p>Solace doesn't keep a history beyond that. Use your own version control (such as git) for history.</p>
+
+<h3>Changes made outside Solace</h3>
+<p>Code is meant to change through tasks, but you can still edit files yourself, pull from git or switch branches. Solace never writes over a source file it didn't write last. It reads your edit in instead.</p>
+<p>If an agent is working, the edit becomes part of that agent's task and shows in its review. If no agent is working, the edit goes to a task called <em>Unexpected Changes</em>, marked with a yellow hazard sign, in <em>needs_review</em>. Its note lists what changed and whether the code still compiles. <em>Approve</em> and <em>complete</em> it to keep the changes, or <em>cancel</em> it to put back the code Solace had. No agent starts work until it is completed or cancelled, so agents never build on code nobody has looked at. You can also <em>reassign</em> it to have an agent fix it.</p>
+<p>Code that came from Solace stays quiet: when you pull or switch to a branch whose code was approved in Solace, it is read in without a task. That works through <code>.solace/approved</code>, a list Solace keeps current; commit it with your code. Only Gleam files under <code>src/</code> and <code>test/</code> count. Other files you add, such as data or documents, never raise <em>Unexpected Changes</em>.</p>
 
 <h2>Models</h2>
 <p>You choose a model each time you assign a task or start a new agent. Solace runs the model through an agent program you already have installed and signed in to: the <strong>Codex CLI</strong> for OpenAI models, or <strong>Claude Code</strong> for Claude models. Solace doesn't store any credentials itself.</p>
@@ -103,12 +119,12 @@ endpoint = { kind = "anthropic", base_url = "https://llm-proxy.example.com", key
 <tr><td>Watched</td><td>Every other text file up to the size limit, including <code>gleam.toml</code></td><td>Read and write, checked by any validator you declare; undoing a task restores them</td></tr>
 <tr><td>Protected</td><td><code>solace.toml</code> and <code>AGENTS.md</code></td><td>Read; a change they want waits for your approval</td></tr>
 <tr><td>Unwatched</td><td><code>.git/</code>, build output, anything <code>.gitignore</code> ignores, paths you list under <code>unwatched</code>, binary or oversized files</td><td>Read and write</td></tr>
-<tr><td>Internal</td><td><code>.solace/</code>, Solace's own files</td><td>Nothing</td></tr>
+<tr><td>Internal</td><td><code>.solace/</code>, Solace's own files, and any other Solace project inside this one</td><td>Nothing</td></tr>
 </table>
 <p>File writes are limited to 256 KiB unless you change <code>watch_limit</code>, and require a current read or an exact replacement. Watched and unwatched file contents never appear in symbol searches.</p>
 
 <h2>Settings</h2>
-<p><code>solace.toml</code> in the project's root holds the project's settings. Import creates a starter file if it is missing and preserves an existing one. Only you edit it; agents can read it, and an agent that needs a change has to ask you. Every part is optional.</p>
+<p><code>solace.toml</code> in the project's root holds the project's settings. <code>solace create</code> creates a starter file if it is missing and preserves an existing one. Only you edit it; agents can read it, and an agent that needs a change has to ask you. Every part is optional.</p>
 <pre>watch_limit = 262144                       # bytes
 unwatched   = ["priv/generated/"]
 
@@ -123,7 +139,8 @@ smoke = { run = ["gleam", "run", "-m", "smoke"], timeout = 60 }</pre>
 <h2>Limits for now</h2>
 <ul>
 <li>Projects must be written in Gleam.</li>
-<li>One agent works on a project at a time. While one is working, assigning another task is refused.</li>
+<li>One agent works on a project at a time. While one is working, assigning another task in that project is refused.</li>
+<li>A task belongs to one project. Its agent can read the other projects but can't change them, even one its project depends on.</li>
 <li>Tasks that are still open aren't kept apart: a later task sees the unapproved changes of earlier ones.</li>
 <li>The board runs on your machine only, for one person, with no sign-in.</li>
 </ul>

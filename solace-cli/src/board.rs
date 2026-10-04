@@ -10,6 +10,12 @@ pub fn lock(root: &Path) -> Result<fs::File, Failure> {
     f.lock()?;
     Ok(f)
 }
+/// The project lock when it is free right now; the board's poll skips a busy project.
+fn try_lock(root: &Path) -> Option<fs::File> {
+    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join(".solace/lock")).ok()?;
+    f.try_lock().ok()?;
+    Some(f)
+}
 pub fn open(root: &Path) -> Result<Store, Failure> {
     let db = Connection::open(root.join(".solace/store.db"))?;
     db.busy_timeout(Duration::from_secs(5))?;
@@ -146,7 +152,7 @@ pub fn workflow(settings: &toml::Value) -> Result<Value, Failure> {
     }
     Ok(w)
 }
-fn column<'a>(w: &'a Value, t: &Value) -> &'a Value {
+pub(super) fn column<'a>(w: &'a Value, t: &Value) -> &'a Value {
     w["columns"].as_array().unwrap().iter().find(|c| c["id"] == t["column"]).unwrap_or(&Value::Null)
 }
 fn allowed(w: &Value, t: &Value) -> Vec<String> {
@@ -158,14 +164,14 @@ fn allowed(w: &Value, t: &Value) -> Vec<String> {
     out.extend(["pause".into(), "resume".into()]);
     out
 }
-fn active(t: &Value) -> bool {
+pub(super) fn active(t: &Value) -> bool {
     t["runs"].as_array().unwrap().iter().any(|r| r["state"] != "ended")
 }
-fn note(t: &mut Value, author: &str, run: Option<&str>, text: &str) {
+pub(super) fn note(t: &mut Value, author: &str, run: Option<&str>, text: &str) {
     t["notes"].as_array_mut().unwrap().push(json!({"author":author,"run":run,"time":now(),"text":text}));
 }
 /// Marks a task as needing a human. The next action a human takes on it clears the mark.
-fn flag(t: &mut Value, reason: &str) {
+pub(super) fn flag(t: &mut Value, reason: &str) {
     t["attention"] = json!({"reason":reason,"time":now()});
     t["finished"] = Value::Null;
 }
@@ -726,6 +732,13 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     {
         return err("E7005", "another task has a work run");
     }
+    // Code changed outside Solace waits for a human before agents build on it (D-58).
+    if matches!(run, "work" | "new_work")
+        && t["unexpected"] != true
+        && tasks(&s.root)?.iter().any(|x| x["unexpected"] == true && column(w, x)["final"] != true)
+    {
+        return err("E7012", format!("complete or cancel the {} task first: it holds code changed outside Solace that no one has reviewed", outside::TITLE));
+    }
     let config = system()?;
     let chosen = body.get("model").unwrap_or(&t["model"]);
     if a["model"] == true && !resume && body["model"].as_str().is_none() {
@@ -798,11 +811,26 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     }
     if column(w, t)["final"] == true {
         end_runs(t, "completed");
+        outside::approve(s, t["id"].as_str().unwrap())?;
         drop_before(s, t["id"].as_str().unwrap())?;
     }
     Ok(None)
 }
 
+/// The models this Solace install knows; the same for every project.
+fn models() -> Result<Value, Failure> {
+    Ok(json!(
+        system()?["models"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .map(|m| {
+                let reason = unavailable(m);
+                json!({"id":m["id"],"label":m["label"],"agent":m["agent"],"effort":m["effort"],"efforts":efforts(m),"available":reason.is_none(),"reason":reason})
+            })
+            .collect::<Vec<_>>()
+    ))
+}
 pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, Failure> {
     // Reads skip the project lock, so the board stays responsive while an agent command holds it.
     // Task files are replaced by rename and the store waits out commits, so a read sees whole states.
@@ -817,17 +845,7 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
     }
     match (method, parts.as_slice()) {
         ("GET", ["workflow"]) => Ok(w),
-        ("GET", ["models"]) => Ok(json!(
-            system()?["models"]
-                .as_array()
-                .unwrap_or(&vec![])
-                .iter()
-                .map(|m| {
-                    let reason = unavailable(m);
-                    json!({"id":m["id"],"label":m["label"],"agent":m["agent"],"effort":m["effort"],"efforts":efforts(m),"available":reason.is_none(),"reason":reason})
-                })
-                .collect::<Vec<_>>()
-        )),
+        ("GET", ["models"]) => models(),
         ("GET", ["tasks"]) => {
             let mut ts = tasks(root)?;
             for t in &mut ts {
@@ -1626,10 +1644,10 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str]) -> Result<fs::
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
-        if r["kind"] != "work" && matches!(a[0], "write" | "submit" | "remove" | "run" | "delete" | "import" | "format" | "agent-config") {
+        if r["kind"] != "work" && matches!(a[0], "write" | "submit" | "remove" | "run" | "delete" | "create" | "migrate" | "format" | "agent-config") {
             return err("E7010", "this run is read-only");
         }
-        if matches!(a[0], "agent-config" | "serve" | "import") {
+        if matches!(a[0], "agent-config" | "serve" | "create" | "migrate") {
             return err("E7010", "host command is unavailable in a run");
         }
         return Ok(guard);
@@ -1696,6 +1714,7 @@ pub fn task_command(
         _ => return usage("task note | task ask | task done, with the text in `text`; task diff [name ...]"),
     }
     if column(&w, &t)["final"] == true {
+        outside::approve(s, tid)?;
         drop_before(s, tid)?;
     }
     save(s, &t)?;
@@ -1721,6 +1740,11 @@ fn wait_reply(s: &Store, tid: &str, i: usize) -> Out {
 pub fn propose_settings(s: &Store, tid: &str, rid: &str, file: &str, base: &[u8], proposed: &str, guard: fs::File) -> Out {
     if file == "solace.toml" {
         workflow(&lockdown::parse_settings(proposed)?)?;
+        // Which projects share the board is the humans' choice (D-57).
+        let projects = |text: &[u8]| std::str::from_utf8(text).ok()?.parse::<toml::Value>().ok()?.get("projects").cloned();
+        if projects(base) != projects(proposed.as_bytes()) {
+            return Err(Failure("E6020 `projects` lists the projects on this root's board; only humans change it, from the board".into(), 1));
+        }
     }
     let base = std::str::from_utf8(base).map_err(|_| Failure(format!("E6020 {file} is not UTF-8"), 1))?;
     if base == proposed {
@@ -1753,39 +1777,305 @@ fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
     Ok(())
 }
 
-pub fn serve(root: &Path, port: u16) -> Out {
-    {
-        let _guard = lock(root)?;
-        let s = open(root)?;
-        let w = workflow(&lockdown::settings(root)?)?;
-        lockdown::recover(root)?;
-        event(&s, json!({"workflow":w}))?;
-        for mut t in tasks(root)? {
-            if active(&t) {
-                let work = t["runs"].as_array().unwrap().iter().any(|r| r["state"] != "ended" && r["kind"] == "work");
-                end_runs(&mut t, "server restarted");
-                flag(&mut t, "the Solace server restarted while an agent was working");
-                if work {
-                    move_to(&w, &mut t, &w["events"]["failed"])?;
+/// Ends runs a previous server left going, as after a restart.
+fn recover_project(root: &Path) -> Result<(), Failure> {
+    let _guard = lock(root)?;
+    let s = open(root)?;
+    let w = workflow(&lockdown::settings(root)?)?;
+    lockdown::recover(root)?;
+    event(&s, json!({"workflow":w}))?;
+    for mut t in tasks(root)? {
+        if active(&t) {
+            let work = t["runs"].as_array().unwrap().iter().any(|r| r["state"] != "ended" && r["kind"] == "work");
+            end_runs(&mut t, "server restarted");
+            flag(&mut t, "the Solace server restarted while an agent was working");
+            if work {
+                move_to(&w, &mut t, &w["events"]["failed"])?;
+            }
+            save(&s, &t)?;
+        }
+    }
+    Ok(())
+}
+
+/// What one `solace serve` shows: the projects of one Solace root (D-57),
+/// each held by this server alone. The root's own project (`.`) answers at
+/// `/`; the others under `/p/<dir>`.
+struct Board {
+    top: PathBuf,
+    held: std::sync::Mutex<HashMap<PathBuf, fs::File>>,
+    /// Serializes changes to the root's project list.
+    editing: std::sync::Mutex<()>,
+    port: u16,
+    /// The migration step running now, and the last one's failure (D-59).
+    step: std::sync::Mutex<Option<String>>,
+    failed: std::sync::Mutex<Option<String>>,
+}
+impl Board {
+    /// Whether the root lists projects (or is a folder of them), so the board
+    /// shows lanes; otherwise it is one project on its own.
+    fn explicit(&self) -> bool {
+        workspace::is_root(&self.top) || !self.top.join(".solace/store.db").exists()
+    }
+    /// `(dir, root)` for each set-up project.
+    fn projects(&self) -> Result<Vec<(String, PathBuf)>, Failure> {
+        Ok(workspace::members(&self.top)?
+            .into_iter()
+            .map(|d| {
+                let r = if d == "." { self.top.clone() } else { self.top.join(&d) };
+                (d, r)
+            })
+            .filter(|(_, r)| r.join(".solace/store.db").exists())
+            .collect())
+    }
+    /// Holds the project's serve lock for this server's life: a second
+    /// server would end the first one's runs as a restart.
+    fn claim(&self, dir: &str, root: &Path) -> Result<(), Failure> {
+        let mut held = self.held.lock().unwrap();
+        if held.contains_key(root) {
+            return Ok(());
+        }
+        let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join(".solace/serve.lock"))?;
+        if f.try_lock().is_err() {
+            let name = if dir == "." { root.display().to_string() } else { dir.to_string() };
+            return fail(format!("{name} is already served by another `solace serve`; stop that one first."));
+        }
+        recover_project(root)?;
+        held.insert(root.to_path_buf(), f);
+        Ok(())
+    }
+    /// The project a request is for, and the path within it; `None` for the
+    /// root's own routes.
+    fn route(&self, url: &str) -> Result<Option<(PathBuf, String)>, Failure> {
+        let projects = self.projects()?;
+        let Some(after) = url.strip_prefix("/p/") else {
+            return Ok(projects.into_iter().find(|(d, _)| d == ".").map(|(_, r)| (r, url.to_string())));
+        };
+        let end = after.find(['/', '?']).unwrap_or(after.len());
+        let dir = percent_decode(&after[..end]);
+        let Some((dir, root)) = projects.into_iter().find(|(d, _)| *d == dir && d != ".") else {
+            return err("E7001", format!("unknown project {dir}"));
+        };
+        self.claim(&dir, &root)?;
+        let rest = &after[end..];
+        Ok(Some((root, if rest.starts_with('/') { rest.to_string() } else { format!("/{rest}") })))
+    }
+    fn listing(&self) -> Result<Value, Failure> {
+        let projects: Vec<Value> = self
+            .projects()?
+            .into_iter()
+            .map(|(dir, root)| {
+                let (base, label) = if dir == "." {
+                    (String::new(), self.top.file_name().map_or(".".into(), |n| n.to_string_lossy().to_string()))
+                } else {
+                    (format!("/p/{}", percent_encode(&dir)), dir.clone())
+                };
+                json!({"dir":dir,"label":label,"name":workspace::name(&root),"base":base})
+            })
+            .collect();
+        Ok(json!({"workspace":self.explicit(),"projects":projects,"found":workspace::found(&self.top)?}))
+    }
+    /// `/migration` (D-59, Spec 17): the long steps run in the background,
+    /// and those that move the served folder restart the server there.
+    fn migration(self: &std::sync::Arc<Self>, method: &str, path: &str, body: &Value) -> Result<Value, Failure> {
+        let action = match (method, path) {
+            ("GET", "/migration") => {
+                // While a step runs, the folders may be mid-swap: report only the step.
+                let mut v = match self.step.lock().unwrap().clone() {
+                    Some(step) => json!({"state":"running","top":self.top,"step":step,"candidates":[],"blockers":[],"undo":false}),
+                    None => migrate::status(&self.top)?,
+                };
+                v["error"] = json!(self.failed.lock().unwrap().clone());
+                return Ok(v);
+            }
+            ("POST", p) => p.trim_start_matches("/migration/").to_string(),
+            _ => return err("E7001", "unknown route"),
+        };
+        let mut step = self.step.lock().unwrap();
+        if step.is_some() {
+            return err("E7003", "a migration step is already running");
+        }
+        let projects: Vec<String> = body["projects"].as_array().into_iter().flatten().filter_map(|p| p.as_str().map(String::from)).collect();
+        let smoke: Vec<String> =
+            body["smoke"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(str::trim)).filter(|c| !c.is_empty()).map(String::from).collect();
+        match action.as_str() {
+            "start" if projects.is_empty() => return err("E7001", "projects required"),
+            "start" | "confirm" | "recheck" | "adopt" | "abandon" | "undo" => {}
+            _ => return err("E7001", "unknown route"),
+        }
+        *step = Some("Starting".into());
+        *self.failed.lock().unwrap() = None;
+        drop(step);
+        let me = self.clone();
+        std::thread::spawn(move || {
+            let report = |s: &str| *me.step.lock().unwrap() = Some(s.to_string());
+            let copy = migrate::locate(&me.top);
+            let moved = match action.as_str() {
+                // A migration that stops partway keeps its copy: serve it, to show why.
+                "start" => migrate::start(&me.top, &projects, &smoke, false, &report)
+                    .map(Some)
+                    .or_else(|e| if migrate::load(&copy).is_some() && me.top != copy { Ok(Some(copy.clone())) } else { Err(e) }),
+                "confirm" => migrate::confirm_paths(&copy, &report).map(Some),
+                "recheck" => migrate::recheck(&copy, &report).map(|_| None),
+                "adopt" => migrate::adopt(&copy, &report).map(Some),
+                "abandon" => migrate::abandon(&copy).map(|(original, _)| Some(original)),
+                _ => migrate::undo(&me.top).map(Some),
+            };
+            match moved {
+                Ok(Some(at)) => {
+                    // /proc/self/exe still runs this binary after a reinstall has replaced its file.
+                    let exe = Path::new("/proc/self/exe");
+                    let exe = if exe.exists() { exe.to_path_buf() } else { env::current_exe().unwrap_or_else(|_| "solace".into()) };
+                    let e = Command::new(exe)
+                        .args(["serve", "--port", &me.port.to_string()])
+                        .current_dir(&at)
+                        .exec();
+                    *me.failed.lock().unwrap() = Some(format!("could not restart the server in {}: {e}", at.display()));
                 }
-                save(&s, &t)?;
+                Ok(None) => {}
+                Err(Failure(e, _)) => *me.failed.lock().unwrap() = Some(e),
+            }
+            *me.step.lock().unwrap() = None;
+        });
+        Ok(json!({"state":"running"}))
+    }
+    /// `/projects`: list, add, create and remove a workspace's projects.
+    fn projects_api(self: &std::sync::Arc<Self>, method: &str, url: &str, body: &Value) -> Result<Value, Failure> {
+        let path = url.split('?').next().unwrap_or("");
+        match (method, path) {
+            ("GET", "/projects") => return self.listing(),
+            ("GET", "/models") => return models(),
+            (_, p) if p == "/migration" || p.starts_with("/migration/") => return self.migration(method, p, body),
+            _ => {}
+        }
+        let _edit = self.editing.lock().unwrap();
+        let field = |k: &str| body[k].as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| Failure(format!("E7001 {k} required"), 1));
+        let dir = match (method, path) {
+            ("POST", "/projects") => {
+                let dir = field("dir")?;
+                workspace::add(&self.top, dir)?;
+                dir.to_string()
+            }
+            ("POST", "/projects/new") => {
+                let name = field("name")?;
+                let dir = body["dir"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(name);
+                workspace::new_project(&self.top, dir, name, body["target"] == "javascript")?;
+                dir.to_string()
+            }
+            ("DELETE", p) if p.starts_with("/projects/") => {
+                let dir = percent_decode(&p["/projects/".len()..]);
+                let root = if dir == "." { self.top.clone() } else { self.top.join(&dir) };
+                if root.join(".solace/store.db").exists() && tasks(&root)?.iter().any(active) {
+                    return err("E7003", format!("an agent is working in {dir}; let it finish or stop it first"));
+                }
+                workspace::remove(&self.top, &dir)?;
+                self.held.lock().unwrap().remove(&root);
+                return self.listing();
+            }
+            _ => return err("E7001", "unknown route"),
+        };
+        let root = if dir == "." { self.top.clone() } else { self.top.join(&dir) };
+        if let Err(e) = self.claim(&dir, &root) {
+            if dir != "." {
+                workspace::remove(&self.top, &dir)?;
+            }
+            return Err(e);
+        }
+        self.listing()
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = vec![];
+    let mut i = 0;
+    while i < b.len() {
+        match (b[i], s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())) {
+            (b'%', Some(x)) => {
+                out.push(x);
+                i += 3;
+            }
+            (c, _) => {
+                out.push(c);
+                i += 1;
             }
         }
     }
+    String::from_utf8_lossy(&out).into()
+}
+fn percent_encode(s: &str) -> String {
+    s.bytes().map(|c| if c.is_ascii_alphanumeric() || b"-_.~".contains(&c) { (c as char).to_string() } else { format!("%{c:02X}") }).collect()
+}
+
+fn respond_json(req: tiny_http::Request, result: Result<Value, Failure>) {
+    let (status, value) = match result {
+        Ok(v) => (200, v),
+        Err(e) => (409, json!({"code":e.0.split_whitespace().next().unwrap_or("E7001"),"message":e.0})),
+    };
+    let _ = req.respond(
+        tiny_http::Response::from_string(value.to_string())
+            .with_status_code(status)
+            .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap()),
+    );
+}
+
+pub fn serve(top: PathBuf, port: u16) -> Out {
+    if let Some(done) = migrate::recover_here(&top)? {
+        return Ok(format!("{done}Run `solace serve` again from there.\n"));
+    }
     let server = tiny_http::Server::http(("127.0.0.1", port)).map_err(|e| Failure(e.to_string(), 1))?;
+    let port = server.server_addr().to_ip().map_or(port, |a| a.port());
+    let board = std::sync::Arc::new(Board {
+        top,
+        held: Default::default(),
+        editing: Default::default(),
+        port,
+        step: Default::default(),
+        failed: Default::default(),
+    });
+    for (dir, root) in board.projects()? {
+        board.claim(&dir, &root)?;
+    }
+    // A migration's folder is held too, so a shell can't move it from under the board.
+    let _migration = match migrate::load(&board.top) {
+        Some(_) if !board.held.lock().unwrap().contains_key(&board.top) => {
+            let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(board.top.join(".solace/serve.lock"))?;
+            if f.try_lock().is_err() {
+                return fail(format!("{} is already served by another `solace serve`; stop that one first.", board.top.display()));
+            }
+            Some(f)
+        }
+        _ => None,
+    };
     println!("Solace listening on http://{}", server.server_addr());
+    if board.explicit() {
+        println!("Solace root {}: {} projects", board.top.display(), board.projects()?.len());
+    }
     std::io::stdout().flush()?;
-    let watcher_root = root.to_path_buf();
+    let watcher = board.clone();
     std::thread::spawn(move || {
-        let mut previous = fs::read(watcher_root.join("solace.toml")).ok();
-        loop {
+        let mut previous: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
+        for tick in 0u64.. {
             std::thread::sleep(Duration::from_millis(100));
-            let current = fs::read(watcher_root.join("solace.toml")).ok();
-            if current != previous {
-                previous = current;
-                if let Ok(_guard) = lock(&watcher_root) {
-                    if let Ok(s) = open(&watcher_root) {
-                        if let Ok(w) = lockdown::settings(&watcher_root).and_then(|v| workflow(&v)) {
+            if watcher.step.lock().unwrap().is_some() {
+                continue;
+            }
+            for (_, root) in watcher.projects().unwrap_or_default() {
+                // About once a second, read in code changed outside Solace (D-58).
+                if tick % 10 == 0
+                    && let Some(_guard) = try_lock(&root)
+                    && let Ok(s) = open(&root)
+                {
+                    let _ = outside::absorb(&s, outside::Mode::Notice);
+                }
+                let current = fs::read(root.join("solace.toml")).ok();
+                match previous.insert(root.clone(), current.clone()) {
+                    Some(old) if old != current => {}
+                    _ => continue,
+                }
+                if let Ok(_guard) = lock(&root) {
+                    if let Ok(s) = open(&root) {
+                        if let Ok(w) = lockdown::settings(&root).and_then(|v| workflow(&v)) {
                             let _ = event(&s, json!({"workflow":w}));
                         }
                     }
@@ -1794,13 +2084,29 @@ pub fn serve(root: &Path, port: u16) -> Out {
         }
     });
     for mut req in server.incoming_requests() {
-        let root = root.to_path_buf();
+        let board = board.clone();
         std::thread::spawn(move || {
-            let url = req.url().to_string();
-            if url == "/events" {
-                let seq =
-                    req.headers().iter().find(|h| h.field.equiv("Last-Event-ID")).and_then(|h| h.value.as_str().parse().ok()).unwrap_or(0);
-                let mut reader = Events { root, seq, caught_up: false, bytes: std::io::Cursor::new(vec![]) };
+            let full = req.url().to_string();
+            let path = full.split('?').next().unwrap_or("");
+            // The root's own routes; `/events` merges every project's when it has several.
+            let own = path == "/projects"
+                || path == "/models"
+                || path.starts_with("/projects/")
+                || path == "/migration"
+                || path.starts_with("/migration/")
+                || (path == "/events" && board.explicit());
+            if req.method().as_str() != "GET" && !path.starts_with("/migration") && board.step.lock().unwrap().is_some() {
+                return respond_json(req, err("E7003", "a migration step is running"));
+            }
+            let routed = if own { Ok(None) } else { board.route(&full) };
+            let (root, url) = match routed {
+                Err(e) => return respond_json(req, Err(e)),
+                Ok(Some((root, url))) => (Some(root), url),
+                Ok(None) => (None, full.clone()),
+            };
+            if url.split('?').next() == Some("/events") {
+                let last = req.headers().iter().find(|h| h.field.equiv("Last-Event-ID")).map(|h| h.value.as_str().to_string());
+                let mut reader = Events::new(board.clone(), root.clone(), last.as_deref());
                 let mut writer = req.into_writer();
                 if writer
                     .write_all(
@@ -1831,6 +2137,18 @@ pub fn serve(root: &Path, port: u16) -> Out {
                 );
                 return;
             }
+            let Some(root) = root else {
+                let mut bytes = Vec::new();
+                let body = match req.as_reader().take(1_048_577).read_to_end(&mut bytes) {
+                    Ok(_) if bytes.len() <= 1_048_576 => if bytes.is_empty() { Ok(json!({})) } else { serde_json::from_slice(&bytes) },
+                    _ => Ok(Value::Null),
+                };
+                let result = match body {
+                    Ok(v) if !v.is_null() => board.projects_api(req.method().as_str(), &url, &v),
+                    _ => err("E7001", "invalid JSON"),
+                };
+                return respond_json(req, result);
+            };
             let parts: Vec<String> = url.split('?').next().unwrap_or("").trim_matches('/').split('/').map(String::from).collect();
             let file = match parts.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
                 ["tasks", tid, "files", rest @ ..] => Some((tid.to_string(), rest.join("/"))),
@@ -1885,12 +2203,57 @@ pub fn serve(root: &Path, port: u16) -> Out {
     }
     Ok(String::new())
 }
+
+/// The `/events` stream: one project's events, or in a workspace's merged
+/// stream every project's, each naming its `project`, with a `{projects}`
+/// event when the list changes. A merged stream's event id holds each
+/// project's position as JSON (D-57).
 struct Events {
-    root: PathBuf,
-    seq: i64,
+    board: std::sync::Arc<Board>,
+    merged: bool,
+    /// `(dir, root, seq)`: each project's position.
+    streams: Vec<(String, PathBuf, i64)>,
     /// Whether this connection has sent `ready`, the end of what it missed.
     caught_up: bool,
     bytes: std::io::Cursor<Vec<u8>>,
+}
+impl Events {
+    fn new(board: std::sync::Arc<Board>, root: Option<PathBuf>, last: Option<&str>) -> Events {
+        let (merged, streams) = match root {
+            Some(root) => (false, vec![(String::new(), root, last.and_then(|l| l.parse().ok()).unwrap_or(0))]),
+            None => {
+                let seen: HashMap<String, i64> = last.and_then(|l| serde_json::from_str(l).ok()).unwrap_or_default();
+                let streams = board.projects().unwrap_or_default().into_iter().map(|(d, r)| {
+                    let seq = seen.get(&d).copied().unwrap_or(0);
+                    (d, r, seq)
+                });
+                (true, streams.collect())
+            }
+        };
+        Events { board, merged, streams, caught_up: false, bytes: Default::default() }
+    }
+    fn id(&self) -> String {
+        json!(self.streams.iter().map(|(d, _, s)| (d.clone(), json!(s))).collect::<serde_json::Map<_, _>>()).to_string()
+    }
+    /// Follows a change to the workspace's list: new projects start at their
+    /// latest event, since the board loads them whole.
+    fn members_changed(&mut self) -> std::io::Result<bool> {
+        let now = self.board.projects().map_err(|e| std::io::Error::other(e.0))?;
+        if now.iter().map(|p| &p.0).eq(self.streams.iter().map(|s| &s.0)) {
+            return Ok(false);
+        }
+        let old = std::mem::take(&mut self.streams);
+        for (d, r) in now {
+            let seq = match old.iter().find(|s| s.0 == d) {
+                Some(s) => s.2,
+                None => Connection::open(r.join(".solace/store.db"))
+                    .and_then(|db| db.query_row("SELECT COALESCE(MAX(seq),0) FROM board_events", [], |row| row.get(0)))
+                    .unwrap_or(0),
+            };
+            self.streams.push((d, r, seq));
+        }
+        Ok(true)
+    }
 }
 impl Read for Events {
     fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
@@ -1902,17 +2265,33 @@ impl Read for Events {
             return Ok(n);
         }
         for _ in 0..10 {
-            let db = Connection::open(self.root.join(".solace/store.db")).map_err(std::io::Error::other)?;
-            let row = db
-                .query_row("SELECT seq,data FROM board_events WHERE seq>? ORDER BY seq LIMIT 1", [self.seq], |r| {
-                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-                })
-                .optional()
-                .map_err(std::io::Error::other)?;
-            if let Some((seq, data)) = row {
-                self.seq = seq;
-                self.bytes = std::io::Cursor::new(format!("id: {seq}\ndata: {data}\n\n").into_bytes());
+            if self.merged && self.members_changed()? {
+                let dirs: Vec<&String> = self.streams.iter().map(|s| &s.0).collect();
+                self.bytes = std::io::Cursor::new(format!("id: {}\ndata: {}\n\n", self.id(), json!({"projects":dirs})).into_bytes());
                 return self.bytes.read(out);
+            }
+            for i in 0..self.streams.len() {
+                let (dir, root, seq) = &self.streams[i];
+                let db = Connection::open(root.join(".solace/store.db")).map_err(std::io::Error::other)?;
+                let row = db
+                    .query_row("SELECT seq,data FROM board_events WHERE seq>? ORDER BY seq LIMIT 1", [*seq], |r| {
+                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                    })
+                    .optional()
+                    .map_err(std::io::Error::other)?;
+                if let Some((seq, data)) = row {
+                    let dir = dir.clone();
+                    self.streams[i].2 = seq;
+                    let text = if self.merged {
+                        let mut v: Value = serde_json::from_str(&data).map_err(std::io::Error::other)?;
+                        v["project"] = json!(dir);
+                        format!("id: {}\ndata: {v}\n\n", self.id())
+                    } else {
+                        format!("id: {seq}\ndata: {data}\n\n")
+                    };
+                    self.bytes = std::io::Cursor::new(text.into_bytes());
+                    return self.bytes.read(out);
+                }
             }
             if !self.caught_up {
                 self.caught_up = true;

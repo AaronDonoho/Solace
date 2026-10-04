@@ -78,7 +78,8 @@ def sh(cmd, cwd, **kw):
 
 def prepare(task: Path, arm: str = "files") -> Path:
     """Fresh git copy of the pilot with the task's setup applied and committed."""
-    work = Path(tempfile.mkdtemp(prefix=f"solace-{task.name}-"))
+    # Migration and its backup stay beside work, inside this task's private folder.
+    work = Path(tempfile.mkdtemp(prefix=f"solace-{task.name}-")) / "work"
     project = (task / "project").read_text().strip() if (task / "project").exists() else "pilot"
     shutil.copytree(ROOT / project, work, dirs_exist_ok=True, ignore=shutil.ignore_patterns("dev", "prod"))
     git = ["git", "-c", "user.email=bench@solace", "-c", "user.name=bench"]
@@ -116,7 +117,7 @@ def validate(tasks):
         good = before["visible_pass"] and not before["hidden_pass"] and after["visible_pass"] and after["hidden_pass"]
         ok &= good
         print(f"{'ok  ' if good else 'FAIL'} {task.name}  before={before}  after={after}")
-        shutil.rmtree(work)
+        shutil.rmtree(work.parent)
     return ok
 
 
@@ -387,9 +388,10 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort=None, run_numbe
         name = f"{task.name}.{rep}"
         work = prepare(task, arm)
         if arm == "solace":
-            r = sh(["solace", "import"], work, env=env)
-            if r.returncode:
-                sys.exit(f"{task.name}: solace import failed\n{r.stdout}")
+            for args in [["migrate", "--yes", "--confirm-paths"], ["migrate", "--adopt", "--yes"]]:
+                r = sh(["solace", *args], work, env=env)
+                if r.returncode:
+                    sys.exit(f"{task.name}: solace {' '.join(args)} failed\n{r.stdout}{r.stderr}")
             (work / ".git" / "info" / "exclude").write_text(".solace/\n")
             if (task / "work.md").exists():
                 sh(["solace", "work", "add"], work, env=env, input=(task / "work.md").read_text())
@@ -455,7 +457,7 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort=None, run_numbe
             f.write(json.dumps(row) + "\n")
         print(f"{'PASS' if row['hidden_pass'] else 'fail'} {name}  tokens={row['tokens']} "
               f"turns_to_edit={row['turns_to_first_edit']} before_edit={row['tokens_before_first_edit']}")
-        shutil.rmtree(work)
+        shutil.rmtree(work.parent)
     print(f"results: {run_dir}")
 
 

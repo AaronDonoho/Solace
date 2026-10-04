@@ -39,6 +39,8 @@ The protocol is the agent's environment. It has few, rich commands that return c
 
 Every command that takes a name resolves it per Spec 1 §4 and fails with the candidate list.
 
+**Other projects (D-57).** `view`, `inspect`, `refs`, `find`, `files` and `read` take `--project <folder>` to read another project under the same Solace root (Spec 15 §4, Workspaces): the folder as the root lists it, `.` for the root's own project. The read uses that project's store and file categories, takes none of its locks, and changes nothing in it. Any other command with `--project`, or a folder that isn't one of the root's projects, is refused with `E6007`. A task changes only its own project. When the root has other projects, `session start` names them after the work records.
+
 ## 3. Context bundle
 
 `inspect <name> --context` returns one document with these sections, always in this order, omitting empty ones:
@@ -109,4 +111,5 @@ Over Gleam, the fast check calls `gleam check` on a generated project materializ
 - A4. A work record opened in one session appears in the next session's `session start`.
 - A5. A single type error in a type used by 5 functions yields one root diagnostic with `caused by above: 5 more`, not 6 separate ones.
 - A6. The latency budgets in §7 are met on the pilot, measured in CI.
+- A8. In a root with projects `a` and `b`, an agent working in `a` reads `b` with `view`, `find` and `read … --project b` while an agent works in `b`; `submit --project b` is refused with `E6007`, and `b`'s source is unchanged (`tests/workspace_acceptance.py`).
 - A7. Changing a signature records the new revision and lists its callers as broken dependents; `commit` is refused with `E5103` until they are fixed.

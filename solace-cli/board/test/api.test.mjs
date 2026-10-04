@@ -14,6 +14,7 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     const path = new URL(req.url).pathname;
     requests.push([req.method, path]);
     if (path === '/events') return new Response(new ReadableStream({ start(c) { events = c; c.enqueue(new TextEncoder().encode('event: ready\ndata: {}\n\n')); } }), { headers: { 'Content-Type': 'text/event-stream' } });
+    if (path === '/projects') return Response.json({ workspace: false, projects: [{ dir: '', name: 'fixture', base: '' }], found: [] });
     if (req.method === 'GET') return Response.json(path === '/graph' ? { review: { summary: '1 effects added, 0 signature changed, 0 test unfinished' } } : path === '/workflow' ? workflow : path === '/models' ? [{ id: 'fake', label: 'Fake' }] : path === '/tasks' ? [task] : task);
     const body = await req.json();
     if (path.endsWith('/actions')) {
@@ -63,7 +64,7 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
   try {
     let effect; [model, effect] = board.init(); execute(effect);
     await until(() => model.model === 'fake' && to_string(board.view(model)).includes('Initial') && events);
-    dispatch(new board.Select('t1'));
+    dispatch(new board.Select('', 't1'));
     await until(() => to_string(board.view(model)).includes('Questions'));
     dispatch(new board.NewTask()); dispatch(new board.DraftTitle('New task')); dispatch(new board.DraftBody('Human description')); dispatch(new board.Create());
     await until(() => task.title === 'New task' && !model.creating && model.draft_title === '');
@@ -99,10 +100,10 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     workflow.columns.push({ id: 'planning', label: 'Custom planning', actions: ['review'], final: false });
     events.enqueue(new TextEncoder().encode('id: 2\ndata: ' + JSON.stringify({ workflow }) + '\n\n'));
     await until(() => to_string(board.view(model)).includes('Custom planning'));
-    for (const pair of [['GET', '/workflow'], ['GET', '/tasks'], ['GET', '/tasks/t1'], ['GET', '/models'], ['GET', '/events'], ['POST', '/tasks'], ['PATCH', '/tasks/t1'], ['POST', '/tasks/t1/notes'], ['POST', '/tasks/t1/actions'], ['POST', '/tasks/t1/questions/q1']]) expect(requests).toContainEqual(pair);
+    for (const pair of [['GET', '/projects'], ['GET', '/workflow'], ['GET', '/tasks'], ['GET', '/tasks/t1'], ['GET', '/models'], ['GET', '/events'], ['POST', '/tasks'], ['PATCH', '/tasks/t1'], ['POST', '/tasks/t1/notes'], ['POST', '/tasks/t1/actions'], ['POST', '/tasks/t1/questions/q1']]) expect(requests).toContainEqual(pair);
     dispatch(new board.Tab('runs')); expect(to_string(board.view(model))).toContain('/logs/r1');
     task.changes = [{ name: 'app.main' }];
-    dispatch(new board.Select('t1')); dispatch(new board.Tab('changes'));
+    dispatch(new board.Select('', 't1')); dispatch(new board.Tab('changes'));
     await until(() => to_string(board.view(model)).includes('1 effects added'));
     expect(to_string(board.view(model))).toContain('/view?task=t1');
     expect(requests).toContainEqual(['GET', '/graph']);
@@ -117,6 +118,8 @@ test('markdown renders only images uploaded to the board, and http(s) links', as
   const { markdown } = await import('../src/api.mjs');
   const url = '/tasks/t-1/files/0123456789abcdef.png';
   expect(markdown(`![shot](${url})`)).toBe(`<p><img alt="shot" src="${url}"></p>`);
+  // A workspace project's images load through its prefix; the stored URL stays project-relative.
+  expect(markdown(`![shot](${url})`, '/p/bench%2Fpilot')).toBe(`<p><img alt="shot" src="/p/bench%2Fpilot${url}"></p>`);
   for (const bad of ['![x](https://evil/x.png)', '![x](javascript:alert(1))', '![x](/tasks/t/files/../../solace.toml)'])
     expect(markdown(bad)).not.toContain('<img');
   expect(markdown('![x" onerror="alert(1)](' + url + ')')).not.toContain('" onerror="');

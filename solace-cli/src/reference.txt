@@ -67,6 +67,10 @@ Reading
   session start [--task]        this overview again (--task: for the task in `text`)
   session start [--scope <module>...]
                                 every symbol, and open work records with context
+  ... --project <folder>        view, inspect, refs, find, files and read in
+                                another project under the same Solace root
+                                (session start lists them); changes stay in
+                                this project
 Replies have a size limit: a signature is printed once per reply, and a reply
 that would be larger says what it left out and the command that shows it.
 
@@ -145,7 +149,20 @@ are read-only: submit, delete, write, remove, format and run are refused.
                                 review; an investigation's report stays on the task
 
 Host commands (humans only, refused in a run)
-  serve [--port N]              local task board (default 3030)
+  create <name> [--javascript] [--yes]
+                                create a new Gleam project below this folder;
+                                asks for confirmation unless --yes
+  migrate [--project DIR]... [--smoke CMD]... [--confirm-paths] [--yes]
+                                copy existing projects to ../solace-migration
+                                and check them; stops first if anything in the
+                                copy could reach the original, until
+                                --confirm-paths; --adopt --yes swaps the copy
+                                into place and keeps <name>.pre-solace
+  migrate --report|--recheck|--confirm-paths|--abandon|--undo [--yes]
+                                inspect, recheck, continue, abandon or undo
+                                migration
+  serve [--port N]              local task board (default 3030); in a workspace
+                                folder, every project's
   agent-config codex|claude <dir>
                                 isolated settings and launch.json for a runner
 From a shell, `text` is stdin, `old` is `--old <text>` and each option is

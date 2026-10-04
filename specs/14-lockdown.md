@@ -14,7 +14,7 @@ Every file under the project root is in exactly one category, named for what Sol
 | --- | --- | --- |
 | 1 | Source the store holds as symbols (Gleam: `src/**/*.gleam`, `test/**/*.gleam`) | graph |
 | 2 | `solace.toml` (§2) and `AGENTS.md` (D-45) | protected |
-| 3 | `.solace/`: the store, the task board's data (Spec 15), and Solace's working files | internal: no agent access at all (`E6006`) |
+| 3 | `.solace/`: the store, the task board's data (Spec 15), and Solace's working files; and every file of another Solace project nested in this one (a folder below the root with its own `.solace/store.db`, D-57) | internal: no agent access at all (`E6006`) |
 | 4 | `.git/`, the target's build and dependency output (Gleam: `build/`, `manifest.toml`), anything `.gitignore` ignores | unwatched |
 | 5 | A path registered in `unwatched` (§2) | unwatched |
 | 6 | A file over `watch_limit` or binary (not UTF-8, or containing a NUL byte) | unwatched, marked `over limit` or `binary` |
@@ -25,6 +25,8 @@ Every file under the project root is in exactly one category, named for what Sol
 ## 2. Project settings
 
 `solace.toml` in the project root, versioned with the project. Import creates a starter file if absent and never overwrites existing settings (D-26). **Humans write it**, through the UX or an editor. Agents can read it (`read solace.toml`) but not write it. In a work run, `write solace.toml` proposes the change for a human to approve on the task board (D-38, Spec 15 §6). `unwatched` patterns classify files; they are not a file-write denylist. The keys `resources`, `ignore` and `resource_limit` were removed by D-52 and make the file invalid (`E6020`), with a message saying what to do.
+
+A root project's `solace.toml` may also list `projects`, the folders below it that share its board (D-57, Spec 15 §4). Only humans change that list, from the board or with `solace create`: an agent's proposed `solace.toml` that changes `projects` is refused (`E6020`).
 
 `AGENTS.md` in the project root holds the project's instructions for agents and is shown first in `session start` (Spec 3). It follows the same rule as `solace.toml`: humans write it, agents read it, and a work run's `write AGENTS.md` is a proposal the human approves (D-45).
 
@@ -86,7 +88,7 @@ The board's agent runner uses this configuration. `bench.py` moves to it too, so
 
 ## 6. Diagnostics
 
-The range `E60xx` is files, settings and commands, in Spec 3 §6's format. `E6001`–`E6006` cover files (§1, §3), `E6010`–`E6012` commands (§4), and `E6020` is an invalid `solace.toml`, reported by every command until it is fixed.
+The range `E60xx` is files, settings and commands, in Spec 3 §6's format. `E6001`–`E6006` cover files (§1, §3), `E6007` a read in another project refused (Spec 3 §2, D-57), `E6010`–`E6012` commands (§4), and `E6020` is an invalid `solace.toml`, reported by every command until it is fixed.
 
 ## 7. Out of scope
 
