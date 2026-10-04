@@ -23,7 +23,7 @@ test('contract view renders visible SVG nodes and uses the view API', async () =
     return new Response(JSON.stringify({ state: 'running' }));
   };
   let source;
-  globalThis.EventSource = class { constructor(path) { requests.push(['GET', path]); source = this; } };
+  globalThis.EventSource = class { constructor(path) { requests.push(['GET', path]); source = this; } addEventListener() {} };
   let model;
   const dispatch = msg => { let effect; [model, effect] = view.update(model, msg); perform(effect, dispatch, () => {}, () => {}, () => {}, () => {}, () => {}, () => {}); };
   try {

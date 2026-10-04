@@ -89,11 +89,13 @@ class Board(unittest.TestCase):
         c=http.client.HTTPConnection('127.0.0.1',self.port,timeout=8);c.request('GET','/events',headers={'Last-Event-ID':str(seq)})
         r=c.getresponse();self.clients.append(c);return r
     def next_event(self,r):
-        seq=None
+        seq=None;ready=False
         while True:
             line=r.readline().decode().strip()
             if line.startswith('id:'):seq=int(line[3:])
-            if line.startswith('data:'):return seq,json.loads(line[5:])
+            if line=='event: ready':ready=True
+            elif line.startswith('data:') and ready:ready=False
+            elif line.startswith('data:'):return seq,json.loads(line[5:])
 
     def test_author_conversations_reviews_handoffs_and_cleanup(self):
         for model in ['native', 'native-claude']:
@@ -531,6 +533,9 @@ class Board(unittest.TestCase):
         self.assertIsNone(self.action(asked,'cancel')['attention'])
 
     def test_a10_events_reconnect(self):
+        stream=self.stream()
+        while stream.readline()!=b'event: ready\n':pass  # after the replay, once
+        self.assertEqual(stream.readline(),b'data: {}\n')
         stream=self.stream();seq,e=self.next_event(stream);self.assertIn('workflow',e)
         t=self.create();seq,e=self.next_event(stream);self.assertEqual(e['task']['id'],t['id'])
         self.api('POST','/tasks/'+t['id']+'/notes',{'text':'first'});self.api('POST','/tasks/'+t['id']+'/notes',{'text':'second'})

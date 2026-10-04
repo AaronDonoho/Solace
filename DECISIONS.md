@@ -407,3 +407,16 @@ Format: question, answer, rationale (and a check where one was run); a pending r
   6. **Areas fold.** When a project has more than 12 entry points, the drawing's overview shows one box per area instead, in a grid, each saying how many ways in it has and what it reads or changes (no fan of connectors). Expanding an area draws its entry points in a frame beside it.
   7. **No repeated prefixes.** A label every item in a list or on the sheet would share is shown once as a heading, not on each item: no kind on each box, no `kind ·` on each connection or search result.
 - **Rationale:** a human starts from what the system does and finds the drawing through it, not the other way round. Requests, areas and module docs are already in the code; state threaded through many modules is what a pure program does to the world. Missing descriptions are agents' work (D-20), so the view asks for them instead of showing "No summary recorded".
+
+## D-56 Board editors, approval mark and notices — decided
+- **Question:** Aaron: the new task form's Cancel duplicates *Close new task*; descriptions should get the note editor's markdown support; the Title label keeps the boxes from aligning; approval should show on the card; the review summary belongs with the changes; the board should tell the human when a run ends or a question is asked.
+- **Answer:** (Aaron's request, 2026-10-04.)
+  1. The new task form has no Cancel; *Close new task* closes it and keeps the draft.
+  2. The new task description and the Details tab's edit form use the same markdown editor as notes (Write/Preview, formatting tools; images once the task exists). The edit form keeps Cancel.
+  3. Title is a placeholder, not a label, so it lines up with the editor.
+  4. A stamped card shows ✓ (the stamp names on hover); the Details tab no longer lists stamps.
+  5. The review summary and the contract view link are on the Changes tab, not Details.
+  6. A live update that ends a run or asks a new question shows a dismissible notice in the board's corner.
+  8. Notices come only from changes after the page has caught up. `/events` still replays everything to a new connection, then sends one `ready` event (Spec 15); the board applies the replay in one step, so only its end result shows, and raises no notices for it. A notice has a bold heading naming what happened and the task ("Reviewed Fix checkout", "Question on Fix checkout"), the detail under it, and a large close icon at its top right.
+  7. Buttons, titles, labels and other interface text can't be selected; only what a human may copy (editors, code and logs, note and description text) can. Nothing is draggable except text inside an editor.
+- **Rationale:** one editor everywhere a human writes markdown; status a human scans for (approved, run ended, question waiting) is visible without opening a task.

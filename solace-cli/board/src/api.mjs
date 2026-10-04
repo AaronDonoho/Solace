@@ -5,9 +5,10 @@ export function request(path, method, body, receive) {
     .then(async response => receive(await response.text()))
     .catch(error => receive(JSON.stringify({ message: String(error) })));
 }
-export function events(receive) {
+export function events(receive, ready = () => {}) {
   const source = new EventSource('/events');
   source.onmessage = event => receive(event.data);
+  source.addEventListener('ready', () => ready());
   // Native EventSource reconnects with Last-Event-ID.
   source.onerror = () => {};
 }
@@ -54,18 +55,18 @@ export function store(key, value) {
   try { value ? localStorage.setItem(key, value) : localStorage.removeItem(key); } catch {}
 }
 
-// Wraps the note editor's selection (or appends, without one).
-export function wrap(text, before, after) {
-  const el = globalThis.document?.getElementById('note-text');
+// Wraps the markdown editor `id`'s selection (or appends, without one).
+export function wrap(id, text, before, after) {
+  const el = globalThis.document?.getElementById(id);
   const start = el?.selectionStart ?? text.length, end = el?.selectionEnd ?? text.length;
   return text.slice(0, start) + before + text.slice(start, end) + after + text.slice(end);
 }
 
-// Images pasted, dropped or picked into the note editor are uploaded; `insert`
-// gets each one's markdown.
+// Images pasted, dropped or picked into a markdown editor are uploaded to its
+// task; `insert` gets the editor's id and each image's markdown.
 export function images(insert, fail) {
   if (!globalThis.document) return;
-  const take = (event, files, task) => {
+  const take = (event, files, task, editor) => {
     const list = [...(files || [])].filter(f => f.type.startsWith('image/'));
     if (!list.length || !task) return;
     event.preventDefault();
@@ -75,18 +76,18 @@ export function images(insert, fail) {
           const v = await response.json();
           if (!v.url) return fail(v.message || 'Image upload failed');
           const alt = file.name.replace(/\.[^.]*$/, '').replace(/[[\]]/g, '') || 'image';
-          insert(`![${alt}](${v.url})`);
+          insert(editor, `![${alt}](${v.url})`);
         })
         .catch(error => fail(String(error)));
     }
   };
-  const inEditor = e => e.target?.id === 'note-text';
-  document.addEventListener('paste', e => inEditor(e) && take(e, e.clipboardData?.files, e.target.dataset.task));
+  const inEditor = e => e.target?.classList?.contains('md-editor') && e.target.dataset.task;
+  document.addEventListener('paste', e => inEditor(e) && take(e, e.clipboardData?.files, e.target.dataset.task, e.target.id));
   document.addEventListener('dragover', e => inEditor(e) && e.preventDefault());
-  document.addEventListener('drop', e => inEditor(e) && take(e, e.dataTransfer?.files, e.target.dataset.task));
+  document.addEventListener('drop', e => inEditor(e) && take(e, e.dataTransfer?.files, e.target.dataset.task, e.target.id));
   document.addEventListener('change', e => {
-    if (e.target?.id !== 'note-image') return;
-    take(e, e.target.files, e.target.dataset.task);
+    if (!e.target?.classList?.contains('md-image')) return;
+    take(e, e.target.files, e.target.dataset.task, e.target.dataset.for);
     e.target.value = '';
   });
 }

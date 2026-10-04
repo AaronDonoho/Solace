@@ -123,7 +123,7 @@ Two rules hold for every workflow:
 | `DELETE /tasks/{id}/notes/{i}` | Deletes the note at position `i` (0 is the oldest), whoever wrote it. Notes are only ever appended, so a position stays valid until a note before it is deleted |
 | `POST /tasks/{id}/questions/{qid}` `{option?, text?}` | Saves the answer and continues the same waiting run once all questions are answered, unless paused; uses its allowed workflow continuation (§6). For a settings question, `Approve` writes `proposed` if `solace.toml` still equals `base` and is valid; otherwise the answer records that it was not applied |
 | `GET /models` | The models this Solace install knows, each with `agent`, `efforts` (the efforts an action may choose; empty for custom runners), `available` and, when unavailable, `reason` (§6) |
-| `GET /events` | Server-sent events: `{task}` in full after every change, and `{workflow}` after a configuration change, in order. A client that reconnects with `Last-Event-ID` gets what it missed |
+| `GET /events` | Server-sent events: `{task}` in full after every change, and `{workflow}` after a configuration change, in order. A client that reconnects with `Last-Event-ID` gets what it missed; a new one gets every change so far. Once a connection has sent what was missed, it sends one `ready` event (`event: ready`), so a client can apply the replay at once and treat only later events as news |
 
 A `text` sent with an action is added as a human note before the action runs.
 
@@ -191,7 +191,7 @@ Several projects on one server, several people, remote access and authentication
 - A12. `/models` includes the presets and reports a model whose program is missing as unavailable, with a reason. Assigning it returns `E7011` and leaves the task in its column. A failed run and an agent's question each set `attention`, and the next action clears it.
 - A13. A Codex log and a Claude Code log each give a transcript with the agent's messages in order and each tool call's command, output and status. A run that exits without finishing sets `attention` with the agent's last message rather than raw log lines. The default board shows which tasks have an agent working, formats notes and messages as markdown with any HTML escaped, and refreshes a followed run's transcript until it ends.
 - A9. A review run's `write` or `submit` returns `E7010`, and the task stays in its column. So does an investigate run's. An investigate run's question keeps the task in planning, and `investigate` with an answer continues the same run. Its `task done` report appears on the task, which stays in planning and can be completed from there.
-- A10. `/events` delivers every change in order, and a reconnect with `Last-Event-ID` returns the missed ones.
+- A10. `/events` delivers every change in order, and a reconnect with `Last-Event-ID` returns the missed ones. A connection sends `ready` once it has sent what was missed.
 - A11. The default board's only connection to Solace is this API: it runs against a stub server implementing §4 and passes its own tests there. Every file command on `.solace/board/` returns `E6006`.
 
 - A14. Reassigning after review retains existing symbol and file edits and before-state records, passes review feedback and human instructions to the new work run, and clears approval. The revised result requires fresh approval, and cancelling restores the state before the original work run.

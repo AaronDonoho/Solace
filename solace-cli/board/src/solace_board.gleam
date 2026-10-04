@@ -13,6 +13,7 @@ import lustre/attribute as a
 import lustre/effect.{type Effect}
 import lustre/element.{type Element}
 import lustre/element/html as h
+import lustre/element/svg
 import lustre/event as e
 
 @external(javascript, "./api.mjs", "request")
@@ -24,7 +25,7 @@ fn request(
 ) -> Nil
 
 @external(javascript, "./api.mjs", "events")
-fn events(receive: fn(String) -> Nil) -> Nil
+fn events(receive: fn(String) -> Nil, ready: fn() -> Nil) -> Nil
 
 @external(javascript, "./api.mjs", "after")
 fn after(ms: Int, callback: fn() -> Nil) -> Nil
@@ -45,10 +46,10 @@ fn load(key: String) -> String
 fn store(key: String, value: String) -> Nil
 
 @external(javascript, "./api.mjs", "wrap")
-fn wrap(text: String, before: String, after: String) -> String
+fn wrap(id: String, text: String, before: String, after: String) -> String
 
 @external(javascript, "./api.mjs", "images")
-fn images(insert: fn(String) -> Nil, fail: fn(String) -> Nil) -> Nil
+fn images(insert: fn(String, String) -> Nil, fail: fn(String) -> Nil) -> Nil
 
 pub type Column {
   Column(id: String, label: String, actions: List(String), final: Bool)
@@ -129,6 +130,11 @@ pub type Agent {
   )
 }
 
+/// A bold heading, such as "Reviewed Fix checkout", and what happened.
+pub type Notice {
+  Notice(heading: String, text: String)
+}
+
 pub type Workflow {
   Workflow(columns: List(Column))
 }
@@ -154,7 +160,10 @@ pub type Model {
     draft_body: String,
     editing: Bool,
     tab: String,
-    preview: Bool,
+    previews: List(String),
+    notices: List(Notice),
+    caught_up: Bool,
+    replay: List(String),
   )
 }
 
@@ -165,6 +174,7 @@ pub type Msg {
   TaskLoaded(String)
   Changed(String)
   Live(String)
+  CaughtUp
   Select(String)
   AgentSelected(String)
   EffortSelected(String)
@@ -179,8 +189,9 @@ pub type Msg {
   Created(String)
   Edit(Bool)
   Tab(String)
-  Preview(Bool)
-  Format(String, String)
+  Preview(String, Bool)
+  Format(String, String, String)
+  Dismiss(Notice)
   Failed(String)
   Save
   Action(String)
@@ -250,15 +261,20 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       draft_body: draft_body,
       editing: False,
       tab: "details",
-      preview: False,
+      previews: [],
+      notices: [],
+      caught_up: False,
+      replay: [],
     ),
     effect.batch([
       get("/workflow", WorkflowLoaded),
       get("/tasks", TasksLoaded),
       get("/models", ModelsLoaded),
-      effect.from(fn(send) { events(fn(text) { send(Live(text)) }) }),
       effect.from(fn(send) {
-        images(fn(image) { send(Format(image, "")) }, fn(text) {
+        events(fn(text) { send(Live(text)) }, fn() { send(CaughtUp) })
+      }),
+      effect.from(fn(send) {
+        images(fn(id, image) { send(Format(id, image, "")) }, fn(text) {
           send(Failed(text))
         })
       }),
@@ -337,7 +353,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             text: "",
             error: "",
             editing: False,
-            preview: False,
+            previews: [],
           ),
           effect.batch([
             get("/tasks", TasksLoaded),
@@ -349,25 +365,21 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
-    Live(text) ->
-      case json.parse(text, decode.at(["task"], task_decoder())) {
-        Ok(task) -> {
-          let tasks = [
-            task,
-            ..list.filter(model.tasks, fn(t) { t.id != task.id })
-          ]
-          let selected = case model.selected {
-            Some(t) if t.id == task.id -> Some(task)
-            other -> other
-          }
-          #(Model(..model, tasks: tasks, selected: selected), effect.none())
-        }
-        Error(_) ->
-          case json.parse(text, decode.at(["workflow"], workflow_decoder())) {
-            Ok(w) -> #(Model(..model, workflow: w), effect.none())
-            Error(_) -> #(model, effect.none())
-          }
-      }
+    // What a new connection missed is replayed: only its end result shows,
+    // and it raises no notices.
+    Live(text) if !model.caught_up -> #(
+      Model(..model, replay: [text, ..model.replay]),
+      effect.none(),
+    )
+    Live(text) -> #(live(model, text, True), effect.none())
+    CaughtUp -> #(
+      list.fold(
+        list.reverse(model.replay),
+        Model(..model, caught_up: True, replay: []),
+        fn(m, text) { live(m, text, False) },
+      ),
+      effect.none(),
+    )
     ReviewLoaded(text) -> {
       let summary =
         json.parse(text, decode.at(["review", "summary"], decode.string))
@@ -382,7 +394,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         entries: [],
         review_summary: "",
         editing: False,
-        preview: False,
+        previews: [],
       ),
       get("/tasks/" <> id, TaskLoaded),
     )
@@ -471,10 +483,23 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         None -> #(model, effect.none())
       }
     Tab(tab) -> #(Model(..model, tab: tab), effect.none())
-    Preview(preview) -> #(Model(..model, preview: preview), effect.none())
-    Format(before, after) -> #(
-      model,
-      effect.from(fn(send) { send(Text(wrap(model.text, before, after))) }),
+    Preview(id, on) -> #(
+      Model(..model, previews: case on {
+        True -> [id, ..model.previews]
+        False -> list.filter(model.previews, fn(p) { p != id })
+      }),
+      effect.none(),
+    )
+    Format(id, before, after) -> {
+      let #(text, msg) = field(model, id)
+      #(
+        model,
+        effect.from(fn(send) { send(msg(wrap(id, text, before, after))) }),
+      )
+    }
+    Dismiss(notice) -> #(
+      Model(..model, notices: list.filter(model.notices, fn(n) { n != notice })),
+      effect.none(),
     )
     Failed(message) -> #(Model(..model, error: message), effect.none())
     Save ->
@@ -577,6 +602,74 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           )
         }
       }
+  }
+}
+
+/// Applies one `/events` message.
+fn live(model: Model, text: String, notify: Bool) -> Model {
+  case json.parse(text, decode.at(["task"], task_decoder())) {
+    Ok(task) -> {
+      let tasks = [task, ..list.filter(model.tasks, fn(t) { t.id != task.id })]
+      let selected = case model.selected {
+        Some(t) if t.id == task.id -> Some(task)
+        other -> other
+      }
+      let new = case list.find(model.tasks, fn(t) { t.id == task.id }), notify {
+        Ok(old), True -> notices(old, task)
+        _, _ -> []
+      }
+      Model(
+        ..model,
+        tasks: tasks,
+        selected: selected,
+        notices: list.append(model.notices, new),
+      )
+    }
+    Error(_) ->
+      case json.parse(text, decode.at(["workflow"], workflow_decoder())) {
+        Ok(w) -> Model(..model, workflow: w)
+        Error(_) -> model
+      }
+  }
+}
+
+/// What the human should hear about in a live update: a run that ended or a
+/// question an agent asked.
+pub fn notices(old: Task, new: Task) -> List(Notice) {
+  let ended =
+    list.filter(new.runs, fn(r) {
+      r.state == "ended"
+      && list.any(old.runs, fn(o) { o.id == r.id && o.state != "ended" })
+    })
+    |> list.map(fn(r) {
+      case r.outcome {
+        "finished" ->
+          Notice("Finished " <> new.title, "The agent finished its work.")
+        "reported" ->
+          Notice("Investigated " <> new.title, "The agent's report is ready.")
+        "reviewed" -> Notice("Reviewed " <> new.title, "The review is ready.")
+        "" -> Notice("Stopped " <> new.title, "The " <> r.kind <> " run ended.")
+        outcome ->
+          Notice(
+            "Stopped " <> new.title,
+            "The " <> r.kind <> " run ended: " <> outcome <> ".",
+          )
+      }
+    })
+  let asked =
+    list.filter(new.questions, fn(q) {
+      q.answer == "" && !list.any(old.questions, fn(o) { o.id == q.id })
+    })
+    |> list.map(fn(q) { Notice("Question on " <> new.title, q.text) })
+  list.append(ended, asked)
+}
+
+/// The text an editor shows, and the message that changes it.
+fn field(model: Model, id: String) -> #(String, fn(String) -> Msg) {
+  case id {
+    "draft-body" -> #(model.draft_body, DraftBody)
+    "edit-body" -> #(model.body, Body)
+    _ -> #(model.text, Text)
   }
 }
 
@@ -785,23 +878,39 @@ pub fn view(model: Model) -> Element(Msg) {
       ]),
     ]),
     h.p([a.role("alert")], [h.text(model.error)]),
+    h.div(
+      [a.class("notices")],
+      list.map(model.notices, fn(n) {
+        h.div([a.class("notice"), a.role("alert")], [
+          h.strong([], [h.text(n.heading)]),
+          h.p([], [h.text(n.text)]),
+          h.button(
+            [
+              a.class("close"),
+              a.attribute("aria-label", "Dismiss"),
+              a.title("Dismiss"),
+              e.on_click(Dismiss(n)),
+            ],
+            [
+              svg.svg(
+                [
+                  a.attribute("viewBox", "0 0 24 24"),
+                  a.attribute("aria-hidden", "true"),
+                ],
+                [svg.path([a.attribute("d", "M6 6l12 12M18 6L6 18")])],
+              ),
+            ],
+          ),
+        ])
+      }),
+    ),
     case model.creating {
       False -> h.text("")
       True ->
         h.section([a.class("editor")], [
-          h.label([], [
-            h.text("Title"),
-            h.input([a.value(model.draft_title), e.on_input(DraftTitle)]),
-          ]),
-          h.label([], [
-            h.text("Description"),
-            h.textarea(
-              [a.value(model.draft_body), e.on_input(DraftBody)],
-              model.draft_body,
-            ),
-          ]),
+          title_input(model.draft_title, DraftTitle),
+          editor(model, "draft-body", "", "Description"),
           button("Create task", Create),
-          button("Cancel", NewTask),
         ])
     },
     h.div(
@@ -824,6 +933,19 @@ pub fn view(model: Model) -> Element(Msg) {
                 "" -> h.text("")
                 _ ->
                   h.strong([a.class("attention")], [h.text("Needs attention ")])
+              },
+              case t.stamps {
+                [] -> h.text("")
+                stamps ->
+                  h.span(
+                    [a.class("stamp"), a.title(string.join(stamps, ", "))],
+                    [
+                      h.text("✓"),
+                      h.span([a.class("sr-only")], [
+                        h.text(" " <> string.join(stamps, ", ") <> ": "),
+                      ]),
+                    ],
+                  )
               },
               h.text(t.title),
               status_badge(t),
@@ -897,6 +1019,14 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
       "questions" -> questions_view(t)
       "runs" -> list.map(list.reverse(t.runs), fn(r) { run_view(model, r) })
       "changes" -> [
+        case t.changes {
+          [] -> h.text("")
+          _ ->
+            h.p([], [
+              h.text(model.review_summary <> " "),
+              h.a([a.href("/view?task=" <> t.id)], [h.text("Contract view")]),
+            ])
+        },
         h.ul([], list.map(t.changes, fn(c) { h.li([], [h.text(c)]) })),
       ]
       _ -> details_view(model, t)
@@ -907,14 +1037,8 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
 fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
   case model.editing {
     True -> [
-      h.label([], [
-        h.text("Title"),
-        h.input([a.value(model.title), e.on_input(Title)]),
-      ]),
-      h.label([], [
-        h.text("Description"),
-        h.textarea([a.value(model.body), e.on_input(Body)], model.body),
-      ]),
+      title_input(model.title, Title),
+      editor(model, "edit-body", t.id, "Description"),
       h.label([], [
         h.text("Rank (lower comes first)"),
         h.input([a.type_("number"), a.value(model.rank), e.on_input(Rank)]),
@@ -924,23 +1048,11 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
     ]
     False -> [
       md(t.body),
-      case t.changes {
-        [] -> h.text("")
-        _ ->
-          h.p([], [
-            h.text(model.review_summary <> " "),
-            h.a([a.href("/view?task=" <> t.id)], [h.text("Contract view")]),
-          ])
-      },
       h.div(
         [],
         list.map(t.links, fn(link) {
           h.a([a.href(link.url)], [h.text(link.name)])
         }),
-      ),
-      h.p(
-        [],
-        list.map(t.stamps, fn(s) { h.span([], [h.text("Stamp: " <> s <> " ")]) }),
       ),
       button("Edit", Edit(True)),
     ]
@@ -985,12 +1097,35 @@ fn agent_choice(model: Model) -> Element(Msg) {
   ])
 }
 
-/// The note, answer and instructions editor. Images pasted, dropped or picked
-/// here are uploaded by `api.mjs` and inserted as markdown.
+fn title_input(value: String, msg: fn(String) -> Msg) -> Element(Msg) {
+  h.input([
+    a.class("title"),
+    a.placeholder("Title"),
+    a.attribute("aria-label", "Title"),
+    a.value(value),
+    e.on_input(msg),
+  ])
+}
+
 fn composer(model: Model, t: Task) -> Element(Msg) {
+  editor(model, "note-text", t.id, "Note, answer or instructions")
+}
+
+/// A markdown editor with Write/Preview and formatting tools; `id` names
+/// what it edits (see `field`). Images pasted, dropped or picked here are uploaded by
+/// `api.mjs` to `task` and inserted as markdown. A task not yet created has no
+/// image tool.
+fn editor(
+  model: Model,
+  id: String,
+  task: String,
+  label: String,
+) -> Element(Msg) {
+  let #(text, msg) = field(model, id)
+  let preview = list.contains(model.previews, id)
   let tool = fn(label, title, before, after) {
     h.button(
-      [a.type_("button"), a.title(title), e.on_click(Format(before, after))],
+      [a.type_("button"), a.title(title), e.on_click(Format(id, before, after))],
       [h.text(label)],
     )
   }
@@ -999,16 +1134,16 @@ fn composer(model: Model, t: Task) -> Element(Msg) {
       h.button(
         [
           a.type_("button"),
-          a.aria_pressed(bool_text(!model.preview)),
-          e.on_click(Preview(False)),
+          a.aria_pressed(bool_text(!preview)),
+          e.on_click(Preview(id, False)),
         ],
         [h.text("Write")],
       ),
       h.button(
         [
           a.type_("button"),
-          a.aria_pressed(bool_text(model.preview)),
-          e.on_click(Preview(True)),
+          a.aria_pressed(bool_text(preview)),
+          e.on_click(Preview(id, True)),
         ],
         [h.text("Preview")],
       ),
@@ -1017,21 +1152,25 @@ fn composer(model: Model, t: Task) -> Element(Msg) {
       tool("`code`", "Code", "`", "`"),
       tool("• List", "List", "\n- ", ""),
       tool("Link", "Link", "[", "](https://)"),
-      h.label([a.class("button"), a.title("Add an image")], [
-        h.text("Image"),
-        h.input([
-          a.type_("file"),
-          a.id("note-image"),
-          a.attribute("data-task", t.id),
-          a.accept(["image/png", "image/jpeg", "image/gif", "image/webp"]),
-          a.class("sr-only"),
-        ]),
-      ]),
+      case task {
+        "" -> h.text("")
+        _ ->
+          h.label([a.class("button"), a.title("Add an image")], [
+            h.text("Image"),
+            h.input([
+              a.type_("file"),
+              a.class("md-image sr-only"),
+              a.attribute("data-task", task),
+              a.attribute("data-for", id),
+              a.accept(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+            ]),
+          ])
+      },
     ]),
-    case model.preview {
+    case preview {
       True ->
         h.div([a.class("preview")], [
-          case model.text {
+          case text {
             "" -> h.p([a.class("muted")], [h.text("Nothing to preview.")])
             text -> md(text)
           },
@@ -1039,16 +1178,22 @@ fn composer(model: Model, t: Task) -> Element(Msg) {
       False ->
         h.textarea(
           [
-            a.id("note-text"),
-            a.attribute("data-task", t.id),
-            a.attribute("aria-label", "Note, answer or instructions"),
+            a.id(id),
+            a.class("md-editor"),
+            a.attribute("data-task", task),
+            a.attribute("aria-label", label),
             a.placeholder(
-              "Note, answer or instructions (markdown). Paste or drop images here.",
+              label
+              <> " (markdown)."
+              <> case task {
+                "" -> ""
+                _ -> " Paste or drop images here."
+              },
             ),
-            a.value(model.text),
-            e.on_input(Text),
+            a.value(text),
+            e.on_input(msg),
           ],
-          model.text,
+          text,
         )
     },
   ])

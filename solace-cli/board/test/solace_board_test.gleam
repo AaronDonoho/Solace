@@ -26,6 +26,7 @@ pub fn workflow_and_live_task_test() {
   board.actions(model.workflow, task) |> should.equal(["assign", "pause"])
   let #(model, _) = board.update(model, board.TaskLoaded(text))
   model.selected |> should.equal(Some(task))
+  let #(model, _) = board.update(model, board.CaughtUp)
   let #(model, _) = board.update(model, board.Live("{\"task\":" <> text <> "}"))
   list.length(model.tasks) |> should.equal(1)
   let rendered = board.view(model) |> element.to_string
@@ -187,4 +188,61 @@ pub fn settings_question_shows_diff_and_approve_test() {
   rendered |> string.contains("+ [commands]") |> should.be_true
   rendered |> string.contains(">Approve</button>") |> should.be_true
   rendered |> string.contains("Reject with the editor") |> should.be_true
+}
+
+pub fn notices_and_stamp_test() {
+  let assert Ok(old) =
+    json.parse(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]}",
+      board.task_decoder(),
+    )
+  let assert Ok(new) =
+    json.parse(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"needs_review\",\"rank\":1,\"stamps\":{\"approved\":{}},\"questions\":[{\"id\":\"q\",\"text\":\"Why?\",\"options\":[]}],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"finished\"}]}",
+      board.task_decoder(),
+    )
+  board.notices(old, new)
+  |> should.equal([
+    board.Notice("Finished T", "The agent finished its work."),
+    board.Notice("Question on T", "Why?"),
+  ])
+  board.notices(new, new) |> should.equal([])
+  let #(model, _) = board.init(Nil)
+  let rendered =
+    board.view(
+      board.Model(
+        ..model,
+        tasks: [new],
+        workflow: board.Workflow([
+          board.Column("needs_review", "Needs review", [], False),
+        ]),
+      ),
+    )
+    |> element.to_string
+  rendered |> string.contains("class=\"stamp\"") |> should.be_true
+}
+
+pub fn replay_shows_end_result_without_notices_test() {
+  let event = fn(state, outcome) {
+    "{\"task\":{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"review\",\"state\":\""
+    <> state
+    <> "\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\""
+    <> outcome
+    <> "\"}]}}"
+  }
+  let #(model, _) = board.init(Nil)
+  let #(model, _) = board.update(model, board.Live(event("running", "")))
+  let #(model, _) = board.update(model, board.Live(event("ended", "reviewed")))
+  // Nothing shows until the replay is over, and then only its end result.
+  model.tasks |> should.equal([])
+  let #(model, _) = board.update(model, board.CaughtUp)
+  let assert [task] = model.tasks
+  let assert [run] = task.runs
+  run.state |> should.equal("ended")
+  model.notices |> should.equal([])
+  // After it, a change is news.
+  let #(model, _) = board.update(model, board.Live(event("running", "")))
+  let #(model, _) = board.update(model, board.Live(event("ended", "reviewed")))
+  model.notices
+  |> should.equal([board.Notice("Reviewed T", "The review is ready.")])
 }

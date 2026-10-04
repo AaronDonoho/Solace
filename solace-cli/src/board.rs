@@ -1800,7 +1800,7 @@ pub fn serve(root: &Path, port: u16) -> Out {
             if url == "/events" {
                 let seq =
                     req.headers().iter().find(|h| h.field.equiv("Last-Event-ID")).and_then(|h| h.value.as_str().parse().ok()).unwrap_or(0);
-                let mut reader = Events { root, seq, bytes: std::io::Cursor::new(vec![]) };
+                let mut reader = Events { root, seq, caught_up: false, bytes: std::io::Cursor::new(vec![]) };
                 let mut writer = req.into_writer();
                 if writer
                     .write_all(
@@ -1888,6 +1888,8 @@ pub fn serve(root: &Path, port: u16) -> Out {
 struct Events {
     root: PathBuf,
     seq: i64,
+    /// Whether this connection has sent `ready`, the end of what it missed.
+    caught_up: bool,
     bytes: std::io::Cursor<Vec<u8>>,
 }
 impl Read for Events {
@@ -1910,6 +1912,11 @@ impl Read for Events {
             if let Some((seq, data)) = row {
                 self.seq = seq;
                 self.bytes = std::io::Cursor::new(format!("id: {seq}\ndata: {data}\n\n").into_bytes());
+                return self.bytes.read(out);
+            }
+            if !self.caught_up {
+                self.caught_up = true;
+                self.bytes = std::io::Cursor::new(b"event: ready\ndata: {}\n\n".to_vec());
                 return self.bytes.read(out);
             }
             std::thread::sleep(Duration::from_millis(100));

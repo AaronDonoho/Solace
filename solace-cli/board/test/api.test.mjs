@@ -13,7 +13,7 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
   const server = Bun.serve({ port: 0, fetch: async req => {
     const path = new URL(req.url).pathname;
     requests.push([req.method, path]);
-    if (path === '/events') return new Response(new ReadableStream({ start(c) { events = c; } }), { headers: { 'Content-Type': 'text/event-stream' } });
+    if (path === '/events') return new Response(new ReadableStream({ start(c) { events = c; c.enqueue(new TextEncoder().encode('event: ready\ndata: {}\n\n')); } }), { headers: { 'Content-Type': 'text/event-stream' } });
     if (req.method === 'GET') return Response.json(path === '/graph' ? { review: { summary: '1 effects added, 0 signature changed, 0 test unfinished' } } : path === '/workflow' ? workflow : path === '/models' ? [{ id: 'fake', label: 'Fake' }] : path === '/tasks' ? [task] : task);
     const body = await req.json();
     if (path.endsWith('/actions')) {
@@ -33,6 +33,8 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
   globalThis.fetch = (path, options) => fetchOriginal(new URL(path, server.url), options);
   // EventSource is a browser primitive absent from Bun; consume real SSE here.
   globalThis.EventSource = class {
+    listeners = {};
+    addEventListener(name, f) { this.listeners[name] = f; }
     constructor(path) {
       const controller = new AbortController(); controllers.push(controller);
       fetch(path, { signal: controller.signal }).then(async response => {
@@ -42,7 +44,9 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
           while (text.includes('\n\n')) {
             const at = text.indexOf('\n\n'); const frame = text.slice(0, at); text = text.slice(at + 2);
             const data = frame.split('\n').find(line => line.startsWith('data: '));
-            if (data) this.onmessage?.({ data: data.slice(6) });
+            const name = frame.split('\n').find(line => line.startsWith('event: '));
+            if (name) this.listeners[name.slice(7)]?.({ data: data?.slice(6) });
+            else if (data) this.onmessage?.({ data: data.slice(6) });
           }
         }
       }).catch(() => {});
@@ -90,6 +94,7 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     task.runs = [{ id: 'r1', kind: 'work', state: 'waiting', model: 'fake', log: '/logs/r1' }];
     events.enqueue(new TextEncoder().encode('id: 1\ndata: ' + JSON.stringify({ task }) + '\n\n'));
     dispatch(new board.Tab('questions')); await until(() => to_string(board.view(model)).includes('Choose'));
+    expect(to_string(board.view(model))).toContain('<strong>Question on Edited</strong><p>Choose</p>');
     dispatch(new board.Answer('q1', 'yes')); await until(() => task.questions[0].answer === 'yes');
     workflow.columns.push({ id: 'planning', label: 'Custom planning', actions: ['review'], final: false });
     events.enqueue(new TextEncoder().encode('id: 2\ndata: ' + JSON.stringify({ workflow }) + '\n\n'));
@@ -97,7 +102,7 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     for (const pair of [['GET', '/workflow'], ['GET', '/tasks'], ['GET', '/tasks/t1'], ['GET', '/models'], ['GET', '/events'], ['POST', '/tasks'], ['PATCH', '/tasks/t1'], ['POST', '/tasks/t1/notes'], ['POST', '/tasks/t1/actions'], ['POST', '/tasks/t1/questions/q1']]) expect(requests).toContainEqual(pair);
     dispatch(new board.Tab('runs')); expect(to_string(board.view(model))).toContain('/logs/r1');
     task.changes = [{ name: 'app.main' }];
-    dispatch(new board.Select('t1')); dispatch(new board.Tab('details'));
+    dispatch(new board.Select('t1')); dispatch(new board.Tab('changes'));
     await until(() => to_string(board.view(model)).includes('1 effects added'));
     expect(to_string(board.view(model))).toContain('/view?task=t1');
     expect(requests).toContainEqual(['GET', '/graph']);
