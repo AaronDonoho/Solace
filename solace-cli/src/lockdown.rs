@@ -69,6 +69,7 @@ pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
                 // `checks`: the entry points a test suite drives (D-44), `"*"` for all
                 if c.get("timeout").is_some_and(|x| x.as_integer().is_none_or(|n| n <= 0))
                     || c.get("args").is_some_and(|x| x.as_bool().is_none())
+                    || c.get("allowed_in_reviews").is_some_and(|x| x.as_bool().is_none())
                     || c.get("checks").is_some_and(|x| x.as_array().is_none_or(|a| a.iter().any(|e| e.as_str().is_none())))
                 {
                     return Err(invalid(name));
@@ -125,6 +126,14 @@ fn gitignored(root: &Path, name: &str) -> bool {
     }
     builder.build().is_ok_and(|g| g.matched_path_or_any_parents(root.join(name), root.join(name).is_dir()).is_ignore())
 }
+/// A `.gitignore` anywhere in a project: what it ignores is unwatched, so only a human changes it.
+pub fn is_gitignore(name: &str) -> bool {
+    (name == ".gitignore" || name.ends_with("/.gitignore")) && !name.split('/').any(|c| c == ".solace")
+}
+/// Dependency folders are never watched, whatever the `.gitignore` says or when it was written.
+fn dependencies(name: &str) -> bool {
+    name.split('/').any(|c| c == "node_modules")
+}
 pub fn tier(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -> String {
     // A project of plain files holds no symbols (D-60).
     if root.join("gleam.toml").exists() && (name.starts_with("src/") || name.starts_with("test/")) && name.ends_with(".gleam") {
@@ -135,6 +144,12 @@ pub fn tier(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -
     }
     if internal(root, name) {
         return "internal".into();
+    }
+    if is_gitignore(name) {
+        return "protected".into();
+    }
+    if dependencies(name) {
+        return "unwatched".into();
     }
     if name == ".git" || name.starts_with(".git/") || name == "build" || name.starts_with("build/") || name == "manifest.toml" {
         return "unwatched".into();
@@ -432,7 +447,7 @@ fn tree_rows(root: &Path, v: &toml::Value, dir: &Path, out: &mut Vec<(String, St
         } else if e.file_type()?.is_dir() {
             if t == "internal" {
                 out.push((format!("{name}/"), "internal".into()));
-            } else if name == "build" || name == ".git" || patterns(v, "unwatched", &name) || gitignored(root, &name) {
+            } else if name == "build" || name == ".git" || dependencies(&name) || patterns(v, "unwatched", &name) || gitignored(root, &name) {
                 out.push((format!("{name}/"), format!("unwatched; {} files", count_files(&p)?)));
             } else {
                 let mut children = vec![];
@@ -523,7 +538,7 @@ pub fn dispatch(
                 "read" => read(root, &name, &a[2.min(a.len())..], budget),
                 "write" => {
                     if t == "protected" {
-                        return error("E6002", &name, "protected files are human-only; request a decision");
+                        return error("E6002", &name, "protected files change only through a human-approved proposal: in a work run, `write` it with the exact new text");
                     }
                     write(root, v, &name, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old)
                 }
@@ -552,7 +567,7 @@ pub fn dispatch(
                         "E6010",
                         name,
                         format!(
-                            "declared commands: {}",
+                            "declared commands: {}; to add one, `write solace.toml` in a work run proposes it for approval",
                             commands.map(|c| c.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default()
                         ),
                     );
@@ -711,6 +726,9 @@ mod tests {
             (".gitignore", b"priv/ignored\n"),
             ("priv/generated/out", b"x"),
             (".git/config", b"x"),
+            ("node_modules/pkg/index.js", b"x"),
+            ("sub/node_modules/pkg/index.js", b"x"),
+            ("sub/.gitignore", b"x"),
         ] {
             fs::create_dir_all(s.root.join(p).parent().unwrap()).unwrap();
             fs::write(s.root.join(p), b).unwrap();
@@ -718,7 +736,7 @@ mod tests {
         let got = call(&s, &v, &["files"], "", None).unwrap();
         assert_eq!(
             got,
-            ".git/ [unwatched; 1 files]\n.gitignore [watched]\n.solace/ [internal]\nAGENTS.md [protected]\ngleam.toml [watched]\nmanifest.toml [unwatched]\nmisc [watched]\npriv/\npriv/a.html [watched]\npriv/b.bin [unwatched (binary)]\npriv/generated/ [unwatched; 1 files]\npriv/ignored [unwatched]\npriv/large [unwatched (over limit)]\nsolace.toml [protected]\nsrc/\nsrc/main.gleam [graph]\n"
+            ".git/ [unwatched; 1 files]\n.gitignore [protected]\n.solace/ [internal]\nAGENTS.md [protected]\ngleam.toml [watched]\nmanifest.toml [unwatched]\nmisc [watched]\nnode_modules/ [unwatched; 1 files]\npriv/\npriv/a.html [watched]\npriv/b.bin [unwatched (binary)]\npriv/generated/ [unwatched; 1 files]\npriv/ignored [unwatched]\npriv/large [unwatched (over limit)]\nsolace.toml [protected]\nsrc/\nsrc/main.gleam [graph]\nsub/\nsub/.gitignore [protected]\nsub/node_modules/ [unwatched; 1 files]\n"
         );
     }
     #[test]

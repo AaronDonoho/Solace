@@ -502,7 +502,7 @@ fn review_graphs(before: &Value, after: &Value, task: &Value, reach: &Value, set
     let effects_removed: Vec<_> = before_effects.difference(&after_effects).cloned().collect();
     let mut files = vec![];
     for change in task["changes"].as_array().unwrap_or(&vec![]) {
-        if let Some(name) = change["entity"].as_str().and_then(|x| x.strip_prefix("file:")) {
+        if let Some(name) = change["entity"].as_str().filter(|k| board::reviewable(root, k)).and_then(|x| x.strip_prefix("file:")) {
             let path = root.join(name);
             let before_path = board::before_file(root, task["id"].as_str().unwrap(), name);
             let change = if !path.exists() {

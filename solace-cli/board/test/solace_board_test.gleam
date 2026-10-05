@@ -1,6 +1,7 @@
 import gleam/json
 import gleam/list
 import gleam/option.{Some}
+import gleam/result
 import gleam/string
 import gleeunit
 import gleeunit/should
@@ -288,7 +289,12 @@ pub fn workspace_lanes_test() {
   let assert [pilot, web] = model.lanes
   pilot.tasks |> should.equal([])
   list.length(web.tasks) |> should.equal(1)
-  let rendered = board.view(model) |> element.to_string
+  let rendered =
+    board.view(model)
+    |> element.to_string
+    |> string.split("</style>")
+    |> list.last
+    |> result.unwrap("")
   // One header row for both lanes; each lane names its folder and links its view.
   rendered |> string.contains("lane-head") |> should.be_true
   rendered |> string.contains("<h2>Backlog</h2>") |> should.be_true
@@ -319,7 +325,12 @@ pub fn workspace_lanes_test() {
       board.WorkflowLoaded("web", "{\"columns\":[{\"id\":\"todo\"}]}"),
     )
   board.shared_columns(model.lanes) |> should.be_false
-  let rendered = board.view(model) |> element.to_string
+  let rendered =
+    board.view(model)
+    |> element.to_string
+    |> string.split("</style>")
+    |> list.last
+    |> result.unwrap("")
   rendered |> string.contains("lane-head") |> should.be_false
   rendered |> string.contains("<h2>todo</h2>") |> should.be_true
   // A collapsed lane hides its columns.
@@ -393,7 +404,12 @@ pub fn single_project_header_test() {
         "{\"workspace\":false,\"projects\":[{\"dir\":\".\",\"label\":\"shop\",\"name\":\"app\",\"base\":\"\",\"target\":\"erlang\"}],\"found\":[]}",
       ),
     )
-  let rendered = board.view(model) |> element.to_string
+  let rendered =
+    board.view(model)
+    |> element.to_string
+    |> string.split("</style>")
+    |> list.last
+    |> result.unwrap("")
   rendered
   |> string.contains(
     "<header class=\"lane-title\"><span><strong>shop</strong><small> app</small><small class=\"lane-target muted\"> erlang</small></span><small>0 tasks</small><a href=\"/view\">Contract view</a></header>",
@@ -467,4 +483,9 @@ pub fn task_across_projects_test() {
   let #(model, _) = board.update(model, board.DraftScope("a", False))
   let #(model, _) = board.update(model, board.DraftScope("b", False))
   model.draft_scope |> should.equal([])
+}
+
+/// Outside a browser registering reports the error instead of crashing.
+pub fn register_outside_browser_test() {
+  board.register() |> should.be_error
 }

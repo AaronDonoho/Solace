@@ -136,9 +136,11 @@ Checking
 
 Files: watched and unwatched files can be read and written; they never appear
 in symbol searches. gleam.toml is watched (new dependencies are fetched by
-check, test and build). solace.toml and AGENTS.md (the project's instructions
-for agents, shown at session start) are human-owned: in a work run, `write` to
-either proposes a change and waits for the human; say why in a `task note` first.
+check, test and build). solace.toml, AGENTS.md (the project's instructions
+for agents, shown at session start) and every .gitignore are human-owned: in a
+work run, `write` to one proposes a change and waits for the human; say why in a
+`task note` first, then `write` the exact new text (don't ask in prose). It is
+this project's file. node_modules folders are never watched.
   files [dir]                   tree with each file's category
   read <path> [--lines a..b | --tail n]
   write <path> [--all]          whole text, or with `old`, just `old` -> `text`
@@ -147,7 +149,8 @@ Project: build | format | run <name> [args...] (commands declared in solace.toml
 Work records, kept between sessions: work add (`text`) | work list | work done <id>
 
 Task runs (the note, summary or question in `text`). Reviews and investigations
-are read-only: submit, delete, write, remove, format and run are refused.
+are read-only: submit, delete, write, remove and format are refused, and so is
+run, except in a review for commands marked `allowed_in_reviews = true`.
   task diff [name...]           what this task changed, against its state before
   task note                     add a note; completes a review run
   task ask                      a question, with 2–4 `options`; waits for the

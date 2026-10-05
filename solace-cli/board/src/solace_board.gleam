@@ -1,4 +1,5 @@
 import gleam/dict
+import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/float
 import gleam/int
@@ -11,6 +12,7 @@ import gleam/string
 import gleam/uri
 import lustre
 import lustre/attribute as a
+import lustre/component
 import lustre/effect.{type Effect}
 import lustre/element.{type Element}
 import lustre/element/html as h
@@ -19,6 +21,7 @@ import lustre/event as e
 
 @external(javascript, "./api.mjs", "request")
 fn request(
+  base: String,
   path: String,
   method: String,
   body: String,
@@ -26,7 +29,11 @@ fn request(
 ) -> Nil
 
 @external(javascript, "./api.mjs", "events")
-fn events(receive: fn(String) -> Nil, ready: fn() -> Nil) -> Nil
+fn events(
+  base: String,
+  receive: fn(String) -> Nil,
+  ready: fn() -> Nil,
+) -> Source
 
 @external(javascript, "./api.mjs", "after")
 fn after(ms: Int, callback: fn() -> Nil) -> Nil
@@ -50,10 +57,20 @@ fn load(key: String) -> String
 fn store(key: String, value: String) -> Nil
 
 @external(javascript, "./api.mjs", "wrap")
-fn wrap(id: String, text: String, before: String, after: String) -> String
+fn wrap(
+  root: dynamic.Dynamic,
+  id: String,
+  text: String,
+  before: String,
+  after: String,
+) -> String
 
 @external(javascript, "./api.mjs", "images")
-fn images(insert: fn(String, String) -> Nil, fail: fn(String) -> Nil) -> Nil
+fn images(
+  root: dynamic.Dynamic,
+  insert: fn(String, String) -> Nil,
+  fail: fn(String) -> Nil,
+) -> Nil
 
 pub type Column {
   Column(id: String, label: String, actions: List(String), final: Bool)
@@ -252,12 +269,21 @@ pub type Model {
     migration_generation: Int,
     migration_error: String,
     migration_dismissed: Bool,
+    source: Option(Source),
+    /// The `base` attribute: this instance's API prefix, "" for the page's.
+    prefix: String,
+    /// The component's shadow root, once it has rendered.
+    root: dynamic.Dynamic,
+    connected: Bool,
+    /// The live migration polling chain; an ended chain schedules nothing.
+    poll: Int,
   )
 }
 
 pub type Msg {
   MigrationLoaded(Int, String)
-  MigrationRefresh
+  MigrationPoll(Int)
+  MigrationPolled(Int, Int, String)
   ToggleMigration
   MigrationProject(String, Bool)
   MigrationSmoke(String)
@@ -309,34 +335,43 @@ pub type Msg {
   Watch(String)
   Unwatch
   TranscriptLoaded(String, String)
-  Refresh(String)
+  Refresh(Int, String)
+  TranscriptPolled(Int, String, String)
   ReviewLoaded(String)
+  BaseChanged(String)
+  Listening(Source)
+  Attached(dynamic.Dynamic)
+  Disconnected
+  Connected
 }
 
 /// While a watched run is going, its transcript is fetched again this often.
 const refresh_ms = 1500
 
 pub fn main() {
-  let assert Ok(_) =
-    lustre.start(lustre.application(init, update, view), "#app", Nil)
-  Nil
+  let assert Ok(_) = register()
 }
 
-fn get(path: String, msg: fn(String) -> Msg) -> Effect(Msg) {
+fn get(model: Model, path: String, msg: fn(String) -> Msg) -> Effect(Msg) {
   effect.from(fn(send) {
-    request(path, "GET", "", fn(text) { send(msg(text)) })
+    request(model.prefix, path, "GET", "", fn(text) { send(msg(text)) })
   })
 }
 
 fn send(
+  model: Model,
   path: String,
   method: String,
   fields: List(#(String, json.Json)),
 ) -> Effect(Msg) {
   effect.from(fn(dispatch) {
-    request(path, method, json.to_string(json.object(fields)), fn(text) {
-      dispatch(Changed(text))
-    })
+    request(
+      model.prefix,
+      path,
+      method,
+      json.to_string(json.object(fields)),
+      fn(text) { dispatch(Changed(text)) },
+    )
   })
 }
 
@@ -394,20 +429,15 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       migration_generation: 0,
       migration_error: "",
       migration_dismissed: False,
+      source: None,
+      prefix: "",
+      root: no_root(),
+      connected: False,
+      poll: 0,
     ),
-    effect.batch([
-      get("/migration", MigrationLoaded(0, _)),
-      get("/projects", ProjectsLoaded),
-      get("/models", ModelsLoaded),
-      effect.from(fn(send) {
-        events(fn(text) { send(Live(text)) }, fn() { send(CaughtUp) })
-      }),
-      effect.from(fn(send) {
-        images(fn(id, image) { send(Format(id, image, "")) }, fn(text) {
-          send(Failed(text))
-        })
-      }),
-    ]),
+    // Lustre runs init once for every instance, before its `base` is set:
+    // the transport starts when the instance connects.
+    effect.none(),
   )
 }
 
@@ -460,8 +490,8 @@ fn draft_lane(model: Model) -> String {
 fn transcript(model: Model, rid: String) -> Effect(Msg) {
   case model.selected {
     Some(t) ->
-      get(base(model) <> "/tasks/" <> t.id <> "/runs/" <> rid, fn(text) {
-        TranscriptLoaded(rid, text)
+      get(model, base(model) <> "/tasks/" <> t.id <> "/runs/" <> rid, fn(text) {
+        TranscriptPolled(model.poll, rid, text)
       })
     None -> effect.none()
   }
@@ -469,13 +499,63 @@ fn transcript(model: Model, rid: String) -> Effect(Msg) {
 
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
-    MigrationRefresh -> #(
-      model,
-      get("/migration", MigrationLoaded(model.migration_generation, _)),
+    Connected -> {
+      let #(model, fx) = start(Model(..model, connected: True))
+      #(
+        model,
+        effect.batch([
+          fx,
+          effect.before_paint(fn(send, root) { send(Attached(root)) }),
+        ]),
+      )
+    }
+    Attached(root) -> #(
+      Model(..model, root: root),
+      effect.from(fn(send) {
+        prevent_drag(root)
+        images(root, fn(id, image) { send(Format(id, image, "")) }, fn(text) {
+          send(Failed(text))
+        })
+      }),
     )
+    Listening(source) -> #(Model(..model, source: Some(source)), effect.none())
+    Disconnected -> #(Model(..stop(model), connected: False), effect.none())
+    // An attribute set before the element is added only takes effect then.
+    BaseChanged(base) -> {
+      let model = Model(..model, prefix: base)
+      case model.connected {
+        True -> start(model)
+        False -> #(model, effect.none())
+      }
+    }
+    MigrationPoll(poll) if poll == model.poll && model.connected -> #(
+      model,
+      get(model, "/migration", MigrationPolled(
+        poll,
+        model.migration_generation,
+        _,
+      )),
+    )
+    MigrationPoll(_) -> #(model, effect.none())
+    // Keep one polling chain, including through a server restart; a reply
+    // from a chain that ended (disconnected, or restarted) schedules nothing.
+    MigrationPolled(poll, generation, text) if poll == model.poll -> {
+      let #(next, _) = update(model, MigrationLoaded(generation, text))
+      let delay = case next.migration {
+        Some(m) if m.state == "running" -> 1000
+        _ -> 5000
+      }
+      #(
+        next,
+        effect.from(fn(send) {
+          after(delay, fn() { send(MigrationPoll(poll)) })
+        }),
+      )
+    }
+    MigrationPolled(_, _, _) -> #(model, effect.none())
     MigrationLoaded(generation, text) -> {
-      // Keep one polling chain, including through a server restart. A reply
-      // fetched before an action was accepted must not end its progress panel.
+      // A reply fetched before an action was accepted must not end its
+      // progress panel.
       let next = case
         json.parse(text, migration_decoder()),
         model.migration_busy
@@ -502,14 +582,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         }
         _, _ -> model
       }
-      let delay = case next.migration {
-        Some(m) if m.state == "running" -> 1000
-        _ -> 5000
-      }
-      #(
-        next,
-        effect.from(fn(send) { after(delay, fn() { send(MigrationRefresh) }) }),
-      )
+      #(next, effect.none())
     }
     ToggleMigration -> {
       let projects = case model.migration {
@@ -611,8 +684,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             effect.batch(
               list.flat_map(lanes, fn(l) {
                 [
-                  get(l.base <> "/workflow", WorkflowLoaded(l.dir, _)),
-                  get(l.base <> "/tasks", TasksLoaded(l.dir, _)),
+                  get(model, l.base <> "/workflow", WorkflowLoaded(l.dir, _)),
+                  get(model, l.base <> "/tasks", TasksLoaded(l.dir, _)),
                 ]
               }),
             ),
@@ -667,7 +740,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           ),
           case task.changes {
             [] -> effect.none()
-            _ -> get(base(model) <> "/graph?task=" <> task.id, ReviewLoaded)
+            _ ->
+              get(model, base(model) <> "/graph?task=" <> task.id, ReviewLoaded)
           },
         )
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
@@ -699,10 +773,15 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               previews: [],
             ),
             effect.batch([
-              get(base(model) <> "/tasks", TasksLoaded(model.lane, _)),
+              get(model, base(model) <> "/tasks", TasksLoaded(model.lane, _)),
               case task.changes {
                 [] -> effect.none()
-                _ -> get(base(model) <> "/graph?task=" <> task.id, ReviewLoaded)
+                _ ->
+                  get(
+                    model,
+                    base(model) <> "/graph?task=" <> task.id,
+                    ReviewLoaded,
+                  )
               },
             ]),
           )
@@ -716,7 +795,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       effect.none(),
     )
     Live(text) -> #(live(model, text, True), case projects_event(text) {
-      True -> get("/projects", ProjectsLoaded)
+      True -> get(model, "/projects", ProjectsLoaded)
       False -> effect.none()
     })
     CaughtUp -> #(
@@ -744,7 +823,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         editing: False,
         previews: [],
       ),
-      get(base_of(model, dir) <> "/tasks/" <> id, TaskLoaded),
+      get(model, base_of(model, dir) <> "/tasks/" <> id, TaskLoaded),
     )
     Collapse(dir) -> {
       let collapsed = case list.contains(model.collapsed, dir) {
@@ -781,7 +860,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           }
           #(
             model,
-            send(base(model) <> "/tasks/" <> t.id <> "/scope", "POST", [
+            send(model, base(model) <> "/tasks/" <> t.id <> "/scope", "POST", [
               #("scope", json.array(in_lane_order(model, wanted), json.string)),
             ]),
           )
@@ -797,7 +876,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         list.any(model.found, fn(f) { f.dir == dir && f.imported && !f.member })
       {
         True ->
-          projects_request("/projects", "POST", [#("dir", json.string(dir))])
+          projects_request(model, "/projects", "POST", [
+            #("dir", json.string(dir)),
+          ])
         False -> effect.none()
       },
     )
@@ -812,6 +893,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         True -> #(
           model,
           projects_request(
+            model,
             "/projects/" <> uri.percent_encode(dir),
             "DELETE",
             [],
@@ -827,7 +909,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     )
     CreateProject -> #(
       model,
-      projects_request("/projects/new", "POST", [
+      projects_request(model, "/projects/new", "POST", [
         #("name", json.string(model.project_name)),
         #("dir", json.string(model.project_dir)),
         #("target", json.string(model.project_target)),
@@ -838,8 +920,29 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       transcript(model, rid),
     )
     Unwatch -> #(Model(..model, watching: "", entries: []), effect.none())
-    Refresh(rid) if rid == model.watching -> #(model, transcript(model, rid))
-    Refresh(_) -> #(model, effect.none())
+    // Like migration polling, one refresh chain per connection: a step from an
+    // ended chain (disconnected, or restarted) fetches and schedules nothing.
+    Refresh(poll, rid) if poll == model.poll && rid == model.watching -> #(
+      model,
+      transcript(model, rid),
+    )
+    Refresh(_, _) -> #(model, effect.none())
+    TranscriptPolled(poll, rid, text) if poll == model.poll -> {
+      let #(next, _) = update(model, TranscriptLoaded(rid, text))
+      let running =
+        rid == next.watching
+        && json.parse(text, decode.at(["state"], decode.string))
+        |> result.map(fn(state) { state != "ended" })
+        |> result.unwrap(False)
+      #(next, case running {
+        True ->
+          effect.from(fn(send) {
+            after(refresh_ms, fn() { send(Refresh(poll, rid)) })
+          })
+        False -> effect.none()
+      })
+    }
+    TranscriptPolled(_, _, _) -> #(model, effect.none())
     TranscriptLoaded(rid, text) if rid == model.watching -> {
       let decoder = {
         use state <- decode.field("state", decode.string)
@@ -847,16 +950,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         decode.success(#(state, entries))
       }
       case json.parse(text, decoder) {
-        Ok(#(state, entries)) -> #(
-          Model(..model, entries: entries),
-          case state {
-            "ended" -> effect.none()
-            _ ->
-              effect.from(fn(send) {
-                after(refresh_ms, fn() { send(Refresh(rid)) })
-              })
-          },
-        )
+        Ok(#(_, entries)) -> #(Model(..model, entries: entries), effect.none())
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
     }
@@ -887,6 +981,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             #("scope", json.array(model.draft_scope, json.string)),
           ])
         request(
+          model.prefix,
           base_of(model, draft_home(model)) <> "/tasks",
           "POST",
           json.to_string(body),
@@ -940,7 +1035,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       let #(text, msg) = field(model, id)
       #(
         model,
-        effect.from(fn(send) { send(msg(wrap(id, text, before, after))) }),
+        effect.from(fn(send) {
+          send(msg(wrap(model.root, id, text, before, after)))
+        }),
       )
     }
     Dismiss(notice) -> #(
@@ -955,7 +1052,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           case float.parse(model.rank) {
             Ok(rank) -> #(
               model,
-              send(base(model) <> "/tasks/" <> t.id, "PATCH", [
+              send(model, base(model) <> "/tasks/" <> t.id, "PATCH", [
                 #("title", json.string(model.title)),
                 #("body", json.string(model.body)),
                 #("rank", json.float(rank)),
@@ -1003,6 +1100,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             True -> #(
               model,
               send(
+                model,
                 base(model) <> "/tasks/" <> t.id <> "/actions",
                 "POST",
                 fields,
@@ -1017,7 +1115,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         None -> #(model, effect.none())
         Some(t) -> #(
           Model(..model, tab: "notes"),
-          send(base(model) <> "/tasks/" <> t.id <> "/notes", "POST", [
+          send(model, base(model) <> "/tasks/" <> t.id <> "/notes", "POST", [
             #("text", json.string(model.text)),
           ]),
         )
@@ -1031,6 +1129,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             True -> #(
               model,
               send(
+                model,
                 base(model)
                   <> "/tasks/"
                   <> t.id
@@ -1053,6 +1152,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           #(
             model,
             send(
+              model,
               base(model) <> "/tasks/" <> t.id <> "/questions/" <> qid,
               "POST",
               [
@@ -1141,14 +1241,19 @@ fn projects_event(text: String) -> Bool {
 
 /// A `/projects` change; the reply is the new list, or an error.
 fn projects_request(
+  model: Model,
   path: String,
   method: String,
   fields: List(#(String, json.Json)),
 ) -> Effect(Msg) {
   effect.from(fn(dispatch) {
-    request(path, method, json.to_string(json.object(fields)), fn(text) {
-      dispatch(ProjectsLoaded(text))
-    })
+    request(
+      model.prefix,
+      path,
+      method,
+      json.to_string(json.object(fields)),
+      fn(text) { dispatch(ProjectsLoaded(text)) },
+    )
   })
 }
 
@@ -1322,6 +1427,7 @@ fn migration_action(model: Model, action: String) -> #(Model, Effect(Msg)) {
             ),
             effect.from(fn(send) {
               request(
+                model.prefix,
                 "/migration/" <> action,
                 "POST",
                 json.to_string(json.object(fields)),
@@ -1953,6 +2059,7 @@ fn migration_mark(status: String) -> Element(Msg) {
 
 pub fn view(model: Model) -> Element(Msg) {
   h.main([], [
+    h.style([], board_styles),
     migration_view(model),
     h.header([a.class("top")], [
       h.h1([], [h.text("Solace tasks")]),
@@ -2818,3 +2925,70 @@ fn projects_pick(
     })
   ])
 }
+
+pub type Source
+
+@external(javascript, "./api.mjs", "close_events")
+fn close_events(source: Source) -> Nil
+
+@external(javascript, "./api.mjs", "prevent_drag")
+fn prevent_drag(root: dynamic.Dynamic) -> Nil
+
+pub fn register() -> Result(Nil, lustre.Error) {
+  lustre.register(
+    lustre.component(init, update, view, [
+      component.on_attribute_change("base", fn(base) { Ok(BaseChanged(base)) }),
+      component.on_disconnect(Disconnected),
+      component.on_connect(Connected),
+      component.adopt_styles(False),
+    ]),
+    "solace-board",
+  )
+}
+
+const board_styles = ".migration{margin-bottom:16px}.migration .editor{margin:8px 0}.migration input[type=checkbox]{width:auto}.projects-pick{margin:8px 0}.projects-pick label{display:inline-block;margin-right:16px}.migration fieldset{border:1px solid #ccd0d5;border-radius:4px}.migration .migration-banner{border-left:4px solid #286ac7}.migration code{overflow-wrap:anywhere}.migration summary{cursor:pointer;font-weight:600}.migration pre{max-height:400px;max-width:none;overflow:auto;white-space:pre;font:13px ui-monospace,monospace;user-select:text}.migration [role=alert]{white-space:pre-wrap}.migration .mark{display:inline-block;width:1.4em;text-align:center;font-weight:700;margin-right:4px}.migration .migration-verified{color:#14552a}.migration .migration-failed{color:#a00016}.migration .migration-not-checked{color:#784400}.migration .migration-action{display:flex;gap:12px;align-items:baseline;margin:8px 0}.migration .migration-action button{flex:none}.migration .migration-legend{color:#56606b}.migration .migration-report ul{list-style:none;padding-left:0}.migration button:disabled{cursor:default;opacity:.55}.migration p{overflow-wrap:anywhere}\n\n:host{display:block;box-sizing:border-box;padding:24px;user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:#20252b;background:#fafafa}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid #aab0b8;border-radius:4px}button{cursor:pointer;background:white}button:hover{background:#e9f1ff}button:focus-visible{outline:3px solid #286ac7}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:#edf0f4;padding:12px;border-radius:6px}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid #ccd0d5;padding:16px;border-radius:6px}small{display:block;color:#56606b;overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:#a00016}article{border-bottom:1px solid #ddd;padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:#9a3b00}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:10px;background:#e3e7ec;margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1f7a3a;margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid #ddd;border-radius:6px;padding:8px 12px;margin:8px 0;background:white}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol{margin:6px 0}.md pre,.transcript pre{background:#f1f3f6;padding:8px;border-radius:4px;overflow:auto;white-space:pre-wrap;font:13px ui-monospace,monospace;max-height:320px}code{font:13px ui-monospace,monospace;background:#eef1f5;padding:1px 4px;border-radius:3px}.transcript{border-left:3px solid #ccd0d5;padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:#56606b}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:#1f7a3a}.tool.failed .icon{color:#a00016}.muted{color:#56606b}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:#286ac7;color:white;border-color:#286ac7}.primary:hover{background:#1f58a8}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:#56606b;margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.composer{border:1px solid #aab0b8;border-radius:6px;margin:8px 4px;max-width:760px;background:white}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid #ddd;border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid #aab0b8;border-radius:4px;background:white;cursor:pointer}.toolbar .button:hover{background:#e9f1ff}.toolbar .button:focus-within{outline:3px solid #286ac7}.toolbar [aria-pressed=true]{background:#e3e7ec;font-weight:600}.separator{width:1px;align-self:stretch;background:#ddd;margin:0 6px}.preview{border-top:1px solid #ddd;padding:8px 12px;min-height:94px}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid #ccd0d5;margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:6px 6px 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:#ccd0d5 #ccd0d5 #fafafa;background:#fafafa;font-weight:600}.panel{padding-top:8px}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:#56606b;width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid #ddd;border-radius:4px}.status.finished{background:#dcefe2;color:#14552a}.diff{font:13px ui-monospace,monospace;background:#f1f3f6;padding:8px;border-radius:4px;max-width:760px}\n.lanes{display:grid;gap:12px;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:6px 0;overflow:visible}.lane{border:1px solid #ccd0d5;border-radius:6px;padding:4px 8px;background:white}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h2{margin-top:0}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{width:auto;flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}.stamp{color:#1f7a3a;font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:#20252b;color:white;padding:12px 52px 12px 14px;border-radius:6px;box-shadow:0 4px 16px #0003}.notice strong{display:block;overflow-wrap:anywhere}.notice p{margin:4px 0 0;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:white;border:0}.notice .close:hover{background:#ffffff22}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}"
+
+/// Opens this instance's transport with its own `base`: the event stream, one
+/// migration polling chain, the followed run's transcript and the first loads.
+/// Runs on connection and when `base` changes; the fresh stream replays what
+/// it missed.
+fn start(model: Model) -> #(Model, Effect(Msg)) {
+  let model = Model(..stop(model), caught_up: False, replay: [])
+  #(
+    model,
+    effect.batch([
+      get(model, "/migration", MigrationPolled(
+        model.poll,
+        model.migration_generation,
+        _,
+      )),
+      get(model, "/projects", ProjectsLoaded),
+      get(model, "/models", ModelsLoaded),
+      case model.watching {
+        "" -> effect.none()
+        rid -> transcript(model, rid)
+      },
+      effect.from(fn(send) {
+        send(
+          Listening(
+            events(model.prefix, fn(text) { send(Live(text)) }, fn() {
+              send(CaughtUp)
+            }),
+          ),
+        )
+      }),
+    ]),
+  )
+}
+
+/// Closes the event stream and ends the migration and transcript polling chains.
+fn stop(model: Model) -> Model {
+  case model.source {
+    Some(source) -> close_events(source)
+    None -> Nil
+  }
+  Model(..model, source: None, poll: model.poll + 1)
+}
+
+@external(javascript, "./api.mjs", "no_root")
+fn no_root() -> dynamic.Dynamic

@@ -159,3 +159,8 @@ pub fn io_line_and_undescribed_test() {
   solace_view.io_line(solace_view.Node(..node, takes: []))
   |> should.equal("→ Payment or an error")
 }
+
+/// Outside a browser registering reports the error instead of crashing.
+pub fn register_outside_browser_test() {
+  solace_view.register() |> should.be_error
+}

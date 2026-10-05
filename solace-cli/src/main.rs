@@ -222,7 +222,7 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         }
         // A run's settings write is a proposal the human approves (D-38).
         if a.first() == Some(&"write")
-            && let Some(file) = a.get(1).map(|p| file_name(Path::new(p))).filter(|p| p == "solace.toml" || p == "AGENTS.md")
+            && let Some(file) = a.get(1).map(|p| file_name(Path::new(p))).filter(|p| p == "solace.toml" || p == "AGENTS.md" || lockdown::is_gitignore(p))
         {
             let current = fs::read(store.root.join(&file)).unwrap_or_default();
             let proposed = lockdown::edited(&current, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old)?;

@@ -28,6 +28,7 @@ test('contract view renders visible SVG nodes and uses the view API', async () =
   const dispatch = msg => { let effect; [model, effect] = view.update(model, msg); perform(effect, dispatch, () => {}, () => {}, () => {}, () => {}, () => {}, () => {}); };
   try {
     let effect; [model, effect] = view.init(); perform(effect, dispatch, () => {}, () => {}, () => {}, () => {}, () => {}, () => {});
+    dispatch(new view.Connected());
     for (let i = 0; i < 50 && !Array.from(model.graph.nodes).length; i++) await Bun.sleep(5);
     expect(Array.from(model.graph.nodes)).toHaveLength(3);
     expect((to_string(view.view(model)).match(/class="view-node /g) || []).length).toBe(2);
@@ -318,4 +319,37 @@ test('outline: areas, requests, a task for missing descriptions, and opening a f
     expect((html.match(/class="view-node entry/g) || []).length).toBe(7);
     expect(html).toMatch(/<g class="view-frame"><rect[^>]*><\/rect><\/g>/);
   } finally { globalThis.location = oldLocation; globalThis.fetch = oldFetch; }
+});
+
+test('diagram helpers use the view shadow root and ignore typing in an inner field', async () => {
+  const oldDocument = globalThis.document, oldFrame = globalThis.requestAnimationFrame, oldCSS = globalThis.CSS;
+  const listeners = new Map(), actions = [];
+  let focused = false;
+  const input = { closest: selector => selector.includes('input') ? input : null };
+  const node = { focus: () => { focused = true; } };
+  const shadowRoot = {
+    addEventListener: (name, fn) => listeners.set(name, fn),
+    querySelector: selector => selector === '.view-drawing' ? { clientWidth: 612, clientHeight: 450 }
+      : selector === '.view-diagram' ? {} : selector.startsWith('[data-node=') ? node : null,
+  };
+  // Nested in a shell's own shadow root, the view can't be found from document.
+  globalThis.document = { querySelector: () => null };
+  globalThis.requestAnimationFrame = fn => fn();
+  globalThis.CSS = { escape: value => value };
+  try {
+    const layout = await import('../src/layout.mjs');
+    expect(layout.viewport_width(shadowRoot)).toBe(612);
+    expect(layout.viewport_height(shadowRoot)).toBe(450);
+    expect(layout.viewport_width(null)).toBe(Math.max(240, (globalThis.innerWidth || 1440) - 48));
+    layout.keys(shadowRoot, action => actions.push(action));
+    const keydown = listeners.get('keydown');
+    keydown({ key: 'ArrowRight', target: {}, composedPath: () => [input], preventDefault() {} });
+    expect(actions).toEqual([]);
+    keydown({ key: 'ArrowRight', target: {}, composedPath: () => [{ closest: () => null }], preventDefault() {} });
+    expect(actions).toEqual(['right']);
+    layout.focus_node(shadowRoot, 'one');
+    expect(focused).toBe(true);
+  } finally {
+    globalThis.document = oldDocument; globalThis.requestAnimationFrame = oldFrame; globalThis.CSS = oldCSS;
+  }
 });

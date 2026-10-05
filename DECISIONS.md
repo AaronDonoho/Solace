@@ -137,7 +137,7 @@ Why: tests written first can't be fitted to the code, and point 4 protects that 
 New tasks sit behind a button that keeps the draft; editing is on the Details tab. Task details are tabs (Details, Notes, Questions, Runs, Changes), newest first. Effort is chosen separately from the model; the run records it, and a changed effort starts a fresh conversation. A successful run marks the task finished ("Agent finished", "Report ready", "Review ready") until the next action. Notes take PNG, JPEG, GIF or WebP images (5 MB, content-checked, no SVG), stored in `.solace/board/` and attached to the agent's prompt as `[image N]`. The markdown editor is built in.
 
 ## D-38 Agents propose settings changes
-In a work run, `write solace.toml` (or `AGENTS.md`, D-45) is validated (`E6020` if invalid) and becomes an Approve or Reject question carrying the old and new text; the run waits. Approve writes it only if the file hasn't changed since. Refused in read-only runs and outside a run.
+An agent that is asked to change settings makes the change itself: in a work run, `write solace.toml` (or `AGENTS.md`, D-45) is validated (`E6020` if invalid) and becomes an Approve or Reject question carrying the old and new text; the run waits, and the human approves on the board. Don't hand the edit back to the human or stop at a plan, and don't ask in prose ("May I add…?") or with `task ask`: run `write solace.toml` with the exact new text, because only that call produces the diff the human approves. The file is the task's own project's `solace.toml` (D-57), never the root's `solace.toml`, which only lists projects. Approve writes it only if the file hasn't changed since. Refused in read-only runs (report the exact edit instead) and outside a run.
 
 ## D-39 Task diff and draft status
 `task diff [name...]`, in any task run, shows each entity the task changed as a line diff against its state before the task. `drafts` marks each draft `current` or `stale`. A review brief starts with `task diff`.
@@ -268,3 +268,12 @@ For a Claude run on a model with an `endpoint`, Solace reads `meta.n_ctx` from t
 
 ## D-65 Signatures carry the whole doc comment
 Outlines, `inspect --context`, `refs` and task packets show a symbol's whole `///` comment above its declaration, not just its first line; a doc-only edit doesn't count as a signature change. Why: Gleam docs needn't open with a summary line (redline's give one rule per line), so the first line was often half a rule; the token reason for cutting went with the signatures in the per-turn index (D-12).
+
+## D-66 Agent task responses
+Task briefs guide agents to use Markdown with relevant sections and short headings, and to explain why they ask a question. Reviews begin with **Assessment: Looks good** or **Assessment: Needs work**, supported by findings and verification. The human chose a label in the review message, not a separate stored field or board badge.
+
+## D-67 Reviews may run marked commands
+In a review, `run <name>` works only for a `[commands]` entry marked `allowed_in_reviews = true` in that project's `solace.toml`; other commands, and `run` in investigations, stay refused. Why: reviewers need `bun test` or a bundle step to verify, and only a human can mark a command, since agents can't change `solace.toml` unapproved.
+
+## D-68 `.gitignore` is human-owned; dependencies are never watched
+Every `.gitignore` in a project is protected like `solace.toml`: in a work run, `write` proposes the change for approval. `node_modules` folders are unwatched by default, as `build` is. Why: what a `.gitignore` ignores is unwatched and so unreviewed, and an agent could hide its own work that way; the dependency rule means installing packages is never recorded as the task's changes, whatever the order of steps.

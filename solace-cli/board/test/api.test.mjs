@@ -63,6 +63,7 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
   };
   try {
     let effect; [model, effect] = board.init(); execute(effect);
+    dispatch(new board.Connected());
     await until(() => model.model === 'fake' && to_string(board.view(model)).includes('Initial') && events);
     dispatch(new board.Select('', 't1'));
     await until(() => to_string(board.view(model)).includes('Questions'));
@@ -141,4 +142,222 @@ test('draft storage survives missing or throwing storage', async () => {
   } finally {
     if (original) Object.defineProperty(globalThis, 'localStorage', original); else delete globalThis.localStorage;
   }
+});
+
+test('transport uses the base it is given; explicit project and migration paths stay absolute', async () => {
+  const oldLocation = globalThis.location, oldFetch = globalThis.fetch, oldEventSource = globalThis.EventSource;
+  const paths = [];
+  let source;
+  globalThis.location = { pathname: '/p/web/view' };
+  globalThis.fetch = async path => { paths.push(path); return new Response('{}'); };
+  globalThis.EventSource = class {
+    constructor(path) { this.path = path; source = this; }
+    addEventListener() {}
+    close() { this.closed = true; }
+  };
+  try {
+    const api = await import('../src/api.mjs');
+    await new Promise(resolve => api.request('/p/shop', '/graph', 'GET', '', resolve));
+    await new Promise(resolve => api.request('/p/shop', '/p/other/tasks', 'GET', '', resolve));
+    await new Promise(resolve => api.request('/p/shop', '/migration', 'GET', '', resolve));
+    await new Promise(resolve => api.request('', '/graph', 'GET', '', resolve));
+    expect(paths).toEqual(['/p/shop/graph', '/p/other/tasks', '/migration', '/p/web/graph']);
+    expect(api.events('/p/shop', () => {})).toBe(source);
+    expect(source.path).toBe('/p/shop/events');
+    api.close_events(source);
+    expect(source.closed).toBe(true);
+  } finally {
+    globalThis.location = oldLocation; globalThis.fetch = oldFetch; globalThis.EventSource = oldEventSource;
+  }
+});
+
+test('editor helpers act on the shadow root they are given, wherever the board is nested', async () => {
+  const oldDocument = globalThis.document, oldFetch = globalThis.fetch;
+  const uploads = [], inserted = [];
+  const input = { classList: { contains: name => name === 'md-image' }, dataset: { task: 't1', for: 'body', base: '/p/shop' }, files: [{ type: 'image/png', name: 'picture.png' }], value: 'picked' };
+  const editor = { selectionStart: 1, selectionEnd: 3 };
+  const makeRoot = () => { const listeners = new Map(); return { listeners, getElementById: id => id === 'body' ? editor : null, addEventListener: (name, fn) => listeners.set(name, fn) }; };
+  const shadowRoot = makeRoot(), other = makeRoot();
+  // Inside a shell's own shadow root, document can't find the board.
+  globalThis.document = { querySelector: () => null };
+  globalThis.fetch = async (path, options) => { uploads.push([path, options.method]); return Response.json({ url: '/tasks/t1/files/0123456789abcdef.png' }); };
+  try {
+    const api = await import('../src/api.mjs');
+    expect(api.wrap(shadowRoot, 'body', 'abcd', '**', '**')).toBe('a**bc**d');
+    expect(api.wrap(null, 'body', 'abcd', '**', '**')).toBe('abcd****');
+    api.images(shadowRoot, (id, image) => inserted.push([id, image]), () => {});
+    api.images(other, () => {}, () => {});
+    api.prevent_drag(other);
+    expect([...other.listeners.keys()].sort()).toEqual(['change', 'dragover', 'dragstart', 'drop', 'paste']);
+    shadowRoot.listeners.get('change')({ target: {}, composedPath: () => [input, shadowRoot], preventDefault() {} });
+    for (let i = 0; i < 20 && !inserted.length; i++) await Bun.sleep(1);
+    expect(uploads).toEqual([['/p/shop/tasks/t1/files', 'POST']]);
+    expect(inserted).toEqual([['body', '![picture](/tasks/t1/files/0123456789abcdef.png)']]);
+    expect(input.value).toBe('');
+  } finally { globalThis.document = oldDocument; globalThis.fetch = oldFetch; }
+});
+
+// A browser without a DOM for the component tests: requests and event streams
+// are recorded, and timers wait until the test fires them.
+function fakeBrowser(search = '', replies = {}) {
+  const saved = Object.fromEntries(['fetch', 'EventSource', 'location', 'setTimeout'].map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]));
+  const paths = [], sources = [], timers = [];
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: { pathname: '/', search } });
+  globalThis.fetch = async path => {
+    paths.push(path);
+    return Response.json(path in replies ? replies[path] : path === '/migration' ? { state: 'none', top: '/w', original: null, copy: null, step: null, candidates: [], report: null, blockers: [], undo: false } : {});
+  };
+  globalThis.setTimeout = callback => { timers.push(callback); return 0; };
+  globalThis.EventSource = class {
+    listeners = {};
+    constructor(path) { this.path = path; sources.push(this); }
+    addEventListener(name, f) { this.listeners[name] = f; }
+    close() { this.closed = true; }
+  };
+  const restore = () => { for (const [k, d] of Object.entries(saved)) d ? Object.defineProperty(globalThis, k, d) : delete globalThis[k]; };
+  return { paths, sources, timers, restore };
+}
+// One component instance, driven as Lustre drives it.
+function mount(app) {
+  const noop = () => {};
+  let model;
+  const dispatch = msg => { let effect; [model, effect] = app.update(model, msg); perform(effect, dispatch, noop, noop, noop, noop, noop, noop); };
+  [model] = app.init();
+  return { dispatch, get model() { return model; } };
+}
+const settle = () => Bun.sleep(20);
+
+test('each instance uses its own base, including one set before it is added to the page', async () => {
+  const browser = fakeBrowser('?task=t1');
+  try {
+    const view = await import('../build/dev/javascript/solace_board/solace_view.mjs');
+    // createElement, then setAttribute('base'), then append: nothing is asked until it connects.
+    const shop = mount(board);
+    shop.dispatch(new board.BaseChanged('/p/shop'));
+    expect(browser.paths).toEqual([]);
+    expect(browser.sources).toEqual([]);
+    shop.dispatch(new board.Connected());
+    await settle();
+    expect(browser.paths).toEqual(expect.arrayContaining(['/p/shop/projects', '/p/shop/models', '/migration']));
+    expect(browser.sources.map(s => s.path)).toEqual(['/p/shop/events']);
+    // A second component on the same page keeps its own base.
+    const contract = mount(view);
+    contract.dispatch(new view.BaseChanged('/p/web'));
+    contract.dispatch(new view.Connected());
+    await settle();
+    expect(browser.paths).toContain('/p/web/graph?task=t1');
+    expect(browser.sources.map(s => s.path)).toEqual(['/p/shop/events', '/p/web/events']);
+    // Changing one instance's base moves only its own requests and stream.
+    contract.dispatch(new view.BaseChanged('/p/api'));
+    await settle();
+    expect(browser.paths).toContain('/p/api/graph?task=t1');
+    expect(browser.sources.map(s => [s.path, !!s.closed])).toEqual([['/p/shop/events', false], ['/p/web/events', true], ['/p/api/events', false]]);
+    // Without a base, the page address decides.
+    const plain = mount(board);
+    plain.dispatch(new board.Connected());
+    expect(browser.sources.at(-1).path).toBe('/events');
+  } finally { browser.restore(); }
+});
+
+test('a component removed and added again reopens one stream, which receives later events', async () => {
+  const browser = fakeBrowser('?task=t1');
+  try {
+    const view = await import('../build/dev/javascript/solace_board/solace_view.mjs');
+    const b = mount(board);
+    b.dispatch(new board.Connected());
+    browser.sources[0].listeners.ready();
+    expect(b.model.caught_up).toBe(true);
+    b.dispatch(new board.Disconnected());
+    expect(browser.sources[0].closed).toBe(true);
+    b.dispatch(new board.Connected());
+    expect(browser.sources).toHaveLength(2);
+    // The new stream replays what was missed before showing live events.
+    expect(b.model.caught_up).toBe(false);
+    browser.sources[1].onmessage({ data: 'missed' });
+    expect(Array.from(b.model.replay)).toEqual(['missed']);
+    browser.sources[1].listeners.ready();
+    expect(b.model.caught_up).toBe(true);
+
+    const v = mount(view);
+    v.dispatch(new view.Connected());
+    v.dispatch(new view.Disconnected());
+    v.dispatch(new view.Connected());
+    await settle();
+    expect(browser.sources[2].closed).toBe(true);
+    const reloads = () => browser.paths.filter(p => p === '/graph?task=t1').length;
+    const before = reloads();
+    browser.sources[3].onmessage({ data: JSON.stringify({ task: { id: 't1' } }) });
+    await settle();
+    expect(reloads()).toBe(before + 1);
+    // One open stream per component.
+    expect(browser.sources.filter(s => !s.closed)).toHaveLength(2);
+  } finally { browser.restore(); }
+});
+
+test('a followed run stops refreshing when the board is removed and resumes in one chain when added again', async () => {
+  const browser = fakeBrowser('', { '/tasks/1/runs/r1': { state: 'running', transcript: [] } });
+  const fetches = () => browser.paths.filter(p => p === '/tasks/1/runs/r1').length;
+  const fire = async () => { browser.timers.splice(0).forEach(f => f()); await settle(); };
+  try {
+    const b = mount(board);
+    b.dispatch(new board.Connected());
+    b.dispatch(new board.TaskLoaded(JSON.stringify({ id: '1', title: 'T', body: '', column: 'assigned', rank: 1, notes: [],
+      runs: [{ id: 'r1', kind: 'work', state: 'running', model: 'm', log: '/l', started: 1 }] })));
+    b.dispatch(new board.Watch('r1'));
+    await settle();
+    expect(fetches()).toBe(1);
+    await fire();
+    expect(fetches()).toBe(2);
+    // Removed: the pending refresh fetches nothing and schedules nothing.
+    b.dispatch(new board.Disconnected());
+    await fire(); await fire();
+    expect(fetches()).toBe(2);
+    expect(browser.timers).toHaveLength(0);
+    // Added again: the transcript refreshes again.
+    b.dispatch(new board.Connected());
+    await settle();
+    expect(fetches()).toBe(3);
+    // Moved while a refresh is pending: the old step is dropped, so one chain remains.
+    b.dispatch(new board.Disconnected());
+    b.dispatch(new board.Connected());
+    await settle();
+    expect(fetches()).toBe(4);
+    await fire();
+    expect(fetches()).toBe(5);
+    await fire();
+    expect(fetches()).toBe(6);
+  } finally { browser.restore(); }
+});
+
+test('migration polling stops when the board is removed and keeps one chain across reconnects and base changes', async () => {
+  const browser = fakeBrowser();
+  const polls = () => browser.paths.filter(p => p === '/migration').length;
+  const fire = async () => { browser.timers.splice(0).forEach(f => f()); await settle(); };
+  try {
+    const b = mount(board);
+    b.dispatch(new board.Connected());
+    await settle();
+    expect(polls()).toBe(1);
+    expect(browser.timers).toHaveLength(1);
+    await fire();
+    expect(polls()).toBe(2);
+    expect(browser.timers).toHaveLength(1);
+    // Removed: the pending step fetches nothing and schedules nothing.
+    b.dispatch(new board.Disconnected());
+    await fire();
+    expect(polls()).toBe(2);
+    expect(browser.timers).toHaveLength(0);
+    // Added again, then its base changed twice: still one chain.
+    b.dispatch(new board.Connected());
+    await settle();
+    b.dispatch(new board.BaseChanged('/p/a'));
+    b.dispatch(new board.BaseChanged('/p/b'));
+    await settle();
+    await fire();
+    expect(browser.timers).toHaveLength(1);
+    const after = polls();
+    await fire();
+    expect(polls()).toBe(after + 1);
+    expect(browser.timers).toHaveLength(1);
+  } finally { browser.restore(); }
 });

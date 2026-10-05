@@ -1,3 +1,4 @@
+import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/float
 import gleam/int
@@ -8,6 +9,7 @@ import gleam/result
 import gleam/string
 import lustre
 import lustre/attribute as a
+import lustre/component
 import lustre/effect.{type Effect}
 import lustre/element.{type Element}
 import lustre/element/html as h
@@ -16,6 +18,7 @@ import lustre/event as e
 
 @external(javascript, "./api.mjs", "request")
 fn request(
+  base: String,
   path: String,
   method: String,
   body: String,
@@ -26,7 +29,7 @@ fn request(
 fn after_draw(callback: fn() -> Nil) -> Nil
 
 @external(javascript, "./api.mjs", "events")
-fn events(receive: fn(String) -> Nil) -> Nil
+fn events(base: String, receive: fn(String) -> Nil) -> Source
 
 @external(javascript, "./layout.mjs", "placement")
 fn placement(
@@ -34,31 +37,33 @@ fn placement(
   edges: String,
   overview: Bool,
   anchor: String,
+  root: dynamic.Dynamic,
+  base: String,
 ) -> String
 
 @external(javascript, "./layout.mjs", "fitted")
-fn fitted(points: String, panel: Bool) -> String
+fn fitted(points: String, panel: Bool, root: dynamic.Dynamic) -> String
 
 @external(javascript, "./layout.mjs", "task_id")
 fn task_id() -> String
 
 @external(javascript, "./layout.mjs", "viewport_width")
-fn viewport_width() -> Float
+fn viewport_width(root: dynamic.Dynamic) -> Float
 
 @external(javascript, "./layout.mjs", "viewport_height")
-fn viewport_height() -> Float
+fn viewport_height(root: dynamic.Dynamic) -> Float
 
 @external(javascript, "./layout.mjs", "keys")
-fn keys(receive: fn(String) -> Nil) -> Nil
+fn keys(root: dynamic.Dynamic, receive: fn(String) -> Nil) -> Nil
 
 @external(javascript, "./layout.mjs", "focus_node")
-fn focus_node(id: String) -> Nil
+fn focus_node(root: dynamic.Dynamic, id: String) -> Nil
 
 @external(javascript, "./layout.mjs", "panel_width")
 fn panel_width() -> Float
 
 @external(javascript, "./layout.mjs", "resizer")
-fn resizer() -> Nil
+fn resizer(root: dynamic.Dynamic) -> Nil
 
 pub type Node {
   Node(
@@ -184,6 +189,12 @@ pub type Model {
     file: Option(FileText),
     outline: Bool,
     asked: String,
+    source_handle: Option(Source),
+    /// The `base` attribute: this instance's API prefix, "" for the page's.
+    prefix: String,
+    /// The component's shadow root, once it has rendered.
+    root: dynamic.Dynamic,
+    connected: Bool,
   )
 }
 
@@ -219,6 +230,11 @@ pub type Msg {
   Reveal(String)
   AskForSummaries
   Asked(String)
+  BaseChanged(String)
+  Listening(Source)
+  Attached(dynamic.Dynamic)
+  Disconnected
+  Connected
 }
 
 pub fn check_decoder() -> decode.Decoder(Check) {
@@ -563,14 +579,12 @@ pub fn toggle(
 }
 
 pub fn main() {
-  let assert Ok(_) =
-    lustre.start(lustre.application(init, update, view), "#app", Nil)
-  Nil
+  let assert Ok(_) = register()
 }
 
-fn get(path: String, msg: fn(String) -> Msg) -> Effect(Msg) {
+fn get(model: Model, path: String, msg: fn(String) -> Msg) -> Effect(Msg) {
   effect.from(fn(send) {
-    request(path, "GET", "", fn(text) { send(msg(text)) })
+    request(model.prefix, path, "GET", "", fn(text) { send(msg(text)) })
   })
 }
 
@@ -619,10 +633,17 @@ fn relayout(model: Model, fresh: Bool) -> Model {
     |> json.to_string
   case
     json.parse(
-      placement(node_json, edge_json, fresh, case model.expanded {
-        [anchor, ..] -> anchor
-        [] -> ""
-      }),
+      placement(
+        node_json,
+        edge_json,
+        fresh,
+        case model.expanded {
+          [anchor, ..] -> anchor
+          [] -> ""
+        },
+        model.root,
+        model.prefix,
+      ),
       decode.list(point_decoder()),
     )
   {
@@ -647,7 +668,7 @@ fn fit(model: Model) -> Model {
     use y <- decode.field("y", decode.float)
     decode.success(#(zoom, x, y))
   }
-  case json.parse(fitted(points, model.pane), decoder) {
+  case json.parse(fitted(points, model.pane, model.root), decoder) {
     Ok(#(zoom, x, y)) -> Model(..model, zoom: zoom, pan_x: x, pan_y: y)
     Error(_) -> model
   }
@@ -655,10 +676,6 @@ fn fit(model: Model) -> Model {
 
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   let task = task_id()
-  let path = case task {
-    "" -> "/graph"
-    _ -> "/graph?task=" <> task
-  }
   #(
     Model(
       Graph([], [], None, "", "", []),
@@ -690,18 +707,14 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       // Without a task the view opens on the outline (D-55.1).
       task == "",
       "",
+      None,
+      "",
+      no_root(),
+      False,
     ),
-    effect.batch([
-      get(path, Loaded),
-      effect.from(fn(send) {
-        keys(fn(key) { send(Key(key)) })
-        resizer()
-      }),
-      case task {
-        "" -> effect.none()
-        _ -> effect.from(fn(send) { events(fn(data) { send(Live(data)) }) })
-      },
-    ]),
+    // Lustre runs init once for every instance, before its `base` is set:
+    // the graph loads when the instance connects.
+    effect.none(),
   )
 }
 
@@ -711,6 +724,43 @@ fn review_needs_tests(review: Review) -> Bool {
 
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
+    Connected -> {
+      let #(model, fx) = start(Model(..model, connected: True))
+      #(
+        model,
+        effect.batch([
+          fx,
+          effect.before_paint(fn(send, root) { send(Attached(root)) }),
+        ]),
+      )
+    }
+    Attached(root) -> #(
+      Model(..model, root: root),
+      effect.from(fn(send) {
+        prevent_drag(root)
+        keys(root, fn(key) { send(Key(key)) })
+        resizer(root)
+      }),
+    )
+    Listening(source) -> #(
+      Model(..model, source_handle: Some(source)),
+      effect.none(),
+    )
+    Disconnected -> {
+      case model.source_handle {
+        Some(source) -> close_events(source)
+        None -> Nil
+      }
+      #(Model(..model, source_handle: None, connected: False), effect.none())
+    }
+    // An attribute set before the element is added only takes effect then.
+    BaseChanged(base) -> {
+      let model = Model(..model, prefix: base)
+      case model.connected {
+        True -> start(model)
+        False -> #(model, effect.none())
+      }
+    }
     Loaded(text) ->
       case json.parse(text, graph_decoder()) {
         Ok(graph) -> {
@@ -743,6 +793,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                 True ->
                   effect.from(fn(send) {
                     request(
+                      model.prefix,
                       "/tests",
                       "POST",
                       json.to_string(
@@ -806,7 +857,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           Model(..next, detail: Some(node)),
           effect.none(),
         )
-        _ -> #(next, get("/nodes/" <> id, Detail))
+        _ -> #(next, get(model, "/nodes/" <> id, Detail))
       }
     }
     Detail(text) ->
@@ -865,7 +916,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       fit(layout(Model(..model, visible: overview(model.graph), expanded: []))),
       fit_after_render(),
     )
-    OpenFile(path) -> #(model, get("/files/" <> path, FileLoaded))
+    OpenFile(path) -> #(model, get(model, "/files/" <> path, FileLoaded))
     FileLoaded(text) ->
       case json.parse(text, file_decoder()) {
         Ok(file) -> #(
@@ -928,6 +979,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       model,
       effect.from(fn(send) {
         request(
+          model.prefix,
           "/tests",
           "POST",
           json.to_string(json.object([#("task", json.string(model.task))])),
@@ -940,13 +992,14 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       case json.parse(text, decode.at(["task", "id"], decode.string)) {
         Ok(id) if id == model.task -> #(
           model,
-          get("/graph?task=" <> model.task, Loaded),
+          get(model, "/graph?task=" <> model.task, Loaded),
         )
         _ -> #(model, effect.none())
       }
     SelectSource(id) -> #(
       model,
       get(
+        model,
         "/nodes/"
           <> id
           <> "?source=1"
@@ -983,6 +1036,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Model(..model, asked: "asking"),
         effect.from(fn(send) {
           request(
+            model.prefix,
             "/tasks",
             "POST",
             json.to_string(
@@ -1042,8 +1096,8 @@ fn source_decoder() -> decode.Decoder(#(String, List(#(String, String)))) {
 /// Zooms about the middle of the drawing, so what is in view stays in view.
 fn zoom(model: Model, amount: Float) -> Model {
   let zoom = float.clamp(model.zoom *. amount, 0.02, 2.5)
-  let half_w = viewport_width() /. 2.0
-  let half_h = viewport_height() /. 2.0
+  let half_w = viewport_width(model.root) /. 2.0
+  let half_h = viewport_height(model.root) /. 2.0
   Model(
     ..model,
     zoom: zoom,
@@ -1056,12 +1110,12 @@ fn zoom(model: Model, amount: Float) -> Model {
 /// doesn't move. `panel`: the detail panel covers the right of a wide sheet.
 fn reveal(model: Model, id: String, panel: Bool) -> Model {
   let Point(_, x, y) = point(model, id)
-  let width = case panel && viewport_width() >. 650.0 {
-    True -> viewport_width() -. panel_width()
-    False -> viewport_width()
+  let width = case panel && viewport_width(model.root) >. 650.0 {
+    True -> viewport_width(model.root) -. panel_width()
+    False -> viewport_width(model.root)
   }
   let w = width /. model.zoom
-  let h = viewport_height() /. model.zoom
+  let h = viewport_height(model.root) /. model.zoom
   let into = fn(pan, at, size, view) {
     case at -. 16.0 <. pan, at +. size +. 16.0 >. pan +. view {
       True, _ -> at -. 16.0
@@ -1109,7 +1163,7 @@ fn keyboard(model: Model, key: String) -> #(Model, Effect(Msg)) {
   let go = fn(model: Model, id) {
     #(
       Model(..reveal(model, id, has_panel), focus: id),
-      effect.from(fn(_) { focus_node(id) }),
+      effect.from(fn(_) { focus_node(model.root, id) }),
     )
   }
   case key, focused {
@@ -2043,9 +2097,9 @@ fn svg_view(model: Model) -> Element(Msg) {
           <> " "
           <> num(model.pan_y)
           <> " "
-          <> num(viewport_width() /. model.zoom)
+          <> num(viewport_width(model.root) /. model.zoom)
           <> " "
-          <> num(viewport_height() /. model.zoom),
+          <> num(viewport_height(model.root) /. model.zoom),
       ),
       e.on("pointerdown", mouse_decoder(PanStart)),
       e.on("pointermove", mouse_decoder(PanMove)),
@@ -2161,6 +2215,7 @@ pub fn view(model: Model) -> Element(Msg) {
     ],
     list.append(
       [
+        h.style([], view_styles),
         h.header([a.class("view-top")], [
           h.div([], [
             h.a([ax("href", "/"), a.class("view-back")], [h.text("← Board")]),
@@ -2430,3 +2485,59 @@ fn drawing_sheet(model: Model) -> Element(Msg) {
     h.div([a.class("view-drawing")], [svg_view(model)]),
   ])
 }
+
+pub type Source
+
+@external(javascript, "./api.mjs", "close_events")
+fn close_events(source: Source) -> Nil
+
+@external(javascript, "./api.mjs", "prevent_drag")
+fn prevent_drag(root: dynamic.Dynamic) -> Nil
+
+pub fn register() -> Result(Nil, lustre.Error) {
+  lustre.register(
+    lustre.component(init, update, view, [
+      component.on_attribute_change("base", fn(base) { Ok(BaseChanged(base)) }),
+      component.on_disconnect(Disconnected),
+      component.on_connect(Connected),
+      component.adopt_styles(False),
+    ]),
+    "solace-view",
+  )
+}
+
+const view_styles = ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78}\n.view-page{font:15px/1.45 'Solace Drawing','Arial Narrow',sans-serif;min-height:100dvh;position:relative;background:var(--sheet);color:var(--ink)}\n.view-page *{box-sizing:border-box;scrollbar-color:var(--line) var(--paper)}.view-page input{caret-color:var(--focus)}.view-page input::placeholder{color:var(--soft);opacity:1}.view-page a{text-underline-offset:3px}.view-page ::selection{background:#bfd5ce;color:var(--ink)}\n.view-page button,.view-page input{font:inherit;border-radius:0;margin:0;color:var(--ink)}\n.view-page button{background:var(--paper);border:1px solid var(--ink);padding:6px 12px}.view-page button:hover{background:#e7eeea}.view-page button:focus-visible,.view-page input:focus-visible,.view-node:focus-visible{outline:3px solid var(--focus);outline-offset:3px}\n.view-page h1,.view-page h2,.view-page h3{line-height:1.2;letter-spacing:-.02em}.view-page h1{font-size:28px;margin:0}.view-page h2{font-size:19px;margin:0 0 10px}.view-page h3{font-size:15px;margin:24px 0 8px;text-transform:uppercase;letter-spacing:.06em}\n.view-page p{margin:8px 0}.view-top{height:100px;padding:12px 22px;display:flex;gap:30px;align-items:center;border-bottom:2px solid var(--ink);background:var(--paper);position:relative;z-index:3}.view-top>div:first-child{min-width:230px}.view-back{color:var(--focus);font-size:13px;text-underline-offset:3px}.view-search{flex:1;max-width:500px}.view-search label{font-size:12px;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}.view-search input{background:var(--paper);width:100%;max-width:none;padding:8px;border:1px solid var(--ink)}.view-search-results{position:absolute;z-index:8;left:min(282px,25vw);top:88px;width:min(500px,65vw);background:var(--paper);border:1px solid var(--ink);max-height:300px;overflow:auto}.view-search-results:empty{display:none}.view-search-results button{display:block;width:100%;text-align:left;border:0;border-bottom:1px solid var(--grid)}\n.view-page{height:100dvh;display:flex;flex-direction:column;background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);background-size:24px 24px}\n.view-top{flex:none}\n.view-sheet{flex:1;min-height:0;position:relative;display:flex;flex-direction:column;gap:20px;padding:24px}\n.view-sheet-head{display:flex;align-items:flex-start;gap:24px;flex:none}\n.view-drawing{flex:1;min-height:0;min-width:0}\n.view-diagram{width:100%;height:100%;display:block;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none}.view-diagram *{-webkit-user-drag:none}\n.view-diagram:active{cursor:grabbing}\n.view-tools{display:flex;gap:4px;margin-left:auto;flex:none}\n.view-tools button{min-width:36px}\n.view-legend{background:var(--paper);border:1px solid var(--ink);padding:12px 16px}\n.view-legend{flex:none;width:360px;max-width:100%}\n.view-legend h2{font-size:14px;text-transform:uppercase;letter-spacing:.1em}\n.view-legend-mobile{display:none}\n.view-legend-kinds,.view-legend-lines{display:flex;flex-wrap:wrap;gap:8px 12px;font-size:12px}\n.view-legend-lines{margin-top:10px}\n.view-legend-kind,.view-legend-lines span{display:inline-flex;align-items:center;gap:6px}\n.view-swatch{margin:0;width:15px;height:17px;border:1px solid var(--ink);background:var(--paper);position:relative}\n.view-swatch:before{content:\"\";position:absolute;inset:0 auto 0 0;width:5px;background:var(--kind)}\n.view-swatch.entry{--kind:var(--entry)}.view-swatch.logic{--kind:var(--logic)}.view-swatch.effect{--kind:var(--effect)}.view-swatch.test{--kind:var(--test)}.view-swatch.file{--kind:var(--file)}.view-swatch.area{--kind:var(--area)}\n.view-legend-lines svg{width:32px;height:18px;flex:none}\n.view-revision-sample{fill:var(--paper);stroke:var(--revision);stroke-width:2}\n.view-drawing-note{max-width:48ch;font-size:13px;line-height:1.5;color:var(--soft);margin:0!important}\n.view-drawing-note:empty{display:none}\n.view-page .view-project{font-size:13px;color:var(--soft);margin:2px 0 0;overflow-wrap:anywhere}\n.view-wire{fill:none;stroke:var(--ink);stroke-width:1.6}\n.view-arrow{fill:none;stroke:var(--ink);stroke-width:1.4}\n.view-node{cursor:pointer;color:var(--ink)}\n.view-box{fill:var(--paper);stroke:var(--ink);stroke-width:1.8}\n.view-node.entry .view-tab{fill:var(--entry)}.view-node.logic .view-tab{fill:var(--logic)}.view-node.effect .view-tab{fill:var(--effect)}.view-node.test .view-tab{fill:var(--test)}.view-node.file .view-tab{fill:var(--file)}.view-node.area .view-tab{fill:var(--area)}.view-node.area .view-box{stroke-width:2.6}.view-face .view-summary.none{color:var(--soft);font-style:italic}\n.view-node.removed .view-box{stroke-dasharray:12 6;fill:var(--paper)}\n.view-node.changed .view-box{stroke:var(--revision);stroke-width:2.4}\n.view-node.selected .view-box{stroke-width:5}\n.view-ring{fill:none;stroke:none}.view-page .view-node:focus-visible{outline:none}.view-node:focus-visible .view-ring{stroke:var(--focus);stroke-width:3}\n.view-expander rect{fill:var(--ink)}.view-expander text{fill:var(--paper)!important;font-size:12px;font-weight:700}\n.view-wire-hit{fill:none;stroke:transparent;stroke-width:12;pointer-events:stroke}\n.view-panel-grip{position:absolute;z-index:6;top:100px;right:calc(min(var(--panel-width,410px),100%) - 4px);width:8px;height:calc(100dvh - 100px);cursor:ew-resize;touch-action:none}.view-panel-grip:hover,.view-panel-grip:focus-visible{background:var(--line);outline:none}\n:host(.view-resizing){cursor:ew-resize;user-select:none}\n.view-tabs{display:flex;align-items:stretch;background:var(--sheet);border-bottom:2px solid var(--ink)}\n.view-panel .view-tabs{position:sticky;top:-24px;z-index:1;margin:-24px -24px 20px}\n.view-page .view-tabs button{border:0;border-right:1px solid var(--line);background:transparent;padding:10px 16px}\n.view-page .view-tabs button[aria-selected=true]{background:var(--paper);font-weight:700;box-shadow:inset 0 -3px var(--ink)}\n.view-page .view-tabs .view-tabs-close{margin-left:auto;border-right:0;border-left:1px solid var(--line)}\n.view-pane-folded{position:absolute;z-index:4;top:30px;right:22px}.view-pane-folded .view-tabs{border:1px solid var(--ink)}\n.view-icon svg{width:18px;height:18px;display:block;fill:none;stroke:currentColor;stroke-width:2;stroke-linejoin:round;stroke-linecap:round}\n.view-file-role{font-size:13px;color:var(--soft)}.view-page .view-files{list-style:none;padding:0;margin:0}.view-page .view-files li{white-space:normal;margin:0}\n.view-files small{display:inline;color:var(--soft);font-size:12px}.view-files-dir{padding:6px 13px;color:var(--soft)}\n.view-page .view-row[aria-current=true]{background:#e7eeea;font-weight:700}\n.view-reader{flex:1;min-height:0;display:flex;flex-direction:column;padding:24px;gap:12px}\n.view-reader-head{display:flex;align-items:start;justify-content:space-between;gap:16px}.view-reader-head h2{overflow-wrap:anywhere}.view-reader-head p{margin:0;color:var(--soft);font-size:13px}\n.view-reader-note{color:var(--soft);font-size:13px}\n.view-reader-text{flex:1;min-height:0;overflow:auto;margin:0;background:var(--paper);border:1px solid var(--ink);padding:12px 0;font:13px/1.5 ui-monospace,monospace;white-space:pre;counter-reset:line}\n.view-reader-text span{display:block;padding-right:16px}.view-reader-text span::before{counter-increment:line;content:counter(line);display:inline-block;width:5ch;margin-right:2ch;text-align:right;color:var(--soft);user-select:none}\n.view-node.changed .view-badge,.view-node.removed .view-badge{fill:var(--revision)}\n.view-node text{fill:var(--ink);font-family:'Solace Drawing','Arial Narrow',sans-serif}\n.view-kind{font-size:9px;letter-spacing:1.1px}\n.view-face{font-family:'Solace Drawing','Arial Narrow',sans-serif;line-height:1.3;pointer-events:none}\n.view-face .view-name{font-size:16px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0 0 4px}\n.view-face .view-summary{font-size:11px;line-height:15px;height:30px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;overflow-wrap:anywhere;margin:0 0 5px}\n.view-face .view-io{font-size:11px;color:var(--soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0}.view-face .view-summary:empty{display:none}\n.view-badge{font-size:8px;font-weight:700}\n.view-panel{position:absolute;z-index:5;top:100px;right:0;width:min(var(--panel-width,410px),100%);height:calc(100dvh - 100px);overflow:auto;background:var(--paper);border-left:2px solid var(--ink);padding:24px;box-shadow:-9px 8px 24px #17222626}.view-panel-head{display:flex;align-items:start;justify-content:space-between;gap:12px}.view-panel-head h2{overflow-wrap:anywhere}.view-detail-kind{text-transform:uppercase;letter-spacing:.1em;color:var(--soft);font-size:12px}.view-code,.view-source{font:12px/1.5 ui-monospace,monospace;overflow-wrap:anywhere;white-space:pre-wrap;border-top:1px solid var(--line);padding-top:8px}.view-row{display:block;width:100%;text-align:left;margin:4px 0!important;overflow-wrap:anywhere}.view-review-summary{font-weight:700;border-top:2px solid var(--ink);border-bottom:1px solid var(--ink);padding:12px 0}.view-diff span{display:block}.view-diff .added{background:#dcefe2}.view-diff .removed{background:#f6dcdc}.view-review-test,.view-file{border-bottom:1px solid var(--line);padding:8px 0}.view-review-test p{overflow-wrap:anywhere}.view-error{position:absolute}.view-error:not(:empty){position:absolute;left:20px;bottom:20px;background:var(--paper);border:2px solid var(--revision);padding:12px;color:var(--revision);z-index:9}\n.view-frame rect{fill:#e9f1ee99;stroke:var(--area);stroke-width:1.4;stroke-dasharray:10 4 2 4}.view-frame text{fill:var(--area);font:700 13px 'Solace Drawing','Arial Narrow',sans-serif;text-transform:uppercase;letter-spacing:.08em}\n.view-switch{display:flex;flex:none}.view-page .view-switch button{padding:8px 14px}.view-page .view-switch button+button{border-left:0}.view-page .view-switch button[aria-pressed=true]{background:var(--ink);color:var(--paper)}\n.view-search-results small,.view-row small{display:block;color:var(--soft);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.view-search-results small:empty,.view-row small:empty{display:none}\n.view-outline{flex:1;min-height:0;overflow:auto;padding:28px 24px 48px}.view-outline-body{max-width:860px;margin:0 auto;background:var(--paper);border:1px solid var(--ink);padding:28px 32px}\n.view-page .view-outline h2{font-size:26px}.view-outline-lead{color:var(--soft)}.view-page .view-outline h3{margin-top:28px;border-bottom:2px solid var(--ink);padding-bottom:6px}\n.view-outline-notice{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;border:1px solid var(--line);border-left:5px solid var(--effect);background:var(--sheet);padding:10px 14px;margin:16px 0}.view-outline-notice p{margin:0}\n.view-page .view-outline-row{display:grid;gap:2px;width:100%;text-align:left;border:0;border-bottom:1px solid var(--grid);background:transparent;padding:10px 4px}.view-page .view-outline-row:hover{background:#eef3f0}\n.view-outline-name{font-weight:700;font-size:16px}.view-outline-summary{font-size:14px}.view-outline-meta{font-size:12.5px;color:var(--soft)}\n.view-outline-requests{margin:4px 0 12px 4px}.view-outline-requests p{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--soft);margin:8px 0 4px}\n.view-requests{list-style:none;padding:0;margin:0;columns:2 220px;column-gap:24px;font-size:14px}.view-requests li{break-inside:avoid;padding:2px 0}.view-requests small{color:var(--soft)}\n.view-area{border-bottom:1px solid var(--line)}.view-area>summary{cursor:pointer;padding:12px 4px;display:grid;grid-template-columns:auto 1fr;gap:2px 12px;align-items:baseline}.view-area>summary:hover{background:#eef3f0}.view-area>summary:focus-visible{outline:3px solid var(--focus);outline-offset:2px}\n.view-area-name{font-weight:700;font-size:17px;text-transform:capitalize}.view-area-counts{font-size:12.5px;color:var(--soft);justify-self:end}.view-area-summary{grid-column:1/-1;font-size:14px;color:var(--soft)}.view-area[open]>summary{border-bottom:1px solid var(--grid)}.view-area .view-outline-row{padding-left:20px}\n.view-detail-summary{font-size:16px}.view-detail-io{color:var(--soft);font-size:14px}.view-examples{padding-left:18px;margin:0;font:12.5px/1.6 ui-monospace,monospace;overflow-wrap:anywhere}\n.view-group{border-top:1px solid var(--line)}.view-group>summary{cursor:pointer;padding:8px 0;font-size:13px;text-transform:uppercase;letter-spacing:.06em;font-weight:700}.view-group>summary:focus-visible{outline:3px solid var(--focus)}\n@media(min-width:700px){\n.view-page.has-panel .view-reader{padding-right:calc(var(--panel-width,410px) + 24px)}\n.view-page.has-panel .view-outline{padding-right:calc(var(--panel-width,410px) + 24px)}\n.view-page.has-panel .view-sheet-head{padding-right:var(--panel-width,410px);flex-wrap:wrap}\n}\n@media(max-width:699px){\n.view-page{height:auto;min-height:100dvh}\n.view-top{height:138px;min-height:138px;flex-wrap:wrap;gap:8px 14px;padding:10px 14px}\n.view-top>div:first-child{min-width:0;flex:1}.view-top h1{font-size:22px}\n.view-search{order:3;flex-basis:100%;max-width:none}.view-search-results{left:14px;top:130px;width:calc(100% - 28px)}\n.view-sheet{flex:none;height:calc(100dvh - 138px);min-height:360px;padding:14px;gap:14px}\n.view-sheet-head{flex-wrap:wrap;gap:10px;align-items:start}\n.view-legend{width:auto;padding:0;border:0;background:transparent}\n.view-legend-desktop{display:none}.view-legend-mobile{display:block}\n.view-legend-mobile summary{cursor:pointer;min-height:36px;padding:6px 10px;border:1px solid var(--ink);background:var(--paper)}\n.view-legend-mobile summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}\n.view-legend:has(details[open]){order:2;width:100%}\n.view-legend-mobile .view-legend-content{padding:12px;background:var(--paper);border:1px solid var(--ink);border-top:0}\n.view-drawing-note{order:3;flex-basis:100%;max-width:none;font-size:12px}\n.view-tools{margin-left:auto}\n.view-switch{order:2}.view-outline{padding:14px}.view-outline-body{padding:18px}.view-area-counts{justify-self:start;grid-column:1/-1}.view-panel{top:138px;height:calc(100dvh - 138px);width:100%;padding:18px}.view-panel .view-tabs{top:-18px;margin:-18px -18px 16px}.view-pane-folded{top:12px;right:14px}.view-reader{height:calc(100dvh - 138px);padding:14px}.view-panel-grip{display:none}\n}\n@media(prefers-reduced-motion:reduce){.view-page *{scroll-behavior:auto!important}}"
+
+/// Opens this instance's transport with its own `base`: the graph, and for a
+/// task the event stream that reloads it. Runs on connection and when `base`
+/// changes.
+fn start(model: Model) -> #(Model, Effect(Msg)) {
+  case model.source_handle {
+    Some(source) -> close_events(source)
+    None -> Nil
+  }
+  let model = Model(..model, source_handle: None)
+  #(
+    model,
+    effect.batch([
+      get(
+        model,
+        case model.task {
+          "" -> "/graph"
+          task -> "/graph?task=" <> task
+        },
+        Loaded,
+      ),
+      case model.task {
+        "" -> effect.none()
+        _ ->
+          effect.from(fn(send) {
+            send(Listening(events(model.prefix, fn(data) { send(Live(data)) })))
+          })
+      },
+    ]),
+  )
+}
+
+@external(javascript, "./api.mjs", "no_root")
+fn no_root() -> dynamic.Dynamic

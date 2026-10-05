@@ -18,6 +18,7 @@ async function render(migration) {
   const run = effect => perform(effect, dispatch, () => {}, () => {}, () => {}, () => {}, () => {}, () => {});
   try {
     let effect; [model, effect] = board.init(); run(effect);
+    dispatch(new board.Connected());
     for (let i = 0; i < 100 && !model.migration[0]; i++) await Bun.sleep(5);
     return to_string(board.view(model));
   } finally {

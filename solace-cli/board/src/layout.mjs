@@ -1,4 +1,6 @@
 import dagre from '@dagrejs/dagre';
+// `root` below is the contract view's own shadow root, passed by its component.
+const eventElement = event => event.composedPath?.()[0] || event.target;
 
 export const nodeWidth = 220;
 export const nodeHeight = 120;
@@ -6,15 +8,15 @@ export const minZoom = 0.8;
 let memory = {};
 let memoryKey = '';
 
-export function viewport_width() {
-  return globalThis.document?.querySelector('.view-drawing')?.clientWidth || Math.max(240, (globalThis.innerWidth || 1440) - 48);
+export function viewport_width(root) {
+  return root?.querySelector?.('.view-drawing')?.clientWidth || Math.max(240, (globalThis.innerWidth || 1440) - 48);
 }
-export function viewport_height() {
-  return globalThis.document?.querySelector('.view-drawing')?.clientHeight || Math.max(240, (globalThis.innerHeight || 900) - ((globalThis.innerWidth || 1440) < 700 ? 248 : 360));
+export function viewport_height(root) {
+  return root?.querySelector?.('.view-drawing')?.clientHeight || Math.max(240, (globalThis.innerHeight || 900) - ((globalThis.innerWidth || 1440) < 700 ? 248 : 360));
 }
-export function layout(nodes, edges, overview = false, anchor = '') {
+export function layout(nodes, edges, overview = false, anchor = '', root = null, base = '') {
   // v2 retires the old single-column coordinates; viewport width separates phone and desktop sheets.
-  const key = 'solace-view-positions:v2:' + (globalThis.location?.pathname.replace(/\/?view$/, '') || '') + (globalThis.location?.search || '') + ':' + Math.round(viewport_width());
+  const key = 'solace-view-positions:v2:' + (base || globalThis.location?.pathname.replace(/\/?view$/, '') || '') + (globalThis.location?.search || '') + ':' + Math.round(viewport_width(root));
   if (key !== memoryKey) {
     memoryKey = key;
     memory = {};
@@ -42,7 +44,7 @@ export function layout(nodes, edges, overview = false, anchor = '') {
   }
   const isolated = nodes.filter(node => !connected.has(node.id));
   // Columns fill the sheet width at full size; extra rows run below and are reached by panning.
-  const columns = Math.max(1, Math.floor((viewport_width() - 32) / 252));
+  const columns = Math.max(1, Math.floor((viewport_width(root) - 32) / 252));
   isolated.forEach((node, index) => {
     fresh[node.id] = { x: (index % columns) * 252, y: gridY + Math.floor(index / columns) * 156 };
   });
@@ -92,10 +94,10 @@ export function fit(positions, width = viewport_width(), height = viewport_heigh
   const fitsWide = (right - left) * zoom <= available;
   return { zoom, x: fitsWide ? (left + right - available / zoom) / 2 : left, y: top };
 }
-export function placement(nodes_json, edges_json, overview, anchor) {
-  return JSON.stringify(layout(JSON.parse(nodes_json), JSON.parse(edges_json), overview, anchor));
+export function placement(nodes_json, edges_json, overview, anchor, root, base) {
+  return JSON.stringify(layout(JSON.parse(nodes_json), JSON.parse(edges_json), overview, anchor, root, base));
 }
-export function fitted(positions_json, panel) { return JSON.stringify(fit(JSON.parse(positions_json), undefined, undefined, panel)); }
+export function fitted(positions_json, panel, root) { return JSON.stringify(fit(JSON.parse(positions_json), viewport_width(root), viewport_height(root), panel)); }
 export function task_id() { return new URLSearchParams(location.search).get('task') || ''; }
 
 // Fit after Lustre has painted the new legend/note and the lettering has loaded.
@@ -107,10 +109,13 @@ export function after_draw(callback) {
 // Diagram keys: arrows/WASD move between boxes; with Shift they pan, Ctrl+Up/Down zoom;
 // Space expands, C collapses (with Shift: all), Enter opens. Typing in a field or pressing a button is left alone.
 const directions = { ArrowLeft: 'left', a: 'left', ArrowRight: 'right', d: 'right', ArrowUp: 'up', w: 'up', ArrowDown: 'down', s: 'down' };
-export function keys(send) {
-  globalThis.document?.addEventListener('keydown', event => {
-    if (event.altKey || event.metaKey || event.target.closest?.('input,textarea,select,button,a,summary,[contenteditable],[role=separator]')) return;
-    if (!document.querySelector('.view-diagram')) return; // a file is open in place of the drawing
+const keyRoots = new WeakSet();
+export function keys(target, send) {
+  if (!target?.addEventListener || keyRoots.has(target)) return;
+  keyRoots.add(target);
+  target.addEventListener('keydown', event => {
+    if (event.altKey || event.metaKey || eventElement(event)?.closest?.('input,textarea,select,button,a,summary,[contenteditable],[role=separator]')) return;
+    if (!target.querySelector?.('.view-diagram')) return; // a file is open in place of the drawing
     const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
     const direction = directions[key];
     let action = '';
@@ -124,9 +129,9 @@ export function keys(send) {
     send(action);
   });
 }
-export function focus_node(id) {
+export function focus_node(root, id) {
   const frame = globalThis.requestAnimationFrame || (fn => setTimeout(fn, 0));
-  frame(() => globalThis.document?.querySelector(`[data-node="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }));
+  frame(() => root?.querySelector?.(`[data-node="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }));
 }
 
 // The side panel's width: drag its left edge, or focus the edge and press Left/Right. Kept per browser.
@@ -141,21 +146,23 @@ function setPanelWidth(width) {
   document.documentElement.style.setProperty('--panel-width', clamped + 'px');
   try { localStorage.setItem(widthKey, String(clamped)); } catch {}
 }
-export function resizer() {
+const resizeRoots = new WeakSet();
+export function resizer(target) {
   const document = globalThis.document;
-  if (!document) return;
+  if (!document || !target?.addEventListener || resizeRoots.has(target)) return;
+  resizeRoots.add(target);
   try { const saved = parseFloat(localStorage.getItem(widthKey)); if (Number.isFinite(saved)) setPanelWidth(saved); } catch {}
-  document.addEventListener('pointerdown', event => {
-    if (!event.target.closest?.('.view-panel-grip')) return;
+  target.addEventListener('pointerdown', event => {
+    if (!eventElement(event)?.closest?.('.view-panel-grip')) return;
     event.preventDefault();
     const move = e => setPanelWidth(globalThis.innerWidth - e.clientX);
-    const stop = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', stop); document.body.classList.remove('view-resizing'); };
-    document.body.classList.add('view-resizing');
+    const stop = () => { document.removeEventListener('pointermove', move); document.removeEventListener('pointerup', stop); (target.host || document.body).classList.remove('view-resizing'); };
+    (target.host || document.body).classList.add('view-resizing');
     document.addEventListener('pointermove', move);
     document.addEventListener('pointerup', stop);
   });
-  document.addEventListener('keydown', event => {
-    if (!event.target.closest?.('.view-panel-grip')) return;
+  target.addEventListener('keydown', event => {
+    if (!eventElement(event)?.closest?.('.view-panel-grip')) return;
     const step = { ArrowLeft: 32, ArrowRight: -32 }[event.key];
     if (!step) return;
     event.preventDefault();

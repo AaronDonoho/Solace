@@ -1,6 +1,16 @@
 # Solace: the code as last approved (D-58). Commit this file; Solace keeps it current.
-6cb1443947c5824d0f9a2a954bc8563c frontend (imports)
-e5645bda8d1ff0cf615b7db8b5ddc11b frontend.main
-9eb0c573ab86cfd0bf42109593a4d2d5 frontend_test (imports)
-45152a014355ff12ccc3fade8ed1a54c frontend_test.hello_world_test
+ea17990273bd379fbc335395d6cf313d frontend (imports)
+f4490a319098e3a4d9134662e7c08552 frontend.Msg
+ee4bbd2a14984b28d39f3b59c22e37bb frontend.Route
+2ad0d313eb42e372794f07392cebae07 frontend.init
+eafe72d24b921e4b498be6534c99c67a frontend.link
+1ae6e78c79d109428363043a260bec54 frontend.main
+c355376fbbdaecd1c6a31139f7ed811d frontend.page
+af41d2066e71fbdeb9429b346989cbc7 frontend.route
+eee8c93ee159b49d876fcc1673eab750 frontend.update
+ef0d98b941db46ae5fafa69e19904b69 frontend.view
+4946cd1a5dd876039fea3b5a3180d2a9 frontend_test (imports)
 a127f48e8d26d57b98ad4475ba0d01ed frontend_test.main
+9f048066145f52d3558ca7de16222dbf frontend_test.menu_current_test
+87a1b179b179f5b06c957d1fb7d8ac77 frontend_test.page_elements_test
+f27584c5c9fd7a9a943f7ea0db01aed9 frontend_test.routes_test

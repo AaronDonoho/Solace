@@ -1,8 +1,3 @@
-// Nothing drags (links, images, selected text) except text inside an editor.
-document.addEventListener('dragstart', e => e.target.closest?.('input,textarea') || e.preventDefault());
-if (/\/view$/.test(location.pathname)) {
-  document.title = 'Solace contract view';
-  import('../build/dev/javascript/solace_board/solace_view.mjs').then(({ main }) => main());
-} else {
-  import('../build/dev/javascript/solace_board/solace_board.mjs').then(({ main }) => main());
-}
+// The wrapper shell owns routing. This page mounts the board for standalone use.
+import('../build/dev/javascript/solace_board/solace_board.mjs').then(({ register }) => register());
+import('../build/dev/javascript/solace_board/solace_view.mjs').then(({ register }) => register());

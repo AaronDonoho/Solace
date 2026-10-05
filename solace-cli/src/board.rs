@@ -438,6 +438,12 @@ pub fn record(s: &Store, home: &Store, tid: &str, rid: &str, before: &Value, aft
     }
     save(home, &t)
 }
+/// Whether a recorded change is still worth reviewing: a file that is unwatched now (ignored after
+/// the change was recorded, say) is not. Cancel and undo still restore it.
+pub fn reviewable(root: &Path, key: &str) -> bool {
+    let Some(name) = key.strip_prefix("file:") else { return true };
+    lockdown::settings(root).map_or(true, |v| !lockdown::tier(root, &v, name, None).starts_with("unwatched"))
+}
 /// `task diff`: what each entity this task changed looked like before the task,
 /// against now. `names` narrows it; past `budget`, the rest are listed by name.
 pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
@@ -465,6 +471,9 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
         for c in t["changes"].as_array().unwrap().iter().filter(|c| project_of(c, &home) == dir) {
             let (key, name) = (c["entity"].as_str().unwrap(), c["name"].as_str().unwrap_or(""));
             let Some(old) = before.get(key) else { continue };
+            if !reviewable(&st.root, key) {
+                continue;
+            }
             if !names.is_empty() && !names.iter().any(|n| *n == name || key.split_once(':').is_some_and(|(_, k)| k == *n)) {
                 continue;
             }
@@ -577,7 +586,7 @@ pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
                 let entry = entry?;
                 let p = entry.path();
                 let name = p.strip_prefix(root).unwrap().to_string_lossy();
-                if entry.file_type()?.is_symlink() || [".solace", ".git", "build"].contains(&name.as_ref()) {
+                if entry.file_type()?.is_symlink() || [".solace", ".git", "build"].contains(&name.as_ref()) || entry.file_name() == "node_modules" {
                     continue;
                 }
                 if entry.file_type()?.is_dir() {
@@ -1651,10 +1660,11 @@ const START: &str = "Start with `session start --task`, with the task's title an
 fn brief(t: &Value, kind: &str) -> String {
     let start = START;
     let ask = "If you need a decision from the human, ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer.";
+    let responses = "Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); keep the options concise.";
     let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `write`, `remove`, `format` and `run` are refused.";
     let role = match kind {
         "review" => format!(
-            "Review the changes this task made (listed below) and give feedback. Start with `task diff`: each change against its state before the task. Then read what you need in small batches, one concern at a time. {read_only} Finish with `task note`, the feedback in `text`."
+            "Review the changes this task made (listed below) and give feedback. Start with `task diff`: each change against its state before the task. Then read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. {read_only} In a review, `run <name>` is allowed for commands marked `allowed_in_reviews` in `solace.toml`; use those to verify (for example JavaScript tests). Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed."
         ),
         "work" => format!(
             "Make the change this task describes. {start} {ask} Finish with `task done`, a summary in `text`: what you changed and how you checked it."
@@ -1665,7 +1675,7 @@ fn brief(t: &Value, kind: &str) -> String {
     };
     let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
     let mut out = format!(
-        "You are working on a task from this project's task board. You work only through the Solace tool: there is no shell and no file access.\n{role}\n\nTask: {}\n",
+        "You are working on a task from this project's task board. You work only through the Solace tool: there is no shell and no file access.\n{role}\n{responses}\n\nTask: {}\n",
         text(&t["title"])
     );
     if !text(&t["body"]).is_empty() {
@@ -1892,7 +1902,15 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: Option<&
         if HOST.contains(&a[0]) {
             return err("E7010", "host command is unavailable in a run");
         }
-        if r["kind"] != "work" && CHANGES.contains(&a[0]) && a[0] != "build" {
+        if r["kind"] == "review" && a[0] == "run" && a.len() > 1 {
+            let marked = lockdown::settings(also.unwrap_or(root))
+                .ok()
+                .and_then(|v| v.get("commands")?.get(a[1])?.get("allowed_in_reviews")?.as_bool())
+                .unwrap_or(false);
+            if !marked {
+                return err("E7010", "in a review, run only works for commands marked allowed_in_reviews in solace.toml");
+            }
+        } else if r["kind"] != "work" && CHANGES.contains(&a[0]) && a[0] != "build" {
             return err("E7010", "this run is read-only");
         }
         // The human may have changed the task's projects while it was paused.
@@ -2597,12 +2615,30 @@ mod tests {
         let tid = t["id"].as_str().unwrap();
         let guard = |rid: &str, a: &[&str]| agent_guard(&s.root, tid, rid, a, None).map(drop).map_err(|e| e.0);
         assert!(guard("r1", &["view", "app"]).is_ok() && guard("r1", &["build"]).is_ok());
-        for a in [["submit", "app.main"], ["write", "x"], ["run", "e2e"]] {
+        std::fs::write(
+            s.root.join("solace.toml"),
+            "[commands]\nsafe = { run = [\"true\"], allowed_in_reviews = true }\ne2e = { run = [\"true\"] }\n",
+        )
+        .unwrap();
+        assert!(guard("r1", &["run", "safe"]).is_ok());
+        assert!(guard("r1", &["run", "e2e"]).unwrap_err().contains("allowed_in_reviews"));
+        for a in [["submit", "app.main"], ["write", "x"]] {
             assert!(guard("r1", &a).unwrap_err().contains("this run is read-only"), "{a:?}");
         }
         assert!(guard("r1", &["migrate", "--yes"]).unwrap_err().contains("host command"));
         assert!(guard("r2", &["view", "app"]).unwrap_err().contains("run ended"));
         assert!(guard("r9", &["view", "app"]).unwrap_err().starts_with("E7003 unknown run"));
+    }
+
+    /// A recorded file change stops being reviewable once the file is unwatched, and symbols always are.
+    #[test]
+    fn reviewable_follows_the_current_tier() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("a.txt", "x")]);
+        let s = open(&p.root).unwrap();
+        assert!(reviewable(&s.root, "file:a.txt") && reviewable(&s.root, "symbol:1"));
+        assert!(!reviewable(&s.root, "file:node_modules/x/index.js"));
+        std::fs::write(s.root.join(".gitignore"), "a.txt\n").unwrap();
+        assert!(!reviewable(&s.root, "file:a.txt"));
     }
 
     /// Canceling a task puts back what it changed: a module it created goes,
@@ -2780,6 +2816,20 @@ mod tests {
         }
         for noise in ["{", "r1", "rank"] {
             assert!(!b.contains(noise), "{noise} in:\n{b}");
+        }
+        for kind in ["work", "investigate", "review"] {
+            let prompt = brief(&t, kind);
+            for guidance in [
+                "Write human-facing task messages in Markdown",
+                "including the text sent to task tools",
+                "relevant sections with short headings",
+                "blank lines around headings and lists",
+                "explain what you need and why it matters",
+            ] {
+                assert!(prompt.contains(guidance), "{kind}: missing {guidance}");
+            }
+            assert_eq!(prompt.contains("**Assessment: Looks good**"), kind == "review");
+            assert_eq!(prompt.contains("**Assessment: Needs work**"), kind == "review");
         }
         assert!(brief(&t, "investigate").contains("Investigate this task"));
         let r = brief(&t, "review");

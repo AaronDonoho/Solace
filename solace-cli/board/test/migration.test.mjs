@@ -53,6 +53,7 @@ test('migration states, report, confirmations and recovery use the root HTTP API
   };
   try {
     let effect; [model, effect] = board.init(); execute(effect);
+    dispatch(new board.Connected());
     await until(() => model.migration[0]?.state && model.listed && timers.length);
     expect(requests.some(r => r.path === '/migration' && r.method === 'GET')).toBe(true);
     expect(html()).toContain('Migrate this project');
@@ -187,7 +188,7 @@ test('migration transport ignores a project contract-view prefix', async () => {
     globalThis.fetch = async path => { requests.push(path); return Response.json({}); };
     const { request } = await import('../src/api.mjs?migration-root-test');
     for (const [path, method] of [['/migration', 'GET'], ['/migration/start', 'POST'], ['/graph', 'GET']]) {
-      await new Promise(resolve => request(path, method, '{}', resolve));
+      await new Promise(resolve => request('', path, method, '{}', resolve));
     }
     expect(requests).toEqual(['/migration', '/migration/start', '/p/web/graph']);
   } finally {
