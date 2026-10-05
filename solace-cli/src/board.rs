@@ -444,10 +444,91 @@ pub fn reviewable(root: &Path, key: &str) -> bool {
     let Some(name) = key.strip_prefix("file:") else { return true };
     lockdown::settings(root).map_or(true, |v| !lockdown::tier(root, &v, name, None).starts_with("unwatched"))
 }
+/// Review content stays internal, separate from notes (which humans can delete).
+fn review_path(root: &Path, tid: &str, rid: &str) -> Result<PathBuf, Failure> {
+    Ok(task_path(root, tid)?.with_extension("").join("reviews").join(format!("{rid}.json")))
+}
+fn clear_reviews(s: &Store, tid: &str) -> Result<(), Failure> {
+    let dir = task_path(&s.root, tid)?.with_extension("").join("reviews");
+    if dir.exists() {
+        fs::remove_dir_all(dir)?;
+    }
+    Ok(())
+}
+fn review_state(s: &Store, t: &Value) -> Result<Value, Failure> {
+    let home = scope::dir(&scope::top(&s.root), &s.root);
+    let mut projects = json!({});
+    let mut context = json!({});
+    for (dir, st) in scope_stores(s, t)? {
+        let current = snapshot(&st)?;
+        let mut entities = json!({});
+        for c in t["changes"].as_array().unwrap().iter().filter(|c| project_of(c, &home) == dir) {
+            let key = c["entity"].as_str().unwrap();
+            entities[key] = match key.strip_prefix("file:") {
+                Some(f) => json!(fs::read(lockdown::path(&st.root, f)?).ok()),
+                None => current[key].clone(),
+            };
+        }
+        projects[&dir] = entities;
+        let mut files = json!({});
+        for (name, tier) in lockdown::tree_files(&st.root, &lockdown::settings(&st.root)?)? {
+            if tier == "watched" || tier == "protected" {
+                files[&name] = json!(sha256(&fs::read(st.root.join(&name))?));
+            }
+        }
+        // Include materialized source too: an outside edit may not yet be absorbed into the store.
+        for (key, row) in current.as_object().unwrap() {
+            if let Some(module) = key.strip_prefix("module:") {
+                let name = format!("{}/{module}.gleam", row[1].as_str().unwrap());
+                files[&name] = json!(fs::read(st.root.join(&name)).ok().map(|b| sha256(&b)));
+            }
+        }
+        // Gleam's dependency lock is deliberately unwatched, but affects review context.
+        files["manifest.toml"] = json!(fs::read(st.root.join("manifest.toml")).ok().map(|b| sha256(&b)));
+        context[dir] = json!([current, files]);
+    }
+    let instructions = json!([
+        t["title"],
+        t["body"],
+        t["links"],
+        t["questions"],
+        t["notes"].as_array().unwrap().iter().filter(|n| n["author"] == "human").collect::<Vec<_>>()
+    ]);
+    Ok(json!({"projects":projects,"context":sha256(context.to_string().as_bytes()),
+        "instructions":sha256(instructions.to_string().as_bytes())}))
+}
+fn previous_review(t: &Value) -> Option<&Value> {
+    t["runs"].as_array()?.iter().rev().find(|r| r["kind"] == "review" && r["outcome"] == "reviewed" && r["state"] == "ended")
+}
+fn review_checkpoint(s: &Store, t: &Value) -> Result<Value, String> {
+    let r = previous_review(t).ok_or("no completed review")?;
+    let checkpoint = (|| -> Result<Value, Failure> {
+        let p = review_path(&s.root, t["id"].as_str().unwrap(), r["id"].as_str().unwrap())?;
+        serde_json::from_slice(&fs::read(p)?).map_err(|e| Failure(e.to_string(), 1))
+    })()
+    .map_err(|_| "missing or legacy review checkpoint")?;
+    if checkpoint["run"] != r["id"] || !checkpoint["projects"].is_object() {
+        return Err("missing or legacy review checkpoint".into());
+    }
+    let scope = scope_stores(s, t).map_err(|e| e.0)?.into_iter().map(|(d, _)| d).collect::<HashSet<_>>();
+    if scope != checkpoint["projects"].as_object().unwrap().keys().cloned().collect() {
+        return Err("project scope changed since review".into());
+    }
+    Ok(checkpoint)
+}
 /// `task diff`: what each entity this task changed looked like before the task,
 /// against now. `names` narrows it; past `budget`, the rest are listed by name.
 pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
     let t = task(&s.root, tid)?;
+    let since = names.contains(&"--since-review");
+    let names: Vec<_> = names.iter().copied().filter(|n| *n != "--since-review").collect();
+    let checkpoint = since.then(|| review_checkpoint(s, &t));
+    let baseline = checkpoint.as_ref().and_then(|c| c.as_ref().ok());
+    let heading = match &checkpoint {
+        Some(Ok(c)) => format!("Since completed review {} (content at review start):\n\n", c["run"].as_str().unwrap()),
+        Some(Err(reason)) => format!("Full task diff: {reason}; falling back to the state before the task.\n\n"),
+        None => String::new(),
+    };
     let projects = scope_stores(s, &t)?;
     let home = scope::dir(&scope::top(&s.root), &s.root);
     let (mut out, mut left) = (String::new(), vec![]);
@@ -470,27 +551,35 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
         };
         for c in t["changes"].as_array().unwrap().iter().filter(|c| project_of(c, &home) == dir) {
             let (key, name) = (c["entity"].as_str().unwrap(), c["name"].as_str().unwrap_or(""));
-            let Some(old) = before.get(key) else { continue };
+            let Some(original) = before.get(key) else { continue };
+            // Entities first touched after the review use their task before-state.
+            let old = baseline.and_then(|b| b["projects"][dir].get(key)).unwrap_or(original);
             if !reviewable(&st.root, key) {
                 continue;
             }
-            if !names.is_empty() && !names.iter().any(|n| *n == name || key.split_once(':').is_some_and(|(_, k)| k == *n)) {
+            if !names.is_empty()
+                && !names.iter().any(|n| *n == format!("{dir}: {name}") || *n == name || key.split_once(':').is_some_and(|(_, k)| k == *n))
+            {
                 continue;
             }
             let new = match key.strip_prefix("file:") {
                 Some(f) => json!(fs::read(lockdown::path(&st.root, f)?).ok()),
                 None => current[key].clone(),
             };
+            if baseline.is_some() && old == &new {
+                continue;
+            }
             // A task across projects names each change's project (D-61).
             let shown = if projects.len() > 1 { format!("{dir}: {name}") } else { name.to_string() };
             let part = match (text(key, old), text(key, &new)) {
+                (a, b) if a == b && baseline.is_some() => format!("## {shown} (metadata or binary content changed)\n"),
                 (a, b) if a == b => format!("## {shown} (back to its state before the task)\n"),
                 (None, Some(b)) => format!("## {shown} (added)\n{}", line_diff("", &b)),
                 (Some(a), None) => format!("## {shown} (deleted)\n{}", line_diff(&a, "")),
                 (a, b) => format!("## {shown} (changed)\n{}", line_diff(&a.unwrap_or_default(), &b.unwrap_or_default())),
             };
             if !out.is_empty() && out.len() + part.len() > budget {
-                left.push(name.to_string());
+                left.push(shown);
             } else {
                 out += &part;
                 out.push('\n');
@@ -498,12 +587,23 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
         }
     }
     if out.is_empty() {
-        return Ok(if names.is_empty() { "This task has no changes.\n".into() } else { "No change of this task matches.\n".into() });
+        return Ok(heading
+            + if baseline.is_some() && names.is_empty() {
+                "No task entity changes since this review.\n"
+            } else if names.is_empty() {
+                "This task has no changes.\n"
+            } else {
+                "No change of this task matches.\n"
+            });
     }
     if !left.is_empty() {
-        out += &format!("Left out to fit the reply; read with `task diff <name>`: {}\n", left.join(", "));
+        out += &format!(
+            "Left out to fit the reply; read with `task diff {}<name>`: {}\n",
+            if since { "--since-review " } else { "" },
+            left.join(", ")
+        );
     }
-    Ok(out)
+    Ok(heading + &out)
 }
 /// Line diff with two lines of context; `…` marks skipped lines.
 fn line_diff(a: &str, b: &str) -> String {
@@ -586,7 +686,10 @@ pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
                 let entry = entry?;
                 let p = entry.path();
                 let name = p.strip_prefix(root).unwrap().to_string_lossy();
-                if entry.file_type()?.is_symlink() || [".solace", ".git", "build"].contains(&name.as_ref()) || entry.file_name() == "node_modules" {
+                if entry.file_type()?.is_symlink()
+                    || [".solace", ".git", "build"].contains(&name.as_ref())
+                    || entry.file_name() == "node_modules"
+                {
                     continue;
                 }
                 if entry.file_type()?.is_dir() {
@@ -720,6 +823,7 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
         drafts::clear(st, &tid)?;
         drop_before(st, &tid)?;
     }
+    clear_reviews(s, &tid)?;
     t["changes"] = json!([]);
     end_runs(t, "reverted");
     Ok(())
@@ -727,6 +831,7 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
 /// A completed task's changes become approved in every project it changed.
 fn settle(s: &Store, t: &Value) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap();
+    clear_reviews(s, tid)?;
     for (_, st) in scope_stores(s, t)? {
         outside::approve(&st, tid)?;
         drop_before(&st, tid)?;
@@ -878,6 +983,13 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
         let kind = if run == "new_work" { "work" } else { run };
         let log = s.root.join(".solace/board").join(t["id"].as_str().unwrap()).join(format!("{rid}.jsonl"));
         t["runs"].as_array_mut().unwrap().push(json!({"id":rid,"kind":kind,"model":m["id"],"effort":m["effort"],"state":"running","started":now(),"log":log,"fresh":run == "new_work" || a["revert"] == true}));
+        if kind == "review" {
+            let mut checkpoint = review_state(s, t)?;
+            checkpoint["run"] = json!(rid);
+            let path = review_path(&s.root, t["id"].as_str().unwrap(), &rid)?;
+            fs::create_dir_all(path.parent().unwrap())?;
+            write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap())?;
+        }
         t["finished"] = Value::Null;
         if kind == "work" {
             t["model"] = m["id"].clone();
@@ -1478,6 +1590,57 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     Ok(())
 }
 
+/// Follow-up review context comes from live notes joined to their runs, never transcripts.
+fn review_context(s: &Store, t: &Value) -> Out {
+    let mut out = String::from("\nReview context:\n");
+    if let Some(previous) = previous_review(t) {
+        let rid = previous["id"].as_str().unwrap();
+        out += &format!("Previous completed review: {rid}\n");
+        let feedback: Vec<_> = t["notes"].as_array().unwrap().iter().filter(|n| n["run"] == rid && n["author"] == "agent").collect();
+        if feedback.is_empty() {
+            out += "Previous feedback was deleted or is unavailable; do not infer its assessment.\n";
+        }
+        for n in feedback {
+            out += &format!("Review feedback ({rid}): {}\n", n["text"].as_str().unwrap_or(""));
+        }
+        let at = run_at(t, rid)?;
+        for n in t["notes"].as_array().unwrap() {
+            let subsequent = n["run"].as_str().and_then(|id| run_at(t, id).ok()).filter(|i| *i > at);
+            if let Some(i) = subsequent {
+                out += &format!(
+                    "Subsequent {} ({}) — {}: {}\n",
+                    t["runs"][i]["kind"].as_str().unwrap_or("run"),
+                    t["runs"][i]["id"].as_str().unwrap(),
+                    n["author"].as_str().unwrap_or(""),
+                    n["text"].as_str().unwrap_or("")
+                );
+            } else if n["author"] == "human" {
+                out += &format!("Human feedback: {}\n", n["text"].as_str().unwrap_or(""));
+            }
+        }
+    }
+    match review_checkpoint(s, t) {
+        Ok(checkpoint) => {
+            out += "Start with `task diff --since-review`. Assess the delta, prior unresolved findings and affected dependencies. Honor human requests for a fresh full review using `task diff`.\n";
+            let current = review_state(s, t)?;
+            if checkpoint["changed_during_review"] != false {
+                out += "Project or instructions changed during the previous review, or stability is unknown. Its checkpoint represents review-start content only; recheck affected code and context before carrying forward any assessment.\n";
+            }
+            if checkpoint["context"] == current["context"]
+                && checkpoint["instructions"] == current["instructions"]
+                && checkpoint["changed_during_review"] == false
+            {
+                out += "Code and relevant context are unchanged since the previous review. A short report carrying forward the previous assessment is sufficient if its feedback is available. Unchanged code must not turn Needs work into Looks good.\n";
+            } else {
+                out += "Code or relevant context changed since the previous review. Even an empty task delta does not establish unchanged dependencies or instructions; inspect affected context and rerun relevant verification.\n";
+            }
+            out += &task_diff(s, t["id"].as_str().unwrap(), &["--since-review"], 8000)?;
+        }
+        Err(reason) => out += &format!("Start with `task diff` and assess the whole task: {reason}. No usable delta baseline.\n"),
+    }
+    Ok(out)
+}
+
 /// The brief, plus the images its notes reference, which are attached to the prompt.
 fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom: bool) -> (String, Vec<PathBuf>) {
     let kind = run["kind"].as_str().unwrap_or("");
@@ -1515,8 +1678,14 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
         }
     }
     if let Ok(s) = open(root) {
+        if kind == "review" {
+            match review_context(&s, t) {
+                Ok(context) => out += &context,
+                Err(e) => out += &format!("\nReview context unavailable: {}. Start with `task diff` and assess the whole task.\n", e.0),
+            }
+        }
         if let Some(checks) = t["verification"].as_object() {
-            let current = verification_base(&s).ok();
+            let current = review_state(&s, t).ok().and_then(|v| v["context"].as_str().map(str::to_string));
             out += "\nLast recorded verification (rerun stale checks before claiming success):\n";
             for (command, v) in checks {
                 let stale = current.as_deref() != v["base"].as_str();
@@ -1635,11 +1804,6 @@ fn note_fingerprint(note: &Value) -> String {
     sha256(note.to_string().as_bytes())
 }
 
-fn verification_base(s: &Store) -> Out {
-    let state = json!([snapshot(s)?, file_snapshot(&s.root, &["run"])?]);
-    Ok(sha256(state.to_string().as_bytes()))
-}
-
 pub fn record_verification(s: &Store, tid: &str, command: &str, result: &Out) -> Result<(), Failure> {
     let mut t = task(&s.root, tid)?;
     if !t["verification"].is_object() {
@@ -1650,7 +1814,7 @@ pub fn record_verification(s: &Store, tid: &str, command: &str, result: &Out) ->
         Err(e) => &e.0,
     };
     t["verification"][command] =
-        json!({"passed":result.is_ok(),"base":verification_base(s)?,"summary":summary.chars().take(1000).collect::<String>()});
+        json!({"passed":result.is_ok(),"base":review_state(s, &t)?["context"],"summary":summary.chars().take(1000).collect::<String>()});
     save(s, &t)
 }
 /// An agent's prompt: what its run is for, how to start, ask and finish, then
@@ -1664,7 +1828,7 @@ fn brief(t: &Value, kind: &str) -> String {
     let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `write`, `remove`, `format` and `run` are refused.";
     let role = match kind {
         "review" => format!(
-            "Review the changes this task made (listed below) and give feedback. Start with `task diff`: each change against its state before the task. Then read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. {read_only} In a review, `run <name>` is allowed for commands marked `allowed_in_reviews` in `solace.toml`; use those to verify (for example JavaScript tests). Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed."
+            "Review the changes this task made (listed below) and give feedback. Follow the review context below: the first review assesses the whole task with `task diff`; follow-ups start with `task diff --since-review` when a completed checkpoint exists. Then read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. {read_only} In a review, `run <name>` is allowed for commands marked `allowed_in_reviews` in `solace.toml`; use those to verify (for example JavaScript tests). Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed."
         ),
         "work" => format!(
             "Make the change this task describes. {start} {ask} Finish with `task done`, a summary in `text`: what you changed and how you checked it."
@@ -1688,7 +1852,19 @@ fn brief(t: &Value, kind: &str) -> String {
     };
     let list = |k: &str| t[k].as_array().cloned().unwrap_or_default();
     section("Links", list("links").iter().map(|l| format!("- {}: {}", text(&l["name"]), text(&l["url"]))).collect());
-    section("Notes so far", list("notes").iter().map(|n| format!("- {}: {}", text(&n["author"]), text(&n["text"]))).collect());
+    section(
+        "Notes so far",
+        list("notes")
+            .iter()
+            .map(|n| {
+                let run = list("runs").into_iter().find(|r| r["id"] == n["run"]);
+                match run {
+                    Some(r) => format!("- {} ({} run {}): {}", text(&n["author"]), text(&r["kind"]), text(&r["id"]), text(&n["text"])),
+                    None => format!("- {}: {}", text(&n["author"]), text(&n["text"])),
+                }
+            })
+            .collect(),
+    );
     section(
         "Questions",
         list("questions")
@@ -1888,7 +2064,11 @@ pub fn context() -> Option<(String, String)> {
 /// another project of its scope (`also`), that project's too (D-61).
 pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: Option<&Path>) -> Result<Vec<fs::File>, Failure> {
     loop {
-        let guard = scope::lock_all(&[root.to_path_buf(), also.unwrap_or(root).to_path_buf()])?;
+        let guard = if a.first() == Some(&"task") {
+            guard(root, vec!["tasks", tid], &json!({}))?
+        } else {
+            scope::lock_all(&[root.to_path_buf(), also.unwrap_or(root).to_path_buf()])?
+        };
         let t = task(root, tid)?;
         let r = &t["runs"][run_at(&t, rid)?];
         if r["state"] == "ended" {
@@ -1941,6 +2121,25 @@ pub fn task_command(
         Some("note") => {
             note(&mut t, "agent", Some(rid), &text);
             if t["runs"][i]["kind"] == "review" {
+                let path = review_path(&s.root, tid, rid)?;
+                if let Ok(bytes) = fs::read(&path) {
+                    let mut checkpoint: Value = serde_json::from_slice(&bytes).map_err(|e| Failure(e.to_string(), 1))?;
+                    let current = review_state(s, &t)?;
+                    checkpoint["changed_during_review"] = json!(
+                        checkpoint["context"] != current["context"]
+                            || checkpoint["instructions"] != current["instructions"]
+                            || checkpoint["projects"] != current["projects"]
+                    );
+                    if checkpoint["changed_during_review"] == true {
+                        note(
+                            &mut t,
+                            "solace",
+                            Some(rid),
+                            "Project or instructions changed during review. This feedback applies to the review-start checkpoint, not a verified finish-time state; recheck affected changes.",
+                        );
+                    }
+                    write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap())?;
+                }
                 end_run(&mut t["runs"][i], "reviewed");
                 t["finished"] = json!({"kind":"review","outcome":"reviewed","time":now()});
             }
@@ -1978,7 +2177,7 @@ pub fn task_command(
             drop(guard);
             return wait_reply(s, tid, i);
         }
-        _ => return usage("task note | task ask | task done, with the text in `text`; task diff [name ...]"),
+        _ => return usage("task note | task ask | task done, with the text in `text`; task diff [--since-review] [name ...]"),
     }
     if column(&w, &t)["final"] == true {
         settle(s, &t)?;
@@ -2639,6 +2838,40 @@ mod tests {
         assert!(!reviewable(&s.root, "file:node_modules/x/index.js"));
         std::fs::write(s.root.join(".gitignore"), "a.txt\n").unwrap();
         assert!(!reviewable(&s.root, "file:a.txt"));
+    }
+
+    #[test]
+    fn review_delta_keeps_module_headers_budget_and_completed_baseline() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Review headers"})).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        t["runs"] = json!([{"id":"work","kind":"work","state":"ended"}]);
+        save(&s, &t).unwrap();
+        let before = snapshot(&s).unwrap();
+        s.db.execute("UPDATE modules SET header='//// Reviewed header' WHERE path='app'", []).unwrap();
+        record(&s, &s, &tid, "work", &before, &snapshot(&s).unwrap()).unwrap();
+        t = task(&s.root, &tid).unwrap();
+        t["runs"].as_array_mut().unwrap().push(json!({"id":"review","kind":"review","state":"ended","outcome":"reviewed"}));
+        let mut checkpoint = review_state(&s, &t).unwrap();
+        checkpoint["run"] = json!("review");
+        checkpoint["changed_during_review"] = json!(false);
+        let path = review_path(&s.root, &tid, "review").unwrap();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+        // A later interrupted run must not displace the completed review.
+        t["runs"].as_array_mut().unwrap().push(json!({"id":"interrupted","kind":"review","state":"ended","outcome":"interrupted"}));
+        save(&s, &t).unwrap();
+        assert!(task_diff(&s, &tid, &["--since-review"], 1000).unwrap().contains("No task entity changes"));
+        s.db.execute("UPDATE modules SET header='//// Repaired header' WHERE path='app'", []).unwrap();
+        fs::write(s.root.join("later.txt"), "later").unwrap();
+        record(&s, &s, &tid, "work", &json!({"file:later.txt":null}), &json!({"file:later.txt":b"later".to_vec()})).unwrap();
+        let delta = task_diff(&s, &tid, &["--since-review"], 1).unwrap();
+        assert!(delta.contains("Since completed review review"));
+        assert!(delta.contains("- //// Reviewed header") && delta.contains("+ //// Repaired header"));
+        assert!(delta.contains("Left out to fit the reply") && delta.contains("task diff --since-review <name>"));
+        let filtered = task_diff(&s, &tid, &["--since-review", "file:later.txt"], 1000).unwrap();
+        assert!(filtered.contains("file:later.txt (added)") && !filtered.contains("module:app"));
     }
 
     /// Canceling a task puts back what it changed: a module it created goes,

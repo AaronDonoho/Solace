@@ -146,6 +146,23 @@ class Board(unittest.TestCase):
             self.assertIn('Please address review', prompt)
             self.assertNotIn('- agent: investigation plan', prompt)
 
+            self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([
+                {'command':'task diff --since-review'}, {'command':'task note **Assessment: Looks good** repaired'}])})
+            t = self.action(t, 'review', model=model)
+            followup = t['runs'][-1]['id']
+            t = self.wait(t, lambda x:(self.root/'.solace'/(followup+'.exited')).exists())
+            launch = json.loads((self.root/'.solace'/(followup+'.launch')).read_text())
+            self.assertEqual(launch['session'], followup)
+            self.assertEqual(t['conversation']['session'], original['session'])
+            prompt = (self.root/'.solace'/(followup+'.prompt')).read_text()
+            self.assertIn('Start with `task diff --since-review`', prompt)
+            self.assertIn('please fix rounding', prompt)
+            self.assertIn('fixed rounding', prompt)
+            delta = json.loads((self.root/'.solace'/(followup+'.responses')).read_text().splitlines()[0])['result']['content'][0]['text']
+            self.assertIn(reviewer, delta)
+            self.assertIn('-   10', delta)
+            self.assertIn('+   20', delta)
+
             # A lost provider session transparently falls back once to a fresh handoff.
             home = self.root/'.solace/board'/t['id']/t['conversation']['home']
             (home/('session-'+original['session'])).unlink()
@@ -164,6 +181,109 @@ class Board(unittest.TestCase):
             self.action(t, 'approve')
             self.action(t, 'complete')
             self.wait(t, lambda x: x.get('conversation') is None and not home.exists())
+
+    def review(self, t, steps=None):
+        if steps is not None:
+            self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps(steps)})
+        t = self.action(t, 'review', model='fake')
+        rid = t['runs'][-1]['id']
+        t = self.wait(t, lambda x:x['runs'][-1]['state']=='ended')
+        prompt = (self.root/'.solace'/(rid+'.prompt')).read_text()
+        responses = self.root/'.solace'/(rid+'.responses')
+        replies = [json.loads(l)['result']['content'][0]['text'] for l in responses.read_text().splitlines()] if responses.exists() else []
+        return t, prompt, replies
+
+    def test_review_checkpoints_unchanged_failure_deleted_feedback_and_legacy(self):
+        t = self.completed([{'command':'submit app.one','text':'pub fn one() { 10 }'}])
+        steps = [{'command':'task diff --since-review'}, {'command':'task note **Assessment: Needs work** unique finding'}]
+        t, prompt, replies = self.review(t, steps)
+        self.assertIn('assess the whole task: no completed review', prompt)
+        self.assertIn('falling back', replies[0])
+        first = t['runs'][-1]['id']
+        t, prompt, replies = self.review(t)
+        self.assertIn('Code and relevant context are unchanged', prompt)
+        self.assertIn('must not turn Needs work into Looks good', prompt)
+        self.assertIn(first, replies[0])
+        self.assertIn('No task entity changes', replies[0])
+        baseline = t['runs'][-1]['id']
+        t, _, _ = self.review(t, [{'exit':7}])
+        t, prompt, replies = self.review(t, steps)
+        self.assertIn(baseline, replies[0])
+        self.assertIn('Code and relevant context are unchanged', prompt)
+        # Delete feedback by its stored run identity; logs must not bring it back.
+        for i in reversed(range(len(t['notes']))):
+            if t['notes'][i]['author'] == 'agent' and 'unique finding' in t['notes'][i]['text']:
+                self.api('DELETE', '/tasks/'+t['id']+'/notes/'+str(i))
+        t, prompt, replies = self.review(t, [{'command':'task diff --since-review'}, {'command':'task note fine'}])
+        self.assertIn('Previous feedback was deleted', prompt)
+        self.assertNotIn('unique finding', prompt)
+        checkpoint = self.root/'.solace/board'/t['id']/'reviews'/(t['runs'][-1]['id']+'.json')
+        checkpoint.unlink()
+        t, prompt, replies = self.review(t)
+        self.assertIn('missing or legacy review checkpoint', prompt)
+        self.assertIn('Full task diff', replies[0])
+        self.action(t, 'approve'); self.action(t, 'complete')
+        self.assertFalse(checkpoint.parent.exists())
+
+    def test_review_delta_add_remove_revert_and_context(self):
+        t = self.completed([
+            {'command':'read priv/a'}, {'command':'write priv/a','text':'reviewed'},
+            {'command':'write priv/new','text':'new'},
+            {'command':'submit app.one','text':'pub fn one() { 10 }'},
+        ])
+        t, _, _ = self.review(t, [{'command':'task note **Assessment: Needs work** repair'}])
+        self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([
+            {'command':'read priv/a'}, {'command':'write priv/a','text':'original'},
+            {'command':'read priv/new'}, {'command':'remove priv/new'},
+            {'command':'write priv/later','text':'added later'},
+            {'command':'submit app.two','text':'pub fn two() { 20 }'},
+            {'command':'delete app.removed'},
+            {'command':'submit --new app.added','text':'pub fn added() { 30 }'},
+            {'command':'task done repaired files'},
+        ])})
+        t = self.action(t, 'reassign', text='Please fix the findings')
+        t = self.wait(t, lambda x:x['column']=='needs_review')
+        steps = [{'command':'task diff --since-review'}, {'command':'task diff --since-review app.two'},
+                 {'command':'task diff'}, {'command':'task note **Assessment: Looks good**'}]
+        t, prompt, replies = self.review(t, steps)
+        delta, filtered, whole = replies[:3]
+        self.assertIn('Subsequent work', prompt)
+        self.assertIn('repaired files', prompt)
+        self.assertIn('Human feedback: Please fix the findings', prompt)
+        self.assertIn('- reviewed', delta); self.assertIn('+ original', delta)
+        self.assertIn('file:priv/new (deleted)', delta)
+        self.assertIn('file:priv/later (added)', delta)
+        self.assertIn('app.two (changed)', delta)
+        self.assertIn('app.removed (deleted)', delta)
+        self.assertIn('app.added (added)', delta)
+        self.assertNotIn('app.one', delta)
+        self.assertIn('app.two', filtered); self.assertNotIn('priv/', filtered)
+        self.assertIn('app.one (changed)', whole)
+        self.assertIn('back to its state before the task', whole)
+        # Same task entities, different surrounding dependency and instructions.
+        (self.root/'manifest.toml').write_text((self.root/'manifest.toml').read_text()+'\n# dependency lock changed\n')
+        t, prompt, replies = self.review(t)
+        self.assertIn('No task entity changes', replies[0])
+        self.assertIn('Code or relevant context changed', prompt)
+        self.api('PATCH', '/tasks/'+t['id'], {'title':'Reconsider requirements'})
+        t, prompt, replies = self.review(t)
+        self.assertIn('No task entity changes', replies[0])
+        self.assertIn('Code or relevant context changed', prompt)
+        self.action(t, 'start_over')
+        self.assertFalse((self.root/'.solace/board'/t['id']/'reviews').exists())
+
+    def test_review_detects_changes_while_running(self):
+        t = self.completed([])
+        self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([{'sleep':.6}, {'command':'task note fine'}])})
+        t = self.action(t, 'review', model='fake')
+        rid = t['runs'][-1]['id']
+        self.wait(t, lambda x:(self.root/'.solace'/(rid+'.prompt')).exists())
+        (self.root/'manifest.toml').write_text((self.root/'manifest.toml').read_text()+'\n# changed during review\n')
+        t = self.wait(t, lambda x:x['runs'][-1]['state']=='ended')
+        checkpoint = json.loads((self.root/'.solace/board'/t['id']/'reviews'/(rid+'.json')).read_text())
+        self.assertTrue(checkpoint['changed_during_review'])
+        t, prompt, _ = self.review(t, [{'command':'task note fine'}])
+        self.assertIn('changed during the previous review', prompt)
 
     def raw(self,method,url,data=b''):
         c=http.client.HTTPConnection('127.0.0.1',self.port,timeout=8)

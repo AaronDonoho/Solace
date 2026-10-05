@@ -453,6 +453,32 @@ class Root(unittest.TestCase):
         # The Contract view in b finds the task and marks b's change.
         g = self.api('GET', f'/p/b/graph?task={t["id"]}')
         self.assertTrue(any(n.get('changed') for n in g['nodes']))
+        # Review baselines distinguish identical names in separate projects.
+        url = f'/p/a/tasks/{t["id"]}'
+        def review(steps):
+            self.api('PATCH', url, {'body':json.dumps(steps)})
+            self.api('POST', url+'/actions', {'action':'review', 'model':'fake'})
+            value = self.wait('/p/a', t, lambda x:x['runs'][-1]['state']=='ended')
+            rid = value['runs'][-1]['id']
+            prompt = (self.root/'a/.solace'/(rid+'.prompt')).read_text()
+            replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'a/.solace'/(rid+'.responses')).read_text().splitlines()]
+            return prompt, replies
+        review([{'command':'task note baseline'}])
+        self.api('PATCH', url, {'body':json.dumps([
+            {'command':'submit app.one --project b','text':'pub fn one() { 30 }'},
+            {'command':'task done repaired b'},
+        ])})
+        self.api('POST', url+'/actions', {'action':'reassign'})
+        self.wait('/p/a', t, lambda x:x['column']=='needs_review')
+        _, replies = review([{'command':'task diff --since-review app.one'}, {'command':'task note checked b'}])
+        self.assertIn('## b: app.one (changed)', replies[0])
+        self.assertNotIn('## a:', replies[0])
+        self.assertIn('-   3', replies[0]); self.assertIn('+   30', replies[0])
+        self.api('POST', url+'/scope', {'scope':['a', 'b', 'c']})
+        prompt, replies = review([{'command':'task diff --since-review'}, {'command':'task note checked scope'}])
+        self.assertIn('project scope changed since review', prompt)
+        self.assertIn('Full task diff', replies[0])
+        self.assertIn('## a: app.one', replies[0]); self.assertIn('## b: app.one', replies[0])
         # Between runs the human widens and narrows the scope, but keeps projects it changed.
         self.assertEqual(self.api('POST', f'/p/a/tasks/{t["id"]}/scope', {'scope': ['a', 'b', 'c']})['scope'], ['a', 'b', 'c'])
         self.assertEqual(self.api('POST', f'/p/a/tasks/{t["id"]}/scope', {'scope': ['a', 'b']})['scope'], ['a', 'b'])
