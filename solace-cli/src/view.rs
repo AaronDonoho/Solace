@@ -396,12 +396,28 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
         .collect();
     json!({"nodes":nodes,"edges":edges,"areas":areas})
 }
+/// A task as this project sees it (D-61): only the changes made here.
+fn changed_here(s: &Store, home: &Path, mut t: Value) -> Value {
+    let top = scope::top(&s.root);
+    let (here, home) = (scope::dir(&top, &s.root), scope::dir(&top, home));
+    let mine: Vec<Value> = t["changes"].as_array().into_iter().flatten().filter(|c| c["project"].as_str().unwrap_or(&home) == here).cloned().collect();
+    t["changes"] = json!(mine);
+    t
+}
+/// A task found from any project in its scope, as this project sees it, with its home.
+fn task_here(s: &Store, tid: &str) -> Result<(PathBuf, Value), Failure> {
+    let home = scope::home(&s.root, tid)?;
+    let t = board::task(&home, tid)?;
+    Ok((home.clone(), changed_here(s, &home, t)))
+}
 pub fn graph(s: &Store) -> Result<Value, Failure> {
     let ix = s.index()?;
     let files = lockdown::tree_files(&s.root, &lockdown::settings(&s.root)?)?;
     let mut changed = HashSet::new();
-    let w = board::workflow(&lockdown::settings(&s.root)?)?;
-    for t in board::tasks(&s.root)? {
+    let w = board::flow(&s.root)?;
+    let top = scope::top(&s.root);
+    for (home, t) in scope::tasks_in(&top, &scope::dir(&top, &s.root))? {
+        let t = changed_here(s, &home, t);
         if w["columns"]
             .as_array()
             .unwrap()
@@ -727,15 +743,19 @@ pub fn run_tests(root: PathBuf, tid: String) {
     std::thread::spawn(move || {
         let result = (|| -> Result<(), Failure> {
             let dir = env::temp_dir().join(format!("solace-view-{}", board::id()));
+            // The task may be stored in another project of its scope (D-61).
+            // ponytail: one review_tests per task; tests run from another project replace them.
+            let home = scope::home(&root, &tid)?;
             let (base, tests) = {
-                let _guard = board::lock(&root)?;
+                let _guard = scope::lock_all(&[root.clone(), home.clone()])?;
                 let s = board::open(&root)?;
-                let mut t = board::task(&root, &tid)?;
+                let (_, here) = task_here(&s, &tid)?;
+                let mut t = board::task(&home, &tid)?;
                 let base = hex(&Sha256::digest(board::snapshot(&s)?.to_string().as_bytes()));
                 scratch(&s, Version::Current, &dir)?;
-                let r = review(&s, &t)?;
+                let r = review(&s, &here)?;
                 t["review_tests"] = json!({"base":base,"state":"running","results":[]});
-                board::save(&s, &t)?;
+                board::save(&board::open(&home)?, &t)?;
                 (base, r["tests"].as_array().cloned().unwrap_or_default())
             };
             let output = lockdown::command(&dir, &["gleam".into(), "test".into()], 300, 100_000);
@@ -750,11 +770,10 @@ pub fn run_tests(root: PathBuf, tid: String) {
                     }).collect::<Vec<_>>();(if compile{"failed to compile"}else{"done"},results)
                 },Err(e)=>("failed to compile",tests.iter().map(|t|json!({"id":t["id"],"name":t["name"],"result":"failed to compile","message":e.0,"checks":t["checks"]})).collect())
             };
-            let _guard = board::lock(&root)?;
-            let s = board::open(&root)?;
-            let mut t = board::task(&root, &tid)?;
+            let _guard = board::lock(&home)?;
+            let mut t = board::task(&home, &tid)?;
             t["review_tests"] = json!({"base":base,"state":state,"results":results});
-            board::save(&s, &t)
+            board::save(&board::open(&home)?, &t)
         })();
         if let Err(e) = result {
             eprintln!("review tests: {}", e.0);
@@ -785,7 +804,7 @@ pub fn api(
         ("GET", ["graph"]) => {
             let mut g = graph(s)?;
             if let Some(tid) = query.get("task") {
-                let t = board::task(&s.root, tid)?;
+                let (_, t) = task_here(s, tid)?;
                 let files=lockdown::tree_files(&s.root,&lockdown::settings(&s.root)?)?;
                 let before=graph_index(&version(s,Version::Before(tid))?,&files,&HashSet::new());
                 let current: HashSet<_>=g["nodes"].as_array().unwrap().iter().filter_map(|n|n["id"].as_str().map(String::from)).collect();
@@ -886,7 +905,7 @@ pub fn api(
             let tid = body["task"]
                 .as_str()
                 .ok_or_else(|| Failure("E7001 task required".into(), 1))?;
-            board::task(&s.root, tid)?;
+            task_here(s, tid)?;
             run_tests(s.root.clone(), tid.into());
             Ok(json!({"state":"running"}))
         }

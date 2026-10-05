@@ -121,6 +121,8 @@ pub type Task {
     attention: String,
     finished: String,
     unexpected: Bool,
+    /// The projects the task may change (D-61); empty for a task saved before.
+    scope: List(String),
   )
 }
 
@@ -152,6 +154,8 @@ pub type Lane {
     label: String,
     name: String,
     base: String,
+    /// The project's compilation target, "" when the server didn't say.
+    target: String,
     workflow: Workflow,
     tasks: List(Task),
   )
@@ -234,6 +238,8 @@ pub type Model {
     replay: List(String),
     collapsed: List(String),
     draft_lane: String,
+    /// The projects a new task covers; empty means the draft lane alone.
+    draft_scope: List(String),
     projects_open: Bool,
     project_name: String,
     project_dir: String,
@@ -269,7 +275,8 @@ pub type Msg {
   Select(String, String)
   Collapse(String)
   NewTaskIn(String)
-  DraftLane(String)
+  DraftScope(String, Bool)
+  SetScope(String, Bool)
   ToggleProjects
   AddProject(String)
   RemoveProject(String)
@@ -345,7 +352,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   let draft_body = load(draft_body_key)
   #(
     Model(
-      lanes: [Lane("", "", "", "", Workflow([]), [])],
+      lanes: [Lane("", "", "", "", "", Workflow([]), [])],
       workspace: False,
       listed: False,
       found: [],
@@ -374,6 +381,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       collapsed: string.split(load(collapsed_key), "\n")
         |> list.filter(fn(d) { d != "" }),
       draft_lane: "",
+      draft_scope: [],
       projects_open: False,
       project_name: "",
       project_dir: "",
@@ -666,26 +674,39 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
     Changed(text) ->
       case json.parse(text, task_decoder()) {
-        Ok(task) -> #(
-          Model(
-            ..model,
-            selected: Some(task),
-            title: task.title,
-            body: task.body,
-            rank: float.to_string(task.rank),
-            text: "",
-            error: "",
-            editing: False,
-            previews: [],
-          ),
-          effect.batch([
-            get(base(model) <> "/tasks", TasksLoaded(model.lane, _)),
-            case task.changes {
-              [] -> effect.none()
-              _ -> get(base(model) <> "/graph?task=" <> task.id, ReviewLoaded)
-            },
-          ]),
-        )
+        Ok(task) -> {
+          // A task whose home left its projects now lives in the first one left (D-61).
+          let model = case
+            list.contains(scope_of(model.lane, task), model.lane)
+          {
+            True -> model
+            False ->
+              Model(
+                ..model,
+                lane: list.first(task.scope) |> result.unwrap(model.lane),
+              )
+          }
+          #(
+            Model(
+              ..model,
+              selected: Some(task),
+              title: task.title,
+              body: task.body,
+              rank: float.to_string(task.rank),
+              text: "",
+              error: "",
+              editing: False,
+              previews: [],
+            ),
+            effect.batch([
+              get(base(model) <> "/tasks", TasksLoaded(model.lane, _)),
+              case task.changes {
+                [] -> effect.none()
+                _ -> get(base(model) <> "/graph?task=" <> task.id, ReviewLoaded)
+              },
+            ]),
+          )
+        }
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
     // What a new connection missed is replayed: only its end result shows,
@@ -734,10 +755,38 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       #(Model(..model, collapsed: collapsed), effect.none())
     }
     NewTaskIn(dir) -> #(
-      Model(..model, creating: True, draft_lane: dir),
+      Model(..model, creating: True, draft_lane: dir, draft_scope: [dir]),
       effect.none(),
     )
-    DraftLane(dir) -> #(Model(..model, draft_lane: dir), effect.none())
+    DraftScope(dir, on) -> {
+      let chosen = case on {
+        True -> [dir, ..model.draft_scope]
+        False -> list.filter(model.draft_scope, fn(d) { d != dir })
+      }
+      // None chosen is allowed while editing, so the starting lane can be
+      // swapped for another; the server refuses a task with no project.
+      #(
+        Model(..model, draft_scope: in_lane_order(model, chosen)),
+        effect.none(),
+      )
+    }
+    SetScope(dir, on) ->
+      case model.selected {
+        None -> #(model, effect.none())
+        Some(t) -> {
+          let current = scope_of(model.lane, t)
+          let wanted = case on {
+            True -> [dir, ..current]
+            False -> list.filter(current, fn(d) { d != dir })
+          }
+          #(
+            model,
+            send(base(model) <> "/tasks/" <> t.id <> "/scope", "POST", [
+              #("scope", json.array(in_lane_order(model, wanted), json.string)),
+            ]),
+          )
+        }
+      }
     ToggleProjects -> #(
       Model(..model, projects_open: !model.projects_open),
       effect.none(),
@@ -835,9 +884,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           json.object([
             #("title", json.string(model.draft_title)),
             #("body", json.string(model.draft_body)),
+            #("scope", json.array(model.draft_scope, json.string)),
           ])
         request(
-          base_of(model, draft_lane(model)) <> "/tasks",
+          base_of(model, draft_home(model)) <> "/tasks",
           "POST",
           json.to_string(body),
           fn(text) { dispatch(Created(text)) },
@@ -853,7 +903,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           update(
             Model(
               ..model,
-              lane: draft_lane(model),
+              lane: draft_home(model),
+              draft_scope: [],
               creating: False,
               draft_title: "",
               draft_body: "",
@@ -1029,9 +1080,13 @@ fn live(model: Model, text: String, notify: Bool) -> Model {
     Ok(lane) ->
       case json.parse(text, decode.at(["task"], task_decoder())) {
         Ok(task) -> {
-          let selected = case model.selected {
-            Some(t) if t.id == task.id && model.lane == dir -> Some(task)
-            other -> other
+          // A task that moved to another project (D-61) is opened from there.
+          let #(selected, model) = case model.selected {
+            Some(t) if t.id == task.id -> #(
+              Some(task),
+              Model(..model, lane: dir),
+            )
+            other -> #(other, model)
           }
           let new = case
             list.find(lane.tasks, fn(t) { t.id == task.id }),
@@ -1065,7 +1120,14 @@ fn live(model: Model, text: String, notify: Bool) -> Model {
         Error(_) ->
           case json.parse(text, decode.at(["workflow"], workflow_decoder())) {
             Ok(w) -> map_lane(model, dir, fn(l) { Lane(..l, workflow: w) })
-            Error(_) -> model
+            Error(_) ->
+              case json.parse(text, decode.at(["removed"], decode.string)) {
+                Ok(id) ->
+                  map_lane(model, dir, fn(l) {
+                    Lane(..l, tasks: list.filter(l.tasks, fn(t) { t.id != id }))
+                  })
+                Error(_) -> model
+              }
           }
       }
   }
@@ -1096,7 +1158,8 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Lane), List(Found))) {
     use label <- decode.optional_field("label", dir, decode.string)
     use name <- decode.field("name", decode.string)
     use base <- decode.field("base", decode.string)
-    decode.success(Lane(dir, label, name, base, Workflow([]), []))
+    use target <- decode.optional_field("target", "", decode.string)
+    decode.success(Lane(dir, label, name, base, target, Workflow([]), []))
   }
   let found = {
     use dir <- decode.field("dir", decode.string)
@@ -1334,7 +1397,11 @@ pub fn task_decoder() -> decode.Decoder(Task) {
   use changes <- decode.optional_field(
     "changes",
     [],
-    decode.list(decode.at(["name"], decode.string)),
+    decode.list({
+      use name <- decode.field("name", decode.string)
+      use project <- decode.optional_field("project", "", decode.string)
+      decode.success(#(project, name))
+    }),
   )
   use stamps <- decode.optional_field(
     "stamps",
@@ -1352,6 +1419,15 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     decode.one_of(decode.at(["outcome"], decode.string), [decode.success("")]),
   )
   use unexpected <- decode.optional_field("unexpected", False, decode.bool)
+  use scope <- decode.optional_field("scope", [], decode.list(decode.string))
+  // A task across projects names each change's project.
+  let changes =
+    list.map(changes, fn(c) {
+      case scope {
+        [_, _, ..] -> c.0 <> ": " <> c.1
+        _ -> c.1
+      }
+    })
   decode.success(Task(
     id,
     title,
@@ -1368,6 +1444,7 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     attention,
     finished,
     unexpected,
+    scope,
   ))
 }
 
@@ -1927,19 +2004,7 @@ pub fn view(model: Model) -> Element(Msg) {
       True ->
         h.section([a.class("editor")], [
           case model.workspace {
-            True ->
-              h.label([], [
-                h.text("Project"),
-                h.select(
-                  [e.on_input(DraftLane)],
-                  list.map(model.lanes, fn(l) {
-                    h.option(
-                      [a.value(l.dir), a.selected(l.dir == draft_lane(model))],
-                      l.label,
-                    )
-                  }),
-                ),
-              ])
+            True -> projects_pick(model, model.draft_scope, False, DraftScope)
             False -> h.text("")
           },
           title_input(model.draft_title, DraftTitle),
@@ -1963,12 +2028,21 @@ pub fn shared_columns(lanes: List(Lane)) -> Bool {
   }
 }
 
-/// One lane per project (a single project's has no header). Lanes with the
-/// same workflow share one header row; otherwise each names its columns.
+/// One lane per project. A single project's header has no toggle and no
+/// + Task, since the New task button is above. Lanes with the same workflow
+/// share one header row; otherwise each names its columns.
 fn lanes_view(model: Model) -> Element(Msg) {
   let shared = model.workspace && shared_columns(model.lanes)
   case model.workspace, model.lanes {
-    False, [lane] -> columns_view(lane, True)
+    False, [lane] ->
+      h.div([], [
+        h.header([a.class("lane-title")], [
+          h.span([], lane_name(lane)),
+          task_count(cards(model, lane)),
+          h.a([a.href(lane.base <> "/view")], [h.text("Contract view")]),
+        ]),
+        columns_view(model, lane, True),
+      ])
     True, [] ->
       h.p([a.class("muted")], [
         h.text(
@@ -1989,7 +2063,6 @@ fn lanes_view(model: Model) -> Element(Msg) {
         },
         ..list.map(lanes, fn(lane) {
           let open = !list.contains(model.collapsed, lane.dir)
-          let count = list.length(lane.tasks)
           h.section([a.class("lane")], [
             h.header([a.class("lane-title")], [
               h.button(
@@ -2003,27 +2076,15 @@ fn lanes_view(model: Model) -> Element(Msg) {
                     True -> "▾ "
                     False -> "▸ "
                   }),
-                  h.strong([], [h.text(lane.label)]),
-                  case lane.name == lane.label {
-                    True -> h.text("")
-                    False -> h.small([], [h.text(" " <> lane.name)])
-                  },
+                  ..lane_name(lane)
                 ],
               ),
-              h.small([], [
-                h.text(
-                  int.to_string(count)
-                  <> case count {
-                    1 -> " task"
-                    _ -> " tasks"
-                  },
-                ),
-              ]),
+              task_count(cards(model, lane)),
               h.button([e.on_click(NewTaskIn(lane.dir))], [h.text("+ Task")]),
               h.a([a.href(lane.base <> "/view")], [h.text("Contract view")]),
             ]),
             case open {
-              True -> columns_view(lane, !shared)
+              True -> columns_view(model, lane, !shared)
               False -> h.text("")
             },
           ])
@@ -2032,15 +2093,17 @@ fn lanes_view(model: Model) -> Element(Msg) {
   }
 }
 
-fn columns_view(lane: Lane, labels: Bool) -> Element(Msg) {
+/// A lane's columns, with every task that covers its project (D-61); a card
+/// opens its task from the project it is stored in.
+fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
   h.div(
     [a.class("board")],
     list.map(lane.workflow.columns, fn(c) {
       let tasks =
-        lane.tasks
-        |> list.filter(fn(t) { t.column == c.id })
+        cards(model, lane)
+        |> list.filter(fn(card) { { card.1 }.column == c.id })
         |> list.sort(fn(a, b) {
-          case a.rank <. b.rank {
+          case { a.1 }.rank <. { b.1 }.rank {
             True -> order.Lt
             False -> order.Gt
           }
@@ -2050,8 +2113,9 @@ fn columns_view(lane: Lane, labels: Bool) -> Element(Msg) {
           True -> h.h2([], [h.text(c.label)])
           False -> h.text("")
         },
-        ..list.map(tasks, fn(t) {
-          h.button([a.class("card"), e.on_click(Select(lane.dir, t.id))], [
+        ..list.map(tasks, fn(card) {
+          let #(home, t) = card
+          h.button([a.class("card"), e.on_click(Select(home, t.id))], [
             case t.attention {
               "" -> h.text("")
               _ ->
@@ -2072,6 +2136,16 @@ fn columns_view(lane: Lane, labels: Bool) -> Element(Msg) {
               True -> hazard()
             },
             h.text(t.title),
+            case t.scope {
+              [_, _, ..] ->
+                h.small([a.class("muted")], [
+                  h.text(string.join(
+                    list.map(t.scope, label_of(model, _)),
+                    " · ",
+                  )),
+                ])
+              _ -> h.text("")
+            },
             status_badge(t),
           ])
         })
@@ -2259,6 +2333,25 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
           h.a([a.href(link.url)], [h.text(link.name)])
         }),
       ),
+      case model.workspace {
+        True -> {
+          let working =
+            t.paused == "" && list.any(t.runs, fn(r) { r.state == "running" })
+          h.div([], [
+            projects_pick(model, scope_of(model.lane, t), working, SetScope),
+            case working {
+              True ->
+                h.small([], [
+                  h.text(
+                    "You can change the projects once the agent stops working, is paused, or asks a question.",
+                  ),
+                ])
+              False -> h.text("")
+            },
+          ])
+        }
+        False -> h.text("")
+      },
       button("Edit", Edit(True)),
     ]
   }
@@ -2634,5 +2727,94 @@ fn hazard() -> Element(Msg) {
       ],
     ),
     h.span([a.class("sr-only")], [h.text(what <> ": ")]),
+  ])
+}
+
+/// The project's folder, then its package name when that differs, then its target.
+fn lane_name(lane: Lane) -> List(Element(Msg)) {
+  [
+    h.strong([], [h.text(lane.label)]),
+    case lane.name == lane.label {
+      True -> h.text("")
+      False -> h.small([], [h.text(" " <> lane.name)])
+    },
+    case lane.target {
+      "" -> h.text("")
+      target -> h.small([a.class("lane-target muted")], [h.text(" " <> target)])
+    },
+  ]
+}
+
+fn task_count(cards: List(#(String, Task))) -> Element(Msg) {
+  let count = list.length(cards)
+  h.small([], [
+    h.text(
+      int.to_string(count)
+      <> case count {
+        1 -> " task"
+        _ -> " tasks"
+      },
+    ),
+  ])
+}
+
+/// The projects a task covers; a task saved before D-61 covers its own.
+fn scope_of(home: String, t: Task) -> List(String) {
+  case t.scope {
+    [] -> [home]
+    scope -> scope
+  }
+}
+
+/// The tasks a lane shows, each with the project it is stored in: every task
+/// on the board whose projects include this lane's (D-61).
+fn cards(model: Model, lane: Lane) -> List(#(String, Task)) {
+  list.flat_map(model.lanes, fn(l) {
+    l.tasks
+    |> list.filter(fn(t) { list.contains(scope_of(l.dir, t), lane.dir) })
+    |> list.map(fn(t) { #(l.dir, t) })
+  })
+}
+
+fn label_of(model: Model, dir: String) -> String {
+  lane_of(model, dir) |> result.map(fn(l) { l.label }) |> result.unwrap(dir)
+}
+
+/// Project folders in the order the lanes show them, each once.
+fn in_lane_order(model: Model, dirs: List(String)) -> List(String) {
+  model.lanes
+  |> list.map(fn(l) { l.dir })
+  |> list.filter(list.contains(dirs, _))
+}
+
+/// The project a new task is stored in: the draft lane when it is one of the
+/// task's projects, else the first of them.
+fn draft_home(model: Model) -> String {
+  let chosen = model.draft_scope
+  case list.contains(chosen, draft_lane(model)), chosen {
+    True, _ | _, [] -> draft_lane(model)
+    False, [first, ..] -> first
+  }
+}
+
+/// A checkbox per project on the board, for the projects a task can change.
+fn projects_pick(
+  model: Model,
+  chosen: List(String),
+  disabled: Bool,
+  msg: fn(String, Bool) -> Msg,
+) -> Element(Msg) {
+  h.fieldset([a.class("projects-pick"), a.disabled(disabled)], [
+    h.legend([], [h.text("Projects this task can change")]),
+    ..list.map(model.lanes, fn(l) {
+      h.label([], [
+        h.input([
+          a.type_("checkbox"),
+          a.checked(list.contains(chosen, l.dir)),
+          e.on_check(msg(l.dir, _)),
+        ]),
+        h.text(" " <> l.label),
+      ])
+    })
   ])
 }

@@ -58,7 +58,7 @@ pub(super) fn tasks(root: &Path) -> Result<Vec<Value>, Failure> {
 fn read_task(root: &Path, path: &Path) -> Result<Value, Failure> {
     let mut t: Value = serde_json::from_slice(&fs::read(path)?).map_err(|e| Failure(e.to_string(), 1))?;
     // The default workflow's `done` column is now `complete`; tasks saved before still say `done`.
-    if t["column"] == "done" && !workflow(&lockdown::settings(root)?)?["columns"].as_array().unwrap().iter().any(|c| c["id"] == "done") {
+    if t["column"] == "done" && !flow(root)?["columns"].as_array().unwrap().iter().any(|c| c["id"] == "done") {
         t["column"] = json!("complete");
     }
     Ok(t)
@@ -73,6 +73,10 @@ pub(super) fn save(s: &Store, t: &Value) -> Result<(), Failure> {
     fs::write(&tmp, serde_json::to_vec_pretty(t).unwrap())?;
     fs::rename(tmp, p)?;
     event(s, json!({"task":t}))
+}
+/// A project's workflow: its root's, shared by every project on the board (D-61).
+pub fn flow(project: &Path) -> Result<Value, Failure> {
+    workflow(&lockdown::settings(&scope::top(project))?)
 }
 pub fn workflow(settings: &toml::Value) -> Result<Value, Failure> {
     let default: toml::Value = include_str!("default-board.toml").parse().unwrap();
@@ -287,6 +291,28 @@ fn endpoint_args(m: &Value) -> Vec<String> {
     ]
 }
 
+/// The context window an endpoint reports for its model: `GET /v1/models`,
+/// `meta.n_ctx` (llama.cpp, Strata). Claude Code doesn't know a local model's
+/// window, so without it, it compacts too late and the server refuses the prompt.
+fn endpoint_context(base_url: &str, model: &str) -> Option<u64> {
+    // ponytail: plain http only; an https endpoint goes undetected.
+    let rest = base_url.strip_prefix("http://")?;
+    let (host, prefix) = rest.split_once('/').unwrap_or((rest, ""));
+    let path = [prefix.trim_matches('/'), "v1/models"].iter().filter(|p| !p.is_empty()).fold(String::new(), |a, p| a + "/" + p);
+    let addr = if host.contains(':') { host.to_string() } else { format!("{host}:80") };
+    let addr = std::net::ToSocketAddrs::to_socket_addrs(&addr).ok()?.next()?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
+    write!(stream, "GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n").ok()?;
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).ok()?;
+    let body: Value = serde_json::from_str(reply.split_once("\r\n\r\n")?.1).ok()?;
+    let models = body["data"].as_array()?;
+    // A server with one model often serves it under any name.
+    let m = models.iter().find(|x| x["id"] == model).or(if models.len() == 1 { models.first() } else { None })?;
+    m["meta"]["n_ctx"].as_u64()
+}
+
 fn on_path(program: &str) -> bool {
     if program.contains('/') {
         return Path::new(program).is_file();
@@ -362,8 +388,25 @@ pub fn snapshot(s: &Store) -> Result<Value, Failure> {
     }
     Ok(out)
 }
-pub fn record(s: &Store, tid: &str, rid: &str, before: &Value, after: &Value) -> Result<(), Failure> {
-    let mut t = task(&s.root, tid)?;
+/// The stores of a task's projects (D-61), with their folders; `s` is its home's.
+pub fn scope_stores(s: &Store, t: &Value) -> Result<Vec<(String, Store)>, Failure> {
+    let top = scope::top(&s.root);
+    let members = workspace::members(&top)?;
+    scope::of(t, &scope::dir(&top, &s.root))
+        .into_iter()
+        .filter(|d| members.contains(d))
+        .map(|d| Ok((d.clone(), open(&scope::path(&top, &d))?)))
+        .collect()
+}
+/// A change entry's project; entries saved before D-61 are the home's.
+fn project_of<'a>(c: &'a Value, home: &'a str) -> &'a str {
+    c["project"].as_str().unwrap_or(home)
+}
+/// Records what a command changed in `s` on the task stored in `home`.
+pub fn record(s: &Store, home: &Store, tid: &str, rid: &str, before: &Value, after: &Value) -> Result<(), Failure> {
+    let mut t = task(&home.root, tid)?;
+    let top = scope::top(&s.root);
+    let (here, home_dir) = (scope::dir(&top, &s.root), scope::dir(&top, &home.root));
     let keys: HashSet<_> = before.as_object().unwrap().keys().chain(after.as_object().unwrap().keys()).collect();
     for key in keys {
         if before[key] == after[key] {
@@ -392,54 +435,60 @@ pub fn record(s: &Store, tid: &str, rid: &str, before: &Value, after: &Value) ->
         } else {
             key.clone()
         };
-        if !t["changes"].as_array().unwrap().iter().any(|x| x["entity"] == *key) {
-            t["changes"].as_array_mut().unwrap().push(json!({"entity":key,"name":name,"run":rid}));
+        if !t["changes"].as_array().unwrap().iter().any(|x| x["entity"] == *key && project_of(x, &home_dir) == here) {
+            t["changes"].as_array_mut().unwrap().push(json!({"entity":key,"name":name,"run":rid,"project":here}));
         }
     }
-    save(s, &t)
+    save(home, &t)
 }
 /// `task diff`: what each entity this task changed looked like before the task,
 /// against now. `names` narrows it; past `budget`, the rest are listed by name.
 pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
     let t = task(&s.root, tid)?;
-    let current = snapshot(s)?;
-    let mut st = s.db.prepare("SELECT entity,data FROM board_before WHERE task=?")?;
-    let before: HashMap<String, Value> = st
-        .query_map([tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-        .map(|r| r.map(|(k, v)| (k, serde_json::from_str(&v).unwrap())))
-        .collect::<Result<_, _>>()?;
-    let text = |key: &str, v: &Value| -> Option<String> {
-        if key.starts_with("symbol:") {
-            (v[7].as_i64() == Some(1)).then(|| v[4].as_str().unwrap_or("").to_string())
-        } else if key.starts_with("module:") {
-            v[2].as_str().map(|h| h.to_string())
-        } else {
-            let bytes: Vec<u8> = v.as_array()?.iter().map(|b| b.as_u64().unwrap() as u8).collect();
-            Some(String::from_utf8(bytes).unwrap_or_else(|e| format!("(binary, {} bytes)", e.as_bytes().len())))
-        }
-    };
+    let projects = scope_stores(s, &t)?;
+    let home = scope::dir(&scope::top(&s.root), &s.root);
     let (mut out, mut left) = (String::new(), vec![]);
-    for c in t["changes"].as_array().unwrap() {
-        let (key, name) = (c["entity"].as_str().unwrap(), c["name"].as_str().unwrap_or(""));
-        let Some(old) = before.get(key) else { continue };
-        if !names.is_empty() && !names.iter().any(|n| *n == name || key.split_once(':').is_some_and(|(_, k)| k == *n)) {
-            continue;
-        }
-        let new = match key.strip_prefix("file:") {
-            Some(f) => json!(fs::read(lockdown::path(&s.root, f)?).ok()),
-            None => current[key].clone(),
+    for (dir, st) in &projects {
+        let current = snapshot(st)?;
+        let mut rows = st.db.prepare("SELECT entity,data FROM board_before WHERE task=?")?;
+        let before: HashMap<String, Value> = rows
+            .query_map([tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .map(|r| r.map(|(k, v)| (k, serde_json::from_str(&v).unwrap())))
+            .collect::<Result<_, _>>()?;
+        let text = |key: &str, v: &Value| -> Option<String> {
+            if key.starts_with("symbol:") {
+                (v[7].as_i64() == Some(1)).then(|| v[4].as_str().unwrap_or("").to_string())
+            } else if key.starts_with("module:") {
+                v[2].as_str().map(|h| h.to_string())
+            } else {
+                let bytes: Vec<u8> = v.as_array()?.iter().map(|b| b.as_u64().unwrap() as u8).collect();
+                Some(String::from_utf8(bytes).unwrap_or_else(|e| format!("(binary, {} bytes)", e.as_bytes().len())))
+            }
         };
-        let part = match (text(key, old), text(key, &new)) {
-            (a, b) if a == b => format!("## {name} (back to its state before the task)\n"),
-            (None, Some(b)) => format!("## {name} (added)\n{}", line_diff("", &b)),
-            (Some(a), None) => format!("## {name} (deleted)\n{}", line_diff(&a, "")),
-            (a, b) => format!("## {name} (changed)\n{}", line_diff(&a.unwrap_or_default(), &b.unwrap_or_default())),
-        };
-        if !out.is_empty() && out.len() + part.len() > budget {
-            left.push(name.to_string());
-        } else {
-            out += &part;
-            out.push('\n');
+        for c in t["changes"].as_array().unwrap().iter().filter(|c| project_of(c, &home) == dir) {
+            let (key, name) = (c["entity"].as_str().unwrap(), c["name"].as_str().unwrap_or(""));
+            let Some(old) = before.get(key) else { continue };
+            if !names.is_empty() && !names.iter().any(|n| *n == name || key.split_once(':').is_some_and(|(_, k)| k == *n)) {
+                continue;
+            }
+            let new = match key.strip_prefix("file:") {
+                Some(f) => json!(fs::read(lockdown::path(&st.root, f)?).ok()),
+                None => current[key].clone(),
+            };
+            // A task across projects names each change's project (D-61).
+            let shown = if projects.len() > 1 { format!("{dir}: {name}") } else { name.to_string() };
+            let part = match (text(key, old), text(key, &new)) {
+                (a, b) if a == b => format!("## {shown} (back to its state before the task)\n"),
+                (None, Some(b)) => format!("## {shown} (added)\n{}", line_diff("", &b)),
+                (Some(a), None) => format!("## {shown} (deleted)\n{}", line_diff(&a, "")),
+                (a, b) => format!("## {shown} (changed)\n{}", line_diff(&a.unwrap_or_default(), &b.unwrap_or_default())),
+            };
+            if !out.is_empty() && out.len() + part.len() > budget {
+                left.push(name.to_string());
+            } else {
+                out += &part;
+                out.push('\n');
+            }
         }
     }
     if out.is_empty() {
@@ -598,66 +647,91 @@ fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failure> {
     s.materialize(&s.index()?)?;
     Ok(())
 }
+/// Undoes a task's changes in every project of its scope (D-61): each is
+/// restored and checked, and a failure puts back the projects already restored.
 fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
-    let tid = t["id"].as_str().unwrap();
-    let mut st = s.db.prepare("SELECT entity,data FROM board_before WHERE task=?")?;
-    let mut states = vec![];
-    for row in st.query_map([tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
-        let (k, v) = row?;
-        states.push((k, serde_json::from_str::<Value>(&v).unwrap()));
-    }
-    let mut conflicts = vec![];
-    for (key, _) in &states {
-        let later:Option<String>=s.db.query_row("SELECT task FROM board_touches WHERE entity=?1 AND seq > (SELECT MIN(seq) FROM board_touches WHERE task=?2 AND entity=?1) AND task!=?2 ORDER BY seq DESC LIMIT 1",params![key,tid],|r|r.get(0)).optional()?;
-        if let Some(other) = later {
-            let name = t["changes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|c| c["entity"] == *key)
-                .map(|c| c["name"].as_str().unwrap_or(key))
-                .unwrap_or(key);
-            conflicts.push(format!("{name}: task {other}"));
+    let tid = t["id"].as_str().unwrap().to_string();
+    let projects = scope_stores(s, t)?;
+    let home = scope::dir(&scope::top(&s.root), &s.root);
+    let named = |dir: &str, key: &str| -> String {
+        let name = t["changes"].as_array().unwrap().iter().find(|c| c["entity"] == key && project_of(c, &home) == dir);
+        let name = name.and_then(|c| c["name"].as_str()).unwrap_or(key);
+        if projects.len() > 1 { format!("{dir}: {name}") } else { name.to_string() }
+    };
+    let (mut plans, mut conflicts) = (vec![], vec![]);
+    for (dir, st) in &projects {
+        let mut rows = st.db.prepare("SELECT entity,data FROM board_before WHERE task=?")?;
+        let mut states = vec![];
+        for row in rows.query_map([&tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (k, v) = row?;
+            states.push((k, serde_json::from_str::<Value>(&v).unwrap()));
         }
+        for (key, _) in &states {
+            let later:Option<String>=st.db.query_row("SELECT task FROM board_touches WHERE entity=?1 AND seq > (SELECT MIN(seq) FROM board_touches WHERE task=?2 AND entity=?1) AND task!=?2 ORDER BY seq DESC LIMIT 1",params![key,tid],|r|r.get(0)).optional()?;
+            if let Some(other) = later {
+                conflicts.push(format!("{}: task {other}", named(dir, key)));
+            }
+        }
+        plans.push((dir, st, states));
     }
     if !conflicts.is_empty() {
         return err("E7007", conflicts.join(", "));
     }
-    if !states.is_empty() {
-        let current = snapshot(s)?;
+    let mut done: Vec<(&Store, Vec<(String, Value)>)> = vec![];
+    for (dir, st, states) in plans.into_iter().filter(|p| !p.2.is_empty()) {
+        let current = snapshot(st)?;
         let mut undo = vec![];
         for (key, _) in &states {
             let v = if let Some(name) = key.strip_prefix("file:") {
-                json!(fs::read(lockdown::path(&s.root, name)?).ok())
+                json!(fs::read(lockdown::path(&st.root, name)?).ok())
             } else {
                 current[key].clone()
             };
             undo.push((key.clone(), v));
         }
-        s.db.execute_batch("SAVEPOINT revert_task")?;
+        st.db.execute_batch("SAVEPOINT revert_task")?;
         let checked = (|| -> Result<(), Failure> {
-            restore(s, &states)?;
-            s.check()?;
+            restore(st, &states)?;
+            // A project of plain files (D-60) has no code to type-check.
+            if st.root.join("gleam.toml").exists() {
+                st.check()?;
+            }
             Ok(())
         })();
         if let Err(e) = checked {
-            s.db.execute_batch("ROLLBACK TO revert_task; RELEASE revert_task")?;
-            restore(s, &undo)?;
-            let other = tasks(&s.root)?
+            st.db.execute_batch("ROLLBACK TO revert_task; RELEASE revert_task")?;
+            restore(st, &undo)?;
+            for (earlier, undo) in done.iter().rev() {
+                restore(earlier, undo)?;
+            }
+            let other = tasks(&st.root)?
                 .iter()
-                .filter(|x| x["id"] != tid)
+                .filter(|x| x["id"] != tid.as_str())
                 .map(|x| format!("task {}: {}", x["id"], x["changes"]))
                 .collect::<Vec<_>>()
                 .join("\n");
-            return err("E7008", format!("{}\n{other}", e.0));
+            let place = if projects.len() > 1 { format!("in {dir}: ") } else { String::new() };
+            return err("E7008", format!("{place}{}\n{other}", e.0));
         }
-        s.db.execute_batch("RELEASE revert_task")?;
+        st.db.execute_batch("RELEASE revert_task")?;
+        done.push((st, undo));
     }
-    s.db.execute("DELETE FROM board_touches WHERE task=?", [tid])?;
-    drafts::clear(s, tid)?;
-    drop_before(s, tid)?;
+    for (_, st) in &projects {
+        st.db.execute("DELETE FROM board_touches WHERE task=?", [&tid])?;
+        drafts::clear(st, &tid)?;
+        drop_before(st, &tid)?;
+    }
     t["changes"] = json!([]);
     end_runs(t, "reverted");
+    Ok(())
+}
+/// A completed task's changes become approved in every project it changed.
+fn settle(s: &Store, t: &Value) -> Result<(), Failure> {
+    let tid = t["id"].as_str().unwrap();
+    for (_, st) in scope_stores(s, t)? {
+        outside::approve(&st, tid)?;
+        drop_before(&st, tid)?;
+    }
     Ok(())
 }
 fn drop_before(s: &Store, tid: &str) -> Result<(), Failure> {
@@ -725,19 +799,9 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     if !run.is_empty() && active(t) && !resume && run != "new_work" && a["revert"] != true {
         return err("E7003", "task already has a run");
     }
-    if matches!(run, "work" | "new_work")
-        && tasks(&s.root)?
-            .iter()
-            .any(|x| x["id"] != t["id"] && x["runs"].as_array().unwrap().iter().any(|r| r["kind"] == "work" && r["state"] != "ended"))
-    {
-        return err("E7005", "another task has a work run");
-    }
-    // Code changed outside Solace waits for a human before agents build on it (D-58).
-    if matches!(run, "work" | "new_work")
-        && t["unexpected"] != true
-        && tasks(&s.root)?.iter().any(|x| x["unexpected"] == true && column(w, x)["final"] != true)
-    {
-        return err("E7012", format!("complete or cancel the {} task first: it holds code changed outside Solace that no one has reviewed", outside::TITLE));
+    if matches!(run, "work" | "new_work") {
+        let top = scope::top(&s.root);
+        claim_projects(&s.root, w, &t["id"], &scope::of(t, &scope::dir(&top, &s.root)))?;
     }
     let config = system()?;
     let chosen = body.get("model").unwrap_or(&t["model"]);
@@ -811,8 +875,7 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     }
     if column(w, t)["final"] == true {
         end_runs(t, "completed");
-        outside::approve(s, t["id"].as_str().unwrap())?;
-        drop_before(s, t["id"].as_str().unwrap())?;
+        settle(s, t)?;
     }
     Ok(None)
 }
@@ -831,12 +894,124 @@ fn models() -> Result<Value, Failure> {
             .collect::<Vec<_>>()
     ))
 }
+fn path_of(url: &str) -> Vec<&str> {
+    url.split('?').next().unwrap_or("").trim_matches('/').split('/').collect()
+}
+/// The locks a change takes: its project's, and for a task, every project in
+/// its scope (and in a new scope it is given), in folder order (D-61).
+fn guard(root: &Path, parts: Vec<&str>, body: &Value) -> Result<Vec<fs::File>, Failure> {
+    let ["tasks", tid, ..] = parts.as_slice() else { return Ok(vec![lock(root)?]) };
+    let top = scope::top(root);
+    let home = scope::dir(&top, root);
+    let members = workspace::members(&top)?;
+    loop {
+        let Ok(t) = task(root, tid) else { return Ok(vec![lock(root)?]) };
+        let seen = scope::of(&t, &home);
+        let mut dirs = seen.clone();
+        dirs.extend(body["scope"].as_array().into_iter().flatten().filter_map(|d| d.as_str().map(String::from)));
+        let mut roots: Vec<PathBuf> = dirs.iter().filter(|d| members.contains(d)).map(|d| scope::path(&top, d)).collect();
+        roots.push(root.into());
+        let held = scope::lock_all(&roots)?;
+        // The scope may have changed while this waited for the locks.
+        if task(root, tid).is_ok_and(|t| scope::of(&t, &home) == seen) {
+            return Ok(held);
+        }
+    }
+}
+/// A scope as a request gives it: projects on this board, sorted, at least one.
+fn checked_scope(root: &Path, v: &Value) -> Result<Vec<String>, Failure> {
+    let top = scope::top(root);
+    let members = workspace::members(&top)?;
+    let mut out = vec![];
+    for d in v.as_array().ok_or_else(|| Failure("E7001 scope must be a list of project folders".into(), 1))? {
+        match d.as_str() {
+            Some(d) if members.iter().any(|m| m == d) => out.push(d.to_string()),
+            _ => return err("E7001", format!("{d} is not a project on this board; its projects: {}", members.join(", "))),
+        }
+    }
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        return err("E7001", "a task needs at least one project");
+    }
+    Ok(out)
+}
+/// Refuses a work run in any of `dirs` while another task holds it (D-61).
+fn claim_projects(root: &Path, w: &Value, tid: &Value, dirs: &[String]) -> Result<(), Failure> {
+    let top = scope::top(root);
+    for dir in dirs {
+        let others: Vec<Value> = scope::tasks_in(&top, dir)?.into_iter().map(|(_, t)| t).filter(|t| t["id"] != *tid).collect();
+        let place = if dirs.len() > 1 { format!(" in {dir}") } else { String::new() };
+        if others.iter().any(|t| t["runs"].as_array().unwrap().iter().any(|r| r["kind"] == "work" && r["state"] != "ended")) {
+            return err("E7005", format!("another task has a work run{place}"));
+        }
+        // Code changed outside Solace waits for a human before agents build on it (D-58).
+        if others.iter().any(|t| t["unexpected"] == true && column(w, t)["final"] != true) {
+            return err("E7012", format!("complete or cancel the {} task{place} first: it holds code changed outside Solace that no one has reviewed", outside::TITLE));
+        }
+    }
+    Ok(())
+}
+/// `POST /tasks/{id}/scope` (D-61): the human changes a task's projects while
+/// no agent of it is working: between runs, paused, or waiting on a question.
+fn set_scope(s: &Store, w: &Value, mut t: Value, body: &Value) -> Result<Value, Failure> {
+    if t["runs"].as_array().unwrap().iter().any(|r| r["state"] == "running") && t["paused_from"].is_null() {
+        return err("E7003", "an agent is working on this task; change its projects between runs, while it is paused, or while it waits on a question");
+    }
+    if column(w, &t)["final"] == true {
+        return err("E7004", "final task");
+    }
+    let top = scope::top(&s.root);
+    let home = scope::dir(&top, &s.root);
+    let old = scope::of(&t, &home);
+    let new = checked_scope(&s.root, &body["scope"])?;
+    for d in old.iter().filter(|d| !new.contains(d)) {
+        if t["changes"].as_array().unwrap().iter().any(|c| c["project"].as_str().unwrap_or(&home) == d) {
+            return err("E7013", format!("this task has changed {d}; undo its changes before taking {d} out of its projects"));
+        }
+    }
+    // A paused or waiting run already holds its projects; one added joins them now.
+    if t["runs"].as_array().unwrap().iter().any(|r| r["kind"] == "work" && r["state"] != "ended") {
+        let added: Vec<String> = new.iter().filter(|d| !old.contains(d)).cloned().collect();
+        claim_projects(&s.root, w, &t["id"], &added)?;
+    }
+    t["scope"] = json!(new);
+    if new.contains(&home) {
+        save(s, &t)?;
+        return Ok(t);
+    }
+    // The agent works from the task's home, so the home changes only between runs.
+    if active(&t) {
+        return err("E7013", format!("this task's agent works from {home}; take {home} out of its projects once the run has ended"));
+    }
+    move_task(s, &mut t, &scope::path(&top, &new[0]))?;
+    Ok(t)
+}
+/// Moves a task to another project of its scope when its home leaves it.
+fn move_task(s: &Store, t: &mut Value, to: &Path) -> Result<(), Failure> {
+    let tid = t["id"].as_str().unwrap().to_string();
+    let (from, into) = (s.root.join(".solace/board").join(&tid), to.join(".solace/board").join(&tid));
+    let target = open(to)?;
+    // A conversation is tied to the folder it ran in; the next run starts a new one, with a handoff.
+    t["conversation"] = Value::Null;
+    if from.exists() {
+        fs::rename(&from, &into)?;
+        for r in t["runs"].as_array_mut().unwrap() {
+            if let Some(rest) = r["log"].as_str().and_then(|l| Path::new(l).strip_prefix(&from).ok()) {
+                r["log"] = json!(into.join(rest));
+            }
+        }
+    }
+    save(&target, t)?;
+    fs::remove_file(task_path(&s.root, &tid)?)?;
+    event(s, json!({"removed":tid}))
+}
 pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, Failure> {
     // Reads skip the project lock, so the board stays responsive while an agent command holds it.
     // Task files are replaced by rename and the store waits out commits, so a read sees whole states.
-    let _guard = if method == "GET" { None } else { Some(lock(root)?) };
+    let _guard = if method == "GET" { None } else { Some(guard(root, path_of(url), &body)?) };
     let s = open(root)?;
-    let w = workflow(&lockdown::settings(root)?)?;
+    let w = flow(root)?;
     let (path, query_text) = url.split_once('?').unwrap_or((url, ""));
     let query: HashMap<String,String> = query_text.split('&').filter_map(|pair| pair.split_once('=')).map(|(k,v)|(k.to_string(),v.to_string())).collect();
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
@@ -860,8 +1035,17 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
             if body.get("body").is_some_and(|x| !x.is_string()) || body.get("links").is_some_and(|x| !x.is_array()) {
                 return err("E7001", "invalid task fields");
             }
+            let top = scope::top(root);
+            let home = scope::dir(&top, root);
+            let scope = match body.get("scope") {
+                Some(v) => checked_scope(root, v)?,
+                None => vec![home.clone()],
+            };
+            if !scope.contains(&home) {
+                return err("E7001", format!("a task is created in a project of its scope; post it to one of {}", scope.join(", ")));
+            }
             let rank = tasks(root)?.iter().filter_map(|t| t["rank"].as_f64()).fold(0., f64::max) + 1.;
-            let t = json!({"id":id(),"title":title,"body":body["body"].as_str().unwrap_or(""),"links":body.get("links").cloned().unwrap_or(json!([])),"column":w["columns"][0]["id"],"rank":rank,"paused_from":null,"attention":null,"stamps":{},"model":null,"notes":[],"questions":[],"runs":[],"changes":[]});
+            let t = json!({"id":id(),"scope":scope,"title":title,"body":body["body"].as_str().unwrap_or(""),"links":body.get("links").cloned().unwrap_or(json!([])),"column":w["columns"][0]["id"],"rank":rank,"paused_from":null,"attention":null,"stamps":{},"model":null,"notes":[],"questions":[],"runs":[],"changes":[]});
             save(&s, &t)?;
             Ok(t)
         }
@@ -899,6 +1083,7 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
                         }
                     }
                 }
+                ("POST", ["scope"]) => return set_scope(&s, &w, t, &body),
                 ("POST", ["notes"]) => {
                     let text = body["text"].as_str().ok_or_else(|| Failure("E7001 text required".into(), 1))?;
                     note(&mut t, "human", None, text);
@@ -973,7 +1158,7 @@ fn start(root: PathBuf, t: Value, rid: String, m: Value) {
                 let dir = conversation_dir(&root, tid, &rid)?;
                 if dir.exists() { fs::remove_dir_all(dir)?; }
             }
-            if column(&workflow(&lockdown::settings(&root)?)?, &current)["final"] == true {
+            if column(&flow(&root)?, &current)["final"] == true {
                 clean_conversation(&root, tid)?;
             }
             result
@@ -1171,6 +1356,11 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
             if let Some(key) = e["key_env"].as_str().and_then(|k| env::var(k).ok()) {
                 cmd.env("ANTHROPIC_AUTH_TOKEN", key);
             }
+            if env::var_os("CLAUDE_CODE_MAX_CONTEXT_TOKENS").is_none() {
+                if let Some(n) = endpoint_context(e["base_url"].as_str().unwrap_or(""), m["model"].as_str().unwrap_or("")) {
+                    cmd.env("CLAUDE_CODE_MAX_CONTEXT_TOKENS", n.to_string());
+                }
+            }
         }
     }
     cmd.env("SOLACE_TASK", tid).env("SOLACE_RUN", rid).env("SOLACE_SESSION", rid).env("SOLACE_BIN", &binary);
@@ -1268,6 +1458,7 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
         n["text"] = json!(text);
     }
     let images: Vec<PathBuf> = images.iter().filter_map(|name| image_path(root, tid, name).ok()).collect();
+    packet["home"] = json!(scope::dir(&scope::top(root), root));
     let mut out = brief(&packet, kind);
     if resumed {
         out = out.replace(
@@ -1461,7 +1652,23 @@ fn brief(t: &Value, kind: &str) -> String {
             })
             .collect(),
     );
-    section("Task changes", list("changes").iter().map(|c| format!("- {}", text(&c["name"]))).collect());
+    // A task across projects (D-61): where the agent works, and how it reaches the others.
+    let home = text(&t["home"]);
+    let projects: Vec<String> = list("scope").iter().map(text).collect();
+    if projects.len() > 1 {
+        section(
+            "Projects",
+            vec![format!(
+                "This task covers the projects {}. You work in {home}; for another of them, add `--project <folder>` to any command (`inspect`, `submit`, `test`, `write`...). A project not listed is out of this task's reach: if you need it, ask the human with `task ask`.",
+                projects.join(", ")
+            )],
+        );
+    }
+    let shown = |c: &Value| match c["project"].as_str() {
+        Some(p) if projects.len() > 1 => format!("- {p}: {}", text(&c["name"])),
+        _ => format!("- {}", text(&c["name"])),
+    };
+    section("Task changes", list("changes").iter().map(shown).collect());
     out
 }
 /// The agent's last message, else its last error or output, cut to 1000 bytes.
@@ -1608,7 +1815,7 @@ fn finish(root: &Path, tid: &str, rid: &str, failure: Option<&str>) -> Result<()
     let _guard = lock(root)?;
     let s = open(root)?;
     let mut t = task(root, tid)?;
-    let w = workflow(&lockdown::settings(root)?)?;
+    let w = flow(root)?;
     let r = t["runs"].as_array_mut().unwrap().iter_mut().find(|r| r["id"] == rid).unwrap();
     if r["state"] == "ended" {
         return Ok(());
@@ -1631,9 +1838,11 @@ fn finish(root: &Path, tid: &str, rid: &str, failure: Option<&str>) -> Result<()
 pub fn context() -> Option<(String, String)> {
     Some((env::var("SOLACE_TASK").ok()?, env::var("SOLACE_RUN").ok()?))
 }
-pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str]) -> Result<fs::File, Failure> {
+/// Waits until the run may act, holding its home's lock and, for a command in
+/// another project of its scope (`also`), that project's too (D-61).
+pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: Option<&Path>) -> Result<Vec<fs::File>, Failure> {
     loop {
-        let guard = lock(root)?;
+        let guard = scope::lock_all(&[root.to_path_buf(), also.unwrap_or(root).to_path_buf()])?;
         let t = task(root, tid)?;
         let r = t["runs"].as_array().unwrap().iter().find(|r| r["id"] == rid).ok_or_else(|| Failure("E7003 unknown run".into(), 1))?;
         if r["state"] == "ended" {
@@ -1650,6 +1859,14 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str]) -> Result<fs::
         if matches!(a[0], "agent-config" | "serve" | "create" | "migrate") {
             return err("E7010", "host command is unavailable in a run");
         }
+        // The human may have changed the task's projects while it was paused.
+        if let Some(p) = also {
+            let top = scope::top(root);
+            let dir = scope::dir(&top, p);
+            if !scope::of(&t, &scope::dir(&top, root)).contains(&dir) {
+                return lockdown::error("E6007", &dir, "no longer one of this task's projects");
+            }
+        }
         return Ok(guard);
     }
 }
@@ -1660,10 +1877,10 @@ pub fn task_command(
     a: &[&str],
     input: &mut dyn FnMut() -> Out,
     options: &[String],
-    guard: fs::File,
+    guard: Vec<fs::File>,
 ) -> Out {
     let mut t = task(&s.root, tid)?;
-    let w = workflow(&lockdown::settings(&s.root)?)?;
+    let w = flow(&s.root)?;
     let i = t["runs"].as_array().unwrap().iter().position(|r| r["id"] == rid).unwrap();
     let text = if a.len() > 2 { a[2..].join(" ") } else { input()? };
     match a.get(1).copied() {
@@ -1714,8 +1931,7 @@ pub fn task_command(
         _ => return usage("task note | task ask | task done, with the text in `text`; task diff [name ...]"),
     }
     if column(&w, &t)["final"] == true {
-        outside::approve(s, tid)?;
-        drop_before(s, tid)?;
+        settle(s, &t)?;
     }
     save(s, &t)?;
     Ok("Recorded.\n".into())
@@ -1737,7 +1953,8 @@ fn wait_reply(s: &Store, tid: &str, i: usize) -> Out {
 }
 /// A work run's `write solace.toml` or `write AGENTS.md`: checked now, written
 /// only when a human approves it on the board (D-38, D-45).
-pub fn propose_settings(s: &Store, tid: &str, rid: &str, file: &str, base: &[u8], proposed: &str, guard: fs::File) -> Out {
+/// `project` is the folder whose settings change: the home, or another project in the task (D-61).
+pub fn propose_settings(s: &Store, project: &Path, tid: &str, rid: &str, file: &str, base: &[u8], proposed: &str, guard: Vec<fs::File>) -> Out {
     if file == "solace.toml" {
         workflow(&lockdown::parse_settings(proposed)?)?;
         // Which projects share the board is the humans' choice (D-57).
@@ -1751,10 +1968,15 @@ pub fn propose_settings(s: &Store, tid: &str, rid: &str, file: &str, base: &[u8]
         return Ok(format!("{file} is unchanged.\n"));
     }
     let mut t = task(&s.root, tid)?;
-    let w = workflow(&lockdown::settings(&s.root)?)?;
+    let w = flow(&s.root)?;
     let i = t["runs"].as_array().unwrap().iter().position(|r| r["id"] == rid).unwrap();
-    t["questions"].as_array_mut().unwrap().push(json!({"id":id(),"text":format!("Change {file}"),"options":["Approve","Reject"],
-        "settings":{"file":file,"base":base,"proposed":proposed}}));
+    let top = scope::top(&s.root);
+    let dir = scope::dir(&top, project);
+    // The file's path from the root folder, so a board of several projects says which one.
+    let name = top.file_name().map(Path::new).unwrap_or(Path::new("")).join(project.strip_prefix(&top).unwrap_or(Path::new(""))).join(file);
+    let name = name.to_string_lossy();
+    t["questions"].as_array_mut().unwrap().push(json!({"id":id(),"text":format!("Change {name}"),"options":["Approve","Reject"],
+        "settings":{"file":file,"project":dir,"base":base,"proposed":proposed}}));
     t["runs"][i]["state"] = json!("waiting");
     flag(&mut t, "an agent proposed a settings change");
     move_to(&w, &mut t, &w["events"]["asked"])?;
@@ -1765,7 +1987,10 @@ pub fn propose_settings(s: &Store, tid: &str, rid: &str, file: &str, base: &[u8]
 /// Applies an approved settings question, unless the file changed since.
 fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
     let file = q["settings"]["file"].as_str().unwrap_or("solace.toml").to_string();
-    let p = root.join(&file);
+    let p = match q["settings"]["project"].as_str() {
+        Some(dir) => scope::path(&scope::top(root), dir).join(&file),
+        None => root.join(&file),
+    };
     let current = fs::read_to_string(&p).unwrap_or_default();
     let proposed = q["settings"]["proposed"].as_str().unwrap();
     if current != q["settings"]["base"] || (file == "solace.toml" && lockdown::parse_settings(proposed).and_then(|v| workflow(&v)).is_err()) {
@@ -1781,7 +2006,7 @@ fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
 fn recover_project(root: &Path) -> Result<(), Failure> {
     let _guard = lock(root)?;
     let s = open(root)?;
-    let w = workflow(&lockdown::settings(root)?)?;
+    let w = flow(root)?;
     lockdown::recover(root)?;
     event(&s, json!({"workflow":w}))?;
     for mut t in tasks(root)? {
@@ -1870,7 +2095,7 @@ impl Board {
                 } else {
                     (format!("/p/{}", percent_encode(&dir)), dir.clone())
                 };
-                json!({"dir":dir,"label":label,"name":workspace::name(&root),"base":base})
+                json!({"dir":dir,"label":label,"name":workspace::name(&root),"target":workspace::target(&root),"base":base})
             })
             .collect();
         Ok(json!({"workspace":self.explicit(),"projects":projects,"found":workspace::found(&self.top)?}))
@@ -1965,8 +2190,14 @@ impl Board {
             ("DELETE", p) if p.starts_with("/projects/") => {
                 let dir = percent_decode(&p["/projects/".len()..]);
                 let root = if dir == "." { self.top.clone() } else { self.top.join(&dir) };
-                if root.join(".solace/store.db").exists() && tasks(&root)?.iter().any(active) {
+                // Tasks stored elsewhere may cover this project too (D-61).
+                let covering = scope::tasks_in(&self.top, &dir)?;
+                if covering.iter().any(|(_, t)| active(t)) {
                     return err("E7003", format!("an agent is working in {dir}; let it finish or stop it first"));
+                }
+                let w = flow(&self.top)?;
+                if let Some((home, t)) = covering.iter().find(|(home, t)| *home != root && column(&w, t)["final"] != true) {
+                    return err("E7013", format!("the task \"{}\" in {} also covers {dir}; take {dir} out of its projects first", t["title"].as_str().unwrap_or(""), scope::dir(&self.top, home)));
                 }
                 workspace::remove(&self.top, &dir)?;
                 self.held.lock().unwrap().remove(&root);
@@ -2187,7 +2418,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                     let mut v = json!({"code":code,"message":e.0});
                     if code == "E7001" && url.ends_with("/actions") {
                         let id = url.split('/').nth(2).unwrap_or("");
-                        if let (Ok(t), Ok(w)) = (task(&root, id), lockdown::settings(&root).and_then(|s| workflow(&s))) {
+                        if let (Ok(t), Ok(w)) = (task(&root, id), flow(&root)) {
                             v["allowed"] = json!(allowed(&w, &t));
                         }
                     }
@@ -2373,6 +2604,30 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_context_is_read_from_the_server() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let replies = [
+            r#"{"data":[{"id":"served-name","meta":{"n_ctx":131072}}]}"#,
+            r#"{"data":[{"id":"a","meta":{"n_ctx":1}},{"id":"b","meta":{"n_ctx":2}}]}"#,
+            r#"{"data":[{"id":"a","meta":{"n_ctx":1}},{"id":"b","meta":{"n_ctx":2}}]}"#,
+        ];
+        let t = std::thread::spawn(move || {
+            for body in replies {
+                let rq = server.recv().unwrap();
+                assert_eq!(rq.url(), "/v1/models");
+                rq.respond(tiny_http::Response::from_string(body)).unwrap();
+            }
+        });
+        // One model: used whatever it's called. Several: matched by name, or unknown.
+        assert_eq!(endpoint_context(&base, "configured-name"), Some(131072));
+        assert_eq!(endpoint_context(&base, "b"), Some(2));
+        assert_eq!(endpoint_context(&base, "c"), None);
+        t.join().unwrap();
+        assert_eq!(endpoint_context("https://example.com", "m"), None);
+    }
+
+    #[test]
     fn transcripts_read_codex_and_claude_logs() {
         let log = env::temp_dir().join(format!("{}.jsonl", id()));
         let codex = [
@@ -2445,6 +2700,15 @@ mod tests {
                 && r.contains("`run` are refused")
                 && !r.contains("task done")
         );
+        assert!(!b.contains("Projects:"), "one project needs no Projects section");
+        // A task across projects (D-61) says where the agent works and how it reaches the rest.
+        let mut wide = t.clone();
+        wide["scope"] = json!(["a", "web"]);
+        wide["home"] = json!("a");
+        wide["changes"][0]["project"] = json!("web");
+        let w = brief(&wide, "work");
+        assert!(w.contains("covers the projects a, web. You work in a; for another of them, add `--project <folder>`"), "{w}");
+        assert!(w.contains("Task changes:\n- web: calc.add"), "{w}");
     }
 
     #[test]

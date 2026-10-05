@@ -1,6 +1,7 @@
 //! The Solace root (D-57): one folder whose projects share one board. Every
 //! project is the root itself (`.`) or a folder below it; each keeps its own
-//! store, settings, lockdown and tasks.
+//! store, settings, lockdown and tasks. A root with a store and no `gleam.toml`
+//! is a project of plain files (D-60).
 //!
 //! A root is explicit when its `solace.toml` lists `projects`, or when it has a
 //! `solace.toml` and no `gleam.toml` (a folder of projects). A project with no
@@ -56,6 +57,7 @@ pub fn enclosing(start: &Path) -> Result<Option<PathBuf>, Failure> {
 pub fn find(start: &Path) -> Result<PathBuf, Failure> {
     if let Some(root) = enclosing(start)? {
         members(&root)?;
+        establish(&root)?;
         return Ok(root);
     }
     // A Gleam project Solace doesn't manage yet is served as it is, read only, so the board can offer to migrate it.
@@ -83,6 +85,7 @@ fn listed(root: &Path) -> Result<Vec<String>, Failure> {
     };
     let v: toml::Value = text.parse().or_else(invalid)?;
     if !root.join("gleam.toml").exists()
+        && !has_store(root)
         && let Some(k) = v.as_table().unwrap().keys().find(|k| *k != "projects")
     {
         return invalid(format!("`{k}`: a folder of projects' solace.toml holds only `projects`"));
@@ -102,10 +105,10 @@ fn listed(root: &Path) -> Result<Vec<String>, Failure> {
     Ok(out)
 }
 
-/// The root's projects: `.` when the root is a set-up project, then the
-/// listed folders.
+/// The root's projects: `.` when the root is a set-up project (Gleam or
+/// plain files, D-60), then the listed folders.
 pub fn members(root: &Path) -> Result<Vec<String>, Failure> {
-    let mut out = if root.join("gleam.toml").exists() && has_store(root) { vec![".".to_string()] } else { vec![] };
+    let mut out = if has_store(root) { vec![".".to_string()] } else { vec![] };
     out.extend(listed(root)?);
     Ok(out)
 }
@@ -157,7 +160,18 @@ fn with_projects(text: &str, dirs: &[String]) -> String {
     out.join("\n") + "\n"
 }
 
+/// Every root is a project (D-60): one without `gleam.toml` is set up as a
+/// project of plain files, with its own lane. A root that is an unmanaged
+/// Gleam project is left alone; it comes in by migration.
+fn establish(root: &Path) -> Result<(), Failure> {
+    if !root.join("gleam.toml").exists() && !has_store(root) {
+        import(root)?;
+    }
+    Ok(())
+}
+
 fn save(root: &Path, dirs: &[String]) -> Result<(), Failure> {
+    establish(root)?;
     let file = root.join("solace.toml");
     let text = match fs::read_to_string(&file) {
         Ok(t) => t,
@@ -167,7 +181,7 @@ fn save(root: &Path, dirs: &[String]) -> Result<(), Failure> {
         Err(e) => return Err(e.into()),
     };
     let new = with_projects(&text, dirs);
-    if root.join("gleam.toml").exists() {
+    if root.join("gleam.toml").exists() || has_store(root) {
         lockdown::parse_settings(&new)?;
     }
     fs::write(&file, &new)?;
@@ -176,11 +190,24 @@ fn save(root: &Path, dirs: &[String]) -> Result<(), Failure> {
 
 /// The package name in a project's `gleam.toml`.
 pub fn name(dir: &Path) -> String {
+    field(dir, "name").unwrap_or_default()
+}
+
+/// The compile target in a project's `gleam.toml` (Gleam's default is
+/// `erlang`), or empty for a project with no Gleam code.
+pub fn target(dir: &Path) -> String {
+    match field(dir, "target") {
+        Some(t) => t,
+        None if dir.join("gleam.toml").exists() => "erlang".into(),
+        None => String::new(),
+    }
+}
+
+fn field(dir: &Path, key: &str) -> Option<String> {
     fs::read_to_string(dir.join("gleam.toml"))
         .ok()
         .and_then(|t| t.parse::<toml::Value>().ok())
-        .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
-        .unwrap_or_default()
+        .and_then(|v| v.get(key).and_then(|n| n.as_str()).map(String::from))
 }
 
 /// Gleam projects in the root (itself as `.`) and below, skipping build
@@ -226,9 +253,6 @@ pub fn add(root: &Path, dir: &str) -> Out {
 /// for a new project, and for a migration's copy.
 pub fn setup(root: &Path, dir: &str) -> Out {
     if dir == "." {
-        if !root.join("gleam.toml").exists() {
-            return fail("The root folder has no gleam.toml.");
-        }
         return Ok(format!("{}: {}", root.display(), import(root)?));
     }
     if !contained(root, dir) {
@@ -246,7 +270,7 @@ pub fn setup(root: &Path, dir: &str) -> Out {
         return fail(format!("{dir} lists projects of its own; one root holds all its projects."));
     }
     let mut all = dirs.clone();
-    if root.join("gleam.toml").exists() {
+    if root.join("gleam.toml").exists() && has_store(root) {
         all.push(".".into());
     }
     if let Some(d) = all.iter().find(|d| in_source(d, dir) || in_source(dir, d)) {
@@ -355,8 +379,9 @@ mod tests {
         std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
         fs::write(root.join("solace.toml"), "projects = [\"link\"]\n").unwrap();
         assert!(members(&root).unwrap_err().0.contains("without symlinks"));
+        // Listing a project makes the root a project of plain files too (D-60).
         save(&root, &["x y".into()]).unwrap();
-        assert_eq!(members(&root).unwrap(), ["x y"]);
+        assert_eq!(members(&root).unwrap(), [".", "x y"]);
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
     }
@@ -400,7 +425,7 @@ mod tests {
         assert!(setup(&root, "a/src/x").unwrap_err().0.contains("overlap"));
         assert!(setup(&root, "../a").is_err());
         setup(&root, "a/tools").unwrap();
-        assert_eq!(members(&root).unwrap(), ["a", "a/tools"]);
+        assert_eq!(members(&root).unwrap(), [".", "a", "a/tools"]);
         // The outer project's agents can't reach the nested one.
         let v = lockdown::settings(&root.join("a")).unwrap();
         assert_eq!(lockdown::tier(&root.join("a"), &v, "tools/gleam.toml", None), "internal");
@@ -417,13 +442,13 @@ mod tests {
         fs::write(root.join("a/docs/solace.toml"), "projects = []\n").unwrap();
         assert!(enclosing(&root.join("a/docs")).unwrap_err().0.contains("is inside the root"));
         setup(&root, "inner/b").unwrap();
-        assert_eq!(members(&root).unwrap(), ["a", "a/tools", "inner/b"]);
+        assert_eq!(members(&root).unwrap(), [".", "a", "a/tools", "inner/b"]);
         remove(&root, "a").unwrap();
-        assert_eq!(members(&root).unwrap(), ["a/tools", "inner/b"]);
+        assert_eq!(members(&root).unwrap(), [".", "a/tools", "inner/b"]);
         assert!(root.join("a/.solace/store.db").exists());
         // A removed project keeps its store, so it can be listed again.
         add(&root, "a").unwrap();
-        assert_eq!(members(&root).unwrap(), ["a/tools", "inner/b", "a"]);
+        assert_eq!(members(&root).unwrap(), [".", "a/tools", "inner/b", "a"]);
         fs::remove_dir_all(root).unwrap();
     }
 

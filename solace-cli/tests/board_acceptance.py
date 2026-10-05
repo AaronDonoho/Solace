@@ -385,7 +385,7 @@ class Board(unittest.TestCase):
         agents=self.root/'AGENTS.md'
         t=self.assign([{'command':'write AGENTS.md','text':'Prices are in cents.\n'},{'command':'task done done'}])
         t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting');q=t['questions'][0]
-        self.assertEqual(q['text'],'Change AGENTS.md');self.assertFalse(agents.exists())
+        self.assertEqual(q['text'],f'Change {self.root.name}/AGENTS.md');self.assertFalse(agents.exists())
         self.api('POST',f'/tasks/{t["id"]}/questions/{q["id"]}',{'option':'Approve'})
         self.wait(t,lambda x:x['column']=='needs_review');self.assertEqual(agents.read_text(),'Prices are in cents.\n')
         agents.unlink()

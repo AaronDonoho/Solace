@@ -12,7 +12,7 @@ Every file under the project root is in exactly one category, named for what Sol
 
 | # | Rule | Category |
 | --- | --- | --- |
-| 1 | Source the store holds as symbols (Gleam: `src/**/*.gleam`, `test/**/*.gleam`) | graph |
+| 1 | Source the store holds as symbols (Gleam: `src/**/*.gleam`, `test/**/*.gleam`; none in a project of plain files, D-60) | graph |
 | 2 | `solace.toml` (§2) and `AGENTS.md` (D-45) | protected |
 | 3 | `.solace/`: the store, the task board's data (Spec 15), and Solace's working files; and every file of another Solace project nested in this one (a folder below the root with its own `.solace/store.db`, D-57) | internal: no agent access at all (`E6006`) |
 | 4 | `.git/`, the target's build and dependency output (Gleam: `build/`, `manifest.toml`), anything `.gitignore` ignores | unwatched |
@@ -53,9 +53,10 @@ Solace rereads the file whenever a command starts, so a change takes effect with
 | Command | Categories | Effect |
 | --- | --- | --- |
 | `files [<dir>]` | all | Tree with each entry's category. An unwatched directory, or one holding nothing graph, watched or protected, is one line with a file count; it is not expanded |
+| `grep <text>` | watched, protected | Case-insensitive search of file text: each matching file with up to 6 matching lines and their numbers, long lines cut around the match, at most 40 files. Unwatched files aren't searched, and graph source is `find`'s. Works in every project, plain-files ones included |
 | `read <path> [--lines a..b \| --tail n]` | watched, unwatched, protected | File text, with line numbers when a range is asked for. Stays within the reply budget: over it, the reply stops at a whole line and says which `--lines` range comes next |
-| `write <path>` (`text`) | watched, unwatched | Creates or replaces the whole file |
-| `write <path> --replace` (`old`, `text`) | watched, unwatched | One exact replacement in UTF-8 text, the same rules as `submit --replace`: zero or several matches are refused |
+| `write <path>` (`text`) | watched, unwatched | Creates or replaces the whole file; an existing file must have been read in full or by `--lines` first (a `--tail` read doesn't count) |
+| `write <path> [--replace]` (`old`, `text`) | watched, unwatched | One exact replacement in UTF-8 text, the same rules as `submit --replace`: zero or several matches are refused. An `old` text makes it a replacement with or without `--replace` |
 | `remove <path>` | watched (except `gleam.toml`), unwatched | Deletes the file |
 
 - **Graph files are refused** by `read`, `write` and `remove` (`E6001`), with the `inspect`, `view` or `submit` command that does the same thing.
@@ -88,7 +89,7 @@ The board's agent runner uses this configuration. `bench.py` moves to it too, so
 
 ## 6. Diagnostics
 
-The range `E60xx` is files, settings and commands, in Spec 3 §6's format. `E6001`–`E6006` cover files (§1, §3), `E6007` a read in another project refused (Spec 3 §2, D-57), `E6010`–`E6012` commands (§4), and `E6020` is an invalid `solace.toml`, reported by every command until it is fixed.
+The range `E60xx` is files, settings and commands, in Spec 3 §6's format. `E6001`–`E6006` cover files (§1, §3), `E6007` a read in another project refused (Spec 3 §2, D-57), `E6010`–`E6012` commands (§4), `E6013` a Gleam command in a project of plain files (D-60), and `E6020` is an invalid `solace.toml`, reported by every command until it is fixed.
 
 ## 7. Out of scope
 

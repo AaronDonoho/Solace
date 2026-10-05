@@ -71,20 +71,24 @@ From Needs review, choose **reassign** to return a task to Assigned for fixes wh
 
 ### Several projects on one board
 
-One Solace root can hold several Gleam projects: the root folder itself, if it is a Gleam project, and any folders below it, next to code Solace doesn't manage. In the root folder:
+One Solace root can hold several Gleam projects in folders below it. The root folder is a project too. If it isn't a Gleam project, it's a project of plain files: its agents read, write and run declared commands on every file outside the other projects, such as docs, scripts and code in other languages. Solace sets the root up this way by itself, with its own lane, when `solace serve` starts there or a project is added below it. In the root folder:
 
 ```sh
 solace create my_app # create a new project below this folder after confirmation
 solace serve         # one board, with a lane per project
 ```
 
-The board's **Projects** button removes projects, re-lists removed projects that still have a store, and creates new ones: give a package name, and optionally a folder and the target (Erlang or JavaScript), and Solace runs `gleam new` (without a nested git repository inside one) and sets the project up. `solace serve` in an empty folder starts an empty root, so a new project can be made entirely from the board. `solace create <name>` adds a new project to the enclosing root. To migrate several existing projects, run `solace migrate --yes --project api --project web` in their common folder, review the report, then run `solace migrate --adopt --yes`. The whole folder is copied and keeps its original path after adoption. The root's `solace.toml` keeps the list (a root project keeps it beside its own settings):
+The board's **Projects** button removes projects, re-lists removed projects that still have a store, and creates new ones: give a package name, and optionally a folder and the target (Erlang or JavaScript), and Solace runs `gleam new` (without a nested git repository inside one) and sets the project up. `solace serve` in an empty folder starts an empty root, so a new project can be made entirely from the board. `solace create <name>` adds a new project to the enclosing root. To migrate several existing projects, run `solace migrate --yes --project api --project web` in their common folder, review the report, then run `solace migrate --adopt --yes`. The whole folder is copied and keeps its original path after adoption. The root's `solace.toml` keeps the list beside the root project's own settings:
 
 ```toml
 projects = ["bench/pilot", "bench/pilot-large", "solace-cli/board"]
 ```
 
-There is one root: `solace serve` and `solace create` find it from anywhere below, and every project stays at it or below it. Folders outside it, reached through `..` or a symlink, are refused, and so is a root inside another root or inside a project. Each project keeps its own store, `solace.toml`, `AGENTS.md`, tasks and agents. Agents in different projects work at the same time. An agent changes only its own project, but reads any project in the root by adding `--project <folder>` to `view`, `inspect`, `refs`, `find`, `files` or `read`. Reads take no locks, so they never wait on another project's agent, and humans can use the same option from a shell. Lanes are named by folder, fold away, and share one row of column headers when every project uses the same workflow. Removing a project keeps its setup. One board serves a project at a time. A Solace project nested inside another is off limits to the outer project's agents, apart from these reads.
+There is one root: `solace serve` and `solace create` find it from anywhere below, and every project stays at it or below it. Folders outside it, reached through `..` or a symlink, are refused, and so is a root inside another root or inside a project. Each project keeps its own store, `solace.toml`, `AGENTS.md`, tasks and agents. Agents in different projects work at the same time. An agent reads any project in the root by adding `--project <folder>` to `view`, `inspect`, `refs`, `find`, `files` or `read`. Reads take no locks, so they never wait on another project's agent, and humans can use the same option from a shell.
+
+A task can change several projects. Pick them under **Projects this task can change** when you create it; the task's card then shows in each of their lanes. In the task's details you can add or remove projects whenever its agent isn't working (paused or waiting on your answer counts), except a project the task has already changed. Its agent works in the task's own project and changes the others with the same `--project` option; asking for a project outside the task's list is refused, so the agent asks you. While it works, no other task's agent starts in any of those projects. Undo, review and completion cover every project the task changed.
+
+Every project on the board uses the root's workflow (the `[board]` section of the root's `solace.toml`). Lanes are named by folder, fold away, and share one row of column headers. Removing a project keeps its setup. One board serves a project at a time. A Solace project nested inside another is off limits to the outer project's agents, apart from these reads.
 
 ### Models
 
@@ -166,7 +170,7 @@ Rejected submissions are retained as editable drafts. Agents use `drafts`, `view
 ## Current limitations
 
 - Gleam is the only project language.
-- One agent works on a project at a time: assigning a second task in the same project is refused while one is running. A task belongs to one project: its agent can read other projects in the root, but not change them, even a path dependency of its own. Tasks that span projects are planned. The work of open tasks isn't isolated either, so a later task sees the unapproved changes of earlier ones.
+- One agent works on a project at a time: assigning a task is refused while another task's agent works in any project it covers. A task changes only the projects it lists, even when it needs a path dependency of its own. The work of open tasks isn't isolated either, so a later task sees the unapproved changes of earlier ones.
 - The board is local only, for one person, with no authentication.
 - The contract view at `/view` opens on an outline of what the project does: its main ways in and the requests they handle, then each area (source module) with every public function described in words, what it reads or changes, and whether tests check it. One button asks an agent to describe functions that have no description. The drawing sheet beside it shows areas, entry points, logic, effects, tests and files. A task link opens review with changes and test results. Running functions and replaying prior runs are later packages.
 - Starting real agents from the board is not yet tested end to end. The tests use a fake agent.

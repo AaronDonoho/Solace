@@ -7,10 +7,15 @@ pub fn error<T>(code: &str, at: &str, message: impl std::fmt::Display) -> Result
     fail(format!("{code} command refused\n  at {at}\n  {message}\n"))
 }
 
+/// A Gleam command in a project of plain files (D-60).
+pub fn plain<T>(command: &str) -> Result<T, Failure> {
+    error("E6013", command, "this project has no Gleam code (no gleam.toml); use files, grep, read, write and run")
+}
+
 pub fn settings(root: &Path) -> Result<toml::Value, Failure> {
     match fs::read_to_string(root.join("solace.toml")) {
-        // A workspace's solace.toml lists projects (D-57); `workspace` checks it.
-        Ok(s) if !root.join("gleam.toml").exists() => s.parse().map_err(|e| Failure(format!("E6020 invalid solace.toml\n  {e}"), 1)),
+        // A folder of projects' solace.toml only lists them (D-57); `workspace` checks it.
+        Ok(s) if !root.join("gleam.toml").exists() && !root.join(".solace/store.db").exists() => s.parse().map_err(|e| Failure(format!("E6020 invalid solace.toml\n  {e}"), 1)),
         Ok(s) => parse_settings(&s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Value::Table(Default::default())),
         Err(e) => Err(e.into()),
@@ -114,7 +119,8 @@ fn gitignored(root: &Path, name: &str) -> bool {
     builder.build().is_ok_and(|g| g.matched_path_or_any_parents(root.join(name), root.join(name).is_dir()).is_ignore())
 }
 pub fn tier(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -> String {
-    if (name.starts_with("src/") || name.starts_with("test/")) && name.ends_with(".gleam") {
+    // A project of plain files holds no symbols (D-60).
+    if root.join("gleam.toml").exists() && (name.starts_with("src/") || name.starts_with("test/")) && name.ends_with(".gleam") {
         return "graph".into();
     }
     if name == "solace.toml" || name == "AGENTS.md" {
@@ -209,10 +215,9 @@ fn read(root: &Path, name: &str, args: &[&str], budget: usize) -> Out {
                 lines.pop_front();
             }
         }
+        // A tail shows only the file's end, so it doesn't count as reading it
+        // for a whole-file write.
         let text = lines.into_iter().collect::<Vec<_>>().join("\n") + "\n";
-        if length <= 262144 * 16 {
-            remember(root, name, &fs::read(root.join(name))?)?;
-        }
         return Ok(trim_output(&text, budget));
     } else if !args.is_empty() {
         return usage("read <path> [--lines a..b | --tail n]");
@@ -329,7 +334,9 @@ pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize) -> Out
 }
 /// The file's new text: `new` whole, or with `old` replaced by `new`.
 pub fn edited(current: &[u8], new: &str, replace: bool, old: Option<&str>) -> Out {
-    if !replace {
+    // `old` given means an exact replacement, with or without `--replace`: a
+    // whole-file write would drop everything around it.
+    if !replace && old.is_none_or(str::is_empty) {
         return Ok(new.to_string());
     }
     let old = old.filter(|s| !s.is_empty()).ok_or_else(|| Failure("E0104 expected nonempty old text".into(), 1))?;
@@ -341,6 +348,8 @@ pub fn edited(current: &[u8], new: &str, replace: bool, old: Option<&str>) -> Ou
     }
 }
 fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, old: Option<&str>) -> Out {
+    // `edited` treats a given `old` as a replacement; so does the read check.
+    let replace = replace || old.is_some_and(|o| !o.is_empty());
     let p = path(root, name)?;
     let before = fs::read(&p).ok();
     let text = edited(before.as_deref().unwrap_or_default(), new, replace, old)?;
@@ -477,6 +486,9 @@ pub fn dispatch(
     budget: usize,
 ) -> Option<Out> {
     let root = &store.root;
+    if a[0] == "grep" {
+        return Some(grep(root, v, &a[1..].join(" ")));
+    }
     if matches!(a[0], "files" | "read" | "write" | "remove") {
         let name = a.get(1).copied().unwrap_or(".");
         let name = Path::new(name)
@@ -486,8 +498,17 @@ pub fn dispatch(
             .collect::<Vec<_>>()
             .join("/");
         return Some((|| {
-            if internal(root, &name) {
+            if Path::new(&name).components().any(|c| c.as_os_str() == ".solace") {
                 return error("E6006", &name, "Solace internal files have no agent access");
+            }
+            // A path out of the project, or into a project nested in it, is another project's.
+            if internal(root, &name) || name.split('/').any(|c| c == "..") {
+                return error(
+                    "E6006",
+                    &name,
+                    "outside this project: another project's files are reached with `--project <folder>`; \
+                     to change a project this task doesn't cover, ask the human with `task ask` rather than putting the change elsewhere",
+                );
             }
             let p = path(root, &name)?;
             let t = tier(root, v, &name, None);
@@ -549,6 +570,8 @@ pub fn dispatch(
                 let mut argv: Vec<String> = c["run"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().into()).collect();
                 argv.extend(a[2..].iter().map(|s| s.to_string()));
                 (argv, c.get("timeout").and_then(|x| x.as_integer()).unwrap_or(120) as u64)
+            } else if !root.join("gleam.toml").exists() {
+                return plain(a[0]);
             } else {
                 (vec!["gleam".into(), a[0].into()], 120)
             };
@@ -658,6 +681,29 @@ mod tests {
         fs::remove_dir_all(s.root).unwrap();
     }
     #[test]
+    fn grep_searches_watched_files_only() {
+        let (s, _) = fixture();
+        let v = "watch_limit = 2000\nunwatched = [\"priv/generated/\"]\n".parse().unwrap();
+        let long = format!("{}needle é{}", "word ".repeat(60), " tail".repeat(60));
+        for (p, b) in [
+            ("docs/a.md", format!("intro\nThe Needle here\n{long}\n")),
+            ("solace.toml", "# needle in settings\n".into()),
+            ("priv/generated/out", "needle\n".into()),
+        ] {
+            fs::create_dir_all(s.root.join(p).parent().unwrap()).unwrap();
+            fs::write(s.root.join(p), b).unwrap();
+        }
+        fs::write(s.root.join("src/main.gleam"), "pub fn main() { \"needle\" }\n").unwrap();
+        let got = call(&s, &v, &["grep", "\"needle\""], "", None).unwrap();
+        // Watched and protected files, with line numbers; never source or unwatched files.
+        assert!(got.starts_with("docs/a.md\n     2: The Needle here\n     3: …"), "{got}");
+        assert!(got.contains("needle é") && got.contains("solace.toml\n     1: # needle in settings"), "{got}");
+        assert!(!got.contains("generated") && !got.contains("main.gleam"), "{got}");
+        assert!(got.lines().nth(3).unwrap().len() < 260, "{got}");
+        assert!(call(&s, &v, &["grep", "absent"], "", None).unwrap().starts_with("No matches"));
+        fs::remove_dir_all(s.root).unwrap();
+    }
+    #[test]
     fn a2_source_internal_and_path_aliases() {
         let (s, v) = fixture();
         for cmd in ["read", "write", "remove"] {
@@ -759,6 +805,15 @@ mod tests {
         assert!(call(&s, &v, &["write", "priv/a"], "new", None).unwrap_err().0.contains("E6005"));
         call(&s, &v, &["write", "priv/a", "--replace"], "second", Some("first")).unwrap();
         assert_eq!(fs::read_to_string(s.root.join("priv/a")).unwrap(), "second changed");
+        // `old` without --replace still replaces only that text (an agent wiped a decision log this way).
+        call(&s, &v, &["write", "priv/a"], "third", Some("second")).unwrap();
+        assert_eq!(fs::read_to_string(s.root.join("priv/a")).unwrap(), "third changed");
+        // The same for a settings proposal, which is built by `edited` alone.
+        assert_eq!(edited(b"projects = []\n[commands]\n", "[commands]\nx = 1", false, Some("[commands]")).unwrap(), "projects = []\n[commands]\nx = 1\n");
+        // A tail read doesn't allow a whole-file write.
+        fs::write(s.root.join("priv/b"), "one\ntwo\n").unwrap();
+        call(&s, &v, &["read", "priv/b", "--tail", "1"], "", None).unwrap();
+        assert!(call(&s, &v, &["write", "priv/b"], "new", None).unwrap_err().0.contains("E6005"));
         fs::remove_dir_all(s.root).unwrap();
     }
     #[test]
@@ -812,6 +867,7 @@ mod edge_tests {
         let root = env::temp_dir().join(new_id(Kind::Fn, "nested", "tiers"));
         fs::create_dir_all(root.join("src/nested")).unwrap();
         fs::create_dir_all(root.join("priv/nested")).unwrap();
+        fs::write(root.join("gleam.toml"), "name = \"app\"\n").unwrap();
         fs::write(root.join("src/nested/source.gleam"), "pub fn a() { 1 }").unwrap();
         fs::write(root.join("priv/nested/index.html"), "hello").unwrap();
         let v = toml::Value::Table(Default::default());
@@ -825,6 +881,50 @@ mod edge_tests {
         assert!(!out.contains("index.html"));
         fs::remove_dir_all(root).unwrap();
     }
+}
+/// `grep <text>`: case-insensitive search of the files Solace watches, and the
+/// protected settings. Source symbols are `find`'s; unwatched files aren't
+/// searched (D-52).
+fn grep(root: &Path, v: &toml::Value, query: &str) -> Out {
+    let query = ['"', '\'', '`'].iter().find_map(|&c| query.strip_prefix(c)?.strip_suffix(c)).filter(|q| !q.is_empty()).unwrap_or(query);
+    if query.is_empty() {
+        return Err(Failure("grep: give the text to search for\n\nRun `solace help` for usage.".into(), 2));
+    }
+    let q = query.to_lowercase();
+    let mut rows = vec![];
+    tree_rows(root, v, root, &mut rows)?;
+    let mut hits = vec![];
+    for (name, _) in rows.into_iter().filter(|(_, t)| t == "watched" || t == "protected") {
+        let Ok(text) = fs::read_to_string(root.join(&name)) else { continue };
+        let lines: Vec<String> = text
+            .lines()
+            .enumerate()
+            .filter_map(|(n, l)| Some(format!("  {:>4}: {}", n + 1, around(l.trim(), l.trim().to_lowercase().find(&q)?, q.len()))))
+            .collect();
+        if !lines.is_empty() {
+            let more = if lines.len() > 6 { format!("\n  … {} more lines", lines.len() - 6) } else { String::new() };
+            hits.push(format!("{name}\n{}{more}\n", lines[..lines.len().min(6)].join("\n")));
+        }
+    }
+    if hits.is_empty() {
+        return Ok(format!("No matches for \"{query}\" in watched files.\n"));
+    }
+    let total = hits.len();
+    let mut out: String = hits.into_iter().take(40).collect();
+    if total > 40 {
+        out += &format!("… {} more files match; narrow the search.\n", total - 40);
+    }
+    Ok(out)
+}
+/// A long line cut to about 200 characters around a match at byte `at`
+/// (lowercasing can shift bytes, so cuts snap to character boundaries).
+fn around(line: &str, at: usize, len: usize) -> String {
+    if line.len() <= 200 {
+        return line.to_string();
+    }
+    let floor = |i: usize| (0..=i.min(line.len())).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
+    let (start, end) = (floor(at.saturating_sub(80)), floor(at + len + 120));
+    format!("{}{}{}", if start > 0 { "…" } else { "" }, &line[start..end], if end < line.len() { "…" } else { "" })
 }
 pub fn tree_files(root: &Path, settings: &toml::Value) -> Result<Vec<(String, String)>, Failure> {
     let mut rows = vec![];

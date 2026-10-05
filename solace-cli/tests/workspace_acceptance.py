@@ -99,25 +99,25 @@ class Root(unittest.TestCase):
         self.api('DELETE', '/projects/b')
         v = self.api('GET', '/projects')
         self.assertTrue(v['workspace'])
-        self.assertEqual([(p['dir'], p['label'], p['name'], p['base']) for p in v['projects']], [('a', 'a', 'pilot', '/p/a')])
+        # The root folder itself is a project of plain files (D-60).
+        self.assertEqual([(p['dir'], p['label'], p['name'], p['target'], p['base']) for p in v['projects']], [('.', 'fixture', '', '', ''), ('a', 'a', 'pilot', 'erlang', '/p/a')])
         self.assertEqual([(f['dir'], f['member']) for f in v['found']], [('a', True), ('b', False)])
         self.assertIsInstance(self.api('GET', '/models'), list)
 
         events = self.stream()
         self.until_ready(events)
         v = self.api('POST', '/projects', {'dir': 'b'})
-        self.assertEqual([p['dir'] for p in v['projects']], ['a', 'b'])
-        self.assertEqual(self.next_event(events)[1], {'projects': ['a', 'b']})
+        self.assertEqual([p['dir'] for p in v['projects']], ['.', 'a', 'b'])
+        self.assertEqual(self.next_event(events)[1], {'projects': ['.', 'a', 'b']})
 
         self.api('POST', '/p/a/tasks', {'title': 'In a'})
         self.assertEqual([x['title'] for x in self.api('GET', '/p/a/tasks')], ['In a'])
         self.assertEqual(self.api('GET', '/p/b/tasks'), [])
         self.refused('GET', '/p/nope/tasks', None, 'unknown project')
-        # No project lives at the root itself, so its routes are the root's own.
-        self.refused('GET', '/tasks', None, 'unknown route')
+        self.assertEqual(self.api('GET', '/tasks'), [])
         ident, data = self.next_event(events)
         self.assertEqual((data['project'], data['task']['title']), ('a', 'In a'))
-        self.assertEqual(set(json.loads(ident)), {'a', 'b'})
+        self.assertEqual(set(json.loads(ident)), {'.', 'a', 'b'})
 
         # A reconnect replays only what it missed, from every project.
         events.close()
@@ -147,14 +147,14 @@ class Root(unittest.TestCase):
         self.assertFalse((self.root/'c/.solace').exists())
         self.assertFalse((self.root/'c/child').exists())
 
-        v = self.api('POST', '/projects/new', {'name': 'fresh'})
-        self.assertIn('fresh', [p['dir'] for p in v['projects']])
+        v = self.api('POST', '/projects/new', {'name': 'fresh', 'target': 'javascript'})
+        self.assertEqual([p['target'] for p in v['projects'] if p['dir'] == 'fresh'], ['javascript'])
         for f in ['gleam.toml', 'solace.toml', '.solace/store.db', 'src/fresh.gleam']:
             self.assertTrue((self.root/'fresh'/f).exists(), f)
         self.assertFalse((self.root/'fresh/.git').exists())
 
         v = self.api('DELETE', '/projects/b')
-        self.assertEqual([p['dir'] for p in v['projects']], ['a', 'fresh'])
+        self.assertEqual([p['dir'] for p in v['projects']], ['.', 'a', 'fresh'])
         self.assertTrue((self.root/'b/.solace/store.db').exists())
         self.api('POST', '/projects', {'dir': 'b'})
         self.assertEqual([t['title'] for t in self.api('GET', '/p/b/tasks')], ['In b'])
@@ -194,7 +194,7 @@ class Root(unittest.TestCase):
             (self.root/'link').symlink_to(outside/'ext')
             self.start()
             self.api('DELETE', '/projects/a')
-            self.assertEqual(self.api('GET', '/projects')['projects'], [])
+            self.assertEqual([p['dir'] for p in self.api('GET', '/projects')['projects']], ['.'])
             self.refused('POST', '/projects', {'dir': 'link'}, 'migrating')
             self.refused('POST', '/projects', {'dir': '../x'}, 'migrating')
             self.refused('POST', '/projects/new', {'name': 'ok', 'dir': '../out'}, 'below the root')
@@ -254,6 +254,66 @@ class Root(unittest.TestCase):
         self.assertIn('E6006', self.cli('read', 'frontend/gleam.toml', ok=False))
         self.assertIn('pub fn main()', self.cli('view', 'frontend.main', '--project', 'frontend'))
 
+    def test_a_root_without_gleam_is_a_project_of_plain_files(self):
+        project(self.root/'app')
+        (self.root/'DECISIONS.md').write_text('# Decisions\n')
+        (self.root/'tool.py').write_text('print("ran")\n')
+        self.migrate('--project', 'app')
+        settings = (self.root/'solace.toml').read_text()
+        self.assertIn('projects = ["app"]', settings)
+        self.assertIn('watch_limit', settings)
+        self.assertTrue((self.root/'.solace/.gitignore').exists())
+        with open(self.root/'solace.toml', 'a') as f: f.write('tool = { run = ["python3", "tool.py"] }\n')
+        self.assertIn('plain files', self.cli('session', 'start'))
+        self.assertIn('app (pilot)', self.cli('session', 'start'))
+        self.assertIn('E6013', self.cli('check', ok=False))
+        self.assertIn('E6013', self.cli('view', 'app.one', '--project', '.', cwd=self.root/'app', ok=False))
+        self.assertIn('# Decisions', self.cli('read', 'DECISIONS.md', '--project', '.', cwd=self.root/'app'))
+        self.start()
+        steps = [{'command': 'session start'}, {'command': 'read DECISIONS.md'},
+                 {'command': 'write DECISIONS.md', 'text': '# Decisions\n\n## D-1 Root files are reachable\n'},
+                 {'command': 'run tool'}, {'command': 'write app/src/app.gleam', 'text': 'pub fn one() { 2 }\n'},
+                 {'command': 'check'}, {'command': 'task done recorded'}]
+        t = self.api('POST', '/tasks', {'title': 'Record a decision', 'body': json.dumps(steps)})
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'plan'})
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        t = self.wait('', t, lambda x: x['column'] == 'needs_review')
+        replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(t['runs'][-1]['id'] + '.responses')).read_text().splitlines()]
+        self.assertIn('plain files', replies[0])
+        self.assertIn('# Decisions', replies[1])
+        self.assertIn('ran', replies[3])
+        self.assertIn('E6006', replies[4])
+        self.assertIn('E6013', replies[5])
+        self.assertIn('D-1 Root files are reachable', (self.root/'DECISIONS.md').read_text())
+        self.assertIn('{ 1 }', (self.root/'app/src/app.gleam').read_text())
+        # A subproject's agent reads the root's files but can't change them.
+        self.assertIn('E6006', self.cli('write', '../DECISIONS.md', cwd=self.root/'app', input='x', ok=False))
+        # Undoing the task restores the root's files; there is no code to type-check.
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'cancel'})
+        self.assertEqual((self.root/'DECISIONS.md').read_text(), '# Decisions\n')
+
+    def test_every_root_gets_its_own_lane(self):
+        # A root from before D-60: its solace.toml only lists projects, and it has no store.
+        project(self.root/'app')
+        self.migrate('--project', 'app')
+        (self.root/'.solace/store.db').unlink()
+        (self.root/'solace.toml').write_text('projects = ["app"]\n')
+        self.start()
+        self.assertEqual([p['dir'] for p in self.api('GET', '/projects')['projects']], ['.', 'app'])
+        settings = (self.root/'solace.toml').read_text()
+        self.assertIn('projects = ["app"]', settings)
+        self.assertIn('watch_limit', settings)
+        self.assertEqual(self.api('GET', '/tasks'), [])
+        # A new project made in an empty folder makes that folder a root with its own lane.
+        empty = Path(self.tmp.name)/'empty'
+        empty.mkdir()
+        self.start(empty)
+        self.assertEqual(self.api('GET', '/projects')['projects'], [])
+        self.assertFalse((empty/'.solace').exists())
+        v = self.api('POST', '/projects/new', {'name': 'fresh'})
+        self.assertEqual([p['dir'] for p in v['projects']], ['.', 'fresh'])
+        self.assertTrue((empty/'.solace/store.db').exists())
+
     def test_agents_work_in_parallel_and_read_across_projects(self):
         project(self.root/'a', 'alpha', 'pub fn one() { 1 }\n')
         project(self.root/'b', 'beta', '/// The answer.\npub fn answer() { 42 }\n')
@@ -263,6 +323,10 @@ class Root(unittest.TestCase):
         self.assertIn('version="1.0.0"', self.cli('read', 'gleam.toml', '--project', 'b/', cwd=self.root/'a'))
         self.assertIn('E6007', self.cli('submit', 'app.answer', '--project', 'b', cwd=self.root/'a', input='pub fn answer() { 0 }', ok=False))
         self.assertIn('E6007', self.cli('view', 'app.one', '--project', 'nope', cwd=self.root/'a', ok=False))
+        # A path out of the project says how to reach another one, not that it is Solace's own.
+        out = self.cli('read', '../b/gleam.toml', cwd=self.root/'a', ok=False)
+        self.assertIn('outside this project', out)
+        self.assertIn('task ask', out)
         # Humans read any project from the root folder too.
         self.assertIn('pub fn one() { 1 }', self.cli('view', 'app.one', '--project', 'a'))
         self.start()
@@ -285,10 +349,87 @@ class Root(unittest.TestCase):
             if d == 'a':
                 self.assertIn('Other projects under this Solace root', replies[0])
                 self.assertIn('b (beta)', replies[0])
+                self.assertIn('ask the human with `task ask` to add that project', replies[0])
             self.assertIn('pub fn answer() { 42 }', replies[1])
             self.assertIn('The answer', replies[2])
-            self.assertIn('E6007', replies[3])
-        self.assertIn('{ 42 }', (self.root/'b/src/app.gleam').read_text())
+            # A task changes the projects it covers (D-61): a's doesn't cover b; b's own is b.
+            self.assertIn('E6007' if d == 'a' else 'Saved app.answer', replies[3])
+        self.assertNotIn('42', (self.root/'b/src/app.gleam').read_text())
+
+    def test_an_agent_proposes_settings_for_a_project_of_its_task(self):
+        # D-61: a settings proposal can name another project in the task; `old` alone is an exact edit.
+        for d in 'ab': project(self.root/d, d, 'pub fn one() { 1 }\n')
+        self.migrate()
+        self.start()
+        steps = [{'command': 'write solace.toml --project b', 'old': '[commands]', 'text': '[commands]\ntool = { run = ["true"] }'},
+                 {'command': 'task done proposed'}]
+        t = self.api('POST', '/p/a/tasks', {'title': 'Settings', 'body': json.dumps(steps), 'scope': ['a', 'b']})
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'plan'})
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        t = self.wait('/p/a', t, lambda x: x['runs'][-1]['state'] == 'waiting')
+        q = t['questions'][0]
+        self.assertEqual(q['text'], f'Change {self.root.name}/b/solace.toml')
+        before = (self.root/'b/solace.toml').read_text()
+        self.assertEqual(q['settings']['proposed'], before.replace('[commands]', '[commands]\ntool = { run = ["true"] }'))
+        self.api('POST', f'/p/a/tasks/{t["id"]}/questions/{q["id"]}', {'option': 'Approve'})
+        self.wait('/p/a', t, lambda x: x['column'] == 'needs_review')
+        self.assertIn('tool = { run = ["true"] }', (self.root/'b/solace.toml').read_text())
+        self.assertNotIn('tool =', (self.root/'a/solace.toml').read_text())
+
+    def test_a_task_changes_every_project_it_covers(self):
+        # D-61: one task across a and b; c stays out of its reach.
+        for d in 'abc': project(self.root/d, d, 'pub fn one() { 1 }\n')
+        self.migrate()
+        (self.root/'b/solace.toml').write_text((self.root/'b/solace.toml').read_text() + '\n[board]\nevents = { asked = "x", finished = "x", failed = "x" }\n[[board.columns]]\nid = "x"\n')
+        self.start()
+        # One workflow for the board: the root's.
+        self.assertEqual(self.api('GET', '/p/b/workflow'), self.api('GET', '/workflow'))
+        self.refused('POST', '/p/a/tasks', {'title': 'T', 'scope': ['b', 'nope']}, 'not a project on this board')
+        self.refused('POST', '/p/a/tasks', {'title': 'T', 'scope': []}, 'at least one project')
+        self.refused('POST', '/p/a/tasks', {'title': 'T', 'scope': ['b']}, 'post it to one of b')
+        steps = [{'command': 'submit app.one', 'text': 'pub fn one() { 2 }'},
+                 {'command': 'submit app.one --project b', 'text': 'pub fn one() { 3 }'},
+                 {'command': 'test --project b'},
+                 {'command': 'submit app.one --project c', 'text': 'pub fn one() { 4 }'},
+                 {'command': 'task diff'},
+                 {'sleep': 1.5}, {'command': 'task done changed a and b'}]
+        t = self.api('POST', '/p/a/tasks', {'title': 'Across', 'body': json.dumps(steps), 'scope': ['b', 'a']})
+        self.assertEqual(t['scope'], ['a', 'b'])
+        other = self.api('POST', '/p/b/tasks', {'title': 'Also in b', 'body': '[]'})
+        for x, base in [(t, '/p/a'), (other, '/p/b')]:
+            self.api('POST', f'{base}/tasks/{x["id"]}/actions', {'action': 'plan'})
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        # The run holds both projects: b's other task can't start work, and the scope can't change mid-run.
+        self.refused('POST', f'/p/b/tasks/{other["id"]}/actions', {'action': 'assign', 'model': 'fake'}, 'another task has a work run')
+        self.refused('POST', f'/p/a/tasks/{t["id"]}/scope', {'scope': ['a', 'b', 'c']}, 'an agent is working')
+        t = self.wait('/p/a', t, lambda x: x['column'] == 'needs_review')
+        rid = t['runs'][-1]['id']
+        replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'a/.solace'/(rid + '.responses')).read_text().splitlines()]
+        self.assertIn('Saved app.one', replies[1])
+        self.assertIn('exit code: 0', replies[2])
+        self.assertIn("not one of this task's projects (a, b)", replies[3])
+        self.assertIn('## a: app.one (changed)', replies[4])
+        self.assertIn('## b: app.one (changed)', replies[4])
+        self.assertEqual(sorted((c['project'], c['name']) for c in t['changes']), [('a', 'app.one'), ('b', 'app.one')])
+        self.assertIn('3', (self.root/'b/src/app.gleam').read_text())
+        self.assertIn('{ 1 }', (self.root/'c/src/app.gleam').read_text())
+        # The Contract view in b finds the task and marks b's change.
+        g = self.api('GET', f'/p/b/graph?task={t["id"]}')
+        self.assertTrue(any(n.get('changed') for n in g['nodes']))
+        # Between runs the human widens and narrows the scope, but keeps projects it changed.
+        self.assertEqual(self.api('POST', f'/p/a/tasks/{t["id"]}/scope', {'scope': ['a', 'b', 'c']})['scope'], ['a', 'b', 'c'])
+        self.assertEqual(self.api('POST', f'/p/a/tasks/{t["id"]}/scope', {'scope': ['a', 'b']})['scope'], ['a', 'b'])
+        self.refused('POST', f'/p/a/tasks/{t["id"]}/scope', {'scope': ['a']}, 'this task has changed b')
+        self.refused('DELETE', '/projects/b', None, 'also covers b')
+        # Canceling undoes the changes in both projects.
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'cancel'})
+        self.assertIn('{ 1 }', (self.root/'a/src/app.gleam').read_text())
+        self.assertIn('{ 1 }', (self.root/'b/src/app.gleam').read_text())
+        # A task whose home leaves its scope moves to the first project left.
+        m = self.api('POST', '/p/a/tasks', {'title': 'Moves', 'scope': ['a', 'c']})
+        self.assertEqual(self.api('POST', f'/p/a/tasks/{m["id"]}/scope', {'scope': ['c']})['scope'], ['c'])
+        self.assertEqual(self.api('GET', f'/p/c/tasks/{m["id"]}')['title'], 'Moves')
+        self.refused('GET', f'/p/a/tasks/{m["id"]}', None, 'unknown task')
 
     def test_changes_made_outside_solace_wait_for_review(self):
         # D-58: the board's poll reads an outside edit in, in its own project only, and never writes over it.

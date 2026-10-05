@@ -95,7 +95,8 @@ pub fn file_of(dir: &str, module: &str) -> String {
 /// Every Gleam file under `src/` and `test/`, except a probe left behind.
 fn graph_files(root: &Path) -> Result<Vec<String>, Failure> {
     let mut out = vec![];
-    for top in ["src", "test"] {
+    // A project of plain files holds no symbols (D-60).
+    for top in ["src", "test"].into_iter().filter(|_| root.join("gleam.toml").exists()) {
         let mut files = vec![];
         collect_gleam_files(&root.join(top), &mut files)?;
         for f in files {
@@ -317,11 +318,18 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         return Ok(unreadable_note);
     }
     // What changed, and of that, what wasn't approved elsewhere.
-    let flow = board::workflow(&lockdown::settings(&s.root)?)?;
-    let all = board::tasks(&s.root)?;
-    let open: Vec<&Value> = all.iter().filter(|t| board::column(&flow, t)["final"] != true).collect();
-    let touched: HashSet<&str> =
-        open.iter().flat_map(|t| t["changes"].as_array().unwrap().iter().filter_map(|c| c["entity"].as_str())).collect();
+    // Tasks from other projects whose scope includes this one count too (D-61).
+    let flow = board::flow(&s.root)?;
+    let top = scope::top(&s.root);
+    let here = scope::dir(&top, &s.root);
+    let all = scope::tasks_in(&top, &here)?;
+    let open: Vec<&(PathBuf, Value)> = all.iter().filter(|(_, t)| board::column(&flow, t)["final"] != true).collect();
+    let mut touched: HashSet<&str> = HashSet::new();
+    for (home, t) in &open {
+        let home = scope::dir(&top, home);
+        let mine = t["changes"].as_array().unwrap().iter().filter(|c| c["project"].as_str().unwrap_or(&home) == here);
+        touched.extend(mine.filter_map(|c| c["entity"].as_str()));
+    }
     let list = approved(&s.root);
     let keys: HashSet<&String> = before.as_object().unwrap().keys().chain(after.as_object().unwrap().keys()).collect();
     let mut unexpected = vec![];
@@ -354,27 +362,28 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         n.sort();
         n
     };
-    let running = open.iter().find_map(|t| {
+    let running = open.iter().find_map(|(home, t)| {
         let r = t["runs"].as_array().unwrap().iter().find(|r| r["kind"] == "work" && r["state"] == "running")?;
-        Some((t["id"].as_str()?.to_string(), r["id"].as_str()?.to_string()))
+        Some((home.clone(), t["id"].as_str()?.to_string(), r["id"].as_str()?.to_string()))
     });
-    if let Some((tid, rid)) = running {
+    if let Some((home, tid, rid)) = running {
+        let home = board::open(&home)?;
         if !unexpected.is_empty() {
-            board::record(s, &tid, &rid, &bf, &af)?;
+            board::record(s, &home, &tid, &rid, &bf, &af)?;
         }
         let text = format!(
             "{}{unreadable_note}",
             if names.is_empty() { String::new() } else { format!("Changed outside Solace during this run and added to this task: {}.\n", names.join(", ")) }
         );
-        let mut t = board::task(&s.root, &tid)?;
+        let mut t = board::task(&home.root, &tid)?;
         board::note(&mut t, "solace", Some(&rid), &text);
-        board::save(s, &t)?;
+        board::save(&home, &t)?;
         return Ok(format!("Note: {text}"));
     }
-    let tid = match open.iter().find(|t| t["unexpected"] == true) {
+    let tid = match open.iter().map(|(_, t)| t).find(|t| t["unexpected"] == true && board::task(&s.root, t["id"].as_str().unwrap_or("")).is_ok()) {
         Some(t) => t["id"].as_str().unwrap().to_string(),
         None => {
-            let rank = all.iter().filter_map(|t| t["rank"].as_f64()).fold(0., f64::min) - 1.;
+            let rank = all.iter().filter_map(|(_, t)| t["rank"].as_f64()).fold(0., f64::min) - 1.;
             let t = json!({"id":board::id(),"title":TITLE,"unexpected":true,
                 "body":"Code changed outside Solace while no agent was working. Complete this task to keep the changes, or cancel it to restore the code Solace had. No agent starts work until it is completed or canceled.",
                 "links":[],"column":flow["events"]["finished"],"rank":rank,"paused_from":null,"attention":null,"stamps":{},"model":null,"notes":[],"questions":[],"runs":[],"changes":[]});
@@ -383,7 +392,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         }
     };
     if !unexpected.is_empty() {
-        board::record(s, &tid, "outside", &bf, &af)?;
+        board::record(s, s, &tid, "outside", &bf, &af)?;
     }
     let compiled = match s.check() {
         Ok(out) => out,

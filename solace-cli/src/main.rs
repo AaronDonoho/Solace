@@ -12,6 +12,7 @@ mod lockdown;
 mod migrate;
 mod outside;
 mod reach;
+mod scope;
 mod view;
 mod workspace;
 
@@ -165,32 +166,44 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     if a.first() == Some(&"task") && board::context().is_none() {
         return lockdown::error("E7010", "task", "task commands work only in a run started from the task board; this session has no task");
     }
-    if let Some(i) = a.iter().position(|x| *x == "--project") {
-        let dir = a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder; session start lists them".into(), 2))?;
-        let mut rest = args.to_vec();
-        rest.drain(i..i + 2);
-        return read_project(dir, &rest, budget);
-    }
+    let rest;
+    let (args, cross) = match a.iter().position(|x| *x == "--project") {
+        Some(i) => {
+            let dir = a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder; session start lists them".into(), 2))?;
+            rest = [&args[..i], &args[i + 2..]].concat();
+            match scoped(dir, &rest)? {
+                Some(target) => (&rest[..], Some(target)),
+                None => return read_project(dir, &rest, budget),
+            }
+        }
+        None => (args, None),
+    };
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    // The task's home: where the run's agent works, and where the task is stored.
+    let home = Store::open().ok().map(|s| s.root);
+    let _within = cross.as_deref().map(Within::enter).transpose()?;
     let Ok(store) = Store::open() else {
-        board::workflow(&lockdown::settings(&env::current_dir()?)?)?;
+        board::flow(&env::current_dir()?)?;
         return run_inner(args, input, old, budget);
     };
     let context = board::context();
+    let home = home.unwrap_or_else(|| store.root.clone());
     let guard = if let Some((tid, rid)) = &context {
-        board::agent_guard(&store.root, tid, rid, if a.is_empty() { &["help"] } else { &a })?
+        board::agent_guard(&home, tid, rid, if a.is_empty() { &["help"] } else { &a }, cross.as_deref())?
     } else {
-        board::lock(&store.root)?
+        vec![board::lock(&store.root)?]
     };
     let store = board::open(&store.root)?;
+    let home = board::open(&home)?;
     lockdown::recover(&store.root)?;
-    board::workflow(&lockdown::settings(&store.root)?)?;
+    board::flow(&store.root)?;
     let noticed = outside::absorb(&store, outside::Mode::Notice)?;
     if let Some((tid, rid)) = &context {
         if a.starts_with(&["task", "diff"]) {
-            return board::task_diff(&store, tid, &a[2..], budget);
+            return board::task_diff(&home, tid, &a[2..], budget);
         }
         if a.first() == Some(&"task") {
-            return board::task_command(&store, tid, rid, &a, input, options, guard);
+            return board::task_command(&home, tid, rid, &a, input, options, guard);
         }
         // A run's settings write is a proposal the human approves (D-38).
         let target = a.get(1).map(|p| Path::new(p).components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect::<PathBuf>());
@@ -199,7 +212,7 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         {
             let current = fs::read(store.root.join(&file)).unwrap_or_default();
             let proposed = lockdown::edited(&current, &input()?, a.contains(&"--replace"), old)?;
-            return board::propose_settings(&store, tid, rid, &file, &current, &proposed, guard);
+            return board::propose_settings(&home, &store.root, tid, rid, &file, &current, &proposed, guard);
         }
     }
     let changing = a.first().is_some_and(|a| matches!(*a, "submit" | "delete" | "write" | "remove" | "run" | "format" | "build"));
@@ -213,7 +226,7 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     let result = run_inner(args, input, old, budget);
     if let Some((tid, _)) = &context {
         if a.first().is_some_and(|c| matches!(*c, "check" | "test" | "build")) {
-            board::record_verification(&store, tid, a[0], &result)?;
+            board::record_verification(&home, tid, a[0], &result)?;
         }
     }
     // A process the command ran (`format`, a declared command) may have changed source: that's this command's change.
@@ -225,7 +238,7 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     if let (Some(before), Some((tid, rid))) = (before, context) {
         let mut after = board::snapshot(&store)?;
         after.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
-        board::record(&store, &tid, &rid, &before, &after)?;
+        board::record(&store, &home, &tid, &rid, &before, &after)?;
     }
     match result {
         Ok(out) => Ok(format!("{noticed}{out}{unread}")),
@@ -233,18 +246,68 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     }
 }
 
+const READS: &[&str] = &["view", "inspect", "refs", "find", "grep", "files", "read"];
+
+/// A project folder as `--project` takes it.
+fn project_dir(dir: &str) -> &str {
+    match dir.trim_end_matches('/') {
+        "" => ".",
+        d => d.strip_prefix("./").unwrap_or(d),
+    }
+}
+
+/// `--project <dir>` on a command that isn't a plain read, in a board run whose
+/// task may change that project (D-61): the folder the command runs in. Plain
+/// reads, and commands outside a run, go to `read_project`.
+fn scoped(dir: &str, args: &[String]) -> Result<Option<PathBuf>, Failure> {
+    let command = args.first().map(String::as_str).unwrap_or("");
+    let (Some((tid, _)), Ok(own)) = (board::context(), Store::open()) else { return Ok(None) };
+    if READS.contains(&command) && !args.iter().any(|x| x == "--draft") {
+        return Ok(None);
+    }
+    let top = scope::top(&own.root);
+    let dir = project_dir(dir);
+    let projects = scope::of(&board::task(&own.root, &tid)?, &scope::dir(&top, &own.root));
+    if !projects.iter().any(|p| p == dir) {
+        return lockdown::error(
+            "E6007",
+            dir,
+            format!("not one of this task's projects ({}); if the task needs it, ask the human to add it with `task ask`", projects.join(", ")),
+        );
+    }
+    if command == "task" {
+        return lockdown::error("E6007", command, "task commands belong to the task's own project; leave out --project");
+    }
+    Ok(Some(scope::path(&top, dir)))
+}
+
+/// Runs a command in another folder, and comes back after.
+// ponytail: the working folder is process-wide; fine while a process serves one call at a time (CLI, MCP).
+struct Within(PathBuf);
+impl Within {
+    fn enter(dir: &Path) -> Result<Within, Failure> {
+        let back = env::current_dir()?;
+        env::set_current_dir(dir)?;
+        Ok(Within(back))
+    }
+}
+impl Drop for Within {
+    fn drop(&mut self) {
+        let _ = env::set_current_dir(&self.0);
+    }
+}
+
 /// `--project <dir>`: a read in another project under the same Solace root
 /// (D-57). It takes no lock in that project, so reading never waits on its
-/// agents; a task still changes only its own project.
+/// agents. Changes go through `scoped` (D-61).
 fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
-    const READS: &[&str] = &["view", "inspect", "refs", "find", "files", "read"];
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     let command = a.first().copied().unwrap_or("");
     if !READS.contains(&command) || a.contains(&"--draft") {
         return lockdown::error(
             "E6007",
             command,
-            "`--project` only reads (view, inspect, refs, find, files, read); a task changes only its own project",
+            "`--project` only reads (view, inspect, refs, find, grep, files, read) here; in a board run, it also changes the task's other projects",
         );
     }
     // From a project, or from a folder of projects with none at its root.
@@ -255,17 +318,14 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
         None => own.clone().ok_or_else(|| Failure("No Solace root here: migrate an existing project (`solace serve`, then Migrate this project) or make a new one with `solace create <name>`.".into(), 1))?,
     };
     let members = workspace::members(&root)?;
-    let dir = match dir.trim_end_matches('/') {
-        "" => ".",
-        d => d.strip_prefix("./").unwrap_or(d),
-    };
+    let dir = project_dir(dir);
     if !members.iter().any(|m| m == dir) {
         return lockdown::error("E6007", dir, format!("not a project under this Solace root; its projects: {}", members.join(", ")));
     }
     let target = if dir == "." { root.clone() } else { root.join(dir) };
     // A board run's agent must still be running, as for any command.
     let _guard = match (board::context(), &own) {
-        (Some((tid, rid)), Some(own)) => Some(board::agent_guard(own, &tid, &rid, &a)?),
+        (Some((tid, rid)), Some(own)) => Some(board::agent_guard(own, &tid, &rid, &a, None)?),
         _ => None,
     };
     let db = Connection::open(target.join(".solace/store.db"))?;
@@ -274,6 +334,9 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
     let settings = lockdown::settings(&store.root)?;
     if let Some(out) = lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
         return out;
+    }
+    if !store.root.join("gleam.toml").exists() {
+        return lockdown::plain(command);
     }
     match a.as_slice() {
         ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
@@ -306,6 +369,10 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
     lockdown::recover(&store.root)?;
     if let Some(out) = lockdown::dispatch(&store, &settings, &a, input, old, budget) {
         return out;
+    }
+    const GLEAM: &[&str] = &["submit", "drafts", "view", "inspect", "refs", "impact", "find", "delete", "check", "test", "probe"];
+    if GLEAM.contains(&a[0]) && !store.root.join("gleam.toml").exists() {
+        return lockdown::plain(a[0]);
     }
     match a.as_slice() {
         ["session", "start", "--task"] => store.session_task(&input()?),
@@ -657,29 +724,39 @@ fn revision(text: &str) -> String {
     format!("sha256:{}", &hex(&Sha256::digest(code.as_bytes()))[..16])
 }
 
+const STARTER_SETTINGS: &str = "# Solace project settings. Protected: agents may read this file.
+# Text files up to this many bytes are watched; file writes are limited to it.
+watch_limit = 262144
+# Files Solace doesn't watch or search (agents can still read and write them).
+unwatched = []
+
+[validators]
+# Optional checks, for example:
+# \"docs/**/*.json\" = [\"python3\", \"-m\", \"json.tool\", \"{file}\"]
+
+[commands]
+# Optional commands agents may run, for example:
+# app = { run = [\"gleam\", \"run\", \"--\"], args = true }
+";
+
+/// Sets up a project: `solace.toml` if missing, and a store holding the Gleam
+/// code under `src/` and `test/`. Without `gleam.toml` the store stays empty:
+/// a project of plain files (D-60).
 fn import(root: &Path) -> Out {
-    if !root.join("gleam.toml").exists() {
-        return usage(format!("No gleam.toml in {}.", root.display()));
-    }
     let mut out = String::new();
     match fs::OpenOptions::new().write(true).create_new(true).open(root.join("solace.toml")) {
         Ok(mut file) => {
-            file.write_all(
-                b"# Solace project settings. Protected: agents may read this file.\n\
-# Text files up to this many bytes are watched; file writes are limited to it.\n\
-watch_limit = 262144\n\
-# Files Solace doesn't watch or search (agents can still read and write them).\n\
-unwatched = []\n\n\
-[validators]\n\
-# Optional checks, for example:\n\
-# \"docs/**/*.json\" = [\"python3\", \"-m\", \"json.tool\", \"{file}\"]\n\n\
-[commands]\n\
-# Optional commands agents may run, for example:\n\
-# app = { run = [\"gleam\", \"run\", \"--\"], args = true }\n",
-            )?;
+            file.write_all(STARTER_SETTINGS.as_bytes())?;
             out += "Created solace.toml with default settings.\n";
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        // A root's list of projects alone gains the settings its own project needs (D-60).
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let text = fs::read_to_string(root.join("solace.toml"))?;
+            if text.parse::<toml::Value>().is_ok_and(|v| v.as_table().is_some_and(|t| t.keys().all(|k| k == "projects"))) {
+                fs::write(root.join("solace.toml"), format!("{}\n{STARTER_SETTINGS}", text.trim_end()))?;
+                out += "Added default settings to solace.toml.\n";
+            }
+        }
         Err(e) => return Err(e.into()),
     }
     let dir = root.join(".solace");
@@ -693,7 +770,7 @@ unwatched = []\n\n\
     let (mut modules, mut symbols) = (0, 0);
     let mut written = outside::Written::load(root);
     written.known = true;
-    for top in ["src", "test"] {
+    for top in ["src", "test"].into_iter().filter(|_| root.join("gleam.toml").exists()) {
         let mut files = vec![];
         collect_gleam_files(&root.join(top), &mut files)?;
         files.sort();
@@ -908,6 +985,47 @@ impl Store {
         Ok(self.resolve(&self.index()?, input).is_ok())
     }
 
+    /// A dependency's module (`lustre/component`) or public symbol
+    /// (`lustre/component.register`), read from `build/packages/` and never
+    /// stored (D-15): a module gives its public signatures, a symbol its doc
+    /// and declaration. Bodies stay out; agents use the API, not the source.
+    fn dependency(&self, input: &str) -> Option<String> {
+        let source = |module: &str| -> Option<(String, String)> {
+            let module = module.replace('.', "/");
+            let packages = fs::read_dir(self.root.join("build/packages")).ok()?;
+            packages.flatten().find_map(|p| {
+                let text = fs::read_to_string(p.path().join("src").join(format!("{module}.gleam"))).ok()?;
+                Some((format!("{} ({}, a dependency; read only)", module, p.file_name().to_string_lossy()), text))
+            })
+        };
+        let declaration = |item: &gleam::Item| {
+            let code = item.text.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+            let sig = gleam::signature(&gleam::Item { text: code, ..item.clone() }).trim_end().to_string();
+            // An opaque type's constructors aren't part of its API.
+            if sig.contains("pub opaque type ") { sig.split(" {").next().unwrap_or(&sig).to_string() } else { sig }
+        };
+        let public = |item: &gleam::Item| item.text.lines().any(|l| l.starts_with("pub "));
+        if let Some((title, text)) = source(input) {
+            let m = gleam::split(&text);
+            let mut out = format!("// ── module {title}, public API: `view {input}.<name>` for one with its docs ──\n");
+            // The module doc's first paragraph; the rest is guides and links.
+            let doc: Vec<&str> = m.header.lines().filter(|l| l.starts_with("////")).take_while(|l| l.trim() != "////").collect();
+            if !doc.is_empty() {
+                out += &format!("{}\n\n", doc.join("\n"));
+            }
+            for item in m.items.iter().filter(|i| public(i)) {
+                let doc = item.text.lines().find(|l| l.starts_with("///")).map(|l| format!("{l}\n")).unwrap_or_default();
+                out += &format!("{doc}{}\n\n", declaration(item));
+            }
+            return Some(out);
+        }
+        let (module, name) = input.rsplit_once('.')?;
+        let (title, text) = source(module)?;
+        let item = gleam::split(&text).items.into_iter().find(|i| i.name == name && public(i))?;
+        let doc: String = item.text.lines().filter(|l| l.starts_with("///")).map(|l| format!("{l}\n")).collect();
+        Some(format!("// ── {name} in {title} ({}) ──\n{doc}{}\n\n", item.kind.as_str(), declaration(&item)))
+    }
+
     fn resolve_module<'a>(&self, ix: &'a Index, input: &str) -> Option<&'a ModuleRow> {
         let input = input.replace('.', "/");
         let exact = ix.modules.iter().find(|m| m.path == input);
@@ -919,6 +1037,9 @@ impl Store {
     /// work records expanded with the context of the symbols they name.
     fn session(&self, scopes: &[&str]) -> Out {
         const CAP: usize = 80;
+        if !self.root.join("gleam.toml").exists() {
+            return self.plain_session();
+        }
         let ix = self.index()?;
         let in_scope =
             |m: &ModuleRow| scopes.is_empty() || scopes.iter().any(|s| self.resolve_module(&ix, s).is_some_and(|r| r.path == m.path));
@@ -948,6 +1069,19 @@ impl Store {
         Ok(out)
     }
 
+    /// Session start in a project of plain files (D-60): no symbols to list.
+    fn plain_session(&self) -> Out {
+        let mut out = self.project_instructions();
+        out += "This project has plain files and no Gleam code of its own: `files` lists them, `read` and `write` change them, \
+                and `run` runs the commands its solace.toml declares.\n";
+        out += &self.status()?;
+        out += &self.work_context(&self.index()?)?;
+        out += &self.other_projects();
+        out += "\n";
+        out += &agent_reference();
+        Ok(out)
+    }
+
     /// The other projects under this project's Solace root, which reads can
     /// reach with `--project` (D-57).
     fn other_projects(&self) -> String {
@@ -959,15 +1093,19 @@ impl Store {
             .into_iter()
             .filter(|m| *m != me)
             .map(|m| {
-                let name = workspace::name(&if m == "." { root.clone() } else { root.join(&m) });
-                format!("{m} ({name})")
+                match workspace::name(&if m == "." { root.clone() } else { root.join(&m) }) {
+                    name if name.is_empty() => m,
+                    name => format!("{m} ({name})"),
+                }
             })
             .collect();
         if others.is_empty() {
             return String::new();
         }
         format!(
-            "\nOther projects under this Solace root (add `--project <folder>` to view, inspect, refs, find, files or read; changes stay in this project): {}\n",
+            "\nOther projects under this Solace root (add `--project <folder>` to view, inspect, refs, find, files or read): {}\n\
+             This task can change only the projects it covers. If it needs a change in another project (or the root, `.`), \
+             ask the human with `task ask` to add that project; never put the change somewhere else instead.\n",
             others.join(", ")
         )
     }
@@ -1027,6 +1165,9 @@ impl Store {
     /// within a fixed budget, plus the module list.
     fn session_task(&self, task: &str) -> Out {
         const BUDGET: usize = 6500; // bytes, about 1.6k tokens
+        if !self.root.join("gleam.toml").exists() {
+            return self.plain_session();
+        }
         let ix = self.index()?;
         let n = ix.syms.len();
         let mut modules = String::from("Modules (`view <module>` for an outline):\n");
@@ -1243,8 +1384,10 @@ impl Store {
                     text
                 }
             } else {
-                let s = &ix.syms[self.resolve(&ix, name)?];
-                format!("// ── {} ({}) ──\n{}\n\n", s.qname(), s.kind.as_str(), s.text)
+                match self.resolve(&ix, name) {
+                    Ok(i) => format!("// ── {} ({}) ──\n{}\n\n", ix.syms[i].qname(), ix.syms[i].kind.as_str(), ix.syms[i].text),
+                    Err(e) => self.dependency(name).ok_or(e)?,
+                }
             };
             if left.is_empty() && fits(&out, &text) {
                 out += &text;
@@ -1277,6 +1420,8 @@ impl Store {
                 Ok(i) => targets.push((name, Some(i))),
                 // a module name gets its outline rather than an error
                 Err(_) if self.resolve_module(&ix, name).is_some() => targets.push((name, None)),
+                // so does a dependency's module or symbol, read from build/packages
+                Err(_) if self.dependency(name).is_some() => targets.push((name, None)),
                 // one bad name doesn't cost the others (run 11)
                 Err(e) => unknown.push(e.0),
             }
@@ -3070,6 +3215,39 @@ mod tests {
         assert_eq!(probe_args(&["--from", "t", "--trace", "a.b", "c"]).unwrap(), (Some("t"), vec!["a.b", "c"]));
         assert_eq!(probe_args(&[]).unwrap(), (None, vec![]));
         assert!(probe_args(&["--trace"]).is_err() && probe_args(&["--from"]).is_err() && probe_args(&["x"]).is_err());
+    }
+
+    #[test]
+    fn dependencies_show_their_public_api() {
+        let root = env::temp_dir().join(format!("solace-dependency-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(root.join("build/packages/dep/src/dep")).unwrap();
+        fs::write(root.join("gleam.toml"), "name = \"app\"\nversion = \"1.0.0\"\n").unwrap();
+        fs::write(root.join("src/app.gleam"), "pub fn main() { 1 }\n").unwrap();
+        fs::write(
+            root.join("build/packages/dep/src/dep/api.gleam"),
+            "//// Talks to things.\n////\n//// A long guide.\n\nimport gleam/list\n\n\
+             /// Makes a widget.\n/// Second doc line.\npub fn make(size: Int) -> Widget {\n  secret(size)\n}\n\n\
+             // SECTION ---\n\nfn secret(n: Int) -> Widget {\n  Widget(n)\n}\n\n\
+             /// A widget.\npub opaque type Widget {\n  Widget(size: Int)\n}\n",
+        )
+        .unwrap();
+        import(&root).ok().unwrap();
+        let store = Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root: root.clone() };
+        // A module: its first doc paragraph and public declarations, no bodies.
+        let out = store.view(&["dep/api"], false, usize::MAX).ok().unwrap();
+        assert!(out.starts_with("// ── module dep/api (dep, a dependency; read only)") && out.contains("//// Talks to things.\n\n"), "{out}");
+        assert!(out.contains("/// Makes a widget.\npub fn make(size: Int) -> Widget\n") && out.contains("pub opaque type Widget\n"), "{out}");
+        for hidden in ["secret", "A long guide", "SECTION", "Widget(size", "Second doc line"] {
+            assert!(!out.contains(hidden), "{hidden}: {out}");
+        }
+        // A symbol: all of its doc; `inspect` falls back to the same view; store names still win.
+        let one = store.inspect(&["dep/api.make", "app.main"], true, usize::MAX).ok().unwrap();
+        assert!(one.contains("/// Second doc line.\npub fn make(size: Int) -> Widget") && !one.contains("secret(size)"), "{one}");
+        assert!(one.contains("app.main"), "{one}");
+        assert!(store.view(&["dep/api.secret"], false, usize::MAX).unwrap_err().0.contains("E1001"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1,462 +1,267 @@
 # Decisions
 
-Format: question, answer, rationale (and a check where one was run); a pending record gives its options instead of an answer. Status is `decided` or `pending`. Settled decisions are not re-asked.
+Settled questions: don't re-ask them. Each record keeps what was decided, and why when that isn't obvious. Every record is decided unless marked **pending**; a pending record gives its options instead of an answer. Details live in the specs, PROPOSAL.md and git history.
 
-## D-1 Test the central hypothesis before building the language — decided
-- **Question:** Build the Solace language first, or first test whether a semantic store plus symbol-level protocol helps agents at all?
-- **Answer:** Store and agent protocol first. The store and agent protocol (§4, §6) are prototyped over **Gleam** code and benchmarked against plain Gleam files. The Solace language is built only after that shows a measurable win.
-- **Rationale:** The language, checker and backend are the most expensive and least novel part of the bet. Gleam already has most of §11 (ADTs, exhaustive match, no null, Result/Option, labeled arguments, no macros) and targets both BEAM and JS.
+## D-1 Store and protocol before the language
+Prototype the store and agent protocol (§4, §6) over Gleam and benchmark it against plain Gleam files. Build the Solace language only after that shows a measurable win. Why: the language, checker and backend are the most expensive and least novel part, and Gleam already has most of §11.
 
-## D-2 BEAM compilation target — decided
-- **Question:** What does the Solace compiler emit for the BEAM?
-- **Answer:** **Erlang source**, compiled by `erlc`. Core Erlang is the upgrade path if we need finer control.
-- **Rationale:** The same argument §12.2 makes against compiling to Elm: emitting Gleam would put a second type checker and its error messages between Solace and the runtime. Elixir adds macros and a larger surface. Erlang source is the stable, direct BEAM input and needs no extra toolchain beyond OTP. Bytecode is unnecessary work.
+## D-2 BEAM target: Erlang source
+Emit Erlang source, compiled by `erlc` (Core Erlang if finer control is needed). Not Gleam (a second type checker in the way), not Elixir (macros), not bytecode (unnecessary).
 
-## D-3 Implementation language for the toolchain — decided (by default)
-- **Question:** What are the compiler, store and checker written in?
-- **Answer:** **Rust**, binding from Phase 1b. The Phase 1a store and protocol prototype may use Rust or Gleam, since it's thin and cheap to redo. Can be reopened before Phase 1b starts.
-- **Rationale:** Sub-second checks; a single binary (note: builds still need OTP because of D-2); Rust bindings for the Phase 2 solver; the Gleam compiler, written in Rust, is a working reference for an ML-style checker that emits Erlang. Against it: slower iteration, and graph-shaped data needs arenas or IDs.
+## D-3 Toolchain in Rust
+The compiler, store and checker are Rust from Phase 1b. May be reopened before Phase 1b starts. Why: fast checks, one binary (builds still need OTP), solver bindings, and the Gleam compiler as a reference.
 
-## D-4 Submits that break dependents — decided
-- **Question:** A submit that breaks its dependents (for example, a signature change): refuse it, or allow it?
-- **Answer:** Accept the submit if the symbol itself checks, and track broken dependents in the open change. `commit` is refused while any broken dependents remain.
-- **Rationale:** Refusing would mean submitting the symbol and all its callers together; otherwise a signature change could never be made one step at a time; benchmark task 04 is this case.
+## D-4 Submits that break dependents
+Accept a submit if the symbol itself checks, and track broken dependents in the open change; `commit` is refused while any remain. Why: otherwise a signature change can't be made one step at a time.
 
-## D-5 Holes, error propagation and fallbacks — decided
-- **Question:** Syntax for typed holes, returning early on an error, and replacing an error with a default.
-- **Answer:** Holes stay `?name "question"` (as in PROPOSAL.md §11.6). Propagation is `try expr`. Fallback is `expr else value`, allowed on `Option` and `Result` only.
-- **Rationale:** With `?` reserved for holes, a keyword for propagation avoids two meanings for one character. `||` would overload boolean OR and need truthiness, and §11.13 excludes both overloading and implicit conversions. `else` reads as English and can't be confused with holes. Swallowing an error with `else` is acceptable because it's explicit in the code and shows up as a branch in the decision tree and in test generation. If agents overuse it, a policy rule can limit it per namespace.
+## D-5 Holes, propagation, fallback
+Holes are `?name "question"`, propagation is `try expr`, and fallback is `expr else value`, on `Option` and `Result` only. Why: `?` stays reserved for holes; no overloading or truthiness (§11.13).
 
-## D-6 Spec review choices: contracts, effects, local names, machines — decided
-- **Contracts:** checked at compile time where the checker can decide them, otherwise at run time, from Phase 1 on. (Spec 4 §3)
-- **Unused effects:** a warning, not an error. Unused effects are compiled out, so callers aren't charged with them. (Spec 4 §4)
-- **Local variable names:** excluded from the revision hash, since renaming a local changes nothing semantically. Bindings are hashed by position. (Spec 1 §3, Spec 2 §1)
-- **State machines:** stay narrowed in Phase 1 (no data on states, no guards). Whether to widen them is revisited during Phase 1b. (Spec 4 §5)
+## D-6 Spec review choices
+Contracts are checked at compile time where decidable, otherwise at run time, from Phase 1. An unused effect is a warning and is compiled out. Local variable names are excluded from the revision hash (bindings are hashed by position). State machines stay narrowed in Phase 1 (no data on states, no guards); revisit in Phase 1b.
 
-## D-7 Benchmark sizes — decided
-- **Question:** The pilot is about 2.5k tokens, too small for the protocol to show a token saving. How big should the benchmark codebase be?
-- **Answer:** Build a second, larger pilot (`pilot-large/`) at about **30k tokens of source**, measured as source bytes ÷ 4. Keep the current pilot and its 10 tasks frozen as the small size point. The two sizes give a scaling curve.
-- **Rationale:** Efficiency is measured in tokens. In the small pilot, 75% of a run's tokens are fixed per-call overhead and reading the code costs almost nothing, so there's nothing for the protocol to save. Tasks are written before the code, so the code isn't tuned to them.
+## D-7 Benchmark sizes
+Two sizes: the frozen small pilot (~2.5k tokens, 10 tasks) and `pilot-large` (~30k tokens of source, bytes ÷ 4). Tasks are written before the code. Why: at 2.5k, fixed per-call overhead hides any saving.
 
-## D-8 What the agent may use in the Solace arm — decided
-- **Question:** In the Phase 1a comparison, does the agent work through the Solace protocol only, or get the protocol on top of its normal file tools?
-- **Answer:** Protocol only: no Read, Edit, Write, Glob or Grep on source files; reading and editing go through `solace` commands, and the agent can still run `gleam test`.
-- **Rationale:** The proposal claims agents should work through the semantic model *instead of* files, and Gate 1 requires building and maintaining the pilot "through the protocol alone". Giving the protocol on top of file tools would largely measure the file workflow again if the agent falls back on familiar tools. With the protocol only, a run where the agent gets stuck shows a gap in the protocol.
+## D-8 The Solace arm uses the protocol only
+No file tools on source; reading and editing go through `solace`. Why: the claim is "instead of files", and a stuck agent shows a gap in the protocol.
 
-## D-9 Agents reach the protocol through MCP, not the shell — decided
-- **Question:** Spec 3 §1 has agents run `solace` through their shell, with an MCP wrapper only "if the benchmark shows it matters". Does it?
-- **Answer:** Yes. The Solace arm gives the agent one MCP tool, `solace` (`command` plus optional `text` for new code), served by `solace mcp`, and no built-in tools at all. The CLI stays for humans and scripts.
-- **Rationale:** In the first smoke run through the shell, (1) Claude Code auto-approved read-only commands such as `git status` and `git diff`, so the agent could see files despite D-8, and (2) Claude Code's shell safety check rejected heredocs containing ordinary Gleam (braces next to string quotes), forcing awkward `printf` workarounds. An MCP tool removes shell quoting and file access in one step.
+## D-9 Agents reach Solace through MCP
+Agents get one MCP tool, `solace` (`command`, optional `text`), served by `solace mcp`, and no built-in tools. The CLI is for humans and scripts. Why: through a shell, agents read files with auto-approved commands, and heredoc quoting broke Gleam.
 
-## D-10 Orientation: outline views, symbol index, batched inspect, turns as the metric — decided
-- **Question:** The first Phase 1a comparison saved 32% of work tokens, but not on orientation. Agents called `session start` and some `inspect --context`, then viewed whole modules anyway (L07: 13 modules before the first edit). Tool results before the first edit came to only 3k–23k tokens, while 124k–410k was spent before it, so turns, not answer size, drive orientation cost. What changes?
-- **Answer:**
-  1. A module view returns an outline by default (signature, effects, one-line description, verification status). Bodies need `--bodies`.
-  2. `session start` includes a one-line-per-symbol index (name, signature, description), narrowed with `--scope`, with "N more" beyond a per-module cap.
-  3. `inspect a b c --context` returns several bundles in one call.
-  4. `session start` expands open work records with the context bundles of the symbols they name.
-  5. L07 is made fair: the work record goes in the store, the prompt says only to resume the work, and the files arm gets the same record as a handoff note in the repository.
-  6. Orientation is measured in model turns before the first edit (primary), with tokens before the first edit secondary. Gate 1 gets a turn target: typical tasks reach their first edit within 3 model turns (median). Tokens remain the overall efficiency metric.
-- **Rationale:** Change what the command agents already use returns, rather than asking them to use a different one. Every turn re-sends the whole context. L07's −41% came from symbol-level editing and diagnostics, not from work records, because the record was never in the store.
+## D-10 Orientation
+Module views are outlines (`--bodies` for code), `inspect a b c --context` batches several names, and `session start` expands open work records with context. Orientation is measured in model turns before the first edit (Gate 1: median ≤ 3), with tokens before the first edit second; tokens remain the overall metric. Why: every turn re-sends the whole context, so turns drive orientation cost.
 
-## D-11 Benchmark agent: Codex with GPT-5.6-Terra at medium effort — decided
-- **Question:** Which agent runs benchmark tasks from now on?
-- **Answer:** The Codex CLI (`codex exec`), model `gpt-5.6-terra`, reasoning effort medium, is `bench.py run`'s default. Earlier runs stay as Sonnet 5 results; that mix is accepted. Every run needs Aaron's go-ahead first.
-- **How the arms map:** each run gets a fresh `CODEX_HOME` holding only the sign-in, so user config, plugins, hooks and memories stay out. Both arms turn off Codex features that aren't part of the task (sub-agents, apps, plugins, goals, images, browser, web search). Files arm: the shell and `apply_patch` in a workspace-write sandbox. Solace arm (D-8): no shell, a read-only sandbox so `apply_patch` can't write, and the `solace` MCP server, which runs outside the sandbox. Codex runs this model in "code mode": one `exec` tool that runs JavaScript calling the other tools, so edits are detected by scanning that code.
-- **Metrics:** taken from Codex's session log, which has one usage record per model call. Sign-in is through ChatGPT, so there's no dollar cost; tokens are the metric anyway.
-- **Consequence:** arms compared with each other must use the same agent, so the D-10 rerun needs a fresh files baseline on Codex as well.
+## D-11 Benchmark agent
+`bench.py run` uses Codex `exec`, `gpt-5.6-terra`, medium effort, and every run needs Aaron's go-ahead. Each run gets a fresh `CODEX_HOME` holding only the sign-in, with unrelated Codex features off. Files arm: shell and `apply_patch` in a workspace-write sandbox. Solace arm: no shell, a read-only sandbox, and the `solace` MCP server outside it. Metrics come from Codex's per-call usage records. Arms compared with each other must use the same agent.
 
-## D-12 The session index lists names only — decided
-- **Question:** The D-10 index (one line per symbol with its signature, about 8k tokens on pilot-large) is re-sent on every turn. In the first Codex comparison that came to about 600k tokens over 67 Solace turns, more than Solace's whole deficit. Keep it?
-- **Answer:** No. `session start` lists symbol names per module (about 1k tokens for pilot-large), and signatures come from `inspect` or `view <module>`. No separate command for the full index: agents re-send their context every turn, so none pays for it only once, and `view <module>` already gives signatures per module.
+## D-12 The session index lists names only
+`session start` lists symbol names per module (~1k tokens on pilot-large); signatures come from `inspect` or `view <module>`. Why: the index with signatures (~8k) was re-sent on every turn.
 
-## D-13 Task-directed session start; exact-replacement submit — decided
-- **Question:** Orientation still takes 5–6 turns, as the agent follows code → tests → fixtures one step per turn. Solace turns are slower than files turns because submit re-sends whole symbols (about 59% of Solace output tokens vs 39% for apply_patch diffs). What changes?
-- **Answer:**
-  1. `session start --task` (the task in `text`) replaces the full symbol index with a task packet: name, signature, doc line and the reason each symbol was chosen, never bodies. Ranking is deterministic: task words (identifiers split at `_` and case changes, lowercased, common English words dropped) are weighted by rarity and by field (name 3, doc 2, code 1, which includes string literals such as fixture data); symbols the task names as `module.name` come first (weights: squared rarity; neighbours ¼ of the seed's score, fixtures ⅛); one hop from the best matches adds callers, callees and covering tests, plus the non-test symbols (fixtures) that the top covering tests use. Entries are never truncated. The module list is reserved first, then entries are added in rank order until about 2k tokens are used. The Solace arm's prompt starts with it. Plain `session start` stays.
-  2. `submit <name> --replace`: one exact old → new replacement (`old` and `text`) within one symbol; zero or several matches are refused; the whole resulting symbol is then formatted and checked in one transaction as usual. No line numbers, fuzzy matching or patch language. Whole-symbol submit stays the default.
-- **Rationale:** (1) targets the general orientation problem rather than one missing fixture. (2) was made conditional on measurement, and the measurement showed submitted source is a large share of output. There are no revision or conflict checks to preserve yet (Spec 3 §4 is not built).
+## D-13 Task packet; exact replacement
+`session start --task` gives a task packet in place of the index: the name, signature and doc line of symbols ranked deterministically from the task's words (rarity × field weight, named symbols first, one hop out to callers, callees, covering tests and their fixtures), within a byte budget, never bodies. `submit <name> --replace` makes one exact `old` → `text` replacement in one symbol, then checks the whole symbol.
 
-## D-14 One signature per reply; a size budget instead of truncation — decided
-- **Question:** In L07 (Luna Max) the two broad `inspect --context` replies were about 14k and 11k tokens. Codex cut both, and the agent re-requested part of the first one. 20–30% of each reply was the same signatures repeated across bundles (`Shipment`, `Store`). Paginate?
-- **Answer:** No pagination: each page costs a model turn, and turns re-send the whole context (D-10). Instead:
-  1. A reply with several names is one document: each signature is printed once, and later bundles refer to it as `(above)`. A symbol that was asked for is printed in full once, and other bundles refer to it as `(in full in this reply)`. Work-record context in `session start` works the same way.
-  2. A reply has a size budget set per agent, below that agent's tool-output cut (about 3.9 bytes per token): 32,000 bytes for Codex, whose code-mode `exec` cuts at about 10k tokens, and 80,000 bytes for Claude Code, whose MCP cap is 25k tokens. `solace mcp --budget <bytes>` sets it; the default is 32,000. Commands in one tool call share it. Over budget, `inspect --context` trims in this order: callers become a count (`solace refs`), then tests are listed by name only, then each Uses list gives names only. The full text of requested symbols is never trimmed. Names that still don't fit are left out and listed at the end with the exact command that shows them. `view` falls back from module bodies to outlines, then lists what doesn't fit. A single item larger than the budget is still printed.
-- **Rationale:** An agent pays for truncated output and then asks for it again. Trimming by priority, with a note saying what was left out, gives the agent a complete document it can act on. Raising agents' output limits scales only so far.
-- **Replay on the Luna Max Solace arm (reads before the first edit, same commands):** L07 −33%, other tasks −9% to −34%. Only L07 and L06 hit the budget.
-- **Low-budget check:** L01 at 6,000 bytes cost 211k tokens against 133k at 32,000, with 3 more turns before the first edit. The agent fetched what was left out. Trimming guards against truncation and does not save tokens, so the budget sits close to each agent's cut (Aaron: set it per agent).
+## D-14 A reply budget instead of truncation or paging
+A reply naming several symbols prints each signature once (`(above)`). Replies have a byte budget per agent, just below that agent's output cut (`solace mcp --budget`: 32,000 for Codex, 80,000 for Claude Code), shared by the commands in one call. Over budget, `inspect --context` cuts callers to a count, then tests to names, then Uses to names, never the symbols asked for, and lists what it left out with the command that shows it; `view` falls back to outlines. Why: truncated output gets requested again, and each page costs a turn.
 
-## D-15 Priorities from the visualizer feedback: build through the protocol first — decided
-- **Question:** Three feedback sessions (`feedback/`) on building and changing the bench visualizer with Solace led to three proposals: (1) safe submissions (validate in a temporary projection, `submit --check-only`, a draft that survives a rejected submit); (2) the whole Gleam workflow through one MCP server (routing across projects, creating packages, dependencies, build/run/smoke commands); (3) missing context through the protocol (read-only dependency signatures; compiler and browser errors mapped to symbols). Which of these does the project take on, and in what order?
-- **Answer:** The goal stays MCP-only (D-8, D-9): agents *build and maintain* code through the protocol alone (Gate 1). Each proposal is judged by whether it keeps an agent limited to MCP on the rails in Phase 1. In order:
-  1. **A benchmark task that builds from scratch:** a new module with several interdependent types and functions. Every task so far is maintenance, so the "build" half of Gate 1 has not been measured.
-  2. **Creating a large module safely through the protocol:** a draft held by Solace, which survives a rejected submit and can be fixed with `submit --replace` instead of sending the whole module again; `submit --check-only`; validation against a temporary projection; diagnostics that give lines within the submitted text.
-  3. **Read-only dependency signatures:** `inspect` and `find` reach dependency packages (signatures from `build/packages/`, never added to the store), so an agent does not read package source or guess APIs.
-  4. **Small fix:** `check` and a rejected `submit` no longer overwrite managed files that differ from the store (`materialize` currently does).
-- **Deferred:** managing Gleam packages and dependencies, bundling, and routing across several projects (Phase 1b replaces Gleam; packages are Phase 6; the browser is Phase 4); run and smoke commands (`test` covers the pilot); runtime and browser errors mapped to symbols (Phase 2 replay, Phase 5 observability); `sync` / `import --update` (with MCP only, only humans edit managed files, so it is a convenience for them, not part of the agent path).
-- **Rationale:** With MCP only, an agent has no scratch file and cannot read package source, so a server-held draft and dependency signatures are the gaps that push it off the protocol. The feedback sessions were not MCP-only (the agent used the CLI and file tools), so their friction over filesystem divergence largely disappears under D-8. Gleam-specific project management would mostly be thrown away in Phase 1b.
+## D-15 Build through the protocol
+Agents build and maintain code through MCP alone (Gate 1). In order: a benchmark task that builds from scratch; creating large modules safely (drafts that survive rejection, diagnostics with lines); read-only dependency signatures from `build/packages/` through `inspect` and `find`. Deferred: package management, bundling, run and smoke commands, runtime errors mapped to symbols, `sync`.
 
-## D-16 Pause measurement; build lockdown, agent tooling and the human UX — decided
-- **Question:** What does the project work on next?
-- **Answer (decided):**
-  1. Benchmark measurement is paused for a while. Gates are not judged until it resumes. The D-15 build task and before/after runs wait.
-  2. Three priorities: (a) **lockdown**: agents do all code-related work through Solace and have no other way to change source; (b) **agent tooling** that makes that work effective (the D-15 drafts, `--check-only` and dependency signatures come under this); (c) **human UX**: the contract view and the channel to agents.
-  3. Gleam is a target, not necessarily the final language. What gets built must not depend on Gleam where a language-neutral form is possible.
-  4. **Contract** means the behavior and footprint of the system: side effects, APIs, infrastructure as code, and the logic that drives each. The human sees a high-level view, descends into each behavior, submits test data and watches it flow through each decision point to its output or side effect.
-  5. **Channel to agents is asynchronous, through a task board.** Columns: backlog (prioritized) → planning (the human can ask agents to review and give feedback) → assigned (the human picks a model; Solace starts the agent and updates the status; the agent's notes go on the task) → blocked (can't finish or needs help) or needs review (finished). From blocked: unblock, or ask for more review. From needs review: approve to done, ask for more agent review, start over, or cancel. Any task can be paused at any time, and then any of these actions taken. A question an agent raises goes to Solace, which puts it on the task and blocks the task. A task may refer to existing contracts, ask for changes to them, or suggest new behavior.
-  6. **The board and Solace are decoupled** and talk only through an API, so the board can be swapped for another. Solace ships with its own board as the default. The API is minimal and defined by Solace: only what a Solace-compatible board needs, not modeled on Jira or any other tracker. Adapting another board to it is that adapter's job.
-  7. **The UX is a web app,** not native.
-  8. **Files come in four tiers.** (1) Source: symbols, as now. (2) Project manifest: a typed record changed through commands (`solace deps add …`); the manifest file is generated from it. (3) Resources (HTML, YAML, SQL, IaC, fixtures…): edited through Solace, checked only by a validator declared for the file kind, shown in the contract view as unverified footprint; **no revisions stored**, since history is source control's job. (4) Ignored (generated code, logs, build output…): not tracked or reported; Solace only lists them in the file tree.
-  9. **Sorting and access.** Tier 3 is the files matching patterns declared in the Solace project settings. Files and folders are made tier 4 by registering them in the project settings; `build/`, `.git/`, dependency caches and whatever `.gitignore` ignores are tier 4 anyway. A tier 3 file must stay under a size limit, which is a per-project setting that can be edited. Solace keeps one content hash per tier 3 file, to refuse edits made on top of a change it didn't see, but no history. A file in no tier is tier 4; it becomes tier 3 only by matching a declared pattern. The UI shows which tier every file is in.
-  10. **No shell for agents (D-8 kept).** Agents get the Solace MCP tool (plus their own web access) and no shell or file tools. Through Solace: tier 1 only through the symbol protocol, never as files; tiers 2 and 3 read and written directly as files; tier 4 read only; a limited set of commands (such as check, test, build and run) that Solace runs for the agent.
-  11. **Humans don't edit tier 1 files on disk.** Solace rewrites them from the store whenever it needs to and doesn't guard against human edits. This replaces D-15 point 4.
-- **Rationale:** Aaron wants Solace usable end to end by a human directing agents before more measurement.
+## D-16 Lockdown, agent tooling and the human interface
+1. Benchmarking is paused; gates aren't judged until it resumes.
+2. Priorities: lockdown (agents change code only through Solace), agent tooling, and the human interface (the contract view and a channel to agents).
+3. Gleam is a target, not necessarily the final language; prefer language-neutral forms.
+4. A contract is the system's behavior and footprint: side effects, APIs, infrastructure and the logic that drives them. Humans see it from the top down and can run test data through it.
+5. Humans reach agents asynchronously through a task board; any task can be paused; an agent's question blocks its task.
+6. The board and Solace talk only through a minimal API that Solace defines; Solace ships a default board.
+7. The interface is a web app.
+8. Agents have no shell (D-8 kept): only the Solace tool and their own web access. Source changes only through the symbol protocol, other files through Solace's file commands (categories: D-52), and Solace runs a limited set of commands for them.
 
-## D-17 The board's workflow and where a task's work lives — decided
-- **Question:** How fixed is the board workflow, where is task data kept, and where does a task's work live until it's accepted, so that `start_over` and `cancel` can undo it?
-- **Answer:**
-  1. **The workflow comes from configuration.** Columns, the actions allowed in each, and the stamps a column requires are set in `solace.toml`, and Solace ships a default. It is expected to change.
-  2. **Task data is local files in the project** (`.solace/board/`), with no agent access. Boards still go through the API.
-  3. **Solace is not tied to git.** Version control is the humans' job. The work stays in the project as it is made. To undo it, Solace records what each task changed and the state before the task first changed it: symbol text and revisions in the store, and the earlier bytes of tier 2 and 3 files. `revert` restores these. It is refused, with nothing changed, if a later task has changed any of the same symbols or files since. The records are invisible to agents: no search, view, index or count includes them. These records are dropped when the task reaches a final column, so they aren't history.
-  4. **`approve` is a stamp.** A column can require a stamp before a task may enter it. In the default workflow, the `complete` column (named `done` until D-51) requires `approved`.
-- **Rationale:** Keep Solace independent of the version control humans choose. The store already sees every symbol edit, so tying edits to a task costs a run id per submit. The store kept only a hash of each revision, not its text, so the earlier text has to be recorded for this.
+## D-17 Workflow and undo
+The workflow (columns, allowed actions, required stamps) comes from `solace.toml`, with a default shipped. Task data lives in `.solace/board/`, out of agents' reach. Solace isn't tied to git: work lands in the project, and Solace records what each task changed and the state before it. `revert` restores that state, and is refused if a later task changed the same things. These records are invisible to agents and dropped when the task reaches a final column. `approve` is a stamp; a column can require one (`complete` requires `approved`).
 
-## D-18 Parallel work on tasks — decided for now
-- **Question:** How will several agents work on tasks at once? D-17 lands a task's work straight into the project, so Spec 15 allows one work run per project at a time. The decision here is which direction to keep open.
-- **Answer:** Serial for now: one work run per project, with the revertible before-state records of D-17. To be revisited. The direction kept open is isolation in the store: each task has its own open change (Spec 3 §4) and its own copy of any resource files it writes, is checked in its own compile directory, and is merged symbol by symbol on `approve` (or an action such as `merge`), with Spec 3's conflict checks (E5101, E5102); D-17's before-state records become its base revisions. Committing an approved task to a git branch or pull request can be added later as an optional integration. Spec 15 §5 states what `revert` and `approve` guarantee separately from how it's done, so that move changes no API or workflow configuration.
+## D-18 Serial work for now
+One work run per project at a time (per scope since D-61). Kept open: isolating each task in the store (its own open change and compile directory, merged symbol by symbol on approve with Spec 3's conflict checks). Spec 15 states what revert and approve guarantee apart from how, so that change needs no API change.
 
-## D-19 Board refinements: agents wait, gates, task types; defaults accepted — decided
-- **Question:** Aaron's review of the choices Claude made in Specs 14 and 15.
-- **Answer:**
-  1. **An agent that asks a question waits** for the answer instead of ending, so its context isn't lost. A human can choose to start a new agent on the task instead (`new_agent`). `pause` also holds the agent without ending it.
-  2. **Later, a view of the agent:** from a task, a human can watch its agent work or read its context. The view is read-only, not a terminal. Asking the agent side questions without disturbing its work is a possible future decision. For now, runs only record where their session log is.
-  3. **Approval gates:** any column can require a human's stamp (such as approval) before a task moves on to the next column. The default puts the gate where an agent's result shows up on the task (`needs_review`). `approve` only stamps; moving on is a separate action.
-  4. **Task types:** tasks come in types. By default these are implementation, which changes the project, and investigation, which changes nothing and whose result is the agent's report.
-  5. **Leaving a gated column any way but forward removes the stamp:** a task moved anywhere else after approval loses its approval. If an agent can't keep waiting, Solace starts a new one when the task continues.
-  6. **Claude's other defaults in Specs 14 and 15 are accepted** (listed in the session of 2026-09-29): sizes, timeouts, `.solace/` internal, `.gitignore`d files in tier 4, command rules, JSON task files, local HTTP with no authentication, the model list in the system configuration, read-only review runs, dropping before-states in final columns, and spec numbers 14 and 15.
+## D-19 Agents wait; gates
+An agent that asks a question waits for the answer, keeping its context; `new_agent` starts a fresh one instead, and `pause` holds it. Any column can require a stamp; the default gate is needs review, and `approve` only stamps. A task leaving a gated column any way but forward loses its stamp. If an agent can't keep waiting, a new one starts when the task continues. Claude's other defaults in Specs 14 and 15 are accepted.
 
-## D-20 Guardrails and the human interface come first; Solace ships as a product — decided
-- **Answer:**
-  1. **Priorities:** the primary goals are guardrails that keep agents working through Solace, and the human interface. Efficiency (tokens, speed) is a secondary goal. PROPOSAL.md says so in §1 and §15.
-  2. **Order of the D-16 work:** lockdown → task board → contract view.
-  3. **Contract view, basic version** until it has its own spec: an interactive graph of the system's behavior and footprint. Nodes are colored by type (API, system logic, infrastructure, side effects, …). The human can search, follow connections, submit test data and watch it flow through the decision points (D-16.4).
-  4. **Solace is a deliverable:** the Solace system is built and shipped as a product that wraps a user's project. The benchmark (`bench/`) and the pilots are development tools and don't ship with it.
+## D-20 Guardrails and the human interface first; Solace ships
+The primary goals are guardrails that keep agents working through Solace, and the human interface; tokens and speed are secondary. Order: lockdown, then the board, then the contract view. Solace is a product that wraps a user's project; `bench/` and the pilots don't ship.
 
-## D-21 Lockdown session and launch configuration details — decided
-- **Question:** Spec 14 does not define CLI session identity, the `agent-config` directory layout, or how a CLI caller supplies `old`.
-- **Answer:** The implementation's reading stands. Each MCP process is a session; the CLI uses `SOLACE_SESSION` (default `cli`; board runs set it to the run id), with one hash per file per session. `agent-config` writes isolated agent settings plus `launch.json` holding the arguments and environment. CLI replacement takes `--old <text>`.
-- **Rationale:** Later decisions were made on top of this reading and none contradicts it: D-27 (isolated runs), D-33 (per-run sessions), D-38 (`--replace` proposals) and D-49 (what `agent-config` writes for Codex). Confirmed 2026-10-03.
+## D-21 Session identity and launch configuration
+Each MCP process is a session; the CLI uses `SOLACE_SESSION` (default `cli`; board runs use the run id), with one hash per file per session. `agent-config` writes isolated agent settings plus `launch.json` (arguments and environment). The CLI's exact replacement takes `--old <text>`.
 
-## D-22 Board system settings, pausing and how a review ends — decided
-- **Question:** Spec 15 left three things open, and the board had run on these readings since 2026-09-29.
-- **Answer:**
-  1. **Machine-wide settings** (the model list and the task timeout, which belong to the Solace install, not to a project) live in `~/.config/solace/config.toml`, or the file named by `$SOLACE_CONFIG`, holding `task_timeout` (default 3600 s) and `[[models]]`.
-  2. **A paused task stays in its column**, marked paused (`paused_from`), and Resume continues from there. There is no Paused column.
-  3. **A review run ends with `task note`.** The note is the review's whole result, and a review can't write, ask or call `task done`, so nothing is left for it to do afterwards. `task done` stays refused in reviews.
-- **Settled elsewhere, no longer open:** the port (3030); task types and their order (removed by D-25); `new_agent` from needs review (D-31 added `reassign`, and `start_over` removes approval as A4 expects); missing models (D-23.5).
+## D-22 System settings, pausing, ending a review
+Machine-wide settings (`[[models]]`, `task_timeout`, default 3600 s) live in `~/.config/solace/config.toml` or `$SOLACE_CONFIG`. A paused task stays in its column (`paused_from`); there's no Paused column. A review ends with `task note`, which is its whole result; `task done` is refused in reviews.
 
-## D-23 Models, endpoints and tasks that need attention — decided
-- **Answer:**
-  1. **Solace runs models through external agent programs** (the Codex CLI, Claude Code) and stores no credentials. Agents use their own sign-in.
-  2. **Built-in presets** for the current major models ship in the binary. The system configuration can add models, replace presets by `id`, or hide them.
-  3. **Custom endpoints:** an OpenAI-compatible endpoint through Codex, or a Claude-compatible endpoint through Claude Code. An endpoint's key is read from an environment variable when the agent starts. An operating-system keychain is the accepted alternative, if environment variables prove insufficient.
-  4. **The model is chosen when a task is assigned** (or a new agent started).
-  5. **Unavailable agents:** a model whose program, sign-in or key is missing is shown as unavailable with the reason, and assigning it is refused. A task whose agent fails, or which needs an answer, is marked as needing attention, with the reason, until a human next acts on it.
+## D-23 Models and endpoints
+Models run through external agent programs (the Codex CLI, Claude Code) with their own sign-in; Solace stores no credentials. Presets ship in the binary, and the system configuration adds, replaces (by `id`) or hides them. Custom endpoints: OpenAI-compatible through Codex, Anthropic-compatible through Claude Code, with the key read from an environment variable at launch. The model is chosen when a task is assigned. A model missing its program, sign-in or key is shown as unavailable and can't be assigned. A task whose agent fails or asks is marked as needing attention until a human acts.
 
-## D-24 Following an agent's work on the board — decided
-- **Answer:**
-  1. **The board shows when an agent is working** on a task, on its card and in its detail.
-  2. **A human can follow a run** as it happens, or read it afterwards: the agent's messages, thinking, and each tool call with its input, output and status, the calls collapsed until opened. It is a view only (D-19).
-  3. **Agent text is formatted:** notes, messages and the attention reason are shown as markdown. A failed run's attention note gives the agent's last message rather than raw log lines.
+## D-24 Following an agent's work
+The board shows when an agent is working. A human can follow a run live or afterwards (messages, thinking, tool calls with input, output and status), read-only. Notes, messages and attention text are rendered as markdown; a failed run's note gives the agent's last message.
 
-## D-25 Phases replace task types — decided
-- **Question:** With task types (D-19.4), an investigation task could be "reviewed" in planning and then assigned for more investigation. The phases of a task already separate looking from changing, so is a type needed?
-- **Answer:**
-  1. **Tasks have no type.** What a run may do comes from its kind: an **investigate** run (planning) explores the task, asks questions and reports findings or a plan, and changes nothing; a **work** run (assigned) makes the change; a **review** run (needs review, blocked) assesses the task's changes. Only work runs write.
-  2. **A task that only needs an answer ends after planning:** planning allows `complete`, and the investigation's report is the result.
-  3. **An investigation's report goes to the work run**, in its brief with the other notes.
-  4. **An investigate run that asks stays in planning** and waits, marked as needing attention. Starting `investigate` again continues it with the answers, as `unblock` does for a work run.
-  5. **Later (not decided):** reviews that give a verdict and structured findings a human can turn into subtasks.
+## D-25 Run kinds replace task types
+Tasks have no type. Investigate runs (planning) explore, ask and report, changing nothing; work runs (assigned) are the only ones that write; review runs assess the changes. Planning allows `complete` for a task that only needs an answer. The report goes into the work run's brief. An investigate run that asks waits, and `investigate` continues it.
 
-## D-26 Tier 4 is writable; import creates project settings — decided
-- **Answer:** Tier 4 files are readable and writable through Solace; being ignored excludes them from symbol search, not file editing. `README.md` and new files such as `bin/coolcalc` require no `resources` entry. This supersedes the tier-4 read-only rule in D-16.10 and Spec 14. Source still uses the symbol protocol; `.solace/` remains inaccessible and `solace.toml` remains human-owned. The existing text-write size limit, stale-write checks, matching validators and task undo apply to direct tier-4 edits as well. Text replacement refuses non-UTF-8 input rather than silently changing its bytes.
-- **Import:** Create a starter `solace.toml` when absent, preserving any existing configuration. Rerunning import on an existing store succeeds and creates missing settings without reimporting source or changing stored symbols. Its examples explain classification and optional validators/commands; they grant no additional command execution by default. Running a script remains subject to declared-command rules; writing it does not set executable permissions.
+## D-26 Unwatched files are writable; create writes settings
+Unwatched files can be read and written through Solace (unwatched means not searched, not read-only), under the size limit, stale-write checks, validators and task undo; replacing non-UTF-8 text is refused. `.solace/` stays out of reach and `solace.toml` human-owned. `create` (once `import`) writes a starter `solace.toml` when there is none, can be rerun safely, and grants no commands by default.
 
-## D-27 Agent memory and skills — decided
-- **Question:** Agent runs are isolated (D-16, D-21): no user settings, skills, plugins, extra MCP servers or memory carry over. How does an agent get skills and memories that last beyond one task?
-- **Answer:**
-  1. **Memories are tier 4 files** in a project directory named in `solace.toml`. Agents read and write them with the ordinary file commands (D-26); no new command is needed.
-  2. **The brief lists a memory index, not the contents:** one line per file (its name and first line), plus an instruction to read what is relevant. An agent writes a memory when a human tells it to remember something, not on its own at the end of each run.
-  3. **Skills use the same mechanism** with a human-owned directory: the brief lists them, and an agent reads one when it needs it.
-  4. **Any run may write memory,** including read-only investigate and review runs; the memory directory is the only exception to their write refusal.
-  5. **Memory edits are not task changes:** they do not appear in a task's review and are not undone when a task is reverted.
-  6. **Review and investigation results are files,** written through Solace, and the board shows the file on the task. They are not memory and do not go in the memory directory. Solace writes the report to `.solace/board/`, beside the run's log, from the text of the run's finishing command; agents keep no access to `.solace/`. Reports, like the rest of the board, are not versioned for now; versioning the board may come later.
-  7. **Later (not decided):** extra MCP servers, possibly as a Solace passthrough command (not named `mcp`, which starts Solace's own server) that logs each call and refuses it in read-only runs unless the human marks the server safe.
+## D-27 Agent memory and skills
+Memories are files in a directory named in `solace.toml`, read and written with the ordinary file commands. The brief lists them (name and first line), not their contents, and agents write one when a human asks. Skills work the same way from a human-owned directory. Any run may write memory, even a read-only one, and memory edits aren't task changes. Review and investigation reports are written by Solace to `.solace/board/`, not to memory. Later: extra MCP servers through a logged passthrough.
 
-## D-28 Unlisted files are tier 3 — decided
-- **Question:** Spec 14 §1 rule 8 puts every file no rule names in tier 4, so ordinary project files such as `README.md`, `bin/` and `docs/` are labelled ignored, `files` collapses their directories, and a `run`'s changes to them cannot be undone. Should unlisted files start in tier 3 instead?
-- **Answer:** Yes. A file no earlier rule matches is tier 3 when it is text within `resource_limit`, and tier 4 when binary or over the limit. Tier 4 then means only noise: `.git`, build and dependency output, anything `.gitignore` ignores, `ignore` patterns, and binary or oversized files.
-- **Humans must see the tiers:** the human view of the project (D-16's human UX) shows each file's tier and what that tier lets agents do.
-- **Settled by D-52:** `resources` is removed.
+## D-28 Unlisted text files are watched
+A file no rule names is watched when it's text within the size limit, and unwatched when it's binary or too large. Humans see each file's category and what it allows.
 
-## D-29 Humans can delete notes — decided
-- **Question:** Notes are append-only, so a wrong or stale note stays on the task and goes into every later agent's brief. Can a human remove one?
-- **Answer:** Yes. The board deletes any note, whoever wrote it, after the human confirms. Deletion is permanent and isn't recorded. Notes are addressed by position, because they have no ids and are only ever appended.
+## D-29 Humans can delete notes
+Any note, after confirmation. Deletion is permanent and unrecorded; notes are addressed by position.
 
-## D-30 Answer submission continues the waiting agent — decided
-- **Problem:** Aaron selected an option in Questions, but the answer was only saved; the investigation continued to wait for a separate Investigate action.
-- **Behavior:** submitting the last pending answer continues the same waiting agent through its allowed workflow continuation. Work and investigation both use this behavior. Paused runs retain the answer until Resume. No answer submission starts a new agent, replaces a run, gives approval or reverts changes. Custom workflows without a continuation retain the answer and show an actionable attention reason.
+## D-30 Answering continues the waiting agent
+Submitting the last pending answer continues the same agent through the workflow's continuation (work and investigation runs). A paused run keeps the answer until Resume. Answering never starts a new agent, replaces a run, approves or reverts. Without a continuation, the answer is kept and the task's attention says what to do.
 
-## D-31 Reassign from review without reverting — decided
-- **Request:** Aaron wants to move a story from review back to assigned to address failed review, without starting over.
-- **Answer:** Add `reassign` to Needs review in the default workflow. Preserve code, resources and original before-state records; clear approval; start a work run with the task notes, review feedback and optional human instructions. Use the existing work model unless another is selected. An active review must finish first. `start_over` keeps its existing revert behavior. Custom workflows can declare the same action explicitly.
+## D-31 Reassign from review
+`reassign` from needs review keeps the code and before-states, removes approval, and starts a work run with the notes, review feedback and optional instructions, on the same model unless another is chosen. Refused while a review is running. `start_over` still reverts.
 
-## D-32 Confirm cancellation and completion — decided
-- **Request:** Aaron wants confirmation dialogs for Cancel and Complete.
-- **Answer:** The bundled board asks before sending either action. Cancel explains that agents stop and task changes are reverted; Complete explains that changes stay, the task closes, and undo records are removed. Both identify the task. Dismissing the dialog sends no request and preserves entered instructions. Use the existing browser confirmation, as for note deletion. API gates remain enforced after confirmation.
+## D-32 Confirm cancel and complete
+The board confirms both, naming the task: cancel stops agents and reverts; complete keeps the changes, closes the task and drops its undo records. Dismissing sends nothing and keeps the form.
 
-## D-33 Conversations follow the author through the task — decided
-- **Answer:** Resume the author's conversation across investigation, implementation, and review fixes when compatible. Each review starts fresh. If resumption is unavailable, automatically provide a handoff. Humans use existing board actions; no session controls or additional accountability features.
-- **Lifecycle:** Finishing tools allow graceful process exit before cleanup, with a 30-second ceiling. Keep author state while the task can return to work; clean it when completed/cancelled or explicitly replaced. Clean reviewers after exit. Follow-ups wait for the preceding process to exit. Only an exited process yields reusable state.
-- **Compatibility:** Native Codex and Claude use explicit session ids with matching agent/model/endpoint/effort. Changed launch configuration, new-agent/start-over, custom runners, missing state and forced shutdown get a fresh handoff. A failed session load retries once before any tool execution; quota/work failures are not retried. Claude macOS keychain-only sign-in uses fresh nonpersistent conversations because changing its config directory changes its keychain entry.
-- **Context:** Changed entities, new notes and answers, recent outcomes/activity, retained drafts, and last check/test/build results. Verification is marked stale after tracked project contents change. Resumed authors skip broad orientation. Note deletion must not hide later feedback.
+## D-33 Conversations follow the author
+Investigation, work and review fixes resume the author's conversation when compatible (native runner, same agent, model, endpoint and effort); each review starts fresh. Otherwise (changed configuration, `new_agent` or start over, a custom runner, missing state, a forced shutdown) the agent gets a handoff brief. A failed session load retries once, fresh, before any tool runs; quota and work failures aren't retried. Claude with macOS keychain-only sign-in gets fresh, non-persistent conversations. A finishing run gets up to 30 s to exit, follow-ups wait for it, and only an exited process's state is reused. Author state lasts until the task completes or is cancelled or replaced; reviewer state is deleted. A resumed brief carries only what changed: entities, new notes and answers, drafts, and the last check, test and build results.
 
-## D-34 Editable rejected submissions and concise warnings — decided
-- **Answer:** Implement the retained-draft part of D-15: save rejected text, including syntax errors and batches, with its original command. Return a draft id; `view --draft`, `submit --draft <id> --replace`, and `submit --draft <id>` inspect, patch and retry without regenerating the batch. `drafts` lists this task's drafts (or the local CLI scope). Successful retries remove drafts; completion/cancellation/start-over clears task drafts. Drafts stay outside symbol search.
-- **Safety:** A source-store fingerprint prevents stale retries from overwriting intervening work. Initially any source-store change invalidates a draft; its text remains readable for a fresh submission. Rejected new modules must leave no projected source behind; creation refuses existing unmanaged files.
-- **Diagnostics:** Successful submissions summarize warnings by symbol; `check --warnings` returns full details. Errors remain detailed. The separate D-15 temporary-projection/check-only work remains outstanding.
+## D-34 Rejected submits become drafts
+A rejected submit's text is kept with its command under an id: `view --draft`, `submit --draft <id> [--replace]`, `drafts`. A successful retry removes it, finishing the task clears its drafts, and drafts aren't searched. A fingerprint stops stale retries (narrowed by D-46). A rejected new module leaves no file behind. Successful submits summarize warnings by symbol; `check --warnings` gives them in full.
 
-## D-35 Contract view: facts, runs, review and tests — decided
-- **Question:** The Spec 16 draft left four questions open: where the graph's facts come from (Q1), how a run is watched (Q2), how review connects to the board (Q3), and where tests come from and who owns saved ones (Q4). D-36 then made tests the specification, which raised a fifth: how a test is shown to a human who doesn't read code (Q5).
-- **Answer:**
-  1. **Facts come from Solace's store** (Q1): its symbols and references, plus a table of known effectful functions and every `@external`. Facts found this way are marked *derived* and never shown as guarantees. The graph has a fixed format, so another language can plug in its own adapter.
-  2. **Runs are not traced** (Q2). A call-by-call trace is debugging, which is the agent's work. A run shows data in, data out and effects. A human who wants to know why asks the agent on the task. If those questions keep coming, the later answer is the program's decisions in business terms, from the Solace language's contracts, not a trace.
-  3. **Review is the task-filtered view, linked from the board** (Q3). The task shows a one-line summary, such as "2 effects added, 1 test unfinished". A panel inside the board can come later from the same data.
-  4. **Human runs are ad hoc, not saved tests** (Q4). A human tests for understanding and manual checking: given this data in, what comes out, including effects to see or hear. A run can call any public function, not only `main`, with inputs entered through forms built from the types, and its steps can chain. Results show as fields, changes to state as before and after, and files by type in the browser's own viewers. A run can be turned into a task that carries the input, what the program did and what the human says it should do, and an agent writes the test. There is no human-owned test folder.
-  5. **Agents' tests are shown as data in → data out** (Q5): each `assert call(args) == expected` as one line, and the rest of a test as source on request.
-  6. **Runs are remembered.** In review, Solace replays the ones that reach what a task changed, on the version before the task and on the current one, and shows what differs. The human judges the difference; it is not pass or fail. This is built after basic runs.
-  7. **Defaults, open to change:** before a run, the view lists the function's derived effects, and effects that leave the scratch copy (network, other processes) need the human's confirmation; public functions that no source function calls are shown as entry points, which covers projects without `main`.
-- **Rationale:** Humans give creative input and judgement, while agents plan, code, debug and write tests (D-20). A human's tests are judgements on what the program does with data, so the view gives them data in and out and turns a judgement into a task rather than asking them to own test code. D-36 already protects agents' tests, so a second, human-owned test store isn't needed. A task made from a wrong run meets D-36.5 automatically, because the old code produced the wrong output the human saw.
-- **Clarified in Spec 16 (2026-10-01):** drawn diagram; run arguments and stdin; before/after on tuple elements and `Ok` payloads; which tests are the task's; routes `/view`, `/types`, `/tests`, `/runs/{id}/files`.
+## D-35 Contract view: facts, runs, review, tests
+1. Facts come from the store (symbols, references, known effectful functions, every `@external`), marked as derived, never as guarantees. The graph format is language-neutral.
+2. Runs aren't traced: a run shows data in, data out and effects. Why something happened is a question for the agent.
+3. Review is the view filtered to a task, linked from the board with a one-line summary.
+4. Humans run any public function ad hoc, with inputs from forms built from the types; results show as fields, state as before and after, files in the browser's viewers. A run can become a task carrying the input, the output and what it should have been. There are no human-owned tests.
+5. Agents' tests are shown as data in → data out, one line per `assert`, with source on request.
+6. Runs are remembered: review replays those that reach the task's changes, before and after, and shows the differences, without pass or fail.
+7. Before a run the view lists the derived effects, and effects that leave the scratch copy need confirmation. Public functions nothing calls count as entry points.
 
-## D-36 Specify before implementing — decided
-- **Question:** In L01 (Terra medium, `bench/results/5`), the Solace agent fixed the code first, then wrote a regression test with the tax worked out wrong (441 instead of 437), and changed the expected value to match the output. How does Solace keep tests from being fitted to the code? Should it run TDD with two agents, one writing tests and one writing code?
-- **Answer:** Keep TDD's purpose rather than its mechanics, with an arithmetic skill alongside.
-  1. **Admitted vs accepted.** Every submit into a task must parse and type-check, as now. A task is accepted (can go to review) only when no test fails and no `todo` is left. Red is a legitimate state inside a task, never in the accepted program.
-  2. **Typed holes are Gleam's `todo`.** It type-checks, and the compiler reports its type. A test that reaches it is *unfinished*, distinct from *wrong*: gleeunit labels the failure `todo`, not `assert`.
-  3. **Specification first, in batches.** Tests, with `todo` stubs for new functions, are submitted before the implementation they cover; the implementation follows in one batch or several. Solace records each test's result as unfinished, wrong or passing. A test covers the symbols it references.
-  4. **Expected values are protected.** Changing an existing test's expected value while its subject has a body is flagged. This applies across tasks, whoever created the test.
-  5. **Bug fixes.** The regression test is linked to the ticket. Where the ticket gives the wrong value, the old code must produce it. A new regression test that passes on the old code is flagged.
-  6. **Declared refactors.** Any edit to a test or to a public signature is flagged automatically. Symbols no test covers need characterization tests first, and these must pass on the old code (PROPOSAL.md §8.3).
-  7. **Flags, not refusals,** to start. The agent that triggered a flag can never resolve it. Every resolution is recorded.
-  8. **Flagged expected values are reviewed blind.** The reviewer computes the expected value from the task before seeing the coder's change, then compares. Only a disagreement or a question about these rules goes to the human.
-  9. **Arithmetic skill, shipped by Solace.** Expected values are written as plain arithmetic from the stated inputs, rounding steps included, and never by calling the code under test. An expected value is never changed to fit the output without deriving it again. This is the first skill Solace ships itself; D-27 covers only human-owned skills.
-  10. **Benchmark:** add a seeded task where an existing expected value is genuinely wrong, so legitimate corrections are measured as well as tampering.
-  11. **Later, not decided:** a separate test-writing run with a fresh context, if the benchmark shows it catches more; refusing instead of flagging, through policy.
-- **Rationale:** For an agent, TDD's value is that tests written before the code can't be fitted to it. Point 4 protects that directly, so no second agent, write scopes or dispute path are needed. Typed holes make red buildable while every submit still type-checks. A blind reviewer can't anchor on the coder's number. Testing before fixing costs turns; D-20 puts the guardrail first.
+## D-36 Specify before implementing
+1. Every submit must type-check. A task is accepted only with no failing test and no `todo`.
+2. Typed holes are Gleam's `todo`; a test that reaches one is unfinished, not wrong.
+3. Tests, with `todo` stubs, come before the implementation. Each test's result is recorded as unfinished, wrong or passing; a test covers the symbols it references.
+4. Changing an existing test's expected value while its subject has a body is flagged, across tasks.
+5. A regression test must fail on the old code with the ticket's wrong value; one that passes on the old code is flagged.
+6. Edits to tests or public signatures are flagged. Uncovered symbols need characterization tests first, passing on the old code.
+7. These are flags, not refusals. The agent that triggered a flag can't resolve it, and resolutions are recorded.
+8. Flagged expected values are reviewed blind: the reviewer works out the value before seeing the change, and only a disagreement goes to the human.
+9. Solace ships an arithmetic skill: expected values are worked out from the stated inputs, never by running the code under test.
+10. The benchmark gets a task whose existing expected value is genuinely wrong.
+Why: tests written first can't be fitted to the code, and point 4 protects that without a second agent.
 
-## D-37 Board usability, effort and note images — decided
-- **Question:** The default board shows everything at once: an always-visible create/edit form, a long detail page and a plain note box. Effort is part of a model preset, so changing it means a different model entry. A task shows when an agent needs help but not when it has finished. How should the board change?
-- **Answer:**
-  1. **Create area** sits behind a "New task" button, keeps its draft in the browser across reloads, and clears after a task is created. Editing a task moves to an Edit button in its Details tab.
-  2. **Task details are tabs** under the title: Details, Notes, Questions, Runs, Changes. Lists show the newest first. Each note collapses, and an agent's note names its run's kind and model, as runs do. "Add note" sits in the action row.
-  3. **Effort is chosen separately from the model.** `/models` lists each model's `efforts` (Codex: low, medium, high, xhigh; Claude: low, medium, high, xhigh, max; none for custom runners). An action may send `effort`; the model's configured `effort` is the default. The run records it, a work run records it on the task, and a changed effort starts a fresh conversation (D-33 already compares effort).
-  4. **Finished.** When a run ends successfully, the task gets `finished = {kind, outcome, time}`. The board shows it as "Agent finished", "Report ready" or "Review ready". The next action, a new run or `attention` clears it.
-  5. **Note images.** The board uploads PNG, JPEG, GIF or WebP images (5 MB each, content-checked; no SVG) to `POST /tasks/{id}/files` (raw bytes) and puts them in notes as markdown images. The board renders images only from that route. Images are stored inside `.solace/board/`, which agents can't reach, and Solace attaches the images referenced by briefed notes to the agent's prompt (Codex `-i`, Claude a stream-json image block); the brief names them `[image N]`.
-  6. **Markdown editor** is built in: a toolbar, Write/Preview, and paste or drop to upload an image. No editor library.
+## D-37 Board layout, effort, note images
+New tasks sit behind a button that keeps the draft; editing is on the Details tab. Task details are tabs (Details, Notes, Questions, Runs, Changes), newest first. Effort is chosen separately from the model; the run records it, and a changed effort starts a fresh conversation. A successful run marks the task finished ("Agent finished", "Report ready", "Review ready") until the next action. Notes take PNG, JPEG, GIF or WebP images (5 MB, content-checked, no SVG), stored in `.solace/board/` and attached to the agent's prompt as `[image N]`. The markdown editor is built in.
 
-## D-38 Agents propose settings changes — decided
-- **Question:** Agents can't write `solace.toml`, so an agent that needs a declared command (e.g. a Lustre `build`) stops and asks the human to edit a file by hand. How can an agent request a settings change that only a human approves?
-- **Answer:**
-  1. In a **work run**, `write solace.toml` (whole text or `--replace`) proposes the change instead of writing it. An invalid proposal is refused at once (`E6020`). A valid one becomes a task question "Change solace.toml" with options Approve and Reject, carrying `settings: {base, proposed}`, and the run waits as for `task ask`.
-  2. **Approve on the board applies it**, only if `solace.toml` still equals `base` and is still valid; otherwise the answer says it was not applied. Any other answer rejects it. The agent continues with the answer.
-  3. Read-only runs and the CLI outside a run are still refused.
-- **Rationale:** Runs can't reach the board's routes (Codex has only the Solace tool; Claude adds read-only web tools) and host commands are refused in runs, so a board answer is a human's. An agent outside Solace running as the same user could post to the board, but it could edit the file directly anyway; proving a human clicked needs authentication, which Spec 15 defers.
+## D-38 Agents propose settings changes
+In a work run, `write solace.toml` (or `AGENTS.md`, D-45) is validated (`E6020` if invalid) and becomes an Approve or Reject question carrying the old and new text; the run waits. Approve writes it only if the file hasn't changed since. Refused in read-only runs and outside a run.
 
-## D-39 Task diff and draft status for reviewers — decided
-- **Question:** A reviewer gets the names of changed symbols but no way to see what changed, and `drafts` lists IDs without saying whether later edits supersede them. What should agents get?
-- **Answer:**
-  1. `task diff [name ...]` (any task run, read-only included) shows each entity the task changed, against its state before the task (the before-states kept for revert): line diff with two lines of context, marked added, deleted, changed, or back to its state before the task. It covers the whole task, not single runs (before-states aren't kept per run). Past the reply budget, the remaining entities are listed by name.
-  2. `drafts` marks each draft `current` or `stale` (source changed since it was made). No timestamps.
-  3. The review brief tells the reviewer to start with `task diff`, then read in small batches, one concern at a time.
-- **Rationale:** From a real review run's feedback. The data already existed; reviewers missed omissions without a diff. A shorter session start and a browser preview were also suggested and deferred: tokens are secondary (D-20), and a preview needs its own spec.
+## D-39 Task diff and draft status
+`task diff [name...]`, in any task run, shows each entity the task changed as a line diff against its state before the task. `drafts` marks each draft `current` or `stale`. A review brief starts with `task diff`.
 
-## D-40 Submissions may hold many symbols; new modules in one call — decided
-- **Question:** A work run on redline (`606a6184`) spent about 14 of its 62 tool calls creating five new modules. `submit --new` took one symbol and whole-module and block submits refused modules that didn't exist yet, so each module took three calls (one symbol, the rest, then `--imports` for the module comment), plus four errors on the first. What is the point of "one symbol at a time"?
-- **Answer:** The symbol is the unit of identity (ids, revisions, references, task changes, diffs), not a limit per call. `submit --new <module>` adds every symbol its text defines; when the module doesn't exist yet it is created whole, keeping the text's module comment and imports. `submit <module>` for a module that doesn't exist routes to the same path. Multi-block `submit` creates modules its block headers name. A block for a named symbol still holds one symbol, since it replaces that one. Defining a name twice is refused (E0103).
-- **Rationale:** Each tool call re-sends the agent's whole context (over 100k tokens late in that run), so calls, not reply size, drive cost. Splitting the text into symbols is the store's job, not the agent's.
+## D-40 Many symbols per submit
+The symbol is the unit of identity, not a limit per call. `submit --new <module>` adds every symbol in the text and creates a missing module whole; `submit <module>` and multi-block submits create modules too. A name defined twice is refused (`E0103`). Why: every call re-sends the whole context.
 
-## D-41 `probe`: run throwaway code against the project — decided
-- **Question:** In redline run `606a6184` the agent wanted actual numbers, so it submitted a deliberately failing test, read the assertion values and deleted it: three calls, and a project change in a work run. Reviewers can't do even that. Should agents run code without saving it?
-- **Answer:** Yes. `probe` takes code as `text`: statements (wrapped as `pub fn main()`, with `import` lines kept at the top) or a module with `pub fn main()`. Project imports it uses are added. It runs as `test/solace_probe.gleam` via `gleam run -m`, in the project so the build cache is reused, under the project lock, and the file is removed in every case. Output is returned with build noise removed; on failure the module as run is shown, so compiler line numbers can be matched. It works in read-only runs, saves nothing and records no task change. A project module named `solace_probe` blocks it.
-- **Rationale:** Agents already run arbitrary project code through `test`, so this adds no new risk. Gleam's `echo` prints values with their line, which replaces the failing-assert trick.
+## D-41 `probe`
+`probe` runs throwaway code from `text` (statements, or a module with `main`), with project imports added, as a temporary module that is always removed. It works in read-only runs and saves nothing.
 
-## D-42 A workflow with examples, and less noise, in session start and the tool schema — decided
-- **Question:** In bench run 6 (local Qwen 27B through Claude Code, L01) the Solace agent took 21 turns, against 5–9 for earlier Codex runs. Claude Code makes each Solace call a turn, and the agent used one command per call although `session start` said, in one line of a 16.4 KB reply, that several commands fit in one call. The reply re-sent every turn held a word list per packet entry ("matches more, discount, off"), "none" status lines, drafts and files detail, host commands agents can't run, and task commands that are refused outside a board run (the agent's last call was a refused `task done`). How should the agent's workflow be made clearer?
-- **Answer:**
-  1. The reference starts with a numbered workflow with examples: read everything in one `inspect … --context` call; change and test in one call (`command` = `submit` then `test`, `text` = a block per symbol, code and tests together); fix only what the reply reports; once `test` passes the code is done (it type-checks first, so no `check`; run 7's agent ended with an unneeded `check --warnings`). Command lines lose the `solace` prefix and are shorter.
-  2. `session start` and the "no command" reply leave out host commands, and show task commands only in a board run (`SOLACE_TASK` and `SOLACE_RUN` set). `help` keeps the full reference.
-  3. The `--task` packet drops the per-entry reasons (amends D-13 point 1), and its budget goes from 8,000 to 6,500 bytes, so it lists about as many entries as before. "Open work records: none" and "Broken symbols: none" are left out.
-  4. The MCP tool's description and `command` parameter say that several commands go in one call, one per line, with examples.
-- **Check:** offline packet check (D-13 method, L01–L10): 34 of 39 changed symbols are still in the packet (35/39 at 8,000 bytes without reasons, but with up to 55 entries). The L01 reply is 11.7 KB, down from 16.4 KB.
+## D-42 A workflow with examples
+The reference opens with a numbered workflow and examples: read with one `inspect --context`; `submit`, then `test`, in one call; fix only what is reported; a passing `test` means done. Agents don't see host commands, and see task commands only in board runs; `help` has the full reference. The tool description says several commands go in one call.
 
-## D-43 Seeded probes, a call tracer, and warnings on self-referential asserts — decided
-- **Question:** After L01 (run 9, Opus 5.5 medium, 3 calls), the agent said it never reproduced the ticket's $71.21 because building a store, an order and a clock by hand in `probe` looked like several calls of trial and error, and that its new test asserted `total == 6030 + 600 + q.tax_cents` because it didn't know how tax rounds. Asked to compare Solace with Benzi, it named Benzi's runtime tracer (`execute_from`, `check_last_execution`) as the best fit. What should Solace add?
-- **Answer:**
-  1. `probe --from <fn>` starts the probe from a zero-argument function's module imports and body (normally a test), and `text` adds statements that can use its variables. Refused (E1005) for a function with arguments, a non-function, or a whole module as `text`.
-  2. Expected values follow D-36 point 9, not the agent's request to read the code's own values: the workflow says to work them out from the task's numbers and the rules the code documents, rounding included, never from running the code under test. A one-line `probe` that is a single expression is printed, so a rule or helper is cheap to evaluate. A single-line `assert a == b` in a submitted test whose two sides read the same local variable gets a note: an expected value taken from the result can't catch a wrong result (a note, per D-36 point 7).
-  3. `probe --trace <fn>...` shows each call to the named functions in order, nested, with arguments and result. Instrumentation is in the source, so it works on both targets: each traced function is renamed `<name>__solace_traced` and made private, and a wrapper with its name, visibility and labels echoes the arguments and the result. Values are cut to 300 characters and at most 60 calls are shown. The materialized files are restored in every case. Refused (E1006) for constants, types and `@external` functions. Probe output no longer includes compiler warnings.
-- **Rationale:** Reproducing the reported case is how an agent confirms a cause from the symptom; Gleam's immutable values make a call trace readable. Using the tracer to find causes is fine; using it to write expected values is what D-36 forbids, so the reference says so and the self-referential-assert note catches the common form.
-- **Check:** on the L01 setup, one call (`probe --trace pricing.quote promotions.discount money.percent` with the ticket's four statements) prints 7121 and shows the loyalty percent taken from 6400, the base after the coupon.
+## D-43 Probes from tests, a call tracer, self-referential asserts
+`probe --from <fn>` starts from a zero-argument function's imports and body (`E1005` otherwise). `probe --trace <fn>...` shows each call's arguments and result, nested (values cut at 300 characters, 60 calls; `E1006` for constants, types and externals). A probe that is one expression is printed. A test asserting `a == b` with both sides read from the same local gets a note. Expected values still follow D-36.9.
 
-## D-44 Impact analysis, reach-based tests, and a better task packet — decided
-- **Question:** In L01 run 10 (Opus 5.5 medium, Solace) the agent didn't reproduce the ticket, guessed the test helpers, and couldn't tell what else its fix reached ("does the refund depend on the loyalty/coupon split?"). Aaron asked for the general versions of these ideas, including CodeGraph's `affected` for projects with far more tests, and how end-to-end tests, performance tests and effects fit.
-- **Answer:** one reach-and-impact engine (`reach.rs`), used everywhere:
-  1. **Test reach.** A test's reach is its transitive closure over the reference graph. `test` runs the tests whose reach hash (revisions of everything reached, those modules' headers, gleam.toml, manifest.toml) changed since they passed, plus those that failed or never ran, and those whose reach includes a processes or network effect or `@external` code (static reach can't see past those, which covers end-to-end tests driving a server or browser). `test <name>…` runs the tests that reach the names; `test --all`, every test. Skipped tests are made private in the projected files for the run (gleeunit runs only public `_test` functions on both targets) and restored afterwards. The reply starts "Ran 33 of 98 tests; the other 65 reach nothing changed since they passed (`test --all` runs every test)." Results per test are kept in `test_runs`; passes are recorded only when gleeunit's failure count matches the failures parsed; a compile failure, timeout or crash records nothing. When nothing is selected, `test` type-checks instead (gleeunit fails on zero tests). Compiler warnings are dropped from `test` output, as from `probe`. The source as of the last full pass is kept in `test_base`, for "changes since tests last passed".
-  2. **Coverage vs reach.** Selection uses reach (could the result change?); "checked by a test" keeps D-36.3's meaning (what the test references, also through helpers in its own test module), so a test that calls `main` doesn't count as testing everything.
-  3. **Data flow.** From a change's changed lines, taint follows `let`/`use` bindings by statement (split at the formatter's indentation), record constructor fields whose argument is tainted, callers of a tainted function (at the call), readers of a tainted field (at the read; certain when one type declares the field or the reader names one of the declaring types, else possible), and the field writes of helpers called with a tainted argument (only those). Depth and breadth aren't settings; only displays are cut. Precision rules found on pilot-large: a field read `x.f` counts only when field `f` is tainted; a record update's `..base` adds no field; `let db = store.put(db, x)` keeps `db`'s state; a piped call's first argument is tainted only if the pipeline's head is; possible uses are listed but not followed.
-  4. **Submit note** (both submit paths, at most 3 lines): how many uses the change reaches and the fields it flows into; the nearest uses with no test of their own, pointing to `impact`; where data leaves the program and declared suites reached.
-  5. **Commands:** `impact [name…]` lists every use, nearest first, with its tests (no names: changes since tests last passed, or the task's changes in a board run; an unchanged name counts as changed throughout); `refs <module>.<Type>.<field>` lists a field's readers.
-  6. **Suites outside `gleam test`** are `[commands]` with an optional `checks` key: entry points by name, `"*"` for all; `gleam run -m <module>` adds that module's `main`. Solace names a suite that reaches a change and never runs it unasked. Performance tests in `gleam test` are selected like any other test.
-  7. **Review (Spec 16 §4):** the task's tests are those it changed, plus those that reach a changed symbol or read a field its change flows into; a new item lists the uses no test checks, with suites and where data leaves; the summary adds "N untested uses". The review's test run stays a full `gleam test`.
-  8. **Task packet:** entries whose string literals hold a rare task term (top idf terms, quoted phrases, runs of capitalized words) show the smallest bracketed expression around it as `  > coupon("TENOFF", FixedOff(1000))`, at most 3 and 300 bytes per entry, inside the 6,500-byte budget. A reproduction line names the highest-scoring test that reaches the top code symbols and those as trace targets. `inspect`'s example test also shows the signatures of the test helpers it uses.
-- **Rationale:** Reproducing the ticket and knowing what a fix reaches are both guardrails (D-20): the first makes the old code produce the wrong value (D-36.5), the second shows the agent and the human what else the change touches and which of it no test checks. Effects inside the process (clock, database, files) don't change whether a change could alter a test's result, so reach answers "did my change break anything?". Reach and data flow are derived facts, not guarantees (D-35.1).
-- **Check:** on an L01 pilot-large copy, the reference fix's note: "Reaches 32 uses: callers, and readers of Quote.loyalty_discount_cents, .coupon_discount_cents, .volume_discount_cents, .total_cents, TaxQuote.taxable_cents, .tax_cents, …"; `test` then runs 33 of 98 tests and passes, `test --all` 98; with a declared suite both name it; the review's summary reads "0 effects added, 0 signature changed, 0 test unfinished, 14 untested uses" with 34 task tests. Offline packet check: 34/39, unchanged. 41 unit tests and the board/view acceptance scenarios pass.
+## D-44 Reach and impact
+One engine (`reach.rs`):
+1. `test` runs the tests whose reach changed since they passed, that failed or never ran, or that reach process or network effects or externals; `test <name>` runs those that reach the names; `test --all` runs all of them.
+2. Selection uses reach; "checked by a test" keeps D-36.3's meaning.
+3. Data flow follows changes through bindings, record fields, callers, field readers (certain or possible) and helpers' field writes.
+4. A submit adds a note of at most 3 lines: uses reached, the nearest untested ones, where data leaves, suites reached.
+5. `impact [name...]` lists every use, nearest first, with its tests; `refs <module>.<Type>.<field>` lists a field's readers.
+6. Suites outside `gleam test` are `[commands]` with `checks`; Solace names a suite a change reaches but never runs it unasked.
+7. Review counts the task's tests and untested uses.
+8. Task packet entries show the string literals that match the task, and a reproduction line names the best test and trace targets.
+Reach and data flow are derived facts, not guarantees.
 
-## D-45 The project's AGENTS.md in session orientation — decided
-- **Question:** In L01 run 14 (local Qwen 27B, reasoning off) the agent fixed only half of the pricing order, then rewrote a correct existing test's expected values three times to match its own output. Aaron called it a skill issue: the model lacks the project's know-how, not tools. How do a project's humans give agents standing instructions, as a first step towards skills?
-- **Answer:**
-  1. `session start` and `session start --task` begin with the project's `AGENTS.md` (root only), headed "Project instructions (AGENTS.md, from the project's maintainers; where they name files or shell commands, use the matching Solace command)". Past 8,000 bytes it is cut at a whole line, with the `read AGENTS.md --lines n..` that shows the rest. It is outside the task packet's budget. No file, no section.
-  2. `AGENTS.md` is human-owned, in the settings tier with `solace.toml` (Spec 14): agents read it; outside a work run `write` and `remove` are refused; in a work run `write AGENTS.md` is a proposal ("Change AGENTS.md", Approve/Reject) the human decides on the board, written only if the file hasn't changed since.
-- **Rationale:** Solace agents can't open files themselves, and native AGENTS.md loading differs by runner, so Solace delivers it the same way to every runner. Instructions to agents are a guardrail (D-20) only if agents can't rewrite them.
+## D-45 AGENTS.md at session start
+`session start` (and `--task`) begins with the root's `AGENTS.md`, introduced as the maintainers' instructions and cut at a whole line past 8,000 bytes. It's protected like `solace.toml`: work runs can only propose changes to it (D-38). Why: runners load it differently, and instructions are a guardrail only if agents can't rewrite them.
 
-## D-46 Leaner replies on ripple tasks, without new commands — decided
-- **Question:** In run 15 (Solace, Codex `gpt-6-sol` medium) Solace beat files (run 16) on every task, but only by 25% on L08 (median 248k vs 330k tokens), with runs of 202k / 248k / 338k. L08 adds a record field and a function parameter and updates every caller. The outlier (run 3) made one `--replace` per call and got the shrinking broken list back in full after each; every run re-sent a 13.7k-byte session start and a 24–30k-byte `inspect` on each turn; `refs` repeated the signatures `inspect` had just printed; `--replace` refused a line repeated 4 times; a caller's draft went stale when its callee changed. What should change, without adding commands agents must discover (D-10)?
-- **Answer:**
-  1. **Broken set by difference.** The `broken` table keeps every error of each broken symbol. A submit or delete reply names the symbols it fixed, gives one line (`<symbol>, line N: <message>`) for each symbol still broken with the errors it had before, and prints new errors in full once per message, the others with that message as `same error: N more` and one line each (`at <symbol>, line N: <source line>`; Spec 3 §6). `check` stays complete. After a signature change, the not-yet-checked list names the other callers of a changed function, or only the construction sites of a changed type, on one line.
-  2. **Sites in the replies agents already read** (amends D-14). `inspect --context` on a type splits "Used by" into "Constructed by" (constructions and patterns without `..`, one line each with the source line) and "Other users" by name; a function's callers each show their call line. `refs` gives the same split and call lines. The commands of one MCP call share what was printed, so `refs` says `(above)` for a signature `inspect` or `view` printed earlier in the call.
-  3. **Edits that don't waste turns.** `submit <name> --replace --all` replaces every occurrence ("Replaced N occurrences"; amends D-13 point 2). E0105 gives the count and each occurrence's line and suggests `--all` or more context. A draft's base is the text of the symbols it replaces plus their modules' headers (or the header of the module it adds to), not the whole store (amends D-34), so a caller's draft retries after its callee changed; a draft whose own symbol changed is still E0107. "Not saved", when every error is a wrong-arity or wrong-type call to a project function the submission leaves out, adds "If you are changing `<fn>` too, submit both in one `submit`, a block each". A block equal to the stored symbol is reported unchanged and not saved; if nothing changed, the type check is skipped. `submit <name>` given several blocks gets a note that it submitted every block.
-  4. **Shorter orientation.** `session start` shows the 4-step workflow (D-42) with one example each, the signature-change and new-test examples, and one line per command (2.8k bytes, was 7.0k); `help` keeps the full reference.
-  5. **Deferred:** a per-conversation record of everything sent (to skip re-sending anything already shown). Run 15 had 0–1 rereads per run, Codex code-mode agents cut replies themselves, and runners compact conversations, so "already shown" can be false. Comparing against store state (broken table, stored text, symbol text) is robust instead. Revisit if the bench's `rereads` median rises above 2 per run.
-  6. **After run 17** (Solace, L08 ×3: median 245k vs 248k; mean 236k vs 263k; turns before the first edit 4 → 8, from orientation): the workflow says imports are added automatically (agents ran `find import …`, which doesn't search imports); `help <command>` gives the reference paragraphs that list that command, and agents' `help` (MCP) leaves out host commands, and task commands outside a board run, as `session start` does (an agent ran `help submit`, got "Unknown command", read the whole 8.7k reference, then tried the refused `task diff`); "Constructed by" ends with "Record updates and patterns with `..` need no change; N not listed" (an agent re-checked a complete list with three `find`s).
-- **Rationale:** An error shown once in full doesn't need repeating; the one-line form keeps symbol, line and message, and `check` prints everything. Naming construction and call sites where the agent already reads lets one `submit` carry a ripple change. Impact notes stay (guardrails first).
-- **Check:** offline replay of run 15's recorded Solace calls through old and new `solace mcp` on fresh L08 copies: reply bytes L08.1 57.8k → 50.1k (−13%), L08.2 58.8k → 50.8k (−14%), L08.3 88.8k → 67.5k (−24%); the same final store in all three. Unit tests `signature_change_reports_changes_once`, `replace_all_and_occurrence_lines`, `unchanged_submit_skips_check`, extended `rejected_text_survives_and_retries_atomically`, `inspect_dedups_and_fits_budget`, `agent_reference_leaves_out_host_and_task_commands`, `locals_shadow_top_level_names`.
+## D-46 Leaner replies for ripple changes
+1. Submit and delete replies report the broken set by difference: symbols fixed, one line per symbol still broken, new errors in full once per message. `check` stays complete.
+2. `inspect --context` on a type separates "Constructed by" (with source lines) from other users; callers show their call line, and `refs` does the same. Commands in one call share what's been printed (`(above)`).
+3. `submit <name> --replace --all` replaces every occurrence, and `E0105` lists the occurrences. A draft's base is only the symbols it replaces and their module headers. Unchanged blocks are reported and not saved.
+4. `session start` shows the short workflow; `help <command>` gives that command's paragraphs.
+Deferred: tracking what was already sent in a conversation.
 
-## D-47 Patches for submit — decided
-- **Question:** On L08 (runs 15–17) Solace used 4.4–6.4k output tokens and 127–173 s per run against the files arm's 3.1–3.6k and 102–111 s. Output costs about 5× uncached input, and time follows output (about 40 tokens/s). The gap is all in the turns that write code: those turns sent 10–13k characters in Solace against about 4k in files, because a submit block is a whole symbol (`seed.customers`, 1.2k characters, to add one line in 4 places; `pricing.quote`, 1.7k, to add one parameter), while `apply_patch` sends only changed lines and a little context. D-46's workflow ("every site in one `submit`, a block each") moved all three run-17 runs to whole blocks. How should agents send edits?
-- **Answer:**
-  1. **A plain `submit` takes a patch** in `apply_patch` form when `text` starts with `*** Begin Patch` (or `*** Update` / `*** Add`): `*** Update[ File|Symbol|Module]: <symbol or module>` (a file path such as `src/pilot/seed.gleam` names its module) with `@@` hunks of ` ` context, `-` removed and `+` added lines; `*** Add: <module>.<name>` (or a new module) with `+` lines. Hunks apply in order, each searched from where the last ended, then from the start, matching exactly, then ignoring trailing, then all surrounding whitespace, as `apply_patch` does; `@@ <line>` first moves to the line starting with it; a unified diff's `@@ -a,b +c,d @@` counts as a plain `@@`. A module's hunks may touch several of its symbols but not span two; code added after a symbol becomes a new symbol; changed imports go with the module's first changed symbol and are merged.
-  2. **It becomes the blocks of a plain `submit`**, one per symbol changed or added, so type-checking, the broken-set report, impact notes and drafts work as for blocks; a rejected patch's draft holds those blocks. A hunk that doesn't match, a delete, a rename or a patch that changes nothing is refused before anything runs (`E0108`, naming the target and the first unmatched line).
-  3. **The workflow** shows a patch as the way to edit code and to make ripple changes; whole blocks remain for `submit <name>`, new modules and `--new`. `--replace` stays.
-- **Rationale:** Codex models are trained on `apply_patch`, so the format needs no teaching beyond one example; reusing the block path keeps every guardrail. The agent still reads each symbol before patching it (hunks must match the current text exactly), and the type check covers the rest.
-- **Check:** unit test `patch_changes_symbols_across_modules`; offline replay of all 13 `apply_patch` calls the files arm made in run 16's L08 runs, sent unchanged as Solace submits on fresh L08 copies: every one applied, and `test --all` passed after each run's patches (100, 101, 100 tests). Run 18 (Solace, L08 ×3): every run edited by patch; median output 3.1k tokens (run 17: 6.2k; files, run 16: 3.6k), 87 s (167 s; 102 s), 146k tokens (245k; 330k).
+## D-47 Patches for submit
+A plain `submit` takes an `apply_patch`-style patch (`*** Update: <symbol or module>` with `@@` hunks, `*** Add: <module>.<name>`), matched the way `apply_patch` matches and turned into per-symbol blocks, so every check works as before. Unmatched hunks, deletes, renames and patches that change nothing are refused (`E0108`). Why: whole-symbol blocks cost output, and Codex knows `apply_patch`.
 
-## D-48 Tests at the reported level; impact lists certain uses first — decided
-- **Question:** In L01 every Solace run (runs 15, 19, 20; sol and the local swift model) added exactly one test, mostly in `pricing_test`; every files run (16, 20) added a checkout-level test that replays the ticket, and sol's files runs also tested the coupon cap the fix shifts (`promotions.discount` never takes more than its base, now smaller). The files agents read whole test modules and see the checkout fixtures; the Solace workflow says not to, its example adds one test, and step 4 ends at a passing `test`. The impact reply that should point at what to test listed 34 uses, most of them `reads LineQuote.sku (possible)`, with `checkout.quote` and its tests 11th. How should Solace steer agents to the tests that matter, without TDD's extra turns?
-- **Answer:**
-  1. **The workflow** asks for a test at the level the task reports the problem (a checkout ticket gets a checkout test) and one for each behaviour the change shifts (a cap, a boundary), replacing the "Writing a new test" line; other wording is shortened to stay under 3,000 bytes.
-  2. **`impact` and the submit note list certain uses first**, nearest first, untested first within a step; possible uses (readers of a field another type also declares) are reduced to a count and the fields they read, with `refs <Type>.<field>` to list them. The note's "No test of their own" names certain uses only.
-  3. **Later, not decided:** a branch and boundary report on changed lines and mutation testing (PROPOSAL.md §8.3, §8.5, Phase 2), and running a fix's new tests against the old code (D-36.5, open in WORK.md), which would have caught that `loyalty_and_coupon_test` passes under both discount orders. A bench score for the agent's own tests (mutants of the reference solution caught) is needed to judge any of these.
-- **Rationale:** a larger submit costs output, not turns; noise in impact hid the one use whose tests reach the change.
-- **Check:** unit tests (`flow_follows_lets_fields_and_helpers` checks the count line and ordering; the workflow test checks the new line); `impact pricing.quote` on L01 after run 19.1's patch: 7 certain uses, `checkout.quote` second, then "And 27 possible uses…", 1.4k characters (4.2k before).
+## D-48 Tests at the reported level; certain uses first
+The workflow asks for a test at the level the task reports the problem (a checkout ticket gets a checkout test) and one for each behavior the change shifts. `impact` and the submit note list certain uses first, untested first; possible uses become a count with the `refs` command that lists them.
 
-## D-49 Solace ships the Codex setup the bench measured — decided
-- **Question:** The bench gave Codex agents in the Solace arm two things Solace itself did not: a tool-output limit of 30k tokens (Codex's default cuts at about 10k, which an `exec` script batching several solace replies overshoots) and a hint on calling the tool from `exec` (`tools.mcp__solace__solace`, code in `text`, batch reads in one script). Task-board Codex runs had neither, so the bench measured a setup that does not ship.
-- **Answer:** `agent-config codex` writes both into `config.toml`: `tool_output_token_limit = 30000` and the hint, unchanged, as `developer_instructions`. The bench drops its copies (`CODEX_SOLACE_HINT`, the solace arm's `-c tool_output_token_limit`) and the unused `MCP_BUDGET`; the files arm keeps its limit flag.
-- **Rationale:** the bench should measure what ships; one config file serves both launchers.
-- **Check:** golden test `a10_agent_config_golden` (updated); `codex mcp list` (codex-cli 0.157.1) loads the generated config; 45 unit tests and acceptance pass. Not checked: a bench run (the hint now arrives as developer instructions instead of in the prompt).
+## D-49 Solace ships the bench's Codex setup
+`agent-config codex` writes `tool_output_token_limit = 30000` and the hint on calling Solace from `exec` (as `developer_instructions`). Why: the bench should measure what ships.
 
-## D-50 Phase 1a checkpoint met — decided
-- **Question:** Does the store and protocol over Gleam meet the Phase 1a checkpoint (a measurable win over plain files on orientation cost and edit reliability, PROPOSAL.md §14.1)?
-- **Answer:** Yes; judged as meeting expectations on 2026-10-03, on the benchmark runs to date (runs 15–21 in WORK.md). Phase 1b (the Solace language core) is next. D-3 (Rust) can be reopened before it starts, and D-6's narrowed state machines are to be revisited during it.
+## D-50 Phase 1a checkpoint met
+Met on 2026-10-03 (benchmark runs 15–21). Phase 1b, the Solace language core, is next; D-3 may be reopened first, and D-6's state machines are revisited during it.
 
-## D-51 The final column is `complete`, not `done` — decided
-- **Question:** An agent's `task done` moves a task to needs review, not to the `done` column, so the two meanings of "done" can be confused.
-- **Answer:** The default workflow's `done` column is renamed `complete`, matching the `complete` action that moves a task there. Task files saved in `done` load as `complete` unless the project's workflow still declares a `done` column.
+## D-51 The final column is `complete`
+The default workflow's `done` column is `complete`, matching its action; tasks saved in `done` load as `complete` unless the workflow still declares `done`. Why: not to be confused with `task done`.
 
-## D-52 File categories are named from Solace's side; `resources` is removed — decided
-- **Question:** Tiers 1–4 plus "settings" and "internal" are numbers and mixed words that say nothing about what Solace does with a file. Tier 2 (`gleam.toml`) differs from tier 3 only by a built-in validator and a refused `remove`. After D-28 makes unlisted text files tier 3, `resources` changes nothing (D-28's open part).
-- **Answer:** Five categories, named for what Solace does with the file, not what an agent may do:
-  1. **graph:** source the store holds as symbols (was tier 1).
-  2. **watched:** every other text file within the size limit, including `gleam.toml` (was tiers 2 and 3). `gleam.toml` keeps its built-in validator and can't be removed.
-  3. **protected:** `solace.toml` and `AGENTS.md` (was settings).
-  4. **unwatched:** `.git/`, build and dependency output, anything `.gitignore` ignores, paths listed in `unwatched`, and binary or oversized files (was tier 4). Agents may still create, read, write and remove them; Solace doesn't search them (D-26 unchanged).
-  5. **internal:** `.solace/`, Solace's own files; no agent access.
-  
-  In `solace.toml`, `resources` is removed, `ignore` is renamed `unwatched`, and `resource_limit` is renamed `watch_limit`. The old keys are an invalid `solace.toml` (`E6020`) whose message says what to do.
-- **Rationale:** the names say what Solace does with a file; tiers 2 and 3 had the same permissions; with D-28, `resources` no longer decides anything.
+## D-52 File categories
+Named for what Solace does with a file:
+- **graph:** source held as symbols.
+- **watched:** other text files within the size limit, including `gleam.toml` (which keeps its validator and can't be removed).
+- **protected:** `solace.toml` and `AGENTS.md`.
+- **unwatched:** `.git/`, build and dependency output, `.gitignore`d files, paths listed in `unwatched`, and binary or oversized files; writable, not searched.
+- **internal:** `.solace/`; no agent access.
 
-## D-53 Contract view: no title block, plain revision border, keyboard, source diff — decided
-- **Question:** Aaron's review of the contract view: the title block in the bottom right had no clear purpose and hid nodes; a pan could select or open nodes; opening a node recentred the sheet; there were no keys for moving around; the revision cloud looked odd; Show source gave text, not what changed.
-- **Answer:** The title block is removed; the project name and the task under review are in the header, and the revision key (REV A added, B changed, C removed) is in the legend. A drag pans and never selects or opens. Opening a node moves the sheet only to bring an out-of-view or covered node into view. Keys: arrows/WASD move between nodes, Shift+arrows/WASD pan, Ctrl+Up/Down zoom, Space expands, C collapses, Enter opens. A changed node has a plain border in the revision colour. With a task, Show source gives the symbol's line diff from before the task.
-- **Also (same review, later):** the selected node gets a thick border; a node shows `+N` for connections not yet drawn, or `−` when expanded; the legend says arrows point from a function to what it calls, uses or tests, and each connector names that on hover; the side panel is resizable from its left edge, keeping its width per browser. A node with no connections can't be expanded and shows no tab; the tab hangs below the box so the selected border keeps its shape, and the keyboard focus ring surrounds the box only. Expand all (Shift+Space) draws every node and connection; collapse all (Shift+C) returns to the overview; both are also toolbar buttons. Entry is green and logic blue, so logic no longer looks like file.
-- **Not done:** Ctrl+W and Ctrl+S for zoom. Browsers don't let a page intercept Ctrl+W (it closes the tab), so neither is mapped.
+In `solace.toml`, `resources` is gone, `ignore` is `unwatched` and `resource_limit` is `watch_limit`; the old keys are invalid (`E6020`).
 
-## D-54 Contract view side panel has tabs; files open read-only — decided
-- **Question:** The header's Files button and the Overview button sat apart from the side panel, and the files list repeated what a category means on every file.
-- **Answer:** The side panel has tabs: Review (with a task), Details (once a node is opened) and Files. Close folds the panel to its tab strip in the header's corner. The Files tab groups files by category, with one line per group saying what that category means, and marks binary or oversized files and collapsed directories with a count. Clicking a file shows its text, read-only and with line numbers, in place of the drawing, until "Back to the drawing" is clicked. Overview is not a tab: it is the zoom tools' button with a house icon ("Back to the default view").
+## D-53 Contract view drawing
+No title block: the project and task are in the header, the revision key in the legend. Dragging pans and never selects or opens; opening a node moves the sheet only to bring it into view. Keys: arrows or WASD move, with Shift they pan, Ctrl+Up/Down zooms, Space expands, C collapses, Enter opens, and Shift+Space or Shift+C expand or collapse everything. A changed node has a plain border in its revision color and the selected node a thick one; `+N` and `−` tabs show hidden or expanded connections (none on a node without any). Connectors name their relation on hover. The side panel is resizable. With a task, Show source gives the line diff.
 
-## D-55 Contract view opens on what the project does — decided
-- **Question:** Aaron: the contract view isn't approachable. It opens on a wall of identical ENTRY boxes in no useful order, the boxes show code (`pub fn …` signatures), the overview is empty for a project with no outside effects (pilot-large), there are no groupings, the details panel is a flat list of `logic · name` buttons, and the same prefix repeats on everything.
-- **Answer:** (Aaron agreed to items 1–6 and 7; a plainer-words and smaller-legend idea was declined.)
-  1. **Outline first.** Without a task, the view opens on an outline of what the project does, grouped by area (a source module; its doc comment as the area's summary). Each public function is one line: name, summary, what it takes and gives in words, what it reads or changes, and "checked by N tests" or "not checked". A line opens the drawing at that function. With a task, the view still opens on the drawing and review.
-  2. **Requests are capabilities.** An entry whose parameter is a project type with at least three constructors that carry data (pilot-large: `api.handle`'s `Request`; a plain enumeration such as `Category` doesn't count) lists them as the requests it handles, named in words ("Create order: order id"). Such entries, and `main`, come first as the main ways in; everything else follows by area, entry points first.
-  3. **State counts as an effect.** A project type that functions in at least three modules both take and return is the program's state (pilot-large: `Store`). A function that takes and returns it *changes* it; one that only takes it *reads* it. Both are derived effects, drawn and reviewed like the others.
-  4. **No code on the boxes.** A box shows its name, its summary (nothing when there is none) and what it takes and gives in words; the signature moves to the details panel. When functions lack descriptions, the outline says how many and offers one button that puts a task on the board for an agent to write them.
-  5. **Details lead with examples.** The details panel shows the summary, the requests, examples taken from the tests that check the function (data in → data out), what it reads or changes, then connections grouped as Calls, Called by, Effects and Tested by, then the signature and source.
-  6. **Areas fold.** When a project has more than 12 entry points, the drawing's overview shows one box per area instead, in a grid, each saying how many ways in it has and what it reads or changes (no fan of connectors). Expanding an area draws its entry points in a frame beside it.
-  7. **No repeated prefixes.** A label every item in a list or on the sheet would share is shown once as a heading, not on each item: no kind on each box, no `kind ·` on each connection or search result.
-- **Rationale:** a human starts from what the system does and finds the drawing through it, not the other way round. Requests, areas and module docs are already in the code; state threaded through many modules is what a pure program does to the world. Missing descriptions are agents' work (D-20), so the view asks for them instead of showing "No summary recorded".
+## D-54 Contract view side panel
+Tabs: Review (with a task), Details and Files; Close folds them into the header's corner. Files are grouped by category, with one line explaining each; a file opens read-only, with line numbers, in place of the drawing. Overview is the zoom tools' home button.
 
-## D-56 Board editors, approval mark and notices — decided
-- **Question:** Aaron: the new task form's Cancel duplicates *Close new task*; descriptions should get the note editor's markdown support; the Title label keeps the boxes from aligning; approval should show on the card; the review summary belongs with the changes; the board should tell the human when a run ends or a question is asked.
-- **Answer:** (Aaron's request, 2026-10-04.)
-  1. The new task form has no Cancel; *Close new task* closes it and keeps the draft.
-  2. The new task description and the Details tab's edit form use the same markdown editor as notes (Write/Preview, formatting tools; images once the task exists). The edit form keeps Cancel.
-  3. Title is a placeholder, not a label, so it lines up with the editor.
-  4. A stamped card shows ✓ (the stamp names on hover); the Details tab no longer lists stamps.
-  5. The review summary and the contract view link are on the Changes tab, not Details.
-  6. A live update that ends a run or asks a new question shows a dismissible notice in the board's corner.
-  8. Notices come only from changes after the page has caught up. `/events` still replays everything to a new connection, then sends one `ready` event (Spec 15); the board applies the replay in one step, so only its end result shows, and raises no notices for it. A notice has a bold heading naming what happened and the task ("Reviewed Fix checkout", "Question on Fix checkout"), the detail under it, and a large close icon at its top right.
-  7. Buttons, titles, labels and other interface text can't be selected; only what a human may copy (editors, code and logs, note and description text) can. Nothing is draggable except text inside an editor.
-- **Rationale:** one editor everywhere a human writes markdown; status a human scans for (approved, run ended, question waiting) is visible without opening a task.
+## D-55 Contract view opens on what the project does
+1. Without a task, it opens on an outline by area (a module, its doc comment as the summary). Each public function shows its summary, what it takes and gives in words, what it reads or changes, and its test coverage; a line opens the drawing at that function.
+2. An entry taking a project type with at least three data-carrying constructors lists them as the requests it handles; such entries and `main` come first.
+3. A project type that functions in at least three modules both take and return is state: a function that takes and returns it changes it, one that only takes it reads it. Both are derived effects.
+4. Boxes show no code: name, summary, and what it takes and gives in words; the signature is in the details. Missing descriptions get one button that makes a task to write them.
+5. Details lead with examples from the tests, then effects, connections (Calls, Called by, Effects, Tested by), signature and source.
+6. With more than 12 entry points, the overview shows one box per area.
+7. A label every item would share is shown once, as a heading.
 
-## D-57 One Solace root, several projects on one board; `import` becomes `create` — decided
-- **Question:** Aaron: a mixed repository (this one has Gleam projects in `solace-cli/board` and `bench/`, beside code Solace doesn't manage) would need a Solace setup and a board per project. How should several projects share one board, and how simple can setting that up be? On review: Solace has a single root, and every project it manages is at that root or below it; humans and agents read from several projects at once; a task may later cut across projects.
-- **Answer:** (Aaron's choices, 2026-10-04.)
-  1. Separate setups, one board, one root. Each project keeps its own store, `solace.toml`, `AGENTS.md`, lockdown and tasks. The **root** is one folder: its projects are the root itself (`.`, when it is a set-up Gleam project) and folders below it, listed in the root's `solace.toml` (`projects = [...]`). A root without `gleam.toml` holds only that key; a root project keeps it beside its settings. A project with no root above it is its own root, with itself as its only project.
-  2. Nothing leaves the root: listed folders are relative, without `.` or `..`, and reached without symlinks. A root inside another root, or inside a project, is refused, and so is listing a project that lists projects of its own. `serve` and `create` use the root that holds their folder, wherever below it they run.
-  3. Setup both ways. `solace create` in a folder without `gleam.toml` finds the Gleam projects in its root (skipping build output, dependencies, ignored folders and symlinks) and asks about each one. In a project below a root it lists that project there. The board's Projects panel adds, removes and creates projects; creating runs `gleam new` (with `--skip-git` inside a repository) and sets the project up.
-  4. `solace import` is renamed `solace create`, which fits its wider job.
-  5. Lanes: one collapsible lane per project. When every lane has the same workflow there is one header row; otherwise each lane labels its own columns. Lanes and URLs are keyed by folder, not package name (`bench/pilot` and `bench/pilot-large` are both `pilot`). The root's own project answers at `/`, the others under `/p/<folder, percent-encoded>`.
-  6. One `/events` stream merges every project's events, each naming its `project`, with a JSON event id holding each project's position (a stream per project would use up the browser's six connections). A root with only its own project keeps the plain stream.
-  7. Reads take no project's lock, so humans and agents read any number of projects at once. An agent reads another project in its root with `--project <folder>` on `view`, `inspect`, `refs`, `find`, `files` and `read`; anything else with `--project` is refused (`E6007`). Session start names the other projects. A task changes only its own project.
-  8. A folder below a project's root holding its own `.solace/store.db` is internal to that project (Spec 14 §1), so an outer project's agents can't edit a nested project's files; they read it with `--project`. Agents can't change `projects` through a settings proposal.
-  9. A server holds each project it serves (`.solace/serve.lock`); a second server for the same project is refused, since starting one ends the first one's runs as a restart. A project can't be removed while one of its agents works, and the root's own project can't be removed; removing keeps a project's setup.
-  10. Later, not built: a task may cut across several projects. It will take each project's lock and work-run slot as it changes that project, in folder order so two such tasks can't deadlock, with its changes and undo spanning those projects. `--project` is the naming such a task's writes will use.
-- **Rationale:** separate setups leave the agent guardrails untouched: an agent changes exactly one project, and projects run agents in parallel. A single root keeps every project the board manages in one known place, so nothing it serves or an agent reads lies outside it. Everything shared (the list, routing, the merged stream, cross-project reads) is a thin layer over the per-project API and store.
-- **Check:** `tests/workspace_acceptance.py` (Spec 15 W1–W3, Spec 3 A8), `workspace::tests`, `workspace_lanes_test`, `root_project_lane_test`; headless Brave on a scratch copy of this repository's projects.
+## D-56 Board editors, approval mark, notices
+The new task form has no Cancel (Close keeps the draft), and Title is a placeholder. Descriptions and notes share one markdown editor. An approved card shows ✓; Details no longer lists stamps. The review summary and contract view link are on the Changes tab. A run ending or a new question raises a dismissible notice naming the event and the task, only for news: `/events` replays, then sends `ready`, and the replay raises none. Only text a human may copy can be selected, and only editor text can be dragged.
 
-## D-58 Changes made outside Solace become reviewed work — decided
-- **Question:** Aaron, on converting this repository: Solace's store holds the code, and every check, test or revert rewrites the source files from it, so edits made outside Solace (by hand, by another tool, by `git pull` or a branch switch) were silently undone. Could a bug then leave code Solace manages that can't be changed? Changes are meant to happen inside tasks; what should happen when they don't?
-- **Answer:** (Aaron's choices, 2026-10-04.)
-  1. Solace never overwrites a source file it didn't write last. It remembers what it last wrote to each Gleam file under `src/` and `test/` (`.solace/written`); a file that differs from that was changed outside Solace, and Solace reads it into the store as a new revision instead of writing over it. A file that changes while a command runs is left as it is and read at the next command.
-  2. Solace notices at the start of every command and, while the board runs, by polling each project about once a second. It compares sizes and modified times and reads only files whose size or time changed (about 2 µs a file).
-  3. Changes noticed while an agent's work run is going belong to that task: they join its changes, its review and its undo, and the agent's reply and the task's notes name them. Code changed by a process a command runs (`format`, a declared command) is that command's change, read in right after it (before, `format`'s output was undone at the next check).
-  4. Changes noticed with no work run going go to a task titled **Unexpected Changes**, whose card carries a hazard icon. It waits in the column a finished run goes to (`needs_review` by default), with the diff and the compile result. Completing it keeps the changes; cancelling it restores the code Solace had. Later outside changes join the open one. While it is open no other task starts or continues a work run (`E7012`); reviews and investigations still run, and the task itself can be handed to an agent to fix.
-  5. Code that doesn't compile is still read in and shown with its errors; Solace never reverts on its own. A file it can't read into symbols (one defining a name twice) is left untouched, named on the Unexpected Changes task, and read again once fixed.
-  6. Only graph files (Gleam under `src/` and `test/`) raise unexpected changes, since only they are rewritten from the store. New data files, documents and assets never do, so files moved in to be ignored later raise nothing, and no Ignore option is needed. A task's revert of a watched file it changed shows that file's current text in the review first.
-  7. Pulls, rebases and branch switches stay quiet when the code came from Solace. `.solace/approved` holds a hash of each symbol and module header as last approved (when a task completes, and at `create`); it is committed with the project, and `.solace/.gitignore` keeps the rest of `.solace/` out of git. A changed symbol whose new text matches an approved hash, or a removed one no longer listed, is read in silently, unless an open task changed it. Anything else is unexpected.
-  8. A fuller branch workflow inside Solace (a task per branch, merges from the board) is a later question; this decision doesn't constrain it.
-- **Rationale:** the files on disk stay authoritative alongside the store, so git, editors and other tools keep working, and a Solace bug never traps code: fix the file by hand and Solace takes the fix. The intended workflow still holds, because anything not done through a task waits for a human's review before agents build on it.
-- **Check:** `outside::tests`, `tests/board_acceptance.py` unexpected-changes scenario (Spec 15 U1–U4).
+## D-57 One root, several projects, one board
+1. Each project keeps its own store, `solace.toml`, `AGENTS.md`, lockdown and tasks. A root is one folder whose `solace.toml` lists its projects (`projects = [...]`, folders below it). A project with no root above it is its own root.
+2. Nothing leaves the root: no `.` or `..`, no symlinks, no root inside another root. `serve` and `create` use the root that holds their folder.
+3. `solace create` (once `import`) finds the Gleam projects in a root and offers each one; the board's Projects panel adds, removes and creates projects.
+4. One collapsible lane per project, keyed by folder. The root's project answers at `/`, the others at `/p/<folder>`.
+5. One `/events` stream merges every project's events, each naming its project.
+6. Reads take no lock; agents read other projects with `--project`.
+7. A folder below a project that has its own store is internal to that project.
+8. One server per project (`.solace/serve.lock`). A project can't be removed while its agent works, and the root's own project can't be removed.
+Why: separate setups keep every guardrail per project, and what's shared is a thin layer.
 
-## D-59 Migrating an existing project without touching it — decided
-- **Question:** Aaron: the top priority for a user converting an existing project to Solace is that the original project is not mangled, and that's easiest to understand if the migration doesn't touch their files. D-58 instead let Solace rewrite the original's source from the store, and only guarded against losing edits. How should migration work?
-- **Aaron's requirements (2026-10-04):** the migration doesn't touch the original's files; original files and Solace's are kept clearly apart until the migration is complete, so agents and humans aren't confused; Solace builds the whole project, every subfolder, in a separate folder, `solace-migration/`, beside the original, so one project or several migrate at once; one migration at a time; the project keeps its path (changing it may break builds), so the copy takes the original's path by a swap at the end, not the start.
-- **Aaron's answers (2026-10-04):** regenerated files need not match byte for byte; testing and review decide, through Astra's checks (coverage, reconstruction with every difference explained, behaviour against a baseline including smoke checks, preservation against an inventory, recovery without Solace), each marked verified, failed or not checked and invalidated by later changes. The human decides when to accept; the files move only after the build, test and check suite succeeds and the human approves. `solace create` only creates brand-new projects and subprojects: it requires a project name that doesn't exist and proceeds only after confirmation.
-- **Design (Claude, drawing on Astra's review):** Spec 17: inventory, full copy, baseline in a throwaway copy, Solace set up in the copy with source regenerated from the store, the migration report, adoption that refuses if the original changed, swaps the folders, rechecks at the real path and swaps back on failure; abandon and undo. The bench harness and acceptance tests move from in-place `create` to `migrate` and `--adopt` on their throwaway copies.
-- **Consequence:** much of D-58's uncommitted code is redone. Detecting edits made outside Solace and the Unexpected Changes task still apply after adoption; the guards for rewriting an unconverted project's files in place are replaced.
-- **Review and Aaron's follow-up (2026-10-04):** Astra's review (`feedback/migration-review.md`) found migration unsafe for a real project, most of all symlinks that let regeneration delete original files. Aaron: fix every finding, and deal with commands that could change the original (finding 2). Failures the original already has don't block adoption; the migration guide says plainly that errors in the original are carried into the migration too. Claude's choices, open to review: commands run sandboxed with the original read-only (bubblewrap) where available, and the path check comes before any command; Reconstruction is judged once, on the first regeneration; the original's build output stays out of Preservation, and the report says so. Plan: `handoff.md`. All fifteen fixes built the same day (Spec 17 updated, M9–M13 added).
-- **Git activity in the original (Aaron, 2026-10-04):** "i'm not gonna worry about the git index changing as long as it doesn't ultimately stop the migration from succeeding." A git command that only rewrites the index (refreshing cached file times, as `git status` does) no longer counts as a change to the original. The index is compared by its staged entries, so staging something still blocks adoption. Commits, fetches and other changes to `.git` still count.
-- **Migration wording (Aaron, 2026-10-04):** the screens assumed knowledge of how Solace works inside. Buttons didn't say what they do, the "verified" and "not checked" stamps meant nothing to him, hints like "judged once, after the first regeneration" made no sense, and "These checks are evidence, not proof of every behaviour" had to go. Also: use American English. Every migration screen, report line and shell message was rewritten for a user with no context: buttons renamed (Make the copy, Continue, Run the checks again, Switch to the copy, Delete the copy, Switch back), each beside a sentence saying what it does to the user's folders; checks with plain titles and a result sentence; marks ✓ / ✗ / ! with a legend. Spec 17 §4 records the names.
+## D-58 Changes made outside Solace become reviewed work
+1. Solace never overwrites a source file it didn't write last (`.solace/written`); a changed file is read into the store as a new revision. Solace checks at each command and, while the board runs, about once a second.
+2. Changes made during a work run belong to that task; changes a command makes (`format`, declared commands) belong to that command.
+3. Other changes go to an **Unexpected Changes** task in needs review, with the diff and compile result. Completing it keeps them, cancelling restores Solace's code, and while it's open no work run starts or continues (`E7012`).
+4. Code that doesn't compile is still read in; Solace never reverts on its own.
+5. Only graph files raise this.
+6. Pulls and branch switches stay quiet when the code matches `.solace/approved`, the hashes as last approved, committed with the project.
+Why: files on disk stay authoritative, so other tools keep working and a Solace bug never traps code, while outside work still waits for review.
+
+## D-59 Migrating a project without touching it
+Migration never touches the original's files. Solace copies the whole folder to `../solace-migration/`, sets Solace up in the copy, regenerates the source from the store, and reports on Coverage, Reconstruction (every difference explained; byte-for-byte isn't required), Behavior (build, tests and smoke checks against a baseline), Preservation (against an inventory) and Recovery (works without Solace). Each check is verified, failed or not checked, and later changes invalidate it. One migration runs at a time. Adoption needs the checks to pass and the human's approval, and is refused if the original changed (index-only git rewrites don't count; staging does). It swaps the folders so the project keeps its path, rechecks there, and swaps back on failure; abandon and undo are available. Commands run sandboxed with the original read-only (bubblewrap) where available, after the path check; symlinks into the original are pointed into the copy. Errors the original already has don't block adoption, and the guide says they carry over. `solace create` only makes new projects, after confirmation. Migration text is written for a user with no context: buttons say what they do (Make the copy, Continue, Run the checks again, Switch to the copy, Delete the copy, Switch back).
+
+## D-60 The root is a project of plain files
+A root with a store is a project, with or without `gleam.toml`. Without one it has no symbols, but has its own settings, `AGENTS.md`, lockdown, lane and tasks, and Gleam commands give `E6013`. Every root is set up this way by default (on `serve`, or when a project is listed); an unmanaged Gleam root waits for migration. The root and its subprojects read each other with `--project`.
+
+## D-61 Tasks across projects; one workflow per board
+1. A task's scope is the projects it may change, chosen at creation (by default the lane it starts from), at least one. Its card shows in each of their lanes, in one column.
+2. The human edits the scope while no agent works; a project the task already changed, and the last project, can't be removed.
+3. One workflow per board, from the root's `[board]`.
+4. A task is stored in its home project, where it was created; removing the home moves it to the first remaining project.
+5. A work run claims every project in its scope when it starts (`E7005` if another task's work run holds one, `E7012` with Unexpected Changes open).
+6. The agent changes another project in its scope with `--project <folder>` on any command, settings proposals included (named by their path from the root). Anything outside the scope is refused (`E6007`), and the agent asks the human.
+7. Changes are recorded in each project's store under the task; review, diff, undo and completion span the whole scope.
+
+## D-62 Shell project and Lustre app contract
+A shell project hosts the board, migration screen and contract view as Lustre components: `/` is the board, `/migrate` migration, and `/view` and `/p/<dir>/view` the contract view; `/migration` stays the JSON API. Each app exposes `register() -> Result(Nil, lustre.Error)`, declares its tag and the attributes it reads (`base` for the project prefix), and owns its CSS.
+
+## Migration component verification commands
+The migration component's test commands (two Bun test files and an optional browser fixture) are declared in `solace-cli/migration/solace.toml`, not at the root.
+
+## D-63 A local model's context window comes from its endpoint
+For a Claude run on a model with an `endpoint`, Solace reads `meta.n_ctx` from the endpoint's `GET /v1/models` and passes it as `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so Claude Code compacts before the server refuses the prompt. There's no config field. Only plain-`http` servers that report `meta.n_ctx` (llama.cpp, Strata). Why: the server knows its window, and a copy in config would drift.
+
+## D-64 `grep` searches the project's files
+`find` stays the search of source symbols. `grep <text>` searches watched files and the protected settings, case-insensitively, in every project (plain-files ones included) and through `--project`; unwatched files stay out (D-52). Why: agents couldn't search documents such as this file; the watched set is small, so searching it doesn't cost Solace much time.

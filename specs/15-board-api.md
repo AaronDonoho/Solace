@@ -22,13 +22,14 @@ The workflow (columns, and the actions allowed in each) comes from configuration
 | `notes` | `{author: human\|agent\|solace, run?, time, text}`, oldest first |
 | `questions` | Raised by agents: `{id, text, options[], answer?, settings?}`. An answer is one option or free text. `settings: {base, proposed}` marks a proposed `solace.toml` change |
 | `runs` | Agent runs: `{id, kind: investigate\|work\|review, model, effort?, state: running\|waiting\|ended, started, ended?, outcome?, log}`. `log` is where the agent's own session log is, for a later view of the run (§6) |
-| `changes` | What the task's work runs changed (§5) |
+| `changes` | What the task's work runs changed (§5), each `{entity, name, run, project}`; `project` is the folder the change was made in |
+| `scope` | The projects the task may change, as folders (D-61). At least one; a task saved before D-61 has none and covers its own project |
 
 Tasks are stored as one JSON file per task in `.solace/board/`, inside the project. Agents have no access to it (Spec 14 §1 rule 4). Boards read and change tasks only through the API (§4), never through the files.
 
 ## 2. Workflow configuration
 
-The `[board]` section of `solace.toml` (humans only, Spec 14 §2) defines the workflow from a fixed set of building blocks:
+The `[board]` section of `solace.toml` (humans only, Spec 14 §2) defines the workflow from a fixed set of building blocks. Every project on a board shares one workflow, the root's (D-61): a project below a root ignores a `[board]` of its own.
 
 - **Columns**, each with an `id`, a `label`, the `actions` allowed there, whether it is `final`, and optionally a gate: a `next` column and the stamps it `requires` before a task may move on to `next`. Moves to other columns, such as back to work or to `cancelled`, are not gated. They do remove the stamps the gate requires: a task moved anywhere but `next` after approval loses its approval.
 - **Actions**, each a combination of these steps, applied in this order:
@@ -102,7 +103,7 @@ cancel     = { revert = true, to = "cancelled" }
 
 Two rules hold for every workflow:
 - A `work` or `new_work` step is refused while any question is unanswered, unless the request has a `text` (`E7002`). The answers, or the `text`, go to the agent.
-- A second run is refused while the task has one going (`E7003`). A work run is refused while another task in the project has a work run going (`E7005`).
+- A second run is refused while the task has one going (`E7003`). A work run is refused while another task has a work run going in any project of its scope (`E7005`), or an `Unexpected Changes` task there is open (`E7012`). The run holds all of them until it ends (D-61).
 
 ## 4. HTTP
 
@@ -114,9 +115,10 @@ Two rules hold for every workflow:
 | `GET /tasks` | All tasks, without `notes` and `changes`. `runs` are included so a board can show which tasks have an agent working |
 | `GET /tasks/{id}` | One task, in full |
 | `GET /tasks/{id}/runs/{rid}` | The run, plus `transcript`: the agent's log read into entries `{kind, text?, title?, input?, output?, status?}`. `kind` is `message`, `thinking`, `tool` (with `status` `running`, `ok` or `failed`), `usage`, `error` or `output` (lines that aren't agent events). A board fetches it again while the run is going (§6) |
-| `POST /tasks` `{title, body, links?}` | Creates a task at the end of the first column |
+| `POST /tasks` `{title, body, links?, scope?}` | Creates a task at the end of the first column. `scope` lists the projects it may change (default: this one) and must include this project, where it is stored (`E7001`) |
 | `PATCH /tasks/{id}` `{title?, body?, links?, rank?}` | Edits a task. Refused while a run is going (`E7003`) or in a final column (`E7004`) |
 | `POST /tasks/{id}/actions` `{action, model?, effort?, text?}` | §2. Returns 200 with the task, or 409 with `E7001` (not allowed here; `allowed` lists what is) or `E7002`–`E7008` (`E7007`, `E7008`: a revert blocked by a later task) |
+| `POST /tasks/{id}/scope` `{scope}` | Sets the projects the task may change (D-61). Refused while its agent is working, not paused or waiting on a question (`E7003`); in a final column (`E7004`); for a project the task has changed, or for the task's own project while a run is open (`E7013`). A run that is paused or waiting holds a project added now (`E7005`, `E7012`). When the task's own project leaves the scope, the task moves to the first project left, which sends `{removed: id}` from the old one |
 | `POST /tasks/{id}/notes` `{text}` | Adds a human note |
 | `POST /tasks/{id}/files` (the image's bytes as the body) | Stores an image (PNG, JPEG, GIF or WebP by content; at most 5 MB) and returns `{name, url}`. A note uses it as `![alt](url)` (D-37) |
 | `GET /tasks/{id}/files/{name}` | The stored image |
@@ -131,7 +133,7 @@ A `text` sent with an action is added as a human note before the action runs.
 
 ### One root, several projects (D-57)
 
-A **Solace root** is one folder; its projects are the root itself (`.`, when it has `gleam.toml`) and folders below it. The root's `solace.toml` lists the folders: `projects = ["bench/pilot", "web"]`, each relative, without `.` or `..`, reached without symlinks, and not itself listing projects. A root without `gleam.toml` holds only that key; a root project's `solace.toml` also holds its own settings. A project with no root above it is its own root, with itself as its only project, which is every project before D-57. Each project keeps its own store, settings, lockdown, tasks and runs.
+A **Solace root** is one folder; its projects are the root itself (`.`, when it has a store) and folders below it. Every root is a project (D-60): a root without `gleam.toml` is set up as a project of plain files when `serve` starts there or a project is listed in it. The root's `solace.toml` lists the folders: `projects = ["bench/pilot", "web"]`, each relative, without `.` or `..`, reached without symlinks, and not itself listing projects. A root with no store holds only that key; a root project's `solace.toml` also holds its own settings. A project with no root above it is its own root, with itself as its only project, which is every project before D-57. Each project keeps its own store, settings, lockdown, tasks and runs.
 
 There is one root: `solace serve` and `solace create` use the root that holds their folder, so they act the same anywhere below it. That is the one folder above that lists projects (or holds only a `solace.toml`), else the outermost project. A root inside another root, or inside a project, is refused (`E6020`). With no root, `serve` makes its folder an empty root, and `create` sets up the project there, or, in a folder without `gleam.toml`, offers each Gleam project below (skipping build output, dependencies, ignored folders and symlinks) and lists the ones confirmed. `create` in a project below a root lists it in that root. A server holds each project it serves (`.solace/serve.lock`); a second server for the same project is refused.
 
@@ -139,16 +141,16 @@ The root's own project answers at `/` as above; every other project's API is und
 
 | Request | Effect |
 | --- | --- |
-| `GET /projects` | `{workspace, projects: [{dir, label, name, base}], found: [{dir, name, imported, member}]}`. `workspace` is true when the root lists projects or has no `gleam.toml`, so a board shows lanes. `label` is the folder (the root's own folder name for `.`), `name` comes from `gleam.toml`, and `base` is the API prefix (`""` for `.`). `found` lists the Gleam projects in the root |
+| `GET /projects` | `{workspace, projects: [{dir, label, name, target, base}], found: [{dir, name, imported, member}]}`. `workspace` is true when the root lists projects or has no `gleam.toml`, so a board shows lanes. `label` is the folder (the root's own folder name for `.`), `name` and `target` come from `gleam.toml` (`target` is `erlang` when unset, `""` with no `gleam.toml`), and `base` is the API prefix (`""` for `.`). `found` lists the Gleam projects in the root |
 | `POST /projects` `{dir}` | Lists the project at `dir` again, keeping its store; only a project that already has a store (one removed from the list, D-59). Existing code without a store comes in by migration (below). Refused if `dir` lies in another project's `src/` or `test/`, lists projects of its own, or another server holds it |
 | `POST /projects/new` `{name, dir?, target?}` | `gleam new` at `dir` (default `name`), with `--template javascript` for `target: "javascript"`, without its own git repository inside one; sets it up and lists it. Refused if `dir` exists or `name` isn't a package name |
 | `DELETE /projects/{dir}` | Takes the project off the list; its `.solace` stays. Refused for `.` and while one of its agents is working (`E7003`) |
 | `GET /models` | As above |
 | `GET /events` | When `workspace`: every project's events, each with `project: dir`, and `{projects: [dir...]}` when the list changes. The event id is a JSON object of each project's position, so `Last-Event-ID` resumes all of them. A project added later starts at its latest event. One `ready` follows the replay. Otherwise the root project's stream as above. `/p/{dir}/events` is one project's stream alone |
 
-Reads never take a project's lock, so humans and agents read any number of projects at once; an agent reads other projects with `--project` (Spec 3 §2). A task, its runs and its changes belong to one project, and each project has at most one work run (§6).
+Reads never take a project's lock, so humans and agents read any number of projects at once; an agent reads other projects with `--project` (Spec 3 §2). Each project has at most one work run (§6).
 
-**Later: tasks across projects (not built).** A task may cut across several projects. It will take each project's lock and work-run slot as it changes that project, in folder order so two such tasks can't deadlock, and its changes and undo will span those projects.
+**Tasks across projects (D-61).** A task's `scope` lists the projects it may change; it is stored in one of them and shown in every lane of its scope, in the same column. A work run holds every project in its scope from start to end. Its agent works in the task's project and changes another project of its scope by adding `--project <folder>` to any command; a project outside the scope is refused (`E6007`) and the agent asks the human. Each change is recorded in the project it was made in; `task diff`, the Contract view (`/p/{dir}/graph?task=` shows that project's part), `revert`, completion and changes made outside Solace during the run (D-58) span the scope. Changes to several projects lock them in folder order. `DELETE /projects/{dir}` is refused while an open task stored elsewhere covers it (`E7013`).
 
 ### Migration (D-59, Spec 17)
 
@@ -195,7 +197,7 @@ When a task reaches a final column, the records of the state before it are dropp
 ## 6. Runs
 
 - **Models** come from the Solace system configuration, not the project: built-in presets for the current major Codex and Claude models (`src/default-models.toml`), plus entries in `~/.config/solace/config.toml` (or `$SOLACE_CONFIG`). An entry with a preset's `id` replaces it, and `presets = false` hides the presets. Each has an `id`, a `label`, an `agent` (`codex` or `claude`), and a `model`, with an optional `effort`, the default. An action may choose another of the model's `efforts` (`E7001` otherwise); Codex gets it as `model_reasoning_effort`, Claude Code as `--effort`. An action that doesn't name a model uses the task's `model` and `effort`.
-- **Endpoints.** A model may name an `endpoint = {kind, base_url, key_env?}`. `kind = "openai"` goes with `agent = "codex"` and is passed to Codex as a custom provider using the Responses API. `kind = "anthropic"` goes with `agent = "claude"` and is passed to Claude Code as `ANTHROPIC_BASE_URL`, plus `ANTHROPIC_AUTH_TOKEN` taken from `key_env`. Solace stores no credentials: agents use their own sign-in, and endpoint keys are read from the named environment variable when the agent starts. A mismatched kind is `E6020`.
+- **Endpoints.** A model may name an `endpoint = {kind, base_url, key_env?}`. `kind = "openai"` goes with `agent = "codex"` and is passed to Codex as a custom provider using the Responses API. `kind = "anthropic"` goes with `agent = "claude"` and is passed to Claude Code as `ANTHROPIC_BASE_URL`, plus `ANTHROPIC_AUTH_TOKEN` taken from `key_env`. If the endpoint is plain `http` and its `GET /v1/models` reports the model's window (`meta.n_ctx`, as llama.cpp and Strata do; a server listing one model is matched whatever the configured name), Claude Code also gets it as `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so it compacts before the server refuses the prompt (D-63). A value already set in Solace's environment wins. Solace stores no credentials: agents use their own sign-in, and endpoint keys are read from the named environment variable when the agent starts. A mismatched kind is `E6020`.
 - **Availability.** `/models` marks a model unavailable, with the reason, when its agent program isn't on `PATH`, when the agent isn't signed in, or when the endpoint's `key_env` isn't set. Only local things are checked, so the check costs nothing. Starting a run on an unavailable model is refused (`E7011`), and the task stays where it is.
 - **Attention.** Solace sets `attention` when a task needs a human: an agent asked a question, a run failed (the note includes the agent's last message, or else the end of its output), or the server restarted while an agent was working. It is cleared by the next successful action request on the task.
 - A **work run** starts the agent with Spec 14 §5's configuration. Its prompt is plain text, not the task's JSON: what the run is for and how to start, ask and finish, then the task's title, body, links, notes and questions with their answers. Images in the briefed notes are attached to the prompt (Codex `-i`, Claude Code a stream-json image block) and named `[image N]` in the text; a custom runner gets `[image N: path]`. The run's kind decides the role line, and a read-only run's brief says which commands are refused. On top of Spec 14, the agent's Solace tool gets:
@@ -252,3 +254,4 @@ Several projects on one server, several people, remote access and authentication
 - W1. One root (`tests/workspace_acceptance.py`): `solace create` in a folder offers each Gleam project and adds only those confirmed; lanes are keyed by folder when package names repeat; `/p/{dir}` reaches only its project; merged events carry `project` and resume from a combined id; a second server for a project, started from inside it, is refused; `create` in a project below the root lists it there; a project created from the board has a store; removal keeps it.
 - W2. Nothing leaves the root: symlinked and `..` folders, a project that lists projects, and a root inside a root or a project are refused. A root that is a project serves itself at `/` and its other projects under `/p/`; its settings keep their comments when `projects` is written; it can't be removed.
 - W3. Agents in two projects work at the same time; each reads the other's code with `--project`, and changes there are refused (Spec 3 A8).
+- W4. A task covering `a` and `b` (`test_a_task_changes_every_project_it_covers`): its agent changes and tests both, with `--project b` for `b`, and is refused `c`; `task diff` names each change's project. While it works, a task in `b` can't start a work run and its scope can't change. Between runs its scope widens and narrows, but not off a project it changed, and `b` can't be removed from the board. `cancel` restores both projects. A task whose own project leaves its scope moves to the first one left. A subproject's `[board]` is ignored; `/p/b/workflow` is the root's.

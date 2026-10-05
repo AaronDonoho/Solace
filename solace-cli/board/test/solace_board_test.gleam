@@ -223,6 +223,7 @@ pub fn notices_and_stamp_test() {
           "",
           "",
           "",
+          "",
           board.Workflow([
             board.Column("needs_review", "Needs review", [], False),
           ]),
@@ -359,4 +360,111 @@ pub fn root_project_lane_test() {
   rendered |> string.contains("(this folder)") |> should.be_true
   rendered |> string.contains("href=\"/view\"") |> should.be_true
   rendered |> string.contains("href=\"/p/frontend/view\"") |> should.be_true
+}
+
+pub fn lane_target_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\".\",\"label\":\"app\",\"name\":\"app\",\"base\":\"\",\"target\":\"javascript\"},{\"dir\":\"lib\",\"label\":\"lib\",\"name\":\"lib\",\"base\":\"/p/lib\"}],\"found\":[]}",
+      ),
+    )
+  let assert [app, lib] = model.lanes
+  app.target |> should.equal("javascript")
+  lib.target |> should.equal("")
+  let rendered = board.view(model) |> element.to_string
+  rendered
+  |> string.contains(
+    "<strong>app</strong><small class=\"lane-target muted\"> javascript</small>",
+  )
+  |> should.be_true
+  rendered |> string.contains("lane-target muted\"> \n") |> should.be_false
+  string.split(rendered, "lane-target") |> list.length |> should.equal(2)
+}
+
+pub fn single_project_header_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":false,\"projects\":[{\"dir\":\".\",\"label\":\"shop\",\"name\":\"app\",\"base\":\"\",\"target\":\"erlang\"}],\"found\":[]}",
+      ),
+    )
+  let rendered = board.view(model) |> element.to_string
+  rendered
+  |> string.contains(
+    "<header class=\"lane-title\"><span><strong>shop</strong><small> app</small><small class=\"lane-target muted\"> erlang</small></span><small>0 tasks</small><a href=\"/view\">Contract view</a></header>",
+  )
+  |> should.be_true
+  rendered |> string.contains("lane-toggle") |> should.be_false
+}
+
+/// D-61: a task covering a and b shows in both lanes, names its projects and
+/// each change's project, and leaves a lane it moved out of.
+pub fn task_across_projects_test() {
+  let #(model, _) = board.init(Nil)
+  let lane = fn(d) {
+    "{\"dir\":\""
+    <> d
+    <> "\",\"label\":\""
+    <> d
+    <> "\",\"name\":\""
+    <> d
+    <> "\",\"base\":\"/p/"
+    <> d
+    <> "\"}"
+  }
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":["
+        <> string.join(list.map(["a", "b", "c"], lane), ",")
+        <> "],\"found\":[]}",
+      ),
+    )
+  let columns = "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"}]}"
+  let model =
+    list.fold(["a", "b", "c"], model, fn(m, d) {
+      board.update(m, board.WorkflowLoaded(d, columns)).0
+    })
+  let #(model, _) = board.update(model, board.CaughtUp)
+  let task =
+    "{\"id\":\"t1\",\"title\":\"Across\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"scope\":[\"a\",\"b\"],\"changes\":[{\"entity\":\"symbol:x\",\"name\":\"app.one\",\"project\":\"b\"}]}"
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live("{\"project\":\"a\",\"task\":" <> task <> "}"),
+    )
+  let rendered = board.view(model) |> element.to_string
+  string.split(rendered, "Across<small class=\"muted\">a · b</small>")
+  |> list.length
+  |> should.equal(3)
+  string.split(rendered, "<small>1 task</small>")
+  |> list.length
+  |> should.equal(3)
+  rendered |> string.contains("<small>0 tasks</small>") |> should.be_true
+  let assert Ok(decoded) = json.parse(task, board.task_decoder())
+  decoded.changes |> should.equal(["b: app.one"])
+  // The task moved out of a: a's lane drops it.
+  let #(model, _) =
+    board.update(model, board.Live("{\"project\":\"a\",\"removed\":\"t1\"}"))
+  board.view(model)
+  |> element.to_string
+  |> string.contains("Across")
+  |> should.be_false
+  // A new task's projects: the lane it starts from, others added; the
+  // starting lane can be unchecked even when it is the only one.
+  let #(model, _) = board.update(model, board.NewTaskIn("b"))
+  let #(model, _) = board.update(model, board.DraftScope("b", False))
+  model.draft_scope |> should.equal([])
+  let #(model, _) = board.update(model, board.DraftScope("b", True))
+  let #(model, _) = board.update(model, board.DraftScope("a", True))
+  model.draft_scope |> should.equal(["a", "b"])
+  let #(model, _) = board.update(model, board.DraftScope("a", False))
+  let #(model, _) = board.update(model, board.DraftScope("b", False))
+  model.draft_scope |> should.equal([])
 }

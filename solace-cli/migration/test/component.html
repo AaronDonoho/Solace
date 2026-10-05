@@ -1,0 +1,126 @@
+<!doctype html><html><head><style>button{color:rgb(255,0,255)}</style></head><body><div id="app"></div>
+<script type="module">
+import * as app from '../build/dev/javascript/migration/migration.mjs';
+const check = (ok, message) => { if (!ok) throw new Error(message); };
+const report = (status, error = '') => {
+  document.body.dataset.result = status;
+  fetch('/__result?' + new URLSearchParams({ status, error })).catch(() => {});
+};
+const wait = async predicate => {
+  for (let i = 0; i < 100; i++) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error('Timed out');
+};
+async function run() {
+try {
+  app.main();
+  const host = document.querySelector('solace-migration');
+  check(host?.shadowRoot, 'standalone main mounts a shadow component');
+  const root = host.shadowRoot;
+  await wait(() => root.textContent.includes('Migrate this project'));
+  check(root.querySelector('h1')?.textContent === 'Migration', 'page heading');
+  check(root.querySelector('style')?.textContent.includes('.migration'), 'owned CSS');
+  check(customElements.get('solace-migration').observedAttributes.length === 0, 'no attributes');
+  check(getComputedStyle(root.querySelector('button')).color !== 'rgb(255, 0, 255)', 'shell styles not adopted');
+  root.querySelector('button').click();
+  await wait(() => root.querySelector('textarea'));
+  const inputs = [...root.querySelectorAll('input[type=checkbox]')];
+  check(inputs.length === 2 && inputs.every(input => input.checked), 'projects selected');
+  inputs[0].click();
+  const smoke = root.querySelector('textarea');
+  smoke.value = '  gleam test  \n\n';
+  smoke.dispatchEvent(new Event('input', { bubbles: true }));
+  await new Promise(resolve => setTimeout(resolve, 30));
+  [...root.querySelectorAll('button')].find(button => button.textContent === 'Make the copy').click();
+  await wait(() => root.textContent.includes('fixture accepted web / gleam test'));
+  const other = document.createElement('solace-migration');
+  document.body.append(other);
+  await wait(() => other.shadowRoot.textContent.includes('Migrate this project'));
+  check(!other.shadowRoot.querySelector('textarea'), 'instances have independent models');
+  check(!document.querySelector('.migration'), 'view stays in shadow DOM');
+
+  // Exercise Lustre's actual custom-element lifecycle with controlled timers.
+  host.remove();
+  other.remove();
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
+  const nativeClearTimeout = globalThis.clearTimeout.bind(globalThis);
+  const timers = new Map();
+  let timerId = 1000000, gets = 0, holdGet = false, pendingGet;
+  const running = { state: 'running', top: '/work', original: '/work',
+    copy: '/copy', step: 'Copying files' };
+  globalThis.fetch = (path, options) => {
+    if (path !== '/migration') return nativeFetch(path, options);
+    gets++;
+    if (holdGet) return new Promise(resolve => { pendingGet = resolve; });
+    return Promise.resolve(Response.json(running));
+  };
+  globalThis.setTimeout = (callback, ms) => {
+    if (ms !== 1000 && ms !== 5000) return nativeSetTimeout(callback, ms);
+    const id = ++timerId;
+    timers.set(id, callback);
+    return id;
+  };
+  globalThis.clearTimeout = id => {
+    if (!timers.delete(id)) nativeClearTimeout(id);
+  };
+
+  // Lustre reuses registration-time init for every custom element.
+  const first = document.createElement('solace-migration');
+  const second = document.createElement('solace-migration');
+  document.body.append(first, second);
+  await wait(() => gets === 2 && timers.size === 2);
+  check(first.shadowRoot.textContent.includes('Copying files'), 'first instance loaded');
+  check(second.shadowRoot.textContent.includes('Copying files'), 'second instance loaded');
+  first.remove();
+  check(timers.size === 1, 'removing one instance keeps the other timer');
+  const [liveId, liveTimer] = [...timers.entries()][0];
+  timers.delete(liveId);
+  liveTimer();
+  await wait(() => gets === 3 && timers.size === 1);
+  check(second.shadowRoot.textContent.includes('Copying files'), 'remaining instance keeps polling');
+  second.remove();
+  check(timers.size === 0, 'remaining instance cleans up its timer');
+  gets = 0;
+
+  const lifecycle = document.createElement('solace-migration');
+  document.body.append(lifecycle);
+  await wait(() => lifecycle.shadowRoot?.textContent.includes('Copying files') && timers.size === 1);
+  check(gets === 1, 'first connection makes one GET');
+  const canceled = [...timers.values()][0];
+  lifecycle.remove();
+  check(timers.size === 0, 'disconnect cancels timer');
+  canceled();
+  await new Promise(resolve => nativeSetTimeout(resolve, 30));
+  check(gets === 1, 'queued timer cannot poll after disconnect');
+
+  document.body.append(lifecycle);
+  await wait(() => gets === 2 && timers.size === 1);
+  holdGet = true;
+  const [nextId, nextTimer] = [...timers.entries()][0];
+  timers.delete(nextId);
+  nextTimer();
+  await wait(() => gets === 3 && pendingGet);
+  lifecycle.remove();
+  pendingGet(Response.json({ state: 'in_progress', top: '/copy', original: '/work', copy: '/copy' }));
+  await new Promise(resolve => nativeSetTimeout(resolve, 30));
+  check(timers.size === 0 && gets === 3, 'late GET cannot poll or reload after disconnect');
+
+  holdGet = false;
+  document.body.append(lifecycle);
+  await wait(() => gets === 4 && timers.size === 1);
+  check(lifecycle.shadowRoot.textContent.includes('Copying files'), 'reconnect renders fresh state');
+  lifecycle.remove();
+  globalThis.fetch = nativeFetch;
+  globalThis.setTimeout = nativeSetTimeout;
+  globalThis.clearTimeout = nativeClearTimeout;
+  report('passed');
+} catch (error) {
+  report('failed', String(error.stack || error));
+  document.body.append(String(error.stack || error));
+}
+}
+run();
+</script></body></html>

@@ -39,7 +39,7 @@ Commands (`help` gives every option, `help <command>` one command's):
   view <name|module>...         source, or a module's outline
   refs <name>                   what uses a symbol
   impact [name...]              what a change reaches, with its tests
-  find <text>                   search all code
+  find | grep <text>            search code | other files
   submit                        save a patch or blocks from `text`, type-checked
   delete <name>                 remove an unused symbol
   test [<name>... | --all]      run the tests a change can affect
@@ -57,6 +57,9 @@ Reading
   view <name>...                symbols' source
   view <module>...              outlines: signatures and doc lines
   view <module> --bodies        whole module; only for one you will rewrite
+  view | inspect <dependency>   a dependency's module (`lustre/component`): its
+                                public signatures; `<module>.<name>`: one with
+                                its docs. Read from build/packages, never stored
   refs <name>                   everything that uses a symbol
   refs <module>.<Type>.<field>  code that reads a record field
   impact [name...]              what a change reaches: callers and readers of the
@@ -64,13 +67,17 @@ Reading
                                 tests (no name: what changed since tests last
                                 passed, or in this task)
   find <text>                   case-insensitive search of all code
+  grep <text>                   case-insensitive search of watched files and
+                                settings (not unwatched files); lines shown
+                                with numbers for `read --lines`
   session start [--task]        this overview again (--task: for the task in `text`)
   session start [--scope <module>...]
                                 every symbol, and open work records with context
-  ... --project <folder>        view, inspect, refs, find, files and read in
+  ... --project <folder>        view, inspect, refs, find, grep, files and read in
                                 another project under the same Solace root
-                                (session start lists them); changes stay in
-                                this project
+                                (session start lists them); any command in
+                                another project the task covers (its brief
+                                lists them), so it changes that project too
 Replies have a size limit: a signature is printed once per reply, and a reply
 that would be larger says what it left out and the command that shows it.
 
@@ -134,7 +141,7 @@ for agents, shown at session start) are human-owned: in a work run, `write` to
 either proposes a change and waits for the human; say why in a `task note` first.
   files [dir]                   tree with each file's category
   read <path> [--lines a..b | --tail n]
-  write <path> [--replace]      whole text, or exact `old` -> `text`
+  write <path>                  whole text, or with `old`, just `old` -> `text`
   remove <path>
 Project: build | format | run <name> [args...] (commands declared in solace.toml)
 Work records, kept between sessions: work add (`text`) | work list | work done <id>
