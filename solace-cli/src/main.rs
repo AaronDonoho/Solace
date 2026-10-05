@@ -5,6 +5,9 @@
 //! it writes the Gleam files back out so `gleam` can check, test and build
 //! them; agents never touch those files.
 
+// Short-lived tuples inside one function read better spelled out than named.
+#![allow(clippy::type_complexity)]
+
 mod board;
 mod drafts;
 mod gleam;
@@ -18,8 +21,9 @@ mod workspace;
 
 use gleam::{Item, Kind, Ref};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -51,8 +55,11 @@ fn agent_help(topic: Option<&str>) -> String {
     let full = if board::context().is_some() { full } else { full.split_once("\nTask runs").unwrap().0 };
     let Some(topic) = topic else { return format!("{full}\n") };
     let paragraphs: Vec<&str> = full.split("\n\n").collect();
-    let word = |p: &str, f: &dyn Fn(&str) -> bool| p.lines().any(|l| f(l) && l.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == topic));
-    let hits: Vec<&str> = paragraphs.iter().copied().filter(|p| word(p, &|l| l.starts_with("  ") && l.trim_start().starts_with(topic))).collect();
+    let word = |p: &str, f: &dyn Fn(&str) -> bool| {
+        p.lines().any(|l| f(l) && l.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == topic))
+    };
+    let hits: Vec<&str> =
+        paragraphs.iter().copied().filter(|p| word(p, &|l| l.starts_with("  ") && l.trim_start().starts_with(topic))).collect();
     let hits = if hits.is_empty() { paragraphs.into_iter().filter(|p| word(p, &|_| true)).collect() } else { hits };
     if hits.is_empty() { format!("No command `{topic}`. Every command:\n{full}\n") } else { hits.join("\n\n") + "\n" }
 }
@@ -104,31 +111,38 @@ impl From<std::io::Error> for Failure {
     }
 }
 
+/// Removes `flag` and its value from `args`; a flag without a value is a usage error.
+fn take(args: &mut Vec<String>, flag: &str) -> Result<Option<String>, Failure> {
+    let Some(i) = args.iter().position(|a| a == flag) else { return Ok(None) };
+    if i + 1 >= args.len() {
+        return usage(format!("{flag} needs a value"));
+    }
+    args.remove(i);
+    Ok(Some(args.remove(i)))
+}
+
 fn main() {
     let mut args: Vec<String> = env::args().skip(1).collect();
-    let mut options = Vec::new();
-    while let Some(i) = args.iter().position(|a| a == "--option") {
-        if i + 1 >= args.len() {
-            break;
+    let result = (|| {
+        let mut options = Vec::new();
+        while let Some(option) = take(&mut args, "--option")? {
+            options.push(option);
         }
-        args.remove(i);
-        options.push(args.remove(i));
-    }
-    let old = args.iter().position(|a| a == "--old").and_then(|i| {
-        if i + 1 >= args.len() {
-            return None;
+        let old = take(&mut args, "--old")?;
+        if args.first().map(String::as_str) == Some("mcp") {
+            let budget = match &args[1..] {
+                [] => BUDGET,
+                [flag, n] if flag == "--budget" => {
+                    n.parse().map_err(|_| Failure(format!("--budget takes a number of bytes, got {n}"), 2))?
+                }
+                _ => return usage("mcp [--budget N]"),
+            };
+            mcp(budget);
+            return Ok(String::new());
         }
-        args.remove(i);
-        Some(args.remove(i))
-    });
-    if args.first().map(String::as_str) == Some("mcp") {
-        let budget = match args.get(1..) {
-            Some([flag, n]) if flag == "--budget" => n.parse().unwrap_or_else(|_| panic!("--budget takes a number of bytes, got {n}")),
-            _ => BUDGET,
-        };
-        return mcp(budget);
-    }
-    let code = match run_options(&args, &mut stdin, old.as_deref(), BUDGET, &options) {
+        run_options(&args, &mut stdin, old.as_deref(), BUDGET, &options)
+    })();
+    let code = match result {
         Ok(out) => {
             print!("{out}");
             0
@@ -169,7 +183,8 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     let rest;
     let (args, cross) = match a.iter().position(|x| *x == "--project") {
         Some(i) => {
-            let dir = a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder; session start lists them".into(), 2))?;
+            let dir =
+                a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder; session start lists them".into(), 2))?;
             rest = [&args[..i], &args[i + 2..]].concat();
             match scoped(dir, &rest)? {
                 Some(target) => (&rest[..], Some(target)),
@@ -180,20 +195,20 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     };
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     // The task's home: where the run's agent works, and where the task is stored.
-    let home = Store::open().ok().map(|s| s.root);
+    let home = Store::root().ok();
     let _within = cross.as_deref().map(Within::enter).transpose()?;
-    let Ok(store) = Store::open() else {
+    let Ok(root) = Store::root() else {
         board::flow(&env::current_dir()?)?;
         return run_inner(args, input, old, budget);
     };
     let context = board::context();
-    let home = home.unwrap_or_else(|| store.root.clone());
+    let home = home.unwrap_or_else(|| root.clone());
     let guard = if let Some((tid, rid)) = &context {
         board::agent_guard(&home, tid, rid, if a.is_empty() { &["help"] } else { &a }, cross.as_deref())?
     } else {
-        vec![board::lock(&store.root)?]
+        vec![board::lock(&root)?]
     };
-    let store = board::open(&store.root)?;
+    let store = board::open(&root)?;
     let home = board::open(&home)?;
     lockdown::recover(&store.root)?;
     board::flow(&store.root)?;
@@ -206,17 +221,15 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
             return board::task_command(&home, tid, rid, &a, input, options, guard);
         }
         // A run's settings write is a proposal the human approves (D-38).
-        let target = a.get(1).map(|p| Path::new(p).components().filter(|c| !matches!(c, std::path::Component::CurDir)).collect::<PathBuf>());
         if a.first() == Some(&"write")
-            && let Some(file) = target.and_then(|p| p.to_str().map(String::from)).filter(|p| p == "solace.toml" || p == "AGENTS.md")
+            && let Some(file) = a.get(1).map(|p| file_name(Path::new(p))).filter(|p| p == "solace.toml" || p == "AGENTS.md")
         {
             let current = fs::read(store.root.join(&file)).unwrap_or_default();
-            let proposed = lockdown::edited(&current, &input()?, a.contains(&"--replace"), old)?;
+            let proposed = lockdown::edited(&current, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old)?;
             return board::propose_settings(&home, &store.root, tid, rid, &file, &current, &proposed, guard);
         }
     }
-    let changing = a.first().is_some_and(|a| matches!(*a, "submit" | "delete" | "write" | "remove" | "run" | "format" | "build"));
-    let before = if changing && context.is_some() {
+    let before = if a.first().is_some_and(|c| CHANGES.contains(c)) && context.is_some() {
         let mut v = board::snapshot(&store)?;
         v.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
         Some(v)
@@ -224,17 +237,14 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         None
     };
     let result = run_inner(args, input, old, budget);
-    if let Some((tid, _)) = &context {
-        if a.first().is_some_and(|c| matches!(*c, "check" | "test" | "build")) {
-            board::record_verification(&home, tid, a[0], &result)?;
-        }
+    if let Some((tid, _)) = &context
+        && a.first().is_some_and(|c| VERIFIES.contains(c))
+    {
+        board::record_verification(&home, tid, a[0], &result)?;
     }
     // A process the command ran (`format`, a declared command) may have changed source: that's this command's change.
-    let unread = if a.first().is_some_and(|c| matches!(*c, "format" | "build" | "run")) {
-        outside::absorb(&store, outside::Mode::Command)?
-    } else {
-        String::new()
-    };
+    let unread =
+        if a.first().is_some_and(|c| PROCESSES.contains(c)) { outside::absorb(&store, outside::Mode::Command)? } else { String::new() };
     if let (Some(before), Some((tid, rid))) = (before, context) {
         let mut after = board::snapshot(&store)?;
         after.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
@@ -246,7 +256,20 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     }
 }
 
+// Commands by what they do. Every check that depends on the command uses these.
+/// Plain reads; with `--project`, they read another project.
 const READS: &[&str] = &["view", "inspect", "refs", "find", "grep", "files", "read"];
+/// May change the project: recorded on the task in a board run, and refused in
+/// read-only runs, except `build`, which reviews run to verify.
+const CHANGES: &[&str] = &["submit", "delete", "write", "remove", "run", "format", "build"];
+/// Run a process that may change source; what it changed is read in after.
+const PROCESSES: &[&str] = &["format", "build", "run"];
+/// Results recorded as the task's verification.
+const VERIFIES: &[&str] = &["check", "test", "build"];
+/// Only for the human, never in a board run.
+const HOST: &[&str] = &["agent-config", "serve", "create", "migrate"];
+/// Need Gleam code: refused in a project of plain files.
+const GLEAM: &[&str] = &["submit", "drafts", "view", "inspect", "refs", "impact", "find", "delete", "check", "test", "probe"];
 
 /// A project folder as `--project` takes it.
 fn project_dir(dir: &str) -> &str {
@@ -261,18 +284,21 @@ fn project_dir(dir: &str) -> &str {
 /// reads, and commands outside a run, go to `read_project`.
 fn scoped(dir: &str, args: &[String]) -> Result<Option<PathBuf>, Failure> {
     let command = args.first().map(String::as_str).unwrap_or("");
-    let (Some((tid, _)), Ok(own)) = (board::context(), Store::open()) else { return Ok(None) };
+    let (Some((tid, _)), Ok(own)) = (board::context(), Store::root()) else { return Ok(None) };
     if READS.contains(&command) && !args.iter().any(|x| x == "--draft") {
         return Ok(None);
     }
-    let top = scope::top(&own.root);
+    let top = scope::top(&own);
     let dir = project_dir(dir);
-    let projects = scope::of(&board::task(&own.root, &tid)?, &scope::dir(&top, &own.root));
+    let projects = scope::of(&board::task(&own, &tid)?, &scope::dir(&top, &own));
     if !projects.iter().any(|p| p == dir) {
         return lockdown::error(
             "E6007",
             dir,
-            format!("not one of this task's projects ({}); if the task needs it, ask the human to add it with `task ask`", projects.join(", ")),
+            format!(
+                "not one of this task's projects ({}); if the task needs it, ask the human to add it with `task ask`",
+                projects.join(", ")
+            ),
         );
     }
     if command == "task" {
@@ -312,7 +338,7 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
     }
     // From a project, or from a folder of projects with none at its root.
     let here = env::current_dir()?;
-    let own = Store::open().ok().map(|s| s.root);
+    let own = Store::root().ok();
     let root = match workspace::enclosing(own.as_deref().unwrap_or(&here))? {
         Some(root) => root,
         None => own.clone().ok_or_else(|| Failure("No Solace root here: migrate an existing project (`solace serve`, then Migrate this project) or make a new one with `solace create <name>`.".into(), 1))?,
@@ -322,15 +348,14 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
     if !members.iter().any(|m| m == dir) {
         return lockdown::error("E6007", dir, format!("not a project under this Solace root; its projects: {}", members.join(", ")));
     }
-    let target = if dir == "." { root.clone() } else { root.join(dir) };
+    let target = scope::path(&root, dir);
     // A board run's agent must still be running, as for any command.
     let _guard = match (board::context(), &own) {
         (Some((tid, rid)), Some(own)) => Some(board::agent_guard(own, &tid, &rid, &a, None)?),
         _ => None,
     };
-    let db = Connection::open(target.join(".solace/store.db"))?;
-    db.busy_timeout(std::time::Duration::from_secs(5))?;
-    let store = Store { db, root: target };
+    // A plain connection: a read creates no tables in another project.
+    let store = Store { db: Connection::open(target.join(".solace/store.db"))?, root: target };
     let settings = lockdown::settings(&store.root)?;
     if let Some(out) = lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
         return out;
@@ -364,13 +389,12 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
         return workspace::create(&env::current_dir()?, &a[1..]);
     }
 
+    // run_options has put back any interrupted file write (lockdown::recover).
     let store = Store::open()?;
     let settings = lockdown::settings(&store.root)?;
-    lockdown::recover(&store.root)?;
     if let Some(out) = lockdown::dispatch(&store, &settings, &a, input, old, budget) {
         return out;
     }
-    const GLEAM: &[&str] = &["submit", "drafts", "view", "inspect", "refs", "impact", "find", "delete", "check", "test", "probe"];
     if GLEAM.contains(&a[0]) && !store.root.join("gleam.toml").exists() {
         return lockdown::plain(a[0]);
     }
@@ -401,15 +425,11 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
         ["work", "list"] | ["work"] => store.work_list(),
         ["work", "done", id] => store.work_done(id),
         _ => usage(format!(
-                "Unknown command: {}\nCommands: session, inspect, view, refs, impact, find, submit, drafts, delete, check, test, probe, work, files, read, write, remove, build, format, run, task.",
+            "Unknown command: {}\nCommands: session, inspect, view, refs, impact, find, submit, drafts, delete, check, test, probe, work, files, read, write, remove, build, format, run, task.",
             a.join(" ")
         )),
     }
 }
-
-/// Per-test results and the source as of the last full pass (D-44).
-const TEST_TABLES: &str = "CREATE TABLE IF NOT EXISTS test_runs(test TEXT PRIMARY KEY, reach TEXT NOT NULL, result TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS test_base(id TEXT PRIMARY KEY, text TEXT NOT NULL);";
 
 /// Command output without build progress and compiler warnings (a warning
 /// runs until the next error or until the program starts).
@@ -473,7 +493,6 @@ fn stdin() -> Result<String, Failure> {
 /// `solace mcp`: the same commands as one MCP tool over stdio, so an agent
 /// can pass code without shell quoting and needs no shell at all.
 fn mcp(budget: usize) {
-    use serde_json::{Value, json};
     let description = "Read, change and test this project's code. Start with `session start --task`, \
         the task in `text`: it lists the symbols most likely relevant, the workflow and the commands. Several commands \
         go in one call, one per line, and run in order: read everything you need in one call, and put \
@@ -523,8 +542,10 @@ fn mcp(budget: usize) {
                 // Code sent as command lines rather than in `text` (run 11): one
                 // error for the call, and nothing runs.
                 if let Some(code) = commands.iter().find(|c| looks_like_code(c)) {
-                    out = format!("Not a command: {code}\nThis looks like code. Code (for probe, submit) goes in `text`, \
-                        not in `command`; nothing in this call ran.\n");
+                    out = format!(
+                        "Not a command: {code}\nThis looks like code. Code (for probe, submit) goes in `text`, \
+                        not in `command`; nothing in this call ran.\n"
+                    );
                     is_error = true;
                 }
                 let refused = is_error;
@@ -613,6 +634,8 @@ struct Index {
     syms: Vec<Sym>,
     modules: Vec<ModuleRow>,
     uses: Vec<Vec<usize>>,
+    /// The reverse of `uses`: the symbols that use each one, in order.
+    used_by: Vec<Vec<usize>>,
     /// Every resolved reference: (symbol, line in the user's text).
     at: Vec<Vec<(usize, usize)>>,
 }
@@ -665,7 +688,7 @@ impl Index {
                 found
             })
             .collect();
-        let uses = at
+        let uses: Vec<Vec<usize>> = at
             .iter()
             .map(|found| {
                 let mut uses: Vec<usize> = vec![];
@@ -677,7 +700,13 @@ impl Index {
                 uses
             })
             .collect();
-        Index { syms, modules, uses, at }
+        let mut used_by = vec![vec![]; syms.len()];
+        for (j, us) in uses.iter().enumerate() {
+            for &u in us {
+                used_by[u].push(j);
+            }
+        }
+        Index { syms, modules, uses, used_by, at }
     }
 }
 
@@ -696,6 +725,19 @@ CREATE TABLE broken(symbol TEXT PRIMARY KEY, diagnostic TEXT NOT NULL);
 CREATE TABLE work(id INTEGER PRIMARY KEY, text TEXT NOT NULL, open INTEGER NOT NULL DEFAULT 1);
 ";
 
+/// Tables added after `SCHEMA`, made when a store opens so older stores have them too.
+const LATER_TABLES: &str = "
+-- per-test results and the source as of the last full pass (D-44)
+CREATE TABLE IF NOT EXISTS test_runs(test TEXT PRIMARY KEY, reach TEXT NOT NULL, result TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS test_base(id TEXT PRIMARY KEY, text TEXT NOT NULL);
+-- rejected submissions, kept to retry (D-46)
+CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY, owner TEXT NOT NULL, args TEXT NOT NULL, text TEXT NOT NULL, base TEXT NOT NULL);
+-- the task board
+CREATE TABLE IF NOT EXISTS board_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS board_before(task TEXT, entity TEXT, data TEXT NOT NULL, PRIMARY KEY(task,entity));
+CREATE TABLE IF NOT EXISTS board_touches(seq INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, entity TEXT);
+";
+
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
@@ -704,24 +746,37 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// A new identity: never derived from content, never reused (Spec 1 §2).
-fn new_id(kind: Kind, module: &str, name: &str) -> String {
+/// The SHA-256 of `bytes`, in hex.
+fn sha256(bytes: impl AsRef<[u8]>) -> String {
+    hex(&Sha256::digest(bytes))
+}
+
+/// A fresh id: 16 hex digits, unique across processes and calls.
+fn unique_id() -> String {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let seed = format!("{module}.{name}/{nanos}/{n}/{}", std::process::id());
+    sha256(format!("{nanos}/{n}/{}", std::process::id()).as_bytes())[..16].to_string()
+}
+
+/// A new symbol identity: never derived from content, never reused (Spec 1 §2).
+fn new_id(kind: Kind) -> String {
     let prefix = match kind {
         Kind::Fn => "fn",
         Kind::Type => "ty",
         Kind::Const => "cn",
     };
-    format!("{prefix}:{}", &hex(&Sha256::digest(seed.as_bytes()))[..16])
+    format!("{prefix}:{}", unique_id())
+}
+
+/// `text` without its comment and doc lines.
+fn without_comment_lines(text: &str) -> String {
+    text.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n")
 }
 
 /// Phase 1a revision: a hash of the code without its comments or doc text.
 fn revision(text: &str) -> String {
-    let code: String = text.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
-    format!("sha256:{}", &hex(&Sha256::digest(code.as_bytes()))[..16])
+    format!("sha256:{}", &sha256(without_comment_lines(text).as_bytes())[..16])
 }
 
 const STARTER_SETTINGS: &str = "# Solace project settings. Protected: agents may read this file.
@@ -767,6 +822,7 @@ fn import(root: &Path) -> Out {
     fs::create_dir_all(&dir)?;
     let db = Connection::open(dir.join("store.db"))?;
     db.execute_batch(SCHEMA)?;
+    db.execute_batch(LATER_TABLES)?;
     let (mut modules, mut symbols) = (0, 0);
     let mut written = outside::Written::load(root);
     written.known = true;
@@ -782,11 +838,7 @@ fn import(root: &Path) -> Out {
             let parsed = gleam::split(&text);
             db.execute("INSERT INTO modules VALUES (?1, ?2, ?3)", params![path, top, parsed.header])?;
             for (ord, item) in parsed.items.iter().enumerate() {
-                let id = new_id(item.kind, &path, &item.name);
-                db.execute(
-                    "INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![id, path, item.name, item.kind.as_str(), item.text, ord as i64, revision(&item.text)],
-                )?;
+                insert_symbol(&db, &path, item, Some(ord as i64))?;
                 symbols += 1;
             }
             modules += 1;
@@ -799,11 +851,36 @@ fn import(root: &Path) -> Out {
     Ok(out)
 }
 
+/// Stores a new symbol at `ord`, or after its module's last; returns its id.
+fn insert_symbol(db: &Connection, module: &str, item: &gleam::Item, ord: Option<i64>) -> Result<String, Failure> {
+    let ord = match ord {
+        Some(o) => o,
+        None => db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [module], |r| r.get(0))?,
+    };
+    let id = new_id(item.kind);
+    db.execute(
+        "INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, module, item.name, item.kind.as_str(), item.text, ord, revision(&item.text)],
+    )?;
+    Ok(id)
+}
+
 /// A Gleam module path: lowercase names of letters, digits and `_`, joined by `/`.
 fn valid_module_path(m: &str) -> bool {
     m.split('/').all(|p| {
         p.starts_with(|c: char| c.is_ascii_lowercase()) && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
     })
+}
+
+/// The Gleam files in a project's `src/` and `test/`, as sorted paths from `dir`.
+fn source_files(dir: &Path) -> Result<Vec<String>, Failure> {
+    let mut files = vec![];
+    for top in ["src", "test"] {
+        collect_gleam_files(&dir.join(top), &mut files)?;
+    }
+    let mut out: Vec<String> = files.iter().map(|f| f.strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/")).collect();
+    out.sort();
+    Ok(out)
 }
 
 fn collect_gleam_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -844,15 +921,28 @@ fn projection(ix: &Index, m: &ModuleRow) -> (String, Vec<(usize, usize, String)>
 }
 
 impl Store {
+    /// The store of the project at `root`, with every table this version uses.
+    fn at(root: &Path) -> Result<Store, Failure> {
+        let db = Connection::open(root.join(".solace/store.db"))?;
+        db.execute_batch(LATER_TABLES)?;
+        Ok(Store { db, root: root.into() })
+    }
+
     fn open() -> Result<Store, Failure> {
+        Store::at(&Store::root()?)
+    }
+
+    /// The project the working folder is in: the nearest folder up with a store.
+    fn root() -> Result<PathBuf, Failure> {
         let mut dir = env::current_dir()?;
         loop {
-            let db = dir.join(".solace/store.db");
-            if db.exists() {
-                return Ok(Store { db: Connection::open(db)?, root: dir });
+            if dir.join(".solace/store.db").exists() {
+                return Ok(dir);
             }
             if !dir.pop() {
-                return fail("No Solace store found (.solace/store.db). Bring existing code in by migrating it: run `solace serve` here and choose Migrate this project.");
+                return fail(
+                    "No Solace store found (.solace/store.db). Bring existing code in by migrating it: run `solace serve` here and choose Migrate this project.",
+                );
             }
         }
     }
@@ -945,7 +1035,11 @@ impl Store {
 
     /// The broken symbols as last checked, each with its errors.
     fn broken(&self) -> Result<HashMap<String, String>, Failure> {
-        Ok(self.db.prepare("SELECT symbol, diagnostic FROM broken")?.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?)
+        Ok(self
+            .db
+            .prepare("SELECT symbol, diagnostic FROM broken")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?)
     }
 
     // --- reading ---------------------------------------------------------------
@@ -977,14 +1071,6 @@ impl Store {
         }
     }
 
-    fn is_module(&self, input: &str) -> Result<bool, Failure> {
-        Ok(self.resolve_module(&self.index()?, input).is_some())
-    }
-
-    fn is_symbol(&self, input: &str) -> Result<bool, Failure> {
-        Ok(self.resolve(&self.index()?, input).is_ok())
-    }
-
     /// A dependency's module (`lustre/component`) or public symbol
     /// (`lustre/component.register`), read from `build/packages/` and never
     /// stored (D-15): a module gives its public signatures, a symbol its doc
@@ -999,8 +1085,7 @@ impl Store {
             })
         };
         let declaration = |item: &gleam::Item| {
-            let code = item.text.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
-            let sig = gleam::signature(&gleam::Item { text: code, ..item.clone() }).trim_end().to_string();
+            let sig = gleam::signature(&gleam::Item { text: without_comment_lines(&item.text), ..item.clone() }).trim_end().to_string();
             // An opaque type's constructors aren't part of its API.
             if sig.contains("pub opaque type ") { sig.split(" {").next().unwrap_or(&sig).to_string() } else { sig }
         };
@@ -1061,11 +1146,7 @@ impl Store {
             out += &format!("{} — {}\n  {}{more}\n", m.path, module_doc(m), names.join(", "));
         }
         out += &format!("\nTest modules (tests): {}\n", tests.join(", "));
-        out += &self.status()?;
-        out += &self.work_context(&ix)?;
-        out += &self.other_projects();
-        out += "\n";
-        out += &agent_reference();
+        out += &self.session_end(&ix)?;
         Ok(out)
     }
 
@@ -1074,12 +1155,29 @@ impl Store {
         let mut out = self.project_instructions();
         out += "This project has plain files and no Gleam code of its own: `files` lists them, `read` and `write` change them, \
                 and `run` runs the commands its solace.toml declares.\n";
-        out += &self.status()?;
-        out += &self.work_context(&self.index()?)?;
-        out += &self.other_projects();
-        out += "\n";
-        out += &agent_reference();
+        out += &self.session_end(&self.index()?)?;
         Ok(out)
+    }
+
+    /// The end of every session start: status, open work and its context,
+    /// the other projects, and the command reference.
+    fn session_end(&self, ix: &Index) -> Out {
+        Ok(format!("{}{}{}\n{}", self.status()?, self.work_context(ix)?, self.other_projects(), agent_reference()))
+    }
+
+    /// The symbols `text` names as `module.name`, in order, each once.
+    fn named(&self, ix: &Index, text: &str) -> Vec<usize> {
+        let mut named = vec![];
+        for word in text.split(|c: char| !(c.is_alphanumeric() || "_./".contains(c))) {
+            let word = word.trim_matches(|c| c == '.' || c == '/');
+            if word.contains('.')
+                && let Ok(i) = self.resolve(ix, word)
+                && !named.contains(&i)
+            {
+                named.push(i);
+            }
+        }
+        named
     }
 
     /// The other projects under this project's Solace root, which reads can
@@ -1092,11 +1190,9 @@ impl Store {
         let others: Vec<String> = members
             .into_iter()
             .filter(|m| *m != me)
-            .map(|m| {
-                match workspace::name(&if m == "." { root.clone() } else { root.join(&m) }) {
-                    name if name.is_empty() => m,
-                    name => format!("{m} ({name})"),
-                }
+            .map(|m| match workspace::name(&scope::path(&root, &m)) {
+                name if name.is_empty() => m,
+                name => format!("{m} ({name})"),
             })
             .collect();
         if others.is_empty() {
@@ -1138,16 +1234,7 @@ impl Store {
     fn work_context(&self, ix: &Index) -> Out {
         let mut out = String::new();
         for (_, text) in self.open_work()? {
-            let mut named = vec![];
-            for word in text.split(|c: char| !(c.is_alphanumeric() || "_./".contains(c))) {
-                let word = word.trim_matches(|c| c == '.' || c == '/');
-                if word.contains('.')
-                    && let Ok(i) = self.resolve(ix, word)
-                    && !named.contains(&i)
-                {
-                    named.push(i);
-                }
-            }
+            let named = self.named(ix, &text);
             if !named.is_empty() {
                 out += "\n== Context of the symbols the work record names ==\n";
                 let (full, mut shown) = (named.iter().copied().collect(), HashSet::new());
@@ -1228,7 +1315,7 @@ impl Store {
                 boost(j, direct[s] / 4.0, &mut score);
             }
             let mut covering = vec![];
-            for j in (0..n).filter(|&j| ix.uses[j].contains(&s)) {
+            for &j in &ix.used_by[s] {
                 if is_test(&ix, j) {
                     covering.push(j);
                 }
@@ -1243,16 +1330,7 @@ impl Store {
         }
 
         // Symbols the task names (`module.name`) are listed first.
-        let mut named = vec![];
-        for word in task.split(|c: char| !(c.is_alphanumeric() || "_./".contains(c))) {
-            let word = word.trim_matches(|c| c == '.' || c == '/');
-            if word.contains('.')
-                && let Ok(i) = self.resolve(&ix, word)
-                && !named.contains(&i)
-            {
-                named.push(i);
-            }
-        }
+        let named = self.named(&ix, task);
         for &i in &named {
             score[i] = f64::MAX;
         }
@@ -1266,8 +1344,12 @@ impl Store {
         evidence_terms.extend(task.split('"').skip(1).step_by(2).filter(|p| (3..=40).contains(&p.len())).map(str::to_lowercase));
         evidence_terms.extend(capitalized_runs(task));
         // A test that reaches the top code symbols reproduces the task's case.
-        let code: Vec<usize> =
-            ranked.iter().copied().filter(|&i| !is_test(&ix, i) && ix.syms[i].kind == Kind::Fn && !ix.syms[i].text.contains("@external")).take(2).collect();
+        let code: Vec<usize> = ranked
+            .iter()
+            .copied()
+            .filter(|&i| !is_test(&ix, i) && ix.syms[i].kind == Kind::Fn && !ix.syms[i].text.contains("@external"))
+            .take(2)
+            .collect();
         let name = |i: usize| {
             let short = reach::short(&ix, i);
             if self.resolve(&ix, &short).ok() == Some(i) { short } else { ix.syms[i].qname() }
@@ -1275,14 +1357,13 @@ impl Store {
         let repro = code
             .first()
             .and_then(|_| {
-                reach::tests(&ix)
-                    .into_iter()
-                    .map(|t| (t, reach::closure(&ix, t)))
-                    .filter(|(_, r)| r.contains(&code[0]))
-                    .max_by(|a, b| {
-                        let reached = |r: &HashSet<usize>| code.iter().filter(|c| r.contains(c)).count();
-                        reached(&a.1).cmp(&reached(&b.1)).then(score[a.0].total_cmp(&score[b.0])).then(ix.syms[b.0].text.len().cmp(&ix.syms[a.0].text.len()))
-                    })
+                reach::tests(&ix).into_iter().map(|t| (t, reach::closure(&ix, t))).filter(|(_, r)| r.contains(&code[0])).max_by(|a, b| {
+                    let reached = |r: &HashSet<usize>| code.iter().filter(|c| r.contains(c)).count();
+                    reached(&a.1)
+                        .cmp(&reached(&b.1))
+                        .then(score[a.0].total_cmp(&score[b.0]))
+                        .then(ix.syms[b.0].text.len().cmp(&ix.syms[a.0].text.len()))
+                })
             })
             .map(|(t, r)| {
                 let traced: Vec<String> = code.iter().filter(|c| r.contains(c)).map(|&c| name(c)).collect();
@@ -1317,11 +1398,7 @@ impl Store {
         out += &format!(
             "Symbols most likely relevant to the task, best first (signatures; `>` lines quote code that names the task's terms; `inspect` for code):\n{packet}{repro}\n{modules}"
         );
-        out += &self.status()?;
-        out += &self.work_context(&ix)?;
-        out += &self.other_projects();
-        out += "\n";
-        out += &agent_reference();
+        out += &self.session_end(&ix)?;
         Ok(out)
     }
 
@@ -1377,9 +1454,13 @@ impl Store {
                     if !doc.is_empty() {
                         text += &format!("{}\n\n", doc.join("\n"));
                     }
+                    let broken = self.broken()?;
                     for s in ix.syms.iter().filter(|s| s.module == m.path) {
-                        let broken = self.db.query_row("SELECT 1 FROM broken WHERE symbol = ?1", [s.qname()], |_| Ok(())).optional()?;
-                        text += &format!("{}{}\n\n", gleam::signature(&s.item()), if broken.is_some() { "  // BROKEN" } else { "" });
+                        text += &format!(
+                            "{}{}\n\n",
+                            gleam::signature(&s.item()),
+                            if broken.contains_key(&s.qname()) { "  // BROKEN" } else { "" }
+                        );
                     }
                     text
                 }
@@ -1499,7 +1580,7 @@ impl Store {
                 format!("-- {q}\n{}\n", gleam::signature(&ix.syms[u].item()))
             }
         };
-        let used_by: Vec<usize> = (0..ix.syms.len()).filter(|&j| ix.uses[j].contains(&i)).collect();
+        let used_by = ix.used_by[i].clone();
         let (tests, callers): (Vec<usize>, Vec<usize>) = used_by.into_iter().partition(|&j| is_test(ix, j));
         if !ix.uses[i].is_empty() {
             let mut uses = ix.uses[i].clone();
@@ -1571,7 +1652,7 @@ impl Store {
             return Ok(reach::field_refs(&ix, t, field));
         }
         let i = self.resolve(&ix, name)?;
-        let users: Vec<usize> = (0..ix.syms.len()).filter(|&j| ix.uses[j].contains(&i)).collect();
+        let users = ix.used_by[i].clone();
         if users.is_empty() {
             return Ok(format!("Nothing uses {}.\n", ix.syms[i].qname()));
         }
@@ -1583,7 +1664,11 @@ impl Store {
         }
         for u in users {
             let q = ix.syms[u].qname();
-            out += &if shown_earlier(&q) { format!("-- {q} (above)\n") } else { format!("-- {q}\n{}\n", gleam::signature(&ix.syms[u].item())) };
+            out += &if shown_earlier(&q) {
+                format!("-- {q} (above)\n")
+            } else {
+                format!("-- {q}\n{}\n", gleam::signature(&ix.syms[u].item()))
+            };
             out += &call_lines(&ix, u, i);
             mark_shown(q);
         }
@@ -1599,7 +1684,9 @@ impl Store {
             Some((tid, _)) => {
                 let mut st = self.db.prepare("SELECT entity, data FROM board_before WHERE task = ?1 AND entity LIKE 'symbol:%'")?;
                 let rows: Vec<(String, String)> = st.query_map([&tid], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
-                let old = |data: &str| serde_json::from_str::<serde_json::Value>(data).ok().filter(|v| v[7] == 1).and_then(|v| v[4].as_str().map(String::from));
+                let old = |data: &str| {
+                    serde_json::from_str::<serde_json::Value>(data).ok().filter(|v| v[7] == 1).and_then(|v| v[4].as_str().map(String::from))
+                };
                 Some(rows.iter().map(|(k, d)| (k["symbol:".len()..].to_string(), old(d))).collect::<Vec<_>>())
             }
             None => self.since_pass()?,
@@ -1613,9 +1700,12 @@ impl Store {
             let mut out = vec![];
             for name in names {
                 let i = self.resolve(&ix, name)?;
-                let then: Vec<(String, Option<String>)> =
-                    before.iter().flatten().filter(|(id, _)| *id == ix.syms[i].id).cloned().collect();
-                out.extend(Some(reach::origins(&ix, &then)).filter(|o| !o.is_empty()).unwrap_or_else(|| vec![(i, (0..ix.syms[i].text.lines().count()).collect())]));
+                let then: Before = before.iter().flatten().filter(|(id, _)| *id == ix.syms[i].id).cloned().collect();
+                out.extend(
+                    Some(reach::origins(&ix, &then))
+                        .filter(|o| !o.is_empty())
+                        .unwrap_or_else(|| vec![(i, (0..ix.syms[i].text.lines().count()).collect())]),
+                );
             }
             out
         };
@@ -1641,8 +1731,7 @@ impl Store {
 
     fn find(&self, query: &str) -> Out {
         let ix = self.index()?;
-        // `find "Customer(.."`: the quotes delimit the query (run 18)
-        let query = ['"', '\'', '`'].iter().find_map(|&c| query.strip_prefix(c)?.strip_suffix(c)).filter(|q| !q.is_empty()).unwrap_or(query);
+        let query = unquoted(query);
         let q = query.to_lowercase();
         let mut hits: Vec<(bool, String)> = vec![];
         for s in &ix.syms {
@@ -1679,27 +1768,20 @@ impl Store {
         let formatted = format_gleam(&raw)?;
         let parsed = gleam::split(&formatted);
         let ix = self.index()?;
-        let (module, mut notes) = match target {
-            Target::Imports(m) => {
-                (self.resolve_module(&ix, m).ok_or_else(|| Failure(format!("E1003 unknown module: {m}"), 1))?.path.clone(), vec![])
-            }
-            Target::Module(m) => {
-                (self.resolve_module(&ix, m).ok_or_else(|| Failure(format!("E1003 unknown module: {m}"), 1))?.path.clone(), vec![])
-            }
-        };
+        let (Target::Imports(m) | Target::Module(m)) = target;
+        let module = self.resolve_module(&ix, m).ok_or_else(|| Failure(format!("E1003 unknown module: {m}"), 1))?.path.clone();
+        let mut notes = vec![];
         let header = &ix.modules.iter().find(|m| m.path == module).unwrap().header;
-        self.db.execute_batch("BEGIN")?;
-        let result = (|| -> Result<(Option<String>, String), Failure> {
+        let out = self.transaction(&[], || {
             let target_name: Option<String> = match target {
                 Target::Module(_) => {
                     let existing: Vec<&Sym> = ix.syms.iter().filter(|s| s.module == module).collect();
-                    let key = |name: &str, kind: Kind| (name.to_string(), kind == Kind::Type);
-                    let submitted: HashSet<(String, bool)> = parsed.items.iter().map(|i| key(&i.name, i.kind)).collect();
+                    let submitted: HashSet<(String, bool)> = parsed.items.iter().map(|i| name_key(&i.name, i.kind)).collect();
                     if submitted.len() != parsed.items.len() {
                         return fail("E0103 the module text defines the same name twice.");
                     }
                     let missing: Vec<String> =
-                        existing.iter().filter(|s| !submitted.contains(&key(&s.name, s.kind))).map(|s| s.name.clone()).collect();
+                        existing.iter().filter(|s| !submitted.contains(&name_key(&s.name, s.kind))).map(|s| s.name.clone()).collect();
                     if !missing.is_empty() {
                         return fail(format!(
                             "E0102 the module text leaves out: {}. Nothing was saved. Removing a symbol must be explicit (solace delete <name>).",
@@ -1717,7 +1799,7 @@ impl Store {
                         if test {
                             notes.extend(weak_asserts(&item.text, &aliases(&header)).into_iter().map(|w| format!("{module}.{}: {w}", item.name)));
                         }
-                        match existing.iter().find(|s| key(&s.name, s.kind) == key(&item.name, item.kind)) {
+                        match existing.iter().find(|s| name_key(&s.name, s.kind) == name_key(&item.name, item.kind)) {
                             Some(e) if e.text == item.text => {}
                             Some(e) => {
                                 self.db.execute(
@@ -1728,16 +1810,7 @@ impl Store {
                                 changed.push(item.name.clone());
                             }
                             None => {
-                                let id = new_id(item.kind, &module, &item.name);
-                                let ord: i64 = self.db.query_row(
-                                    "SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1",
-                                    [&module],
-                                    |r| r.get(0),
-                                )?;
-                                self.db.execute(
-                                    "INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                                    params![id, module, item.name, item.kind.as_str(), item.text, ord, revision(&item.text)],
-                                )?;
+                                let id = insert_symbol(&self.db, &module, item, None)?;
                                 self.history(&id, "create", &item.name)?;
                                 added.push(item.name.clone());
                             }
@@ -1771,18 +1844,16 @@ impl Store {
             if !own_errors.is_empty() {
                 let text: Vec<&str> = own_errors.iter().map(|d| d.text.as_str()).collect();
                 let module_syms: Vec<String> = self.index()?.syms.iter().filter(|s| s.module == module).map(Sym::qname).collect();
-                let hint = self.callee_hint(&own_errors, &module_syms)?;
-                return fail(format!("Not saved: the submitted text has errors.\n\n{}{hint}", text.join("\n\n")));
+                return fail(format!("Not saved: the submitted text has errors.\n\n{}{}", text.join("\n\n"), self.callee_hint(&own_errors, &module_syms)?));
             }
             if whole_module {
                 let after = self.index()?;
-                let key = |name: &str, kind: Kind| (name.to_string(), kind == Kind::Type);
-                let before: Vec<(String, Option<String>)> = after
+                let before: Before = after
                     .syms
                     .iter()
                     .filter(|s| s.module == module)
                     .map(|s| {
-                        let old = ix.syms.iter().find(|o| o.module == module && key(&o.name, o.kind) == key(&s.name, s.kind));
+                        let old = ix.syms.iter().find(|o| o.module == module && name_key(&o.name, o.kind) == name_key(&s.name, s.kind));
                         (s.id.clone(), old.map(|o| o.text.clone()))
                     })
                     .collect();
@@ -1792,16 +1863,25 @@ impl Store {
             let mut out = format!("Saved {}.\n", target_name.as_deref().unwrap_or(&what));
             out += &warning_summary(diags.iter().filter(|d| !d.error).filter(own));
             out += &broken_report(&before_broken, &diags);
-            Ok((target_name, out))
-        })();
-        match result {
-            Ok((_, out)) => {
+            Ok(out)
+        })?;
+        Ok(note_lines(&notes) + &out)
+    }
+
+    /// Runs `body` in one store transaction: committed, or rolled back with
+    /// `created` files removed and the project files written again from the store.
+    fn transaction(&self, created: &[PathBuf], body: impl FnOnce() -> Out) -> Out {
+        self.db.execute_batch("BEGIN")?;
+        match body() {
+            Ok(out) => {
                 self.db.execute_batch("COMMIT")?;
-                let notes: String = notes.iter().map(|n| format!("Note: {n}\n")).collect();
-                Ok(notes + &out)
+                Ok(out)
             }
             Err(e) => {
                 self.db.execute_batch("ROLLBACK")?;
+                for path in created.iter().filter(|p| p.exists()) {
+                    fs::remove_file(path)?;
+                }
                 self.materialize(&self.index()?)?;
                 Err(e)
             }
@@ -1900,20 +1980,19 @@ impl Store {
                 if let Some(c) = clash {
                     return fail(format!("E1004 {} already exists; submit to it instead.", ix.syms[c].qname()));
                 }
-                let key = |i: &Item| (i.name.clone(), i.kind == Kind::Type);
-                if plan.iter().any(|p| p.0 == module && p.1.is_none() && key(&p.2) == key(item)) {
+                if plan.iter().any(|p| p.0 == module && p.1.is_none() && name_key(&p.2.name, p.2.kind) == name_key(&item.name, item.kind)) {
                     return fail(format!("E0103 the text defines {module}.{} twice.", item.name));
                 }
                 plan.push((module.clone(), existing, item.clone(), parsed.header.clone()));
             }
         }
 
-        let created_files: Vec<PathBuf> = created.iter().map(|(module, dir, _)| self.root.join(dir).join(format!("{module}.gleam"))).collect();
+        let created_files: Vec<PathBuf> =
+            created.iter().map(|(module, dir, _)| self.root.join(dir).join(format!("{module}.gleam"))).collect();
         if created_files.iter().any(|p| p.exists()) {
             return fail("E0101 the new module's file already exists outside the store; import or resolve it before creating this module");
         }
-        self.db.execute_batch("BEGIN")?;
-        let result = (|| -> Out {
+        let out = self.transaction(&created_files, || {
             for (path, dir, header) in &created {
                 self.db.execute("INSERT INTO modules VALUES (?1, ?2, ?3)", params![path, dir, header])?;
                 notes.push(format!("created module {path} ({dir}/{path}.gleam)"));
@@ -1956,13 +2035,7 @@ impl Store {
                         self.history(&e.id, "edit", &item.name)?;
                     }
                     None => {
-                        let id = new_id(item.kind, module, &item.name);
-                        let ord: i64 =
-                            self.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [module], |r| r.get(0))?;
-                        self.db.execute(
-                            "INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                            params![id, module, item.name, item.kind.as_str(), item.text, ord, revision(&item.text)],
-                        )?;
+                        let id = insert_symbol(&self.db, module, item, None)?;
                         self.history(&id, "create", &item.name)?;
                     }
                 }
@@ -1972,8 +2045,15 @@ impl Store {
             if !changed {
                 let broken = self.broken()?;
                 let still: Vec<&String> = unchanged.iter().filter(|u| broken.contains_key(*u)).collect();
-                let still = if still.is_empty() { String::new() } else { format!("Still broken: {} (`check` shows why).\n", still.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")) };
-                return Ok(format!("Unchanged: {}. The text equals the stored symbols, so nothing was saved or checked.\n{still}", unchanged.join(", ")));
+                let still = if still.is_empty() {
+                    String::new()
+                } else {
+                    format!("Still broken: {} (`check` shows why).\n", still.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "))
+                };
+                return Ok(format!(
+                    "Unchanged: {}. The text equals the stored symbols, so nothing was saved or checked.\n{still}",
+                    unchanged.join(", ")
+                ));
             }
             let modules: HashSet<&str> = plan.iter().map(|p| p.0.as_str()).collect();
             let own = |d: &Diag| match &d.symbol {
@@ -2006,11 +2086,14 @@ impl Store {
             let own_errors: Vec<&Diag> = diags.iter().filter(|d| d.error && own(d)).collect();
             if !own_errors.is_empty() {
                 let text: Vec<&str> = own_errors.iter().map(|d| d.text.as_str()).collect();
-                let hint = self.callee_hint(&own_errors, &saved)?;
-                return fail(format!("Not saved: the submitted text has errors.\n\n{}{hint}", text.join("\n\n")));
+                return fail(format!(
+                    "Not saved: the submitted text has errors.\n\n{}{}",
+                    text.join("\n\n"),
+                    self.callee_hint(&own_errors, &saved)?
+                ));
             }
             let after = self.index()?;
-            let before: Vec<(String, Option<String>)> = plan
+            let before: Before = plan
                 .iter()
                 .filter_map(|(module, existing, item, _)| {
                     let s = after.syms.iter().find(|s| &s.module == module && s.name == item.name && s.kind == item.kind)?;
@@ -2037,10 +2120,10 @@ impl Store {
                     let Some(a) = after.syms.iter().position(|s| s.id == before.id) else {
                         continue;
                     };
-                    if gleam::signature(&before.item()) == gleam::signature(&item.clone()) {
+                    if gleam::head(&before.item()) == gleam::head(item) {
                         continue;
                     }
-                    for j in (0..after.syms.len()).filter(|&j| after.uses[j].contains(&a)) {
+                    for &j in &after.used_by[a] {
                         let n = after.syms[j].qname();
                         let site = item.kind != Kind::Type || !sites(&after, j, a, false).is_empty();
                         if site && !broken.contains(n.as_str()) && !saved.contains(&n) && !unchecked.contains(&n) {
@@ -2049,26 +2132,15 @@ impl Store {
                     }
                 }
                 if !unchecked.is_empty() {
-                    out += &format!("\nNot checked until the errors above are fixed, and may need the same change: {}\n", unchecked.join(", "));
+                    out += &format!(
+                        "\nNot checked until the errors above are fixed, and may need the same change: {}\n",
+                        unchecked.join(", ")
+                    );
                 }
             }
             Ok(out)
-        })();
-        match result {
-            Ok(out) => {
-                self.db.execute_batch("COMMIT")?;
-                let notes: String = notes.iter().map(|n| format!("Note: {n}\n")).collect();
-                Ok(notes + &out)
-            }
-            Err(e) => {
-                self.db.execute_batch("ROLLBACK")?;
-                for path in created_files.iter().filter(|p| p.exists()) {
-                    fs::remove_file(path)?;
-                }
-                self.materialize(&self.index()?)?;
-                Err(e)
-            }
-        }
+        })?;
+        Ok(note_lines(&notes) + &out)
     }
 
     /// For a rejected submit whose every error is a call, with the wrong arity
@@ -2106,6 +2178,12 @@ impl Store {
         Ok(())
     }
 
+    /// Takes a symbol out of the project; its history stays.
+    fn retire(&self, id: &str, detail: &str) -> Result<(), Failure> {
+        self.db.execute("UPDATE symbols SET live = 0 WHERE id = ?1", [id])?;
+        self.history(id, "retire", detail)
+    }
+
     fn history(&self, id: &str, action: &str, detail: &str) -> Result<(), Failure> {
         self.db.execute(
             "INSERT INTO history(at, symbol, action, detail) VALUES (?1, ?2, ?3, ?4)",
@@ -2118,12 +2196,11 @@ impl Store {
         let ix = self.index()?;
         let i = self.resolve(&ix, name)?;
         let before = self.broken()?;
-        let users: Vec<String> = (0..ix.syms.len()).filter(|&j| ix.uses[j].contains(&i)).map(|j| ix.syms[j].qname()).collect();
+        let users: Vec<String> = ix.used_by[i].iter().map(|&j| ix.syms[j].qname()).collect();
         if !users.is_empty() {
             return fail(format!("E5001 {} is still used by:\n  {}", ix.syms[i].qname(), users.join("\n  ")));
         }
-        self.db.execute("UPDATE symbols SET live = 0 WHERE id = ?1", [&ix.syms[i].id])?;
-        self.history(&ix.syms[i].id, "retire", "")?;
+        self.retire(&ix.syms[i].id, "")?;
         let diags = self.check_all(&self.index()?)?;
         Ok(format!("Deleted {}.\n{}", ix.syms[i].qname(), broken_report(&before, &diags)))
     }
@@ -2138,7 +2215,9 @@ impl Store {
         let warnings = diags.len() - errors.len();
         let details = if show_warnings {
             diags.iter().filter(|d| !d.error).map(|d| d.text.as_str()).collect::<Vec<_>>().join("\n\n")
-        } else { String::new() };
+        } else {
+            String::new()
+        };
         if errors.is_empty() {
             Ok(format!("No errors ({warnings} warnings).\n{details}"))
         } else {
@@ -2152,7 +2231,6 @@ impl Store {
     /// them; `--all`, every test (D-44). Tests left out are made private in the
     /// projected files for the run, so gleeunit skips them on either target.
     fn test(&self, args: &[&str]) -> Out {
-        self.db.execute_batch(TEST_TABLES)?;
         let ix = self.index()?;
         let named: Vec<usize> = operands(args).iter().map(|n| self.resolve(&ix, n)).collect::<Result<_, _>>()?;
         let all = args.contains(&"--all");
@@ -2182,12 +2260,8 @@ impl Store {
             hashes.insert(t, hash);
         }
         // Suites outside `gleam test` that reach a change since tests last passed.
-        let changed: Vec<usize> = self
-            .since_pass()?
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|(id, _)| ix.syms.iter().position(|s| &s.id == id))
-            .collect();
+        let changed: Vec<usize> =
+            self.since_pass()?.unwrap_or_default().iter().filter_map(|(id, _)| ix.syms.iter().position(|s| &s.id == id)).collect();
         let suites = reach::reached(&reach::suites(self, &ix)?, &changed);
         let head = if run.len() == tests.len() {
             format!("Ran all {} tests.\n", tests.len())
@@ -2270,8 +2344,7 @@ impl Store {
 
     /// Symbols changed since `test` last passed in full: (id, text then, `None`
     /// if new). `None` if it never has.
-    fn since_pass(&self) -> Result<Option<Vec<(String, Option<String>)>>, Failure> {
-        self.db.execute_batch(TEST_TABLES)?;
+    fn since_pass(&self) -> Result<Option<Before>, Failure> {
         if !self.db.query_row("SELECT EXISTS(SELECT 1 FROM test_base)", [], |r| r.get::<_, bool>(0))? {
             return Ok(None);
         }
@@ -2355,11 +2428,12 @@ impl Store {
         let Some(open) = open else {
             return fail(format!("E1005 {} isn't a function; --from takes a test or another function without arguments.", s.qname()));
         };
-        if !params(&gleam::signature(&s.item()), &s.name).is_empty() {
+        if !params(&gleam::head(&s.item()), &s.name).is_empty() {
             return fail(format!("E1005 {} takes arguments; --from takes a test or another function without arguments.", s.qname()));
         }
         let body = &s.text[open + 1..s.text.rfind('}').unwrap_or(s.text.len())];
-        let imports: String = self.header(&s.module)?.lines().filter(|l| !l.trim_start().starts_with("//")).map(|l| format!("{l}\n")).collect();
+        let imports: String =
+            self.header(&s.module)?.lines().filter(|l| !l.trim_start().starts_with("//")).map(|l| format!("{l}\n")).collect();
         Ok((imports, format!("{}\n", body.trim_matches('\n'))))
     }
 
@@ -2414,21 +2488,24 @@ impl Store {
     }
 }
 
-/// Failing tests in `gleam test` output: `module.function` -> (unfinished or
-/// wrong, the line naming it). Erlang prints modules as `pilot@x_test`.
-fn failures(output: &str) -> std::collections::BTreeMap<String, (String, String)> {
+/// Failed tests in `gleam test` output by `module.name` (Erlang prints
+/// modules as `pilot@x_test`): whether wrong or unfinished, and the failure
+/// block (`assert …`, `test:`, `code:`, `left:`, `right:`, `info:`).
+fn failures(output: &str) -> BTreeMap<String, (String, String)> {
     let clean = strip_ansi(output);
-    let mut out = std::collections::BTreeMap::new();
-    let mut kind = "";
-    for line in clean.lines() {
-        let line = line.trim();
-        if ["todo ", "assert ", "let assert ", "panic "].iter().any(|p| line.starts_with(p)) {
-            kind = if line.starts_with("todo ") { "unfinished" } else { "wrong" };
-        } else if let Some(name) = line.strip_prefix("test: ")
-            && !kind.is_empty()
-        {
-            out.insert(name.replace('@', "/"), (kind.into(), line.into()));
-            kind = "";
+    let mut out = BTreeMap::new();
+    let mut block: Vec<&str> = vec![];
+    for line in clean.lines().map(str::trim).chain([""]) {
+        let start = ["todo ", "assert ", "let assert ", "panic "].iter().any(|p| line.starts_with(p));
+        if (start || line.is_empty()) && !block.is_empty() {
+            if let Some(name) = block.iter().find_map(|l| l.strip_prefix("test: ")) {
+                let kind = if block[0].starts_with("todo ") { "unfinished" } else { "wrong" };
+                out.insert(name.replace('@', "/"), (kind.into(), block.join("\n")));
+            }
+            block.clear();
+        }
+        if start || (!block.is_empty() && !line.is_empty()) {
+            block.push(line);
         }
     }
     out
@@ -2681,22 +2758,11 @@ fn format_gleam(source: &str) -> Result<String, Failure> {
     }
 }
 
-/// `import` paths needed for `alias.name` references to modules the header
-/// doesn't import yet: project modules by last path segment, or the stdlib.
 /// Where a function's body opens: the first `{` outside parentheses after
 /// its `fn name(`.
 fn fn_body_start(s: &Sym) -> Option<usize> {
     let at = s.text.find(&format!("fn {}(", s.name))?;
-    let mut depth = 0i32;
-    for (i, c) in s.text[at..].char_indices() {
-        match c {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth -= 1,
-            '{' if depth == 0 => return Some(at + i),
-            _ => {}
-        }
-    }
-    None
+    Some(at + gleam::body_start(&s.text[at..])?)
 }
 
 /// A function's parameters from its signature: (label if any, name).
@@ -2717,7 +2783,7 @@ fn trace_wrap(s: &Sym) -> String {
     let decl = format!("fn {}(", s.name);
     let public = s.text.lines().any(|l| l.trim_start().starts_with(&format!("pub {decl}")));
     let renamed = s.text.replacen(&format!("pub {decl}"), &decl, 1).replacen(&decl, &format!("fn {inner}("), 1);
-    let ps = params(&gleam::signature(&s.item()), &s.name);
+    let ps = params(&gleam::head(&s.item()), &s.name);
     let names: Vec<String> = (0..ps.len()).map(|i| format!("p{i}")).collect();
     let decls: Vec<String> =
         ps.iter().zip(&names).map(|((label, _), n)| label.as_ref().map_or(n.clone(), |l| format!("{l} {n}"))).collect();
@@ -2745,7 +2811,10 @@ fn trace_report(output: &str) -> String {
         if lines.get(i + 1).is_some_and(|n| n.starts_with("#(\"solace-")) && line.contains(".gleam:") {
             continue;
         }
-        let event = line.strip_prefix("#(\"solace-call\", \"").map(|r| (true, r)).or(line.strip_prefix("#(\"solace-return\", \"").map(|r| (false, r)));
+        let event = line
+            .strip_prefix("#(\"solace-call\", \"")
+            .map(|r| (true, r))
+            .or(line.strip_prefix("#(\"solace-return\", \"").map(|r| (false, r)));
         let Some((call, rest)) = event else {
             out += &format!("{line}\n");
             continue;
@@ -2823,9 +2892,11 @@ fn weak_asserts(text: &str, aliases: &HashSet<String>) -> Vec<String> {
     out
 }
 
+/// `import` paths needed for `alias.name` references to modules the header
+/// doesn't import yet: project modules by last path segment, or the stdlib.
 /// `test`: the code is in a test module, which may also import test modules.
 fn missing_imports(ix: &Index, header: &str, text: &str, test: bool) -> Vec<String> {
-    let aliases: HashSet<String> = gleam::imports(header).into_iter().map(|i| i.alias).collect();
+    let aliases = aliases(header);
     let mut out = vec![];
     for r in gleam::references(text) {
         let Ref::Qualified(alias, _) = r else {
@@ -2932,11 +3003,11 @@ fn unimported_name(ix: &Index, error: &str) -> Option<(String, String)> {
     let mut found: Vec<&str> = ix
         .syms
         .iter()
-        .filter(|s| s.kind == Kind::Type && gleam::signature(&s.item()).contains("pub type"))
+        .filter(|s| s.kind == Kind::Type && gleam::head(&s.item()).contains("pub type"))
         .filter(|s| if is_type { s.name == name } else { gleam::constructors(&s.text).contains(&name) })
         .map(|s| s.module.as_str())
         .collect();
-    found.dedup();
+    unique(&mut found);
     match found.as_slice() {
         [m] => Some((m.to_string(), item)),
         _ => None,
@@ -3092,18 +3163,93 @@ fn warning_summary<'a>(diags: impl Iterator<Item = &'a Diag>) -> String {
             )
         })
         .collect();
-    if lines.is_empty() { String::new() } else { format!("\nWarnings:\n{}\nUse `check --warnings` for full diagnostics.\n", lines.join("\n")) }
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("\nWarnings:\n{}\nUse `check --warnings` for full diagnostics.\n", lines.join("\n"))
+    }
 }
 
 /// What a change did to the broken set (D-46): `before` is the broken table
 /// as it was. Fixed symbols are named; a symbol broken with the same errors as
 /// before gets one line; new errors are printed in full, once per message, and
 /// the other errors with that message as one line each (Spec 3 §6).
+/// What a name is unique by: types and values are separate namespaces in Gleam.
+fn name_key(name: &str, kind: Kind) -> (String, bool) {
+    (name.to_string(), kind == Kind::Type)
+}
+
+/// Holds the lock on the file at `path`, created if missing; waits for it.
+fn lock_file(path: &Path) -> Result<fs::File, Failure> {
+    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
+    f.lock()?;
+    Ok(f)
+}
+
+/// The lock on the file at `path`, or `None` while another holds it.
+fn try_lock_file(path: &Path) -> Result<Option<fs::File>, Failure> {
+    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
+    Ok(f.try_lock().is_ok().then_some(f))
+}
+
+/// Bytes stored in JSON as an array of numbers.
+fn json_bytes(a: &[Value]) -> Vec<u8> {
+    a.iter().map(|b| b.as_u64().unwrap_or(0) as u8).collect()
+}
+
+/// A search query without the quotes, backticks or apostrophes around it
+/// (`find "Customer(.."`: the quotes delimit the query, run 18).
+fn unquoted(query: &str) -> &str {
+    ['"', '\'', '`'].iter().find_map(|&c| query.strip_prefix(c)?.strip_suffix(c)).filter(|q| !q.is_empty()).unwrap_or(query)
+}
+
+/// Writes a file whole or not at all: a reader never sees half of it.
+fn write_atomic(path: &Path, bytes: impl AsRef<[u8]>) -> Result<(), Failure> {
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    fs::write(&tmp, bytes)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// `n` and the noun, plural unless `n` is 1: "1 file", "2 files".
+fn count(n: usize, noun: &str) -> String {
+    format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
+}
+
+/// A project file's name as Solace lists it: `/`-separated, without `.` parts.
+fn file_name(path: &Path) -> String {
+    path.components()
+        .filter(|c| !matches!(c, std::path::Component::CurDir))
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Symbols as they were before a change: (id, text then; `None` if new).
+type Before = Vec<(String, Option<String>)>;
+
+/// Notes for a reply, a line each.
+fn note_lines(notes: &[String]) -> String {
+    notes.iter().map(|n| format!("Note: {n}\n")).collect()
+}
+
+/// Drops repeats anywhere in `v`, keeping the first of each, in order.
+fn unique<T: PartialEq>(v: &mut Vec<T>) {
+    let mut out = Vec::with_capacity(v.len());
+    for x in v.drain(..) {
+        if !out.contains(&x) {
+            out.push(x);
+        }
+    }
+    *v = out;
+}
+
 fn broken_report(before: &HashMap<String, String>, diags: &[Diag]) -> String {
     let errors: Vec<&Diag> = diags.iter().filter(|d| d.error).collect();
     let mut names: Vec<String> =
         errors.iter().map(|d| d.symbol.clone().or(d.module.clone().map(|m| m + " imports")).unwrap_or("?".into())).collect();
-    names.dedup();
+    unique(&mut names);
     let mut fixed: Vec<&str> = before.keys().map(String::as_str).filter(|k| !names.iter().any(|n| n == k)).collect();
     fixed.sort();
     let fixed = if fixed.is_empty() { String::new() } else { format!("Fixed: {}.\n", fixed.join(", ")) };
@@ -3111,7 +3257,8 @@ fn broken_report(before: &HashMap<String, String>, diags: &[Diag]) -> String {
         return format!("{fixed}The project type-checks.\n");
     }
     let mut out = format!("\nBroken symbols ({}): {}\n{fixed}", names.len(), names.join(", "));
-    let own = |sym: &str| errors.iter().filter(|d| d.symbol.as_deref() == Some(sym)).map(|d| d.text.as_str()).collect::<Vec<_>>().join("\n\n");
+    let own =
+        |sym: &str| errors.iter().filter(|d| d.symbol.as_deref() == Some(sym)).map(|d| d.text.as_str()).collect::<Vec<_>>().join("\n\n");
     let same: Vec<&String> = names.iter().filter(|n| before.get(*n).is_some_and(|t| *t == own(n))).collect();
     if !same.is_empty() {
         out += "Still broken, with the errors shown before (`check` shows them again):\n";
@@ -3176,18 +3323,104 @@ fn test_index(sources: &[(&str, &str, &str)]) -> Index {
         let m = gleam::split(text);
         modules.push(ModuleRow { path: (*path).into(), dir: (*dir).into(), header: m.header });
         for item in m.items {
-            syms.push(Sym { id: format!("fn:{path}.{}", item.name), module: (*path).into(), name: item.name, kind: item.kind, text: item.text });
+            syms.push(Sym {
+                id: format!("fn:{path}.{}", item.name),
+                module: (*path).into(),
+                name: item.name,
+                kind: item.kind,
+                text: item.text,
+            });
         }
     }
     Index::build(syms, modules)
 }
 
+/// Fixtures for every module's tests.
+#[cfg(test)]
+mod testing {
+    use super::*;
+
+    /// A folder for one test, deleted when the test ends, passed or failed.
+    pub(crate) struct Scratch(pub PathBuf);
+    impl Scratch {
+        pub(crate) fn new() -> Scratch {
+            let dir = env::temp_dir().join(format!("solace-test-{}", unique_id()));
+            fs::create_dir_all(&dir).unwrap();
+            Scratch(dir)
+        }
+        /// Writes `files` (path, text) into the folder.
+        pub(crate) fn with(self, files: &[(&str, &str)]) -> Scratch {
+            for (path, text) in files {
+                let p = self.0.join(path);
+                fs::create_dir_all(p.parent().unwrap()).unwrap();
+                fs::write(p, text).unwrap();
+            }
+            self
+        }
+        /// Gleam's packages and compiled dependencies, so `gleam test` runs
+        /// without downloading anything: the bench pilot's.
+        pub(crate) fn with_packages(self) -> Scratch {
+            let pilot = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/pilot-large");
+            for f in ["manifest.toml", "test/pilot_test.gleam"] {
+                fs::create_dir_all(self.0.join(f).parent().unwrap()).unwrap();
+                fs::copy(pilot.join(f), self.0.join(f)).unwrap();
+            }
+            let name = fs::read_to_string(self.0.join("gleam.toml")).map(|_| workspace::name(&self.0)).unwrap_or_else(|_| "app".into());
+            fs::write(self.0.join("gleam.toml"), fs::read_to_string(pilot.join("gleam.toml")).unwrap().replace("pilot_large", &name))
+                .unwrap();
+            migrate::copy_tree(&pilot.join("build"), &self.0.join("build"), &|_| false).unwrap();
+            self
+        }
+        /// The folder's Gleam project, read into a new store.
+        pub(crate) fn import(self) -> Project {
+            if !self.0.join("gleam.toml").exists() {
+                fs::write(self.0.join("gleam.toml"), "name = \"app\"\nversion = \"1.0.0\"\n").unwrap();
+            }
+            import(&self.0).unwrap();
+            Project { store: Store::at(&self.0).unwrap(), _dir: self }
+        }
+    }
+    impl std::ops::Deref for Scratch {
+        type Target = Path;
+        fn deref(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A store and its folder, deleted together.
+    pub(crate) struct Project {
+        pub(crate) store: Store,
+        _dir: Scratch,
+    }
+    impl std::ops::Deref for Project {
+        type Target = Store;
+        fn deref(&self) -> &Store {
+            &self.store
+        }
+    }
+
+    /// A Gleam project of `files` (path, text), named `app`, in a store.
+    pub(crate) fn project(files: &[(&str, &str)]) -> Project {
+        Scratch::new().with(files).import()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use testing::*;
 
-    /// D-14: a multi-name inspect prints each signature once, and trims, then
-    /// defers names, to stay within the budget.
+    #[test]
+    fn broken_symbols_counted_once() {
+        let d = |sym: &str| Diag { error: true, module: None, symbol: Some(sym.into()), text: format!("error: {sym}") };
+        let out = broken_report(&HashMap::new(), &[d("a.f"), d("a.g"), d("a.f")]);
+        assert!(out.contains("Broken symbols (2): a.f, a.g"), "{out}");
+    }
     #[test]
     fn agent_reference_leaves_out_host_and_task_commands() {
         // Tests run outside a board run; `help` keeps everything.
@@ -3199,7 +3432,9 @@ mod tests {
         // test examples (D-48: a test at the level reported, one per shifted
         // behavior), in under 3k bytes; `help` keeps every option.
         assert!(r.len() < 3000, "{}", r.len());
-        assert!(r.contains("Changing a signature or adding a field") && r.contains("one at the level the task reports") && r.contains("`help`"));
+        assert!(
+            r.contains("Changing a signature or adding a field") && r.contains("one at the level the task reports") && r.contains("`help`")
+        );
         assert!(!r.contains("probe --from <fn>") && REFERENCE.contains("probe --from <fn>") && REFERENCE.contains("--replace [--all]"));
         assert!(r.contains("Imports are added") && !r.contains("task ask"));
         // `help` for agents: every option, but no host or task commands here.
@@ -3219,26 +3454,26 @@ mod tests {
 
     #[test]
     fn dependencies_show_their_public_api() {
-        let root = env::temp_dir().join(format!("solace-dependency-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::create_dir_all(root.join("build/packages/dep/src/dep")).unwrap();
-        fs::write(root.join("gleam.toml"), "name = \"app\"\nversion = \"1.0.0\"\n").unwrap();
-        fs::write(root.join("src/app.gleam"), "pub fn main() { 1 }\n").unwrap();
-        fs::write(
-            root.join("build/packages/dep/src/dep/api.gleam"),
-            "//// Talks to things.\n////\n//// A long guide.\n\nimport gleam/list\n\n\
+        let store = project(&[
+            ("src/app.gleam", "pub fn main() { 1 }\n"),
+            (
+                "build/packages/dep/src/dep/api.gleam",
+                "//// Talks to things.\n////\n//// A long guide.\n\nimport gleam/list\n\n\
              /// Makes a widget.\n/// Second doc line.\npub fn make(size: Int) -> Widget {\n  secret(size)\n}\n\n\
              // SECTION ---\n\nfn secret(n: Int) -> Widget {\n  Widget(n)\n}\n\n\
              /// A widget.\npub opaque type Widget {\n  Widget(size: Int)\n}\n",
-        )
-        .unwrap();
-        import(&root).ok().unwrap();
-        let store = Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root: root.clone() };
+            ),
+        ]);
         // A module: its first doc paragraph and public declarations, no bodies.
         let out = store.view(&["dep/api"], false, usize::MAX).ok().unwrap();
-        assert!(out.starts_with("// ── module dep/api (dep, a dependency; read only)") && out.contains("//// Talks to things.\n\n"), "{out}");
-        assert!(out.contains("/// Makes a widget.\npub fn make(size: Int) -> Widget\n") && out.contains("pub opaque type Widget\n"), "{out}");
+        assert!(
+            out.starts_with("// ── module dep/api (dep, a dependency; read only)") && out.contains("//// Talks to things.\n\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("/// Makes a widget.\npub fn make(size: Int) -> Widget\n") && out.contains("pub opaque type Widget\n"),
+            "{out}"
+        );
         for hidden in ["secret", "A long guide", "SECTION", "Widget(size", "Second doc line"] {
             assert!(!out.contains(hidden), "{hidden}: {out}");
         }
@@ -3247,18 +3482,20 @@ mod tests {
         assert!(one.contains("/// Second doc line.\npub fn make(size: Int) -> Widget") && !one.contains("secret(size)"), "{one}");
         assert!(one.contains("app.main"), "{one}");
         assert!(store.view(&["dep/api.secret"], false, usize::MAX).unwrap_err().0.contains("E1001"));
-        fs::remove_dir_all(root).unwrap();
     }
 
+    /// D-14: a multi-name inspect prints each signature once, and trims, then
+    /// defers names, to stay within the budget.
     #[test]
     fn inspect_dedups_and_fits_budget() {
-        let root = env::temp_dir().join(format!("solace-inspect-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/pilot-large");
-        assert!(Command::new("cp").arg("-r").arg(&src).arg(&root).status().unwrap().success());
-        let _ = fs::remove_dir_all(root.join(".solace"));
-        import(&root).ok().unwrap();
-        let store = Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root: root.clone() };
+        // A real project of some size: the bench pilot's code.
+        let dir = Scratch::new();
+        let pilot = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/pilot-large");
+        for top in ["src", "test"] {
+            migrate::copy_tree(&pilot.join(top), &dir.join(top), &|_| false).unwrap();
+        }
+        fs::copy(pilot.join("gleam.toml"), dir.join("gleam.toml")).unwrap();
+        let store = dir.import();
         let names = ["store.put_shipment", "shipments.dispatch", "shipments.deliver", "fulfillment.ship"];
         let ok = |r: Out| r.ok().unwrap();
 
@@ -3282,7 +3519,6 @@ mod tests {
         let mixed = ok(store.inspect(&["shipments.deliver", "shipping.standard_cost_cents"], false, usize::MAX));
         assert!(mixed.contains("// ── pilot/shipments.deliver ") && mixed.contains("E1001 unknown name: shipping.standard_cost_cents"));
         assert!(store.inspect(&["shipping.nope"], false, usize::MAX).is_err());
-        assert!(looks_like_code("let assert Ok(q) = checkout.quote(db, o.id, Standard)") && looks_like_code("echo q"));
         // D-46: a type's users split into the sites that list every field and
         // the rest by name; a function's callers show the call line.
         let ty = ok(store.inspect(&["customer.Customer"], true, usize::MAX));
@@ -3297,17 +3533,19 @@ mod tests {
         assert!(r.contains("-- pilot/checkout.quote (above)\n  > line "), "{r}");
         SHOWN.with(|s| *s.borrow_mut() = None);
         assert!(ok(store.refs("pricing.quote")).contains("-- pilot/checkout.quote\n"));
+    }
+
+    #[test]
+    fn code_is_told_from_commands() {
+        assert!(looks_like_code("let assert Ok(q) = checkout.quote(db, o.id, Standard)") && looks_like_code("echo q"));
         assert!(!looks_like_code("probe --from checkout_test.quote_test --trace pricing.quote"));
-        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn import_creates_settings_without_overwriting() {
         for existing in [None, Some("# custom\nresources = [\"docs/**\"]\n")] {
-            let root = env::temp_dir().join(new_id(Kind::Fn, "import", "settings"));
-            fs::create_dir_all(root.join("src")).unwrap();
-            fs::write(root.join("gleam.toml"), "name = \"app\"\nversion = \"1.0.0\"\n").unwrap();
-            fs::write(root.join("src/app.gleam"), "pub fn main() { 1 }\n").unwrap();
+            let root =
+                Scratch::new().with(&[("gleam.toml", "name = \"app\"\nversion = \"1.0.0\"\n"), ("src/app.gleam", "pub fn main() { 1 }\n")]);
             if let Some(text) = existing {
                 fs::write(root.join("solace.toml"), text).unwrap();
             }
@@ -3329,92 +3567,120 @@ mod tests {
             assert!(import(&root).unwrap().contains("Created solace.toml"));
             assert!(lockdown::settings(&root).is_ok());
             assert_eq!(fs::read(root.join(".solace/store.db")).unwrap(), store);
-            fs::remove_dir_all(root).unwrap();
         }
     }
 
     #[test]
     fn submit_new_creates_a_module() {
-        let root = env::temp_dir().join(format!("solace-new-module-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("gleam.toml"), "name = \"app\"\nversion = \"1.0.0\"\n").unwrap();
-        fs::write(root.join("src/app.gleam"), "pub fn main() { 1 }\n").unwrap();
-        fs::create_dir_all(root.join("test")).unwrap();
-        fs::write(root.join("test/helper.gleam"), "pub fn two() { 2 }\n").unwrap();
-        import(&root).unwrap();
-        let store = Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root: root.clone() };
+        let store = project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
         // Code with errors creates nothing.
         assert!(store.submit_symbols(None, Some("calc"), "pub fn add(a: Int) -> Int { a <> 1 }").is_err());
-        assert!(!store.is_module("calc").unwrap());
+        assert!(store.resolve_module(&store.index().unwrap(), "calc").is_none());
         let out = store.submit_symbols(None, Some("calc"), "pub fn add(a: Int, b: Int) -> Int { a + b }").unwrap();
         assert!(out.contains("created module calc (src/calc.gleam)"), "{out}");
-        assert!(store.is_module("calc").unwrap());
+        assert!(store.resolve_module(&store.index().unwrap(), "calc").is_some());
         let out = store.submit_symbols(None, Some("calc_test"), "pub fn add_test() { assert calc.add(1, 2) == 3 }").unwrap();
         assert!(out.contains("(test/calc_test.gleam)"), "{out}");
         assert!(store.submit_symbols(None, Some("Bad"), "pub fn x() { 1 }").unwrap_err().0.starts_with("E1003"));
-        // A probe runs statements against the project and leaves nothing behind.
+        // A whole new module in one submit: module comment, imports and several symbols.
+        let module = "//// Geometry helpers.\nimport calc\n\npub const unit = 1\n\npub type Shape {\n  Square(Int)\n}\n\npub fn area(s: Shape) -> Int {\n  let Square(n) = s\n  calc.add(n * n, unit)\n}\n";
+        let out = store.submit_symbols(None, Some("geo"), module).unwrap();
+        assert!(out.contains("created module geo") && out.contains("geo.unit, geo.Shape, geo.area"), "{out}");
+        let file = fs::read_to_string(store.root.join("src/geo.gleam")).unwrap();
+        assert!(file.starts_with("//// Geometry helpers.\n") && file.contains("import calc\n"), "{file}");
+        assert!(store.submit_symbols(None, Some("geo2"), "pub fn a() { 1 }\npub fn a() { 2 }").unwrap_err().0.starts_with("E0103"));
+        // Blocks may name a module that doesn't exist yet; a named block still holds one symbol.
+        let out = store
+            .submit_symbols(None, None, "// ── shapes.side ──\npub fn side() { 2 }\n// ── shapes.twice ──\npub fn twice() { side() * 2 }\n")
+            .unwrap();
+        assert!(out.contains("created module shapes"), "{out}");
+        assert!(
+            store
+                .submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int) -> Int { a + b }\npub fn sub() { 1 }")
+                .unwrap_err()
+                .0
+                .starts_with("E0101")
+        );
+    }
+
+    /// `calc.add` and `scale`, a test helper, and a test with a local.
+    fn probe_project() -> Project {
+        project(&[
+            (
+                "src/calc.gleam",
+                "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn scale(x: Int, by factor: Int) -> Int {\n  factor * x\n}\n",
+            ),
+            ("test/helper.gleam", "pub fn two() {\n  2\n}\n"),
+            ("test/calc_test.gleam", "import calc\n\npub fn sum_test() {\n  let x = calc.add(1, 2)\n  assert x == 3\n}\n"),
+        ])
+    }
+
+    #[test]
+    fn probe_runs_and_leaves_nothing() {
+        let store = probe_project();
+        let probe_file = store.root.join("test/solace_probe.gleam");
         let out = store.probe("echo calc.add(2, 3)", None, &[]).unwrap();
         assert!(out.contains("5"), "{out}");
-        assert!(!root.join("test/solace_probe.gleam").exists());
+        assert!(!probe_file.exists());
         let err = store.probe("echo calc.nope()", None, &[]).unwrap_err().0;
         assert!(err.contains("The probe ran as") && err.contains("import calc"), "{err}");
-        assert!(!root.join("test/solace_probe.gleam").exists());
-        // Test-side code (probes, tests) imports test helpers automatically; source code doesn't.
-        let out = store.probe("echo helper.two()", None, &[]).unwrap();
-        assert!(out.contains("2"), "{out}");
-        let out = store.submit_symbols(None, Some("calc_test"), "pub fn two_test() { assert helper.two() == 2 }").unwrap();
-        assert!(out.contains("import helper"), "{out}");
-        assert!(store.submit_symbols(None, Some("calc"), "pub fn four() { helper.two() * 2 }").is_err());
+        assert!(!probe_file.exists());
+        // A probe is test-side code: it may use test helpers.
+        assert!(store.probe("echo helper.two()", None, &[]).unwrap().contains("2"));
         // `--from` starts from a function's body; a single expression is printed (D-43).
-        store.submit_symbols(None, Some("calc_test"), "pub fn sum_test() {\n  let x = calc.add(1, 2)\n  assert x == 3\n}").unwrap();
         let out = store.probe("echo x + 10", Some("calc_test.sum_test"), &[]).unwrap();
         assert!(out.contains("13"), "{out}");
         assert!(store.probe("", Some("calc.add"), &[]).unwrap_err().0.starts_with("E1005"));
         let out = store.probe("calc.add(20, 3)", None, &[]).unwrap();
         assert!(out.contains("23") && !out.contains("warning"), "{out}");
-        // `--trace` shows each call and result, then puts the module back.
-        let before = fs::read_to_string(root.join("src/calc.gleam")).unwrap();
+    }
+
+    #[test]
+    fn probe_trace_shows_calls_and_puts_the_module_back() {
+        let store = probe_project();
+        let before = fs::read_to_string(store.root.join("src/calc.gleam")).unwrap();
         let out = store.probe("calc.add(2, 3)", None, &["calc.add"]).unwrap();
         assert!(out.contains("→ calc.add(2, 3)") && out.contains("← calc.add = 5"), "{out}");
-        assert_eq!(fs::read_to_string(root.join("src/calc.gleam")).unwrap(), before);
-        store.submit_symbols(None, Some("calc"), "pub fn scale(x: Int, by factor: Int) -> Int { factor * x }").unwrap();
+        assert_eq!(fs::read_to_string(store.root.join("src/calc.gleam")).unwrap(), before);
         let out = store.probe("calc.scale(3, by: 2)", None, &["calc.scale"]).unwrap();
         assert!(out.contains("← calc.scale = 6"), "{out}");
         assert!(store.probe("1", None, &["calc_test"]).is_err());
-        // An assert whose expected side reads the value it checks gets a note.
-        let out = store.submit_symbols(None, Some("calc_test"), "pub fn weak_test() {\n  let q = #(1, 2)\n  assert q.0 == q.1 - 1\n  assert q.1 == 2\n}").unwrap();
+    }
+
+    #[test]
+    fn test_helpers_are_imported_only_by_test_code() {
+        let store = probe_project();
+        let out = store.submit_symbols(None, Some("calc_test"), "pub fn two_test() { assert helper.two() == 2 }").unwrap();
+        assert!(out.contains("import helper"), "{out}");
+        assert!(store.submit_symbols(None, Some("calc"), "pub fn four() { helper.two() * 2 }").is_err());
+    }
+
+    /// D-43: an assert whose expected side reads the value it checks gets a note.
+    #[test]
+    fn weak_asserts_get_a_note() {
+        let store = probe_project();
+        let out = store
+            .submit_symbols(
+                None,
+                Some("calc_test"),
+                "pub fn weak_test() {\n  let q = #(1, 2)\n  assert q.0 == q.1 - 1\n  assert q.1 == 2\n}",
+            )
+            .unwrap();
         assert!(out.contains("`assert q.0 == q.1 - 1` reads `q` on both sides") && !out.contains("assert q.1 == 2`"), "{out}");
-        // A whole new module in one submit: module comment, imports and several symbols.
-        let module = "//// Geometry helpers.\nimport calc\n\npub const unit = 1\n\npub type Shape {\n  Square(Int)\n}\n\npub fn area(s: Shape) -> Int {\n  let Square(n) = s\n  calc.add(n * n, unit)\n}\n";
-        let out = store.submit_symbols(None, Some("geo"), module).unwrap();
-        assert!(out.contains("created module geo") && out.contains("geo.unit, geo.Shape, geo.area"), "{out}");
-        let file = fs::read_to_string(root.join("src/geo.gleam")).unwrap();
-        assert!(file.starts_with("//// Geometry helpers.\n") && file.contains("import calc\n"), "{file}");
-        assert!(store.submit_symbols(None, Some("geo2"), "pub fn a() { 1 }\npub fn a() { 2 }").unwrap_err().0.starts_with("E0103"));
-        // Blocks may name a module that doesn't exist yet; a named block still holds one symbol.
-        let out = store.submit_symbols(None, None, "// ── shapes.side ──\npub fn side() { 2 }\n// ── shapes.twice ──\npub fn twice() { side() * 2 }\n").unwrap();
-        assert!(out.contains("created module shapes"), "{out}");
-        assert!(store.submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int) -> Int { a + b }\npub fn sub() { 1 }").unwrap_err().0.starts_with("E0101"));
-        fs::remove_dir_all(&root).unwrap();
     }
 
     /// A small project: `calc.add` and three callers.
-    fn calc_project(name: &str) -> Store {
-        let root = env::temp_dir().join(new_id(Kind::Fn, name, ""));
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("gleam.toml"), "name = \"app\"\nversion = \"1.0.0\"\n").unwrap();
-        let callers = "pub fn one() -> Int {\n  add(0, 1)\n}\n\npub fn two() -> Int {\n  add(1, 1)\n}\n\npub fn three() -> Int {\n  add(1, 2)\n}\n";
-        fs::write(root.join("src/calc.gleam"), format!("pub fn add(a: Int, b: Int) -> Int {{\n  a + b\n}}\n\n{callers}")).unwrap();
-        import(&root).unwrap();
-        Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root }
+    fn calc_project() -> Project {
+        let callers =
+            "pub fn one() -> Int {\n  add(0, 1)\n}\n\npub fn two() -> Int {\n  add(1, 1)\n}\n\npub fn three() -> Int {\n  add(1, 2)\n}\n";
+        project(&[("src/calc.gleam", &format!("pub fn add(a: Int, b: Int) -> Int {{\n  a + b\n}}\n\n{callers}"))])
     }
 
     /// D-46: a submit reports what changed in the broken set; an error seen
     /// before is one line, and errors with one message are printed in full once.
     #[test]
     fn signature_change_reports_changes_once() {
-        let store = calc_project("signature-change");
+        let store = calc_project();
         let out = store.submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int, c: Int) -> Int { a + b + c }").unwrap();
         assert!(out.contains("Broken symbols (3)") && out.contains("same error: 2 more"), "{out}");
         assert_eq!(out.matches("Expected 3 arguments, got 2").count(), 1, "{out}");
@@ -3426,96 +3692,96 @@ mod tests {
         // `check` stays complete.
         let full = store.check().unwrap_err().0;
         assert_eq!(full.matches("Expected 3 arguments, got 2").count(), 2, "{full}");
-        let out = store.submit_symbols(None, None, "// ── calc.two ──\npub fn two() -> Int { add(1, 1, 0) }\n// ── calc.three ──\npub fn three() -> Int { add(1, 2, 0) }\n").unwrap();
+        let out = store
+            .submit_symbols(
+                None,
+                None,
+                "// ── calc.two ──\npub fn two() -> Int { add(1, 1, 0) }\n// ── calc.three ──\npub fn three() -> Int { add(1, 2, 0) }\n",
+            )
+            .unwrap();
         assert!(out.contains("Fixed: calc.three, calc.two.\nThe project type-checks."), "{out}");
-        fs::remove_dir_all(&store.root).unwrap();
     }
 
     /// D-46: text equal to what is stored is reported unchanged, and when
     /// nothing changed the type check is skipped.
     #[test]
     fn unchanged_submit_skips_check() {
-        let store = calc_project("unchanged");
+        let store = calc_project();
         let blocks = "// ── calc.one ──\npub fn one() -> Int { add(0, 2) }\n// ── calc.two ──\npub fn two() -> Int { add(1, 1) }\n";
         let out = store.submit_symbols(Some("calc.one"), None, blocks).unwrap();
-        assert!(out.contains("plain `submit` does the same") && out.contains("Saved calc.one.\nUnchanged (the same as stored): calc.two."), "{out}");
+        assert!(
+            out.contains("plain `submit` does the same") && out.contains("Saved calc.one.\nUnchanged (the same as stored): calc.two."),
+            "{out}"
+        );
         // A source change on disk would show if the project were checked again.
         fs::write(store.root.join("src/calc.gleam"), "not gleam").unwrap();
         let out = store.submit_symbols(Some("calc.two"), None, blocks).unwrap();
         assert!(out.contains("Unchanged: calc.one, calc.two.") && out.contains("nothing was saved or checked"), "{out}");
         assert_eq!(fs::read_to_string(store.root.join("src/calc.gleam")).unwrap(), "not gleam");
-        fs::remove_dir_all(&store.root).unwrap();
     }
 
     /// D-44: `test` runs the tests whose reach changed since they passed, those
     /// that failed, and those reaching foreign code; the rest are skipped.
     #[test]
     fn test_runs_what_reaches_a_change() {
-        let root = env::temp_dir().join(format!("solace-test-select-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let pilot = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/pilot-large");
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::create_dir_all(root.join("test")).unwrap();
-        for f in ["gleam.toml", "manifest.toml", "test/pilot_test.gleam"] {
-            fs::copy(pilot.join(f), root.join(f)).unwrap();
-        }
-        assert!(Command::new("cp").arg("-r").arg(pilot.join("build")).arg(root.join("build")).status().unwrap().success());
-        fs::write(
-            root.join("src/calc.gleam"),
-            "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn double(a: Int) -> Int {\n  add(a, a)\n}\n\npub fn sub(a: Int, b: Int) -> Int {\n  a - b\n}\n\n@external(erlang, \"erlang\", \"abs\")\npub fn abs(x: Int) -> Int\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("test/calc_test.gleam"),
-            "import calc\n\npub fn add_test() {\n  assert calc.add(1, 2) == 3\n}\n\npub fn double_test() {\n  assert calc.double(2) == 4\n}\n\npub fn sub_test() {\n  assert calc.sub(3, 1) == 3\n}\n\npub fn abs_test() {\n  assert calc.abs(-2) == 2\n}\n",
-        )
-        .unwrap();
-        import(&root).unwrap();
-        let store = Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root: root.clone() };
+        let store = Scratch::new()
+            .with(&[
+                (
+                    "src/calc.gleam",
+                    "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn double(a: Int) -> Int {\n  add(a, a)\n}\n\npub fn sub(a: Int, b: Int) -> Int {\n  a - b\n}\n\n@external(erlang, \"erlang\", \"abs\")\npub fn abs(x: Int) -> Int\n",
+                ),
+                (
+                    "test/calc_test.gleam",
+                    "import calc\n\npub fn add_test() {\n  assert calc.add(1, 2) == 3\n}\n\npub fn double_test() {\n  assert calc.double(2) == 4\n}\n\npub fn sub_test() {\n  assert calc.sub(3, 1) == 3\n}\n\npub fn abs_test() {\n  assert calc.abs(-2) == 2\n}\n",
+                ),
+            ])
+            .with_packages()
+            .import();
         let first = |out: Out| out.unwrap_or_else(|e| e.0).lines().next().unwrap_or("").to_string();
         // First run: everything; sub_test fails.
         let err = store.test(&[]).unwrap_err().0;
         assert!(err.starts_with("Ran all 4 tests.") && err.contains("sub_test"), "{err}");
         // The failing test runs again, as does the one reaching foreign code.
         store.submit_symbols(Some("calc_test.sub_test"), None, "pub fn sub_test() {\n  assert calc.sub(3, 1) == 2\n}").unwrap();
-        assert_eq!(first(store.test(&[])), "Ran 2 of 4 tests; the other 2 reach nothing changed since they passed (`test --all` runs every test).");
+        assert_eq!(
+            first(store.test(&[])),
+            "Ran 2 of 4 tests; the other 2 reach nothing changed since they passed (`test --all` runs every test)."
+        );
         // A change reaches only the tests that can see it, and the files match the store afterwards.
         store.submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int) -> Int {\n  b + a\n}").unwrap();
         let out = store.test(&[]).unwrap();
         assert!(out.starts_with("Ran 3 of 4 tests;") && out.contains("3 passed"), "{out}");
-        let file = fs::read_to_string(root.join("test/calc_test.gleam")).unwrap();
+        let file = fs::read_to_string(store.root.join("test/calc_test.gleam")).unwrap();
         assert_eq!(file.matches("pub fn ").count(), 4, "{file}");
         assert_eq!(first(store.test(&["--all"])), "Ran all 4 tests.");
         assert_eq!(first(store.test(&["calc.double"])), "Ran 1 of 4 tests: those that reach calc.double.");
         assert!(store.test(&["calc.nope"]).unwrap_err().0.starts_with("E1001"));
         // With nothing changed, only the test reaching foreign code runs.
         assert!(first(store.test(&[])).starts_with("Ran 1 of 4 tests;"));
-        fs::remove_dir_all(&root).unwrap();
     }
 
     /// D-44: the packet quotes code that names the task's terms, and names a
     /// test that reaches the top symbols to reproduce the case with.
     #[test]
     fn packet_quotes_evidence_and_reproduction() {
-        let root = env::temp_dir().join(format!("solace-packet-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::create_dir_all(root.join("test")).unwrap();
-        fs::write(root.join("gleam.toml"), "name = \"shop\"\nversion = \"1.0.0\"\n").unwrap();
-        fs::write(
-            root.join("src/shop.gleam"),
-            "pub type Customer {\n  Customer(name: String, tier: Int)\n}\n\npub const customers = [Customer(\"Grace\", 2), Customer(\"Ada\", 1)]\n\n/// The price after the tier discount.\npub fn price(c: Customer, cents: Int) -> Int {\n  cents - c.tier * 100\n}\n",
-        )
-        .unwrap();
-        fs::write(
-            root.join("test/shop_test.gleam"),
-            "import shop\n\npub fn price_test() {\n  let assert [grace, ..] = shop.customers\n  assert shop.price(grace, 1000) == 800\n}\n",
-        )
-        .unwrap();
-        import(&root).unwrap();
-        let store = Store { db: Connection::open(root.join(".solace/store.db")).unwrap(), root: root.clone() };
+        let store = project(&[
+            (
+                "src/shop.gleam",
+                "pub type Customer {\n  Customer(name: String, tier: Int)\n}\n\npub const customers = [Customer(\"Grace\", 2), Customer(\"Ada\", 1)]\n\n/// The price after the tier discount.\npub fn price(c: Customer, cents: Int) -> Int {\n  cents - c.tier * 100\n}\n",
+            ),
+            (
+                "test/shop_test.gleam",
+                "import shop\n\npub fn price_test() {\n  let assert [grace, ..] = shop.customers\n  assert shop.price(grace, 1000) == 800\n}\n",
+            ),
+        ]);
+        let root = &store.root;
         let out = store.session_task("Grace (tier 2) was charged the wrong price.").unwrap();
-        assert!(out.contains("-- shop.customers\npub const customers = [Customer(\"Grace\", 2), Customer(\"Ada\", 1)]\n  > Customer(\"Grace\", 2)\n"), "{out}");
+        assert!(
+            out.contains(
+                "-- shop.customers\npub const customers = [Customer(\"Grace\", 2), Customer(\"Ada\", 1)]\n  > Customer(\"Grace\", 2)\n"
+            ),
+            "{out}"
+        );
         assert!(out.contains("To reproduce the task's case: `probe --from shop_test.price_test --trace shop.price`"), "{out}");
         assert!(!out.contains("Project instructions"));
         // The project's AGENTS.md comes first in both orientations, cut at a whole line (D-45).
@@ -3526,8 +3792,94 @@ mod tests {
         fs::write(root.join("AGENTS.md"), "a line of forty bytes, give or take ok.\n".repeat(250)).unwrap();
         let out = store.session(&[]).unwrap();
         assert!(out.contains("ok.\n… `read AGENTS.md --lines 201..` for the rest\n"), "{out}");
-        assert_eq!(lockdown::tier(&root, &toml::Value::Table(Default::default()), "AGENTS.md", None), "protected");
-        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A whole module replaces every symbol it holds, and may not drop one;
+    /// `--imports` replaces only the header.
+    #[test]
+    fn whole_module_and_imports_submit() {
+        let store = calc_project();
+        let file = store.root.join("src/calc.gleam");
+        let module = fs::read_to_string(&file).unwrap().replace("a + b", "b + a");
+        let out = store.submit(Target::Module("calc"), &module).unwrap();
+        assert_eq!(out, "Note: calc: changed add; added none\nSaved calc.\nThe project type-checks.\n");
+        assert!(fs::read_to_string(&file).unwrap().contains("b + a"));
+        let without_three = module.split("pub fn three").next().unwrap();
+        assert!(store.submit(Target::Module("calc"), without_three).unwrap_err().0.contains("E0102 the module text leaves out: three"));
+        assert!(store.submit(Target::Module("calc"), &format!("{module}\npub fn one() {{ 1 }}")).unwrap_err().0.starts_with("E0103"));
+        // A rejected module leaves the stored code, and its file, as they were.
+        let before = fs::read_to_string(&file).unwrap();
+        let err = store.submit(Target::Module("calc"), &module.replace("b + a", "b +. a")).unwrap_err().0;
+        assert!(err.starts_with("Not saved: the submitted text has errors."), "{err}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), before);
+        store.submit_symbols(None, Some("other"), "pub fn x() { 1 }").unwrap();
+        let out = store.submit(Target::Imports("calc"), "//// Arithmetic.\nimport other").unwrap();
+        assert!(out.starts_with("Saved calc imports."), "{out}");
+        let text = fs::read_to_string(&file).unwrap();
+        assert!(text.starts_with("//// Arithmetic.\n\nimport other\n"), "{text}");
+        assert!(store.submit(Target::Imports("calc"), "pub fn x() { 1 }").unwrap_err().0.starts_with("E0101"));
+        assert!(store.submit(Target::Imports("nope"), "").unwrap_err().0.starts_with("E1003"));
+    }
+
+    /// D-44: `impact` follows a symbol's data to what uses it.
+    #[test]
+    fn impact_names_what_a_symbol_reaches() {
+        let store = calc_project();
+        let out = store.impact(&["calc.add"], BUDGET).unwrap();
+        assert!(out.starts_with("calc.add reaches 3 uses, nearest first:"), "{out}");
+        assert!(out.contains("calc.one") && out.contains("calc.two") && out.contains("calc.three"), "{out}");
+        assert!(store.impact(&[], BUDGET).unwrap().starts_with("Tests haven't passed in full yet"));
+        assert!(store.impact(&["calc.nope"], BUDGET).unwrap_err().0.starts_with("E1001"));
+    }
+
+    /// D-12: work records last between sessions; a session start shows the
+    /// open ones with the symbols they name.
+    #[test]
+    fn work_records_open_and_close() {
+        let store = calc_project();
+        assert_eq!(store.work_add("Make calc.add handle overflow").unwrap(), "Work record #1 added.\n");
+        let list = store.work_list().unwrap();
+        assert!(list.contains("Open work records:\n#1\nMake calc.add handle overflow\n"), "{list}");
+        let session = store.session(&[]).unwrap();
+        assert!(session.contains("== Context of the symbols the work record names ==") && session.contains("pub fn add("), "{session}");
+        assert_eq!(store.work_done("#1").unwrap(), "Work record #1 closed.\n");
+        assert!(!store.work_list().unwrap().contains("#1"));
+        assert_eq!(store.work_done("9").unwrap_err().0, "No work record #9.");
+        assert_eq!(store.work_done("x").unwrap_err().1, 2);
+    }
+
+    #[test]
+    fn delete_refuses_a_used_symbol_and_names_are_unambiguous() {
+        let store = calc_project();
+        let err = store.delete("calc.add").unwrap_err().0;
+        assert!(err.starts_with("E5001 calc.add is still used by:") && err.contains("calc.three"), "{err}");
+        assert!(store.delete("calc.one").unwrap().starts_with("Deleted calc.one."));
+        assert!(store.resolve(&store.index().unwrap(), "calc.one").is_err());
+        store.submit_symbols(None, Some("other"), "pub fn two() -> Int { 2 }").unwrap();
+        let err = store.resolve(&store.index().unwrap(), "two").unwrap_err().0;
+        assert!(err.starts_with("E1002 ambiguous name: two") && err.contains("calc.two") && err.contains("other.two"), "{err}");
+    }
+
+    /// An unqualified type or constructor the module doesn't import is imported
+    /// for it: from the standard library, or the one project module that has it.
+    #[test]
+    fn missing_type_imports_are_added() {
+        let store = Scratch::new()
+            .with(&[
+                ("src/shape.gleam", "pub type Shape {\n  Square(Int)\n}\n"),
+                ("src/app.gleam", "import shape\n\npub fn main() {\n  1\n}\n"),
+            ])
+            .with_packages()
+            .import();
+        let out = store.submit_symbols(None, Some("app"), "pub fn unit() -> Shape { Square(1) }").unwrap();
+        assert!(
+            out.contains("Note: imported `type Shape` from shape in app") && out.contains("Note: imported `Square` from shape in app"),
+            "{out}"
+        );
+        let file = fs::read_to_string(store.root.join("src/app.gleam")).unwrap();
+        assert!(file.starts_with("import shape.{type Shape, Square}\n"), "{file}");
+        let out = store.submit_symbols(None, Some("app"), "pub fn none() -> Option(Int) { None }").unwrap();
+        assert!(out.contains("from gleam/option in app") && out.contains("type-checks"), "{out}");
     }
 
     #[test]

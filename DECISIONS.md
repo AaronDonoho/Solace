@@ -265,3 +265,6 @@ For a Claude run on a model with an `endpoint`, Solace reads `meta.n_ctx` from t
 
 ## D-64 `grep` searches the project's files
 `find` stays the search of source symbols. `grep <text>` searches watched files and the protected settings, case-insensitively, in every project (plain-files ones included) and through `--project`; unwatched files stay out (D-52). Why: agents couldn't search documents such as this file; the watched set is small, so searching it doesn't cost Solace much time.
+
+## D-65 Signatures carry the whole doc comment
+Outlines, `inspect --context`, `refs` and task packets show a symbol's whole `///` comment above its declaration, not just its first line; a doc-only edit doesn't count as a signature change. Why: Gleam docs needn't open with a summary line (redline's give one rule per line), so the first line was often half a rule; the token reason for cutting went with the signatures in the per-turn index (D-12).

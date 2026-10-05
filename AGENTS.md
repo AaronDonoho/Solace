@@ -5,7 +5,6 @@ A semantic programming system: programs are a store of identified, typed, verifi
 ## Working on a board task
 - Your task, its notes and its answers are in your brief. Start from them.
 - `DECISIONS.md` contains past decision: `grep D-57` (or a word) finds the line, and `read DECISIONS.md --lines a..b` reads that record. Don't re-open a settled decision.
-- Before finishing, add one entry to the top of `WORK.md`: `read WORK.md --lines 1..3`, then `write WORK.md` replacing the first entry's opening words with your entry followed by them. The entry says what changed, the checks that passed, and what's next.
 - A new decision made by a human goes at the end of `DECISIONS.md`, in the same short form as the others. If you need a human's judgment, ask with `task ask`; don't guess.
 
 ## Rules

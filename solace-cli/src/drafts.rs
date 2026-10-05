@@ -1,29 +1,26 @@
 //! Rejected submissions are scratch text, never live symbols.
 use super::*;
-use serde_json::json;
 
 fn owner() -> String {
     env::var("SOLACE_TASK").unwrap_or_else(|_| "cli".into())
 }
 
-fn setup(s: &Store) -> Result<(), Failure> {
-    s.db.execute_batch("CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY, owner TEXT NOT NULL, args TEXT NOT NULL, text TEXT NOT NULL, base TEXT NOT NULL)")?;
-    Ok(())
-}
-
 /// A draft's base (D-46): the text of the symbols it replaces and the headers
 /// of their modules (or of the module it adds to), so edits elsewhere, such as
 /// to a callee, leave it current.
-fn base(s: &Store, args: &[String], text: &str) -> Out {
-    let ix = s.index()?;
+fn base(s: &Store, ix: &Index, args: &[String], text: &str) -> Out {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let mut names: Vec<&str> = text.lines().filter_map(|l| l.strip_prefix("// ── ")).map(|h| h.split([' ', '(']).next().unwrap_or("")).collect();
+    let mut names: Vec<&str> =
+        text.lines().filter_map(|l| l.strip_prefix("// ── ")).map(|h| h.split([' ', '(']).next().unwrap_or("")).collect();
     let (mut parts, mut modules) = (vec![], vec![]);
     match a.as_slice() {
         // the module it adds to, or whose imports it replaces
-        [_, "--new" | "--imports", m] => modules.push(s.resolve_module(&ix, m).map_or(m.to_string(), |m| m.path.clone())),
+        [_, "--new" | "--imports", m] => modules.push(s.resolve_module(ix, m).map_or(m.to_string(), |m| m.path.clone())),
         // a whole module: every symbol in it
-        [_, m] if !m.contains('.') && let Some(m) = s.resolve_module(&ix, m) => {
+        [_, m]
+            if !m.contains('.')
+                && let Some(m) = s.resolve_module(ix, m) =>
+        {
             parts.extend(ix.syms.iter().filter(|x| x.module == m.path).map(|x| format!("{}\n{}", x.qname(), x.text)));
             modules.push(m.path.clone());
         }
@@ -31,7 +28,7 @@ fn base(s: &Store, args: &[String], text: &str) -> Out {
         _ => {}
     }
     for name in names {
-        match s.resolve(&ix, name) {
+        match s.resolve(ix, name) {
             Ok(i) => {
                 parts.push(format!("{}\n{}", ix.syms[i].qname(), ix.syms[i].text));
                 modules.push(ix.syms[i].module.clone());
@@ -41,10 +38,10 @@ fn base(s: &Store, args: &[String], text: &str) -> Out {
         }
     }
     for m in modules {
-        let header = s.resolve_module(&ix, &m).map(|r| format!("module {}\n{}", r.path, r.header));
+        let header = s.resolve_module(ix, &m).map(|r| format!("module {}\n{}", r.path, r.header));
         parts.push(header.unwrap_or_else(|| format!("no module {m}")));
     }
-    Ok(hex(&Sha256::digest(parts.join("\n\n").as_bytes())))
+    Ok(sha256(parts.join("\n\n").as_bytes()))
 }
 
 pub fn list(s: &Store) -> Out {
@@ -52,13 +49,13 @@ pub fn list(s: &Store) -> Out {
 }
 
 pub fn list_for(s: &Store, task: &str) -> Out {
-    setup(s)?;
     let mut q = s.db.prepare("SELECT id, args, text, base FROM drafts WHERE owner=? ORDER BY rowid")?;
     let rows: Vec<(String, String, String, String)> =
         q.query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<_, _>>()?;
     let mut out = vec![];
+    let ix = s.index()?;
     for (id, args, text, then) in rows {
-        let current = base(s, &serde_json::from_str::<Vec<String>>(&args).unwrap_or_default(), &text)? == then;
+        let current = base(s, &ix, &serde_json::from_str::<Vec<String>>(&args).unwrap_or_default(), &text)? == then;
         let status = if current { "current" } else { "stale: what it replaces changed since; check it isn't superseded" };
         out.push(format!("{id}: {args} ({status})"));
     }
@@ -66,7 +63,6 @@ pub fn list_for(s: &Store, task: &str) -> Out {
 }
 
 fn load(s: &Store, id: &str) -> Result<(Vec<String>, String, String), Failure> {
-    setup(s)?;
     let row: Option<(String, String, String)> =
         s.db.query_row("SELECT args,text,base FROM drafts WHERE id=? AND owner=?", params![id, owner()], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -83,11 +79,11 @@ pub fn view(s: &Store, id: &str) -> Out {
 
 /// `old` → `new` in `text`: exactly one occurrence, or every one with `all`.
 /// Returns the text and how many were replaced.
-fn replace(text: &str, old: Option<&str>, new: &str, all: bool) -> Result<(String, usize), Failure> {
+pub fn replace(text: &str, old: Option<&str>, new: &str, all: bool) -> Result<(String, usize), Failure> {
     let old = old.filter(|x| !x.is_empty()).ok_or_else(|| Failure("E0104 provide nonempty exact text in `old`".into(), 2))?;
     let at: Vec<usize> = text.match_indices(old).map(|(k, _)| text[..k].matches('\n').count() + 1).collect();
     match at.len() {
-        0 => fail("E0105 `old` does not occur; view the current symbol (or draft) and copy the text exactly"),
+        0 => fail("E0105 `old` does not occur; read the current text and copy it exactly"),
         1 => Ok((text.replacen(old, new, 1), 1)),
         n if all => Ok((text.replace(old, new), n)),
         n => fail(format!(
@@ -191,7 +187,8 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
         };
         // One list of lines, with a separator no hunk can match between units.
         const SEP: &str = "\u{0}";
-        let mut lines: Vec<String> = units.iter().map(|u| u.1.clone()).collect::<Vec<_>>().join(&format!("\n{SEP}\n")).lines().map(String::from).collect();
+        let mut lines: Vec<String> =
+            units.iter().map(|u| u.1.clone()).collect::<Vec<_>>().join(&format!("\n{SEP}\n")).lines().map(String::from).collect();
         let mut cursor = 0;
         for (at, hunk) in hunks {
             let old: Vec<&str> = hunk.iter().filter(|l| !l.starts_with('+')).map(|l| &l[1..]).collect();
@@ -199,7 +196,9 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
             let mut from = cursor;
             if let Some(at) = &at {
                 let found = (cursor..lines.len()).chain(0..cursor).find(|&k| lines[k].trim().starts_with(at.as_str()));
-                from = found.ok_or_else(|| bad(format!("in {target}, no line starts with `@@ {at}`; `view {target}` shows the current text.")))? + 1;
+                from = found
+                    .ok_or_else(|| bad(format!("in {target}, no line starts with `@@ {at}`; `view {target}` shows the current text.")))?
+                    + 1;
             }
             let at_k = if old.is_empty() {
                 if at.is_none() {
@@ -207,8 +206,11 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 }
                 Some(from)
             } else {
-                let same: [&dyn Fn(&str, &str) -> bool; 3] = [&|a, b| a == b, &|a, b| a.trim_end() == b.trim_end(), &|a, b| a.trim() == b.trim()];
-                let fits = |k: usize, eq: &dyn Fn(&str, &str) -> bool| k + old.len() <= lines.len() && old.iter().zip(&lines[k..]).all(|(o, l)| eq(o, l));
+                let same: [&dyn Fn(&str, &str) -> bool; 3] =
+                    [&|a, b| a == b, &|a, b| a.trim_end() == b.trim_end(), &|a, b| a.trim() == b.trim()];
+                let fits = |k: usize, eq: &dyn Fn(&str, &str) -> bool| {
+                    k + old.len() <= lines.len() && old.iter().zip(&lines[k..]).all(|(o, l)| eq(o, l))
+                };
                 same.iter().find_map(|eq| (from..lines.len()).chain(0..from).find(|&k| fits(k, *eq)))
             };
             let Some(k) = at_k else {
@@ -261,15 +263,15 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
 }
 
 pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option<&str>) -> Out {
-    setup(s)?;
     // `--all`: `--replace` changes every occurrence of `old` (D-46)
     let all = a.contains(&"--all");
     let a: Vec<&str> = a.iter().copied().filter(|x| *x != "--all").collect();
     let mut replaced = 0;
+    let ix = s.index()?;
     let (id, args, raw) = match a.as_slice() {
         ["submit", "--draft", id] | ["submit", "--draft", id, "--replace"] => {
             let (args, text, expected) = load(s, id)?;
-            if base(s, &args, &text)? != expected {
+            if base(s, &ix, &args, &text)? != expected {
                 return fail(format!(
                     "E0107 draft {id} is stale: a symbol it replaces (or its module's imports) changed since it was created. `view --draft {id}` preserves your text; inspect current source and make a new submission."
                 ));
@@ -284,34 +286,33 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
             (id.to_string(), args, raw)
         }
         ["submit", name, "--replace"] => {
-            let ix = s.index()?;
             let symbol = &ix.syms[s.resolve(&ix, name)?];
             let (raw, n) = replace(&symbol.text, old, &input()?, all)?;
             replaced = n;
-            (new_id(Kind::Fn, "draft", ""), vec!["submit".into(), symbol.qname()], raw)
+            (unique_id(), vec!["submit".into(), symbol.qname()], raw)
         }
         // a patch (D-47) becomes the blocks of a plain `submit`; the draft keeps the blocks
         ["submit"] | ["submit", _] | ["submit", "--new" | "--imports", _] => {
             let text = input()?;
             if a.len() <= 2 && is_patch(&text) {
-                (new_id(Kind::Fn, "draft", ""), vec!["submit".into()], patch_blocks(s, &text)?)
+                (unique_id(), vec!["submit".into()], patch_blocks(s, &text)?)
             } else {
-                (new_id(Kind::Fn, "draft", ""), a.iter().map(|x| x.to_string()).collect(), text)
+                (unique_id(), a.iter().map(|x| x.to_string()).collect(), text)
             }
         }
         _ => {
             return usage("submit [name [--replace [--all]] | --new module | --imports module | --draft id [--replace [--all]]]");
         }
     };
-    let base = base(s, &args, &raw)?;
+    let base = base(s, &ix, &args, &raw)?;
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match refs.as_slice() {
         ["submit"] => s.submit_symbols(None, None, &raw),
         ["submit", "--new", module] => s.submit_symbols(None, Some(module), &raw),
         ["submit", "--imports", module] => s.submit(Target::Imports(module), &raw),
-        ["submit", name] if !name.contains('.') && s.is_module(name)? => s.submit(Target::Module(name), &raw),
+        ["submit", name] if !name.contains('.') && s.resolve_module(&ix, name).is_some() => s.submit(Target::Module(name), &raw),
         // A whole module for a module that doesn't exist yet creates it.
-        ["submit", name] if !name.contains('.') && !s.is_symbol(name)? => s.submit_symbols(None, Some(name), &raw),
+        ["submit", name] if !name.contains('.') && s.resolve(&ix, name).is_err() => s.submit_symbols(None, Some(name), &raw),
         ["submit", name] => s.submit_symbols(Some(name), None, &raw),
         _ => return fail("E0106 invalid draft command"),
     };
@@ -336,7 +337,6 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
 }
 
 pub fn clear(s: &Store, task: &str) -> Result<(), Failure> {
-    setup(s)?;
     s.db.execute("DELETE FROM drafts WHERE owner=?", [task])?;
     Ok(())
 }
@@ -344,15 +344,18 @@ pub fn clear(s: &Store, task: &str) -> Result<(), Failure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use testing::*;
+
+    /// A project of `files` on a board.
+    fn board_project(files: &[(&str, &str)]) -> Project {
+        let p = project(files);
+        board::open(&p.root).unwrap();
+        p
+    }
 
     #[test]
     fn rejected_text_survives_and_retries_atomically() {
-        let root = env::temp_dir().join(new_id(Kind::Fn, "draft-test", ""));
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("gleam.toml"), "name=\"app\"\nversion=\"1.0.0\"\n").unwrap();
-        fs::write(root.join("src/app.gleam"), "pub fn main() { 1 }\n").unwrap();
-        import(&root).unwrap();
-        let s = board::open(&root).unwrap();
+        let s = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
         let original = board::snapshot(&s).unwrap();
         let raw = "// ── app.main ──\npub fn main() { helper() }\n// ── app.helper ──\nfn helper() { -. 2 }\n";
         assert!(submit(&s, &["submit"], &mut || Ok(raw.into()), None).unwrap_err().0.contains("Draft"));
@@ -372,10 +375,16 @@ mod tests {
         for args in [vec!["submit", "--new", "other"], vec!["submit", "app"]] {
             assert!(submit(&s, &args, &mut || Ok("pub fn main() { absent() }".into()), None).is_err());
         }
-        assert!(!root.join("src/other.gleam").exists(), "rejected modules must leave no compiler input behind");
+        assert!(!s.root.join("src/other.gleam").exists(), "rejected modules must leave no compiler input behind");
         // Stale only when what a draft replaces changed (D-46): the whole-module
         // draft of `app` after app.helper changes, not the new module's draft.
-        let ids: Vec<String> = s.db.prepare("SELECT id FROM drafts ORDER BY rowid").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        let ids: Vec<String> =
+            s.db.prepare("SELECT id FROM drafts ORDER BY rowid")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
         s.submit_symbols(Some("app.helper"), None, "fn helper() { 3 }").unwrap();
         let listed = list(&s).unwrap();
         assert!(listed.lines().next().unwrap().ends_with("(current)") && listed.lines().nth(1).unwrap().contains("(stale"), "{listed}");
@@ -395,13 +404,18 @@ mod tests {
         assert!(view(&s, &stale).unwrap_err().0.contains("E0106"));
         clear(&s, "another-task").unwrap();
         assert!(view(&s, &stale).is_err());
+    }
+
+    /// A submit names its warnings in one line each; `check --warnings` shows them in full.
+    #[test]
+    fn warnings_are_summarized_on_submit() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
         let warning = s.submit_symbols(None, Some("app"), "fn unused() { 1 }").unwrap();
         assert!(warning.contains("app.unused: warning:"), "{warning}");
         assert!(warning.contains("check --warnings"));
         assert!(!warning.contains("│"), "{warning}");
         let full = s.check_report(true).unwrap();
         assert!(full.contains("warning:") && full.contains("│"), "{full}");
-        fs::remove_dir_all(root).unwrap();
     }
 
     /// D-47: a patch changes a signature and its callers in two modules in
@@ -409,13 +423,10 @@ mod tests {
     /// symbol, and a hunk that doesn't match changes nothing.
     #[test]
     fn patch_changes_symbols_across_modules() {
-        let root = env::temp_dir().join(new_id(Kind::Fn, "patch-test", ""));
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("gleam.toml"), "name=\"app\"\nversion=\"1.0.0\"\n").unwrap();
-        fs::write(root.join("src/calc.gleam"), "pub fn add(a: Int) -> Int {\n  a + 1\n}\n\npub fn sub(a: Int) -> Int {\n  a - 1\n}\n").unwrap();
-        fs::write(root.join("src/app.gleam"), "import calc\n\npub fn main() -> Int {\n  let x = calc.add(1)\n  let y = calc.add(2)\n  x + y\n}\n").unwrap();
-        import(&root).unwrap();
-        let s = board::open(&root).unwrap();
+        let s = board_project(&[
+            ("src/calc.gleam", "pub fn add(a: Int) -> Int {\n  a + 1\n}\n\npub fn sub(a: Int) -> Int {\n  a - 1\n}\n"),
+            ("src/app.gleam", "import calc\n\npub fn main() -> Int {\n  let x = calc.add(1)\n  let y = calc.add(2)\n  x + y\n}\n"),
+        ]);
         let original = board::snapshot(&s).unwrap();
         let missing = "*** Begin Patch\n*** Update File: src/calc.gleam\n@@\n-pub fn add(a: Int) -> Int {\n+pub fn add(a: Int, b: Int) -> Int {\n*** Update: app.main\n-  let x = calc.nope(1)\n*** End Patch\n";
         let err = submit(&s, &["submit"], &mut || Ok(missing.into()), None).unwrap_err().0;
@@ -438,24 +449,25 @@ mod tests {
         assert!(err.contains("Draft"), "{err}");
         let id: String = s.db.query_row("SELECT id FROM drafts", [], |r| r.get(0)).unwrap();
         assert!(view(&s, &id).unwrap().starts_with("// ── calc.sub ──\npub fn sub"));
-        fs::remove_dir_all(root).unwrap();
     }
 
     /// D-46: E0105 names each occurrence's line; `--all` replaces every one.
     #[test]
     fn replace_all_and_occurrence_lines() {
-        let root = env::temp_dir().join(new_id(Kind::Fn, "replace-all-test", ""));
-        fs::create_dir_all(root.join("src")).unwrap();
-        fs::write(root.join("gleam.toml"), "name=\"app\"\nversion=\"1.0.0\"\n").unwrap();
-        fs::write(root.join("src/app.gleam"), "pub fn five() -> Int {\n  let a = 1\n  let b = a + 1\n  let c = b + 1\n  let d = c + 1\n  d + 1\n}\n").unwrap();
-        import(&root).unwrap();
-        let s = board::open(&root).unwrap();
+        let s = board_project(&[(
+            "src/app.gleam",
+            "pub fn five() -> Int {\n  let a = 1\n  let b = a + 1\n  let c = b + 1\n  let d = c + 1\n  d + 1\n}\n",
+        )]);
         let err = submit(&s, &["submit", "app.five", "--replace"], &mut || Ok(" + 2".into()), Some(" + 1")).unwrap_err().0;
         assert!(err.contains("occurs 4 times (lines 3, 4, 5, 6)") && err.contains("--all"), "{err}");
-        assert!(submit(&s, &["submit", "app.five", "--replace"], &mut || Ok("x".into()), Some("nowhere")).unwrap_err().0.contains("does not occur"));
+        assert!(
+            submit(&s, &["submit", "app.five", "--replace"], &mut || Ok("x".into()), Some("nowhere"))
+                .unwrap_err()
+                .0
+                .contains("does not occur")
+        );
         let out = submit(&s, &["submit", "app.five", "--replace", "--all"], &mut || Ok(" + 2".into()), Some(" + 1")).unwrap();
         assert!(out.starts_with("Replaced 4 occurrences.") && out.contains("Saved app.five"), "{out}");
         assert_eq!(s.view(&["app.five"], false, BUDGET).unwrap().matches(" + 2").count(), 4);
-        fs::remove_dir_all(root).unwrap();
     }
 }

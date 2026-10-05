@@ -1,37 +1,23 @@
 use super::*;
-use serde_json::{Value, json};
 use std::os::unix::process::CommandExt;
 use std::time::{Duration, Instant};
 
 pub fn lock(root: &Path) -> Result<fs::File, Failure> {
     fs::create_dir_all(root.join(".solace"))?;
-    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join(".solace/lock"))?;
     // ponytail: one project lock; use per-change store isolation if parallel work is introduced.
-    f.lock()?;
-    Ok(f)
+    lock_file(&root.join(".solace/lock"))
 }
 /// The project lock when it is free right now; the board's poll skips a busy project.
 fn try_lock(root: &Path) -> Option<fs::File> {
-    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join(".solace/lock")).ok()?;
-    f.try_lock().ok()?;
-    Some(f)
+    try_lock_file(&root.join(".solace/lock")).ok()?
 }
 pub fn open(root: &Path) -> Result<Store, Failure> {
-    let db = Connection::open(root.join(".solace/store.db"))?;
-    db.busy_timeout(Duration::from_secs(5))?;
-    db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS board_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
-        CREATE TABLE IF NOT EXISTS board_before(task TEXT, entity TEXT, data TEXT NOT NULL, PRIMARY KEY(task,entity));
-        CREATE TABLE IF NOT EXISTS board_touches(seq INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, entity TEXT);",
-    )?;
+    let s = Store::at(root)?;
     fs::create_dir_all(root.join(".solace/board"))?;
-    Ok(Store { root: root.into(), db })
+    Ok(s)
 }
 pub(super) fn err<T>(code: &str, message: impl std::fmt::Display) -> Result<T, Failure> {
     lockdown::error(code, "task", message)
-}
-pub(super) fn id() -> String {
-    new_id(Kind::Fn, "board", "").replace("fn:", "")
 }
 fn task_path(root: &Path, id: &str) -> Result<PathBuf, Failure> {
     if id.is_empty() || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
@@ -41,7 +27,9 @@ fn task_path(root: &Path, id: &str) -> Result<PathBuf, Failure> {
 }
 pub(super) fn task(root: &Path, id: &str) -> Result<Value, Failure> {
     let path = task_path(root, id)?;
-    if !path.exists() { return err("E7001", "unknown task"); }
+    if !path.exists() {
+        return err("E7001", "unknown task");
+    }
     read_task(root, &path)
 }
 pub(super) fn tasks(root: &Path) -> Result<Vec<Value>, Failure> {
@@ -68,10 +56,7 @@ fn event(s: &Store, v: Value) -> Result<(), Failure> {
     Ok(())
 }
 pub(super) fn save(s: &Store, t: &Value) -> Result<(), Failure> {
-    let p = task_path(&s.root, t["id"].as_str().unwrap())?;
-    let tmp = p.with_extension("tmp");
-    fs::write(&tmp, serde_json::to_vec_pretty(t).unwrap())?;
-    fs::rename(tmp, p)?;
+    write_atomic(&task_path(&s.root, t["id"].as_str().unwrap())?, serde_json::to_vec_pretty(t).unwrap())?;
     event(s, json!({"task":t}))
 }
 /// A project's workflow: its root's, shared by every project on the board (D-61).
@@ -115,10 +100,10 @@ pub fn workflow(settings: &toml::Value) -> Result<Value, Failure> {
         }
     }
     for c in cols {
-        if let Some(next) = c.get("next") {
-            if !ids.contains(next.as_str().unwrap_or("")) {
-                return Err(invalid("unknown gate next"));
-            }
+        if let Some(next) = c.get("next")
+            && !ids.contains(next.as_str().unwrap_or(""))
+        {
+            return Err(invalid("unknown gate next"));
         }
     }
     for (name, a) in actions {
@@ -194,12 +179,19 @@ fn move_to(w: &Value, t: &mut Value, to: &Value) -> Result<(), Failure> {
     t["column"] = to.clone();
     Ok(())
 }
+/// Where run `rid` is in the task's runs.
+fn run_at(t: &Value, rid: &str) -> Result<usize, Failure> {
+    t["runs"].as_array().and_then(|runs| runs.iter().position(|r| r["id"] == rid)).ok_or_else(|| Failure("E7003 unknown run".into(), 1))
+}
+fn end_run(r: &mut Value, outcome: &str) {
+    r["state"] = json!("ended");
+    r["ended"] = json!(now());
+    r["outcome"] = json!(outcome);
+}
 fn end_runs(t: &mut Value, outcome: &str) {
     for r in t["runs"].as_array_mut().unwrap() {
         if r["state"] != "ended" {
-            r["state"] = json!("ended");
-            r["ended"] = json!(now());
-            r["outcome"] = json!(outcome);
+            end_run(r, outcome);
         }
     }
     t["paused_from"] = Value::Null;
@@ -399,7 +391,13 @@ pub fn scope_stores(s: &Store, t: &Value) -> Result<Vec<(String, Store)>, Failur
         .collect()
 }
 /// A change entry's project; entries saved before D-61 are the home's.
-fn project_of<'a>(c: &'a Value, home: &'a str) -> &'a str {
+/// A new task in `column`, with nothing done on it yet.
+pub fn new_task(title: &str, body: &str, column: &Value, rank: f64) -> Value {
+    json!({"id":unique_id(),"title":title,"body":body,"links":[],"column":column,"rank":rank,"paused_from":null,"attention":null,
+        "stamps":{},"model":null,"notes":[],"questions":[],"runs":[],"changes":[]})
+}
+/// The project a change was made in; changes saved before D-61 are all in the task's home.
+pub fn project_of<'a>(c: &'a Value, home: &'a str) -> &'a str {
     c["project"].as_str().unwrap_or(home)
 }
 /// Records what a command changed in `s` on the task stored in `home`.
@@ -417,11 +415,10 @@ pub fn record(s: &Store, home: &Store, tid: &str, rid: &str, before: &Value, aft
             let exists: bool =
                 s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1 AND entity=?2)", params![tid, key], |r| r.get(0))?;
             if !exists {
-                let dir = s.root.join(".solace/board").join(tid).join("before");
-                fs::create_dir_all(&dir)?;
-                let file = dir.join(hex(&Sha256::digest(name.as_bytes())));
+                fs::create_dir_all(before_dir(&s.root, tid))?;
+                let file = before_file(&s.root, tid, name);
                 if let Some(bytes) = data.as_array() {
-                    fs::write(file, bytes.iter().map(|b| b.as_u64().unwrap() as u8).collect::<Vec<_>>())?;
+                    fs::write(file, json_bytes(bytes))?;
                 } else {
                     fs::write(file.with_extension("absent"), b"")?;
                 }
@@ -461,7 +458,7 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
             } else if key.starts_with("module:") {
                 v[2].as_str().map(|h| h.to_string())
             } else {
-                let bytes: Vec<u8> = v.as_array()?.iter().map(|b| b.as_u64().unwrap() as u8).collect();
+                let bytes = json_bytes(v.as_array()?);
                 Some(String::from_utf8(bytes).unwrap_or_else(|e| format!("(binary, {} bytes)", e.as_bytes().len())))
             }
         };
@@ -571,14 +568,7 @@ pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
         && let Some(name) = a.get(1)
     {
         let p = lockdown::path(root, name)?;
-        let name = p
-            .strip_prefix(root)
-            .unwrap()
-            .components()
-            .filter(|c| !matches!(c, std::path::Component::CurDir))
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
+        let name = file_name(p.strip_prefix(root).unwrap());
         v[format!("file:{name}")] = json!(fs::read(p).ok());
     }
     if a[0] == "run" {
@@ -638,7 +628,7 @@ fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failure> {
             let p = lockdown::path(&s.root, name)?;
             if let Some(bytes) = v.as_array() {
                 fs::create_dir_all(p.parent().unwrap())?;
-                fs::write(p, bytes.iter().map(|b| b.as_u64().unwrap() as u8).collect::<Vec<_>>())?;
+                fs::write(p, json_bytes(bytes))?;
             } else if p.exists() {
                 fs::remove_file(p)?;
             }
@@ -734,9 +724,22 @@ fn settle(s: &Store, t: &Value) -> Result<(), Failure> {
     }
     Ok(())
 }
+/// Where a task keeps files as they were before it changed them.
+fn before_dir(root: &Path, tid: &str) -> PathBuf {
+    root.join(".solace/board").join(tid).join("before")
+}
+/// File `name` as it was before the task changed it; with extension `absent`
+/// when it didn't exist.
+pub fn before_file(root: &Path, tid: &str, name: &str) -> PathBuf {
+    before_dir(root, tid).join(sha256(name.as_bytes()))
+}
+/// Changes whenever the store's code does.
+pub fn fingerprint(s: &Store) -> Out {
+    Ok(sha256(snapshot(s)?.to_string().as_bytes()))
+}
 fn drop_before(s: &Store, tid: &str) -> Result<(), Failure> {
     s.db.execute("DELETE FROM board_before WHERE task=?", [tid])?;
-    let p = s.root.join(".solace/board").join(tid).join("before");
+    let p = before_dir(&s.root, tid);
     if p.exists() {
         fs::remove_dir_all(p)?;
     }
@@ -862,7 +865,7 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
         end_runs(t, "replaced");
     }
     if let Some(m) = selected {
-        let rid = id();
+        let rid = unique_id();
         let kind = if run == "new_work" { "work" } else { run };
         let log = s.root.join(".solace/board").join(t["id"].as_str().unwrap()).join(format!("{rid}.jsonl"));
         t["runs"].as_array_mut().unwrap().push(json!({"id":rid,"kind":kind,"model":m["id"],"effort":m["effort"],"state":"running","started":now(),"log":log,"fresh":run == "new_work" || a["revert"] == true}));
@@ -947,7 +950,13 @@ fn claim_projects(root: &Path, w: &Value, tid: &Value, dirs: &[String]) -> Resul
         }
         // Code changed outside Solace waits for a human before agents build on it (D-58).
         if others.iter().any(|t| t["unexpected"] == true && column(w, t)["final"] != true) {
-            return err("E7012", format!("complete or cancel the {} task{place} first: it holds code changed outside Solace that no one has reviewed", outside::TITLE));
+            return err(
+                "E7012",
+                format!(
+                    "complete or cancel the {} task{place} first: it holds code changed outside Solace that no one has reviewed",
+                    outside::TITLE
+                ),
+            );
         }
     }
     Ok(())
@@ -956,7 +965,10 @@ fn claim_projects(root: &Path, w: &Value, tid: &Value, dirs: &[String]) -> Resul
 /// no agent of it is working: between runs, paused, or waiting on a question.
 fn set_scope(s: &Store, w: &Value, mut t: Value, body: &Value) -> Result<Value, Failure> {
     if t["runs"].as_array().unwrap().iter().any(|r| r["state"] == "running") && t["paused_from"].is_null() {
-        return err("E7003", "an agent is working on this task; change its projects between runs, while it is paused, or while it waits on a question");
+        return err(
+            "E7003",
+            "an agent is working on this task; change its projects between runs, while it is paused, or while it waits on a question",
+        );
     }
     if column(w, &t)["final"] == true {
         return err("E7004", "final task");
@@ -966,7 +978,7 @@ fn set_scope(s: &Store, w: &Value, mut t: Value, body: &Value) -> Result<Value, 
     let old = scope::of(&t, &home);
     let new = checked_scope(&s.root, &body["scope"])?;
     for d in old.iter().filter(|d| !new.contains(d)) {
-        if t["changes"].as_array().unwrap().iter().any(|c| c["project"].as_str().unwrap_or(&home) == d) {
+        if t["changes"].as_array().unwrap().iter().any(|c| project_of(c, &home) == d) {
             return err("E7013", format!("this task has changed {d}; undo its changes before taking {d} out of its projects"));
         }
     }
@@ -1013,7 +1025,8 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
     let s = open(root)?;
     let w = flow(root)?;
     let (path, query_text) = url.split_once('?').unwrap_or((url, ""));
-    let query: HashMap<String,String> = query_text.split('&').filter_map(|pair| pair.split_once('=')).map(|(k,v)|(k.to_string(),v.to_string())).collect();
+    let query: HashMap<String, String> =
+        query_text.split('&').filter_map(|pair| pair.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
     let parts: Vec<_> = path.trim_matches('/').split('/').collect();
     if matches!(parts.first(), Some(&"graph" | &"nodes" | &"tests" | &"files")) {
         return view::api(&s, method, &parts, &query, &body);
@@ -1045,7 +1058,9 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
                 return err("E7001", format!("a task is created in a project of its scope; post it to one of {}", scope.join(", ")));
             }
             let rank = tasks(root)?.iter().filter_map(|t| t["rank"].as_f64()).fold(0., f64::max) + 1.;
-            let t = json!({"id":id(),"scope":scope,"title":title,"body":body["body"].as_str().unwrap_or(""),"links":body.get("links").cloned().unwrap_or(json!([])),"column":w["columns"][0]["id"],"rank":rank,"paused_from":null,"attention":null,"stamps":{},"model":null,"notes":[],"questions":[],"runs":[],"changes":[]});
+            let mut t = new_task(title, body["body"].as_str().unwrap_or(""), &w["columns"][0]["id"], rank);
+            t["scope"] = json!(scope);
+            t["links"] = body.get("links").cloned().unwrap_or(json!([]));
             save(&s, &t)?;
             Ok(t)
         }
@@ -1054,13 +1069,7 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
             match (method, rest) {
                 ("GET", []) => return Ok(t),
                 ("GET", ["runs", rid]) => {
-                    let mut run = t["runs"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|r| r["id"] == *rid)
-                        .cloned()
-                        .ok_or_else(|| Failure("E7001 unknown run".into(), 1))?;
+                    let mut run = t["runs"][run_at(&t, rid)?].clone();
                     run["transcript"] = json!(transcript(Path::new(run["log"].as_str().unwrap_or(""))));
                     return Ok(run);
                 }
@@ -1150,13 +1159,15 @@ fn start(root: PathBuf, t: Value, rid: String, m: Value) {
             let _guard = conversation_lock(&root, tid)?;
             let result = agent_process(&root, &task(&root, tid)?, &rid, &m, true);
             let result = match result {
-                Err(Failure(_, 3)) => agent_process(&root, &task(&root, tid)?, &rid, &m, false),
+                Err(Failure(_, SESSION_GONE)) => agent_process(&root, &task(&root, tid)?, &rid, &m, false),
                 other => other,
             };
             let current = task(&root, tid)?;
             if t["runs"].as_array().unwrap().iter().any(|r| r["id"] == rid && r["kind"] == "review") || m["run"].is_array() {
                 let dir = conversation_dir(&root, tid, &rid)?;
-                if dir.exists() { fs::remove_dir_all(dir)?; }
+                if dir.exists() {
+                    fs::remove_dir_all(dir)?;
+                }
             }
             if column(&flow(&root)?, &current)["final"] == true {
                 clean_conversation(&root, tid)?;
@@ -1172,9 +1183,7 @@ fn start(root: PathBuf, t: Value, rid: String, m: Value) {
 fn conversation_lock(root: &Path, tid: &str) -> Result<fs::File, Failure> {
     let dir = task_path(root, tid)?.with_extension("");
     fs::create_dir_all(&dir)?;
-    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(dir.join("agent.lock"))?;
-    f.lock()?;
-    Ok(f)
+    lock_file(&dir.join("agent.lock"))
 }
 
 fn conversation_dir(root: &Path, tid: &str, home: &str) -> Result<PathBuf, Failure> {
@@ -1211,9 +1220,12 @@ fn session_id(log: &Path, agent: &str) -> Option<String> {
     })
 }
 
+/// `agent_process`'s failure when the agent can't resume its conversation:
+/// the run starts again with a fresh one.
+const SESSION_GONE: i32 = 3;
 fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: bool) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap();
-    let run = t["runs"].as_array().unwrap().iter().find(|r| r["id"] == rid).unwrap();
+    let run = &t["runs"][run_at(t, rid)?];
     let log = PathBuf::from(run["log"].as_str().unwrap());
     fs::create_dir_all(log.parent().unwrap())?;
     if run["state"] == "ended" {
@@ -1221,13 +1233,18 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     }
     let author = run["kind"] != "review";
     let native = m["run"].is_null();
-    let claude_home = env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from)
+    let claude_home = env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".claude"));
     // macOS keychain entries are keyed to CLAUDE_CONFIG_DIR. Keep that sign-in
     // working without copying credentials: use a fresh, nonpersistent handoff.
-    let persistent = native && !(m["agent"] == "claude" && cfg!(target_os = "macos")
-        && !claude_home.join(".credentials.json").exists() && m["endpoint"].is_null()
-        && env::var_os("ANTHROPIC_API_KEY").is_none() && env::var_os("ANTHROPIC_AUTH_TOKEN").is_none());
+    let persistent = native
+        && !(m["agent"] == "claude"
+            && cfg!(target_os = "macos")
+            && !claude_home.join(".credentials.json").exists()
+            && m["endpoint"].is_null()
+            && env::var_os("ANTHROPIC_API_KEY").is_none()
+            && env::var_os("ANTHROPIC_AUTH_TOKEN").is_none());
     let previous = &t["conversation"];
     // Compare launch-relevant configuration, not labels. A changed model or endpoint gets a handoff.
     let compatibility = json!({"agent":m["agent"],"model":m["model"],"endpoint":m["endpoint"],"effort":m["effort"],"run":m["run"]});
@@ -1249,12 +1266,13 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
         format!("{rid}-fallback")
     };
     let dir = conversation_dir(root, tid, &home)?;
-    if author && resume.is_none() {
-        if let Some(old) = previous["home"].as_str() {
-            let old = conversation_dir(root, tid, old)?;
-            if old != dir && old.exists() {
-                fs::remove_dir_all(old)?;
-            }
+    if author
+        && resume.is_none()
+        && let Some(old) = previous["home"].as_str()
+    {
+        let old = conversation_dir(root, tid, old)?;
+        if old != dir && old.exists() {
+            fs::remove_dir_all(old)?;
         }
     }
     let custom = m["run"].as_array();
@@ -1287,7 +1305,9 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
         ]
     };
     if custom.is_none() {
-        if agent == "claude" && !persistent { argv.push("--no-session-persistence".into()); }
+        if agent == "claude" && !persistent {
+            argv.push("--no-session-persistence".into());
+        }
         if let Some(session) = &resume {
             if agent == "codex" {
                 argv.insert(2, "resume".into());
@@ -1349,17 +1369,19 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
         cmd.env(k, v.as_str().unwrap());
     }
     if agent == "claude" && custom.is_none() {
-        if persistent { cmd.env("CLAUDE_CONFIG_DIR", &dir); }
+        if persistent {
+            cmd.env("CLAUDE_CONFIG_DIR", &dir);
+        }
         if let Some(e) = m.get("endpoint") {
             cmd.env("ANTHROPIC_BASE_URL", e["base_url"].as_str().unwrap_or(""));
             // The key is read from the named variable at launch and never stored.
             if let Some(key) = e["key_env"].as_str().and_then(|k| env::var(k).ok()) {
                 cmd.env("ANTHROPIC_AUTH_TOKEN", key);
             }
-            if env::var_os("CLAUDE_CODE_MAX_CONTEXT_TOKENS").is_none() {
-                if let Some(n) = endpoint_context(e["base_url"].as_str().unwrap_or(""), m["model"].as_str().unwrap_or("")) {
-                    cmd.env("CLAUDE_CODE_MAX_CONTEXT_TOKENS", n.to_string());
-                }
+            if env::var_os("CLAUDE_CODE_MAX_CONTEXT_TOKENS").is_none()
+                && let Some(n) = endpoint_context(e["base_url"].as_str().unwrap_or(""), m["model"].as_str().unwrap_or(""))
+            {
+                cmd.env("CLAUDE_CODE_MAX_CONTEXT_TOKENS", n.to_string());
             }
         }
     }
@@ -1385,7 +1407,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     loop {
         std::thread::sleep(Duration::from_millis(50));
         let current = task(root, tid)?;
-        let r = current["runs"].as_array().unwrap().iter().find(|r| r["id"] == rid).unwrap();
+        let r = &current["runs"][run_at(&current, rid)?];
         if r["state"] == "running" && current["paused_from"].is_null() {
             elapsed += last.elapsed();
         }
@@ -1408,7 +1430,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
                         .iter()
                         .any(|s| raw.contains(s))
                 {
-                    return Err(Failure("session unavailable; using a fresh handoff".into(), 3));
+                    return Err(Failure("session unavailable; using a fresh handoff".into(), SESSION_GONE));
                 }
                 let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
                 let message = format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
@@ -1417,9 +1439,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
             break;
         }
         if expired || (ended && ending.is_none()) || ending.is_some_and(|at| at.elapsed() >= Duration::from_secs(30)) {
-            let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).status();
-            let _ = child.kill();
-            let _ = child.wait();
+            lockdown::kill_group(&mut child);
             if expired {
                 finish(root, tid, rid, Some("task timeout"))?;
             }
@@ -1433,9 +1453,15 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
         current["conversation"]["session"] = if forced { Value::Null } else { json!(session_id(&log, agent)) };
         // Only notes actually briefed, plus the agent's own notes, are known to
         // this conversation. A human may add feedback during graceful exit.
-        current["conversation"]["notes_seen"] = json!(t["notes"].as_array().unwrap().iter()
-            .chain(current["notes"].as_array().unwrap().iter().filter(|n| n["run"] == rid && n["author"] == "agent"))
-            .map(note_fingerprint).collect::<Vec<_>>());
+        current["conversation"]["notes_seen"] = json!(
+            t["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .chain(current["notes"].as_array().unwrap().iter().filter(|n| n["run"] == rid && n["author"] == "agent"))
+                .map(note_fingerprint)
+                .collect::<Vec<_>>()
+        );
         save(&open(root)?, &current)?;
     } else {
         fs::remove_dir_all(&dir)?;
@@ -1449,7 +1475,8 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
     let mut packet = t.clone();
     if resumed {
         let seen: HashSet<&str> = t["conversation"]["notes_seen"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-        packet["notes"] = json!(t["notes"].as_array().unwrap().iter().filter(|n| !seen.contains(note_fingerprint(n).as_str())).collect::<Vec<_>>());
+        packet["notes"] =
+            json!(t["notes"].as_array().unwrap().iter().filter(|n| !seen.contains(note_fingerprint(n).as_str())).collect::<Vec<_>>());
     }
     let tid = t["id"].as_str().unwrap_or("");
     let mut images = vec![];
@@ -1461,10 +1488,7 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
     packet["home"] = json!(scope::dir(&scope::top(root), root));
     let mut out = brief(&packet, kind);
     if resumed {
-        out = out.replace(
-            "Start with `session start --task`, with the task's title and description as `text`.",
-            "Use the continuation context below.",
-        );
+        out = out.replace(START, "Use the continuation context below.");
     }
     if kind != "review" && t["runs"].as_array().is_some_and(|r| r.len() > 1) {
         if resumed {
@@ -1474,10 +1498,10 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
         }
         for r in t["runs"].as_array().unwrap().iter().rev().filter(|r| r["id"] != run["id"]).take(3) {
             out += &format!("Previous {}: {}\n", r["kind"].as_str().unwrap_or("run"), r["outcome"].as_str().unwrap_or("unfinished"));
-            if let Some(log) = r["log"].as_str() {
-                if let Some(said) = last_words(&transcript(Path::new(log))) {
-                    out += &format!("Last activity: {said}\n");
-                }
+            if let Some(log) = r["log"].as_str()
+                && let Some(said) = last_words(&transcript(Path::new(log)))
+            {
+                out += &format!("Last activity: {said}\n");
             }
         }
     }
@@ -1487,13 +1511,18 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
             out += "\nLast recorded verification (rerun stale checks before claiming success):\n";
             for (command, v) in checks {
                 let stale = current.as_deref() != v["base"].as_str();
-                out += &format!("- {command}: {}{}\n{}\n", if v["passed"] == true { "passed" } else { "failed" }, if stale { " (stale: project changed)" } else { "" }, v["summary"].as_str().unwrap_or(""));
+                out += &format!(
+                    "- {command}: {}{}\n{}\n",
+                    if v["passed"] == true { "passed" } else { "failed" },
+                    if stale { " (stale: project changed)" } else { "" },
+                    v["summary"].as_str().unwrap_or("")
+                );
             }
         }
-        if let Ok(drafts) = drafts::list_for(&s, t["id"].as_str().unwrap_or("")) {
-            if !drafts.is_empty() {
-                out += &format!("\nRetained drafts (view with `view --draft <id>`):\n{drafts}\n");
-            }
+        if let Ok(drafts) = drafts::list_for(&s, t["id"].as_str().unwrap_or(""))
+            && !drafts.is_empty()
+        {
+            out += &format!("\nRetained drafts (view with `view --draft <id>`):\n{drafts}\n");
         }
     }
     if !images.is_empty() {
@@ -1575,7 +1604,7 @@ pub fn upload(root: &Path, tid: &str, bytes: &[u8]) -> Result<Value, Failure> {
         return err("E7001", "image over 5 MB");
     }
     let ext = image_kind(bytes).ok_or_else(|| Failure("E7001 only PNG, JPEG, GIF or WebP images".into(), 1))?;
-    let name = format!("{}.{ext}", &hex(&Sha256::digest(bytes))[..16]);
+    let name = format!("{}.{ext}", &sha256(bytes)[..16]);
     let dir = task_path(root, tid)?.with_extension("").join("files");
     fs::create_dir_all(&dir)?;
     fs::write(dir.join(&name), bytes)?;
@@ -1594,25 +1623,33 @@ fn base64(bytes: &[u8]) -> String {
 }
 
 fn note_fingerprint(note: &Value) -> String {
-    hex(&Sha256::digest(note.to_string().as_bytes()))
+    sha256(note.to_string().as_bytes())
 }
 
 fn verification_base(s: &Store) -> Out {
     let state = json!([snapshot(s)?, file_snapshot(&s.root, &["run"])?]);
-    Ok(hex(&Sha256::digest(state.to_string().as_bytes())))
+    Ok(sha256(state.to_string().as_bytes()))
 }
 
 pub fn record_verification(s: &Store, tid: &str, command: &str, result: &Out) -> Result<(), Failure> {
     let mut t = task(&s.root, tid)?;
-    if !t["verification"].is_object() { t["verification"] = json!({}); }
-    let summary = match result { Ok(out) => out, Err(e) => &e.0 };
-    t["verification"][command] = json!({"passed":result.is_ok(),"base":verification_base(s)?,"summary":summary.chars().take(1000).collect::<String>()});
+    if !t["verification"].is_object() {
+        t["verification"] = json!({});
+    }
+    let summary = match result {
+        Ok(out) => out,
+        Err(e) => &e.0,
+    };
+    t["verification"][command] =
+        json!({"passed":result.is_ok(),"base":verification_base(s)?,"summary":summary.chars().take(1000).collect::<String>()});
     save(s, &t)
 }
 /// An agent's prompt: what its run is for, how to start, ask and finish, then
 /// what it needs from the task (Spec 15 §6), as plain text.
+/// A fresh run's first step; a resumed run continues instead.
+const START: &str = "Start with `session start --task`, with the task's title and description as `text`.";
 fn brief(t: &Value, kind: &str) -> String {
-    let start = "Start with `session start --task`, with the task's title and description as `text`.";
+    let start = START;
     let ask = "If you need a decision from the human, ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer.";
     let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `write`, `remove`, `format` and `run` are refused.";
     let role = match kind {
@@ -1816,13 +1853,12 @@ fn finish(root: &Path, tid: &str, rid: &str, failure: Option<&str>) -> Result<()
     let s = open(root)?;
     let mut t = task(root, tid)?;
     let w = flow(root)?;
-    let r = t["runs"].as_array_mut().unwrap().iter_mut().find(|r| r["id"] == rid).unwrap();
+    let i = run_at(&t, rid)?;
+    let r = &mut t["runs"][i];
     if r["state"] == "ended" {
         return Ok(());
     }
-    r["state"] = json!("ended");
-    r["ended"] = json!(now());
-    r["outcome"] = json!(failure.unwrap_or("finished"));
+    end_run(r, failure.unwrap_or("finished"));
     // Only a failed work run moves the task; a failed review or investigation stays in its column.
     let work = r["kind"] == "work";
     if let Some(message) = failure {
@@ -1844,7 +1880,7 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: Option<&
     loop {
         let guard = scope::lock_all(&[root.to_path_buf(), also.unwrap_or(root).to_path_buf()])?;
         let t = task(root, tid)?;
-        let r = t["runs"].as_array().unwrap().iter().find(|r| r["id"] == rid).ok_or_else(|| Failure("E7003 unknown run".into(), 1))?;
+        let r = &t["runs"][run_at(&t, rid)?];
         if r["state"] == "ended" {
             return err("E7003", "run ended");
         }
@@ -1853,11 +1889,11 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: Option<&
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
-        if r["kind"] != "work" && matches!(a[0], "write" | "submit" | "remove" | "run" | "delete" | "create" | "migrate" | "format" | "agent-config") {
-            return err("E7010", "this run is read-only");
-        }
-        if matches!(a[0], "agent-config" | "serve" | "create" | "migrate") {
+        if HOST.contains(&a[0]) {
             return err("E7010", "host command is unavailable in a run");
+        }
+        if r["kind"] != "work" && CHANGES.contains(&a[0]) && a[0] != "build" {
+            return err("E7010", "this run is read-only");
         }
         // The human may have changed the task's projects while it was paused.
         if let Some(p) = also {
@@ -1881,15 +1917,13 @@ pub fn task_command(
 ) -> Out {
     let mut t = task(&s.root, tid)?;
     let w = flow(&s.root)?;
-    let i = t["runs"].as_array().unwrap().iter().position(|r| r["id"] == rid).unwrap();
+    let i = run_at(&t, rid)?;
     let text = if a.len() > 2 { a[2..].join(" ") } else { input()? };
     match a.get(1).copied() {
         Some("note") => {
             note(&mut t, "agent", Some(rid), &text);
             if t["runs"][i]["kind"] == "review" {
-                t["runs"][i]["state"] = json!("ended");
-                t["runs"][i]["ended"] = json!(now());
-                t["runs"][i]["outcome"] = json!("reviewed");
+                end_run(&mut t["runs"][i], "reviewed");
                 t["finished"] = json!({"kind":"review","outcome":"reviewed","time":now()});
             }
         }
@@ -1898,13 +1932,11 @@ pub fn task_command(
                 return err("E7010", "reviews finish with task note");
             }
             note(&mut t, "agent", Some(rid), &text);
-            t["runs"][i]["state"] = json!("ended");
-            t["runs"][i]["ended"] = json!(now());
             if t["runs"][i]["kind"] == "investigate" {
                 // The report is the result; the task stays in planning.
-                t["runs"][i]["outcome"] = json!("reported");
+                end_run(&mut t["runs"][i], "reported");
             } else {
-                t["runs"][i]["outcome"] = json!("finished");
+                end_run(&mut t["runs"][i], "finished");
                 move_to(&w, &mut t, &w["events"]["finished"])?;
             }
             t["finished"] = json!({"kind":t["runs"][i]["kind"],"outcome":t["runs"][i]["outcome"],"time":now()});
@@ -1916,7 +1948,7 @@ pub fn task_command(
             if t["runs"][i]["kind"] == "review" {
                 return err("E7010", "review cannot move task with a question");
             }
-            let qid = id();
+            let qid = unique_id();
             t["questions"].as_array_mut().unwrap().push(json!({"id":qid,"text":text,"options":options}));
             t["runs"][i]["state"] = json!("waiting");
             flag(&mut t, "an agent asked a question");
@@ -1954,13 +1986,26 @@ fn wait_reply(s: &Store, tid: &str, i: usize) -> Out {
 /// A work run's `write solace.toml` or `write AGENTS.md`: checked now, written
 /// only when a human approves it on the board (D-38, D-45).
 /// `project` is the folder whose settings change: the home, or another project in the task (D-61).
-pub fn propose_settings(s: &Store, project: &Path, tid: &str, rid: &str, file: &str, base: &[u8], proposed: &str, guard: Vec<fs::File>) -> Out {
+#[allow(clippy::too_many_arguments)]
+pub fn propose_settings(
+    s: &Store,
+    project: &Path,
+    tid: &str,
+    rid: &str,
+    file: &str,
+    base: &[u8],
+    proposed: &str,
+    guard: Vec<fs::File>,
+) -> Out {
     if file == "solace.toml" {
         workflow(&lockdown::parse_settings(proposed)?)?;
         // Which projects share the board is the humans' choice (D-57).
         let projects = |text: &[u8]| std::str::from_utf8(text).ok()?.parse::<toml::Value>().ok()?.get("projects").cloned();
         if projects(base) != projects(proposed.as_bytes()) {
-            return Err(Failure("E6020 `projects` lists the projects on this root's board; only humans change it, from the board".into(), 1));
+            return Err(Failure(
+                "E6020 `projects` lists the projects on this root's board; only humans change it, from the board".into(),
+                1,
+            ));
         }
     }
     let base = std::str::from_utf8(base).map_err(|_| Failure(format!("E6020 {file} is not UTF-8"), 1))?;
@@ -1969,13 +2014,13 @@ pub fn propose_settings(s: &Store, project: &Path, tid: &str, rid: &str, file: &
     }
     let mut t = task(&s.root, tid)?;
     let w = flow(&s.root)?;
-    let i = t["runs"].as_array().unwrap().iter().position(|r| r["id"] == rid).unwrap();
+    let i = run_at(&t, rid)?;
     let top = scope::top(&s.root);
     let dir = scope::dir(&top, project);
     // The file's path from the root folder, so a board of several projects says which one.
     let name = top.file_name().map(Path::new).unwrap_or(Path::new("")).join(project.strip_prefix(&top).unwrap_or(Path::new(""))).join(file);
     let name = name.to_string_lossy();
-    t["questions"].as_array_mut().unwrap().push(json!({"id":id(),"text":format!("Change {name}"),"options":["Approve","Reject"],
+    t["questions"].as_array_mut().unwrap().push(json!({"id":unique_id(),"text":format!("Change {name}"),"options":["Approve","Reject"],
         "settings":{"file":file,"project":dir,"base":base,"proposed":proposed}}));
     t["runs"][i]["state"] = json!("waiting");
     flag(&mut t, "an agent proposed a settings change");
@@ -1993,7 +2038,8 @@ fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
     };
     let current = fs::read_to_string(&p).unwrap_or_default();
     let proposed = q["settings"]["proposed"].as_str().unwrap();
-    if current != q["settings"]["base"] || (file == "solace.toml" && lockdown::parse_settings(proposed).and_then(|v| workflow(&v)).is_err()) {
+    if current != q["settings"]["base"] || (file == "solace.toml" && lockdown::parse_settings(proposed).and_then(|v| workflow(&v)).is_err())
+    {
         q["answer"] = json!(format!("Not applied: {file} changed since the proposal; read it and propose again"));
         return Ok(());
     }
@@ -2047,7 +2093,7 @@ impl Board {
         Ok(workspace::members(&self.top)?
             .into_iter()
             .map(|d| {
-                let r = if d == "." { self.top.clone() } else { self.top.join(&d) };
+                let r = scope::path(&self.top, &d);
                 (d, r)
             })
             .filter(|(_, r)| r.join(".solace/store.db").exists())
@@ -2060,11 +2106,10 @@ impl Board {
         if held.contains_key(root) {
             return Ok(());
         }
-        let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join(".solace/serve.lock"))?;
-        if f.try_lock().is_err() {
+        let Some(f) = try_lock_file(&root.join(".solace/serve.lock"))? else {
             let name = if dir == "." { root.display().to_string() } else { dir.to_string() };
             return fail(format!("{name} is already served by another `solace serve`; stop that one first."));
-        }
+        };
         recover_project(root)?;
         held.insert(root.to_path_buf(), f);
         Ok(())
@@ -2077,7 +2122,7 @@ impl Board {
             return Ok(projects.into_iter().find(|(d, _)| d == ".").map(|(_, r)| (r, url.to_string())));
         };
         let end = after.find(['/', '?']).unwrap_or(after.len());
-        let dir = percent_decode(&after[..end]);
+        let dir = view::percent_decode(&after[..end]);
         let Some((dir, root)) = projects.into_iter().find(|(d, _)| *d == dir && d != ".") else {
             return err("E7001", format!("unknown project {dir}"));
         };
@@ -2120,9 +2165,16 @@ impl Board {
         if step.is_some() {
             return err("E7003", "a migration step is already running");
         }
-        let projects: Vec<String> = body["projects"].as_array().into_iter().flatten().filter_map(|p| p.as_str().map(String::from)).collect();
-        let smoke: Vec<String> =
-            body["smoke"].as_array().into_iter().flatten().filter_map(|c| c.as_str().map(str::trim)).filter(|c| !c.is_empty()).map(String::from).collect();
+        let projects: Vec<String> =
+            body["projects"].as_array().into_iter().flatten().filter_map(|p| p.as_str().map(String::from)).collect();
+        let smoke: Vec<String> = body["smoke"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c.as_str().map(str::trim))
+            .filter(|c| !c.is_empty())
+            .map(String::from)
+            .collect();
         match action.as_str() {
             "start" if projects.is_empty() => return err("E7001", "projects required"),
             "start" | "confirm" | "recheck" | "adopt" | "abandon" | "undo" => {}
@@ -2151,10 +2203,7 @@ impl Board {
                     // /proc/self/exe still runs this binary after a reinstall has replaced its file.
                     let exe = Path::new("/proc/self/exe");
                     let exe = if exe.exists() { exe.to_path_buf() } else { env::current_exe().unwrap_or_else(|_| "solace".into()) };
-                    let e = Command::new(exe)
-                        .args(["serve", "--port", &me.port.to_string()])
-                        .current_dir(&at)
-                        .exec();
+                    let e = Command::new(exe).args(["serve", "--port", &me.port.to_string()]).current_dir(&at).exec();
                     *me.failed.lock().unwrap() = Some(format!("could not restart the server in {}: {e}", at.display()));
                 }
                 Ok(None) => {}
@@ -2174,7 +2223,8 @@ impl Board {
             _ => {}
         }
         let _edit = self.editing.lock().unwrap();
-        let field = |k: &str| body[k].as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| Failure(format!("E7001 {k} required"), 1));
+        let field =
+            |k: &str| body[k].as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| Failure(format!("E7001 {k} required"), 1));
         let dir = match (method, path) {
             ("POST", "/projects") => {
                 let dir = field("dir")?;
@@ -2188,8 +2238,8 @@ impl Board {
                 dir.to_string()
             }
             ("DELETE", p) if p.starts_with("/projects/") => {
-                let dir = percent_decode(&p["/projects/".len()..]);
-                let root = if dir == "." { self.top.clone() } else { self.top.join(&dir) };
+                let dir = view::percent_decode(&p["/projects/".len()..]);
+                let root = scope::path(&self.top, &dir);
                 // Tasks stored elsewhere may cover this project too (D-61).
                 let covering = scope::tasks_in(&self.top, &dir)?;
                 if covering.iter().any(|(_, t)| active(t)) {
@@ -2197,7 +2247,14 @@ impl Board {
                 }
                 let w = flow(&self.top)?;
                 if let Some((home, t)) = covering.iter().find(|(home, t)| *home != root && column(&w, t)["final"] != true) {
-                    return err("E7013", format!("the task \"{}\" in {} also covers {dir}; take {dir} out of its projects first", t["title"].as_str().unwrap_or(""), scope::dir(&self.top, home)));
+                    return err(
+                        "E7013",
+                        format!(
+                            "the task \"{}\" in {} also covers {dir}; take {dir} out of its projects first",
+                            t["title"].as_str().unwrap_or(""),
+                            scope::dir(&self.top, home)
+                        ),
+                    );
                 }
                 workspace::remove(&self.top, &dir)?;
                 self.held.lock().unwrap().remove(&root);
@@ -2205,7 +2262,7 @@ impl Board {
             }
             _ => return err("E7001", "unknown route"),
         };
-        let root = if dir == "." { self.top.clone() } else { self.top.join(&dir) };
+        let root = scope::path(&self.top, &dir);
         if let Err(e) = self.claim(&dir, &root) {
             if dir != "." {
                 workspace::remove(&self.top, &dir)?;
@@ -2216,33 +2273,35 @@ impl Board {
     }
 }
 
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = vec![];
-    let mut i = 0;
-    while i < b.len() {
-        match (b[i], s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())) {
-            (b'%', Some(x)) => {
-                out.push(x);
-                i += 3;
-            }
-            (c, _) => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into()
-}
 fn percent_encode(s: &str) -> String {
-    s.bytes().map(|c| if c.is_ascii_alphanumeric() || b"-_.~".contains(&c) { (c as char).to_string() } else { format!("%{c:02X}") }).collect()
+    s.bytes()
+        .map(|c| if c.is_ascii_alphanumeric() || b"-_.~".contains(&c) { (c as char).to_string() } else { format!("%{c:02X}") })
+        .collect()
 }
 
+/// The largest request body the API reads, besides image uploads.
+const BODY_LIMIT: usize = 1_048_576;
+/// A request's body, or `None` when it's over `limit` bytes or can't be read.
+fn read_body(req: &mut tiny_http::Request, limit: usize) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let read = req.as_reader().take(limit as u64 + 1).read_to_end(&mut bytes);
+    (read.is_ok() && bytes.len() <= limit).then_some(bytes)
+}
+/// A JSON request body; an empty one is `{}`.
+fn body_json(bytes: &[u8]) -> Result<Value, Failure> {
+    if bytes.is_empty() { Ok(json!({})) } else { serde_json::from_slice(bytes).or_else(|_| err("E7001", "invalid JSON")) }
+}
+/// An API error as the board reads it: its code and message.
+fn error_json(e: &Failure) -> Value {
+    json!({"code":e.0.split_whitespace().next().unwrap_or("E7001"),"message":e.0})
+}
 fn respond_json(req: tiny_http::Request, result: Result<Value, Failure>) {
-    let (status, value) = match result {
-        Ok(v) => (200, v),
-        Err(e) => (409, json!({"code":e.0.split_whitespace().next().unwrap_or("E7001"),"message":e.0})),
-    };
+    match result {
+        Ok(v) => respond(req, 200, v),
+        Err(e) => respond(req, 409, error_json(&e)),
+    }
+}
+fn respond(req: tiny_http::Request, status: u16, value: Value) {
     let _ = req.respond(
         tiny_http::Response::from_string(value.to_string())
             .with_status_code(status)
@@ -2270,10 +2329,9 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
     // A migration's folder is held too, so a shell can't move it from under the board.
     let _migration = match migrate::load(&board.top) {
         Some(_) if !board.held.lock().unwrap().contains_key(&board.top) => {
-            let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(board.top.join(".solace/serve.lock"))?;
-            if f.try_lock().is_err() {
+            let Some(f) = try_lock_file(&board.top.join(".solace/serve.lock"))? else {
                 return fail(format!("{} is already served by another `solace serve`; stop that one first.", board.top.display()));
-            }
+            };
             Some(f)
         }
         _ => None,
@@ -2286,14 +2344,16 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
     let watcher = board.clone();
     std::thread::spawn(move || {
         let mut previous: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
-        for tick in 0u64.. {
+        let mut tick = 0u64;
+        loop {
+            tick += 1;
             std::thread::sleep(Duration::from_millis(100));
             if watcher.step.lock().unwrap().is_some() {
                 continue;
             }
             for (_, root) in watcher.projects().unwrap_or_default() {
                 // About once a second, read in code changed outside Solace (D-58).
-                if tick % 10 == 0
+                if tick % 10 == 1
                     && let Some(_guard) = try_lock(&root)
                     && let Ok(s) = open(&root)
                 {
@@ -2304,12 +2364,11 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                     Some(old) if old != current => {}
                     _ => continue,
                 }
-                if let Ok(_guard) = lock(&root) {
-                    if let Ok(s) = open(&root) {
-                        if let Ok(w) = lockdown::settings(&root).and_then(|v| workflow(&v)) {
-                            let _ = event(&s, json!({"workflow":w}));
-                        }
-                    }
+                if let Ok(_guard) = lock(&root)
+                    && let Ok(s) = open(&root)
+                    && let Ok(w) = lockdown::settings(&root).and_then(|v| workflow(&v))
+                {
+                    let _ = event(&s, json!({"workflow":w}));
                 }
             }
         }
@@ -2356,7 +2415,9 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 }
                 return;
             }
-            if req.method().as_str() == "GET" && matches!(url.split('?').next().unwrap_or(""), "/" | "/view" | "/app.js" | "/guide" | "/drawing.woff") {
+            if req.method().as_str() == "GET"
+                && matches!(url.split('?').next().unwrap_or(""), "/" | "/view" | "/app.js" | "/guide" | "/drawing.woff")
+            {
                 let (data, kind) = match url.split('?').next().unwrap_or("") {
                     "/" | "/view" => (include_bytes!("../board/index.html").as_slice(), "text/html"),
                     "/guide" => (include_bytes!("../board/guide.html").as_slice(), "text/html"),
@@ -2369,14 +2430,9 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 return;
             }
             let Some(root) = root else {
-                let mut bytes = Vec::new();
-                let body = match req.as_reader().take(1_048_577).read_to_end(&mut bytes) {
-                    Ok(_) if bytes.len() <= 1_048_576 => if bytes.is_empty() { Ok(json!({})) } else { serde_json::from_slice(&bytes) },
-                    _ => Ok(Value::Null),
-                };
-                let result = match body {
-                    Ok(v) if !v.is_null() => board.projects_api(req.method().as_str(), &url, &v),
-                    _ => err("E7001", "invalid JSON"),
+                let result = match read_body(&mut req, BODY_LIMIT) {
+                    Some(bytes) => body_json(&bytes).and_then(|v| board.projects_api(req.method().as_str(), &url, &v)),
+                    None => err("E7001", "request body too large"),
                 };
                 return respond_json(req, result);
             };
@@ -2397,39 +2453,26 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 return;
             }
             let upload_to = file.filter(|(_, name)| name.is_empty() && req.method().as_str() == "POST").map(|(tid, _)| tid);
-            let limit = if upload_to.is_some() { IMAGE_LIMIT } else { 1_048_576 };
-            let mut bytes = Vec::new();
-            let parsed = req.as_reader().take(limit as u64 + 1).read_to_end(&mut bytes);
-            let result = if parsed.is_err() || bytes.len() > limit {
-                err("E7001", if upload_to.is_some() { "image over 5 MB" } else { "request body too large" })
-            } else if let Some(tid) = upload_to {
-                upload(&root, &tid, &bytes)
-            } else {
-                let body = if bytes.is_empty() { Ok(json!({})) } else { serde_json::from_slice(&bytes) };
-                match body {
-                    Ok(v) => api(&root, req.method().as_str(), &url, v),
-                    Err(_) => err("E7001", "invalid JSON"),
-                }
+            let limit = if upload_to.is_some() { IMAGE_LIMIT } else { BODY_LIMIT };
+            let result = match (read_body(&mut req, limit), upload_to) {
+                (None, upload_to) => err("E7001", if upload_to.is_some() { "image over 5 MB" } else { "request body too large" }),
+                (Some(bytes), Some(tid)) => upload(&root, &tid, &bytes),
+                (Some(bytes), None) => body_json(&bytes).and_then(|v| api(&root, req.method().as_str(), &url, v)),
             };
-            let (status, value) = match result {
-                Ok(v) => (200, v),
+            match result {
+                Ok(v) => respond(req, 200, v),
                 Err(e) => {
-                    let code = e.0.split_whitespace().next().unwrap_or("E7001");
-                    let mut v = json!({"code":code,"message":e.0});
-                    if code == "E7001" && url.ends_with("/actions") {
+                    let mut v = error_json(&e);
+                    // A refused action says which actions the task allows now.
+                    if v["code"] == "E7001" && url.ends_with("/actions") {
                         let id = url.split('/').nth(2).unwrap_or("");
                         if let (Ok(t), Ok(w)) = (task(&root, id), flow(&root)) {
                             v["allowed"] = json!(allowed(&w, &t));
                         }
                     }
-                    (409, v)
+                    respond(req, 409, v)
                 }
-            };
-            let _ = req.respond(
-                tiny_http::Response::from_string(value.to_string())
-                    .with_status_code(status)
-                    .with_header(tiny_http::Header::from_bytes("Content-Type", "application/json").unwrap()),
-            );
+            }
         });
     }
     Ok(String::new())
@@ -2503,6 +2546,8 @@ impl Read for Events {
             }
             for i in 0..self.streams.len() {
                 let (dir, root, seq) = &self.streams[i];
+                // Opened on each poll, not kept: a kept connection would follow a store
+                // that adopting or undoing a migration moved away.
                 let db = Connection::open(root.join(".solace/store.db")).map_err(std::io::Error::other)?;
                 let row = db
                     .query_row("SELECT seq,data FROM board_events WHERE seq>? ORDER BY seq LIMIT 1", [*seq], |r| {
@@ -2540,6 +2585,49 @@ impl Read for Events {
 mod tests {
     use super::*;
 
+    /// A review or investigation run reads but doesn't change (it may build to
+    /// verify); host commands never run in a run; an ended run runs nothing.
+    #[test]
+    fn agent_guard_follows_the_run() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Look"})).unwrap();
+        t["runs"] = json!([{"id":"r1","kind":"review","state":"running"},{"id":"r2","kind":"work","state":"ended"}]);
+        save(&s, &t).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        let guard = |rid: &str, a: &[&str]| agent_guard(&s.root, tid, rid, a, None).map(drop).map_err(|e| e.0);
+        assert!(guard("r1", &["view", "app"]).is_ok() && guard("r1", &["build"]).is_ok());
+        for a in [["submit", "app.main"], ["write", "x"], ["run", "e2e"]] {
+            assert!(guard("r1", &a).unwrap_err().contains("this run is read-only"), "{a:?}");
+        }
+        assert!(guard("r1", &["migrate", "--yes"]).unwrap_err().contains("host command"));
+        assert!(guard("r2", &["view", "app"]).unwrap_err().contains("run ended"));
+        assert!(guard("r9", &["view", "app"]).unwrap_err().starts_with("E7003 unknown run"));
+    }
+
+    /// Canceling a task puts back what it changed: a module it created goes,
+    /// with its file.
+    #[test]
+    fn cancel_removes_a_module_the_task_created() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Shapes"})).unwrap();
+        t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+        save(&s, &t).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        let before = snapshot(&s).unwrap();
+        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
+        record(&s, &s, tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+        assert!(s.root.join("src/geo.gleam").exists());
+        let mut t = task(&s.root, tid).unwrap();
+        end_runs(&mut t, "finished");
+        save(&s, &t).unwrap();
+        api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
+        assert!(!s.root.join("src/geo.gleam").exists());
+        assert!(s.resolve_module(&s.index().unwrap(), "geo").is_none());
+        assert_eq!(snapshot(&s).unwrap(), before);
+    }
+
     #[test]
     fn note_images_are_checked_numbered_and_encoded() {
         assert_eq!(base64(b"Man"), "TWFu");
@@ -2560,14 +2648,11 @@ mod tests {
 
     #[test]
     fn tasks_saved_in_done_load_as_complete() {
-        let root = env::temp_dir().join(id());
-        fs::create_dir_all(root.join(".solace/board")).unwrap();
-        fs::write(root.join(".solace/board/t1.json"), r#"{"id":"t1","column":"done"}"#).unwrap();
+        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"done"}"#)]);
         assert_eq!(task(&root, "t1").unwrap()["column"], "complete");
         // A custom workflow that still has a `done` column keeps it.
         fs::write(root.join("solace.toml"), include_str!("default-board.toml").replace("= \"complete\"", "= \"done\"")).unwrap();
         assert_eq!(tasks(&root).unwrap()[0]["column"], "done");
-        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn presets_merge_with_configured_models() {
@@ -2629,7 +2714,8 @@ mod tests {
 
     #[test]
     fn transcripts_read_codex_and_claude_logs() {
-        let log = env::temp_dir().join(format!("{}.jsonl", id()));
+        let dir = testing::Scratch::new();
+        let log = dir.join("log.jsonl");
         let codex = [
             json!({"type":"item.started","item":{"id":"i1","type":"mcp_tool_call","tool":"solace","arguments":{"command":"view a"},"status":"in_progress"}}),
             json!({"type":"item.completed","item":{"id":"i1","type":"mcp_tool_call","tool":"solace","arguments":{"command":"view a","text":"x"},"result":{"content":[{"type":"text","text":"pub fn a()"}]},"status":"completed"}}),
@@ -2661,7 +2747,11 @@ mod tests {
         // Live usage: the latest call's context and output per call; Anthropic adds cache, LM Studio includes it.
         let call = |id: &str, u: Value| json!({"type":"assistant","message":{"id":id,"usage":u,"content":[]}}).to_string();
         let anthropic = json!({"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":5,"output_tokens":7});
-        let lines = [call("m1", anthropic.clone()), call("m1", anthropic), call("m2", json!({"input_tokens":300,"cache_read_input_tokens":250,"output_tokens":2}))];
+        let lines = [
+            call("m1", anthropic.clone()),
+            call("m1", anthropic),
+            call("m2", json!({"input_tokens":300,"cache_read_input_tokens":250,"output_tokens":2})),
+        ];
         fs::write(&log, lines.join("\n")).unwrap();
         assert_eq!(transcript(&log).last().unwrap()["text"], "Context 300 tokens; 9 output tokens so far");
         let result = json!({"type":"result","usage":{"input_tokens":310,"cache_read_input_tokens":350,"output_tokens":9}}).to_string();
@@ -2670,7 +2760,6 @@ mod tests {
         assert_eq!(usage.len(), 1);
         assert!(usage[0]["text"].as_str().unwrap().ends_with("; last context 300 tokens"));
         assert_eq!(last_words(&[json!({"kind":"message","text":"é".repeat(600)})]).unwrap().chars().count(), 501);
-        fs::remove_file(log).unwrap();
     }
 
     #[test]

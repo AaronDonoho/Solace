@@ -1,0 +1,3 @@
+# Wide lines and compact one-liners, matching how this code was written.
+max_width = 140
+use_small_heuristics = "Max"

@@ -37,10 +37,16 @@ pub fn main() {
 ''')
         (self.root / 'test/app_test.gleam').write_text('''import app
 
+@external(erlang, "file", "read_file")
+fn read(path: String) -> Result(BitArray, e)
+
 pub fn main_test() {
-  assert app.main() == Nil
+  let _ = app.main()
+  assert read("priv/greeting.txt") == Ok(<<"hi":utf8>>)
 }
 ''')
+        (self.root / 'priv').mkdir()
+        (self.root / 'priv/greeting.txt').write_text('hi')
         shutil.copy(PILOT / 'test/pilot_test.gleam', self.root / 'test/pilot_test.gleam')
         for name in ['gleam.toml', 'manifest.toml']:
             shutil.copy(PILOT / name, self.root / name)
@@ -107,6 +113,15 @@ pub fn main_test() {
         self.assertIn('1 effects added', review['summary'])
         self.assertIn('untested uses', review['summary'])
         self.assertIn('untested', review)
+        # Review tests run in a copy of the project that includes its data files.
+        self.api('POST', '/tests', {'task': task['id']})
+        for _ in range(600):
+            if (self.api('GET', '/tasks/' + task['id']).get('review_tests') or {}).get('state') not in (None, 'running'):
+                break
+            time.sleep(.1)
+        review = self.api('GET', '/graph?task=' + task['id'])['review']
+        results = {t['name']: t['result'] for t in review['tests']}
+        self.assertEqual(results.get('main_test'), 'passing', review['tests'])
 
 
 if __name__ == '__main__':

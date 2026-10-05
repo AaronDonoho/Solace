@@ -4,7 +4,6 @@
 //! recorded where it was made, under the task's id.
 
 use super::*;
-use serde_json::Value;
 
 /// The Solace root that holds a project: the project itself when none does.
 pub fn top(project: &Path) -> PathBuf {

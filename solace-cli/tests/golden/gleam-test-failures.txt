@@ -1,0 +1,25 @@
+  Compiling pilot
+warning: Todo found
+  ┌─ /project/test/app_test.gleam:4:22
+  │
+4 │ pub fn todo_test() { todo }
+  │                      ^^^^ This code is incomplete
+
+This code will crash if it is run. Be sure to finish it before
+running your program.
+
+   Compiled in 0.20s
+    Running pilot_test.main
+[32m.[39m
+[1m[31massert[39m[22m [90mtest/app_test.gleam:3[39m
+[36m test[39m: app_test.wrong_test
+[36m code[39m: assert 1 + 1 == 3
+[36m left[39m: 2
+[36mright[39m: 3
+[36m info[39m: Assertion failed.
+
+[1m[33mtodo[39m[22m [90mtest/app_test.gleam:4[39m
+[36m test[39m: app_test.todo_test
+[36m info[39m: `todo` expression evaluated. This code has not yet been implemented.
+[31m
+1 passed, 2 failures[39m

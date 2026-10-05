@@ -8,10 +8,9 @@
 //! root above it is its own root, with itself as its only project.
 
 use super::*;
-use serde_json::{Value, json};
 
 fn invalid<T>(why: impl std::fmt::Display) -> Result<T, Failure> {
-    fail(format!("E6020 invalid solace.toml\n  {why}"))
+    Err(lockdown::invalid_settings(why))
 }
 
 fn has_store(dir: &Path) -> bool {
@@ -243,7 +242,7 @@ fn in_source(outer: &str, inner: &str) -> bool {
 /// Lists the project at `dir` again, keeping its store. Existing code without
 /// a store comes in by migration (D-59), never in place.
 pub fn add(root: &Path, dir: &str) -> Out {
-    if !has_store(&if dir == "." { root.to_path_buf() } else { root.join(dir) }) {
+    if !has_store(&scope::path(root, dir)) {
         return fail(format!("{dir} isn't set up. Existing code comes into Solace by migrating it (Migrate this project), not in place."));
     }
     setup(root, dir)
@@ -297,12 +296,17 @@ pub fn remove(root: &Path, dir: &str) -> Out {
     Ok(format!("Removed {dir} from the board; its Solace store is kept.\n"))
 }
 
+/// Gleam's rule for package names: lowercase letters, digits and `_`, starting with a letter.
+pub fn package_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_lowercase()) && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
 /// A new Gleam project at `dir` (`gleam new`), set up and listed.
 pub fn new_project(root: &Path, dir: &str, name: &str, javascript: bool) -> Out {
     if !contained(root, dir) {
         return lockdown::error("E6002", dir, "expected a folder below the root, reached without symlinks");
     }
-    if !name.starts_with(|c: char| c.is_ascii_lowercase()) || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+    if !package_name(name) {
         return fail(format!("{name:?} isn't a Gleam package name: use lowercase letters, digits and _, starting with a letter."));
     }
     if root.join(dir).exists() {
@@ -332,7 +336,9 @@ pub fn create(here: &Path, args: &[&str]) -> Out {
         return usage("create <name> [--javascript] [--yes]: creates a new Gleam project in the folder <name>");
     };
     if here.join("gleam.toml").exists() && !has_store(here) {
-        return fail("This folder is a Gleam project Solace doesn't manage. Existing code comes into Solace by migrating it: run `solace serve` here and choose Migrate this project.");
+        return fail(
+            "This folder is a Gleam project Solace doesn't manage. Existing code comes into Solace by migrating it: run `solace serve` here and choose Migrate this project.",
+        );
     }
     let root = enclosing(here)?.unwrap_or_else(|| here.to_path_buf());
     let rel = here.strip_prefix(&root).unwrap().join(name);
@@ -340,11 +346,8 @@ pub fn create(here: &Path, args: &[&str]) -> Out {
     if here.join(name).exists() {
         return fail(format!("{} already exists; give a name that isn't taken.", here.join(name).display()));
     }
-    print!("Create the Gleam project {name} at {} in the Solace root {}? [y/N] ", here.join(name).display(), root.display());
-    std::io::stdout().flush()?;
-    let yes = args.contains(&"--yes")
-        || std::io::stdin().lines().next().and_then(|l| l.ok()).is_some_and(|l| l.trim().to_lowercase().starts_with('y'));
-    if !yes {
+    let question = format!("Create the Gleam project {name} at {} in the Solace root {}?", here.join(name).display(), root.display());
+    if !migrate::confirm(&question, args.contains(&"--yes"))? {
         return Ok("\nNothing was created.\n".into());
     }
     Ok(format!("\n{}", new_project(&root, &dir, name, args.contains(&"--javascript"))?))
@@ -354,11 +357,8 @@ pub fn create(here: &Path, args: &[&str]) -> Out {
 mod tests {
     use super::*;
 
-    fn scratch() -> PathBuf {
-        let root = env::temp_dir().join(new_id(Kind::Fn, "workspace", "test"));
-        fs::create_dir_all(&root).unwrap();
-        root
-    }
+    use testing::Scratch;
+
     fn project(root: &Path, d: &str) {
         fs::create_dir_all(root.join(d).join("src")).unwrap();
         fs::write(root.join(d).join("gleam.toml"), format!("name = \"{}\"\n", d.replace(['/', ' ', '.'], "_"))).unwrap();
@@ -366,7 +366,7 @@ mod tests {
 
     #[test]
     fn members_are_folders_below_the_root() {
-        let root = scratch();
+        let root = Scratch::new();
         assert!(members(&root).unwrap().is_empty());
         fs::write(root.join("solace.toml"), "projects = [\"a\", \"b/c\"]\n").unwrap();
         assert_eq!(members(&root).unwrap(), ["a", "b/c"]);
@@ -375,15 +375,13 @@ mod tests {
             assert!(members(&root).unwrap_err().0.contains("E6020"), "{bad}");
         }
         // A symlink would lead out of the root.
-        let outside = scratch();
-        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let outside = Scratch::new();
+        std::os::unix::fs::symlink(&*outside, root.join("link")).unwrap();
         fs::write(root.join("solace.toml"), "projects = [\"link\"]\n").unwrap();
         assert!(members(&root).unwrap_err().0.contains("without symlinks"));
         // Listing a project makes the root a project of plain files too (D-60).
         save(&root, &["x y".into()]).unwrap();
         assert_eq!(members(&root).unwrap(), [".", "x y"]);
-        fs::remove_dir_all(root).unwrap();
-        fs::remove_dir_all(outside).unwrap();
     }
 
     #[test]
@@ -397,7 +395,7 @@ mod tests {
 
     #[test]
     fn found_skips_build_dependencies_and_ignored_folders() {
-        let root = scratch();
+        let root = Scratch::new();
         for d in ["a", "a/inner", "a/build/packages/dep", "node_modules/x", "ignored", "b"] {
             project(&root, d);
         }
@@ -409,12 +407,11 @@ mod tests {
         assert_eq!(dirs, ["a", "a/inner", "b"]);
         assert_eq!(f[2]["member"], true);
         assert_eq!(f[1]["name"], "a_inner");
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn one_root_holds_every_project() {
-        let root = scratch();
+        let root = Scratch::new();
         for d in ["a", "a/src/x", "a/tools", "inner/b"] {
             project(&root, d);
         }
@@ -432,8 +429,8 @@ mod tests {
         assert_eq!(lockdown::tier(&root.join("a"), &v, "tools", None), "internal");
         assert_eq!(lockdown::tier(&root.join("a"), &v, "gleam.toml", None), "watched");
         // Inside a member, and anywhere below, the root is the same one.
-        assert_eq!(enclosing(&root.join("a/tools/src")).unwrap(), Some(root.clone()));
-        assert_eq!(find(&root.join("a")).unwrap(), root);
+        assert_eq!(enclosing(&root.join("a/tools/src")).unwrap(), Some(root.0.clone()));
+        assert_eq!(find(&root.join("a")).unwrap(), root.0);
         // A second root inside it, or a root inside a project, is refused.
         fs::write(root.join("inner/solace.toml"), "projects = [\"b\"]\n").unwrap();
         assert!(enclosing(&root.join("inner/b")).unwrap_err().0.contains("is inside the root"));
@@ -449,17 +446,16 @@ mod tests {
         // A removed project keeps its store, so it can be listed again.
         add(&root, "a").unwrap();
         assert_eq!(members(&root).unwrap(), [".", "a/tools", "inner/b", "a"]);
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn the_root_can_be_a_project_itself() {
-        let root = scratch();
+        let root = Scratch::new();
         project(&root, ".");
         project(&root, "frontend");
         fs::write(root.join("src/app.gleam"), "pub fn one() { 1 }\n").unwrap();
         setup(&root, ".").unwrap();
-        assert_eq!(enclosing(&root).unwrap(), Some(root.clone()));
+        assert_eq!(enclosing(&root).unwrap(), Some(root.0.clone()));
         assert_eq!(members(&root).unwrap(), ["."]);
         assert!(!is_root(&root));
         // Setting up a project below it makes the root explicit; its settings stay.
@@ -474,6 +470,5 @@ mod tests {
         // Its agents can't reach the project below it.
         let v = lockdown::settings(&root).unwrap();
         assert_eq!(lockdown::tier(&root, &v, "frontend/gleam.toml", None), "internal");
-        fs::remove_dir_all(root).unwrap();
     }
 }

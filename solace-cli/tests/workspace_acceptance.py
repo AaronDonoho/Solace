@@ -159,6 +159,43 @@ class Root(unittest.TestCase):
         self.api('POST', '/projects', {'dir': 'b'})
         self.assertEqual([t['title'] for t in self.api('GET', '/p/b/tasks')], ['In b'])
 
+    def test_mcp_serves_the_command_tool(self):
+        project(self.root, body='pub fn one() { 1 }\n\npub fn two() { one() + 1 }\n')
+        self.migrate()
+        p = subprocess.Popen([BIN, 'mcp'], cwd=self.root, env=self.env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: (p.stdin.close(), p.wait(timeout=10), p.stdout.close()))
+        def rpc(id, method, params=None):
+            p.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': id, 'method': method, 'params': params or {}}) + '\n')
+            p.stdin.flush()
+            reply = json.loads(p.stdout.readline())
+            self.assertEqual(reply['id'], id)
+            return reply
+        def call(command, **args):
+            r = rpc(9, 'tools/call', {'name': 'solace', 'arguments': {'command': command, **args}})['result']
+            return r['content'][0]['text'], r['isError']
+        self.assertEqual(rpc(1, 'initialize', {'protocolVersion': '2025-06-18'})['result']['serverInfo']['name'], 'solace')
+        # A notification gets no reply; the next request's reply comes next.
+        p.stdin.write(json.dumps({'jsonrpc': '2.0', 'method': 'notifications/initialized'}) + '\n')
+        tools = rpc(2, 'tools/list')['result']['tools']
+        self.assertEqual([t['name'] for t in tools], ['solace'])
+        self.assertEqual(rpc(3, 'nope')['error']['code'], -32601)
+        # Several commands run in order, each under a header.
+        text, error = call('view app.two\nsolace refs app.one')
+        self.assertFalse(error, text)
+        self.assertIn('==== solace view app.two ====', text)
+        self.assertIn('==== solace refs app.one ====', text)
+        self.assertIn('app.two', text.split('==== solace refs app.one ====')[1])
+        # Code in `command` runs nothing.
+        text, error = call('let x = app.one()')
+        self.assertTrue(error)
+        self.assertTrue(text.startswith('Not a command: let x = app.one()'), text)
+        text, error = call('')
+        self.assertTrue(error)
+        self.assertTrue(text.startswith('No command given.'), text)
+        text, error = call('submit app.one', text='pub fn one() { 2 }')
+        self.assertFalse(error, text)
+        self.assertIn('Saved app.one', text)
+
     def test_create_requires_a_new_name_and_confirmation(self):
         self.assertIn('create <name>', self.cli('create', ok=False))
         for answer in ['', '\n', 'n\n']:

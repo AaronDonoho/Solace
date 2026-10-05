@@ -206,7 +206,7 @@ A submission that type-checks but breaks code that depends on it, such as a sign
 
 For reading, the store can render several symbols as one text document: a namespace, a feature, a call path, or the symbols a change touched. Edits to such a view are split into one transaction per symbol and applied all together or not at all.
 
-A namespace view is an outline by default. Each symbol gets one entry with its signature, effects, one-line description and verification status, and no body. Bodies are shown with an explicit flag (`--bodies`) or in a symbol's own view. Agents habitually open whole files, so the view they reach for first should return a table of contents rather than the implementation. From the outline they go straight to the few symbols they need.
+A namespace view is an outline by default. Each symbol gets one entry with its signature, effects, doc comment and verification status, and no body. Bodies are shown with an explicit flag (`--bodies`) or in a symbol's own view. Agents habitually open whole files, so the view they reach for first should return a table of contents rather than the implementation. From the outline they go straight to the few symbols they need.
 
 ### 4.8 Export format
 

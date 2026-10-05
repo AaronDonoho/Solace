@@ -49,10 +49,9 @@ pub(super) fn declaration(line: &str) -> Option<(Kind, String)> {
         (Kind::Fn, r)
     } else if let Some(r) = rest.strip_prefix("type ") {
         (Kind::Type, r)
-    } else if let Some(r) = rest.strip_prefix("const ") {
-        (Kind::Const, r)
     } else {
-        return None;
+        let r = rest.strip_prefix("const ")?;
+        (Kind::Const, r)
     };
     let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
     (!name.is_empty()).then_some((kind, name))
@@ -61,6 +60,12 @@ pub(super) fn declaration(line: &str) -> Option<(Kind, String)> {
 /// Comment or attribute lines that belong to the item below them.
 pub(super) fn is_leading(line: &str) -> bool {
     (line.starts_with("//") && !line.starts_with("////")) || line.starts_with('@')
+}
+
+/// Names defined again after their first definition, once per repeat.
+pub fn repeated(items: &[Item]) -> Vec<&str> {
+    let mut seen = std::collections::HashSet::new();
+    items.iter().filter(|i| !seen.insert(&i.name)).map(|i| i.name.as_str()).collect()
 }
 
 pub fn split(source: &str) -> Module {
@@ -141,32 +146,38 @@ pub fn record_fields(type_text: &str) -> Vec<(String, Vec<Option<String>>)> {
     out
 }
 
-/// The declaration part of an item: a function up to its body, a type or
-/// constant in full. Leading comments except the first doc line are dropped.
+/// An item's doc comment, whole (D-65), then its `head`. Other leading
+/// comments are dropped.
 pub fn signature(item: &Item) -> String {
-    let doc = item.text.lines().find(|l| l.starts_with("///")).map(|l| format!("{l}\n"));
+    let doc: String =
+        item.text.lines().take_while(|l| declaration(l).is_none()).filter(|l| l.starts_with("///")).map(|l| format!("{l}\n")).collect();
+    doc + &head(item)
+}
+
+/// Where a function's body opens in `decl` (text from its `fn`): the first `{`
+/// outside parentheses and brackets.
+pub fn body_start(decl: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    for (i, c) in decl.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '{' if depth == 0 => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The declaration part of an item: a function up to its body, a type or
+/// constant in full.
+pub fn head(item: &Item) -> String {
     let decl_start = item.text.lines().position(|l| declaration(l).is_some()).unwrap_or(0);
     let decl: String = item.text.lines().skip(decl_start).collect::<Vec<_>>().join("\n");
-    let decl = match item.kind {
-        Kind::Fn => {
-            let mut depth = 0i32;
-            let mut cut = decl.len();
-            for (i, c) in decl.char_indices() {
-                match c {
-                    '(' => depth += 1,
-                    ')' => depth -= 1,
-                    '{' if depth == 0 => {
-                        cut = i;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            decl[..cut].trim_end().to_string()
-        }
+    match item.kind {
+        Kind::Fn => decl[..body_start(&decl).unwrap_or(decl.len())].trim_end().to_string(),
         _ => decl,
-    };
-    doc.unwrap_or_default() + &decl
+    }
 }
 
 pub struct Import {
@@ -349,7 +360,11 @@ fn scan(code: &str) -> (Vec<(Ref, usize)>, Vec<(String, usize)>) {
                 ':' if depth > 0 && lower(&word) => reads.push((std::mem::take(&mut word), n)),
                 _ => {}
             }
-            if is_ident(c) { word.push(c) } else if c != ' ' { word.clear() }
+            if is_ident(c) {
+                word.push(c)
+            } else if c != ' ' {
+                word.clear()
+            }
         }
     }
     (refs, reads)
@@ -557,6 +572,10 @@ mod tests {
     fn signatures_and_constructors() {
         let m = split(SRC);
         assert_eq!(signature(&m.items[0]), "/// Pays.\npub fn pay(a: Int) -> Result(\n  Int,\n  Nil,\n)");
+        // The whole doc, and not a constructor's doc for the type's.
+        let item = Item { text: "/// Pays.\n// note\n/// Never twice.\npub fn pay() {\n  1\n}".into(), ..m.items[0].clone() };
+        assert_eq!(signature(&item), "/// Pays.\n/// Never twice.\npub fn pay()");
+        assert!(!signature(&m.items[2]).starts_with("/// doc"));
         assert_eq!(constructors(&m.items[2].text), ["Draft", "Cancelled"]);
     }
 
@@ -569,25 +588,35 @@ mod tests {
         assert_eq!(i[2].unqualified[1], ("Line".to_string(), "L".to_string()));
     }
 
+    /// The `alias.name` references in `code`.
+    fn qualified(code: &str) -> Vec<String> {
+        references(code).iter().filter_map(|r| if let Ref::Qualified(a, b) = r { Some(format!("{a}.{b}")) } else { None }).collect()
+    }
+    /// The bare-name references in `code`.
+    fn bare_names(code: &str) -> Vec<String> {
+        references(code).iter().filter_map(|r| if let Ref::Bare(b) = r { Some(b.clone()) } else { None }).collect()
+    }
+
     #[test]
     fn finds_references_outside_strings_and_comments() {
         let m = split(SRC);
-        let refs = references(&m.items[0].text);
-        let q: Vec<_> = refs.iter().filter_map(|r| if let Ref::Qualified(a, b) = r { Some(format!("{a}.{b}")) } else { None }).collect();
-        let bare: Vec<_> = refs.iter().filter_map(|r| if let Ref::Bare(b) = r { Some(b.as_str()) } else { None }).collect();
-        assert_eq!(q, ["list.map"]);
-        assert!(bare.contains(&"helper") && bare.contains(&"L") && !bare.contains(&"b"));
+        let bare = bare_names(&m.items[0].text);
+        assert_eq!(qualified(&m.items[0].text), ["list.map"]);
+        assert!(bare.iter().any(|b| b == "helper") && bare.iter().any(|b| b == "L") && !bare.iter().any(|b| b == "b"));
     }
 
     #[test]
     fn record_fields_and_field_reads() {
         let ty = "pub type Quote {\n  Quote(\n    /// the lines\n    lines: List(Line),\n    total_cents: Int,\n  )\n  Empty\n  Pair(Int, label: String)\n}";
         let none: Vec<Option<String>> = vec![];
-        assert_eq!(record_fields(ty), [
-            ("Quote".to_string(), vec![Some("lines".to_string()), Some("total_cents".to_string())]),
-            ("Empty".to_string(), none),
-            ("Pair".to_string(), vec![None, Some("label".to_string())]),
-        ]);
+        assert_eq!(
+            record_fields(ty),
+            [
+                ("Quote".to_string(), vec![Some("lines".to_string()), Some("total_cents".to_string())]),
+                ("Empty".to_string(), none),
+                ("Pair".to_string(), vec![None, Some("label".to_string())]),
+            ]
+        );
         let code = "pub fn f(q: Quote) {\n  let t = q.total_cents\n  let Quote(lines: ls, ..) = q\n  let r = Quote(..q, total_cents: tax.rate)\n  case g(q).lines {\n    Pair(_, label:) -> label\n  }\n  r.inner.depth\n}";
         let got: Vec<(String, usize)> = field_reads(code);
         let got: Vec<(&str, usize)> = got.iter().map(|(f, l)| (f.as_str(), *l)).collect();
@@ -597,20 +626,19 @@ mod tests {
     #[test]
     fn locals_shadow_top_level_names() {
         let code = "pub fn f(quote: Quote, shipping: S) -> Int {\n  let tax = tax.quote(1)\n  let assert Ok(#(db, o)) = g(o)\n  list.map([], fn(order) { order.id })\n  case x {\n    Ok(line) if line > 0 -> line + tax.total + db\n    order.Paid -> order.x\n  }\n  shipping.cost + quote.total + h(label: 1)\n}";
-        let q: Vec<String> = references(code).iter().filter_map(|r| if let Ref::Qualified(a, b) = r { Some(format!("{a}.{b}")) } else { None }).collect();
-        let bare: Vec<String> = references(code).iter().filter_map(|r| if let Ref::Bare(b) = r { Some(b.clone()) } else { None }).collect();
+        let q = qualified(code);
+        let bare = bare_names(code);
         assert_eq!(q, ["tax.quote", "list.map", "order.Paid", "order.x"]);
         assert!(bare.contains(&"g".to_string()) && bare.contains(&"o".to_string()) && bare.contains(&"h".to_string()));
         assert!(!bare.contains(&"quote".to_string()) && !bare.contains(&"line".to_string()) && !bare.contains(&"label".to_string()));
         // a `use` or `let` pattern binds its names; it doesn't refer to symbols of that name
-        let bare: Vec<String> = references("pub fn f() {\n  use request <- try(g())\n  let tax = 1\n  request + tax\n}")
-            .iter()
-            .filter_map(|r| if let Ref::Bare(b) = r { Some(b.clone()) } else { None })
-            .collect();
-        assert!(bare.contains(&"g".to_string()) && !bare.contains(&"request".to_string()) && !bare.contains(&"tax".to_string()), "{bare:?}");
+        let bare = bare_names("pub fn f() {\n  use request <- try(g())\n  let tax = 1\n  request + tax\n}");
+        assert!(
+            bare.contains(&"g".to_string()) && !bare.contains(&"request".to_string()) && !bare.contains(&"tax".to_string()),
+            "{bare:?}"
+        );
         // a binding starts after its whole right-hand side, however many lines it takes
         let code = "pub fn f() {\n  use customer <- result.try(\n    customer.Customer(id: 1)\n    |> customer.validate,\n  )\n  customer.email\n}";
-        let q: Vec<String> = references(code).iter().filter_map(|r| if let Ref::Qualified(a, b) = r { Some(format!("{a}.{b}")) } else { None }).collect();
-        assert_eq!(q, ["result.try", "customer.Customer", "customer.validate"]);
+        assert_eq!(qualified(code), ["result.try", "customer.Customer", "customer.validate"]);
     }
 }

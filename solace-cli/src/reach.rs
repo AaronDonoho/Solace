@@ -34,7 +34,11 @@ pub fn covered(ix: &Index, t: usize) -> HashSet<usize> {
     while let Some(j) = stack.pop() {
         if seen.insert(j) {
             for &u in &ix.uses[j] {
-                if ix.syms[u].module == *module { stack.push(u) } else { out.insert(u); }
+                if ix.syms[u].module == *module {
+                    stack.push(u)
+                } else {
+                    out.insert(u);
+                }
             }
         }
     }
@@ -83,7 +87,10 @@ pub fn origins(ix: &Index, before: &[(String, Option<String>)]) -> Vec<(usize, V
         }
         let lines: Vec<&str> = new.lines().collect();
         let mut seeds: Vec<usize> = match old {
-            Some(o) => board::changed_lines(o, new).into_iter().filter(|&l| !lines.get(l).is_some_and(|t| t.trim_start().starts_with("//"))).collect(),
+            Some(o) => board::changed_lines(o, new)
+                .into_iter()
+                .filter(|&l| !lines.get(l).is_some_and(|t| t.trim_start().starts_with("//")))
+                .collect(),
             None => vec![],
         };
         if seeds.is_empty() {
@@ -150,7 +157,11 @@ fn read_types(ix: &Index, rec: &Records, r: usize, field: &str) -> (Vec<usize>, 
 pub fn readers(ix: &Index, fields: &[(usize, String)]) -> HashSet<usize> {
     let rec = records(ix);
     (0..ix.syms.len())
-        .filter(|&r| gleam::field_reads(&ix.syms[r].text).iter().any(|(f, _)| fields.iter().any(|(t, g)| g == f && read_types(ix, &rec, r, f).0.contains(t))))
+        .filter(|&r| {
+            gleam::field_reads(&ix.syms[r].text)
+                .iter()
+                .any(|(f, _)| fields.iter().any(|(t, g)| g == f && read_types(ix, &rec, r, f).0.contains(t)))
+        })
         .collect()
 }
 
@@ -170,7 +181,12 @@ pub fn field_refs(ix: &Index, ty: usize, field: &str) -> String {
         let (types, certain) = read_types(ix, &rec, r, field);
         if types.contains(&ty) {
             n += 1;
-            out += &format!("-- {}{}\n{}\n", ix.syms[r].qname(), if certain { "" } else { " (possible: another type has this field)" }, gleam::signature(&ix.syms[r].item()));
+            out += &format!(
+                "-- {}{}\n{}\n",
+                ix.syms[r].qname(),
+                if certain { "" } else { " (possible: another type has this field)" },
+                gleam::signature(&ix.syms[r].item())
+            );
         }
     }
     if n == 0 { format!("Nothing reads {q}.\n") } else { format!("{q} is read by {n}:\n{out}") }
@@ -186,12 +202,7 @@ pub fn field_refs(ix: &Index, ty: usize, field: &str) -> String {
 pub fn flow(ix: &Index, origins: &[(usize, Vec<usize>)]) -> Impact {
     let n = ix.syms.len();
     let rec = records(ix);
-    let mut callers: Vec<Vec<usize>> = vec![vec![]; n];
-    for (c, uses) in ix.uses.iter().enumerate() {
-        for &u in uses {
-            callers[u].push(c);
-        }
-    }
+    let callers = &ix.used_by;
     let reads: Vec<Vec<(String, usize)>> =
         (0..n).map(|j| if is_test(ix, j) { vec![] } else { gleam::field_reads(&ix.syms[j].text) }).collect();
     let mut impact = Impact::default();
@@ -207,8 +218,8 @@ pub fn flow(ix: &Index, origins: &[(usize, Vec<usize>)]) -> Impact {
         }
         let (known, marked) = seeds.entry(i).or_default();
         let fresh = lines.into_iter().filter(|l| known.insert(*l)).count() + marks.into_iter().filter(|m| marked.insert(m.clone())).count();
-        if !found.contains_key(&i) {
-            found.insert(i, impact.uses.len());
+        if let std::collections::hash_map::Entry::Vacant(e) = found.entry(i) {
+            e.insert(impact.uses.len());
             impact.uses.push(Use { sym: i, steps, via, certain });
         } else if fresh == 0 {
             continue;
@@ -359,7 +370,11 @@ fn taint(ix: &Index, rec: &Records, i: usize, seeds: &HashSet<usize>, marks: &Ha
             // tracked as fields, so the name keeps its state
             let updated = roots(value);
             for w in gleam::pattern_names(pattern).into_iter().filter(|w| !updated.contains(w)) {
-                if hit { names.insert(w) } else { names.remove(&w) };
+                if hit {
+                    names.insert(w)
+                } else {
+                    names.remove(&w)
+                };
             }
         }
         if !hit {
@@ -420,7 +435,9 @@ fn taint(ix: &Index, rec: &Records, i: usize, seeds: &HashSet<usize>, marks: &Ha
             let ps = params_of(&ix.syms[g]);
             let name = format!("{}(", ix.syms[g].name);
             let call = text.match_indices(&name).map(|(p, _)| p).find(|&p| !text[..p].ends_with(|c: char| c.is_alphanumeric() || c == '_'));
-            let piped = call.is_some_and(|p| text[..p].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.').trim_end().ends_with("|>"));
+            let piped = call.is_some_and(|p| {
+                text[..p].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.').trim_end().ends_with("|>")
+            });
             let tainted: Vec<String> = match call.filter(|_| !whole) {
                 Some(p) => {
                     let mut free: Vec<usize> = (0..ps.len()).collect();
@@ -467,7 +484,7 @@ fn taint(ix: &Index, rec: &Records, i: usize, seeds: &HashSet<usize>, marks: &Ha
 
 /// A function's parameters: (label, name).
 fn params_of(s: &Sym) -> Vec<(Option<String>, String)> {
-    params(&gleam::signature(&s.item()), &s.name)
+    params(&gleam::head(&s.item()), &s.name)
 }
 
 /// `label: value` (or the shorthand `label:`) into its parts.
@@ -542,7 +559,10 @@ fn roots(text: &str) -> HashSet<String> {
 /// Declared commands that are test suites outside `gleam test` (`checks` in
 /// solace.toml, D-44): (name, reach; `None` when it checks everything). For
 /// `gleam run -m <module>`, the module's `main` is an entry point.
-pub fn suites(s: &Store, ix: &Index) -> Result<Vec<(String, Option<HashSet<usize>>)>, Failure> {
+/// A declared command that tests: its name, and what it reaches (`None`: everything).
+pub type Suite = (String, Option<HashSet<usize>>);
+
+pub fn suites(s: &Store, ix: &Index) -> Result<Vec<Suite>, Failure> {
     let settings = lockdown::settings(&s.root)?;
     let mut out = vec![];
     for (name, c) in settings.get("commands").and_then(|c| c.as_table()).into_iter().flatten() {
@@ -564,7 +584,7 @@ pub fn suites(s: &Store, ix: &Index) -> Result<Vec<(String, Option<HashSet<usize
 }
 
 /// The suites whose reach holds one of `syms`, as `e2e (`run e2e`)`.
-pub fn reached(suites: &[(String, Option<HashSet<usize>>)], syms: &[usize]) -> Vec<String> {
+pub fn reached(suites: &[Suite], syms: &[usize]) -> Vec<String> {
     suites
         .iter()
         .filter(|(_, r)| !syms.is_empty() && r.as_ref().is_none_or(|r| syms.iter().any(|j| r.contains(j))))
@@ -606,7 +626,13 @@ fn possible_text(uses: &[(&Use, Vec<usize>)]) -> Option<String> {
     }
     let n = uses.iter().filter(|(u, _)| !u.certain).count();
     let more = if fields.len() > 4 { format!(" and {} more", fields.len() - 4) } else { String::new() };
-    (n > 0).then(|| format!("{n} possible use{}: readers of a field another type also declares ({}{more})", if n == 1 { "" } else { "s" }, fields[..fields.len().min(4)].join(", ")))
+    (n > 0).then(|| {
+        format!(
+            "{}: readers of a field another type also declares ({}{more})",
+            count(n, "possible use"),
+            fields[..fields.len().min(4)].join(", ")
+        )
+    })
 }
 
 fn fields_text(ix: &Index, impact: &Impact) -> String {
@@ -619,10 +645,6 @@ fn fields_text(ix: &Index, impact: &Impact) -> String {
         out.push(format!("and {} more", impact.fields.len() - 8));
     }
     out.join(", ")
-}
-
-fn steps(n: usize) -> String {
-    format!("{n} step{}", if n == 1 { "" } else { "s" })
 }
 
 /// The submit reply's note: at most three lines (D-44).
@@ -640,13 +662,13 @@ pub fn note(ix: &Index, impact: &Impact, suites: &[String]) -> Vec<String> {
     };
     let sure = uses.iter().filter(|(u, _)| u.certain).count();
     let maybe = if sure < uses.len() { format!(" (and {} possible)", uses.len() - sure) } else { String::new() };
-    let mut out = vec![format!("Reaches {sure} use{}{maybe}: {kinds}.", if sure == 1 { "" } else { "s" })];
+    let mut out = vec![format!("Reaches {}{maybe}: {kinds}.", count(sure, "use"))];
     let untested: Vec<String> = uses
         .iter()
         .filter(|(u, t)| u.certain && t.is_empty())
         .map(|(u, _)| {
             let via = u.via.strip_prefix("reads ").map_or(String::new(), |f| format!(", reads {}", f.split_once('.').map_or(f, |p| p.1)));
-            format!("{} ({}{via})", short(ix, u.sym), steps(u.steps))
+            format!("{} ({}{via})", short(ix, u.sym), count(u.steps, "step"))
         })
         .collect();
     let all = format!("`impact {}` lists all.", origin.join(" "));
@@ -675,7 +697,8 @@ pub fn report(ix: &Index, impact: &Impact, suites: &[String], budget: usize) -> 
     let origin: Vec<String> = impact.uses.iter().filter(|u| u.steps == 0).map(|u| short(ix, u.sym)).collect();
     let uses = ranked(ix, impact);
     let sure = uses.iter().filter(|(u, _)| u.certain).count();
-    let mut out = format!("{} reach{} {sure} uses, nearest first:\n", origin.join(", "), if origin.len() == 1 { "es" } else { "" });
+    let mut out =
+        format!("{} reach{} {}, nearest first:\n", origin.join(", "), if origin.len() == 1 { "es" } else { "" }, count(sure, "use"));
     let mut tail = possible_text(&uses).map_or(String::new(), |p| format!("And {p}; `refs <Type>.<field>` lists them\n"));
     if !impact.fields.is_empty() {
         let fields: Vec<String> = impact.fields.iter().map(|(t, f)| format!("{}.{f}", ix.syms[*t].name)).collect();
@@ -694,8 +717,7 @@ pub fn report(ix: &Index, impact: &Impact, suites: &[String], budget: usize) -> 
             [one] => format!("tested by {}", short(ix, *one)),
             [one, rest @ ..] => format!("tested by {} and {} more", short(ix, *one), rest.len()),
         };
-        let line =
-            format!("  {} — {}, {}; {tests}\n", short(ix, u.sym), steps(u.steps), u.via);
+        let line = format!("  {} — {}, {}; {tests}\n", short(ix, u.sym), count(u.steps, "step"), u.via);
         if out.len() + line.len() + tail.len() + 60 > budget {
             out += &format!("  … {} more not shown, to fit the size limit\n", sure - k);
             break;
@@ -708,6 +730,47 @@ pub fn report(ix: &Index, impact: &Impact, suites: &[String], budget: usize) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use testing::*;
+
+    /// `refs Type.field`: who reads one field, sure or possible (D-44).
+    #[test]
+    fn field_refs_list_the_readers_of_a_field() {
+        let ix = test_index(&[
+            ("src", "price", "pub type Quote {\n  Quote(discount: Int, total: Int)\n}\n\npub type Rate {\n  Rate(total: Int)\n}"),
+            (
+                "src",
+                "report",
+                "import price\n\npub fn discount(q: price.Quote) -> Int {\n  q.discount\n}\n\npub fn total(x) -> Int {\n  x.total\n}",
+            ),
+        ]);
+        let quote = ix.syms.iter().position(|s| s.name == "Quote").unwrap();
+        let out = field_refs(&ix, quote, "discount");
+        assert!(out.starts_with("price.Quote.discount is read by 1:\n-- report.discount\n"), "{out}");
+        let out = field_refs(&ix, quote, "total");
+        assert!(out.contains("-- report.total (possible: another type has this field)"), "{out}");
+        assert_eq!(field_refs(&ix, quote, "nope"), "price.Quote has no field nope.\n");
+    }
+
+    /// Declared commands with `checks` are suites: they reach what their
+    /// entries reach, a `gleam run -m` module's `main` included.
+    #[test]
+    fn declared_suites_reach_their_entries() {
+        let store = project(&[
+            ("src/calc.gleam", "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn sub(a: Int, b: Int) -> Int {\n  a - b\n}\n"),
+            ("src/e2e.gleam", "import calc\n\npub fn main() {\n  calc.sub(2, 1)\n}\n"),
+        ]);
+        fs::write(
+            store.root.join("solace.toml"),
+            "[commands]\ne2e = { run = [\"gleam\", \"run\", \"-m\", \"e2e\"], checks = [\"calc.add\"] }\nall = { run = [\"make\"], checks = [\"*\"] }\n",
+        )
+        .unwrap();
+        let ix = store.index().unwrap();
+        let suites = suites(&store, &ix).unwrap();
+        let id = |name: &str| ix.syms.iter().position(|s| s.name == name).unwrap();
+        assert_eq!(reached(&suites, &[id("add")]), ["e2e (`run e2e`)", "all (`run all`)"]);
+        assert_eq!(reached(&suites, &[id("sub")]), ["e2e (`run e2e`)", "all (`run all`)"]);
+        assert!(reached(&suites, &[]).is_empty());
+    }
 
     fn names(ix: &Index, impact: &Impact) -> Vec<String> {
         impact.uses.iter().filter(|u| u.steps > 0).map(|u| short(ix, u.sym)).collect()
@@ -722,7 +785,11 @@ mod tests {
                 "price",
                 "import money\n\npub type Quote {\n  Quote(discount: Int, total: Int, note: String)\n}\n\npub type Rate {\n  Rate(total: Int)\n}\n\npub fn quote(cents: Int, extra: Int) -> Quote {\n  let discount = money.percent(cents, 5)\n  let total = cents + extra\n  let note = \"fixed\"\n  Quote(discount: discount, total: total, note:)\n}\n\npub fn wrap(q: Quote) -> Quote {\n  Quote(..q, total: q.total + 1, note: \"x\")\n}",
             ),
-            ("src", "report", "import price\n\npub fn discounts(qs: List(price.Quote)) -> Int {\n  case qs {\n    [q, ..] -> q.discount\n    [] -> 0\n  }\n}\n\npub fn totals(q) -> Int {\n  q.total\n}\n\npub fn rate(r: price.Rate) -> Int {\n  r.total\n}"),
+            (
+                "src",
+                "report",
+                "import price\n\npub fn discounts(qs: List(price.Quote)) -> Int {\n  case qs {\n    [q, ..] -> q.discount\n    [] -> 0\n  }\n}\n\npub fn totals(q) -> Int {\n  q.total\n}\n\npub fn rate(r: price.Rate) -> Int {\n  r.total\n}",
+            ),
             ("src", "other", "import money\n\npub fn tip(x: Int) -> Int {\n  money.percent(x, 10)\n}"),
             ("test", "price_test", "import price\n\npub fn quote_test() {\n  assert price.quote(100, 0).total == 100\n}"),
         ]);
@@ -766,8 +833,16 @@ mod tests {
     #[test]
     fn coverage_and_always_run() {
         let ix = test_index(&[
-            ("src", "app", "import shellout\n\npub fn main() {\n  step()\n}\n\nfn step() {\n  helper()\n}\n\nfn helper() {\n  1\n}\n\npub fn run() {\n  shellout.command(\"ls\", [], \".\", [])\n}\n\n@external(erlang, \"erlang\", \"abs\")\npub fn abs(x: Int) -> Int"),
-            ("test", "app_test", "import app\n\npub fn main_test() {\n  assert app.main() == 1\n}\n\npub fn run_test() {\n  check(app.run())\n}\n\nfn check(x) {\n  app.abs(x)\n}"),
+            (
+                "src",
+                "app",
+                "import shellout\n\npub fn main() {\n  step()\n}\n\nfn step() {\n  helper()\n}\n\nfn helper() {\n  1\n}\n\npub fn run() {\n  shellout.command(\"ls\", [], \".\", [])\n}\n\n@external(erlang, \"erlang\", \"abs\")\npub fn abs(x: Int) -> Int",
+            ),
+            (
+                "test",
+                "app_test",
+                "import app\n\npub fn main_test() {\n  assert app.main() == 1\n}\n\npub fn run_test() {\n  check(app.run())\n}\n\nfn check(x) {\n  app.abs(x)\n}",
+            ),
         ]);
         let id = |n: &str| ix.syms.iter().position(|s| s.name == n).unwrap();
         let main_test = id("main_test");
