@@ -2234,7 +2234,8 @@ pub fn shared_columns(lanes: List(Lane)) -> Bool {
 
 /// One lane per project. A single project's header has no toggle and no
 /// + Task, since the New task button is above. Lanes with the same workflow
-/// share one header row; otherwise each names its columns.
+/// share one header row; otherwise each lane names its own columns. A header
+/// row is a bar that sticks to the top while its lanes are on screen.
 fn lanes_view(model: Model) -> Element(Msg) {
   let shared = model.workspace && shared_columns(model.lanes)
   case model.workspace, model.lanes {
@@ -2256,13 +2257,7 @@ fn lanes_view(model: Model) -> Element(Msg) {
     _, lanes ->
       h.div([a.class("lanes")], [
         case shared, lanes {
-          True, [first, ..] ->
-            h.div(
-              [a.class("board lane-head"), a.attribute("aria-hidden", "true")],
-              list.map(first.workflow.columns, fn(c) {
-                h.div([a.class("column")], [h.h2([], [h.text(c.label)])])
-              }),
-            )
+          True, [first, ..] -> head_view(first.workflow.columns)
           _, _ -> h.text("")
         },
         ..list.map(lanes, fn(lane) {
@@ -2287,10 +2282,14 @@ fn lanes_view(model: Model) -> Element(Msg) {
               h.button([e.on_click(NewTaskIn(lane.dir))], [h.text("+ Task")]),
               h.a([a.href(lane.base <> "/view")], [h.text("Contract view")]),
             ]),
-            case open {
-              True -> columns_view(model, lane, !shared)
-              False -> h.text("")
-            },
+            ..case open, shared {
+              True, True -> [columns_view(model, lane, False)]
+              True, False -> [
+                head_view(lane.workflow.columns),
+                columns_view(model, lane, False),
+              ]
+              False, _ -> []
+            }
           ])
         })
       ])
@@ -3098,7 +3097,7 @@ textarea{font-family:inherit}
 .theme{margin:0 0 0 4px;padding:6px;line-height:0}.theme svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.theme .sun{display:var(--sun)}.theme .moon{display:var(--moon)}
 .column{background:var(--well);border:1px solid var(--line);padding:0 12px 12px}
 .column h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;margin:0 -12px 12px;padding:10px 12px;background:var(--paper);border-bottom:2px solid var(--edge)}
-.lane-head .column{background:transparent;border:0}.lane-head h2{margin:0 -12px;border-bottom:2px solid var(--edge)}
+.lanes{display:block;overflow:visible}.lane-head{position:sticky;top:0;z-index:5;background:var(--paper);border-bottom:2px solid var(--edge)}.lane-head .column{background:transparent;border:0}.lane-head h2{margin:0 -12px;border-bottom:0}.lane .lane-head{margin:0;padding:0}
 .lane{border-color:var(--edge);background:var(--paper)}.lane-title{padding:6px 0}.lane-toggle{font-weight:700;background:transparent}.lane-toggle:hover{background:var(--hover)}
 .card{position:relative;background:var(--paper);border-color:var(--edge);padding:10px 12px 10px 22px;line-height:1.35;--tab:var(--file)}
 .card::before{content:\"\";position:absolute;inset:0 auto 0 0;width:8px;background:var(--tab)}
@@ -3244,3 +3243,15 @@ pub fn change_groups(
 
 @external(javascript, "./api.mjs", "toggle_theme")
 fn toggle_theme() -> Nil
+
+/// The column names as one bar, shared by lanes with one workflow or one per
+/// lane when they differ. It is the first thing in its container, so it sticks
+/// to the top of the page until the last lane in that container scrolls past.
+fn head_view(columns: List(Column)) -> Element(Msg) {
+  h.div(
+    [a.class("board lane-head"), a.attribute("aria-hidden", "true")],
+    list.map(columns, fn(c) {
+      h.div([a.class("column")], [h.h2([], [h.text(c.label)])])
+    }),
+  )
+}

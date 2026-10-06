@@ -297,6 +297,22 @@ pub fn workspace_lanes_test() {
     |> result.unwrap("")
   // One header row for both lanes; each lane names its folder and links its view.
   rendered |> string.contains("lane-head") |> should.be_true
+  // The header row is a bar that sticks to the page: the lanes container is
+  // not a scroll container, and the bar is opaque so cards can't show through.
+  let css =
+    board.view(model)
+    |> element.to_string
+    |> string.split("</style>")
+    |> list.first
+    |> result.unwrap("")
+  css
+  |> string.contains(
+    ".lane-head{position:sticky;top:0;z-index:5;background:var(--paper);border-bottom:2px solid var(--edge)}",
+  )
+  |> should.be_true
+  css
+  |> string.contains(".lanes{display:block;overflow:visible}")
+  |> should.be_true
   rendered |> string.contains("<h2>Backlog</h2>") |> should.be_true
   rendered
   |> string.contains("href=\"/p/bench%2Fpilot/view\"")
@@ -331,7 +347,9 @@ pub fn workspace_lanes_test() {
     |> string.split("</style>")
     |> list.last
     |> result.unwrap("")
-  rendered |> string.contains("lane-head") |> should.be_false
+  // Lanes with different workflows each get a bar of their own, which sticks
+  // inside that lane.
+  rendered |> string.split("lane-head") |> list.length |> should.equal(3)
   rendered |> string.contains("<h2>todo</h2>") |> should.be_true
   // A collapsed lane hides its columns.
   let #(model, _) = board.update(model, board.Collapse("web"))
@@ -339,6 +357,15 @@ pub fn workspace_lanes_test() {
   |> element.to_string
   |> string.contains("<h2>todo</h2>")
   |> should.be_false
+  // Collapsing a lane takes its bar away with its columns.
+  board.view(model)
+  |> element.to_string
+  |> string.split("</style>")
+  |> list.last
+  |> result.unwrap("")
+  |> string.split("lane-head")
+  |> list.length
+  |> should.equal(2)
   // Its tasks go to the project's own API.
   let #(model, _) = board.update(model, board.Select("bench/pilot", "1"))
   model.lane |> should.equal("bench/pilot")
