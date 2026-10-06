@@ -79,7 +79,7 @@ pub fn working_status_notes_and_transcript_test() {
     board.update(
       model,
       board.TaskLoaded(
-        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"notes\":[{\"author\":\"agent\",\"text\":\"Done: **five** tests <b>pass</b>\",\"time\":1}],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\",\"started\":1}]}",
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"notes\":[{\"author\":\"agent\",\"text\":\"Done: **five** tests <b>pass</b>\\n## Done\\n- fixed A\\n  - nested\",\"time\":1}],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\",\"started\":1}]}",
       ),
     )
   let assert Some(task) = model.selected
@@ -90,6 +90,8 @@ pub fn working_status_notes_and_transcript_test() {
   // Markdown is formatted, and agent HTML is escaped.
   rendered |> string.contains("<strong>five</strong>") |> should.be_true
   rendered |> string.contains("&lt;b&gt;pass") |> should.be_true
+  rendered |> string.contains("<h4>Done</h4>") |> should.be_true
+  rendered |> string.contains("<ul><li>fixed A<ul><li>nested") |> should.be_true
   let #(model, _) = board.update(model, board.Tab("runs"))
   board.view(model)
   |> element.to_string

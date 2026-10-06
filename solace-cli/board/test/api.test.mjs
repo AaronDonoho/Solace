@@ -128,6 +128,16 @@ test('markdown renders only images uploaded to the board, and http(s) links', as
   expect(markdown('[x](javascript:alert(1))')).not.toContain('<a');
 });
 
+test('markdown applies headings and lists mixed with other lines, nests lists, and keeps code literal', async () => {
+  const { markdown } = await import('../src/api.mjs');
+  expect(markdown('Summary:\n- fixed A\n- tested B')).toBe('<p>Summary:</p><ul><li>fixed A</li><li>tested B</li></ul>');
+  expect(markdown('## Root cause\nthe cache was stale')).toBe('<h4>Root cause</h4><p>the cache was stale</p>');
+  expect(markdown('- a\n  - b')).toBe('<ul><li>a<ul><li>b</li></ul></li></ul>');
+  expect(markdown('**a * b**')).toBe('<p><strong>a * b</strong></p>');
+  expect(markdown('`**x**`')).toBe('<p><code>**x**</code></p>');
+  expect(markdown('1. one\nmixed\n2. two')).toBe('<ol><li>one</li></ol><p>mixed</p><ol><li>two</li></ol>');
+});
+
 test('draft storage survives missing or throwing storage', async () => {
   const { load, store } = await import('../src/api.mjs');
   const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');

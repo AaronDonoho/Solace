@@ -28,26 +28,61 @@ export function clock(seconds) {
   return seconds ? new Date(seconds * 1000).toLocaleString() : '';
 }
 // Agent text is untrusted: everything is escaped before the few markdown forms
-// (code blocks, headings, lists, `code`, **bold**, images uploaded to this task
+// (code blocks, headings, nested lists, `code`, **bold**, images uploaded to this task
 // board, and http(s) links) are turned into HTML. Image URLs are stored
 // relative to their project; `base` is the project's prefix on this server.
 export function markdown(text, base = '') {
   const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  const inline = s => escape(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/!\[([^\]]*)\]\((\/tasks\/[\w-]+\/files\/[0-9a-f]{16}\.(?:png|jpg|gif|webp))\)/g, `<img alt="$1" src="${escape(base)}$2">`)
-    .replace(/(^|[^!])\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '$1<a href="$3" rel="noopener noreferrer">$2</a>');
+  // Code spans are lifted out first so bold and links leave them literal.
+  const inline = s => {
+    const codes = [];
+    return escape(s.replace(/\u0000/g, '')).replace(/`([^`]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`)
+      .replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/!\[([^\]]*)\]\((\/tasks\/[\w-]+\/files\/[0-9a-f]{16}\.(?:png|jpg|gif|webp))\)/g, `<img alt="$1" src="${escape(base)}$2">`)
+      .replace(/(^|[^!])\[([^\]]+)\]\((https?:\/\/[^\s)\u0000]+)\)/g, '$1<a href="$3" rel="noopener noreferrer">$2</a>')
+      .replace(/\u0000(\d+)\u0000/g, (_, n) => `<code>${codes[n]}</code>`);
+  };
+  const item = /^(\s*)([-*]|\d+[.)])\s+(.*)/, heading = /^(#{1,4})\s+(.*)/;
+  // One run of list lines; deeper indentation nests inside the current item.
+  const list = run => {
+    let html = '';
+    const stack = [];
+    const tag = l => l.ordered ? 'ol' : 'ul';
+    for (const line of run) {
+      const [, space, mark, content] = line.match(item);
+      const indent = space.replace(/\t/g, '    ').length, ordered = /\d/.test(mark);
+      while (stack.length && indent < stack.at(-1).indent) html += `</li></${tag(stack.pop())}>`;
+      const top = stack.at(-1);
+      if (top && indent === top.indent && top.ordered === ordered) html += '</li>';
+      else {
+        if (top && indent === top.indent) html += `</li></${tag(stack.pop())}>`;
+        stack.push({ indent, ordered });
+        html += `<${tag({ ordered })}>`;
+      }
+      html += `<li>${inline(content)}`;
+    }
+    while (stack.length) html += `</li></${tag(stack.pop())}>`;
+    return html;
+  };
   const out = [];
   const parts = text.split(/^```[^\n]*\n?/m);
   parts.forEach((part, i) => {
     if (i % 2) { out.push(`<pre><code>${escape(part.replace(/\n$/, ''))}</code></pre>`); return; }
     for (const block of part.split(/\n\s*\n/)) {
-      const lines = block.split('\n').filter(l => l.trim());
-      if (!lines.length) continue;
-      const heading = lines.length === 1 && lines[0].match(/^(#{1,4})\s+(.*)/);
-      if (heading) out.push(`<h4>${inline(heading[2])}</h4>`);
-      else if (lines.every(l => /^\s*[-*]\s+/.test(l))) out.push(`<ul>${lines.map(l => `<li>${inline(l.replace(/^\s*[-*]\s+/, ''))}</li>`).join('')}</ul>`);
-      else if (lines.every(l => /^\s*\d+[.)]\s+/.test(l))) out.push(`<ol>${lines.map(l => `<li>${inline(l.replace(/^\s*\d+[.)]\s+/, ''))}</li>`).join('')}</ol>`);
-      else out.push(`<p>${lines.map(inline).join('<br>')}</p>`);
+      const lines = block.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.trim());
+      for (let i = 0; i < lines.length;) {
+        const head = lines[i].match(heading);
+        if (head) { out.push(`<h4>${inline(head[2])}</h4>`); i++; continue; }
+        const run = [];
+        const plain = l => !heading.test(l) && !item.test(l);
+        if (item.test(lines[i])) {
+          while (i < lines.length && item.test(lines[i])) run.push(lines[i++]);
+          out.push(list(run));
+        } else {
+          while (i < lines.length && plain(lines[i])) run.push(lines[i++]);
+          out.push(`<p>${run.map(inline).join('<br>')}</p>`);
+        }
+      }
     }
   });
   return out.join('');
