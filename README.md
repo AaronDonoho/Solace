@@ -38,10 +38,20 @@ The deliverable is the single file `solace-cli/target/release/solace`. The store
 To build and install in one step:
 
 ```sh
-cargo install --path solace-cli
+cargo install --locked --path solace-cli
 ```
 
-This puts `solace` in `~/.cargo/bin`. Use `cargo install --path solace-cli --root <dir>` to install elsewhere.
+This puts `solace` in `~/.cargo/bin`. Use `cargo install --locked --path solace-cli --root <dir>` to install elsewhere. `--locked` uses the repository's tested dependency versions.
+
+If you already ran the release build above, install that executable directly instead of compiling it again:
+
+```sh
+install -m 755 solace-cli/target/release/solace "$HOME/.cargo/bin/solace"
+```
+
+Create the destination directory first if it does not exist. Use a different destination on your `PATH` if you prefer.
+
+A first (cold) build takes about 48 s, and 40 s of that is compiling the bundled SQLite (D-70). After that, builds reuse `solace-cli/target`, so keep that directory between builds to avoid paying the cost again.
 
 ## Use it on a project
 

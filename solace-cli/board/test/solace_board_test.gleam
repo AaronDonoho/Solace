@@ -1,6 +1,6 @@
 import gleam/json
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
 import gleeunit
@@ -31,7 +31,7 @@ pub fn workflow_and_live_task_test() {
     "{\"id\":\"1\",\"title\":\"Fix checkout\",\"body\":\"Details\",\"column\":\"triage\",\"rank\":1,\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[]}"
   let assert Ok(task) = json.parse(text, board.task_decoder())
   board.actions(board.workflow(model), task)
-  |> should.equal(["assign", "pause"])
+  |> should.equal(["assign", "pause", "discuss"])
   let #(model, _) = board.update(model, board.TaskLoaded(text))
   model.selected |> should.equal(Some(task))
   let #(model, _) = board.update(model, board.CaughtUp)
@@ -464,7 +464,7 @@ pub fn task_across_projects_test() {
   |> should.equal(3)
   rendered |> string.contains("<small>0 tasks</small>") |> should.be_true
   let assert Ok(decoded) = json.parse(task, board.task_decoder())
-  decoded.changes |> should.equal(["b: app.one"])
+  decoded.changes |> should.equal([board.Change("b", "app", "one")])
   // The task moved out of a: a's lane drops it.
   let #(model, _) =
     board.update(model, board.Live("{\"project\":\"a\",\"removed\":\"t1\"}"))
@@ -488,4 +488,178 @@ pub fn task_across_projects_test() {
 /// Outside a browser registering reports the error instead of crashing.
 pub fn register_outside_browser_test() {
   board.register() |> should.be_error
+}
+
+pub fn selected_card_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"},{\"dir\":\"b\",\"label\":\"b\",\"name\":\"b\",\"base\":\"/p/b\"}],\"found\":[]}",
+      ),
+    )
+  let columns = "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"}]}"
+  let #(model, _) = board.update(model, board.WorkflowLoaded("a", columns))
+  let #(model, _) = board.update(model, board.WorkflowLoaded("b", columns))
+  let shared =
+    "{\"id\":\"1\",\"title\":\"Across\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"scope\":[\"a\",\"b\"]}"
+  let other =
+    "{\"id\":\"1\",\"title\":\"Other\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1}"
+  let #(model, _) = board.update(model, board.CaughtUp)
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live("{\"project\":\"a\",\"task\":" <> shared <> "}"),
+    )
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live("{\"project\":\"b\",\"task\":" <> other <> "}"),
+    )
+  let rendered = board.view(model) |> element.to_string
+  string.split(rendered, "class=\"card selected\"")
+  |> list.length
+  |> should.equal(1)
+  let #(model, _) = board.update(model, board.Select("a", "1"))
+  let rendered = board.view(model) |> element.to_string
+  string.split(rendered, "class=\"card selected\"")
+  |> list.length
+  |> should.equal(3)
+  string.split(rendered, "aria-current=\"true\"")
+  |> list.length
+  |> should.equal(3)
+  let #(model, _) =
+    board.update(model, board.SelectedTaskLoaded(1, "a", "1", shared))
+  let rendered = board.view(model) |> element.to_string
+  string.split(rendered, "class=\"card selected\"")
+  |> list.length
+  |> should.equal(3)
+  rendered
+  |> string.contains(
+    "button.card[aria-current=true],button.card[aria-current=true]:hover",
+  )
+  |> should.be_true
+  let #(model, _) = board.update(model, board.Select("b", "1"))
+  let #(model, _) =
+    board.update(model, board.SelectedTaskLoaded(1, "a", "1", shared))
+  model.selected |> should.equal(None)
+  let rendered = board.view(model) |> element.to_string
+  string.split(rendered, "class=\"card selected\"")
+  |> list.length
+  |> should.equal(2)
+  let #(model, _) =
+    board.update(model, board.SelectedTaskLoaded(2, "b", "1", other))
+  let assert Some(task) = model.selected
+  task.title |> should.equal("Other")
+  let rendered = board.view(model) |> element.to_string
+  string.split(rendered, "class=\"card selected\"")
+  |> list.length
+  |> should.equal(2)
+  let #(model, _) = board.update(model, board.Select("a", "1"))
+  let #(model, _) = board.update(model, board.Select("b", "1"))
+  let #(model, _) = board.update(model, board.Select("a", "1"))
+  let #(model, _) =
+    board.update(model, board.SelectedTaskLoaded(3, "a", "1", shared))
+  model.selected |> should.equal(None)
+  let #(model, _) =
+    board.update(model, board.SelectedTaskLoaded(5, "a", "1", shared))
+  let assert Some(task) = model.selected
+  task.title |> should.equal("Across")
+  // The open task moves from a to b: details and highlight follow it.
+  let moved =
+    "{\"id\":\"1\",\"title\":\"Moved\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"scope\":[\"b\",\"a\"]}"
+  let #(model, _) =
+    board.update(model, board.Live("{\"project\":\"b\",\"removed\":\"1\"}"))
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live("{\"project\":\"b\",\"task\":" <> moved <> "}"),
+    )
+  let #(model, _) =
+    board.update(model, board.Live("{\"project\":\"a\",\"removed\":\"1\"}"))
+  let assert Some(task) = model.selected
+  task.title |> should.equal("Moved")
+  model.selected_card |> should.equal(Some(#("b", "1")))
+  model.lane |> should.equal("b")
+  let rendered = board.view(model) |> element.to_string
+  string.split(rendered, "class=\"card selected\"")
+  |> list.length
+  |> should.equal(3)
+}
+
+pub fn models_loaded_keeps_choice_test() {
+  let list_json =
+    "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\",\"high\"]},{\"id\":\"c\",\"label\":\"C\",\"available\":false}]"
+  let #(base, _) = board.init(Nil)
+  let loaded = fn(model, text) {
+    let #(m, _) = board.update(model, board.ModelsLoaded(text))
+    m
+  }
+  // No choice yet: the first available agent.
+  let first = loaded(board.Model(..base, model: "", effort: ""), list_json)
+  assert first.model == "a"
+  // A remembered available agent and its effort are kept.
+  let kept = loaded(board.Model(..base, model: "b", effort: "high"), list_json)
+  assert kept.model == "b"
+  assert kept.effort == "high"
+  // An effort the agent doesn't offer is dropped.
+  let dropped =
+    loaded(board.Model(..base, model: "b", effort: "max"), list_json)
+  assert dropped.effort == ""
+  // An unavailable or unknown agent falls back to the first available one.
+  let unavailable =
+    loaded(board.Model(..base, model: "c", effort: "high"), list_json)
+  assert unavailable.model == "a"
+  assert unavailable.effort == ""
+  let unknown = loaded(board.Model(..base, model: "zzz", effort: ""), list_json)
+  assert unknown.model == "a"
+}
+
+/// Source modules come before test modules, symbols are alphabetical, and a
+/// task across projects names the project in each heading.
+pub fn change_groups_test() {
+  let changes = [
+    board.Change("a", "app_test", "t_test"),
+    board.Change("a", "util", "zed"),
+    board.Change("a", "app", "beta"),
+    board.Change("a", "app", "alpha"),
+  ]
+  board.change_groups(changes, False)
+  |> should.equal([
+    #("app", ["alpha", "beta"]),
+    #("util", ["zed"]),
+    #("app_test", ["t_test"]),
+  ])
+  board.change_groups([board.Change("b", "app", "one")], True)
+  |> should.equal([#("b · app", ["one"])])
+}
+
+pub fn stop_and_discussion_actions_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.WorkflowLoaded(
+        "",
+        "{\"columns\":[{\"id\":\"triage\",\"label\":\"Triage\",\"actions\":[\"assign\"]}]}",
+      ),
+    )
+  let task = fn(kind, state) {
+    let text =
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[{\"id\":\"r\",\"kind\":\""
+      <> kind
+      <> "\",\"model\":\"m\",\"state\":\""
+      <> state
+      <> "\",\"started\":1,\"log\":\"\"}]}"
+    let assert Ok(t) = json.parse(text, board.task_decoder())
+    t
+  }
+  board.actions(board.workflow(model), task("work", "running"))
+  |> should.equal(["assign", "pause", "stop"])
+  board.actions(board.workflow(model), task("discuss", "waiting"))
+  |> should.equal(["assign", "pause", "end_discussion", "stop"])
+  board.status(task("discuss", "waiting"))
+  |> should.equal("Waiting for your reply")
+  board.status(task("discuss", "running")) |> should.equal("Agent discussing")
 }

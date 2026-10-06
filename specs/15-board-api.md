@@ -21,7 +21,7 @@ The workflow (columns, and the actions allowed in each) comes from configuration
 | `finished` | `{kind, outcome, time}` after a run ends successfully, until the next action or new run (D-37) |
 | `notes` | `{author: human\|agent\|solace, run?, time, text}`, oldest first |
 | `questions` | Raised by agents: `{id, text, options[], answer?, settings?}`. An answer is one option or free text. `settings: {base, proposed}` marks a proposed `solace.toml` change |
-| `runs` | Agent runs: `{id, kind: investigate\|work\|review, model, effort?, state: running\|waiting\|ended, started, ended?, outcome?, log}`. `log` is where the agent's own session log is, for a later view of the run (§6) |
+| `runs` | Agent runs: `{id, kind: investigate\|work\|review\|discuss, model, effort?, state: running\|waiting\|ended, started, ended?, outcome?, log}`. `log` is where the agent's own session log is, for a later view of the run (§6) |
 | `changes` | What the task's work runs changed (§5), each `{entity, name, run, project}`; `project` is the folder the change was made in |
 | `scope` | The projects the task may change, as folders (D-61). At least one; a task saved before D-61 has none and covers its own project |
 
@@ -40,9 +40,12 @@ The `[board]` section of `solace.toml` (humans only, Spec 14 §2) defines the wo
 - Tasks have no type (D-25): what an agent may do comes from the kind of run the column's actions start. Only work runs change the project.
 - **Events**, the moves Solace makes by itself: `asked` (an agent asked a question), `finished` (an agent reported it was done) and `failed` (a run crashed, timed out, or exited without finishing). Each names a target column. No action can make these moves.
 
-Two actions are built in and allowed in every column that isn't final:
+Five actions are built in and allowed in every column that isn't final:
 - `pause` records `paused_from`. The task's agent is held at its next Solace call until `resume`, so it keeps its context. The only actions that end an agent are those with `new_work`, and `revert`.
 - `resume` returns the task to `paused_from`. A paused task also allows the actions of `paused_from`.
+- `stop` (D-72) ends every open run with outcome `stopped`, kills its agent and throws away its session; changes are kept, the task stays in its column, and no event fires. Refused without an open run (`E7003`). It also ends an agent, as `new_work` and `revert` do.
+- `discuss` (D-72) starts a read-only `discuss` run with `{model, effort?, text}`; `text` is required (`E7001`) and is the discussion's first note. Refused while a run is open (`E7003`). The agent replies with `task note`, which waits for the human's next note (`task done` and `task ask` are refused); waiting doesn't count toward the timeout. While it is open, a human note is the discussion's next turn.
+- `end_discussion` ends the open discussion with outcome `discussed` (`E7003` without one). When a discussion ends, by this or by `stop`, Solace replaces its notes with one `solace` note: a verbatim transcript, each turn labeled `**Human:**` or `**Agent (<model>):**` on its own line, followed by a blank line and the turn's text. A discussion's brief keeps every note whole, lists the decision titles from `DECISIONS.md`, and leaves out the verification record.
 
 Solace checks the configuration at start and on every change. An invalid workflow is `E6020` (Spec 14 §6): an unknown column, an action that is never allowed anywhere, an event with no target, a gate whose `next` is unknown, or a final column with actions.
 

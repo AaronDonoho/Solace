@@ -133,7 +133,7 @@ pub type Task {
     questions: List(Question),
     runs: List(Run),
     links: List(Link),
-    changes: List(String),
+    changes: List(Change),
     stamps: List(String),
     attention: String,
     finished: String,
@@ -233,6 +233,9 @@ pub type Model {
     /// The dir of the selected task's lane.
     lane: String,
     selected: Option(Task),
+    /// The task chosen on the board, including while its details load.
+    selected_card: Option(#(String, String)),
+    selection_generation: Int,
     models: List(Agent),
     model: String,
     effort: String,
@@ -295,6 +298,7 @@ pub type Msg {
   TasksLoaded(String, String)
   ModelsLoaded(String)
   TaskLoaded(String)
+  SelectedTaskLoaded(Int, String, String, String)
   Changed(String)
   Live(String)
   CaughtUp
@@ -304,6 +308,7 @@ pub type Msg {
   DraftScope(String, Bool)
   SetScope(String, Bool)
   ToggleProjects
+  ToggleTheme
   AddProject(String)
   RemoveProject(String)
   ProjectName(String)
@@ -393,9 +398,11 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       found: [],
       lane: "",
       selected: None,
+      selected_card: None,
+      selection_generation: 0,
       models: [],
-      model: "",
-      effort: "",
+      model: load(agent_key),
+      effort: load(effort_key),
       text: "",
       title: "",
       body: "",
@@ -715,24 +722,43 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
     ModelsLoaded(text) ->
       case json.parse(text, decode.list(agent_decoder())) {
-        Ok(models) -> #(
-          Model(
-            ..model,
-            models: models,
-            model: list.find(models, fn(a) { a.available })
-              |> result.map(fn(a) { a.id })
-              |> result.unwrap(""),
-          ),
-          effect.none(),
-        )
+        Ok(models) -> {
+          // The remembered agent stays if it is still available; its effort
+          // stays if the agent still offers it.
+          let kept =
+            list.find(models, fn(a) { a.available && a.id == model.model })
+          let chosen = case kept {
+            Ok(a) -> Ok(a)
+            Error(_) -> list.find(models, fn(a) { a.available })
+          }
+          let id = result.map(chosen, fn(a) { a.id }) |> result.unwrap("")
+          let effort = case kept {
+            Ok(a) ->
+              case list.contains(a.efforts, model.effort) {
+                True -> model.effort
+                False -> ""
+              }
+            Error(_) -> ""
+          }
+          #(
+            Model(..model, models: models, model: id, effort: effort),
+            effect.none(),
+          )
+        }
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
+    SelectedTaskLoaded(generation, dir, id, text)
+      if generation == model.selection_generation
+      && model.selected_card == Some(#(dir, id))
+    -> update(model, TaskLoaded(text))
+    SelectedTaskLoaded(_, _, _, _) -> #(model, effect.none())
     TaskLoaded(text) ->
       case json.parse(text, task_decoder()) {
         Ok(task) -> #(
           Model(
             ..model,
             selected: Some(task),
+            selected_card: Some(#(model.lane, task.id)),
             title: task.title,
             body: task.body,
             rank: float.to_string(task.rank),
@@ -764,6 +790,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             Model(
               ..model,
               selected: Some(task),
+              selected_card: Some(#(model.lane, task.id)),
               title: task.title,
               body: task.body,
               rank: float.to_string(task.rank),
@@ -816,6 +843,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(
         ..model,
         lane: dir,
+        selected: None,
+        selected_card: Some(#(dir, id)),
+        selection_generation: model.selection_generation + 1,
         text: "",
         watching: "",
         entries: [],
@@ -823,7 +853,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         editing: False,
         previews: [],
       ),
-      get(model, base_of(model, dir) <> "/tasks/" <> id, TaskLoaded),
+      get(model, base_of(model, dir) <> "/tasks/" <> id, SelectedTaskLoaded(
+        model.selection_generation + 1,
+        dir,
+        id,
+        _,
+      )),
     )
     Collapse(dir) -> {
       let collapsed = case list.contains(model.collapsed, dir) {
@@ -866,6 +901,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           )
         }
       }
+    ToggleTheme -> #(model, effect.from(fn(_) { toggle_theme() }))
     ToggleProjects -> #(
       Model(..model, projects_open: !model.projects_open),
       effect.none(),
@@ -956,8 +992,15 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     }
     TranscriptLoaded(_, _) -> #(model, effect.none())
     // Efforts differ between models, so a new model starts at its default.
-    AgentSelected(id) -> #(Model(..model, model: id, effort: ""), effect.none())
-    EffortSelected(effort) -> #(Model(..model, effort: effort), effect.none())
+    AgentSelected(id) -> {
+      store(agent_key, id)
+      store(effort_key, "")
+      #(Model(..model, model: id, effort: ""), effect.none())
+    }
+    EffortSelected(effort) -> {
+      store(effort_key, effort)
+      #(Model(..model, effort: effort), effect.none())
+    }
     Text(text) -> #(Model(..model, text: text), effect.none())
     Title(text) -> #(Model(..model, title: text), effect.none())
     Body(text) -> #(Model(..model, body: text), effect.none())
@@ -1094,6 +1137,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                 <> t.title
                 <> "\"? This keeps its changes and closes the task. Its undo records will be removed, so it cannot be reopened or reverted through the board.",
               )
+            "stop" ->
+              confirm(
+                "Stop the agent working on \""
+                <> t.title
+                <> "\"? This ends its session; its changes are kept, and a later run starts a fresh agent.",
+              )
             _ -> True
           }
           case proceed {
@@ -1180,13 +1229,12 @@ fn live(model: Model, text: String, notify: Bool) -> Model {
     Ok(lane) ->
       case json.parse(text, decode.at(["task"], task_decoder())) {
         Ok(task) -> {
-          // A task that moved to another project (D-61) is opened from there.
-          let #(selected, model) = case model.selected {
-            Some(t) if t.id == task.id -> #(
-              Some(task),
-              Model(..model, lane: dir),
-            )
-            other -> #(other, model)
+          // Only the selected task's home project may refresh its details.
+          let #(selected, model) = case model.selected, model.selected_card {
+            Some(t), Some(#(home, id))
+              if t.id == task.id && id == task.id && home == dir
+            -> #(Some(task), Model(..model, lane: dir))
+            other, _ -> #(other, model)
           }
           let new = case
             list.find(lane.tasks, fn(t) { t.id == task.id }),
@@ -1226,6 +1274,7 @@ fn live(model: Model, text: String, notify: Bool) -> Model {
                   map_lane(model, dir, fn(l) {
                     Lane(..l, tasks: list.filter(l.tasks, fn(t) { t.id != id }))
                   })
+                  |> follow_move(dir, id)
                 Error(_) -> model
               }
           }
@@ -1506,7 +1555,16 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     decode.list({
       use name <- decode.field("name", decode.string)
       use project <- decode.optional_field("project", "", decode.string)
-      decode.success(#(project, name))
+      // `module.symbol`: the symbol follows the last dot.
+      let parts = string.split(name, ".")
+      let #(module, symbol) = case list.reverse(parts) {
+        [symbol, ..rest] if rest != [] -> #(
+          string.join(list.reverse(rest), "."),
+          symbol,
+        )
+        _ -> #("", name)
+      }
+      decode.success(Change(project, module, symbol))
     }),
   )
   use stamps <- decode.optional_field(
@@ -1526,14 +1584,6 @@ pub fn task_decoder() -> decode.Decoder(Task) {
   )
   use unexpected <- decode.optional_field("unexpected", False, decode.bool)
   use scope <- decode.optional_field("scope", [], decode.list(decode.string))
-  // A task across projects names each change's project.
-  let changes =
-    list.map(changes, fn(c) {
-      case scope {
-        [_, _, ..] -> c.0 <> ": " <> c.1
-        _ -> c.1
-      }
-    })
   decode.success(Task(
     id,
     title,
@@ -1674,13 +1724,23 @@ fn column_decoder() -> decode.Decoder(Column) {
 }
 
 pub fn actions(workflow: Workflow, task: Task) -> List(String) {
+  // Discuss starts between runs; stop ends any run, and a discussion can be ended.
+  let built_in = case list.find(task.runs, fn(r) { r.state != "ended" }) {
+    Error(_) -> ["discuss"]
+    Ok(r) if r.kind == "discuss" -> ["end_discussion", "stop"]
+    Ok(_) -> ["stop"]
+  }
   case list.find(workflow.columns, fn(c) { c.id == task.column }) {
     Ok(c) if c.final -> []
     Ok(c) ->
-      list.append(c.actions, case task.paused {
-        "" -> ["pause"]
-        _ -> ["resume"]
-      })
+      list.flatten([
+        c.actions,
+        case task.paused {
+          "" -> ["pause"]
+          _ -> ["resume"]
+        },
+        built_in,
+      ])
     Error(_) -> []
   }
 }
@@ -2059,7 +2119,7 @@ fn migration_mark(status: String) -> Element(Msg) {
 
 pub fn view(model: Model) -> Element(Msg) {
   h.main([], [
-    h.style([], board_styles),
+    h.style([], board_styles <> selected_card_styles),
     migration_view(model),
     h.header([a.class("top")], [
       h.h1([], [h.text("Solace tasks")]),
@@ -2074,6 +2134,43 @@ pub fn view(model: Model) -> Element(Msg) {
           False -> "New task"
         }),
       ]),
+      h.button(
+        [
+          a.class("theme"),
+          a.attribute("aria-label", "Switch between light and dark theme"),
+          a.title("Switch between light and dark theme"),
+          e.on_click(ToggleTheme),
+        ],
+        [
+          svg.svg(
+            [
+              a.class("sun"),
+              a.attribute("viewBox", "0 0 24 24"),
+              a.attribute("aria-hidden", "true"),
+            ],
+            [
+              svg.path([
+                a.attribute(
+                  "d",
+                  "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
+                ),
+              ]),
+            ],
+          ),
+          svg.svg(
+            [
+              a.class("moon"),
+              a.attribute("viewBox", "0 0 24 24"),
+              a.attribute("aria-hidden", "true"),
+            ],
+            [
+              svg.path([
+                a.attribute("d", "M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"),
+              ]),
+            ],
+          ),
+        ],
+      ),
     ]),
     h.p([a.role("alert")], [h.text(model.error)]),
     h.div(
@@ -2222,39 +2319,56 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
         },
         ..list.map(tasks, fn(card) {
           let #(home, t) = card
-          h.button([a.class("card"), e.on_click(Select(home, t.id))], [
-            case t.attention {
-              "" -> h.text("")
-              _ ->
-                h.strong([a.class("attention")], [h.text("Needs attention ")])
-            },
-            case t.stamps {
-              [] -> h.text("")
-              stamps ->
-                h.span([a.class("stamp"), a.title(string.join(stamps, ", "))], [
-                  h.text("✓"),
-                  h.span([a.class("sr-only")], [
-                    h.text(" " <> string.join(stamps, ", ") <> ": "),
-                  ]),
-                ])
-            },
-            case t.unexpected {
-              False -> h.text("")
-              True -> hazard()
-            },
-            h.text(t.title),
-            case t.scope {
-              [_, _, ..] ->
-                h.small([a.class("muted")], [
-                  h.text(string.join(
-                    list.map(t.scope, label_of(model, _)),
-                    " · ",
-                  )),
-                ])
-              _ -> h.text("")
-            },
-            status_badge(t),
-          ])
+          let current = model.selected_card == Some(#(home, t.id))
+          h.button(
+            [
+              a.class(case current {
+                True -> "card selected"
+                False -> "card"
+              }),
+              a.attribute("aria-current", case current {
+                True -> "true"
+                False -> "false"
+              }),
+              e.on_click(Select(home, t.id)),
+            ],
+            [
+              case t.attention {
+                "" -> h.text("")
+                _ ->
+                  h.strong([a.class("attention")], [h.text("Needs attention ")])
+              },
+              case t.stamps {
+                [] -> h.text("")
+                stamps ->
+                  h.span(
+                    [a.class("stamp"), a.title(string.join(stamps, ", "))],
+                    [
+                      h.text("✓"),
+                      h.span([a.class("sr-only")], [
+                        h.text(" " <> string.join(stamps, ", ") <> ": "),
+                      ]),
+                    ],
+                  )
+              },
+              case t.unexpected {
+                False -> h.text("")
+                True -> hazard()
+              },
+              h.text(t.title),
+              case t.scope {
+                [_, _, ..] ->
+                  h.small([a.class("muted")], [
+                    h.text(string.join(
+                      list.map(t.scope, label_of(model, _)),
+                      " · ",
+                    )),
+                  ])
+                _ -> h.text("")
+              },
+              status_badge(t),
+            ],
+          )
         })
       ])
     }),
@@ -2400,7 +2514,7 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
     ),
     h.div([a.class("panel"), a.role("tabpanel")], case model.tab {
       "notes" -> notes_view(base(model), t)
-      "questions" -> questions_view(t)
+      "questions" -> questions_view(base(model), t)
       "runs" -> list.map(list.reverse(t.runs), fn(r) { run_view(model, r) })
       "changes" -> [
         case t.changes {
@@ -2413,7 +2527,15 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
               ]),
             ])
         },
-        h.ul([], list.map(t.changes, fn(c) { h.li([], [h.text(c)]) })),
+        h.div(
+          [],
+          list.map(change_groups(t.changes, list.length(t.scope) > 1), fn(g) {
+            h.section([], [
+              h.h4([], [h.text(g.0)]),
+              h.ul([], list.map(g.1, fn(n) { h.li([], [h.text(n)]) })),
+            ])
+          }),
+        ),
       ]
       _ -> details_view(model, t)
     }),
@@ -2473,10 +2595,18 @@ fn agent_choice(model: Model) -> Element(Msg) {
         [a.value(model.model), e.on_input(AgentSelected)],
         list.map(model.models, fn(m) {
           case m.available {
-            True -> h.option([a.value(m.id)], m.label)
+            True ->
+              h.option(
+                [a.value(m.id), a.selected(m.id == model.model)],
+                m.label,
+              )
             False ->
               h.option(
-                [a.value(m.id), a.disabled(True)],
+                [
+                  a.value(m.id),
+                  a.disabled(True),
+                  a.selected(m.id == model.model),
+                ],
                 m.label <> " (unavailable: " <> m.reason <> ")",
               )
           }
@@ -2488,12 +2618,18 @@ fn agent_choice(model: Model) -> Element(Msg) {
         h.label([], [
           h.text("Effort"),
           h.select([a.value(model.effort), e.on_input(EffortSelected)], [
-            h.option([a.value("")], case m.effort {
-              "" -> "Default"
-              effort -> "Default (" <> effort <> ")"
-            }),
+            h.option(
+              [a.value(""), a.selected(model.effort == "")],
+              case m.effort {
+                "" -> "Default"
+                effort -> "Default (" <> effort <> ")"
+              },
+            ),
             ..list.map(m.efforts, fn(effort) {
-              h.option([a.value(effort)], effort)
+              h.option(
+                [a.value(effort), a.selected(effort == model.effort)],
+                effort,
+              )
             })
           ]),
         ])
@@ -2613,17 +2749,17 @@ fn bool_text(value: Bool) -> String {
   }
 }
 
-fn questions_view(t: Task) -> List(Element(Msg)) {
+fn questions_view(base: String, t: Task) -> List(Element(Msg)) {
   list.map(list.reverse(t.questions), fn(q) {
     let #(diff, other) = case q.settings {
-      Some(#(base, proposed)) -> #(
-        [h.pre([a.class("diff")], [h.text(settings_diff(base, proposed))])],
+      Some(#(current, proposed)) -> #(
+        [h.pre([a.class("diff")], [h.text(settings_diff(current, proposed))])],
         "Reject with the editor's text",
       )
       None -> #([], "Answer with the editor's text")
     }
     h.article([], [
-      h.p([], [h.text(q.text)]),
+      md(base, q.text),
       ..list.append(diff, [
         case q.answer {
           "" ->
@@ -2708,7 +2844,10 @@ pub fn status(t: Task) -> String {
         "reviewed" -> "Review ready"
         _ -> ""
       }
+    "", Ok(r) if r.state == "waiting" && r.kind == "discuss" ->
+      "Waiting for your reply"
     "", Ok(r) if r.state == "waiting" -> "Waiting for your answer"
+    "", Ok(r) if r.kind == "discuss" -> "Agent discussing"
     "", Ok(r) if r.kind == "review" -> "Agent reviewing"
     "", Ok(r) if r.kind == "investigate" -> "Agent investigating"
     "", Ok(_) -> "Agent working"
@@ -2946,7 +3085,38 @@ pub fn register() -> Result(Nil, lustre.Error) {
   )
 }
 
-const board_styles = ".migration{margin-bottom:16px}.migration .editor{margin:8px 0}.migration input[type=checkbox]{width:auto}.projects-pick{margin:8px 0}.projects-pick label{display:inline-block;margin-right:16px}.migration fieldset{border:1px solid #ccd0d5;border-radius:4px}.migration .migration-banner{border-left:4px solid #286ac7}.migration code{overflow-wrap:anywhere}.migration summary{cursor:pointer;font-weight:600}.migration pre{max-height:400px;max-width:none;overflow:auto;white-space:pre;font:13px ui-monospace,monospace;user-select:text}.migration [role=alert]{white-space:pre-wrap}.migration .mark{display:inline-block;width:1.4em;text-align:center;font-weight:700;margin-right:4px}.migration .migration-verified{color:#14552a}.migration .migration-failed{color:#a00016}.migration .migration-not-checked{color:#784400}.migration .migration-action{display:flex;gap:12px;align-items:baseline;margin:8px 0}.migration .migration-action button{flex:none}.migration .migration-legend{color:#56606b}.migration .migration-report ul{list-style:none;padding-left:0}.migration button:disabled{cursor:default;opacity:.55}.migration p{overflow-wrap:anywhere}\n\n:host{display:block;box-sizing:border-box;padding:24px;user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:#20252b;background:#fafafa}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid #aab0b8;border-radius:4px}button{cursor:pointer;background:white}button:hover{background:#e9f1ff}button:focus-visible{outline:3px solid #286ac7}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:#edf0f4;padding:12px;border-radius:6px}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid #ccd0d5;padding:16px;border-radius:6px}small{display:block;color:#56606b;overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:#a00016}article{border-bottom:1px solid #ddd;padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:#9a3b00}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:10px;background:#e3e7ec;margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:#1f7a3a;margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid #ddd;border-radius:6px;padding:8px 12px;margin:8px 0;background:white}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol{margin:6px 0}.md pre,.transcript pre{background:#f1f3f6;padding:8px;border-radius:4px;overflow:auto;white-space:pre-wrap;font:13px ui-monospace,monospace;max-height:320px}code{font:13px ui-monospace,monospace;background:#eef1f5;padding:1px 4px;border-radius:3px}.transcript{border-left:3px solid #ccd0d5;padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:#56606b}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:#1f7a3a}.tool.failed .icon{color:#a00016}.muted{color:#56606b}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:#286ac7;color:white;border-color:#286ac7}.primary:hover{background:#1f58a8}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:#56606b;margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.composer{border:1px solid #aab0b8;border-radius:6px;margin:8px 4px;max-width:760px;background:white}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid #ddd;border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid #aab0b8;border-radius:4px;background:white;cursor:pointer}.toolbar .button:hover{background:#e9f1ff}.toolbar .button:focus-within{outline:3px solid #286ac7}.toolbar [aria-pressed=true]{background:#e3e7ec;font-weight:600}.separator{width:1px;align-self:stretch;background:#ddd;margin:0 6px}.preview{border-top:1px solid #ddd;padding:8px 12px;min-height:94px}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid #ccd0d5;margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:6px 6px 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:#ccd0d5 #ccd0d5 #fafafa;background:#fafafa;font-weight:600}.panel{padding-top:8px}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:#56606b;width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid #ddd;border-radius:4px}.status.finished{background:#dcefe2;color:#14552a}.diff{font:13px ui-monospace,monospace;background:#f1f3f6;padding:8px;border-radius:4px;max-width:760px}\n.lanes{display:grid;gap:12px;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:6px 0;overflow:visible}.lane{border:1px solid #ccd0d5;border-radius:6px;padding:4px 8px;background:white}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h2{margin-top:0}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{width:auto;flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}.stamp{color:#1f7a3a;font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:#20252b;color:white;padding:12px 52px 12px 14px;border-radius:6px;box-shadow:0 4px 16px #0003}.notice strong{display:block;overflow-wrap:anywhere}.notice p{margin:4px 0 0;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:white;border:0}.notice .close:hover{background:#ffffff22}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}"
+const board_styles = ".migration{margin-bottom:16px}.migration .editor{margin:8px 0}.migration input[type=checkbox]{width:auto}.projects-pick{margin:8px 0}.projects-pick label{display:inline-block;margin-right:16px}.migration fieldset{border:1px solid var(--line);border-radius:0}.migration .migration-banner{border-top:4px solid var(--logic)}.migration code{overflow-wrap:anywhere}.migration summary{cursor:pointer;font-weight:600}.migration pre{max-height:400px;max-width:none;overflow:auto;white-space:pre;font:13px 'IBM Plex Mono',ui-monospace,monospace;user-select:text}.migration [role=alert]{white-space:pre-wrap}.migration .mark{display:inline-block;width:1.4em;text-align:center;font-weight:700;margin-right:4px}.migration .migration-verified{color:var(--ok-text)}.migration .migration-failed{color:var(--revision)}.migration .migration-not-checked{color:var(--warn-text)}.migration .migration-action{display:flex;gap:12px;align-items:baseline;margin:8px 0}.migration .migration-action button{flex:none}.migration .migration-legend{color:var(--soft)}.migration .migration-report ul{list-style:none;padding-left:0}.migration button:disabled{cursor:default;opacity:.55}.migration p{overflow-wrap:anywhere}\n\n:host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sun:none;--moon:inline-block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 24px 48px;min-height:100dvh;user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol{margin:6px 0}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;max-width:760px;background:var(--paper)}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid var(--line);border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}.toolbar [aria-pressed=true]{background:var(--well);font-weight:600}.separator{width:1px;align-self:stretch;background:var(--line);margin:0 6px}.preview{border-top:1px solid var(--line);padding:8px 12px;min-height:94px}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h2{margin-top:0}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{width:auto;flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice p{margin:4px 0 0;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
+:host{background:var(--sheet);color:var(--ink)}
+main{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;color:var(--ink);background:none}
+*{scrollbar-color:var(--line) var(--paper)}::selection{background:var(--sel);color:var(--ink)}
+h1,h2,h3{line-height:1.2;letter-spacing:-.02em}a{color:var(--focus);text-underline-offset:3px}
+button,input,textarea,select{border:1px solid var(--edge);background:var(--paper);color:var(--ink);caret-color:var(--focus)}input::placeholder,textarea::placeholder{color:var(--soft);opacity:1}
+button:hover{background:var(--hover)}button:disabled{color:var(--soft)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+textarea{font-family:inherit}
+.top{margin:0 -24px 24px;padding:12px 22px;background:var(--paper);border-bottom:2px solid var(--edge)}.top h1{font-size:28px}
+.primary{background:var(--ink);color:var(--paper);border-color:var(--edge);font-weight:700}.primary:hover{background:var(--focus);border-color:var(--focus);color:var(--paper)}
+.theme{margin:0 0 0 4px;padding:6px;line-height:0}.theme svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.theme .sun{display:var(--sun)}.theme .moon{display:var(--moon)}
+.column{background:var(--well);border:1px solid var(--line);padding:0 12px 12px}
+.column h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;margin:0 -12px 12px;padding:10px 12px;background:var(--paper);border-bottom:2px solid var(--edge)}
+.lane-head .column{background:transparent;border:0}.lane-head h2{margin:0 -12px;border-bottom:2px solid var(--edge)}
+.lane{border-color:var(--edge);background:var(--paper)}.lane-title{padding:6px 0}.lane-toggle{font-weight:700;background:transparent}.lane-toggle:hover{background:var(--hover)}
+.card{position:relative;background:var(--paper);border-color:var(--edge);padding:10px 12px 10px 22px;line-height:1.35;--tab:var(--file)}
+.card::before{content:\"\";position:absolute;inset:0 auto 0 0;width:8px;background:var(--tab)}
+.card:has(.working){--tab:var(--logic)}.card:has(.stamp){--tab:var(--entry)}.card:has(.attention){--tab:var(--effect)}.card:has(.hazard){--tab:var(--revision)}
+.card:hover{background:var(--hover)}.card+.card{margin-top:8px}
+.attention{font-weight:700}.stamp{margin-right:6px}
+.status{border:1px solid var(--line);background:var(--paper);font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:1px 8px}.status.finished{background:var(--add);color:var(--ok-text);border-color:var(--ok-text)}.working::before{background:var(--entry)}
+.detail,.editor,.composer,.note,.run,.projects{background:var(--paper);border-color:var(--edge)}.detail{padding:20px 24px}
+.tabs{border-bottom:2px solid var(--edge)}.tabs button{border:0;border-right:1px solid var(--line);background:transparent;margin:0;padding:10px 16px}.tabs [aria-selected=true]{background:var(--paper);box-shadow:inset 0 -3px var(--ink);border-color:var(--line)}
+.composer textarea{border:0;border-top:1px solid var(--edge)}.toolbar .button{border-color:var(--edge);background:var(--paper)}.toolbar .button:hover{background:var(--hover)}.toolbar [aria-pressed=true]{background:var(--ink);color:var(--paper)}
+article{border-bottom-color:var(--line)}.transcript{border-left:1px solid var(--edge)}
+.md pre,.transcript pre,.diff,code{background:var(--code);color:var(--ink)}
+.notices .notice{background:var(--ink);color:var(--paper);box-shadow:4px 8px 24px var(--shadow)}.notice .close{color:var(--paper)}
+@media(prefers-reduced-motion:no-preference){button,.card{transition:background-color .12s ease-out}}
+.lane+.lane{margin-top:-1px}
+.top a,.lane-title a{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid var(--edge);background:var(--paper);color:var(--ink);text-decoration:none;font-weight:700}
+.top a:hover,.lane-title a:hover{background:var(--hover)}
+.top a::after,.lane-title a::after{content:\"\";width:14px;height:14px;background:currentColor;-webkit-mask:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 5l7 7-7 7'/%3E%3C/svg%3E\") center/contain no-repeat;mask:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 5l7 7-7 7'/%3E%3C/svg%3E\") center/contain no-repeat}"
 
 /// Opens this instance's transport with its own `base`: the event stream, one
 /// migration polling chain, the followed run's transcript and the first loads.
@@ -2992,3 +3162,85 @@ fn stop(model: Model) -> Model {
 
 @external(javascript, "./api.mjs", "no_root")
 fn no_root() -> dynamic.Dynamic
+
+const selected_card_styles = "
+button.card[aria-current=true],button.card[aria-current=true]:hover{background:var(--hover);border-color:var(--ink);box-shadow:0 0 0 2px var(--ink),4px 6px 14px var(--shadow)}button.card[aria-current=true]:focus-visible{outline:3px solid var(--focus);outline-offset:5px}@media(forced-colors:active){button.card[aria-current=true],button.card[aria-current=true]:hover{border-color:Highlight;box-shadow:0 0 0 2px Highlight}}"
+
+/// The open task left its home project: if it moved to another project it
+/// covers (D-61), it is opened from there.
+fn follow_move(model: Model, dir: String, id: String) -> Model {
+  case model.selected, model.selected_card {
+    Some(t), Some(#(home, card_id))
+      if home == dir && card_id == id && t.id == id
+    ->
+      case
+        list.find_map(model.lanes, fn(l) {
+          case l.dir != dir && list.contains(t.scope, l.dir) {
+            True ->
+              list.find(l.tasks, fn(x) { x.id == id })
+              |> result.map(fn(x) { #(l.dir, x) })
+            False -> Error(Nil)
+          }
+        })
+      {
+        Ok(#(to, task)) ->
+          Model(
+            ..model,
+            lane: to,
+            selected: Some(task),
+            selected_card: Some(#(to, id)),
+          )
+        Error(_) -> model
+      }
+    _, _ -> model
+  }
+}
+
+/// Browser storage keys for the last agent and effort chosen.
+const agent_key = "solace-board-agent"
+
+const effort_key = "solace-board-effort"
+
+/// One changed symbol, split so the Changes tab can group it.
+pub type Change {
+  Change(project: String, module: String, name: String)
+}
+
+/// Changes as an outline: source modules before test modules, each module's
+/// symbols alphabetical. Headings name the project too when `multi_project`.
+pub fn change_groups(
+  changes: List(Change),
+  multi_project: Bool,
+) -> List(#(String, List(String))) {
+  let is_test = fn(c: Change) {
+    case string.ends_with(c.module, "_test") {
+      True -> 1
+      False -> 0
+    }
+  }
+  let sorted =
+    list.sort(changes, fn(a, b) {
+      string.compare(a.project, b.project)
+      |> order.break_tie(int.compare(is_test(a), is_test(b)))
+      |> order.break_tie(string.compare(a.module, b.module))
+      |> order.break_tie(string.compare(a.name, b.name))
+    })
+  let heading = fn(c: Change) {
+    case multi_project, c.project {
+      True, p if p != "" -> p <> " · " <> c.module
+      _, _ -> c.module
+    }
+  }
+  list.fold(sorted, [], fn(groups, c) {
+    let h = heading(c)
+    case groups {
+      [#(last, names), ..rest] if last == h -> [#(h, [c.name, ..names]), ..rest]
+      _ -> [#(h, [c.name]), ..groups]
+    }
+  })
+  |> list.map(fn(g) { #(g.0, list.reverse(g.1)) })
+  |> list.reverse
+}
+
+@external(javascript, "./api.mjs", "toggle_theme")
+fn toggle_theme() -> Nil

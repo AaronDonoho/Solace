@@ -69,6 +69,14 @@ export function store(key, value) {
   try { value ? localStorage.setItem(key, value) : localStorage.removeItem(key); } catch {}
 }
 
+// Flips the page between light and dark; index.html applies the stored choice.
+export function toggle_theme() {
+  const root = globalThis.document.documentElement;
+  const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
+  root.dataset.theme = next;
+  store('solace-theme', next);
+}
+
 // Wraps the markdown editor `id`'s selection (or appends, without one); `root`
 // is the board's shadow root.
 export function wrap(root, id, text, before, after) {

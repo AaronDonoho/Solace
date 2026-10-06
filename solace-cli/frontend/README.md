@@ -46,7 +46,7 @@ The server task must serve this index.html at /, /migrate, /view and
 
 priv/app.js is generated, not source: build it before embedding it — run
 install, build, then run bundle in this project. The server must keep
-serving board/priv/drawing.woff at /drawing.woff and board/guide.html at /guide,
+serving the board's fonts at /fonts/sans-400.woff2, /fonts/sans-700.woff2 and /fonts/mono-400.woff2 and board/guide.html at /guide,
 and preserve JSON and SSE routes, including /migration.
 Links inside app shadow roots use full page navigation.
 

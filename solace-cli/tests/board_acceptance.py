@@ -366,17 +366,18 @@ class Board(unittest.TestCase):
         self.assertIn('usage limit reached', t['attention']['reason'])
         self.assertFalse((self.root/'.solace/board'/t['id']/(rid+'-fallback')).exists())
 
-    def test_done_allows_graceful_exit_and_bounds_hung_shutdown(self):
+    def test_done_allows_graceful_exit(self):
+        # The 30-second bound on hung shutdown is board::tests::hung_shutdown_is_killed_after_the_grace_period.
         t = self.completed([])
         rid = t['runs'][-1]['id']
         self.wait(t, lambda x: (self.root/'.solace'/(rid+'.exited')).exists())
-        t = self.assign([{'command':'task done done'}, {'sleep':45}])
+        t = self.assign([{'command':'task done done'}, {'sleep':2}])
         t = self.wait(t, lambda x: x['column']=='needs_review')
         rid = t['runs'][-1]['id']
         home = self.root/'.solace/board'/t['id']/rid
         self.assertTrue(home.exists())
-        self.wait(t, lambda x: not home.exists(), timeout=40)
-        self.assertFalse((self.root/'.solace'/(rid+'.exited')).exists())
+        self.wait(t, lambda x: not home.exists())
+        self.assertTrue((self.root/'.solace'/(rid+'.exited')).exists())
     def test_a1_default_action_matrix(self):
         w=self.api('GET','/workflow')
         # Seed column positions through the human-owned JSON fixture, then use only HTTP actions.
@@ -385,7 +386,7 @@ class Board(unittest.TestCase):
                 t=self.create([{'sleep':.2},{'command':'task done done'}])
                 t['column']=col['id']
                 (self.root/'.solace/board'/f'{t["id"]}.json').write_text(json.dumps(t))
-                allowed=[] if col['final'] else [*col['actions'],'pause','resume']
+                allowed=[] if col['final'] else [*col['actions'],'pause','resume','discuss','stop','end_discussion']
                 if name not in allowed:
                     e=self.action(t,name,'E7001',model='fake');self.assertEqual(e['allowed'],allowed)
                 elif name=='complete' and col.get('requires'):self.action(t,name,'E7006')
@@ -475,6 +476,36 @@ class Board(unittest.TestCase):
         for broken in [default.replace('to = "planning"','to = "missing"'),default+'\nunused={to="backlog"}\n',default.replace('asked = "blocked",',''),default.replace('next = "complete"','next = "missing"'),default.replace('id = "complete"','id = "complete"\nactions=["plan"]')]:
             (self.root/'solace.toml').write_text(original+broken);self.api('GET','/workflow',code='E6020')
         (self.root/'solace.toml').write_text(original)
+    def test_stop_ends_running_and_paused_agents(self):
+        t=self.assign([{'command':'submit app.one','text':'pub fn one() { 7 }'},{'sleep':30}])
+        t=self.wait(t,lambda x:x['changes'])
+        rid=t['runs'][-1]['id'];pid=int((self.root/'.solace'/(rid+'.pid')).read_text())
+        t=self.action(t,'stop')
+        self.assertEqual(t['runs'][-1]['outcome'],'stopped');self.assertEqual(t['column'],'assigned')
+        self.wait(t,lambda x:(self.root/'.solace'/(rid+'.exited')).exists() or not os.path.exists(f'/proc/{pid}'))
+        self.assertIn('7',self.cli('view','app.one'))  # Changes are kept.
+        self.action(t,'stop','E7003')
+        # A paused agent is held inside its next Solace call; stopping ends that call too.
+        t=self.create([{'sleep':.3},{'command':'check'},{'command':'task done done'}]);self.action(t,'plan');t=self.action(t,'investigate',model='fake')
+        self.action(t,'pause');time.sleep(.6)
+        t=self.action(t,'stop');self.assertIsNone(t['paused_from'])
+        self.wait(t,lambda x:x['runs'][-1]['outcome']=='stopped' and x['finished'] is None)
+    def test_discussion_turns_and_transcript(self):
+        t=self.create([{'command':'task note first reply'},{'command':'task note second reply'}]);self.action(t,'plan')
+        self.action(t,'discuss','E7001',model='fake')
+        t=self.action(t,'discuss',model='fake',text='What about X?')
+        rid=t['runs'][-1]['id'];self.assertEqual(t['runs'][-1]['kind'],'discuss')
+        self.action(t,'investigate','E7003',model='fake')
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting')
+        self.api('POST','/tasks/'+t['id']+'/notes',{'text':'And Y?'})
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(x['notes'])==4)
+        t=self.action(t,'end_discussion')
+        self.assertEqual(t['runs'][-1]['outcome'],'discussed')
+        self.assertEqual(len(t['notes']),1);n=t['notes'][0]
+        self.assertEqual((n['author'],n['run']),('solace',rid))
+        self.assertEqual(n['text'],'### Discussion\n\n**Human:**\n\nWhat about X?\n\n**Agent (fake):**\n\nfirst reply\n\n**Human:**\n\nAnd Y?\n\n**Agent (fake):**\n\nsecond reply')
+        self.assertEqual(t['column'],'planning')
+        self.action(t,'end_discussion','E7003')
     def test_a5_question_wait_and_new_agent(self):
         t=self.assign([{'command':'task ask','text':'Which?','options':['a','b']},{'command':'task done answered'}])
         t=self.wait(t,lambda x:x['column']=='blocked');rid=t['runs'][-1]['id'];pid=int((self.root/'.solace'/(rid+'.pid')).read_text());os.kill(pid,0)

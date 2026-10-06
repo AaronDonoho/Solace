@@ -11,3 +11,5 @@ unwatched = []
 [commands]
 js_tests = { run = ["bun", "test", "test/api.test.mjs", "test/migration.test.mjs", "test/migration_states.test.mjs", "test/view.test.mjs"] }
 bundle = { run = ["bun", "build", "src/main.mjs", "--outfile", "priv/app.js", "--minify", "--target", "browser"] }
+# The board's release output, priv/app.js: compiled Gleam, then bundled. solace-cli/build.rs runs this.
+build-release = { run = ["sh", "-c", "gleam build && bun build src/main.mjs --outfile priv/app.js --minify --target browser"] }

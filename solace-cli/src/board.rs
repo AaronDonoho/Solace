@@ -150,8 +150,32 @@ fn allowed(w: &Value, t: &Value) -> Vec<String> {
         return vec![];
     }
     let mut out = c["actions"].as_array().unwrap_or(&vec![]).iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>();
-    out.extend(["pause".into(), "resume".into()]);
+    out.extend(["pause", "resume", "discuss", "stop", "end_discussion"].map(String::from));
     out
+}
+/// The task's discussion run that hasn't ended, if one is going.
+fn discussion(t: &Value) -> Option<String> {
+    t["runs"].as_array().unwrap().iter().find(|r| r["kind"] == "discuss" && r["state"] != "ended").and_then(|r| r["id"].as_str()).map(String::from)
+}
+/// Replaces a discussion's notes with one verbatim transcript, each turn
+/// labeled with who said it.
+fn compact(t: &mut Value, rid: &str) {
+    let model = t["runs"].as_array().unwrap().iter().find(|r| r["id"] == rid).and_then(|r| r["model"].as_str()).unwrap_or("").to_string();
+    let notes = t["notes"].as_array_mut().unwrap();
+    let (turns, rest): (Vec<Value>, Vec<Value>) = notes.drain(..).partition(|n| n["run"] == rid);
+    *notes = rest;
+    if turns.is_empty() {
+        return;
+    }
+    let lines: Vec<String> = turns
+        .iter()
+        .map(|n| {
+            let who = if n["author"] == "human" { "Human".to_string() } else { format!("Agent ({model})") };
+            // The label stands on its own line, so a turn that opens with a heading or list still renders.
+            format!("**{who}:**\n\n{}", n["text"].as_str().unwrap_or("").trim())
+        })
+        .collect();
+    note(t, "solace", Some(rid), &format!("### Discussion\n\n{}", lines.join("\n\n")));
 }
 pub(super) fn active(t: &Value) -> bool {
     t["runs"].as_array().unwrap().iter().any(|r| r["state"] != "ended")
@@ -902,7 +926,35 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
         continue_answered(s, w, t)?;
         return Ok(None);
     }
-    let a = &w["actions"][name];
+    // Stop ends every open run; the killed agent's conversation isn't kept.
+    if name == "stop" {
+        if !active(t) {
+            return err("E7003", "no agent is working on this task");
+        }
+        let discussing = discussion(t);
+        end_runs(t, "stopped");
+        if let Some(rid) = discussing {
+            compact(t, &rid);
+        }
+        return Ok(None);
+    }
+    if name == "end_discussion" {
+        let rid = discussion(t).ok_or_else(|| Failure("E7003 no discussion is going".into(), 1))?;
+        let i = run_at(t, &rid)?;
+        end_run(&mut t["runs"][i], "discussed");
+        compact(t, &rid);
+        return Ok(None);
+    }
+    if name == "discuss" {
+        if body["text"].as_str().is_none_or(|s| s.trim().is_empty()) {
+            return err("E7001", "a discussion starts with a message");
+        }
+        if active(t) {
+            return err("E7003", "task already has a run");
+        }
+    }
+    let discuss = json!({"run":"discuss","model":true});
+    let a = if name == "discuss" { &discuss } else { &w["actions"][name] };
     let run = a["run"].as_str().unwrap_or("");
     if matches!(run, "investigate" | "work" | "new_work")
         && body["text"].as_str().is_none_or(|s| s.is_empty())
@@ -957,7 +1009,9 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
         proposed["runs"] = t["runs"].clone();
     }
     *t = proposed;
-    if let Some(text) = body["text"].as_str() {
+    if let Some(text) = body["text"].as_str()
+        && run != "discuss"
+    {
         note(t, "human", None, text);
         for q in t["questions"].as_array_mut().unwrap() {
             if q["answer"].is_null() {
@@ -989,6 +1043,10 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
             let path = review_path(&s.root, t["id"].as_str().unwrap(), &rid)?;
             fs::create_dir_all(path.parent().unwrap())?;
             write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap())?;
+        }
+        // The discussion's first message is its first turn.
+        if kind == "discuss" {
+            note(t, "human", Some(&rid), body["text"].as_str().unwrap_or(""));
         }
         t["finished"] = Value::Null;
         if kind == "work" {
@@ -1216,7 +1274,9 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
                 ("POST", ["scope"]) => return set_scope(&s, &w, t, &body),
                 ("POST", ["notes"]) => {
                     let text = body["text"].as_str().ok_or_else(|| Failure("E7001 text required".into(), 1))?;
-                    note(&mut t, "human", None, text);
+                    // While a discussion is going, a human note is its next turn.
+                    let discussing = discussion(&t);
+                    note(&mut t, "human", discussing.as_deref(), text);
                 }
                 // Notes are only appended, so a note's position names it.
                 ("DELETE", ["notes", i]) => {
@@ -1284,7 +1344,9 @@ fn start(root: PathBuf, t: Value, rid: String, m: Value) {
                 other => other,
             };
             let current = task(&root, tid)?;
-            if t["runs"].as_array().unwrap().iter().any(|r| r["id"] == rid && r["kind"] == "review") || m["run"].is_array() {
+            if t["runs"].as_array().unwrap().iter().any(|r| r["id"] == rid && matches!(r["kind"].as_str(), Some("review" | "discuss")))
+                || m["run"].is_array()
+            {
                 let dir = conversation_dir(&root, tid, &rid)?;
                 if dir.exists() {
                     fs::remove_dir_all(dir)?;
@@ -1352,7 +1414,8 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     if run["state"] == "ended" {
         return Ok(());
     }
-    let author = run["kind"] != "review";
+    // A review or discussion has its own conversation, never the author's.
+    let author = !matches!(run["kind"].as_str(), Some("review" | "discuss"));
     let native = m["run"].is_null();
     let claude_home = env::var_os("CLAUDE_CONFIG_DIR")
         .map(PathBuf::from)
@@ -1521,53 +1584,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
         writeln!(stdin, "{prompt}")?;
     }
     drop(stdin);
-    let mut elapsed = Duration::ZERO;
-    let mut last = Instant::now();
-    let mut ending = None;
-    let mut forced = false;
-    loop {
-        std::thread::sleep(Duration::from_millis(50));
-        let current = task(root, tid)?;
-        let r = &current["runs"][run_at(&current, rid)?];
-        if r["state"] == "running" && current["paused_from"].is_null() {
-            elapsed += last.elapsed();
-        }
-        last = Instant::now();
-        let expired = r["state"] != "ended" && elapsed >= Duration::from_secs(timeout);
-        let ended = r["state"] == "ended";
-        if ended && matches!(r["outcome"].as_str(), Some("finished" | "reported" | "reviewed")) {
-            ending.get_or_insert_with(Instant::now);
-        }
-        if let Some(status) = child.try_wait()? {
-            if !ended {
-                let entries = transcript(&log);
-                let error = entries.iter().rev().find(|e| e["kind"] == "error").and_then(|e| e["text"].as_str()).unwrap_or("");
-                let raw = fs::read_to_string(&log).unwrap_or_default().to_lowercase();
-                // Retry only a failed session load, before any tool execution. Never retry quota or work failures.
-                if resume.is_some()
-                    && !status.success()
-                    && !entries.iter().any(|e| e["kind"] == "tool")
-                    && ["session not found", "no session found", "failed to resume", "could not find session", "unable to find session"]
-                        .iter()
-                        .any(|s| raw.contains(s))
-                {
-                    return Err(Failure("session unavailable; using a fresh handoff".into(), SESSION_GONE));
-                }
-                let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
-                let message = format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
-                finish(root, tid, rid, Some(&message))?;
-            }
-            break;
-        }
-        if expired || (ended && ending.is_none()) || ending.is_some_and(|at| at.elapsed() >= Duration::from_secs(30)) {
-            lockdown::kill_group(&mut child);
-            if expired {
-                finish(root, tid, rid, Some("task timeout"))?;
-            }
-            forced = true;
-            break;
-        }
-    }
+    let forced = supervise(root, tid, rid, &mut child, &log, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT)?;
     if author && persistent {
         let _guard = lock(root)?;
         let mut current = task(root, tid)?;
@@ -1588,6 +1605,70 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
         fs::remove_dir_all(&dir)?;
     }
     Ok(())
+}
+
+/// How long a run that called a finishing tool may take to exit (spec 15).
+const GRACEFUL_EXIT: Duration = Duration::from_secs(30);
+
+/// Watches a launched agent until it exits or is killed, and says whether it
+/// was killed. Running time (not paused time) past `timeout` ends the run; a
+/// run that finished gets `grace` to exit; any other ended run is killed.
+#[allow(clippy::too_many_arguments)]
+fn supervise(
+    root: &Path,
+    tid: &str,
+    rid: &str,
+    child: &mut std::process::Child,
+    log: &Path,
+    resumed: bool,
+    timeout: Duration,
+    grace: Duration,
+) -> Result<bool, Failure> {
+    let mut elapsed = Duration::ZERO;
+    let mut last = Instant::now();
+    let mut ending = None;
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        let current = task(root, tid)?;
+        let r = &current["runs"][run_at(&current, rid)?];
+        if r["state"] == "running" && current["paused_from"].is_null() {
+            elapsed += last.elapsed();
+        }
+        last = Instant::now();
+        let expired = r["state"] != "ended" && elapsed >= timeout;
+        let ended = r["state"] == "ended";
+        if ended && matches!(r["outcome"].as_str(), Some("finished" | "reported" | "reviewed" | "discussed")) {
+            ending.get_or_insert_with(Instant::now);
+        }
+        if let Some(status) = child.try_wait()? {
+            if !ended {
+                let entries = transcript(log);
+                let error = entries.iter().rev().find(|e| e["kind"] == "error").and_then(|e| e["text"].as_str()).unwrap_or("");
+                let raw = fs::read_to_string(log).unwrap_or_default().to_lowercase();
+                // Retry only a failed session load, before any tool execution. Never retry quota or work failures.
+                if resumed
+                    && !status.success()
+                    && !entries.iter().any(|e| e["kind"] == "tool")
+                    && ["session not found", "no session found", "failed to resume", "could not find session", "unable to find session"]
+                        .iter()
+                        .any(|s| raw.contains(s))
+                {
+                    return Err(Failure("session unavailable; using a fresh handoff".into(), SESSION_GONE));
+                }
+                let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
+                let message = format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
+                finish(root, tid, rid, Some(&message))?;
+            }
+            return Ok(false);
+        }
+        if expired || (ended && ending.is_none()) || ending.is_some_and(|at| at.elapsed() >= grace) {
+            lockdown::kill_group(child);
+            if expired {
+                finish(root, tid, rid, Some("task timeout"))?;
+            }
+            return Ok(true);
+        }
+    }
 }
 
 /// Follow-up review context comes from live notes joined to their runs, never transcripts.
@@ -1662,7 +1743,7 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
     if resumed {
         out = out.replace(START, "Use the continuation context below.");
     }
-    if kind != "review" && t["runs"].as_array().is_some_and(|r| r.len() > 1) {
+    if !matches!(kind, "review" | "discuss") && t["runs"].as_array().is_some_and(|r| r.len() > 1) {
         if resumed {
             out += "\nContinue the author's conversation. The role and permissions above replace those of earlier runs. Skip broad orientation; inspect current versions of symbols you need before editing.\n";
         } else {
@@ -1684,7 +1765,14 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
                 Err(e) => out += &format!("\nReview context unavailable: {}. Start with `task diff` and assess the whole task.\n", e.0),
             }
         }
-        if let Some(checks) = t["verification"].as_object() {
+        // A discussion runs no checks, so it gets the decision titles instead of the verification record.
+        if kind == "discuss" {
+            let decisions = fs::read_to_string(scope::top(root).join("DECISIONS.md")).unwrap_or_default();
+            let titles: Vec<String> = decisions.lines().filter_map(|l| l.strip_prefix("## ")).filter(|l| l.starts_with("D-")).map(|l| format!("- {l}")).collect();
+            if !titles.is_empty() {
+                out += &format!("\nDecisions (DECISIONS.md; `grep D-<n>` then `read` for a record):\n{}\n", titles.join("\n"));
+            }
+        } else if let Some(checks) = t["verification"].as_object() {
             let current = review_state(&s, t).ok().and_then(|v| v["context"].as_str().map(str::to_string));
             out += "\nLast recorded verification (rerun stale checks before claiming success):\n";
             for (command, v) in checks {
@@ -1830,6 +1918,9 @@ fn brief(t: &Value, kind: &str) -> String {
         "review" => format!(
             "Review the changes this task made (listed below) and give feedback. Follow the review context below: the first review assesses the whole task with `task diff`; follow-ups start with `task diff --since-review` when a completed checkpoint exists. Then read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. {read_only} In a review, `run <name>` is allowed for commands marked `allowed_in_reviews` in `solace.toml`; use those to verify (for example JavaScript tests). Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed."
         ),
+        "discuss" => format!(
+            "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} The human's message is the last note. Reply with `task note`, the reply in `text`; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
+        ),
         "work" => format!(
             "Make the change this task describes. {start} {ask} Finish with `task done`, a summary in `text`: what you changed and how you checked it."
         ),
@@ -1857,10 +1948,11 @@ fn brief(t: &Value, kind: &str) -> String {
         list("notes")
             .iter()
             .map(|n| {
+                let body = text(&n["text"]);
                 let run = list("runs").into_iter().find(|r| r["id"] == n["run"]);
                 match run {
-                    Some(r) => format!("- {} ({} run {}): {}", text(&n["author"]), text(&r["kind"]), text(&r["id"]), text(&n["text"])),
-                    None => format!("- {}: {}", text(&n["author"]), text(&n["text"])),
+                    Some(r) => format!("- {} ({} run {}): {body}", text(&n["author"]), text(&r["kind"]), text(&r["id"])),
+                    None => format!("- {}: {body}", text(&n["author"])),
                 }
             })
             .collect(),
@@ -2117,7 +2209,17 @@ pub fn task_command(
     let w = flow(&s.root)?;
     let i = run_at(&t, rid)?;
     let text = if a.len() > 2 { a[2..].join(" ") } else { input()? };
+    let discussing = t["runs"][i]["kind"] == "discuss";
     match a.get(1).copied() {
+        // A discussion's reply waits for the human's next message.
+        Some("note") if discussing => {
+            note(&mut t, "agent", Some(rid), &text);
+            t["runs"][i]["state"] = json!("waiting");
+            save(s, &t)?;
+            drop(guard);
+            return wait_discussion(s, tid, rid);
+        }
+        Some("done" | "ask") if discussing => return err("E7010", "a discussion goes on until the human ends it; reply with task note"),
         Some("note") => {
             note(&mut t, "agent", Some(rid), &text);
             if t["runs"][i]["kind"] == "review" {
@@ -2197,6 +2299,28 @@ fn wait_reply(s: &Store, tid: &str, i: usize) -> Out {
         }
         if t["runs"][i]["state"] == "running" && t["paused_from"].is_null() {
             return Ok(format!("{}\n", t["runs"][i]["reply"]));
+        }
+    }
+}
+/// Holds a discussion's reply until the human writes again or ends it. Waiting
+/// doesn't count toward the task timeout.
+fn wait_discussion(s: &Store, tid: &str, rid: &str) -> Out {
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        let _guard = lock(&s.root)?;
+        let mut t = task(&s.root, tid)?;
+        let i = run_at(&t, rid)?;
+        if t["runs"][i]["state"] == "ended" {
+            return Ok("The discussion has ended. Stop now, without further calls.\n".into());
+        }
+        let notes = t["notes"].as_array().unwrap();
+        let after = notes.iter().rposition(|n| n["run"] == rid && n["author"] == "agent").map_or(0, |l| l + 1);
+        let new: Vec<&str> = notes[after..].iter().filter(|n| n["run"] == rid && n["author"] == "human").filter_map(|n| n["text"].as_str()).collect();
+        if !new.is_empty() && t["paused_from"].is_null() {
+            let reply = format!("The human replied:\n\n{}\n", new.join("\n\n"));
+            t["runs"][i]["state"] = json!("running");
+            save(s, &t)?;
+            return Ok(reply);
         }
     }
 }
@@ -2633,12 +2757,14 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 return;
             }
             if req.method().as_str() == "GET"
-                && matches!(url.split('?').next().unwrap_or(""), "/" | "/view" | "/app.js" | "/guide" | "/drawing.woff")
+                && matches!(url.split('?').next().unwrap_or(""), "/" | "/view" | "/app.js" | "/guide" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2")
             {
                 let (data, kind) = match url.split('?').next().unwrap_or("") {
                     "/" | "/view" => (include_bytes!("../board/index.html").as_slice(), "text/html"),
                     "/guide" => (include_bytes!("../board/guide.html").as_slice(), "text/html"),
-                    "/drawing.woff" => (include_bytes!("../board/priv/drawing.woff").as_slice(), "font/woff"),
+                    "/fonts/sans-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-400-normal.woff2").as_slice(), "font/woff2"),
+                    "/fonts/sans-700.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-700-normal.woff2").as_slice(), "font/woff2"),
+                    "/fonts/mono-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-mono-latin-400-normal.woff2").as_slice(), "font/woff2"),
                     _ => (include_bytes!("../board/priv/app.js").as_slice(), "text/javascript"),
                 };
                 let _ = req.respond(
@@ -2801,6 +2927,59 @@ impl Read for Events {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A task with one run `r1` in `run`'s state, and a hung agent in its own process group.
+    fn supervised(run: Value) -> (testing::Project, String, std::process::Child) {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Supervise"})).unwrap();
+        t["runs"] = json!([run]);
+        save(&s, &t).unwrap();
+        let child = Command::new("sleep").arg("45").process_group(0).spawn().unwrap();
+        (p, t["id"].as_str().unwrap().to_string(), child)
+    }
+
+    /// A finished agent that hangs is killed once the grace period passes, not before.
+    #[test]
+    fn hung_shutdown_is_killed_after_the_grace_period() {
+        let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"ended","outcome":"finished"}));
+        let log = p.root.join(".solace/r1.log");
+        let start = Instant::now();
+        let forced = supervise(&p.root, &tid, "r1", &mut child, &log, false, Duration::from_secs(3600), Duration::from_millis(300)).unwrap();
+        assert!(forced);
+        assert!(start.elapsed() >= Duration::from_millis(300) && start.elapsed() < Duration::from_secs(10));
+        assert!(child.try_wait().unwrap().is_some());
+        assert_eq!(GRACEFUL_EXIT, Duration::from_secs(30));
+    }
+
+    /// A finished agent that exits within the grace period isn't killed.
+    #[test]
+    fn graceful_exit_is_not_forced() {
+        let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"ended","outcome":"finished"}));
+        lockdown::kill_group(&mut child);
+        let mut child = Command::new("sleep").arg("0.2").process_group(0).spawn().unwrap();
+        let log = p.root.join(".solace/r1.log");
+        let start = Instant::now();
+        assert!(!supervise(&p.root, &tid, "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+        assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    /// An interrupted run's agent is killed at once; a running one past its timeout ends the run.
+    #[test]
+    fn interrupted_and_timed_out_agents_are_killed() {
+        let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"ended","outcome":"interrupted"}));
+        let log = p.root.join(".solace/r1.log");
+        let start = Instant::now();
+        assert!(supervise(&p.root, &tid, "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+        assert!(start.elapsed() < Duration::from_secs(10));
+        let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"running"}));
+        let log = p.root.join(".solace/r1.log");
+        assert!(supervise(&p.root, &tid, "r1", &mut child, &log, false, Duration::from_millis(200), GRACEFUL_EXIT).unwrap());
+        assert!(child.try_wait().unwrap().is_some());
+        let t = task(&p.root, &tid).unwrap();
+        assert_eq!(t["runs"][0]["state"], "ended");
+        assert!(t["notes"].as_array().unwrap().iter().any(|n| n["text"] == "task timeout"));
+    }
 
     /// A review or investigation run reads but doesn't change (it may build to
     /// verify); host commands never run in a run; an ended run runs nothing.
@@ -3065,6 +3244,15 @@ mod tests {
             assert_eq!(prompt.contains("**Assessment: Needs work**"), kind == "review");
         }
         assert!(brief(&t, "investigate").contains("Investigate this task"));
+        // A discussion keeps every note whole: no command reads a cut note's full text.
+        let mut talk = t.clone();
+        talk["notes"] = json!([
+            {"author":"agent","text":"### Summary\n\nPlan A.\n\n### Details\n\nLong A.","run":null},
+            {"author":"human","text":"### Mine\n\nKeep.\n\n### All\n\nOf it.","run":null},
+            {"author":"agent","text":"### Summary\n\nPlan B.\n\n### Details\n\nLong B.","run":null}
+        ]);
+        let d = brief(&talk, "discuss");
+        assert!(d.contains("Long A.") && d.contains("Keep.\n\n### All\n\nOf it.") && d.contains("Long B."), "{d}");
         let r = brief(&t, "review");
         assert!(
             r.contains("Task changes:\n- calc.add")
