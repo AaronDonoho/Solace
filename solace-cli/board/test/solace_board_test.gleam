@@ -692,3 +692,48 @@ pub fn stop_and_discussion_actions_test() {
   |> should.equal("Waiting for your reply")
   board.status(task("discuss", "running")) |> should.equal("Agent discussing")
 }
+
+pub fn removing_a_project_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"},{\"dir\":\"b\",\"label\":\"b\",\"name\":\"b\",\"base\":\"/p/b\"}],\"found\":[]}",
+      ),
+    )
+  let #(model, _) = board.update(model, board.ToggleProjects)
+  let shows = fn(model, text) {
+    board.view(model) |> element.to_string |> string.contains(text)
+  }
+  shows(model, "Remove and delete files") |> should.be_false
+  // Step one asks whether to keep the files.
+  let #(model, _) = board.update(model, board.RemoveProject("a"))
+  model.removing |> should.equal(Some(#("a", False, "")))
+  shows(model, "Remove only") |> should.be_true
+  shows(model, "Remove and delete files") |> should.be_true
+  shows(model, "Delete permanently") |> should.be_false
+  // Step two warns, and Delete stays disabled until the name matches.
+  let #(model, _) = board.update(model, board.RemoveFiles)
+  model.removing |> should.equal(Some(#("a", True, "")))
+  shows(model, "It cannot be undone") |> should.be_true
+  shows(model, " disabled>Delete permanently") |> should.be_true
+  let #(model, _) = board.update(model, board.RemoveTyped("b"))
+  shows(model, " disabled>Delete permanently") |> should.be_true
+  let #(model, _) = board.update(model, board.RemoveTyped("a"))
+  shows(model, "Delete permanently") |> should.be_true
+  shows(model, " disabled>Delete permanently") |> should.be_false
+  // Cancel closes the dialog and sends nothing.
+  let #(model, _) = board.update(model, board.RemoveCancel)
+  model.removing |> should.equal(None)
+  // A reloaded list closes it too.
+  let #(model, _) = board.update(model, board.RemoveProject("b"))
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"}],\"found\":[]}",
+      ),
+    )
+  model.removing |> should.equal(None)
+}

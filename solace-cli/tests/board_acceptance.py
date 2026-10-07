@@ -338,14 +338,19 @@ class Board(unittest.TestCase):
         t=self.wait(self.action(t,'assign',model='fake'),lambda x:x['column']=='needs_review')
         self.assertIn('[image 1: ',(self.root/'.solace'/(t['runs'][-1]['id']+'.prompt')).read_text())
 
-    def test_model_change_and_start_over_get_fresh_conversations(self):
+    def test_model_and_effort_change_keep_session_and_start_over_gets_fresh(self):
         t = self.create([{'command':'task done done'}])
         self.action(t, 'plan'); self.action(t, 'assign', model='native')
         t = self.wait(t, lambda x: x.get('conversation', {}).get('notes_seen'))
         original = t['conversation']['session']
+        n = len(t['runs'])
         t = self.action(t, 'reassign', model='native-other')
-        t = self.wait(t, lambda x: x.get('conversation', {}).get('notes_seen') and x['conversation']['session'] != original)
-        original = t['conversation']['session']
+        t = self.wait(t, lambda x: len(x['runs']) > n and x['column']=='needs_review' and x.get('conversation', {}).get('session'))
+        self.assertEqual(t['conversation']['session'], original)
+        n = len(t['runs'])
+        t = self.action(t, 'reassign', model='native', effort='low')
+        t = self.wait(t, lambda x: len(x['runs']) > n and x['column']=='needs_review' and x.get('conversation', {}).get('session'))
+        self.assertEqual(t['conversation']['session'], original)
         t = self.action(t, 'start_over')
         t = self.wait(t, lambda x: x.get('conversation', {}).get('notes_seen') and x['conversation']['session'] != original)
         home = self.root/'.solace/board'/t['id']/t['conversation']['home']
@@ -506,6 +511,22 @@ class Board(unittest.TestCase):
         self.assertEqual(n['text'],'### Discussion\n\n**Human:**\n\nWhat about X?\n\n**Agent (fake):**\n\nfirst reply\n\n**Human:**\n\nAnd Y?\n\n**Agent (fake):**\n\nsecond reply')
         self.assertEqual(t['column'],'planning')
         self.action(t,'end_discussion','E7003')
+    def test_discussion_plain_reply_is_a_turn(self):
+        # An agent that replies in plain text and exits cleanly has taken its turn.
+        t=self.create([{'say':'plain reply'}]);self.action(t,'plan')
+        t=self.action(t,'discuss',model='fake',text='What about X?');rid=t['runs'][-1]['id']
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(x['notes'])==2)
+        self.assertEqual((t['notes'][1]['author'],t['notes'][1]['text']),('agent','plain reply'))
+        self.assertIsNone(t['attention'])
+        self.api('POST','/tasks/'+t['id']+'/notes',{'text':'And Y?'})
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(x['notes'])==4)
+        t=self.action(t,'end_discussion')
+        self.assertEqual(t['notes'][0]['text'],'### Discussion\n\n**Human:**\n\nWhat about X?\n\n**Agent (fake):**\n\nplain reply\n\n**Human:**\n\nAnd Y?\n\n**Agent (fake):**\n\nplain reply')
+        # Exiting with an error still fails the run.
+        t=self.create([{'say':'half a reply'},{'exit':1,'error':'boom'}]);self.action(t,'plan')
+        t=self.action(t,'discuss',model='fake',text='What about Z?')
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        self.assertIn('agent exited without finishing',t['notes'][-1]['text']);self.assertIsNotNone(t['attention'])
     def test_a5_question_wait_and_new_agent(self):
         t=self.assign([{'command':'task ask','text':'Which?','options':['a','b']},{'command':'task done answered'}])
         t=self.wait(t,lambda x:x['column']=='blocked');rid=t['runs'][-1]['id'];pid=int((self.root/'.solace'/(rid+'.pid')).read_text());os.kill(pid,0)
@@ -665,7 +686,7 @@ class Board(unittest.TestCase):
         self.assertEqual((self.root/'priv/a').read_text(),'original');self.assertFalse((self.root/'priv/created').exists())
 
     def test_a11_embedded_client_and_internal_files(self):
-        for path,expected in [('/',b'Solace tasks'),('/app.js',b'/workflow'),('/guide',b'Using Solace')]:
+        for path,expected in [('/',b'Solace tasks'),('/migrate',b'Solace tasks'),('/app.js',b'/workflow'),('/guide',b'Using Solace')]:
             c=http.client.HTTPConnection('127.0.0.1',self.port);c.request('GET',path);r=c.getresponse();self.assertEqual(r.status,200);self.assertIn(expected,r.read());c.close()
         for command in ['files','read','write','remove']:
             p=subprocess.run([BIN,command,'.solace/board'],cwd=self.root,env=self.env,input='x',text=True,capture_output=True)

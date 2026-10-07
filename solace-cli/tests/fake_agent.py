@@ -42,6 +42,9 @@ for i, step in enumerate(steps):
         mcp.stdin.close()
         mcp.wait(timeout=3)
         sys.exit(step['exit'])
+    if 'say' in step:
+        print(json.dumps({'type':'item.completed', 'item':{'type':'agent_message', 'text':step['say']}}), flush=True)
+        continue
     if 'sleep' in step:
         time.sleep(step['sleep'])
         continue

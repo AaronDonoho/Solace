@@ -15,43 +15,110 @@ One executable, `solace`, which contains:
 
 The benchmark harness (`bench/`), the pilots (`bench/pilot/`, `bench/pilot-large/`) and the benchmark visualizer are development tools for this repository and are not part of Solace.
 
-## Requirements
-
-- **To build:** Rust and Cargo (1.98.1 is used here).
-- **To use on a project:** Gleam and Erlang/OTP (Gleam 1.18.1 and OTP 29 are used here). Solace runs `gleam` to format, check, test and build the project.
-- **To run agents:** the Codex CLI or Claude Code, signed in. Agent runs use those services and may cost money.
-
-Nothing else is needed at run time: the board's web client is built into the binary.
-
-## Build
-
-From the repository root:
-
-```sh
-cargo build --release --manifest-path solace-cli/Cargo.toml
-```
-
-The deliverable is the single file `solace-cli/target/release/solace`. The store (SQLite), the board's web client and the guide are all built into it, and it links only to the system C library. Copy it anywhere on the target machine's `PATH`. It runs on the platform it was built for, so build on (or for) each platform you ship to. Building needs only Cargo: the board's web client is committed prebuilt, so Gleam and Bun aren't needed unless you change the board.
-
 ## Install
 
-To build and install in one step:
+Start from a machine with nothing but a terminal. Linux and macOS are supported (Solace is developed on Linux; on Windows use WSL). Steps 1 to 3 install the tools, step 4 builds Solace, and step 5 is optional.
+
+### 1. Install the tools
+
+Solace is built with Rust, and its web clients are compiled by Gleam and bundled by Bun during the build. Projects run on Gleam and Erlang. You need all four, plus Git and a C compiler (used to build the bundled SQLite).
+
+| Tool | What it's for | Tested version |
+| --- | --- | --- |
+| Rust and Cargo | builds Solace | 1.98.1 |
+| Gleam | builds the board; Solace runs it on your project to format, check, test and build | 1.18.1 |
+| Erlang/OTP | runs Gleam projects | 29 |
+| Bun | bundles the board's and the frontend's web clients | 1.2.23 |
+
+**macOS** (install [Homebrew](https://brew.sh) first if you don't have it; it also installs the compiler tools):
 
 ```sh
+brew install rustup gleam erlang oven-sh/bun/bun git
+rustup default stable
+```
+
+**Ubuntu or Debian:**
+
+```sh
+sudo apt update
+sudo apt install -y build-essential curl git unzip erlang bubblewrap
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+curl -fsSL https://bun.sh/install | bash
+```
+
+Gleam isn't in apt. Download the `x86_64-unknown-linux-musl` (or `aarch64-unknown-linux-musl`) archive from the [Gleam releases page](https://github.com/gleam-lang/gleam/releases), then unpack it and put it on your `PATH`:
+
+```sh
+tar xf gleam-*-linux.tar.gz && sudo install -m 755 gleam /usr/local/bin/gleam
+```
+
+**Arch Linux:**
+
+```sh
+sudo pacman -S --needed base-devel git rustup gleam erlang bun bubblewrap
+rustup default stable
+```
+
+Other systems: install the four tools from [rustup.rs](https://rustup.rs), [gleam.run](https://gleam.run/install/), [erlang.org](https://www.erlang.org/downloads) and [bun.sh](https://bun.sh).
+
+Open a new terminal so the tools are on your `PATH`, then check them:
+
+```sh
+cargo --version && gleam --version && erl -noshell -eval 'io:format("OTP ~s~n",[erlang:system_info(otp_release)]),halt().' && bun --version
+```
+
+Each should print a version. If one says "command not found", its installer printed a line to add to your shell profile; follow it and open a new terminal.
+
+### 2. Get an AI agent
+
+Solace doesn't contain a model. The board hands tasks to an agent program that you've installed and signed in to, and Solace stores no credentials. Install one of these, run it once, and sign in:
+
+- **Claude Code:** `curl -fsSL https://claude.ai/install.sh | bash`, then run `claude`.
+- **Codex CLI:** `brew install codex` on macOS, or a release binary from the [Codex releases page](https://github.com/openai/codex/releases), then run `codex`.
+
+Agent runs use those services and may cost money. You can install and look around the board without an agent, but no task will run until one is signed in. A model that can't start is greyed out on the board with the reason.
+
+### 3. Get the code
+
+```sh
+git clone https://github.com/AaronDonoho/Solace.git
+cd Solace
+```
+
+### 4. Build and install Solace
+
+```sh
+(cd solace-cli/board && bun install)
+(cd solace-cli/frontend && bun install)
 cargo install --locked --path solace-cli
 ```
 
-This puts `solace` in `~/.cargo/bin`. Use `cargo install --locked --path solace-cli --root <dir>` to install elsewhere. `--locked` uses the repository's tested dependency versions.
-
-If you already ran the release build above, install that executable directly instead of compiling it again:
+The first two lines download the web clients' one JavaScript dependency each. The third compiles Solace (a first build takes a minute or two, most of it the bundled SQLite, D-70) and puts one executable, `solace`, in `~/.cargo/bin`. Cargo's installer adds that folder to your `PATH`; open a new terminal and check:
 
 ```sh
-install -m 755 solace-cli/target/release/solace "$HOME/.cargo/bin/solace"
+solace --help
 ```
 
-Create the destination directory first if it does not exist. Use a different destination on your `PATH` if you prefer.
+`--locked` uses the repository's tested dependency versions. Add `--root <dir>` to install elsewhere. The executable contains everything Solace needs, including the web clients and guide, so you can copy it to any other machine of the same kind (running it there still needs Gleam and Erlang, and an agent for tasks).
 
-A first (cold) build takes about 48 s, and 40 s of that is compiling the bundled SQLite (D-70). After that, builds reuse `solace-cli/target`, so keep that directory between builds to avoid paying the cost again.
+To build without installing:
+
+```sh
+cargo build --release --manifest-path solace-cli/Cargo.toml   # produces solace-cli/target/release/solace
+```
+
+Keep `solace-cli/target` between builds; later builds reuse it.
+
+### 5. Optional: bubblewrap
+
+On Linux, install bubblewrap (`bwrap`; the Ubuntu line above already includes it) so your folder is read-only to every command Solace runs during a migration. Without it the migration still works, but without that protection.
+
+### Troubleshooting
+
+- **`linker 'cc' not found`:** install the C compiler (`build-essential` on Ubuntu or Debian, `base-devel` on Arch; on macOS run `xcode-select --install`).
+- **The build stops in a web client step (`gleam` or `bun` not found):** install them as in step 1. These steps run on every build, because the board's and the frontend's web clients are compiled then.
+- **`Cannot find module '@dagrejs/dagre'`:** run `bun install` in `solace-cli/board` and `solace-cli/frontend`, as in step 4.
+- **`solace: command not found`:** open a new terminal, or add `~/.cargo/bin` to your `PATH`.
 
 ## Use it on a project
 
@@ -196,7 +263,7 @@ python3 -m unittest bench.test_bench                   # benchmark harness
 cd solace-cli/board && gleam test --target javascript && bun test test/api.test.mjs
 ```
 
-The board's web client is in `solace-cli/board/` (Gleam and Lustre). After changing it, rebuild the bundle that is built into the binary, as described in [solace-cli/board/README.md](solace-cli/board/README.md). Bun is needed only for that.
+The board's web client is in `solace-cli/board/` and the frontend shell that serves it, the contract view and the migration is in `solace-cli/frontend/` (both Gleam and Lustre). Building Solace rebuilds both bundles (see Install); each project's README describes its own build.
 
 ### Pilots
 

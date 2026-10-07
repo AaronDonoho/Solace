@@ -154,7 +154,7 @@ test('draft storage survives missing or throwing storage', async () => {
   }
 });
 
-test('transport uses the base it is given; explicit project and migration paths stay absolute', async () => {
+test('transport uses the base it is given; explicit project paths stay absolute', async () => {
   const oldLocation = globalThis.location, oldFetch = globalThis.fetch, oldEventSource = globalThis.EventSource;
   const paths = [];
   let source;
@@ -169,9 +169,8 @@ test('transport uses the base it is given; explicit project and migration paths 
     const api = await import('../src/api.mjs');
     await new Promise(resolve => api.request('/p/shop', '/graph', 'GET', '', resolve));
     await new Promise(resolve => api.request('/p/shop', '/p/other/tasks', 'GET', '', resolve));
-    await new Promise(resolve => api.request('/p/shop', '/migration', 'GET', '', resolve));
     await new Promise(resolve => api.request('', '/graph', 'GET', '', resolve));
-    expect(paths).toEqual(['/p/shop/graph', '/p/other/tasks', '/migration', '/p/web/graph']);
+    expect(paths).toEqual(['/p/shop/graph', '/p/other/tasks', '/p/web/graph']);
     expect(api.events('/p/shop', () => {})).toBe(source);
     expect(source.path).toBe('/p/shop/events');
     api.close_events(source);
@@ -215,7 +214,7 @@ function fakeBrowser(search = '', replies = {}) {
   Object.defineProperty(globalThis, 'location', { configurable: true, value: { pathname: '/', search } });
   globalThis.fetch = async path => {
     paths.push(path);
-    return Response.json(path in replies ? replies[path] : path === '/migration' ? { state: 'none', top: '/w', original: null, copy: null, step: null, candidates: [], report: null, blockers: [], undo: false } : {});
+    return Response.json(path in replies ? replies[path] : {});
   };
   globalThis.setTimeout = callback => { timers.push(callback); return 0; };
   globalThis.EventSource = class {
@@ -248,7 +247,7 @@ test('each instance uses its own base, including one set before it is added to t
     expect(browser.sources).toEqual([]);
     shop.dispatch(new board.Connected());
     await settle();
-    expect(browser.paths).toEqual(expect.arrayContaining(['/p/shop/projects', '/p/shop/models', '/migration']));
+    expect(browser.paths).toEqual(expect.arrayContaining(['/p/shop/projects', '/p/shop/models']));
     expect(browser.sources.map(s => s.path)).toEqual(['/p/shop/events']);
     // A second component on the same page keeps its own base.
     const contract = mount(view);
@@ -336,38 +335,5 @@ test('a followed run stops refreshing when the board is removed and resumes in o
     expect(fetches()).toBe(5);
     await fire();
     expect(fetches()).toBe(6);
-  } finally { browser.restore(); }
-});
-
-test('migration polling stops when the board is removed and keeps one chain across reconnects and base changes', async () => {
-  const browser = fakeBrowser();
-  const polls = () => browser.paths.filter(p => p === '/migration').length;
-  const fire = async () => { browser.timers.splice(0).forEach(f => f()); await settle(); };
-  try {
-    const b = mount(board);
-    b.dispatch(new board.Connected());
-    await settle();
-    expect(polls()).toBe(1);
-    expect(browser.timers).toHaveLength(1);
-    await fire();
-    expect(polls()).toBe(2);
-    expect(browser.timers).toHaveLength(1);
-    // Removed: the pending step fetches nothing and schedules nothing.
-    b.dispatch(new board.Disconnected());
-    await fire();
-    expect(polls()).toBe(2);
-    expect(browser.timers).toHaveLength(0);
-    // Added again, then its base changed twice: still one chain.
-    b.dispatch(new board.Connected());
-    await settle();
-    b.dispatch(new board.BaseChanged('/p/a'));
-    b.dispatch(new board.BaseChanged('/p/b'));
-    await settle();
-    await fire();
-    expect(browser.timers).toHaveLength(1);
-    const after = polls();
-    await fire();
-    expect(polls()).toBe(after + 1);
-    expect(browser.timers).toHaveLength(1);
   } finally { browser.restore(); }
 });

@@ -183,44 +183,6 @@ pub type Found {
   Found(dir: String, name: String, imported: Bool, member: Bool)
 }
 
-pub type MigrationItem {
-  MigrationItem(text: String, status: String, detail: String)
-}
-
-pub type MigrationCheck {
-  MigrationCheck(
-    name: String,
-    status: String,
-    summary: String,
-    items: List(MigrationItem),
-  )
-}
-
-pub type MigrationReport {
-  MigrationReport(
-    checked_at: String,
-    current: Bool,
-    checks: List(MigrationCheck),
-    warnings: List(String),
-  )
-}
-
-pub type Migration {
-  Migration(
-    state: String,
-    top: String,
-    original: String,
-    copy: String,
-    step: String,
-    candidates: List(#(String, String)),
-    report: Option(MigrationReport),
-    flagged: List(MigrationItem),
-    problem: String,
-    blockers: List(String),
-    undo: Bool,
-  )
-}
-
 pub type Model {
   Model(
     lanes: List(Lane),
@@ -264,35 +226,21 @@ pub type Model {
     project_name: String,
     project_dir: String,
     project_target: String,
-    migration: Option(Migration),
-    migration_open: Bool,
-    migration_projects: List(String),
-    migration_smoke: String,
-    migration_busy: Bool,
-    migration_generation: Int,
-    migration_error: String,
-    migration_dismissed: Bool,
+    /// The project being removed: its dir, whether the second step (deleting
+    /// its files) shows, and the name typed to confirm it.
+    removing: Option(#(String, Bool, String)),
     source: Option(Source),
     /// The `base` attribute: this instance's API prefix, "" for the page's.
     prefix: String,
     /// The component's shadow root, once it has rendered.
     root: dynamic.Dynamic,
     connected: Bool,
-    /// The live migration polling chain; an ended chain schedules nothing.
+    /// The live transcript polling chain; an ended chain schedules nothing.
     poll: Int,
   )
 }
 
 pub type Msg {
-  MigrationLoaded(Int, String)
-  MigrationPoll(Int)
-  MigrationPolled(Int, Int, String)
-  ToggleMigration
-  MigrationProject(String, Bool)
-  MigrationSmoke(String)
-  MigrationAction(String)
-  MigrationChanged(String)
-  DismissMigration
   ProjectsLoaded(String)
   WorkflowLoaded(String, String)
   TasksLoaded(String, String)
@@ -311,6 +259,11 @@ pub type Msg {
   ToggleTheme
   AddProject(String)
   RemoveProject(String)
+  RemoveOnly
+  RemoveFiles
+  RemoveTyped(String)
+  RemoveDelete
+  RemoveCancel
   ProjectName(String)
   ProjectDir(String)
   ProjectTarget(String)
@@ -428,14 +381,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       project_name: "",
       project_dir: "",
       project_target: "erlang",
-      migration: None,
-      migration_open: False,
-      migration_projects: [],
-      migration_smoke: "",
-      migration_busy: False,
-      migration_generation: 0,
-      migration_error: "",
-      migration_dismissed: False,
+      removing: None,
       source: None,
       prefix: "",
       root: no_root(),
@@ -535,130 +481,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         False -> #(model, effect.none())
       }
     }
-    MigrationPoll(poll) if poll == model.poll && model.connected -> #(
-      model,
-      get(model, "/migration", MigrationPolled(
-        poll,
-        model.migration_generation,
-        _,
-      )),
-    )
-    MigrationPoll(_) -> #(model, effect.none())
-    // Keep one polling chain, including through a server restart; a reply
-    // from a chain that ended (disconnected, or restarted) schedules nothing.
-    MigrationPolled(poll, generation, text) if poll == model.poll -> {
-      let #(next, _) = update(model, MigrationLoaded(generation, text))
-      let delay = case next.migration {
-        Some(m) if m.state == "running" -> 1000
-        _ -> 5000
-      }
-      #(
-        next,
-        effect.from(fn(send) {
-          after(delay, fn() { send(MigrationPoll(poll)) })
-        }),
-      )
-    }
-    MigrationPolled(_, _, _) -> #(model, effect.none())
-    MigrationLoaded(generation, text) -> {
-      // A reply fetched before an action was accepted must not end its
-      // progress panel.
-      let next = case
-        json.parse(text, migration_decoder()),
-        model.migration_busy
-      {
-        Ok(migration), False if generation == model.migration_generation -> {
-          case model.migration {
-            Some(old)
-              if old.state == "running"
-              && { migration.state != old.state || migration.top != old.top }
-            -> reload()
-            _ -> Nil
-          }
-          let failure =
-            json.parse(text, decode.at(["error"], decode.string))
-            |> result.unwrap("")
-          Model(
-            ..model,
-            migration: Some(migration),
-            migration_error: case failure {
-              "" -> model.migration_error
-              message -> message
-            },
-          )
-        }
-        _, _ -> model
-      }
-      #(next, effect.none())
-    }
-    ToggleMigration -> {
-      let projects = case model.migration {
-        Some(migration) -> list.map(migration.candidates, fn(c) { c.0 })
-        None -> []
-      }
-      #(
-        Model(
-          ..model,
-          migration_open: !model.migration_open,
-          migration_projects: projects,
-        ),
-        effect.none(),
-      )
-    }
-    MigrationProject(dir, checked) -> #(
-      Model(..model, migration_projects: case checked {
-        True -> list.unique([dir, ..model.migration_projects])
-        False -> list.filter(model.migration_projects, fn(p) { p != dir })
-      }),
-      effect.none(),
-    )
-    MigrationSmoke(text) -> #(
-      Model(..model, migration_smoke: text),
-      effect.none(),
-    )
-    DismissMigration -> #(
-      Model(..model, migration_dismissed: True),
-      effect.none(),
-    )
-    MigrationAction(action) -> migration_action(model, action)
-    MigrationChanged(text) -> {
-      let code = json.parse(text, decode.at(["code"], decode.string))
-      case code, model.migration {
-        Ok(code), _ -> #(
-          Model(
-            ..model,
-            migration_busy: False,
-            migration_error: code <> ": " <> error(text),
-          ),
-          effect.none(),
-        )
-        _, Some(migration) -> #(
-          Model(
-            ..model,
-            migration_busy: False,
-            migration_open: False,
-            migration: Some(
-              Migration(
-                ..migration,
-                state: "running",
-                step: "Waiting for the server…",
-              ),
-            ),
-            migration_error: case
-              json.parse(text, decode.at(["state"], decode.string))
-            {
-              Ok(_) -> ""
-              Error(_) -> error(text)
-            },
-          ),
-          effect.none(),
-        )
-        _, None -> #(
-          Model(..model, migration_busy: False, migration_error: error(text)),
-          effect.none(),
-        )
-      }
-    }
     // Every lane is loaded again: the list changes rarely.
     ProjectsLoaded(text) ->
       case json.parse(text, projects_decoder()) {
@@ -686,6 +508,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               projects_open: model.projects_open || { workspace && lanes == [] },
               project_name: "",
               project_dir: "",
+              removing: None,
               error: "",
             ),
             effect.batch(
@@ -918,15 +741,15 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         False -> effect.none()
       },
     )
-    RemoveProject(dir) ->
-      case
-        confirm(
-          "Remove "
-          <> dir
-          <> " from this board? Its tasks and Solace setup stay in its folder, and it can be added again.",
-        )
-      {
-        True -> #(
+    // Removing asks first whether to keep the files; deleting them takes a
+    // second warning and the project's name (D-74).
+    RemoveProject(dir) -> #(
+      Model(..model, removing: Some(#(dir, False, ""))),
+      effect.none(),
+    )
+    RemoveOnly ->
+      case model.removing {
+        Some(#(dir, _, _)) -> #(
           model,
           projects_request(
             model,
@@ -935,8 +758,38 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             [],
           ),
         )
-        False -> #(model, effect.none())
+        None -> #(model, effect.none())
       }
+    RemoveFiles ->
+      case model.removing {
+        Some(#(dir, _, _)) -> #(
+          Model(..model, removing: Some(#(dir, True, ""))),
+          effect.none(),
+        )
+        None -> #(model, effect.none())
+      }
+    RemoveTyped(text) ->
+      case model.removing {
+        Some(#(dir, True, _)) -> #(
+          Model(..model, removing: Some(#(dir, True, text))),
+          effect.none(),
+        )
+        _ -> #(model, effect.none())
+      }
+    RemoveDelete ->
+      case model.removing {
+        Some(#(dir, True, typed)) if typed == dir -> #(
+          model,
+          projects_request(
+            model,
+            "/projects/" <> uri.percent_encode(dir),
+            "DELETE",
+            [#("delete", json.bool(True)), #("name", json.string(typed))],
+          ),
+        )
+        _ -> #(model, effect.none())
+      }
+    RemoveCancel -> #(Model(..model, removing: None), effect.none())
     ProjectName(text) -> #(Model(..model, project_name: text), effect.none())
     ProjectDir(text) -> #(Model(..model, project_dir: text), effect.none())
     ProjectTarget(text) -> #(
@@ -956,8 +809,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       transcript(model, rid),
     )
     Unwatch -> #(Model(..model, watching: "", entries: []), effect.none())
-    // Like migration polling, one refresh chain per connection: a step from an
-    // ended chain (disconnected, or restarted) fetches and schedules nothing.
+    // One refresh chain per connection, including through a server restart: a
+    // step from an ended chain (disconnected, or restarted) fetches and
+    // schedules nothing.
     Refresh(poll, rid) if poll == model.poll && rid == model.watching -> #(
       model,
       transcript(model, rid),
@@ -1328,168 +1182,6 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Lane), List(Found))) {
   decode.success(#(workspace, lanes, found))
 }
 
-pub fn migration_decoder() -> decode.Decoder(Migration) {
-  let nullable_text =
-    decode.optional(decode.string) |> decode.map(option.unwrap(_, ""))
-  let candidate = {
-    use dir <- decode.field("dir", decode.string)
-    use name <- decode.field("name", decode.string)
-    decode.success(#(dir, name))
-  }
-  let item = {
-    use text <- decode.field("text", decode.string)
-    use status <- decode.optional_field("status", "", nullable_text)
-    use detail <- decode.optional_field("detail", "", nullable_text)
-    decode.success(MigrationItem(text, status, detail))
-  }
-  let check = {
-    use name <- decode.field("name", decode.string)
-    use status <- decode.field("status", decode.string)
-    use summary <- decode.field("summary", decode.string)
-    use items <- decode.field("items", decode.list(item))
-    decode.success(MigrationCheck(name, status, summary, items))
-  }
-  let report = {
-    use checked_at <- decode.field(
-      "checked_at",
-      decode.one_of(decode.string, [decode.map(decode.int, clock)]),
-    )
-    use current <- decode.field("current", decode.bool)
-    use checks <- decode.field("checks", decode.list(check))
-    use warnings <- decode.optional_field(
-      "warnings",
-      [],
-      decode.list(decode.string),
-    )
-    decode.success(MigrationReport(checked_at, current, checks, warnings))
-  }
-  use state <- decode.field("state", decode.string)
-  use top <- decode.field("top", decode.string)
-  use original <- decode.optional_field("original", "", nullable_text)
-  use copy <- decode.optional_field("copy", "", nullable_text)
-  use step <- decode.optional_field("step", "", nullable_text)
-  use candidates <- decode.optional_field(
-    "candidates",
-    [],
-    decode.list(candidate),
-  )
-  use report <- decode.optional_field("report", None, decode.optional(report))
-  use flagged <- decode.optional_field("flagged", [], decode.list(item))
-  use problem <- decode.optional_field("problem", "", nullable_text)
-  use blockers <- decode.optional_field(
-    "blockers",
-    [],
-    decode.list(decode.string),
-  )
-  use undo <- decode.optional_field("undo", False, decode.bool)
-  decode.success(Migration(
-    state,
-    top,
-    original,
-    copy,
-    step,
-    candidates,
-    report,
-    flagged,
-    problem,
-    blockers,
-    undo,
-  ))
-}
-
-fn migration_action(model: Model, action: String) -> #(Model, Effect(Msg)) {
-  case model.migration {
-    None -> #(model, effect.none())
-    Some(m) -> {
-      let allowed =
-        !model.migration_busy
-        && case action {
-          "start" -> m.state == "available" && model.migration_projects != []
-          "confirm" -> m.state == "confirm_paths"
-          "recheck" -> m.state == "in_progress"
-          "abandon" ->
-            list.contains(
-              ["in_progress", "confirm_paths", "failed", "copying"],
-              m.state,
-            )
-          "adopt" -> m.state == "in_progress" && m.blockers == []
-          "undo" -> m.state == "adopted" && m.undo
-          _ -> False
-        }
-      let question = case action {
-        "confirm" ->
-          "Continue? Solace will now build and test your code, and run your check commands, in the copy and in a temporary folder."
-        "adopt" -> {
-          let unchecked = case m.report {
-            None -> []
-            Some(report) ->
-              list.flat_map(report.checks, fn(c) {
-                list.filter(c.items, fn(i) { i.status == "not checked" })
-                |> list.map(fn(i) { i.text })
-              })
-          }
-          "Switch to the copy?\n\nYour original folder moves to "
-          <> m.original
-          <> ".pre-solace, and the copy takes its place at "
-          <> m.original
-          <> ". Solace then builds and tests it there; if anything fails, both folders go back. You can switch back later."
-          <> "\n\nIf your project has build errors or failing tests, the copy has the same ones."
-          <> case unchecked {
-            [] -> ""
-            _ -> "\n\nWorth a look first:\n• " <> string.join(unchecked, "\n• ")
-          }
-        }
-        "abandon" ->
-          "Delete the copy at "
-          <> m.copy
-          <> "? Anything done in it is lost. Your original folder at "
-          <> m.original
-          <> " stays as it is."
-        "undo" ->
-          "Switch back to your original folder? It returns to "
-          <> m.original
-          <> ", and the Solace version moves to ../solace-migration with any work done in it since. You can switch again or delete it later."
-        _ -> ""
-      }
-      case allowed && { question == "" || confirm(question) } {
-        False -> #(model, effect.none())
-        True -> {
-          let fields = case action {
-            "start" -> [
-              #("projects", json.array(model.migration_projects, json.string)),
-              #(
-                "smoke",
-                string.split(model.migration_smoke, "\n")
-                  |> list.map(string.trim)
-                  |> list.filter(fn(s) { s != "" })
-                  |> json.array(json.string),
-              ),
-            ]
-            _ -> []
-          }
-          #(
-            Model(
-              ..model,
-              migration_busy: True,
-              migration_generation: model.migration_generation + 1,
-              migration_error: "",
-            ),
-            effect.from(fn(send) {
-              request(
-                model.prefix,
-                "/migration/" <> action,
-                "POST",
-                json.to_string(json.object(fields)),
-                fn(text) { send(MigrationChanged(text)) },
-              )
-            }),
-          )
-        }
-      }
-    }
-  }
-}
-
 /// What the human should hear about in a live update: a run that ended or a
 /// question an agent asked.
 pub fn notices(old: Task, new: Task) -> List(Notice) {
@@ -1749,378 +1441,9 @@ fn button(label: String, msg: Msg) -> Element(Msg) {
   h.button([e.on_click(msg)], [h.text(label)])
 }
 
-/// A button with a sentence beside it saying what it does to the user's folders.
-fn migration_button(
-  label: String,
-  what: String,
-  action: String,
-  disabled: Bool,
-  primary: Bool,
-) -> Element(Msg) {
-  h.div([a.class("migration-action")], [
-    h.button(
-      [
-        a.classes([#("primary", primary)]),
-        a.disabled(disabled),
-        e.on_click(MigrationAction(action)),
-      ],
-      [h.text(label)],
-    ),
-    h.span([], [h.text(what)]),
-  ])
-}
-
-fn migration_view(model: Model) -> Element(Msg) {
-  case model.migration {
-    None -> h.text("")
-    Some(m) -> {
-      let busy = model.migration_busy
-      let delete =
-        migration_button(
-          "Delete the copy",
-          "Deletes the copy and anything done in it. Your original folder stays as it is.",
-          "abandon",
-          busy,
-          False,
-        )
-      let folders =
-        h.div([], [
-          h.p([], [
-            h.text("Your original folder: "),
-            h.code([], [h.text(m.original)]),
-          ]),
-          h.p([], [h.text("The copy: "), h.code([], [h.text(m.copy)])]),
-        ])
-      h.section([a.class("migration")], [
-        case model.migration_error {
-          "" -> h.text("")
-          message -> h.p([a.role("alert")], [h.text(message)])
-        },
-        case m.state {
-          "available" ->
-            h.div([], [
-              button("Migrate this project", ToggleMigration),
-              case model.migration_open {
-                False -> h.text("")
-                True ->
-                  h.section(
-                    [
-                      a.class("editor"),
-                      a.role("dialog"),
-                      a.attribute("aria-labelledby", "migration-title"),
-                    ],
-                    [
-                      h.h2([a.id("migration-title")], [
-                        h.text("Migrate this project"),
-                      ]),
-                      h.p([], [
-                        h.text(
-                          "Solace makes a copy of this folder next to it, called solace-migration, and sets up the copy to use Solace. Your folder isn't changed. You can try Solace in the copy, then switch to it, or delete it.",
-                        ),
-                      ]),
-                      h.p([], [
-                        h.text(
-                          "If your project has build errors or failing tests now, the copy will have the same ones.",
-                        ),
-                      ]),
-                      h.fieldset([a.disabled(busy)], [
-                        h.legend([], [h.text("Projects to set up for Solace")]),
-                        h.div(
-                          [],
-                          list.map(m.candidates, fn(c) {
-                            h.label([], [
-                              h.input([
-                                a.type_("checkbox"),
-                                a.checked(list.contains(
-                                  model.migration_projects,
-                                  c.0,
-                                )),
-                                e.on_check(MigrationProject(c.0, _)),
-                              ]),
-                              h.text(case c.0 {
-                                "." -> c.1 <> " (this folder)"
-                                dir -> c.1 <> " (" <> dir <> ")"
-                              }),
-                            ])
-                          }),
-                        ),
-                      ]),
-                      h.label([], [
-                        h.text("Commands that check your app works (optional)"),
-                        h.textarea(
-                          [
-                            a.value(model.migration_smoke),
-                            a.disabled(busy),
-                            a.attribute(
-                              "aria-describedby",
-                              "migration-smoke-hint",
-                            ),
-                            e.on_input(MigrationSmoke),
-                          ],
-                          model.migration_smoke,
-                        ),
-                      ]),
-                      h.small([a.id("migration-smoke-hint")], [
-                        h.text(
-                          "One command per line, run from this folder, such as a script that starts your app and requests a page. Solace runs each one before and after migrating, and compares the results.",
-                        ),
-                      ]),
-                      h.button(
-                        [
-                          a.class("primary"),
-                          a.disabled(model.migration_projects == [] || busy),
-                          e.on_click(MigrationAction("start")),
-                        ],
-                        [h.text("Make the copy")],
-                      ),
-                      button("Close", ToggleMigration),
-                    ],
-                  )
-              },
-            ])
-          "running" ->
-            h.section(
-              [
-                a.class("editor"),
-                a.role("status"),
-                a.attribute("aria-live", "polite"),
-              ],
-              [
-                h.h2([], [h.text("Migrating")]),
-                h.p([], [h.text(m.step)]),
-                h.small([], [h.text("This page reloads when it's done.")]),
-              ],
-            )
-          "confirm_paths" ->
-            h.div([a.class("editor migration-banner")], [
-              h.h2([], [h.text("Check these files before going on")]),
-              h.p([], [
-                h.text(
-                  "Each one could change your original folder if it runs from the copy, for example a script that uses the folder's full path. Nothing has run yet. Look at each one, then continue.",
-                ),
-              ]),
-              h.ul([], list.map(m.flagged, migration_item)),
-              folders,
-              migration_button(
-                "Continue",
-                "Builds and tests your code, and runs your check commands.",
-                "confirm",
-                busy,
-                True,
-              ),
-              delete,
-            ])
-          "failed" ->
-            h.div([a.class("editor migration-banner")], [
-              h.h2([], [h.text("The migration stopped")]),
-              h.p([a.role("alert")], [h.text(m.problem)]),
-              folders,
-              case m.report {
-                Some(_) -> migration_report(m.report)
-                None -> h.text("")
-              },
-              delete,
-            ])
-          "copying" ->
-            h.div([a.class("editor migration-banner")], [
-              h.h2([], [h.text("Copying your folder")]),
-              h.p([], [
-                h.text(
-                  "A copy of your folder is being made, or an earlier attempt was interrupted.",
-                ),
-              ]),
-              folders,
-              delete,
-            ])
-          "in_progress" ->
-            h.div([], [
-              h.div([a.class("editor migration-banner")], [
-                h.h2([], [
-                  h.text("You're trying Solace on a copy of your project"),
-                ]),
-                h.p([], [
-                  h.text(
-                    "This board shows the copy. Your original folder hasn't been changed.",
-                  ),
-                ]),
-                folders,
-                case m.blockers {
-                  [] -> h.text("")
-                  _ ->
-                    h.div([a.id("migration-blockers")], [
-                      h.p([], [h.text("Before you can switch to the copy:")]),
-                      h.ul(
-                        [],
-                        list.map(m.blockers, fn(b) { h.li([], [h.text(b)]) }),
-                      ),
-                    ])
-                },
-                migration_button(
-                  "Switch to the copy",
-                  "Moves your original folder to "
-                    <> m.original
-                    <> ".pre-solace and puts the copy in its place, then builds and tests it there. If that fails, both folders go back.",
-                  "adopt",
-                  busy || m.blockers != [],
-                  True,
-                ),
-                migration_button(
-                  "Run the checks again",
-                  "Builds and tests the copy again and compares it with your original folder. Do this after changing the copy.",
-                  "recheck",
-                  busy,
-                  False,
-                ),
-                delete,
-              ]),
-              migration_report(m.report),
-            ])
-          "adopted" if m.undo && !model.migration_dismissed ->
-            h.div([a.class("notice editor")], [
-              h.strong([], [h.text("Your project now uses Solace")]),
-              h.p([], [
-                h.text("Your old folder is kept at "),
-                h.code([], [h.text(m.original <> ".pre-solace")]),
-                h.text(
-                  ", in case you want to switch back. Delete it yourself once you're sure.",
-                ),
-              ]),
-              migration_button(
-                "Switch back",
-                "Puts your old folder back, and moves this one to ../solace-migration.",
-                "undo",
-                busy,
-                False,
-              ),
-              button("Dismiss", DismissMigration),
-            ])
-          _ -> h.text("")
-        },
-        case busy {
-          True -> h.p([a.role("status")], [h.text("Starting…")])
-          False -> h.text("")
-        },
-      ])
-    }
-  }
-}
-
-fn migration_item(item: MigrationItem) -> Element(Msg) {
-  h.li([], [
-    migration_mark(item.status),
-    h.text(item.text),
-    case item.detail {
-      "" -> h.text("")
-      detail ->
-        h.details([a.class("entry")], [
-          h.summary([], [h.text("Show details")]),
-          h.pre([a.class("diff")], [h.text(detail)]),
-        ])
-    },
-  ])
-}
-
-fn migration_report(report: Option(MigrationReport)) -> Element(Msg) {
-  h.section([a.class("editor migration-report")], [
-    h.h2([], [h.text("What Solace checked")]),
-    case report {
-      None ->
-        h.p([], [
-          h.text("The checks haven't run yet. Run the checks to see them."),
-        ])
-      Some(report) ->
-        h.div([], [
-          h.div(
-            [],
-            list.map(report.warnings, fn(warning) {
-              h.p([a.role("alert")], [h.strong([], [h.text(warning)])])
-            }),
-          ),
-          case report.current {
-            True -> h.text("")
-            False ->
-              h.p([a.role("alert")], [
-                h.text(
-                  "The copy changed after these checks ran. Run the checks again before switching.",
-                ),
-              ])
-          },
-          h.p(
-            [a.class("migration-legend")],
-            list.flat_map(
-              [
-                #("verified", "✓", "fine"),
-                #("failed", "✗", "a problem to fix before switching"),
-                #("not checked", "!", "worth a look"),
-              ],
-              fn(l) {
-                [
-                  h.span(
-                    [
-                      a.class(
-                        "mark migration-" <> string.replace(l.0, " ", "-"),
-                      ),
-                      a.attribute("aria-hidden", "true"),
-                    ],
-                    [h.text(l.1)],
-                  ),
-                  h.text(l.2 <> " "),
-                ]
-              },
-            ),
-          ),
-          h.div(
-            [],
-            list.map(report.checks, fn(c) {
-              h.article([], [
-                h.h3([], [migration_mark(c.status), h.text(c.name)]),
-                h.p([], [h.text(c.summary)]),
-                h.ul([], list.map(c.items, migration_item)),
-              ])
-            }),
-          ),
-          h.small([], [
-            h.text(
-              "Last checked "
-              <> {
-                int.parse(report.checked_at)
-                |> result.map(clock)
-                |> result.unwrap(report.checked_at)
-              },
-            ),
-          ]),
-        ])
-    },
-  ])
-}
-
-/// A result's mark: fine, a problem, or something worth a look. The words
-/// are for screen readers; the legend above the checks explains the marks.
-fn migration_mark(status: String) -> Element(Msg) {
-  let #(mark, words) = case status {
-    "verified" -> #("✓", "fine")
-    "failed" -> #("✗", "a problem")
-    "not checked" -> #("!", "worth a look")
-    _ -> #("", "")
-  }
-  case mark {
-    "" -> h.text("")
-    _ ->
-      h.span(
-        [
-          a.class("mark migration-" <> string.replace(status, " ", "-")),
-          a.attribute("aria-label", words),
-          a.attribute("title", words),
-        ],
-        [h.text(mark)],
-      )
-  }
-}
-
 pub fn view(model: Model) -> Element(Msg) {
   h.main([], [
     h.style([], board_styles <> selected_card_styles),
-    migration_view(model),
     h.header([a.class("top")], [
       h.h1([], [h.text("Solace tasks")]),
       h.a([a.href("/guide")], [h.text("Guide")]),
@@ -2394,6 +1717,7 @@ fn projects_view(model: Model) -> Element(Msg) {
         ])
       }),
     ),
+    removal_view(model),
     case others {
       [] -> h.text("")
       _ ->
@@ -2421,7 +1745,9 @@ fn projects_view(model: Model) -> Element(Msg) {
                   True -> button("Add", AddProject(f.dir))
                   False ->
                     h.small([], [
-                      h.text("Existing code is brought in by migrating."),
+                      h.text("Existing code is brought in on the "),
+                      h.a([a.href("/migrate")], [h.text("Migration page")]),
+                      h.text("."),
                     ])
                 },
               ])
@@ -3084,7 +2410,7 @@ pub fn register() -> Result(Nil, lustre.Error) {
   )
 }
 
-const board_styles = ".migration{margin-bottom:16px}.migration .editor{margin:8px 0}.migration input[type=checkbox]{width:auto}.projects-pick{margin:8px 0}.projects-pick label{display:inline-block;margin-right:16px}.migration fieldset{border:1px solid var(--line);border-radius:0}.migration .migration-banner{border-top:4px solid var(--logic)}.migration code{overflow-wrap:anywhere}.migration summary{cursor:pointer;font-weight:600}.migration pre{max-height:400px;max-width:none;overflow:auto;white-space:pre;font:13px 'IBM Plex Mono',ui-monospace,monospace;user-select:text}.migration [role=alert]{white-space:pre-wrap}.migration .mark{display:inline-block;width:1.4em;text-align:center;font-weight:700;margin-right:4px}.migration .migration-verified{color:var(--ok-text)}.migration .migration-failed{color:var(--revision)}.migration .migration-not-checked{color:var(--warn-text)}.migration .migration-action{display:flex;gap:12px;align-items:baseline;margin:8px 0}.migration .migration-action button{flex:none}.migration .migration-legend{color:var(--soft)}.migration .migration-report ul{list-style:none;padding-left:0}.migration button:disabled{cursor:default;opacity:.55}.migration p{overflow-wrap:anywhere}\n\n:host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sun:none;--moon:inline-block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 24px 48px;min-height:100dvh;user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol{margin:6px 0}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;max-width:760px;background:var(--paper)}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid var(--line);border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}.toolbar [aria-pressed=true]{background:var(--well);font-weight:600}.separator{width:1px;align-self:stretch;background:var(--line);margin:0 6px}.preview{border-top:1px solid var(--line);padding:8px 12px;min-height:94px}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h2{margin-top:0}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{width:auto;flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice p{margin:4px 0 0;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
+const board_styles = ".projects-pick{margin:8px 0}.projects-pick label{display:inline-block;margin-right:16px}\n\n:host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sun:none;--moon:inline-block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 24px 48px;min-height:100dvh;user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol{margin:6px 0}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;max-width:760px;background:var(--paper)}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid var(--line);border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}.toolbar [aria-pressed=true]{background:var(--well);font-weight:600}.separator{width:1px;align-self:stretch;background:var(--line);margin:0 6px}.preview{border-top:1px solid var(--line);padding:8px 12px;min-height:94px}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h2{margin-top:0}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{width:auto;flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice p{margin:4px 0 0;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
 :host{background:var(--sheet);color:var(--ink)}
 main{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;color:var(--ink);background:none}
 *{scrollbar-color:var(--line) var(--paper)}::selection{background:var(--sel);color:var(--ink)}
@@ -3118,7 +2444,7 @@ article{border-bottom-color:var(--line)}.transcript{border-left:1px solid var(--
 .top a::after,.lane-title a::after{content:\"\";width:14px;height:14px;background:currentColor;-webkit-mask:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 5l7 7-7 7'/%3E%3C/svg%3E\") center/contain no-repeat;mask:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 5l7 7-7 7'/%3E%3C/svg%3E\") center/contain no-repeat}"
 
 /// Opens this instance's transport with its own `base`: the event stream, one
-/// migration polling chain, the followed run's transcript and the first loads.
+/// the followed run's transcript and the first loads.
 /// Runs on connection and when `base` changes; the fresh stream replays what
 /// it missed.
 fn start(model: Model) -> #(Model, Effect(Msg)) {
@@ -3126,11 +2452,6 @@ fn start(model: Model) -> #(Model, Effect(Msg)) {
   #(
     model,
     effect.batch([
-      get(model, "/migration", MigrationPolled(
-        model.poll,
-        model.migration_generation,
-        _,
-      )),
       get(model, "/projects", ProjectsLoaded),
       get(model, "/models", ModelsLoaded),
       case model.watching {
@@ -3150,7 +2471,7 @@ fn start(model: Model) -> #(Model, Effect(Msg)) {
   )
 }
 
-/// Closes the event stream and ends the migration and transcript polling chains.
+/// Closes the event stream and ends the transcript polling chain.
 fn stop(model: Model) -> Model {
   case model.source {
     Some(source) -> close_events(source)
@@ -3254,4 +2575,49 @@ fn head_view(columns: List(Column)) -> Element(Msg) {
       h.div([a.class("column")], [h.h2([], [h.text(c.label)])])
     }),
   )
+}
+
+/// The dialog for removing a project: keep its files, or delete them after a
+/// second warning and typing its name.
+fn removal_view(model: Model) -> Element(Msg) {
+  case model.removing {
+    None -> h.text("")
+    Some(#(dir, False, _)) ->
+      h.div([a.class("removal"), a.attribute("role", "alertdialog")], [
+        h.p([], [
+          h.text(
+            "Remove "
+            <> dir
+            <> " from this board? Its tasks and Solace setup stay in its folder, and it can be added again. Should its folder and files be deleted too?",
+          ),
+        ]),
+        button("Remove only", RemoveOnly),
+        button("Remove and delete files…", RemoveFiles),
+        button("Cancel", RemoveCancel),
+      ])
+    Some(#(dir, True, typed)) ->
+      h.div([a.class("removal"), a.attribute("role", "alertdialog")], [
+        h.p([], [
+          h.strong([], [
+            h.text(
+              "This permanently deletes "
+              <> dir
+              <> " and everything in it. It cannot be undone.",
+            ),
+          ]),
+        ]),
+        h.label([], [
+          h.text("Type " <> dir <> " to confirm"),
+          h.input([
+            a.attribute("aria-label", "Project name"),
+            a.value(typed),
+            e.on_input(RemoveTyped),
+          ]),
+        ]),
+        h.button([a.disabled(typed != dir), e.on_click(RemoveDelete)], [
+          h.text("Delete permanently"),
+        ]),
+        button("Cancel", RemoveCancel),
+      ])
+  }
 }

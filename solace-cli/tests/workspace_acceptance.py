@@ -159,6 +159,20 @@ class Root(unittest.TestCase):
         self.api('POST', '/projects', {'dir': 'b'})
         self.assertEqual([t['title'] for t in self.api('GET', '/p/b/tasks')], ['In b'])
 
+        # Removing with its files (D-74) needs the project's name; a wrong one changes nothing.
+        self.refused('DELETE', '/projects/fresh', {'delete': True, 'name': 'other'}, 'type the project')
+        self.refused('DELETE', '/projects/fresh', {'delete': True}, 'type the project')
+        self.refused('DELETE', '/projects/.', {'delete': True, 'name': '.'}, 'can')
+        self.assertTrue((self.root/'fresh/gleam.toml').exists())
+        self.assertIn('fresh', [p['dir'] for p in self.api('GET', '/projects')['projects']])
+        v = self.api('DELETE', '/projects/fresh', {'delete': True, 'name': 'fresh'})
+        self.assertEqual([p['dir'] for p in v['projects']], ['.', 'a', 'b'])
+        self.assertFalse((self.root/'fresh').exists())
+        self.assertNotIn('fresh', (self.root/'solace.toml').read_text())
+        # Without `delete`, the files stay.
+        self.api('DELETE', '/projects/b')
+        self.assertTrue((self.root/'b/.solace/store.db').exists())
+
     def test_mcp_serves_the_command_tool(self):
         project(self.root, body='pub fn one() { 1 }\n\npub fn two() { one() + 1 }\n')
         self.migrate()

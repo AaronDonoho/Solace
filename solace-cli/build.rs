@@ -1,16 +1,16 @@
-//! Builds the board's release output, `board/priv/app.js`, which `src/board.rs`
-//! embeds. The board owns the recipe: its `solace.toml` declares the
-//! `build-release` command, and this runs it in `board/`.
+//! Builds each frontend project's release output, `priv/app.js`, which `src/board.rs`
+//! embeds: the board's bundle, and the frontend shell's bundle served at `/app.js`.
+//! Each project owns the recipe: its `solace.toml` declares the `build-release`
+//! command, and this runs it in that project.
 
 use std::path::Path;
 use std::process::Command;
 
-fn main() {
-    let board = Path::new(env!("CARGO_MANIFEST_DIR")).join("board");
-    for watched in ["src", "solace.toml", "gleam.toml", "package.json"] {
-        println!("cargo:rerun-if-changed={}", board.join(watched).display());
+fn build_release(project: &Path, watched: &[&str]) {
+    for dir in watched {
+        println!("cargo:rerun-if-changed={}", project.join(dir).display());
     }
-    let settings = board.join("solace.toml");
+    let settings = project.join("solace.toml");
     let text = std::fs::read_to_string(&settings).unwrap_or_else(|e| panic!("reading {}: {e}", settings.display()));
     let value: toml::Value = text.parse().unwrap_or_else(|e| panic!("parsing {}: {e}", settings.display()));
     let run: Vec<&str> = value
@@ -25,10 +25,24 @@ fn main() {
     };
     let status = Command::new(program)
         .args(args)
-        .current_dir(&board)
+        .current_dir(project)
         .status()
-        .unwrap_or_else(|e| panic!("running the board's build-release ({program}): {e}"));
+        .unwrap_or_else(|e| panic!("running {}'s build-release ({program}): {e}", project.display()));
     if !status.success() {
-        panic!("the board's build-release failed ({status}); board/priv/app.js was not rebuilt");
+        panic!("{}'s build-release failed ({status}); its priv/app.js was not rebuilt", project.display());
+    }
+}
+
+fn main() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let own = ["src", "solace.toml", "gleam.toml", "package.json"];
+    // The frontend bundles the board and migration, so build the board first, and
+    // watch the frontend's path dependencies.
+    build_release(&root.join("board"), &own);
+    build_release(&root.join("frontend"), &own);
+    for dep in ["board", "migration"] {
+        for watched in ["src", "gleam.toml"] {
+            println!("cargo:rerun-if-changed={}", root.join(dep).join(watched).display());
+        }
     }
 }

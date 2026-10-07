@@ -7,7 +7,7 @@ const prefix = base => base || fallbackBase();
 // A component's shadow root before it has rendered: the helpers do nothing.
 export function no_root() { return null; }
 export function request(base, path, method, body, receive) {
-  fetch((path === '/migration' || path.startsWith('/migration/') || path.startsWith('/p/') ? '' : prefix(base)) + path, { method, headers: { 'Content-Type': 'application/json' },
+  fetch((path.startsWith('/p/') ? '' : prefix(base)) + path, { method, headers: { 'Content-Type': 'application/json' },
     ...(method === 'GET' ? {} : { body }) })
     .then(async response => receive(await response.text()))
     .catch(error => receive(JSON.stringify({ message: String(error) })));

@@ -13,7 +13,7 @@ The source of the `solace` executable. Installing and using it are described in 
 - `src/workspace.rs`: the Solace root and its projects on one board: finding the one root, the project list, finding, adding and creating projects (D-57). Cross-project reads (`--project`) are `read_project` in `main.rs`.
 - `src/migrate.rs`: copies existing projects, checks them and adopts the copy at the original path (D-59). `solace create <name>` only makes a new project, after confirmation.
 - `src/view.rs`: the contract graph, task review and scratch test runner (Spec 16, P1–P3).
-- `board/`: the board's web client, which is built into the binary.
+- `board/`, `frontend/`, `migration/`: the web clients, bundled into the binary by `build.rs`, which runs the `build-release` command in `board` and `frontend`; the migration client is bundled as part of the frontend bundle.
 - `tests/`: the board acceptance scenarios (`board_acceptance.py`, `view_acceptance.py` and `workspace_acceptance.py`, run by `cargo test`), a fake agent, and golden files for `agent-config`.
 
 A model in the system configuration can give `run = ["program", "argument", ...]` in place of `agent` and `model`, to start a custom adapter or a fake agent. The program gets the task prompt on stdin and the variables `SOLACE_TASK`, `SOLACE_RUN`, `SOLACE_SESSION` and `SOLACE_BIN`. The tests use only this path. CLI file commands use the session `SOLACE_SESSION` (default `cli`); each MCP process is its own session.

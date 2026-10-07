@@ -1,4 +1,4 @@
-<!doctype html><html><head><style>button{color:rgb(255,0,255)}</style></head><body><div id="app"></div>
+<!doctype html><html><head><style>button{color:rgb(255,0,255)}html[data-theme=dark] :is(solace-migration){--ink:#e8eaf8;--sheet:#1f2136}</style></head><body><div id="app"></div>
 <script type="module">
 import * as app from '../build/dev/javascript/migration/migration.mjs';
 const check = (ok, message) => { if (!ok) throw new Error(message); };
@@ -24,6 +24,10 @@ try {
   check(root.querySelector('style')?.textContent.includes('.migration'), 'owned CSS');
   check(customElements.get('solace-migration').observedAttributes.length === 0, 'no attributes');
   check(getComputedStyle(root.querySelector('button')).color !== 'rgb(255, 0, 255)', 'shell styles not adopted');
+  check(getComputedStyle(host).color === 'rgb(23, 34, 38)', 'light tokens apply to the migration page');
+  document.documentElement.dataset.theme = 'dark';
+  check(getComputedStyle(host).color === 'rgb(232, 234, 248)', 'dark tokens apply to the migration page');
+  document.documentElement.dataset.theme = 'light';
   root.querySelector('button').click();
   await wait(() => root.querySelector('textarea'));
   const inputs = [...root.querySelectorAll('input[type=checkbox]')];

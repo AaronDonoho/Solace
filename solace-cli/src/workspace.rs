@@ -296,6 +296,36 @@ pub fn remove(root: &Path, dir: &str) -> Out {
     Ok(format!("Removed {dir} from the board; its Solace store is kept.\n"))
 }
 
+/// The folder of the listed project `dir`, once it may be deleted with its
+/// files (D-74): `name` is its folder or package name, it is reached without
+/// symlinks, and it holds no other listed project.
+pub fn deletable(root: &Path, dir: &str, name: &str) -> Result<PathBuf, Failure> {
+    let refuse = |why: String| Err(Failure(format!("E7014 {why}"), 1));
+    if dir == "." {
+        return refuse("the root's own project can't be deleted".into());
+    }
+    let dirs = listed(root)?;
+    if !dirs.iter().any(|d| d == dir) {
+        return fail(format!("{dir} is not a project of this root."));
+    }
+    let path = root.join(dir);
+    let package = self::name(&path);
+    if name != dir && (package.is_empty() || name != package) {
+        return refuse(format!("type the project's name ({dir}) to delete its folder"));
+    }
+    let mut at = root.to_path_buf();
+    for part in dir.split('/') {
+        at.push(part);
+        if fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
+            return refuse(format!("{dir} is reached through a symlink; delete it yourself"));
+        }
+    }
+    if let Some(other) = dirs.iter().find(|d| d.starts_with(&format!("{dir}/"))) {
+        return refuse(format!("{dir} holds the project {other}; remove that one first"));
+    }
+    Ok(path)
+}
+
 /// Gleam's rule for package names: lowercase letters, digits and `_`, starting with a letter.
 pub fn package_name(name: &str) -> bool {
     name.starts_with(|c: char| c.is_ascii_lowercase()) && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')

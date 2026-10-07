@@ -20,7 +20,7 @@ cd5e157c66273aa74e5f80017d197745 migration.migration_report
 2342ab0e12f0fe87966ff2681a65e638 migration.register
 514b191b0c720dadd6013a80b89653e6 migration.reload
 ef48a71f0215eae074a0f9a77c03283d migration.request
-434fb47b76c4bb901765fa11fa32e7b6 migration.styles
+621c70939e6be89e6a4af115d9960bc3 migration.styles
 5594b17d76a088ca7aa87613b00ee92c migration.update
 3d0b076ed1dda26dde4f7b7c55ff6581 migration.view
 86dd65e372da749d9d60e8a755f38a8d migration/api (imports)

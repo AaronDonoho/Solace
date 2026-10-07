@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Solace: A Technical White Paper</title>
+<style>
+  @page { size: Letter; margin: 0.8in 0.9in; }
+  body { font: 11pt/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; color: #1c1c1e; max-width: 7in; margin: 0 auto; }
+  h1 { font-size: 24pt; margin: 0 0 2pt; }
+  h2 { font-size: 15pt; margin: 22pt 0 6pt; break-after: avoid; }
+  h3 { font-size: 12pt; margin: 14pt 0 4pt; break-after: avoid; }
+  .by { color: #666; margin: 0 0 14pt; }
+  p, li { margin: 5pt 0; }
+  ul, ol { padding-left: 20pt; }
+  table { border-collapse: collapse; width: 100%; margin: 8pt 0; font-size: 10pt; break-inside: avoid; }
+  th, td { border: 1px solid #c8c8cc; padding: 4pt 7pt; text-align: left; vertical-align: top; }
+  th { background: #f1f1f4; }
+  td.n, th.n { text-align: right; white-space: nowrap; }
+  code { font: 9.5pt ui-monospace, "SF Mono", Menlo, Consolas, monospace; background: #f1f1f4; padding: 0 2pt; border-radius: 2pt; }
+  .note { color: #555; font-size: 10pt; }
+  .built { color: #1d6b33; font-weight: 600; }
+  .planned { color: #8a5a00; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>Solace: A Technical White Paper</h1>
+<p class="by">Oct 6, 2026 &middot; Aaron</p>
+
+<h2>Summary</h2>
+<p>Solace is an agentic development environment. It wraps a software project and mediates all work on it: AI agents carry out the engineering tasks, and a human sets direction, answers the agents' questions and approves the results. Agents change the project only through Solace, and the human assigns, follows and reviews their work through the app, without reading code or using a command line.</p>
+<p>Solace keeps the project's code in a store of symbols (functions, types and constants), each with a permanent ID. An agent reads and changes code by symbol, through a single tool, and every change is type-checked as it arrives; code with errors is not saved. Solace writes ordinary source files from the store for the normal compiler and test runner. The agent has no shell and no file tools. It reaches the project's other files through the same tool, under rules set by file type, and runs only the commands the human has declared. Each task records what it changed, so its work can be reviewed and undone.</p>
+<p>The human works in three places: a task board, where tasks are assigned to agents, questions are answered, runs are followed live and results are reviewed; a contract view, which draws the project's entry points, logic, side effects, tests and files and describes each function in plain words; and a migration tool, which brings an existing project under Solace and can be reversed.</p>
+<p>The first goals are the guardrails on agents and the interface for humans. How many tokens an agent uses is measured and reduced, but never at the expense of those two.</p>
+<p>Solace is at an early stage. It ships as a single executable that runs locally for one person, and it supports projects written in Gleam, a functional language that runs on Erlang's virtual machine (the BEAM) and on JavaScript. Running functions from the contract view, replaying runs to compare a change's behavior, a strategy page for planning, and possibly a language of Solace's own are planned.</p>
+
+<h2>1. The problem</h2>
+<p>Development tools are built around people editing text files and reading what the compiler prints. That works poorly for an agent, and it leaves the person who directs the agent with little to go on besides the agent's own report.</p>
+<h3>For the agent</h3>
+<ul>
+  <li><b>Finding its way around.</b> It searches, opens and reads files for several rounds before changing anything, and it re-sends its whole conversation to the model on every step.</li>
+  <li><b>Editing text.</b> Find-and-replace patches fail when whitespace differs or the search text appears more than once.</li>
+  <li><b>Remembering.</b> Each session starts with no record of earlier plans or decisions.</li>
+  <li><b>Hidden inputs.</b> Time, randomness and network calls don't appear in function signatures, so behavior is hard to predict and tests can be flaky.</li>
+</ul>
+<h3>For the human</h3>
+<ul>
+  <li><b>Review means reading code.</b> A person who owns a project but doesn't read its language, or who has no time to read every change, can only trust the agent's summary of what it did.</li>
+  <li><b>Work is hard to follow.</b> Running several agents on a project means watching terminals, and the plan, the decisions and the questions agents have are scattered.</li>
+  <li><b>Agents can reach everything.</b> An agent with a shell and file tools can change files it was never asked to touch, including the tests that would catch its mistakes.</li>
+  <li><b>Planning happens elsewhere.</b> The vision, the feature list and the roadmap live in documents and trackers that agents don't see.</li>
+</ul>
+
+<h2>2. What Solace is</h2>
+<p>Solace wraps a user's project. Agents change the project only through Solace, and humans direct and review the work through Solace's app. All of it ships as one executable, <code>solace</code>, which holds the store, the command-line interface, the server for agents, the task board with its web client, and the generator for locked-down agent configurations. It runs on the user's machine and keeps its data in the project's <code>.solace/</code> folder. There are no accounts.</p>
+<p>Solace contains no model. It starts agent programs that the user has already installed and signed in to, currently the Codex CLI for OpenAI models and Claude Code for Claude models, and stores no credentials. Any OpenAI-compatible or Claude-compatible endpoint, including a model running on the same machine, can be added in a settings file.</p>
+<table>
+  <tr><th>Tool</th><th>For</th><th>Status</th></tr>
+  <tr><td>Agent tool</td><td>Agents read and change the project by symbol, with type checking, impact analysis and test selection</td><td class="built">Built</td></tr>
+  <tr><td>Task board</td><td>Humans create tasks, assign them to agents, answer questions, follow runs live and review the result</td><td class="built">Built</td></tr>
+  <tr><td>Contract view</td><td>Humans see what the software does, what it touches and what tests cover it, and can run it</td><td class="built">Built</td></tr>
+  <tr><td>Migration tool</td><td>Brings an existing project under Solace, with checks and a way back</td><td class="built">Built</td></tr>
+  <tr><td>Multi-project roots</td><td>Several projects on one board, with tasks that change more than one</td><td class="built">Built</td></tr>
+  <tr><td>Strategy page</td><td>Vision, feature design, roadmap with milestones, breakdown into tasks</td><td class="planned">Planned</td></tr>
+  <tr><td>Further life-cycle tools</td><td>The rest of the software engineering life cycle</td><td class="planned">Planned</td></tr>
+</table>
+
+<h2>3. How humans work</h2>
+<p>The human side is the Solace app. It is meant for someone who gives creative input and judgment and does not need to read source code or use a terminal.</p>
+
+<h3>3.1 The task board</h3>
+<p>Tasks move through columns, and the workflow is configurable. A person writes a task in a markdown editor, which can include images that agents also see. In planning, the person can have an agent investigate the task first. An investigation changes nothing and reports findings or a plan. Then the person assigns the task to a model and an effort level. Solace starts the agent and puts the agent's notes and questions on the task. It moves the task to <i>blocked</i> when the agent needs an answer and to <i>needs review</i> when it has finished. Cards show which tasks have an agent working, and each run can be followed live: the agent's messages and each command it ran with its result.</p>
+<p>In review, a separate agent checks the work, and the person approves it or returns the task for fixes with new instructions. Solace records what each task changed and the state before it, so a person can undo a task entirely, unless a later task has changed the same code. A built-in guide explains the workflow.</p>
+
+<h3>3.2 The contract view</h3>
+<p>The contract view shows a project as a drawn graph of its entry points, its logic, the effects it has on the outside world (files, network, clock, randomness, other processes), its tests and its other files. Each node and connection is labeled with how it is known: written in the code, derived from reading it, or observed in a run. The view never presents a derived fact as a guarantee. A person can open any part, read it in plain words (what it takes, what it gives and what it touches), and run any public function with a form built from its types.</p>
+<p>For a task, the view shows what changed in terms of behavior: the tests that ran, what the change reaches that no test covers, and a before-and-after replay of the same run. A difference is shown as evidence for the person to judge, not as a failure.</p>
+
+<h3>3.3 Migration</h3>
+<p>To bring an existing Gleam project under Solace, the person chooses <b>Migrate this project</b> on the board. Solace copies the folder, builds and tests the original as a baseline, sets up the copy, regenerates the code from the store, and writes a report. The report covers whether every symbol was found, whether the regenerated code matches the original and where it differs, whether the tests still behave the same, whether any path points outside the folder, whether every file was kept, and whether the copy builds without Solace's files. The original folder is not changed until the person chooses to switch, which keeps the original as a backup folder and can be reversed. Where bubblewrap is installed, every command Solace runs during a migration sees the original as read-only.</p>
+
+<h3>3.4 Several projects on one board</h3>
+<p>One Solace root can hold several projects below it, shown as lanes on one board. The root folder is itself a project of plain files (documents, scripts and code in other languages), so agents can maintain those too. A task can change several projects, chosen when it is created. Agents in different projects work at the same time.</p>
+
+<h3>3.5 Planned: strategy and planning</h3>
+<p class="planned">Planned, not built.</p>
+<p>The board starts at a task. The strategy page will start earlier, with the project's purpose, and carry it down to tasks:</p>
+<ul>
+  <li><b>Vision.</b> A person writes down what the software is for and who uses it.</li>
+  <li><b>Feature design.</b> A person and an agent work out a feature together: what it does, its edge cases and the questions that need an answer before work starts.</li>
+  <li><b>Roadmap and milestones.</b> Features are placed on a roadmap with milestones.</li>
+  <li><b>Breakdown.</b> An agent proposes tasks from a feature, the person edits them, and they go onto the board.</li>
+</ul>
+<p>The aim is one place where a person plans with agents, watches work happen and reviews the product, instead of a planning tool, a tracker and a terminal.</p>
+
+<h2>4. How agents work</h2>
+<h3>4.1 The data model</h3>
+<p>Everything in a project's code is a symbol: a function, type, type variant, constant or test. Each symbol has a permanent ID that is assigned by the system and never reused, a name, a revision, and a history of changes. Editing or renaming a symbol keeps its ID, and deleting is refused while anything still uses the symbol.</p>
+<p>The revision is a hash of the symbol's code without its comments and doc text, so editing only a comment does not count as a change. Solace records the result of each test together with a hash of everything the test can reach, and runs a test again only when something it reaches has changed.</p>
+<p>The code lives in one SQLite file, <code>.solace/store.db</code>. Dependencies between symbols are worked out from their text and drive the "who uses this" queries. After each change, Solace writes the Gleam files back out for the normal compiler and test runner, and the agent never sees them. Edits made outside Solace (by hand, by another tool, or by pulling from Git) are read back into the store. If an agent is working, the edit joins its task. Otherwise it waits on an <i>Unexpected Changes</i> task for the person to keep or discard. Code that was approved in Solace, such as a teammate's pulled work, is recognized from a committed list and read in without a prompt.</p>
+
+<h3>4.2 The agent tool</h3>
+<p>The agent gets one tool, <code>solace</code>, provided over MCP (Model Context Protocol, the standard way coding agents call external tools). The tool takes <code>command</code> (one or more command lines, run in order, so several steps can share one round trip), <code>text</code> (new code, a patch, a note or a question) and <code>old</code> (text to replace, for small edits). The agent's first message is a short workflow with examples and one line per command, and <code>help</code> gives every option. A typical session:</p>
+<ol>
+  <li><code>session start --task</code> matches the words of the task against names, documentation and code, adds callers, called functions and covering tests, and returns about 2,000 to 3,000 tokens: each symbol's signature and description, why it was chosen, the project's <code>AGENTS.md</code> instructions, the other projects on the board, and notes from earlier sessions.</li>
+  <li><code>inspect a b c --context</code> returns each symbol's code, the signatures of what it uses, its callers (with the line that calls it), and the smallest test that exercises it. For a type, it lists every place that constructs it with every field, which are the places a new field breaks. A signature is printed once per reply, and a reply over a size limit says what it left out and the command that shows it.</li>
+  <li><code>submit</code> followed by <code>test</code>, in the same call. <code>submit</code> takes a patch in the <code>apply_patch</code> form that agents already know, naming symbols or modules instead of files, so the agent sends only the lines that change. Solace type-checks it and saves it. Missing imports are added. The reply reports what changed in the set of broken symbols: what it fixed, one line for each symbol still broken, and new errors in full.</li>
+  <li><code>test</code> runs only the tests that can see a change since they last passed, plus any that failed. It reports failures only, and says what else the change reaches that no test checks.</li>
+  <li><code>task done</code> ends the run with a summary for human review, and <code>work add</code> leaves a note for the next session.</li>
+</ol>
+<table>
+  <tr><th>Command</th><th>What it does</th></tr>
+  <tr><td><code>session start [--task]</code></td><td>Starting point: relevant symbols, instructions, other projects, saved notes</td></tr>
+  <tr><td><code>inspect</code>, <code>view</code>, <code>refs</code></td><td>Read symbols with their dependencies, callers and tests; module outlines; what uses a symbol or reads a record field</td></tr>
+  <tr><td><code>find</code>, <code>grep</code></td><td>Search code; search other project files</td></tr>
+  <tr><td><code>impact</code></td><td>What a change reaches, nearest first, with the tests that cover each</td></tr>
+  <tr><td><code>submit</code>, <code>delete</code></td><td>Change symbols by patch, by exact replacement or by whole block; remove an unused symbol</td></tr>
+  <tr><td><code>drafts</code></td><td>Rejected submits are kept, and the agent patches and retries one instead of resending it</td></tr>
+  <tr><td><code>test</code>, <code>check</code></td><td>Run the affected tests (or all of them); type-check everything</td></tr>
+  <tr><td><code>probe</code></td><td>Run throwaway code, start from an existing test's setup, or trace the calls a function receives, with arguments and results</td></tr>
+  <tr><td><code>files</code>, <code>read</code>, <code>write</code>, <code>remove</code></td><td>Project files outside the store, under the rules in 4.3</td></tr>
+  <tr><td><code>build</code>, <code>format</code>, <code>run</code></td><td>Build and format the project, and run commands the human declared</td></tr>
+  <tr><td><code>task note</code>, <code>ask</code>, <code>diff</code>, <code>done</code></td><td>On the board: add a note, ask the human a question with 2 to 4 options and wait, see what the task has changed, and finish</td></tr>
+  <tr><td><code>work add</code>, <code>list</code>, <code>done</code></td><td>Notes that carry over between sessions</td></tr>
+</table>
+<p>Reading a dependency, such as a library module, gives its public signatures and documentation from the package source without storing them. <code>--project &lt;folder&gt;</code> on a read command reads another project on the same board, and on any command changes another project that the task covers.</p>
+<p>If submitted code has errors, nothing is saved. If it is correct but breaks other code, such as callers of a changed signature, it is saved and the broken callers are listed until fixed. Errors carry a stable code, name the symbol, state what was expected and found, and group follow-on errors under the first. Agent programs differ in how much tool output they accept, so Solace sets the reply size limit and a few other settings for each agent it starts.</p>
+
+<h3>4.3 Guardrails</h3>
+<p>Solace sorts every file in the project into one of five categories, and the category decides what agents may do.</p>
+<table>
+  <tr><th>Category</th><th>Files</th><th>Agents</th></tr>
+  <tr><td>Graph</td><td>Gleam source and tests, held as symbols</td><td>Read and change symbols, never files</td></tr>
+  <tr><td>Watched</td><td>Other text files up to a size limit</td><td>Read and write through Solace, checked by any validator for that kind of file; undone with the task</td></tr>
+  <tr><td>Protected</td><td><code>solace.toml</code>, <code>AGENTS.md</code></td><td>Read; propose a change that the human approves or rejects</td></tr>
+  <tr><td>Unwatched</td><td>Build output, ignored files, binary or oversized files</td><td>Read and write through Solace</td></tr>
+  <tr><td>Internal</td><td><code>.solace/</code> and any other Solace project nested inside</td><td>No access</td></tr>
+</table>
+<p>Agents get no shell and no file tools, only the Solace tool and web access. They run only commands the human has declared in <code>solace.toml</code>, such as an end-to-end test suite. Reviews and investigations are read-only: they can't change code or files, and can run only declared commands that are marked as safe for reviews. An agent that needs something outside its task, for example a change to another project, asks the human with <code>task ask</code> instead of working around the limit.</p>
+
+<h2>5. Advantages</h2>
+<h3>For agents</h3>
+<ul>
+  <li><b>A short path to the right code.</b> The task-based starting list and the inspect bundle replace most of the search-open-read cycle.</li>
+  <li><b>Smaller reads.</b> The agent reads the definitions it needs, not whole files.</li>
+  <li><b>Reliable edits.</b> The agent changes a named symbol, so an edit can't fail on whitespace or land in the wrong place.</li>
+  <li><b>Fast feedback.</b> Each change is type-checked in about half a second, and reads take milliseconds.</li>
+  <li><b>Step-by-step refactors.</b> Broken callers are tracked, so a signature change can be fixed one caller at a time or submitted together with its callers.</li>
+  <li><b>Less bookkeeping.</b> Imports, formatting and rename fix-ups are never the agent's job.</li>
+  <li><b>Memory between sessions.</b> Saved notes appear at the next session start with the code they mention.</li>
+</ul>
+<h3>For humans</h3>
+<ul>
+  <li><b>Review without reading code.</b> The contract view shows behavior, effects and test results, taken from the store and from recorded runs and not from the agent's account of itself.</li>
+  <li><b>A narrow, auditable interface.</b> With one tool, no file system and no shell, an agent can only work through Solace, every change is recorded, and a task can be undone as a whole.</li>
+  <li><b>Protected checks and settings.</b> Agents can't edit <code>solace.toml</code> or <code>AGENTS.md</code>, and changes they make outside Solace are surfaced for review.</li>
+  <li><b>One place for the work.</b> Tasks, agent questions, live runs and reviews are on one board, and agents can work on several projects at once.</li>
+  <li><b>No command line.</b> The human side runs in the app, and agents are started from the board.</li>
+</ul>
+
+<h2>6. Costs and open problems</h2>
+<ul>
+  <li><b>One language.</b> Only Gleam projects are supported. The store and the contract view are written to be language-neutral, but nothing else has been tried.</li>
+  <li><b>Unfamiliar tools.</b> Models are trained on file-based workflows. They still sometimes open whole modules or read tests one at a time, which costs extra steps.</li>
+  <li><b>Reply size has to be tuned.</b> Agents re-send everything they have read on each step, so each reply from Solace adds to the cost of every later step. Solace keeps replies short: a symbol's signature is printed once, replies have a size limit, and the starting list names symbols and leaves out their signatures. The right amount of detail varies by task and model, so these limits are adjusted from benchmark results.</li>
+    <li><b>Friction with file-based tools.</b> Editors, linters and GitHub review depend on the Gleam files that Solace writes out. Edits made directly to those files have to be reviewed in Solace before agents continue.</li>
+  <li><b>Contract-view facts are derived.</b> Effects and dependencies are found by reading Gleam code. The view says so, but it can miss an effect that is hidden behind a call it doesn't recognize.</li>
+  <li><b>Early scale.</b> It has been tried on two benchmark projects and on Solace's own repository, with one user. Behavior on large codebases and with several people is untested.</li>
+  <li><b>Agents cost money.</b> Agent runs use the model provider's service. Solace reduces what each task uses and doesn't remove the cost.</li>
+  <li><b>Missing pieces.</b> The strategy page, conflict detection between several people's changes, and the rest of the life-cycle tools are not built.</li>
+</ul>
+
+<h2>7. Early results</h2>
+<p>The test project is an order-management service in Gleam (22 modules, about 30,000 tokens of code, 98 tests) with ten tasks: new features, bug fixes, a change touching many callers, a state-machine change and resuming half-finished work. Each task was done by the same agent in two ways, once with ordinary files and a shell and once through Solace only, and hidden tests graded the results. A step is one round trip to the model. Tokens are all tokens the model processed during the task, including the conversation re-sent on each step.</p>
+
+<h3>Latest runs: four tasks, three runs each</h3>
+<p>These used the Codex CLI with GPT-6-Sol at medium reasoning effort, on four of the ten tasks: a coupon feature, a partial-return rule, a tax-exemption change that touches many callers, and a business-day delivery estimate. Every run passed, 12 of 12 with files and 12 of 12 through Solace. The table gives the median run for each task. The two sides ran at different times, and Solace changed between them: the workflow now sends patches instead of whole symbols and prints less per reply.</p>
+<table>
+  <tr><th>Task</th><th class="n">Tokens, files</th><th class="n">Tokens, Solace</th><th class="n">Change</th><th class="n">Steps (files / Solace)</th><th class="n">Seconds (files / Solace)</th></tr>
+  <tr><td>Coupon feature</td><td class="n">228k</td><td class="n">107k</td><td class="n">&minus;53%</td><td class="n">11 / 7</td><td class="n">85 / 59</td></tr>
+  <tr><td>Partial return</td><td class="n">232k</td><td class="n">95k</td><td class="n">&minus;59%</td><td class="n">10 / 6</td><td class="n">70 / 44</td></tr>
+  <tr><td>Tax exemption</td><td class="n">330k</td><td class="n">146k</td><td class="n">&minus;56%</td><td class="n">12 / 7</td><td class="n">102 / 87</td></tr>
+  <tr><td>Business-day estimate</td><td class="n">153k</td><td class="n">119k</td><td class="n">&minus;22%</td><td class="n">8 / 7</td><td class="n">58 / 49</td></tr>
+  <tr><td><b>Total of medians</b></td><td class="n"><b>943k</b></td><td class="n"><b>468k</b></td><td class="n"><b>&minus;50%</b></td><td class="n"><b>41 / 27</b></td><td class="n"><b>315 / 239</b></td></tr>
+</table>
+<ul>
+  <li>Through Solace the agent used half the tokens, a third fewer steps and a quarter less time. Output tokens fell 25%.</li>
+  <li>The first edit came after a median of 4 to 5 steps both ways, so the saving comes after orientation, not before it.</li>
+  <li>No run had a failed edit through Solace.</li>
+</ul>
+
+<h3>The same model on a local machine</h3>
+<p>To check that the gain doesn't depend on one provider, two runs of each of four tasks used a quantized open model served on the same machine and run through Claude Code. All 16 runs passed. Through Solace the agent used 727k tokens against 1.81M with files (&minus;60%) across the median runs, and wall-clock time was 7% lower (727 seconds against 780).</p>
+
+<h3>Earlier full comparison: all ten tasks</h3>
+<p>The first complete comparison used GPT-6-Luna at maximum effort, one run per task per side. All 20 runs passed. Through Solace, the agent used 43% fewer tokens (3.12M against 5.51M) and 40% fewer steps (97 against 163). The saving per task ranged from 62% down to none, and no task cost more. Resuming work from a saved note used 52% fewer tokens. Wall-clock time was 35% longer through Solace in that run. Tool time was under 1% in both setups, so the difference was model time. Part of it was the model writing whole symbols where a file patch sends only the changed lines, and part may have been provider speed, since the two sides ran an hour apart. Solace has since added patches by symbol, and the latest runs, which used a different model, were faster than with files.</p>
+
+<p class="note">Repeat runs of the same task vary by 15% or more, and the latest comparison has three runs per task and one model on one project, so these are early signs. The full ten-task comparison has not been repeated since the changes above. The benchmark harness and every run's logs are in the repository.</p>
+
+<h2>8. What's next</h2>
+<ul>
+  <li><b>Now:</b>
+      Continue improvements in UX of Board, Contract View, and Migration pages.</li>
+  <li><b>Next:</b>
+      The strategy page: vision, feature design with an agent, roadmap and milestones, and a breakdown into tasks that land on the board. Alongside it, more of the review experience: guarantees and decisions described in business terms, scenario replay, and tracing a failure back to its cause.</li>
+  <li><b>Later:</b>
+      Tools for the rest of the software life cycle, possible support for more languages than Gleam</li>
+</ul>
+
+<h2>9. A possible language of Solace's own</h2>
+<p>Solace's tools were built over Gleam so that they could be measured against ordinary files before any language work. A language designed for agents remains possible later. It would write into the program what an agent can't see in ordinary code, so the compiler can check it:</p>
+<ul>
+  <li><b>Declared effects.</b> A function could affect the outside world only through a value it was handed, such as a clock, a database or an HTTP client, and its signature would list the effects it uses. Tests would pass fakes, so they behave the same on every run.</li>
+  <li><b>Contracts and examples in the signature.</b> Preconditions, postconditions and examples would sit beside the function. Examples would run as tests.</li>
+  <li><b>Types that rule out wrong meanings.</b> No null and no exceptions, distinct types for different kinds of ID, restricted ranges of values, and units of measure.</li>
+  <li><b>Explicit unfinished code.</b> A typed hole would mark a gap with a question for a human. The rest of the program would still compile and run its tests.</li>
+</ul>
+<p>The contract view would then show these as written guarantees instead of derived facts. Whether the language is worth building will be decided from how far the current tools get with Gleam.</p>
+
+</body>
+</html>

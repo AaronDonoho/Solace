@@ -1339,10 +1339,16 @@ fn start(root: PathBuf, t: Value, rid: String, m: Value) {
             // Never open one provider conversation in two processes.
             let _guard = conversation_lock(&root, tid)?;
             let result = agent_process(&root, &task(&root, tid)?, &rid, &m, true);
-            let result = match result {
+            let mut result = match result {
                 Err(Failure(_, SESSION_GONE)) => agent_process(&root, &task(&root, tid)?, &rid, &m, false),
                 other => other,
             };
+            // A discussion agent that exited after replying gets a fresh agent,
+            // briefed with every note, at the human's next note.
+            while let Err(Failure(_, REPLIED)) = result {
+                wait_discussion(&open(&root)?, tid, &rid)?;
+                result = agent_process(&root, &task(&root, tid)?, &rid, &m, false);
+            }
             let current = task(&root, tid)?;
             if t["runs"].as_array().unwrap().iter().any(|r| r["id"] == rid && matches!(r["kind"].as_str(), Some("review" | "discuss")))
                 || m["run"].is_array()
@@ -1406,6 +1412,9 @@ fn session_id(log: &Path, agent: &str) -> Option<String> {
 /// `agent_process`'s failure when the agent can't resume its conversation:
 /// the run starts again with a fresh one.
 const SESSION_GONE: i32 = 3;
+/// `agent_process`'s result when a discussion agent replied in plain text and
+/// exited: the reply is recorded and the run waits for the human.
+const REPLIED: i32 = 4;
 fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: bool) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap();
     let run = &t["runs"][run_at(t, rid)?];
@@ -1430,8 +1439,8 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
             && env::var_os("ANTHROPIC_API_KEY").is_none()
             && env::var_os("ANTHROPIC_AUTH_TOKEN").is_none());
     let previous = &t["conversation"];
-    // Compare launch-relevant configuration, not labels. A changed model or endpoint gets a handoff.
-    let compatibility = json!({"agent":m["agent"],"model":m["model"],"endpoint":m["endpoint"],"effort":m["effort"],"run":m["run"]});
+    // Compare launch-relevant configuration, not labels. A changed provider, endpoint or runner gets a handoff; model and effort are launch flags and keep the session (D-75).
+    let compatibility = json!({"agent":m["agent"],"endpoint":m["endpoint"],"run":m["run"]});
     let resume = if allow_resume && author && persistent && run["fresh"] != true && previous["config"] == compatibility {
         previous["home"]
             .as_str()
@@ -1584,7 +1593,11 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
         writeln!(stdin, "{prompt}")?;
     }
     drop(stdin);
-    let forced = supervise(root, tid, rid, &mut child, &log, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT)?;
+    let supervised = supervise(root, tid, rid, &mut child, &log, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT);
+    if !(author && persistent) && matches!(supervised, Err(Failure(_, REPLIED))) && dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    let forced = supervised?;
     if author && persistent {
         let _guard = lock(root)?;
         let mut current = task(root, tid)?;
@@ -1654,6 +1667,20 @@ fn supervise(
                         .any(|s| raw.contains(s))
                 {
                     return Err(Failure("session unavailable; using a fresh handoff".into(), SESSION_GONE));
+                }
+                // A discussion agent that replied in plain text and exited cleanly has
+                // taken its turn: the reply is its note, and the discussion waits.
+                let reply = entries.iter().rev().find(|e| e["kind"] == "message").and_then(|e| e["text"].as_str()).map(str::trim).unwrap_or("");
+                if r["kind"] == "discuss" && status.success() && error.is_empty() && !reply.is_empty() {
+                    let _guard = lock(root)?;
+                    let mut t = task(root, tid)?;
+                    let i = run_at(&t, rid)?;
+                    if t["runs"][i]["state"] != "ended" {
+                        note(&mut t, "agent", Some(rid), reply);
+                        t["runs"][i]["state"] = json!("waiting");
+                        save(&open(root)?, &t)?;
+                    }
+                    return Err(Failure("discussion reply".into(), REPLIED));
                 }
                 let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
                 let message = format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
@@ -1919,7 +1946,7 @@ fn brief(t: &Value, kind: &str) -> String {
             "Review the changes this task made (listed below) and give feedback. Follow the review context below: the first review assesses the whole task with `task diff`; follow-ups start with `task diff --since-review` when a completed checkpoint exists. Then read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. {read_only} In a review, `run <name>` is allowed for commands marked `allowed_in_reviews` in `solace.toml`; use those to verify (for example JavaScript tests). Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed."
         ),
         "discuss" => format!(
-            "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} The human's message is the last note. Reply with `task note`, the reply in `text`; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
+            "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
         ),
         "work" => format!(
             "Make the change this task describes. {start} {ask} Finish with `task done`, a summary in `text`: what you changed and how you checked it."
@@ -2597,8 +2624,18 @@ impl Board {
                         ),
                     );
                 }
+                // Deleting the files (D-74) is checked before anything changes.
+                let doomed = if body["delete"] == true {
+                    Some(workspace::deletable(&self.top, &dir, body["name"].as_str().unwrap_or("").trim())?)
+                } else {
+                    None
+                };
+                // Unlist first, so a failed delete still leaves a consistent list.
                 workspace::remove(&self.top, &dir)?;
                 self.held.lock().unwrap().remove(&root);
+                if let Some(path) = doomed {
+                    fs::remove_dir_all(path)?;
+                }
                 return self.listing();
             }
             _ => return err("E7001", "unknown route"),
@@ -2757,15 +2794,15 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 return;
             }
             if req.method().as_str() == "GET"
-                && matches!(url.split('?').next().unwrap_or(""), "/" | "/view" | "/app.js" | "/guide" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2")
+                && matches!(url.split('?').next().unwrap_or(""), "/" | "/migrate" | "/view" | "/app.js" | "/guide" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2")
             {
                 let (data, kind) = match url.split('?').next().unwrap_or("") {
-                    "/" | "/view" => (include_bytes!("../board/index.html").as_slice(), "text/html"),
+                    "/" | "/migrate" | "/view" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
                     "/guide" => (include_bytes!("../board/guide.html").as_slice(), "text/html"),
                     "/fonts/sans-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-400-normal.woff2").as_slice(), "font/woff2"),
                     "/fonts/sans-700.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-700-normal.woff2").as_slice(), "font/woff2"),
                     "/fonts/mono-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-mono-latin-400-normal.woff2").as_slice(), "font/woff2"),
-                    _ => (include_bytes!("../board/priv/app.js").as_slice(), "text/javascript"),
+                    _ => (include_bytes!("../frontend/priv/app.js").as_slice(), "text/javascript"),
                 };
                 let _ = req.respond(
                     tiny_http::Response::from_data(data).with_header(tiny_http::Header::from_bytes("Content-Type", kind).unwrap()),
