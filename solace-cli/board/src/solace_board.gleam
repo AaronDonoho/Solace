@@ -1443,7 +1443,7 @@ fn button(label: String, msg: Msg) -> Element(Msg) {
 
 pub fn view(model: Model) -> Element(Msg) {
   h.main([], [
-    h.style([], board_styles <> selected_card_styles),
+    h.style([], board_styles <> selected_card_styles <> modal_styles),
     h.header([a.class("top")], [
       h.h1([], [h.text("Solace tasks")]),
       h.a([a.href("/guide")], [h.text("Guide")]),
@@ -2583,7 +2583,7 @@ fn removal_view(model: Model) -> Element(Msg) {
   case model.removing {
     None -> h.text("")
     Some(#(dir, False, _)) ->
-      h.div([a.class("removal"), a.attribute("role", "alertdialog")], [
+      modal([
         h.p([], [
           h.text(
             "Remove "
@@ -2596,7 +2596,7 @@ fn removal_view(model: Model) -> Element(Msg) {
         button("Cancel", RemoveCancel),
       ])
     Some(#(dir, True, typed)) ->
-      h.div([a.class("removal"), a.attribute("role", "alertdialog")], [
+      modal([
         h.p([], [
           h.strong([], [
             h.text(
@@ -2610,6 +2610,7 @@ fn removal_view(model: Model) -> Element(Msg) {
           h.text("Type " <> dir <> " to confirm"),
           h.input([
             a.attribute("aria-label", "Project name"),
+            a.attribute("autofocus", ""),
             a.value(typed),
             e.on_input(RemoveTyped),
           ]),
@@ -2620,4 +2621,20 @@ fn removal_view(model: Model) -> Element(Msg) {
         button("Cancel", RemoveCancel),
       ])
   }
+}
+
+const modal_styles = ".modal-backdrop{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:var(--shadow);padding:16px}.removal{background:var(--paper);color:var(--ink);border:2px solid var(--edge);box-shadow:0 8px 32px var(--shadow);padding:20px 24px;width:min(480px,100%);max-height:100%;overflow:auto}.removal p{margin:0 0 12px;overflow-wrap:anywhere}.removal input{width:calc(100% - 8px);box-sizing:border-box}.removal button:disabled{opacity:.5;cursor:not-allowed}"
+
+/// A modal dialog: a backdrop over the page that blocks the board behind it.
+fn modal(body: List(Element(Msg))) -> Element(Msg) {
+  h.div([a.class("modal-backdrop")], [
+    h.div(
+      [
+        a.class("removal"),
+        a.attribute("role", "alertdialog"),
+        a.attribute("aria-modal", "true"),
+      ],
+      body,
+    ),
+  ])
 }
