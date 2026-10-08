@@ -1779,7 +1779,11 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     }
     let custom = m["run"].as_array();
     let (prompt, images) = continuation_brief(t, run, resume.is_some(), root, custom.is_some());
-    let binary = env::current_exe()?;
+    // `SOLACE_BIN` names the CLI agents call when the server is another program (D-80).
+    let binary = match env::var_os("SOLACE_BIN").filter(|b| !b.is_empty()) {
+        Some(b) => PathBuf::from(b),
+        None => env::current_exe()?,
+    };
     let config = system()?;
     let timeout = config["task_timeout"].as_u64().unwrap_or(3600);
     let agent = m["agent"].as_str().unwrap_or("codex");
@@ -2914,6 +2918,7 @@ impl Board {
             let name = if dir == "." { root.display().to_string() } else { dir.to_string() };
             return fail(format!("{name} is already served by another `solace serve`; stop that one first."));
         };
+        record_port(&f, self.port);
         adopt_tasks(&scope::top(root), root)?;
         recover_project(root)?;
         held.insert(root.to_path_buf(), f);
@@ -3094,6 +3099,18 @@ fn percent_encode(s: &str) -> String {
         .collect()
 }
 
+/// Whether a request names this server's own address: `Host` (when sent) and
+/// `Origin` (when sent) are `127.0.0.1` or `localhost` with the server's port.
+fn own_address(req: &tiny_http::Request, port: u16) -> bool {
+    let named = |field: &str, prefix: &str| {
+        req.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(field)).is_none_or(|h| {
+            let v = h.value.as_str().to_ascii_lowercase();
+            v.strip_prefix(prefix).is_some_and(|a| a == format!("127.0.0.1:{port}") || a == format!("localhost:{port}"))
+        })
+    };
+    named("Host", "") && named("Origin", "http://")
+}
+
 /// The largest request body the API reads, besides image uploads.
 const BODY_LIMIT: usize = 1_048_576;
 /// A request's body, or `None` when it's over `limit` bytes or can't be read.
@@ -3150,6 +3167,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             let Some(f) = try_lock_file(&board.top.join(".solace/serve.lock"))? else {
                 return fail(format!("{} is already served by another `solace serve`; stop that one first.", board.top.display()));
             };
+            record_port(&f, board.port);
             Some(f)
         }
         _ => None,
@@ -3196,6 +3214,11 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
         std::thread::spawn(move || {
             let full = req.url().to_string();
             let path = full.split('?').next().unwrap_or("");
+            // Only the server's own localhost address may ask (D-80): a page on
+            // another site, or a rebound name, is refused before any route.
+            if !own_address(&req, board.port) {
+                return respond(req, 403, error_json(&Failure("E7016 request is not from this server's own address".into(), 1)));
+            }
             // The root's own routes; `/events` merges every project's when it has several.
             let own = path == "/projects"
                 || path == "/models"

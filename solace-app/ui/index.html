@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Solace</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; color: #1e1b4b; }
+  h1 { font-size: 1.4rem; }
+  button { font: inherit; padding: .4rem .9rem; }
+  ul { list-style: none; padding: 0; }
+  li button { width: 100%; text-align: left; margin: .2rem 0; }
+  #error { color: #b91c1c; white-space: pre-wrap; }
+  fieldset { border: none; padding: 0; margin: 1rem 0; }
+</style>
+</head>
+<body>
+<h1>Open a Solace project</h1>
+<button id="pick">Choose folder…</button>
+<fieldset>
+  <legend>Open in</legend>
+  <label><input type="radio" name="mode" value="app"> App window</label>
+  <label><input type="radio" name="mode" value="browser"> Browser</label>
+</fieldset>
+<h2>Recent</h2>
+<ul id="recent"></ul>
+<p id="error"></p>
+<script>
+  const { invoke } = window.__TAURI__.core;
+  const { open } = window.__TAURI__.dialog;
+  const recent = () => JSON.parse(localStorage.getItem('recent') || '[]');
+  const mode = () => localStorage.getItem('mode') || 'app';
+  for (const r of document.querySelectorAll('input[name=mode]')) {
+    r.checked = r.value === mode();
+    r.onchange = () => localStorage.setItem('mode', r.value);
+  }
+  function list() {
+    const ul = document.getElementById('recent');
+    ul.replaceChildren(...recent().map(dir => {
+      const li = document.createElement('li'), b = document.createElement('button');
+      b.textContent = dir; b.onclick = () => go(dir); li.append(b); return li;
+    }));
+  }
+  async function go(root) {
+    const error = document.getElementById('error');
+    error.textContent = '';
+    try {
+      await invoke('open_project', { root, mode: mode() });
+      localStorage.setItem('recent', JSON.stringify([root, ...recent().filter(d => d !== root)].slice(0, 8)));
+      list();
+    } catch (e) {
+      error.textContent = String(e);
+    }
+  }
+  document.getElementById('pick').onclick = async () => {
+    const dir = await open({ directory: true });
+    if (dir) go(dir);
+  };
+  list();
+</script>
+</body>
+</html>

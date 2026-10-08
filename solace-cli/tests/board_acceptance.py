@@ -79,6 +79,26 @@ class Board(unittest.TestCase):
     def action(self,t,name,code=None,**kw):
         return self.api('POST','/tasks/'+t['id']+'/actions',{'action':name,**kw},code)
     def get(self,t):return self.api('GET','/tasks/'+t['id'])
+    def bare(self,method,url,headers,body=None):
+        c=http.client.HTTPConnection('127.0.0.1',self.port,timeout=8)
+        c.putrequest(method,url,skip_host='Host' in headers)
+        for k,v in headers.items():c.putheader(k,v)
+        c.putheader('Content-Length',str(len(body or '')));c.endheaders(body.encode() if body else None)
+        r=c.getresponse();v=r.read();c.close();return r.status,v
+    def test_only_the_servers_own_address_may_ask(self):  # D-80
+        own=f'127.0.0.1:{self.port}'
+        body=json.dumps({'title':'Cross','body':'[]'})
+        status,v=self.bare('POST','/tasks',{'Origin':'http://evil.example','Content-Type':'text/plain'},body)
+        self.assertEqual(status,403,v);self.assertEqual(json.loads(v)['code'],'E7016')
+        self.assertEqual(self.bare('POST','/tasks',{'Origin':f'http://{own}','Content-Type':'text/plain'},body)[0],200)
+        self.assertEqual(self.bare('GET','/tasks',{'Origin':'http://evil.example'})[0],403)
+        self.assertEqual(self.bare('GET','/tasks',{'Host':'evil.example'})[0],403)
+        self.assertEqual(self.bare('GET','/tasks',{'Host':f'localhost:{self.port}'})[0],200)
+        self.assertEqual(self.bare('GET','/tasks',{'Host':'127.0.0.1:1'})[0],403)
+        self.assertEqual([t['title'] for t in self.api('GET','/tasks')],['Cross'])
+    def test_the_lock_file_holds_the_port_while_served(self):  # D-80
+        lock=json.loads((self.root/'.solace/serve.lock').read_text())
+        self.assertEqual(lock['port'],self.port);self.assertEqual(lock['pid'],self.server.pid)
     def wait(self,t,predicate,timeout=10):
         end=time.monotonic()+timeout
         while time.monotonic()<end:

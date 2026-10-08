@@ -3280,6 +3280,13 @@ fn try_lock_file(path: &Path) -> Result<Option<fs::File>, Failure> {
     Ok(f.try_lock().is_ok().then_some(f))
 }
 
+/// Writes the serving port into a lock this server holds (D-80). A reader
+/// trusts it only while the lock is held.
+fn record_port(f: &fs::File, port: u16) {
+    let _ = f.set_len(0);
+    let _ = std::io::Write::write_all(&mut &*f, format!("{{\"port\":{port},\"pid\":{}}}", std::process::id()).as_bytes());
+}
+
 /// Bytes stored in JSON as an array of numbers.
 fn json_bytes(a: &[Value]) -> Vec<u8> {
     a.iter().map(|b| b.as_u64().unwrap_or(0) as u8).collect()

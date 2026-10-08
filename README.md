@@ -113,6 +113,40 @@ Keep `solace-cli/target` between builds; later builds reuse it.
 
 On Linux, install bubblewrap (`bwrap`; the Ubuntu line above already includes it) so your folder is read-only to every command Solace runs during a migration. Without it the migration still works, but without that protection.
 
+### 6. Optional: the desktop app
+
+`solace-app/` is a Tauri v2 app (D-80) that wraps `solace serve`. It has a start screen with a folder picker, recent projects and an "Open in: App window / Browser" choice. A tray icon has Open board, Switch project and Quit. Closing a window keeps the server running; Quit stops it. The app runs the bundled `solace` CLI as a separate process. If a server already holds the project, the app opens that one instead. It is new; the Linux `.deb` and `.AppImage` builds have been checked, macOS has not. Linux and macOS only.
+
+**Get Tauri's system libraries.** On macOS, the Xcode command line tools are enough (`xcode-select --install`). On Linux, install WebKitGTK and its companions:
+
+```sh
+# Ubuntu or Debian
+sudo apt install -y libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev file
+# Arch Linux
+sudo pacman -S --needed webkit2gtk-4.1 xdotool openssl libappindicator-gtk3 librsvg
+```
+
+**Get the Tauri CLI:**
+
+```sh
+cargo install tauri-cli --version '^2' --locked
+```
+
+**Icon.** The repository ships a plain placeholder at `solace-app/icons/icon.png`. To use your own, generate the full set from a square PNG (at least 512×512) with `(cd solace-app && cargo tauri icon path/to/logo.png)`.
+
+**Build:**
+
+```sh
+cd solace-app
+cargo tauri build     # builds solace-cli in release, bundles it, then the app
+```
+
+The `beforeBuildCommand` starts from the repository root (so it works from any directory), builds `solace-cli` (so step 4's Gleam and Bun setup is still needed), then `scripts/sidecar.sh` copies it to `binaries/solace-<target triple>`, where Tauri bundles it. Packages land in `solace-app/target/release/bundle/`: `.deb` and `.AppImage` on Linux, `.app` and `.dmg` on macOS. Signing and notarization are not set up yet.
+
+For development, run `sh scripts/sidecar.sh` once after a release build of `solace-cli`, then `cargo tauri dev`.
+
+**Set up:** install the package, or run the built binary in `solace-app/target/release/`. Keep `solace` on your `PATH` as well (step 4), since agents call `solace mcp`. On first launch, choose your project's folder and where to open the board. The app starts the server on port 3030, or on a free port if 3030 is taken. It uses your login shell's `PATH`, so it finds agents, Gleam and Bun the same way your terminal does.
+
 ### Troubleshooting
 
 - **`linker 'cc' not found`:** install the C compiler (`build-essential` on Ubuntu or Debian, `base-devel` on Arch; on macOS run `xcode-select --install`).

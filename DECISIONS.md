@@ -325,3 +325,11 @@ Amends Spec 15 §6 (Aaron, 2026-10-07).
 1. Every agent prompt says that `text` and `options` are tool arguments beside `command`: for `task note|done|ask`, `command` is just the command and the whole message goes in `text`, never as a `--text` flag.
 2. `task note|done|ask` whose first word after the subcommand starts with `--` is refused (`E7015`) and sends nothing; the error says how to resend. The refused call returns at once, so the agent stays in its turn and retries.
 Why: a discussion agent sent `task note --text "### …"`; the command was cut at its first line and the human got `--text "### What I'm suggesting` as the reply.
+
+## D-80 The desktop app runs `solace serve` as a sidecar
+Builds on D-57 point 8 and D-77 point 1 (Aaron, 2026-10-07).
+1. The Tauri app (`solace-app/`, Linux and macOS first) starts the bundled `solace serve --port N` as a child process with the chosen folder as its working directory. It does not call `board::serve` on a thread. The app depends only on a process contract: `serve --port N`, the `Solace listening on` line or the lock file, and HTTP/SSE on 127.0.0.1. The server could later move to Gleam/BEAM without touching the app.
+2. A server writes `{"port":N,"pid":P}` into every `.solace/serve.lock` it holds. A port read from a lock file is trusted only while that lock is held. An app that finds a held lock with a port attaches to that server instead of failing.
+3. `SOLACE_BIN`, when set in the server's environment, is the CLI that agents and MCP call, in place of the server's own executable.
+4. The server refuses (403, `E7016`) any request whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>`, or that sends an `Origin` other than `http://127.0.0.1:<port>` or `http://localhost:<port>`. Requests without those headers (curl, tests) pass. This stops other sites' no-preflight POSTs and DNS rebinding, for plain `solace serve` as well.
+Why: browser mode makes any website a possible client of the local server, and the server and agent binaries can differ once the server is not the CLI. The app, start screen, tray and installer follow in later steps.

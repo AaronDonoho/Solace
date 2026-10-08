@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Solace",
+  "version": "0.1.0",
+  "identifier": "dev.solace.app",
+  "build": {
+    "frontendDist": "ui",
+    "beforeBuildCommand": "cd \"$(git rev-parse --show-toplevel)\" && cargo build --release --manifest-path solace-cli/Cargo.toml && sh solace-app/scripts/sidecar.sh"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      { "label": "main", "title": "Solace", "width": 520, "height": 560, "url": "index.html" }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage", "dmg", "app"],
+    "externalBin": ["binaries/solace"],
+    "icon": ["icons/icon.png"]
+  }
+}
