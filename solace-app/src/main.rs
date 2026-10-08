@@ -22,6 +22,9 @@ const PREFERRED_PORT: u16 = 3030;
 struct Server {
     child: Mutex<Option<Child>>,
     port: Mutex<Option<u16>>,
+    /// Whether the board was opened in a browser, which needs the server
+    /// after every window closes.
+    browser: Mutex<bool>,
 }
 
 /// The bundled CLI, next to the app's executable (Tauri's externalBin).
@@ -35,7 +38,9 @@ fn solace_bin() -> PathBuf {
 /// gleam and bun need the shell's.
 fn login_path() -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let out = Command::new(shell).args(["-lc", "printf %s \"$PATH\""]).output().ok()?;
+    let mut cmd = Command::new(shell);
+    without_appimage(&mut cmd);
+    let out = cmd.args(["-lc", "printf %s \"$PATH\""]).output().ok()?;
     let path = String::from_utf8(out.stdout).ok()?;
     (out.status.success() && !path.is_empty()).then_some(path)
 }
@@ -62,6 +67,39 @@ fn answers(port: u16) -> bool {
     s.write_all(req.as_bytes()).is_ok() && s.read_exact(&mut head).is_ok() && head.ends_with(b"200")
 }
 
+/// Variables an AppImage's runtime sets for its bundled GTK, WebKit and
+/// Python. Left in, they reach the server and everything it runs (agents,
+/// gleam, bun, python test commands) and break them.
+const APPIMAGE_VARS: &[&str] = &[
+    "PYTHONHOME", "PYTHONPATH", "PERLLIB", "LD_LIBRARY_PATH", "LD_PRELOAD",
+    "GIO_MODULE_DIR", "GIO_EXTRA_MODULES", "GDK_PIXBUF_MODULE_FILE", "GDK_PIXBUF_MODULEDIR",
+    "GSETTINGS_SCHEMA_DIR", "GST_PLUGIN_SYSTEM_PATH", "GST_PLUGIN_SYSTEM_PATH_1_0",
+    "GTK_PATH", "GTK_EXE_PREFIX", "GTK_DATA_PREFIX", "QT_PLUGIN_PATH",
+    "GDK_BACKEND", "GTK_THEME", "GI_TYPELIB_PATH", "GTK_IM_MODULE_FILE",
+    "APPDIR", "APPIMAGE", "OWD", "ARGV0",
+];
+
+/// Gives `cmd` the user's environment instead of the AppImage's: drops the
+/// runtime's variables and its entries in `XDG_DATA_DIRS`. Outside an
+/// AppImage (`.deb`, dev runs) nothing changes.
+fn without_appimage(cmd: &mut Command) {
+    if std::env::var_os("APPIMAGE").is_none() {
+        return;
+    }
+    let appdir = std::env::var("APPDIR").unwrap_or_default();
+    for v in APPIMAGE_VARS {
+        cmd.env_remove(v);
+    }
+    if let Ok(dirs) = std::env::var("XDG_DATA_DIRS") {
+        let kept: Vec<&str> = dirs.split(':').filter(|d| !d.is_empty() && (appdir.is_empty() || !d.starts_with(&appdir))).collect();
+        if kept.is_empty() {
+            cmd.env_remove("XDG_DATA_DIRS");
+        } else {
+            cmd.env("XDG_DATA_DIRS", kept.join(":"));
+        }
+    }
+}
+
 /// Starts `solace serve --port <port>` in `root`; its port, or what it said
 /// when it stopped.
 fn spawn(root: &Path, port: u16) -> Result<(Child, u16), String> {
@@ -73,8 +111,24 @@ fn spawn(root: &Path, port: u16) -> Result<(Child, u16), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    without_appimage(&mut cmd);
     if let Some(path) = login_path() {
         cmd.env("PATH", path);
+    }
+    // The server ends with the app, even when the app is killed or crashes.
+    // The signal follows the spawning thread, Tauri's main thread for a
+    // sync command, and survives the server's `exec` restart.
+    #[cfg(target_os = "linux")]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        let parent = libc::getpid();
+        cmd.pre_exec(move || {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+            if libc::getppid() != parent {
+                libc::_exit(1);
+            }
+            Ok(())
+        });
     }
     let mut child = cmd.spawn().map_err(|e| format!("couldn't start {}: {e}", bin.display()))?;
     let mut out = BufReader::new(child.stdout.take().unwrap());
@@ -83,6 +137,19 @@ fn spawn(root: &Path, port: u16) -> Result<(Child, u16), String> {
     if let Some(addr) = line.trim().strip_prefix("Solace listening on http://") {
         // Keep draining stdout so the server never blocks on a full pipe.
         std::thread::spawn(move || std::io::copy(&mut out, &mut std::io::sink()));
+        // Its stderr too: the server reports there, and a full pipe would
+        // block the thread writing, maybe while it holds a lock. Write
+        // errors (a launcher may close the app's stderr) don't stop the reading.
+        let mut err = child.stderr.take().unwrap();
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            while let Ok(n) = err.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let _ = std::io::stderr().write_all(&buf[..n]);
+            }
+        });
         let port = addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(port);
         return Ok((child, port));
     }
@@ -113,6 +180,20 @@ fn stop(server: &Server) {
 fn show(app: &AppHandle, port: u16, mode: &str) -> Result<(), String> {
     let url = format!("http://127.0.0.1:{port}/");
     if mode == "browser" {
+        // From an AppImage, a browser started here would inherit the
+        // runtime's variables; open it with the user's environment instead.
+        if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some() {
+            let mut cmd = Command::new("xdg-open");
+            without_appimage(&mut cmd);
+            return cmd
+                .arg(&url)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| format!("couldn't open the browser: {e}"));
+        }
         return tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| e.to_string());
     }
     if let Some(w) = app.get_webview_window("board") {
@@ -146,6 +227,7 @@ fn open_project(app: AppHandle, root: String, mode: String) -> Result<u16, Strin
         port
     };
     *server.port.lock().unwrap() = Some(port);
+    *server.browser.lock().unwrap() |= mode == "browser";
     show(&app, port, &mode)?;
     Ok(port)
 }
@@ -196,12 +278,19 @@ fn main() {
                 .build(app)?;
             Ok(())
         })
-        // Closing a window keeps Solace running: a browser tab may still use
-        // the server. Quit is in the tray.
+        // Closing the last window quits, server included, unless a browser
+        // may still use the server; then Solace keeps running in the tray.
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                let others = app.webview_windows().values().any(|w| w.label() != window.label() && w.is_visible().unwrap_or(false));
                 api.prevent_close();
-                let _ = window.hide();
+                if others || *app.state::<Server>().browser.lock().unwrap() {
+                    let _ = window.hide();
+                } else {
+                    stop(&app.state::<Server>());
+                    app.exit(0);
+                }
             }
         })
         .build(tauri::generate_context!())
