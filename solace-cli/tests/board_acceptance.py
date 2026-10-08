@@ -41,15 +41,17 @@ class Board(unittest.TestCase):
                 f.write(f'\n[[models]]\nid="{name}"\nlabel="Fixture"\nagent="{agent}"\nmodel="{model}"\nendpoint={{kind="{kind}",base_url="http://localhost:1"}}\n')
         self.cli('migrate', '--yes')
         self.cli('migrate', '--adopt', '--yes')
+        self.serve()
+        self.clients=[]
+    def serve(self):
         self.server=subprocess.Popen([BIN,'serve','--port','0'],cwd=self.root,env=self.env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
         line=self.server.stdout.readline()
         self.assertIn('listening',line)
         self.port=int(line.strip().rsplit(':',1)[1])
-        self.clients=[]
     def tearDown(self):
         # End all fake processes before terminating their supervisor.
         try:
-            for t in self.api('GET','/tasks'):
+            for t in ([] if self.server.poll() is not None else self.api('GET','/tasks')):
                 full=self.api('GET','/tasks/'+t['id'])
                 for r in full['runs']:
                     p=self.root/'.solace'/(r['id']+'.pid')
@@ -95,7 +97,7 @@ class Board(unittest.TestCase):
         seq=None;ready=False
         while True:
             line=r.readline().decode().strip()
-            if line.startswith('id:'):seq=int(line[3:])
+            if line.startswith('id:'):seq=line[3:].strip()
             if line=='event: ready':ready=True
             elif line.startswith('data:') and ready:ready=False
             elif line.startswith('data:'):return seq,json.loads(line[5:])
@@ -389,8 +391,8 @@ class Board(unittest.TestCase):
         for col in w['columns']:
             for name in [*w['actions'],'pause','resume']:
                 t=self.create([{'sleep':.2},{'command':'task done done'}])
-                t['column']=col['id']
-                (self.root/'.solace/board'/f'{t["id"]}.json').write_text(json.dumps(t))
+                t['column']=col['id'];t['home']='.'
+                (self.root/'.solace/tasks'/f'{t["id"]}.json').write_text(json.dumps(t))
                 allowed=[] if col['final'] else [*col['actions'],'pause','resume','discuss','stop','end_discussion']
                 if name not in allowed:
                     e=self.action(t,name,'E7001',model='fake');self.assertEqual(e['allowed'],allowed)
@@ -457,7 +459,8 @@ class Board(unittest.TestCase):
         self.action(t,'approve')
         t=self.action(t,'reassign',text='Please address the review.')
         self.assertEqual(t['column'],'assigned');self.assertEqual(t['stamps'],{})
-        self.assertEqual(t['changes'],changes);self.assertNotEqual(t['runs'][-1]['id'],review)
+        # The task's changes are computed from the store (D-77 point 4), so read them from the task's GET.
+        self.assertEqual(self.get(t)['changes'],changes);self.assertNotEqual(t['runs'][-1]['id'],review)
         rid=t['runs'][-1]['id'];self.assertEqual(t['runs'][-1]['kind'],'work')
         self.assertEqual(t['runs'][-1]['model'],'fake')
         t=self.wait(t,lambda x:x['column']=='needs_review')
@@ -536,8 +539,9 @@ class Board(unittest.TestCase):
         events=self.stream()
         while True:
             _,event=self.next_event(events)
-            if event.get('task',{}).get('questions'):
-                self.assertEqual(event['task']['questions'][0]['text'],'Which?');break
+            asked=[q for x in event.get('tasks',[]) for q in x.get('questions',[])]+event.get('task',{}).get('questions',[])
+            if asked:
+                self.assertEqual(asked[0]['text'],'Which?');break
         other=self.create();self.action(other,'plan');self.action(other,'assign','E7005',model='fake')
         self.action(t,'review','E7003',model='fake')
         self.api('PATCH','/tasks/'+t['id'],{'title':'blocked edit'},'E7003')
@@ -590,8 +594,8 @@ class Board(unittest.TestCase):
         t=self.assign([{'command':'task ask','text':'First?','options':['a','b']},{'command':'task done answered'}])
         t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting');rid=t['runs'][-1]['id']
         # Seed a second pending question to exercise the all-answers condition.
-        t['questions'].append({'id':'second','text':'Second?','options':['a','b']})
-        (self.root/'.solace/board'/f'{t["id"]}.json').write_text(json.dumps(t))
+        t['questions'].append({'id':'second','text':'Second?','options':['a','b']});t['home']='.'
+        (self.root/'.solace/tasks'/f'{t["id"]}.json').write_text(json.dumps(t))
         t=self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][0]["id"]}',{'option':'a'})
         self.assertEqual(t['runs'][-1]['state'],'waiting')
         self.action(t,'pause')
@@ -650,7 +654,7 @@ class Board(unittest.TestCase):
         self.action(t,'resume');self.wait(t,lambda x:x['column']=='needs_review')
         before=self.cli('view','app.one')
         steps=[{'command':'write priv/new','text':'no'},{'command':'submit app.one','text':'pub fn one() { 100 }'}]
-        t=self.create([*steps,{'command':'task ask','text':'Which?','options':['a','b']},{'command':'task done report'}]);self.action(t,'plan')
+        t=self.create([*steps,{'command':'task ask','text':'Which?','options':['a','b']},{'command':'task note --text "### Cut'},{'command':'task done report'}]);self.action(t,'plan')
         self.action(t,'investigate',model='fake');t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting')
         self.assertEqual(t['column'],'planning');self.assertIn('question',t['attention']['reason']);rid=t['runs'][-1]['id']
         self.action(t,'investigate','E7002')
@@ -662,6 +666,7 @@ class Board(unittest.TestCase):
         self.assertIn('This run is read-only',prompt)
         self.assertEqual(before,self.cli('view','app.one'));self.assertFalse((self.root/'priv/new').exists())
         responses=(self.root/'.solace'/(rid+'.responses')).read_text();self.assertEqual(responses.count('E7010'),2)
+        self.assertIn('E7015',responses);self.assertFalse([n for n in t['notes'] if 'Cut' in n['text']])  # D-79
         self.assertEqual(self.action(t,'complete')['column'],'complete')  # an answered question ends after planning
         review=self.completed([]);self.api('PATCH','/tasks/'+review['id'],{'body':json.dumps([*steps,{'command':'task note review report'}])})
         # Starting a run on a paused task ends the pause instead of leaving the run hung.
@@ -676,6 +681,43 @@ class Board(unittest.TestCase):
         start=time.monotonic();self.api('GET','/tasks');self.get(t)
         self.assertLess(time.monotonic()-start,1)
         self.wait(t,lambda x:x['runs'][-1]['state']=='ended')  # the fixture's 2-second timeout ends it
+    def test_a_task_command_leaves_a_live_runs_records(self):
+        # D-77 point 5: a task command takes no project lock, so it must not
+        # recover a live run's records as a crashed one's.
+        config=self.root/'solace.toml'
+        script="import time; from pathlib import Path; Path('priv/a').write_text('changed'); Path('priv/gen').mkdir(exist_ok=True); Path('priv/gen/marker').write_text('x'); time.sleep(1.5)"
+        config.write_text(config.read_text()+'\n[commands]\nslow={run=["python3","-c",'+json.dumps(script)+']}\n')
+        t=self.assign([{'command':'run slow'}])
+        rid=t['runs'][-1]['id'];pending=self.root/'.solace/pending'
+        end=time.monotonic()+5
+        while not (self.root/'priv/gen/marker').exists():
+            self.assertLess(time.monotonic(),end);time.sleep(.02)
+        start=time.monotonic()
+        p=subprocess.run([BIN,'task','note','x'],cwd=self.root,env={**self.env,'SOLACE_TASK':t['id'],'SOLACE_RUN':rid},text=True,capture_output=True)
+        self.assertEqual(p.returncode,0,p.stdout+p.stderr)
+        self.assertLess(time.monotonic()-start,1)
+        self.assertTrue((pending/f'run-{rid}.json').exists());self.assertTrue((pending/f'command-{rid}.json').exists())
+        self.assertEqual(self.rows(t['id']),[])
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        self.assertEqual(self.rows(t['id']),['file:priv/a'])
+        db=sqlite3.connect(self.root/'.solace/store.db')
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM board_touches WHERE task=?",[t['id']]).fetchone()[0],1)
+        self.action(t,'cancel')
+        self.assertEqual((self.root/'priv/a').read_text(),'original')
+    def test_task_only_changes_wait_for_no_agent_command(self):
+        # D-77 point 5: create, a note and stop take no project lock, so they
+        # finish while an agent's command holds it.
+        config=self.root/'solace.toml'
+        script="import time; from pathlib import Path; Path('priv/gen').mkdir(exist_ok=True); Path('priv/gen/marker').write_text('x'); time.sleep(1.5)"
+        config.write_text(config.read_text()+'\n[commands]\nslow={run=["python3","-c",'+json.dumps(script)+']}\n')
+        t=self.assign([{'command':'run slow'}])
+        end=time.monotonic()+5
+        while not (self.root/'priv/gen/marker').exists():
+            self.assertLess(time.monotonic(),end);time.sleep(.02)
+        for method,path,body in [('POST','/tasks',{'title':'meanwhile'}),('POST',f'/tasks/{t["id"]}/notes',{'text':'meanwhile'}),('POST',f'/tasks/{t["id"]}/actions',{'action':'stop'})]:
+            start=time.monotonic();self.api(method,path,body)
+            self.assertLess(time.monotonic()-start,1,path)
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
     def test_declared_run_watched_files_revert(self):
         config=self.root/'solace.toml'
         config.write_text(config.read_text()+'\n[commands]\nedit={run=["python3","-c",'+json.dumps("from pathlib import Path; Path('priv/a').write_text('changed'); Path('priv/created').write_text('new')")+']}\n')
@@ -684,6 +726,51 @@ class Board(unittest.TestCase):
         self.assertEqual((self.root/'priv/a').read_text(),'changed')
         self.action(t,'cancel')
         self.assertEqual((self.root/'priv/a').read_text(),'original');self.assertFalse((self.root/'priv/created').exists())
+
+    def restart(self,env):
+        # Restarts the server with the test's env, so the agent's Solace process gets it.
+        self.server.terminate();self.server.wait(timeout=3)
+        self.env={**self.env,**env}
+        self.serve()
+    def rows(self,tid):
+        db=sqlite3.connect(self.root/'.solace/store.db')
+        return sorted(r[0] for r in db.execute("SELECT entity FROM board_touches WHERE task=?",[tid]))
+    def test_a_crash_between_a_symbol_change_and_its_undo_leaves_neither(self):
+        self.restart({'SOLACE_FAIL_AFTER':'command'})
+        t=self.assign([{'command':'submit app.one','text':'pub fn one() { 10 }'}])
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        self.cli('view','app.one')  # recovery runs at the start of this command
+        self.assertEqual((self.root/'src/app.gleam').read_text(),'pub fn one() { 1 }\n\npub fn two() { 2 }\n\npub fn removed() { 3 }\n')
+        self.assertEqual(self.rows(t['id']),[])
+    def test_a_crash_after_a_file_write_keeps_its_undo(self):
+        self.restart({'SOLACE_FAIL_AFTER':'command'})
+        t=self.assign([{'command':'read priv/a'},{'command':'write priv/a','text':'changed'}])
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        self.cli('read','priv/a')
+        self.assertIn('file:priv/a',self.rows(t['id']))
+        self.assertEqual((self.root/'priv/a').read_text(),'changed')
+        self.action(t,'cancel')
+        self.assertEqual((self.root/'priv/a').read_text(),'original')
+    def test_a_crash_after_a_declared_run_adds_its_rows(self):
+        config=self.root/'solace.toml'
+        config.write_text(config.read_text()+'\n[commands]\nedit={run=["python3","-c",'+json.dumps("from pathlib import Path; Path('priv/a').write_text('changed'); Path('priv/created').write_text('new')")+']}\n')
+        self.restart({'SOLACE_FAIL_AFTER':'command'})
+        t=self.assign([{'command':'run edit'}])
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        self.cli('read','priv/a')
+        self.assertEqual(self.rows(t['id']),['file:priv/a','file:priv/created'])
+        self.action(t,'cancel')
+        self.assertEqual((self.root/'priv/a').read_text(),'original')
+        self.assertFalse((self.root/'priv/created').exists())
+    def test_a_crash_after_commit_adds_its_undo_once(self):
+        self.restart({'SOLACE_FAIL_AFTER':'commit'})
+        t=self.assign([{'command':'read priv/a'},{'command':'write priv/a','text':'changed'}])
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        self.cli('read','priv/a')
+        db=sqlite3.connect(self.root/'.solace/store.db')
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM board_touches WHERE task=? AND entity='file:priv/a'",[t['id']]).fetchone()[0],1)
+        self.action(t,'cancel')
+        self.assertEqual((self.root/'priv/a').read_text(),'original')
 
     def test_a11_embedded_client_and_internal_files(self):
         for path,expected in [('/',b'Solace tasks'),('/migrate',b'Solace tasks'),('/app.js',b'/workflow'),('/guide',b'Using Solace')]:
@@ -711,16 +798,98 @@ class Board(unittest.TestCase):
         stream=self.stream()
         while stream.readline()!=b'event: ready\n':pass  # after the replay, once
         self.assertEqual(stream.readline(),b'data: {}\n')
+        # D-78: a new stream starts from the project's workflow and tasks, then follows the changes.
         stream=self.stream();seq,e=self.next_event(stream);self.assertIn('workflow',e)
+        seq,e=self.next_event(stream);self.assertIsInstance(e['tasks'],list)
         t=self.create();seq,e=self.next_event(stream);self.assertEqual(e['task']['id'],t['id'])
         self.api('POST','/tasks/'+t['id']+'/notes',{'text':'first'});self.api('POST','/tasks/'+t['id']+'/notes',{'text':'second'})
         resumed=self.stream(seq);s1,e1=self.next_event(resumed);s2,e2=self.next_event(resumed)
-        self.assertEqual(s2,s1+1);self.assertEqual(e1['task']['notes'][-1]['text'],'first');self.assertEqual(e2['task']['notes'][-1]['text'],'second')
+        self.assertEqual(json.loads(s2)['tasks'],json.loads(s1)['tasks']+1);self.assertEqual(e1['task']['notes'][-1]['text'],'first');self.assertEqual(e2['task']['notes'][-1]['text'],'second')
+
+    def test_a_new_stream_starts_from_the_task_files(self):
+        # D-78: a task file changed without an event shows in a new stream's snapshot.
+        t=self.create();path=self.root/'.solace/tasks'/(t['id']+'.json')
+        v=json.loads(path.read_text());v['title']='Edited on disk';path.write_text(json.dumps(v))
+        stream=self.stream()
+        while True:
+            _,e=self.next_event(stream)
+            if 'tasks' in e:break
+        self.assertEqual([x['title'] for x in e['tasks'] if x['id']==t['id']],['Edited on disk'])
+        self.assertNotIn('notes',e['tasks'][0])
 
     def test_delete_note(self):
         t=self.create()
         for text in ['a','b','c']:self.api('POST','/tasks/'+t['id']+'/notes',{'text':text})
         t=self.api('DELETE','/tasks/'+t['id']+'/notes/1');self.assertEqual([n['text'] for n in t['notes']],['a','c'])
         self.api('DELETE','/tasks/'+t['id']+'/notes/2',code='E7001')
+
+    def test_a_request_creates_one_task(self):
+        # D-77: a repeated create, in turn or at once, returns the first one's task.
+        body={'title':'Once','request':'r-1'}
+        first=self.api('POST','/tasks',body);again=self.api('POST','/tasks',body)
+        self.assertEqual(again['id'],first['id']);self.assertEqual(first['request'],'r-1')
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(8) as pool:
+            made=list(pool.map(lambda _:self.api('POST','/tasks',{'title':'Burst','request':'r-2'})['id'],range(8)))
+        self.assertEqual(len(set(made)),1)
+        self.assertEqual(sorted(t['title'] for t in self.api('GET','/tasks')),['Burst','Once'])
+        self.api('POST','/tasks',{'title':'Bad','request':7},code='E7001')
+
+    def test_inbox_is_applied_after_a_restart(self):
+        # D-77: a message waits in the inbox while no server runs, and is applied when one starts.
+        t=self.create()
+        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        inbox=self.root/'.solace/tasks/inbox';inbox.mkdir(exist_ok=True)
+        name=f'{time.time_ns():024}-x'
+        (inbox/(name+'.json')).write_text(json.dumps({'id':name,'kind':'note','task':t['id'],'author':'solace','text':'queued'}))
+        self.serve()
+        self.assertEqual([n['text'] for n in self.wait(t,lambda x:x['notes'])['notes']],['queued'])
+        self.assertEqual(list(inbox.iterdir()),[])
+
+    def test_a_stopped_server_queues_a_note(self):
+        # applied() waits for the server, not forever: with no server, the note
+        # stays in the inbox for the next serve, and the agent's call returns.
+        t=self.create([{'sleep':.5},{'command':'task note reply'}]);self.action(t,'plan')
+        t=self.action(t,'discuss',model='fake',text='What about X?')
+        rid=t['runs'][-1]['id']
+        prompt=self.root/'.solace'/(rid+'.prompt')
+        end=time.monotonic()+8
+        while time.monotonic()<end and not prompt.exists():time.sleep(.05)
+        self.assertTrue(prompt.exists(),'the discussion agent never started')
+        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        responses=self.root/'.solace'/(rid+'.responses')
+        end=time.monotonic()+4
+        while time.monotonic()<end and not responses.exists():time.sleep(.1)
+        self.assertTrue(responses.exists(),'the note call never returned')
+        self.assertIn('reaches the board',responses.read_text())
+        inbox=self.root/'.solace/tasks/inbox'
+        self.assertEqual(len(list(inbox.iterdir())),1)
+        self.serve()
+        t=self.wait(t,lambda x:len(x['notes'])==2)
+        self.assertEqual([n['text'] for n in t['notes']],['What about X?','reply'])
+        self.assertEqual(list(inbox.iterdir()),[])
+
+    def test_a_stopped_server_queues_an_ask(self):
+        # The same for a question: the agent is told it is queued, not left waiting.
+        t=self.assign([{'sleep':.5},{'command':'task ask','text':'Which?','options':['a','b']}])
+        rid=t['runs'][-1]['id']
+        prompt=self.root/'.solace'/(rid+'.prompt')
+        end=time.monotonic()+8
+        while time.monotonic()<end and not prompt.exists():time.sleep(.05)
+        self.assertTrue(prompt.exists(),'the work agent never started')
+        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        responses=self.root/'.solace'/(rid+'.responses')
+        end=time.monotonic()+4
+        while time.monotonic()<end and not responses.exists():time.sleep(.1)
+        self.assertTrue(responses.exists(),'the ask call never returned')
+        self.assertIn('reaches the board',responses.read_text())
+        self.serve()
+        # The restart ended the run before the question was applied: the question
+        # is kept as a note, and does not wake the dead run or ask anyone.
+        t=self.wait(t,lambda x:x['notes'])
+        self.assertEqual(t['notes'][0]['text'],'Which?')
+        self.assertEqual(t['questions'],[])
+        self.assertEqual(t['runs'][-1]['state'],'ended')
+        self.assertEqual(list((self.root/'.solace/tasks/inbox').iterdir()),[])
 
 if __name__=='__main__':unittest.main()

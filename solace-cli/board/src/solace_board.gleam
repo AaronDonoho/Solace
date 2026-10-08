@@ -222,6 +222,12 @@ pub type Model {
     draft_lane: String,
     /// The projects a new task covers; empty means the draft lane alone.
     draft_scope: List(String),
+    /// Whether a create is waiting for the server; Create task is disabled
+    /// meanwhile, so one submit makes one task (D-77).
+    submitting: Bool,
+    /// The action sent and not yet answered: its buttons are disabled
+    /// meanwhile, so one click makes one request. "" when none.
+    acting: String,
     projects_open: Bool,
     project_name: String,
     project_dir: String,
@@ -243,11 +249,11 @@ pub type Model {
 pub type Msg {
   ProjectsLoaded(String)
   WorkflowLoaded(String, String)
-  TasksLoaded(String, String)
   ModelsLoaded(String)
   TaskLoaded(String)
   SelectedTaskLoaded(Int, String, String, String)
   Changed(String)
+  Acted(String)
   Live(String)
   CaughtUp
   Select(String, String)
@@ -377,6 +383,8 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
         |> list.filter(fn(d) { d != "" }),
       draft_lane: "",
       draft_scope: [],
+      submitting: False,
+      acting: "",
       projects_open: False,
       project_name: "",
       project_dir: "",
@@ -481,7 +489,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         False -> #(model, effect.none())
       }
     }
-    // Every lane is loaded again: the list changes rarely.
+    // Every lane's workflow is loaded again: the list changes rarely. Its
+    // tasks come on the event stream.
     ProjectsLoaded(text) ->
       case json.parse(text, projects_decoder()) {
         // A project on its own that gains another needs the merged event
@@ -499,24 +508,24 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               }
             })
           #(
-            Model(
-              ..model,
-              lanes: lanes,
-              workspace: workspace,
-              listed: True,
-              found: found,
-              projects_open: model.projects_open || { workspace && lanes == [] },
-              project_name: "",
-              project_dir: "",
-              removing: None,
-              error: "",
+            settle(
+              Model(
+                ..model,
+                lanes: lanes,
+                workspace: workspace,
+                listed: True,
+                found: found,
+                projects_open: model.projects_open
+                  || { workspace && lanes == [] },
+                project_name: "",
+                project_dir: "",
+                removing: None,
+                error: "",
+              ),
             ),
             effect.batch(
               list.flat_map(lanes, fn(l) {
-                [
-                  get(model, l.base <> "/workflow", WorkflowLoaded(l.dir, _)),
-                  get(model, l.base <> "/tasks", TasksLoaded(l.dir, _)),
-                ]
+                [get(model, l.base <> "/workflow", WorkflowLoaded(l.dir, _))]
               }),
             ),
           )
@@ -528,16 +537,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Ok(w) -> #(
           map_lane(Model(..model, error: ""), dir, fn(l) {
             Lane(..l, workflow: w)
-          }),
-          effect.none(),
-        )
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
-      }
-    TasksLoaded(dir, text) ->
-      case json.parse(text, decode.list(task_decoder())) {
-        Ok(tasks) -> #(
-          map_lane(Model(..model, error: ""), dir, fn(l) {
-            Lane(..l, tasks: tasks)
           }),
           effect.none(),
         )
@@ -595,6 +594,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
+    // The reply to an action; it may have waited for the agent's command (D-77 point 5).
+    Acted(text) -> update(Model(..model, acting: ""), Changed(text))
     Changed(text) ->
       case json.parse(text, task_decoder()) {
         Ok(task) -> {
@@ -622,18 +623,15 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               editing: False,
               previews: [],
             ),
-            effect.batch([
-              get(model, base(model) <> "/tasks", TasksLoaded(model.lane, _)),
-              case task.changes {
-                [] -> effect.none()
-                _ ->
-                  get(
-                    model,
-                    base(model) <> "/graph?task=" <> task.id,
-                    ReviewLoaded,
-                  )
-              },
-            ]),
+            case task.changes {
+              [] -> effect.none()
+              _ ->
+                get(
+                  model,
+                  base(model) <> "/graph?task=" <> task.id,
+                  ReviewLoaded,
+                )
+            },
           )
         }
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
@@ -644,18 +642,18 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(..model, replay: [text, ..model.replay]),
       effect.none(),
     )
-    Live(text) -> #(live(model, text, True), case projects_event(text) {
-      True -> get(model, "/projects", ProjectsLoaded)
-      False -> effect.none()
-    })
-    CaughtUp -> #(
-      list.fold(
-        list.reverse(model.replay),
-        Model(..model, caught_up: True, replay: []),
-        fn(m, text) { live(m, text, False) },
-      ),
-      effect.none(),
-    )
+    Live(text) -> {
+      let fx = case projects_event(text) {
+        True -> get(model, "/projects", ProjectsLoaded)
+        False -> effect.none()
+      }
+      case knows(model, text) {
+        True -> #(live(model, text, True), fx)
+        // A project not listed yet: held until the list names it.
+        False -> #(Model(..model, replay: [text, ..model.replay]), fx)
+      }
+    }
+    CaughtUp -> #(settle(Model(..model, caught_up: True)), effect.none())
     ReviewLoaded(text) -> {
       let summary =
         json.parse(text, decode.at(["review", "summary"], decode.string))
@@ -868,14 +866,17 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       store(draft_body_key, text)
       #(Model(..model, draft_body: text), effect.none())
     }
+    Create if model.submitting -> #(model, effect.none())
+    // One request id per submit: the server returns the same task for a repeat of it.
     Create -> #(
-      model,
+      Model(..model, submitting: True),
       effect.from(fn(dispatch) {
         let body =
           json.object([
             #("title", json.string(model.draft_title)),
             #("body", json.string(model.draft_body)),
             #("scope", json.array(model.draft_scope, json.string)),
+            #("request", json.string(request_id())),
           ])
         request(
           model.prefix,
@@ -887,7 +888,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }),
     )
     // Only a task that was really created clears the draft.
-    Created(text) ->
+    Created(text) -> {
+      let model = Model(..model, submitting: False)
       case json.parse(text, task_decoder()) {
         Ok(_) -> {
           store(draft_title_key, "")
@@ -906,6 +908,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         }
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
+    }
     Edit(editing) ->
       case model.selected {
         Some(t) -> #(
@@ -961,6 +964,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             )
           }
       }
+    Action(_) if model.acting != "" -> #(model, effect.none())
     Action(name) ->
       case model.selected {
         None -> #(model, effect.none())
@@ -1001,13 +1005,16 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           }
           case proceed {
             True -> #(
-              model,
-              send(
-                model,
-                base(model) <> "/tasks/" <> t.id <> "/actions",
-                "POST",
-                fields,
-              ),
+              Model(..model, acting: name),
+              effect.from(fn(dispatch) {
+                request(
+                  model.prefix,
+                  base(model) <> "/tasks/" <> t.id <> "/actions",
+                  "POST",
+                  json.to_string(json.object(fields)),
+                  fn(text) { dispatch(Acted(text)) },
+                )
+              }),
             )
             False -> #(model, effect.none())
           }
@@ -1071,13 +1078,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 /// Applies one `/events` message; a workspace's name their `project`.
 fn live(model: Model, text: String, notify: Bool) -> Model {
   // A project on its own sends no `project`: it is the root's.
-  let dir = case json.parse(text, decode.at(["project"], decode.string)) {
-    Ok(dir) -> dir
-    Error(_) ->
-      list.find(model.lanes, fn(l) { l.base == "" })
-      |> result.map(fn(l) { l.dir })
-      |> result.unwrap("")
-  }
+  let dir = event_dir(model, text)
   case lane_of(model, dir) {
     Error(_) -> model
     Ok(lane) ->
@@ -1123,13 +1124,27 @@ fn live(model: Model, text: String, notify: Bool) -> Model {
           case json.parse(text, decode.at(["workflow"], workflow_decoder())) {
             Ok(w) -> map_lane(model, dir, fn(l) { Lane(..l, workflow: w) })
             Error(_) ->
-              case json.parse(text, decode.at(["removed"], decode.string)) {
-                Ok(id) ->
-                  map_lane(model, dir, fn(l) {
-                    Lane(..l, tasks: list.filter(l.tasks, fn(t) { t.id != id }))
-                  })
-                  |> follow_move(dir, id)
-                Error(_) -> model
+              // A new connection starts from the project's tasks as they are.
+              case
+                json.parse(
+                  text,
+                  decode.at(["tasks"], decode.list(task_decoder())),
+                )
+              {
+                Ok(tasks) ->
+                  map_lane(model, dir, fn(l) { Lane(..l, tasks: tasks) })
+                Error(_) ->
+                  case json.parse(text, decode.at(["removed"], decode.string)) {
+                    Ok(id) ->
+                      map_lane(model, dir, fn(l) {
+                        Lane(
+                          ..l,
+                          tasks: list.filter(l.tasks, fn(t) { t.id != id }),
+                        )
+                      })
+                      |> follow_move(dir, id)
+                    Error(_) -> model
+                  }
               }
           }
       }
@@ -1536,7 +1551,12 @@ pub fn view(model: Model) -> Element(Msg) {
           },
           title_input(model.draft_title, DraftTitle),
           editor(model, "draft-body", "", "Description"),
-          button("Create task", Create),
+          h.button([a.disabled(model.submitting), e.on_click(Create)], [
+            h.text(case model.submitting {
+              True -> "Creating…"
+              False -> "Create task"
+            }),
+          ]),
         ])
     },
     lanes_view(model),
@@ -1802,6 +1822,10 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
     #("runs", "Runs (" <> int.to_string(list.length(t.runs)) <> ")"),
     #("changes", "Changes (" <> int.to_string(list.length(t.changes)) <> ")"),
   ]
+  let tabs = case model.workspace {
+    True -> list.append(tabs, [#("scope", "Scope")])
+    False -> tabs
+  }
   h.section([a.class("detail")], [
     h.h2([], [h.text(t.title)]),
     h.p([a.class("meta")], [h.text(t.column), status_badge(t)]),
@@ -1815,11 +1839,16 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
     },
     agent_choice(model),
     composer(model, t),
+    case model.acting {
+      "" -> h.text("")
+      name ->
+        h.p([a.class("muted"), a.role("status")], [h.text(acting_text(t, name))])
+    },
     h.div(
       [a.class("actions")],
       list.append(
         list.map(actions(workflow(model), t), fn(name) {
-          button(name, Action(name))
+          action_button(name, model.acting != "")
         }),
         [button("Add note", AddNote)],
       ),
@@ -1862,6 +1891,7 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
           }),
         ),
       ]
+      "scope" -> [scope_view(model, t)]
       _ -> details_view(model, t)
     }),
   ])
@@ -1887,25 +1917,6 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
           h.a([a.href(link.url)], [h.text(link.name)])
         }),
       ),
-      case model.workspace {
-        True -> {
-          let working =
-            t.paused == "" && list.any(t.runs, fn(r) { r.state == "running" })
-          h.div([], [
-            projects_pick(model, scope_of(model.lane, t), working, SetScope),
-            case working {
-              True ->
-                h.small([], [
-                  h.text(
-                    "You can change the projects once the agent stops working, is paused, or asks a question.",
-                  ),
-                ])
-              False -> h.text("")
-            },
-          ])
-        }
-        False -> h.text("")
-      },
       button("Edit", Edit(True)),
     ]
   }
@@ -2368,7 +2379,7 @@ fn draft_home(model: Model) -> String {
   }
 }
 
-/// A checkbox per project on the board, for the projects a task can change.
+/// A switch per project on the board, for the projects a task can change.
 fn projects_pick(
   model: Model,
   chosen: List(String),
@@ -2381,10 +2392,11 @@ fn projects_pick(
       h.label([], [
         h.input([
           a.type_("checkbox"),
+          a.role("switch"),
           a.checked(list.contains(chosen, l.dir)),
           e.on_check(msg(l.dir, _)),
         ]),
-        h.text(" " <> l.label),
+        h.text(l.label),
       ])
     })
   ])
@@ -2410,7 +2422,7 @@ pub fn register() -> Result(Nil, lustre.Error) {
   )
 }
 
-const board_styles = ".projects-pick{margin:8px 0}.projects-pick label{display:inline-block;margin-right:16px}\n\n:host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sun:none;--moon:inline-block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 24px 48px;min-height:100dvh;user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol{margin:6px 0}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;max-width:760px;background:var(--paper)}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid var(--line);border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}.toolbar [aria-pressed=true]{background:var(--well);font-weight:600}.separator{width:1px;align-self:stretch;background:var(--line);margin:0 6px}.preview{border-top:1px solid var(--line);padding:8px 12px;min-height:94px}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h2{margin-top:0}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{width:auto;flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice p{margin:4px 0 0;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
+const board_styles = ".projects-pick{margin:8px 0}.projects-pick label{display:flex;align-items:center;gap:10px;margin:6px 0;cursor:pointer}.projects-pick input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:34px;height:20px;padding:0;margin:0;border:1px solid var(--edge);border-radius:10px;background:var(--well);cursor:pointer;transition:background .15s}.projects-pick input::before{content:\"\";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--paper);border:1px solid var(--edge);box-sizing:border-box;transition:transform .15s}.projects-pick input:checked{background:var(--focus)}.projects-pick input:checked::before{transform:translateX(14px)}.projects-pick input:focus-visible{outline:3px solid var(--focus);outline-offset:2px}.projects-pick[disabled] label,.projects-pick[disabled] input{opacity:.5;cursor:default}@media (prefers-reduced-motion:reduce){.projects-pick input,.projects-pick input::before{transition:none}}\n\n:host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sun:none;--moon:inline-block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 24px 48px;min-height:100dvh;user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol{margin:6px 0}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;max-width:760px;background:var(--paper)}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid var(--line);border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}.toolbar [aria-pressed=true]{background:var(--well);font-weight:600}.separator{width:1px;align-self:stretch;background:var(--line);margin:0 6px}.preview{border-top:1px solid var(--line);padding:8px 12px;min-height:94px}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h2{margin-top:0}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{width:auto;flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice p{margin:4px 0 0;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
 :host{background:var(--sheet);color:var(--ink)}
 main{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;color:var(--ink);background:none}
 *{scrollbar-color:var(--line) var(--paper)}::selection{background:var(--sel);color:var(--ink)}
@@ -2637,4 +2649,75 @@ fn modal(body: List(Element(Msg))) -> Element(Msg) {
       body,
     ),
   ])
+}
+
+/// A new id for a request, so the server can tell a repeat of it.
+@external(javascript, "./api.mjs", "request_id")
+fn request_id() -> String
+
+/// The Scope tab: a switch per project the task can change, locked while the
+/// agent works.
+fn scope_view(model: Model, t: Task) -> Element(Msg) {
+  let working =
+    t.paused == "" && list.any(t.runs, fn(r) { r.state == "running" })
+  h.div([], [
+    projects_pick(model, scope_of(model.lane, t), working, SetScope),
+    case working {
+      True ->
+        h.small([], [
+          h.text(
+            "You can change the projects once the agent stops working, is paused, or asks a question.",
+          ),
+        ])
+      False -> h.text("")
+    },
+  ])
+}
+
+/// The project a live message is for: the one it names, else the root's.
+fn event_dir(model: Model, text: String) -> String {
+  case json.parse(text, decode.at(["project"], decode.string)) {
+    Ok(dir) -> dir
+    Error(_) ->
+      list.find(model.lanes, fn(l) { l.base == "" })
+      |> result.map(fn(l) { l.dir })
+      |> result.unwrap("")
+  }
+}
+
+/// Whether a live message can be applied now: its lane is loaded, or it is
+/// the list of projects, which names no lane.
+fn knows(model: Model, text: String) -> Bool {
+  projects_event(text) || result.is_ok(lane_of(model, event_dir(model, text)))
+}
+
+/// Applies the held messages whose lane is loaded; the others wait for the
+/// project list to name it (a snapshot can arrive before it).
+fn settle(model: Model) -> Model {
+  case model.caught_up {
+    False -> model
+    True -> {
+      let #(known, unknown) =
+        list.partition(list.reverse(model.replay), fn(t) { knows(model, t) })
+      list.fold(
+        known,
+        Model(..model, replay: list.reverse(unknown)),
+        fn(m, text) { live(m, text, False) },
+      )
+    }
+  }
+}
+
+/// What an action in flight is waiting for: with a work run going, a code
+/// change takes the project's lock, which the agent's command holds.
+pub fn acting_text(t: Task, name: String) -> String {
+  case list.any(t.runs, fn(r) { r.kind == "work" && r.state != "ended" }) {
+    True ->
+      "Waiting for the agent's current command to finish before " <> name <> "…"
+    False -> "Sending " <> name <> "…"
+  }
+}
+
+fn action_button(name: String, busy: Bool) -> Element(Msg) {
+  h.button([e.on_click(Action(name)), a.disabled(busy)], [h.text(name)])
 }

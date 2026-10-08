@@ -601,6 +601,7 @@ fn reconstruction(original: &Path, copy: &Path, projects: &[String]) -> Result<V
     for d in projects {
         let (o, c) = (scope::path(original, d), scope::path(copy, d));
         let db = Connection::open(c.join(".solace/store.db"))?;
+        db.busy_timeout(Duration::from_secs(10))?;
         let mut files = source_files(&o).unwrap_or_default();
         files.extend(source_files(&c).unwrap_or_default());
         files.sort();
@@ -669,6 +670,7 @@ fn coverage(original: &Path, copy: &Path, projects: &[String]) -> Result<Value, 
     let mut items = vec![];
     for d in projects {
         let db = Connection::open(scope::path(copy, d).join(".solace/store.db"))?;
+        db.busy_timeout(Duration::from_secs(10))?;
         let rows = |sql: &str| db.query_row(sql, [], |r| r.get::<_, i64>(0));
         let (m, s) = (rows("SELECT count(*) FROM modules")?, rows("SELECT count(*) FROM symbols")?);
         items.push(item(

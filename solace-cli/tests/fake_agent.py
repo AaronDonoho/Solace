@@ -9,7 +9,8 @@ from pathlib import Path
 
 prompt = sys.stdin.read()
 # The prompt is plain text for a model; this stand-in reads its steps from the task file.
-task = json.loads((Path('.solace/board') / (os.environ['SOLACE_TASK'] + '.json')).read_text())
+store = next(d / '.solace/tasks' for d in [Path.cwd(), *Path.cwd().parents] if (d / '.solace/tasks').is_dir())
+task = json.loads((store / (os.environ['SOLACE_TASK'] + '.json')).read_text())
 rid = os.environ['SOLACE_RUN']
 root = Path('.solace')
 (root / (rid + '.prompt')).write_text(prompt)
@@ -33,6 +34,9 @@ if native:
 config = json.loads((home / 'mcp.json').read_text())['mcpServers']['solace'] if claude else tomllib.loads((home / 'config.toml').read_text())['mcp_servers']['solace']
 mcp_env = {k: v for k, v in os.environ.items() if not k.startswith('SOLACE_')}
 mcp_env.update({k: os.environ[k] for k in (['SOLACE_TASK', 'SOLACE_RUN', 'SOLACE_SESSION', 'SOLACE_CONFIG'] if claude else config.get('env_vars', [])) if k in os.environ})
+# The crash hook is test-only; forward it to the Solace process that runs the command.
+if 'SOLACE_FAIL_AFTER' in os.environ:
+    mcp_env['SOLACE_FAIL_AFTER'] = os.environ['SOLACE_FAIL_AFTER']
 mcp = subprocess.Popen([config['command'], *config['args']], env=mcp_env,
                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 for i, step in enumerate(steps):

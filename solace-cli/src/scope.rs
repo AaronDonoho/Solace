@@ -1,7 +1,8 @@
 //! Tasks across projects (D-61). A task's scope is the projects it may
-//! change, named by folder as the root names them; the task is stored in one
-//! of them, its home. Each project keeps its own store, so a change is
-//! recorded where it was made, under the task's id.
+//! change, named by folder as the root names them; the task is stored in the
+//! root's task store and its agent works from one of them, its home (D-77).
+//! Each project keeps its own store, so a change is recorded where it was
+//! made, under the task's id.
 
 use super::*;
 
@@ -41,15 +42,10 @@ pub fn lock_all(roots: &[PathBuf]) -> Result<Vec<fs::File>, Failure> {
 /// Every task on the board whose scope includes the project `dir`, with its home.
 pub fn tasks_in(top: &Path, dir: &str) -> Result<Vec<(PathBuf, Value)>, Failure> {
     let mut out = vec![];
-    for home in workspace::members(top)? {
-        let root = path(top, &home);
-        if !root.join(".solace/board").exists() {
-            continue;
-        }
-        for t in board::tasks(&root)? {
-            if of(&t, &home).iter().any(|d| d == dir) {
-                out.push((root.clone(), t));
-            }
+    for t in board::all_tasks(top)? {
+        let home = t["home"].as_str().unwrap_or(".").to_string();
+        if of(&t, &home).iter().any(|d| d == dir) {
+            out.push((path(top, &home), t));
         }
     }
     Ok(out)
@@ -57,9 +53,6 @@ pub fn tasks_in(top: &Path, dir: &str) -> Result<Vec<(PathBuf, Value)>, Failure>
 
 /// A task's home, found from any project in its scope.
 pub fn home(project: &Path, tid: &str) -> Result<PathBuf, Failure> {
-    if board::task(project, tid).is_ok() {
-        return Ok(project.into());
-    }
     let top = top(project);
     tasks_in(&top, &dir(&top, project))?
         .into_iter()

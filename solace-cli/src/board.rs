@@ -14,7 +14,12 @@ fn try_lock(root: &Path) -> Option<fs::File> {
 pub fn open(root: &Path) -> Result<Store, Failure> {
     let s = Store::at(root)?;
     fs::create_dir_all(root.join(".solace/board"))?;
+    fs::create_dir_all(store_dir(&scope::top(root)))?;
     Ok(s)
+}
+/// The root's task store (D-77): every task of every project, one file each.
+pub(super) fn store_dir(top: &Path) -> PathBuf {
+    top.join(".solace/tasks")
 }
 pub(super) fn err<T>(code: &str, message: impl std::fmt::Display) -> Result<T, Failure> {
     lockdown::error(code, "task", message)
@@ -23,41 +28,124 @@ fn task_path(root: &Path, id: &str) -> Result<PathBuf, Failure> {
     if id.is_empty() || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
         return err("E7001", "invalid task id");
     }
-    Ok(root.join(".solace/board").join(format!("{id}.json")))
+    Ok(store_dir(&scope::top(root)).join(format!("{id}.json")))
 }
+/// The task's own folder in a project: run logs, conversations, reviews, files.
+fn task_dir(root: &Path, id: &str) -> Result<PathBuf, Failure> {
+    let _ = task_path(root, id)?;
+    Ok(root.join(".solace/board").join(id))
+}
+/// A task whose home is the project `root`.
 pub(super) fn task(root: &Path, id: &str) -> Result<Value, Failure> {
     let path = task_path(root, id)?;
+    let top = scope::top(root);
     if !path.exists() {
         return err("E7001", "unknown task");
     }
-    read_task(root, &path)
+    let t = read_task(&top, &path)?;
+    if t["home"] != scope::dir(&top, root) {
+        return err("E7001", "unknown task");
+    }
+    Ok(t)
 }
+/// The tasks whose home is the project `root`, in rank order.
 pub(super) fn tasks(root: &Path) -> Result<Vec<Value>, Failure> {
+    let top = scope::top(root);
+    let home = scope::dir(&top, root);
+    Ok(all_tasks(&top)?.into_iter().filter(|t| t["home"] == home).collect())
+}
+/// Every task in the root's store, in rank order.
+pub(super) fn all_tasks(top: &Path) -> Result<Vec<Value>, Failure> {
     let mut out = vec![];
-    for entry in fs::read_dir(root.join(".solace/board"))? {
+    let dir = store_dir(top);
+    if !dir.exists() {
+        return Ok(out);
+    }
+    for entry in fs::read_dir(dir)? {
         let p = entry?.path();
         if p.extension().is_some_and(|x| x == "json") {
-            out.push(read_task(root, &p)?);
+            // One unreadable file (empty after a crash) must not hide the rest.
+            match read_task(top, &p) {
+                Ok(t) => out.push(t),
+                Err(e) => eprintln!("skipping task file {}: {}", p.display(), e.0),
+            }
         }
     }
     out.sort_by(|a: &Value, b: &Value| a["rank"].as_f64().unwrap_or(0.).total_cmp(&b["rank"].as_f64().unwrap_or(0.)));
     Ok(out)
 }
-fn read_task(root: &Path, path: &Path) -> Result<Value, Failure> {
+fn read_task(top: &Path, path: &Path) -> Result<Value, Failure> {
     let mut t: Value = serde_json::from_slice(&fs::read(path)?).map_err(|e| Failure(e.to_string(), 1))?;
     // The default workflow's `done` column is now `complete`; tasks saved before still say `done`.
-    if t["column"] == "done" && !flow(root)?["columns"].as_array().unwrap().iter().any(|c| c["id"] == "done") {
+    let home = scope::path(top, t["home"].as_str().unwrap_or("."));
+    if t["column"] == "done" && !flow(&home)?["columns"].as_array().unwrap().iter().any(|c| c["id"] == "done") {
         t["column"] = json!("complete");
     }
     Ok(t)
 }
+/// Moves a project's tasks from before D-77 into the root's store, once, with
+/// the project as their home. Called under the project's serve lock.
+pub(super) fn adopt_tasks(top: &Path, root: &Path) -> Result<(), Failure> {
+    let old = root.join(".solace/board");
+    if !old.exists() {
+        return Ok(());
+    }
+    let home = scope::dir(top, root);
+    fs::create_dir_all(store_dir(top))?;
+    for entry in fs::read_dir(&old)? {
+        let p = entry?.path();
+        if !p.is_file() || p.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        let mut t: Value = serde_json::from_slice(&fs::read(&p)?).map_err(|e| Failure(e.to_string(), 1))?;
+        let to = task_path(root, t["id"].as_str().unwrap_or(""))?;
+        if to.exists() {
+            // A crash between writing the store copy and removing this one: finish the move.
+            let stored: Option<Value> = fs::read(&to).ok().and_then(|b| serde_json::from_slice(&b).ok());
+            if stored.is_some_and(|s| s["home"] == json!(home)) {
+                fs::remove_file(&p)?;
+                continue;
+            }
+            return fail(format!(
+                "task {} is in {} and also in the root's task store under another project (or unreadable); the id is used twice, e.g. by a copied project folder. Delete or rename one copy before `solace serve`",
+                t["id"].as_str().unwrap(),
+                p.display()
+            ));
+        }
+        // The change entries move into the store of the project each was made in
+        // (D-77 point 4); the task file keeps none.
+        let tid = t["id"].as_str().unwrap_or("");
+        for c in t["changes"].as_array().cloned().unwrap_or_default() {
+            let (Some(entity), Some(dir)) = (c["entity"].as_str(), c["project"].as_str().or(Some(home.as_str()))) else { continue };
+            let st = open(&scope::path(top, dir))?;
+            let (run, name) = (c["run"].as_str().unwrap_or(""), c["name"].as_str().unwrap_or(""));
+            // Rows from before D-77 have no run or name: fill the first in, so a
+            // repeated move adds nothing.
+            let filled = st.db.execute(
+                "UPDATE board_touches SET run=?3, name=?4 WHERE seq=(SELECT MIN(seq) FROM board_touches WHERE task=?1 AND entity=?2 AND run IS NULL)",
+                params![tid, entity, run, name],
+            )?;
+            let known: i64 = st.db.query_row("SELECT COUNT(*) FROM board_touches WHERE task=?1 AND entity=?2", params![tid, entity], |r| r.get(0))?;
+            if filled == 0 && known == 0 {
+                st.db.execute("INSERT INTO board_touches(task,entity,run,name) VALUES (?1,?2,?3,?4)", params![tid, entity, run, name])?;
+            }
+        }
+        t.as_object_mut().unwrap().remove("changes");
+        // Older task files may lack lists the server indexes into.
+        for k in ["runs", "notes", "questions", "links"] {
+            if !t[k].is_array() {
+                t[k] = json!([]);
+            }
+        }
+        t["home"] = json!(home);
+        write_atomic(&to, serde_json::to_vec_pretty(&t).unwrap())?;
+        fs::remove_file(&p)?;
+    }
+    Ok(())
+}
 fn event(s: &Store, v: Value) -> Result<(), Failure> {
     s.db.execute("INSERT INTO board_events(data) VALUES (?)", [v.to_string()])?;
     Ok(())
-}
-pub(super) fn save(s: &Store, t: &Value) -> Result<(), Failure> {
-    write_atomic(&task_path(&s.root, t["id"].as_str().unwrap())?, serde_json::to_vec_pretty(t).unwrap())?;
-    event(s, json!({"task":t}))
 }
 /// A project's workflow: its root's, shared by every project on the board (D-61).
 pub fn flow(project: &Path) -> Result<Value, Failure> {
@@ -414,21 +502,95 @@ pub fn scope_stores(s: &Store, t: &Value) -> Result<Vec<(String, Store)>, Failur
         .map(|d| Ok((d.clone(), open(&scope::path(&top, &d))?)))
         .collect()
 }
-/// A change entry's project; entries saved before D-61 are the home's.
-/// A new task in `column`, with nothing done on it yet.
+/// A new task in `column`, with nothing done on it yet. Its changes are computed
+/// from the scope projects' stores (D-77 point 4), so the task holds none.
 pub fn new_task(title: &str, body: &str, column: &Value, rank: f64) -> Value {
     json!({"id":unique_id(),"title":title,"body":body,"links":[],"column":column,"rank":rank,"paused_from":null,"attention":null,
-        "stamps":{},"model":null,"notes":[],"questions":[],"runs":[],"changes":[]})
+        "stamps":{},"model":null,"notes":[],"questions":[],"runs":[]})
 }
-/// The project a change was made in; changes saved before D-61 are all in the task's home.
-pub fn project_of<'a>(c: &'a Value, home: &'a str) -> &'a str {
-    c["project"].as_str().unwrap_or(home)
+/// Records what a command changed in `s` on the task stored in `home`. The rows
+/// commit inside the command's outer transaction (D-77 point 7); the task's
+/// change list comes from the committed rows after the release (D-77 point 4).
+pub fn record(s: &Store, tid: &str, rid: &str, before: &Value, after: &Value) -> Result<(), Failure> {
+    touch(s, tid, rid, before, after)?;
+    Ok(())
 }
-/// Records what a command changed in `s` on the task stored in `home`.
-pub fn record(s: &Store, home: &Store, tid: &str, rid: &str, before: &Value, after: &Value) -> Result<(), Failure> {
-    let mut t = task(&home.root, tid)?;
-    let top = scope::top(&s.root);
-    let (here, home_dir) = (scope::dir(&top, &s.root), scope::dir(&top, &home.root));
+/// The task's changes, computed from each scope project's store (D-77 point 4):
+/// `board_touches` rows by task id, in insertion order, one entry per entity and
+/// project (the first row that touched it). A WAL read through `open`, no project lock.
+pub fn changes_of(s: &Store, t: &Value) -> Result<Vec<Value>, Failure> {
+    let tid = t["id"].as_str().unwrap_or("");
+    let (mut out, mut seen) = (vec![], HashSet::new());
+    for (dir, st) in scope_stores(s, t)? {
+        let mut q = st.db.prepare("SELECT entity,run,name FROM board_touches WHERE task=?1 ORDER BY seq")?;
+        for row in q.query_map(params![tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?)))? {
+            let (entity, run, name) = row?;
+            let (run, name) = (run.unwrap_or_default(), name.unwrap_or_else(|| entity.clone()));
+            if !seen.insert((dir.clone(), entity.clone())) {
+                continue;
+            }
+            out.push(json!({"entity": entity, "name": name, "run": run, "project": dir}));
+        }
+    }
+    Ok(out)
+}
+/// Adds the undo rows for a pending record whose files changed (D-77 point 7):
+/// one per path whose bytes differ from the file now, skipping paths whose rows
+/// are already committed. A declared run's record lists the watched files as
+/// they were before the process; a watched file it doesn't list was created by it.
+pub fn adopt_pending(s: &Store, record: &Value) -> Result<(), Failure> {
+    let (Some(tid), Some(rid)) = (record["task"].as_str(), record["run"].as_str()) else { return Ok(()) };
+    let bad = || Failure("invalid pending record".into(), 1);
+    let mut files: Vec<(String, Value)> = vec![];
+    if let Some(v) = record.get("files") {
+        for f in v.as_array().unwrap() {
+            files.push((f["path"].as_str().ok_or_else(bad)?.to_string(), f["bytes"].clone()));
+        }
+    } else if let Some(path) = record.get("path") {
+        files.push((path.as_str().ok_or_else(bad)?.to_string(), record["bytes"].clone()));
+    } else {
+        // A command's marker: the store already discarded what didn't commit.
+        return Ok(());
+    }
+    let listed: HashSet<String> = files.iter().map(|(p, _)| p.clone()).collect();
+    if record.get("files").is_some() {
+        let v = lockdown::settings(&s.root)?;
+        for name in lockdown::watched_paths(&s.root, &v)? {
+            if !listed.contains(&name) {
+                files.push((name.clone(), Value::Null));
+            }
+        }
+    }
+    for (name, bytes) in files {
+        let key = format!("file:{name}");
+        let now = fs::read(lockdown::path(&s.root, &name)?).ok();
+        let before = bytes.as_array().map(|a| json_bytes(a.as_slice()));
+        if now == before {
+            continue;
+        }
+        let committed: bool = s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_touches WHERE task=?1 AND run=?2 AND entity=?3)", params![tid, rid, key], |r| r.get(0))?;
+        if committed {
+            continue;
+        }
+        let exists: bool = s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1 AND entity=?2)", params![tid, key], |r| r.get(0))?;
+        if !exists {
+            fs::create_dir_all(before_dir(&s.root, tid))?;
+            let file = before_file(&s.root, tid, &name);
+            match &before {
+                Some(b) => fs::write(file, b)?,
+                None => fs::write(file.with_extension("absent"), b"")?,
+            }
+        }
+        s.db.execute("INSERT OR IGNORE INTO board_before VALUES (?1,?2,?3)", params![tid, key, bytes.to_string()])?;
+        s.db.execute("INSERT INTO board_touches(task,entity,run,name) VALUES (?1,?2,?3,?4)", params![tid, key, rid, key])?;
+    }
+    Ok(())
+}
+/// Records in `s` how to undo what a command changed there for task `tid`,
+/// and returns the task's change entries for it.
+pub fn touch(s: &Store, tid: &str, rid: &str, before: &Value, after: &Value) -> Result<Vec<Value>, Failure> {
+    let mut out = vec![];
+    let here = scope::dir(&scope::top(&s.root), &s.root);
     let keys: HashSet<_> = before.as_object().unwrap().keys().chain(after.as_object().unwrap().keys()).collect();
     for key in keys {
         if before[key] == after[key] {
@@ -448,19 +610,17 @@ pub fn record(s: &Store, home: &Store, tid: &str, rid: &str, before: &Value, aft
                 }
             }
         }
-        s.db.execute("INSERT OR IGNORE INTO board_before VALUES (?1,?2,?3)", params![tid, key, data.to_string()])?;
-        s.db.execute("INSERT INTO board_touches(task,entity) VALUES (?1,?2)", params![tid, key])?;
         let name = if key.starts_with("symbol:") {
             let row = if after[key].is_null() { data } else { &after[key] };
             format!("{}.{}", row[1].as_str().unwrap_or(""), row[2].as_str().unwrap_or(""))
         } else {
             key.clone()
         };
-        if !t["changes"].as_array().unwrap().iter().any(|x| x["entity"] == *key && project_of(x, &home_dir) == here) {
-            t["changes"].as_array_mut().unwrap().push(json!({"entity":key,"name":name,"run":rid,"project":here}));
-        }
+        s.db.execute("INSERT OR IGNORE INTO board_before VALUES (?1,?2,?3)", params![tid, key, data.to_string()])?;
+        s.db.execute("INSERT INTO board_touches(task,entity,run,name) VALUES (?1,?2,?3,?4)", params![tid, key, rid, name])?;
+        out.push(json!({"entity":key,"name":name,"run":rid,"project":here}));
     }
-    save(home, &t)
+    Ok(out)
 }
 /// Whether a recorded change is still worth reviewing: a file that is unwatched now (ignored after
 /// the change was recorded, say) is not. Cancel and undo still restore it.
@@ -470,23 +630,23 @@ pub fn reviewable(root: &Path, key: &str) -> bool {
 }
 /// Review content stays internal, separate from notes (which humans can delete).
 fn review_path(root: &Path, tid: &str, rid: &str) -> Result<PathBuf, Failure> {
-    Ok(task_path(root, tid)?.with_extension("").join("reviews").join(format!("{rid}.json")))
+    Ok(task_dir(root, tid)?.join("reviews").join(format!("{rid}.json")))
 }
 fn clear_reviews(s: &Store, tid: &str) -> Result<(), Failure> {
-    let dir = task_path(&s.root, tid)?.with_extension("").join("reviews");
+    let dir = task_dir(&s.root, tid)?.join("reviews");
     if dir.exists() {
         fs::remove_dir_all(dir)?;
     }
     Ok(())
 }
 fn review_state(s: &Store, t: &Value) -> Result<Value, Failure> {
-    let home = scope::dir(&scope::top(&s.root), &s.root);
+    let changes = changes_of(s, t)?;
     let mut projects = json!({});
     let mut context = json!({});
     for (dir, st) in scope_stores(s, t)? {
         let current = snapshot(&st)?;
         let mut entities = json!({});
-        for c in t["changes"].as_array().unwrap().iter().filter(|c| project_of(c, &home) == dir) {
+        for c in changes.iter().filter(|c| c["project"] == dir) {
             let key = c["entity"].as_str().unwrap();
             entities[key] = match key.strip_prefix("file:") {
                 Some(f) => json!(fs::read(lockdown::path(&st.root, f)?).ok()),
@@ -554,7 +714,7 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
         None => String::new(),
     };
     let projects = scope_stores(s, &t)?;
-    let home = scope::dir(&scope::top(&s.root), &s.root);
+    let changes = changes_of(s, &t)?;
     let (mut out, mut left) = (String::new(), vec![]);
     for (dir, st) in &projects {
         let current = snapshot(st)?;
@@ -573,7 +733,7 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
                 Some(String::from_utf8(bytes).unwrap_or_else(|e| format!("(binary, {} bytes)", e.as_bytes().len())))
             }
         };
-        for c in t["changes"].as_array().unwrap().iter().filter(|c| project_of(c, &home) == dir) {
+        for c in changes.iter().filter(|c| c["project"] == *dir) {
             let (key, name) = (c["entity"].as_str().unwrap(), c["name"].as_str().unwrap_or(""));
             let Some(original) = before.get(key) else { continue };
             // Entities first touched after the review use their task before-state.
@@ -778,9 +938,13 @@ fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failure> {
 fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap().to_string();
     let projects = scope_stores(s, t)?;
-    let home = scope::dir(&scope::top(&s.root), &s.root);
+    // Under the locks, what a stopped run left half-written becomes the task's own rows first.
+    for (_, st) in &projects {
+        lockdown::recover(&st.root, st, &[])?;
+    }
+    let changes = changes_of(s, t)?;
     let named = |dir: &str, key: &str| -> String {
-        let name = t["changes"].as_array().unwrap().iter().find(|c| c["entity"] == key && project_of(c, &home) == dir);
+        let name = changes.iter().find(|c| c["entity"] == key && c["project"] == dir);
         let name = name.and_then(|c| c["name"].as_str()).unwrap_or(key);
         if projects.len() > 1 { format!("{dir}: {name}") } else { name.to_string() }
     };
@@ -833,7 +997,10 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
             let other = tasks(&st.root)?
                 .iter()
                 .filter(|x| x["id"] != tid.as_str())
-                .map(|x| format!("task {}: {}", x["id"], x["changes"]))
+                .map(|x| {
+                    let names: Vec<String> = changes_of(st, x).unwrap_or_default().iter().map(|c| c["name"].as_str().unwrap_or("").to_string()).collect();
+                    format!("task {}: {}", x["id"], names.join(", "))
+                })
                 .collect::<Vec<_>>()
                 .join("\n");
             let place = if projects.len() > 1 { format!("in {dir}: ") } else { String::new() };
@@ -848,7 +1015,6 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
         drop_before(st, &tid)?;
     }
     clear_reviews(s, &tid)?;
-    t["changes"] = json!([]);
     end_runs(t, "reverted");
     Ok(())
 }
@@ -857,13 +1023,49 @@ fn settle(s: &Store, t: &Value) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap();
     clear_reviews(s, tid)?;
     for (_, st) in scope_stores(s, t)? {
+        lockdown::recover(&st.root, &st, &[])?;
         outside::approve(&st, tid)?;
         drop_before(&st, tid)?;
     }
     Ok(())
 }
+/// Settles task `tid` once the task server has moved it into a final column
+/// (D-77 point 5, Option B): a step of its own, never on the server's thread, that
+/// takes the scope's locks like a human action does. It reads the task again
+/// under them, so a task that has left the final column since is not settled, and
+/// it can run again: approving and dropping records twice changes nothing.
+pub(super) fn settle_final(top: &Path, tid: &str) -> Result<(), Failure> {
+    let home = scope::path(top, task(top, tid)?["home"].as_str().unwrap_or("."));
+    let _held = guard(&home, vec!["tasks", tid, "settle"], &json!({}))?;
+    let t = task(&home, tid)?;
+    if column(&flow(&home)?, &t)["final"] == true {
+        settle(&open(&home)?, &t)?;
+    }
+    Ok(())
+}
+/// Settles every task already in a final column that still has undo records,
+/// which a stop or a crash between the move and its settle leaves behind.
+pub(super) fn resettle(top: &Path) {
+    for t in all_tasks(top).unwrap_or_default() {
+        let (Some(tid), Some(home)) = (t["id"].as_str(), t["home"].as_str()) else { continue };
+        let home = scope::path(top, home);
+        let Ok(w) = flow(&home) else { continue };
+        if column(&w, &t)["final"] != true {
+            continue;
+        }
+        let left = open(&home).and_then(|s| scope_stores(&s, &t)).is_ok_and(|stores| {
+            stores.iter().any(|(_, st)| {
+                st.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap_or(false)
+                    || lockdown::pending_for(&st.root, tid)
+            })
+        });
+        if left && let Err(e) = settle_final(top, tid) {
+            eprintln!("settling task {tid}: {}", e.0);
+        }
+    }
+}
 /// Where a task keeps files as they were before it changed them.
-fn before_dir(root: &Path, tid: &str) -> PathBuf {
+pub fn before_dir(root: &Path, tid: &str) -> PathBuf {
     root.join(".solace/board").join(tid).join("before")
 }
 /// File `name` as it was before the task changed it; with extension `absent`
@@ -1005,7 +1207,6 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     }
     if a["revert"] == true {
         revert(s, t)?;
-        proposed["changes"] = t["changes"].clone();
         proposed["runs"] = t["runs"].clone();
     }
     *t = proposed;
@@ -1081,8 +1282,8 @@ fn path_of(url: &str) -> Vec<&str> {
 }
 /// The locks a change takes: its project's, and for a task, every project in
 /// its scope (and in a new scope it is given), in folder order (D-61).
-fn guard(root: &Path, parts: Vec<&str>, body: &Value) -> Result<Vec<fs::File>, Failure> {
-    let ["tasks", tid, ..] = parts.as_slice() else { return Ok(vec![lock(root)?]) };
+pub(super) fn guard(root: &Path, parts: Vec<&str>, body: &Value) -> Result<Vec<fs::File>, Failure> {
+    let ["tasks", tid, rest @ ..] = parts.as_slice() else { return Ok(vec![lock(root)?]) };
     let top = scope::top(root);
     let home = scope::dir(&top, root);
     let members = workspace::members(&top)?;
@@ -1093,11 +1294,68 @@ fn guard(root: &Path, parts: Vec<&str>, body: &Value) -> Result<Vec<fs::File>, F
         dirs.extend(body["scope"].as_array().into_iter().flatten().filter_map(|d| d.as_str().map(String::from)));
         let mut roots: Vec<PathBuf> = dirs.iter().filter(|d| members.contains(d)).map(|d| scope::path(&top, d)).collect();
         roots.push(root.into());
+        // Approving a settings proposal writes a file in the project it names.
+        if let ["questions", qid] = rest
+            && let Some(dir) = t["questions"].as_array().into_iter().flatten().find(|q| q["id"] == *qid).and_then(|q| q["settings"]["project"].as_str())
+            && members.iter().any(|m| m == dir)
+        {
+            roots.push(scope::path(&top, dir));
+        }
         let held = scope::lock_all(&roots)?;
         // The scope may have changed while this waited for the locks.
         if task(root, tid).is_ok_and(|t| scope::of(&t, &home) == seen) {
             return Ok(held);
         }
+    }
+}
+/// Whether a human change to a task changes code, so it takes its projects'
+/// locks (D-77 point 5): undoing the task's changes or settling them in a final
+/// column, or approving a settings proposal. Cancelling a task that never had
+/// changes, and every other change, is task-only. Reads without a lock.
+pub(super) fn needs_lock(root: &Path, parts: &[&str], body: &Value) -> Result<bool, Failure> {
+    let ["tasks", tid, rest @ ..] = parts else { return Ok(false) };
+    let Ok(t) = task(root, tid) else { return Ok(false) };
+    match rest {
+        ["actions"] => {
+            let name = body["action"].as_str().unwrap_or("");
+            if matches!(name, "pause" | "resume" | "stop" | "end_discussion" | "discuss") {
+                return Ok(false);
+            }
+            let w = flow(root)?;
+            let a = &w["actions"][name];
+            let mut moved = t.clone();
+            if let Some(to) = a.get("to")
+                && move_to(&w, &mut moved, to).is_err()
+            {
+                return Ok(false);
+            }
+            if a["revert"] != true && column(&w, &moved)["final"] != true {
+                return Ok(false);
+            }
+            // A work run's command may be about to record: it holds the lock until it has.
+            if t["runs"].as_array().into_iter().flatten().any(|r| r["kind"] == "work" && r["state"] != "ended") {
+                return Ok(true);
+            }
+            let s = open(root)?;
+            if !changes_of(&s, &t)?.is_empty() {
+                return Ok(true);
+            }
+            for (_, st) in scope_stores(&s, &t)? {
+                if st.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0))? {
+                    return Ok(true);
+                }
+                // A run stopped mid-write left a record that recovery has yet to adopt.
+                if lockdown::pending_for(&st.root, tid) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        ["questions", qid] => {
+            let answer = body.get("text").or_else(|| body.get("option")).and_then(|v| v.as_str());
+            Ok(answer == Some("Approve") && t["questions"].as_array().into_iter().flatten().any(|q| q["id"] == *qid && !q["settings"].is_null()))
+        }
+        _ => Ok(false),
     }
 }
 /// A scope as a request gives it: projects on this board, sorted, at least one.
@@ -1142,7 +1400,7 @@ fn claim_projects(root: &Path, w: &Value, tid: &Value, dirs: &[String]) -> Resul
 }
 /// `POST /tasks/{id}/scope` (D-61): the human changes a task's projects while
 /// no agent of it is working: between runs, paused, or waiting on a question.
-fn set_scope(s: &Store, w: &Value, mut t: Value, body: &Value) -> Result<Value, Failure> {
+fn set_scope(s: &Store, w: &Value, mut t: Value, body: &Value) -> Result<(Value, After), Failure> {
     if t["runs"].as_array().unwrap().iter().any(|r| r["state"] == "running") && t["paused_from"].is_null() {
         return err(
             "E7003",
@@ -1156,8 +1414,12 @@ fn set_scope(s: &Store, w: &Value, mut t: Value, body: &Value) -> Result<Value, 
     let home = scope::dir(&top, &s.root);
     let old = scope::of(&t, &home);
     let new = checked_scope(&s.root, &body["scope"])?;
+    // Takes no lock (D-77 point 5): a paused run could still record in a project
+    // after this check and before it leaves the scope. The project's lock goes
+    // with it; telling apart which task changed what is later work.
+    let changes = changes_of(s, &t)?;
     for d in old.iter().filter(|d| !new.contains(d)) {
-        if t["changes"].as_array().unwrap().iter().any(|c| project_of(c, &home) == d) {
+        if changes.iter().any(|c| c["project"] == d.as_str()) {
             return err("E7013", format!("this task has changed {d}; undo its changes before taking {d} out of its projects"));
         }
     }
@@ -1168,21 +1430,20 @@ fn set_scope(s: &Store, w: &Value, mut t: Value, body: &Value) -> Result<Value, 
     }
     t["scope"] = json!(new);
     if new.contains(&home) {
-        save(s, &t)?;
-        return Ok(t);
+        return Ok((t, After::Nothing));
     }
     // The agent works from the task's home, so the home changes only between runs.
     if active(&t) {
         return err("E7013", format!("this task's agent works from {home}; take {home} out of its projects once the run has ended"));
     }
     move_task(s, &mut t, &scope::path(&top, &new[0]))?;
-    Ok(t)
+    Ok((t, After::Removed(home)))
 }
-/// Moves a task to another project of its scope when its home leaves it.
+/// Moves a task's folder to another project of its scope when its home leaves it.
 fn move_task(s: &Store, t: &mut Value, to: &Path) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap().to_string();
     let (from, into) = (s.root.join(".solace/board").join(&tid), to.join(".solace/board").join(&tid));
-    let target = open(to)?;
+    open(to)?;
     // A conversation is tied to the folder it ran in; the next run starts a new one, with a handoff.
     t["conversation"] = Value::Null;
     if from.exists() {
@@ -1193,65 +1454,120 @@ fn move_task(s: &Store, t: &mut Value, to: &Path) -> Result<(), Failure> {
             }
         }
     }
-    save(&target, t)?;
-    fs::remove_file(task_path(&s.root, &tid)?)?;
-    event(s, json!({"removed":tid}))
+    // The task stays in the root's store; only its home changes (D-77).
+    t["home"] = json!(scope::dir(&scope::top(to), to));
+    Ok(())
 }
 pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, Failure> {
+    let (path, query_text) = url.split_once('?').unwrap_or((url, ""));
+    let parts: Vec<_> = path.trim_matches('/').split('/').collect();
+    // Tasks are the task server's (D-77).
+    if parts.first() == Some(&"tasks") {
+        return tasks::api(root, method, &parts, body);
+    }
+    // Task routes lock only a change to code, in `tasks::api` (D-77 point 5); the rest lock every change here.
     // Reads skip the project lock, so the board stays responsive while an agent command holds it.
     // Task files are replaced by rename and the store waits out commits, so a read sees whole states.
     let _guard = if method == "GET" { None } else { Some(guard(root, path_of(url), &body)?) };
     let s = open(root)?;
     let w = flow(root)?;
-    let (path, query_text) = url.split_once('?').unwrap_or((url, ""));
     let query: HashMap<String, String> =
         query_text.split('&').filter_map(|pair| pair.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
-    let parts: Vec<_> = path.trim_matches('/').split('/').collect();
     if matches!(parts.first(), Some(&"graph" | &"nodes" | &"tests" | &"files")) {
         return view::api(&s, method, &parts, &query, &body);
     }
     match (method, parts.as_slice()) {
         ("GET", ["workflow"]) => Ok(w),
         ("GET", ["models"]) => models(),
-        ("GET", ["tasks"]) => {
-            let mut ts = tasks(root)?;
-            for t in &mut ts {
-                for k in ["notes", "changes"] {
-                    t.as_object_mut().unwrap().remove(k);
-                }
-            }
-            Ok(json!(ts))
+        _ => err("E7001", "unknown route"),
+    }
+}
+/// The project `root`'s tasks as a list shows them, without their notes and changes.
+fn listed(root: &Path) -> Result<Vec<Value>, Failure> {
+    let mut ts = tasks(root)?;
+    for t in &mut ts {
+        for k in ["notes", "changes"] {
+            t.as_object_mut().unwrap().remove(k);
         }
-        ("POST", ["tasks"]) => {
-            let title = body["title"].as_str().filter(|s| !s.trim().is_empty()).ok_or_else(|| Failure("E7001 title required".into(), 1))?;
-            if body.get("body").is_some_and(|x| !x.is_string()) || body.get("links").is_some_and(|x| !x.is_array()) {
-                return err("E7001", "invalid task fields");
-            }
-            let top = scope::top(root);
-            let home = scope::dir(&top, root);
-            let scope = match body.get("scope") {
-                Some(v) => checked_scope(root, v)?,
-                None => vec![home.clone()],
-            };
-            if !scope.contains(&home) {
-                return err("E7001", format!("a task is created in a project of its scope; post it to one of {}", scope.join(", ")));
-            }
-            let rank = tasks(root)?.iter().filter_map(|t| t["rank"].as_f64()).fold(0., f64::max) + 1.;
-            let mut t = new_task(title, body["body"].as_str().unwrap_or(""), &w["columns"][0]["id"], rank);
-            t["scope"] = json!(scope);
-            t["links"] = body.get("links").cloned().unwrap_or(json!([]));
-            save(&s, &t)?;
+    }
+    Ok(ts)
+}
+/// `GET /tasks` and `GET /tasks/{id}/...` of the project `root`.
+pub(super) fn read_task_api(root: &Path, parts: &[&str]) -> Result<Value, Failure> {
+    match parts {
+        ["tasks"] => Ok(json!(listed(root)?)),
+        ["tasks", tid] => {
+            let mut t = task(root, tid)?;
+            // The task's changes are computed from its scope projects' stores (D-77 point 4).
+            t["changes"] = json!(changes_of(&open(root)?, &t)?);
             Ok(t)
         }
-        (_, ["tasks", tid, rest @ ..]) => {
-            let mut t = task(root, tid)?;
-            match (method, rest) {
-                ("GET", []) => return Ok(t),
-                ("GET", ["runs", rid]) => {
-                    let mut run = t["runs"][run_at(&t, rid)?].clone();
-                    run["transcript"] = json!(transcript(Path::new(run["log"].as_str().unwrap_or(""))));
-                    return Ok(run);
+        ["tasks", tid, "runs", rid] => {
+            let t = task(root, tid)?;
+            let mut run = t["runs"][run_at(&t, rid)?].clone();
+            run["transcript"] = json!(transcript(Path::new(run["log"].as_str().unwrap_or(""))));
+            Ok(run)
+        }
+        _ => err("E7001", "unknown route"),
+    }
+}
+/// `POST /tasks`: a new task of the project `root`, not yet written.
+pub(super) fn created(root: &Path, body: &Value) -> Result<Value, Failure> {
+    let w = flow(root)?;
+    let title = body["title"].as_str().filter(|s| !s.trim().is_empty()).ok_or_else(|| Failure("E7001 title required".into(), 1))?;
+    if body.get("body").is_some_and(|x| !x.is_string()) || body.get("links").is_some_and(|x| !x.is_array()) {
+        return err("E7001", "invalid task fields");
+    }
+    let top = scope::top(root);
+    let home = scope::dir(&top, root);
+    let scope = match body.get("scope") {
+        Some(v) => checked_scope(root, v)?,
+        None => vec![home.clone()],
+    };
+    if !scope.contains(&home) {
+        return err("E7001", format!("a task is created in a project of its scope; post it to one of {}", scope.join(", ")));
+    }
+    let rank = tasks(root)?.iter().filter_map(|t| t["rank"].as_f64()).fold(0., f64::max) + 1.;
+    let mut t = new_task(title, body["body"].as_str().unwrap_or(""), &w["columns"][0]["id"], rank);
+    t["scope"] = json!(scope);
+    t["links"] = body.get("links").cloned().unwrap_or(json!([]));
+    t["home"] = json!(home);
+    Ok(t)
+}
+/// What a change to a task leaves to do once the task server has written it.
+pub(super) enum After {
+    Nothing,
+    /// Launch the run `(rid, model)`.
+    Start(String, Value),
+    /// The task reached a final column: its conversation goes.
+    Clean,
+    /// The task's home left its scope; the board's lane for this one drops it (D-61).
+    Removed(String),
+}
+pub(super) fn after(root: &Path, t: &Value, after: After) {
+    match after {
+        After::Start(rid, m) => start(root.to_path_buf(), t.clone(), rid, m),
+        After::Clean => {
+            let root = root.to_path_buf();
+            let tid = t["id"].as_str().unwrap().to_string();
+            std::thread::spawn(move || {
+                if let Ok(_guard) = conversation_lock(&root, &tid) {
+                    let _ = clean_conversation(&root, &tid);
                 }
+            });
+        }
+        After::Nothing | After::Removed(_) => {}
+    }
+}
+/// A change to task `tid` of the project `root` from the API (`method` on
+/// `rest`, the path below `/tasks/{tid}`): the task as the server writes it.
+pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: &Value) -> Result<(Value, After), Failure> {
+    let s = open(root)?;
+    let w = flow(root)?;
+    let mut t = task(root, tid)?;
+    {
+        {
+            match (method, rest) {
                 ("PATCH", []) => {
                     if active(&t) {
                         return err("E7003", "run going");
@@ -1271,7 +1587,7 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
                         }
                     }
                 }
-                ("POST", ["scope"]) => return set_scope(&s, &w, t, &body),
+                ("POST", ["scope"]) => return set_scope(&s, &w, t, body),
                 ("POST", ["notes"]) => {
                     let text = body["text"].as_str().ok_or_else(|| Failure("E7001 text required".into(), 1))?;
                     // While a discussion is going, a human note is its next turn.
@@ -1306,30 +1622,21 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
                     continue_answered(&s, &w, &mut t)?;
                 }
                 ("POST", ["actions"]) => {
-                    let launch = action(&s, &w, &mut t, &body)?;
+                    let launch = action(&s, &w, &mut t, body)?;
                     t["attention"] = Value::Null;
                     t["finished"] = Value::Null;
-                    save(&s, &t)?;
-                    if let Some((rid, m)) = launch {
-                        start(root.to_path_buf(), t.clone(), rid, m);
-                    } else if column(&w, &t)["final"] == true {
-                        let root = root.to_path_buf();
-                        let tid = t["id"].as_str().unwrap().to_string();
-                        std::thread::spawn(move || {
-                            if let Ok(_guard) = conversation_lock(&root, &tid) {
-                                let _ = clean_conversation(&root, &tid);
-                            }
-                        });
-                    }
-                    return Ok(t);
+                    let after = match launch {
+                        Some((rid, m)) => After::Start(rid, m),
+                        None if column(&w, &t)["final"] == true => After::Clean,
+                        None => After::Nothing,
+                    };
+                    return Ok((t, after));
                 }
                 _ => return err("E7001", "unknown route"),
             }
-            save(&s, &t)?;
-            Ok(t)
         }
-        _ => err("E7001", "unknown route"),
     }
+    Ok((t, After::Nothing))
 }
 fn start(root: PathBuf, t: Value, rid: String, m: Value) {
     std::thread::spawn(move || {
@@ -1370,7 +1677,7 @@ fn start(root: PathBuf, t: Value, rid: String, m: Value) {
 }
 
 fn conversation_lock(root: &Path, tid: &str) -> Result<fs::File, Failure> {
-    let dir = task_path(root, tid)?.with_extension("");
+    let dir = task_dir(root, tid)?;
     fs::create_dir_all(&dir)?;
     lock_file(&dir.join("agent.lock"))
 }
@@ -1378,22 +1685,24 @@ fn conversation_lock(root: &Path, tid: &str) -> Result<fs::File, Failure> {
 fn conversation_dir(root: &Path, tid: &str, home: &str) -> Result<PathBuf, Failure> {
     // Reuse the id validator before allowing any deletion or launch path.
     let _ = task_path(root, home)?;
-    Ok(task_path(root, tid)?.with_extension("").join(home))
+    Ok(task_dir(root, tid)?.join(home))
 }
 
 fn clean_conversation(root: &Path, tid: &str) -> Result<(), Failure> {
     let _guard = lock(root)?;
     let s = open(root)?;
-    let mut t = task(root, tid)?;
+    let t = task(root, tid)?;
     if let Some(home) = t["conversation"]["home"].as_str() {
         let p = conversation_dir(root, tid, home)?;
         if p.exists() {
             fs::remove_dir_all(p)?;
         }
     }
-    t["conversation"] = Value::Null;
     drafts::clear(&s, tid)?;
-    save(&s, &t)
+    tasks::update(root, tid, |t| {
+        t["conversation"] = Value::Null;
+        Ok(())
+    })
 }
 
 fn session_id(log: &Path, agent: &str) -> Option<String> {
@@ -1543,17 +1852,22 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     }
     if agent == "claude" && native {
         let auth = claude_home.join(".credentials.json");
-        if auth.exists() && !dir.join(".credentials.json").exists() {
-            std::os::unix::fs::symlink(auth, dir.join(".credentials.json"))?;
+        // A token refresh replaces the symlink with a private copy whose rotated
+        // token goes stale; relink so every launch uses the real sign-in.
+        let link = dir.join(".credentials.json");
+        if auth.exists() && !fs::read_link(&link).is_ok_and(|t| t == auth) {
+            let _ = fs::remove_file(&link);
+            std::os::unix::fs::symlink(auth, link)?;
         }
     }
     if author {
-        let _guard = lock(root)?;
-        let mut current = task(root, tid)?;
         // Only an exited process has a reusable session; a server crash during
         // a turn falls back instead of resuming a possibly orphaned process.
-        current["conversation"] = if persistent { json!({"home":home,"config":compatibility,"session":null}) } else { Value::Null };
-        save(&open(root)?, &current)?;
+        let conversation = if persistent { json!({"home":home,"config":compatibility,"session":null}) } else { Value::Null };
+        tasks::update(root, tid, move |current| {
+            current["conversation"] = conversation;
+            Ok(())
+        })?;
     }
     let file = fs::File::create(&log)?;
     let mut cmd = Command::new(&argv[0]);
@@ -1599,21 +1913,23 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     }
     let forced = supervised?;
     if author && persistent {
-        let _guard = lock(root)?;
-        let mut current = task(root, tid)?;
-        current["conversation"]["session"] = if forced { Value::Null } else { json!(session_id(&log, agent)) };
-        // Only notes actually briefed, plus the agent's own notes, are known to
-        // this conversation. A human may add feedback during graceful exit.
-        current["conversation"]["notes_seen"] = json!(
-            t["notes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .chain(current["notes"].as_array().unwrap().iter().filter(|n| n["run"] == rid && n["author"] == "agent"))
-                .map(note_fingerprint)
-                .collect::<Vec<_>>()
-        );
-        save(&open(root)?, &current)?;
+        let session = if forced { Value::Null } else { json!(session_id(&log, agent)) };
+        let (briefed, rid) = (t["notes"].clone(), rid.to_string());
+        tasks::update(root, tid, move |current| {
+            current["conversation"]["session"] = session;
+            // Only notes actually briefed, plus the agent's own notes, are known to
+            // this conversation. A human may add feedback during graceful exit.
+            current["conversation"]["notes_seen"] = json!(
+                briefed
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .chain(current["notes"].as_array().unwrap().iter().filter(|n| n["run"] == rid && n["author"] == "agent"))
+                    .map(note_fingerprint)
+                    .collect::<Vec<_>>()
+            );
+            Ok(())
+        })?;
     } else {
         fs::remove_dir_all(&dir)?;
     }
@@ -1672,14 +1988,15 @@ fn supervise(
                 // taken its turn: the reply is its note, and the discussion waits.
                 let reply = entries.iter().rev().find(|e| e["kind"] == "message").and_then(|e| e["text"].as_str()).map(str::trim).unwrap_or("");
                 if r["kind"] == "discuss" && status.success() && error.is_empty() && !reply.is_empty() {
-                    let _guard = lock(root)?;
-                    let mut t = task(root, tid)?;
-                    let i = run_at(&t, rid)?;
-                    if t["runs"][i]["state"] != "ended" {
-                        note(&mut t, "agent", Some(rid), reply);
-                        t["runs"][i]["state"] = json!("waiting");
-                        save(&open(root)?, &t)?;
-                    }
+                    let (rid, reply) = (rid.to_string(), reply.to_string());
+                    tasks::update(root, tid, move |t| {
+                        let i = run_at(t, &rid)?;
+                        if t["runs"][i]["state"] != "ended" {
+                            note(t, "agent", Some(&rid), &reply);
+                            t["runs"][i]["state"] = json!("waiting");
+                        }
+                        Ok(())
+                    })?;
                     return Err(Failure("discussion reply".into(), REPLIED));
                 }
                 let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
@@ -1766,6 +2083,8 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
     }
     let images: Vec<PathBuf> = images.iter().filter_map(|name| image_path(root, tid, name).ok()).collect();
     packet["home"] = json!(scope::dir(&scope::top(root), root));
+    // The task's changes come from the scope projects' stores (D-77 point 4).
+    packet["changes"] = json!(open(root).map(|s| changes_of(&s, &packet).unwrap_or_default()).unwrap_or_default());
     let mut out = brief(&packet, kind);
     if resumed {
         out = out.replace(START, "Use the continuation context below.");
@@ -1885,7 +2204,7 @@ fn image_type(name: &str) -> Option<&'static str> {
     }
 }
 fn image_path(root: &Path, tid: &str, name: &str) -> Result<PathBuf, Failure> {
-    let p = task_path(root, tid)?.with_extension("").join("files").join(name);
+    let p = task_dir(root, tid)?.join("files").join(name);
     if image_type(name).is_none() || !p.exists() {
         return err("E7001", "unknown image");
     }
@@ -1898,7 +2217,7 @@ pub fn upload(root: &Path, tid: &str, bytes: &[u8]) -> Result<Value, Failure> {
     }
     let ext = image_kind(bytes).ok_or_else(|| Failure("E7001 only PNG, JPEG, GIF or WebP images".into(), 1))?;
     let name = format!("{}.{ext}", &sha256(bytes)[..16]);
-    let dir = task_path(root, tid)?.with_extension("").join("files");
+    let dir = task_dir(root, tid)?.join("files");
     fs::create_dir_all(&dir)?;
     fs::write(dir.join(&name), bytes)?;
     Ok(json!({"name":name,"url":format!("/tasks/{tid}/files/{name}")}))
@@ -1920,17 +2239,15 @@ fn note_fingerprint(note: &Value) -> String {
 }
 
 pub fn record_verification(s: &Store, tid: &str, command: &str, result: &Out) -> Result<(), Failure> {
-    let mut t = task(&s.root, tid)?;
-    if !t["verification"].is_object() {
-        t["verification"] = json!({});
-    }
+    let t = task(&s.root, tid)?;
     let summary = match result {
         Ok(out) => out,
         Err(e) => &e.0,
     };
-    t["verification"][command] =
+    let result =
         json!({"passed":result.is_ok(),"base":review_state(s, &t)?["context"],"summary":summary.chars().take(1000).collect::<String>()});
-    save(s, &t)
+    tasks::send(&scope::top(&s.root), json!({"kind":"verification","task":tid,"command":command,"result":result}))?;
+    Ok(())
 }
 /// An agent's prompt: what its run is for, how to start, ask and finish, then
 /// what it needs from the task (Spec 15 §6), as plain text.
@@ -1939,7 +2256,7 @@ const START: &str = "Start with `session start --task`, with the task's title an
 fn brief(t: &Value, kind: &str) -> String {
     let start = START;
     let ask = "If you need a decision from the human, ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer.";
-    let responses = "Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); keep the options concise.";
+    let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); keep the options concise.";
     let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `write`, `remove`, `format` and `run` are refused.";
     let role = match kind {
         "review" => format!(
@@ -2154,37 +2471,40 @@ fn context_tokens(u: &Value) -> u64 {
     }
 }
 fn finish(root: &Path, tid: &str, rid: &str, failure: Option<&str>) -> Result<(), Failure> {
-    let _guard = lock(root)?;
-    let s = open(root)?;
-    let mut t = task(root, tid)?;
     let w = flow(root)?;
-    let i = run_at(&t, rid)?;
-    let r = &mut t["runs"][i];
-    if r["state"] == "ended" {
-        return Ok(());
-    }
-    end_run(r, failure.unwrap_or("finished"));
-    // Only a failed work run moves the task; a failed review or investigation stays in its column.
-    let work = r["kind"] == "work";
-    if let Some(message) = failure {
-        note(&mut t, "solace", Some(rid), message);
-        flag(&mut t, message);
-        if work {
-            move_to(&w, &mut t, &w["events"]["failed"])?;
+    let (rid, failure) = (rid.to_string(), failure.map(String::from));
+    tasks::update(root, tid, move |t| {
+        let i = run_at(t, &rid)?;
+        let r = &mut t["runs"][i];
+        if r["state"] == "ended" {
+            return Ok(());
         }
-    }
-    save(&s, &t)
+        end_run(r, failure.as_deref().unwrap_or("finished"));
+        // Only a failed work run moves the task; a failed review or investigation stays in its column.
+        let work = r["kind"] == "work";
+        if let Some(message) = &failure {
+            note(t, "solace", Some(&rid), message);
+            flag(t, message);
+            if work {
+                move_to(&w, t, &w["events"]["failed"])?;
+            }
+        }
+        Ok(())
+    })
 }
 
 pub fn context() -> Option<(String, String)> {
     Some((env::var("SOLACE_TASK").ok()?, env::var("SOLACE_RUN").ok()?))
 }
-/// Waits until the run may act, holding its home's lock and, for a command in
-/// another project of its scope (`also`), that project's too (D-61).
+/// Waits until the run may act. A `task` command takes no lock: it sends the
+/// task server a message, and reads run state from the task file, which is
+/// replaced by rename (D-77 point 5). Any other command holds its home's lock
+/// and, for a command in another project of its scope (`also`), that
+/// project's too (D-61).
 pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: Option<&Path>) -> Result<Vec<fs::File>, Failure> {
     loop {
         let guard = if a.first() == Some(&"task") {
-            guard(root, vec!["tasks", tid], &json!({}))?
+            vec![]
         } else {
             scope::lock_all(&[root.to_path_buf(), also.unwrap_or(root).to_path_buf()])?
         };
@@ -2195,6 +2515,16 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: Option<&
         }
         if !t["paused_from"].is_null() {
             drop(guard);
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        // The run waits for an answer: an agent that went on without it (its ask was
+        // queued) holds still until the human replies, or stops if no server is there to hear.
+        if r["state"] == "waiting" && a.first() != Some(&"task") {
+            drop(guard);
+            if !tasks::serving(&scope::top(root)) {
+                return err("E7003", "the run waits for an answer and no board server is running; stop now");
+            }
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
@@ -2232,23 +2562,37 @@ pub fn task_command(
     options: &[String],
     guard: Vec<fs::File>,
 ) -> Out {
-    let mut t = task(&s.root, tid)?;
+    let t = task(&s.root, tid)?;
     let w = flow(&s.root)?;
     let i = run_at(&t, rid)?;
+    // A message written into `command` (`task note --text "..."`) arrives cut at
+    // its first line; refuse it so the agent resends it whole.
+    if matches!(a.get(1).copied(), Some("note" | "done" | "ask")) && a.get(2).is_some_and(|w| w.starts_with("--")) {
+        return err(
+            "E7015",
+            &format!("nothing was sent. Resend with `command` set to just `task {}` and the whole message in the `text` argument", a[1]),
+        );
+    }
     let text = if a.len() > 2 { a[2..].join(" ") } else { input()? };
     let discussing = t["runs"][i]["kind"] == "discuss";
+    let top = scope::top(&s.root);
+    // The agent sends the task server a message; the server applies it (D-77).
+    let mut m = json!({"kind":"agent","task":tid,"run":rid,"command":a.get(1),"text":text});
     match a.get(1).copied() {
         // A discussion's reply waits for the human's next message.
         Some("note") if discussing => {
-            note(&mut t, "agent", Some(rid), &text);
-            t["runs"][i]["state"] = json!("waiting");
-            save(s, &t)?;
+            let sent = tasks::send(&top, m)?;
             drop(guard);
+            if !tasks::applied(&top, &sent) {
+                return Ok(format!("{}\n", tasks::QUEUED));
+            }
+            if tasks::rejected(&top, &sent) {
+                return err("E7001", REJECTED);
+            }
             return wait_discussion(s, tid, rid);
         }
         Some("done" | "ask") if discussing => return err("E7010", "a discussion goes on until the human ends it; reply with task note"),
         Some("note") => {
-            note(&mut t, "agent", Some(rid), &text);
             if t["runs"][i]["kind"] == "review" {
                 let path = review_path(&s.root, tid, rid)?;
                 if let Ok(bytes) = fs::read(&path) {
@@ -2259,33 +2603,15 @@ pub fn task_command(
                             || checkpoint["instructions"] != current["instructions"]
                             || checkpoint["projects"] != current["projects"]
                     );
-                    if checkpoint["changed_during_review"] == true {
-                        note(
-                            &mut t,
-                            "solace",
-                            Some(rid),
-                            "Project or instructions changed during review. This feedback applies to the review-start checkpoint, not a verified finish-time state; recheck affected changes.",
-                        );
-                    }
+                    m["changed_during_review"] = checkpoint["changed_during_review"].clone();
                     write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap())?;
                 }
-                end_run(&mut t["runs"][i], "reviewed");
-                t["finished"] = json!({"kind":"review","outcome":"reviewed","time":now()});
             }
         }
         Some("done") => {
             if t["runs"][i]["kind"] == "review" {
                 return err("E7010", "reviews finish with task note");
             }
-            note(&mut t, "agent", Some(rid), &text);
-            if t["runs"][i]["kind"] == "investigate" {
-                // The report is the result; the task stays in planning.
-                end_run(&mut t["runs"][i], "reported");
-            } else {
-                end_run(&mut t["runs"][i], "finished");
-                move_to(&w, &mut t, &w["events"]["finished"])?;
-            }
-            t["finished"] = json!({"kind":t["runs"][i]["kind"],"outcome":t["runs"][i]["outcome"],"time":now()});
         }
         Some("ask") => {
             if !(2..=4).contains(&options.len()) {
@@ -2294,33 +2620,134 @@ pub fn task_command(
             if t["runs"][i]["kind"] == "review" {
                 return err("E7010", "review cannot move task with a question");
             }
-            let qid = unique_id();
-            t["questions"].as_array_mut().unwrap().push(json!({"id":qid,"text":text,"options":options}));
-            t["runs"][i]["state"] = json!("waiting");
-            flag(&mut t, "an agent asked a question");
-            // An investigation waits in planning; `investigate` continues it.
-            if t["runs"][i]["kind"] == "work" {
-                move_to(&w, &mut t, &w["events"]["asked"])?;
-            }
-            save(s, &t)?;
+            m["question"] = json!({"id":unique_id(),"text":text,"options":options});
+            message(&w, &mut t.clone(), &m)?;
+            let sent = tasks::send(&top, m)?;
             drop(guard);
-            return wait_reply(s, tid, i);
+            if !tasks::applied(&top, &sent) {
+                return Ok(format!("{}\n", tasks::QUEUED));
+            }
+            if tasks::rejected(&top, &sent) {
+                return err("E7001", REJECTED);
+            }
+            return wait_reply(s, tid, rid);
         }
         _ => return usage("task note | task ask | task done, with the text in `text`; task diff [--since-review] [name ...]"),
     }
-    if column(&w, &t)["final"] == true {
-        settle(s, &t)?;
-    }
-    save(s, &t)?;
-    Ok("Recorded.\n".into())
+    // The task as the server will have it: checked here, so a refusal reaches the agent.
+    let mut next = t.clone();
+    message(&w, &mut next, &m)?;
+    // Moving into a final column settles on the server, once it has applied the
+    // move (`tasks::settle_later`): the task may have changed since this copy.
+    tasks::send(&top, m)?;
+    Ok(if tasks::serving(&top) { "Recorded.\n".into() } else { format!("{}\n", tasks::QUEUED) })
 }
 
-/// Holds the agent's call until its answers arrive and the run continues.
-fn wait_reply(s: &Store, tid: &str, i: usize) -> Out {
+/// Applies a message from an agent or a command to task `t` (D-77 point 3):
+/// the same change on the server and, to check it first, in the sender.
+pub(super) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure> {
+    let rid = m["run"].as_str();
+    let text = m["text"].as_str().unwrap_or("");
+    match m["kind"].as_str().unwrap_or("") {
+        "agent" => {
+            let rid = rid.unwrap_or("");
+            let i = run_at(t, rid)?;
+            let kind = t["runs"][i]["kind"].as_str().unwrap_or("").to_string();
+            note(t, "agent", Some(rid), text);
+            // The run ended (stopped, cancelled, restarted) before this arrived: the
+            // note is kept, but it must not wake the run or move the task.
+            if t["runs"][i]["state"] == "ended" {
+                return Ok(());
+            }
+            match m["command"].as_str().unwrap_or("") {
+                "note" if kind == "discuss" => t["runs"][i]["state"] = json!("waiting"),
+                "note" if kind == "review" => {
+                    if m["changed_during_review"] == true {
+                        note(
+                            t,
+                            "solace",
+                            Some(rid),
+                            "Project or instructions changed during review. This feedback applies to the review-start checkpoint, not a verified finish-time state; recheck affected changes.",
+                        );
+                    }
+                    end_run(&mut t["runs"][i], "reviewed");
+                    t["finished"] = json!({"kind":"review","outcome":"reviewed","time":now()});
+                }
+                "note" => {}
+                "done" => {
+                    if kind == "investigate" {
+                        // The report is the result; the task stays in planning.
+                        end_run(&mut t["runs"][i], "reported");
+                    } else {
+                        end_run(&mut t["runs"][i], "finished");
+                        move_to(w, t, &w["events"]["finished"])?;
+                    }
+                    t["finished"] = json!({"kind":t["runs"][i]["kind"],"outcome":t["runs"][i]["outcome"],"time":now()});
+                }
+                "ask" => {
+                    t["questions"].as_array_mut().unwrap().push(m["question"].clone());
+                    t["runs"][i]["state"] = json!("waiting");
+                    flag(t, "an agent asked a question");
+                    // An investigation waits in planning; `investigate` continues it.
+                    if kind == "work" {
+                        move_to(w, t, &w["events"]["asked"])?;
+                    }
+                }
+                _ => return err("E7001", "unknown agent message"),
+            }
+        }
+        // The human replied to a discussion; its agent goes on.
+        "resume" => {
+            let i = run_at(t, rid.unwrap_or(""))?;
+            if t["runs"][i]["state"] == "waiting" {
+                t["runs"][i]["state"] = json!("running");
+            }
+        }
+        "settings" => {
+            let i = run_at(t, rid.unwrap_or(""))?;
+            if t["runs"][i]["state"] == "ended" {
+                let late = format!("A settings proposal arrived after the run ended and was not applied: {}", m["question"]["text"].as_str().unwrap_or(""));
+                note(t, "solace", rid, &late);
+                return Ok(());
+            }
+            t["questions"].as_array_mut().unwrap().push(m["question"].clone());
+            t["runs"][i]["state"] = json!("waiting");
+            flag(t, "an agent proposed a settings change");
+            move_to(w, t, &w["events"]["asked"])?;
+        }
+        // A changes message from before D-77 point 4: the board_touches rows are the
+        // source, so applying one adds nothing. One left in an old inbox is ignored.
+        "changes" => {}
+        "verification" => {
+            if !t["verification"].is_object() {
+                t["verification"] = json!({});
+            }
+            t["verification"][m["command"].as_str().unwrap_or("")] = m["result"].clone();
+        }
+        "note" => {
+            note(t, m["author"].as_str().unwrap_or("solace"), rid, text);
+            if let Some(reason) = m["flag"].as_str() {
+                flag(t, reason);
+            }
+        }
+        _ => return err("E7001", "unknown task message"),
+    }
+    Ok(())
+}
+
+/// Holds the agent's call until its answers arrive and the run continues. The
+/// caller has seen its message applied (`tasks::applied`), or the run would still
+/// read `running` here and get the previous reply.
+fn wait_reply(s: &Store, tid: &str, rid: &str) -> Out {
+    let top = scope::top(&s.root);
     loop {
         std::thread::sleep(Duration::from_millis(50));
-        let _guard = lock(&s.root)?;
+        // No server, so no answer is coming: return rather than wait forever.
+        if !tasks::serving(&top) {
+            return err("E7003", "the board server stopped while waiting");
+        }
         let t = task(&s.root, tid)?;
+        let i = run_at(&t, rid)?;
         if t["runs"][i]["state"] == "ended" {
             return err("E7003", "run ended while waiting");
         }
@@ -2332,10 +2759,14 @@ fn wait_reply(s: &Store, tid: &str, i: usize) -> Out {
 /// Holds a discussion's reply until the human writes again or ends it. Waiting
 /// doesn't count toward the task timeout.
 fn wait_discussion(s: &Store, tid: &str, rid: &str) -> Out {
+    let top = scope::top(&s.root);
     loop {
         std::thread::sleep(Duration::from_millis(50));
-        let _guard = lock(&s.root)?;
-        let mut t = task(&s.root, tid)?;
+        // No server, so the human can't reply: return rather than wait forever.
+        if !tasks::serving(&top) {
+            return err("E7003", "the board server stopped while waiting");
+        }
+        let t = task(&s.root, tid)?;
         let i = run_at(&t, rid)?;
         if t["runs"][i]["state"] == "ended" {
             return Ok("The discussion has ended. Stop now, without further calls.\n".into());
@@ -2345,8 +2776,7 @@ fn wait_discussion(s: &Store, tid: &str, rid: &str) -> Out {
         let new: Vec<&str> = notes[after..].iter().filter(|n| n["run"] == rid && n["author"] == "human").filter_map(|n| n["text"].as_str()).collect();
         if !new.is_empty() && t["paused_from"].is_null() {
             let reply = format!("The human replied:\n\n{}\n", new.join("\n\n"));
-            t["runs"][i]["state"] = json!("running");
-            save(s, &t)?;
+            tasks::send(&scope::top(&s.root), json!({"kind":"resume","task":tid,"run":rid}))?;
             return Ok(reply);
         }
     }
@@ -2380,23 +2810,29 @@ pub fn propose_settings(
     if base == proposed {
         return Ok(format!("{file} is unchanged.\n"));
     }
-    let mut t = task(&s.root, tid)?;
+    let t = task(&s.root, tid)?;
     let w = flow(&s.root)?;
-    let i = run_at(&t, rid)?;
     let top = scope::top(&s.root);
     let dir = scope::dir(&top, project);
     // The file's path from the root folder, so a board of several projects says which one.
     let name = top.file_name().map(Path::new).unwrap_or(Path::new("")).join(project.strip_prefix(&top).unwrap_or(Path::new(""))).join(file);
     let name = name.to_string_lossy();
-    t["questions"].as_array_mut().unwrap().push(json!({"id":unique_id(),"text":format!("Change {name}"),"options":["Approve","Reject"],
-        "settings":{"file":file,"project":dir,"base":base,"proposed":proposed}}));
-    t["runs"][i]["state"] = json!("waiting");
-    flag(&mut t, "an agent proposed a settings change");
-    move_to(&w, &mut t, &w["events"]["asked"])?;
-    save(s, &t)?;
+    let question = json!({"id":unique_id(),"text":format!("Change {name}"),"options":["Approve","Reject"],
+        "settings":{"file":file,"project":dir,"base":base,"proposed":proposed}});
+    let m = json!({"kind":"settings","task":tid,"run":rid,"question":question});
+    message(&w, &mut t.clone(), &m)?;
+    let sent = tasks::send(&top, m)?;
     drop(guard);
-    wait_reply(s, tid, i)
+    if !tasks::applied(&top, &sent) {
+        return Ok(format!("{}\n", tasks::QUEUED));
+    }
+    if tasks::rejected(&top, &sent) {
+        return err("E7001", REJECTED);
+    }
+    wait_reply(s, tid, rid)
 }
+/// What an agent is told when the task server set its message aside.
+const REJECTED: &str = "the board could not apply this message; it was set aside in .solace/tasks/inbox/failed, so nothing was recorded";
 /// Applies an approved settings question, unless the file changed since.
 fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
     let file = q["settings"]["file"].as_str().unwrap_or("solace.toml").to_string();
@@ -2418,10 +2854,10 @@ fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
 
 /// Ends runs a previous server left going, as after a restart.
 fn recover_project(root: &Path) -> Result<(), Failure> {
-    let _guard = lock(root)?;
+    let guard = lock(root)?;
     let s = open(root)?;
     let w = flow(root)?;
-    lockdown::recover(root)?;
+    lockdown::recover(root, &s, std::slice::from_ref(&guard))?;
     event(&s, json!({"workflow":w}))?;
     for mut t in tasks(root)? {
         if active(&t) {
@@ -2431,7 +2867,7 @@ fn recover_project(root: &Path) -> Result<(), Failure> {
             if work {
                 move_to(&w, &mut t, &w["events"]["failed"])?;
             }
-            save(&s, &t)?;
+            tasks::put(&s, &t)?;
         }
     }
     Ok(())
@@ -2478,6 +2914,7 @@ impl Board {
             let name = if dir == "." { root.display().to_string() } else { dir.to_string() };
             return fail(format!("{name} is already served by another `solace serve`; stop that one first."));
         };
+        adopt_tasks(&scope::top(root), root)?;
         recover_project(root)?;
         held.insert(root.to_path_buf(), f);
         Ok(())
@@ -2704,6 +3141,9 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
     for (dir, root) in board.projects()? {
         board.claim(&dir, &root)?;
     }
+    // Once every project's tasks are in the root's store, the task server
+    // applies what its inbox holds and takes over (D-77).
+    tasks::start(&board.top)?;
     // A migration's folder is held too, so a shell can't move it from under the board.
     let _migration = match migrate::load(&board.top) {
         Some(_) if !board.held.lock().unwrap().contains_key(&board.top) => {
@@ -2861,52 +3301,134 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
 /// The `/events` stream: one project's events, or in a workspace's merged
 /// stream every project's, each naming its `project`, with a `{projects}`
 /// event when the list changes. A merged stream's event id holds each
-/// project's position as JSON (D-57).
+/// project's position as JSON (D-57). A new stream starts from each project's
+/// workflow and tasks as they are, then follows the changes (D-78).
 struct Events {
+    /// Whether the snapshot a new stream starts with is still to be sent.
+    fresh: bool,
     board: std::sync::Arc<Board>,
     merged: bool,
-    /// `(dir, root, seq)`: each project's position.
+    /// The position in the task log, shared by every project (D-77).
+    tasks: i64,
+    /// `(dir, root, seq)`: each project's position in its workflow events.
     streams: Vec<(String, PathBuf, i64)>,
     /// Whether this connection has sent `ready`, the end of what it missed.
     caught_up: bool,
     bytes: std::io::Cursor<Vec<u8>>,
 }
 impl Events {
+    /// An event id is `{"tasks": n, dir: seq, ...}`; any other starts from the beginning.
     fn new(board: std::sync::Arc<Board>, root: Option<PathBuf>, last: Option<&str>) -> Events {
+        let seen: HashMap<String, i64> = last.and_then(|l| serde_json::from_str(l).ok()).unwrap_or_default();
+        let at = |d: &str| seen.get(d).copied().unwrap_or(0);
         let (merged, streams) = match root {
-            Some(root) => (false, vec![(String::new(), root, last.and_then(|l| l.parse().ok()).unwrap_or(0))]),
-            None => {
-                let seen: HashMap<String, i64> = last.and_then(|l| serde_json::from_str(l).ok()).unwrap_or_default();
-                let streams = board.projects().unwrap_or_default().into_iter().map(|(d, r)| {
-                    let seq = seen.get(&d).copied().unwrap_or(0);
-                    (d, r, seq)
-                });
-                (true, streams.collect())
+            Some(root) => {
+                let d = scope::dir(&board.top, &root);
+                (false, vec![(d.clone(), root, at(&d))])
             }
+            None => (true, board.projects().unwrap_or_default().into_iter().map(|(d, r)| (d.clone(), r, at(&d))).collect()),
         };
-        Events { board, merged, streams, caught_up: false, bytes: Default::default() }
+        Events { fresh: seen.is_empty(), board, merged, tasks: at("tasks"), streams, caught_up: false, bytes: Default::default() }
+    }
+    /// What a new stream starts from: the log positions first, then the files,
+    /// so a change made in between is seen again as an event, never missed.
+    fn snapshot(&mut self) -> std::io::Result<String> {
+        let top = self.board.top.clone();
+        self.tasks = if store_dir(&top).is_dir() {
+            let db = tasks::events(&top).map_err(|e| std::io::Error::other(e.0))?;
+            db.query_row("SELECT COALESCE(MAX(seq),0) FROM events", [], |r| r.get(0)).map_err(std::io::Error::other)?
+        } else {
+            0
+        };
+        for stream in &mut self.streams {
+            stream.2 = Connection::open(stream.1.join(".solace/store.db"))
+                .and_then(|db| {
+                    db.busy_timeout(Duration::from_secs(10))?;
+                    db.query_row("SELECT COALESCE(MAX(seq),0) FROM board_events", [], |row| row.get(0))
+                })
+                .unwrap_or(0);
+        }
+        Ok(self.state_of(&(0..self.streams.len()).collect::<Vec<_>>()))
+    }
+    /// The workflow and tasks of the streams at `which`, as events.
+    fn state_of(&self, which: &[usize]) -> String {
+        let (id, merged) = (self.id(), self.merged);
+        let mut out = String::new();
+        for &i in which {
+            let (dir, root, _) = &self.streams[i];
+            let mut add = |mut v: Value| {
+                if merged {
+                    v["project"] = json!(dir);
+                }
+                out += &format!("id: {id}\ndata: {v}\n\n");
+            };
+            if let Ok(w) = flow(root) {
+                add(json!({"workflow":w}));
+            }
+            if let Ok(ts) = listed(root) {
+                add(json!({"tasks":ts}));
+            }
+        }
+        out
     }
     fn id(&self) -> String {
-        json!(self.streams.iter().map(|(d, _, s)| (d.clone(), json!(s))).collect::<serde_json::Map<_, _>>()).to_string()
+        let mut id: serde_json::Map<_, _> = self.streams.iter().map(|(d, _, s)| (d.clone(), json!(s))).collect();
+        id.insert("tasks".into(), json!(self.tasks));
+        json!(id).to_string()
+    }
+    /// The next task event this stream shows, past those of other projects.
+    fn next_task(&mut self) -> std::io::Result<Option<String>> {
+        if !store_dir(&self.board.top).is_dir() {
+            return Ok(None);
+        }
+        let db = tasks::events(&self.board.top).map_err(|e| std::io::Error::other(e.0))?;
+        loop {
+            let row = db
+                .query_row("SELECT seq,project,data FROM events WHERE seq>? ORDER BY seq LIMIT 1", [self.tasks], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+                })
+                .optional()
+                .map_err(std::io::Error::other)?;
+            let Some((seq, project, data)) = row else { return Ok(None) };
+            self.tasks = seq;
+            if !self.streams.iter().any(|s| s.0 == project) {
+                continue;
+            }
+            let mut v: Value = serde_json::from_str(&data).map_err(std::io::Error::other)?;
+            if self.merged {
+                v["project"] = json!(project);
+            }
+            return Ok(Some(format!("id: {}\ndata: {v}\n\n", self.id())));
+        }
     }
     /// Follows a change to the workspace's list: new projects start at their
     /// latest event, since the board loads them whole.
-    fn members_changed(&mut self) -> std::io::Result<bool> {
+    fn members_changed(&mut self) -> std::io::Result<Option<String>> {
         let now = self.board.projects().map_err(|e| std::io::Error::other(e.0))?;
         if now.iter().map(|p| &p.0).eq(self.streams.iter().map(|s| &s.0)) {
-            return Ok(false);
+            return Ok(None);
         }
         let old = std::mem::take(&mut self.streams);
+        let mut added = vec![];
         for (d, r) in now {
             let seq = match old.iter().find(|s| s.0 == d) {
                 Some(s) => s.2,
-                None => Connection::open(r.join(".solace/store.db"))
-                    .and_then(|db| db.query_row("SELECT COALESCE(MAX(seq),0) FROM board_events", [], |row| row.get(0)))
-                    .unwrap_or(0),
+                None => {
+                    added.push(self.streams.len());
+                    Connection::open(r.join(".solace/store.db"))
+                    .and_then(|db| {
+                        db.busy_timeout(Duration::from_secs(10))?;
+                        db.query_row("SELECT COALESCE(MAX(seq),0) FROM board_events", [], |row| row.get(0))
+                    })
+                    .unwrap_or(0)
+                }
             };
             self.streams.push((d, r, seq));
         }
-        Ok(true)
+        // The new projects' state follows the list: their positions were read before their files.
+        let dirs: Vec<&String> = self.streams.iter().map(|s| &s.0).collect();
+        let list = format!("id: {}\ndata: {}\n\n", self.id(), json!({"projects":dirs}));
+        Ok(Some(list + &self.state_of(&added)))
     }
 }
 impl Read for Events {
@@ -2918,10 +3440,19 @@ impl Read for Events {
         if n > 0 {
             return Ok(n);
         }
+        if self.fresh {
+            self.fresh = false;
+            let text = self.snapshot()?;
+            if !text.is_empty() {
+                self.bytes = std::io::Cursor::new(text.into_bytes());
+                return self.bytes.read(out);
+            }
+        }
         for _ in 0..10 {
-            if self.merged && self.members_changed()? {
-                let dirs: Vec<&String> = self.streams.iter().map(|s| &s.0).collect();
-                self.bytes = std::io::Cursor::new(format!("id: {}\ndata: {}\n\n", self.id(), json!({"projects":dirs})).into_bytes());
+            if self.merged
+                && let Some(text) = self.members_changed()?
+            {
+                self.bytes = std::io::Cursor::new(text.into_bytes());
                 return self.bytes.read(out);
             }
             for i in 0..self.streams.len() {
@@ -2929,6 +3460,7 @@ impl Read for Events {
                 // Opened on each poll, not kept: a kept connection would follow a store
                 // that adopting or undoing a migration moved away.
                 let db = Connection::open(root.join(".solace/store.db")).map_err(std::io::Error::other)?;
+                db.busy_timeout(Duration::from_secs(10)).map_err(std::io::Error::other)?;
                 let row = db
                     .query_row("SELECT seq,data FROM board_events WHERE seq>? ORDER BY seq LIMIT 1", [*seq], |r| {
                         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
@@ -2938,16 +3470,18 @@ impl Read for Events {
                 if let Some((seq, data)) = row {
                     let dir = dir.clone();
                     self.streams[i].2 = seq;
-                    let text = if self.merged {
-                        let mut v: Value = serde_json::from_str(&data).map_err(std::io::Error::other)?;
+                    let mut v: Value = serde_json::from_str(&data).map_err(std::io::Error::other)?;
+                    if self.merged {
                         v["project"] = json!(dir);
-                        format!("id: {}\ndata: {v}\n\n", self.id())
-                    } else {
-                        format!("id: {seq}\ndata: {data}\n\n")
-                    };
-                    self.bytes = std::io::Cursor::new(text.into_bytes());
+                    }
+                    self.bytes = std::io::Cursor::new(format!("id: {}\ndata: {v}\n\n", self.id()).into_bytes());
                     return self.bytes.read(out);
                 }
+            }
+            // Workflow events first, so a replay draws the columns before their tasks.
+            if let Some(text) = self.next_task()? {
+                self.bytes = std::io::Cursor::new(text.into_bytes());
+                return self.bytes.read(out);
             }
             if !self.caught_up {
                 self.caught_up = true;
@@ -2971,9 +3505,23 @@ mod tests {
         let s = open(&p.root).unwrap();
         let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Supervise"})).unwrap();
         t["runs"] = json!([run]);
-        save(&s, &t).unwrap();
+        tasks::put(&s, &t).unwrap();
         let child = Command::new("sleep").arg("45").process_group(0).spawn().unwrap();
         (p, t["id"].as_str().unwrap().to_string(), child)
+    }
+
+    /// D-78: the file is the record, so a log that can't take the change doesn't fail it.
+    #[test]
+    fn a_task_is_written_when_the_log_cannot_take_it() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Logged"})).unwrap();
+        let log = store_dir(&scope::top(&s.root)).join("events.db");
+        fs::remove_file(&log).unwrap();
+        fs::create_dir(&log).unwrap();
+        t["title"] = json!("Edited");
+        tasks::put(&s, &t).unwrap();
+        assert_eq!(task(&s.root, t["id"].as_str().unwrap()).unwrap()["title"], "Edited");
     }
 
     /// A finished agent that hangs is killed once the grace period passes, not before.
@@ -3026,7 +3574,7 @@ mod tests {
         let s = open(&p.root).unwrap();
         let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Look"})).unwrap();
         t["runs"] = json!([{"id":"r1","kind":"review","state":"running"},{"id":"r2","kind":"work","state":"ended"}]);
-        save(&s, &t).unwrap();
+        tasks::put(&s, &t).unwrap();
         let tid = t["id"].as_str().unwrap();
         let guard = |rid: &str, a: &[&str]| agent_guard(&s.root, tid, rid, a, None).map(drop).map_err(|e| e.0);
         assert!(guard("r1", &["view", "app"]).is_ok() && guard("r1", &["build"]).is_ok());
@@ -3043,6 +3591,19 @@ mod tests {
         assert!(guard("r1", &["migrate", "--yes"]).unwrap_err().contains("host command"));
         assert!(guard("r2", &["view", "app"]).unwrap_err().contains("run ended"));
         assert!(guard("r9", &["view", "app"]).unwrap_err().starts_with("E7003 unknown run"));
+        // A `task` command takes no project lock (D-77 point 5); any other waits for it.
+        let held = lock(&s.root).unwrap();
+        let waits = |a: &'static [&'static str]| {
+            let (root, tid) = (s.root.clone(), tid.to_string());
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || drop(tx.send(agent_guard(&root, &tid, "r1", a, None).map(|g| g.len()).map_err(|e| e.0))));
+            rx
+        };
+        assert_eq!(waits(&["task", "note", "x"]).recv_timeout(Duration::from_secs(1)).unwrap(), Ok(0));
+        let view = waits(&["view", "app"]);
+        assert!(view.recv_timeout(Duration::from_millis(300)).is_err());
+        drop(held);
+        assert_eq!(view.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(1));
     }
 
     /// A recorded file change stops being reviewable once the file is unwatched, and symbols always are.
@@ -3056,6 +3617,12 @@ mod tests {
         assert!(!reviewable(&s.root, "file:a.txt"));
     }
 
+    /// Records a work run's change, as a command does. The task lists its changes
+    /// from the committed rows (D-77 point 4), so nothing is written to the task.
+    fn record_listed(s: &Store, tid: &str, before: &Value, after: &Value) {
+        record(s, tid, "work", before, after).unwrap();
+    }
+
     #[test]
     fn review_delta_keeps_module_headers_budget_and_completed_baseline() {
         let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
@@ -3063,10 +3630,10 @@ mod tests {
         let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Review headers"})).unwrap();
         let tid = t["id"].as_str().unwrap().to_string();
         t["runs"] = json!([{"id":"work","kind":"work","state":"ended"}]);
-        save(&s, &t).unwrap();
+        tasks::put(&s, &t).unwrap();
         let before = snapshot(&s).unwrap();
         s.db.execute("UPDATE modules SET header='//// Reviewed header' WHERE path='app'", []).unwrap();
-        record(&s, &s, &tid, "work", &before, &snapshot(&s).unwrap()).unwrap();
+        record_listed(&s, &tid, &before, &snapshot(&s).unwrap());
         t = task(&s.root, &tid).unwrap();
         t["runs"].as_array_mut().unwrap().push(json!({"id":"review","kind":"review","state":"ended","outcome":"reviewed"}));
         let mut checkpoint = review_state(&s, &t).unwrap();
@@ -3077,11 +3644,11 @@ mod tests {
         write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
         // A later interrupted run must not displace the completed review.
         t["runs"].as_array_mut().unwrap().push(json!({"id":"interrupted","kind":"review","state":"ended","outcome":"interrupted"}));
-        save(&s, &t).unwrap();
+        tasks::put(&s, &t).unwrap();
         assert!(task_diff(&s, &tid, &["--since-review"], 1000).unwrap().contains("No task entity changes"));
         s.db.execute("UPDATE modules SET header='//// Repaired header' WHERE path='app'", []).unwrap();
         fs::write(s.root.join("later.txt"), "later").unwrap();
-        record(&s, &s, &tid, "work", &json!({"file:later.txt":null}), &json!({"file:later.txt":b"later".to_vec()})).unwrap();
+        record_listed(&s, &tid, &json!({"file:later.txt":null}), &json!({"file:later.txt":b"later".to_vec()}));
         let delta = task_diff(&s, &tid, &["--since-review"], 1).unwrap();
         assert!(delta.contains("Since completed review review"));
         assert!(delta.contains("- //// Reviewed header") && delta.contains("+ //// Repaired header"));
@@ -3098,19 +3665,188 @@ mod tests {
         let s = open(&p.root).unwrap();
         let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Shapes"})).unwrap();
         t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
-        save(&s, &t).unwrap();
+        tasks::put(&s, &t).unwrap();
         let tid = t["id"].as_str().unwrap();
         let before = snapshot(&s).unwrap();
         s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-        record(&s, &s, tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+        record(&s, tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
         assert!(s.root.join("src/geo.gleam").exists());
         let mut t = task(&s.root, tid).unwrap();
         end_runs(&mut t, "finished");
-        save(&s, &t).unwrap();
+        tasks::put(&s, &t).unwrap();
         api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
         assert!(!s.root.join("src/geo.gleam").exists());
         assert!(s.resolve_module(&s.index().unwrap(), "geo").is_none());
         assert_eq!(snapshot(&s).unwrap(), before);
+    }
+
+    /// D-77 point 4: a `changes` message left in an old inbox adds nothing. The
+    /// board_touches rows are the task's changes, so a revert followed by the
+    /// pending message leaves the task with none.
+    #[test]
+    fn a_pending_changes_message_adds_nothing_after_a_revert() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
+        t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
+        tasks::put(&s, &t).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let before = snapshot(&s).unwrap();
+        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
+        record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+        assert!(!changes_of(&s, &task(&s.root, &tid).unwrap()).unwrap().is_empty());
+        // A changes message from before D-77 point 4 waits in the inbox.
+        let top = scope::top(&s.root);
+        let inbox = store_dir(&top).join("inbox");
+        fs::create_dir_all(&inbox).unwrap();
+        let id = "0000000000000000000000000001";
+        let msg = json!({"id": id, "kind": "changes", "task": tid, "run": "r1",
+            "changes": [{"entity": "symbol:1", "name": "geo.side", "run": "r1"}]});
+        fs::write(inbox.join(format!("{id}.json")), msg.to_string().as_bytes()).unwrap();
+        // Cancel reverts the task: its rows go, so it has no changes.
+        end_runs(&mut t, "finished");
+        tasks::put(&s, &t).unwrap();
+        api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap();
+        assert!(changes_of(&s, &task(&s.root, &tid).unwrap()).unwrap().is_empty());
+        // Applying the pending message adds nothing.
+        tasks::drain(&top);
+        let t = task(&s.root, &tid).unwrap();
+        assert_eq!(t["inbox"], json!(id), "the pending message was applied");
+        assert!(!inbox.join(format!("{id}.json")).exists(), "the inbox is drained");
+        assert!(changes_of(&s, &t).unwrap().is_empty());
+        assert!(t["changes"].is_null(), "{}", t);
+    }
+
+    /// D-77 point 5: only a change to code takes the project locks.
+    #[test]
+    fn needs_lock_only_for_changes_to_code() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let needs = |rest: &[&str], body: Value| {
+            let parts: Vec<&str> = ["tasks", tid.as_str()].into_iter().chain(rest.iter().copied()).collect();
+            needs_lock(&s.root, &parts, &body).unwrap()
+        };
+        assert!(!needs_lock(&s.root, &["tasks"], &json!({"title": "x"})).unwrap());
+        assert!(!needs(&["notes"], json!({"text": "x"})));
+        assert!(!needs(&["actions"], json!({"action": "stop"})));
+        assert!(!needs(&["actions"], json!({"action": "cancel"})), "a task that never had changes");
+        t["questions"] = json!([{"id": "q1", "options": ["Approve", "Reject"], "answer": null,
+            "settings": {"file": "solace.toml", "base": "", "proposed": ""}}]);
+        t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
+        tasks::put(&s, &t).unwrap();
+        assert!(needs(&["questions", "q1"], json!({"option": "Approve"})));
+        assert!(!needs(&["questions", "q1"], json!({"option": "Reject"})));
+        assert!(needs(&["actions"], json!({"action": "cancel"})), "a work run may be mid-command");
+        let before = snapshot(&s).unwrap();
+        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
+        record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+        assert!(needs(&["actions"], json!({"action": "cancel"})));
+        assert!(!needs(&["actions"], json!({"action": "stop"})));
+    }
+
+    /// A run stopped mid-write leaves a record and no rows; cancelling must still lock and undo.
+    #[test]
+    fn a_pending_record_alone_needs_the_locks() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        let cancel = |tid: &str| needs_lock(&s.root, &["tasks", tid, "actions"], &json!({"action": "cancel"})).unwrap();
+        assert!(!cancel(tid));
+        lockdown::mark(&s.root, "other", "r9").unwrap();
+        assert!(!cancel(tid), "another task's record is not this task's");
+        lockdown::mark(&s.root, tid, "r1").unwrap();
+        assert!(cancel(tid));
+    }
+
+    /// Stop then Cancel while a write was under way: the record is adopted under the
+    /// locks first, so cancelling restores the file instead of leaving it to recovery.
+    #[test]
+    fn cancel_undoes_a_write_a_stopped_run_left_pending() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("notes.txt", "old\n")]);
+        let s = open(&p.root).unwrap();
+        let t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        lockdown::mark(&s.root, &tid, "r1").unwrap();
+        fs::write(s.root.join(".solace/pending/notes.json"), json!({"task": tid, "run": "r1", "path": "notes.txt", "bytes": b"old\n".to_vec()}).to_string()).unwrap();
+        fs::write(s.root.join("notes.txt"), "new\n").unwrap();
+        api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap();
+        assert_eq!(fs::read_to_string(s.root.join("notes.txt")).unwrap(), "old\n");
+        assert!(!lockdown::pending_for(&s.root, &tid));
+    }
+
+    /// A workflow whose `finished` event targets a final column, so `task done` settles.
+    const DONE_IS_FINAL: &str = "[board]\nevents = { asked = \"todo\", finished = \"done\", failed = \"todo\" }\n[[board.columns]]\nid = \"todo\"\nactions = [\"cancel\"]\n[[board.columns]]\nid = \"done\"\nfinal = true\n[[board.columns]]\nid = \"gone\"\nfinal = true\n[board.actions]\ncancel = { revert = true, to = \"gone\" }\n";
+
+    /// A `done` from a live run, applied by the server, settles: the move and the settle both happen.
+    #[test]
+    fn a_done_applied_by_the_server_settles() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", DONE_IS_FINAL)]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
+        tasks::put(&s, &t).unwrap();
+        let before = snapshot(&s).unwrap();
+        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
+        record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+        let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+        assert!(has_before());
+        inbox_file(&s.root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"done"}));
+        tasks::drain(&s.root);
+        assert_eq!(task(&s.root, &tid).unwrap()["column"], "done");
+        assert!(!has_before(), "applying the move settled the task");
+    }
+
+    /// `serve` settles a task left final with undo records (a crash between move and settle).
+    #[test]
+    fn resettle_settles_a_final_task_left_unsettled() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", DONE_IS_FINAL)]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let before = snapshot(&s).unwrap();
+        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
+        record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+        let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+        resettle(&s.root);
+        assert!(has_before(), "a task not in a final column is left alone");
+        t["column"] = json!("done");
+        tasks::put(&s, &t).unwrap();
+        resettle(&s.root);
+        assert!(!has_before());
+    }
+
+    /// `task done` from a run that ended before the server applied it neither moves
+    /// the task nor settles it: its undo records stay.
+    #[test]
+    fn a_late_done_does_not_settle_and_a_real_one_does() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        t["runs"] = json!([{"id": "r1", "kind": "work", "state": "ended", "outcome": "stopped"}]);
+        tasks::put(&s, &t).unwrap();
+        let before = snapshot(&s).unwrap();
+        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
+        record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+        let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+        assert!(has_before());
+        inbox_file(&s.root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"late"}));
+        tasks::drain(&s.root);
+        assert!(has_before(), "the late done must not drop the undo records");
+        // The server itself moving the task into a final column settles it.
+        let w = flow(&s.root).unwrap();
+        let last = w["columns"].as_array().unwrap().iter().find(|c| c["final"] == true).unwrap()["id"].clone();
+        tasks::update(&s.root, &tid, move |t| {
+            t["column"] = last;
+            Ok(())
+        })
+        .unwrap();
+        settle_final(&s.root, &tid).unwrap();
+        assert!(!has_before());
     }
 
     #[test]
@@ -3131,13 +3867,178 @@ mod tests {
         assert_eq!(found, ["0123456789abcdef.png"]);
     }
 
+    /// A message for a run that has ended keeps its note and changes nothing else.
+    #[test]
+    fn a_late_agent_message_does_not_wake_an_ended_run() {
+        let w = workflow(&toml::Value::Table(Default::default())).unwrap();
+        let mut t = new_task("T", "", &w["columns"][0]["id"], 1.);
+        t["runs"] = json!([{"id":"r1","kind":"work","state":"ended","outcome":"stopped"}]);
+        let before = t["column"].clone();
+        for command in ["ask", "done", "note"] {
+            let m = json!({"kind":"agent","task":"t","run":"r1","command":command,"text":"late","question":{"id":"q","text":"?","options":["a","b"]}});
+            message(&w, &mut t, &m).unwrap();
+        }
+        assert_eq!(t["runs"][0]["state"], "ended");
+        assert_eq!(t["column"], before);
+        assert!(t["questions"].as_array().unwrap().is_empty());
+        assert_eq!(t["notes"].as_array().unwrap().len(), 3);
+    }
+    fn inbox_file(root: &Path, id: &str, mut m: Value) {
+        let dir = store_dir(root).join("inbox");
+        fs::create_dir_all(&dir).unwrap();
+        m["id"] = json!(id);
+        fs::write(dir.join(format!("{id}.json")), m.to_string()).unwrap();
+    }
+    /// A message with an older id that lands after a newer one is still applied.
+    #[test]
+    fn an_older_inbox_message_arriving_late_is_applied() {
+        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
+        adopt_tasks(&root, &root).unwrap();
+        inbox_file(&root, "0002", json!({"kind":"note","task":"t1","author":"solace","text":"newer"}));
+        tasks::drain(&root);
+        inbox_file(&root, "0001", json!({"kind":"note","task":"t1","author":"solace","text":"older"}));
+        tasks::drain(&root);
+        let texts: Vec<String> = task(&root, "t1").unwrap()["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap().to_string()).collect();
+        assert_eq!(texts, ["newer", "older"]);
+        // The same message again (a replay after a crash) is skipped.
+        inbox_file(&root, "0001", json!({"kind":"note","task":"t1","author":"solace","text":"older"}));
+        tasks::drain(&root);
+        assert_eq!(task(&root, "t1").unwrap()["notes"].as_array().unwrap().len(), 2);
+    }
+    /// A message that can't be applied, or that panics, is set aside and the task is told.
+    #[test]
+    fn a_message_that_fails_or_panics_is_set_aside() {
+        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
+        adopt_tasks(&root, &root).unwrap();
+        // No such run: refused.
+        inbox_file(&root, "0001", json!({"kind":"agent","task":"t1","run":"nope","command":"done","text":"x"}));
+        // A task file that lacks its lists (written by hand): applying it panics.
+        fs::write(store_dir(&root).join("t2.json"), r#"{"id":"t2","column":"backlog","home":"."}"#).unwrap();
+        inbox_file(&root, "0002", json!({"kind":"agent","task":"t2","run":"r","command":"note","text":"x"}));
+        tasks::drain(&root);
+        let inbox = store_dir(&root).join("inbox");
+        assert!(inbox.join("failed/0001.json").exists() && inbox.join("failed/0002.json").exists());
+        assert!(!inbox.join("0001.json").exists() && !inbox.join("0002.json").exists());
+        assert!(tasks::rejected(&root, &inbox.join("0001.json")));
+        let t = task(&root, "t1").unwrap();
+        assert!(t["notes"][0]["text"].as_str().unwrap().contains("set aside"));
+        assert_eq!(t["attention"]["reason"], "a task message was set aside");
+    }
+    /// A sender waits for as long as a server lives, not for a fixed time, and
+    /// gives up at once when the server stops.
+    #[test]
+    fn applied_waits_while_a_server_holds_the_lock() {
+        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
+        adopt_tasks(&root, &root).unwrap();
+        let held = try_lock_file(&store_dir(&root).join("server.lock")).unwrap().unwrap();
+        let sent = tasks::send(&root, json!({"kind":"note","task":"t1","text":"x"})).unwrap();
+        let (gone, start) = (sent.clone(), std::time::Instant::now());
+        let remover = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            fs::remove_file(gone).unwrap();
+        });
+        assert!(tasks::applied(&root, &sent));
+        assert!(start.elapsed() >= Duration::from_millis(350));
+        remover.join().unwrap();
+        // The server stops with the message still there: false, and the message stays.
+        let sent = tasks::send(&root, json!({"kind":"note","task":"t1","text":"y"})).unwrap();
+        drop(held);
+        assert!(!tasks::applied(&root, &sent) && sent.exists());
+    }
+    /// A message delivered where no server runs lands after the earlier ones in
+    /// the inbox: a create a stopped server left must not be sent again.
+    #[test]
+    fn deliver_applies_the_inbox_before_its_message() {
+        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
+        adopt_tasks(&root, &root).unwrap();
+        let mut t = new_task("Late", "", &json!("backlog"), 1.);
+        t["home"] = json!(".");
+        let tid = t["id"].as_str().unwrap().to_string();
+        inbox_file(&root, "0001", json!({"kind":"create","new":t}));
+        tasks::deliver(&root, json!({"kind":"note","task":tid,"author":"solace","text":"hi"})).unwrap();
+        assert_eq!(task(&root, &tid).unwrap()["notes"].as_array().unwrap().len(), 1);
+        assert!(!store_dir(&root).join("inbox/0001.json").exists());
+    }
+    /// A crash between writing the store copy and removing the old file leaves
+    /// both; the move finishes. The same id under another project is an error.
+    #[test]
+    fn adopt_finishes_an_interrupted_move_and_refuses_a_reused_id() {
+        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
+        fs::create_dir_all(store_dir(&root)).unwrap();
+        fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"backlog","home":".","runs":[],"notes":[],"questions":[],"links":[]}"#).unwrap();
+        adopt_tasks(&root, &root).unwrap();
+        assert!(!root.join(".solace/board/t1.json").exists());
+        fs::create_dir_all(root.join(".solace/board")).unwrap();
+        fs::write(root.join(".solace/board/t1.json"), r#"{"id":"t1","column":"backlog"}"#).unwrap();
+        fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"backlog","home":"other"}"#).unwrap();
+        let e = adopt_tasks(&root, &root).unwrap_err();
+        assert!(e.0.contains("used twice") && e.0.contains("t1"));
+        assert!(root.join(".solace/board/t1.json").exists());
+    }
+    /// One unreadable task file doesn't hide the others.
+    #[test]
+    fn all_tasks_skips_an_unreadable_file() {
+        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
+        adopt_tasks(&root, &root).unwrap();
+        fs::write(store_dir(&root).join("empty.json"), "").unwrap();
+        let all = all_tasks(&root).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0]["id"], "t1");
+    }
+    /// A run that waits for an answer lets no command through: it holds still
+    /// while a server runs and stops when none does.
+    #[test]
+    fn agent_guard_holds_a_run_that_waits() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Ask"})).unwrap();
+        t["runs"] = json!([{"id":"r1","kind":"work","state":"waiting"}]);
+        tasks::put(&s, &t).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let guard = |a: &'static [&'static str]| {
+            let (root, tid) = (s.root.clone(), tid.clone());
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || drop(tx.send(agent_guard(&root, &tid, "r1", a, None).map(drop).map_err(|e| e.0))));
+            rx
+        };
+        // No server: stop.
+        assert!(guard(&["view", "app"]).recv_timeout(Duration::from_secs(2)).unwrap().unwrap_err().contains("waits for an answer"));
+        // A `task` command is not held.
+        assert!(guard(&["task", "note", "x"]).recv_timeout(Duration::from_secs(2)).unwrap().is_ok());
+        // A server runs: the command waits until the run is answered.
+        let _server = try_lock_file(&store_dir(&s.root).join("server.lock")).unwrap().unwrap();
+        let view = guard(&["view", "app"]);
+        assert!(view.recv_timeout(Duration::from_millis(300)).is_err());
+        t["runs"][0]["state"] = json!("running");
+        tasks::put(&s, &t).unwrap();
+        assert!(view.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
+    }
     #[test]
     fn tasks_saved_in_done_load_as_complete() {
         let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"done"}"#)]);
+        adopt_tasks(&root, &root).unwrap();
         assert_eq!(task(&root, "t1").unwrap()["column"], "complete");
         // A custom workflow that still has a `done` column keeps it.
         fs::write(root.join("solace.toml"), include_str!("default-board.toml").replace("= \"complete\"", "= \"done\"")).unwrap();
         assert_eq!(tasks(&root).unwrap()[0]["column"], "done");
+    }
+    #[test]
+    fn tasks_move_once_into_the_root_store() {
+        let root = testing::Scratch::new().with(&[
+            (".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#),
+            (".solace/board/t1/r1.jsonl", "{}\n"),
+        ]);
+        adopt_tasks(&root, &root).unwrap();
+        assert!(!root.join(".solace/board/t1.json").exists());
+        assert!(root.join(".solace/board/t1/r1.jsonl").exists(), "run logs stay in the project");
+        let t = task(&root, "t1").unwrap();
+        assert_eq!(t["home"], ".");
+        assert_eq!(scope::home(&root, "t1").unwrap(), root.to_path_buf());
+        // A leftover copy of a task already moved from this project is dropped, not merged.
+        fs::write(root.join(".solace/board/t1.json"), r#"{"id":"t1"}"#).unwrap();
+        adopt_tasks(&root, &root).unwrap();
+        assert!(!root.join(".solace/board/t1.json").exists());
+        assert_eq!(task(&root, "t1").unwrap()["home"], ".");
     }
     #[test]
     fn presets_merge_with_configured_models() {

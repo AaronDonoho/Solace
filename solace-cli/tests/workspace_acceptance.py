@@ -3,6 +3,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -11,9 +12,10 @@ import unittest
 BIN = os.environ['SOLACE_TEST_BIN']
 FAKE = str(Path(__file__).with_name('fake_agent.py'))
 
-def project(path, name='pilot', body='pub fn one() { 1 }\n'):
+def project(path, name='pilot', body='pub fn one() { 1 }\n', target='javascript'):
     (path/'src').mkdir(parents=True, exist_ok=True)
-    (path/'gleam.toml').write_text(f'name="{name}"\nversion="1.0.0"\n')
+    # JavaScript builds skip the Erlang compiler, which takes most of a build's time.
+    (path/'gleam.toml').write_text(f'name="{name}"\nversion="1.0.0"\n' + (f'target="{target}"\n' if target else ''))
     (path/'src/app.gleam').write_text(body)
 
 class Root(unittest.TestCase):
@@ -88,7 +90,9 @@ class Root(unittest.TestCase):
 
     def test_folder_of_projects(self):
         # Two projects with the same package name: lanes are keyed by folder.
-        for d in ['a', 'b', 'a/build/packages/dep']: project(self.root/d)
+        # a has no target, so the board reports Gleam's default.
+        project(self.root/'a', target=None)
+        for d in ['b', 'a/build/packages/dep']: project(self.root/d)
         self.migrate('--project', 'a', '--project', 'b')
         for d in ['a', 'b']:
             self.assertTrue((self.root/d/'.solace/store.db').exists())
@@ -109,6 +113,10 @@ class Root(unittest.TestCase):
         v = self.api('POST', '/projects', {'dir': 'b'})
         self.assertEqual([p['dir'] for p in v['projects']], ['.', 'a', 'b'])
         self.assertEqual(self.next_event(events)[1], {'projects': ['.', 'a', 'b']})
+        # D-78: the project that came back follows with its workflow and tasks as they are.
+        self.assertEqual(self.next_event(events)[1]['project'], 'b')
+        ident, data = self.next_event(events)
+        self.assertEqual((data['project'], data['tasks']), ('b', []))
 
         self.api('POST', '/p/a/tasks', {'title': 'In a'})
         self.assertEqual([x['title'] for x in self.api('GET', '/p/a/tasks')], ['In a'])
@@ -117,7 +125,7 @@ class Root(unittest.TestCase):
         self.assertEqual(self.api('GET', '/tasks'), [])
         ident, data = self.next_event(events)
         self.assertEqual((data['project'], data['task']['title']), ('a', 'In a'))
-        self.assertEqual(set(json.loads(ident)), {'.', 'a', 'b'})
+        self.assertEqual(set(json.loads(ident)), {'tasks', '.', 'a', 'b'})
 
         # A reconnect replays only what it missed, from every project.
         events.close()
@@ -131,7 +139,7 @@ class Root(unittest.TestCase):
         single = self.stream('/p/a/events')
         ident, data = self.next_event(single)
         self.assertNotIn('project', data)
-        int(ident)
+        self.assertEqual(set(json.loads(ident)), {'tasks', 'a'})
         self.assertIn('<div id="app">', self.call('GET', '/p/a/view')[1])
 
         # Inside a project, the root is still the one root: a second server is refused.
@@ -280,7 +288,7 @@ class Root(unittest.TestCase):
         self.api('POST', '/tasks', {'title': 'Root task'})
         events = self.stream()
         ident, data = self.next_event(events)
-        int(ident)
+        self.assertEqual(set(json.loads(ident)), {'tasks', '.'})
         self.assertNotIn('project', data)
         events.close()
 
@@ -507,6 +515,42 @@ class Root(unittest.TestCase):
         self.assertEqual(self.api('POST', f'/p/a/tasks/{m["id"]}/scope', {'scope': ['c']})['scope'], ['c'])
         self.assertEqual(self.api('GET', f'/p/c/tasks/{m["id"]}')['title'], 'Moves')
         self.refused('GET', f'/p/a/tasks/{m["id"]}', None, 'unknown task')
+
+    def test_old_tasks_keep_scope_conversation_and_changes_after_the_move(self):
+        # D-77 point 4: a task saved in a project's old board folder keeps its scope,
+        # conversation and changes when serve moves it into the root's task store; the
+        # changes are computed from the projects' stores, and cancel undoes them.
+        for d in 'ab': project(self.root/d, d, 'pub fn one() { 1 }\n')
+        self.migrate()
+        self.start()
+        steps = [{'command': 'submit app.one', 'text': 'pub fn one() { 2 }'},
+                 {'command': 'submit app.one --project b', 'text': 'pub fn one() { 3 }'},
+                 {'command': 'task done changed a and b'}]
+        t = self.api('POST', '/p/a/tasks', {'title': 'Move', 'body': json.dumps(steps), 'scope': ['a', 'b']})
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'plan'})
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        t = self.wait('/p/a', t, lambda x: x['column'] == 'needs_review')
+        tid = t['id']
+        changes = sorted((c['project'], c['name'], c['entity']) for c in t['changes'])
+        conversation = t['conversation']
+        # The old format: changes in the task file, the file in the project's board
+        # folder, and rows in the projects' stores without run or name.
+        self.servers[0].terminate(); self.servers[0].wait(timeout=3)
+        for d in 'ab':
+            db = sqlite3.connect(self.root/d/'.solace/store.db')
+            db.execute('UPDATE board_touches SET run=NULL, name=NULL WHERE task=?', [tid]); db.commit(); db.close()
+        (self.root/'a/.solace/board'/f'{tid}.json').write_text(json.dumps(t))
+        (self.root/'.solace/tasks'/f'{tid}.json').unlink()
+        self.start()
+        v = self.api('GET', f'/p/a/tasks/{tid}')
+        self.assertEqual(v['scope'], ['a', 'b'])
+        self.assertEqual(v['conversation'], conversation)
+        self.assertEqual(sorted((c['project'], c['name'], c['entity']) for c in v['changes']), changes)
+        self.assertNotIn('changes', json.loads((self.root/'.solace/tasks'/f'{tid}.json').read_text()))
+        # Undo works: cancel puts both projects back.
+        self.api('POST', f'/p/a/tasks/{tid}/actions', {'action': 'cancel'})
+        self.assertIn('{ 1 }', (self.root/'a/src/app.gleam').read_text())
+        self.assertIn('{ 1 }', (self.root/'b/src/app.gleam').read_text())
 
     def test_changes_made_outside_solace_wait_for_review(self):
         # D-58: the board's poll reads an outside edit in, in its own project only, and never writes over it.

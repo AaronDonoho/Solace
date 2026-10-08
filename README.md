@@ -131,6 +131,8 @@ solace check         # type-check the project from the store
 solace serve         # start the task board on http://127.0.0.1:3030 (--port to change it)
 ```
 
+Only `solace serve` writes tasks. With no server running, what a CLI run sends to its task (notes, questions, verification, settings proposals) waits in `.solace/tasks/inbox/` and reaches the board at the next `solace serve`.
+
 For a project you already have, run `solace serve` in its folder and choose **Migrate this project**. Solace makes a copy next to it, `solace-migration`, sets up the copy to use Solace, and shows what it checked. Your folder isn't changed until you choose **Switch to the copy**, which moves it to `<name>.pre-solace` and puts the copy in its place; **Switch back** undoes that. The same from the shell:
 
 ```sh
@@ -163,7 +165,7 @@ projects = ["bench/pilot", "bench/pilot-large", "solace-cli/board"]
 
 There is one root: `solace serve` and `solace create` find it from anywhere below, and every project stays at it or below it. Folders outside it, reached through `..` or a symlink, are refused, and so is a root inside another root or inside a project. Each project keeps its own store, `solace.toml`, `AGENTS.md`, tasks and agents. Agents in different projects work at the same time. An agent reads any project in the root by adding `--project <folder>` to `view`, `inspect`, `refs`, `find`, `files` or `read`. Reads take no locks, so they never wait on another project's agent, and humans can use the same option from a shell.
 
-A task can change several projects. Pick them under **Projects this task can change** when you create it; the task's card then shows in each of their lanes. In the task's details you can add or remove projects whenever its agent isn't working (paused or waiting on your answer counts), except a project the task has already changed. Its agent works in the task's own project and changes the others with the same `--project` option; asking for a project outside the task's list is refused, so the agent asks you. While it works, no other task's agent starts in any of those projects. Undo, review and completion cover every project the task changed.
+A task can change several projects. Pick them under **Projects this task can change** when you create it; the task's card then shows in each of their lanes. In the task's **Scope** tab you can switch projects on or off whenever its agent isn't working (paused or waiting on your answer counts), except a project the task has already changed. Its agent works in the task's own project and changes the others with the same `--project` option; asking for a project outside the task's list is refused, so the agent asks you. While it works, no other task's agent starts in any of those projects. Undo, review and completion cover every project the task changed.
 
 Every project on the board uses the root's workflow (the `[board]` section of the root's `solace.toml`). Lanes are named by folder, fold away, and share one row of column headers. Removing a project keeps its setup. One board serves a project at a time. A Solace project nested inside another is off limits to the outer project's agents, apart from these reads.
 

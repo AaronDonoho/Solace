@@ -13,7 +13,7 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
   const server = Bun.serve({ port: 0, fetch: async req => {
     const path = new URL(req.url).pathname;
     requests.push([req.method, path]);
-    if (path === '/events') return new Response(new ReadableStream({ start(c) { events = c; c.enqueue(new TextEncoder().encode('event: ready\ndata: {}\n\n')); } }), { headers: { 'Content-Type': 'text/event-stream' } });
+    if (path === '/events') return new Response(new ReadableStream({ start(c) { events = c; c.enqueue(new TextEncoder().encode('id: 0\ndata: ' + JSON.stringify({ workflow }) + '\n\nid: 0\ndata: ' + JSON.stringify({ tasks: [task] }) + '\n\nevent: ready\ndata: {}\n\n')); } }), { headers: { 'Content-Type': 'text/event-stream' } });
     if (path === '/projects') return Response.json({ workspace: false, projects: [{ dir: '', name: 'fixture', base: '' }], found: [] });
     if (req.method === 'GET') return Response.json(path === '/graph' ? { review: { summary: '1 effects added, 0 signature changed, 0 test unfinished' } } : path === '/workflow' ? workflow : path === '/models' ? [{ id: 'fake', label: 'Fake' }] : path === '/tasks' ? [task] : task);
     const body = await req.json();
@@ -101,7 +101,7 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     workflow.columns.push({ id: 'planning', label: 'Custom planning', actions: ['review'], final: false });
     events.enqueue(new TextEncoder().encode('id: 2\ndata: ' + JSON.stringify({ workflow }) + '\n\n'));
     await until(() => to_string(board.view(model)).includes('Custom planning'));
-    for (const pair of [['GET', '/projects'], ['GET', '/workflow'], ['GET', '/tasks'], ['GET', '/tasks/t1'], ['GET', '/models'], ['GET', '/events'], ['POST', '/tasks'], ['PATCH', '/tasks/t1'], ['POST', '/tasks/t1/notes'], ['POST', '/tasks/t1/actions'], ['POST', '/tasks/t1/questions/q1']]) expect(requests).toContainEqual(pair);
+    for (const pair of [['GET', '/projects'], ['GET', '/workflow'], ['GET', '/tasks/t1'], ['GET', '/models'], ['GET', '/events'], ['POST', '/tasks'], ['PATCH', '/tasks/t1'], ['POST', '/tasks/t1/notes'], ['POST', '/tasks/t1/actions'], ['POST', '/tasks/t1/questions/q1']]) expect(requests).toContainEqual(pair);
     dispatch(new board.Tab('runs')); expect(to_string(board.view(model))).toContain('/logs/r1');
     task.changes = [{ name: 'app.main' }];
     dispatch(new board.Select('', 't1')); dispatch(new board.Tab('changes'));

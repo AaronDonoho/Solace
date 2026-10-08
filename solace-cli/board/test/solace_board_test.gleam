@@ -737,3 +737,164 @@ pub fn removing_a_project_test() {
     )
   model.removing |> should.equal(None)
 }
+
+pub fn one_submit_creates_once_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) = board.update(model, board.NewTask)
+  let #(model, _) = board.update(model, board.DraftTitle("Once"))
+  let #(model, _) = board.update(model, board.Create)
+  model.submitting |> should.be_true
+  board.view(model)
+  |> element.to_string
+  |> string.contains("<button disabled>Creating…</button>")
+  |> should.be_true
+  // A second click while waiting sends nothing more.
+  let #(again, _) = board.update(model, board.Create)
+  again |> should.equal(model)
+  // A refusal ends the wait and keeps the draft.
+  let #(model, _) =
+    board.update(
+      model,
+      board.Created("{\"code\":\"E7001\",\"message\":\"title required\"}"),
+    )
+  #(model.submitting, model.draft_title) |> should.equal(#(False, "Once"))
+}
+
+/// The Scope tab sits right of Changes, with a vertical switch per project;
+/// Details no longer holds the projects, and a running task locks them.
+pub fn scope_tab_test() {
+  let #(model, _) = board.init(Nil)
+  let lane = fn(d) {
+    "{\"dir\":\""
+    <> d
+    <> "\",\"label\":\""
+    <> d
+    <> "\",\"name\":\""
+    <> d
+    <> "\",\"base\":\"/p/"
+    <> d
+    <> "\"}"
+  }
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":["
+        <> string.join(list.map(["a", "b", "c"], lane), ",")
+        <> "],\"found\":[]}",
+      ),
+    )
+  let task =
+    "{\"id\":\"t1\",\"title\":\"Across\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"scope\":[\"a\",\"b\"]}"
+  let assert Ok(t) = json.parse(task, board.task_decoder())
+  let model =
+    board.Model(..model, selected: option.Some(t), lane: "a", tab: "details")
+  let body = fn(m) {
+    board.view(m)
+    |> element.to_string
+    |> string.split("</style>")
+    |> list.last
+    |> result.unwrap("")
+  }
+  let details = body(model)
+  let assert [_, after_changes] = string.split(details, ">Changes (0)</button>")
+  after_changes |> string.contains(">Scope</button>") |> should.be_true
+  details
+  |> string.contains("Projects this task can change")
+  |> should.be_false
+  let #(model, _) = board.update(model, board.Tab("scope"))
+  let scope = body(model)
+  scope |> string.contains("Projects this task can change") |> should.be_true
+  scope |> string.split("role=\"switch\"") |> list.length |> should.equal(4)
+  scope |> string.contains("You can change the projects") |> should.be_false
+  let running =
+    "{\"id\":\"t1\",\"title\":\"Across\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"scope\":[\"a\",\"b\"],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]}"
+  let assert Ok(r) = json.parse(running, board.task_decoder())
+  let locked = body(board.Model(..model, selected: option.Some(r)))
+  locked |> string.contains("You can change the projects") |> should.be_true
+  // Switches stack vertically.
+  let css =
+    board.view(model)
+    |> element.to_string
+    |> string.split("</style>")
+    |> list.first
+    |> result.unwrap("")
+  css
+  |> string.contains(".projects-pick label{display:flex;")
+  |> should.be_true
+  css
+  |> string.contains(".projects-pick input:checked::before{transform:")
+  |> should.be_true
+}
+
+/// D-78: a new stream starts from each project's tasks; a snapshot that comes
+/// before the project list names its lane is held until it does.
+pub fn snapshot_waits_for_its_lane_and_replaces_tasks_test() {
+  let task = fn(id, title) {
+    "{\"id\":\""
+    <> id
+    <> "\",\"title\":\""
+    <> title
+    <> "\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"runs\":[]}"
+  }
+  let #(model, _) = board.init(Nil)
+  let #(model, _) = board.update(model, board.CaughtUp)
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live(
+        "{\"project\":\"web\",\"tasks\":[" <> task("1", "In web") <> "]}",
+      ),
+    )
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\"web\",\"name\":\"web\",\"base\":\"/p/web\"}],\"found\":[]}",
+      ),
+    )
+  let assert [web] = model.lanes
+  list.map(web.tasks, fn(t) { t.title }) |> should.equal(["In web"])
+  model.notices |> should.equal([])
+  // A later snapshot replaces the lane's tasks.
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live(
+        "{\"project\":\"web\",\"tasks\":[" <> task("2", "Another") <> "]}",
+      ),
+    )
+  let assert [web] = model.lanes
+  list.map(web.tasks, fn(t) { t.title }) |> should.equal(["Another"])
+}
+
+/// An action in flight disables the action buttons and says what it waits for;
+/// its reply clears that.
+pub fn an_action_waits_for_its_reply_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.WorkflowLoaded(
+        "",
+        "{\"columns\":[{\"id\":\"triage\",\"label\":\"Triage\",\"actions\":[\"assign\"]}]}",
+      ),
+    )
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[{\"id\":\"r\",\"kind\":\"work\",\"model\":\"m\",\"state\":\"running\",\"started\":1,\"log\":\"\"}]}"
+  let #(model, _) = board.update(model, board.TaskLoaded(text))
+  let #(model, _) = board.update(model, board.Action("assign"))
+  model.acting |> should.equal("assign")
+  let html = board.view(model) |> element.to_string
+  string.contains(html, "<button disabled>assign</button>") |> should.be_true
+  string.contains(html, "current command to finish before assign")
+  |> should.be_true
+  // A second click while waiting sends nothing more.
+  let #(again, _) = board.update(model, board.Action("assign"))
+  again |> should.equal(model)
+  let #(model, _) = board.update(model, board.Acted(text))
+  model.acting |> should.equal("")
+  let assert Ok(t) = json.parse(text, board.task_decoder())
+  board.acting_text(board.Task(..t, runs: []), "assign")
+  |> should.equal("Sending assign…")
+}

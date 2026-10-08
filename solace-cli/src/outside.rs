@@ -306,11 +306,10 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
     let here = scope::dir(&top, &s.root);
     let all = scope::tasks_in(&top, &here)?;
     let open: Vec<&(PathBuf, Value)> = all.iter().filter(|(_, t)| board::column(&flow, t)["final"] != true).collect();
-    let mut touched: HashSet<&str> = HashSet::new();
-    for (home, t) in &open {
-        let home = scope::dir(&top, home);
-        let mine = t["changes"].as_array().unwrap().iter().filter(|c| board::project_of(c, &home) == here);
-        touched.extend(mine.filter_map(|c| c["entity"].as_str()));
+    let mut touched: HashSet<String> = HashSet::new();
+    for (_, t) in &open {
+        let changes = board::changes_of(s, t)?;
+        touched.extend(changes.iter().filter(|c| c["project"] == here).filter_map(|c| c["entity"].as_str().map(String::from)));
     }
     let list = approved(&s.root);
     let keys: HashSet<&String> = before.as_object().unwrap().keys().chain(after.as_object().unwrap().keys()).collect();
@@ -348,10 +347,10 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         let r = t["runs"].as_array().unwrap().iter().find(|r| r["kind"] == "work" && r["state"] == "running")?;
         Some((home.clone(), t["id"].as_str()?.to_string(), r["id"].as_str()?.to_string()))
     });
-    if let Some((home, tid, rid)) = running {
-        let home = board::open(&home)?;
+    // Tasks change through the task server (D-77).
+    if let Some((_, tid, rid)) = running {
         if !unexpected.is_empty() {
-            board::record(s, &home, &tid, &rid, &bf, &af)?;
+            board::record(s, &tid, &rid, &bf, &af)?;
         }
         let text = format!(
             "{}{unreadable_note}",
@@ -361,9 +360,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
                 format!("Changed outside Solace during this run and added to this task: {}.\n", names.join(", "))
             }
         );
-        let mut t = board::task(&home.root, &tid)?;
-        board::note(&mut t, "solace", Some(&rid), &text);
-        board::save(&home, &t)?;
+        tasks::deliver(&top, json!({"kind":"note","task":tid,"run":rid,"author":"solace","text":text}))?;
         return Ok(format!("Note: {text}"));
     }
     let tid = match open
@@ -381,23 +378,25 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
                 rank,
             );
             t["unexpected"] = json!(true);
-            board::save(s, &t)?;
+            t["home"] = json!(here);
+            tasks::deliver(&top, json!({"kind":"create","new":t}))?;
             t["id"].as_str().unwrap().to_string()
         }
     };
     if !unexpected.is_empty() {
-        board::record(s, s, &tid, "outside", &bf, &af)?;
+        board::record(s, &tid, "outside", &bf, &af)?;
     }
     let compiled = match s.check() {
         Ok(out) => out,
         Err(Failure(out, _)) => out,
     };
     let compiled: String = compiled.chars().take(4000).collect();
-    let mut t = board::task(&s.root, &tid)?;
     let changed_note = if names.is_empty() { String::new() } else { format!("Changed outside Solace: {}.\n", names.join(", ")) };
-    board::note(&mut t, "solace", None, &format!("{changed_note}{unreadable_note}\nCheck: {compiled}"));
-    board::flag(&mut t, "code changed outside Solace");
-    board::save(s, &t)?;
+    tasks::deliver(
+        &top,
+        json!({"kind":"note","task":tid,"author":"solace","text":format!("{changed_note}{unreadable_note}\nCheck: {compiled}"),
+            "flag":"code changed outside Solace"}),
+    )?;
     Ok(format!("Note: code changed outside Solace with no agent working; review it on the {TITLE} task. {changed_note}{unreadable_note}"))
 }
 
@@ -508,15 +507,16 @@ mod tests {
         let s = app();
         let mut t = board::api(&s.root, "POST", "/tasks", json!({"title":"Work"})).unwrap();
         t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
-        board::save(&s, &t).unwrap();
+        tasks::put(&s, &t).unwrap();
         fs::write(s.root.join("src/app.gleam"), APP.replace("  2", "  9")).unwrap();
         let note = absorb(&s, Mode::Notice).unwrap();
         assert_eq!(note, "Note: Changed outside Solace during this run and added to this task: app.two.\n");
         let t = board::task(&s.root, t["id"].as_str().unwrap()).unwrap();
+        let changes = board::changes_of(&s, &t).unwrap();
         assert!(
-            t["changes"].as_array().unwrap().iter().any(|c| c["entity"].as_str().is_some_and(|e| e.starts_with("symbol:"))),
+            changes.iter().any(|c| c["entity"].as_str().is_some_and(|e| e.starts_with("symbol:"))),
             "{}",
-            t["changes"]
+            json!(changes)
         );
         assert_eq!(board::tasks(&s.root).unwrap().len(), 1);
     }

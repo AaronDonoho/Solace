@@ -16,6 +16,7 @@ mod migrate;
 mod outside;
 mod reach;
 mod scope;
+mod tasks;
 mod view;
 mod workspace;
 
@@ -28,6 +29,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::{env, fs};
+use std::time::Duration;
+use std::{cell::RefCell, rc::Rc};
+
 
 const REFERENCE: &str = include_str!("reference.txt");
 
@@ -210,9 +214,10 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     };
     let store = board::open(&root)?;
     let home = board::open(&home)?;
-    lockdown::recover(&store.root)?;
-    board::flow(&store.root)?;
-    let noticed = outside::absorb(&store, outside::Mode::Notice)?;
+    // A `task` command holds no project lock (D-77 point 5), so it runs before
+    // recovery and absorbing: those need the lock, and a live command's records
+    // must not be taken for a crashed one's. Its changes are committed rows, so
+    // it reads them without either.
     if let Some((tid, rid)) = &context {
         if a.starts_with(&["task", "diff"]) {
             return board::task_diff(&home, tid, &a[2..], budget);
@@ -220,6 +225,12 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         if a.first() == Some(&"task") {
             return board::task_command(&home, tid, rid, &a, input, options, guard);
         }
+    }
+    // Every guard here holds the lock of `store`'s project.
+    lockdown::recover(&store.root, &store, &guard)?;
+    board::flow(&store.root)?;
+    let noticed = outside::absorb(&store, outside::Mode::Notice)?;
+    if let Some((tid, rid)) = &context {
         // A run's settings write is a proposal the human approves (D-38).
         if a.first() == Some(&"write")
             && let Some(file) = a.get(1).map(|p| file_name(Path::new(p))).filter(|p| p == "solace.toml" || p == "AGENTS.md" || lockdown::is_gitignore(p))
@@ -236,23 +247,68 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     } else {
         None
     };
+    // A code change and its undo rows commit together (D-77 point 7): one outer
+    // transaction around the command and `record`. A process runs outside it, so
+    // a long `run` holds the store's write lock only for the rows; the ahead
+    // record in `.solace/pending/` covers a crash while the process runs.
+    let processes = a.first().is_some_and(|c| PROCESSES.contains(c));
+    COMMAND_DB.set(Some((store.root.clone(), store.db.clone())));
+    let _outer = OuterTransaction(store.db.clone());
+    if let (Some(_), Some((tid, rid))) = (&before, &context) {
+        lockdown::mark(&store.root, tid, rid)?;
+    }
+    if before.is_some() && !processes {
+        store.db.execute_batch("BEGIN IMMEDIATE")?;
+    }
     let result = run_inner(args, input, old, budget);
+    if before.is_some() {
+        crash_after("command");
+    }
     if let Some((tid, _)) = &context
         && a.first().is_some_and(|c| VERIFIES.contains(c))
     {
         board::record_verification(&home, tid, a[0], &result)?;
     }
+    if before.is_some() && processes {
+        store.db.execute_batch("BEGIN IMMEDIATE")?;
+    }
     // A process the command ran (`format`, a declared command) may have changed source: that's this command's change.
-    let unread =
-        if a.first().is_some_and(|c| PROCESSES.contains(c)) { outside::absorb(&store, outside::Mode::Command)? } else { String::new() };
-    if let (Some(before), Some((tid, rid))) = (before, context) {
+    let unread = if processes { outside::absorb(&store, outside::Mode::Command)? } else { String::new() };
+    if let (Some(before), Some((tid, rid))) = (before, &context) {
         let mut after = board::snapshot(&store)?;
         after.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
-        board::record(&store, &home, &tid, &rid, &before, &after)?;
+        board::record(&store, &tid, &rid, &before, &after)?;
+        store.db.execute_batch("COMMIT")?;
+        crash_after("commit");
+        // The task lists its changes from the rows that committed (D-77 point 4),
+        // computed by changes_of, so there is nothing to write here.
+        lockdown::drop_records(&store.root, &rid)?;
     }
     match result {
         Ok(out) => Ok(format!("{noticed}{out}{unread}")),
         Err(Failure(msg, code)) => Err(Failure(format!("{noticed}{msg}{unread}"), code)),
+    }
+}
+
+/// Ends a command's outer transaction on every path out of `run_options`: one
+/// left open by an early `?` rolls back, and the shared connection is let go,
+/// so a longer-lived caller never keeps the store's write lock.
+struct OuterTransaction(Rc<Connection>);
+impl Drop for OuterTransaction {
+    fn drop(&mut self) {
+        if !self.0.is_autocommit() {
+            let _ = self.0.execute_batch("ROLLBACK");
+        }
+        COMMAND_DB.set(None);
+    }
+}
+
+/// A test-only hook: exits after the named point, so recovery is tested
+/// (`SOLACE_FAIL_AFTER=command` | `commit`). Only in a board run, so a plain
+/// CLI call is never interrupted.
+fn crash_after(point: &str) {
+    if board::context().is_some() && env::var("SOLACE_FAIL_AFTER").is_ok_and(|v| v == point) {
+        std::process::exit(1);
     }
 }
 
@@ -355,7 +411,9 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
         _ => None,
     };
     // A plain connection: a read creates no tables in another project.
-    let store = Store { db: Connection::open(target.join(".solace/store.db"))?, root: target };
+    let db = Connection::open(target.join(".solace/store.db"))?;
+    db.busy_timeout(Duration::from_secs(10))?;
+    let store = Store { db: Rc::new(db), root: target };
     let settings = lockdown::settings(&store.root)?;
     if let Some(out) = lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
         return out;
@@ -625,8 +683,15 @@ struct ModuleRow {
 }
 
 struct Store {
-    db: Connection,
+    /// Shared with the command's other stores of the same project, so they
+    /// run inside its outer transaction (D-77 point 7).
+    db: Rc<Connection>,
     root: PathBuf,
+}
+
+thread_local! {
+    /// The connection a command's outer transaction holds, by project root.
+    static COMMAND_DB: RefCell<Option<(PathBuf, Rc<Connection>)>> = const { RefCell::new(None) };
 }
 
 /// All live symbols and modules, with the reference graph resolved.
@@ -735,7 +800,7 @@ CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY, owner TEXT NOT NULL, args
 -- the task board
 CREATE TABLE IF NOT EXISTS board_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS board_before(task TEXT, entity TEXT, data TEXT NOT NULL, PRIMARY KEY(task,entity));
-CREATE TABLE IF NOT EXISTS board_touches(seq INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, entity TEXT);
+CREATE TABLE IF NOT EXISTS board_touches(seq INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, entity TEXT, run TEXT, name TEXT);
 ";
 
 fn now() -> u64 {
@@ -821,6 +886,7 @@ fn import(root: &Path) -> Out {
     }
     fs::create_dir_all(&dir)?;
     let db = Connection::open(dir.join("store.db"))?;
+    db.busy_timeout(Duration::from_secs(10))?;
     db.execute_batch(SCHEMA)?;
     db.execute_batch(LATER_TABLES)?;
     let (mut modules, mut symbols) = (0, 0);
@@ -845,7 +911,7 @@ fn import(root: &Path) -> Out {
         }
     }
     written.save()?;
-    let store = Store { db, root: root.to_path_buf() };
+    let store = Store { db: Rc::new(db), root: root.to_path_buf() };
     outside::approve_all(&store)?;
     out += &format!("Imported {modules} modules, {symbols} symbols into .solace/store.db\n");
     Ok(out)
@@ -923,10 +989,31 @@ fn projection(ix: &Index, m: &ModuleRow) -> (String, Vec<(usize, usize, String)>
 impl Store {
     /// The store of the project at `root`, with every table this version uses.
     fn at(root: &Path) -> Result<Store, Failure> {
+        let shared = COMMAND_DB.with_borrow(|c| c.as_ref().filter(|(r, _)| r == root).map(|(_, db)| db.clone()));
+        if let Some(db) = shared {
+            return Ok(Store { db, root: root.into() });
+        }
         let db = Connection::open(root.join(".solace/store.db"))?;
+        // WAL and a busy timeout: readers see the last committed state while a
+        // command holds the store's write lock (D-77 point 8).
+        db.busy_timeout(Duration::from_secs(10))?;
+        db.execute_batch("PRAGMA journal_mode=WAL;")?;
         db.execute_batch(LATER_TABLES)?;
-        Ok(Store { db, root: root.into() })
+        Self::add_columns(&db)?;
+        Ok(Store { db: Rc::new(db), root: root.into() })
     }
+
+    /// `board_touches` gains `run` and `name` (D-77 point 4); older stores get them.
+    fn add_columns(db: &Connection) -> Result<(), Failure> {
+        for col in ["run", "name"] {
+            let has: bool = db.query_row("SELECT COUNT(*) FROM pragma_table_info('board_touches') WHERE name=?1", params![col], |r| r.get(0))?;
+            if !has {
+                db.execute(&format!("ALTER TABLE board_touches ADD COLUMN {col} TEXT"), [])?;
+            }
+        }
+        Ok(())
+    }
+
 
     fn open() -> Result<Store, Failure> {
         Store::at(&Store::root()?)
@@ -1871,14 +1958,15 @@ impl Store {
     /// Runs `body` in one store transaction: committed, or rolled back with
     /// `created` files removed and the project files written again from the store.
     fn transaction(&self, created: &[PathBuf], body: impl FnOnce() -> Out) -> Out {
-        self.db.execute_batch("BEGIN")?;
+        // A savepoint, so it nests inside a command's outer transaction (D-77 point 7).
+        self.db.execute_batch("SAVEPOINT solace_tx")?;
         match body() {
             Ok(out) => {
-                self.db.execute_batch("COMMIT")?;
+                self.db.execute_batch("RELEASE solace_tx")?;
                 Ok(out)
             }
             Err(e) => {
-                self.db.execute_batch("ROLLBACK")?;
+                self.db.execute_batch("ROLLBACK TO solace_tx; RELEASE solace_tx")?;
                 for path in created.iter().filter(|p| p.exists()) {
                     fs::remove_file(path)?;
                 }

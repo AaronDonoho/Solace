@@ -22,6 +22,9 @@ gleam_stdlib = ">= 0.44.0 and < 2.0.0"
 gleeunit = ">= 1.0.0 and < 2.0.0"
 '''
 
+# Tests whose app has packages and a test module; the rest use a plain app.
+WITH_PACKAGES = {'test_m1_m3_m7_the_original_is_only_read', 'test_board_migrates_and_restarts_where_the_project_is'}
+
 BWRAP = shutil.which('bwrap') is not None and subprocess.run(['bwrap', '--dev-bind', '/', '/', 'true']).returncode == 0
 
 def snapshot(root):
@@ -45,16 +48,22 @@ class Migrate(unittest.TestCase):
         self.repo = self.parent/'repo'
         self.copy = self.parent/'solace-migration'
         app = self.repo/'app'
-        (app/'src').mkdir(parents=True); (app/'test').mkdir()
-        (app/'gleam.toml').write_text(APP_TOML)
+        (app/'src').mkdir(parents=True)
         # Extra blank lines and no final newline: Solace lays it out differently.
         (app/'src/app.gleam').write_text('pub fn double(x: Int) -> Int {\n  x * 2\n}\n\n\n\npub fn half(x: Int) -> Int { x / 2 }')
-        (app/'test/app_test.gleam').write_text(
-            'import app\nimport gleeunit\n\npub fn main() { gleeunit.main() }\n\n'
-            'pub fn double_test() {\n  assert app.double(2) == 4\n}\n\npub fn broken_test() {\n  assert app.double(2) == 5\n}\n')
+        if self._testMethodName in WITH_PACKAGES:
+            # Packages and tests cost a stdlib compile in each of the migration's builds.
+            (app/'gleam.toml').write_text(APP_TOML)
+            (app/'test').mkdir()
+            (app/'test/app_test.gleam').write_text(
+                'import app\nimport gleeunit\n\npub fn main() { gleeunit.main() }\n\n'
+                'pub fn double_test() {\n  assert app.double(2) == 4\n}\n\npub fn broken_test() {\n  assert app.double(2) == 5\n}\n')
+        else:
+            # JavaScript builds skip the Erlang compiler, which takes most of a build's time.
+            (app/'gleam.toml').write_text('name = "app"\nversion = "1.0.0"\ntarget = "javascript"\n')
         lib = self.repo/'lib'
         (lib/'src').mkdir(parents=True)
-        (lib/'gleam.toml').write_text('name = "lib"\nversion = "1.0.0"\n')
+        (lib/'gleam.toml').write_text('name = "lib"\nversion = "1.0.0"\ntarget = "javascript"\n')
         (lib/'src/lib.gleam').write_text('pub fn one() { 1 }\n')
         (self.repo/'.git').mkdir()
         (self.repo/'.git/HEAD').write_text('ref: refs/heads/main\n')

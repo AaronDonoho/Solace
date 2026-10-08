@@ -342,10 +342,9 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
     json!({"nodes":nodes,"edges":edges,"areas":areas})
 }
 /// A task as this project sees it (D-61): only the changes made here.
-fn changed_here(s: &Store, home: &Path, mut t: Value) -> Value {
-    let top = scope::top(&s.root);
-    let (here, home) = (scope::dir(&top, &s.root), scope::dir(&top, home));
-    let mine: Vec<Value> = t["changes"].as_array().into_iter().flatten().filter(|c| board::project_of(c, &home) == here).cloned().collect();
+fn changed_here(s: &Store, mut t: Value) -> Value {
+    let here = scope::dir(&scope::top(&s.root), &s.root);
+    let mine: Vec<Value> = board::changes_of(s, &t).unwrap_or_default().into_iter().filter(|c| c["project"] == here).collect();
     t["changes"] = json!(mine);
     t
 }
@@ -353,7 +352,7 @@ fn changed_here(s: &Store, home: &Path, mut t: Value) -> Value {
 fn task_here(s: &Store, tid: &str) -> Result<(PathBuf, Value), Failure> {
     let home = scope::home(&s.root, tid)?;
     let t = board::task(&home, tid)?;
-    Ok((home.clone(), changed_here(s, &home, t)))
+    Ok((home.clone(), changed_here(s, t)))
 }
 pub fn graph(s: &Store) -> Result<Value, Failure> {
     let ix = s.index()?;
@@ -361,8 +360,8 @@ pub fn graph(s: &Store) -> Result<Value, Failure> {
     let mut changed = HashSet::new();
     let w = board::flow(&s.root)?;
     let top = scope::top(&s.root);
-    for (home, t) in scope::tasks_in(&top, &scope::dir(&top, &s.root))? {
-        let t = changed_here(s, &home, t);
+    for (_, t) in scope::tasks_in(&top, &scope::dir(&top, &s.root))? {
+        let t = changed_here(s, t);
         if w["columns"].as_array().unwrap().iter().any(|c| c["id"] == t["column"] && c["final"] == true) {
             continue;
         }
@@ -628,12 +627,14 @@ pub fn run_tests(root: PathBuf, tid: String) {
                 let _guard = scope::lock_all(&[root.clone(), home.clone()])?;
                 let s = board::open(&root)?;
                 let (_, here) = task_here(&s, &tid)?;
-                let mut t = board::task(&home, &tid)?;
                 let base = board::fingerprint(&s)?;
                 scratch(&s, &dir)?;
                 let r = review(&s, &here)?;
-                t["review_tests"] = json!({"base":base,"state":"running","results":[]});
-                board::save(&board::open(&home)?, &t)?;
+                let running = json!({"base":base,"state":"running","results":[]});
+                tasks::update(&home, &tid, move |t| {
+                    t["review_tests"] = running;
+                    Ok(())
+                })?;
                 (base, r["tests"].as_array().cloned().unwrap_or_default())
             };
             let output = lockdown::command(&dir, &["gleam".into(), "test".into()], 300, 100_000);
@@ -666,10 +667,11 @@ pub fn run_tests(root: PathBuf, tid: String) {
                         .collect(),
                 ),
             };
-            let _guard = board::lock(&home)?;
-            let mut t = board::task(&home, &tid)?;
-            t["review_tests"] = json!({"base":base,"state":state,"results":results});
-            board::save(&board::open(&home)?, &t)
+            let done = json!({"base":base,"state":state,"results":results});
+            tasks::update(&home, &tid, move |t| {
+                t["review_tests"] = done;
+                Ok(())
+            })
         })();
         if let Err(e) = result {
             eprintln!("review tests: {}", e.0);

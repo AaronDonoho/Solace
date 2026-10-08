@@ -14,6 +14,7 @@ unwatched = []
 # Optional commands agents may run, for example:
 # app = { run = ["gleam", "run", "--"], args = true }
 rust-board-tests = { run = ["cargo", "test", "--manifest-path", "solace-cli/Cargo.toml", "board::"], allowed_in_reviews = true }
+rust-lockdown-tests = { run = ["cargo", "test", "--manifest-path", "solace-cli/Cargo.toml", "lockdown::"], allowed_in_reviews = true }
 # D-71: fixture instances run independently of the invoking agent's task context.
 rust-acceptance = { run = ["env", "-u", "SOLACE_TASK", "-u", "SOLACE_RUN", "-u", "SOLACE_SESSION", "-u", "SOLACE_CONFIG", "-u", "SOLACE_BIN", "cargo", "test", "--manifest-path", "solace-cli/Cargo.toml", "--test", "acceptance"], allowed_in_reviews = true }
 cargo-timings = { run = ["cargo", "build", "--release", "--timings", "--manifest-path", "solace-cli/Cargo.toml"], allowed_in_reviews = true }

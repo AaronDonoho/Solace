@@ -181,26 +181,90 @@ fn remember(root: &Path, name: &str, bytes: &[u8]) -> Result<(), Failure> {
     fs::write(session_file(root), r.to_string())?;
     Ok(())
 }
-pub fn recover(root: &Path) -> Result<(), Failure> {
+/// Puts the project back after a crash (D-77 point 7), at the start of each
+/// command and at serve start. It runs only under the project lock (`_held`):
+/// a live command holds that lock until its records are dropped, so every
+/// record found here is a dead command's. Checking that the run has ended
+/// would be wrong, since a run whose command crashed keeps running and its
+/// next command must adopt the record. A record with a task and a
+/// run is an undo record: if its file changed, the write landed and the rows
+/// never committed, so recovery adds them; if the file is as the record says,
+/// the write never landed and the record is dropped. A record with no task is
+/// the in-place validator journal (Spec 14 §64): the file is restored.
+pub fn recover(root: &Path, store: &Store, _held: &[fs::File]) -> Result<(), Failure> {
     let pending = root.join(".solace/pending");
-    if !pending.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(&pending)? {
+    let Ok(dir) = fs::read_dir(&pending) else { return Ok(()) };
+    let mut records = vec![];
+    for entry in dir {
         let p = entry?.path();
-        if p.extension().is_none_or(|e| e != "json") {
-            continue;
+        if p.extension().is_some_and(|e| e == "json") {
+            // A record that can't be read was never fully written, so its change
+            // never started: drop it rather than fail every later command.
+            match fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+                Some(record) => records.push((p, record)),
+                None => fs::remove_file(&p)?,
+            }
         }
-        let record: Value = serde_json::from_slice(&fs::read(&p)?).map_err(|e| Failure(e.to_string(), 1))?;
-        let target = path(root, record["path"].as_str().ok_or_else(|| Failure("invalid pending record".into(), 1))?)?;
-        if let Some(a) = record["bytes"].as_array() {
-            fs::write(target, json_bytes(a))?;
-        } else if target.exists() {
-            fs::remove_file(target)?;
+    }
+    if records.iter().any(|(_, r)| r["task"].is_string() && r["run"].is_string()) {
+        // A command's outer transaction never committed: the code files go back
+        // to the store, which is the source of truth.
+        store.materialize(&store.index()?)?;
+    }
+    for (p, record) in records {
+        if record["task"].is_string() && record["run"].is_string() {
+            board::adopt_pending(store, &record)?;
+        } else {
+            let target = path(root, record["path"].as_str().ok_or_else(|| Failure("invalid pending record".into(), 1))?)?;
+            if let Some(a) = record["bytes"].as_array() {
+                fs::write(target, json_bytes(a))?;
+            } else if target.exists() {
+                fs::remove_file(target)?;
+            }
         }
         fs::remove_file(p)?;
     }
     Ok(())
+}
+/// Marks that run `rid` of task `tid` is changing the project, before its outer
+/// transaction begins, so a crash before the commit sends recovery to put the
+/// code files back from the store (D-77 point 7).
+pub fn mark(root: &Path, tid: &str, rid: &str) -> Result<(), Failure> {
+    let dir = root.join(".solace/pending");
+    fs::create_dir_all(&dir)?;
+    write_atomic(&dir.join(format!("command-{rid}.json")), json!({"task":tid,"run":rid}).to_string().into_bytes())?;
+    Ok(())
+}
+/// Whether the project has an undo record or command marker for task `tid`
+/// that no recovery has adopted yet: a run was stopped mid-write, so its change
+/// is on disk but not yet in the task's rows.
+pub fn pending_for(root: &Path, tid: &str) -> bool {
+    let Ok(dir) = fs::read_dir(root.join(".solace/pending")) else { return false };
+    dir.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).any(|p| {
+        fs::read(&p).is_ok_and(|b| serde_json::from_slice::<Value>(&b).is_ok_and(|v| v["task"].as_str() == Some(tid)))
+    })
+}
+/// Drops the undo records a committed command wrote for run `rid`.
+pub fn drop_records(root: &Path, rid: &str) -> Result<(), Failure> {
+    let dir = root.join(".solace/pending");
+    if !dir.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(&dir)? {
+        let p = entry?.path();
+        if p.extension().is_some_and(|e| e == "json")
+            && fs::read(&p).is_ok_and(|b| serde_json::from_slice::<Value>(&b).is_ok_and(|v| v["run"].as_str() == Some(rid)))
+        {
+            fs::remove_file(p)?;
+        }
+    }
+    Ok(())
+}
+/// Every watched file path, relative to `root`.
+pub fn watched_paths(root: &Path, v: &toml::Value) -> Result<Vec<String>, Failure> {
+    let mut rows = vec![];
+    tree_rows(root, v, root, &mut rows)?;
+    Ok(rows.into_iter().filter(|(_, t)| t == "watched").map(|(n, _)| n).collect())
 }
 fn read(root: &Path, name: &str, args: &[&str], budget: usize) -> Out {
     let file = fs::File::open(path(root, name)?)?;
@@ -376,6 +440,10 @@ pub fn edited(current: &[u8], new: &str, replace: bool, all: bool, old: Option<&
     let current = std::str::from_utf8(current).map_err(|_| Failure("E6002 text replacement requires a UTF-8 file".into(), 1))?;
     Ok(drafts::replace(current, old, new, all)?.0)
 }
+/// Whether `journal` already holds an undo record from run `rid`.
+fn same_run(journal: &Path, rid: &serde_json::Value) -> bool {
+    fs::read(journal).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).is_some_and(|r| &r["run"] == rid)
+}
 fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, all: bool, old: Option<&str>) -> Out {
     // `edited` treats a given `old` as a replacement; so does the read check.
     let replace = replace || old.is_some_and(|o| !o.is_empty());
@@ -397,7 +465,17 @@ fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, all
     }
     fs::create_dir_all(root.join(".solace/pending"))?;
     let journal = root.join(".solace/pending").join(format!("{}.json", sha256(name.as_bytes())));
-    fs::write(&journal, json!({"path":name,"bytes":before}).to_string())?;
+    // In a board run the record is an undo record: it stays until the command's
+    // outer transaction commits, and recovery adds the rows from it (D-77 point 7).
+    let record = match board::context() {
+        Some((tid, rid)) => json!({"task":tid,"run":rid,"path":name,"bytes":before}),
+        None => json!({"path":name,"bytes":before}),
+    };
+    // An earlier change to this file in the command keeps its record: it holds the original bytes.
+    let wrote = record["task"].is_null() || !same_run(&journal, &record["run"]);
+    if wrote {
+        write_atomic(&journal, record.to_string())?;
+    }
     fs::create_dir_all(p.parent().unwrap())?;
     let result = (|| -> Out {
         fs::write(&p, &text)?;
@@ -428,11 +506,24 @@ fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, all
         Ok(format!("Wrote {name}\n"))
     })();
     if result.is_err() {
-        recover(root)?;
+        // The write is refused: the file goes back, with no undo to record.
+        match &before {
+            Some(b) => fs::write(&p, b)?,
+            None => fs::remove_file(&p)?,
+        }
+        // An earlier change's record stays: that change still stands.
+        if wrote {
+            fs::remove_file(journal)?;
+        }
     } else {
-        fs::remove_file(journal)?;
+        if record["task"].is_null() {
+            fs::remove_file(journal)?;
+        }
         remember(root, name, text.as_bytes())?;
     }
+    // A write that fails validation is put back above and leaves no record, so
+    // a failed command keeps no undo for it; one that succeeded keeps its
+    // record until the outer transaction commits, even if the command then fails.
     result
 }
 fn tree_rows(root: &Path, v: &toml::Value, dir: &Path, out: &mut Vec<(String, String)>) -> Result<(), Failure> {
@@ -550,6 +641,14 @@ pub fn dispatch(
                             format!("only watched and unwatched files can be removed, and never gleam.toml; {t}"),
                         );
                     }
+                    if let Some((tid, rid)) = board::context() {
+                        fs::create_dir_all(root.join(".solace/pending"))?;
+                        let record = root.join(".solace/pending").join(format!("{}.json", sha256(name.as_bytes())));
+                        // An earlier change to this file in the command keeps its record: it holds the original bytes.
+                        if !same_run(&record, &json!(rid)) {
+                            write_atomic(&record, json!({"task":tid,"run":rid,"path":name,"bytes":fs::read(&p).ok()}).to_string())?;
+                        }
+                    }
                     fs::remove_file(p)?;
                     Ok(format!("Removed {name}\n"))
                 }
@@ -583,6 +682,16 @@ pub fn dispatch(
             } else {
                 (vec!["gleam".into(), a[0].into()], 120)
             };
+            // A declared run writes one undo record with its whole snapshot of
+            // watched files before the process runs (D-77 point 7).
+            if let Some((tid, rid)) = board::context() {
+                fs::create_dir_all(root.join(".solace/pending"))?;
+                let files: Vec<Value> = watched_paths(root, v)?
+                    .into_iter()
+                    .map(|name| json!({"path": name, "bytes": fs::read(root.join(&name)).ok()}))
+                    .collect();
+                write_atomic(&root.join(".solace/pending").join(format!("run-{rid}.json")), json!({"task":tid,"run":rid,"files":files}).to_string())?;
+            }
             store.materialize(&store.index()?)?;
             let out = command(root, &argv, timeout, budget)?;
             if out.starts_with("exit code: 0\n") { Ok(out) } else { fail(out) }
@@ -770,6 +879,9 @@ mod tests {
         }
         for cmd in ["files", "read", "write", "remove"] {
             assert!(call(&s, &v, &[cmd, ".solace/board/x"], "x", None).unwrap_err().0.contains("E6006"));
+            // The root's task store (D-77), from the root and from a project inside it.
+            assert!(call(&s, &v, &[cmd, ".solace/tasks/x.json"], "x", None).unwrap_err().0.contains("E6006"));
+            assert!(call(&s, &v, &[cmd, "../.solace/tasks/x.json"], "x", None).unwrap_err().0.contains("E6006"));
         }
         std::os::unix::fs::symlink(s.root.join("src/main.gleam"), s.root.join("priv/link")).unwrap();
         assert!(call(&s, &v, &["write", "priv/link"], "x", None).is_err());
@@ -853,8 +965,93 @@ mod tests {
         assert!(!s.root.join("priv/new").exists());
         call(&s, &v, &["write", "priv/a"], "good", None).unwrap();
         fs::write(s.root.join(".solace/pending/test.json"), json!({"path":"priv/a","bytes":b"original".to_vec()}).to_string()).unwrap();
-        recover(&s.root).unwrap();
+        recover(&s.root, &s, &[board::lock(&s.root).unwrap()]).unwrap();
         assert_eq!(fs::read(s.root.join("priv/a")).unwrap(), b"original");
+    }
+    /// A pending undo record whose file changed: recovery adds the rows (D-77 point 7).
+    #[test]
+    fn undo_record_recovery_adds_rows_when_the_file_changed() {
+        let (s, _) = fixture();
+        fs::write(s.root.join("priv/a"), "original").unwrap();
+        fs::create_dir_all(s.root.join(".solace/pending")).unwrap();
+        fs::write(s.root.join(".solace/pending/x.json"), json!({"task":"t1","run":"r1","path":"priv/a","bytes":b"original".to_vec()}).to_string()).unwrap();
+        fs::write(s.root.join("priv/a"), "changed").unwrap();
+        recover(&s.root, &s, &[board::lock(&s.root).unwrap()]).unwrap();
+        let rows: Vec<(String, String, String)> = s
+            .db
+            .prepare("SELECT task,entity,name FROM board_touches WHERE task='t1'")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, [("t1".to_string(), "file:priv/a".to_string(), "file:priv/a".to_string())]);
+        assert_eq!(fs::read(board::before_file(&s.root, "t1", "priv/a")).unwrap(), b"original");
+        assert!(!s.root.join(".solace/pending/x.json").exists());
+    }
+    /// A pending undo record whose file never changed: recovery drops it, adds nothing.
+    #[test]
+    fn undo_record_recovery_drops_an_unchanged_file() {
+        let (s, _) = fixture();
+        fs::write(s.root.join("priv/a"), "original").unwrap();
+        fs::create_dir_all(s.root.join(".solace/pending")).unwrap();
+        fs::write(s.root.join(".solace/pending/x.json"), json!({"task":"t1","run":"r1","path":"priv/a","bytes":b"original".to_vec()}).to_string()).unwrap();
+        recover(&s.root, &s, &[board::lock(&s.root).unwrap()]).unwrap();
+        let n: i64 = s.db.query_row("SELECT COUNT(*) FROM board_touches WHERE task='t1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0);
+        assert!(!s.root.join(".solace/pending/x.json").exists());
+        assert_eq!(fs::read(s.root.join("priv/a")).unwrap(), b"original");
+    }
+    /// A declared run's record: rows for changed files, and for files the process created.
+    #[test]
+    fn declared_run_record_adds_rows_for_changed_and_created_files() {
+        let (s, _) = fixture();
+        fs::write(s.root.join("priv/a"), "original").unwrap();
+        fs::create_dir_all(s.root.join(".solace/pending")).unwrap();
+        // The snapshot lists every watched file, as `run` takes it; one it doesn't list was created.
+        let manifest = fs::read(s.root.join("gleam.toml")).unwrap();
+        let files = json!([{"path":"gleam.toml","bytes":manifest},{"path":"priv/a","bytes":b"original".to_vec()}]);
+        fs::write(s.root.join(".solace/pending/run-r1.json"), json!({"task":"t1","run":"r1","files":files}).to_string()).unwrap();
+        fs::write(s.root.join("priv/a"), "changed").unwrap();
+        fs::write(s.root.join("priv/created"), "new").unwrap();
+        recover(&s.root, &s, &[board::lock(&s.root).unwrap()]).unwrap();
+        let entities: Vec<String> = s
+            .db
+            .prepare("SELECT entity FROM board_touches WHERE task='t1' ORDER BY entity")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(entities, ["file:priv/a", "file:priv/created"]);
+        assert_eq!(fs::read(board::before_file(&s.root, "t1", "priv/created").with_extension("absent")).unwrap(), b"");
+    }
+    /// A second change to a file keeps only its own run's record, so a refused
+    /// write never deletes the earlier change's record.
+    #[test]
+    fn same_run_matches_only_its_own_record() {
+        let (s, _) = fixture();
+        let journal = s.root.join(".solace/pending/x.json");
+        assert!(!same_run(&journal, &json!("r1")));
+        fs::create_dir_all(s.root.join(".solace/pending")).unwrap();
+        fs::write(&journal, json!({"task":"t1","run":"r1","path":"priv/a","bytes":null}).to_string()).unwrap();
+        assert!(same_run(&journal, &json!("r1")));
+        assert!(!same_run(&journal, &json!("r2")));
+        fs::write(&journal, "{torn").unwrap();
+        assert!(!same_run(&journal, &json!("r1")));
+    }
+    /// A crash after the commit: the rows are already there, recovery adds no duplicate.
+    #[test]
+    fn recovery_skips_rows_already_committed() {
+        let (s, _) = fixture();
+        fs::write(s.root.join("priv/a"), "changed").unwrap();
+        s.db.execute("INSERT INTO board_touches(task,entity,run,name) VALUES ('t1','file:priv/a','r1','file:priv/a')", []).unwrap();
+        fs::create_dir_all(s.root.join(".solace/pending")).unwrap();
+        fs::write(s.root.join(".solace/pending/x.json"), json!({"task":"t1","run":"r1","path":"priv/a","bytes":b"original".to_vec()}).to_string()).unwrap();
+        recover(&s.root, &s, &[board::lock(&s.root).unwrap()]).unwrap();
+        let n: i64 = s.db.query_row("SELECT COUNT(*) FROM board_touches WHERE task='t1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+        assert!(!s.root.join(".solace/pending/x.json").exists());
     }
     #[test]
     fn a6_manifest_validation() {

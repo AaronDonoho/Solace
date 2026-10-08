@@ -24,6 +24,9 @@ export function close_events(source) { source?.close(); }
 export function after(ms, callback) {
   setTimeout(callback, ms);
 }
+export function request_id() {
+  return crypto.randomUUID();
+}
 export function clock(seconds) {
   return seconds ? new Date(seconds * 1000).toLocaleString() : '';
 }
