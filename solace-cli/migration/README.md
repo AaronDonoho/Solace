@@ -1,24 +1,28 @@
 # migration
 
-[![Package Version](https://img.shields.io/hexpm/v/migration)](https://hex.pm/packages/migration)
-[![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://migration.hexdocs.pm/)
+The Migration page of the Solace web app: a Lustre (Gleam, JavaScript target) web component, `<solace-migration>`. It reads no attributes and carries its own styles. It talks to the server's `/migration` JSON endpoints. URLs and the app contract are in D-62 (`DECISIONS.md`).
+
+`migration.register()` returns `Result(Nil, lustre.Error)` and defines the element. The shell (`solace-cli/frontend`) registers it and bundles it with the board and view into one `app.js`. `main()` registers it on its own, for `index.html`.
+
+## Build
 
 ```sh
-gleam add migration@1
-```
-```gleam
-import migration
-
-pub fn main() -> Nil {
-  // TODO: An example of the project in use
-}
+gleam build --target javascript
 ```
 
-Further documentation can be found at <https://migration.hexdocs.pm/>.
+There is no bundle step here; the shell's bundle includes this project.
 
-## Development
+## Test
 
 ```sh
-gleam run   # Run the project
-gleam test  # Run the tests
+gleam test --target javascript
+bun test test/migration.test.mjs test/migration_states.test.mjs   # command: migration-tests
+python3 test/browser.py                                           # command: migration-browser (needs a browser)
 ```
+
+## Layout
+
+- `src/migration.gleam`: the component.
+- `src/migration/api.gleam`, `src/api.mjs`: requests to `/migration`.
+- `index.html`: standalone page.
+- `test/`: Gleam tests, Bun tests, browser check (`browser.py`, `component.html`).

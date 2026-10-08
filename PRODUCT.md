@@ -25,7 +25,7 @@ The human's view comes from Solace's own store of identified, typed symbols and 
 
 ## Capabilities and Constraints
 - Local-only, one user: served on localhost by the `solace serve` binary; no accounts.
-- The board and view are Lustre (Gleam on the JavaScript target), bundled by bun into one `app.js` and embedded in the binary.
+- The board, view and migration apps are Lustre (Gleam on the JavaScript target) web components. A shell (`solace-cli/frontend`) bundles them with bun into one `app.js`, embedded in the binary.
 - Every derived fact is labeled as `declared`, `derived` or `observed`; the UI never presents a derived fact as a guarantee.
 - Source text appears only on request.
 

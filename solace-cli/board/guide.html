@@ -13,6 +13,9 @@ table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid 
 <h1>Using Solace</h1>
 <p>Solace lets AI coding agents build and change your project while you direct the work. You describe tasks on this board, choose which model works on each one, answer the agents' questions, and approve or reject what they did. The agents do all their work through Solace, which checks and records every change they make.</p>
 
+<h2>The menu bar</h2>
+<p>A menu bar at the top has two pages: <strong>Board</strong> (<code>/</code>) and <strong>Migration</strong> (<code>/migrate</code>). The contract view (<code>/view</code>, or <code>/p/&lt;folder&gt;/view</code> for one project) opens without the menu bar, and this guide is a separate page.</p>
+
 <h2>How it works</h2>
 <p>Your project's code is kept in a store inside the project, in the <code>.solace/</code> folder, where each function, type and constant is a separate entry. The source files on disk are written from that store. Agents never edit files directly. They read and change code one entry at a time through Solace, and every change is type-checked before it is kept.</p>
 <p>Agents have no shell and no general file access. They get one tool, Solace, plus web access for looking things up. That means:</p>
@@ -24,7 +27,7 @@ table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid 
 <p>The drawbacks: an agent is limited to what Solace provides, so some tasks that are easy with a shell (a quick throwaway script, for example) need a command you declare for it. And you shouldn't edit the source files by hand either, because Solace rewrites them from its store.</p>
 
 <h2>Migrating an existing project</h2>
-<p>To start using Solace on a Gleam project you already have, run <code>solace serve</code> in its folder and choose <strong>Migrate this project</strong>. Solace makes a copy of the whole folder next to it, called <code>solace-migration</code>, and sets up the copy to use Solace. Your folder isn't changed. You can try Solace in the copy for as long as you like, then switch to it or delete it.</p>
+<p>To start using Solace on a Gleam project you already have, run <code>solace serve</code> in its folder, open <strong>Migration</strong> in the menu bar (<code>/migrate</code>) and choose <strong>Migrate this project</strong>. The page stops polling for status when you leave it. Solace makes a copy of the whole folder next to it, called <code>solace-migration</code>, and sets up the copy to use Solace. Your folder isn't changed. You can try Solace in the copy for as long as you like, then switch to it or delete it.</p>
 <p>When you start, choose which Gleam projects to set up. You can also give commands that check your app works, one per line, such as a script that starts the app and requests a page. Solace runs each one in your folder before migrating and in the copy afterwards, and compares the results. Without any, only builds and tests are compared.</p>
 <p>The copy has exactly the same code as your original, errors included. If a build or a test fails before migrating, it fails in the copy too. That doesn't stop you from switching: fixing it is ordinary work afterwards.</p>
 <h3>Keeping your original folder safe</h3>
