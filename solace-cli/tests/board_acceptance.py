@@ -792,6 +792,37 @@ class Board(unittest.TestCase):
         self.assertEqual(db.execute("SELECT COUNT(*) FROM board_touches WHERE task=? AND entity='file:priv/a'",[t['id']]).fetchone()[0],1)
         self.action(t,'cancel')
         self.assertEqual((self.root/'priv/a').read_text(),'original')
+    def test_a_move_is_recorded_and_undone(self):  # D-84
+        (self.root/'priv/d/deep').mkdir(parents=True);(self.root/'priv/d/one').write_text('1');(self.root/'priv/d/deep/two').write_text('2')
+        (self.root/'priv/b').write_text('b')
+        t=self.completed([{'command':'move priv/a priv/moved/a'},{'command':'move priv/a priv/moved/a'},
+                          {'command':'move priv/b priv/moved/a'},{'command':'move priv/d docs/d'},{'command':'task diff'}])
+        rid=t['runs'][-1]['id']
+        replies=[json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(rid+'.responses')).read_text().splitlines()]
+        self.assertIn('Moved priv/a to priv/moved/a',replies[0])
+        self.assertIn('Already moved priv/a',replies[1])
+        self.assertIn('already exists',replies[2])
+        self.assertIn('Moved priv/d to docs/d (2 files)',replies[3])
+        self.assertIn('file:priv/a (deleted)',replies[4]);self.assertIn('file:priv/moved/a (added)',replies[4])
+        self.assertEqual(sorted(c['name'] for c in t['changes']),['file:docs/d/deep/two','file:docs/d/one','file:priv/a','file:priv/d/deep/two','file:priv/d/one','file:priv/moved/a'])
+        self.action(t,'cancel')
+        self.assertEqual((self.root/'priv/a').read_text(),'original');self.assertEqual((self.root/'priv/d/deep/two').read_text(),'2')
+        self.assertFalse((self.root/'priv/moved/a').exists());self.assertFalse((self.root/'docs/d/one').exists())
+        self.assertEqual((self.root/'priv/b').read_text(),'b')
+    def test_an_investigation_cannot_move(self):  # D-84
+        t=self.create([{'command':'move priv/a priv/b'},{'command':'task done looked'}])
+        self.action(t,'plan');self.action(t,'investigate',model='fake')
+        t=self.wait(t,lambda x:x['runs'] and x['runs'][-1]['state']=='ended')
+        self.assertIn('E7010',(self.root/'.solace'/(t['runs'][-1]['id']+'.responses')).read_text())
+        self.assertEqual((self.root/'priv/a').read_text(),'original');self.assertFalse((self.root/'priv/b').exists())
+    def test_a_crash_after_a_move_keeps_its_undo(self):  # D-84
+        self.restart({'SOLACE_FAIL_AFTER':'command'})
+        t=self.assign([{'command':'move priv/a priv/b'}])
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        self.cli('read','priv/b')
+        self.assertEqual(self.rows(t['id']),['file:priv/a','file:priv/b'])
+        self.action(t,'cancel')
+        self.assertEqual((self.root/'priv/a').read_text(),'original');self.assertFalse((self.root/'priv/b').exists())
 
     def test_a11_embedded_client_and_internal_files(self):
         for path,expected in [('/',b'Solace tasks'),('/migrate',b'Solace tasks'),('/app.js',b'/workflow'),('/guide',b'Using Solace')]:

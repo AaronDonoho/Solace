@@ -198,6 +198,22 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         None => (args, None),
     };
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    // `move --to-project <dir>`: the destination's project, which the task must
+    // cover too (D-84); outside a board run a command changes one project.
+    let dest = match a.iter().position(|x| *x == "--to-project") {
+        Some(i) if a.first() == Some(&"move") => {
+            let dir = a.get(i + 1).copied().ok_or_else(|| Failure("--to-project needs a project folder; session start lists them".into(), 2))?;
+            let Some(p) = scoped(dir, args)? else {
+                return lockdown::error("E6007", dir, "`move --to-project` works only in a board run whose task covers both projects");
+            };
+            let here = match &cross {
+                Some(c) => c.clone(),
+                None => Store::root()?,
+            };
+            Some(fs::canonicalize(&p)?).filter(|p| fs::canonicalize(&here).ok().as_ref() != Some(p))
+        }
+        _ => None,
+    };
     // The task's home: where the run's agent works, and where the task is stored.
     let home = Store::root().ok();
     let _within = cross.as_deref().map(Within::enter).transpose()?;
@@ -208,12 +224,14 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     let context = board::context();
     let home = home.unwrap_or_else(|| root.clone());
     let guard = if let Some((tid, rid)) = &context {
-        board::agent_guard(&home, tid, rid, if a.is_empty() { &["help"] } else { &a }, cross.as_deref())?
+        let also: Vec<&Path> = cross.iter().chain(&dest).map(PathBuf::as_path).collect();
+        board::agent_guard(&home, tid, rid, if a.is_empty() { &["help"] } else { &a }, &also)?
     } else {
         vec![board::lock(&root)?]
     };
     let store = board::open(&root)?;
     let home = board::open(&home)?;
+    let dest = dest.map(|d| board::open(&d)).transpose()?;
     // A `task` command holds no project lock (D-77 point 5), so it runs before
     // recovery and absorbing: those need the lock, and a live command's records
     // must not be taken for a crashed one's. Its changes are committed rows, so
@@ -228,6 +246,9 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     }
     // Every guard here holds the lock of `store`'s project.
     lockdown::recover(&store.root, &store, &guard)?;
+    if let Some(d) = &dest {
+        lockdown::recover(&d.root, d, &guard)?;
+    }
     board::flow(&store.root)?;
     let noticed = outside::absorb(&store, outside::Mode::Notice)?;
     if let Some((tid, rid)) = &context {
@@ -247,6 +268,14 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     } else {
         None
     };
+    // A move into another project changes files there too: they're recorded in its store.
+    let dest_before = match (&dest, &before) {
+        (Some(d), Some(_)) => {
+            let (_, to, _) = lockdown::move_args(&store.root, &a)?;
+            Some((d, to, board::files_under(&d.root, to)))
+        }
+        _ => None,
+    };
     // A code change and its undo rows commit together (D-77 point 7): one outer
     // transaction around the command and `record`. A process runs outside it, so
     // a long `run` holds the store's write lock only for the rows; the ahead
@@ -256,6 +285,9 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     let _outer = OuterTransaction(store.db.clone());
     if let (Some(_), Some((tid, rid))) = (&before, &context) {
         lockdown::mark(&store.root, tid, rid)?;
+        if let Some((d, ..)) = &dest_before {
+            lockdown::mark(&d.root, tid, rid)?;
+        }
     }
     if before.is_some() && !processes {
         store.db.execute_batch("BEGIN IMMEDIATE")?;
@@ -283,6 +315,12 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         // The task lists its changes from the rows that committed (D-77 point 4),
         // computed by changes_of, so there is nothing to write here.
         lockdown::drop_records(&store.root, &rid)?;
+        if let Some((d, to, files)) = dest_before {
+            d.db.execute_batch("BEGIN IMMEDIATE")?;
+            board::record(d, tid, rid, &Value::Object(files), &Value::Object(board::files_under(&d.root, to)))?;
+            d.db.execute_batch("COMMIT")?;
+            lockdown::drop_records(&d.root, rid)?;
+        }
     }
     match result {
         Ok(out) => Ok(format!("{noticed}{out}{unread}")),
@@ -317,7 +355,7 @@ fn crash_after(point: &str) {
 const READS: &[&str] = &["view", "inspect", "refs", "find", "grep", "files", "read"];
 /// May change the project: recorded on the task in a board run, and refused in
 /// read-only runs, except `build`, which reviews run to verify.
-const CHANGES: &[&str] = &["submit", "delete", "write", "remove", "run", "format", "build"];
+const CHANGES: &[&str] = &["submit", "delete", "write", "remove", "move", "run", "format", "build"];
 /// Run a process that may change source; what it changed is read in after.
 const PROCESSES: &[&str] = &["format", "build", "run"];
 /// Results recorded as the task's verification.
@@ -407,7 +445,7 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
     let target = scope::path(&root, dir);
     // A board run's agent must still be running, as for any command.
     let _guard = match (board::context(), &own) {
-        (Some((tid, rid)), Some(own)) => Some(board::agent_guard(own, &tid, &rid, &a, None)?),
+        (Some((tid, rid)), Some(own)) => Some(board::agent_guard(own, &tid, &rid, &a, &[])?),
         _ => None,
     };
     // A plain connection: a read creates no tables in another project.
@@ -483,7 +521,7 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
         ["work", "list"] | ["work"] => store.work_list(),
         ["work", "done", id] => store.work_done(id),
         _ => usage(format!(
-            "Unknown command: {}\nCommands: session, inspect, view, refs, impact, find, submit, drafts, delete, check, test, probe, work, files, read, write, remove, build, format, run, task.",
+            "Unknown command: {}\nCommands: session, inspect, view, refs, impact, find, submit, drafts, delete, check, test, probe, work, files, read, write, remove, move, build, format, run, task.",
             a.join(" ")
         )),
     }

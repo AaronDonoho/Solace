@@ -1,3 +1,4 @@
+import contracts
 import gleam/uri.{type Uri}
 import lustre
 import lustre/attribute
@@ -7,11 +8,10 @@ import lustre/element/html
 import migration
 import modem
 import solace_board
-import solace_view
 
 pub fn main() -> Nil {
   let assert Ok(_) = solace_board.register()
-  let assert Ok(_) = solace_view.register()
+  let assert Ok(_) = contracts.register()
   let assert Ok(_) = migration.register()
   let assert Ok(_) =
     lustre.application(init, update, view)
@@ -22,7 +22,7 @@ pub fn main() -> Nil {
 pub type Route {
   Board
   Migrate
-  View(base: String)
+  Contracts(base: String)
 }
 
 pub type Msg {
@@ -33,8 +33,8 @@ pub fn route(uri: Uri) -> Route {
   case uri.path_segments(uri.path) {
     [] -> Board
     ["migrate"] -> Migrate
-    ["view"] -> View("")
-    ["p", dir, "view"] -> View("/p/" <> dir)
+    ["contracts"] -> Contracts("")
+    ["p", dir, "contracts"] -> Contracts("/p/" <> dir)
     _ -> Board
   }
 }
@@ -43,12 +43,12 @@ pub fn page(route: Route) -> Element(msg) {
   case route {
     Board -> element.element("solace-board", [], [])
     Migrate -> element.element("solace-migration", [], [])
-    View(base) -> {
+    Contracts(base) -> {
       let attributes = case base {
         "" -> []
         _ -> [attribute.attribute("base", base)]
       }
-      element.element("solace-view", attributes, [])
+      element.element("solace-contracts", attributes, [])
     }
   }
 }
@@ -83,6 +83,10 @@ pub fn view(route: Route) -> Element(msg) {
     html.nav([attribute.class("menu")], [
       link("/", "Board", route == Board),
       link("/migrate", "Migration", route == Migrate),
+      link("/contracts", "Contracts", case route {
+        Contracts(_) -> True
+        _ -> False
+      }),
     ]),
     page(route),
   ])

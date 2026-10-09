@@ -6,4 +6,4 @@ Requested browser captures are pending. In this sandbox, `solace serve --port 30
 
 - Board with the menu bar (`/`).
 - Migration page (`/migrate`), with the menu bar's Migration link marked current.
-- Contract view (`/view`, `/p/<dir>/view`), which has no menu bar.
+- Contracts page (`/contracts`, `/p/<dir>/contracts`), with the menu bar's Contracts link marked current.

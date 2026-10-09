@@ -140,7 +140,7 @@ class Root(unittest.TestCase):
         ident, data = self.next_event(single)
         self.assertNotIn('project', data)
         self.assertEqual(set(json.loads(ident)), {'tasks', 'a'})
-        self.assertIn('<div id="app">', self.call('GET', '/p/a/view')[1])
+        self.assertIn('<div id="app">', self.call('GET', '/p/a/contracts')[1])
 
         # Inside a project, the root is still the one root: a second server is refused.
         other = self.serve(self.root/'a/src')
@@ -515,6 +515,34 @@ class Root(unittest.TestCase):
         self.assertEqual(self.api('POST', f'/p/a/tasks/{m["id"]}/scope', {'scope': ['c']})['scope'], ['c'])
         self.assertEqual(self.api('GET', f'/p/c/tasks/{m["id"]}')['title'], 'Moves')
         self.refused('GET', f'/p/a/tasks/{m["id"]}', None, 'unknown task')
+
+    def test_a_move_between_the_projects_a_task_covers(self):
+        # D-84: a move crosses projects only within the task's scope; each side is recorded in its own project.
+        for d in 'abc': project(self.root/d, d, 'pub fn one() { 1 }\n')
+        self.migrate()
+        (self.root/'a/notes.txt').write_text('notes')
+        self.start()
+        steps = [{'command': 'move notes.txt docs/notes.txt --to-project b'},
+                 {'command': 'move notes.txt docs/notes.txt --to-project b'},
+                 {'command': 'move docs/notes.txt notes.txt --project b --to-project c'},
+                 {'command': 'task diff'},
+                 {'command': 'task done moved'}]
+        t = self.api('POST', '/p/a/tasks', {'title': 'Move', 'body': json.dumps(steps), 'scope': ['a', 'b']})
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'plan'})
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        t = self.wait('/p/a', t, lambda x: x['column'] == 'needs_review')
+        rid = t['runs'][-1]['id']
+        replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'a/.solace'/(rid + '.responses')).read_text().splitlines()]
+        self.assertIn('Moved a: notes.txt to b: docs/notes.txt', replies[0])
+        self.assertIn('Already moved', replies[1])
+        self.assertIn("not one of this task's projects (a, b)", replies[2])
+        self.assertIn('a: file:notes.txt (deleted)', replies[3])
+        self.assertIn('b: file:docs/notes.txt (added)', replies[3])
+        self.assertEqual((self.root/'b/docs/notes.txt').read_text(), 'notes')
+        self.assertFalse((self.root/'c/notes.txt').exists())
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'cancel'})
+        self.assertEqual((self.root/'a/notes.txt').read_text(), 'notes')
+        self.assertFalse((self.root/'b/docs/notes.txt').exists())
 
     def test_old_tasks_keep_scope_conversation_and_changes_after_the_move(self):
         # D-77 point 4: a task saved in a project's old board folder keeps its scope,

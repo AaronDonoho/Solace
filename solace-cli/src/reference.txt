@@ -46,7 +46,7 @@ Commands (`help` gives every option, `help <command>` one command's):
   check [--warnings]            type-check everything
   probe                         run throwaway code from `text`
   drafts                        rejected submits, kept to fix and retry
-  files | read | write          project files outside the store
+  files | read | write | move   project files outside the store
   work add | list | done        work records, kept between sessions
 
 Commands in full
@@ -145,11 +145,17 @@ this project's file. node_modules folders are never watched.
   read <path> [--lines a..b | --tail n]
   write <path> [--all]          whole text, or with `old`, just `old` -> `text`
   remove <path>
+  move <from> <to> [--to-project <folder>]
+                                move a file or folder, whole or not at all, never
+                                onto anything that exists; graph, protected and
+                                internal files stay put. --to-project: another
+                                project of this task. A repeated move changes
+                                nothing
 Project: build | format | run <name> [args...] (commands declared in solace.toml)
 Work records, kept between sessions: work add (`text`) | work list | work done <id>
 
 Task runs (the note, summary or question in `text`). Reviews and investigations
-are read-only: submit, delete, write, remove and format are refused, and so is
+are read-only: submit, delete, write, remove, move and format are refused, and so is
 run, except in a review for commands marked `allowed_in_reviews = true`.
   task diff [name...]           what this task changed, against its state before
   task note                     add a note; completes a review run

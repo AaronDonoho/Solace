@@ -106,7 +106,7 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     task.changes = [{ name: 'app.main' }];
     dispatch(new board.Select('', 't1')); dispatch(new board.Tab('changes'));
     await until(() => to_string(board.view(model)).includes('1 effects added'));
-    expect(to_string(board.view(model))).toContain('/view?task=t1');
+    expect(to_string(board.view(model))).toContain('/contracts?task=t1');
     expect(requests).toContainEqual(['GET', '/graph']);
   } finally {
     if (confirmOriginal === undefined) delete globalThis.confirm;
@@ -158,7 +158,7 @@ test('transport uses the base it is given; explicit project paths stay absolute'
   const oldLocation = globalThis.location, oldFetch = globalThis.fetch, oldEventSource = globalThis.EventSource;
   const paths = [];
   let source;
-  globalThis.location = { pathname: '/p/web/view' };
+  globalThis.location = { pathname: '/p/web/contracts' };
   globalThis.fetch = async path => { paths.push(path); return new Response('{}'); };
   globalThis.EventSource = class {
     constructor(path) { this.path = path; source = this; }
@@ -239,7 +239,6 @@ const settle = () => Bun.sleep(20);
 test('each instance uses its own base, including one set before it is added to the page', async () => {
   const browser = fakeBrowser('?task=t1');
   try {
-    const view = await import('../build/dev/javascript/solace_board/solace_view.mjs');
     // createElement, then setAttribute('base'), then append: nothing is asked until it connects.
     const shop = mount(board);
     shop.dispatch(new board.BaseChanged('/p/shop'));
@@ -249,18 +248,6 @@ test('each instance uses its own base, including one set before it is added to t
     await settle();
     expect(browser.paths).toEqual(expect.arrayContaining(['/p/shop/projects', '/p/shop/models']));
     expect(browser.sources.map(s => s.path)).toEqual(['/p/shop/events']);
-    // A second component on the same page keeps its own base.
-    const contract = mount(view);
-    contract.dispatch(new view.BaseChanged('/p/web'));
-    contract.dispatch(new view.Connected());
-    await settle();
-    expect(browser.paths).toContain('/p/web/graph?task=t1');
-    expect(browser.sources.map(s => s.path)).toEqual(['/p/shop/events', '/p/web/events']);
-    // Changing one instance's base moves only its own requests and stream.
-    contract.dispatch(new view.BaseChanged('/p/api'));
-    await settle();
-    expect(browser.paths).toContain('/p/api/graph?task=t1');
-    expect(browser.sources.map(s => [s.path, !!s.closed])).toEqual([['/p/shop/events', false], ['/p/web/events', true], ['/p/api/events', false]]);
     // Without a base, the page address decides.
     const plain = mount(board);
     plain.dispatch(new board.Connected());
@@ -271,7 +258,6 @@ test('each instance uses its own base, including one set before it is added to t
 test('a component removed and added again reopens one stream, which receives later events', async () => {
   const browser = fakeBrowser('?task=t1');
   try {
-    const view = await import('../build/dev/javascript/solace_board/solace_view.mjs');
     const b = mount(board);
     b.dispatch(new board.Connected());
     browser.sources[0].listeners.ready();
@@ -286,20 +272,8 @@ test('a component removed and added again reopens one stream, which receives lat
     expect(Array.from(b.model.replay)).toEqual(['missed']);
     browser.sources[1].listeners.ready();
     expect(b.model.caught_up).toBe(true);
-
-    const v = mount(view);
-    v.dispatch(new view.Connected());
-    v.dispatch(new view.Disconnected());
-    v.dispatch(new view.Connected());
-    await settle();
-    expect(browser.sources[2].closed).toBe(true);
-    const reloads = () => browser.paths.filter(p => p === '/graph?task=t1').length;
-    const before = reloads();
-    browser.sources[3].onmessage({ data: JSON.stringify({ task: { id: 't1' } }) });
-    await settle();
-    expect(reloads()).toBe(before + 1);
-    // One open stream per component.
-    expect(browser.sources.filter(s => !s.closed)).toHaveLength(2);
+    // One open stream.
+    expect(browser.sources.filter(s => !s.closed)).toHaveLength(1);
   } finally { browser.restore(); }
 });
 
@@ -485,17 +459,17 @@ test('the editor sends what its buttons ask for, and wraps the selection in plac
   } finally { browser.restore(); delete globalThis.confirm; }
 });
 
-test('the page registers the board and the view as elements', async () => {
+test('the page registers the board as an element', async () => {
   const tags = [];
   const saved = [globalThis.document, globalThis.HTMLElement, globalThis.customElements, globalThis.location];
-  globalThis.location = { pathname: '/view', search: '' };
+  globalThis.location = { pathname: '/', search: '' };
   globalThis.document = { documentElement: { dataset: {} } };
   globalThis.HTMLElement = class {};
   globalThis.customElements = { get: () => undefined, define: name => tags.push(name) };
   try {
     await import('../src/main.mjs');
     await settle();
-    expect(tags).toEqual(['solace-board', 'solace-view']);
+    expect(tags).toEqual(['solace-board']);
   } finally {
     [globalThis.document, globalThis.HTMLElement, globalThis.customElements, globalThis.location] = saved;
   }

@@ -888,6 +888,29 @@ pub fn diff_ops<'a>(a: &'a str, b: &'a str) -> Vec<(char, &'a str)> {
     ops.extend(a[a.len() - suf..].iter().map(|s| (' ', *s)));
     ops
 }
+/// Snapshot entries for every regular file at or under `name` in `root`; none
+/// for a path an agent can't reach, which the command refuses anyway.
+pub fn files_under(root: &Path, name: &str) -> serde_json::Map<String, Value> {
+    fn walk(p: &Path, name: &str, out: &mut serde_json::Map<String, Value>) {
+        let Ok(m) = fs::symlink_metadata(p) else { return };
+        if m.is_file() {
+            out.insert(format!("file:{name}"), json!(fs::read(p).ok()));
+        } else if m.is_dir() {
+            for e in fs::read_dir(p).into_iter().flatten().flatten() {
+                walk(&e.path(), &format!("{name}/{}", e.file_name().to_string_lossy()), out);
+            }
+        }
+    }
+    let mut out = serde_json::Map::new();
+    let name = file_name(Path::new(name));
+    if !name.is_empty()
+        && !name.split('/').any(|c| c == ".solace")
+        && let Ok(p) = lockdown::path(root, &name)
+    {
+        walk(&p, &name, &mut out);
+    }
+    out
+}
 pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
     let mut v = json!({});
     if matches!(a[0], "write" | "remove")
@@ -896,6 +919,16 @@ pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
         let p = lockdown::path(root, name)?;
         let name = file_name(p.strip_prefix(root).unwrap());
         v[format!("file:{name}")] = json!(fs::read(p).ok());
+    }
+    // A move's files on both sides; a side in another project is recorded there (D-84).
+    if a[0] == "move"
+        && let Ok((from, to, dest)) = lockdown::move_args(root, a)
+    {
+        let m = v.as_object_mut().unwrap();
+        m.extend(files_under(root, from));
+        if lockdown::same_project(root, &dest) {
+            m.extend(files_under(root, to));
+        }
     }
     if a[0] == "run" {
         fn collect(root: &Path, dir: &Path, settings: &toml::Value, out: &mut Value) -> Result<(), Failure> {
@@ -2556,12 +2589,12 @@ pub fn context() -> Option<(String, String)> {
 /// replaced by rename (D-77 point 5). Any other command holds its home's lock
 /// and, for a command in another project of its scope (`also`), that
 /// project's too (D-61).
-pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: Option<&Path>) -> Result<Vec<fs::File>, Failure> {
+pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: &[&Path]) -> Result<Vec<fs::File>, Failure> {
     loop {
         let guard = if a.first() == Some(&"task") {
             vec![]
         } else {
-            scope::lock_all(&[root.to_path_buf(), also.unwrap_or(root).to_path_buf()])?
+            scope::lock_all(&[root].iter().chain(also).map(|p| p.to_path_buf()).collect::<Vec<_>>())?
         };
         let t = task(root, tid)?;
         let r = &t["runs"][run_at(&t, rid)?];
@@ -2587,7 +2620,7 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: Option<&
             return err("E7010", "host command is unavailable in a run");
         }
         if r["kind"] == "review" && a[0] == "run" && a.len() > 1 {
-            let marked = lockdown::settings(also.unwrap_or(root))
+            let marked = lockdown::settings(also.first().copied().unwrap_or(root))
                 .ok()
                 .and_then(|v| v.get("commands")?.get(a[1])?.get("allowed_in_reviews")?.as_bool())
                 .unwrap_or(false);
@@ -2598,7 +2631,7 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: Option<&
             return err("E7010", "this run is read-only");
         }
         // The human may have changed the task's projects while it was paused.
-        if let Some(p) = also {
+        for p in also {
             let top = scope::top(root);
             let dir = scope::dir(&top, p);
             if !scope::of(&t, &scope::dir(&top, root)).contains(&dir) {
@@ -3310,10 +3343,10 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 return;
             }
             if req.method().as_str() == "GET"
-                && matches!(url.split('?').next().unwrap_or(""), "/" | "/migrate" | "/view" | "/app.js" | "/guide" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2")
+                && matches!(url.split('?').next().unwrap_or(""), "/" | "/migrate" | "/contracts" | "/app.js" | "/guide" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2")
             {
                 let (data, kind) = match url.split('?').next().unwrap_or("") {
-                    "/" | "/migrate" | "/view" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
+                    "/" | "/migrate" | "/contracts" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
                     "/guide" => (include_bytes!("../board/guide.html").as_slice(), "text/html"),
                     "/fonts/sans-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-400-normal.woff2").as_slice(), "font/woff2"),
                     "/fonts/sans-700.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-700-normal.woff2").as_slice(), "font/woff2"),
@@ -3652,7 +3685,7 @@ mod tests {
         t["runs"] = json!([{"id":"r1","kind":"review","state":"running"},{"id":"r2","kind":"work","state":"ended"}]);
         tasks::put(&s, &t).unwrap();
         let tid = t["id"].as_str().unwrap();
-        let guard = |rid: &str, a: &[&str]| agent_guard(&s.root, tid, rid, a, None).map(drop).map_err(|e| e.0);
+        let guard = |rid: &str, a: &[&str]| agent_guard(&s.root, tid, rid, a, &[]).map(drop).map_err(|e| e.0);
         assert!(guard("r1", &["view", "app"]).is_ok() && guard("r1", &["build"]).is_ok());
         std::fs::write(
             s.root.join("solace.toml"),
@@ -3672,7 +3705,7 @@ mod tests {
         let waits = |a: &'static [&'static str]| {
             let (root, tid) = (s.root.clone(), tid.to_string());
             let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || drop(tx.send(agent_guard(&root, &tid, "r1", a, None).map(|g| g.len()).map_err(|e| e.0))));
+            std::thread::spawn(move || drop(tx.send(agent_guard(&root, &tid, "r1", a, &[]).map(|g| g.len()).map_err(|e| e.0))));
             rx
         };
         assert_eq!(waits(&["task", "note", "x"]).recv_timeout(Duration::from_secs(1)).unwrap(), Ok(0));
@@ -3998,7 +4031,7 @@ mod tests {
         let guard = |a: &'static [&'static str]| {
             let (root, tid) = (s.root.clone(), tid.clone());
             let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || drop(tx.send(agent_guard(&root, &tid, "r1", a, None).map(drop).map_err(|e| e.0))));
+            std::thread::spawn(move || drop(tx.send(agent_guard(&root, &tid, "r1", a, &[]).map(drop).map_err(|e| e.0))));
             rx
         };
         // No server: stop.

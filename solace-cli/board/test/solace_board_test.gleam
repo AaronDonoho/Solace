@@ -317,7 +317,7 @@ pub fn workspace_lanes_test() {
   |> should.be_true
   rendered |> string.contains("<h2>Backlog</h2>") |> should.be_true
   rendered
-  |> string.contains("href=\"/p/bench%2Fpilot/view\"")
+  |> string.contains("href=\"/p/bench%2Fpilot/contracts\"")
   |> should.be_true
   rendered |> string.contains(">Projects</button>") |> should.be_true
   // A run ending in a workspace names its project.
@@ -398,8 +398,10 @@ pub fn root_project_lane_test() {
   let rendered = board.view(model) |> element.to_string
   rendered |> string.contains("<strong>visualizer</strong>") |> should.be_true
   rendered |> string.contains("(this folder)") |> should.be_true
-  rendered |> string.contains("href=\"/view\"") |> should.be_true
-  rendered |> string.contains("href=\"/p/frontend/view\"") |> should.be_true
+  rendered |> string.contains("href=\"/contracts\"") |> should.be_true
+  rendered
+  |> string.contains("href=\"/p/frontend/contracts\"")
+  |> should.be_true
 }
 
 pub fn lane_target_test() {
@@ -441,7 +443,7 @@ pub fn single_project_header_test() {
     |> result.unwrap("")
   rendered
   |> string.contains(
-    "<header class=\"lane-title\"><span><strong>shop</strong><small> app</small><small class=\"lane-target muted\"> erlang</small></span><small>0 tasks</small><a href=\"/view\">Contract view</a></header>",
+    "<header class=\"lane-title\"><span><strong>shop</strong><small> app</small><small class=\"lane-target muted\"> erlang</small></span><small>0 tasks</small><a href=\"/contracts\">Contract view</a></header>",
   )
   |> should.be_true
   rendered |> string.contains("lane-toggle") |> should.be_false
@@ -994,4 +996,51 @@ pub fn removing_needs_the_second_step_and_the_exact_name_test() {
   // Adding a directory that was not found does nothing.
   let #(same, _) = board.update(model, board.AddProject("zzz"))
   same |> should.equal(model)
+}
+
+/// Events and action replies carry no `changes` (D-77): the selected task
+/// keeps its list, and a fetch of the task replaces it.
+pub fn changes_survive_events_and_replies_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) = board.update(model, board.CaughtUp)
+  let bare =
+    "{\"id\":\"t1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1}"
+  let full =
+    "{\"id\":\"t1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"changes\":[{\"entity\":\"symbol:x\",\"name\":\"app.one\",\"project\":\"\"}]}"
+  let #(model, _) = board.update(model, board.Select("", "t1"))
+  let #(model, _) =
+    board.update(
+      model,
+      board.SelectedTaskLoaded(model.selection_generation, "", "t1", full),
+    )
+  let changes = fn(m: board.Model) {
+    let assert Some(t) = m.selected
+    t.changes
+  }
+  let one = [board.Change("", "app", "one")]
+  changes(model) |> should.equal(one)
+  let #(model, _) = board.update(model, board.Live("{\"task\":" <> bare <> "}"))
+  changes(model) |> should.equal(one)
+  let #(model, _) = board.update(model, board.Changed(bare))
+  changes(model) |> should.equal(one)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ChangesLoaded(model.selection_generation, "t1", bare),
+    )
+  changes(model) |> should.equal([])
+}
+
+/// A file is listed by its path under Files, after the code; an entry that
+/// is neither keeps its name under Other.
+pub fn file_changes_list_under_files_test() {
+  let text =
+    "{\"id\":\"t1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"changes\":[{\"entity\":\"file:src/api.mjs\",\"name\":\"file:src/api.mjs\"},{\"entity\":\"symbol:y\",\"name\":\"pilot/checkout.pay\"},{\"entity\":\"module:m\",\"name\":\"module:m\"}]}"
+  let assert Ok(t) = json.parse(text, board.task_decoder())
+  board.change_groups(t.changes, False)
+  |> should.equal([
+    #("pilot/checkout", ["pay"]),
+    #("Files", ["src/api.mjs"]),
+    #("Other", ["module:m"]),
+  ])
 }

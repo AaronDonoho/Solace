@@ -131,7 +131,7 @@ pub fn main_test() {
             (['submit', 'app.main'], 'pub fn main() {\n  let _ = args()\n  io.println("hello")\n  write("out", "hi")\n}'),
             (['drafts'], None), (['delete', 'app.nosuch'], None), (['check'], None), (['test', 'app_test.main_test'], None),
             (['probe'], 'let x = 1'), (['work', 'list'], None), (['files'], None), (['read', 'gleam.toml'], None),
-            (['write', 'notes.txt'], 'notes\n'), (['remove', 'notes.txt'], None), (['build'], None), (['format'], None),
+            (['write', 'notes.txt'], 'notes\n'), (['move', 'notes.txt', 'moved.txt'], None), (['remove', 'moved.txt'], None), (['build'], None), (['format'], None),
             (['run', 'nosuch'], None), (['task', 'diff'], None),
         ]
         usage = subprocess.run([BIN, 'nosuchcommand'], cwd=self.root, env=self.env, input='', capture_output=True, text=True)

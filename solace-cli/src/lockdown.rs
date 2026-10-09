@@ -577,6 +577,226 @@ fn count_files(p: &Path) -> Result<usize, Failure> {
     Ok(n)
 }
 
+/// Where `name` is in `root`, if an agent may reach it: not Solace's own files,
+/// not out of the project or into a project nested in it, and no symlink.
+fn reachable(root: &Path, name: &str) -> Result<PathBuf, Failure> {
+    if Path::new(name).components().any(|c| c.as_os_str() == ".solace") {
+        return error("E6006", name, "Solace internal files have no agent access");
+    }
+    // A path out of the project, or into a project nested in it, is another project's.
+    if internal(root, name) || name.split('/').any(|c| c == "..") {
+        return error(
+            "E6006",
+            name,
+            "outside this project: another project's files are reached with `--project <folder>`; \
+             to change a project this task doesn't cover, ask the human with `task ask` rather than putting the change elsewhere",
+        );
+    }
+    path(root, name)
+}
+
+/// `move <from> <to> [--to-project <folder>]`: the source, the destination, and
+/// the destination's project, `root` itself without `--to-project` (D-84).
+pub fn move_args<'a>(root: &Path, a: &[&'a str]) -> Result<(&'a str, &'a str, PathBuf), Failure> {
+    let (mut operands, mut project) = (vec![], None);
+    let mut rest = a[1..].iter();
+    while let Some(&x) = rest.next() {
+        if x == "--to-project" {
+            project = Some(*rest.next().ok_or_else(|| Failure("--to-project needs a project folder; session start lists them".into(), 2))?);
+        } else {
+            operands.push(x);
+        }
+    }
+    let [from, to] = operands[..] else { return usage("move <from> <to> [--to-project <folder>]") };
+    let Some(dir) = project.map(project_dir) else { return Ok((from, to, root.to_path_buf())) };
+    let top = scope::top(root);
+    if !workspace::members(&top)?.iter().any(|m| m == dir) {
+        return error("E6007", dir, "not a project under this Solace root");
+    }
+    Ok((from, to, scope::path(&top, dir)))
+}
+
+/// Whether two folders are the same project.
+pub fn same_project(a: &Path, b: &Path) -> bool {
+    a == b || fs::canonicalize(a).ok().is_some_and(|x| fs::canonicalize(b).ok() == Some(x))
+}
+
+/// `rel` below `name`; `name` itself when `rel` is empty.
+fn joined(name: &str, rel: &str) -> String {
+    if rel.is_empty() { name.to_string() } else { format!("{name}/{rel}") }
+}
+
+/// The files a move of `p` (named `name`) takes, relative to it: "" for a file,
+/// every file below a folder. A symlink, or anything that is neither file nor
+/// folder, refuses the move.
+fn moved_files(name: &str, p: &Path, rel: &str, out: &mut Vec<String>) -> Result<(), Failure> {
+    let kind = fs::symlink_metadata(p)?.file_type();
+    if kind.is_symlink() || !(kind.is_file() || kind.is_dir()) {
+        return error("E6002", &joined(name, rel), "only files and folders can be moved; this is a symlink or a special file");
+    }
+    if kind.is_file() {
+        out.push(rel.to_string());
+        return Ok(());
+    }
+    let mut entries: Vec<_> = fs::read_dir(p)?.collect::<Result<_, _>>()?;
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        moved_files(name, &e.path(), &joined(rel, &e.file_name().to_string_lossy()), out)?;
+    }
+    Ok(())
+}
+
+/// Refuses a move of `name` out of or into its place in `root`: graph files are
+/// a projection of the store, and protected and internal files aren't the agent's.
+fn movable(root: &Path, v: &toml::Value, name: &str) -> Result<(), Failure> {
+    if name == "gleam.toml" {
+        return error("E6002", name, "gleam.toml can't be moved");
+    }
+    match tier(root, v, name, Some(b"")).as_str() {
+        "graph" => error("E6001", name, "Gleam source is held as symbols, and its file is a projection of the store: it can't be moved"),
+        "internal" => error("E6006", name, "Solace's own files and other projects' files can't be moved"),
+        t if t == "watched" || t.starts_with("unwatched") => Ok(()),
+        t => error("E6002", name, format!("{t} files can't be moved")),
+    }
+}
+
+/// In a board run, the undo record for `name` before a move changes it, as
+/// `remove` writes one. Returns a record this call wrote, so a failed move can drop it.
+fn undo_record(root: &Path, name: &str, bytes: Option<Vec<u8>>) -> Result<Option<PathBuf>, Failure> {
+    let Some((tid, rid)) = board::context() else { return Ok(None) };
+    let dir = root.join(".solace/pending");
+    fs::create_dir_all(&dir)?;
+    let record = dir.join(format!("{}.json", sha256(name.as_bytes())));
+    // An earlier change to this file in the command keeps its record: it holds the original bytes.
+    if same_run(&record, &json!(rid)) {
+        return Ok(None);
+    }
+    write_atomic(&record, json!({"task":tid,"run":rid,"path":name,"bytes":bytes}).to_string())?;
+    Ok(Some(record))
+}
+
+/// This session's moves, by source, so a repeated move finds its own.
+fn moves_file(root: &Path) -> PathBuf {
+    let reads = session_file(root);
+    reads.with_file_name(reads.file_name().unwrap().to_string_lossy().replacen("reads-", "moves-", 1))
+}
+
+/// Renames `from` to `to` in one step that never replaces anything at `to`.
+fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        unsafe extern "C" {
+            fn renameat2(olddirfd: i32, oldpath: *const std::ffi::c_char, newdirfd: i32, newpath: *const std::ffi::c_char, flags: u32) -> i32;
+        }
+        const AT_FDCWD: i32 = -100;
+        const RENAME_NOREPLACE: u32 = 1;
+        const EINVAL: i32 = 22;
+        let (a, b) = (std::ffi::CString::new(from.as_os_str().as_bytes())?, std::ffi::CString::new(to.as_os_str().as_bytes())?);
+        // SAFETY: both are NUL-terminated paths that live through the call.
+        if unsafe { renameat2(AT_FDCWD, a.as_ptr(), AT_FDCWD, b.as_ptr(), RENAME_NOREPLACE) } == 0 {
+            return Ok(());
+        }
+        let e = std::io::Error::last_os_error();
+        // A file system without RENAME_NOREPLACE falls through: the project lock keeps the check below sound.
+        if e.raw_os_error() != Some(EINVAL) {
+            return Err(e);
+        }
+    }
+    if fs::symlink_metadata(to).is_ok() {
+        return Err(std::io::ErrorKind::AlreadyExists.into());
+    }
+    fs::rename(from, to)
+}
+
+/// Moves a file or folder from `from` in project `src` to `to` in project `dst`
+/// (D-84), whole or not at all: everything is checked before anything changes,
+/// and the move is one rename that never replaces what is at `to`. Repeating a
+/// move this session made changes nothing.
+pub fn move_files(src: &Path, sv: &toml::Value, from: &str, dst: &Path, dv: &toml::Value, to: &str) -> Out {
+    let (from, to) = (file_name(Path::new(from)), file_name(Path::new(to)));
+    if from.is_empty() || to.is_empty() {
+        return error("E6002", "move", "name a file or folder inside the project on both sides");
+    }
+    let (p, q) = (reachable(src, &from)?, reachable(dst, &to)?);
+    let same = same_project(src, dst);
+    let shown = |root: &Path, name: &str| if same { name.to_string() } else { format!("{}: {name}", scope::dir(&scope::top(root), root)) };
+    let (shown_from, shown_to) = (shown(src, &from), shown(dst, &to));
+    let intent = json!({"to": q.to_string_lossy()});
+    let mut moves: Value = fs::read(moves_file(src)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+    if fs::symlink_metadata(&p).is_err() {
+        if fs::symlink_metadata(&q).is_ok() && moves[from.as_str()] == intent {
+            return Ok(format!("Already moved {shown_from} to {shown_to}; nothing changed\n"));
+        }
+        return error("E6002", &from, "nothing to move: no file or folder there");
+    }
+    if fs::symlink_metadata(&q).is_ok() {
+        return error("E6002", &to, "something already exists there; a move never replaces a file or folder");
+    }
+    if same && to.starts_with(&format!("{from}/")) {
+        return error("E6002", &to, "a folder can't move into itself");
+    }
+    let mut files = vec![];
+    moved_files(&from, &p, "", &mut files)?;
+    for f in &files {
+        movable(src, sv, &joined(&from, f))?;
+        movable(dst, dv, &joined(&to, f))?;
+    }
+    // Checked; from here the move happens whole or not at all. Undo records go
+    // first, so a crash after the rename still records it (D-77 point 7).
+    let mut records = vec![];
+    for f in &files {
+        let bytes = fs::read(if f.is_empty() { p.clone() } else { p.join(f) }).ok();
+        records.extend(undo_record(src, &joined(&from, f), bytes)?);
+        records.extend(undo_record(dst, &joined(&to, f), None)?);
+    }
+    moves[from.as_str()] = intent;
+    write_atomic(&moves_file(src), moves.to_string())?;
+    // Folders made for the destination go again if the rename fails.
+    let mut made = vec![];
+    let mut parent = q.parent().unwrap().to_path_buf();
+    while fs::symlink_metadata(&parent).is_err() {
+        made.push(parent.clone());
+        parent.pop();
+    }
+    if let Err(e) = fs::create_dir_all(q.parent().unwrap()).and_then(|_| rename_new(&p, &q)) {
+        for d in &made {
+            let _ = fs::remove_dir(d);
+        }
+        for r in &records {
+            fs::remove_file(r)?;
+        }
+        moves.as_object_mut().unwrap().remove(&from);
+        write_atomic(&moves_file(src), moves.to_string())?;
+        const EXDEV: i32 = 18;
+        return match e.kind() {
+            std::io::ErrorKind::AlreadyExists => error("E6002", &to, "something already exists there; a move never replaces a file or folder"),
+            _ if e.raw_os_error() == Some(EXDEV) => error("E6002", &to, "the two places are on different file systems, so the move can't be one step"),
+            _ => Err(e.into()),
+        };
+    }
+    // What this session read keeps counting as read under the new name.
+    let mut old = reads(src);
+    let carried: Vec<(String, Value)> =
+        files.iter().filter_map(|f| Some((joined(&to, f), old.as_object_mut()?.remove(&joined(&from, f))?))).collect();
+    if !carried.is_empty() {
+        if same {
+            for (k, h) in carried {
+                old[k.as_str()] = h;
+            }
+        } else {
+            let mut new = reads(dst);
+            for (k, h) in carried {
+                new[k.as_str()] = h;
+            }
+            fs::write(session_file(dst), new.to_string())?;
+        }
+        fs::write(session_file(src), old.to_string())?;
+    }
+    let what = if files.len() == 1 && files[0].is_empty() { String::new() } else { format!(" ({})", count(files.len(), "file")) };
+    Ok(format!("Moved {shown_from} to {shown_to}{what}\n"))
+}
+
 pub fn dispatch(
     store: &Store,
     v: &toml::Value,
@@ -589,23 +809,18 @@ pub fn dispatch(
     if a[0] == "grep" {
         return Some(grep(root, v, &a[1..].join(" ")));
     }
+    if a[0] == "move" {
+        return Some((|| {
+            let (from, to, dest) = move_args(root, a)?;
+            let dv = if same_project(root, &dest) { v.clone() } else { settings(&dest)? };
+            move_files(root, v, from, &dest, &dv, to)
+        })());
+    }
     if matches!(a[0], "files" | "read" | "write" | "remove") {
         let name = a.get(1).copied().unwrap_or(".");
         let name = file_name(Path::new(name));
         return Some((|| {
-            if Path::new(&name).components().any(|c| c.as_os_str() == ".solace") {
-                return error("E6006", &name, "Solace internal files have no agent access");
-            }
-            // A path out of the project, or into a project nested in it, is another project's.
-            if internal(root, &name) || name.split('/').any(|c| c == "..") {
-                return error(
-                    "E6006",
-                    &name,
-                    "outside this project: another project's files are reached with `--project <folder>`; \
-                     to change a project this task doesn't cover, ask the human with `task ask` rather than putting the change elsewhere",
-                );
-            }
-            let p = path(root, &name)?;
+            let p = reachable(root, &name)?;
             let t = tier(root, v, &name, None);
             if a[0] != "files" && t == "graph" {
                 let module = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/")).unwrap().trim_end_matches(".gleam");
@@ -948,6 +1163,83 @@ mod tests {
         assert!(call(&s, &v, &["write", "README.md"], &"x".repeat(101), None).unwrap_err().0.contains("E6004"));
         call(&s, &v, &["write", "priv/new"], "x", None).unwrap();
         assert!(call(&s, &v, &["write", "priv/large"], &"x".repeat(101), None).unwrap_err().0.contains("E6004"));
+    }
+    /// D-84: a file or folder moves whole, never onto anything, and a repeat changes nothing.
+    #[test]
+    fn move_takes_files_and_folders_and_never_replaces() {
+        let (s, v) = fixture();
+        for (p, b) in [("priv/a", "a"), ("priv/b", "b"), ("docs/x/one", "1"), ("docs/x/deep/two", "2")] {
+            fs::create_dir_all(s.root.join(p).parent().unwrap()).unwrap();
+            fs::write(s.root.join(p), b).unwrap();
+        }
+        let mv = |from: &str, to: &str| call(&s, &v, &["move", from, to], "", None);
+        assert_eq!(mv("priv/a", "new/dir/a").unwrap(), "Moved priv/a to new/dir/a\n");
+        assert_eq!(fs::read_to_string(s.root.join("new/dir/a")).unwrap(), "a");
+        assert!(!s.root.join("priv/a").exists());
+        assert!(mv("priv/a", "new/dir/a").unwrap().starts_with("Already moved priv/a to new/dir/a"));
+        // Onto an existing file or folder: refused, and both stay as they were.
+        let e = mv("priv/b", "new/dir/a").unwrap_err().0;
+        assert!(e.contains("E6002") && e.contains("already exists"), "{e}");
+        assert!(mv("priv/b", "docs").unwrap_err().0.contains("already exists"));
+        assert_eq!(fs::read_to_string(s.root.join("priv/b")).unwrap(), "b");
+        assert_eq!(fs::read_to_string(s.root.join("new/dir/a")).unwrap(), "a");
+        assert_eq!(mv("docs/x", "notes/x").unwrap(), "Moved docs/x to notes/x (2 files)\n");
+        assert_eq!(fs::read_to_string(s.root.join("notes/x/deep/two")).unwrap(), "2");
+        assert!(!s.root.join("docs/x").exists());
+        assert!(mv("notes", "notes/inner").unwrap_err().0.contains("into itself"));
+        assert!(mv("nothing", "else").unwrap_err().0.contains("nothing to move"));
+        assert_eq!(call(&s, &v, &["move", "priv/b"], "", None).unwrap_err().1, 2);
+    }
+    /// D-84: graph, protected and internal files, gleam.toml and symlinks stay
+    /// put, named directly or inside a folder, and a refused move changes nothing.
+    #[test]
+    fn move_refuses_what_isnt_the_agents() {
+        let (s, v) = fixture();
+        for (p, b) in [("AGENTS.md", "x"), ("priv/a", "a"), ("box/.gitignore", "x"), ("box/keep", "k"), ("inner/.solace/store.db", "")] {
+            fs::create_dir_all(s.root.join(p).parent().unwrap()).unwrap();
+            fs::write(s.root.join(p), b).unwrap();
+        }
+        fs::create_dir_all(s.root.join("links")).unwrap();
+        std::os::unix::fs::symlink(s.root.join("priv/a"), s.root.join("links/l")).unwrap();
+        for (from, to, code) in [
+            ("src/main.gleam", "priv/main.gleam", "E6001"),
+            ("priv/a", "src/a.gleam", "E6001"),
+            ("src", "lib", "E6001"),
+            ("AGENTS.md", "priv/agents", "E6002"),
+            ("priv/a", "AGENTS2/.gitignore", "E6002"),
+            ("box", "crate", "E6002"),
+            ("gleam.toml", "priv/g", "E6002"),
+            ("links", "elsewhere", "E6002"),
+            ("priv/a", ".solace/a", "E6006"),
+            ("priv/a", "../a", "E6006"),
+            ("inner", "outer", "E6006"),
+            ("priv/a", "inner/a", "E6006"),
+        ] {
+            let e = call(&s, &v, &["move", from, to], "", None).unwrap_err().0;
+            assert!(e.contains(code), "{from} -> {to}: {e}");
+        }
+        assert_eq!(fs::read_to_string(s.root.join("priv/a")).unwrap(), "a");
+        assert!(s.root.join("src/main.gleam").exists() && s.root.join("box/keep").exists());
+        for gone in ["lib", "crate", "elsewhere", "AGENTS2", "outer"] {
+            assert!(!s.root.join(gone).exists(), "{gone}");
+        }
+    }
+    /// D-84: a move between projects checks the destination by its own project's rules.
+    #[test]
+    fn move_between_projects() {
+        let ((a, v), (b, w)) = (fixture(), fixture());
+        fs::write(a.root.join("priv/a"), "a").unwrap();
+        call(&a, &v, &["read", "priv/a"], "", None).unwrap();
+        let out = move_files(&a.root, &v, "priv/a", &b.root, &w, "docs/a").unwrap();
+        assert!(out.starts_with("Moved ") && out.contains("docs/a"), "{out}");
+        assert_eq!(fs::read_to_string(b.root.join("docs/a")).unwrap(), "a");
+        assert!(!a.root.join("priv/a").exists());
+        // What was read counts as read under its new name.
+        call(&b, &w, &["write", "docs/a"], "b", None).unwrap();
+        fs::write(a.root.join("priv/c"), "c").unwrap();
+        assert!(move_files(&a.root, &v, "priv/c", &b.root, &w, "src/c.gleam").unwrap_err().0.contains("E6001"));
+        assert!(move_files(&a.root, &v, "priv/c", &b.root, &w, "docs/a").unwrap_err().0.contains("already exists"));
+        assert!(a.root.join("priv/c").exists());
     }
     #[test]
     fn a5_validation_in_place_and_recovery() {

@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test';
-import * as view from '../build/dev/javascript/solace_board/solace_view.mjs';
+import * as view from '../build/dev/javascript/contracts/contracts.mjs';
 import { perform } from '../build/dev/javascript/lustre/lustre/effect.mjs';
 import { to_string } from '../build/dev/javascript/lustre/lustre/element.mjs';
 
@@ -7,7 +7,7 @@ test('contract view renders visible SVG nodes and uses the view API', async () =
   const oldLocation = globalThis.location;
   const oldFetch = globalThis.fetch;
   const oldEvents = globalThis.EventSource;
-  globalThis.location = { pathname: '/view', search: '?task=t1' };
+  globalThis.location = { pathname: '/contracts', search: '?task=t1' };
   const requests = [];
   const nodes = [
     { id: 'fn:app.main', kind: 'entry', name: 'main', module: 'app', summary: 'Entries about one subject, oldest first, with every matching event and its recorded description', signature: 'pub fn main(entries: List(Entry), subject: Subject) -> List(Entry)', known: 'derived', tests: 0, changed: true },
@@ -132,11 +132,11 @@ test('contract view renders visible SVG nodes and uses the view API', async () =
 });
 
 test('expanded graph keeps stored node coordinates', async () => {
-  const { layout } = await import('../build/dev/javascript/solace_board/layout.mjs');
+  const { layout } = await import('../build/dev/javascript/contracts/layout.mjs');
   const oldLocation = globalThis.location;
   const oldStorage = globalThis.localStorage;
   const values = new Map();
-  globalThis.location = { pathname: '/view', search: '' };
+  globalThis.location = { pathname: '/contracts', search: '' };
   globalThis.localStorage = { getItem: key => values.get(key), setItem: (key, value) => values.set(key, value) };
   try {
     const nodes = [{ id: 'entry' }, { id: 'effect' }];
@@ -151,7 +151,7 @@ test('33 isolated entries fill the sheet width at a readable size; extra rows pa
   const originals = [globalThis.location, globalThis.innerWidth, globalThis.innerHeight];
   try {
     for (const [width, height] of [[1440, 900], [390, 844]]) {
-      globalThis.location = { pathname: '/view', search: '' };
+      globalThis.location = { pathname: '/contracts', search: '' };
       globalThis.innerWidth = width;
       globalThis.innerHeight = height;
       const nodes = ['entry', 'logic', 'test', 'file'].flatMap((kind, i) => Array.from({ length: [33, 205, 98, 6][i] }, (_, n) => ({ id: `${kind}:${n}`, kind, name: `${kind}_${n}` })));
@@ -190,8 +190,8 @@ test('33 isolated entries fill the sheet width at a readable size; extra rows pa
 });
 
 test('opening a node puts callees right, callers left and tests below it, keeping the grid in order', async () => {
-  const { layout } = await import('../build/dev/javascript/solace_board/layout.mjs');
-  globalThis.location = { pathname: '/view', search: '?beside' };
+  const { layout } = await import('../build/dev/javascript/contracts/layout.mjs');
+  globalThis.location = { pathname: '/contracts', search: '?beside' };
   const grid = ['a', 'b', 'c'].map(id => ({ id }));
   const before = Object.fromEntries(layout(grid, [], true).map(p => [p.id, p]));
   const nodes = [...grid, { id: 'callee1' }, { id: 'callee2' }, { id: 'caller' }, { id: 't' }];
@@ -213,7 +213,7 @@ test('opening a node puts callees right, callers left and tests below it, keepin
 test('files tab groups files by category and opens one read-only in place of the drawing', async () => {
   const oldLocation = globalThis.location;
   const oldFetch = globalThis.fetch;
-  globalThis.location = { pathname: '/view', search: '' };
+  globalThis.location = { pathname: '/contracts', search: '' };
   const requests = [];
   globalThis.fetch = async path => { requests.push(path); return new Response(JSON.stringify({ path: 'README.md', category: 'watched', text: 'line one\nline two', size: 17, truncated: false })); };
   try {
@@ -252,7 +252,7 @@ test('files tab groups files by category and opens one read-only in place of the
 test('outline: areas, requests, a task for missing descriptions, and opening a function on the drawing', async () => {
   const oldLocation = globalThis.location;
   const oldFetch = globalThis.fetch;
-  globalThis.location = { pathname: '/view', search: '' };
+  globalThis.location = { pathname: '/contracts', search: '' };
   const posts = [];
   globalThis.fetch = async (path, opts) => {
     if (opts.method === 'POST') { posts.push([path, JSON.parse(opts.body)]); return new Response(JSON.stringify({ id: 'task1' })); }
@@ -357,7 +357,7 @@ test('diagram helpers use the view shadow root and ignore typing in an inner fie
 function view_app(graph) {
   const old = [globalThis.location, globalThis.fetch, globalThis.EventSource, globalThis.innerWidth, globalThis.innerHeight];
   globalThis.innerWidth = 700; globalThis.innerHeight = 900;
-  globalThis.location = { pathname: '/view', search: '?task=t2' };
+  globalThis.location = { pathname: '/contracts', search: '?task=t2' };
   const sent = [];
   globalThis.fetch = async (path, opts) => {
     sent.push([opts?.method ?? 'GET', path.split('?')[0]]);
@@ -537,4 +537,86 @@ test('the panel grip drags and steps the panel width, keeping it on screen', asy
     globalThis.document = oldDocument; globalThis.innerWidth = oldWidth;
     oldStorage ? Object.defineProperty(globalThis, 'localStorage', oldStorage) : delete globalThis.localStorage;
   }
+});
+
+// A browser without a DOM for the component tests: requests and event streams are recorded.
+function fakeBrowser(search = '') {
+  const saved = Object.fromEntries(['fetch', 'EventSource', 'location'].map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]));
+  const paths = [], sources = [];
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: { pathname: '/', search } });
+  globalThis.fetch = async path => { paths.push(path); return Response.json({}); };
+  globalThis.EventSource = class {
+    listeners = {};
+    constructor(path) { this.path = path; sources.push(this); }
+    addEventListener(name, f) { this.listeners[name] = f; }
+    close() { this.closed = true; }
+  };
+  const restore = () => { for (const [k, d] of Object.entries(saved)) d ? Object.defineProperty(globalThis, k, d) : delete globalThis[k]; };
+  return { paths, sources, restore };
+}
+// One component instance, driven as Lustre drives it.
+function mount() {
+  const noop = () => {};
+  let model;
+  const dispatch = msg => { let effect; [model, effect] = view.update(model, msg); perform(effect, dispatch, noop, noop, noop, noop, noop, noop); };
+  [model] = view.init();
+  return { dispatch, get model() { return model; } };
+}
+const settle = () => Bun.sleep(20);
+
+test('each instance uses its own base, including one set before it is added to the page', async () => {
+  const browser = fakeBrowser('?task=t1');
+  try {
+    // createElement, then setAttribute('base'), then append: nothing is asked until it connects.
+    const web = mount();
+    web.dispatch(new view.BaseChanged('/p/web'));
+    expect(browser.paths).toEqual([]);
+    expect(browser.sources).toEqual([]);
+    web.dispatch(new view.Connected());
+    await settle();
+    expect(browser.paths).toContain('/p/web/graph?task=t1');
+    expect(browser.sources.map(s => s.path)).toEqual(['/p/web/events']);
+    // A second instance on the same page keeps its own base.
+    const shop = mount();
+    shop.dispatch(new view.BaseChanged('/p/shop'));
+    shop.dispatch(new view.Connected());
+    await settle();
+    expect(browser.sources.map(s => s.path)).toEqual(['/p/web/events', '/p/shop/events']);
+    // Changing one instance's base moves only its own requests and stream.
+    web.dispatch(new view.BaseChanged('/p/api'));
+    await settle();
+    expect(browser.paths).toContain('/p/api/graph?task=t1');
+    expect(browser.sources.map(s => [s.path, !!s.closed])).toEqual([['/p/web/events', true], ['/p/shop/events', false], ['/p/api/events', false]]);
+  } finally { browser.restore(); }
+});
+
+test('an instance removed and added again reopens one stream, which reloads the graph', async () => {
+  const browser = fakeBrowser('?task=t1');
+  try {
+    const v = mount();
+    v.dispatch(new view.Connected());
+    v.dispatch(new view.Disconnected());
+    v.dispatch(new view.Connected());
+    await settle();
+    expect(browser.sources[0].closed).toBe(true);
+    const reloads = () => browser.paths.filter(p => p === '/graph?task=t1').length;
+    const before = reloads();
+    browser.sources[1].onmessage({ data: JSON.stringify({ task: { id: 't1' } }) });
+    await settle();
+    expect(reloads()).toBe(before + 1);
+    // One open stream.
+    expect(browser.sources.filter(s => !s.closed)).toHaveLength(1);
+  } finally { browser.restore(); }
+});
+
+test('the page registers the contract view as solace-contracts', async () => {
+  const tags = [];
+  const saved = [globalThis.HTMLElement, globalThis.customElements, globalThis.document];
+  globalThis.HTMLElement = class {};
+  globalThis.document = { documentElement: { dataset: {} } };
+  globalThis.customElements = { get: () => undefined, define: name => tags.push(name) };
+  try {
+    view.main();
+    expect(tags).toEqual(['solace-contracts']);
+  } finally { [globalThis.HTMLElement, globalThis.customElements, globalThis.document] = saved; }
 });
