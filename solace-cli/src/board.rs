@@ -66,11 +66,13 @@ pub(super) fn all_tasks(top: &Path) -> Result<Vec<Value>, Failure> {
     if !dir.exists() {
         return Ok(out);
     }
+    // Each home's workflow is read at most once per listing.
+    let mut flows = HashMap::new();
     for entry in fs::read_dir(dir)? {
         let p = entry?.path();
         if p.extension().is_some_and(|x| x == "json") {
             // One unreadable file (empty after a crash) must not hide the rest.
-            match read_task(top, &p) {
+            match read_task_with(top, &p, &mut flows) {
                 Ok(t) => out.push(t),
                 Err(e) => eprintln!("skipping task file {}: {}", p.display(), e.0),
             }
@@ -79,13 +81,23 @@ pub(super) fn all_tasks(top: &Path) -> Result<Vec<Value>, Failure> {
     out.sort_by(|a: &Value, b: &Value| a["rank"].as_f64().unwrap_or(0.).total_cmp(&b["rank"].as_f64().unwrap_or(0.)));
     Ok(out)
 }
-fn read_task(top: &Path, path: &Path) -> Result<Value, Failure> {
+pub(super) fn read_task(top: &Path, path: &Path) -> Result<Value, Failure> {
+    read_task_with(top, path, &mut HashMap::new())
+}
+/// `read_task`, taking each home's workflow from `flows` once it has been read.
+fn read_task_with(top: &Path, path: &Path, flows: &mut HashMap<PathBuf, Value>) -> Result<Value, Failure> {
     let mut t: Value = serde_json::from_slice(&fs::read(path)?).map_err(|e| Failure(e.to_string(), 1))?;
     // The default workflow's `done` column is now `complete`; tasks saved before still say `done`.
     let home = scope::path(top, t["home"].as_str().unwrap_or("."));
+    let mut workflow = |home: &PathBuf| -> Result<Value, Failure> {
+        if !flows.contains_key(home) {
+            flows.insert(home.clone(), flow(home)?);
+        }
+        Ok(flows[home].clone())
+    };
     // Only these two old columns need the workflow, so other tasks read without it.
     let old_column = matches!(t["column"].as_str(), Some("done" | "blocked"));
-    let columns = if old_column { flow(&home)?["columns"].as_array().unwrap().clone() } else { vec![] };
+    let columns = if old_column { workflow(&home)?["columns"].as_array().unwrap().clone() } else { vec![] };
     if t["column"] == "done" && !columns.iter().any(|c| c["id"] == "done") {
         t["column"] = json!("complete");
     }
@@ -97,6 +109,24 @@ fn read_task(top: &Path, path: &Path) -> Result<Value, Failure> {
             t["attention"] = json!({"reason":"the agent needed an answer or stopped","time":now()});
         }
         t["attention"]["hold"] = json!(true);
+    }
+    // Tasks saved before D-87 have no links; one already in a final column takes the
+    // time it last finished, or else its file's, as when it closed.
+    if t.get("closedTime").is_none() {
+        for k in ["feature", "milestone", "closedTime", "archivedTime"] {
+            t[k] = Value::Null;
+        }
+        if t.get("dependsOn").is_none() {
+            t["dependsOn"] = json!([]);
+        }
+        if column(&workflow(&home)?, &t)["final"] == true {
+            let ended = t["runs"].as_array().into_iter().flatten().filter_map(|r| r["ended"].as_u64());
+            let last = ended.chain(t["finished"]["time"].as_u64()).max();
+            let modified = || {
+                fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
+            };
+            t["closedTime"] = json!(last.unwrap_or_else(modified));
+        }
     }
     Ok(t)
 }
@@ -309,7 +339,7 @@ fn on_event(w: &Value, t: &mut Value, event: &str) -> Result<(), Failure> {
         _ => Ok(()),
     }
 }
-fn move_to(w: &Value, t: &mut Value, to: &Value) -> Result<(), Failure> {
+pub(super) fn move_to(w: &Value, t: &mut Value, to: &Value) -> Result<(), Failure> {
     let c = column(w, t);
     let requires = c["requires"].as_array().cloned().unwrap_or_default();
     if &c["next"] == to {
@@ -322,6 +352,10 @@ fn move_to(w: &Value, t: &mut Value, to: &Value) -> Result<(), Failure> {
         }
     }
     t["column"] = to.clone();
+    // When the task first reaches a final column; never cleared (D-87).
+    if column(w, t)["final"] == true && t["closedTime"].is_null() {
+        t["closedTime"] = json!(now());
+    }
     Ok(())
 }
 /// Where run `rid` is in the task's runs.
@@ -539,7 +573,8 @@ pub fn scope_stores(s: &Store, t: &Value) -> Result<Vec<(String, Store)>, Failur
 /// from the scope projects' stores (D-77 point 4), so the task holds none.
 pub fn new_task(title: &str, body: &str, column: &Value, rank: f64) -> Value {
     json!({"id":unique_id(),"title":title,"body":body,"links":[],"column":column,"rank":rank,"paused_from":null,"attention":null,
-        "stamps":{},"model":null,"notes":[],"questions":[],"runs":[]})
+        "stamps":{},"model":null,"notes":[],"questions":[],"runs":[],
+        "feature":null,"milestone":null,"dependsOn":[],"closedTime":null,"archivedTime":null})
 }
 /// Records what a command changed in `s` on the task stored in `home`. The rows
 /// commit inside the command's outer transaction (D-77 point 7); the task's
@@ -1152,26 +1187,19 @@ fn drop_before(s: &Store, tid: &str) -> Result<(), Failure> {
     Ok(())
 }
 
-fn continue_answered(s: &Store, w: &Value, t: &mut Value) -> Result<(), Failure> {
+fn continue_answered(t: &mut Value) {
     if !t["paused_from"].is_null() || t["questions"].as_array().unwrap().iter().any(|q| q["answer"].is_null()) {
-        return Ok(());
+        return;
     }
-    let Some(run) = t["runs"].as_array().unwrap().iter().find(|r| r["state"] == "waiting") else {
-        return Ok(());
+    let Some(i) = t["runs"].as_array().unwrap().iter().position(|r| r["state"] == "waiting") else {
+        return;
     };
-    // Use the configured continuation, never a replacement run or a human stamp.
-    let next = allowed(w, t).into_iter().find(|name| {
-        let a = &w["actions"][name];
-        a["run"] == run["kind"] && a["revert"] != true && a["stamp"].is_null() && a["unstamp"].is_null()
-    });
-    if let Some(name) = next {
-        action(s, w, t, &json!({"action":name}))?;
-        t["attention"] = Value::Null;
-        t["finished"] = Value::Null;
-    } else {
-        flag(t, "answers saved; no continuation action is available in this column");
-    }
-    Ok(())
+    // The answers go straight to the waiting agent, in any column and any workflow:
+    // no workflow action is looked up, and nothing is moved, stamped or replaced.
+    t["runs"][i]["state"] = json!("running");
+    t["runs"][i]["reply"] = json!({"questions":t["questions"],"text":null});
+    t["attention"] = Value::Null;
+    t["finished"] = Value::Null;
 }
 
 fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(String, Value)>, Failure> {
@@ -1191,7 +1219,7 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
             t["column"] = t["paused_from"].clone();
             t["paused_from"] = Value::Null;
         }
-        continue_answered(s, w, t)?;
+        continue_answered(t);
         return Ok(None);
     }
     // Stop ends every open run; the killed agent's conversation isn't kept.
@@ -1625,6 +1653,65 @@ pub(super) fn after(root: &Path, t: &Value, after: After) {
         After::Nothing | After::Removed(_) => {}
     }
 }
+/// Sets a task's `feature`, `milestone` and `dependsOn` from a `PATCH` (D-87).
+/// A feature given to a task with no milestone brings its own, unless the
+/// request names one.
+fn set_links(top: &Path, t: &mut Value, body: &Value) -> Result<(), Failure> {
+    for (k, kind) in [("feature", "features"), ("milestone", "milestones")] {
+        match body.get(k) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(id)) if tasks::record(top, kind, id).is_some() => {}
+            Some(Value::String(id)) => return err("E7023", format!("unknown {k} {id}")),
+            Some(_) => return err("E7001", format!("invalid {k}")),
+        }
+    }
+    if let Some(f) = body.get("feature") {
+        if let Some(id) = f.as_str()
+            && t["milestone"].is_null()
+            && body.get("milestone").is_none()
+        {
+            t["milestone"] = tasks::record(top, "features", id).map_or(Value::Null, |r| r["milestone"].clone());
+        }
+        t["feature"] = f.clone();
+    }
+    if let Some(m) = body.get("milestone") {
+        t["milestone"] = m.clone();
+    }
+    let Some(deps) = body.get("dependsOn") else { return Ok(()) };
+    let Some(deps) = deps.as_array().filter(|d| d.iter().all(Value::is_string)) else { return err("E7001", "invalid dependsOn") };
+    let mut ids: Vec<String> = vec![];
+    for d in deps.iter().filter_map(Value::as_str) {
+        if !ids.iter().any(|x| x == d) {
+            ids.push(d.to_string());
+        }
+    }
+    let me = t["id"].as_str().unwrap_or("").to_string();
+    let mut graph: HashMap<String, Vec<String>> = all_tasks(top)?
+        .iter()
+        .map(|o| {
+            let deps = o["dependsOn"].as_array().into_iter().flatten().filter_map(|x| x.as_str().map(String::from)).collect();
+            (o["id"].as_str().unwrap_or("").to_string(), deps)
+        })
+        .collect();
+    for d in &ids {
+        if *d == me || !graph.contains_key(d) {
+            return err("E7024", format!("a task can depend only on another existing task; {d} is not one"));
+        }
+    }
+    graph.insert(me.clone(), ids.clone());
+    // A cycle is a path from one of the new dependencies back to this task.
+    let (mut todo, mut seen) = (ids.clone(), HashSet::new());
+    while let Some(id) = todo.pop() {
+        if id == me {
+            return err("E7025", "these dependencies would make a cycle");
+        }
+        if seen.insert(id.clone()) {
+            todo.extend(graph.get(&id).cloned().unwrap_or_default());
+        }
+    }
+    t["dependsOn"] = json!(ids);
+    Ok(())
+}
 /// A change to task `tid` of the project `root` from the API (`method` on
 /// `rest`, the path below `/tasks/{tid}`): the task as the server writes it.
 pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: &Value) -> Result<(Value, After), Failure> {
@@ -1635,12 +1722,15 @@ pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
         {
             match (method, rest) {
                 ("PATCH", []) => {
-                    if active(&t) {
+                    // Links can change during a run and in a final column (D-87 point 4, D-88).
+                    let links_only = body.as_object().is_some_and(|o| !o.is_empty() && o.keys().all(|k| k == "feature" || k == "milestone"));
+                    if active(&t) && !links_only {
                         return err("E7003", "run going");
                     }
-                    if column(&w, &t)["final"] == true {
+                    if column(&w, &t)["final"] == true && !links_only {
                         return err("E7004", "final task");
                     }
+                    set_links(&scope::top(root), &mut t, body)?;
                     for k in ["title", "body", "links", "rank"] {
                         if let Some(v) = body.get(k) {
                             if (matches!(k, "title" | "body") && !v.is_string())
@@ -1685,7 +1775,7 @@ pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
                     if !q["settings"].is_null() && answer == "Approve" {
                         apply_settings(root, q)?;
                     }
-                    continue_answered(&s, &w, &mut t)?;
+                    continue_answered(&mut t);
                 }
                 ("POST", ["actions"]) => {
                     let launch = action(&s, &w, &mut t, body)?;
@@ -3315,6 +3405,18 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             if req.method().as_str() != "GET" && !path.starts_with("/migration") && board.step.lock().unwrap().is_some() {
                 return respond_json(req, err("E7003", "a migration step is running"));
             }
+            // Milestones and features are root records (D-87): never under `/p/{dir}`.
+            let strategy: Vec<&str> = path.trim_matches('/').split('/').collect();
+            if matches!(strategy[0], "milestones" | "features") {
+                let result = match read_body(&mut req, BODY_LIMIT) {
+                    Some(bytes) => body_json(&bytes).map_err(|e| (409, e)).and_then(|v| tasks::strategy_api(&board.top, req.method().as_str(), &strategy, v)),
+                    None => err("E7001", "request body too large").map_err(|e| (409, e)),
+                };
+                return match result {
+                    Ok(v) => respond(req, 200, v),
+                    Err((status, e)) => respond(req, status, error_json(&e)),
+                };
+            }
             let routed = if own { Ok(None) } else { board.route(&full) };
             let (root, url) = match routed {
                 Err(e) => return respond_json(req, Err(e)),
@@ -3457,7 +3559,21 @@ impl Events {
                 })
                 .unwrap_or(0);
         }
-        Ok(self.state_of(&(0..self.streams.len()).collect::<Vec<_>>()))
+        Ok(self.state_of(&(0..self.streams.len()).collect::<Vec<_>>()) + &self.strategy_state())
+    }
+    /// Whether this stream carries the root's own records: the merged stream, or
+    /// the root project's (D-87 point 7), never `/p/{dir}/events`.
+    fn at_root(&self) -> bool {
+        self.merged || self.streams.iter().any(|s| s.0 == ".")
+    }
+    /// The root's milestones and features as they are, after the tasks.
+    fn strategy_state(&self) -> String {
+        if !self.at_root() {
+            return String::new();
+        }
+        let (id, top) = (self.id(), &self.board.top);
+        let (milestones, features) = (json!({"milestones":tasks::records(top, "milestones")}), json!({"features":tasks::records(top, "features")}));
+        format!("id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\n")
     }
     /// The workflow and tasks of the streams at `which`, as events.
     fn state_of(&self, which: &[usize]) -> String {
@@ -3500,11 +3616,13 @@ impl Events {
                 .map_err(std::io::Error::other)?;
             let Some((seq, project, data)) = row else { return Ok(None) };
             self.tasks = seq;
-            if !self.streams.iter().any(|s| s.0 == project) {
+            // A row with no project is a root record's (D-87).
+            let shown = if project.is_empty() { self.at_root() } else { self.streams.iter().any(|s| s.0 == project) };
+            if !shown {
                 continue;
             }
             let mut v: Value = serde_json::from_str(&data).map_err(std::io::Error::other)?;
-            if self.merged {
+            if self.merged && !project.is_empty() {
                 v["project"] = json!(project);
             }
             return Ok(Some(format!("id: {}\ndata: {v}\n\n", self.id())));
@@ -3537,7 +3655,7 @@ impl Events {
         // The new projects' state follows the list: their positions were read before their files.
         let dirs: Vec<&String> = self.streams.iter().map(|s| &s.0).collect();
         let list = format!("id: {}\ndata: {}\n\n", self.id(), json!({"projects":dirs}));
-        Ok(Some(list + &self.state_of(&added)))
+        Ok(Some(list + &self.strategy_state() + &self.state_of(&added)))
     }
 }
 impl Read for Events {

@@ -1,5 +1,6 @@
-// The page's document handlers. The decisions live in frontend.gleam (blocks_drag, keeps_new_tab, find_opens, next_match, count_text), where they are tested.
-import { blocks_drag, keeps_new_tab, find_opens, next_match, count_text } from '../build/dev/javascript/frontend/frontend.mjs';
+// The page's document handlers. The decisions live in frontend.gleam (blocks_drag, keeps_new_tab, find_opens, next_match, count_text, to_markdown), where they are tested.
+import { blocks_drag, keeps_new_tab, find_opens, next_match, count_text, to_markdown, Text as HtmlText, Tag } from '../build/dev/javascript/frontend/frontend.mjs';
+import { toList } from '../build/dev/javascript/frontend/gleam.mjs';
 
 export function guard(root) {
   root.addEventListener('dragstart', e => {
@@ -13,6 +14,71 @@ export function guard(root) {
   }, true);
 
   find(root);
+  copy(root);
+}
+
+// Copy keeps markdown: a selection that touches rendered markdown (.md, from the board's renderer) goes to the
+// clipboard as its markdown source, with the HTML beside it for rich paste. Any other selection copies as usual.
+const INLINE = new Set(['STRONG', 'B', 'CODE', 'A']);
+
+const shadowRoots = (node, out = []) => {
+  for (const el of node.querySelectorAll('*')) if (el.shadowRoot) { out.push(el.shadowRoot); shadowRoots(el.shadowRoot, out); }
+  return out;
+};
+
+// The selected range, inside whichever shadow root holds it: Chromium has a selection per shadow root, WebKit
+// gives composed ranges from the document's (taking the roots as a dictionary or, before that, as arguments).
+function selected() {
+  const roots = shadowRoots(document);
+  for (const root of roots) {
+    const sel = root.getSelection?.();
+    if (sel?.rangeCount && !sel.isCollapsed) return sel.getRangeAt(0);
+  }
+  const sel = document.getSelection();
+  if (!sel?.rangeCount) return null;
+  let found = sel.getRangeAt(0);
+  if (sel.getComposedRanges) {
+    try { [found] = sel.getComposedRanges({ shadowRoots: roots }); } catch { [found] = sel.getComposedRanges(...roots); }
+  }
+  if (!found || found.collapsed) return null;
+  const range = new Range();
+  try { range.setStart(found.startContainer, found.startOffset); range.setEnd(found.endContainer, found.endOffset); } catch { return null; }
+  return range.collapsed ? null : range;
+}
+
+const elementOf = node => node.nodeType === 1 ? node : node.parentElement;
+
+// The DOM as frontend.Html. Attributes are read raw, so a task image keeps its relative src.
+const tree = node => toList([...node.childNodes].flatMap(child =>
+  child.nodeType === 3 ? [new HtmlText(child.data)]
+  : child.nodeType === 1 && !SKIP.has(child.tagName)
+    ? [new Tag(child.tagName.toLowerCase(), toList([...child.attributes].map(a => [a.name, a.value])), tree(child))]
+    : []));
+
+function copy(doc) {
+  doc.addEventListener('copy', e => {
+    if ((e.composedPath?.()[0] || e.target)?.closest?.('input,textarea') || !e.clipboardData) return;
+    const range = selected();
+    if (!range) return;
+    const inMarkdown = node => !!elementOf(node)?.closest?.('.md');
+    let node = range.cloneContents();
+    if (!inMarkdown(range.startContainer) && !inMarkdown(range.endContainer) && !node.querySelector('.md')) return;
+    // A selection within bold, code or a link keeps its markup, and items of one list keep the list. Block ancestors
+    // aren't kept: a word in a list item copies without the item's marker, and part of a code block without backticks.
+    for (let el = elementOf(range.commonAncestorContainer); el && !el.classList.contains('md'); el = el.parentElement) {
+      const list = el === range.commonAncestorContainer && /^(UL|OL)$/.test(el.tagName);
+      const inline = INLINE.has(el.tagName) && !(el.tagName === 'CODE' && el.parentElement?.tagName === 'PRE');
+      if (!list && !inline) continue;
+      const outer = el.cloneNode(false);
+      outer.append(node);
+      node = outer;
+    }
+    const box = document.createElement('div');
+    box.append(node);
+    e.clipboardData.setData('text/plain', to_markdown(tree(box)));
+    e.clipboardData.setData('text/html', box.innerHTML);
+    e.preventDefault();
+  });
 }
 
 // Find in page (Ctrl+F). The webview has no find of its own, and native find misses shadow DOM, where every page lives.
@@ -240,7 +306,8 @@ function find(doc) {
     ranges = [];
     index = -1;
     paint();
-    returnTo?.focus?.();
+    // Restore focus for the keyboard, without scrolling the page to the element focused before Ctrl+F.
+    returnTo?.focus?.({ preventScroll: true });
     returnTo = null;
   };
 

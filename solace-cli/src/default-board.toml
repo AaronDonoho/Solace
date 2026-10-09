@@ -11,7 +11,7 @@ actions = ["investigate", "assign", "complete", "to_backlog", "cancel"]
 
 [[board.columns]]
 id = "assigned"
-actions = ["unblock", "new_agent", "review", "cancel"]
+actions = ["reassign", "new_agent", "review", "cancel"]
 
 [[board.columns]]
 id = "needs_review"
@@ -34,7 +34,6 @@ to_backlog = { to = "backlog" }
 investigate = { run = "investigate", model = true }     # read-only; stays in its column
 review     = { run = "review" }                         # stays in its column
 assign     = { to = "assigned", run = "work", model = true }
-unblock    = { to = "assigned", run = "work" }         # the waiting agent continues
 new_agent  = { to = "assigned", run = "new_work" }     # a fresh agent, with the notes so far
 approve    = { stamp = "approved" }
 complete   = { to = "complete" }

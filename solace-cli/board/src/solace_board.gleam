@@ -154,9 +154,11 @@ pub type Agent {
   )
 }
 
-/// A bold heading, such as "Reviewed Fix checkout", and what happened.
+/// A bold heading, such as "Reviewed Fix checkout", and what happened. It
+/// names its task (`dir` is the project it is stored in, filled in by `live`)
+/// and the tab that shows the news: "notes", "questions" or "runs".
 pub type Notice {
-  Notice(heading: String, text: String)
+  Notice(heading: String, text: String, dir: String, id: String, tab: String)
 }
 
 pub type Workflow {
@@ -243,6 +245,8 @@ pub type Model {
     connected: Bool,
     /// The live transcript polling chain; an ended chain schedules nothing.
     poll: Int,
+    /// Whether the task being opened from a notice scrolls into view once it loads.
+    revealing: Bool,
   )
 }
 
@@ -290,7 +294,12 @@ pub type Msg {
   Tab(String)
   Preview(String, Bool)
   Format(String, String, String)
+  /// The editor's selected lines become a block: "heading", "list",
+  /// "numbered", "quote" or "code" (see `block` in api.mjs).
+  Block(String, String)
   Dismiss(Notice)
+  /// A notice's button: its task opens on the notice's tab and scrolls into view.
+  Open(Notice)
   Failed(String)
   Save
   Action(String)
@@ -396,6 +405,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       root: no_root(),
       connected: False,
       poll: 0,
+      revealing: False,
     ),
     // Lustre runs init once for every instance, before its `base` is set:
     // the transport starts when the instance connects.
@@ -589,6 +599,11 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
         _, _ -> #(model, effect.none())
       }
+    TaskLoaded(text) if model.revealing -> {
+      let #(next, fx) =
+        update(Model(..model, revealing: False), TaskLoaded(text))
+      #(next, effect.batch([fx, reveal()]))
+    }
     TaskLoaded(text) ->
       case json.parse(text, task_decoder()) {
         Ok(task) -> #(
@@ -685,6 +700,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         selected: None,
         selected_card: Some(#(dir, id)),
         selection_generation: model.selection_generation + 1,
+        revealing: False,
         text: "",
         watching: "",
         entries: [],
@@ -958,10 +974,33 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         }),
       )
     }
+    Block(id, kind) -> {
+      let #(text, msg) = field(model, id)
+      #(
+        model,
+        effect.from(fn(send) { send(msg(block(model.root, id, text, kind))) }),
+      )
+    }
     Dismiss(notice) -> #(
       Model(..model, notices: list.filter(model.notices, fn(n) { n != notice })),
       effect.none(),
     )
+    Open(notice) -> {
+      let model =
+        Model(
+          ..model,
+          tab: notice.tab,
+          notices: list.filter(model.notices, fn(n) { n != notice }),
+        )
+      let target = #(notice.dir, notice.id)
+      case model.selected_card, model.selected {
+        Some(card), Some(_) if card == target -> #(model, reveal())
+        _, _ -> {
+          let #(next, fx) = update(model, Select(notice.dir, notice.id))
+          #(Model(..next, revealing: True), fx)
+        }
+      }
+    }
     Failed(message) -> #(Model(..model, error: message), effect.none())
     Save ->
       case model.selected {
@@ -1120,6 +1159,7 @@ fn live(model: Model, text: String, notify: Bool) -> Model {
             Ok(old), True ->
               notices(old, task)
               |> list.map(fn(n) {
+                let n = Notice(..n, dir: dir)
                 case model.workspace {
                   True -> Notice(..n, heading: lane.label <> ": " <> n.heading)
                   False -> n
@@ -1228,16 +1268,22 @@ pub fn notices(old: Task, new: Task) -> List(Notice) {
       && list.any(old.runs, fn(o) { o.id == r.id && o.state != "ended" })
     })
     |> list.map(fn(r) {
+      // A run that left a note shows it; else its run is the place to look.
+      let tab = case list.any(new.notes, fn(n) { n.run == r.id }) {
+        True -> "notes"
+        False -> "runs"
+      }
+      let notice = fn(heading, text) {
+        Notice(heading <> new.title, text, "", new.id, tab)
+      }
       case r.outcome {
-        "finished" ->
-          Notice("Finished " <> new.title, "The agent finished its work.")
-        "reported" ->
-          Notice("Investigated " <> new.title, "The agent's report is ready.")
-        "reviewed" -> Notice("Reviewed " <> new.title, "The review is ready.")
-        "" -> Notice("Stopped " <> new.title, "The " <> r.kind <> " run ended.")
+        "finished" -> notice("Finished ", "The agent finished its work.")
+        "reported" -> notice("Investigated ", "The agent's report is ready.")
+        "reviewed" -> notice("Reviewed ", "The review is ready.")
+        "" -> notice("Stopped ", "The " <> r.kind <> " run ended.")
         outcome ->
-          Notice(
-            "Stopped " <> new.title,
+          notice(
+            "Stopped ",
             "The " <> r.kind <> " run ended: " <> outcome <> ".",
           )
       }
@@ -1246,7 +1292,9 @@ pub fn notices(old: Task, new: Task) -> List(Notice) {
     list.filter(new.questions, fn(q) {
       q.answer == "" && !list.any(old.questions, fn(o) { o.id == q.id })
     })
-    |> list.map(fn(q) { Notice("Question on " <> new.title, q.text) })
+    |> list.map(fn(q) {
+      Notice("Question on " <> new.title, q.text, "", new.id, "questions")
+    })
   list.append(ended, asked)
 }
 
@@ -1485,7 +1533,10 @@ fn button(label: String, msg: Msg) -> Element(Msg) {
 
 pub fn view(model: Model) -> Element(Msg) {
   h.main([], [
-    h.style([], board_styles <> selected_card_styles <> modal_styles),
+    h.style(
+      [],
+      board_styles <> selected_card_styles <> modal_styles <> notice_styles,
+    ),
     h.header([a.class("top")], [
       h.h1([], [h.text("Solace tasks")]),
       h.a([a.href("/guide")], [h.text("Guide")]),
@@ -1544,6 +1595,9 @@ pub fn view(model: Model) -> Element(Msg) {
         h.div([a.class("notice"), a.role("alert")], [
           h.strong([], [h.text(n.heading)]),
           h.p([], [h.text(n.text)]),
+          h.button([a.class("show"), e.on_click(Open(n))], [
+            h.text("Show task"),
+          ]),
           h.button(
             [
               a.class("close"),
@@ -2035,6 +2089,11 @@ fn editor(
       [h.text(label)],
     )
   }
+  let block_tool = fn(label, title, kind) {
+    h.button([a.type_("button"), a.title(title), e.on_click(Block(id, kind))], [
+      h.text(label),
+    ])
+  }
   h.div([a.class("composer")], [
     h.div([a.class("toolbar")], [
       h.button(
@@ -2054,9 +2113,13 @@ fn editor(
         [h.text("Preview")],
       ),
       h.span([a.class("separator")], []),
+      block_tool("H", "Heading", "heading"),
       tool("B", "Bold", "**", "**"),
       tool("`code`", "Code", "`", "`"),
-      tool("• List", "List", "\n- ", ""),
+      block_tool("Code block", "Code block", "code"),
+      block_tool("• List", "List", "list"),
+      block_tool("1. List", "Numbered list", "numbered"),
+      block_tool("Quote", "Quote", "quote"),
       tool("Link", "Link", "[", "](https://)"),
       case task {
         "" -> h.text("")
@@ -2451,7 +2514,7 @@ pub fn register() -> Result(Nil, lustre.Error) {
   )
 }
 
-const board_styles = ".projects-pick{margin:8px 0}.projects-pick label{display:flex;align-items:center;gap:10px;margin:6px 0;cursor:pointer}.projects-pick input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:34px;height:20px;padding:0;margin:0;border:1px solid var(--edge);border-radius:10px;background:var(--well);cursor:pointer;transition:background .15s}.projects-pick input::before{content:\"\";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--paper);border:1px solid var(--edge);box-sizing:border-box;transition:transform .15s}.projects-pick input:checked{background:var(--focus)}.projects-pick input:checked::before{transform:translateX(14px)}.projects-pick input:focus-visible{outline:3px solid var(--focus);outline-offset:2px}.projects-pick[disabled] label,.projects-pick[disabled] input{opacity:.5;cursor:default}@media (prefers-reduced-motion:reduce){.projects-pick input,.projects-pick input::before{transition:none}}\n\n:host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sun:none;--moon:inline-block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 24px 48px;min-height:100dvh;user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol{margin:6px 0}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;max-width:760px;background:var(--paper)}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid var(--line);border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}.toolbar [aria-pressed=true]{background:var(--well);font-weight:600}.separator{width:1px;align-self:stretch;background:var(--line);margin:0 6px}.preview{border-top:1px solid var(--line);padding:8px 12px;min-height:94px}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h2{margin-top:0}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{width:auto;flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice p{margin:4px 0 0;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
+const board_styles = ".projects-pick{margin:8px 0}.projects-pick label{display:flex;align-items:center;gap:10px;margin:6px 0;cursor:pointer}.projects-pick input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:34px;height:20px;padding:0;margin:0;border:1px solid var(--edge);border-radius:10px;background:var(--well);cursor:pointer;transition:background .15s}.projects-pick input::before{content:\"\";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--paper);border:1px solid var(--edge);box-sizing:border-box;transition:transform .15s}.projects-pick input:checked{background:var(--focus)}.projects-pick input:checked::before{transform:translateX(14px)}.projects-pick input:focus-visible{outline:3px solid var(--focus);outline-offset:2px}.projects-pick[disabled] label,.projects-pick[disabled] input{opacity:.5;cursor:default}@media (prefers-reduced-motion:reduce){.projects-pick input,.projects-pick input::before{transition:none}}\n\n:host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sun:none;--moon:inline-block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 24px 48px;min-height:100dvh;user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;max-width:760px;background:var(--paper)}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid var(--line);border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}.toolbar [aria-pressed=true]{background:var(--well);font-weight:600}.separator{width:1px;align-self:stretch;background:var(--line);margin:0 6px}.preview{border-top:1px solid var(--line);padding:8px 12px;min-height:94px}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h2{margin-top:0}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{width:auto;flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice p{margin:4px 0 0;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
 :host{background:var(--sheet);color:var(--ink)}
 main{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;color:var(--ink);background:none}
 *{scrollbar-color:var(--line) var(--paper)}::selection{background:var(--sel);color:var(--ink)}
@@ -2775,3 +2838,22 @@ pub const files_heading = "Files"
 
 /// The Changes tab heading for changes that are neither symbols nor files.
 pub const other_heading = "Other"
+
+@external(javascript, "./api.mjs", "block")
+fn block(
+  root: dynamic.Dynamic,
+  id: String,
+  text: String,
+  kind: String,
+) -> String
+
+/// Scrolls the open task into view and puts focus on its selected tab, once
+/// the page has rendered.
+fn reveal() -> Effect(Msg) {
+  effect.before_paint(fn(_, root) { reveal_task(root) })
+}
+
+@external(javascript, "./api.mjs", "reveal_task")
+fn reveal_task(root: dynamic.Dynamic) -> Nil
+
+const notice_styles = ".notice .show{margin:8px 0 0;padding:4px 10px;background:transparent;color:var(--paper);border-color:var(--paper)}.notice .show:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .show:focus-visible{outline-color:var(--paper)}"

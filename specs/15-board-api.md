@@ -1,6 +1,6 @@
 # Spec 15: Task Board
 
-**Status:** accepted 2026-09-29 · **Implements:** D-16 (points 5, 6), D-17, D-19, D-23, D-25 · **Needed by:** the D-16 work. Not in the PROPOSAL.md §14.4 table; numbered after it.
+**Status:** accepted 2026-09-29 · **Implements:** D-16 (points 5, 6), D-17, D-19, D-23, D-25, D-87, D-88 · **Needed by:** the D-16 work. Not in the PROPOSAL.md §14.4 table; numbered after it.
 
 Humans direct agents through tasks on a board. Solace owns each task's state, starts and stops agents, and enforces the workflow. A board only shows tasks and passes on what the human asks for. The API is the smallest one a Solace-compatible board needs. Solace ships a default board built only on this API; any other board, or an adapter for one, can replace it.
 
@@ -24,8 +24,29 @@ The workflow (columns, and the actions allowed in each) comes from configuration
 | `runs` | Agent runs: `{id, kind: investigate\|work\|review\|discuss, model, effort?, state: running\|waiting\|ended, started, ended?, outcome?, log}`. `log` is where the agent's own session log is, for a later view of the run (§6) |
 | `changes` | What the task's work runs changed (§5), each `{entity, name, run, project}`; `project` is the folder the change was made in. Computed from the scope projects' stores by task id, not stored on the task (D-77) |
 | `scope` | The projects the task may change, as folders (D-61). At least one; a task saved before D-61 has none and covers its own project |
+| `feature`, `milestone` | The feature and the milestone the task belongs to, each optional (§1, Features and milestones; D-87). A task given a feature while it has no milestone takes the feature's milestone; after that the two can differ |
+| `dependsOn` | Ids of the tasks this one depends on. Recorded and validated (existing tasks, not itself, no cycles), not yet enforced (D-87) |
+| `closedTime` | When the task first reached a final column; never cleared |
+| `archivedTime` | When the task was archived, otherwise null. How a task is archived, and how the board hides it, is decided later |
+
+Tasks saved before D-87 have none of the last five fields: read them as null, or `[]` for `dependsOn`.
 
 Tasks are stored as one JSON file per task in the root's task store, `<root>/.solace/tasks/` (D-77), not in a project. A task never moves. The task server (`tasks.rs`, inside `serve`, API `/tasks/...`) is the only writer: it applies operations one at a time, in order, each file written atomically (write, then rename). Agents have no access to the store (Spec 14 §1 rule 4); they send messages that wait durably in `<root>/.solace/tasks/inbox/` until the server applies them. Boards, and later the archive and Strategy pages, read and change tasks only through the task server's API (§4), never through the files. `changes` is not stored on the task: it is read from each scope project's store by task id. Run logs, conversations and review checkpoints stay in each project's `.solace/board/<tid>/`.
+
+### Features and milestones (D-87)
+
+A **milestone** is a planned release; a **feature** is a capability of the product. Both are records at the Solace root, not tasks (D-25): they have no column, runs, scope or workflow.
+
+| Record | Fields |
+| --- | --- |
+| Milestone | `{id, title, body, rank, targetDate?, state}`. Milestones are ordered by `rank` (lower first) |
+| Feature | `{id, title, body, milestone?, rank, state}`. `milestone` is the feature's target. `rank` orders features within their milestone, or among features with no milestone |
+
+`state` is one of `proposed | planned | active | complete | canceled`, the same list for both. A new record starts `proposed` unless its create names a state. Any state can change to any other. A `canceled` record keeps its links to tasks; only a delete clears them.
+
+Links are optional. A task has at most one feature and at most one milestone; a feature has at most one target milestone. A feature appears in every milestone that holds one of its tasks, as well as in its target. Deleting a feature or milestone clears every link to it in the same operation; it never deletes tasks.
+
+Each record is one JSON file, at `<root>/.solace/strategy/milestones/<id>.json` and `<root>/.solace/strategy/features/<id>.json`. The task server is their only writer: it writes each file atomically, as it does tasks, and assigns ids the same way as task ids. Clients read and change them only through the API (§4); agents have no access (Spec 14 §1 rule 4). The vision document is not part of this spec; it belongs to the Strategy page work.
 
 ## 2. Workflow configuration
 
@@ -65,7 +86,7 @@ actions = ["investigate", "assign", "complete", "to_backlog", "cancel"]
 
 [[board.columns]]
 id = "assigned"
-actions = ["unblock", "new_agent", "review", "cancel"]
+actions = ["reassign", "new_agent", "review", "cancel"]
 
 [[board.columns]]
 id = "needs_review"
@@ -87,7 +108,6 @@ to_backlog = { to = "backlog" }
 investigate = { run = "investigate", model = true }     # read-only; stays in its column
 review     = { run = "review" }                         # stays in its column
 assign     = { to = "assigned", run = "work", model = true }
-unblock    = { to = "assigned", run = "work" }         # the waiting agent continues
 new_agent  = { to = "assigned", run = "new_work" }     # a fresh agent, with the notes so far
 approve    = { stamp = "approved" }
 complete   = { to = "complete" }
@@ -96,7 +116,7 @@ start_over = { revert = true, unstamp = "approved", to = "assigned", run = "new_
 cancel     = { revert = true, to = "cancelled" }
 ```
 
-`reassign` moves a task from needs review to assigned, preserves its code and change records, removes approval, and starts a work run with the notes and review feedback. It uses the previous work model unless the human selects another. It is refused while a review run is still active. `start_over` additionally reverts the task before starting again.
+`reassign` moves a task from needs review to assigned, preserves its code and change records, removes approval, and starts a work run with the notes and review feedback. In `assigned` it brings back an agent that failed or was cut off: the previous conversation when it is compatible (D-33), else a fresh agent with the notes. It uses the previous work model unless the human selects another. It is refused while a review run is still active. `start_over` additionally reverts the task before starting again.
 
 `revert` also ends the task's agent, if it has one.
 
@@ -115,18 +135,37 @@ Two rules hold for every workflow:
 | `GET /tasks/{id}` | One task, in full |
 | `GET /tasks/{id}/runs/{rid}` | The run, plus `transcript`: the agent's log read into entries `{kind, text?, title?, input?, output?, status?}`. `kind` is `message`, `thinking`, `tool` (with `status` `running`, `ok` or `failed`), `usage`, `error` or `output` (lines that aren't agent events). A board fetches it again while the run is going (§6) |
 | `POST /tasks` `{title, body, links?, scope?}` | Creates a task at the end of the first column. `scope` lists the projects it may change (default: this one) and must include this project, its first lane (`E7001`). `request` is a client-chosen id: a second create with the same `request` returns the task the first made, so a double submit makes one task (D-77) |
-| `PATCH /tasks/{id}` `{title?, body?, links?, rank?}` | Edits a task. Refused while a run is going (`E7003`) or in a final column (`E7004`) |
+| `PATCH /tasks/{id}` `{title?, body?, links?, rank?, feature?, milestone?, dependsOn?}` | Edits a task. While a run is going only `feature` and `milestone` may change; any other field is refused (`E7003`, D-88). In a final column only `feature` and `milestone` may change; any other field is refused (`E7004`). An unknown feature or milestone id is `E7023`; a `dependsOn` naming a missing task or the task itself is `E7024`, and one that makes a cycle is `E7025`. Setting `feature` on a task with no `milestone` also sets the feature's milestone |
 | `POST /tasks/{id}/actions` `{action, model?, effort?, text?}` | §2. Returns 200 with the task, or 409 with `E7001` (not allowed here; `allowed` lists what is) or `E7002`–`E7008` (`E7007`, `E7008`: a revert blocked by a later task) |
 | `POST /tasks/{id}/scope` `{scope}` | Sets the projects the task may change (D-61). Refused while its agent is working, not paused or waiting on a question (`E7003`); in a final column (`E7004`); for a project the task has changed, or for the task's own project while a run is open (`E7013`). A run that is paused or waiting holds a project added now (`E7005`, `E7012`). When the task's own project leaves the scope, the task moves to the first project left, which sends `{removed: id}` from the old one |
 | `POST /tasks/{id}/notes` `{text}` | Adds a human note |
 | `POST /tasks/{id}/files` (the image's bytes as the body) | Stores an image (PNG, JPEG, GIF or WebP by content; at most 5 MB) and returns `{name, url}`. A note uses it as `![alt](url)` (D-37) |
 | `GET /tasks/{id}/files/{name}` | The stored image |
 | `DELETE /tasks/{id}/notes/{i}` | Deletes the note at position `i` (0 is the oldest), whoever wrote it. Notes are only ever appended, so a position stays valid until a note before it is deleted |
-| `POST /tasks/{id}/questions/{qid}` `{option?, text?}` | Saves the answer and continues the same waiting run once all questions are answered, unless paused; uses its allowed workflow continuation (§6). For a settings question, `Approve` writes `proposed` if `solace.toml` still equals `base` and is valid; otherwise the answer records that it was not applied |
+| `POST /tasks/{id}/questions/{qid}` `{option?, text?}` | Saves the answer and continues the same waiting run once all questions are answered, unless paused; the answers go straight to the waiting agent, and no workflow action is involved (D-88). For a settings question, `Approve` writes `proposed` if `solace.toml` still equals `base` and is valid; otherwise the answer records that it was not applied |
 | `GET /models` | The models this Solace install knows, each with `agent`, `efforts` (the efforts an action may choose; empty for custom runners), `available` and, when unavailable, `reason` (§6) |
 | `GET /events` | Server-sent events: `{task}` in full after every change, and `{workflow}` after a configuration change, in order. A client that reconnects with `Last-Event-ID` gets what it missed; a new one starts from the project's `{workflow}` and `{tasks: [...]}` (the list `GET /tasks` returns) as they are, then gets every later change (D-78). Once a connection has sent what was missed, it sends one `ready` event (`event: ready`), so a client can apply the replay at once and treat only later events as news |
 
 A `text` sent with an action is added as a human note before the action runs.
+
+### Features and milestones (D-87)
+
+These answer at the root only, not under `/p/{dir}`.
+
+| Request | Effect |
+| --- | --- |
+| `GET /milestones` | All milestones |
+| `POST /milestones` `{title, body?, targetDate?, state?, request?}` | Creates a milestone at the end of the order, in `state` (default `proposed`). Uses `request` the same way as `POST /tasks` |
+| `PATCH /milestones/{id}` `{title?, body?, rank?, targetDate?, state?}` | Edits it |
+| `DELETE /milestones/{id}` | Deletes it and clears `milestone` on every feature and task linked to it |
+| `GET /features` | All features |
+| `POST /features` `{title, body?, milestone?, state?, request?}` | Creates a feature at the end of its group, in `state` (default `proposed`). Uses `request` the same way as `POST /tasks` |
+| `PATCH /features/{id}` `{title?, body?, milestone?, rank?, state?}` | Edits it |
+| `DELETE /features/{id}` | Deletes it and clears `feature` on every task linked to it |
+
+An unknown feature or milestone id, in a path or a body, is `E7023`.
+
+**Events.** The root's `/events` sends `{milestone}` and `{feature}` in full after every change, and `{removedMilestone: id}` and `{removedFeature: id}` after a delete. They carry no `project` field and go on the root task log, so the `tasks` position in `Last-Event-ID` resumes them. A new connection's replay sends `{milestones: [...]}` and `{features: [...]}` after `{tasks}`. A delete that clears links also sends `{task}` for each task it changed. `/p/{dir}/events` leaves them out.
 
 `solace serve` also serves the default board at `/` and a guide for humans at `/guide`.
 
@@ -147,7 +186,7 @@ The root's own project answers at `/` as above; every other project's API is und
 | `POST /projects/new` `{name, dir?, target?}` | `gleam new` at `dir` (default `name`), with `--template javascript` for `target: "javascript"`, without its own git repository inside one; sets it up and lists it. Refused if `dir` exists or `name` isn't a package name |
 | `DELETE /projects/{dir}` | Takes the project off the list; its `.solace` stays. Refused for `.` and while one of its agents is working (`E7003`). With `{delete: true, name}` (D-74) it also deletes the project's folder after unlisting it; refused (`E7014`) unless `name` is the folder or package name, the folder is reached without symlinks and holds no other listed project |
 | `GET /models` | As above |
-| `GET /events` | When `workspace`: every project's events, each with `project: dir`, and `{projects: [dir...]}` when the list changes. The event id is a JSON object of the task log's position (`tasks`, one log for the root's task store, D-77) and each project's position for its workflow events, so `Last-Event-ID` resumes all of them. A new connection starts from each project's `{workflow}` and `{tasks}`; a project added later sends the same pair after `{projects}` and then follows from its latest event (D-78). One `ready` follows the replay. Otherwise the root project's stream as above. `/p/{dir}/events` is one project's stream alone |
+| `GET /events` | When `workspace`: every project's events, each with `project: dir`, and `{projects: [dir...]}` when the list changes. The event id is a JSON object of the task log's position (`tasks`, one log for the root's task store, D-77) and each project's position for its workflow events, so `Last-Event-ID` resumes all of them. A new connection starts from each project's `{workflow}` and `{tasks}`, then the root's `{milestones}` and `{features}`, which carry no `project` (D-87); a project added later sends the same pair after `{projects}` and then follows from its latest event (D-78). One `ready` follows the replay. Otherwise the root project's stream as above. `/p/{dir}/events` is one project's stream alone |
 
 Reads never take a project's lock, so humans and agents read any number of projects at once; an agent reads other projects with `--project` (Spec 3 §2). Each project has at most one work run (§6).
 
@@ -204,13 +243,13 @@ When a task reaches a final column, the records of the state before it are dropp
 - A **work run** starts the agent with Spec 14 §5's configuration. Its prompt is plain text, not the task's JSON: what the run is for and how to start, ask and finish, then the task's title, body, links, notes and questions with their answers. Images in the briefed notes are attached to the prompt (Codex `-i`, Claude Code a stream-json image block) and named `[image N]` in the text; a custom runner gets `[image N: path]`. The run's kind decides the role line, and a read-only run's brief says which commands are refused. A work run's role line has the agent run all tests of the projects the task covers before `task done`, fix those its changes broke, and report the rest (D-81). On top of Spec 14, the agent's Solace tool gets:
   - `task note <text>`: adds an agent note;
   - `write solace.toml` (D-38) validates the proposed text (`E6020` if invalid), then adds a settings question with options Approve and Reject and waits exactly like `task ask`. Only Approve writes the file;
-  - `task ask` (`text`, 2–4 `options`): adds a question and fires `asked`. **The agent waits:** answering the last pending question automatically continues the same run through its allowed workflow action (`unblock` by default for work). The call returns the answers and any continuation `text`. Explicit `unblock` with `text` still works. The run keeps its context. `new_agent` instead ends it and starts a fresh one, which gets the notes and answers in its prompt;
+  - `task ask` (`text`, 2–4 `options`): adds a question and fires `asked`. **The agent waits:** answering the last pending question automatically continues the same run, in any column and any workflow: the answers go straight to the waiting agent and no workflow action is involved (D-88). The call returns the answers and any continuation `text`. An action that continues the waiting run's kind (`reassign` in `assigned`) with a `text` still works, answering every open question with that text. The run keeps its context. `new_agent` instead ends it and starts a fresh one, which gets the notes and answers in its prompt;
   - `task done <summary>`: adds the summary as a note, fires `finished`, and ends the run.
   - The message of `task note|done|ask` goes in `text`; a first word after the subcommand that starts with `--` (such as `--text`) is refused with `E7015`, and nothing is sent (D-79).
 - An **investigate run** gets the same prompt, with a role line asking for findings or a plan. It is read-only like a review run: `write`, `submit`, `delete`, `remove`, `format` and `run` are refused (`E7010`). Its `task done` report is added as a note and ends the run, and fires no event: the task stays where it is. Its `task ask` fires no event either. The task stays in its column, marked as needing attention, and answering its pending questions automatically continues the waiting agent. Explicit `investigate` with an answer still works. A later work run gets the report in its prompt with the other notes.
 - A **review run** gets the same prompt plus the names of the task's `changes`. It is read-only (`E7010`), ends by adding its feedback with `task note`, and fires no event.
 - A run past the task timeout (a system setting; default 60 min) is stopped and fires `failed`. Time spent waiting on a question or paused doesn't count.
-- **Pause and continuation:** answering a paused run saves the answers without continuing it; `resume` continues it once all questions are answered. Answer submission never starts a new agent, replaces a run, grants a stamp or reverts work. A custom workflow without an allowed continuation keeps the answers and flags the missing action. Repeated answer submissions do not start another run.
+- **Pause and continuation:** answering a paused run saves the answers without continuing it; `resume` continues it once all questions are answered. Answer submission never starts a new agent, replaces a run, grants a stamp or reverts work. Answering continues the waiting run directly, in any column and any workflow (D-88). Repeated answer submissions do not start another run.
 - **Keeping an agent waiting** depends on the agent's tool-call timeout. `agent-config` (Spec 14 §5) sets it to the task timeout or more (Codex: the MCP server's `tool_timeout_sec`; Claude Code: `MCP_TOOL_TIMEOUT`). If the agent gives up anyway, the run fires `failed`, and the task continues with a new agent.
 - Each run records `log`, the path of the agent's own session log. `GET /tasks/{id}/runs/{rid}` reads it (Codex `exec --json` or Claude Code `stream-json`) into a transcript, so a human can follow the agent's work live or read it afterwards. The view is read only (D-19, D-24).
 
@@ -234,7 +273,7 @@ Several projects on one server, several people, remote access and authentication
 - A2. No action moves a task to an event's target column except through that column's actions. `asked`, `finished` and `failed` move it only as configured.
 - A3. A custom workflow with an extra column and action works end to end. The invalid workflows in §2 each give `E6020`.
 - A4. `complete` from `needs_review` without `approved` is refused (`E7006`). After `approve`, `complete` moves the task to the `complete` column. `start_over` and `cancel` from `needs_review` are not gated, and `start_over` removes the stamp. The stamp records who gave it and when. A task approved and then moved back with `start_over` or `new_agent` no longer holds `approved`.
-- A5. With a fake agent: `task ask` flags the task (`attention.hold`, still in `assigned`), and the question appears on it and in `/events`, while the agent's call stays open. `unblock` is refused until the question is answered or a `text` is given. After the last answer is submitted, the same agent process (same run id) receives the answer and continues without an extra `unblock` request. A paused run waits for `resume`. Custom continuation action names work, and repeated answers never launch a replacement run. `new_agent` instead ends it and starts a run with a new id whose prompt has the answer. `task done` moves the task to `needs_review`.
+- A5. With a fake agent: `task ask` flags the task (`attention.hold`, still in `assigned`), and the question appears on it and in `/events`, while the agent's call stays open. `reassign` is refused until the question is answered or a `text` is given. After the last answer is submitted, the same agent process (same run id) receives the answer and continues without an extra action request, even in a workflow whose column offers no work action. A paused run waits for `resume`. Repeated answers never launch a replacement run. `new_agent` instead ends it and starts a run with a new id whose prompt has the answer. `task done` moves the task to `needs_review`.
 - A6. A fake agent's run edits two symbols, creates one, deletes one, writes a watched file and creates a new one. `cancel` restores the store and those files byte-for-byte to how they were before the task.
 - A7. Task B changes a symbol after task A did. Cancelling A is refused with `E7007`, naming the symbol and B, and nothing changes. After B is cancelled, cancelling A succeeds.
 - A7c. Task B adds a caller of a function task A added, without editing any of A's symbols. Cancelling A is refused with `E7008`, naming B's caller, and the store and files are unchanged.

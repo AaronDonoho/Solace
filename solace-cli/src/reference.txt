@@ -113,8 +113,10 @@ resending it: `submit --draft <id> --replace` (`old` and `text`) patches and
 retries it, `submit --draft <id>` retries it as is, `view --draft <id>` reads it,
 `drafts` lists them. A draft is stale once a symbol it replaces, or its module's
 imports, changed; its retry is refused (E0107): read the current source and
-submit again. A block equal to the stored symbol is reported unchanged. A
-rejected patch's draft holds the symbols it changed, as blocks.
+submit again. A block equal to the stored symbol is reported unchanged. A patch
+that can't be applied (E0108, with the patch line at fault) is kept as written,
+so fix that line with `--replace` instead of resending it; a patch that applies
+but is rejected after is kept as the blocks it changed.
 
 Checking
   test                          run the tests that can see a change since they

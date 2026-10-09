@@ -566,7 +566,7 @@ class Board(unittest.TestCase):
         other=self.create();self.action(other,'plan');self.action(other,'assign','E7005',model='fake')
         self.action(t,'review','E7003',model='fake')
         self.api('PATCH','/tasks/'+t['id'],{'title':'blocked edit'},'E7003')
-        self.action(t,'unblock','E7002')
+        self.action(t,'reassign','E7002')
         self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][0]["id"]}',{'option':'a'})
         t=self.wait(t,lambda x:x['column']=='needs_review');self.assertEqual(t['runs'][-1]['id'],rid)
         self.assertIsNone(t['attention'])
@@ -577,7 +577,7 @@ class Board(unittest.TestCase):
         t=self.action(t,'new_agent',text='b');new=t['runs'][-1]['id'];self.assertNotEqual(old,new)
         self.wait(t,lambda x:len(x['questions'])==2)
         prompt=(self.root/'.solace'/(new+'.prompt')).read_text();self.assertIn("Answer: b",prompt);self.assertNotIn('"runs"',prompt)
-        self.action(t,'unblock',text='b');self.wait(t,lambda x:x['column']=='needs_review')
+        self.action(t,'reassign',text='b');self.wait(t,lambda x:x['column']=='needs_review')
     def test_a17_agents_md_proposal(self):  # D-45: AGENTS.md is human-owned like solace.toml
         agents=self.root/'AGENTS.md'
         t=self.assign([{'command':'write AGENTS.md','text':'Prices are in cents.\n'},{'command':'task done done'}])
@@ -611,7 +611,8 @@ class Board(unittest.TestCase):
     def test_answers_respect_pause_and_all_questions(self):
         config=self.root/'solace.toml'
         workflow=Path(__file__).parents[1].joinpath('src/default-board.toml').read_text()
-        config.write_text(config.read_text()+workflow.replace('unblock','continue_work'))
+        # No continuing work action in `assigned`: answers still reach the waiting agent (D-88).
+        config.write_text(config.read_text()+workflow.replace('actions = ["reassign", "new_agent", "review", "cancel"]','actions = ["new_agent", "review", "cancel"]'))
         t=self.assign([{'command':'task ask','text':'First?','options':['a','b']},{'command':'task done answered'}])
         t=self.wait(t,lambda x:x['runs'][-1]['state']=='waiting');rid=t['runs'][-1]['id']
         # Seed a second pending question to exercise the all-answers condition.
@@ -857,6 +858,9 @@ class Board(unittest.TestCase):
         # D-78: a new stream starts from the project's workflow and tasks, then follows the changes.
         stream=self.stream();seq,e=self.next_event(stream);self.assertIn('workflow',e)
         seq,e=self.next_event(stream);self.assertIsInstance(e['tasks'],list)
+        # D-87: the root's records follow the tasks, before the changes.
+        _,e=self.next_event(stream);self.assertEqual(e['milestones'],[])
+        _,e=self.next_event(stream);self.assertEqual(e['features'],[])
         t=self.create();seq,e=self.next_event(stream);self.assertEqual(e['task']['id'],t['id'])
         self.api('POST','/tasks/'+t['id']+'/notes',{'text':'first'});self.api('POST','/tasks/'+t['id']+'/notes',{'text':'second'})
         resumed=self.stream(seq);s1,e1=self.next_event(resumed);s2,e2=self.next_event(resumed)
@@ -947,5 +951,47 @@ class Board(unittest.TestCase):
         self.assertEqual(t['questions'],[])
         self.assertEqual(t['runs'][-1]['state'],'ended')
         self.assertEqual(list((self.root/'.solace/tasks/inbox').iterdir()),[])
+
+    def test_task_links_survive_completion_and_a_feature_delete(self):  # D-87
+        m=self.api('POST','/milestones',{'title':'1.0'})
+        f=self.api('POST','/features',{'title':'F','milestone':m['id']})
+        t=self.completed([])
+        linked=self.api('PATCH','/tasks/'+t['id'],{'feature':f['id']})
+        self.assertEqual((linked['feature'],linked['milestone'],linked['dependsOn'],linked['closedTime']),(f['id'],m['id'],[],None))
+        self.action(t,'approve');done=self.action(t,'complete')
+        self.assertIsInstance(done['closedTime'],int)
+        self.api('DELETE','/features/'+f['id'])
+        t=self.api('GET','/tasks/'+t['id'])
+        self.assertEqual((t['feature'],t['milestone'],t['closedTime'],t['archivedTime']),(None,m['id'],done['closedTime'],None))
+
+    def test_milestones_and_features_are_root_records(self):  # D-87
+        stream=self.stream()
+        _,e=self.next_event(stream);self.assertIn('workflow',e)
+        _,e=self.next_event(stream);self.assertIn('tasks',e)
+        seq,e=self.next_event(stream);self.assertEqual(e['milestones'],[])
+        _,e=self.next_event(stream);self.assertEqual(e['features'],[])
+        m=self.api('POST','/milestones',{'title':'1.0','targetDate':'2027-01-01'})
+        f=self.api('POST','/features',{'title':'F','milestone':m['id']})
+        self.assertEqual((m['state'],m['targetDate'],f['state'],f['milestone']),('proposed','2027-01-01','proposed',m['id']))
+        _,e=self.next_event(stream);self.assertEqual(e['milestone']['id'],m['id'])
+        _,e=self.next_event(stream);self.assertEqual(e['feature']['id'],f['id'])
+        # An unknown milestone in a body is E7023 with 400; per-project routes are checked in workspace_acceptance.
+        status,v=self.bare('POST','/features',{'Content-Type':'application/json'},json.dumps({'title':'G','milestone':'nope'}))
+        self.assertEqual((status,json.loads(v)['code']),(400,'E7023'))
+        # After a restart the records are still there, replayed after the tasks, and a
+        # Last-Event-ID from the snapshot resumes the root log: the restart's own
+        # workflow event leads, from the project's store, before the log's records.
+        self.restart({})
+        self.assertEqual([x['title'] for x in self.api('GET','/milestones')],['1.0'])
+        self.assertEqual([x['title'] for x in self.api('GET','/features')],['F'])
+        resumed=self.stream(seq)
+        _,e=self.next_event(resumed);self.assertIn('workflow',e)
+        _,e=self.next_event(resumed);self.assertEqual(e['milestone']['id'],m['id'])
+        _,e=self.next_event(resumed);self.assertEqual(e['feature']['id'],f['id'])
+        fresh=self.stream()
+        _,e=self.next_event(fresh);self.assertIn('workflow',e)
+        _,e=self.next_event(fresh);self.assertIn('tasks',e)
+        _,e=self.next_event(fresh);self.assertEqual([x['id'] for x in e['milestones']],[m['id']])
+        _,e=self.next_event(fresh);self.assertEqual([x['id'] for x in e['features']],[f['id']])
 
 if __name__=='__main__':unittest.main()

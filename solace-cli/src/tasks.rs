@@ -113,16 +113,202 @@ fn write(top: &Path, t: &Value) -> Result<(), Failure> {
     if !board::valid_id(id) {
         return board::err("E7001", "invalid task id");
     }
-    // Synced like an inbox message, so a power loss never leaves an empty task file.
-    let dir = board::store_dir(top);
-    let (part, to) = (dir.join(format!("{id}.json.tmp")), dir.join(format!("{id}.json")));
-    let mut f = fs::File::create(&part)?;
-    f.write_all(&serde_json::to_vec_pretty(t).unwrap())?;
-    f.sync_all()?;
-    fs::rename(&part, &to)?;
-    fs::File::open(&dir)?.sync_all()?;
+    replace_file(&board::store_dir(top), id, t)?;
     log(top, t["home"].as_str().unwrap_or("."), &json!({"task":t}));
     Ok(())
+}
+/// Writes `<dir>/<id>.json` as `v`, synced like an inbox message and renamed
+/// into place, so a power loss never leaves an empty file.
+fn replace_file(dir: &Path, id: &str, v: &Value) -> Result<(), Failure> {
+    fs::create_dir_all(dir)?;
+    let (part, to) = (dir.join(format!("{id}.json.tmp")), dir.join(format!("{id}.json")));
+    let mut f = fs::File::create(&part)?;
+    f.write_all(&serde_json::to_vec_pretty(v).unwrap())?;
+    f.sync_all()?;
+    fs::rename(&part, &to)?;
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+/// The states of a milestone or a feature (D-87 point 8).
+const STATES: [&str; 5] = ["proposed", "planned", "active", "complete", "canceled"];
+
+fn strategy_dir(top: &Path, kind: &str) -> PathBuf {
+    top.join(".solace/strategy").join(kind)
+}
+/// The event key of one record of `kind` (`milestones` or `features`).
+fn singular(kind: &str) -> &'static str {
+    if kind == "milestones" { "milestone" } else { "feature" }
+}
+fn rank_of(v: &Value) -> f64 {
+    v["rank"].as_f64().unwrap_or(0.)
+}
+/// Every milestone (`kind` "milestones") or feature ("features") of the root, in
+/// rank order. A missing folder holds none, and an unreadable file is skipped.
+pub fn records(top: &Path, kind: &str) -> Vec<Value> {
+    let mut out = vec![];
+    let Ok(entries) = fs::read_dir(strategy_dir(top, kind)) else { return out };
+    for p in entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")) {
+        match fs::read(&p).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| e.to_string())) {
+            Ok(v) => out.push(v),
+            Err(e) => eprintln!("skipping record file {}: {e}", p.display()),
+        }
+    }
+    out.sort_by(|a, b| rank_of(a).total_cmp(&rank_of(b)).then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
+    out
+}
+pub(super) fn record(top: &Path, kind: &str, id: &str) -> Option<Value> {
+    if !board::valid_id(id) {
+        return None;
+    }
+    serde_json::from_slice(&fs::read(strategy_dir(top, kind).join(format!("{id}.json"))).ok()?).ok()
+}
+/// Writes a record and logs it as a root event: no project (D-87 point 7).
+fn put_record(top: &Path, kind: &str, v: &Value) -> Result<(), Failure> {
+    let id = v["id"].as_str().unwrap_or("");
+    if !board::valid_id(id) {
+        return board::err("E7001", "invalid id");
+    }
+    replace_file(&strategy_dir(top, kind), id, v)?;
+    let event = if kind == "milestones" { json!({"milestone": v}) } else { json!({"feature": v}) };
+    log(top, "", &event);
+    Ok(())
+}
+fn remove_record(top: &Path, kind: &str, id: &str) -> Result<(), Failure> {
+    let dir = strategy_dir(top, kind);
+    fs::remove_file(dir.join(format!("{id}.json")))?;
+    fs::File::open(&dir)?.sync_all()?;
+    let event = if kind == "milestones" { json!({"removedMilestone": id}) } else { json!({"removedFeature": id}) };
+    log(top, "", &event);
+    Ok(())
+}
+/// The rank a new record takes at the end of its group: all milestones, or the
+/// features of one milestone (or of none), leaving out `except`.
+fn end_rank(top: &Path, kind: &str, milestone: &Value, except: &str) -> f64 {
+    let group = |r: &&Value| r["id"] != except && (kind == "milestones" || r["milestone"] == *milestone);
+    records(top, kind).iter().filter(group).map(rank_of).fold(0., f64::max) + 1.
+}
+
+/// `/milestones...` and `/features...` (D-87), root records: reads take nothing
+/// and a change is one operation. An error comes with its HTTP status: 404 for an
+/// unknown id in the path, 400 for one in the body, else 409.
+pub fn strategy_api(top: &Path, method: &str, parts: &[&str], body: Value) -> Result<Value, (u16, Failure)> {
+    if method == "GET" && parts.len() == 1 {
+        return Ok(json!(records(top, parts[0])));
+    }
+    let (root, method) = (top.to_path_buf(), method.to_string());
+    let parts: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
+    let done = op(top, move || {
+        let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+        let mut status = 409;
+        Ok(strategy(&root, &method, &parts, &body, &mut status).map_err(|e| (status, e)))
+    })
+    .map_err(|e| (409, e))?;
+    done
+}
+fn strategy(top: &Path, method: &str, parts: &[&str], req: &Value, status: &mut u16) -> Result<Value, Failure> {
+    let kind = parts[0];
+    match (method, parts.len()) {
+        ("POST", 1) => create_record(top, kind, req, status),
+        ("PATCH", 2) => edit_record(top, kind, parts[1], req, status),
+        ("DELETE", 2) => delete_record(top, kind, parts[1], status),
+        _ => board::err("E7001", "unknown route"),
+    }
+}
+fn unknown_id<T>(kind: &str, id: &str, status: &mut u16, code: u16) -> Result<T, Failure> {
+    *status = code;
+    board::err("E7023", format!("unknown {} {id}", singular(kind)))
+}
+/// Checks the type of each field a request names.
+fn check_fields(kind: &str, req: &Value) -> Result<(), Failure> {
+    let link = if kind == "milestones" { "targetDate" } else { "milestone" };
+    for k in ["title", "body", "state", "rank", link] {
+        let Some(x) = req.get(k) else { continue };
+        let ok = match k {
+            "title" => x.as_str().is_some_and(|t| !t.trim().is_empty()),
+            "body" => x.is_string(),
+            "state" => x.as_str().is_some_and(|s| STATES.contains(&s)),
+            "rank" => x.is_number(),
+            _ => x.is_string() || x.is_null(),
+        };
+        if !ok {
+            return board::err("E7001", format!("invalid {k}"));
+        }
+    }
+    Ok(())
+}
+/// The milestone a feature request names, which must exist (any state).
+fn linked(top: &Path, req: &Value, status: &mut u16) -> Result<Value, Failure> {
+    match req.get("milestone") {
+        Some(Value::String(m)) if record(top, "milestones", m).is_none() => unknown_id("milestones", m, status, 400),
+        Some(m) => Ok(m.clone()),
+        None => Ok(Value::Null),
+    }
+}
+fn create_record(top: &Path, kind: &str, req: &Value, status: &mut u16) -> Result<Value, Failure> {
+    check_fields(kind, req)?;
+    let Some(title) = req["title"].as_str() else { return board::err("E7001", "title required") };
+    let request = match req.get("request") {
+        None => None,
+        Some(Value::String(r)) if !r.is_empty() => Some(r.clone()),
+        Some(_) => return board::err("E7001", "request must be a string"),
+    };
+    if let Some(r) = &request
+        && let Some(v) = records(top, kind).into_iter().find(|v| v["request"] == *r)
+    {
+        return Ok(v);
+    }
+    let mut v = json!({"id": unique_id(), "title": title, "body": req["body"].as_str().unwrap_or(""),
+        "state": req["state"].as_str().unwrap_or("proposed")});
+    if kind == "milestones" {
+        v["targetDate"] = req.get("targetDate").cloned().unwrap_or(Value::Null);
+    } else {
+        v["milestone"] = linked(top, req, status)?;
+    }
+    v["rank"] = json!(end_rank(top, kind, &v["milestone"], ""));
+    if let Some(r) = request {
+        v["request"] = json!(r);
+    }
+    put_record(top, kind, &v)?;
+    Ok(v)
+}
+fn edit_record(top: &Path, kind: &str, id: &str, req: &Value, status: &mut u16) -> Result<Value, Failure> {
+    let Some(mut v) = record(top, kind, id) else { return unknown_id(kind, id, status, 404) };
+    check_fields(kind, req)?;
+    let link = if kind == "milestones" { "targetDate" } else { "milestone" };
+    if kind == "features" {
+        linked(top, req, status)?;
+    }
+    let moved = kind == "features" && req.get("milestone").is_some_and(|m| *m != v["milestone"]);
+    for k in ["title", "body", "state", "rank", link] {
+        if let Some(x) = req.get(k) {
+            v[k] = x.clone();
+        }
+    }
+    // A feature that changes milestone goes to the end of its new group, unless the request ranks it.
+    if moved && req.get("rank").is_none() {
+        v["rank"] = json!(end_rank(top, kind, &v["milestone"], id));
+    }
+    put_record(top, kind, &v)?;
+    Ok(v)
+}
+/// Deletes a record. Its features and tasks lose their link first, so a crash
+/// between the steps leaves no link to a missing record (D-87 point 5).
+fn delete_record(top: &Path, kind: &str, id: &str, status: &mut u16) -> Result<Value, Failure> {
+    let Some(v) = record(top, kind, id) else { return unknown_id(kind, id, status, 404) };
+    if kind == "milestones" {
+        for mut f in records(top, "features").into_iter().filter(|f| f["milestone"] == id) {
+            f["milestone"] = Value::Null;
+            put_record(top, "features", &f)?;
+        }
+    }
+    let link = singular(kind);
+    for mut t in board::all_tasks(top)?.into_iter().filter(|t| t[link] == id) {
+        t[link] = Value::Null;
+        write(top, &t)?;
+    }
+    remove_record(top, kind, id)?;
+    Ok(v)
 }
 
 /// The task log `/events` reads: every change in order, with the project it
@@ -295,8 +481,7 @@ fn drain_with(top: &Path, settle: bool) {
 fn flag_set_aside(top: &Path, m: &Value, why: &str) {
     let Some(tid) = m["task"].as_str().filter(|t| board::valid_id(t)) else { return };
     let path = board::store_dir(top).join(format!("{tid}.json"));
-    let Ok(bytes) = fs::read(&path) else { return };
-    let Ok(mut t) = serde_json::from_slice::<Value>(&bytes) else { return };
+    let Ok(mut t) = board::read_task(top, &path) else { return };
     let kind = m["kind"].as_str().unwrap_or("");
     let text = format!("A task message ({kind}) could not be applied and was set aside in .solace/tasks/inbox/failed: {why}");
     let Ok(w) = board::flow(&scope::path(top, t["home"].as_str().unwrap_or("."))) else { return };
@@ -349,7 +534,7 @@ fn apply(top: &Path, m: &Value) -> Result<Option<String>, Failure> {
         return board::err("E7001", "invalid task id");
     }
     let path = board::store_dir(top).join(format!("{tid}.json"));
-    let mut t: Value = serde_json::from_slice(&fs::read(&path)?).map_err(|e| Failure(e.to_string(), 1))?;
+    let mut t = board::read_task(top, &path)?;
     // Only the message applied just before a crash can come again; a message with
     // an older id may still be new (it was sent before a later one landed).
     if t["inbox"].as_str().is_some_and(|last| last == id) {
@@ -505,6 +690,174 @@ mod tests {
             assert!(e.0.contains("request must be a string"), "{bad}: {}", e.0);
         }
         assert_eq!(board::all_tasks(&root).unwrap().len(), 4);
+    }
+
+    /// D-87: milestones and features are created at the end of their group, edited,
+    /// reordered and deleted; a missing folder holds none.
+    #[test]
+    fn milestones_and_features_are_created_edited_reordered_and_deleted() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body);
+        let titles = |kind: &str| -> Vec<String> { records(&root, kind).iter().map(|r| r["title"].as_str().unwrap().into()).collect() };
+        assert_eq!(call("GET", &["milestones"], json!({})).unwrap(), json!([]));
+        assert_eq!(call("GET", &["features"], json!({})).unwrap(), json!([]));
+        let a = call("POST", &["milestones"], json!({"title": "1.0"})).unwrap();
+        let b = call("POST", &["milestones"], json!({"title": "2.0", "state": "planned", "targetDate": "2027-01-01"})).unwrap();
+        assert_eq!((a["state"].as_str(), b["state"].as_str(), b["targetDate"].as_str()), (Some("proposed"), Some("planned"), Some("2027-01-01")));
+        assert_eq!((a["rank"].as_f64(), b["rank"].as_f64()), (Some(1.), Some(2.)));
+        let (aid, bid) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
+        let edited = call("PATCH", &["milestones", aid], json!({"title": "1.0 final", "rank": 3})).unwrap();
+        assert_eq!((edited["title"].as_str(), edited["state"].as_str()), (Some("1.0 final"), Some("proposed")));
+        assert_eq!(titles("milestones"), ["2.0", "1.0 final"], "a new rank reorders");
+        let e = call("PATCH", &["milestones", aid], json!({"state": "done"})).unwrap_err();
+        assert!(e.1.0.starts_with("E7001"), "{}", e.1.0);
+        assert_eq!(record(&root, "milestones", aid).unwrap(), edited, "a refused edit writes nothing");
+
+        // Features rank within their milestone, or among those with none.
+        let feature = |title: &str, milestone: Value| call("POST", &["features"], json!({"title": title, "milestone": milestone})).unwrap();
+        let (f1, f2, f3) = (feature("F1", json!(aid)), feature("F2", json!(aid)), feature("F3", Value::Null));
+        assert_eq!((f1["rank"].as_f64(), f2["rank"].as_f64(), f3["rank"].as_f64()), (Some(1.), Some(2.), Some(1.)));
+        assert_eq!((f1["state"].as_str(), f3["milestone"].is_null()), (Some("proposed"), true));
+        let (f1id, f2id, f3id) = (f1["id"].as_str().unwrap(), f2["id"].as_str().unwrap(), f3["id"].as_str().unwrap());
+        // Moving to another milestone puts a feature at the end of the new group, unless it is ranked.
+        let moved = call("PATCH", &["features", f1id], json!({"milestone": bid})).unwrap();
+        assert_eq!((moved["milestone"].as_str(), moved["rank"].as_f64()), (Some(bid), Some(1.)));
+        let moved = call("PATCH", &["features", f2id], json!({"milestone": bid})).unwrap();
+        assert_eq!(moved["rank"].as_f64(), Some(2.));
+        let ranked = call("PATCH", &["features", f2id], json!({"milestone": aid, "rank": 7})).unwrap();
+        assert_eq!(ranked["rank"].as_f64(), Some(7.));
+        let canceled = call("PATCH", &["features", f3id], json!({"state": "canceled", "body": "no"})).unwrap();
+        assert_eq!((canceled["state"].as_str(), canceled["body"].as_str()), (Some("canceled"), Some("no")));
+
+        call("DELETE", &["features", f3id], json!({})).unwrap();
+        assert_eq!(titles("features"), ["F1", "F2"]);
+        call("DELETE", &["milestones", bid], json!({})).unwrap();
+        assert_eq!(titles("milestones"), ["1.0 final"]);
+        assert!(!strategy_dir(&root, "milestones").join(format!("{bid}.json")).exists());
+        assert!(!strategy_dir(&root, "features").read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+    }
+
+    /// D-87: deleting a milestone clears the link on its features; an unknown
+    /// milestone is refused with E7023 (400 in a body, 404 in a path) and writes nothing.
+    #[test]
+    fn a_deleted_milestone_unlinks_its_features_and_an_unknown_one_is_refused() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body);
+        let m = call("POST", &["milestones"], json!({"title": "M"})).unwrap();
+        let mid = m["id"].as_str().unwrap();
+        let f = call("POST", &["features"], json!({"title": "F", "milestone": mid, "request": "r1"})).unwrap();
+        let again = call("POST", &["features"], json!({"title": "F again", "milestone": mid, "request": "r1"})).unwrap();
+        assert_eq!(again["id"], f["id"], "a known request returns its record");
+        assert_eq!(records(&root, "features").len(), 1);
+
+        let e = call("POST", &["features"], json!({"title": "G", "milestone": "nope"})).unwrap_err();
+        assert_eq!(e.0, 400);
+        assert!(e.1.0.starts_with("E7023"), "{}", e.1.0);
+        let e = call("PATCH", &["features", f["id"].as_str().unwrap()], json!({"milestone": "nope"})).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7023")), (400, true));
+        let e = call("PATCH", &["milestones", "nope"], json!({"title": "x"})).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7023")), (404, true));
+        let e = call("DELETE", &["features", "../x"], json!({})).unwrap_err();
+        assert_eq!(e.0, 404);
+        assert_eq!(records(&root, "features"), [f.clone()], "nothing was written");
+
+        let deleted = call("DELETE", &["milestones", mid], json!({})).unwrap();
+        assert_eq!(deleted["id"], m["id"]);
+        let kept = records(&root, "features");
+        assert_eq!((kept.len(), kept[0]["milestone"].is_null(), kept[0]["title"].as_str()), (1, true, Some("F")));
+        // Each change was logged without a project, in order.
+        let rows: Vec<String> = events(&root)
+            .unwrap()
+            .prepare("SELECT data FROM events WHERE project='' ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let keys: Vec<String> = rows.iter().map(|d| serde_json::from_str::<Value>(d).unwrap().as_object().unwrap().keys().next().unwrap().clone()).collect();
+        assert_eq!(keys, ["milestone", "feature", "feature", "removedMilestone"]);
+    }
+
+    /// D-87: a task saved before the links loads with them empty; one already in a
+    /// final column takes its last end time, or its file's, as its closedTime.
+    #[test]
+    fn an_old_task_loads_with_empty_links_and_a_closed_time() {
+        let root = root();
+        let t = board::task(&root, "t1").unwrap();
+        assert_eq!(
+            (&t["feature"], &t["milestone"], &t["dependsOn"], &t["closedTime"], &t["archivedTime"]),
+            (&Value::Null, &Value::Null, &json!([]), &Value::Null, &Value::Null)
+        );
+        let dir = board::store_dir(&root);
+        fs::write(dir.join("t2.json"), r#"{"id":"t2","column":"complete","home":".","runs":[{"ended":50}],"finished":{"time":70}}"#).unwrap();
+        fs::write(dir.join("t3.json"), r#"{"id":"t3","column":"complete","home":".","runs":[]}"#).unwrap();
+        assert_eq!(board::task(&root, "t2").unwrap()["closedTime"], json!(70));
+        let modified = fs::metadata(dir.join("t3.json")).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(board::task(&root, "t3").unwrap()["closedTime"], json!(modified));
+    }
+
+    /// D-87: entering a final column sets closedTime once; later moves keep it.
+    #[test]
+    fn entering_complete_sets_closed_time_once() {
+        let root = root();
+        let w = board::flow(&root).unwrap();
+        let mut t = api(&root, "POST", &["tasks"], json!({"title": "T"})).unwrap();
+        board::move_to(&w, &mut t, &json!("complete")).unwrap();
+        let closed = t["closedTime"].as_u64().expect("set on entering complete");
+        t["closedTime"] = json!(closed - 100);
+        board::move_to(&w, &mut t, &json!("cancelled")).unwrap();
+        board::move_to(&w, &mut t, &json!("backlog")).unwrap();
+        assert_eq!(t["closedTime"], json!(closed - 100));
+    }
+
+    /// D-87: a feature brings its milestone to a task with none; links are checked,
+    /// editable in a final column and during a run, and cleared by a delete.
+    #[test]
+    fn task_links_are_set_checked_and_cleared() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body).unwrap();
+        let patch = |tid: &str, body: Value| api(&root, "PATCH", &["tasks", tid], body);
+        let code = |r: Result<Value, Failure>| r.unwrap_err().0[..5].to_string();
+        let (m1, m2) = (call("POST", &["milestones"], json!({"title": "1"})), call("POST", &["milestones"], json!({"title": "2"})));
+        let f = call("POST", &["features"], json!({"title": "F", "milestone": m1["id"]}));
+        let t1 = api(&root, "POST", &["tasks"], json!({"title": "T1"})).unwrap();
+        let t1 = t1["id"].as_str().unwrap();
+        let t = patch(t1, json!({"feature": f["id"]})).unwrap();
+        assert_eq!((&t["feature"], &t["milestone"]), (&f["id"], &m1["id"]), "an empty milestone takes the feature's");
+        let t = patch(t1, json!({"milestone": m2["id"]})).unwrap();
+        let t2 = api(&root, "POST", &["tasks"], json!({"title": "T2"})).unwrap();
+        let t2id = t2["id"].as_str().unwrap();
+        assert_eq!(patch(t1, json!({"feature": f["id"]})).unwrap()["milestone"], m2["id"], "a set milestone stays");
+        assert_eq!(patch(t2id, json!({"feature": f["id"], "milestone": null})).unwrap()["milestone"], Value::Null, "the request's wins");
+        assert_eq!(code(patch(t1, json!({"feature": "nope"}))), "E7023");
+        assert_eq!(code(patch(t1, json!({"dependsOn": [t1]}))), "E7024");
+        assert_eq!(code(patch(t1, json!({"dependsOn": ["nope"]}))), "E7024");
+        assert_eq!(patch(t1, json!({"dependsOn": [t2id]})).unwrap()["dependsOn"], json!([t2id]));
+        assert_eq!(code(patch(t2id, json!({"dependsOn": [t1]}))), "E7025");
+        assert_eq!(board::task(&root, t1).unwrap()["milestone"], t["milestone"]);
+
+        // During a run, and in a final column, only the links change; an empty edit is refused too.
+        let mut busy = board::task(&root, t2id).unwrap();
+        busy["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
+        write(&root, &busy).unwrap();
+        assert_eq!(patch(t2id, json!({"milestone": m1["id"]})).unwrap()["milestone"], m1["id"]);
+        assert_eq!(code(patch(t2id, json!({"title": "no"}))), "E7003");
+        assert_eq!(code(patch(t2id, json!({}))), "E7003");
+        let mut done = board::task(&root, t2id).unwrap();
+        done["runs"] = json!([]);
+        done["column"] = json!("complete");
+        write(&root, &done).unwrap();
+        assert_eq!(patch(t2id, json!({"milestone": null})).unwrap()["milestone"], Value::Null);
+        assert_eq!(code(patch(t2id, json!({"title": "no", "feature": null}))), "E7004");
+        assert_eq!(code(patch(t2id, json!({}))), "E7004");
+
+        call("DELETE", &["features", f["id"].as_str().unwrap()], json!({}));
+        for id in [t1, t2id] {
+            assert_eq!(board::task(&root, id).unwrap()["feature"], Value::Null);
+        }
+        assert_eq!(board::task(&root, t1).unwrap()["milestone"], m2["id"], "the milestone stays");
+        call("DELETE", &["milestones", m2["id"].as_str().unwrap()], json!({}));
+        assert_eq!(board::task(&root, t1).unwrap()["milestone"], Value::Null);
     }
 
     /// An update whose change fails writes nothing.

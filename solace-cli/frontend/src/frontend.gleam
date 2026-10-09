@@ -1,5 +1,7 @@
 import contracts
 import gleam/int
+import gleam/list
+import gleam/result
 import gleam/string
 import gleam/uri.{type Uri}
 import lustre
@@ -41,31 +43,43 @@ pub fn route(uri: Uri) -> Route {
   }
 }
 
-pub fn page(route: Route) -> Element(msg) {
-  case route {
-    Board -> element.element("solace-board", [], [])
-    Migrate -> element.element("solace-migration", [], [])
-    Contracts(base) -> {
-      let attributes = case base {
-        "" -> []
-        _ -> [attribute.attribute("base", base)]
-      }
-      element.element("solace-contracts", attributes, [])
-    }
+/// A route's page element, hidden unless it is the one shown.
+pub fn page(route: Route, shown: Bool) -> Element(msg) {
+  let attributes = case route {
+    Contracts(base) if base != "" -> [attribute.attribute("base", base)]
+    _ -> []
   }
+  let attributes = case shown {
+    True -> attributes
+    False -> [attribute.attribute("hidden", ""), ..attributes]
+  }
+  element.element(page_of(route), attributes, [])
 }
 
-pub fn init(_flags: Nil) -> #(Route, Effect(Msg)) {
+pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   let initial = case modem.initial_uri() {
     Ok(uri) -> route(uri)
     Error(_) -> Board
   }
-  #(initial, modem.init(fn(uri) { RouteChanged(route(uri)) }))
+  #(
+    Model(route: initial, opened: [initial]),
+    modem.init(fn(uri) { RouteChanged(route(uri)) }),
+  )
 }
 
-pub fn update(_model: Route, msg: Msg) -> #(Route, Effect(Msg)) {
+/// Showing another page keeps the window's scroll of the one left, read before the view hides it, and
+/// puts back the scroll of the one shown once it is drawn.
+pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   let RouteChanged(route) = msg
-  #(route, effect.none())
+  let next = Model(route: route, opened: open(model.opened, route))
+  let entering = page_of(route)
+  case page_of(model.route) == entering {
+    True -> #(next, effect.none())
+    False -> {
+      leave_scroll(page_of(model.route))
+      #(next, effect.before_paint(fn(_, _) { enter_scroll(entering) }))
+    }
+  }
 }
 
 fn link(path: String, label: String, current: Bool) -> Element(msg) {
@@ -80,17 +94,15 @@ fn link(path: String, label: String, current: Bool) -> Element(msg) {
   html.a(attributes, [html.text(label)])
 }
 
-pub fn view(route: Route) -> Element(msg) {
+pub fn view(model: Model) -> Element(msg) {
+  let shown = page_of(model.route)
   element.fragment([
     html.nav([attribute.class("menu")], [
-      link("/", "Board", route == Board),
-      link("/migrate", "Migration", route == Migrate),
-      link("/contracts", "Contracts", case route {
-        Contracts(_) -> True
-        _ -> False
-      }),
+      link("/", "Board", shown == page_of(Board)),
+      link("/migrate", "Migration", shown == page_of(Migrate)),
+      link("/contracts", "Contracts", shown == page_of(Contracts(""))),
     ]),
-    page(route),
+    ..list.map(model.opened, fn(r) { page(r, page_of(r) == shown) })
   ])
 }
 
@@ -144,3 +156,235 @@ pub fn count_text(
     _, _ -> int.to_string(index + 1) <> " of " <> int.to_string(count)
   }
 }
+
+/// A node of copied HTML, as `shell.mjs` hands a selection to `to_markdown`.
+pub type Html {
+  Text(String)
+  Tag(name: String, attributes: List(#(String, String)), children: List(Html))
+}
+
+/// The markdown for copied HTML, so a copy of rendered markdown gets its source back. It undoes the board's
+/// renderer (`markdown` in the board's api.mjs): paragraphs and line breaks, headings (the renderer draws every
+/// level as h4, so they come back as ####), blockquotes, nested lists (a numbered one from its start), code blocks
+/// and spans, bold, links, and task images,
+/// whose src loses the project's prefix. Other elements give their text.
+pub fn to_markdown(nodes: List(Html)) -> String {
+  blocks(nodes) |> string.join("\n\n")
+}
+
+fn blocks(nodes: List(Html)) -> List(String) {
+  let #(done, run) =
+    list.fold(nodes, #([], []), fn(acc, node) {
+      let #(done, run) = acc
+      case is_block(node) {
+        True -> #(
+          list.append(list.reverse(block(node)), paragraph(run, done)),
+          [],
+        )
+        False -> #(done, [node, ..run])
+      }
+    })
+  paragraph(run, done)
+  |> list.reverse
+  |> list.filter(fn(b) { string.trim(b) != "" })
+}
+
+// Inline nodes collected in reverse become one paragraph on top of the blocks so far, also in reverse.
+fn paragraph(run: List(Html), done: List(String)) -> List(String) {
+  case run {
+    [] -> done
+    _ -> [inline(list.reverse(run)), ..done]
+  }
+}
+
+fn is_block(node: Html) -> Bool {
+  case node {
+    Text(_) -> False
+    Tag(name, _, _) ->
+      list.contains(
+        [
+          "p", "div", "section", "article", "details", "summary", "blockquote",
+          "pre", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+        ],
+        name,
+      )
+  }
+}
+
+fn block(node: Html) -> List(String) {
+  case node {
+    Tag("p", _, children) -> [inline(children)]
+    Tag("pre", _, children) -> ["```\n" <> plain(children) <> "\n```"]
+    Tag("ul", _, children) -> [items(children, False, 1, "")]
+    Tag("ol", attributes, children) -> [
+      items(children, True, first_number(attributes), ""),
+    ]
+    Tag("li", _, _) -> [items([node], False, 1, "")]
+    Tag("blockquote", _, children) -> [
+      blocks(children)
+      |> string.join("\n\n")
+      |> string.split("\n")
+      |> list.map(fn(line) {
+        case line {
+          "" -> ">"
+          _ -> "> " <> line
+        }
+      })
+      |> string.join("\n"),
+    ]
+    Tag("h" <> level, _, children) ->
+      case int.parse(level) {
+        Ok(n) -> [string.repeat("#", n) <> " " <> inline(children)]
+        Error(_) -> blocks(children)
+      }
+    Tag(_, _, children) -> blocks(children)
+    Text(text) -> [text]
+  }
+}
+
+// A list's items, one line each: `- `, or numbered from `start` by position; a nested list is indented under its item's text.
+fn items(
+  children: List(Html),
+  ordered: Bool,
+  start: Int,
+  indent: String,
+) -> String {
+  children
+  |> list.filter(fn(child) {
+    case child {
+      Tag("li", _, _) -> True
+      _ -> False
+    }
+  })
+  |> list.index_map(fn(item, i) {
+    let marker = case ordered {
+      True -> int.to_string(start + i) <> ". "
+      False -> "- "
+    }
+    let inner = case item {
+      Tag(_, _, children) -> children
+      Text(_) -> []
+    }
+    let #(nested, text) =
+      list.partition(inner, fn(child) {
+        case child {
+          Tag("ul", _, _) | Tag("ol", _, _) -> True
+          _ -> False
+        }
+      })
+    let deeper = indent <> string.repeat(" ", string.length(marker))
+    [
+      indent <> marker <> inline(text),
+      ..list.map(nested, fn(sub) {
+        case sub {
+          Tag("ol", attributes, children) ->
+            items(children, True, first_number(attributes), deeper)
+          Tag(_, _, children) -> items(children, False, 1, deeper)
+          Text(_) -> ""
+        }
+      })
+    ]
+    |> list.filter(fn(line) { line != "" })
+    |> string.join("\n")
+  })
+  |> string.join("\n")
+}
+
+// An empty tag, left at the edge of a selection, adds no markup.
+fn inline(nodes: List(Html)) -> String {
+  list.map(nodes, fn(node) {
+    case node {
+      Text(text) -> text
+      Tag("br", _, _) -> "\n"
+      Tag("img", attributes, _) -> image(attributes)
+      Tag("strong", _, children) | Tag("b", _, children) ->
+        case inline(children) {
+          "" -> ""
+          text -> "**" <> text <> "**"
+        }
+      Tag("code", _, children) ->
+        case plain(children) {
+          "" -> ""
+          text -> "`" <> text <> "`"
+        }
+      Tag("a", attributes, children) ->
+        case inline(children), list.key_find(attributes, "href") {
+          "", _ -> ""
+          text, Ok(href) -> "[" <> text <> "](" <> href <> ")"
+          text, Error(_) -> text
+        }
+      Tag(_, _, children) -> inline(children)
+    }
+  })
+  |> string.concat
+}
+
+// Task images load from the project's prefix on this server; the markdown keeps the path stored with the task.
+fn image(attributes: List(#(String, String))) -> String {
+  let alt = list.key_find(attributes, "alt") |> result.unwrap("")
+  case list.key_find(attributes, "src") {
+    Error(_) -> ""
+    Ok(src) -> {
+      let path = case list.reverse(string.split(src, "/tasks/")) {
+        [last, _, ..] -> "/tasks/" <> last
+        _ -> src
+      }
+      "![" <> alt <> "](" <> path <> ")"
+    }
+  }
+}
+
+fn plain(nodes: List(Html)) -> String {
+  list.map(nodes, fn(node) {
+    case node {
+      Text(text) -> text
+      Tag("br", _, _) -> "\n"
+      Tag(_, _, children) -> plain(children)
+    }
+  })
+  |> string.concat
+}
+
+// The number an `ol` begins at: its `start` attribute, or 1.
+fn first_number(attributes: List(#(String, String))) -> Int {
+  list.key_find(attributes, "start")
+  |> result.try(int.parse)
+  |> result.unwrap(1)
+}
+
+/// The shell's state: the route shown, and every page opened so far, in the order first opened. A page
+/// stays in the document once opened, hidden while another shows, so its work is there when you come back.
+pub type Model {
+  Model(route: Route, opened: List(Route))
+}
+
+/// The page a route shows: its custom element. Routes to the same page share one element and its state.
+pub fn page_of(route: Route) -> String {
+  case route {
+    Board -> "solace-board"
+    Migrate -> "solace-migration"
+    Contracts(_) -> "solace-contracts"
+  }
+}
+
+/// The pages open after showing a route: a new page is added at the end, so the others keep their place
+/// and Lustre never recreates them; an open one takes the route's attributes (a contract page's base).
+pub fn open(opened: List(Route), route: Route) -> List(Route) {
+  let page = page_of(route)
+  case list.any(opened, fn(r) { page_of(r) == page }) {
+    True ->
+      list.map(opened, fn(r) {
+        case page_of(r) == page {
+          True -> route
+          False -> r
+        }
+      })
+    False -> list.append(opened, [route])
+  }
+}
+
+@external(javascript, "./page_scroll.mjs", "leave")
+fn leave_scroll(page: String) -> Nil
+
+@external(javascript, "./page_scroll.mjs", "enter")
+fn enter_scroll(page: String) -> Nil

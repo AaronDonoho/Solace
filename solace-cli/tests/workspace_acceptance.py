@@ -113,6 +113,9 @@ class Root(unittest.TestCase):
         v = self.api('POST', '/projects', {'dir': 'b'})
         self.assertEqual([p['dir'] for p in v['projects']], ['.', 'a', 'b'])
         self.assertEqual(self.next_event(events)[1], {'projects': ['.', 'a', 'b']})
+        # D-87: the root's records follow the list, before the project that came back.
+        self.assertEqual(self.next_event(events)[1], {'milestones': []})
+        self.assertEqual(self.next_event(events)[1], {'features': []})
         # D-78: the project that came back follows with its workflow and tasks as they are.
         self.assertEqual(self.next_event(events)[1]['project'], 'b')
         ident, data = self.next_event(events)
@@ -136,10 +139,17 @@ class Root(unittest.TestCase):
         self.assertEqual(self.next_event(events), ('ready', None))
 
         # A project's own stream and view, as a project on its own has them.
+        self.api('POST', '/milestones', {'title': 'Root only'})
         single = self.stream('/p/a/events')
         ident, data = self.next_event(single)
         self.assertNotIn('project', data)
         self.assertEqual(set(json.loads(ident)), {'tasks', 'a'})
+        # D-87: the root's records are not a project's; its stream and routes leave them out.
+        keys = set(data)
+        while (e := self.next_event(single))[0] != 'ready': keys |= set(e[1])
+        self.assertFalse(keys & {'milestones', 'features', 'milestone', 'feature'}, keys)
+        self.refused('GET', '/p/a/milestones', None, 'unknown route')
+        self.refused('POST', '/p/a/features', {'title': 'F'}, 'unknown route')
         self.assertIn('<div id="app">', self.call('GET', '/p/a/contracts')[1])
 
         # Inside a project, the root is still the one root: a second server is refused.
@@ -307,7 +317,9 @@ class Root(unittest.TestCase):
         while True:
             ident, data = self.next_event(events)
             if ident == 'ready': break
-            projects.add(data.get('project'))
+            # D-87: the root's records come with the snapshot, with no project to name.
+            if 'milestones' in data or 'features' in data: continue
+            projects.add(data['project'])
         self.assertEqual(projects, {'.', 'frontend'})
         # The root project's agents can't reach into the project below it, only read it.
         self.assertIn('E6006', self.cli('read', 'frontend/gleam.toml', ok=False))

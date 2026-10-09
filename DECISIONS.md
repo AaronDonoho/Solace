@@ -1,11 +1,17 @@
 
 ## D-82 Blocked is not a column; a held or stopped agent is attention
 Amends Spec 15 §1, §2, §3 and §6 (Aaron, 2026-10-08).
-1. The default workflow has no `blocked` column. `asked` and `failed` have no target: the task stays in its column (normally `assigned`) and gets `attention`. `unblock` and `review` are allowed in `assigned`, so answering the last question still continues the agent (D-30). A workflow may still name targets for `asked` and `failed`; only `finished` must have one.
-2. Attention from a held question (work or investigation), a settings proposal, or a failed or restarted work run carries `hold: true`. It stays through other actions and clears when the run continues (an answer, `unblock`, `investigate`), is restarted (`new_agent`, `start_over`, `reassign`), is stopped, or the task reaches a final column. Any other attention clears on the next action, as before.
+1. The default workflow has no `blocked` column. `asked` and `failed` have no target: the task stays in its column (normally `assigned`) and gets `attention`. Answering the last question continues the agent directly (D-88). A workflow may still name targets for `asked` and `failed`; only `finished` must have one.
+2. Attention from a held question (work or investigation), a settings proposal, or a failed or restarted work run carries `hold: true`. It stays through other actions and clears when the run continues (an answer, `investigate`), is restarted (`new_agent`, `start_over`, `reassign`), is stopped, or the task reaches a final column. Any other attention clears on the next action, as before.
 3. A task saved in `blocked`, under a workflow without that column, loads in `assigned` with held attention (its own, or "the agent needed an answer or stopped").
 4. `blocked` is reserved for a task that depends on another task. Nothing sets it yet and the task has no field for it.
 Why: every known case of "blocked" is an agent needing a human, which attention already says; a column for it moved the card away from the work it belongs to.
+
+## D-88 Answering continues the agent; there is no Unblock
+Amends D-30, D-82 and Spec 15 §2, §6 (Aaron, 2026-10-09).
+1. Answering a waiting agent's last open question hands the answers straight to its run, in any column and any workflow. No workflow action is looked up, so none is guessed, moved, stamped or replaced. A paused task waits for `resume`.
+2. The default workflow has no `unblock`. After a failed or cut-off work run, `assigned` offers `reassign`, which brings back the previous conversation when it is compatible (D-33) and otherwise starts a fresh agent with the notes. `new_agent` always starts fresh.
+Why: `unblock` did nothing a human could see, yet answering secretly pressed it; removing it from a workflow silently stopped answers from reaching the agent.
 
 ## D-83 Tests are short and bounded
 (Aaron, 2026-10-08.)
@@ -40,3 +46,20 @@ Why: each page is its own app with its own build and tests, as the migration pag
 3. Matches are marked by boxes drawn over the text from `range.getClientRects()`, in a fixed layer with `pointer-events: none`, never by changing the DOM Lustre renders and never by changing `user-select`: cards stay unselectable and draggable. Boxes are clipped to every scroll area around the match, skipped where something else covers the text (a sticky lane header, a modal, a notice, the find bar), and redrawn on scroll (captured on the document and each shadow root, since scroll events don't cross shadow boundaries), resize and re-search. Not the CSS Custom Highlight API: WebKit doesn't paint it on `user-select: none` text (WebKit bug 278455).
 4. The bar and the marks layer are plain DOM owned by `shell.mjs`, outside `#app`; the decisions (`find_opens`, `next_match`, `count_text`) live in `frontend.gleam` and are tested. Changes inside a component's shadow root re-run the search (debounced); the bar's and the marks' own changes don't.
 Why: Tauri's webview has no find, and native find in WebKit misses shadow DOM, where every page lives.
+
+## D-87 Features and milestones are root records kept by the task server
+Amends Spec 15 §1 and §4 (Aaron, 2026-10-09).
+1. A **milestone** is a planned release. A **feature** is a capability of the product. Both are records at the Solace root, kept by the task server, which is their only writer. They are not tasks (D-25) and have no column, runs, scope or workflow.
+2. Links are optional. A task has at most one feature and at most one milestone. A feature has an optional *target* milestone. A task given a feature with no milestone of its own takes the feature's milestone; after that the two can differ. A feature appears in every milestone that holds one of its tasks.
+3. Tasks gain `feature`, `milestone`, `dependsOn` (task ids), `closedTime` (when the task first reached a final column; never cleared) and `archivedTime` (when the task was archived; null otherwise). How a task is archived, and how the board hides it, is decided later.
+4. `feature` and `milestone` can be changed on a task in a final column. Other edits there stay refused (`E7004`).
+5. Deleting a feature or milestone clears every link to it in the same operation. It never deletes tasks.
+6. `dependsOn` is recorded and validated (existing tasks, no self-reference, no cycles), but nothing enforces it yet. D-82 point 4 keeps `blocked` for its later use.
+7. Their events go on the root's stream only, with no `project` field; `/p/{dir}/events` leaves them out.
+8. Milestones and features share one list of states: `proposed | planned | active | complete | canceled`. A new record starts `proposed` unless its create names a state. Any state can change to any other. A `canceled` record keeps its links to tasks; only a delete clears them.
+Why: the Feature/Milestone store and the Strategy page need a settled model to be built and reviewed against.
+
+## D-88 A task's feature and milestone can change while a run is going
+Amends D-87 point 4 and Spec 15 §4 (Aaron, 2026-10-09).
+1. `PATCH /tasks/{id}` with only `feature` and `milestone` is accepted while a run is going, as in a final column. Any other field during a run is still refused (`E7003`), `dependsOn` included.
+Why: the links are for planning and don't affect the agent; a long run or an unanswered question shouldn't hold planning up.

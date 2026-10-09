@@ -10,9 +10,21 @@ fn owner() -> String {
 /// to a callee, leave it current.
 fn base(s: &Store, ix: &Index, args: &[String], text: &str) -> Out {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let mut names: Vec<&str> =
-        text.lines().filter_map(|l| l.strip_prefix("// ── ")).map(|h| h.split([' ', '(']).next().unwrap_or("")).collect();
+    let mut names: Vec<String> =
+        text.lines().filter_map(|l| l.strip_prefix("// ── ")).map(|h| h.split([' ', '(']).next().unwrap_or("").to_string()).collect();
     let (mut parts, mut modules) = (vec![], vec![]);
+    // a patch draft: what its sections update or add to; a module section covers the whole module
+    if is_patch(text) {
+        for target in text.lines().filter(|l| l.starts_with("*** Update") || l.starts_with("*** Add")).map(patch_target) {
+            match s.resolve_module(ix, &target) {
+                Some(m) if !target.contains('.') => {
+                    parts.extend(ix.syms.iter().filter(|x| x.module == m.path).map(|x| format!("{}\n{}", x.qname(), x.text)));
+                    modules.push(m.path.clone());
+                }
+                _ => names.push(target),
+            }
+        }
+    }
     match a.as_slice() {
         // the module it adds to, or whose imports it replaces
         [_, "--new" | "--imports", m] => modules.push(s.resolve_module(ix, m).map_or(m.to_string(), |m| m.path.clone())),
@@ -24,17 +36,17 @@ fn base(s: &Store, ix: &Index, args: &[String], text: &str) -> Out {
             parts.extend(ix.syms.iter().filter(|x| x.module == m.path).map(|x| format!("{}\n{}", x.qname(), x.text)));
             modules.push(m.path.clone());
         }
-        [_, name] => names.push(name),
+        [_, name] => names.push(name.to_string()),
         _ => {}
     }
     for name in names {
-        match s.resolve(ix, name) {
+        match s.resolve(ix, &name) {
             Ok(i) => {
                 parts.push(format!("{}\n{}", ix.syms[i].qname(), ix.syms[i].text));
                 modules.push(ix.syms[i].module.clone());
             }
             // a new symbol: its module, which may not exist yet
-            Err(_) => modules.push(name.rsplit_once('.').map_or(name, |p| p.0).to_string()),
+            Err(_) => modules.push(name.rsplit_once('.').map_or(name.as_str(), |p| p.0).to_string()),
         }
     }
     for m in modules {
@@ -107,6 +119,14 @@ fn patch_target(line: &str) -> String {
     name.strip_suffix(".gleam").unwrap_or(name).to_string()
 }
 
+/// A patch line quoted in an error: long ones are cut.
+fn clip(line: &str) -> String {
+    match line.char_indices().nth(100) {
+        Some((k, _)) => format!("{}…", &line[..k]),
+        None => line.to_string(),
+    }
+}
+
 /// Blocks for a plain `submit` from a patch (D-47): `*** Update: <symbol or
 /// module>` sections of `@@` hunks (` ` context, `-` removed, `+` added) change
 /// stored symbols, applied in order as `apply_patch` does, each from where the
@@ -114,36 +134,46 @@ fn patch_target(line: &str) -> String {
 /// Returns one block per symbol changed or added.
 pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
     let bad = |m: String| Failure(format!("E0108 {m}"), 1);
-    // (update?, target, hunks of (context line, lines))
-    let mut sections: Vec<(bool, String, Vec<(Option<String>, Vec<String>)>)> = vec![];
-    for line in raw.lines() {
+    // (update?, target, line of its header, hunks of (context line, lines, line))
+    let mut sections: Vec<(bool, String, usize, Vec<(Option<String>, Vec<String>, usize)>)> = vec![];
+    let mut prev = "";
+    for (n, line) in raw.lines().enumerate().map(|(i, l)| (i + 1, l)) {
+        // a refusal at this line, with the line before it, so a bare `}` can be placed
+        let here = |m: String| {
+            let before = if n > 1 { format!(" (line {} is `{}`)", n - 1, clip(prev)) } else { String::new() };
+            bad(format!("line {n} of the patch: {m}{before}"))
+        };
         match line {
             l if l.starts_with("*** Begin Patch") || l.starts_with("*** End") => {}
-            l if l.starts_with("*** Update") => sections.push((true, patch_target(l), vec![])),
-            l if l.starts_with("*** Add") => sections.push((false, patch_target(l), vec![(None, vec![])])),
-            l if l.starts_with("*** Delete") => return Err(bad("a patch can't delete; use `delete <name>`.".into())),
-            l if l.starts_with("*** Move") => return Err(bad("a patch can't rename; submit the symbol under its new name.".into())),
+            l if l.starts_with("*** Update") => sections.push((true, patch_target(l), n, vec![])),
+            l if l.starts_with("*** Add") => sections.push((false, patch_target(l), n, vec![(None, vec![], n + 1)])),
+            l if l.starts_with("*** Delete") => return Err(here("a patch can't delete; use `delete <name>`.".into())),
+            l if l.starts_with("*** Move") => return Err(here("a patch can't rename; submit the symbol under its new name.".into())),
             l => {
-                let Some((update, target, hunks)) = sections.last_mut() else {
-                    return Err(bad("a patch starts with `*** Begin Patch`, then `*** Update: <name>` or `*** Add: <name>`.".into()));
+                let Some((update, target, _, hunks)) = sections.last_mut() else {
+                    return Err(here("a patch starts with `*** Begin Patch`, then `*** Update: <name>` or `*** Add: <name>`.".into()));
                 };
                 if let Some(at) = l.strip_prefix("@@").filter(|_| *update) {
                     let at = at.trim().trim_end_matches("@@").trim();
                     // a unified diff's `@@ -3,4 +3,5 @@` gives no context line
                     let numbers = at.starts_with('-') && at[1..].starts_with(|c: char| c.is_ascii_digit());
-                    hunks.push(((!at.is_empty() && !numbers).then(|| at.to_string()), vec![]));
+                    hunks.push(((!at.is_empty() && !numbers).then(|| at.to_string()), vec![], n));
                 } else if !*update && !l.starts_with('+') {
-                    return Err(bad(format!("in `*** Add: {target}` every line starts with `+`: {l}")));
+                    return Err(here(format!("in `*** Add: {target}` every line starts with `+`; this one doesn't: `{}`", clip(l))));
                 } else if *update && !l.is_empty() && !l.starts_with([' ', '-', '+']) {
-                    return Err(bad(format!("in `*** Update: {target}` each line starts with ` `, `-` or `+` (or `@@`): {l}")));
+                    return Err(here(format!(
+                        "in `*** Update: {target}` each line starts with ` `, `-` or `+` (or `@@`); this one doesn't: `{}`",
+                        clip(l)
+                    )));
                 } else {
                     if hunks.is_empty() {
-                        hunks.push((None, vec![]));
+                        hunks.push((None, vec![], n));
                     }
                     hunks.last_mut().unwrap().1.push(if l.is_empty() { " ".into() } else { l.to_string() });
                 }
             }
         }
+        prev = line;
     }
     if sections.is_empty() {
         return Err(bad("the patch has no `*** Update: <name>` or `*** Add: <name>` section.".into()));
@@ -158,7 +188,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
             blocks += &format!("// ── {module}.{} ──\n{}{}\n", item.name, std::mem::take(&mut header), item.text);
         }
     };
-    for (update, target, hunks) in sections {
+    for (update, target, at_line, hunks) in sections {
         if !update {
             let text: String = hunks[0].1.iter().map(|l| format!("{}\n", &l[1..])).collect();
             let parsed = gleam::split(&text);
@@ -167,7 +197,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 _ => target.clone(),
             };
             if parsed.items.is_empty() {
-                return Err(bad(format!("`*** Add: {target}` defines no function, type or constant.")));
+                return Err(bad(format!("`*** Add: {target}` (line {at_line}) defines no function, type or constant.")));
             }
             emit(&module, &parsed.header, &text, "");
             continue;
@@ -190,19 +220,19 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
         let mut lines: Vec<String> =
             units.iter().map(|u| u.1.clone()).collect::<Vec<_>>().join(&format!("\n{SEP}\n")).lines().map(String::from).collect();
         let mut cursor = 0;
-        for (at, hunk) in hunks {
+        for (at, hunk, hl) in hunks {
             let old: Vec<&str> = hunk.iter().filter(|l| !l.starts_with('+')).map(|l| &l[1..]).collect();
             let new: Vec<String> = hunk.iter().filter(|l| !l.starts_with('-')).map(|l| l[1..].to_string()).collect();
             let mut from = cursor;
             if let Some(at) = &at {
                 let found = (cursor..lines.len()).chain(0..cursor).find(|&k| lines[k].trim().starts_with(at.as_str()));
                 from = found
-                    .ok_or_else(|| bad(format!("in {target}, no line starts with `@@ {at}`; `view {target}` shows the current text.")))?
+                    .ok_or_else(|| bad(format!("in {target} (hunk at line {hl}), no line starts with `@@ {at}`; `view {target}` shows the current text.")))?
                     + 1;
             }
             let at_k = if old.is_empty() {
                 if at.is_none() {
-                    return Err(bad(format!("in {target}, a hunk that only adds lines needs `@@ <the line before them>`.")));
+                    return Err(bad(format!("in {target} (hunk at line {hl}), a hunk that only adds lines needs `@@ <the line before them>`.")));
                 }
                 Some(from)
             } else {
@@ -216,7 +246,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
             let Some(k) = at_k else {
                 let first = old.iter().find(|l| !l.trim().is_empty()).unwrap_or(&"");
                 return Err(bad(format!(
-                    "in {target}, these lines weren't found: `{}`{}; copy them exactly from `view {target}`.",
+                    "in {target} (hunk at line {hl}), these lines weren't found: `{}`{}; copy them exactly from `view {target}`.",
                     first.trim(),
                     if old.len() > 1 { format!(" (and {} more)", old.len() - 1) } else { String::new() }
                 )));
@@ -227,7 +257,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
         let joined = lines.join("\n");
         let texts: Vec<&str> = joined.split(&format!("\n{SEP}\n")).collect();
         if texts.len() != units.len() {
-            return Err(bad(format!("in {target}, a hunk spans two symbols; give each symbol its own hunk.")));
+            return Err(bad(format!("in {target} (section at line {at_line}), a hunk spans two symbols; give each symbol its own hunk.")));
         }
         for (u, t) in units.iter_mut().zip(&texts) {
             u.1 = t.trim_end().to_string();
@@ -242,9 +272,9 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 continue;
             }
             match gleam::split(text).items.first() {
-                None => return Err(bad(format!("the patch leaves nothing of {}; use `delete <name>`.", ix.syms[*i].qname()))),
+                None => return Err(bad(format!("the patch leaves nothing of {} (section at line {at_line}); use `delete <name>`.", ix.syms[*i].qname()))),
                 Some(item) if item.name != ix.syms[*i].name => {
-                    return Err(bad(format!("the patch renames {}; submit it whole under its new name.", ix.syms[*i].qname())));
+                    return Err(bad(format!("the patch renames {} (section at line {at_line}); submit it whole under its new name.", ix.syms[*i].qname())));
                 }
                 _ => {}
             }
@@ -252,7 +282,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
         }
         if !header.is_empty() {
             return Err(bad(format!(
-                "the patch changes only {module}'s imports; imports are added automatically (`submit --imports {module}` replaces them)."
+                "the patch changes only {module}'s imports (section at line {at_line}); imports are added automatically (`submit --imports {module}` replaces them)."
             )));
         }
     }
@@ -291,11 +321,11 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
             replaced = n;
             (unique_id(), vec!["submit".into(), symbol.qname()], raw)
         }
-        // a patch (D-47) becomes the blocks of a plain `submit`; the draft keeps the blocks
+        // a patch (D-47) is kept as written until it applies; then the draft holds the blocks
         ["submit"] | ["submit", _] | ["submit", "--new" | "--imports", _] => {
             let text = input()?;
             if a.len() <= 2 && is_patch(&text) {
-                (unique_id(), vec!["submit".into()], patch_blocks(s, &text)?)
+                (unique_id(), vec!["submit".into()], text)
             } else {
                 (unique_id(), a.iter().map(|x| x.to_string()).collect(), text)
             }
@@ -304,9 +334,19 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
             return usage("submit [name [--replace [--all]] | --new module | --imports module | --draft id [--replace [--all]]]");
         }
     };
-    let base = base(s, &ix, &args, &raw)?;
+    let mut raw = raw;
+    let mut as_blocks = false;
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match refs.as_slice() {
+        // a patch that applies is submitted as the blocks it changes; if those are rejected, the draft keeps them
+        ["submit"] if is_patch(&raw) => patch_blocks(s, &raw).and_then(|blocks| {
+            let result = s.submit_symbols(None, None, &blocks);
+            if result.is_err() {
+                raw = blocks;
+                as_blocks = true;
+            }
+            result
+        }),
         ["submit"] => s.submit_symbols(None, None, &raw),
         ["submit", "--new", module] => s.submit_symbols(None, Some(module), &raw),
         ["submit", "--imports", module] => s.submit(Target::Imports(module), &raw),
@@ -322,13 +362,15 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
             Ok(if replaced > 1 { format!("Replaced {replaced} occurrences.\n{out}") } else { out })
         }
         Err(Failure(message, code)) => {
+            let base = base(s, &ix, &args, &raw)?;
             s.db.execute(
                 "INSERT OR REPLACE INTO drafts(id,owner,args,text,base) VALUES (?,?,?,?,?)",
                 params![id, owner(), json!(args).to_string(), raw, base],
             )?;
+            let what = if as_blocks { " (the patch applied; the draft holds the blocks it changed)" } else { "" };
             Err(Failure(
                 format!(
-                    "{message}\n\nDraft {id} retained. Read: `view --draft {id}`. Fix and retry: `submit --draft {id} --replace` with `old` and `text`. List: `drafts`."
+                    "{message}\n\nDraft {id} retained{what}. Read: `view --draft {id}`. Fix and retry: `submit --draft {id} --replace` with `old` and `text`. List: `drafts`."
                 ),
                 code,
             ))
@@ -431,12 +473,48 @@ mod tests {
             let e = patch_blocks(&s, patch).unwrap_err().0;
             assert!(e.contains("E0108") && e.contains(why), "{why}: {e}");
         }
+        // Each refusal says where in the patch it is; a prefix error quotes the line before.
+        let bare = "*** Begin Patch\n*** Add: app.x\n+pub fn x() {\n+  1\n}\n*** End Patch\n";
+        let e = patch_blocks(&s, bare).unwrap_err().0;
+        assert!(e.contains("line 5 of the patch") && e.contains("`}`") && e.contains("(line 4 is `+  1`)"), "{e}");
+        let hunk = "*** Begin Patch\n*** Update: app.main\n@@ nosuchline\n+  let y = 2\n*** End Patch\n";
+        assert!(patch_blocks(&s, hunk).unwrap_err().0.contains("in app.main (hunk at line 3)"));
+        let rename = "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n+pub fn primary() {\n*** End Patch\n";
+        assert!(patch_blocks(&s, rename).unwrap_err().0.contains("renames app.main (section at line 2)"));
         // Units are joined by a NUL line; only a hunk naming that line can remove it.
         let spans = "*** Begin Patch\n*** Update: app\n-}\n-\u{0}\n-pub fn other() {\n+  y\n*** End Patch\n";
         assert!(patch_blocks(&s, spans).unwrap_err().0.contains("a hunk spans two symbols"), "spans");
         let imports = "*** Begin Patch\n*** Update: app\n-import gleam/int\n+import gleam/list\n*** End Patch\n";
         assert!(patch_blocks(&s, imports).unwrap_err().0.contains("changes only app's imports"), "imports");
         assert_eq!(board::snapshot(&s).unwrap(), original);
+    }
+
+    /// A patch that doesn't apply is kept as written: the error names its draft
+    /// and the line at fault, a `--replace` fixes one line and retries, and the
+    /// draft goes stale when a symbol it updates changes.
+    #[test]
+    fn an_unparsable_patch_is_kept_and_fixed_in_place() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let original = board::snapshot(&s).unwrap();
+        let patch = "*** Begin Patch\n*** Add: app.one\n+pub fn one() {\n+  1\n}\n*** Add: app.two\n+pub fn two() {\n+  2\n+}\n*** End Patch\n";
+        let err = submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
+        assert!(err.contains("E0108") && err.contains("line 5 of the patch") && err.contains("Draft"), "{err}");
+        let id: String = s.db.query_row("SELECT id FROM drafts", [], |r| r.get(0)).unwrap();
+        assert_eq!(view(&s, &id).unwrap(), patch);
+        assert_eq!(board::snapshot(&s).unwrap(), original);
+        assert!(list(&s).unwrap().ends_with("(current)"));
+        let fix = |out: &str| submit(&s, &["submit", "--draft", &id, "--replace"], &mut || Ok(out.into()), Some("\n}\n*** Add: app.two"));
+        let out = fix("\n+}\n*** Add: app.two").unwrap();
+        assert!(out.contains("app.one") && out.contains("app.two"), "{out}");
+        assert!(list(&s).unwrap().is_empty());
+        // A patch draft is stale once a symbol it updates changes.
+        let missing = "*** Begin Patch\n*** Update: app.main\n-  nothing\n+  2\n*** End Patch\n";
+        assert!(submit(&s, &["submit"], &mut || Ok(missing.into()), None).is_err());
+        let id: String = s.db.query_row("SELECT id FROM drafts", [], |r| r.get(0)).unwrap();
+        assert!(list(&s).unwrap().ends_with("(current)"));
+        s.submit_symbols(Some("app.main"), None, "pub fn main() { 3 }").unwrap();
+        assert!(list(&s).unwrap().contains("(stale"));
+        assert!(submit(&s, &["submit", "--draft", &id], &mut || Ok(String::new()), None).unwrap_err().0.contains("E0107"));
     }
 
     /// Hunks match through trailing whitespace and indentation, and a unified
@@ -499,7 +577,7 @@ mod tests {
         let original = board::snapshot(&s).unwrap();
         let missing = "*** Begin Patch\n*** Update File: src/calc.gleam\n@@\n-pub fn add(a: Int) -> Int {\n+pub fn add(a: Int, b: Int) -> Int {\n*** Update: app.main\n-  let x = calc.nope(1)\n*** End Patch\n";
         let err = submit(&s, &["submit"], &mut || Ok(missing.into()), None).unwrap_err().0;
-        assert!(err.starts_with("E0108 in app.main, these lines weren't found: `let x = calc.nope(1)`"), "{err}");
+        assert!(err.starts_with("E0108 in app.main (hunk at line 7), these lines weren't found: `let x = calc.nope(1)`"), "{err}");
         assert_eq!(board::snapshot(&s).unwrap(), original);
         let patch = "*** Begin Patch\n*** Update File: src/calc.gleam\n@@ pub fn add(\n-pub fn add(a: Int) -> Int {\n-  a + 1\n+pub fn add(a: Int, b: Int) -> Int {\n+  a + b\n*** Update File: src/app.gleam\n@@\n-  let x = calc.add(1)\n+  let x = calc.add(1, 1)\n@@\n-  let y = calc.add(2)\n+  let y = calc.add(2, 1)\n*** Add File: calc.twice\n+pub fn twice(a: Int) -> Int {\n+  add(a, a)\n+}\n*** End Patch\n";
         let out = submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap();
@@ -516,7 +594,8 @@ mod tests {
         let wrong = "*** Update: calc.sub\n-  a - 1\n+  a -. 1.0\n";
         let err = submit(&s, &["submit"], &mut || Ok(wrong.into()), None).unwrap_err().0;
         assert!(err.contains("Draft"), "{err}");
-        let id: String = s.db.query_row("SELECT id FROM drafts", [], |r| r.get(0)).unwrap();
+        assert!(err.contains("the draft holds the blocks"), "{err}");
+        let id: String = s.db.query_row("SELECT id FROM drafts ORDER BY rowid DESC LIMIT 1", [], |r| r.get(0)).unwrap();
         assert!(view(&s, &id).unwrap().starts_with("// ── calc.sub ──\npub fn sub"));
     }
 

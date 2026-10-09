@@ -213,8 +213,8 @@ pub fn notices_and_stamp_test() {
     )
   board.notices(old, new)
   |> should.equal([
-    board.Notice("Finished T", "The agent finished its work."),
-    board.Notice("Question on T", "Why?"),
+    board.Notice("Finished T", "The agent finished its work.", "", "1", "runs"),
+    board.Notice("Question on T", "Why?", "", "1", "questions"),
   ])
   board.notices(new, new) |> should.equal([])
   let #(model, _) = board.init(Nil)
@@ -259,8 +259,10 @@ pub fn replay_shows_end_result_without_notices_test() {
   // After it, a change is news.
   let #(model, _) = board.update(model, board.Live(event("running", "")))
   let #(model, _) = board.update(model, board.Live(event("ended", "reviewed")))
-  model.notices
-  |> should.equal([board.Notice("Reviewed T", "The review is ready.")])
+  let assert [notice] = model.notices
+  notice.heading |> should.equal("Reviewed T")
+  notice.id |> should.equal("1")
+  notice.tab |> should.equal("runs")
 }
 
 pub fn workspace_lanes_test() {
@@ -334,7 +336,13 @@ pub fn workspace_lanes_test() {
     )
   model.notices
   |> should.equal([
-    board.Notice("web: Finished In web", "The agent finished its work."),
+    board.Notice(
+      "web: Finished In web",
+      "The agent finished its work.",
+      "web",
+      "1",
+      "runs",
+    ),
   ])
   // Different workflows: each lane names its own columns.
   let #(model, _) =
@@ -930,8 +938,8 @@ pub fn previews_and_dismissed_notices_come_and_go_test() {
   model.previews |> should.equal(["text", "body"])
   let #(model, _) = board.update(model, board.Preview("body", False))
   model.previews |> should.equal(["text"])
-  let one = board.Notice("Reviewed A", "done")
-  let two = board.Notice("Reviewed B", "done")
+  let one = board.Notice("Reviewed A", "done", "", "1", "runs")
+  let two = board.Notice("Reviewed B", "done", "", "2", "runs")
   let model = board.Model(..model, notices: [one, two])
   let #(model, _) = board.update(model, board.Dismiss(one))
   model.notices |> should.equal([two])
@@ -1043,4 +1051,67 @@ pub fn file_changes_list_under_files_test() {
     #("Files", ["src/api.mjs"]),
     #("Other", ["module:m"]),
   ])
+}
+
+pub fn editor_toolbar_has_every_markdown_tool_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) = board.update(model, board.NewTask)
+  let rendered = board.view(model) |> element.to_string
+  [
+    "title=\"Heading\"", "title=\"Bold\"", "title=\"Code\"",
+    "title=\"Code block\"", "title=\"List\"", "title=\"Numbered list\"",
+    "title=\"Quote\"", "title=\"Link\"",
+  ]
+  |> list.each(fn(tool) { rendered |> string.contains(tool) |> should.be_true })
+}
+
+/// A notice's tab is the notes when the run left one, else the runs; a
+/// question opens the questions. Its button opens the task there.
+pub fn notice_opens_task_on_its_tab_test() {
+  let task = fn(runs, notes, questions) {
+    let assert Ok(t) =
+      json.parse(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"notes\":["
+          <> notes
+          <> "],\"questions\":["
+          <> questions
+          <> "],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\""
+          <> runs
+          <> "\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"finished\"}]}",
+        board.task_decoder(),
+      )
+    t
+  }
+  let note =
+    "{\"author\":\"agent\",\"run\":\"r1\",\"text\":\"Done\",\"time\":1}"
+  let assert [with_note] =
+    board.notices(task("running", "", ""), task("ended", note, ""))
+  with_note.tab |> should.equal("notes")
+  let assert [without] =
+    board.notices(task("running", "", ""), task("ended", "", ""))
+  without.tab |> should.equal("runs")
+  let asked = "{\"id\":\"q\",\"text\":\"Why?\",\"options\":[]}"
+  let assert [question] =
+    board.notices(task("running", "", ""), task("running", "", asked))
+  question.tab |> should.equal("questions")
+  let #(model, _) = board.init(Nil)
+  let model = board.Model(..model, notices: [question, without])
+  let #(model, _) =
+    board.update(model, board.Open(board.Notice(..question, dir: "")))
+  model.tab |> should.equal("questions")
+  model.notices |> should.equal([without])
+  model.revealing |> should.be_true
+  model.selected_card |> should.equal(option.Some(#("", "1")))
+  // A task that is already open only changes tab.
+  let #(model, _) = board.update(model, board.TaskLoaded(task_json()))
+  model.revealing |> should.be_false
+  let #(model, _) =
+    board.update(model, board.Open(board.Notice(..without, dir: "")))
+  model.tab |> should.equal("runs")
+  model.revealing |> should.be_false
+  model.notices |> should.equal([])
+}
+
+fn task_json() -> String {
+  "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1}"
 }

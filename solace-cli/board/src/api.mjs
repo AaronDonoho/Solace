@@ -31,10 +31,13 @@ export function clock(seconds) {
   return seconds ? new Date(seconds * 1000).toLocaleString() : '';
 }
 // Agent text is untrusted: everything is escaped before the few markdown forms
-// (code blocks, headings, nested lists, `code`, **bold**, images uploaded to this task
+// (code blocks, headings, blockquotes, nested lists, `code`, **bold**, images uploaded to this task
 // board, and http(s) links) are turned into HTML. Image URLs are stored
 // relative to their project; `base` is the project's prefix on this server.
-export function markdown(text, base = '') {
+// Quotes nest at most `maxQuotes` deep; a deeper `>` stays text, so untrusted
+// text can't exhaust the stack. `depth` is the quotes already open.
+const maxQuotes = 100;
+export function markdown(text, base = '', depth = 0) {
   const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   // Code spans are lifted out first so bold and links leave them literal.
   const inline = s => {
@@ -45,7 +48,7 @@ export function markdown(text, base = '') {
       .replace(/(^|[^!])\[([^\]]+)\]\((https?:\/\/[^\s)\u0000]+)\)/g, '$1<a href="$3" rel="noopener noreferrer">$2</a>')
       .replace(/\u0000(\d+)\u0000/g, (_, n) => `<code>${codes[n]}</code>`);
   };
-  const item = /^(\s*)([-*]|\d+[.)])\s+(.*)/, heading = /^(#{1,4})\s+(.*)/;
+  const item = /^(\s*)([-*]|\d+[.)])\s+(.*)/, heading = /^(#{1,4})\s+(.*)/, quote = /^ {0,3}>[ \t]?/;
   // One run of list lines; deeper indentation nests inside the current item.
   const list = run => {
     let html = '';
@@ -60,7 +63,9 @@ export function markdown(text, base = '') {
       else {
         if (top && indent === top.indent) html += `</li></${tag(stack.pop())}>`;
         stack.push({ indent, ordered });
-        html += `<${tag({ ordered })}>`;
+        // A numbered list begins at its first number; the browser counts on from there.
+        const first = ordered ? Number.parseInt(mark, 10) : 1;
+        html += ordered && first !== 1 && Number.isSafeInteger(first) ? `<ol start="${first}">` : `<${tag({ ordered })}>`;
       }
       html += `<li>${inline(content)}`;
     }
@@ -71,20 +76,25 @@ export function markdown(text, base = '') {
   const parts = text.split(/^```[^\n]*\n?/m);
   parts.forEach((part, i) => {
     if (i % 2) { out.push(`<pre><code>${escape(part.replace(/\n$/, ''))}</code></pre>`); return; }
-    for (const block of part.split(/\n\s*\n/)) {
-      const lines = block.split('\n').map(l => l.replace(/\r$/, '')).filter(l => l.trim());
-      for (let i = 0; i < lines.length;) {
-        const head = lines[i].match(heading);
-        if (head) { out.push(`<h4>${inline(head[2])}</h4>`); i++; continue; }
-        const run = [];
-        const plain = l => !heading.test(l) && !item.test(l);
-        if (item.test(lines[i])) {
-          while (i < lines.length && item.test(lines[i])) run.push(lines[i++]);
-          out.push(list(run));
-        } else {
-          while (i < lines.length && plain(lines[i])) run.push(lines[i++]);
-          out.push(`<p>${run.map(inline).join('<br>')}</p>`);
-        }
+    const lines = part.split('\n').map(l => l.replace(/\r$/, ''));
+    const quoted = l => depth < maxQuotes && quote.test(l);
+    const plain = l => !heading.test(l) && !item.test(l) && !quoted(l);
+    // The next non-blank line at or after `from`, or lines.length.
+    const skip = from => { while (from < lines.length && !lines[from].trim()) from++; return from; };
+    for (let i = skip(0); i < lines.length; i = skip(i)) {
+      const head = lines[i].match(heading);
+      if (head) { out.push(`<h4>${inline(head[2])}</h4>`); i++; continue; }
+      const run = [];
+      if (quoted(lines[i])) {
+        while (i < lines.length && quoted(lines[i])) run.push(lines[i++].replace(quote, ''));
+        out.push(`<blockquote>${markdown(run.join('\n'), base, depth + 1)}</blockquote>`);
+      } else if (item.test(lines[i])) {
+        // Blank lines inside a list don't end it: the next item continues it.
+        while (i < lines.length && item.test(lines[skip(i)] ?? '')) { i = skip(i); run.push(lines[i++]); }
+        out.push(list(run));
+      } else {
+        while (i < lines.length && lines[i].trim() && plain(lines[i])) run.push(lines[i++]);
+        out.push(`<p>${run.map(inline).join('<br>')}</p>`);
       }
     }
   });
@@ -123,6 +133,35 @@ export function wrap(root, id, text, before, after) {
   return text.slice(0, start) + before + text.slice(start, end) + after + text.slice(end);
 }
 
+// Turns the markdown editor `id`'s selected lines into a block of `kind`
+// ("heading", "list", "numbered", "quote" or "code"); `root` is the board's
+// shadow root. The selection widens to whole lines; without one, the cursor's
+// line is used. Each non-blank line gets the marker (numbered 1, 2, 3...), a
+// code block is fenced on lines of its own, and blank lines set the block off
+// from the text around it.
+export function block(root, id, text, kind) {
+  const el = root?.getElementById?.(id);
+  let start = el?.selectionStart ?? text.length, end = el?.selectionEnd ?? text.length;
+  // A selection ending at the start of a line leaves that line out.
+  if (end > start && text[end - 1] === '\n') end--;
+  start = text.lastIndexOf('\n', start - 1) + 1;
+  end = text.indexOf('\n', end) < 0 ? text.length : text.indexOf('\n', end);
+  const lines = text.slice(start, end).split('\n');
+  const empty = lines.every(l => !l.trim());
+  let n = 0;
+  const marked = kind === 'code' ? ['```', ...(empty ? [''] : lines), '```']
+    : empty ? [{ heading: '#### ', list: '- ', numbered: '1. ', quote: '> ' }[kind]]
+    : lines.map(l => {
+      if (kind === 'quote') return l.trim() ? '> ' + l : '>';
+      if (!l.trim()) return '';
+      return { heading: '#### ', list: '- ', numbered: `${++n}. ` }[kind] + l.trim();
+    });
+  let before = text.slice(0, start), after = text.slice(end);
+  if (before.trim() && !before.endsWith('\n\n')) before += '\n';
+  if (after.trim() && !after.startsWith('\n\n')) after = '\n' + after;
+  return before + marked.join('\n') + after;
+}
+
 // Images pasted, dropped or picked into a markdown editor are uploaded to its
 // task; `insert` gets the editor's id and each image's markdown.
 const imageRoots = new WeakSet();
@@ -155,6 +194,16 @@ export function images(target, insert, fail) {
     take(e, el.files, el.dataset.task, el.dataset.for, el.dataset.base);
     el.value = '';
   });
+}
+
+// Brings the open task's details into view and puts focus on its selected tab,
+// for a notice's button; `root` is the board's shadow root.
+export function reveal_task(root) {
+  const detail = root?.querySelector?.('.detail');
+  if (!detail) return;
+  const calm = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+  detail.scrollIntoView?.({ block: 'start', behavior: calm ? 'auto' : 'smooth' });
+  detail.querySelector('[role=tab][aria-selected=true]')?.focus?.({ preventScroll: true });
 }
 
 const dragRoots = new WeakSet();

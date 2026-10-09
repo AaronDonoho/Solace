@@ -135,7 +135,55 @@ test('markdown applies headings and lists mixed with other lines, nests lists, a
   expect(markdown('- a\n  - b')).toBe('<ul><li>a<ul><li>b</li></ul></li></ul>');
   expect(markdown('**a * b**')).toBe('<p><strong>a * b</strong></p>');
   expect(markdown('`**x**`')).toBe('<p><code>**x**</code></p>');
-  expect(markdown('1. one\nmixed\n2. two')).toBe('<ol><li>one</li></ol><p>mixed</p><ol><li>two</li></ol>');
+  expect(markdown('1. one\nmixed\n2. two')).toBe('<ol><li>one</li></ol><p>mixed</p><ol start="2"><li>two</li></ol>');
+});
+
+test('markdown renders blockquotes, including blocks inside them', async () => {
+  const { markdown } = await import('../src/api.mjs');
+  expect(markdown('> a\n> **b**')).toBe('<blockquote><p>a<br><strong>b</strong></p></blockquote>');
+  expect(markdown('> a\n>\n> b')).toBe('<blockquote><p>a</p><p>b</p></blockquote>');
+  expect(markdown('> a\n> > b')).toBe('<blockquote><p>a</p><blockquote><p>b</p></blockquote></blockquote>');
+  expect(markdown('> - x\n> - y')).toBe('<blockquote><ul><li>x</li><li>y</li></ul></blockquote>');
+  expect(markdown('> ```\n> <b>\n> ```')).toBe('<blockquote><pre><code>&lt;b&gt;</code></pre></blockquote>');
+  expect(markdown('before\n> quoted\nafter')).toBe('<p>before</p><blockquote><p>quoted</p></blockquote><p>after</p>');
+  expect(markdown('> <script>')).toBe('<blockquote><p>&lt;script&gt;</p></blockquote>');
+});
+
+test('markdown nests quotes at most 100 deep; a deeper > stays text', async () => {
+  const { markdown } = await import('../src/api.mjs');
+  const open = '<blockquote>'.repeat(100), close = '</blockquote>'.repeat(100);
+  expect(markdown('>'.repeat(100) + ' x')).toBe(`${open}<p>x</p>${close}`);
+  expect(markdown('>'.repeat(101) + ' x')).toBe(`${open}<p>&gt; x</p>${close}`);
+  // Far deeper input renders without exhausting the stack.
+  expect(markdown('>'.repeat(100000) + ' x')).toContain('<p>&gt;&gt;');
+});
+
+test('block turns whole selected lines into a markdown block', async () => {
+  const { block } = await import('../src/api.mjs');
+  const at = (selectionStart, selectionEnd = selectionStart) => ({ getElementById: () => ({ selectionStart, selectionEnd }) });
+  const text = 'intro\none\n\ntwo\noutro';
+  // From the middle of "one" to the middle of "two": both lines, set off by blank lines.
+  expect(block(at(7, 13), 'e', text, 'numbered')).toBe('intro\n\n1. one\n\n2. two\n\noutro');
+  expect(block(at(7, 13), 'e', text, 'list')).toBe('intro\n\n- one\n\n- two\n\noutro');
+  expect(block(at(7, 13), 'e', text, 'quote')).toBe('intro\n\n> one\n>\n> two\n\noutro');
+  expect(block(at(7, 13), 'e', text, 'heading')).toBe('intro\n\n#### one\n\n#### two\n\noutro');
+  expect(block(at(7, 13), 'e', text, 'code')).toBe('intro\n\n```\none\n\ntwo\n```\n\noutro');
+  // A selection ending at a line's start leaves that line out.
+  expect(block(at(0, 2), 'e', 'a\nb', 'list')).toBe('- a\n\nb');
+  // Without a selection, the cursor's line; on an empty line, a bare marker.
+  expect(block(at(1), 'e', 'ab', 'quote')).toBe('> ab');
+  expect(block(null, 'e', 'Hello\n', 'numbered')).toBe('Hello\n\n1. ');
+  expect(block(null, 'e', '', 'code')).toBe('```\n\n```');
+});
+
+test('markdown keeps one numbered list across blank lines and starts it at its first number', async () => {
+  const { markdown } = await import('../src/api.mjs');
+  expect(markdown('1. a\n1. b\n1. c')).toBe('<ol><li>a</li><li>b</li><li>c</li></ol>');
+  expect(markdown('1. a\n\n1. b\n\n\n1. c')).toBe('<ol><li>a</li><li>b</li><li>c</li></ol>');
+  expect(markdown('3. a\n1. b\n7. c')).toBe('<ol start="3"><li>a</li><li>b</li><li>c</li></ol>');
+  expect(markdown('- a\n\n- b')).toBe('<ul><li>a</li><li>b</li></ul>');
+  expect(markdown('1. a\n\ntext\n\n1. b')).toBe('<ol><li>a</li></ol><p>text</p><ol><li>b</li></ol>');
+  expect(markdown('1. a\n   1. x\n   1. y')).toBe('<ol><li>a<ol><li>x</li><li>y</li></ol></li></ol>');
 });
 
 test('draft storage survives missing or throwing storage', async () => {
