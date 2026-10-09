@@ -131,3 +131,31 @@ pub fn a_modified_click_on_a_menu_link_keeps_the_browser_test() {
     )
     == False
 }
+
+pub fn ctrl_f_opens_find_test() {
+  assert frontend.find_opens(ctrl: True, meta: False, alt: False, key: "f")
+  assert frontend.find_opens(ctrl: False, meta: True, alt: False, key: "f")
+  assert frontend.find_opens(ctrl: True, meta: False, alt: False, key: "F")
+  assert frontend.find_opens(ctrl: False, meta: False, alt: False, key: "f")
+    == False
+  assert frontend.find_opens(ctrl: True, meta: False, alt: True, key: "f")
+    == False
+  assert frontend.find_opens(ctrl: True, meta: False, alt: False, key: "g")
+    == False
+}
+
+pub fn find_steps_wrap_around_test() {
+  assert frontend.next_match(index: 0, count: 3, back: False) == 1
+  assert frontend.next_match(index: 2, count: 3, back: False) == 0
+  assert frontend.next_match(index: 0, count: 3, back: True) == 2
+  assert frontend.next_match(index: 2, count: 3, back: True) == 1
+  assert frontend.next_match(index: -1, count: 3, back: False) == 0
+  assert frontend.next_match(index: 0, count: 0, back: False) == -1
+  assert frontend.next_match(index: 0, count: 0, back: True) == -1
+}
+
+pub fn find_count_text_test() {
+  assert frontend.count_text(query: "ab", index: 2, count: 12) == "3 of 12"
+  assert frontend.count_text(query: "ab", index: -1, count: 0) == "No matches"
+  assert frontend.count_text(query: "", index: -1, count: 0) == ""
+}

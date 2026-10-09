@@ -1,4 +1,6 @@
 import contracts
+import gleam/int
+import gleam/string
 import gleam/uri.{type Uri}
 import lustre
 import lustre/attribute
@@ -107,4 +109,38 @@ pub fn keeps_new_tab(
   on_menu_link on_menu_link: Bool,
 ) -> Bool {
   { ctrl || meta || shift || alt } && on_menu_link
+}
+
+/// Whether a key press opens the find bar: Ctrl+F or Cmd+F, from anywhere, including a text box.
+/// The key is compared in lower case, so Shift or Caps Lock doesn't stop it.
+pub fn find_opens(
+  ctrl ctrl: Bool,
+  meta meta: Bool,
+  alt alt: Bool,
+  key key: String,
+) -> Bool {
+  { ctrl || meta } && !alt && string.lowercase(key) == "f"
+}
+
+/// The match to show after Enter (forward) or Shift+Enter (back), wrapping around; -1 when there are none.
+pub fn next_match(index index: Int, count count: Int, back back: Bool) -> Int {
+  case count <= 0, back {
+    True, _ -> -1
+    False, False -> { index + 1 } % count
+    False, True if index <= 0 -> count - 1
+    False, True -> { index - 1 } % count
+  }
+}
+
+/// The find bar's count: "3 of 12", "No matches", or nothing while the query is empty.
+pub fn count_text(
+  query query: String,
+  index index: Int,
+  count count: Int,
+) -> String {
+  case query, count {
+    "", _ -> ""
+    _, 0 -> "No matches"
+    _, _ -> int.to_string(index + 1) <> " of " <> int.to_string(count)
+  }
 }

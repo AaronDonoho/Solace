@@ -58,3 +58,11 @@ Links inside app shadow roots use full page navigation.
 
 After server integration, check menu navigation and back/forward, direct
 loading of each page, and component cleanup when switching apps in a browser.
+
+Find in page (D-86) needs a DOM, so check it by hand, in a browser and in the
+app (`cargo tauri dev` and the AppImage): Ctrl+F opens the bar, also from a
+textarea; typing shows "n of m" and a card title is marked; marks follow lane
+and page scrolling and are clipped to the lane; cards still click and drag,
+and stay unselectable; Enter/Shift+Enter step and scroll; Esc closes and
+clears; a query with no matches clears the marks; a live board update and a
+switch between pages re-run the search.
