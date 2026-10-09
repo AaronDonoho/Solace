@@ -353,3 +353,188 @@ test('diagram helpers use the view shadow root and ignore typing in an inner fie
     globalThis.document = oldDocument; globalThis.requestAnimationFrame = oldFrame; globalThis.CSS = oldCSS;
   }
 });
+
+function view_app(graph) {
+  const old = [globalThis.location, globalThis.fetch, globalThis.EventSource, globalThis.innerWidth, globalThis.innerHeight];
+  globalThis.innerWidth = 700; globalThis.innerHeight = 900;
+  globalThis.location = { pathname: '/view', search: '?task=t2' };
+  const sent = [];
+  globalThis.fetch = async (path, opts) => {
+    sent.push([opts?.method ?? 'GET', path.split('?')[0]]);
+    return new Response(JSON.stringify(path.startsWith('/graph') ? graph : {}));
+  };
+  globalThis.EventSource = class { constructor(path) { sent.push(['GET', path]); } addEventListener() {} };
+  let model;
+  const dispatch = msg => { let effect; [model, effect] = view.update(model, msg); perform(effect, dispatch, () => {}, () => {}, () => {}, () => {}, () => {}, () => {}); };
+  const restore = () => { [globalThis.location, globalThis.fetch, globalThis.EventSource, globalThis.innerWidth, globalThis.innerHeight] = old; };
+  const start = async () => {
+    let effect; [model, effect] = view.init();
+    perform(effect, dispatch, () => {}, () => {}, () => {}, () => {}, () => {}, () => {});
+    dispatch(new view.Connected());
+    for (let i = 0; i < 50 && !Array.from(model.graph.nodes).length; i++) await Bun.sleep(5);
+  };
+  return { dispatch, sent, restore, start, get model() { return model; } };
+}
+
+const two_nodes = {
+  nodes: [
+    { id: 'fn:a.one', kind: 'entry', name: 'one', module: 'a', summary: 'First', signature: 'one() -> Nil', known: 'derived', tests: 0 },
+    { id: 'fn:a.two', kind: 'entry', name: 'two', module: 'a', summary: 'Second', signature: 'two() -> Nil', known: 'derived', tests: 0 },
+  ],
+  edges: [],
+  review: { summary: 'nothing to see', entries: [], signatures: [], tests: [], files: [], effects: { added: [], removed: [] } },
+  project: { name: 'p', fingerprint: '0123456789abcdef0123456789abcdef' },
+};
+
+test('the review panel marks a test that failed to compile, and asks for tests once', async () => {
+  const graph = { ...two_nodes, review: { summary: '1 effect added, tests not run yet', entries: [], signatures: [],
+    tests: [{ id: 'fn:a.one', name: 'main_test', result: 'failed to compile', message: 'error: cannot compile', checks: [] }],
+    files: [], effects: { added: [], removed: [] } } };
+  const app = view_app(graph);
+  try {
+    await app.start();
+    expect(app.model.tests_requested).toBe(true);
+    expect(app.sent.filter(([m, p]) => m === 'POST' && p === '/tests')).toHaveLength(1);
+    const html = to_string(view.view(app.model));
+    expect(html).toContain('main_test · wrong · failed to compile');
+    expect(html).toContain('error: cannot compile');
+    // A second load of the same graph doesn't ask again: the request stays made.
+    app.dispatch(new view.Loaded(JSON.stringify(graph)));
+    await Bun.sleep(20);
+    expect(app.sent.filter(([m, p]) => m === 'POST' && p === '/tests')).toHaveLength(1);
+  } finally { app.restore(); }
+});
+
+test('reveal pans the least distance, counting the panel that covers the right', async () => {
+  const app = view_app(two_nodes);
+  try {
+    await app.start();
+    // The sheet fits the two cards at 0.8, showing 302.5 units of the 242 the panel leaves.
+    expect(app.model.zoom).toBeCloseTo(0.8, 6);
+    expect(app.model.pan_x).toBeCloseTo(-16, 6);
+    const w = (652 - 410) / app.model.zoom;
+    // The left card is already in view: revealing it moves nothing.
+    app.dispatch(new view.Reveal('fn:a.one'));
+    expect(app.model.pan_x).toBeCloseTo(-16, 6);
+    // The right card hangs past the visible edge, so the sheet pans to its right edge.
+    app.dispatch(new view.Reveal('fn:a.two'));
+    expect(app.model.pan_x).toBeCloseTo(252 + 220 + 16 - w, 6);
+    const moved = app.model.pan_x;
+    // Revealing it again, now in view, moves nothing.
+    app.dispatch(new view.Reveal('fn:a.two'));
+    expect(app.model.pan_x).toBeCloseTo(moved, 6);
+    // With the pane closed the whole width is visible, so it stays put.
+    app.dispatch(new view.Close());
+    app.dispatch(new view.Reveal('fn:a.two'));
+    expect(app.model.pan_x).toBeCloseTo(moved, 6);
+  } finally { app.restore(); }
+});
+
+test('zoom keeps the middle of the drawing fixed, and clamps at both ends', async () => {
+  const app = view_app(two_nodes);
+  try {
+    await app.start();
+    // Zooming in by 1.2 holds the point at the middle of the sheet fixed.
+    app.dispatch(new view.Zoom(1.2));
+    expect(app.model.zoom).toBeCloseTo(0.96, 6);
+    expect(app.model.pan_x).toBeCloseTo(-16 + 326 / 0.8 - 326 / 0.96, 6);
+    expect(app.model.pan_y).toBeCloseTo(-16 + 270 / 0.8 - 270 / 0.96, 6);
+    // Past the top of the range the zoom stops, and the pan follows that zoom.
+    app.dispatch(new view.Zoom(10));
+    expect(app.model.zoom).toBeCloseTo(2.5, 6);
+    expect(app.model.pan_x).toBeCloseTo(app.model.pan_x, 6);
+    const at = app.model.pan_x;
+    app.dispatch(new view.Zoom(10));
+    expect(app.model.zoom).toBeCloseTo(2.5, 6);
+    expect(app.model.pan_x).toBe(at);
+    // Past the bottom it stops too.
+    app.dispatch(new view.Zoom(0.001));
+    expect(app.model.zoom).toBeCloseTo(0.02, 6);
+  } finally { app.restore(); }
+});
+
+test('fit returns the sheet to the whole drawing after a pan', async () => {
+  const app = view_app(two_nodes);
+  try {
+    await app.start();
+    const fitted = [app.model.zoom, app.model.pan_x, app.model.pan_y];
+    app.dispatch(new view.PanStart(0, 0));
+    app.dispatch(new view.PanMove(100, 50));
+    expect(app.model.pan_x).toBeCloseTo(-16 - 125, 6);
+    expect(app.model.pan_y).toBeCloseTo(-16 - 62.5, 6);
+    app.dispatch(new view.PanEnd());
+    app.dispatch(new view.Fit());
+    expect(app.model.zoom).toBeCloseTo(fitted[0], 6);
+    expect(app.model.pan_x).toBeCloseTo(fitted[1], 6);
+    expect(app.model.pan_y).toBeCloseTo(fitted[2], 6);
+  } finally { app.restore(); }
+});
+
+test('the search box lists the first eight matches, in the order the drawing holds', async () => {
+  const names = ['main', 'work', ...Array.from({ length: 9 }, (_, i) => 'match' + (i + 1))];
+  const graph = { ...two_nodes,
+    nodes: names.map((name, i) => ({ id: 'fn:a.' + name, kind: i < 2 ? 'entry' : 'logic', name, module: 'a',
+      summary: name === 'main' ? 'Starts it' : 'A step', signature: name + '() -> Nil', known: 'derived', tests: 0 })) };
+  const app = view_app(graph);
+  try {
+    await app.start();
+    // The term is trimmed and lowercased; the ninth match is past the cap.
+    app.dispatch(new view.Search('  match '));
+    const html = to_string(view.view(app.model));
+    expect(html).toContain('match1');
+    expect(html).toContain('match8');
+    expect(html).not.toContain('match9');
+    app.dispatch(new view.Search('MAIN'));
+    expect(to_string(view.view(app.model))).toContain('>main<');
+    // An empty term lists nothing.
+    app.dispatch(new view.Search(''));
+    expect(to_string(view.view(app.model))).not.toContain('match1');
+  } finally { app.restore(); }
+});
+
+test('the panel grip drags and steps the panel width, keeping it on screen', async () => {
+  const oldDocument = globalThis.document, oldWidth = globalThis.innerWidth;
+  const oldStorage = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const style = new Map(), docEvents = new Map();
+  globalThis.document = {
+    documentElement: { style: { setProperty: (k, v) => style.set(k, v), getPropertyValue: k => style.get(k) ?? '' } },
+    addEventListener: (name, fn) => docEvents.set(name, fn),
+    removeEventListener: name => docEvents.delete(name),
+    body: { classList: { add() {}, remove() {} } },
+  };
+  globalThis.innerWidth = 1000;
+  const stored = new Map([['solace-view-panel-width', '360']]);
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: k => stored.get(k) ?? null, setItem: (k, v) => stored.set(k, v), removeItem: k => stored.delete(k) } });
+  const listeners = new Map();
+  const shadowRoot = { addEventListener: (name, fn) => listeners.set(name, fn), host: { classList: { add() {}, remove() {} } } };
+  const grip = { closest: selector => selector.includes('view-panel-grip') ? grip : null };
+  try {
+    const layout = await import('../src/layout.mjs');
+    layout.resizer(shadowRoot);
+    // The width saved in the browser is restored when the view opens.
+    expect(style.get('--panel-width')).toBe('360px');
+    expect(layout.panel_width()).toBe(360);
+    listeners.get('pointerdown')({ preventDefault() {}, composedPath: () => [grip] });
+    // A drag to x=700 asks for 300, under the minimum, so the panel stays 320 wide.
+    docEvents.get('pointermove')({ clientX: 700 });
+    expect(layout.panel_width()).toBe(320);
+    // A drag to x=500 fits the screen, so the panel takes that width.
+    docEvents.get('pointermove')({ clientX: 500 });
+    expect(layout.panel_width()).toBe(500);
+    // The keyboard steps by 32 from the width it has.
+    listeners.get('keydown')({ key: 'ArrowLeft', preventDefault() {}, composedPath: () => [grip] });
+    expect(layout.panel_width()).toBe(532);
+    listeners.get('keydown')({ key: 'ArrowRight', preventDefault() {}, composedPath: () => [grip] });
+    expect(layout.panel_width()).toBe(500);
+    // A key that isn't an arrow leaves the width alone.
+    listeners.get('keydown')({ key: 'Enter', preventDefault() {}, composedPath: () => [grip] });
+    expect(layout.panel_width()).toBe(500);
+    // Releasing the pointer stops tracking the moves.
+    docEvents.get('pointerup')({});
+    expect(docEvents.has('pointermove')).toBe(false);
+  } finally {
+    globalThis.document = oldDocument; globalThis.innerWidth = oldWidth;
+    oldStorage ? Object.defineProperty(globalThis, 'localStorage', oldStorage) : delete globalThis.localStorage;
+  }
+});

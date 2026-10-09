@@ -406,6 +406,75 @@ mod tests {
         assert!(view(&s, &stale).is_err());
     }
 
+    /// Every way a patch is refused says why (E0108) and changes nothing.
+    #[test]
+    fn patch_refusals_name_the_problem() {
+        let s = board_project(&[("src/app.gleam", "import gleam/int\n\npub fn main() {\n  let x = 1\n  x\n}\n\npub fn other() {\n  2\n}\n")]);
+        let original = board::snapshot(&s).unwrap();
+        let cases: [(&str, &str); 14] = [
+            ("*** Begin Patch\n*** Delete: app.main\n*** End Patch\n", "a patch can't delete"),
+            ("*** Begin Patch\n*** Move: app.main\n*** End Patch\n", "a patch can't rename"),
+            ("+pub fn x() { 1 }\n", "a patch starts with `*** Begin Patch`"),
+            ("*** Begin Patch\n*** End Patch\n", "the patch has no"),
+            ("*** Begin Patch\n*** Add: app.x\nfn x() { 1 }\n*** End Patch\n", "every line starts with `+`"),
+            ("*** Begin Patch\n*** Add: app.x\n+// only a comment\n*** End Patch\n", "defines no function"),
+            ("*** Begin Patch\n*** Update: app.main\nx\n*** End Patch\n", "each line starts with"),
+            ("*** Begin Patch\n*** Update: app.main\n+  let y = 2\n*** End Patch\n", "needs `@@ <the line before them>`"),
+            ("*** Begin Patch\n*** Update: app.main\n@@ nosuchline\n+  let y = 2\n*** End Patch\n", "no line starts with `@@ nosuchline`"),
+            ("*** Begin Patch\n*** Update: app.main\n-  let z = 9\n+  let z = 8\n*** End Patch\n", "these lines weren't found: `let z = 9`"),
+            ("*** Begin Patch\n*** Update: app.main\n-  let z = 9\n-  let w = 9\n*** End Patch\n", "(and 1 more)"),
+            ("*** Begin Patch\n*** Update: app.main\n-  let x = 1\n+  let x = 1\n*** End Patch\n", "the patch changes nothing"),
+            ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-  let x = 1\n-  x\n-}\n*** End Patch\n", "leaves nothing of app.main"),
+            ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n+pub fn primary() {\n*** End Patch\n", "renames app.main"),
+        ];
+        for (patch, why) in cases {
+            let e = patch_blocks(&s, patch).unwrap_err().0;
+            assert!(e.contains("E0108") && e.contains(why), "{why}: {e}");
+        }
+        // Units are joined by a NUL line; only a hunk naming that line can remove it.
+        let spans = "*** Begin Patch\n*** Update: app\n-}\n-\u{0}\n-pub fn other() {\n+  y\n*** End Patch\n";
+        assert!(patch_blocks(&s, spans).unwrap_err().0.contains("a hunk spans two symbols"), "spans");
+        let imports = "*** Begin Patch\n*** Update: app\n-import gleam/int\n+import gleam/list\n*** End Patch\n";
+        assert!(patch_blocks(&s, imports).unwrap_err().0.contains("changes only app's imports"), "imports");
+        assert_eq!(board::snapshot(&s).unwrap(), original);
+    }
+
+    /// Hunks match through trailing whitespace and indentation, and a unified
+    /// diff's `@@ -3,4 +3,5 @@` gives no context line.
+    #[test]
+    fn patch_matching_tolerates_whitespace_and_unified_headers() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() {\n  let x = 1\n  x\n}\n")]);
+        let trailing = "*** Begin Patch\n*** Update: app.main\n-  let x = 1   \n+  let x = 2\n*** End Patch\n";
+        let blocks = patch_blocks(&s, trailing).unwrap();
+        assert!(blocks.starts_with("// ── app.main ──\n") && blocks.contains("let x = 2") && !blocks.contains("let x = 1"), "{blocks}");
+        let indented = "*** Begin Patch\n*** Update: app.main\n-let x = 1\n+  let x = 3\n*** End Patch\n";
+        assert!(patch_blocks(&s, indented).unwrap().contains("let x = 3"));
+        let unified = "*** Begin Patch\n*** Update: app.main\n@@ -1,4 +1,4 @@\n-  let x = 1\n+  let x = 4\n*** End Patch\n";
+        assert!(patch_blocks(&s, unified).unwrap().contains("let x = 4"));
+        // `*** Add` of a name that is a symbol of a module goes into that module; any other name is a new module.
+        let add = "*** Begin Patch\n*** Add: app.extra\n+pub fn extra() { 1 }\n*** End Patch\n";
+        assert!(patch_blocks(&s, add).unwrap().starts_with("// ── app.extra ──\n"));
+        let new_module = "*** Begin Patch\n*** Add: fresh\n+pub fn extra() { 1 }\n*** End Patch\n";
+        assert!(patch_blocks(&s, new_module).unwrap().starts_with("// ── fresh.extra ──\n"));
+    }
+
+    /// A submit that fits no shape gets the usage line; a stored draft with an
+    /// unknown command, `E0106`; a replace with no `old`, `E0104`.
+    #[test]
+    fn submit_refuses_shapes_it_does_not_know() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let e = submit(&s, &["submit", "a", "b", "c"], &mut || Ok(String::new()), None).unwrap_err().0;
+        assert!(e.contains("submit [name [--replace"), "{e}");
+        for old in [None, Some("")] {
+            let e = submit(&s, &["submit", "app.main", "--replace"], &mut || Ok("2".into()), old).unwrap_err().0;
+            assert!(e.contains("E0104"), "{old:?}: {e}");
+        }
+        s.db.execute("INSERT INTO drafts(id,owner,args,text,base) VALUES ('d1',?,?,?,?)", params![owner(), json!(["submit", "x", "y", "z"]).to_string(), "text", ""])
+            .unwrap();
+        let e = submit(&s, &["submit", "--draft", "d1"], &mut || Ok(String::new()), None).unwrap_err().0;
+        assert!(e.contains("E0106") || e.contains("E0107"), "{e}");
+    }
+
     /// A submit names its warnings in one line each; `check --warnings` shows them in full.
     #[test]
     fn warnings_are_summarized_on_submit() {

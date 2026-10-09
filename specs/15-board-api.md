@@ -15,7 +15,7 @@ The workflow (columns, and the actions allowed in each) comes from configuration
 | `links` | Contracts and symbols the task refers to, as `{id, name, url}`; `url` opens it in the Solace UX |
 | `column`, `rank` | Where the task is, and its order within the column (lower first) |
 | `paused_from` | Set while paused: the column the task returns to |
-| `attention` | `{reason, time}` while the task needs a human, otherwise null (§6) |
+| `attention` | `{reason, time, hold?}` while the task needs a human, otherwise null; `hold` is true while its agent is held on a question or stopped (§6, D-82) |
 | `stamps` | Stamps the task holds, such as `approved`, each with who gave it and when (§2) |
 | `model`, `effort` | The agent, and the effort if one was chosen, of the last action that started a work run |
 | `finished` | `{kind, outcome, time}` after a run ends successfully, until the next action or new run (D-37) |
@@ -38,7 +38,7 @@ The `[board]` section of `solace.toml` (humans only, Spec 14 §2) defines the wo
   3. `to`: move to a column. Refused (`E7006`) if this is the current column's `next` and the task lacks a stamp it `requires`;
   4. `run`: `investigate` and `work` hand the task back to its waiting agent of that kind if there is one, and otherwise start an investigate or work run. `new_work` ends any run and starts a fresh work agent. `review` starts a review run (§6). With `model = true`, the request must name a model, unless it continues a waiting agent; any request may name one.
 - Tasks have no type (D-25): what an agent may do comes from the kind of run the column's actions start. Only work runs change the project.
-- **Events**, the moves Solace makes by itself: `asked` (an agent asked a question), `finished` (an agent reported it was done) and `failed` (a run crashed, timed out, or exited without finishing). Each names a target column. No action can make these moves.
+- **Events**, the moves Solace makes by itself: `asked` (a work agent asked a question or proposed a settings change), `finished` (an agent reported it was done) and `failed` (a work run crashed, timed out, or exited without finishing). `finished` names a target column. `asked` and `failed` may name one; without it the task stays in its column and is flagged for attention (D-82). No action can make these moves.
 
 Five actions are built in and allowed in every column that isn't final:
 - `pause` records `paused_from`. The task's agent is held at its next Solace call until `resume`, so it keeps its context. The only actions that end an agent are those with `new_work`, and `revert`.
@@ -53,7 +53,7 @@ Solace checks the configuration at start and on every change. An invalid workflo
 
 ```toml
 [board]
-events = { asked = "blocked", finished = "needs_review", failed = "blocked" }
+events = { finished = "needs_review" }   # asked and failed leave the task where it is, flagged for attention
 
 [[board.columns]]
 id = "backlog"
@@ -65,10 +65,6 @@ actions = ["investigate", "assign", "complete", "to_backlog", "cancel"]
 
 [[board.columns]]
 id = "assigned"
-actions = ["new_agent", "cancel"]
-
-[[board.columns]]
-id = "blocked"
 actions = ["unblock", "new_agent", "review", "cancel"]
 
 [[board.columns]]
@@ -204,8 +200,8 @@ When a task reaches a final column, the records of the state before it are dropp
 - **Models** come from the Solace system configuration, not the project: built-in presets for the current major Codex and Claude models (`src/default-models.toml`), plus entries in `~/.config/solace/config.toml` (or `$SOLACE_CONFIG`). An entry with a preset's `id` replaces it, and `presets = false` hides the presets. Each has an `id`, a `label`, an `agent` (`codex` or `claude`), and a `model`, with an optional `effort`, the default. An action may choose another of the model's `efforts` (`E7001` otherwise); Codex gets it as `model_reasoning_effort`, Claude Code as `--effort`. An action that doesn't name a model uses the task's `model` and `effort`.
 - **Endpoints.** A model may name an `endpoint = {kind, base_url, key_env?}`. `kind = "openai"` goes with `agent = "codex"` and is passed to Codex as a custom provider using the Responses API. `kind = "anthropic"` goes with `agent = "claude"` and is passed to Claude Code as `ANTHROPIC_BASE_URL`, plus `ANTHROPIC_AUTH_TOKEN` taken from `key_env`. If the endpoint is plain `http` and its `GET /v1/models` reports the model's window (`meta.n_ctx`, as llama.cpp and Strata do; a server listing one model is matched whatever the configured name), Claude Code also gets it as `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, so it compacts before the server refuses the prompt (D-63). A value already set in Solace's environment wins. Solace stores no credentials: agents use their own sign-in, and endpoint keys are read from the named environment variable when the agent starts. A mismatched kind is `E6020`.
 - **Availability.** `/models` marks a model unavailable, with the reason, when its agent program isn't on `PATH`, when the agent isn't signed in, or when the endpoint's `key_env` isn't set. Only local things are checked, so the check costs nothing. Starting a run on an unavailable model is refused (`E7011`), and the task stays where it is.
-- **Attention.** Solace sets `attention` when a task needs a human: an agent asked a question, a run failed (the note includes the agent's last message, or else the end of its output), or the server restarted while an agent was working. It is cleared by the next successful action request on the task.
-- A **work run** starts the agent with Spec 14 §5's configuration. Its prompt is plain text, not the task's JSON: what the run is for and how to start, ask and finish, then the task's title, body, links, notes and questions with their answers. Images in the briefed notes are attached to the prompt (Codex `-i`, Claude Code a stream-json image block) and named `[image N]` in the text; a custom runner gets `[image N: path]`. The run's kind decides the role line, and a read-only run's brief says which commands are refused. On top of Spec 14, the agent's Solace tool gets:
+- **Attention.** Solace sets `attention` when a task needs a human: an agent asked a question, a run failed (the note includes the agent's last message, or else the end of its output), or the server restarted while an agent was working. It is cleared by the next successful action request on the task, except attention with `hold: true` (D-82): an agent held on a question or settings proposal, or a work run that failed or was cut off by a restart. That stays until the run continues, is restarted (`new_work`, `revert`), is stopped, or the task reaches a final column. A task no longer moves to a `blocked` column; `blocked` is reserved for tasks that depend on other tasks. A task saved in `blocked` under a workflow without that column loads in `assigned` with held attention.
+- A **work run** starts the agent with Spec 14 §5's configuration. Its prompt is plain text, not the task's JSON: what the run is for and how to start, ask and finish, then the task's title, body, links, notes and questions with their answers. Images in the briefed notes are attached to the prompt (Codex `-i`, Claude Code a stream-json image block) and named `[image N]` in the text; a custom runner gets `[image N: path]`. The run's kind decides the role line, and a read-only run's brief says which commands are refused. A work run's role line has the agent run all tests of the projects the task covers before `task done`, fix those its changes broke, and report the rest (D-81). On top of Spec 14, the agent's Solace tool gets:
   - `task note <text>`: adds an agent note;
   - `write solace.toml` (D-38) validates the proposed text (`E6020` if invalid), then adds a settings question with options Approve and Reject and waits exactly like `task ask`. Only Approve writes the file;
   - `task ask` (`text`, 2–4 `options`): adds a question and fires `asked`. **The agent waits:** answering the last pending question automatically continues the same run through its allowed workflow action (`unblock` by default for work). The call returns the answers and any continuation `text`. Explicit `unblock` with `text` still works. The run keeps its context. `new_agent` instead ends it and starts a fresh one, which gets the notes and answers in its prompt;
@@ -238,7 +234,7 @@ Several projects on one server, several people, remote access and authentication
 - A2. No action moves a task to an event's target column except through that column's actions. `asked`, `finished` and `failed` move it only as configured.
 - A3. A custom workflow with an extra column and action works end to end. The invalid workflows in §2 each give `E6020`.
 - A4. `complete` from `needs_review` without `approved` is refused (`E7006`). After `approve`, `complete` moves the task to the `complete` column. `start_over` and `cancel` from `needs_review` are not gated, and `start_over` removes the stamp. The stamp records who gave it and when. A task approved and then moved back with `start_over` or `new_agent` no longer holds `approved`.
-- A5. With a fake agent: `task ask` blocks the task, and the question appears on it and in `/events`, while the agent's call stays open. `unblock` is refused until the question is answered or a `text` is given. After the last answer is submitted, the same agent process (same run id) receives the answer and continues without an extra `unblock` request. A paused run waits for `resume`. Custom continuation action names work, and repeated answers never launch a replacement run. `new_agent` instead ends it and starts a run with a new id whose prompt has the answer. `task done` moves the task to `needs_review`.
+- A5. With a fake agent: `task ask` flags the task (`attention.hold`, still in `assigned`), and the question appears on it and in `/events`, while the agent's call stays open. `unblock` is refused until the question is answered or a `text` is given. After the last answer is submitted, the same agent process (same run id) receives the answer and continues without an extra `unblock` request. A paused run waits for `resume`. Custom continuation action names work, and repeated answers never launch a replacement run. `new_agent` instead ends it and starts a run with a new id whose prompt has the answer. `task done` moves the task to `needs_review`.
 - A6. A fake agent's run edits two symbols, creates one, deletes one, writes a watched file and creates a new one. `cancel` restores the store and those files byte-for-byte to how they were before the task.
 - A7. Task B changes a symbol after task A did. Cancelling A is refused with `E7007`, naming the symbol and B, and nothing changes. After B is cancelled, cancelling A succeeds.
 - A7c. Task B adds a caller of a function task A added, without editing any of A's symbols. Cancelling A is refused with `E7008`, naming B's caller, and the store and files are unchanged.

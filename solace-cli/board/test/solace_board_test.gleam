@@ -62,7 +62,7 @@ pub fn attention_and_unavailable_models_test() {
     board.update(
       model,
       board.TaskLoaded(
-        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"blocked\",\"rank\":1,\"attention\":{\"reason\":\"task timeout\",\"time\":1}}",
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"attention\":{\"reason\":\"task timeout\",\"time\":1,\"hold\":true}}",
       ),
     )
   let rendered = board.view(model) |> element.to_string
@@ -190,7 +190,7 @@ pub fn settings_question_shows_diff_and_approve_test() {
     board.update(
       model,
       board.TaskLoaded(
-        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"blocked\",\"rank\":1,\"questions\":[{\"id\":\"q\",\"text\":\"Change solace.toml\",\"options\":[\"Approve\",\"Reject\"],\"settings\":{\"base\":\"x=1\",\"proposed\":\"x=1\\n[commands]\"}}]}",
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q\",\"text\":\"Change solace.toml\",\"options\":[\"Approve\",\"Reject\"],\"settings\":{\"base\":\"x=1\",\"proposed\":\"x=1\\n[commands]\"}}]}",
       ),
     )
   let #(model, _) = board.update(model, board.Tab("questions"))
@@ -897,4 +897,101 @@ pub fn an_action_waits_for_its_reply_test() {
   let assert Ok(t) = json.parse(text, board.task_decoder())
   board.acting_text(board.Task(..t, runs: []), "assign")
   |> should.equal("Sending assign…")
+}
+
+pub fn typed_fields_and_toggles_update_the_model_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) = board.update(model, board.Text("hello"))
+  let #(model, _) = board.update(model, board.Title("T2"))
+  let #(model, _) = board.update(model, board.Body("B2"))
+  let #(model, _) = board.update(model, board.Rank("3.5"))
+  #(model.text, model.title, model.body, model.rank)
+  |> should.equal(#("hello", "T2", "B2", "3.5"))
+  let #(model, _) = board.update(model, board.ProjectName("web"))
+  let #(model, _) = board.update(model, board.ProjectDir("apps/web"))
+  let #(model, _) = board.update(model, board.ProjectTarget("javascript"))
+  #(model.project_name, model.project_dir, model.project_target)
+  |> should.equal(#("web", "apps/web", "javascript"))
+  let open = model.projects_open
+  let #(model, _) = board.update(model, board.ToggleProjects)
+  model.projects_open |> should.equal(!open)
+  let #(model, _) = board.update(model, board.Tab("notes"))
+  model.tab |> should.equal("notes")
+  let #(model, _) = board.update(model, board.Failed("boom"))
+  model.error |> should.equal("boom")
+}
+
+pub fn previews_and_dismissed_notices_come_and_go_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) = board.update(model, board.Preview("body", True))
+  let #(model, _) = board.update(model, board.Preview("text", True))
+  model.previews |> should.equal(["text", "body"])
+  let #(model, _) = board.update(model, board.Preview("body", False))
+  model.previews |> should.equal(["text"])
+  let one = board.Notice("Reviewed A", "done")
+  let two = board.Notice("Reviewed B", "done")
+  let model = board.Model(..model, notices: [one, two])
+  let #(model, _) = board.update(model, board.Dismiss(one))
+  model.notices |> should.equal([two])
+  let #(model, _) = board.update(model, board.Dismiss(one))
+  model.notices |> should.equal([two])
+}
+
+pub fn editing_needs_a_selected_task_and_a_numeric_rank_test() {
+  let #(model, _) = board.init(Nil)
+  // With no task selected, these change nothing.
+  let #(same, _) = board.update(model, board.Edit(True))
+  same |> should.equal(model)
+  let #(same, _) = board.update(model, board.Save)
+  same |> should.equal(model)
+  let #(same, _) = board.update(model, board.AddNote)
+  same |> should.equal(model)
+  let #(same, _) = board.update(model, board.DeleteNote(0))
+  same |> should.equal(model)
+  let #(same, _) = board.update(model, board.Answer("q", "yes"))
+  same |> should.equal(model)
+  let #(same, _) = board.update(model, board.Action("assign"))
+  same |> should.equal(model)
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"B\",\"column\":\"triage\",\"rank\":1,\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[]}"
+  let #(model, _) = board.update(model, board.TaskLoaded(text))
+  // Editing starts from the task's own fields.
+  let #(model, _) = board.update(model, board.Title("changed"))
+  let #(model, _) = board.update(model, board.Edit(True))
+  #(model.editing, model.title, model.body, model.rank)
+  |> should.equal(#(True, "T", "B", "1.0"))
+  // A rank that is not a number is refused before anything is sent.
+  let #(model, _) = board.update(model, board.Rank("high"))
+  let #(model, _) = board.update(model, board.Save)
+  model.error |> should.equal("Rank must be a number")
+  // Adding a note shows the notes tab.
+  let #(model, _) = board.update(model, board.AddNote)
+  model.tab |> should.equal("notes")
+}
+
+pub fn removing_needs_the_second_step_and_the_exact_name_test() {
+  let #(model, _) = board.init(Nil)
+  // Nothing is being removed: every removal message is a no-op.
+  let #(same, _) = board.update(model, board.RemoveOnly)
+  same |> should.equal(model)
+  let #(same, _) = board.update(model, board.RemoveFiles)
+  same |> should.equal(model)
+  let #(same, _) = board.update(model, board.RemoveTyped("a"))
+  same |> should.equal(model)
+  let #(same, _) = board.update(model, board.RemoveDelete)
+  same |> should.equal(model)
+  // Typing before the second step is ignored, and Delete before it sends nothing.
+  let #(first, _) = board.update(model, board.RemoveProject("a"))
+  let #(same, _) = board.update(first, board.RemoveTyped("a"))
+  same |> should.equal(first)
+  let #(same, _) = board.update(first, board.RemoveDelete)
+  same |> should.equal(first)
+  // A wrong name keeps the dialog open.
+  let #(second, _) = board.update(first, board.RemoveFiles)
+  let #(wrong, _) = board.update(second, board.RemoveTyped("b"))
+  let #(same, _) = board.update(wrong, board.RemoveDelete)
+  same |> should.equal(wrong)
+  // Adding a directory that was not found does nothing.
+  let #(same, _) = board.update(model, board.AddProject("zzz"))
+  same |> should.equal(model)
 }

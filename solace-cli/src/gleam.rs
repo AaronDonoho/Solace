@@ -641,4 +641,93 @@ mod tests {
         let code = "pub fn f() {\n  use customer <- result.try(\n    customer.Customer(id: 1)\n    |> customer.validate,\n  )\n  customer.email\n}";
         assert_eq!(qualified(code), ["result.try", "customer.Customer", "customer.validate"]);
     }
+
+    /// `declaration` takes `opaque`, and wants a name: `type` and `fn` alone,
+    /// `const1`, and a word that is no declaration give nothing.
+    #[test]
+    fn declarations_take_opaque_and_refuse_an_empty_name() {
+        assert_eq!(declaration("pub opaque type T"), Some((Kind::Type, "T".to_string())));
+        assert_eq!(declaration("opaque fn x() { 1 }"), Some((Kind::Fn, "x".to_string())));
+        assert_eq!(declaration("const x = 1"), Some((Kind::Const, "x".to_string())));
+        for bad in ["type ", "fn ", "const ", "pub", "pub fn", "const1 = 1", "mytype", ""] {
+            assert_eq!(declaration(bad), None, "{bad}");
+        }
+    }
+
+    /// A body's `{` is the first one outside brackets; a declaration with no
+    /// body keeps its whole head.
+    #[test]
+    fn body_start_skips_braces_inside_brackets() {
+        assert_eq!(body_start("fn f(a: Int) { 1 }"), Some(13));
+        assert_eq!(body_start("fn f(a: #(Int, Int)) { 1 }"), Some(21));
+        assert_eq!(body_start("fn f(a: Int) -> Int"), None);
+        let item = Item { kind: Kind::Fn, name: "f".into(), text: "pub fn f() -> Int".into() };
+        assert_eq!(head(&item), "pub fn f() -> Int", "no body brace: the head is the whole declaration");
+    }
+
+    /// Nested brackets keep one part; a trailing comma and a missing close
+    /// give the parts there are, and a lone close gives none.
+    #[test]
+    fn split_args_nests_and_keeps_only_the_parts_there_are() {
+        assert_eq!(split_args("a(b, c), [d, e])"), [(0, "a(b, c)".to_string()), (8, " [d, e]".to_string())]);
+        assert_eq!(split_args("a, b,)"), [(0, "a".to_string()), (2, " b".to_string())]);
+        assert_eq!(split_args("a, b"), [(0, "a".to_string()), (2, " b".to_string())]);
+        assert_eq!(split_args(")"), []);
+    }
+
+    /// A field label starts with a lowercase letter; `Label:` is a value, not a label.
+    #[test]
+    fn record_fields_wants_a_lowercase_label() {
+        let ty = "pub type Shape {\n  Shape(Int, Label: String)\n}";
+        assert_eq!(record_fields(ty), [("Shape".to_string(), vec![None, None])]);
+    }
+
+    /// Only an `import` at a line start counts: one in a doc comment, and one
+    /// after other text on its line, are left out. A `.{` with no close takes
+    /// the rest of the header as its list.
+    #[test]
+    fn imports_only_at_a_line_start() {
+        let i = imports("//// uses import gleam/int\nimport gleam/string\nx import gleam/float\n");
+        assert_eq!(i.len(), 1);
+        assert_eq!(i[0].module, "gleam/string");
+        let i = imports("import gleam/option.{Some as S\nas o\n");
+        assert_eq!((i[0].module.as_str(), i[0].alias.as_str()), ("gleam/option", "option"));
+        assert_eq!(i[0].unqualified[0], ("Some".to_string(), "S\nas o".to_string()));
+    }
+
+    /// String literals and comments are blanked out; the quotes and the line
+    /// breaks are kept, so the lines still match the source's. An escaped
+    /// quote is skipped, so the string ends at the quote that closes it.
+    #[test]
+    fn strip_comments_blanks_strings_and_comments() {
+        assert_eq!(strip_comments("let s = \"a // b\""), "let s = \"\"");
+        assert_eq!(strip_comments("let s = \"\\\"\" // c\nx"), "let s = \"\" \nx");
+        assert_eq!(strip_comments("let s = \"a\nb\" // c\nx"), "let s = \"\n\" \nx");
+        assert_eq!(strip_comments("// whole\nx"), "\nx");
+    }
+
+    /// `..base` in a record update names a value, not a field; `module::` is
+    /// two names, not a label.
+    #[test]
+    fn a_record_update_base_is_a_value_and_a_double_colon_is_no_label() {
+        let code = "pub fn f(q: Quote) {\n  let r = Quote(..base, x: 1)\n  r\n}";
+        let reads = field_reads(code);
+        assert!(!reads.iter().any(|(f, _)| f == "base"), "{reads:?}");
+        assert!(bare_names(code).contains(&"base".to_string()), "{:?}", bare_names(code));
+        assert_eq!(bare_names("a::b"), ["a", "b"]);
+    }
+
+    /// A binding lasts to the line indented no more than its `let`: the `x`
+    /// after the function is a name, the one inside is not. Keywords in a
+    /// pattern are not names, and `mod.Ctor` binds only `x`.
+    #[test]
+    fn a_binding_ends_at_its_indent_and_keywords_are_no_names() {
+        let code = "pub fn f() {\n  let x = 1\n  x\n}\nx";
+        let bare = bare_names(code);
+        assert_eq!(bare.iter().filter(|b| *b == "x").count(), 1, "{bare:?}");
+        assert_eq!(pattern_names("Ok(a) if b -> c"), ["a", "b", "c"]);
+        assert_eq!(pattern_names("Ok(a) as b"), ["a", "b"]);
+        assert_eq!(pattern_names("mod.Ctor(x)"), ["x"]);
+        assert_eq!(pattern_names("_"), ["_"]);
+    }
 }

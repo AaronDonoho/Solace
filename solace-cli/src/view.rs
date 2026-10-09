@@ -1017,6 +1017,96 @@ pub fn main_test() {
         assert_eq!(failed["app_test.todo_test"].0, "unfinished");
         assert!(!failed.contains_key("app_test.passing_test"));
     }
+    /// `%xx` decodes; a byte that isn't UTF-8 is replaced, and a non-hex
+    /// escape stays as written.
+    #[test]
+    fn percent_decoding_replaces_invalid_utf8() {
+        assert_eq!(percent_decode("%41"), "A");
+        assert_eq!(percent_decode("a%41b"), "aAb");
+        assert_eq!(percent_decode("%E9"), "\u{FFFD}");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    /// A file shown up to 1 MiB: a cut through a multi-byte character at the
+    /// end is text, not binary.
+    #[test]
+    fn a_cut_through_a_multibyte_character_is_still_text() {
+        let p = Scratch::new()
+            .with(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", "watch_limit = 1100000\nunwatched = []\n")])
+            .import();
+        let root = p.root.clone();
+        fs::create_dir_all(root.join("docs")).unwrap();
+        let mut bytes = vec![b'a'; (1 << 20) - 1];
+        bytes.extend("é".bytes());
+        fs::write(root.join("docs/big.txt"), &bytes).unwrap();
+        let f = board::api(&root, "GET", "/files/docs/big.txt", json!({})).unwrap();
+        assert_eq!(f["size"], json!((1 << 20) + 1));
+        assert_eq!(f["truncated"], json!(true));
+        assert_eq!(f["text"].as_str().unwrap().len(), (1 << 20) - 1, "the cut drops the partial character");
+    }
+
+    /// `/nodes/{id}` without `source`: the neighbours from the graph's edges,
+    /// and at most six examples from the tests that call it.
+    #[test]
+    fn node_details_list_neighbours_and_examples() {
+        let p = Scratch::new()
+            .with(&[
+                ("src/app.gleam", "pub fn main(n: Int) -> Int {\n  helper(n)\n}\n\nfn helper(n: Int) -> Int {\n  n\n}\n"),
+                (
+                    "test/app_test.gleam",
+                    "import app\n\npub fn main_test() {\n  assert app.main(1) == 1\n  assert app.main(2) == 2\n  assert app.main(3) == 3\n  assert app.main(4) == 4\n  assert app.main(5) == 5\n  assert app.main(6) == 6\n  assert app.main(7) == 7\n}\n",
+                ),
+                ("gleam.toml", "name=\"fixture\"\nversion=\"1.0.0\"\n"),
+            ])
+            .import();
+        let root = p.root.clone();
+        let g = board::api(&root, "GET", "/graph", json!({})).unwrap();
+        let id_of = |name: &str| g["nodes"].as_array().unwrap().iter().find(|n| n["name"] == name).unwrap()["id"].as_str().unwrap().to_string();
+        let node = board::api(&root, "GET", &format!("/nodes/{}", id_of("main")), json!({})).unwrap();
+        assert_eq!(node["callees"], json!([id_of("helper")]));
+        assert_eq!(node["callers"], json!([]));
+        assert_eq!(node["tests"], json!([id_of("main_test")]));
+        let examples = node["examples"].as_array().unwrap();
+        assert_eq!(examples.len(), 6, "seven checks, six shown: {examples:?}");
+        assert_eq!(examples[0]["call"], json!("app.main(1)"));
+        assert!(examples.iter().all(|c| c["call"].as_str().unwrap().contains("app.main(")));
+    }
+
+    /// A review of a signature change: the entry and the signature are listed,
+    /// an unfinished test shows, and a check whose expected value moved carries
+    /// `was`.
+    #[test]
+    fn review_graphs_show_signatures_unfinished_and_changed_checks() {
+        let before = graph_index(
+            &test_index(&[
+                ("src", "app", "pub fn main(n: Int) -> Int {\n  n\n}"),
+                ("test", "app_test", "import app\n\npub fn main_test() {\n  assert app.main(1) == 1\n}"),
+            ]),
+            &[],
+            &HashSet::new(),
+        );
+        let after = graph_index(
+            &test_index(&[
+                ("src", "app", "pub fn main(n: Int, k: Int) -> Int {\n  n\n}"),
+                ("test", "app_test", "import app\n\npub fn main_test() {\n  assert app.main(1) == 2\n}"),
+            ]),
+            &[],
+            &HashSet::new(),
+        );
+        let task = json!({"id":"t","changes":[{"entity":"symbol:fn:app.main"}],
+            "review_tests": {"base":"x","state":"done","results":[{"id":"fn:app_test.main_test","name":"main_test","result":"unfinished","checks":[{"call":"app.main(1)","expected":"2"}]}]}});
+        let r = review_graphs(&before, &after, &task, &json!({"tests":["fn:app_test.main_test"],"untested":[],"suites":[],"leaves":[]}), &"".parse().unwrap(), Path::new("/tmp"));
+        assert_eq!(
+            r["signatures"],
+            json!([{"id":"fn:app.main","before":"pub fn main(n: Int) -> Int","after":"pub fn main(n: Int, k: Int) -> Int"}])
+        );
+        assert_eq!(r["tests"].as_array().unwrap().len(), 1, "{:?}", r["tests"]);
+        assert_eq!(r["tests"][0]["result"], json!("unfinished"));
+        assert_eq!(r["tests"][0]["checks"][0]["was"], json!("1"), "the check's old expected value");
+        assert!(r["summary"].as_str().unwrap().contains("1 signature changed, 1 test unfinished, 0 untested uses"), "{}", r["summary"]);
+        assert!(!r["summary"].as_str().unwrap().contains("not run yet"), "{}", r["summary"]);
+    }
+
     #[test]
     fn test_failure_blocks() {
         let f =

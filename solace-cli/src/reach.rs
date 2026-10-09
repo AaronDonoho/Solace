@@ -855,4 +855,168 @@ mod tests {
         assert!(out.contains(&id("run")) && out.contains(&id("abs")) && !out.contains(&id("main")));
         assert_eq!(tests(&ix), [main_test, id("run_test")]);
     }
+
+    /// A new symbol seeds every line; a comment-only change is no change at
+    /// all; changed lines that are comments don't seed.
+    #[test]
+    fn origins_seed_the_changed_lines_and_skip_what_is_not_code() {
+        let ix = test_index(&[
+            ("src", "main", "pub fn a() -> Int {\n  1\n}\n\npub fn b() -> Int {\n  2\n  // c\n  3\n}"),
+            ("test", "main_test", "import main\n\npub fn a_test() {\n  assert main.a() == 1\n}"),
+        ]);
+        let b = ix.syms.iter().position(|s| s.name == "b").unwrap();
+        assert!(
+            origins(&ix, &[("fn:main.a".to_string(), Some("pub fn a() -> Int {\n  // note\n  1\n}".to_string()))]).is_empty(),
+            "a comment-only change is not code"
+        );
+        assert!(
+            origins(&ix, &[("fn:main_test.a_test".to_string(), Some("import main\n\npub fn a_test() {\n  assert main.a() == 2\n}".to_string()))]).is_empty(),
+            "a test's own change is not an origin"
+        );
+        assert_eq!(origins(&ix, &[("fn:main.b".to_string(), None)]), [(b, vec![0, 1, 2, 3, 4])], "a new symbol seeds every line");
+        assert_eq!(
+            origins(&ix, &[("fn:main.b".to_string(), Some("pub fn b() -> Int {\n  2\n  // c\n}".to_string()))]),
+            [(b, vec![3])],
+            "the added code line seeds, its closing brace doesn't"
+        );
+        assert_eq!(
+            origins(&ix, &[("fn:main.b".to_string(), Some("pub fn b() -> Int {\n  2\n}".to_string()))]),
+            [(b, vec![3])],
+            "the added code line seeds; the added comment line doesn't"
+        );
+    }
+
+    /// A changed type seeds its users at the lines that name it, not at a call.
+    #[test]
+    fn a_type_change_seeds_the_lines_that_name_it() {
+        let ix = test_index(&[
+            ("src", "shape", "pub type Shape {\n  Shape(a: Int)\n}"),
+            ("src", "use", "import shape\n\npub fn f(s: shape.Shape) -> Int {\n  1\n}"),
+        ]);
+        let shape = ix.syms.iter().position(|s| s.name == "Shape").unwrap();
+        let impact = flow(&ix, &[(shape, vec![0])]);
+        assert_eq!(names(&ix, &impact), ["use.f"], "seeded at the line naming the type");
+        assert_eq!(impact.uses.iter().find(|u| u.sym == shape).map(|u| u.steps), Some(0));
+    }
+
+    /// A piped call taints its first parameter when the pipeline's head is
+    /// tainted; a positional argument reaches the parameter at its position;
+    /// an argument that isn't tainted reaches none.
+    #[test]
+    fn piped_and_positional_arguments_taint_the_parameters_they_carry() {
+        let ix = test_index(&[
+            ("src", "lib", "pub fn double(n: Int) -> Int {\n  n * 2\n}"),
+            ("src", "main", "import lib\n\npub fn f(x: Int, y: Int) -> Int {\n  x |> lib.double()\n  lib.double(x)\n  lib.double(y)\n}"),
+        ]);
+        let double = ix.syms.iter().position(|s| s.name == "double").unwrap();
+        let f = ix.syms.iter().position(|s| s.name == "f").unwrap();
+        let marks: HashSet<String> = ["lib.double".to_string()].into();
+        let t = taint(&ix, &records(&ix), f, &HashSet::new(), &marks, &["x".into()]);
+        assert_eq!(t.calls, [(double, vec!["n".to_string()])], "the piped head and `double(x)` carry x, `double(y)` nothing");
+        let t = taint(&ix, &records(&ix), f, &HashSet::new(), &marks, &[]);
+        assert!(t.any && t.calls.is_empty(), "nothing is tainted, so no parameter is: {:?}", t.calls);
+    }
+
+    /// A body whose layout isn't the formatter's can't be segmented: the taint
+    /// takes the whole symbol, so every field of a record it writes counts.
+    #[test]
+    fn an_unformatted_body_is_taken_as_a_whole() {
+        let ix = test_index(&[
+            ("src", "quote", "pub type Quote {\n  Quote(a: Int, b: Int)\n}"),
+            ("src", "odd", "import quote\n\npub fn f(n: Int) -> quote.Quote {\n    let q = quote.Quote(a: n)\n  quote.Quote(..q, b: 1)\n}"),
+        ]);
+        let f = ix.syms.iter().position(|s| s.name == "f").unwrap();
+        let mut fields: Vec<String> = taint(&ix, &records(&ix), f, &[1].into(), &HashSet::new(), &["n".into()]).fields.into_iter().map(|(_, g)| g).collect();
+        fields.sort();
+        fields.dedup();
+        assert_eq!(fields, ["a", "b"], "the whole symbol is tainted, so every field counts");
+    }
+
+    /// A caller using an unqualified import — its own name or its `as` name —
+    /// is seeded by the symbol it writes, as an alias is.
+    #[test]
+    fn unqualified_imports_count_as_writing_the_symbol() {
+        let ix = test_index(&[
+            ("src", "lib", "pub fn make() -> Int {\n  1\n}"),
+            ("src", "plain", "import lib.{make}\n\npub fn a() {\n  make()\n}"),
+            ("src", "renamed", "import lib.{make as m}\n\npub fn b() {\n  m()\n}"),
+            ("src", "aliased", "import lib\n\npub fn c() {\n  lib.make()\n}"),
+        ]);
+        let make = ix.syms.iter().position(|s| s.name == "make").unwrap();
+        assert_eq!(names(&ix, &flow(&ix, &[(make, vec![0, 1])])), ["plain.a", "renamed.b", "aliased.c"]);
+    }
+
+    /// The note and the report cut long lists: fields past eight, untested uses
+    /// past three, possible fields past four, and uses past the size limit.
+    #[test]
+    fn the_note_and_the_report_cut_their_lists() {
+        let ix = test_index(&[
+            (
+                "src",
+                "main",
+                "pub fn a() {\n  1\n}\n\npub fn b() {\n  1\n}\n\npub fn c() {\n  1\n}\n\npub fn d() {\n  1\n}\n\npub fn e() {\n  1\n}\n\npub fn f() {\n  1\n}\n\npub fn g() {\n  1\n}\n\npub fn h() {\n  1\n}\n\npub fn i() {\n  1\n}\n\npub fn j() {\n  1\n}\n\npub fn k() {\n  1\n}\n\npub fn l() {\n  1\n}",
+            ),
+            ("src", "shape", "pub type T {\n  T(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int, i: Int)\n}"),
+        ]);
+        let t = ix.syms.iter().position(|s| s.name == "T").unwrap();
+        let mut impact = Impact::default();
+        impact.uses.push(Use { sym: 0, steps: 0, via: "changed".to_string(), certain: true });
+        for i in 1..5 {
+            impact.uses.push(Use { sym: i, steps: 1, via: "calls main.a".to_string(), certain: true });
+        }
+        for k in 0..6 {
+            impact.uses.push(Use { sym: 5 + k, steps: 1, via: format!("reads T.{}", (b'a' + k as u8) as char), certain: false });
+        }
+        impact.fields = (0..9).map(|k| (t, format!("{}", (b'a' + k as u8) as char))).collect();
+        impact.leaves = vec![(0, "prints".to_string())];
+        let lines = note(&ix, &impact, &["e2e (`run e2e`)".to_string()]);
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert!(
+            lines[0].starts_with("Reaches 4 uses (and 6 possible): callers, and readers of T.a, .b, .c, .d, .e, .f, .g, .h, and 1 more."),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].starts_with("No test of their own: main.b (1 step), main.c (1 step), main.d (1 step) and 1 more"),
+            "{lines:?}"
+        );
+        assert_eq!(lines[2], "Leaves the program: main.a (prints). Also reached: e2e (`run e2e`).");
+        let r = report(&ix, &impact, &["e2e (`run e2e`)".to_string()], 10_000);
+        assert!(
+            r.starts_with("main.a reaches 4 uses, nearest first:\n  main.b — 1 step, calls main.a; no test of its own\n"),
+            "{r}"
+        );
+        assert!(
+            r.contains("And 6 possible uses: readers of a field another type also declares (T.a, T.b, T.c, T.d and 2 more)"),
+            "{r}"
+        );
+        let r = report(&ix, &impact, &[], 10);
+        assert!(r.contains("  … 4 more not shown, to fit the size limit"), "{r}");
+    }
+
+    /// A declared command whose entries don't resolve is a suite that reaches
+    /// nothing, and it is skipped silently.
+    #[test]
+    fn suites_skip_entries_that_do_not_resolve() {
+        let store = project(&[("src/calc.gleam", "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n")]);
+        fs::write(store.root.join("solace.toml"), "[commands]\nghost = { run = [\"make\"], checks = [\"calc.gone\"] }\n").unwrap();
+        let ix = store.index().unwrap();
+        let suites = suites(&store, &ix).unwrap();
+        assert_eq!(suites.len(), 1);
+        assert!(suites[0].1.as_ref().is_some_and(|r| r.is_empty()), "{suites:?}");
+        assert!(reached(&suites, &[0]).is_empty(), "nothing is reached, so no suite is listed");
+    }
+
+    /// A test's reach hash covers the revisions of everything it reaches, those
+    /// modules' headers, and the manifests: any of them changes it.
+    #[test]
+    fn the_reach_hash_follows_revisions_headers_and_manifests() {
+        let store = project(&[("src/calc.gleam", "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n")]);
+        let ix = store.index().unwrap();
+        let reach: HashSet<usize> = [0].into();
+        let base = hash(&ix, &reach, &["r1".to_string()], &store.root);
+        assert_eq!(base, hash(&ix, &reach, &["r1".to_string()], &store.root), "the same inputs give the same hash");
+        assert_ne!(base, hash(&ix, &reach, &["r2".to_string()], &store.root), "a revision is part of it");
+        fs::write(store.root.join("gleam.toml"), "name = \"other\"\n").unwrap();
+        assert_ne!(base, hash(&ix, &reach, &["r1".to_string()], &store.root), "the manifest is part of it");
+    }
 }

@@ -337,3 +337,166 @@ test('a followed run stops refreshing when the board is removed and resumes in o
     expect(fetches()).toBe(6);
   } finally { browser.restore(); }
 });
+
+test('the project panel sends only the requests its buttons make', async () => {
+  const projects = { workspace: true, projects: [{ dir: 'a/b', name: 'ab', base: '' }],
+    found: [{ dir: 'c/d', name: 'cd', imported: true, member: false }, { dir: 'e/f', name: 'ef', imported: false, member: false }] };
+  const browser = fakeBrowser('', { '/projects': projects, '/models': [] });
+  const sent = [];
+  globalThis.fetch = async (path, opts) => {
+    sent.push([opts?.method ?? 'GET', path, opts?.body ? JSON.parse(opts.body) : null]);
+    return Response.json(opts?.method === 'GET' && path === '/projects' ? projects : opts?.method === 'GET' && path === '/models' ? [] : opts?.method === 'GET' && path.endsWith('/workflow') ? { columns: [] } : {});
+  };
+  try {
+    const b = mount(board);
+    b.dispatch(new board.Connected());
+    await settle();
+    expect(sent).toEqual([['GET', '/projects', null], ['GET', '/models', null], ['GET', '/workflow', null]]);
+    // An imported project that isn't a member joins; anything else sends nothing.
+    b.dispatch(new board.AddProject('c/d'));
+    b.dispatch(new board.AddProject('e/f'));
+    b.dispatch(new board.AddProject('z/z'));
+    await settle();
+    expect(sent[3]).toEqual(['POST', '/projects', { dir: 'c/d' }]);
+    expect(sent.length).toBe(4);
+    // The new-project form posts what it holds.
+    b.dispatch(new board.ProjectName('new'));
+    b.dispatch(new board.ProjectDir('newdir'));
+    b.dispatch(new board.ProjectTarget('javascript'));
+    b.dispatch(new board.CreateProject());
+    await settle();
+    expect(sent[4]).toEqual(['POST', '/projects/new', { name: 'new', dir: 'newdir', target: 'javascript' }]);
+    // Remove asks first whether to keep the files; deleting them needs the project's name.
+    b.dispatch(new board.RemoveProject('a/b'));
+    b.dispatch(new board.RemoveOnly());
+    await settle();
+    expect(sent[5]).toEqual(['DELETE', '/projects/a%2Fb', {}]);
+    b.dispatch(new board.RemoveProject('a/b'));
+    b.dispatch(new board.RemoveFiles());
+    b.dispatch(new board.RemoveTyped('wrong'));
+    b.dispatch(new board.RemoveDelete());
+    await settle();
+    expect(sent.length).toBe(6);
+    b.dispatch(new board.RemoveTyped('a/b'));
+    b.dispatch(new board.RemoveDelete());
+    await settle();
+    expect(sent[6]).toEqual(['DELETE', '/projects/a%2Fb', { delete: true, name: 'a/b' }]);
+    // Cancel closes the dialog, so RemoveOnly then sends nothing.
+    b.dispatch(new board.RemoveProject('a/b'));
+    b.dispatch(new board.RemoveCancel());
+    b.dispatch(new board.RemoveOnly());
+    await settle();
+    expect(sent.length).toBe(7);
+  } finally { browser.restore(); }
+});
+
+test('the theme button flips the page theme and stores the choice', async () => {
+  const stored = new Map();
+  const saved = [globalThis.document, Object.getOwnPropertyDescriptor(globalThis, 'localStorage')];
+  globalThis.document = { documentElement: { dataset: {} } };
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+    getItem: k => stored.get(k) ?? null, setItem: (k, v) => stored.set(k, v), removeItem: k => stored.delete(k) } });
+  try {
+    const b = mount(board);
+    b.dispatch(new board.ToggleTheme());
+    await settle();
+    expect(document.documentElement.dataset.theme).toBe('dark');
+    expect(stored.get('solace-theme')).toBe('dark');
+    b.dispatch(new board.ToggleTheme());
+    await settle();
+    expect(document.documentElement.dataset.theme).toBe('light');
+    expect(stored.get('solace-theme')).toBe('light');
+  } finally {
+    globalThis.document = saved[0];
+    saved[1] ? Object.defineProperty(globalThis, 'localStorage', saved[1]) : delete globalThis.localStorage;
+  }
+});
+
+test('the editor sends what its buttons ask for, and wraps the selection in place', async () => {
+  const browser = fakeBrowser();
+  const sent = [];
+  globalThis.fetch = async (path, opts) => {
+    sent.push([opts?.method ?? 'GET', path, opts?.body ? JSON.parse(opts.body) : null]);
+    return Response.json({});
+  };
+  const root = { addEventListener: () => {}, getElementById: () => ({ selectionStart: 1, selectionEnd: 3 }) };
+  const answers = [false, true];
+  globalThis.confirm = () => answers.shift();
+  try {
+    const b = mount(board);
+    b.dispatch(new board.Attached(root));
+    b.dispatch(new board.TaskLoaded(JSON.stringify({ id: 't1', title: 'T', body: 'abcd', column: 'assigned', rank: 1 })));
+    // A note posts its text and moves the pane to notes.
+    b.dispatch(new board.Text('note text'));
+    b.dispatch(new board.AddNote());
+    await settle();
+    expect(b.model.tab).toBe('notes');
+    expect(sent).toContainEqual(['POST', '/tasks/t1/notes', { text: 'note text' }]);
+    // An answer sends the option when there is one, the typed text when there isn't.
+    b.dispatch(new board.Answer('q1', 'yes'));
+    b.dispatch(new board.Answer('q2', ''));
+    await settle();
+    expect(sent).toContainEqual(['POST', '/tasks/t1/questions/q1', { option: 'yes' }]);
+    expect(sent).toContainEqual(['POST', '/tasks/t1/questions/q2', { text: 'note text' }]);
+    // Save needs a number for the rank; with one it patches the task.
+    b.dispatch(new board.Rank('x'));
+    b.dispatch(new board.Save());
+    expect(b.model.error).toBe('Rank must be a number');
+    expect(sent.filter(([m]) => m === 'PATCH')).toHaveLength(0);
+    b.dispatch(new board.Title('T2'));
+    b.dispatch(new board.Body('body text'));
+    // The rank box holds a float, so "2" is refused and "2.0" is sent.
+    b.dispatch(new board.Rank('2.0'));
+    b.dispatch(new board.Save());
+    await settle();
+    expect(sent).toContainEqual(['PATCH', '/tasks/t1', { title: 'T2', body: 'body text', rank: 2 }]);
+    // Deleting a note asks first.
+    b.dispatch(new board.DeleteNote(0));
+    await settle();
+    expect(sent.some(([m, p]) => m === 'DELETE')).toBe(false);
+    b.dispatch(new board.DeleteNote(1));
+    await settle();
+    expect(sent).toContainEqual(['DELETE', '/tasks/t1/notes/1', {}]);
+    // Format wraps the editor's selection: the body editor, then the draft.
+    b.dispatch(new board.Format('edit-body', '**', '**'));
+    await settle();
+    expect(b.model.body).toBe('b**od**y text');
+    b.dispatch(new board.DraftBody('xy'));
+    b.dispatch(new board.Format('draft-body', '*', '*'));
+    await settle();
+    expect(b.model.draft_body).toBe('x*y*');
+    b.dispatch(new board.Text('typed'));
+    b.dispatch(new board.Format('comment', '[', ']'));
+    await settle();
+    expect(b.model.text).toBe('t[yp]ed');
+    // Previews add and remove; a notice from a run that ended is dismissed.
+    b.dispatch(new board.Preview('edit-body', true));
+    expect(Array.from(b.model.previews)).toEqual(['edit-body']);
+    b.dispatch(new board.Preview('edit-body', false));
+    expect(Array.from(b.model.previews)).toEqual([]);
+    const task = run => JSON.stringify({ task: { id: 't1', title: 'T', body: '', column: 'assigned', rank: 1,
+      runs: [{ id: 'r1', kind: 'work', state: run, model: 'm', log: '', outcome: run === 'ended' ? 'finished' : '' }] } });
+    b.dispatch(new board.CaughtUp());
+    b.dispatch(new board.Live(task('running')));
+    b.dispatch(new board.Live(task('ended')));
+    expect(Array.from(b.model.notices).map(n => n.heading)).toEqual(['Finished T']);
+    b.dispatch(new board.Dismiss(b.model.notices.head));
+    expect(Array.from(b.model.notices)).toEqual([]);
+  } finally { browser.restore(); delete globalThis.confirm; }
+});
+
+test('the page registers the board and the view as elements', async () => {
+  const tags = [];
+  const saved = [globalThis.document, globalThis.HTMLElement, globalThis.customElements, globalThis.location];
+  globalThis.location = { pathname: '/view', search: '' };
+  globalThis.document = { documentElement: { dataset: {} } };
+  globalThis.HTMLElement = class {};
+  globalThis.customElements = { get: () => undefined, define: name => tags.push(name) };
+  try {
+    await import('../src/main.mjs');
+    await settle();
+    expect(tags).toEqual(['solace-board', 'solace-view']);
+  } finally {
+    [globalThis.document, globalThis.HTMLElement, globalThis.customElements, globalThis.location] = saved;
+  }
+});

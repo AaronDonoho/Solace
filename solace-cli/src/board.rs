@@ -24,8 +24,13 @@ pub(super) fn store_dir(top: &Path) -> PathBuf {
 pub(super) fn err<T>(code: &str, message: impl std::fmt::Display) -> Result<T, Failure> {
     lockdown::error(code, "task", message)
 }
+/// Whether `id` can name a task: it names the task's file and folder, so only
+/// letters, digits and `-`.
+pub(super) fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')
+}
 fn task_path(root: &Path, id: &str) -> Result<PathBuf, Failure> {
-    if id.is_empty() || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
+    if !valid_id(id) {
         return err("E7001", "invalid task id");
     }
     Ok(store_dir(&scope::top(root)).join(format!("{id}.json")))
@@ -78,8 +83,20 @@ fn read_task(top: &Path, path: &Path) -> Result<Value, Failure> {
     let mut t: Value = serde_json::from_slice(&fs::read(path)?).map_err(|e| Failure(e.to_string(), 1))?;
     // The default workflow's `done` column is now `complete`; tasks saved before still say `done`.
     let home = scope::path(top, t["home"].as_str().unwrap_or("."));
-    if t["column"] == "done" && !flow(&home)?["columns"].as_array().unwrap().iter().any(|c| c["id"] == "done") {
+    // Only these two old columns need the workflow, so other tasks read without it.
+    let old_column = matches!(t["column"].as_str(), Some("done" | "blocked"));
+    let columns = if old_column { flow(&home)?["columns"].as_array().unwrap().clone() } else { vec![] };
+    if t["column"] == "done" && !columns.iter().any(|c| c["id"] == "done") {
         t["column"] = json!("complete");
+    }
+    // The default workflow has no `blocked` column (D-82): a task saved there stays in
+    // `assigned`, flagged as held until its run continues.
+    if t["column"] == "blocked" && !columns.iter().any(|c| c["id"] == "blocked") && columns.iter().any(|c| c["id"] == "assigned") {
+        t["column"] = json!("assigned");
+        if t["attention"].is_null() {
+            t["attention"] = json!({"reason":"the agent needed an answer or stopped","time":now()});
+        }
+        t["attention"]["hold"] = json!(true);
     }
     Ok(t)
 }
@@ -211,8 +228,10 @@ pub fn workflow(settings: &toml::Value) -> Result<Value, Failure> {
             return Err(invalid("unknown run step"));
         }
     }
+    // `finished` needs a target; `asked` and `failed` may have none, and then the task stays put (D-82).
     for e in ["asked", "finished", "failed"] {
-        if !ids.contains(w["events"][e].as_str().unwrap_or("")) {
+        let target = w["events"].get(e).filter(|v| !v.is_null());
+        if target.is_none_or(|v| !ids.contains(v.as_str().unwrap_or(""))) && (e == "finished" || target.is_some()) {
             return Err(invalid("event has no target"));
         }
     }
@@ -275,6 +294,20 @@ pub(super) fn note(t: &mut Value, author: &str, run: Option<&str>, text: &str) {
 pub(super) fn flag(t: &mut Value, reason: &str) {
     t["attention"] = json!({"reason":reason,"time":now()});
     t["finished"] = Value::Null;
+}
+/// Marks a task whose agent is held on a question or stopped before finishing
+/// (D-82). The mark stays through other actions until the run continues, is
+/// restarted, or the task is stopped or settled; `blocked` is reserved for tasks that depend on other tasks.
+pub(super) fn hold(t: &mut Value, reason: &str) {
+    flag(t, reason);
+    t["attention"]["hold"] = json!(true);
+}
+/// Moves the task to the column an event names; an event with no target leaves it where it is (D-82).
+fn on_event(w: &Value, t: &mut Value, event: &str) -> Result<(), Failure> {
+    match w["events"].get(event) {
+        Some(to) if !to.is_null() => move_to(w, t, to),
+        _ => Ok(()),
+    }
 }
 fn move_to(w: &Value, t: &mut Value, to: &Value) -> Result<(), Failure> {
     let c = column(w, t);
@@ -1623,7 +1656,17 @@ pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
                 }
                 ("POST", ["actions"]) => {
                     let launch = action(&s, &w, &mut t, body)?;
-                    t["attention"] = Value::Null;
+                    // A held question or a stopped work run stays flagged until the run
+                    // continues, restarts, stops or the task settles (D-82).
+                    let name = body["action"].as_str().unwrap_or("");
+                    let a = &w["actions"][name];
+                    let resolves = matches!(a["run"].as_str(), Some("work" | "new_work" | "investigate"))
+                        || a["revert"] == true
+                        || name == "stop"
+                        || column(&w, &t)["final"] == true;
+                    if t["attention"]["hold"] != true || resolves {
+                        t["attention"] = Value::Null;
+                    }
                     t["finished"] = Value::Null;
                     let after = match launch {
                         Some((rid, m)) => After::Start(rid, m),
@@ -2270,7 +2313,7 @@ fn brief(t: &Value, kind: &str) -> String {
             "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
         ),
         "work" => format!(
-            "Make the change this task describes. {start} {ask} Finish with `task done`, a summary in `text`: what you changed and how you checked it."
+            "Make the change this task describes. {start} {ask} Before `task done`, run all tests of the projects this task covers: `test --all` in each one with Gleam code, and the test commands its `solace.toml` declares (`run <name>`). Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Finish with `task done`, a summary in `text`: what you changed and how you checked it."
         ),
         _ => format!(
             "Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work."
@@ -2450,7 +2493,13 @@ pub fn transcript(log: &Path) -> Vec<Value> {
                 ended = true;
                 let u = &e["usage"];
                 let last = context.map(|c| format!("; last context {c} tokens")).unwrap_or_default();
-                out.push(json!({"kind":"usage","text":format!("{} input tokens ({} cached), {} output tokens{last}", u["input_tokens"], u["cache_read_input_tokens"], u["output_tokens"])}));
+                let n = |k: &str| u[k].as_u64().unwrap_or(0);
+                let written = if u.get("cache_creation_input_tokens").is_some() {
+                    format!(", {} written to cache", n("cache_creation_input_tokens"))
+                } else {
+                    String::new()
+                };
+                out.push(json!({"kind":"usage","text":format!("{} input tokens ({} read from cache{written}), {} output tokens{last}", context_tokens(u), n("cache_read_input_tokens"), n("output_tokens"))}));
                 if e["is_error"] == true {
                     out.push(json!({"kind":"error","text":text_of(&e["result"])}));
                 }
@@ -2488,9 +2537,11 @@ fn finish(root: &Path, tid: &str, rid: &str, failure: Option<&str>) -> Result<()
         let work = r["kind"] == "work";
         if let Some(message) = &failure {
             note(t, "solace", Some(&rid), message);
-            flag(t, message);
             if work {
-                move_to(&w, t, &w["events"]["failed"])?;
+                hold(t, message);
+                on_event(&w, t, "failed")?;
+            } else {
+                flag(t, message);
             }
         }
         Ok(())
@@ -2691,10 +2742,10 @@ pub(super) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
                 "ask" => {
                     t["questions"].as_array_mut().unwrap().push(m["question"].clone());
                     t["runs"][i]["state"] = json!("waiting");
-                    flag(t, "an agent asked a question");
+                    hold(t, "an agent asked a question");
                     // An investigation waits in planning; `investigate` continues it.
                     if kind == "work" {
-                        move_to(w, t, &w["events"]["asked"])?;
+                        on_event(w, t, "asked")?;
                     }
                 }
                 _ => return err("E7001", "unknown agent message"),
@@ -2716,8 +2767,8 @@ pub(super) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
             }
             t["questions"].as_array_mut().unwrap().push(m["question"].clone());
             t["runs"][i]["state"] = json!("waiting");
-            flag(t, "an agent proposed a settings change");
-            move_to(w, t, &w["events"]["asked"])?;
+            hold(t, "an agent proposed a settings change");
+            on_event(w, t, "asked")?;
         }
         // A changes message from before D-77 point 4: the board_touches rows are the
         // source, so applying one adds nothing. One left in an old inbox is ignored.
@@ -2867,9 +2918,11 @@ fn recover_project(root: &Path) -> Result<(), Failure> {
         if active(&t) {
             let work = t["runs"].as_array().unwrap().iter().any(|r| r["state"] != "ended" && r["kind"] == "work");
             end_runs(&mut t, "server restarted");
-            flag(&mut t, "the Solace server restarted while an agent was working");
             if work {
-                move_to(&w, &mut t, &w["events"]["failed"])?;
+                hold(&mut t, "the Solace server restarted while an agent was working");
+                on_event(&w, &mut t, "failed")?;
+            } else {
+                flag(&mut t, "the Solace server restarted while an agent was working");
             }
             tasks::put(&s, &t)?;
         }
@@ -3817,7 +3870,7 @@ mod tests {
         record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
         let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
         assert!(has_before());
-        inbox_file(&s.root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"done"}));
+        testing::inbox_file(&s.root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"done"}));
         tasks::drain(&s.root);
         assert_eq!(task(&s.root, &tid).unwrap()["column"], "done");
         assert!(!has_before(), "applying the move settled the task");
@@ -3857,7 +3910,7 @@ mod tests {
         record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
         let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
         assert!(has_before());
-        inbox_file(&s.root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"late"}));
+        testing::inbox_file(&s.root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"late"}));
         tasks::drain(&s.root);
         assert!(has_before(), "the late done must not drop the undo records");
         // The server itself moving the task into a final column settles it.
@@ -3905,82 +3958,6 @@ mod tests {
         assert_eq!(t["column"], before);
         assert!(t["questions"].as_array().unwrap().is_empty());
         assert_eq!(t["notes"].as_array().unwrap().len(), 3);
-    }
-    fn inbox_file(root: &Path, id: &str, mut m: Value) {
-        let dir = store_dir(root).join("inbox");
-        fs::create_dir_all(&dir).unwrap();
-        m["id"] = json!(id);
-        fs::write(dir.join(format!("{id}.json")), m.to_string()).unwrap();
-    }
-    /// A message with an older id that lands after a newer one is still applied.
-    #[test]
-    fn an_older_inbox_message_arriving_late_is_applied() {
-        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
-        adopt_tasks(&root, &root).unwrap();
-        inbox_file(&root, "0002", json!({"kind":"note","task":"t1","author":"solace","text":"newer"}));
-        tasks::drain(&root);
-        inbox_file(&root, "0001", json!({"kind":"note","task":"t1","author":"solace","text":"older"}));
-        tasks::drain(&root);
-        let texts: Vec<String> = task(&root, "t1").unwrap()["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap().to_string()).collect();
-        assert_eq!(texts, ["newer", "older"]);
-        // The same message again (a replay after a crash) is skipped.
-        inbox_file(&root, "0001", json!({"kind":"note","task":"t1","author":"solace","text":"older"}));
-        tasks::drain(&root);
-        assert_eq!(task(&root, "t1").unwrap()["notes"].as_array().unwrap().len(), 2);
-    }
-    /// A message that can't be applied, or that panics, is set aside and the task is told.
-    #[test]
-    fn a_message_that_fails_or_panics_is_set_aside() {
-        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
-        adopt_tasks(&root, &root).unwrap();
-        // No such run: refused.
-        inbox_file(&root, "0001", json!({"kind":"agent","task":"t1","run":"nope","command":"done","text":"x"}));
-        // A task file that lacks its lists (written by hand): applying it panics.
-        fs::write(store_dir(&root).join("t2.json"), r#"{"id":"t2","column":"backlog","home":"."}"#).unwrap();
-        inbox_file(&root, "0002", json!({"kind":"agent","task":"t2","run":"r","command":"note","text":"x"}));
-        tasks::drain(&root);
-        let inbox = store_dir(&root).join("inbox");
-        assert!(inbox.join("failed/0001.json").exists() && inbox.join("failed/0002.json").exists());
-        assert!(!inbox.join("0001.json").exists() && !inbox.join("0002.json").exists());
-        assert!(tasks::rejected(&root, &inbox.join("0001.json")));
-        let t = task(&root, "t1").unwrap();
-        assert!(t["notes"][0]["text"].as_str().unwrap().contains("set aside"));
-        assert_eq!(t["attention"]["reason"], "a task message was set aside");
-    }
-    /// A sender waits for as long as a server lives, not for a fixed time, and
-    /// gives up at once when the server stops.
-    #[test]
-    fn applied_waits_while_a_server_holds_the_lock() {
-        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
-        adopt_tasks(&root, &root).unwrap();
-        let held = try_lock_file(&store_dir(&root).join("server.lock")).unwrap().unwrap();
-        let sent = tasks::send(&root, json!({"kind":"note","task":"t1","text":"x"})).unwrap();
-        let (gone, start) = (sent.clone(), std::time::Instant::now());
-        let remover = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(400));
-            fs::remove_file(gone).unwrap();
-        });
-        assert!(tasks::applied(&root, &sent));
-        assert!(start.elapsed() >= Duration::from_millis(350));
-        remover.join().unwrap();
-        // The server stops with the message still there: false, and the message stays.
-        let sent = tasks::send(&root, json!({"kind":"note","task":"t1","text":"y"})).unwrap();
-        drop(held);
-        assert!(!tasks::applied(&root, &sent) && sent.exists());
-    }
-    /// A message delivered where no server runs lands after the earlier ones in
-    /// the inbox: a create a stopped server left must not be sent again.
-    #[test]
-    fn deliver_applies_the_inbox_before_its_message() {
-        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
-        adopt_tasks(&root, &root).unwrap();
-        let mut t = new_task("Late", "", &json!("backlog"), 1.);
-        t["home"] = json!(".");
-        let tid = t["id"].as_str().unwrap().to_string();
-        inbox_file(&root, "0001", json!({"kind":"create","new":t}));
-        tasks::deliver(&root, json!({"kind":"note","task":tid,"author":"solace","text":"hi"})).unwrap();
-        assert_eq!(task(&root, &tid).unwrap()["notes"].as_array().unwrap().len(), 1);
-        assert!(!store_dir(&root).join("inbox/0001.json").exists());
     }
     /// A crash between writing the store copy and removing the old file leaves
     /// both; the move finishes. The same id under another project is an error.
@@ -4045,6 +4022,24 @@ mod tests {
         fs::write(root.join("solace.toml"), include_str!("default-board.toml").replace("= \"complete\"", "= \"done\"")).unwrap();
         assert_eq!(tasks(&root).unwrap()[0]["column"], "done");
     }
+    /// D-82: the default workflow has no `blocked` column.
+    #[test]
+    fn tasks_saved_in_blocked_load_as_assigned_and_held() {
+        let root = testing::Scratch::new().with(&[
+            (".solace/board/t1.json", r#"{"id":"t1","column":"blocked","attention":{"reason":"an agent asked a question","time":1}}"#),
+            (".solace/board/t2.json", r#"{"id":"t2","column":"blocked"}"#),
+        ]);
+        adopt_tasks(&root, &root).unwrap();
+        let (a, b) = (task(&root, "t1").unwrap(), task(&root, "t2").unwrap());
+        assert_eq!((a["column"].as_str(), a["attention"]["reason"].as_str(), a["attention"]["hold"].as_bool()), (Some("assigned"), Some("an agent asked a question"), Some(true)));
+        assert_eq!((b["column"].as_str(), b["attention"]["hold"].as_bool()), (Some("assigned"), Some(true)));
+        // `asked` and `failed` need no target; `finished` does, and a target must exist.
+        let default = include_str!("default-board.toml");
+        let w = |text: String| workflow(&text.parse::<toml::Value>().unwrap());
+        assert!(w(default.to_string()).is_ok());
+        assert!(w(default.replace("finished = \"needs_review\"", "")).is_err());
+        assert!(w(default.replace("events = {", "events = { asked = \"missing\",")).is_err());
+    }
     #[test]
     fn tasks_move_once_into_the_root_store() {
         let root = testing::Scratch::new().with(&[
@@ -4095,6 +4090,49 @@ mod tests {
         assert_eq!(provider["p"]["env_key"].as_str(), Some("SOLACE_TEST_UNSET_KEY"));
         assert_eq!(provider["p"]["wire_api"].as_str(), Some("responses"));
         assert!(endpoint_args(&json!({"label":"No endpoint"})).is_empty());
+    }
+
+    /// A line diff keeps two lines around each change and marks the lines it
+    /// skips, between changes and after the last one.
+    #[test]
+    fn line_diff_marks_the_lines_it_skips() {
+        let lines = |f: &dyn Fn(usize) -> String| (1..=12).map(|n| format!("{}\n", f(n))).collect::<String>();
+        let a = lines(&|n| format!("l{n}"));
+        let b = lines(&|n| if n == 2 || n == 10 { format!("L{n}") } else { format!("l{n}") });
+        assert_eq!(line_diff(&a, &b), "  l1\n- l2\n+ L2\n  l3\n  l4\n  …\n  l8\n  l9\n- l10\n+ L10\n  l11\n  l12\n");
+        let first = lines(&|n| if n == 1 { "L1".into() } else { format!("l{n}") });
+        assert_eq!(line_diff(&a, &first), "- l1\n+ L1\n  l2\n  l3\n  …\n");
+        assert_eq!(line_diff("", ""), "");
+        assert_eq!(line_diff("x\ny\n", "x\ny\n"), "  …\n");
+        assert_eq!(diff_ops("a\nb", "a\nb"), [(' ', "a"), (' ', "b")]);
+    }
+
+    /// The marked lines are numbered in the new text; a removal marks the line it left.
+    #[test]
+    fn changed_lines_number_the_new_text() {
+        let lines = |f: &dyn Fn(usize) -> String| (1..=12).map(|n| format!("{}\n", f(n))).collect::<String>();
+        let a = lines(&|n| format!("l{n}"));
+        let b = lines(&|n| if n == 2 || n == 10 { format!("L{n}") } else { format!("l{n}") });
+        assert_eq!(changed_lines(&a, &b), [1, 9]);
+        assert_eq!(changed_lines("x\ny\nz", "x\ny"), [1], "a removal at the end marks the last line there is");
+        assert_eq!(changed_lines("b", "a\nb"), [0]);
+        assert!(changed_lines("a\nb", "a\nb").is_empty());
+    }
+
+    /// Anthropic reports cache creation, so cached input is added; an endpoint
+    /// that omits it counts the cache in `input_tokens` already.
+    #[test]
+    fn context_tokens_adds_the_cache_only_when_creation_is_reported() {
+        assert_eq!(context_tokens(&json!({"input_tokens": 1, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 100})), 111);
+        assert_eq!(context_tokens(&json!({"input_tokens": 3, "cache_read_input_tokens": 4, "cache_creation_input_tokens": null})), 7);
+        assert_eq!(context_tokens(&json!({"input_tokens": 5, "cache_read_input_tokens": 10})), 5);
+        assert_eq!(context_tokens(&json!({})), 0);
+    }
+
+    #[test]
+    fn percent_encode_keeps_unreserved_and_escapes_the_rest() {
+        assert_eq!(percent_encode("a b/é~-_.9"), "a%20b%2F%C3%A9~-_.9");
+        assert_eq!(percent_encode(""), "");
     }
 
     #[test]
@@ -4167,7 +4205,12 @@ mod tests {
         fs::write(&log, [lines.join("\n"), result].join("\n")).unwrap();
         let usage: Vec<Value> = transcript(&log).into_iter().filter(|e| e["kind"] == "usage").collect();
         assert_eq!(usage.len(), 1);
-        assert!(usage[0]["text"].as_str().unwrap().ends_with("; last context 300 tokens"));
+        assert_eq!(usage[0]["text"], "310 input tokens (350 read from cache), 9 output tokens; last context 300 tokens");
+        // Anthropic reports input outside the cache: the total adds reads and writes.
+        let result = json!({"type":"result","usage":{"input_tokens":16,"cache_read_input_tokens":166278,"cache_creation_input_tokens":34062,"output_tokens":4040}}).to_string();
+        fs::write(&log, [lines.join("\n"), result].join("\n")).unwrap();
+        let usage: Vec<Value> = transcript(&log).into_iter().filter(|e| e["kind"] == "usage").collect();
+        assert_eq!(usage[0]["text"], "200356 input tokens (166278 read from cache, 34062 written to cache), 4040 output tokens; last context 300 tokens");
         assert_eq!(last_words(&[json!({"kind":"message","text":"é".repeat(600)})]).unwrap().chars().count(), 501);
     }
 
@@ -4205,6 +4248,10 @@ mod tests {
             assert_eq!(prompt.contains("**Assessment: Needs work**"), kind == "review");
         }
         assert!(brief(&t, "investigate").contains("Investigate this task"));
+        // Only a work run changes code, so only it is told to run every test before finishing.
+        for kind in ["work", "investigate", "review", "discuss"] {
+            assert_eq!(brief(&t, kind).contains("Before `task done`, run all tests of the projects this task covers"), kind == "work", "{kind}");
+        }
         // A discussion keeps every note whole: no command reads a cut note's full text.
         let mut talk = t.clone();
         talk["notes"] = json!([

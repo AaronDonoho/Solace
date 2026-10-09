@@ -1,5 +1,5 @@
 # Solace root: the projects in this folder, shown on one board. Each has its own solace.toml.
-projects = ["bench/visualizer", "bench/visualizer/frontend", "solace-cli/board", "solace-cli/migration", "solace-cli/frontend"]
+projects = ["bench/visualizer", "bench/visualizer/frontend", "solace-cli/board", "solace-cli/migration", "solace-cli/frontend", "solace-cli/archive"]
 # Solace project settings. Protected: agents may read this file.
 # Text files up to this many bytes are watched; file writes are limited to it.
 watch_limit = 262144
@@ -15,6 +15,8 @@ unwatched = []
 # app = { run = ["gleam", "run", "--"], args = true }
 rust-board-tests = { run = ["cargo", "test", "--manifest-path", "solace-cli/Cargo.toml", "board::"], allowed_in_reviews = true }
 rust-lockdown-tests = { run = ["cargo", "test", "--manifest-path", "solace-cli/Cargo.toml", "lockdown::"], allowed_in_reviews = true }
+# Every module's unit tests; an argument filters by test name (`tasks::`, `scope::`).
+rust-unit = { run = ["env", "-u", "SOLACE_TASK", "-u", "SOLACE_RUN", "-u", "SOLACE_SESSION", "-u", "SOLACE_CONFIG", "-u", "SOLACE_BIN", "cargo", "test", "--manifest-path", "solace-cli/Cargo.toml", "--bins"], args = true, allowed_in_reviews = true }
 # D-71: fixture instances run independently of the invoking agent's task context.
 rust-acceptance = { run = ["env", "-u", "SOLACE_TASK", "-u", "SOLACE_RUN", "-u", "SOLACE_SESSION", "-u", "SOLACE_CONFIG", "-u", "SOLACE_BIN", "cargo", "test", "--manifest-path", "solace-cli/Cargo.toml", "--test", "acceptance"], allowed_in_reviews = true }
 cargo-timings = { run = ["cargo", "build", "--release", "--timings", "--manifest-path", "solace-cli/Cargo.toml"], allowed_in_reviews = true }

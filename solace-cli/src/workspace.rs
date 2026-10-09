@@ -439,6 +439,107 @@ mod tests {
         assert_eq!(f[1]["name"], "a_inner");
     }
 
+    /// D-74: deleting a project's folder is refused unless the name is typed, the
+    /// folder is reached without symlinks, and no other listed project is inside it.
+    #[test]
+    fn deletable_refuses_what_it_should_not_delete() {
+        let root = Scratch::new();
+        for d in ["a", "a/inner", "b", "real"] {
+            project(&root, d);
+        }
+        std::os::unix::fs::symlink(root.join("real"), root.join("link")).unwrap();
+        fs::write(root.join("solace.toml"), "projects = [\"a\", \"a/inner\", \"b\"]\n").unwrap();
+        let refused = |dir: &str, name: &str, why: &str| {
+            let e = deletable(&root, dir, name).unwrap_err();
+            assert!(e.0.contains(why), "{dir} {name}: {}", e.0);
+            e
+        };
+        assert!(refused(".", ".", "root's own project").0.contains("E7014"));
+        assert!(deletable(&root, "zzz", "zzz").unwrap_err().0.contains("not a project of this root"));
+        assert!(refused("b", "other", "type the project's name").0.contains("E7014"));
+        assert!(refused("b", "", "type the project's name").0.contains("E7014"));
+        assert!(refused("a", "a", "holds the project a/inner").0.contains("E7014"));
+        // The folder name, or the package name in its gleam.toml, confirms.
+        assert_eq!(deletable(&root, "b", "b").unwrap(), root.join("b"));
+        assert_eq!(deletable(&root, "a/inner", "a/inner").unwrap(), root.join("a/inner"));
+        assert_eq!(deletable(&root, "a/inner", "a_inner").unwrap(), root.join("a/inner"));
+        // A folder with no package name is confirmed by its folder name only.
+        fs::write(root.join("b/gleam.toml"), "").unwrap();
+        refused("b", "b_pkg", "type the project's name");
+        assert!(deletable(&root, "b", "b").is_ok());
+        // A symlinked folder never gets this far: `listed` refuses it first, so
+        // `deletable`'s own symlink check is a second line of defence.
+        fs::write(root.join("solace.toml"), "projects = [\"a\", \"b\", \"link\"]\n").unwrap();
+        assert!(deletable(&root, "link", "link").unwrap_err().0.contains("without symlinks"));
+    }
+
+    /// `new_project` refuses before it runs `gleam`, so none of these need the toolchain.
+    #[test]
+    fn new_project_refuses_before_running_gleam() {
+        let root = Scratch::new();
+        fs::create_dir_all(root.join("taken")).unwrap();
+        for dir in ["../x", "/x", "a/../b", "a\\b", ""] {
+            assert!(new_project(&root, dir, "fine", false).unwrap_err().0.contains("E6002"), "{dir}");
+        }
+        for name in ["Bad", "1st", "a-b", "", "a b"] {
+            assert!(new_project(&root, "fresh", name, false).unwrap_err().0.contains("isn't a Gleam package name"), "{name}");
+        }
+        assert!(new_project(&root, "taken", "fine", true).unwrap_err().0.contains("already exists"));
+        assert!(package_name("a_1") && !package_name("_a"));
+    }
+
+    fn has_gleam() -> bool {
+        Command::new("gleam").arg("--version").output().is_ok_and(|o| o.status.success())
+    }
+
+    /// The flags `new_project` hands to `gleam new`: the erlang default, `--javascript`,
+    /// and `--skip-git` inside a repository. Needs `gleam` on PATH; without it nothing runs.
+    #[test]
+    fn new_project_passes_the_toolchain_its_flags() {
+        if !has_gleam() {
+            return;
+        }
+        // Not inside a repository: the project starts its own.
+        let root = Scratch::new();
+        new_project(&root, "erl", "erl", false).unwrap();
+        assert_eq!(target(&root.join("erl")), "erlang");
+        assert!(root.join("erl/.git").exists(), "outside a repository the project starts its own");
+        new_project(&root, "js", "js", true).unwrap();
+        assert_eq!(target(&root.join("js")), "javascript");
+        assert!(members(&root).unwrap().contains(&"js".to_string()), "a new project is listed");
+        // Inside a repository it joins that one.
+        let repo = Scratch::new();
+        fs::create_dir_all(repo.join(".git")).unwrap();
+        new_project(&repo, "inner", "inner", false).unwrap();
+        assert!(!repo.join("inner/.git").exists(), "inside a repository there is no nested one");
+    }
+
+    /// A name `gleam new` rejects comes back with gleam's own output.
+    #[test]
+    fn new_project_reports_a_failing_gleam_new() {
+        if !has_gleam() {
+            return;
+        }
+        let root = Scratch::new();
+        // Package names that collide with Gleam's own are refused by the toolchain, not by `package_name`.
+        let err = new_project(&root, "gleam", "gleam", false).unwrap_err().0;
+        assert!(err.contains("gleam new failed"), "{err}");
+        assert!(!members(&root).unwrap().contains(&"gleam".to_string()));
+    }
+
+    #[test]
+    fn target_defaults_to_erlang_for_a_gleam_project_only() {
+        let root = Scratch::new();
+        project(&root, "erl");
+        project(&root, "js");
+        fs::write(root.join("js/gleam.toml"), "name = \"js\"\ntarget = \"javascript\"\n").unwrap();
+        fs::create_dir_all(root.join("plain")).unwrap();
+        assert_eq!(target(&root.join("erl")), "erlang");
+        assert_eq!(target(&root.join("js")), "javascript");
+        assert_eq!(target(&root.join("plain")), "");
+        assert!(!contained(&root, "a\\b"));
+    }
+
     #[test]
     fn one_root_holds_every_project() {
         let root = Scratch::new();

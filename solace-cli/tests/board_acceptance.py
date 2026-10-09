@@ -387,7 +387,8 @@ class Board(unittest.TestCase):
         self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([{'exit':1, 'error':'usage limit reached'}])})
         t = self.action(t, 'reassign')
         rid = t['runs'][-1]['id']
-        t = self.wait(t, lambda x: x['column']=='blocked')
+        t = self.wait(t, lambda x: (x['attention'] or {}).get('hold'))
+        self.assertEqual(t['column'], 'assigned')
         launch = json.loads((self.root/'.solace'/(rid+'.launch')).read_text())
         self.assertEqual(launch['session'], original)
         self.assertIn('usage limit reached', t['attention']['reason'])
@@ -430,14 +431,14 @@ class Board(unittest.TestCase):
         self.api('PATCH','/tasks/'+t['id'],{'title':'no'},'E7004')
         t=self.completed([]);self.action(t,'approve');t=self.action(t,'start_over');self.assertEqual(t['stamps'],{})
         self.wait(t,lambda x:x['column']=='needs_review');self.action(t,'approve');self.assertEqual(self.action(t,'cancel')['column'],'cancelled')
-        crashed=self.assign([{'exit':7}]);crashed=self.wait(crashed,lambda x:x['column']=='blocked');self.assertIn('without finishing',crashed['notes'][-1]['text'])
+        crashed=self.assign([{'exit':7}]);crashed=self.wait(crashed,lambda x:(x['attention'] or {}).get('hold'));self.assertEqual(crashed['column'],'assigned');self.assertIn('without finishing',crashed['notes'][-1]['text'])
         self.assertIn('without finishing',crashed['attention']['reason'])
         self.assertIsNone(self.action(crashed,'cancel')['attention'])
         # A failed review is flagged but leaves the task where it was.
         reviewed=self.completed([]);self.api('PATCH','/tasks/'+reviewed['id'],{'body':json.dumps([{'exit':7}])})
         self.action(reviewed,'review',model='fake');reviewed=self.wait(reviewed,lambda x:x['runs'][-1]['state']=='ended')
         self.assertEqual(reviewed['column'],'needs_review');self.assertIn('without finishing',reviewed['attention']['reason'])
-        timed=self.assign([{'sleep':3}]);timed=self.wait(timed,lambda x:x['column']=='blocked');self.assertIn('timeout',timed['notes'][-1]['text'])
+        timed=self.assign([{'sleep':3}]);timed=self.wait(timed,lambda x:(x['attention'] or {}).get('hold'));self.assertEqual(timed['column'],'assigned');self.assertIn('timeout',timed['notes'][-1]['text'])
     def test_a18_review_reads_task_diff(self):
         (self.root/'priv/b').write_text('one\ntwo\nthree\nfour\nfive\nsix\n')
         t=self.completed([
@@ -501,7 +502,7 @@ class Board(unittest.TestCase):
         custom=default.replace('actions = ["plan", "cancel"]','actions = ["triage", "plan", "cancel"]')+'\ntriage = {to="triage"}\n\n[[board.columns]]\nid="triage"\nlabel="Triage"\nactions=["plan"]\n'
         (self.root/'solace.toml').write_text(original+custom)
         t=self.create();self.assertEqual(self.action(t,'triage')['column'],'triage');self.assertEqual(self.action(t,'plan')['column'],'planning')
-        for broken in [default.replace('to = "planning"','to = "missing"'),default+'\nunused={to="backlog"}\n',default.replace('asked = "blocked",',''),default.replace('next = "complete"','next = "missing"'),default.replace('id = "complete"','id = "complete"\nactions=["plan"]')]:
+        for broken in [default.replace('to = "planning"','to = "missing"'),default+'\nunused={to="backlog"}\n',default.replace('finished = "needs_review"',''),default.replace('events = {','events = { asked = "missing",'),default.replace('next = "complete"','next = "missing"'),default.replace('id = "complete"','id = "complete"\nactions=["plan"]')]:
             (self.root/'solace.toml').write_text(original+broken);self.api('GET','/workflow',code='E6020')
         (self.root/'solace.toml').write_text(original)
     def test_stop_ends_running_and_paused_agents(self):
@@ -552,7 +553,7 @@ class Board(unittest.TestCase):
         self.assertIn('agent exited without finishing',t['notes'][-1]['text']);self.assertIsNotNone(t['attention'])
     def test_a5_question_wait_and_new_agent(self):
         t=self.assign([{'command':'task ask','text':'Which?','options':['a','b']},{'command':'task done answered'}])
-        t=self.wait(t,lambda x:x['column']=='blocked');rid=t['runs'][-1]['id'];pid=int((self.root/'.solace'/(rid+'.pid')).read_text());os.kill(pid,0)
+        t=self.wait(t,lambda x:(x['attention'] or {}).get('hold'));self.assertEqual(t['column'],'assigned');rid=t['runs'][-1]['id'];pid=int((self.root/'.solace'/(rid+'.pid')).read_text());os.kill(pid,0)
         self.assertFalse((self.root/'.solace'/(rid+'.responses')).exists())
         time.sleep(2.2)  # Waiting does not consume the two-second task timeout.
         self.assertEqual(self.get(t)['runs'][-1]['state'],'waiting')
@@ -572,7 +573,7 @@ class Board(unittest.TestCase):
         self.api('POST',f'/tasks/{t["id"]}/questions/{t["questions"][0]["id"]}',{'option':'a'})
         self.assertEqual(len(self.get(t)['runs']),1)  # Retried answers never launch a new agent.
         response=json.loads((self.root/'.solace'/(rid+'.responses')).read_text().splitlines()[0]);self.assertEqual(json.loads(response['result']['content'][0]['text'])['questions'][0]['answer'],'a')
-        t=self.assign([{'command':'task ask','text':'Again?','options':['a','b']},{'command':'task done answered'}]);t=self.wait(t,lambda x:x['column']=='blocked');old=t['runs'][-1]['id']
+        t=self.assign([{'command':'task ask','text':'Again?','options':['a','b']},{'command':'task done answered'}]);t=self.wait(t,lambda x:(x['attention'] or {}).get('hold'));old=t['runs'][-1]['id']
         t=self.action(t,'new_agent',text='b');new=t['runs'][-1]['id'];self.assertNotEqual(old,new)
         self.wait(t,lambda x:len(x['questions'])==2)
         prompt=(self.root/'.solace'/(new+'.prompt')).read_text();self.assertIn("Answer: b",prompt);self.assertNotIn('"runs"',prompt)
@@ -620,7 +621,7 @@ class Board(unittest.TestCase):
         self.assertEqual(t['runs'][-1]['state'],'waiting')
         self.action(t,'pause')
         t=self.api('POST',f'/tasks/{t["id"]}/questions/second',{'text':'custom answer'})
-        self.assertEqual(t['runs'][-1]['state'],'waiting');self.assertEqual(t['paused_from'],'blocked')
+        self.assertEqual(t['runs'][-1]['state'],'waiting');self.assertEqual(t['paused_from'],'assigned')
         self.assertFalse((self.root/'.solace'/(rid+'.responses')).exists())
         t=self.action(t,'resume')
         self.assertEqual(t['column'],'assigned');self.assertEqual(t['runs'][-1]['state'],'running')
@@ -808,10 +809,14 @@ class Board(unittest.TestCase):
         e=self.action(t,'assign','E7011',model='missing');self.assertIn('not installed',e['message'])
         self.assertEqual(self.get(t)['column'],'planning')
         t=self.action(t,'assign',model='fake')
-        t=self.wait(t,lambda x:x['column']=='blocked')  # the fake agent has no steps and exits
+        t=self.wait(t,lambda x:(x['attention'] or {}).get('hold'))  # the fake agent has no steps and exits
+        self.assertEqual(t['column'],'assigned')
         self.assertTrue(t['attention']['reason'])
         asked=self.assign([{'command':'task ask','text':'Which?','options':['a','b']}])
-        asked=self.wait(asked,lambda x:x['column']=='blocked');self.assertIn('question',asked['attention']['reason'])
+        asked=self.wait(asked,lambda x:(x['attention'] or {}).get('hold'));self.assertIn('question',asked['attention']['reason'])
+        self.assertEqual(asked['column'],'assigned')
+        # Held attention survives an unrelated action while the question is open (D-82).
+        asked=self.action(asked,'pause');self.assertTrue(asked['attention']['hold']);asked=self.action(asked,'resume');self.assertTrue(asked['attention']['hold'])
         self.assertIsNone(self.action(asked,'cancel')['attention'])
 
     def test_a10_events_reconnect(self):

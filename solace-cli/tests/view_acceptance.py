@@ -123,6 +123,51 @@ pub fn main_test() {
         results = {t['name']: t['result'] for t in review['tests']}
         self.assertEqual(results.get('main_test'), 'passing', review['tests'])
 
+    def test_every_command_in_the_usage_list_is_dispatched(self):
+        # One valid shape per command: none may fall through to "Unknown command" (it may still refuse).
+        shapes = [
+            (['session', 'start'], None), (['inspect', 'app.main'], None), (['view', 'app.main'], None),
+            (['refs', 'app.main'], None), (['impact'], None), (['find', 'main'], None),
+            (['submit', 'app.main'], 'pub fn main() {\n  let _ = args()\n  io.println("hello")\n  write("out", "hi")\n}'),
+            (['drafts'], None), (['delete', 'app.nosuch'], None), (['check'], None), (['test', 'app_test.main_test'], None),
+            (['probe'], 'let x = 1'), (['work', 'list'], None), (['files'], None), (['read', 'gleam.toml'], None),
+            (['write', 'notes.txt'], 'notes\n'), (['remove', 'notes.txt'], None), (['build'], None), (['format'], None),
+            (['run', 'nosuch'], None), (['task', 'diff'], None),
+        ]
+        usage = subprocess.run([BIN, 'nosuchcommand'], cwd=self.root, env=self.env, input='', capture_output=True, text=True)
+        listed = usage.stdout.split('Commands: ', 1)[1].split('.')[0].split(', ')
+        self.assertEqual(sorted({args[0] for args, _ in shapes}), sorted(listed), 'the table covers exactly the usage list')
+        for args, text in shapes:
+            p = subprocess.run([BIN, *args], cwd=self.root, env=self.env, input=text or '', capture_output=True, text=True, timeout=120)
+            self.assertNotIn('Unknown command', p.stdout + p.stderr, args)
+
+    def test_c3_tests_that_cannot_compile_are_reported_as_such(self):
+        self.cli('submit', 'app.main', input_text='pub fn main() { let _ = args()\n write("out", "hi") }')
+        steps = [{'command': 'submit app.main', 'text': 'pub fn main() {\n  let _ = args()\n  io.println("changed")\n  write("out", "hi")\n}'}, {'command': 'task done done'}]
+        task = self.api('POST', '/tasks', {'title': 'Print', 'body': json.dumps(steps)})
+        self.api('POST', '/tasks/' + task['id'] + '/actions', {'action': 'plan'})
+        self.api('POST', '/tasks/' + task['id'] + '/actions', {'action': 'assign', 'model': 'fake'})
+        for _ in range(200):
+            task = self.api('GET', '/tasks/' + task['id'])
+            if task['column'] == 'needs_review':
+                break
+            time.sleep(.05)
+        self.assertEqual(task['column'], 'needs_review')
+        # A dependency that does not exist stops the review copy from building, so no test can run.
+        manifest = self.root / 'gleam.toml'
+        manifest.write_text(manifest.read_text() + '\n[dev-dependencies]\nno_such_package_for_solace = ">= 1.0.0 and < 2.0.0"\n')
+        self.api('POST', '/tests', {'task': task['id']})
+        state = None
+        for _ in range(600):
+            state = (self.api('GET', '/tasks/' + task['id']).get('review_tests') or {}).get('state')
+            if state not in (None, 'running'):
+                break
+            time.sleep(.1)
+        self.assertEqual(state, 'failed to compile')
+        review = self.api('GET', '/graph?task=' + task['id'])['review']
+        results = {t['name']: t['result'] for t in review['tests']}
+        self.assertEqual(results.get('main_test'), 'failed to compile', review['tests'])
+
 
 if __name__ == '__main__':
     unittest.main()

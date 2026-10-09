@@ -1,5 +1,5 @@
 [board]
-events = { asked = "blocked", finished = "needs_review", failed = "blocked" }
+events = { finished = "needs_review" }   # asked and failed leave the task where it is, flagged for attention
 
 [[board.columns]]
 id = "backlog"
@@ -11,10 +11,6 @@ actions = ["investigate", "assign", "complete", "to_backlog", "cancel"]
 
 [[board.columns]]
 id = "assigned"
-actions = ["new_agent", "cancel"]
-
-[[board.columns]]
-id = "blocked"
 actions = ["unblock", "new_agent", "review", "cancel"]
 
 [[board.columns]]

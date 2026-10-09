@@ -25,7 +25,7 @@ pub type Route {
   View(base: String)
 }
 
-type Msg {
+pub type Msg {
   RouteChanged(Route)
 }
 
@@ -53,7 +53,7 @@ pub fn page(route: Route) -> Element(msg) {
   }
 }
 
-fn init(_flags: Nil) -> #(Route, Effect(Msg)) {
+pub fn init(_flags: Nil) -> #(Route, Effect(Msg)) {
   let initial = case modem.initial_uri() {
     Ok(uri) -> route(uri)
     Error(_) -> Board
@@ -61,7 +61,7 @@ fn init(_flags: Nil) -> #(Route, Effect(Msg)) {
   #(initial, modem.init(fn(uri) { RouteChanged(route(uri)) }))
 }
 
-fn update(_model: Route, msg: Msg) -> #(Route, Effect(Msg)) {
+pub fn update(_model: Route, msg: Msg) -> #(Route, Effect(Msg)) {
   let RouteChanged(route) = msg
   #(route, effect.none())
 }
@@ -86,4 +86,21 @@ pub fn view(route: Route) -> Element(msg) {
     ]),
     page(route),
   ])
+}
+
+/// Whether a drag starting at an element is stopped: only a box you can type in may be dragged from.
+pub fn blocks_drag(in_text_box: Bool) -> Bool {
+  !in_text_box
+}
+
+/// Whether a click must skip modem's in-page router so the browser keeps its new-tab behaviour:
+/// a click with a modifier key held, on a menu link.
+pub fn keeps_new_tab(
+  ctrl ctrl: Bool,
+  meta meta: Bool,
+  shift shift: Bool,
+  alt alt: Bool,
+  on_menu_link on_menu_link: Bool,
+) -> Bool {
+  { ctrl || meta || shift || alt } && on_menu_link
 }

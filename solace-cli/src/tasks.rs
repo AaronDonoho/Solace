@@ -15,9 +15,15 @@ type Job = Box<dyn FnOnce() + Send>;
 struct Server {
     jobs: mpsc::Sender<Job>,
     thread: std::thread::ThreadId,
+    top: PathBuf,
 }
 /// This process's task server; only `solace serve` starts one.
 static SERVER: OnceLock<Server> = OnceLock::new();
+/// This process's task server, when it serves the root `top`: another root
+/// (a test's, as the server test runs in the same process) has no server here.
+fn server_for(top: &Path) -> Option<&'static Server> {
+    SERVER.get().filter(|s| s.top == top)
+}
 
 /// Starts the task server for the root `top`: first the messages left in the
 /// inbox, then each operation and message in the order they arrive.
@@ -27,37 +33,43 @@ pub fn start(top: &Path) -> Result<(), Failure> {
     let thread = std::thread::spawn(move || {
         // Held while this process serves the root, so others see it is served;
         // taken once the root has a `.solace`, which an empty folder doesn't yet.
-        let mut _held = None;
+        let mut held = None;
         // Tasks a stop or crash left in a final column unsettled, settled off this thread.
         let again = root.clone();
         std::thread::spawn(move || board::resettle(&again));
         loop {
-            if _held.is_none() && root.join(".solace").is_dir() {
-                _held = fs::create_dir_all(board::store_dir(&root)).ok().and_then(|_| try_lock_file(&server_lock(&root)).ok().flatten());
-            }
-            drain(&root);
-            if let Ok(job) = queue.recv_timeout(Duration::from_millis(50)) {
-                // Messages sent before this job was queued (an agent's `done` just
-                // before it exits) are applied first, so they keep their order.
-                drain(&root);
-                // A failed operation fails its request, not the server.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
-            }
+            tick(&root, &mut held, &queue);
         }
     });
     SERVER
-        .set(Server { jobs, thread: thread.thread().id() })
+        .set(Server { jobs, thread: thread.thread().id(), top: scope::top(top) })
         .map_err(|_| Failure("the task server is already running".into(), 1))
 }
+/// One turn of the task server: takes the server lock (`held`) once the root
+/// has a `.solace`, applies the inbox, then runs at most one queued operation.
+fn tick(root: &Path, held: &mut Option<fs::File>, queue: &mpsc::Receiver<Job>) {
+    if held.is_none() && root.join(".solace").is_dir() {
+        *held = fs::create_dir_all(board::store_dir(root)).ok().and_then(|_| try_lock_file(&server_lock(root)).ok().flatten());
+    }
+    drain(root);
+    if let Ok(job) = queue.recv_timeout(Duration::from_millis(50)) {
+        // Messages sent before this job was queued (an agent's `done` just
+        // before it exits) are applied first, so they keep their order.
+        drain(root);
+        // A failed operation fails its request, not the server.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+    }
+}
 
-/// Runs `f` as one operation of the task server: on its thread when this
-/// process serves the root, else here (a process without a server, as tests).
+/// Runs `f` as one operation of the task server for the root `top`: on its
+/// thread when this process serves that root, else here (a process without a
+/// server for it, as tests).
 /// An operation never takes a project lock, so a caller holding one can't
 /// block the server. An operation can be slow (an undo type-checks each
 /// project inside it): other writes and senders wait their turn, however long it
 /// takes (`applied` has no time limit while a server runs).
-pub fn op<R: Send + 'static>(f: impl FnOnce() -> Result<R, Failure> + Send + 'static) -> Result<R, Failure> {
-    match SERVER.get() {
+pub fn op<R: Send + 'static>(top: &Path, f: impl FnOnce() -> Result<R, Failure> + Send + 'static) -> Result<R, Failure> {
+    match server_for(top) {
         Some(server) if server.thread != std::thread::current().id() => {
             let (reply, answer) = mpsc::channel();
             let stopped = || Failure("the task server stopped".into(), 1);
@@ -76,7 +88,8 @@ pub fn put(s: &Store, t: &Value) -> Result<(), Failure> {
         t["home"] = json!(scope::dir(&scope::top(&s.root), &s.root));
     }
     let top = scope::top(&s.root);
-    op(move || write(&top, &t))
+    let served = top.clone();
+    op(&served, move || write(&top, &t))
 }
 
 /// Changes task `tid` of the project `root` with `f`, read and written as one
@@ -86,8 +99,8 @@ pub fn update<R: Send + 'static>(
     tid: &str,
     f: impl FnOnce(&mut Value) -> Result<R, Failure> + Send + 'static,
 ) -> Result<R, Failure> {
-    let (root, tid) = (root.to_path_buf(), tid.to_string());
-    op(move || {
+    let (top, root, tid) = (scope::top(root), root.to_path_buf(), tid.to_string());
+    op(&top, move || {
         let mut t = board::task(&root, &tid)?;
         let out = f(&mut t)?;
         write(&scope::top(&root), &t)?;
@@ -97,7 +110,7 @@ pub fn update<R: Send + 'static>(
 
 fn write(top: &Path, t: &Value) -> Result<(), Failure> {
     let id = t["id"].as_str().unwrap_or("");
-    if id.is_empty() || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') {
+    if !board::valid_id(id) {
         return board::err("E7001", "invalid task id");
     }
     // Synced like an inbox message, so a power loss never leaves an empty task file.
@@ -165,7 +178,7 @@ fn server_lock(top: &Path) -> PathBuf {
 }
 /// Whether a server is running for the root, so a message is applied soon.
 pub fn serving(top: &Path) -> bool {
-    SERVER.get().is_some() || try_lock_file(&server_lock(top)).is_ok_and(|f| f.is_none())
+    server_for(top).is_some() || try_lock_file(&server_lock(top)).is_ok_and(|f| f.is_none())
 }
 /// Applies message `m` before returning, for a sender that reads the task
 /// next: as an operation where this process serves the root, through the
@@ -177,7 +190,7 @@ pub fn deliver(top: &Path, mut m: Value) -> Result<(), Failure> {
     // to it), so no server starts in between. A caller may hold project locks, so
     // nothing is settled here: `serve` settles what is left.
     let mut _held = None;
-    if SERVER.get().is_none() {
+    if server_for(top).is_none() {
         match try_lock_file(&server_lock(top)) {
             Ok(None) => {
                 let sent = send(top, m)?;
@@ -196,7 +209,7 @@ pub fn deliver(top: &Path, mut m: Value) -> Result<(), Failure> {
     }
     m["id"] = json!(message_id());
     let top = top.to_path_buf();
-    if let Some(tid) = op({
+    if let Some(tid) = op(&top, {
         let top = top.clone();
         move || apply(&top, &m)
     })? {
@@ -280,7 +293,7 @@ fn drain_with(top: &Path, settle: bool) {
 /// Tells the task, when it can be read, that a message for it was set aside, so
 /// a human learns that something an agent said never took effect.
 fn flag_set_aside(top: &Path, m: &Value, why: &str) {
-    let Some(tid) = m["task"].as_str().filter(|t| !t.is_empty() && t.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-')) else { return };
+    let Some(tid) = m["task"].as_str().filter(|t| board::valid_id(t)) else { return };
     let path = board::store_dir(top).join(format!("{tid}.json"));
     let Ok(bytes) = fs::read(&path) else { return };
     let Ok(mut t) = serde_json::from_slice::<Value>(&bytes) else { return };
@@ -304,13 +317,14 @@ pub fn rejected(top: &Path, path: &Path) -> bool {
 /// project locks, and a holder of those may be waiting on this thread. Elsewhere
 /// (no server, as tests) it runs here.
 fn settle_later(top: &Path, tid: String) {
+    let on_server = server_for(top).is_some_and(|s| s.thread == std::thread::current().id());
     let top = top.to_path_buf();
     let run = move || {
         if let Err(e) = board::settle_final(&top, &tid) {
             eprintln!("settling task {tid}: {}", e.0);
         }
     };
-    if SERVER.get().is_some_and(|s| s.thread == std::thread::current().id()) {
+    if on_server {
         std::thread::spawn(run);
     } else {
         run();
@@ -330,6 +344,10 @@ fn apply(top: &Path, m: &Value) -> Result<Option<String>, Failure> {
         return write(top, &t).map(|_| None);
     }
     let tid = m["task"].as_str().unwrap_or("");
+    // The id names the task's file, so one that could leave the store is refused.
+    if !board::valid_id(tid) {
+        return board::err("E7001", "invalid task id");
+    }
     let path = board::store_dir(top).join(format!("{tid}.json"));
     let mut t: Value = serde_json::from_slice(&fs::read(&path)?).map_err(|e| Failure(e.to_string(), 1))?;
     // Only the message applied just before a crash can come again; a message with
@@ -350,20 +368,28 @@ fn apply(top: &Path, m: &Value) -> Result<Option<String>, Failure> {
 /// operation, and a create with a `request` seen before returns its task
 /// (D-77 point 6).
 pub fn api(root: &Path, method: &str, parts: &[&str], body: Value) -> Result<Value, Failure> {
+    api_with(root, method, parts, body, board::needs_lock)
+}
+/// Whether a change takes its task's projects' locks: `board::needs_lock`, or
+/// a stand-in in tests.
+type NeedsLock = fn(&Path, &[&str], &Value) -> Result<bool, Failure>;
+/// `api`, with `needs` deciding whether a change takes the locks.
+fn api_with(root: &Path, method: &str, parts: &[&str], body: Value, needs: NeedsLock) -> Result<Value, Failure> {
     if method == "GET" {
         return board::read_task_api(root, parts);
     }
     // Only a change to code takes its projects' locks (D-77 point 5), so a
     // task-only change never waits on an agent's command.
-    let mut guard = if board::needs_lock(root, parts, &body)? { Some(board::guard(root, parts.to_vec(), &body)?) } else { None };
+    let mut guard = if needs(root, parts, &body)? { Some(board::guard(root, parts.to_vec(), &body)?) } else { None };
     if parts.len() == 1 {
         let (top, root) = (scope::top(root), root.to_path_buf());
+        let served = top.clone();
         let request = match body.get("request") {
             None => None,
             Some(Value::String(r)) if !r.is_empty() => Some(r.clone()),
             Some(_) => return board::err("E7001", "request must be a string"),
         };
-        return op(move || {
+        return op(&served, move || {
             if let Some(r) = &request
                 && let Some(t) = board::all_tasks(&top)?.into_iter().find(|t| t["request"] == *r)
             {
@@ -377,13 +403,13 @@ pub fn api(root: &Path, method: &str, parts: &[&str], body: Value) -> Result<Val
             Ok(t)
         });
     }
-    let (t, after) = match change(root, method, parts, &body, guard.is_some())? {
+    let (t, after) = match change(root, method, parts, &body, guard.is_some(), needs)? {
         Some(done) => done,
         // The task gained changes after the check: take the locks and run it
         // again, keeping them whatever it needs now, so it retries once.
         None => {
             guard = Some(board::guard(root, parts.to_vec(), &body)?);
-            change(root, method, parts, &body, true)?.ok_or_else(|| Failure("the task's projects were not locked".into(), 1))?
+            change(root, method, parts, &body, true, needs)?.ok_or_else(|| Failure("the task's projects were not locked".into(), 1))?
         }
     };
     board::after(&scope::path(&scope::top(root), t["home"].as_str().unwrap_or(".")), &t, after);
@@ -393,13 +419,14 @@ pub fn api(root: &Path, method: &str, parts: &[&str], body: Value) -> Result<Val
 /// One change to a task, as an operation. Without its projects' locks
 /// (`held` false) it checks again inside the operation, where nothing else
 /// writes the task, and returns None, changing nothing, when the change now
-/// needs them. The operation never takes a lock itself (see `op`).
-fn change(root: &Path, method: &str, parts: &[&str], body: &Value, held: bool) -> Result<Option<(Value, board::After)>, Failure> {
+/// needs them (`needs` says). The operation never takes a lock itself (see `op`).
+fn change(root: &Path, method: &str, parts: &[&str], body: &Value, held: bool, needs: NeedsLock) -> Result<Option<(Value, board::After)>, Failure> {
     let (root, method, body, top) = (root.to_path_buf(), method.to_string(), body.clone(), scope::top(root));
     let parts: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
-    op(move || {
+    let served = top.clone();
+    op(&served, move || {
         let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
-        if !held && board::needs_lock(&root, &parts, &body)? {
+        if !held && needs(&root, &parts, &body)? {
             return Ok(None);
         }
         let tid = parts[1];
@@ -410,4 +437,515 @@ fn change(root: &Path, method: &str, parts: &[&str], body: &Value, held: bool) -
         }
         Ok(Some((t, after)))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A root whose task store holds t1, in `backlog`.
+    fn root() -> testing::Scratch {
+        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
+        board::adopt_tasks(&root, &root).unwrap();
+        root
+    }
+    fn stored(root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(board::store_dir(root)).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
+        names.sort();
+        names
+    }
+
+    /// The id names the task's file, so one that could leave the store is refused.
+    #[test]
+    fn write_refuses_an_id_that_is_not_a_plain_name() {
+        let root = root();
+        let before = stored(&root);
+        for bad in [json!(""), json!("../x"), json!("a/b"), json!("a b"), json!("a.b"), json!(1), Value::Null] {
+            let e = write(&root, &json!({"id": bad, "home": "."})).unwrap_err();
+            assert!(e.0.contains("E7001") && e.0.contains("invalid task id"), "{bad}: {}", e.0);
+        }
+        assert_eq!(stored(&root), before);
+        assert!(!root.join(".solace/x.json").exists());
+        write(&root, &json!({"id": "ab-12", "home": "."})).unwrap();
+        assert!(stored(&root).contains(&"ab-12.json".to_string()));
+        assert!(!stored(&root).iter().any(|n| n.ends_with(".tmp")), "the temporary file is renamed");
+    }
+
+    /// A create applied again (a replay after a crash) leaves the first one.
+    #[test]
+    fn a_create_message_applies_once() {
+        let root = root();
+        let mut t = board::new_task("New", "", &json!("backlog"), 1.);
+        t["home"] = json!(".");
+        let tid = t["id"].as_str().unwrap().to_string();
+        assert_eq!(apply(&root, &json!({"id": "m1", "kind": "create", "new": t})).unwrap(), None);
+        let first = board::task(&root, &tid).unwrap();
+        assert_eq!((first["title"].as_str(), first["inbox"].as_str()), (Some("New"), Some("m1")));
+        t["title"] = json!("Again");
+        assert_eq!(apply(&root, &json!({"id": "m2", "kind": "create", "new": t})).unwrap(), None);
+        assert_eq!(board::task(&root, &tid).unwrap(), first);
+    }
+
+    /// D-77 point 6: a create with a `request` seen before returns its task.
+    #[test]
+    fn a_create_with_a_known_request_returns_its_task() {
+        let root = root();
+        let post = |body: Value| api(&root, "POST", &["tasks"], body);
+        let a = post(json!({"title": "A", "request": "req-1"})).unwrap();
+        assert_eq!(a["request"], "req-1");
+        let again = post(json!({"title": "A, resent", "request": "req-1"})).unwrap();
+        assert_eq!(again["id"], a["id"]);
+        assert_eq!(board::all_tasks(&root).unwrap().len(), 2);
+        // Without a request, each create is a new task.
+        let (b, c) = (post(json!({"title": "B"})).unwrap(), post(json!({"title": "B"})).unwrap());
+        assert_ne!(b["id"], c["id"]);
+        assert!(b.get("request").is_none_or(Value::is_null));
+        for bad in [json!(""), json!(5), json!(null)] {
+            let e = post(json!({"title": "C", "request": bad})).unwrap_err();
+            assert!(e.0.contains("request must be a string"), "{bad}: {}", e.0);
+        }
+        assert_eq!(board::all_tasks(&root).unwrap().len(), 4);
+    }
+
+    /// An update whose change fails writes nothing.
+    #[test]
+    fn a_failed_update_writes_nothing() {
+        let root = root();
+        let before = board::task(&root, "t1").unwrap();
+        let e = update(&root, "t1", |t| {
+            t["title"] = json!("Changed");
+            Err::<(), _>(Failure("refused".into(), 1))
+        })
+        .unwrap_err();
+        assert_eq!(e.0, "refused");
+        assert_eq!(board::task(&root, "t1").unwrap(), before);
+        assert_eq!(update(&root, "t1", |t| Ok(t["column"].clone())).unwrap(), "backlog");
+        assert!(update(&root, "nope", |_| Ok(())).is_err());
+    }
+
+    /// A message lands whole, with its id, and ids sort in the order sent.
+    #[test]
+    fn send_leaves_whole_messages_in_order() {
+        let root = root();
+        let first = send(&root, json!({"kind": "note", "task": "t1", "text": "a"})).unwrap();
+        let second = send(&root, json!({"kind": "note", "task": "t1", "text": "b"})).unwrap();
+        assert!(first < second);
+        let m: Value = serde_json::from_slice(&fs::read(&first).unwrap()).unwrap();
+        assert_eq!(m["id"].as_str(), first.file_stem().and_then(|s| s.to_str()));
+        assert_eq!(m["text"], "a");
+        let names: Vec<_> = fs::read_dir(inbox(&root)).unwrap().map(|e| e.unwrap().path()).collect();
+        assert!(names.iter().all(|p| p.extension().is_some_and(|x| x == "json")), "{names:?}");
+        assert!(!rejected(&root, &first));
+    }
+
+    /// The server lock tells whether a server runs for the root.
+    #[test]
+    fn serving_follows_the_server_lock() {
+        let root = root();
+        assert!(!serving(&root));
+        let held = try_lock_file(&server_lock(&root)).unwrap().unwrap();
+        assert!(serving(&root));
+        drop(held);
+        assert!(!serving(&root));
+    }
+
+    /// A message with an older id that lands after a newer one is still applied.
+    #[test]
+    fn an_older_inbox_message_arriving_late_is_applied() {
+        let root = root();
+        testing::inbox_file(&root, "0002", json!({"kind":"note","task":"t1","author":"solace","text":"newer"}));
+        drain(&root);
+        testing::inbox_file(&root, "0001", json!({"kind":"note","task":"t1","author":"solace","text":"older"}));
+        drain(&root);
+        let texts: Vec<String> = board::task(&root, "t1").unwrap()["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap().to_string()).collect();
+        assert_eq!(texts, ["newer", "older"]);
+        // The same message again (a replay after a crash) is skipped.
+        testing::inbox_file(&root, "0001", json!({"kind":"note","task":"t1","author":"solace","text":"older"}));
+        drain(&root);
+        assert_eq!(board::task(&root, "t1").unwrap()["notes"].as_array().unwrap().len(), 2);
+    }
+
+    /// A message that can't be applied, or that panics, is set aside and the task is told.
+    #[test]
+    fn a_message_that_fails_or_panics_is_set_aside() {
+        let root = root();
+        // No such run: refused.
+        testing::inbox_file(&root, "0001", json!({"kind":"agent","task":"t1","run":"nope","command":"done","text":"x"}));
+        // A task file that lacks its lists (written by hand): applying it panics.
+        fs::write(board::store_dir(&root).join("t2.json"), r#"{"id":"t2","column":"backlog","home":"."}"#).unwrap();
+        testing::inbox_file(&root, "0002", json!({"kind":"agent","task":"t2","run":"r","command":"note","text":"x"}));
+        drain(&root);
+        let inbox = inbox(&root);
+        assert!(inbox.join("failed/0001.json").exists() && inbox.join("failed/0002.json").exists());
+        assert!(!inbox.join("0001.json").exists() && !inbox.join("0002.json").exists());
+        assert!(rejected(&root, &inbox.join("0001.json")));
+        let t = board::task(&root, "t1").unwrap();
+        assert!(t["notes"][0]["text"].as_str().unwrap().contains("set aside"));
+        assert_eq!(t["attention"]["reason"], "a task message was set aside");
+    }
+
+    /// Telling the task that a message was set aside happens only when the task
+    /// can be read and written; every other case leaves the store as it was.
+    #[test]
+    fn flagging_a_set_aside_message_touches_only_a_readable_task() {
+        let root = root();
+        let dir = board::store_dir(&root);
+        fs::write(dir.join("junk.json"), "not json").unwrap();
+        fs::write(dir.join("bare.json"), r#"{"id":"bare","column":"backlog","home":"."}"#).unwrap();
+        let before = |names: &[&str]| -> Vec<Vec<u8>> { names.iter().map(|n| fs::read(dir.join(format!("{n}.json"))).unwrap()).collect() };
+        let others = ["junk", "bare", "t1"];
+        let kept = before(&others);
+        let note = |tid: Value| json!({"kind": "note", "task": tid, "text": "x"});
+        for m in [note(json!("../x")), note(json!("")), note(json!(null)), note(json!("missing")), note(json!("junk")), note(json!("bare"))] {
+            flag_set_aside(&root, &m, "why");
+        }
+        // The flow can't be read while the settings are broken.
+        fs::write(root.join("solace.toml"), "[board\n").unwrap();
+        flag_set_aside(&root, &note(json!("t1")), "why");
+        fs::remove_file(root.join("solace.toml")).unwrap();
+        assert_eq!(before(&others), kept, "an invalid id, a missing or unparseable file, no notes list, or no flow: nothing is written");
+        flag_set_aside(&root, &json!({"kind": "agent", "task": "t1"}), "the reason");
+        let t = board::task(&root, "t1").unwrap();
+        assert_eq!(t["notes"].as_array().unwrap().len(), 1);
+        let text = t["notes"][0]["text"].as_str().unwrap();
+        assert!(text.contains("(agent)") && text.contains("the reason"), "{text}");
+        assert_eq!(t["notes"][0]["author"], "solace");
+        // A message with no kind is named with an empty one.
+        flag_set_aside(&root, &json!({"task": "t1"}), "again");
+        assert!(board::task(&root, "t1").unwrap()["notes"][1]["text"].as_str().unwrap().contains("()"));
+    }
+
+    /// A task file that doesn't parse sets its message aside, as a panic does.
+    #[test]
+    fn a_message_for_an_unparseable_task_file_is_set_aside() {
+        let root = root();
+        fs::write(board::store_dir(&root).join("t9.json"), "{ not json").unwrap();
+        testing::inbox_file(&root, "0001", json!({"kind":"note","task":"t9","author":"solace","text":"x"}));
+        drain(&root);
+        assert!(rejected(&root, &inbox(&root).join("0001.json")));
+        assert_eq!(fs::read_to_string(board::store_dir(&root).join("t9.json")).unwrap(), "{ not json");
+        // A message for a task that doesn't exist fails the same way.
+        testing::inbox_file(&root, "0002", json!({"kind":"note","task":"nope","author":"solace","text":"x"}));
+        drain(&root);
+        assert!(rejected(&root, &inbox(&root).join("0002.json")));
+    }
+
+    /// Only `.json` files in the inbox are messages.
+    #[test]
+    fn drain_leaves_files_that_are_not_json() {
+        let root = root();
+        let dir = inbox(&root);
+        fs::create_dir_all(&dir).unwrap();
+        for name in ["0001.tmp", "notes.txt", "0002"] {
+            fs::write(dir.join(name), r#"{"kind":"note","task":"t1","author":"solace","text":"x"}"#).unwrap();
+        }
+        drain(&root);
+        assert!(board::task(&root, "t1").unwrap()["notes"].as_array().is_none_or(Vec::is_empty));
+        for name in ["0001.tmp", "notes.txt", "0002"] {
+            assert!(dir.join(name).exists(), "{name}");
+        }
+        assert!(!failed_dir(&root).exists());
+    }
+
+    /// The first message in the root's inbox, waited for at most 10 s: a test
+    /// that waits for one that never comes fails, it doesn't hang the run.
+    fn next_message(top: &Path) -> PathBuf {
+        let end = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(f) = fs::read_dir(inbox(top)).ok().and_then(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "json"))) {
+                return f;
+            }
+            assert!(std::time::Instant::now() < end, "no message reached the inbox");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Runs `f` on a thread and waits at most 10 s for its result: a call that
+    /// would wait forever fails the test instead of hanging the run (D-83).
+    fn within<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+        let (done, result) = mpsc::channel();
+        std::thread::spawn(move || drop(done.send(f())));
+        result.recv_timeout(Duration::from_secs(10)).expect("the call did not return within 10 s")
+    }
+
+    /// A sender where another process serves waits for that server's answer: a
+    /// message it took returns Ok, one it set aside is an error, and a server
+    /// that stops first leaves the message queued.
+    #[test]
+    fn deliver_hands_the_message_to_a_server_elsewhere() {
+        // Taken: the "server" (another holder of the lock) removes the message.
+        let root = root();
+        let held = try_lock_file(&server_lock(&root)).unwrap().unwrap();
+        let top = root.to_path_buf();
+        let taker = std::thread::spawn(move || fs::remove_file(next_message(&top)).unwrap());
+        let to = root.to_path_buf();
+        within(move || deliver(&to, json!({"kind":"note","task":"t1","author":"solace","text":"x"}))).unwrap();
+        taker.join().unwrap();
+        // Set aside: the "server" moves it to failed/.
+        let top = root.to_path_buf();
+        let rejecter = std::thread::spawn(move || {
+            let file = next_message(&top);
+            fs::create_dir_all(failed_dir(&top)).unwrap();
+            fs::rename(&file, failed_dir(&top).join(file.file_name().unwrap())).unwrap();
+        });
+        let to = root.to_path_buf();
+        let e = within(move || deliver(&to, json!({"kind":"note","task":"t1","author":"solace","text":"y"}))).unwrap_err();
+        rejecter.join().unwrap();
+        assert!(e.0.contains("set aside"), "{}", e.0);
+        // Gone: the lock is released and the message stays in the inbox, undelivered.
+        let top = root.to_path_buf();
+        let stopper = std::thread::spawn(move || {
+            next_message(&top);
+            drop(held);
+        });
+        let to = root.to_path_buf();
+        within(move || deliver(&to, json!({"kind":"note","task":"t1","author":"solace","text":"z"}))).unwrap();
+        stopper.join().unwrap();
+        assert_eq!(fs::read_dir(inbox(&root)).unwrap().filter_map(|e| e.ok()).filter(|e| e.path().is_file()).count(), 1);
+        assert!(board::task(&root, "t1").unwrap()["notes"].as_array().is_none_or(Vec::is_empty));
+    }
+
+    /// A brief failure (`solace.toml` mid-save) is tried again: the message is
+    /// applied, not set aside.
+    #[test]
+    fn drain_retries_a_brief_failure() {
+        let root = root();
+        fs::write(root.join("solace.toml"), "[board\n").unwrap();
+        testing::inbox_file(&root, "0001", json!({"kind":"note","task":"t1","author":"solace","text":"later"}));
+        let settings = root.join("solace.toml");
+        let fixer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            fs::remove_file(settings).unwrap();
+        });
+        drain(&root);
+        fixer.join().unwrap();
+        assert_eq!(board::task(&root, "t1").unwrap()["notes"][0]["text"], "later");
+        assert!(!inbox(&root).join("0001.json").exists());
+        assert!(!failed_dir(&root).exists(), "nothing was set aside");
+    }
+
+    /// Without a place to set it aside, a failed message is logged and removed,
+    /// so the inbox never sticks on it.
+    #[test]
+    fn a_failed_message_with_nowhere_to_go_is_dropped() {
+        let root = root();
+        testing::inbox_file(&root, "0001", json!({"kind":"agent","task":"t1","run":"nope","command":"done","text":"x"}));
+        fs::write(failed_dir(&root), "not a folder").unwrap();
+        drain(&root);
+        assert!(!inbox(&root).join("0001.json").exists());
+        assert!(failed_dir(&root).is_file());
+        assert!(!rejected(&root, &inbox(&root).join("0001.json")));
+    }
+
+    /// A sender waits for as long as a server lives, not for a fixed time, and
+    /// gives up at once when the server stops.
+    #[test]
+    fn applied_waits_while_a_server_holds_the_lock() {
+        let root = root();
+        let held = try_lock_file(&server_lock(&root)).unwrap().unwrap();
+        let sent = send(&root, json!({"kind":"note","task":"t1","text":"x"})).unwrap();
+        let (gone, start) = (sent.clone(), std::time::Instant::now());
+        let remover = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(400));
+            fs::remove_file(gone).unwrap();
+        });
+        let (top, file) = (root.to_path_buf(), sent.clone());
+        assert!(within(move || applied(&top, &file)));
+        assert!(start.elapsed() >= Duration::from_millis(350));
+        remover.join().unwrap();
+        // The server stops with the message still there: false, and the message stays.
+        let sent = send(&root, json!({"kind":"note","task":"t1","text":"y"})).unwrap();
+        drop(held);
+        let (top, file) = (root.to_path_buf(), sent.clone());
+        assert!(!within(move || applied(&top, &file)) && sent.exists());
+    }
+
+    /// A message delivered where no server runs lands after the earlier ones in
+    /// the inbox: a create a stopped server left must not be sent again.
+    #[test]
+    fn deliver_applies_the_inbox_before_its_message() {
+        let root = root();
+        let mut t = board::new_task("Late", "", &json!("backlog"), 1.);
+        t["home"] = json!(".");
+        let tid = t["id"].as_str().unwrap().to_string();
+        testing::inbox_file(&root, "0001", json!({"kind":"create","new":t}));
+        deliver(&root, json!({"kind":"note","task":tid,"author":"solace","text":"hi"})).unwrap();
+        assert_eq!(board::task(&root, &tid).unwrap()["notes"].as_array().unwrap().len(), 1);
+        assert!(!inbox(&root).join("0001.json").exists());
+    }
+
+    /// A task id names a file, so it has only letters, digits and dashes.
+    #[test]
+    fn valid_id_takes_only_letters_digits_and_dashes() {
+        for good in ["t1", "ab-12", "A-z-9"] {
+            assert!(board::valid_id(good), "{good}");
+        }
+        for bad in ["", "../x", "a/b", "a b", "a.b", "é"] {
+            assert!(!board::valid_id(bad), "{bad}");
+        }
+    }
+
+    /// A message for a task id that could leave the store is refused, and
+    /// nothing outside the store is read into it.
+    #[test]
+    fn a_message_for_an_invalid_task_id_is_refused() {
+        let root = root();
+        fs::write(root.join(".solace/x.json"), r#"{"id":"x","column":"backlog","home":".","notes":[]}"#).unwrap();
+        let before = stored(&root);
+        for bad in ["", "../x", "a/b"] {
+            let e = apply(&root, &json!({"id": "m1", "kind": "note", "task": bad, "author": "solace", "text": "x"})).unwrap_err();
+            assert!(e.0.contains("E7001") && e.0.contains("invalid task id"), "{bad}: {}", e.0);
+        }
+        assert_eq!(stored(&root), before);
+    }
+
+    fn always(_: &Path, _: &[&str], _: &Value) -> Result<bool, Failure> {
+        Ok(true)
+    }
+
+    /// Without the locks, a change that now needs them changes nothing; with
+    /// them, it applies.
+    #[test]
+    fn a_change_that_now_needs_the_locks_waits_for_them() {
+        let root = root();
+        let before = board::task(&root, "t1").unwrap();
+        let patch = json!({"title": "Renamed"});
+        assert!(change(&root, "PATCH", &["tasks", "t1"], &patch, false, always).unwrap().is_none());
+        assert_eq!(board::task(&root, "t1").unwrap(), before);
+        let (t, _) = change(&root, "PATCH", &["tasks", "t1"], &patch, true, always).unwrap().unwrap();
+        assert_eq!(t["title"], "Renamed");
+        assert_eq!(board::task(&root, "t1").unwrap()["title"], "Renamed");
+    }
+
+    /// A change that needed no locks at the first check but needs them inside
+    /// the operation takes them and runs again, applying once.
+    #[test]
+    fn api_retries_a_change_that_came_to_need_the_locks() {
+        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        fn later(_: &Path, _: &[&str], _: &Value) -> Result<bool, Failure> {
+            Ok(CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0)
+        }
+        let root = root();
+        let t = api_with(&root, "POST", &["tasks", "t1", "notes"], json!({"text": "once"}), later).unwrap();
+        assert_eq!(CALLS.load(std::sync::atomic::Ordering::SeqCst), 2, "the first check, then the one inside the operation");
+        let notes = board::task(&root, "t1").unwrap()["notes"].clone();
+        assert_eq!(notes.as_array().unwrap().len(), 1);
+        assert_eq!(t["notes"], notes);
+    }
+
+    /// The server takes its lock only once the root has a `.solace`.
+    #[test]
+    fn a_tick_takes_the_server_lock_once_the_root_has_solace() {
+        let root = testing::Scratch::new();
+        let (_jobs, queue) = mpsc::channel::<Job>();
+        let mut held = None;
+        tick(&root, &mut held, &queue);
+        assert!(held.is_none() && !root.join(".solace").exists());
+        fs::create_dir_all(root.join(".solace")).unwrap();
+        tick(&root, &mut held, &queue);
+        assert!(held.is_some() && serving(&root));
+        drop(held);
+        assert!(!serving(&root));
+    }
+
+    /// A tick applies the inbox before the operation it runs, and an operation
+    /// that panics leaves the server running.
+    #[test]
+    fn a_tick_applies_the_inbox_first_and_survives_a_panic() {
+        let root = root();
+        let (jobs, queue) = mpsc::channel::<Job>();
+        let mut held = None;
+        let (seen, notes) = mpsc::channel();
+        let again = seen.clone();
+        testing::inbox_file(&root, "0001", json!({"kind":"note","task":"t1","author":"solace","text":"first"}));
+        let r = root.to_path_buf();
+        jobs.send(Box::new(move || seen.send(board::task(&r, "t1").unwrap()["notes"].as_array().unwrap().len()).unwrap())).unwrap();
+        tick(&root, &mut held, &queue);
+        assert_eq!(notes.try_recv().unwrap(), 1);
+        jobs.send(Box::new(|| panic!("a failing operation"))).unwrap();
+        tick(&root, &mut held, &queue);
+        jobs.send(Box::new(move || again.send(0).unwrap())).unwrap();
+        tick(&root, &mut held, &queue);
+        assert_eq!(notes.try_recv().unwrap(), 0);
+    }
+
+    /// A root listing project `sub`: t1 at home in the root, scoped to both, with
+    /// its folder in the root's board.
+    fn workspace() -> testing::Scratch {
+        let root = testing::Scratch::new().with(&[
+            ("solace.toml", "projects = [\"sub\"]\n"),
+            (".solace/board/t1.json", r#"{"id":"t1","column":"backlog","home":".","runs":[]}"#),
+        ]);
+        fs::create_dir_all(root.join("sub/.solace")).unwrap();
+        board::adopt_tasks(&root, &root).unwrap();
+        fs::create_dir_all(root.join(".solace/board/t1")).unwrap();
+        root
+    }
+
+    /// D-61: a home leaving the scope moves the task's folder to the first project
+    /// left, keeps the task in the root's store, and logs the project it left.
+    #[test]
+    fn a_task_whose_home_leaves_its_scope_is_logged_as_removed() {
+        let root = workspace();
+        let t = api(&root, "POST", &["tasks", "t1", "scope"], json!({"scope": ["sub"]})).unwrap();
+        assert_eq!(t["home"], "sub");
+        assert_eq!(board::task(&root.join("sub"), "t1").unwrap()["home"], "sub", "the task stays in the root's store");
+        assert!(board::task(&root, "t1").is_err(), "and is no longer a task of the root's own project");
+        assert!(!root.join(".solace/board/t1").exists(), "the folder leaves its old home");
+        assert!(root.join("sub/.solace/board/t1").exists(), "the folder moves to the new home");
+        let db = events(&root).unwrap();
+        let rows: Vec<(String, String)> = db
+            .prepare("SELECT project, data FROM events ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(rows.iter().any(|(p, d)| p == "." && d.contains(r#""removed":"t1"#)), "{rows:?}");
+    }
+
+    /// A workflow whose `finished` event targets a final column, so `task done` settles.
+    const DONE_IS_FINAL: &str = "[board]\nevents = { asked = \"todo\", finished = \"done\", failed = \"todo\" }\n[[board.columns]]\nid = \"todo\"\nactions = [\"cancel\"]\n[[board.columns]]\nid = \"done\"\nfinal = true\n[[board.columns]]\nid = \"gone\"\nfinal = true\n[board.actions]\ncancel = { revert = true, to = \"gone\" }\n";
+
+    /// One server per process, for one root. `start` runs it on its own thread; `op` sends its
+    /// operations there; a second `start` says it is already running; and a `done`
+    /// the server applies settles on a thread of its own (D-77 point 5).
+    #[test]
+    fn the_task_server_runs_its_operations_on_its_own_thread() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", DONE_IS_FINAL)]);
+        let root = p.root.clone();
+        start(&root).unwrap();
+        let ran_on = op(&root, move || Ok(std::thread::current().id())).unwrap();
+        assert_eq!(ran_on, SERVER.get().unwrap().thread, "the operation ran on the server's thread");
+        assert_ne!(ran_on, std::thread::current().id());
+        // Another root has no server here: it isn't served and its operations run on the caller.
+        let other = testing::Scratch::new();
+        assert!(!serving(&other));
+        let here = op(&other, move || Ok(std::thread::current().id())).unwrap();
+        assert_eq!(here, std::thread::current().id());
+        let e = start(&root).unwrap_err();
+        assert!(e.0.contains("the task server is already running"), "{}", e.0);
+        // A `done` the server applies moves the task and settles it off the server's thread.
+        let t = api(&root, "POST", &["tasks"], json!({"title": "Shapes"})).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let mut t = t;
+        t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
+        write(&root, &t).unwrap();
+        let s = board::open(&root).unwrap();
+        let before = board::snapshot(&s).unwrap();
+        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
+        board::record(&s, &tid, "r1", &before, &board::snapshot(&s).unwrap()).unwrap();
+        let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+        assert!(has_before(), "the change is recorded");
+        testing::inbox_file(&root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"done"}));
+        let mut settled = false;
+        for _ in 0..400 {
+            if board::task(&root, &tid).unwrap()["column"] == "done" && !has_before() {
+                settled = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(settled, "the server applied the done and settled the task off its own thread");
+    }
 }

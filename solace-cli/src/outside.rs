@@ -532,6 +532,61 @@ mod tests {
         assert!(board::tasks(&s.root).unwrap().is_empty());
     }
 
+    /// A file read in with a bad module name is refused with its reason; one
+    /// deleted outside retires its symbols and drops its module.
+    #[test]
+    fn read_in_refuses_a_bad_name_and_retires_a_deleted_file() {
+        let s = app();
+        let msg = read_in(&s, "src/Bad-Name.gleam", Some(APP)).unwrap().unwrap_err();
+        assert!(msg.contains("isn't a Gleam module name"), "{msg}");
+        let modules = |s: &Store| s.db.query_row("SELECT count(*) FROM modules WHERE path = 'app'", [], |r| r.get::<_, i64>(0)).unwrap();
+        assert_eq!(modules(&s), 1);
+        read_in(&s, "src/app.gleam", None).unwrap().unwrap();
+        assert!(text(&s, "one").is_none() && text(&s, "two").is_none());
+        assert_eq!(modules(&s), 0);
+    }
+
+    /// Moving a symbol without editing it changes its order only; the text stays.
+    #[test]
+    fn a_reordered_symbol_keeps_its_text_and_takes_its_new_place() {
+        let s = app();
+        let ord = |name: &str| s.db.query_row("SELECT ord FROM symbols WHERE module = 'app' AND name = ?1 AND live = 1", [name], |r| r.get::<_, i64>(0)).unwrap();
+        let before = (ord("one"), ord("two"));
+        assert!(before.0 < before.1);
+        let swapped = "pub fn two() -> Int {\n  2\n}\n\npub fn one() -> Int {\n  1\n}\n";
+        read_in(&s, "src/app.gleam", Some(swapped)).unwrap().unwrap();
+        assert!(ord("two") < ord("one"));
+        assert_eq!(text(&s, "one").as_deref(), Some("pub fn one() -> Int {\n  1\n}"));
+    }
+
+    /// `unchanged` is true where nothing is lost by writing: no record, or no file.
+    #[test]
+    fn unchanged_follows_the_record() {
+        let s = app();
+        let mut w = Written::load(&s.root);
+        assert!(w.known && w.unchanged("src/app.gleam") && w.unchanged("src/absent.gleam"));
+        fs::write(s.root.join("src/app.gleam"), APP.replace("  1", "  9")).unwrap();
+        assert!(!w.unchanged("src/app.gleam"), "edited since Solace wrote it");
+        fs::write(s.root.join("src/app.gleam"), APP).unwrap();
+        assert!(w.unchanged("src/app.gleam"), "the same bytes again, by hash");
+        w.forget("src/app.gleam");
+        assert!(!w.unchanged("src/app.gleam"), "a file with no entry is not Solace's");
+        let fresh = Written::load(&Scratch::new());
+        assert!(!fresh.known && fresh.unchanged("src/app.gleam"));
+    }
+
+    /// A project of plain files holds no symbols, and an approval needs the
+    /// fields of the entry it describes.
+    #[test]
+    fn plain_files_have_no_graph_and_odd_entries_no_approval() {
+        let plain = Scratch::new().with(&[("notes/readme.txt", "hi")]);
+        assert!(graph_files(&plain).unwrap().is_empty());
+        assert_eq!(approval("task:1", &json!(["a"])), None);
+        assert_eq!(approval("symbol:1", &json!([0, "app", 5, 0, "text"])), None);
+        assert_eq!(approval("module:1", &json!(["app.gleam", 0, null])), None);
+        assert!(approval("symbol:1", &json!([0, "app", "one", 0, "text"])).is_some_and(|(k, _)| k == "app.one"));
+    }
+
     /// A store from before D-58 has no record: what it holds counts as
     /// written, so a file edited since is read in rather than overwritten.
     #[test]

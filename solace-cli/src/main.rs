@@ -3503,6 +3503,14 @@ mod testing {
     pub(crate) fn project(files: &[(&str, &str)]) -> Project {
         Scratch::new().with(files).import()
     }
+
+    /// Leaves message `m` in the root's task inbox under `id`, as a sender would.
+    pub(crate) fn inbox_file(root: &Path, id: &str, mut m: Value) {
+        let dir = board::store_dir(root).join("inbox");
+        fs::create_dir_all(&dir).unwrap();
+        m["id"] = json!(id);
+        fs::write(dir.join(format!("{id}.json")), m.to_string()).unwrap();
+    }
 }
 
 #[cfg(test)]
