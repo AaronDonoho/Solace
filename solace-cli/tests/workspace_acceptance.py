@@ -427,6 +427,28 @@ class Root(unittest.TestCase):
             self.assertIn('E6007' if d == 'a' else 'Saved app.answer', replies[3])
         self.assertNotIn('42', (self.root/'b/src/app.gleam').read_text())
 
+    def test_a_question_is_alone_in_its_call_and_a_settings_reason_is_part_of_it(self):
+        # A note beside a question is refused with nothing recorded; the why goes in `reason`.
+        for d in 'ab': project(self.root/d, d, 'pub fn one() { 1 }\n')
+        self.migrate()
+        self.start()
+        edit = {'old': '[commands]', 'text': '[commands]\ntool = { run = ["true"] }'}
+        steps = [{'command': 'task note beside\nwrite solace.toml --project b', **edit},
+                 {'command': 'task note beside\ntask ask', 'text': 'Which?', 'options': ['a', 'b']},
+                 {'command': 'write solace.toml --project b', 'reason': 'Agents need the tool.', **edit},
+                 {'command': 'task done proposed'}]
+        t = self.api('POST', '/p/a/tasks', {'title': 'Settings', 'body': json.dumps(steps), 'scope': ['a', 'b']})
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'plan'})
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        t = self.wait('/p/a', t, lambda x: x['runs'][-1]['state'] == 'waiting')
+        self.assertEqual(len(t['questions']), 1)
+        self.assertEqual(t['questions'][0]['text'], f'Change {self.root.name}/b/solace.toml\n\nAgents need the tool.')
+        self.assertFalse([n for n in t['notes'] if 'beside' in n.get('text', '')])
+        rid = t['runs'][-1]['id']
+        replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'a/.solace'/(rid + '.responses')).read_text().splitlines()]
+        self.assertIn('E7017', replies[0])
+        self.assertIn('E7017', replies[1])
+
     def test_an_agent_proposes_settings_for_a_project_of_its_task(self):
         # D-61: a settings proposal can name another project in the task; `old` alone is an exact edit.
         for d in 'ab': project(self.root/d, d, 'pub fn one() { 1 }\n')

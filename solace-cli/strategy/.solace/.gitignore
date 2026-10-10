@@ -1,0 +1,4 @@
+# Only the approved list is shared (D-58).
+*
+!.gitignore
+!approved

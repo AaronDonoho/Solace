@@ -1259,12 +1259,13 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Lane), List(Found))) {
   decode.success(#(workspace, lanes, found))
 }
 
-/// What the human should hear about in a live update: a run that ended or a
-/// question an agent asked.
+/// What the human should hear about in a live update: a run that ended, a
+/// discussion reply, or a question an agent asked.
 pub fn notices(old: Task, new: Task) -> List(Notice) {
   let ended =
     list.filter(new.runs, fn(r) {
       r.state == "ended"
+      && r.kind != "discuss"
       && list.any(old.runs, fn(o) { o.id == r.id && o.state != "ended" })
     })
     |> list.map(fn(r) {
@@ -1295,7 +1296,27 @@ pub fn notices(old: Task, new: Task) -> List(Notice) {
     |> list.map(fn(q) {
       Notice("Question on " <> new.title, q.text, "", new.id, "questions")
     })
-  list.append(ended, asked)
+  // An agent's reply sets its discussion run waiting in the same update that
+  // adds the note, so the run going waiting is the reply. Tasks loaded at
+  // startup come without their notes, so the run's state is what to watch.
+  let replied =
+    list.filter(new.runs, fn(r) {
+      r.kind == "discuss"
+      && r.state == "waiting"
+      && list.any(old.runs, fn(o) { o.id == r.id && o.state != "waiting" })
+    })
+    |> list.map(fn(r) {
+      let text = case
+        list.filter(new.notes, fn(n) { n.author == "agent" && n.run == r.id })
+        |> list.sort(fn(a, b) { int.compare(b.time, a.time) })
+        |> list.first
+      {
+        Ok(note) -> note.text
+        Error(_) -> "The agent replied."
+      }
+      Notice("Reply on " <> new.title, text, "", new.id, "notes")
+    })
+  list.flatten([ended, replied, asked])
 }
 
 /// The text an editor shows, and the message that changes it.

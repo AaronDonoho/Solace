@@ -82,6 +82,68 @@ impl Written {
         let Some((h, size, time)) = self.files.get(rel) else { return false };
         stat(&path) == Some((*size, *time)) || fs::read(&path).is_ok_and(|b| &digest(&b) == h)
     }
+
+    /// Removes each file Solace wrote that no module in `keep` holds any more,
+    /// with the folders that leaves empty. A file edited since stays, for
+    /// `absorb` to read in and report; files Solace never wrote are not its own.
+    pub fn prune(&mut self, keep: &HashSet<String>) -> Result<(), Failure> {
+        if !self.known {
+            return Ok(());
+        }
+        let gone: Vec<String> = self.files.keys().filter(|rel| !keep.contains(*rel) && !self.bad.contains_key(*rel)).cloned().collect();
+        for rel in gone {
+            if !self.unchanged(&rel) {
+                continue;
+            }
+            let path = self.root.join(&rel);
+            if path.exists() {
+                fs::remove_file(&path)?;
+            }
+            drop_build_output(&self.root, &rel)?;
+            // Up to, not including, `src/` or `test/`.
+            let top = self.root.join(rel.split('/').next().unwrap_or_default());
+            let mut dir = path.parent();
+            while let Some(d) = dir.filter(|d| d.starts_with(&top) && *d != top) {
+                if fs::remove_dir(d).is_err() {
+                    break;
+                }
+                dir = d.parent();
+            }
+            self.forget(&rel);
+        }
+        Ok(())
+    }
+}
+
+/// Removes what Gleam compiled from module file `rel`, which `gleam build`
+/// leaves behind once the source is gone: `ebin/` and `_gleam_artefacts/`
+/// files named `a@b.*`, and JavaScript's `a/b.mjs` and `a/b.d.mts`.
+fn drop_build_output(root: &Path, rel: &str) -> Result<(), Failure> {
+    let module = rel.split_once('/').map_or(rel, |p| p.1).trim_end_matches(".gleam");
+    let erl = format!("{}.", module.replace('/', "@"));
+    let pkg = workspace::name(root);
+    if pkg.is_empty() {
+        return Ok(());
+    }
+    for profile in ["dev", "prod", "lsp"] {
+        for target in ["erlang", "javascript"] {
+            let base = root.join("build").join(profile).join(target).join(&pkg);
+            for sub in ["ebin", "_gleam_artefacts"] {
+                for e in fs::read_dir(base.join(sub)).into_iter().flatten().flatten() {
+                    if e.file_name().to_string_lossy().starts_with(&erl) && e.path().is_file() {
+                        fs::remove_file(e.path())?;
+                    }
+                }
+            }
+            for ext in ["mjs", "d.mts"] {
+                let p = base.join(format!("{module}.{ext}"));
+                if p.is_file() {
+                    fs::remove_file(p)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// A module's file path relative to the root, as `src/app.gleam`.

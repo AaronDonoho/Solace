@@ -258,7 +258,8 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         {
             let current = fs::read(store.root.join(&file)).unwrap_or_default();
             let proposed = lockdown::edited(&current, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old)?;
-            return board::propose_settings(&home, &store.root, tid, rid, &file, &current, &proposed, guard);
+            let reason = REASON.with(|r| r.borrow().clone());
+            return board::propose_settings(&home, &store.root, tid, rid, &file, &current, &proposed, reason.as_deref(), guard);
         }
     }
     let before = if a.first().is_some_and(|c| CHANGES.contains(c)) && context.is_some() {
@@ -574,6 +575,25 @@ fn operands<'a>(args: &[&'a str]) -> Vec<&'a str> {
     args.iter().copied().filter(|a| !a.starts_with("--")).collect()
 }
 
+thread_local! {
+    /// The `reason` argument of the current tool call, for a settings write's question.
+    static REASON: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A command that asks the human something: `task ask`, or a run's write of a
+/// protected file (a settings proposal). It must be the only command in its call.
+fn is_question(line: &str) -> bool {
+    let w: Vec<&str> = line.strip_prefix("solace").unwrap_or(line).split_whitespace().collect();
+    match w.as_slice() {
+        ["task", "ask", ..] => true,
+        ["write", rest @ ..] if board::context().is_some() => rest.iter().any(|p| {
+            let name = file_name(Path::new(p));
+            name == "solace.toml" || name == "AGENTS.md" || lockdown::is_gitignore(&name)
+        }),
+        _ => false,
+    }
+}
+
 /// A `command` line that is Gleam code, not a Solace command.
 fn looks_like_code(line: &str) -> bool {
     let first = line.split_whitespace().next().unwrap_or("");
@@ -618,6 +638,7 @@ fn mcp(budget: usize) {
                         "command": {"type": "string", "description": "One or more commands, one per line, e.g. `inspect checkout.pay tax.quote --context`, or `submit` then `test`"},
                         "text": {"type": "string", "description": "For submit: a patch (`*** Begin Patch` / `*** Update: <symbol or module>` / `@@` hunks) or new code; the task for `session start --task`; the record, note, summary or question for `work add` and `task note|done|ask`"},
                         "options": {"type": "array", "items": {"type": "string"}, "description": "2–4 options, for `task ask`"},
+                        "reason": {"type": "string", "description": "For a settings `write` (solace.toml, AGENTS.md): why the change, shown with the question the human approves"},
                         "old": {"type": "string", "description": "For `--replace`: the exact text that `text` replaces"}
                     },
                     "required": ["command"]
@@ -644,6 +665,18 @@ fn mcp(budget: usize) {
                     );
                     is_error = true;
                 }
+                // A question is complete in itself: no note or other action beside it.
+                if !is_error
+                    && commands.len() > 1
+                    && let Some(q) = commands.iter().find(|c| is_question(c))
+                {
+                    out = format!(
+                        "E7017 `{q}` must be the only command in its call: put the explanation in the question \
+                        (`text`, or `reason` for a settings write), not in a note beside it; nothing in this call ran.\n"
+                    );
+                    is_error = true;
+                }
+                REASON.with(|r| *r.borrow_mut() = args["reason"].as_str().map(String::from).filter(|r| !r.trim().is_empty()));
                 let refused = is_error;
                 for command in commands.iter().filter(|_| !refused) {
                     let command = command.strip_prefix("solace").map_or(*command, |c| c.trim_start());
@@ -1116,6 +1149,8 @@ impl Store {
             maps.push(FileMap { module: m.path.clone(), file: path, ranges });
         }
         if let Some(w) = written.as_mut() {
+            // A file whose module is gone goes with it, unless edited since.
+            w.prune(&ix.modules.iter().map(|m| outside::file_of(&m.dir, &m.path)).collect())?;
             w.save()?;
         }
         Ok(maps)
@@ -2327,8 +2362,18 @@ impl Store {
             return fail(format!("E5001 {} is still used by:\n  {}", ix.syms[i].qname(), users.join("\n  ")));
         }
         self.retire(&ix.syms[i].id, "")?;
+        // The module goes with its last symbol, unless another module imports it.
+        let module = &ix.syms[i].module;
+        let last = !ix.syms.iter().enumerate().any(|(j, s)| j != i && s.module == *module);
+        let imported = ix.modules.iter().any(|m| gleam::imports(&m.header).iter().any(|imp| imp.module == *module));
+        let retired = if last && !imported {
+            self.db.execute("DELETE FROM modules WHERE path = ?1", [module])?;
+            format!("; module {module} retired")
+        } else {
+            String::new()
+        };
         let diags = self.check_all(&self.index()?)?;
-        Ok(format!("Deleted {}.\n{}", ix.syms[i].qname(), broken_report(&before, &diags)))
+        Ok(format!("Deleted {}{retired}.\n{}", ix.syms[i].qname(), broken_report(&before, &diags)))
     }
 
     fn check(&self) -> Out {
@@ -3999,6 +4044,80 @@ mod tests {
         store.submit_symbols(None, Some("other"), "pub fn two() -> Int { 2 }").unwrap();
         let err = store.resolve(&store.index().unwrap(), "two").unwrap_err().0;
         assert!(err.starts_with("E1002 ambiguous name: two") && err.contains("calc.two") && err.contains("other.two"), "{err}");
+    }
+
+    fn module_paths(s: &Store) -> Vec<String> {
+        s.index().unwrap().modules.into_iter().map(|m| m.path).collect()
+    }
+
+    /// Deleting a module's last symbol retires the module, and its file and
+    /// emptied folder go with it; a module another one imports stays.
+    #[test]
+    fn deleting_the_last_symbol_retires_the_module_and_its_file() {
+        let store = calc_project();
+        store.submit_symbols(None, Some("other/deep"), "pub fn four() -> Int { 4 }").unwrap();
+        assert!(store.root.join("src/other/deep.gleam").exists());
+        let out = store.delete("other/deep.four").unwrap();
+        assert!(out.starts_with("Deleted other/deep.four; module other/deep retired."), "{out}");
+        assert!(!module_paths(&store).contains(&"other/deep".to_string()));
+        assert!(!store.root.join("src/other").exists());
+        let written = fs::read_to_string(store.root.join(".solace/written")).unwrap();
+        assert!(!written.contains("src/other/deep.gleam"), "{written}");
+        store.submit_symbols(None, Some("lib"), "pub fn five() -> Int { 5 }").unwrap();
+        store.set_header("calc", "import lib\n").unwrap();
+        assert!(store.delete("lib.five").unwrap().starts_with("Deleted lib.five.\n"));
+        assert!(module_paths(&store).contains(&"lib".to_string()) && store.root.join("src/lib.gleam").exists());
+    }
+
+    /// Prune keeps a file edited since Solace wrote it, for `absorb` to read
+    /// back in and report; a rolled-back change leaves no file behind.
+    #[test]
+    fn prune_keeps_an_edited_file_and_a_rollback_leaves_none() {
+        let store = calc_project();
+        store.submit_symbols(None, Some("other"), "pub fn four() -> Int { 4 }").unwrap();
+        let file = store.root.join("src/other.gleam");
+        fs::write(&file, "pub fn four() -> Int {\n  44\n}\n").unwrap();
+        let ix = store.index().unwrap();
+        store.retire(&ix.syms[store.resolve(&ix, "other.four").unwrap()].id, "").unwrap();
+        store.db.execute("DELETE FROM modules WHERE path = 'other'", []).unwrap();
+        store.materialize(&store.index().unwrap()).unwrap();
+        assert!(file.exists());
+        let note = outside::absorb(&store, outside::Mode::Notice).unwrap();
+        assert!(note.contains("other.four"), "{note}");
+        assert!(module_paths(&store).contains(&"other".to_string()));
+        let out = store.transaction(&[], || {
+            store.submit_symbols(None, Some("temp"), "pub fn t() -> Int { 1 }")?;
+            fail("stop")
+        });
+        assert!(out.is_err() && !store.root.join("src/temp.gleam").exists());
+    }
+
+    /// `gleam build` keeps a deleted module's `.beam` and artefacts; prune
+    /// removes them with its file.
+    #[test]
+    fn prune_drops_the_build_output_of_a_retired_module() {
+        let store = calc_project();
+        store.submit_symbols(None, Some("other"), "pub fn four() -> Int { 4 }").unwrap();
+        assert!(store.gleam(&["build"]).unwrap().0);
+        let left = |s: &Store| {
+            let mut out = vec![];
+            let mut todo = vec![s.root.join("build/dev")];
+            while let Some(d) = todo.pop() {
+                for e in fs::read_dir(&d).into_iter().flatten().flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        todo.push(p);
+                    } else if p.file_name().unwrap().to_string_lossy().starts_with("other.") {
+                        out.push(p.strip_prefix(&s.root).unwrap().to_string_lossy().to_string());
+                    }
+                }
+            }
+            out
+        };
+        assert!(!left(&store).is_empty());
+        store.delete("other.four").unwrap();
+        assert!(store.gleam(&["build"]).unwrap().0);
+        assert!(left(&store).is_empty(), "{:?}", left(&store));
     }
 
     /// An unqualified type or constructor the module doesn't import is imported

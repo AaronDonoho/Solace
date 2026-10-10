@@ -1115,3 +1115,74 @@ pub fn notice_opens_task_on_its_tab_test() {
 fn task_json() -> String {
   "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1}"
 }
+
+/// A toast when the agent replies to a discussion; none when the discussion
+/// ends or is stopped; a finished work run still toasts.
+pub fn discussion_reply_notices_test() {
+  let task = fn(kind, state, notes, outcome) {
+    let assert Ok(t) =
+      json.parse(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"notes\":["
+          <> notes
+          <> "],\"runs\":[{\"id\":\"r1\",\"kind\":\""
+          <> kind
+          <> "\",\"state\":\""
+          <> state
+          <> "\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\""
+          <> outcome
+          <> "\"}]}",
+        board.task_decoder(),
+      )
+    t
+  }
+  let reply =
+    "{\"author\":\"agent\",\"run\":\"r1\",\"text\":\"Here is my take\",\"time\":2}"
+  let human =
+    "{\"author\":\"human\",\"run\":null,\"text\":\"And also\",\"time\":3}"
+  // The agent replies: the toast shows its note on the notes tab.
+  let assert [toast] =
+    board.notices(
+      task("discuss", "running", "", ""),
+      task("discuss", "waiting", reply, ""),
+    )
+  toast
+  |> should.equal(board.Notice(
+    "Reply on T",
+    "Here is my take",
+    "",
+    "1",
+    "notes",
+  ))
+  // A human note while the run stays waiting: no toast.
+  board.notices(
+    task("discuss", "waiting", reply, ""),
+    task("discuss", "waiting", reply <> "," <> human, ""),
+  )
+  |> should.equal([])
+  // The agent takes the human's turn: no toast.
+  board.notices(
+    task("discuss", "waiting", reply, ""),
+    task("discuss", "running", reply, ""),
+  )
+  |> should.equal([])
+  // Ending a discussion: no toast.
+  board.notices(
+    task("discuss", "waiting", reply, ""),
+    task("discuss", "ended", reply, "discussed"),
+  )
+  |> should.equal([])
+  // Stopping a discussion: no toast.
+  board.notices(
+    task("discuss", "waiting", reply, ""),
+    task("discuss", "ended", reply, "stopped"),
+  )
+  |> should.equal([])
+  // A work run that finishes still toasts.
+  board.notices(
+    task("work", "running", "", ""),
+    task("work", "ended", "", "finished"),
+  )
+  |> should.equal([
+    board.Notice("Finished T", "The agent finished its work.", "", "1", "runs"),
+  ])
+}

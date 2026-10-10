@@ -1,4 +1,10 @@
 
+## D-89 A question is alone in its call
+Amends D-38 and Spec 15 §6 (Aaron, 2026-10-09).
+1. In a run, `task ask`, and a `write` of `solace.toml`, `AGENTS.md` or a `.gitignore` (a settings proposal), must be the only command in their tool call. Otherwise the whole call is refused with `E7017` and nothing runs.
+2. A settings `write` takes a `reason` argument; the question reads "Change <file>", a blank line, then the reason. The explanation belongs to the question, not to a note beside it. Agents are told so in their brief.
+Why: agents posted a `task note` next to a question, because a settings question had no place for its why.
+
 ## D-82 Blocked is not a column; a held or stopped agent is attention
 Amends Spec 15 §1, §2, §3 and §6 (Aaron, 2026-10-08).
 1. The default workflow has no `blocked` column. `asked` and `failed` have no target: the task stays in its column (normally `assigned`) and gets `attention`. Answering the last question continues the agent directly (D-88). A workflow may still name targets for `asked` and `failed`; only `finished` must have one.

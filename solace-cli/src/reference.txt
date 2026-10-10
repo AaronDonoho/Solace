@@ -140,12 +140,13 @@ Files: watched and unwatched files can be read and written; they never appear
 in symbol searches. gleam.toml is watched (new dependencies are fetched by
 check, test and build). solace.toml, AGENTS.md (the project's instructions
 for agents, shown at session start) and every .gitignore are human-owned: in a
-work run, `write` to one proposes a change and waits for the human; say why in a
-`task note` first, then `write` the exact new text (don't ask in prose). It is
-this project's file. node_modules folders are never watched.
+work run, `write` to one proposes a change and waits for the human; `write` the
+exact new text, alone in its call, with the why in `reason` (no `task note`
+beside it; don't ask in prose). It is this project's file. node_modules folders are never watched.
   files [dir]                   tree with each file's category
   read <path> [--lines a..b | --tail n]
-  write <path> [--all]          whole text, or with `old`, just `old` -> `text`
+  write <path> [--all]          whole text, or with `old`, just `old` -> `text`;
+                                a settings file takes `reason` too
   remove <path>
   move <from> <to> [--to-project <folder>]
                                 move a file or folder, whole or not at all, never

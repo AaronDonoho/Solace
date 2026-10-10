@@ -1011,12 +1011,7 @@ fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failure> {
             }
         } else if let Some(name) = key.strip_prefix("module:") {
             if v.is_null() {
-                if let Ok(dir) = s.db.query_row("SELECT dir FROM modules WHERE path=?", [name], |r| r.get::<_, String>(0)) {
-                    let p = s.root.join(dir).join(format!("{name}.gleam"));
-                    if p.exists() {
-                        fs::remove_file(p)?;
-                    }
-                }
+                // Its file goes in the `materialize` below, which keeps one edited outside Solace (D-58).
                 s.db.execute("DELETE FROM modules WHERE path=?", [name])?;
             } else {
                 s.db.execute("INSERT OR REPLACE INTO modules VALUES (?1,?2,?3)", params![v[0].as_str(), v[1].as_str(), v[2].as_str()])?;
@@ -2425,7 +2420,7 @@ pub fn record_verification(s: &Store, tid: &str, command: &str, result: &Out) ->
 const START: &str = "Start with `session start --task`, with the task's title and description as `text`.";
 fn brief(t: &Value, kind: &str) -> String {
     let start = START;
-    let ask = "If you need a decision from the human, ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer.";
+    let ask = "If you need a decision from the human, ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
     let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); keep the options concise.";
     let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `write`, `remove`, `format` and `run` are refused.";
     let role = match kind {
@@ -2971,6 +2966,7 @@ pub fn propose_settings(
     file: &str,
     base: &[u8],
     proposed: &str,
+    reason: Option<&str>,
     guard: Vec<fs::File>,
 ) -> Out {
     if file == "solace.toml" {
@@ -2995,7 +2991,8 @@ pub fn propose_settings(
     // The file's path from the root folder, so a board of several projects says which one.
     let name = top.file_name().map(Path::new).unwrap_or(Path::new("")).join(project.strip_prefix(&top).unwrap_or(Path::new(""))).join(file);
     let name = name.to_string_lossy();
-    let question = json!({"id":unique_id(),"text":format!("Change {name}"),"options":["Approve","Reject"],
+    let why = reason.map(str::trim).filter(|r| !r.is_empty()).map(|r| format!("\n\n{r}")).unwrap_or_default();
+    let question = json!({"id":unique_id(),"text":format!("Change {name}{why}"),"options":["Approve","Reject"],
         "settings":{"file":file,"project":dir,"base":base,"proposed":proposed}});
     let m = json!({"kind":"settings","task":tid,"run":rid,"question":question});
     message(&w, &mut t.clone(), &m)?;
@@ -3905,6 +3902,28 @@ mod tests {
         assert!(!s.root.join("src/geo.gleam").exists());
         assert!(s.resolve_module(&s.index().unwrap(), "geo").is_none());
         assert_eq!(snapshot(&s).unwrap(), before);
+    }
+
+    /// Canceling does not delete a created module's file that was edited
+    /// outside Solace and not yet read in; the next read-in reports it.
+    #[test]
+    fn cancel_keeps_an_edited_file_of_a_module_the_task_created() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Shapes"})).unwrap();
+        t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+        tasks::put(&s, &t).unwrap();
+        let tid = t["id"].as_str().unwrap();
+        let before = snapshot(&s).unwrap();
+        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
+        record(&s, tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+        let file = s.root.join("src/geo.gleam");
+        fs::write(&file, "pub fn side() {\n  22\n}\n").unwrap();
+        let mut t = task(&s.root, tid).unwrap();
+        end_runs(&mut t, "finished");
+        tasks::put(&s, &t).unwrap();
+        api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
+        assert_eq!(fs::read_to_string(&file).unwrap(), "pub fn side() {\n  22\n}\n");
     }
 
     /// D-77 point 4: a `changes` message left in an old inbox adds nothing. The
