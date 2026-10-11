@@ -9,5 +9,5 @@ unwatched = []
 # "docs/**/*.json" = ["python3", "-m", "json.tool", "{file}"]
 
 [commands]
-# Optional commands agents may run, for example:
-# app = { run = ["gleam", "run", "--"], args = true }
+# The JS tests of <solace-task>'s browser code and flows; run after `gleam build`.
+js_tests = { run = ["bun", "test", "test/task_api.test.mjs"] }

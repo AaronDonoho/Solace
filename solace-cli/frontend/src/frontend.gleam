@@ -12,10 +12,12 @@ import lustre/element/html
 import migration
 import modem
 import solace_board
+import strategy
 
 pub fn main() -> Nil {
   let assert Ok(_) = solace_board.register()
   let assert Ok(_) = contracts.register()
+  let assert Ok(_) = strategy.register()
   let assert Ok(_) = migration.register()
   let assert Ok(_) =
     lustre.application(init, update, view)
@@ -27,6 +29,7 @@ pub type Route {
   Board
   Migrate
   Contracts(base: String)
+  Strategy
 }
 
 pub type Msg {
@@ -38,6 +41,7 @@ pub fn route(uri: Uri) -> Route {
     [] -> Board
     ["migrate"] -> Migrate
     ["contracts"] -> Contracts("")
+    ["strategy"] -> Strategy
     ["p", dir, "contracts"] -> Contracts("/p/" <> dir)
     _ -> Board
   }
@@ -101,6 +105,7 @@ pub fn view(model: Model) -> Element(msg) {
       link("/", "Board", shown == page_of(Board)),
       link("/migrate", "Migration", shown == page_of(Migrate)),
       link("/contracts", "Contracts", shown == page_of(Contracts(""))),
+      link("/strategy", "Strategy", shown == page_of(Strategy)),
     ]),
     ..list.map(model.opened, fn(r) { page(r, page_of(r) == shown) })
   ])
@@ -364,6 +369,7 @@ pub fn page_of(route: Route) -> String {
     Board -> "solace-board"
     Migrate -> "solace-migration"
     Contracts(_) -> "solace-contracts"
+    Strategy -> "solace-strategy"
   }
 }
 

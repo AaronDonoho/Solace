@@ -51,13 +51,13 @@ class Board(unittest.TestCase):
     def tearDown(self):
         # End all fake processes before terminating their supervisor.
         try:
-            for t in ([] if self.server.poll() is not None else self.api('GET','/tasks')):
-                full=self.api('GET','/tasks/'+t['id'])
-                for r in full['runs']:
-                    p=self.root/'.solace'/(r['id']+'.pid')
-                    if p.exists():
-                        try: os.killpg(int(p.read_text()),9)
-                        except ProcessLookupError: pass
+            alive=self.server.poll() is None
+            runs=[r for t in (self.api('GET','/tasks') if alive else []) for r in self.api('GET','/tasks/'+t['id'])['runs']]
+            for r in runs+(self.api('GET','/strategy/runs') if alive else []):
+                p=self.root/'.solace'/(r['id']+'.pid')
+                if p.exists():
+                    try: os.killpg(int(p.read_text()),9)
+                    except ProcessLookupError: pass
         finally:
             for c in self.clients: c.close()
             self.server.terminate();self.server.wait(timeout=3)
@@ -826,7 +826,7 @@ class Board(unittest.TestCase):
         self.assertEqual((self.root/'priv/a').read_text(),'original');self.assertFalse((self.root/'priv/b').exists())
 
     def test_a11_embedded_client_and_internal_files(self):
-        for path,expected in [('/',b'Solace tasks'),('/migrate',b'Solace tasks'),('/app.js',b'/workflow'),('/guide',b'Using Solace')]:
+        for path,expected in [('/',b'Solace tasks'),('/migrate',b'Solace tasks'),('/strategy',b'Solace tasks'),('/strategy?tab=tasks',b'Solace tasks'),('/app.js',b'/workflow'),('/guide',b'Using Solace')]:
             c=http.client.HTTPConnection('127.0.0.1',self.port);c.request('GET',path);r=c.getresponse();self.assertEqual(r.status,200);self.assertIn(expected,r.read());c.close()
         for command in ['files','read','write','remove']:
             p=subprocess.run([BIN,command,'.solace/board'],cwd=self.root,env=self.env,input='x',text=True,capture_output=True)
@@ -861,6 +861,8 @@ class Board(unittest.TestCase):
         # D-87: the root's records follow the tasks, before the changes.
         _,e=self.next_event(stream);self.assertEqual(e['milestones'],[])
         _,e=self.next_event(stream);self.assertEqual(e['features'],[])
+        _,e=self.next_event(stream);self.assertEqual(e['vision']['text'],'')
+        _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
         t=self.create();seq,e=self.next_event(stream);self.assertEqual(e['task']['id'],t['id'])
         self.api('POST','/tasks/'+t['id']+'/notes',{'text':'first'});self.api('POST','/tasks/'+t['id']+'/notes',{'text':'second'})
         resumed=self.stream(seq);s1,e1=self.next_event(resumed);s2,e2=self.next_event(resumed)
@@ -970,6 +972,8 @@ class Board(unittest.TestCase):
         _,e=self.next_event(stream);self.assertIn('tasks',e)
         seq,e=self.next_event(stream);self.assertEqual(e['milestones'],[])
         _,e=self.next_event(stream);self.assertEqual(e['features'],[])
+        _,e=self.next_event(stream);self.assertIn('vision',e)
+        _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
         m=self.api('POST','/milestones',{'title':'1.0','targetDate':'2027-01-01'})
         f=self.api('POST','/features',{'title':'F','milestone':m['id']})
         self.assertEqual((m['state'],m['targetDate'],f['state'],f['milestone']),('proposed','2027-01-01','proposed',m['id']))
@@ -993,5 +997,142 @@ class Board(unittest.TestCase):
         _,e=self.next_event(fresh);self.assertIn('tasks',e)
         _,e=self.next_event(fresh);self.assertEqual([x['id'] for x in e['milestones']],[m['id']])
         _,e=self.next_event(fresh);self.assertEqual([x['id'] for x in e['features']],[f['id']])
+
+    def test_the_vision_is_one_root_document(self):  # D-91
+        stream=self.stream()
+        while 'vision' not in (e:=self.next_event(stream)[1]):pass
+        self.assertEqual(e['vision']['text'],'')
+        _,runs=self.next_event(stream);self.assertEqual(runs,{'strategyRuns':[]})
+        v=self.api('PUT','/vision',{'text':'# Why\nFor teams.','base':e['vision']['revision']})
+        self.assertEqual(self.api('GET','/vision'),v)
+        _,e=self.next_event(stream);self.assertEqual(e,{'vision':v})
+        # A put from an older revision is refused and writes nothing.
+        status,body=self.bare('PUT','/vision',{'Content-Type':'application/json'},json.dumps({'text':'lost','base':'sha256:old'}))
+        self.assertEqual((status,json.loads(body)['code']),(409,'E7026'))
+        # D-92: at most 1000 characters, counted as Unicode code points.
+        status,body=self.bare('PUT','/vision',{'Content-Type':'application/json'},json.dumps({'text':'é'*1001,'base':v['revision']}))
+        self.assertEqual((status,json.loads(body)['code']),(400,'E7027'))
+        self.assertEqual(self.api('GET','/vision')['text'],'# Why\nFor teams.')
+        fresh=self.stream()
+        while 'vision' not in (e:=self.next_event(fresh)[1]):pass
+        self.assertEqual(e,{'vision':v})
+
+    def wait_run(self,rid,predicate,timeout=10):
+        end=time.monotonic()+timeout
+        while time.monotonic()<end:
+            value=self.api('GET',f'/strategy/runs/{rid}')
+            if predicate(value):return value
+            time.sleep(.03)
+        self.fail('timed out: '+json.dumps(value))
+    def replies(self,rid):
+        p=self.root/'.solace'/(rid+'.responses')
+        return [json.loads(l)['result']['content'][0]['text'] for l in p.read_text().splitlines()] if p.exists() else []
+
+    def test_strategy_runs_start_refuse_note_and_end(self):  # D-93, A19
+        stream=self.stream()
+        while 'vision' not in (e:=self.next_event(stream)[1]):pass
+        _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
+        m=self.api('POST','/milestones',{'title':'M1'})
+        f=self.api('POST','/features',{'title':'Feature F1','milestone':m['id']})
+        t1,t2=self.create(),self.create()
+        self.api('PATCH','/tasks/'+t1['id'],{'feature':f['id'],'milestone':None})
+        self.api('PATCH','/tasks/'+t2['id'],{'feature':f['id'],'milestone':m['id']})
+        on_f={'kind':'feature','id':f['id']}
+        # The fake agent's steps are the run's first message.
+        steps=[{'command':'strategy list'},{'command':f"strategy show feature {f['id']}"},{'command':f"strategy show milestone {m['id']}"},
+               {'command':'submit app.one','text':'pub fn one() { 9 }'},{'command':'write priv/a','text':'changed'},{'command':'task done','text':'no'},
+               {'command':'strategy note','text':'A first plan'},{'command':'strategy note','text':'A second plan'}]
+        run=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':on_f})
+        self.assertEqual((run['state'],run['context']),('running',on_f))
+        while 'strategyRun' not in (e:=self.next_event(stream)[1]):pass
+        self.assertEqual(e,{'strategyRun':run});self.assertNotIn('project',e)
+        # A second run on the same feature is refused while the first is open.
+        status,body=self.bare('POST','/strategy/runs',{'Content-Type':'application/json'},json.dumps({'model':'fake','text':'Again','context':on_f}))
+        self.assertEqual((status,json.loads(body)['code']),(409,'E7003'))
+        rid=run['id']
+        # The agent reads the graph by following links, can't change code, and its note waits.
+        waiting=self.wait_run(rid,lambda r:r['state']=='waiting')
+        self.assertEqual([(n['author'],n['text']) for n in waiting['notes'][1:]],[('agent','A first plan')])
+        out=self.replies(rid)
+        listed=json.loads(out[0])
+        self.assertEqual((sorted(t['id'] for t in listed['tasks']),[x['id'] for x in listed['features']],[x['id'] for x in listed['milestones']]),
+                         (sorted([t1['id'],t2['id']]),[f['id']],[m['id']]))
+        shown=json.loads(out[1])
+        self.assertEqual((shown['record']['title'],shown['links']['milestone'],sorted(shown['links']['tasks'])),('Feature F1',m['id'],sorted([t1['id'],t2['id']])))
+        self.assertEqual(json.loads(out[2])['links'],{'features':[f['id']],'tasks':[t2['id']]})
+        for r in out[3:6]:self.assertTrue(r.startswith('E7010'),r)
+        # Outside a strategy run, strategy commands are refused.
+        p=subprocess.run([BIN,'strategy','list'],cwd=self.root,env=self.env,text=True,capture_output=True)
+        self.assertTrue(p.stdout.startswith('E7001'),p.stdout)
+        self.assertEqual(len(out),6)
+        self.assertFalse((self.root/'.solace'/(rid+'.exited')).exists())
+        self.assertEqual(((self.root/'priv/a').read_text(),(self.root/'src/app.gleam').read_text().splitlines()[0]),('original','pub fn one() { 1 }'))
+        prompt=(self.root/'.solace'/(rid+'.prompt')).read_text()
+        self.assertIn('Feature F1',prompt);self.assertIn('Reply only with `strategy note`',prompt)
+        # The human's next note reaches the waiting agent, which replies again.
+        self.api('POST',f'/strategy/runs/{rid}/notes',{'text':'And tasks'})
+        self.wait_run(rid,lambda r:r['state']=='waiting' and r['notes'][-1]['text']=='A second plan')
+        self.assertEqual(self.replies(rid)[6],'The human replied:\n\nAnd tasks\n')
+        ended=self.api('POST',f'/strategy/runs/{rid}/end')
+        self.assertEqual((ended['state'],ended['outcome'],len(ended['notes']),ended['notes'][0]['author']),('ended','planned',1,'solace'))
+        self.assertIn('A second plan',ended['notes'][0]['text'])
+        # The agent hears that the run ended and exits on its own.
+        deadline=time.monotonic()+10
+        while not (self.root/'.solace'/(rid+'.exited')).exists() and time.monotonic()<deadline:time.sleep(.05)
+        self.assertTrue((self.root/'.solace'/(rid+'.exited')).exists())
+        self.assertIn('has ended',self.replies(rid)[7])
+        while 'strategyRun' not in (e:=self.next_event(stream)[1]) or e['strategyRun']['state']!='ended':pass
+        self.assertEqual(e,{'strategyRun':ended})
+        status,body=self.bare('POST',f'/strategy/runs/{rid}/notes',{'Content-Type':'application/json'},json.dumps({'text':'late'}))
+        self.assertEqual((status,json.loads(body)['code']),(409,'E7003'))
+        listed=self.api('GET','/strategy/runs')
+        self.assertEqual(([r['id'] for r in listed],'notes' in listed[0]),([rid],False))
+        self.assertEqual(self.api('GET',f'/strategy/runs/{rid}')['notes'],ended['notes'])
+        # A new connection replays the runs after the vision.
+        fresh=self.stream()
+        while 'vision' not in (e:=self.next_event(fresh)[1]):pass
+        _,e=self.next_event(fresh);self.assertEqual(e,{'strategyRuns':listed})
+
+    def test_strategy_proposals_wait_for_approval(self):  # D-93, A19
+        f=self.api('POST','/features',{'title':'Done F','state':'complete'})
+        steps=[{'command':'strategy note\nstrategy vision','text':'not alone'},
+               {'command':'strategy task','text':json.dumps({'title':'Rejected one'})},
+               {'command':'strategy task','text':json.dumps({'title':'Approved one','feature':f['id']})},
+               {'command':'strategy vision','text':'Agent vision'},
+               {'command':'strategy note','text':'Done proposing'}]
+        rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
+        def asked(n):return self.wait_run(rid,lambda r:len(r['questions'])==n and r['state']=='waiting')['questions'][-1]
+        # Reject creates nothing.
+        q=asked(1)
+        self.assertEqual((q['options'],q['proposal']['kind'],q['answer']),(['Approve','Reject'],'task',None))
+        self.api('POST',f'/strategy/runs/{rid}/questions/{q["id"]}',{'option':'Reject'})
+        # A task linked to a complete feature reopens it only on Approve.
+        q=asked(2)
+        self.assertNotIn('Rejected one',[t['title'] for t in self.api('GET','/tasks')])
+        self.assertEqual(q['proposal']['reopens'],[{'kind':'feature','id':f['id']}]);self.assertIn('back to planned',q['text'])
+        self.assertEqual(self.api('GET','/features')[0]['state'],'complete')
+        self.api('POST',f'/strategy/runs/{rid}/questions/{q["id"]}',{'option':'Approve'})
+        self.assertEqual(self.api('GET','/features')[0]['state'],'planned')
+        t=next(t for t in self.api('GET','/tasks') if t['title']=='Approved one')
+        self.assertEqual(t['feature'],f['id'])
+        self.assertEqual(self.api('GET','/tasks/'+t['id'])['notes'][-1]['text'],f'Created by strategy run {rid}')
+        # A vision proposal approved after a human edit is not applied.
+        q=asked(3)
+        self.assertEqual(q['proposal']['base'],self.api('GET','/vision')['revision'])
+        self.api('PUT','/vision',{'text':'Human vision','base':q['proposal']['base']})
+        answered=self.api('POST',f'/strategy/runs/{rid}/questions/{q["id"]}',{'option':'Approve'})
+        self.assertTrue(answered['questions'][2]['answer'].startswith('Not applied: E7026'),answered['questions'][2])
+        self.assertEqual(self.api('GET','/vision')['text'],'Human vision')
+        run=self.wait_run(rid,lambda r:r['state']=='waiting' and r['notes'][-1]['text']=='Done proposing')
+        out=self.replies(rid)
+        self.assertTrue(out[0].startswith('E7017'),out[0])
+        self.assertEqual(out[1],'The human answered the proposal: Reject\n')
+        self.assertIn(f'Approved and applied: created task {t["id"]}',out[2]);self.assertIn('Not applied: E7026',out[3])
+        # Every answer is on the run's notes, and so in its transcript once it ends.
+        answers=[n['text'] for n in run['notes'] if n['author']=='solace']
+        self.assertEqual(len(answers),3)
+        for a,want in zip(answers,['Answer: Reject','Answer: Approved and applied','Answer: Not applied: E7026']):self.assertIn(want,a)
+        ended=self.api('POST',f'/strategy/runs/{rid}/end')
+        self.assertEqual((ended['outcome'],len(ended['notes'])),('planned',1));self.assertIn('Answer: Not applied: E7026',ended['notes'][0]['text'])
 
 if __name__=='__main__':unittest.main()

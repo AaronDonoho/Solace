@@ -69,3 +69,44 @@ Why: the Feature/Milestone store and the Strategy page need a settled model to b
 Amends D-87 point 4 and Spec 15 §4 (Aaron, 2026-10-09).
 1. `PATCH /tasks/{id}` with only `feature` and `milestone` is accepted while a run is going, as in a final column. Any other field during a run is still refused (`E7003`), `dependsOn` included.
 Why: the links are for planning and don't affect the agent; a long run or an unanswered question shouldn't hold planning up.
+
+## D-90 Strategy is its own app at `/strategy`, with tabs
+Like D-85 (Aaron, 2026-10-09).
+1. The Strategy page is its own Gleam project, `solace-cli/strategy` (package `strategy`, JavaScript target). Its component is `<solace-strategy>`. The shell depends on it by path and registers it.
+2. The page is `/strategy`; the server serves the shell there. There is no `/p/<dir>/strategy`: features and milestones are root records (D-87). The menu bar has a **Strategy** link, marked current on the page.
+3. The page has tabs, one component per tab: **Vision**, **Features**, **Roadmap**, **Tasks**. The tab shown is kept in the URL as `?tab=<name>` (`/strategy?tab=tasks`), written with `replaceState`, so a reload returns to it; a missing or unknown value shows Vision.
+4. "Archive" is the Tasks tab: there is no separate archive project, and `solace-cli/archive` is removed.
+Why: each page is its own app with its own build and tests; planning grows into several views that belong on one page.
+
+## D-91 The vision is one internal Markdown document kept by the task server
+Amends Spec 15 §1 and §4 (Aaron, 2026-10-10).
+1. The root has one vision: Markdown at `<root>/.solace/strategy/vision.md`. It has no store and no records. It is internal, so agents can't reach it (Spec 14 §1); the task server is its only writer, and writes it atomically.
+2. `GET /vision` returns `{text, revision}`; `revision` is `sha256:` and the hex SHA-256 of the text, so a missing file reads as `""` and its hash. `PUT /vision {text, base}` writes only if `base` is the current revision; otherwise it is refused with `E7026` (409) and nothing is written, so two editors don't overwrite each other. Both answer at the root only.
+3. The root's `/events` sends `{vision: {text, revision}}` after every write, and a new connection's replay sends it after `{features}`. `/p/{dir}/events` leaves it out.
+4. Investigate, work and discuss briefs carry the vision, at most its first 1000 characters (cut at a line end when one is in reach, and marked as cut). Review briefs don't: a review judges the diff.
+5. The Strategy page's Vision tab shows it as Markdown and edits it with the shared Markdown editor; a draft begun from an older revision says so and offers to reload.
+Why: agents should work toward what the product is for, and the human writes that down once, where the page and every brief read it.
+
+## D-92 The vision is at most 1000 characters
+Amends D-91 and Spec 15 §1 and §4 (Aaron, 2026-10-10).
+1. `PUT /vision` refuses text over 1000 characters with `E7027` (400) and writes nothing. Characters are Unicode code points, as Rust's `chars().count()`; the page counts the same way.
+2. While editing, a line below the text box reads "973 / 1000 character limit". Past the limit it is an alert, and **Save** is disabled.
+3. Briefs carry the whole vision. Only a vision saved before the limit, and longer than it, is still cut as D-91 point 4 says.
+Why: agents should always read the whole vision, so it has to be short enough to go into every brief.
+
+## D-93 Strategy runs: agents plan with the human on the Strategy page
+Amends D-90 point 3 and Spec 15 §1, §4 and §6 (Aaron, 2026-10-10).
+1. A **strategy run** is not a task's run. It is a root record at `<root>/.solace/strategy/runs/<id>.json`, written only by the task server: `{id, kind: "strategy", model, effort?, state: running|waiting|ended, started, ended?, outcome?, log, context, notes, questions}`. `context` is what it was started on: `{kind: "page"}` or `{kind: "task"|"feature"|"milestone", id}`. The human starts it from the Strategy page with a first message; a second open run on the same context is refused (`E7003`).
+2. Its scope is everything on the Strategy page. It reads tasks, features, milestones and the vision by following their links (`strategy list`, `strategy show <kind> <id>`), and reads any project's code with `--project`. It changes no code: commands that change a project are refused (`E7010`), and it takes no project lock.
+3. It is discuss-like (D-72, D-76). The agent replies with `strategy note`, which waits for the human's next message; `task done` and `task ask` are refused. The human ends it (outcome `planned`), and its notes become one transcript note, as `end_discussion` does.
+4. **Every change needs the human's approval.** `strategy task|feature|milestone|vision` proposes creating or editing a record, or a new vision text. Each proposal is a question on the run, with options Approve and Reject, and the agent waits for the answer. Approve applies it as the page's own request would be applied, with the same refusals (`E7003`, `E7004`, `E7023`–`E7027`); a refused apply changes nothing, and the answer says why. Reject changes nothing.
+5. Decisions are logged where they apply: every answer, applied or not, is on the run's transcript, and a task created or changed by an approved proposal gets a `solace` note naming the run.
+6. A feature or milestone is done when its tasks are, and can come back to planning for new tasks. A proposal that links a task to a `complete` or `canceled` feature or milestone also sets that record to `planned`; the question says so, and both are approved together. Completing a feature or milestone by itself when its tasks are done is not part of this decision.
+7. The page has no Plan tab. A planning panel, one component docked beside every tab and collapsible, holds the run: Start takes its context from what is selected (the whole page when nothing is), and the panel shows the transcript, a message box and the proposals with Approve and Reject. It stays open across tab switches. A record with an open run shows a marker, and the panel lists past runs to reopen.
+Why: planning is a conversation about the page's records, not a task; the human keeps every change to the plan in their own hands, and the conversation sits beside what it is about.
+
+## D-94 A proposed task may name projects that don't exist yet
+Amends D-93 point 4 (Aaron, 2026-10-10).
+1. A strategy run's task proposal takes its projects from `scope`; without one it goes in the root's own project. Its home is the first folder in `scope` that is a project.
+2. A folder in `scope` may not be a project yet. When none is, the task is still created, with the first folder as its home: it is in no lane, so the board doesn't show it, until that project exists.
+Why: planning runs ahead of the code; a task for a project not created yet should still be part of the plan.

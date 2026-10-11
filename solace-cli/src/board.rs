@@ -304,15 +304,24 @@ fn compact(t: &mut Value, rid: &str) {
     if turns.is_empty() {
         return;
     }
+    note(t, "solace", Some(rid), &conversation(&turns, &model));
+}
+/// A conversation's turns as one verbatim transcript, each labeled with who
+/// said it: a discussion's, or a strategy run's (D-93).
+pub(super) fn conversation(turns: &[Value], model: &str) -> String {
     let lines: Vec<String> = turns
         .iter()
         .map(|n| {
-            let who = if n["author"] == "human" { "Human".to_string() } else { format!("Agent ({model})") };
+            let who = match n["author"].as_str() {
+                Some("human") => "Human".to_string(),
+                Some("solace") => "Solace".to_string(),
+                _ => format!("Agent ({model})"),
+            };
             // The label stands on its own line, so a turn that opens with a heading or list still renders.
             format!("**{who}:**\n\n{}", n["text"].as_str().unwrap_or("").trim())
         })
         .collect();
-    note(t, "solace", Some(rid), &format!("### Discussion\n\n{}", lines.join("\n\n")));
+    format!("### Discussion\n\n{}", lines.join("\n\n"))
 }
 pub(super) fn active(t: &Value) -> bool {
     t["runs"].as_array().unwrap().iter().any(|r| r["state"] != "ended")
@@ -362,7 +371,7 @@ pub(super) fn move_to(w: &Value, t: &mut Value, to: &Value) -> Result<(), Failur
 fn run_at(t: &Value, rid: &str) -> Result<usize, Failure> {
     t["runs"].as_array().and_then(|runs| runs.iter().position(|r| r["id"] == rid)).ok_or_else(|| Failure("E7003 unknown run".into(), 1))
 }
-fn end_run(r: &mut Value, outcome: &str) {
+pub(super) fn end_run(r: &mut Value, outcome: &str) {
     r["state"] = json!("ended");
     r["ended"] = json!(now());
     r["outcome"] = json!(outcome);
@@ -521,6 +530,24 @@ fn model(config: &Value, name: &str) -> Result<Value, Failure> {
         .and_then(|a| a.iter().find(|x| x["id"] == name))
         .cloned()
         .ok_or_else(|| Failure(format!("E7001 unknown model {name}; configure system [[models]]"), 1))
+}
+/// The model a request names in `model`, with the `effort` it asks for, checked
+/// as an action's are: an unknown model or an effort it doesn't offer is
+/// `E7001`, and an unavailable model `E7011`.
+pub(super) fn chosen_model(config: &Value, body: &Value) -> Result<Value, Failure> {
+    let Some(id) = body["model"].as_str() else { return err("E7001", "a model is required") };
+    let mut m = model(config, id)?;
+    if let Some(e) = body.get("effort").filter(|e| !e.is_null()) {
+        let e = e
+            .as_str()
+            .filter(|e| efforts(&m).contains(e))
+            .ok_or_else(|| Failure(format!("E7001 effort not offered by {id}; offered: {}", efforts(&m).join(", ")), 1))?;
+        m["effort"] = json!(e);
+    }
+    if let Some(reason) = unavailable(&m) {
+        return err("E7011", format!("model {id} is unavailable: {reason}"));
+    }
+    Ok(m)
 }
 /// Efforts an action may choose for a model. Custom runners take none.
 fn efforts(m: &Value) -> &'static [&'static str] {
@@ -1651,7 +1678,7 @@ pub(super) fn after(root: &Path, t: &Value, after: After) {
 /// Sets a task's `feature`, `milestone` and `dependsOn` from a `PATCH` (D-87).
 /// A feature given to a task with no milestone brings its own, unless the
 /// request names one.
-fn set_links(top: &Path, t: &mut Value, body: &Value) -> Result<(), Failure> {
+pub(super) fn set_links(top: &Path, t: &mut Value, body: &Value) -> Result<(), Failure> {
     for (k, kind) in [("feature", "features"), ("milestone", "milestones")] {
         match body.get(k) {
             None | Some(Value::Null) => {}
@@ -1895,19 +1922,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     }
     // A review or discussion has its own conversation, never the author's.
     let author = !matches!(run["kind"].as_str(), Some("review" | "discuss"));
-    let native = m["run"].is_null();
-    let claude_home = env::var_os("CLAUDE_CONFIG_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".claude"));
-    // macOS keychain entries are keyed to CLAUDE_CONFIG_DIR. Keep that sign-in
-    // working without copying credentials: use a fresh, nonpersistent handoff.
-    let persistent = native
-        && !(m["agent"] == "claude"
-            && cfg!(target_os = "macos")
-            && !claude_home.join(".credentials.json").exists()
-            && m["endpoint"].is_null()
-            && env::var_os("ANTHROPIC_API_KEY").is_none()
-            && env::var_os("ANTHROPIC_AUTH_TOKEN").is_none());
+    let persistent = persists(m);
     let previous = &t["conversation"];
     // Compare launch-relevant configuration, not labels. A changed provider, endpoint or runner gets a handoff; model and effort are launch flags and keep the session (D-75).
     let compatibility = json!({"agent":m["agent"],"endpoint":m["endpoint"],"run":m["run"]});
@@ -1938,17 +1953,90 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
             fs::remove_dir_all(old)?;
         }
     }
+    let (prompt, images) = continuation_brief(t, run, resume.is_some(), root, m["run"].is_array());
+    let timeout = system()?["task_timeout"].as_u64().unwrap_or(3600);
+    if author {
+        // Only an exited process has a reusable session; a server crash during
+        // a turn falls back instead of resuming a possibly orphaned process.
+        let conversation = if persistent { json!({"home":home,"config":compatibility,"session":null}) } else { Value::Null };
+        tasks::update(root, tid, move |current| {
+            current["conversation"] = conversation;
+            Ok(())
+        })?;
+    }
+    let mut child = spawn_agent(root, &dir, &log, m, &prompt, &images, resume.as_deref(), persistent, [tid, rid], timeout)?;
+    let supervised = supervise(Watch::Task(root, tid), rid, &mut child, &log, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT);
+    if !(author && persistent) && matches!(supervised, Err(Failure(_, REPLIED))) && dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    let forced = supervised?;
+    if author && persistent {
+        let session = if forced { Value::Null } else { json!(session_id(&log, agent_of(m))) };
+        let (briefed, rid) = (t["notes"].clone(), rid.to_string());
+        tasks::update(root, tid, move |current| {
+            current["conversation"]["session"] = session;
+            // Only notes actually briefed, plus the agent's own notes, are known to
+            // this conversation. A human may add feedback during graceful exit.
+            current["conversation"]["notes_seen"] = json!(
+                briefed
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .chain(current["notes"].as_array().unwrap().iter().filter(|n| n["run"] == rid && n["author"] == "agent"))
+                    .map(note_fingerprint)
+                    .collect::<Vec<_>>()
+            );
+            Ok(())
+        })?;
+    } else {
+        fs::remove_dir_all(&dir)?;
+    }
+    Ok(())
+}
+
+fn agent_of(m: &Value) -> &str {
+    m["agent"].as_str().unwrap_or("codex")
+}
+fn claude_home() -> PathBuf {
+    env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".claude"))
+}
+/// Whether model `m`'s agent keeps its conversation in its own folder.
+fn persists(m: &Value) -> bool {
+    // macOS keychain entries are keyed to CLAUDE_CONFIG_DIR. Keep that sign-in
+    // working without copying credentials: use a fresh, nonpersistent handoff.
+    m["run"].is_null()
+        && !(m["agent"] == "claude"
+            && cfg!(target_os = "macos")
+            && !claude_home().join(".credentials.json").exists()
+            && m["endpoint"].is_null()
+            && env::var_os("ANTHROPIC_API_KEY").is_none()
+            && env::var_os("ANTHROPIC_AUTH_TOKEN").is_none())
+}
+/// Starts model `m`'s agent with its settings in `dir`, its output in `log`
+/// and `prompt` (with `images`) on stdin: the launch every run shares, a
+/// task's or a strategy run's. `ids` are its `SOLACE_TASK` and `SOLACE_RUN`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_agent(
+    root: &Path,
+    dir: &Path,
+    log: &Path,
+    m: &Value,
+    prompt: &str,
+    images: &[PathBuf],
+    resume: Option<&str>,
+    persistent: bool,
+    ids: [&str; 2],
+    timeout: u64,
+) -> Result<std::process::Child, Failure> {
     let custom = m["run"].as_array();
-    let (prompt, images) = continuation_brief(t, run, resume.is_some(), root, custom.is_some());
+    let native = m["run"].is_null();
     // `SOLACE_BIN` names the CLI agents call when the server is another program (D-80).
     let binary = match env::var_os("SOLACE_BIN").filter(|b| !b.is_empty()) {
         Some(b) => PathBuf::from(b),
         None => env::current_exe()?,
     };
-    let config = system()?;
-    let timeout = config["task_timeout"].as_u64().unwrap_or(3600);
-    let agent = m["agent"].as_str().unwrap_or("codex");
-    let launch: Value = serde_json::from_str(&lockdown::agent_config(agent, &dir, &binary, timeout)?).unwrap();
+    let agent = agent_of(m);
+    let launch: Value = serde_json::from_str(&lockdown::agent_config(agent, dir, &binary, timeout)?).unwrap();
     let mut argv: Vec<String> = if let Some(a) = custom {
         a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
     } else if agent == "codex" {
@@ -1975,12 +2063,12 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
         if agent == "claude" && !persistent {
             argv.push("--no-session-persistence".into());
         }
-        if let Some(session) = &resume {
+        if let Some(session) = resume {
             if agent == "codex" {
                 argv.insert(2, "resume".into());
-                argv.push(session.clone());
+                argv.push(session.into());
             } else {
-                argv.extend(["--resume".into(), session.clone()]);
+                argv.extend(["--resume".into(), session.into()]);
             }
         }
         if agent == "claude" {
@@ -2016,7 +2104,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
         }
     }
     if agent == "claude" && native {
-        let auth = claude_home.join(".credentials.json");
+        let auth = claude_home().join(".credentials.json");
         // A token refresh replaces the symlink with a private copy whose rotated
         // token goes stale; relink so every launch uses the real sign-in.
         let link = dir.join(".credentials.json");
@@ -2025,16 +2113,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
             std::os::unix::fs::symlink(auth, link)?;
         }
     }
-    if author {
-        // Only an exited process has a reusable session; a server crash during
-        // a turn falls back instead of resuming a possibly orphaned process.
-        let conversation = if persistent { json!({"home":home,"config":compatibility,"session":null}) } else { Value::Null };
-        tasks::update(root, tid, move |current| {
-            current["conversation"] = conversation;
-            Ok(())
-        })?;
-    }
-    let file = fs::File::create(&log)?;
+    let file = fs::File::create(log)?;
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(root).process_group(0).stdin(Stdio::piped()).stdout(file.try_clone()?).stderr(file);
     for (k, v) in launch["env"].as_object().unwrap() {
@@ -2042,7 +2121,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     }
     if agent == "claude" && custom.is_none() {
         if persistent {
-            cmd.env("CLAUDE_CONFIG_DIR", &dir);
+            cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
         if let Some(e) = m.get("endpoint") {
             cmd.env("ANTHROPIC_BASE_URL", e["base_url"].as_str().unwrap_or(""));
@@ -2057,13 +2136,13 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
             }
         }
     }
-    cmd.env("SOLACE_TASK", tid).env("SOLACE_RUN", rid).env("SOLACE_SESSION", rid).env("SOLACE_BIN", &binary);
+    cmd.env("SOLACE_TASK", ids[0]).env("SOLACE_RUN", ids[1]).env("SOLACE_SESSION", ids[1]).env("SOLACE_BIN", &binary);
     let mut child = cmd.spawn()?;
     let mut stdin = child.stdin.take().unwrap();
     if agent == "claude" && custom.is_none() && !images.is_empty() {
         // Claude Code takes images only inside a stream-json user message.
         let mut content = vec![json!({"type":"text","text":prompt})];
-        for image in &images {
+        for image in images {
             let media = image_type(&image.to_string_lossy()).unwrap_or("image/png");
             content.push(json!({"type":"image","source":{"type":"base64","media_type":media,"data":base64(&fs::read(image)?)}}));
         }
@@ -2072,33 +2151,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
         writeln!(stdin, "{prompt}")?;
     }
     drop(stdin);
-    let supervised = supervise(root, tid, rid, &mut child, &log, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT);
-    if !(author && persistent) && matches!(supervised, Err(Failure(_, REPLIED))) && dir.exists() {
-        fs::remove_dir_all(&dir)?;
-    }
-    let forced = supervised?;
-    if author && persistent {
-        let session = if forced { Value::Null } else { json!(session_id(&log, agent)) };
-        let (briefed, rid) = (t["notes"].clone(), rid.to_string());
-        tasks::update(root, tid, move |current| {
-            current["conversation"]["session"] = session;
-            // Only notes actually briefed, plus the agent's own notes, are known to
-            // this conversation. A human may add feedback during graceful exit.
-            current["conversation"]["notes_seen"] = json!(
-                briefed
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .chain(current["notes"].as_array().unwrap().iter().filter(|n| n["run"] == rid && n["author"] == "agent"))
-                    .map(note_fingerprint)
-                    .collect::<Vec<_>>()
-            );
-            Ok(())
-        })?;
-    } else {
-        fs::remove_dir_all(&dir)?;
-    }
-    Ok(())
+    Ok(child)
 }
 
 /// How long a run that called a finishing tool may take to exit (spec 15).
@@ -2109,8 +2162,7 @@ const GRACEFUL_EXIT: Duration = Duration::from_secs(30);
 /// run that finished gets `grace` to exit; any other ended run is killed.
 #[allow(clippy::too_many_arguments)]
 fn supervise(
-    root: &Path,
-    tid: &str,
+    watch: Watch,
     rid: &str,
     child: &mut std::process::Child,
     log: &Path,
@@ -2123,15 +2175,15 @@ fn supervise(
     let mut ending = None;
     loop {
         std::thread::sleep(Duration::from_millis(50));
-        let current = task(root, tid)?;
-        let r = &current["runs"][run_at(&current, rid)?];
-        if r["state"] == "running" && current["paused_from"].is_null() {
+        let (run, paused) = watch.run(rid)?;
+        let r = &run;
+        if r["state"] == "running" && !paused {
             elapsed += last.elapsed();
         }
         last = Instant::now();
         let expired = r["state"] != "ended" && elapsed >= timeout;
         let ended = r["state"] == "ended";
-        if ended && matches!(r["outcome"].as_str(), Some("finished" | "reported" | "reviewed" | "discussed")) {
+        if ended && matches!(r["outcome"].as_str(), Some("finished" | "reported" | "reviewed" | "discussed" | "planned")) {
             ending.get_or_insert_with(Instant::now);
         }
         if let Some(status) = child.try_wait()? {
@@ -2149,33 +2201,86 @@ fn supervise(
                 {
                     return Err(Failure("session unavailable; using a fresh handoff".into(), SESSION_GONE));
                 }
-                // A discussion agent that replied in plain text and exited cleanly has
-                // taken its turn: the reply is its note, and the discussion waits.
+                // A discussion or strategy agent that replied in plain text and exited
+                // cleanly has taken its turn: the reply is its note, and the run waits.
                 let reply = entries.iter().rev().find(|e| e["kind"] == "message").and_then(|e| e["text"].as_str()).map(str::trim).unwrap_or("");
-                if r["kind"] == "discuss" && status.success() && error.is_empty() && !reply.is_empty() {
-                    let (rid, reply) = (rid.to_string(), reply.to_string());
-                    tasks::update(root, tid, move |t| {
-                        let i = run_at(t, &rid)?;
-                        if t["runs"][i]["state"] != "ended" {
-                            note(t, "agent", Some(&rid), &reply);
-                            t["runs"][i]["state"] = json!("waiting");
-                        }
-                        Ok(())
-                    })?;
+                if matches!(r["kind"].as_str(), Some("discuss" | "strategy")) && status.success() && error.is_empty() && !reply.is_empty() {
+                    watch.reply(rid, reply.to_string())?;
                     return Err(Failure("discussion reply".into(), REPLIED));
                 }
                 let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
                 let message = format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
-                finish(root, tid, rid, Some(&message))?;
+                watch.fail(rid, &message)?;
             }
             return Ok(false);
         }
         if expired || (ended && ending.is_none()) || ending.is_some_and(|at| at.elapsed() >= grace) {
             lockdown::kill_group(child);
             if expired {
-                finish(root, tid, rid, Some("task timeout"))?;
+                watch.fail(rid, "task timeout")?;
             }
             return Ok(true);
+        }
+    }
+}
+
+/// What `supervise` watches: a task's run (the project and task), or a
+/// strategy run of the root (D-93).
+enum Watch<'a> {
+    Task(&'a Path, &'a str),
+    Strategy(&'a Path),
+}
+impl Watch<'_> {
+    /// The run as it is now, and whether its task is paused.
+    fn run(&self, rid: &str) -> Result<(Value, bool), Failure> {
+        match self {
+            Watch::Task(root, tid) => {
+                let t = task(root, tid)?;
+                let i = run_at(&t, rid)?;
+                Ok((t["runs"][i].clone(), !t["paused_from"].is_null()))
+            }
+            Watch::Strategy(top) => match tasks::strategy_run(top, rid) {
+                Some(run) => Ok((run, false)),
+                None => err("E7023", format!("unknown strategy run {rid}")),
+            },
+        }
+    }
+    /// Records a plain-text reply as the agent's note; the run waits for the human.
+    fn reply(&self, rid: &str, reply: String) -> Result<(), Failure> {
+        let rid = rid.to_string();
+        match self {
+            Watch::Task(root, tid) => tasks::update(root, tid, move |t| {
+                let i = run_at(t, &rid)?;
+                if t["runs"][i]["state"] != "ended" {
+                    note(t, "agent", Some(&rid), &reply);
+                    t["runs"][i]["state"] = json!("waiting");
+                }
+                Ok(())
+            }),
+            Watch::Strategy(top) => tasks::update_run(top, &rid.clone(), move |r| {
+                if r["state"] != "ended" {
+                    note(r, "agent", Some(&rid), &reply);
+                    r["state"] = json!("waiting");
+                }
+                Ok(())
+            }),
+        }
+    }
+    /// Ends the run as failed, saying why. A strategy run ends `stopped`, with
+    /// its notes as one transcript note.
+    fn fail(&self, rid: &str, message: &str) -> Result<(), Failure> {
+        match self {
+            Watch::Task(root, tid) => finish(root, tid, rid, Some(message)),
+            Watch::Strategy(top) => {
+                let (rid, message) = (rid.to_string(), message.to_string());
+                tasks::update_run(top, &rid.clone(), move |r| {
+                    if r["state"] != "ended" {
+                        note(r, "solace", Some(&rid), &message);
+                        tasks::end_strategy(r, "stopped");
+                    }
+                    Ok(())
+                })
+            }
         }
     }
 }
@@ -2302,6 +2407,7 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
             out += &format!("\nRetained drafts (view with `view --draft <id>`):\n{drafts}\n");
         }
     }
+    out += &vision_section(&scope::top(root), kind);
     if !images.is_empty() {
         out += "\nImages in the notes are attached to this message as [image 1], [image 2], ... in order.\n";
         if custom {
@@ -2312,6 +2418,31 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
     }
     out += "\nAfter the finishing tool returns, give a short final response and exit normally.\n";
     (out, images)
+}
+
+/// The most of the vision a brief carries (D-91): all of it, since a save is
+/// held to the same limit (D-92). Only a vision saved before the limit is cut.
+const VISION_CAP: usize = tasks::VISION_LIMIT;
+
+/// The root's vision for an investigate, work or discuss brief (D-91): the
+/// whole text, or for an older, longer one its first `VISION_CAP` characters,
+/// cut at a line end when one is in reach. None for a review, or when there is
+/// no vision.
+fn vision_section(top: &Path, kind: &str) -> String {
+    let text = tasks::vision(top)["text"].as_str().unwrap_or("").trim().to_string();
+    if kind == "review" || text.is_empty() {
+        return String::new();
+    }
+    let mut shown = text.clone();
+    if text.chars().count() > VISION_CAP {
+        let cut: String = text.chars().take(VISION_CAP).collect();
+        shown = match cut.rfind('\n') {
+            Some(i) if i > 0 => cut[..i].trim_end().to_string(),
+            _ => cut,
+        };
+        shown += "\n(cut short; the whole vision is on the Strategy page)";
+    }
+    format!("\nVision (what the product is for, kept on the Strategy page; let it guide your choices):\n{shown}\n")
 }
 
 /// Replaces each markdown image of an uploaded file with `[image N]`, numbering
@@ -2666,8 +2797,18 @@ fn finish(root: &Path, tid: &str, rid: &str, failure: Option<&str>) -> Result<()
     })
 }
 
+/// A task run's task and run, from its agent's environment; none in a
+/// strategy run.
 pub fn context() -> Option<(String, String)> {
-    Some((env::var("SOLACE_TASK").ok()?, env::var("SOLACE_RUN").ok()?))
+    Some((env::var("SOLACE_TASK").ok().filter(|t| t != STRATEGY)?, env::var("SOLACE_RUN").ok()?))
+}
+/// `SOLACE_TASK` in a strategy run's agent (D-93). No task has this id: task
+/// ids are hex digits.
+const STRATEGY: &str = "strategy";
+/// A strategy run's id, from its agent's environment.
+pub fn strategy_context() -> Option<String> {
+    env::var("SOLACE_TASK").ok().filter(|t| t == STRATEGY)?;
+    env::var("SOLACE_RUN").ok()
 }
 /// Waits until the run may act. A `task` command takes no lock: it sends the
 /// task server a message, and reads run state from the task file, which is
@@ -2951,6 +3092,253 @@ fn wait_discussion(s: &Store, tid: &str, rid: &str) -> Out {
             let reply = format!("The human replied:\n\n{}\n", new.join("\n\n"));
             tasks::send(&scope::top(&s.root), json!({"kind":"resume","task":tid,"run":rid}))?;
             return Ok(reply);
+        }
+    }
+}
+
+// Strategy runs (D-93): an agent plans with the human on the Strategy page. The
+// run is a root record, not a task's; its agent reads and replies, and changes
+// no code.
+
+/// Launches strategy run `rid`'s agent on its own thread. A plain-text reply
+/// is its turn: a fresh agent, briefed with every note, takes the next one.
+pub(super) fn start_strategy(top: PathBuf, rid: String) {
+    std::thread::spawn(move || {
+        let result = (|| {
+            let mut result = strategy_process(&top, &rid);
+            while let Err(Failure(_, REPLIED)) = result {
+                wait_strategy(&top, &rid)?;
+                result = strategy_process(&top, &rid);
+            }
+            result
+        })();
+        if let Err(e) = result {
+            let _ = Watch::Strategy(&top).fail(&rid, &e.0);
+        }
+    });
+}
+/// Runs strategy run `rid`'s agent until it exits. It always starts a fresh
+/// conversation, in a folder beside the run's log, removed after.
+fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
+    let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
+    if run["state"] == "ended" {
+        return Ok(());
+    }
+    let config = system()?;
+    let m = chosen_model(&config, &run)?;
+    let timeout = config["task_timeout"].as_u64().unwrap_or(3600);
+    let log = PathBuf::from(run["log"].as_str().unwrap_or(""));
+    let dir = log.with_extension("");
+    fs::create_dir_all(&dir)?;
+    let prompt = strategy_brief(top, &run);
+    let launched = spawn_agent(top, &dir, &log, &m, &prompt, &[], None, persists(&m), [STRATEGY, rid], timeout);
+    let supervised = launched.and_then(|mut child| supervise(Watch::Strategy(top), rid, &mut child, &log, false, Duration::from_secs(timeout), GRACEFUL_EXIT));
+    if dir.exists() {
+        fs::remove_dir_all(&dir)?;
+    }
+    supervised.map(drop)
+}
+/// A strategy run's role (Spec 15 §6).
+const STRATEGY_ROLE: &str = "Plan with the human: the tasks, features, milestones and vision on the Strategy page. This run is read-only: it changes no code, and every change to the plan is the human's. To propose one, send `strategy task|feature|milestone` (with the id to edit one, none to create one) and the fields of the board's request as a JSON object in `text`, or `strategy vision` with the new vision in `text`, alone in its call; it waits for the human to approve or reject it, and the reply says which, with a new record's id. Read the plan with `strategy list` and `strategy show <task|feature|milestone> <id>`, and follow the ids each record links to. Read code with `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` (`help <command>` gives its options), adding `--project <folder>` for a project below the root. Other commands, `task` commands among them, are refused. The human's message is the last note. Reply only with `strategy note`: `command` is just `strategy note`, and the whole reply goes in `text`, in Markdown. The call waits and returns the human's next message. Keep replying until a call says the run has ended, then stop without further calls.";
+/// A strategy run's prompt: its role, the record it was started on in full,
+/// the vision, the decision titles from `DECISIONS.md` and its notes.
+fn strategy_brief(top: &Path, run: &Value) -> String {
+    let mut out = format!("You are planning with the human on this project's Strategy page. You work only through the Solace tool: there is no shell and no file access.\n{STRATEGY_ROLE}\n");
+    let c = &run["context"];
+    match (c["kind"].as_str(), c["id"].as_str()) {
+        (Some(kind @ ("task" | "feature" | "milestone")), Some(id)) => match strategy_show(top, kind, id) {
+            Ok(record) => out += &format!("\nThis run is about the {kind} {id}:\n{}\n", serde_json::to_string_pretty(&record).unwrap()),
+            Err(_) => out += &format!("\nThis run is about the {kind} {id}, which no longer exists.\n"),
+        },
+        _ => out += "\nThis run is about the whole Strategy page.\n",
+    }
+    let vision = tasks::vision(top)["text"].as_str().unwrap_or("").trim().to_string();
+    if !vision.is_empty() {
+        out += &format!("\nVision:\n{vision}\n");
+    }
+    // Reads without `--project` go to the root's own project; a folder of
+    // projects has none, so its files can't be read in a run.
+    let projects = workspace::members(top).unwrap_or_default();
+    let own = projects.iter().any(|p| p == ".");
+    if !own {
+        out += &format!("\nThe root is a folder of projects, not a project: add `--project <folder>` to every read. Its projects: {}.\n", projects.join(", "));
+    }
+    let decisions = fs::read_to_string(top.join("DECISIONS.md")).unwrap_or_default();
+    let titles: Vec<String> = decisions.lines().filter_map(|l| l.strip_prefix("## ")).filter(|l| l.starts_with("D-")).map(|l| format!("- {l}")).collect();
+    if !titles.is_empty() {
+        let how = if own { "`grep D-<n>`, then `read DECISIONS.md --lines a..b`, reads one" } else { "titles only: the file is in no project, so this run can't read it" };
+        out += &format!("\nDecisions (titles from DECISIONS.md; {how}):\n{}\n", titles.join("\n"));
+    }
+    let notes: Vec<String> = run["notes"]
+        .as_array()
+        .map(|ns| ns.iter().map(|n| format!("- {}: {}", n["author"].as_str().unwrap_or(""), n["text"].as_str().unwrap_or("").trim())).collect())
+        .unwrap_or_default();
+    if !notes.is_empty() {
+        out += &format!("\nNotes so far:\n{}\n", notes.join("\n"));
+    }
+    out
+}
+/// `strategy list`: every task, feature and milestone in brief, and the vision.
+fn strategy_list(top: &Path) -> Result<Value, Failure> {
+    let pick = |v: &Value, keys: &[&str]| -> Value { Value::Object(keys.iter().map(|k| (k.to_string(), v[*k].clone())).collect()) };
+    let records = |kind: &str, keys: &[&str]| -> Vec<Value> { tasks::records(top, kind).iter().map(|v| pick(v, keys)).collect() };
+    Ok(json!({
+        "tasks": all_tasks(top)?.iter().map(|t| pick(t, &["id", "title", "column", "feature", "milestone"])).collect::<Vec<_>>(),
+        "features": records("features", &["id", "title", "state", "milestone"]),
+        "milestones": records("milestones", &["id", "title", "state", "rank"]),
+        "vision": tasks::vision(top)["text"],
+    }))
+}
+/// `strategy show`: one task, feature or milestone in full as `record`, with
+/// `links`, the ids of the records it links to: a task's feature, milestone and
+/// `dependsOn`; a feature's milestone and tasks; a milestone's features (its
+/// own, and those holding one of its tasks) and tasks.
+fn strategy_show(top: &Path, kind: &str, id: &str) -> Result<Value, Failure> {
+    let all = all_tasks(top)?;
+    let ids = |of: &[&Value]| -> Vec<Value> { of.iter().map(|v| v["id"].clone()).collect() };
+    let (record, links) = match kind {
+        "task" => {
+            let Some(t) = all.iter().find(|t| t["id"] == id) else { return err("E7023", format!("unknown task {id}")) };
+            (t.clone(), json!({"feature": t["feature"], "milestone": t["milestone"], "dependsOn": t["dependsOn"]}))
+        }
+        "feature" => {
+            let Some(f) = tasks::record(top, "features", id) else { return err("E7023", format!("unknown feature {id}")) };
+            let held: Vec<&Value> = all.iter().filter(|t| t["feature"] == id).collect();
+            let links = json!({"milestone": f["milestone"], "tasks": ids(&held)});
+            (f, links)
+        }
+        "milestone" => {
+            let Some(m) = tasks::record(top, "milestones", id) else { return err("E7023", format!("unknown milestone {id}")) };
+            let held: Vec<&Value> = all.iter().filter(|t| t["milestone"] == id).collect();
+            let features = tasks::records(top, "features");
+            let features: Vec<&Value> = features.iter().filter(|f| f["milestone"] == id || held.iter().any(|t| t["feature"] == f["id"])).collect();
+            (m, json!({"features": ids(&features), "tasks": ids(&held)}))
+        }
+        _ => return err("E7001", "strategy show takes task, feature or milestone, and an id"),
+    };
+    // `links` sorts first, so a reply cut at its budget loses the record's end, never the links.
+    Ok(json!({"links": links, "record": record}))
+}
+/// A reply cut to `budget` bytes, saying so.
+fn within(text: String, budget: usize) -> String {
+    if text.len() <= budget {
+        return text;
+    }
+    let cut = (0..=budget.saturating_sub(120)).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
+    format!("{}\n… cut at the reply limit; `strategy show` reads one record at a time.\n", &text[..cut])
+}
+/// Waits until strategy run `rid`'s agent may act. It takes no project lock.
+/// An ended run runs nothing; while the run waits for the human, any command
+/// but `strategy` holds still, as `agent_guard` holds a task's run.
+pub fn strategy_guard(top: &Path, rid: &str, a: &[&str]) -> Result<(), Failure> {
+    loop {
+        let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
+        if run["state"] == "ended" {
+            return err("E7003", "run ended");
+        }
+        if run["state"] == "waiting" && a.first() != Some(&"strategy") {
+            if !tasks::serving(top) {
+                return err("E7003", "the run waits for the human and no board server is running; stop now");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+        return Ok(());
+    }
+}
+/// `strategy list | show | note` in strategy run `rid`, which `strategy_guard`
+/// let act.
+pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut() -> Out, budget: usize) -> Out {
+    let pretty = |v: Value| within(format!("{}\n", serde_json::to_string_pretty(&v).unwrap()), budget);
+    match a {
+        ["strategy", "list"] => Ok(pretty(strategy_list(top)?)),
+        ["strategy", "show", kind, id] => Ok(pretty(strategy_show(top, kind, id)?)),
+        ["strategy", "note", rest @ ..] => {
+            if rest.first().is_some_and(|w| w.starts_with("--")) {
+                return err("E7015", "nothing was sent. Resend with `command` set to just `strategy note` and the whole reply in the `text` argument");
+            }
+            let text = if rest.is_empty() { input()? } else { rest.join(" ") };
+            if text.trim().is_empty() {
+                return err("E7001", "strategy note needs the reply in `text`");
+            }
+            // The agent sends the task server a message; the run waits for the human.
+            let sent = tasks::send(top, json!({"kind":"strategy_note","run":rid,"text":text}))?;
+            if !tasks::applied(top, &sent) {
+                return Ok(format!("{}\n", tasks::QUEUED));
+            }
+            if tasks::rejected(top, &sent) {
+                return err("E7001", REJECTED);
+            }
+            wait_strategy(top, rid)
+        }
+        ["strategy", kind @ ("task" | "feature" | "milestone" | "vision"), rest @ ..] => {
+            if rest.first().is_some_and(|w| w.starts_with("--")) {
+                return err("E7015", format!("nothing was sent. Resend with `command` set to just `strategy {kind}` (and the id to edit) and the proposal in the `text` argument"));
+            }
+            let id = match (*kind, rest) {
+                (_, []) => None,
+                ("task" | "feature" | "milestone", [id]) => Some(*id),
+                _ => return usage("strategy task|feature|milestone [<id>] with the fields as JSON in `text`, or strategy vision with the new text in `text`"),
+            };
+            let text = input()?;
+            if text.trim().is_empty() {
+                return err("E7001", format!("strategy {kind} needs the proposal in `text`"));
+            }
+            // Checked now as the request would be; applied only when the human approves.
+            let question = tasks::proposal(top, rid, kind, id, &text)?;
+            let qid = question["id"].as_str().unwrap_or("").to_string();
+            let sent = tasks::send(top, json!({"kind":"strategy_propose","run":rid,"question":question}))?;
+            if !tasks::applied(top, &sent) {
+                return Ok(format!("{}\n", tasks::QUEUED));
+            }
+            if tasks::rejected(top, &sent) {
+                return err("E7001", REJECTED);
+            }
+            wait_answer(top, rid, &qid)
+        }
+        _ => usage(
+            "strategy list | strategy show <task|feature|milestone> <id> | strategy note, with the reply in `text` | strategy task|feature|milestone [<id>] or strategy vision, with the proposal in `text`",
+        ),
+    }
+}
+/// Holds a strategy run's proposal until the human answers it or ends the run.
+/// Waiting doesn't count toward the timeout.
+fn wait_answer(top: &Path, rid: &str, qid: &str) -> Out {
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        if !tasks::serving(top) {
+            return err("E7003", "the board server stopped while waiting");
+        }
+        let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
+        if run["state"] == "ended" {
+            return Ok("The strategy run has ended. Stop now, without further calls.\n".into());
+        }
+        let answer = run["questions"].as_array().and_then(|qs| qs.iter().find(|q| q["id"] == qid)).map(|q| q["answer"].clone());
+        if let Some(Value::String(a)) = answer {
+            tasks::send(top, json!({"kind":"strategy_resume","run":rid}))?;
+            return Ok(format!("The human answered the proposal: {a}\n"));
+        }
+    }
+}
+/// Holds a strategy run's reply until the human writes again or ends the run,
+/// as `wait_discussion` does. Waiting doesn't count toward the timeout.
+fn wait_strategy(top: &Path, rid: &str) -> Out {
+    loop {
+        std::thread::sleep(Duration::from_millis(50));
+        // No server, so the human can't reply: return rather than wait forever.
+        if !tasks::serving(top) {
+            return err("E7003", "the board server stopped while waiting");
+        }
+        let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
+        if run["state"] == "ended" {
+            return Ok("The strategy run has ended. Stop now, without further calls.\n".into());
+        }
+        let notes = run["notes"].as_array().cloned().unwrap_or_default();
+        let after = notes.iter().rposition(|n| n["author"] == "agent").map_or(0, |l| l + 1);
+        let new: Vec<&str> = notes[after..].iter().filter(|n| n["author"] == "human").filter_map(|n| n["text"].as_str()).collect();
+        if !new.is_empty() {
+            tasks::send(top, json!({"kind":"strategy_resume","run":rid}))?;
+            return Ok(format!("The human replied:\n\n{}\n", new.join("\n\n")));
         }
     }
 }
@@ -3334,6 +3722,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
     // Once every project's tasks are in the root's store, the task server
     // applies what its inbox holds and takes over (D-77).
     tasks::start(&board.top)?;
+    tasks::end_strategy_runs(&board.top)?;
     // A migration's folder is held too, so a shell can't move it from under the board.
     let _migration = match migrate::load(&board.top) {
         Some(_) if !board.held.lock().unwrap().contains_key(&board.top) => {
@@ -3402,11 +3791,25 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             if req.method().as_str() != "GET" && !path.starts_with("/migration") && board.step.lock().unwrap().is_some() {
                 return respond_json(req, err("E7003", "a migration step is running"));
             }
-            // Milestones and features are root records (D-87): never under `/p/{dir}`.
+            // Milestones, features (D-87), the vision (D-91) and strategy runs (D-93)
+            // are the root's: never under `/p/{dir}`.
             let strategy: Vec<&str> = path.trim_matches('/').split('/').collect();
-            if matches!(strategy[0], "milestones" | "features") {
+            let runs = strategy.len() >= 2 && strategy[..2] == ["strategy", "runs"];
+            if matches!(strategy[0], "milestones" | "features") || strategy == ["vision"] || runs {
                 let result = match read_body(&mut req, BODY_LIMIT) {
-                    Some(bytes) => body_json(&bytes).map_err(|e| (409, e)).and_then(|v| tasks::strategy_api(&board.top, req.method().as_str(), &strategy, v)),
+                    Some(bytes) => body_json(&bytes).map_err(|e| (409, e)).and_then(|v| match strategy[0] {
+                        "vision" => tasks::vision_api(&board.top, req.method().as_str(), v),
+                        "strategy" => {
+                            let started = req.method().as_str() == "POST" && strategy.len() == 2;
+                            tasks::strategy_runs_api(&board.top, req.method().as_str(), &strategy[2..], v).inspect(|run| {
+                                // A new run's agent starts now.
+                                if started {
+                                    start_strategy(board.top.clone(), run["id"].as_str().unwrap_or("").to_string());
+                                }
+                            })
+                        }
+                        _ => tasks::strategy_api(&board.top, req.method().as_str(), &strategy, v),
+                    }),
                     None => err("E7001", "request body too large").map_err(|e| (409, e)),
                 };
                 return match result {
@@ -3442,10 +3845,10 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 return;
             }
             if req.method().as_str() == "GET"
-                && matches!(url.split('?').next().unwrap_or(""), "/" | "/migrate" | "/contracts" | "/app.js" | "/guide" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2")
+                && matches!(url.split('?').next().unwrap_or(""), "/" | "/migrate" | "/contracts" | "/strategy" | "/app.js" | "/guide" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2")
             {
                 let (data, kind) = match url.split('?').next().unwrap_or("") {
-                    "/" | "/migrate" | "/contracts" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
+                    "/" | "/migrate" | "/contracts" | "/strategy" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
                     "/guide" => (include_bytes!("../board/guide.html").as_slice(), "text/html"),
                     "/fonts/sans-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-400-normal.woff2").as_slice(), "font/woff2"),
                     "/fonts/sans-700.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-700-normal.woff2").as_slice(), "font/woff2"),
@@ -3563,14 +3966,17 @@ impl Events {
     fn at_root(&self) -> bool {
         self.merged || self.streams.iter().any(|s| s.0 == ".")
     }
-    /// The root's milestones and features as they are, after the tasks.
+    /// The root's milestones, features, vision and strategy runs as they are,
+    /// after the tasks.
     fn strategy_state(&self) -> String {
         if !self.at_root() {
             return String::new();
         }
         let (id, top) = (self.id(), &self.board.top);
         let (milestones, features) = (json!({"milestones":tasks::records(top, "milestones")}), json!({"features":tasks::records(top, "features")}));
-        format!("id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\n")
+        let vision = json!({"vision": tasks::vision(top)});
+        let runs = json!({"strategyRuns": tasks::strategy_runs(top)});
+        format!("id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {runs}\n\n")
     }
     /// The workflow and tasks of the streams at `which`, as events.
     fn state_of(&self, which: &[usize]) -> String {
@@ -3748,13 +4154,34 @@ mod tests {
         assert_eq!(task(&s.root, t["id"].as_str().unwrap()).unwrap()["title"], "Edited");
     }
 
+    /// D-91: investigate, work and discuss briefs carry the vision, cut at a line
+    /// end within the cap; a review's doesn't, and no vision adds nothing.
+    #[test]
+    fn a_brief_carries_the_vision_up_to_the_cap() {
+        let root = testing::Scratch::new();
+        assert_eq!(vision_section(&root, "work"), "");
+        let line = format!("{}\n", "v".repeat(99));
+        let long = line.repeat(12);
+        fs::create_dir_all(root.join(".solace/strategy")).unwrap();
+        fs::write(root.join(".solace/strategy/vision.md"), &long).unwrap();
+        for kind in ["investigate", "work", "discuss"] {
+            let s = vision_section(&root, kind);
+            assert!(s.starts_with("\nVision ("), "{kind}: {s}");
+            assert_eq!(s.matches(&"v".repeat(99)).count(), 10, "{kind}: ten whole lines fit in {VISION_CAP} characters");
+            assert!(s.contains("(cut short;"), "{kind}");
+        }
+        assert_eq!(vision_section(&root, "review"), "");
+        fs::write(root.join(".solace/strategy/vision.md"), "For teams.\n").unwrap();
+        assert!(vision_section(&root, "work").ends_with(":\nFor teams.\n"));
+    }
+
     /// A finished agent that hangs is killed once the grace period passes, not before.
     #[test]
     fn hung_shutdown_is_killed_after_the_grace_period() {
         let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"ended","outcome":"finished"}));
         let log = p.root.join(".solace/r1.log");
         let start = Instant::now();
-        let forced = supervise(&p.root, &tid, "r1", &mut child, &log, false, Duration::from_secs(3600), Duration::from_millis(300)).unwrap();
+        let forced = supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), Duration::from_millis(300)).unwrap();
         assert!(forced);
         assert!(start.elapsed() >= Duration::from_millis(300) && start.elapsed() < Duration::from_secs(10));
         assert!(child.try_wait().unwrap().is_some());
@@ -3769,7 +4196,7 @@ mod tests {
         let mut child = Command::new("sleep").arg("0.2").process_group(0).spawn().unwrap();
         let log = p.root.join(".solace/r1.log");
         let start = Instant::now();
-        assert!(!supervise(&p.root, &tid, "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+        assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
         assert!(start.elapsed() < Duration::from_secs(10));
     }
 
@@ -3779,11 +4206,11 @@ mod tests {
         let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"ended","outcome":"interrupted"}));
         let log = p.root.join(".solace/r1.log");
         let start = Instant::now();
-        assert!(supervise(&p.root, &tid, "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+        assert!(supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
         assert!(start.elapsed() < Duration::from_secs(10));
         let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"running"}));
         let log = p.root.join(".solace/r1.log");
-        assert!(supervise(&p.root, &tid, "r1", &mut child, &log, false, Duration::from_millis(200), GRACEFUL_EXIT).unwrap());
+        assert!(supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_millis(200), GRACEFUL_EXIT).unwrap());
         assert!(child.try_wait().unwrap().is_some());
         let t = task(&p.root, &tid).unwrap();
         assert_eq!(t["runs"][0]["state"], "ended");
@@ -3828,6 +4255,45 @@ mod tests {
         assert!(view.recv_timeout(Duration::from_millis(300)).is_err());
         drop(held);
         assert_eq!(view.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(1));
+    }
+
+    /// D-93: a strategy run's guard takes no project lock and refuses an ended
+    /// run; `strategy show` follows links both ways; the brief carries the
+    /// record the run is about, the decision titles and the notes.
+    #[test]
+    fn strategy_runs_read_the_graph() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let top = scope::top(&p.root);
+        let runs = top.join(".solace/strategy/runs");
+        fs::create_dir_all(&runs).unwrap();
+        for (id, state) in [("r1", "running"), ("r2", "ended")] {
+            let run = json!({"id":id,"kind":"strategy","state":state,"context":{"kind":"page"},"notes":[],"questions":[]});
+            fs::write(runs.join(format!("{id}.json")), run.to_string()).unwrap();
+        }
+        let held = lock(&p.root).unwrap();
+        assert!(strategy_guard(&top, "r1", &["view", "app"]).is_ok());
+        assert!(strategy_guard(&top, "r2", &["view", "app"]).unwrap_err().0.starts_with("E7003"));
+        assert!(strategy_guard(&top, "r9", &["view", "app"]).unwrap_err().0.starts_with("E7023"));
+        drop(held);
+        let m = tasks::strategy_api(&top, "POST", &["milestones"], json!({"title":"M"})).unwrap();
+        let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"F","milestone":m["id"]})).unwrap();
+        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
+        (t["feature"], t["milestone"]) = (f["id"].clone(), m["id"].clone());
+        tasks::put(&s, &t).unwrap();
+        let (tid, fid, mid) = (t["id"].as_str().unwrap(), f["id"].as_str().unwrap(), m["id"].as_str().unwrap());
+        assert_eq!(strategy_show(&top, "feature", fid).unwrap()["links"], json!({"milestone":mid,"tasks":[tid]}));
+        assert_eq!(strategy_show(&top, "milestone", mid).unwrap()["links"], json!({"features":[fid],"tasks":[tid]}));
+        assert_eq!(strategy_show(&top, "task", tid).unwrap()["links"], json!({"feature":fid,"milestone":mid,"dependsOn":[]}));
+        assert!(strategy_show(&top, "feature", "nope").unwrap_err().0.starts_with("E7023"));
+        assert!(strategy_show(&top, "vision", "x").unwrap_err().0.starts_with("E7001"));
+        assert_eq!(strategy_list(&top).unwrap()["tasks"], json!([{"id":tid,"title":"T","column":t["column"],"feature":fid,"milestone":mid}]));
+        fs::write(top.join("DECISIONS.md"), "# Decisions\n## D-1 First thing\nWhy: x\n## Notes\n").unwrap();
+        let brief = strategy_brief(&top, &json!({"context":{"kind":"feature","id":fid},"notes":[{"author":"human","text":"Plan F"}]}));
+        assert!(brief.contains(&format!("This run is about the feature {fid}")) && brief.contains("\"title\": \"F\""), "{brief}");
+        assert!(brief.contains("- D-1 First thing") && !brief.contains("- Notes") && brief.contains("- human: Plan F"), "{brief}");
+        // The root is a project itself, so the decisions can be read in full.
+        assert!(brief.contains("`grep D-<n>`") && !brief.contains("folder of projects"), "{brief}");
     }
 
     /// A recorded file change stops being reviewable once the file is unwatched, and symbols always are.

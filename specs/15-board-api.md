@@ -1,6 +1,6 @@
 # Spec 15: Task Board
 
-**Status:** accepted 2026-09-29 · **Implements:** D-16 (points 5, 6), D-17, D-19, D-23, D-25, D-87, D-88 · **Needed by:** the D-16 work. Not in the PROPOSAL.md §14.4 table; numbered after it.
+**Status:** accepted 2026-09-29 · **Implements:** D-16 (points 5, 6), D-17, D-19, D-23, D-25, D-87, D-88, D-93 · **Needed by:** the D-16 work. Not in the PROPOSAL.md §14.4 table; numbered after it.
 
 Humans direct agents through tasks on a board. Solace owns each task's state, starts and stops agents, and enforces the workflow. A board only shows tasks and passes on what the human asks for. The API is the smallest one a Solace-compatible board needs. Solace ships a default board built only on this API; any other board, or an adapter for one, can replace it.
 
@@ -46,7 +46,24 @@ A **milestone** is a planned release; a **feature** is a capability of the produ
 
 Links are optional. A task has at most one feature and at most one milestone; a feature has at most one target milestone. A feature appears in every milestone that holds one of its tasks, as well as in its target. Deleting a feature or milestone clears every link to it in the same operation; it never deletes tasks.
 
-Each record is one JSON file, at `<root>/.solace/strategy/milestones/<id>.json` and `<root>/.solace/strategy/features/<id>.json`. The task server is their only writer: it writes each file atomically, as it does tasks, and assigns ids the same way as task ids. Clients read and change them only through the API (§4); agents have no access (Spec 14 §1 rule 4). The vision document is not part of this spec; it belongs to the Strategy page work.
+Each record is one JSON file, at `<root>/.solace/strategy/milestones/<id>.json` and `<root>/.solace/strategy/features/<id>.json`. The task server is their only writer: it writes each file atomically, as it does tasks, and assigns ids the same way as task ids. Clients read and change them only through the API (§4); agents have no access (Spec 14 §1 rule 4).
+
+### Vision (D-91)
+
+The root has one **vision**: what the product is for and who uses it, as Markdown at `<root>/.solace/strategy/vision.md`. It is one document, not records, and has no id or history. Its `revision` is `sha256:` and the hex SHA-256 of its text; a missing file reads as the empty text. The task server is its only writer and writes it atomically; agents have no access (Spec 14 §1 rule 4). Clients read and change it only through the API (§4). It holds at most 1000 characters, counted as Unicode code points (D-92). Investigate, work and discuss briefs carry it whole; review briefs don't. A vision saved before the limit and longer than it is cut to its first 1000 characters, at a line end when one is in reach.
+
+### Strategy runs (D-93)
+
+A **strategy run** is an agent planning with the human on the Strategy page. It belongs to no task: each is one JSON file at `<root>/.solace/strategy/runs/<id>.json`, written atomically by the task server alone, with ids assigned as for tasks.
+
+| Field | Meaning |
+| --- | --- |
+| `id`, `model`, `effort?`, `state`, `started`, `ended?`, `outcome?`, `log` | As a task's run (§1 `runs`); `kind` is always `strategy`, `outcome` is `planned` or `stopped` |
+| `context` | What the run was started on: `{kind: "page"}`, or `{kind: "task"\|"feature"\|"milestone", id}` |
+| `notes` | As a task's `notes`; the human's messages, the agent's replies, and `solace` notes recording each answered proposal |
+| `questions` | As a task's `questions`, each with a `proposal` (§6) |
+
+Its scope is every task, feature and milestone and the vision; it reads code in any project and changes none. Every change it proposes waits for the human's approval.
 
 ## 2. Workflow configuration
 
@@ -148,7 +165,7 @@ Two rules hold for every workflow:
 
 A `text` sent with an action is added as a human note before the action runs.
 
-### Features and milestones (D-87)
+### Features, milestones and the vision (D-87, D-91)
 
 These answer at the root only, not under `/p/{dir}`.
 
@@ -165,7 +182,28 @@ These answer at the root only, not under `/p/{dir}`.
 
 An unknown feature or milestone id, in a path or a body, is `E7023`.
 
-**Events.** The root's `/events` sends `{milestone}` and `{feature}` in full after every change, and `{removedMilestone: id}` and `{removedFeature: id}` after a delete. They carry no `project` field and go on the root task log, so the `tasks` position in `Last-Event-ID` resumes them. A new connection's replay sends `{milestones: [...]}` and `{features: [...]}` after `{tasks}`. A delete that clears links also sends `{task}` for each task it changed. `/p/{dir}/events` leaves them out.
+| Request (D-91) | Effect |
+| --- | --- |
+| `GET /vision` | The vision, `{text, revision}` |
+| `PUT /vision` `{text, base}` | Replaces the text if `base` is the current revision, and returns the vision as it is now. Another `base` is refused with `E7026` (409) and writes nothing; a missing or non-string field is `E7001` (400), and text over 1000 characters is `E7027` (400, D-92) |
+
+**Events.** The root's `/events` sends `{milestone}` and `{feature}` in full after every change, `{removedMilestone: id}` and `{removedFeature: id}` after a delete, and `{vision: {text, revision}}` after every vision write. They carry no `project` field and go on the root task log, so the `tasks` position in `Last-Event-ID` resumes them. A new connection's replay sends `{milestones: [...]}`, `{features: [...]}` and `{vision}` after `{tasks}`. A delete that clears links also sends `{task}` for each task it changed. `/p/{dir}/events` leaves them out.
+
+### Strategy runs (D-93)
+
+These answer at the root only.
+
+| Request | Effect |
+| --- | --- |
+| `GET /strategy/runs` | All strategy runs, without `notes` |
+| `GET /strategy/runs/{rid}` | One run in full, plus `transcript` as `GET /tasks/{id}/runs/{rid}` gives it |
+| `POST /strategy/runs` `{model, effort?, text, context}` | Starts a run; `text` is required (`E7001`) and is its first note. A `context` naming a missing record is `E7023`, or `E7001` for an unknown task. Refused while a run on the same context is open (`E7003`), or for an unavailable model (`E7011`) |
+| `POST /strategy/runs/{rid}/notes` `{text}` | The human's next message: the waiting agent gets it. Refused once the run has ended (`E7003`) |
+| `POST /strategy/runs/{rid}/questions/{qid}` `{option?, text?}` | Answers a proposal (§6); the waiting agent gets the answer |
+| `POST /strategy/runs/{rid}/end` | Ends the open run with outcome `planned` (`E7003` if ended); its notes become one transcript note, as `end_discussion` does (§2) |
+| `POST /strategy/runs/{rid}/stop` | Kills its agent and ends it with outcome `stopped`, with the same transcript note |
+
+**Events.** The root's `/events` sends `{strategyRun}` in full after every change, with no `project` field, on the root task log. A new connection's replay sends `{strategyRuns: [...]}` (the list `GET /strategy/runs` returns) after `{vision}`.
 
 `solace serve` also serves the default board at `/` and a guide for humans at `/guide`.
 
@@ -248,6 +286,12 @@ When a task reaches a final column, the records of the state before it are dropp
   - The message of `task note|done|ask` goes in `text`; a first word after the subcommand that starts with `--` (such as `--text`) is refused with `E7015`, and nothing is sent (D-79).
 - An **investigate run** gets the same prompt, with a role line asking for findings or a plan. It is read-only like a review run: `write`, `submit`, `delete`, `remove`, `format` and `run` are refused (`E7010`). Its `task done` report is added as a note and ends the run, and fires no event: the task stays where it is. Its `task ask` fires no event either. The task stays in its column, marked as needing attention, and answering its pending questions automatically continues the waiting agent. Explicit `investigate` with an answer still works. A later work run gets the report in its prompt with the other notes.
 - A **review run** gets the same prompt plus the names of the task's `changes`. It is read-only (`E7010`), ends by adding its feedback with `task note`, and fires no event.
+- A **strategy run** (D-93) is started from the Strategy page (§4), not by an action. Its brief gives the role (plan with the human, read-only, every change is a proposal), its `context` record in full, the vision and the decision titles from `DECISIONS.md`, and its notes. Commands that change a project are refused (`E7010`), and it takes no project lock; reads with `--project` reach every project. `task note|done|ask` are refused; it has instead:
+  - `strategy list`: every task `{id, title, column, feature, milestone}`, feature `{id, title, state, milestone}` and milestone `{id, title, state, rank}`, and the vision;
+  - `strategy show <task|feature|milestone> <id>`: one record in full, with the ids of the records it links to (a task's feature, milestone and `dependsOn`; a feature's milestone and tasks; a milestone's features and tasks);
+  - `strategy note`: the agent's reply; it waits for the human's next note, as a discussion's `task note` does (§2), and a plain-text reply is its turn (D-76);
+  - `strategy task|feature|milestone [<id>]` with the fields in `text` as JSON (those of `POST`/`PATCH` in §4; an id edits that record, none creates one), and `strategy vision` with the new text in `text`: a **proposal**. It is checked as the request would be, then becomes a question on the run with options Approve and Reject and `proposal: {kind, id?, fields, base?, reopens?}`, and the agent waits. `base` is the vision's revision when proposed. `reopens` lists the `complete` or `canceled` feature and milestone a task proposal links to; Approve also sets them `planned`. Approve applies the proposal as the request would be applied, with the same refusals (`E7003`, `E7004`, `E7023`–`E7027`); a refused apply changes nothing and the answer says why. Reject changes nothing. Each answer adds a `solace` note to the run, and an applied task proposal adds one to the task, naming the run. The agent gets the answer, with the new record's id for a create. Like `task ask`, a proposal must be the only command in its call (`E7017`).
+  - Waiting doesn't count toward the timeout. A strategy command outside a strategy run is refused (`E7001`).
 - A run past the task timeout (a system setting; default 60 min) is stopped and fires `failed`. Time spent waiting on a question or paused doesn't count.
 - **Pause and continuation:** answering a paused run saves the answers without continuing it; `resume` continues it once all questions are answered. Answer submission never starts a new agent, replaces a run, grants a stamp or reverts work. Answering continues the waiting run directly, in any column and any workflow (D-88). Repeated answer submissions do not start another run.
 - **Keeping an agent waiting** depends on the agent's tool-call timeout. `agent-config` (Spec 14 §5) sets it to the task timeout or more (Codex: the MCP server's `tool_timeout_sec`; Claude Code: `MCP_TOOL_TIMEOUT`). If the agent gives up anyway, the run fires `failed`, and the task continues with a new agent.
@@ -289,6 +333,7 @@ Several projects on one server, several people, remote access and authentication
 - A16. `/models` lists each model's `efforts`. An action's `effort` is recorded on the run and reaches the agent; an effort the model doesn't offer is `E7001`. A successful `task done` sets `finished`, and the next action clears it. An uploaded PNG is served back as `image/png`; SVG or over 5 MB is `E7001`. A note referencing an uploaded image reaches the agent's brief as `[image 1: path]`.
 - A15. Fake native Codex and Claude launchers retain author conversations through investigate/work/reassign, use fresh reviewers, fall back on lost sessions, enforce current run permissions, and clean up on completion/cancellation. Model and effort changes keep the conversation, start-over creates a fresh one; quota errors are not retried. Graceful exit persists state after the finishing tool returns; hung shutdown is bounded. Deleted notes do not swallow later feedback; intervening edits mark previous checks stale.
 - A17. With a fake agent in a work run, an invalid `write solace.toml` is `E6020` and adds no question. A valid one waits on a settings question; Reject leaves the file unchanged and the agent receives the answer; Approve writes it; Approve after a human edit to the file leaves it unchanged and says so. A review run's `write solace.toml` is `E7010`.
+- A19. Strategy runs (D-93), with a fake agent: `POST /strategy/runs` on a feature starts a run, and a second one on that feature is `E7003`. `strategy list` and `strategy show` follow links from the feature to its tasks and milestone. Code changes are `E7010`, and `task done` is refused. `strategy note` waits for the human's next note. A task proposal waits on a question: Reject creates nothing, and Approve creates the task with a note naming the run. A task proposal linked to a `complete` feature reopens it (`planned`) only on Approve. A vision proposal approved after a human edit is not applied, and the answer says so. Every answer is on the run's notes. `end` ends the run `planned` with one transcript note. `{strategyRun}` events reach the root's `/events` only.
 - U1. An edit to a module file while no run is going is read in by the board's poll, the file keeps the edit, and an `Unexpected Changes` task with the hazard flag holds the change and its compile result; another task's `assign` is `E7012`; `cancel` restores the file and the store (`outside::tests`, `tests/workspace_acceptance.py`). Only the edited project gets the task.
 - U2. A file changed during a command isn't written over; a file defining a name twice is left as it is and reported once; a store with no record counts what it holds as written.
 - U3. A change whose hash is on `.solace/approved` is read in without a task; completing an `Unexpected Changes` task adds its changes to the list.

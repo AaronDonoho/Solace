@@ -1,0 +1,655 @@
+import { test, expect } from 'bun:test';
+import * as strategy from '../build/dev/javascript/strategy/strategy.mjs';
+import * as features from '../build/dev/javascript/strategy/features.mjs';
+import { None } from '../build/dev/javascript/gleam_stdlib/gleam/option.mjs';
+import { toList } from '../build/dev/javascript/strategy/gleam.mjs';
+import { perform } from '../build/dev/javascript/lustre/lustre/effect.mjs';
+import { to_string } from '../build/dev/javascript/lustre/lustre/element.mjs';
+
+const frame = (data, id = 0) => 'id: ' + id + '\ndata: ' + JSON.stringify(data) + '\n\n';
+const encode = text => new TextEncoder().encode(text);
+
+// A workspace root: its own `/tasks` holds only its project, so the list comes from the merged stream.
+test('Tasks tab merges every project, sorts and filters, opens a task and links it inline', async () => {
+  const requests = [];
+  const workflow = { columns: [{ id: 'backlog', label: 'Backlog', actions: [], final: false }, { id: 'done', label: 'Done', actions: [], final: true }] };
+  const blank = { body: '', rank: 1, paused_from: null, stamps: {}, links: [], runs: [], questions: [], feature: null, milestone: null, dependsOn: [], closedTime: null };
+  const older = { ...blank, id: 't1', title: 'Older', column: 'done', closedTime: 100 };
+  let newer = { ...blank, id: 't2', title: 'Newer', column: 'done', closedTime: 200 };
+  const open = { ...blank, id: 't3', title: 'Still open', body: 'needs a search box', column: 'backlog' };
+  let events, patch;
+  const server = Bun.serve({ port: 0, fetch: async req => {
+    const path = new URL(req.url).pathname;
+    requests.push([req.method, path]);
+    if (path === '/events') return new Response(new ReadableStream({ start(c) { events = c; c.enqueue(encode(
+      frame({ project: '.', workflow }) + frame({ project: '.', tasks: [older, open] }) +
+      frame({ project: 'web', workflow }) + frame({ project: 'web', tasks: [newer] }) +
+      frame({ milestones: [{ id: 'm2', title: 'Empty', rank: 2 }, { id: 'm1', title: 'Launch', rank: 1 }] }) +
+      frame({ features: [{ id: 'f2', title: 'Loose', body: '', milestone: null, rank: 1, state: 'proposed' }, { id: 'f1', title: 'Search', body: 'A **fast** lookup', milestone: 'm1', rank: 1, state: 'active' }] }) +
+      'event: ready\ndata: {}\n\n')); } }), { headers: { 'Content-Type': 'text/event-stream' } });
+    if (path === '/projects') return Response.json({ workspace: true, projects: [{ dir: '.', label: 'root', name: 'root', base: '' }, { dir: 'web', label: 'web', name: 'web', base: '/p/web' }], found: [] });
+    if (path.endsWith('/workflow')) return Response.json(workflow);
+    if (req.method === 'PATCH' && path === '/p/web/tasks/t2') { patch = await req.json(); newer = { ...newer, ...patch }; return Response.json(newer); }
+    return Response.json({ message: 'unexpected ' + path }, { status: 404 });
+  }});
+  const fetchOriginal = globalThis.fetch;
+  const controllers = [];
+  globalThis.fetch = (path, options) => fetchOriginal(new URL(path, server.url), options);
+  // EventSource is a browser primitive absent from Bun; consume real SSE here.
+  globalThis.EventSource = class {
+    listeners = {};
+    addEventListener(name, f) { this.listeners[name] = f; }
+    close() {}
+    constructor(path) {
+      const controller = new AbortController(); controllers.push(controller);
+      fetch(path, { signal: controller.signal }).then(async response => {
+        let text = '';
+        for await (const chunk of response.body) {
+          text += new TextDecoder().decode(chunk);
+          while (text.includes('\n\n')) {
+            const at = text.indexOf('\n\n'); const block = text.slice(0, at); text = text.slice(at + 2);
+            const data = block.split('\n').find(line => line.startsWith('data: '));
+            const name = block.split('\n').find(line => line.startsWith('event: '));
+            if (name) this.listeners[name.slice(7)]?.({ data: data?.slice(6) });
+            else if (data) this.onmessage?.({ data: data.slice(6) });
+          }
+        }
+      }).catch(() => {});
+    }
+  };
+  let model;
+  const noop = () => {};
+  const execute = effect => perform(effect, dispatch, noop, noop, noop, noop, noop, noop);
+  const dispatch = msg => { let effect; [model, effect] = strategy.update(model, msg); execute(effect); };
+  const html = () => to_string(strategy.view(model));
+  const until = async predicate => {
+    for (let i = 0; i < 200; i++) { if (predicate()) return; await Bun.sleep(10); }
+    throw new Error('UI did not reach expected state: ' + html());
+  };
+  const row = id => strategy.visible(model).toArray().find(pair => pair[1].id === id)[1];
+  try {
+    // `new` is a JavaScript keyword: Gleam exports it as `new$`.
+    model = strategy.new$(new strategy.Tasks());
+    dispatch(new strategy.Connected());
+    await until(() => html().includes('Still open') && html().includes('Newer') && html().includes('Launch') && events);
+    // Closed newest first, then open; column labels come from each project's workflow.
+    const page = html();
+    expect(page.indexOf('Newer')).toBeLessThan(page.indexOf('Older'));
+    expect(page.indexOf('Older')).toBeLessThan(page.indexOf('Still open'));
+    expect(page).toContain('Backlog');
+    // Filters and search run on the client.
+    dispatch(new strategy.Filter(new strategy.Filters('', 'web', '', '', '')));
+    expect(html()).not.toContain('Older');
+    dispatch(new strategy.Filter(new strategy.Filters('', '', '', '', 'SEARCH box')));
+    expect(html()).toContain('Still open');
+    expect(html()).not.toContain('Newer');
+    dispatch(new strategy.Filter(new strategy.Filters('', '', '', '', '')));
+    // A row opens the task's details from its own project.
+    dispatch(new strategy.Open('web', 't2'));
+    expect(html()).toMatch(/<solace-task [^>]*base="\/p\/web"[^>]*dir="web"/);
+    expect(html()).toMatch(/<solace-task [^>]*task="t2"/);
+    // A live update of the open task reaches its details and its row.
+    events.enqueue(encode(frame({ project: 'web', task: { ...newer, title: 'Newer, renamed' } }, 1)));
+    await until(() => Array.from(model.live).some(m => m[1].includes('renamed')));
+    expect(html()).toContain('Newer, renamed');
+    // An inline link is one PATCH to the task's project; the reply updates the row.
+    dispatch(new strategy.Link('web', 't2', 'feature', 'f1'));
+    await until(() => row('t2').feature[0] === 'f1');
+    expect(patch).toEqual({ feature: 'f1' });
+    // The Features tab groups by milestone in rank order, then "No milestone"; a feature lists its tasks from every project.
+    dispatch(new strategy.Select(new strategy.Features()));
+    const list = html();
+    const at = text => list.indexOf(text, list.indexOf('id="panel-features"'));
+    expect(at('Launch')).toBeGreaterThan(-1);
+    expect(at('Launch')).toBeLessThan(at('Search'));
+    expect(at('Search')).toBeLessThan(at('Empty'));
+    expect(at('Empty')).toBeLessThan(at('No features.'));
+    expect(at('No features.')).toBeLessThan(at('No milestone'));
+    expect(at('No milestone')).toBeLessThan(at('Loose'));
+    expect(list).toContain('class="state">active<');
+    expect(list).toContain('<strong>fast</strong>');
+    expect(at('Newer')).toBeGreaterThan(at('Search'));
+    expect(at('Newer')).toBeLessThan(at('Empty'));
+    // Clicking a task opens it on the Tasks tab.
+    dispatch(new strategy.Open('web', 't2'));
+    expect(model.tab).toBeInstanceOf(strategy.Tasks);
+    expect(html()).toMatch(/<solace-task [^>]*task="t2"/);
+    dispatch(new strategy.Link('web', 't2', 'feature', ''));
+    await until(() => patch.feature === null);
+    for (const pair of [['GET', '/projects'], ['GET', '/workflow'], ['GET', '/p/web/workflow'], ['GET', '/events'], ['PATCH', '/p/web/tasks/t2']]) expect(requests).toContainEqual(pair);
+  } finally {
+    controllers.forEach(c => c.abort()); server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
+  }
+});
+
+// D-91: the vision comes with the stream; a save names the revision the edit began from.
+test('Vision tab shows the document, edits it and saves over its revision', async () => {
+  let vision = { text: '# Why\nFor teams.', revision: 'r1' }, put;
+  const server = Bun.serve({ port: 0, fetch: async req => {
+    const path = new URL(req.url).pathname;
+    if (path === '/events') return new Response(encode(frame({ vision }) + 'event: ready\ndata: {}\n\n'), { headers: { 'Content-Type': 'text/event-stream' } });
+    if (path === '/projects') return Response.json({ workspace: false, projects: [{ dir: '.', label: 'root', name: 'root', base: '' }], found: [] });
+    if (path === '/workflow') return Response.json({ columns: [] });
+    if (path === '/vision' && req.method === 'PUT') {
+      put = await req.json();
+      if (put.base !== vision.revision) return Response.json({ code: 'E7026', message: 'E7026 the vision changed' }, { status: 409 });
+      vision = { text: put.text, revision: 'r2' };
+      return Response.json(vision);
+    }
+    return Response.json({ message: 'unexpected ' + path }, { status: 404 });
+  }});
+  const fetchOriginal = globalThis.fetch;
+  globalThis.fetch = (path, options) => fetchOriginal(new URL(path, server.url), options);
+  globalThis.EventSource = class {
+    listeners = {};
+    addEventListener(name, f) { this.listeners[name] = f; }
+    close() {}
+    constructor(path) {
+      fetch(path).then(r => r.text()).then(text => {
+        for (const block of text.split('\n\n')) {
+          const data = block.split('\n').find(line => line.startsWith('data: '));
+          const name = block.split('\n').find(line => line.startsWith('event: '));
+          if (name) this.listeners[name.slice(7)]?.({ data: data?.slice(6) });
+          else if (data) this.onmessage?.({ data: data.slice(6) });
+        }
+      }).catch(() => {});
+    }
+  };
+  let model;
+  const noop = () => {};
+  const dispatch = msg => { let effect; [model, effect] = strategy.update(model, msg); perform(effect, dispatch, noop, noop, noop, noop, noop, noop); };
+  const html = () => to_string(strategy.view(model));
+  const until = async predicate => {
+    for (let i = 0; i < 200; i++) { if (predicate()) return; await Bun.sleep(10); }
+    throw new Error('UI did not reach expected state: ' + html());
+  };
+  try {
+    model = strategy.new$(new strategy.Vision());
+    dispatch(new strategy.Connected());
+    await until(() => html().includes('For teams.'));
+    dispatch(new strategy.EditVision());
+    expect(html()).toContain('id="vision-text"');
+    dispatch(new strategy.Draft('For small teams.'));
+    expect(html()).toContain('16 / 1000 character limit');
+    dispatch(new strategy.SaveVision());
+    await until(() => !html().includes('id="vision-text"'));
+    expect(put).toEqual({ text: 'For small teams.', base: 'r1' });
+    expect(html()).toContain('For small teams.');
+    // Someone else saves meanwhile: this draft's save is refused, and the draft stays.
+    vision = { text: 'Theirs', revision: 'r3' };
+    dispatch(new strategy.EditVision());
+    dispatch(new strategy.Draft('Late'));
+    dispatch(new strategy.SaveVision());
+    await until(() => html().includes('E7026'));
+    expect(put).toEqual({ text: 'Late', base: 'r2' });
+    expect(html()).toContain('id="vision-text"');
+    expect(html()).toContain('Late');
+  } finally {
+    server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
+  }
+});
+
+// D-87: a create names its `request`; an edit sends only what changed; a refusal keeps the form.
+test('Features tab creates a feature and edits it with only the changed fields', async () => {
+  let feature = { id: 'f1', title: 'Search', body: '', milestone: null, rank: 1, state: 'proposed' }, post, patch;
+  let tags = { id: 'f3', title: 'Tags', body: '', milestone: null, rank: 3, state: 'proposed' };
+  const moves = [], deleted = [];
+  const linked = { id: 't1', title: 'Index', body: '', rank: 1, column: 'backlog', paused_from: null, stamps: {}, links: [], runs: [], questions: [], feature: 'f1', milestone: null, closedTime: null };
+  const server = Bun.serve({ port: 0, fetch: async req => {
+    const path = new URL(req.url).pathname;
+    if (path === '/events') return new Response(encode(frame({ milestones: [{ id: 'm1', title: 'Launch', rank: 1 }] }) +
+      frame({ features: [feature, tags] }) + frame({ project: '.', workflow: { columns: [] } }) +
+      frame({ project: '.', tasks: [linked] }) + 'event: ready\ndata: {}\n\n'), { headers: { 'Content-Type': 'text/event-stream' } });
+    if (path === '/features/f3' && req.method === 'PATCH') {
+      moves.push(await req.json());
+      tags = { ...tags, ...moves.at(-1) };
+      return Response.json(tags);
+    }
+    if (path === '/features/f1' && req.method === 'DELETE') { deleted.push(path); return Response.json(feature); }
+    if (path === '/projects') return Response.json({ workspace: false, projects: [{ dir: '.', label: 'root', name: 'root', base: '' }], found: [] });
+    if (path === '/workflow') return Response.json({ columns: [] });
+    if (path === '/features' && req.method === 'POST') {
+      post = await req.json();
+      return Response.json({ id: 'f2', title: post.title, body: post.body, milestone: post.milestone ?? null, rank: 2, state: post.state });
+    }
+    if (path === '/features/f1' && req.method === 'PATCH') {
+      patch = await req.json();
+      if (patch.milestone === 'm9') return Response.json({ code: 'E7023', message: 'E7023 unknown milestone m9' }, { status: 400 });
+      feature = { ...feature, ...patch };
+      return Response.json(feature);
+    }
+    return Response.json({ message: 'unexpected ' + path }, { status: 404 });
+  }});
+  const fetchOriginal = globalThis.fetch;
+  globalThis.fetch = (path, options) => fetchOriginal(new URL(path, server.url), options);
+  globalThis.EventSource = class {
+    listeners = {};
+    addEventListener(name, f) { this.listeners[name] = f; }
+    close() {}
+    constructor(path) {
+      fetch(path).then(r => r.text()).then(text => {
+        for (const block of text.split('\n\n')) {
+          const data = block.split('\n').find(line => line.startsWith('data: '));
+          const name = block.split('\n').find(line => line.startsWith('event: '));
+          if (name) this.listeners[name.slice(7)]?.({ data: data?.slice(6) });
+          else if (data) this.onmessage?.({ data: data.slice(6) });
+        }
+      }).catch(() => {});
+    }
+  };
+  let model;
+  const noop = () => {};
+  const dispatch = msg => { let effect; [model, effect] = strategy.update(model, msg); perform(effect, dispatch, noop, noop, noop, noop, noop, noop); };
+  const html = () => to_string(strategy.view(model));
+  const until = async predicate => {
+    for (let i = 0; i < 200; i++) { if (predicate()) return; await Bun.sleep(10); }
+    throw new Error('UI did not reach expected state: ' + html());
+  };
+  try {
+    model = strategy.new$(new strategy.Features());
+    dispatch(new strategy.Connected());
+    await until(() => html().includes('Search'));
+    // With a single project, a feature's new-task form has no project picker.
+    await until(() => html().includes('Add task'));
+    expect(html()).not.toContain('name="project"');
+    // Create: the form has its own textarea, a state and a milestone select with "(none)".
+    dispatch(new strategy.NewFeature());
+    expect(html()).toContain('id="feature-text"');
+    expect(html()).toContain('>(none)<');
+    expect(html()).toContain('>canceled<');
+    dispatch(new strategy.FeatureTitle('Export'));
+    dispatch(new strategy.FeatureText('CSV and JSON'));
+    dispatch(new strategy.FeatureMilestone('m1'));
+    dispatch(new strategy.SaveFeature());
+    await until(() => !html().includes('id="feature-text"'));
+    expect(post).toEqual({ title: 'Export', body: 'CSV and JSON', state: 'proposed', milestone: 'm1', request: expect.any(String) });
+    expect(post.request).not.toBe('');
+    expect(html()).toContain('Export');
+    // Edit: only the changed field is sent.
+    dispatch(new strategy.EditFeature('f1'));
+    dispatch(new strategy.FeatureState('active'));
+    dispatch(new strategy.SaveFeature());
+    await until(() => !html().includes('id="feature-text"'));
+    expect(patch).toEqual({ state: 'active' });
+    expect(html()).toContain('class="state">active<');
+    // A refusal shows its error and keeps the form.
+    dispatch(new strategy.EditFeature('f1'));
+    dispatch(new strategy.FeatureMilestone('m9'));
+    dispatch(new strategy.SaveFeature());
+    await until(() => html().includes('E7023'));
+    expect(patch).toEqual({ milestone: 'm9' });
+    expect(html()).toContain('id="feature-text"');
+    dispatch(new strategy.CancelFeature());
+    // Up moves Tags above Search in "No milestone": one PATCH, to one below its neighbour.
+    const order = () => html().indexOf('Tags') < html().indexOf('Search');
+    expect(order()).toBe(false);
+    // The rank the Up button sends: from the group as the page draws it.
+    const loose = features.groups(model.milestones, model.features).toArray().at(-1).features;
+    const rank = features.move_rank(loose, 'f3', true)[0];
+    dispatch(new strategy.MoveFeature('f3', rank));
+    await until(() => order());
+    expect(moves).toEqual([{ rank: 0 }]);
+    // Delete asks first, naming the tasks that lose their link; the events update the page.
+    dispatch(new strategy.DeleteFeature('f1'));
+    expect(html()).toContain('Delete <em>Search</em>? Its 1 task loses its link to it; the tasks stay.');
+    dispatch(new strategy.ConfirmDeleteFeature());
+    await until(() => deleted.length === 1);
+    dispatch(new strategy.Live(JSON.stringify({ project: '.', task: { ...linked, feature: null } })));
+    dispatch(new strategy.Live(JSON.stringify({ removedFeature: 'f1' })));
+    expect(strategy.visible(model).toArray().find(pair => pair[1].id === 't1')[1].feature).toBeInstanceOf(None);
+    expect(html()).not.toContain('Delete Search');
+    expect(html()).toContain('Delete Tags');
+    expect(deleted).toEqual(['/features/f1']);
+  } finally {
+    server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
+  }
+});
+
+// The Roadmap: a feature shows in its target and in every milestone holding one of its tasks (D-87 point 2).
+test('Roadmap tab edits milestones, retargets a feature and sets dependencies, showing E7024 and E7025', async () => {
+  const task = { body: '', rank: 1, column: 'backlog', paused_from: null, stamps: {}, links: [], runs: [], questions: [], closedTime: null };
+  const tasks = {
+    t1: { ...task, id: 't1', title: 'Index', feature: 'f1', milestone: 'm1', dependsOn: [] },
+    t2: { ...task, id: 't2', title: 'Csv', feature: 'f2', milestone: 'm1', dependsOn: [] },
+    t3: { ...task, id: 't3', title: 'Docs', feature: null, milestone: 'm2', dependsOn: [] },
+  };
+  const milestones = { m1: { id: 'm1', title: 'Launch', body: '', rank: 1, state: 'proposed' }, m2: { id: 'm2', title: 'Later', body: '', rank: 2, targetDate: '2027-06-01', state: 'planned' } };
+  const records = { f1: { id: 'f1', title: 'Search', body: '', milestone: 'm1', rank: 1, state: 'proposed' }, f2: { id: 'f2', title: 'Export', body: '', milestone: 'm2', rank: 1, state: 'proposed' } };
+  const calls = [];
+  const server = Bun.serve({ port: 0, fetch: async req => {
+    const path = new URL(req.url).pathname;
+    const body = ['POST', 'PATCH'].includes(req.method) ? await req.json() : null;
+    if (body) calls.push([req.method, path, body]);
+    if (path === '/events') return new Response(encode(frame({ milestones: Object.values(milestones) }) +
+      frame({ features: Object.values(records) }) + frame({ project: '.', workflow: { columns: [] } }) +
+      frame({ project: '.', tasks: Object.values(tasks) }) + 'event: ready\ndata: {}\n\n'), { headers: { 'Content-Type': 'text/event-stream' } });
+    if (path === '/projects') return Response.json({ workspace: false, projects: [{ dir: '.', label: 'root', name: 'root', base: '' }], found: [] });
+    if (path === '/workflow') return Response.json({ columns: [] });
+    if (path === '/milestones' && req.method === 'POST') return Response.json({ id: 'm3', rank: 3, targetDate: null, ...body });
+    const [, kind, id] = path.split('/');
+    if (kind === 'milestones' && req.method === 'PATCH') return Response.json(milestones[id] = { ...milestones[id], ...body });
+    if (kind === 'milestones' && req.method === 'DELETE') { calls.push(['DELETE', path]); return Response.json(milestones[id]); }
+    if (kind === 'features' && req.method === 'PATCH') return Response.json(records[id] = { ...records[id], ...body });
+    if (kind === 'tasks' && req.method === 'PATCH') {
+      const deps = body.dependsOn;
+      if (deps.some(d => d === id || !tasks[d])) return Response.json({ code: 'E7024', message: 'E7024 a task can depend only on another existing task; ' + id + ' is not one' }, { status: 400 });
+      if (deps.some(d => tasks[d].dependsOn.includes(id))) return Response.json({ code: 'E7025', message: 'E7025 these dependencies would make a cycle' }, { status: 400 });
+      return Response.json(tasks[id] = { ...tasks[id], dependsOn: deps });
+    }
+    return Response.json({ message: 'unexpected ' + path }, { status: 404 });
+  }});
+  const fetchOriginal = globalThis.fetch;
+  globalThis.fetch = (path, options) => fetchOriginal(new URL(path, server.url), options);
+  globalThis.EventSource = class {
+    listeners = {};
+    addEventListener(name, f) { this.listeners[name] = f; }
+    close() {}
+    constructor(path) {
+      fetch(path).then(r => r.text()).then(text => {
+        for (const block of text.split('\n\n')) {
+          const data = block.split('\n').find(line => line.startsWith('data: '));
+          const name = block.split('\n').find(line => line.startsWith('event: '));
+          if (name) this.listeners[name.slice(7)]?.({ data: data?.slice(6) });
+          else if (data) this.onmessage?.({ data: data.slice(6) });
+        }
+      }).catch(() => {});
+    }
+  };
+  let model;
+  const noop = () => {};
+  const dispatch = msg => { let effect; [model, effect] = strategy.update(model, msg); perform(effect, dispatch, noop, noop, noop, noop, noop, noop); };
+  const panel = () => { const all = to_string(strategy.view(model)); return all.slice(all.indexOf('id="panel-roadmap"')); };
+  const until = async predicate => {
+    for (let i = 0; i < 200; i++) { if (predicate()) return; await Bun.sleep(10); }
+    throw new Error('UI did not reach expected state: ' + panel());
+  };
+  const count = text => panel().split(text).length - 1;
+  try {
+    model = strategy.new$(new strategy.Roadmap());
+    dispatch(new strategy.Connected());
+    await until(() => panel().includes('Csv'));
+    // Milestones in rank order; Export targets Later and shows in Launch too, through its task.
+    expect(panel().indexOf('Launch')).toBeLessThan(panel().indexOf('Later'));
+    expect(panel()).toContain('class="target">2027-06-01<');
+    expect(count('<h4>Export')).toBe(2);
+    // Dependencies are edited one task at a time.
+    expect(panel()).not.toContain('class="depends-edit"');
+    // Create with a target date: the form has its own textarea and a date input.
+    dispatch(new strategy.NewMilestone());
+    expect(panel()).toContain('id="milestone-text"');
+    expect(panel()).toContain('type="date"');
+    dispatch(new strategy.MilestoneTitle('2.0'));
+    dispatch(new strategy.MilestoneTargetDate('2027-01-01'));
+    dispatch(new strategy.SaveMilestone());
+    await until(() => !panel().includes('id="milestone-text"'));
+    expect(calls.at(-1)).toEqual(['POST', '/milestones', { title: '2.0', body: '', state: 'proposed', targetDate: '2027-01-01', request: expect.any(String) }]);
+    expect(panel()).toContain('class="target">2027-01-01<');
+    // Edit: only the changed field.
+    dispatch(new strategy.EditMilestone('m1'));
+    dispatch(new strategy.MilestoneState('active'));
+    dispatch(new strategy.SaveMilestone());
+    await until(() => !panel().includes('id="milestone-text"'));
+    expect(calls.at(-1)).toEqual(['PATCH', '/milestones/m1', { state: 'active' }]);
+    // Reorder: one PATCH; Later moves above Launch.
+    dispatch(new strategy.MoveMilestone('m2', 0));
+    await until(() => panel().indexOf('Later') < panel().indexOf('Launch'));
+    expect(calls.at(-1)).toEqual(['PATCH', '/milestones/m2', { rank: 0 }]);
+    // Move a feature to another milestone: Search targets Later, and stays in Launch through its task.
+    dispatch(new strategy.TargetFeature('f1', 'm2'));
+    await until(() => count('<h4>Search') === 2);
+    expect(calls.at(-1)).toEqual(['PATCH', '/features/f1', { milestone: 'm2' }]);
+    // Dependencies: set, then the server's refusals show.
+    dispatch(new strategy.SetDepends('.', 't2', toList(['t1'])));
+    await until(() => panel().includes('depends on Index'));
+    expect(calls.at(-1)).toEqual(['PATCH', '/tasks/t2', { dependsOn: ['t1'] }]);
+    // Any task of the root is offered, in another milestone too; Csv would make a cycle, so it isn't.
+    dispatch(new strategy.OpenDepends('.', 't1'));
+    expect(count('class="depends-edit"')).toBe(1);
+    expect(panel()).toContain('aria-label="Depend on Docs"');
+    expect(panel()).not.toContain('aria-label="Depend on Csv"');
+    dispatch(new strategy.DependsQuery('csv'));
+    expect(panel()).toContain('No task matches.');
+    dispatch(new strategy.SetDepends('.', 't1', toList(['t3'])));
+    await until(() => panel().includes('aria-label="Remove Docs"'));
+    expect(calls.at(-1)).toEqual(['PATCH', '/tasks/t1', { dependsOn: ['t3'] }]);
+    expect(panel()).toContain('depends on Docs');
+    dispatch(new strategy.SetDepends('.', 't1', toList(['t2'])));
+    await until(() => panel().includes('E7025 these dependencies would make a cycle'));
+    dispatch(new strategy.SetDepends('.', 't1', toList(['t1'])));
+    await until(() => panel().includes('E7024 a task can depend only on another existing task'));
+    // Delete asks first, naming what loses its link.
+    dispatch(new strategy.DeleteMilestone('m1'));
+    expect(panel()).toContain('Delete <em>Launch</em>? Its 0 features and 2 tasks lose their link to it; they stay.');
+    dispatch(new strategy.ConfirmDeleteMilestone());
+    await until(() => calls.at(-1)[0] === 'DELETE');
+    expect(calls.at(-1)).toEqual(['DELETE', '/milestones/m1']);
+    dispatch(new strategy.Live(JSON.stringify({ removedMilestone: 'm1' })));
+    expect(panel()).not.toContain('Delete Launch');
+  } finally {
+    server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
+  }
+});
+
+// A new task for a feature: POST to the picked project, then one PATCH for the link; each step reports its own failure.
+test('Features tab adds a task to a feature, then links it; a refused link says the task exists without it', async () => {
+  const calls = [];
+  let refuse = false, n = 0;
+  const blank = { body: '', rank: 1, column: 'backlog', paused_from: null, stamps: {}, links: [], runs: [], questions: [], feature: null, milestone: null, dependsOn: [], closedTime: null };
+  const server = Bun.serve({ port: 0, fetch: async req => {
+    const path = new URL(req.url).pathname;
+    if (path === '/events') return new Response(encode(frame({ features: [{ id: 'f1', title: 'Search', body: '', milestone: null, rank: 1, state: 'active' }] }) +
+      frame({ project: '.', workflow: { columns: [] } }) + frame({ project: 'web', workflow: { columns: [] } }) + 'event: ready\ndata: {}\n\n'), { headers: { 'Content-Type': 'text/event-stream' } });
+    if (path === '/projects') return Response.json({ workspace: true, projects: [{ dir: '.', label: 'root', name: 'root', base: '' }, { dir: 'web', label: 'web', name: 'web', base: '/p/web' }], found: [] });
+    if (path.endsWith('/workflow')) return Response.json({ columns: [] });
+    if (req.method === 'POST' && path === '/p/web/tasks') {
+      const body = await req.json(); calls.push(['POST', path, body]);
+      return Response.json({ ...blank, id: 't' + ++n, title: body.title });
+    }
+    if (req.method === 'PATCH' && path.startsWith('/p/web/tasks/')) {
+      const body = await req.json(); calls.push(['PATCH', path, body]);
+      if (refuse) return Response.json({ code: 'E7023', message: 'E7023 unknown feature f1' }, { status: 400 });
+      return Response.json({ ...blank, id: path.split('/').at(-1), title: 'Index', ...body });
+    }
+    return Response.json({ message: 'unexpected ' + path }, { status: 404 });
+  }});
+  const fetchOriginal = globalThis.fetch;
+  globalThis.fetch = (path, options) => fetchOriginal(new URL(path, server.url), options);
+  globalThis.EventSource = class {
+    listeners = {};
+    addEventListener(name, f) { this.listeners[name] = f; }
+    close() {}
+    constructor(path) {
+      fetch(path).then(r => r.text()).then(text => {
+        for (const block of text.split('\n\n')) {
+          const data = block.split('\n').find(line => line.startsWith('data: '));
+          const name = block.split('\n').find(line => line.startsWith('event: '));
+          if (name) this.listeners[name.slice(7)]?.({ data: data?.slice(6) });
+          else if (data) this.onmessage?.({ data: data.slice(6) });
+        }
+      }).catch(() => {});
+    }
+  };
+  let model;
+  const noop = () => {};
+  const dispatch = msg => { let effect; [model, effect] = strategy.update(model, msg); perform(effect, dispatch, noop, noop, noop, noop, noop, noop); };
+  const html = () => to_string(strategy.view(model));
+  const until = async predicate => {
+    for (let i = 0; i < 200; i++) { if (predicate()) return; await Bun.sleep(10); }
+    throw new Error('UI did not reach expected state: ' + html());
+  };
+  try {
+    model = strategy.new$(new strategy.Features());
+    dispatch(new strategy.Connected());
+    await until(() => html().includes('Search') && html().includes('name="project"'));
+    // In a workspace the picker defaults to the root's project.
+    expect(html()).toContain('<option selected value=".">root</option>');
+    dispatch(new strategy.TaskProject('web'));
+    dispatch(new strategy.TaskTitle('f1', 'Index'));
+    dispatch(new strategy.AddTask('f1'));
+    await until(() => calls.length === 2 && html().includes('class="open">Index<'));
+    expect(calls[0]).toEqual(['POST', '/p/web/tasks', { title: 'Index', body: '', request: expect.any(String) }]);
+    expect(calls[1]).toEqual(['PATCH', '/p/web/tasks/t1', { feature: 'f1' }]);
+    expect(model.task_titles.toArray()).toEqual([]);
+    // The link is refused: the task was made, and the feature says it has no link.
+    refuse = true;
+    dispatch(new strategy.TaskTitle('f1', 'Ranking'));
+    dispatch(new strategy.AddTask('f1'));
+    await until(() => html().includes('created without the link'));
+    expect(calls.filter(c => c[0] === 'POST').length).toBe(2);
+    expect(calls.at(-1)).toEqual(['PATCH', '/p/web/tasks/t2', { feature: 'f1' }]);
+    expect(html()).toContain('The task was created without the link to this feature: E7023 unknown feature f1');
+  } finally {
+    server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
+  }
+});
+
+// D-93: the planning panel starts a run on the selected task, follows it live, answers its proposal and ends it.
+test('Planning panel starts a run on the selection, answers a proposal, keeps across tabs and reopens past runs', async () => {
+  const calls = [];
+  const blank = { body: '', rank: 1, column: 'backlog', paused_from: null, stamps: {}, links: [], runs: [], questions: [], feature: null, milestone: null, dependsOn: [], closedTime: null };
+  const onTask = { kind: 'task', id: 't1' };
+  const past = { id: 'r0', kind: 'strategy', model: 'fake', state: 'ended', outcome: 'planned', started: 100, context: onTask, notes: [{ author: 'solace', text: 'An earlier plan' }], questions: [] };
+  const proposal = { id: 'q1', text: 'Create task "Ranking"', options: ['Approve', 'Reject'], answer: null,
+    proposal: { kind: 'task', fields: { title: 'Ranking', feature: 'f1' }, reopens: [{ kind: 'feature', id: 'f1' }] } };
+  let r1, events;
+  const server = Bun.serve({ port: 0, fetch: async req => {
+    const path = new URL(req.url).pathname;
+    const body = req.method === 'POST' ? await req.json() : null;
+    if (body) calls.push([path, body]);
+    if (path === '/events') return new Response(new ReadableStream({ start(c) { events = c; c.enqueue(encode(
+      frame({ project: '.', workflow: { columns: [] } }) + frame({ project: '.', tasks: [{ ...blank, id: 't1', title: 'Index' }] }) +
+      frame({ features: [{ id: 'f1', title: 'Search', body: '', milestone: null, rank: 1, state: 'complete' }] }) +
+      frame({ strategyRuns: [{ ...past, notes: undefined }] }) + 'event: ready\ndata: {}\n\n')); } }), { headers: { 'Content-Type': 'text/event-stream' } });
+    if (path === '/projects') return Response.json({ workspace: false, projects: [{ dir: '.', label: 'root', name: 'root', base: '' }], found: [] });
+    if (path === '/workflow') return Response.json({ columns: [] });
+    if (path === '/models') return Response.json([{ id: 'fake', label: 'Fake' }, { id: 'big', label: 'Big', available: false, reason: 'no key' }]);
+    if (path === '/strategy/runs' && req.method === 'POST') {
+      r1 = { id: 'r1', kind: 'strategy', model: body.model, state: 'running', started: 200, context: body.context, notes: [{ author: 'human', text: body.text }], questions: [] };
+      return Response.json(r1);
+    }
+    if (path === '/strategy/runs/r1' && req.method === 'GET') return Response.json({ ...r1, transcript: [{ kind: 'message', text: 'Looking at Index' }, { kind: 'tool', title: 'strategy list', status: 'ok', output: '[]' }] });
+    if (path === '/strategy/runs/r0' && req.method === 'GET') return Response.json({ ...past, transcript: [] });
+    if (path === '/strategy/runs/r1/questions/q1') {
+      r1 = { ...r1, state: 'running', questions: [{ ...proposal, answer: 'Created task t2' }] };
+      return Response.json(r1);
+    }
+    if (path === '/strategy/runs/r1/notes') return Response.json(r1 = { ...r1, notes: [...r1.notes, { author: 'human', text: body.text }] });
+    if (path === '/strategy/runs/r1/end') return Response.json(r1 = { ...r1, state: 'ended', outcome: 'planned', notes: [{ author: 'solace', text: 'The conversation' }] });
+    return Response.json({ message: 'unexpected ' + path }, { status: 404 });
+  }});
+  const fetchOriginal = globalThis.fetch;
+  const controllers = [];
+  globalThis.fetch = (path, options) => fetchOriginal(new URL(path, server.url), options);
+  globalThis.EventSource = class {
+    listeners = {};
+    addEventListener(name, f) { this.listeners[name] = f; }
+    close() {}
+    constructor(path) {
+      const controller = new AbortController(); controllers.push(controller);
+      fetch(path, { signal: controller.signal }).then(async response => {
+        let text = '';
+        for await (const chunk of response.body) {
+          text += new TextDecoder().decode(chunk);
+          while (text.includes('\n\n')) {
+            const at = text.indexOf('\n\n'); const block = text.slice(0, at); text = text.slice(at + 2);
+            const data = block.split('\n').find(line => line.startsWith('data: '));
+            const name = block.split('\n').find(line => line.startsWith('event: '));
+            if (name) this.listeners[name.slice(7)]?.({ data: data?.slice(6) });
+            else if (data) this.onmessage?.({ data: data.slice(6) });
+          }
+        }
+      }).catch(() => {});
+    }
+  };
+  let model;
+  const noop = () => {};
+  const dispatch = msg => { let effect; [model, effect] = strategy.update(model, msg); perform(effect, dispatch, noop, noop, noop, noop, noop, noop); };
+  const html = () => to_string(strategy.view(model));
+  // The panel alone: from the aside to the first tab panel.
+  const panel = () => { const all = html(); return all.slice(all.indexOf('<aside'), all.indexOf('</aside>')); };
+  const until = async predicate => {
+    for (let i = 0; i < 200; i++) { if (predicate()) return; await Bun.sleep(10); }
+    throw new Error('UI did not reach expected state: ' + panel());
+  };
+  try {
+    model = strategy.new$(new strategy.Tasks());
+    dispatch(new strategy.Connected());
+    await until(() => html().includes('class="open">Index<') && panel().includes('Fake') && events);
+    // Unavailable models say why and can't be picked.
+    expect(panel()).toContain('Big (unavailable: no key)');
+    // Nothing selected: the whole page. Selecting a task plans it, and lists its past run.
+    expect(panel()).toContain('On the whole page');
+    dispatch(new strategy.Open('.', 't1'));
+    expect(panel()).toContain('On task <em>Index</em>');
+    expect(panel()).toContain('Runs on this');
+    expect(panel()).toContain('Ended: planned · fake');
+    dispatch(new strategy.PlanText('Plan the index'));
+    dispatch(new strategy.StartPlan());
+    await until(() => panel().includes('Looking at Index'));
+    expect(calls[0]).toEqual(['/strategy/runs', { model: 'fake', text: 'Plan the index', context: onTask }]);
+    expect(panel()).toContain('Working · fake');
+    expect(panel()).toContain('strategy list');
+    // The task's row shows the open run's marker.
+    expect(html()).toMatch(/class="open">Index<\/button><span class="planning"/);
+    // The agent replies and proposes, live.
+    r1 = { ...r1, state: 'waiting', notes: [...r1.notes, { author: 'agent', text: 'Shall I add a ranking task?' }], questions: [proposal] };
+    events.enqueue(encode(frame({ strategyRun: r1 }, 1)));
+    await until(() => panel().includes('Shall I add a ranking task?'));
+    expect(panel()).toContain('Create task<em> Ranking</em>');
+    expect(panel()).toContain('Approving also sets the feature <em>Search</em> back to planned.');
+    // Another tab: the panel and its run stay.
+    dispatch(new strategy.Select(new strategy.Features()));
+    expect(panel()).toContain('Shall I add a ranking task?');
+    expect(panel()).toContain('On task <em>Index</em>');
+    dispatch(new strategy.AnswerPlan('q1', 'Approve'));
+    await until(() => panel().includes('Answer: Created task t2'));
+    expect(calls.at(-1)).toEqual(['/strategy/runs/r1/questions/q1', { option: 'Approve' }]);
+    expect(panel()).not.toContain('>Approve</button>');
+    dispatch(new strategy.PlanText('Thanks'));
+    dispatch(new strategy.SendPlan());
+    await until(() => calls.length === 3 && model.plan_text === '');
+    expect(calls.at(-1)).toEqual(['/strategy/runs/r1/notes', { text: 'Thanks' }]);
+    dispatch(new strategy.EndPlan());
+    await until(() => panel().includes('Ended: planned · fake') && panel().includes('The conversation'));
+    expect(calls.at(-1)).toEqual(['/strategy/runs/r1/end', {}]);
+    expect(panel()).not.toContain('id="plan-text"');
+    expect(html()).not.toContain('class="planning"');
+    // Back on the task: both runs, newest first; the past one reopens read-only.
+    dispatch(new strategy.Select(new strategy.Tasks()));
+    dispatch(new strategy.ShowPlan(''));
+    const runs = panel().slice(panel().indexOf('Runs on this'));
+    expect(runs.indexOf('Ended: planned')).toBeGreaterThan(-1);
+    expect(runs.split('<li>').length - 1).toBe(2);
+    dispatch(new strategy.ShowPlan('r0'));
+    await until(() => panel().includes('An earlier plan'));
+    expect(panel()).not.toContain('id="plan-text"');
+    expect(panel()).toContain('aria-current="true"');
+  } finally {
+    controllers.forEach(c => c.abort()); server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
+  }
+});
+
+test('transport uses the base it is given; project paths stay absolute', async () => {
+  const oldFetch = globalThis.fetch, oldEventSource = globalThis.EventSource;
+  const paths = [];
+  let source;
+  globalThis.fetch = async path => { paths.push(path); return new Response('{}'); };
+  globalThis.EventSource = class {
+    constructor(path) { this.path = path; source = this; }
+    addEventListener() {}
+    close() { this.closed = true; }
+  };
+  try {
+    const api = await import('../src/api.mjs');
+    await new Promise(resolve => api.request('/p/shop', '/projects', 'GET', '', resolve));
+    await new Promise(resolve => api.request('/p/shop', '/p/other/tasks/t1', 'PATCH', '{}', resolve));
+    await new Promise(resolve => api.request('', '/projects', 'GET', '', resolve));
+    expect(paths).toEqual(['/p/shop/projects', '/p/other/tasks/t1', '/projects']);
+    expect(api.events('/p/shop', () => {})).toBe(source);
+    expect(source.path).toBe('/p/shop/events');
+    api.close_events(source);
+    expect(source.closed).toBe(true);
+  } finally {
+    globalThis.fetch = oldFetch; globalThis.EventSource = oldEventSource;
+  }
+});

@@ -1,7 +1,5 @@
-import gleam/dict
 import gleam/dynamic
 import gleam/dynamic/decode
-import gleam/float
 import gleam/int
 import gleam/json
 import gleam/list
@@ -18,6 +16,7 @@ import lustre/element.{type Element}
 import lustre/element/html as h
 import lustre/element/svg
 import lustre/event as e
+import solace_task
 
 @external(javascript, "./api.mjs", "request")
 fn request(
@@ -35,135 +34,14 @@ fn events(
   ready: fn() -> Nil,
 ) -> Source
 
-@external(javascript, "./api.mjs", "after")
-fn after(ms: Int, callback: fn() -> Nil) -> Nil
-
-@external(javascript, "./api.mjs", "clock")
-fn clock(seconds: Int) -> String
-
 @external(javascript, "./api.mjs", "reload")
 fn reload() -> Nil
-
-@external(javascript, "./api.mjs", "confirm")
-fn confirm(question: String) -> Bool
-
-@external(javascript, "./api.mjs", "markdown")
-fn markdown(text: String, base: String) -> String
 
 @external(javascript, "./api.mjs", "load")
 fn load(key: String) -> String
 
 @external(javascript, "./api.mjs", "store")
 fn store(key: String, value: String) -> Nil
-
-@external(javascript, "./api.mjs", "wrap")
-fn wrap(
-  root: dynamic.Dynamic,
-  id: String,
-  text: String,
-  before: String,
-  after: String,
-) -> String
-
-@external(javascript, "./api.mjs", "images")
-fn images(
-  root: dynamic.Dynamic,
-  insert: fn(String, String) -> Nil,
-  fail: fn(String) -> Nil,
-) -> Nil
-
-pub type Column {
-  Column(id: String, label: String, actions: List(String), final: Bool)
-}
-
-pub type Note {
-  Note(author: String, run: String, text: String, time: Int)
-}
-
-/// One step of a run's transcript: a message, thinking, a tool call, token
-/// usage, an error or raw output.
-pub type Entry {
-  Entry(
-    kind: String,
-    text: String,
-    title: String,
-    input: String,
-    output: String,
-    status: String,
-  )
-}
-
-pub type Question {
-  Question(
-    id: String,
-    text: String,
-    options: List(String),
-    answer: String,
-    settings: Option(#(String, String)),
-  )
-}
-
-pub type Run {
-  Run(
-    id: String,
-    kind: String,
-    state: String,
-    model: String,
-    effort: String,
-    log: String,
-    outcome: String,
-    started: Int,
-    ended: Int,
-  )
-}
-
-pub type Link {
-  Link(name: String, url: String)
-}
-
-pub type Task {
-  Task(
-    id: String,
-    title: String,
-    body: String,
-    column: String,
-    rank: Float,
-    paused: String,
-    notes: List(Note),
-    questions: List(Question),
-    runs: List(Run),
-    links: List(Link),
-    changes: List(Change),
-    stamps: List(String),
-    attention: String,
-    finished: String,
-    unexpected: Bool,
-    /// The projects the task may change (D-61); empty for a task saved before.
-    scope: List(String),
-  )
-}
-
-pub type Agent {
-  Agent(
-    id: String,
-    label: String,
-    available: Bool,
-    reason: String,
-    effort: String,
-    efforts: List(String),
-  )
-}
-
-/// A bold heading, such as "Reviewed Fix checkout", and what happened. It
-/// names its task (`dir` is the project it is stored in, filled in by `live`)
-/// and the tab that shows the news: "notes", "questions" or "runs".
-pub type Notice {
-  Notice(heading: String, text: String, dir: String, id: String, tab: String)
-}
-
-pub type Workflow {
-  Workflow(columns: List(Column))
-}
 
 /// One project's tasks on the board (D-57). The root's own project has dir
 /// "." and base ""; the others are served under `base`, `/p/<dir>`.
@@ -175,8 +53,8 @@ pub type Lane {
     base: String,
     /// The project's compilation target, "" when the server didn't say.
     target: String,
-    workflow: Workflow,
-    tasks: List(Task),
+    workflow: solace_task.Workflow,
+    tasks: List(solace_task.Task),
   )
 }
 
@@ -194,30 +72,15 @@ pub type Model {
     /// Whether the project list has loaded once.
     listed: Bool,
     found: List(Found),
-    /// The dir of the selected task's lane.
-    lane: String,
-    selected: Option(Task),
-    /// The task chosen on the board, including while its details load.
+    /// The task chosen on the board: the project it is stored in, and its id.
+    /// Its details are `<solace-task>`, which loads them itself.
     selected_card: Option(#(String, String)),
-    selection_generation: Int,
-    models: List(Agent),
-    model: String,
-    effort: String,
-    text: String,
-    title: String,
-    body: String,
     error: String,
-    rank: String,
-    watching: String,
-    entries: List(Entry),
-    review_summary: String,
     creating: Bool,
     draft_title: String,
     draft_body: String,
-    editing: Bool,
-    tab: String,
     previews: List(String),
-    notices: List(Notice),
+    notices: List(solace_task.Notice),
     caught_up: Bool,
     replay: List(String),
     collapsed: List(String),
@@ -227,9 +90,6 @@ pub type Model {
     /// Whether a create is waiting for the server; Create task is disabled
     /// meanwhile, so one submit makes one task (D-77).
     submitting: Bool,
-    /// The action sent and not yet answered: its buttons are disabled
-    /// meanwhile, so one click makes one request. "" when none.
-    acting: String,
     projects_open: Bool,
     project_name: String,
     project_dir: String,
@@ -243,29 +103,30 @@ pub type Model {
     /// The component's shadow root, once it has rendered.
     root: dynamic.Dynamic,
     connected: Bool,
-    /// The live transcript polling chain; an ended chain schedules nothing.
-    poll: Int,
-    /// Whether the task being opened from a notice scrolls into view once it loads.
-    revealing: Bool,
+    /// The live messages about the open task, numbered, oldest first and
+    /// kept to the last few, handed to its `<solace-task>` so it needs no
+    /// stream of its own. It applies each once, so none is lost when several
+    /// arrive before a redraw, and a replay after a reconnect reaches it.
+    live: List(#(Int, String)),
+    /// The number of the last message handed down.
+    live_n: Int,
+    /// The tab and task a notice's button asked to show, and how many times
+    /// one was asked, so asking again is news to `<solace-task>`.
+    reveal: #(String, String, Int),
   )
 }
 
 pub type Msg {
   ProjectsLoaded(String)
   WorkflowLoaded(String, String)
-  ModelsLoaded(String)
-  TaskLoaded(String)
-  SelectedTaskLoaded(Int, String, String, String)
-  ChangesLoaded(Int, String, String)
-  Changed(String)
-  Acted(String)
   Live(String)
   CaughtUp
   Select(String, String)
+  /// `<solace-task>` says the open task now lives in another project.
+  TaskMoved(String, String)
   Collapse(String)
   NewTaskIn(String)
   DraftScope(String, Bool)
-  SetScope(String, Bool)
   ToggleProjects
   ToggleTheme
   AddProject(String)
@@ -279,48 +140,25 @@ pub type Msg {
   ProjectDir(String)
   ProjectTarget(String)
   CreateProject
-  AgentSelected(String)
-  EffortSelected(String)
-  Text(String)
-  Title(String)
-  Body(String)
-  Rank(String)
   NewTask
   DraftTitle(String)
   DraftBody(String)
   Create
   Created(String)
-  Edit(Bool)
-  Tab(String)
   Preview(String, Bool)
   Format(String, String, String)
   /// The editor's selected lines become a block: "heading", "list",
-  /// "numbered", "quote" or "code" (see `block` in api.mjs).
+  /// "numbered", "quote" or "code" (see `block` in the components project).
   Block(String, String)
-  Dismiss(Notice)
+  Dismiss(solace_task.Notice)
   /// A notice's button: its task opens on the notice's tab and scrolls into view.
-  Open(Notice)
-  Failed(String)
-  Save
-  Action(String)
-  AddNote
-  DeleteNote(Int)
-  Answer(String, String)
-  Watch(String)
-  Unwatch
-  TranscriptLoaded(String, String)
-  Refresh(Int, String)
-  TranscriptPolled(Int, String, String)
-  ReviewLoaded(String)
+  Open(solace_task.Notice)
   BaseChanged(String)
   Listening(Source)
   Attached(dynamic.Dynamic)
   Disconnected
   Connected
 }
-
-/// While a watched run is going, its transcript is fetched again this often.
-const refresh_ms = 1500
 
 pub fn main() {
   let assert Ok(_) = register()
@@ -329,23 +167,6 @@ pub fn main() {
 fn get(model: Model, path: String, msg: fn(String) -> Msg) -> Effect(Msg) {
   effect.from(fn(send) {
     request(model.prefix, path, "GET", "", fn(text) { send(msg(text)) })
-  })
-}
-
-fn send(
-  model: Model,
-  path: String,
-  method: String,
-  fields: List(#(String, json.Json)),
-) -> Effect(Msg) {
-  effect.from(fn(dispatch) {
-    request(
-      model.prefix,
-      path,
-      method,
-      json.to_string(json.object(fields)),
-      fn(text) { dispatch(Changed(text)) },
-    )
   })
 }
 
@@ -361,30 +182,15 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   let draft_body = load(draft_body_key)
   #(
     Model(
-      lanes: [Lane("", "", "", "", "", Workflow([]), [])],
+      lanes: [Lane("", "", "", "", "", solace_task.Workflow([]), [])],
       workspace: False,
       listed: False,
       found: [],
-      lane: "",
-      selected: None,
       selected_card: None,
-      selection_generation: 0,
-      models: [],
-      model: load(agent_key),
-      effort: load(effort_key),
-      text: "",
-      title: "",
-      body: "",
       error: "",
-      rank: "0",
-      watching: "",
-      entries: [],
-      review_summary: "",
       creating: draft_title != "" || draft_body != "",
       draft_title: draft_title,
       draft_body: draft_body,
-      editing: False,
-      tab: "details",
       previews: [],
       notices: [],
       caught_up: False,
@@ -394,7 +200,6 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       draft_lane: "",
       draft_scope: [],
       submitting: False,
-      acting: "",
       projects_open: False,
       project_name: "",
       project_dir: "",
@@ -404,8 +209,9 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       prefix: "",
       root: no_root(),
       connected: False,
-      poll: 0,
-      revealing: False,
+      live: [],
+      live_n: 0,
+      reveal: #("", "", 0),
     ),
     // Lustre runs init once for every instance, before its `base` is set:
     // the transport starts when the instance connects.
@@ -424,18 +230,6 @@ fn lane_of(model: Model, dir: String) -> Result(Lane, Nil) {
 
 fn base_of(model: Model, dir: String) -> String {
   lane_of(model, dir) |> result.map(fn(l) { l.base }) |> result.unwrap("")
-}
-
-/// The API prefix of the selected task's project.
-fn base(model: Model) -> String {
-  base_of(model, model.lane)
-}
-
-/// The selected task's workflow.
-pub fn workflow(model: Model) -> Workflow {
-  lane_of(model, model.lane)
-  |> result.map(fn(l) { l.workflow })
-  |> result.unwrap(Workflow([]))
 }
 
 fn map_lane(model: Model, dir: String, f: fn(Lane) -> Lane) -> Model {
@@ -459,16 +253,6 @@ fn draft_lane(model: Model) -> String {
   }
 }
 
-fn transcript(model: Model, rid: String) -> Effect(Msg) {
-  case model.selected {
-    Some(t) ->
-      get(model, base(model) <> "/tasks/" <> t.id <> "/runs/" <> rid, fn(text) {
-        TranscriptPolled(model.poll, rid, text)
-      })
-    None -> effect.none()
-  }
-}
-
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
     Connected -> {
@@ -483,12 +267,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     }
     Attached(root) -> #(
       Model(..model, root: root),
-      effect.from(fn(send) {
-        prevent_drag(root)
-        images(root, fn(id, image) { send(Format(id, image, "")) }, fn(text) {
-          send(Failed(text))
-        })
-      }),
+      effect.from(fn(_) { prevent_drag(root) }),
     )
     Listening(source) -> #(Model(..model, source: Some(source)), effect.none())
     Disconnected -> #(Model(..stop(model), connected: False), effect.none())
@@ -544,122 +323,13 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
     WorkflowLoaded(dir, text) ->
-      case json.parse(text, workflow_decoder()) {
+      case json.parse(text, solace_task.workflow_decoder()) {
         Ok(w) -> #(
           map_lane(Model(..model, error: ""), dir, fn(l) {
             Lane(..l, workflow: w)
           }),
           effect.none(),
         )
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
-      }
-    ModelsLoaded(text) ->
-      case json.parse(text, decode.list(agent_decoder())) {
-        Ok(models) -> {
-          // The remembered agent stays if it is still available; its effort
-          // stays if the agent still offers it.
-          let kept =
-            list.find(models, fn(a) { a.available && a.id == model.model })
-          let chosen = case kept {
-            Ok(a) -> Ok(a)
-            Error(_) -> list.find(models, fn(a) { a.available })
-          }
-          let id = result.map(chosen, fn(a) { a.id }) |> result.unwrap("")
-          let effort = case kept {
-            Ok(a) ->
-              case list.contains(a.efforts, model.effort) {
-                True -> model.effort
-                False -> ""
-              }
-            Error(_) -> ""
-          }
-          #(
-            Model(..model, models: models, model: id, effort: effort),
-            effect.none(),
-          )
-        }
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
-      }
-    SelectedTaskLoaded(generation, dir, id, text)
-      if generation == model.selection_generation
-      && model.selected_card == Some(#(dir, id))
-    -> update(model, TaskLoaded(text))
-    SelectedTaskLoaded(_, _, _, _) -> #(model, effect.none())
-    // Only the list of changes is taken, so fields being edited stay as typed.
-    ChangesLoaded(generation, id, text) ->
-      case model.selected, json.parse(text, task_decoder()) {
-        Some(t), Ok(fresh)
-          if generation == model.selection_generation && t.id == id
-        -> #(
-          Model(..model, selected: Some(Task(..t, changes: fresh.changes))),
-          case fresh.changes {
-            [] -> effect.none()
-            _ -> get(model, base(model) <> "/graph?task=" <> id, ReviewLoaded)
-          },
-        )
-        _, _ -> #(model, effect.none())
-      }
-    TaskLoaded(text) if model.revealing -> {
-      let #(next, fx) =
-        update(Model(..model, revealing: False), TaskLoaded(text))
-      #(next, effect.batch([fx, reveal()]))
-    }
-    TaskLoaded(text) ->
-      case json.parse(text, task_decoder()) {
-        Ok(task) -> #(
-          Model(
-            ..model,
-            selected: Some(task),
-            selected_card: Some(#(model.lane, task.id)),
-            title: task.title,
-            body: task.body,
-            rank: float.to_string(task.rank),
-            error: "",
-          ),
-          case task.changes {
-            [] -> effect.none()
-            _ ->
-              get(model, base(model) <> "/graph?task=" <> task.id, ReviewLoaded)
-          },
-        )
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
-      }
-    // The reply to an action; it may have waited for the agent's command (D-77 point 5).
-    Acted(text) -> update(Model(..model, acting: ""), Changed(text))
-    Changed(text) ->
-      case json.parse(text, task_decoder()) {
-        Ok(task) -> {
-          // A reply carries no `changes` (D-77): keep the list until it is fetched again.
-          let task = case model.selected {
-            Some(old) if old.id == task.id -> Task(..task, changes: old.changes)
-            _ -> task
-          }
-          // A task whose home left its projects now lives in the first one left (D-61).
-          let model = case
-            list.contains(scope_of(model.lane, task), model.lane)
-          {
-            True -> model
-            False ->
-              Model(
-                ..model,
-                lane: list.first(task.scope) |> result.unwrap(model.lane),
-              )
-          }
-          let model =
-            Model(
-              ..model,
-              selected: Some(task),
-              selected_card: Some(#(model.lane, task.id)),
-              title: task.title,
-              body: task.body,
-              rank: float.to_string(task.rank),
-              text: "",
-              error: "",
-              editing: False,
-              previews: [],
-            )
-          #(model, refresh_changes(model))
-        }
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
     // What a new connection missed is replayed: only its end result shows,
@@ -676,45 +346,25 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       case knows(model, text) {
         True -> {
           let next = live(model, text, True)
-          let refetch = case next.selected != model.selected {
-            True -> refresh_changes(next)
-            False -> effect.none()
-          }
-          #(next, effect.batch([fx, refetch]))
+          #(hand(next, text), fx)
         }
         // A project not listed yet: held until the list names it.
         False -> #(Model(..model, replay: [text, ..model.replay]), fx)
       }
     }
     CaughtUp -> #(settle(Model(..model, caught_up: True)), effect.none())
-    ReviewLoaded(text) -> {
-      let summary =
-        json.parse(text, decode.at(["review", "summary"], decode.string))
-        |> result.unwrap("")
-      #(Model(..model, review_summary: summary), effect.none())
-    }
     Select(dir, id) -> #(
-      Model(
-        ..model,
-        lane: dir,
-        selected: None,
-        selected_card: Some(#(dir, id)),
-        selection_generation: model.selection_generation + 1,
-        revealing: False,
-        text: "",
-        watching: "",
-        entries: [],
-        review_summary: "",
-        editing: False,
-        previews: [],
-      ),
-      get(model, base_of(model, dir) <> "/tasks/" <> id, SelectedTaskLoaded(
-        model.selection_generation + 1,
-        dir,
-        id,
-        _,
-      )),
+      Model(..model, selected_card: Some(#(dir, id)), live: []),
+      effect.none(),
     )
+    TaskMoved(dir, id) ->
+      case model.selected_card {
+        Some(#(_, card)) if card == id -> #(
+          Model(..model, selected_card: Some(#(dir, id))),
+          effect.none(),
+        )
+        _ -> #(model, effect.none())
+      }
     Collapse(dir) -> {
       let collapsed = case list.contains(model.collapsed, dir) {
         True -> list.filter(model.collapsed, fn(d) { d != dir })
@@ -739,23 +389,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         effect.none(),
       )
     }
-    SetScope(dir, on) ->
-      case model.selected {
-        None -> #(model, effect.none())
-        Some(t) -> {
-          let current = scope_of(model.lane, t)
-          let wanted = case on {
-            True -> [dir, ..current]
-            False -> list.filter(current, fn(d) { d != dir })
-          }
-          #(
-            model,
-            send(model, base(model) <> "/tasks/" <> t.id <> "/scope", "POST", [
-              #("scope", json.array(in_lane_order(model, wanted), json.string)),
-            ]),
-          )
-        }
-      }
     ToggleTheme -> #(model, effect.from(fn(_) { toggle_theme() }))
     ToggleProjects -> #(
       Model(..model, projects_open: !model.projects_open),
@@ -836,61 +469,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         #("target", json.string(model.project_target)),
       ]),
     )
-    Watch(rid) -> #(
-      Model(..model, watching: rid, entries: []),
-      transcript(model, rid),
-    )
-    Unwatch -> #(Model(..model, watching: "", entries: []), effect.none())
-    // One refresh chain per connection, including through a server restart: a
-    // step from an ended chain (disconnected, or restarted) fetches and
-    // schedules nothing.
-    Refresh(poll, rid) if poll == model.poll && rid == model.watching -> #(
-      model,
-      transcript(model, rid),
-    )
-    Refresh(_, _) -> #(model, effect.none())
-    TranscriptPolled(poll, rid, text) if poll == model.poll -> {
-      let #(next, _) = update(model, TranscriptLoaded(rid, text))
-      let running =
-        rid == next.watching
-        && json.parse(text, decode.at(["state"], decode.string))
-        |> result.map(fn(state) { state != "ended" })
-        |> result.unwrap(False)
-      #(next, case running {
-        True ->
-          effect.from(fn(send) {
-            after(refresh_ms, fn() { send(Refresh(poll, rid)) })
-          })
-        False -> effect.none()
-      })
-    }
-    TranscriptPolled(_, _, _) -> #(model, effect.none())
-    TranscriptLoaded(rid, text) if rid == model.watching -> {
-      let decoder = {
-        use state <- decode.field("state", decode.string)
-        use entries <- decode.field("transcript", decode.list(entry_decoder()))
-        decode.success(#(state, entries))
-      }
-      case json.parse(text, decoder) {
-        Ok(#(_, entries)) -> #(Model(..model, entries: entries), effect.none())
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
-      }
-    }
-    TranscriptLoaded(_, _) -> #(model, effect.none())
-    // Efforts differ between models, so a new model starts at its default.
-    AgentSelected(id) -> {
-      store(agent_key, id)
-      store(effort_key, "")
-      #(Model(..model, model: id, effort: ""), effect.none())
-    }
-    EffortSelected(effort) -> {
-      store(effort_key, effort)
-      #(Model(..model, effort: effort), effect.none())
-    }
-    Text(text) -> #(Model(..model, text: text), effect.none())
-    Title(text) -> #(Model(..model, title: text), effect.none())
-    Body(text) -> #(Model(..model, body: text), effect.none())
-    Rank(rank) -> #(Model(..model, rank: rank), effect.none())
     NewTask -> #(Model(..model, creating: !model.creating), effect.none())
     DraftTitle(text) -> {
       store(draft_title_key, text)
@@ -921,43 +499,30 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
       }),
     )
-    // Only a task that was really created clears the draft.
+    // Only a task that was really created clears the draft; it opens.
     Created(text) -> {
       let model = Model(..model, submitting: False)
-      case json.parse(text, task_decoder()) {
-        Ok(_) -> {
+      case json.parse(text, solace_task.task_decoder()) {
+        Ok(t) -> {
           store(draft_title_key, "")
           store(draft_body_key, "")
-          update(
+          #(
             Model(
               ..model,
-              lane: draft_home(model),
+              selected_card: Some(#(draft_home(model), t.id)),
               draft_scope: [],
               creating: False,
               draft_title: "",
               draft_body: "",
+              previews: [],
+              error: "",
             ),
-            Changed(text),
+            effect.none(),
           )
         }
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
     }
-    Edit(editing) ->
-      case model.selected {
-        Some(t) -> #(
-          Model(
-            ..model,
-            editing: editing,
-            title: t.title,
-            body: t.body,
-            rank: float.to_string(t.rank),
-          ),
-          effect.none(),
-        )
-        None -> #(model, effect.none())
-      }
-    Tab(tab) -> #(Model(..model, tab: tab), effect.none())
     Preview(id, on) -> #(
       Model(..model, previews: case on {
         True -> [id, ..model.previews]
@@ -965,170 +530,48 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }),
       effect.none(),
     )
-    Format(id, before, after) -> {
-      let #(text, msg) = field(model, id)
-      #(
-        model,
-        effect.from(fn(send) {
-          send(msg(wrap(model.root, id, text, before, after)))
-        }),
-      )
-    }
-    Block(id, kind) -> {
-      let #(text, msg) = field(model, id)
-      #(
-        model,
-        effect.from(fn(send) { send(msg(block(model.root, id, text, kind))) }),
-      )
-    }
+    // The board's one editor is the new task's description.
+    Format(id, before, after) -> #(
+      model,
+      effect.from(fn(send) {
+        send(
+          DraftBody(solace_task.wrap(
+            model.root,
+            id,
+            model.draft_body,
+            before,
+            after,
+          )),
+        )
+      }),
+    )
+    Block(id, kind) -> #(
+      model,
+      effect.from(fn(send) {
+        send(
+          DraftBody(solace_task.block(model.root, id, model.draft_body, kind)),
+        )
+      }),
+    )
     Dismiss(notice) -> #(
       Model(..model, notices: list.filter(model.notices, fn(n) { n != notice })),
       effect.none(),
     )
-    Open(notice) -> {
-      let model =
-        Model(
-          ..model,
-          tab: notice.tab,
-          notices: list.filter(model.notices, fn(n) { n != notice }),
-        )
-      let target = #(notice.dir, notice.id)
-      case model.selected_card, model.selected {
-        Some(card), Some(_) if card == target -> #(model, reveal())
-        _, _ -> {
-          let #(next, fx) = update(model, Select(notice.dir, notice.id))
-          #(Model(..next, revealing: True), fx)
-        }
-      }
-    }
-    Failed(message) -> #(Model(..model, error: message), effect.none())
-    Save ->
-      case model.selected {
-        None -> #(model, effect.none())
-        Some(t) ->
-          case float.parse(model.rank) {
-            Ok(rank) -> #(
-              model,
-              send(model, base(model) <> "/tasks/" <> t.id, "PATCH", [
-                #("title", json.string(model.title)),
-                #("body", json.string(model.body)),
-                #("rank", json.float(rank)),
-              ]),
-            )
-            Error(_) -> #(
-              Model(..model, error: "Rank must be a number"),
-              effect.none(),
-            )
-          }
-      }
-    Action(_) if model.acting != "" -> #(model, effect.none())
-    Action(name) ->
-      case model.selected {
-        None -> #(model, effect.none())
-        Some(t) -> {
-          let fields = [#("action", json.string(name))]
-          let fields = case model.model {
-            "" -> fields
-            id -> [#("model", json.string(id)), ..fields]
-          }
-          let fields = case model.effort {
-            "" -> fields
-            effort -> [#("effort", json.string(effort)), ..fields]
-          }
-          let fields = case model.text {
-            "" -> fields
-            text -> [#("text", json.string(text)), ..fields]
-          }
-          let proceed = case name {
-            "cancel" ->
-              confirm(
-                "Cancel task \""
-                <> t.title
-                <> "\"? This stops its agents and reverts its changes. This cannot be undone.",
-              )
-            "complete" ->
-              confirm(
-                "Complete task \""
-                <> t.title
-                <> "\"? This keeps its changes and closes the task. Its undo records will be removed, so it cannot be reopened or reverted through the board.",
-              )
-            "stop" ->
-              confirm(
-                "Stop the agent working on \""
-                <> t.title
-                <> "\"? This ends its session; its changes are kept, and a later run starts a fresh agent.",
-              )
-            _ -> True
-          }
-          case proceed {
-            True -> #(
-              Model(..model, acting: name),
-              effect.from(fn(dispatch) {
-                request(
-                  model.prefix,
-                  base(model) <> "/tasks/" <> t.id <> "/actions",
-                  "POST",
-                  json.to_string(json.object(fields)),
-                  fn(text) { dispatch(Acted(text)) },
-                )
-              }),
-            )
-            False -> #(model, effect.none())
-          }
-        }
-      }
-    AddNote ->
-      case model.selected {
-        None -> #(model, effect.none())
-        Some(t) -> #(
-          Model(..model, tab: "notes"),
-          send(model, base(model) <> "/tasks/" <> t.id <> "/notes", "POST", [
-            #("text", json.string(model.text)),
-          ]),
-        )
-      }
-    DeleteNote(i) ->
-      case model.selected {
-        None -> #(model, effect.none())
-        Some(t) ->
-          case confirm("Delete this note? It can't be restored.") {
-            False -> #(model, effect.none())
-            True -> #(
-              model,
-              send(
-                model,
-                base(model)
-                  <> "/tasks/"
-                  <> t.id
-                  <> "/notes/"
-                  <> int.to_string(i),
-                "DELETE",
-                [],
-              ),
-            )
-          }
-      }
-    Answer(qid, option) ->
-      case model.selected {
-        None -> #(model, effect.none())
-        Some(t) -> {
-          let answer = case option {
-            "" -> #("text", json.string(model.text))
-            option -> #("option", json.string(option))
-          }
-          #(
-            model,
-            send(
-              model,
-              base(model) <> "/tasks/" <> t.id <> "/questions/" <> qid,
-              "POST",
-              [
-                answer,
-              ],
-            ),
-          )
-        }
-      }
+    // `<solace-task>` shows the notice's tab and scrolls into view, now or
+    // once the task loads.
+    Open(notice) -> #(
+      Model(
+        ..model,
+        selected_card: Some(#(notice.dir, notice.id)),
+        live: case model.selected_card == Some(#(notice.dir, notice.id)) {
+          True -> model.live
+          False -> []
+        },
+        reveal: #(notice.tab, notice.id, model.reveal.2 + 1),
+        notices: list.filter(model.notices, fn(n) { n != notice }),
+      ),
+      effect.none(),
+    )
   }
 }
 
@@ -1139,40 +582,29 @@ fn live(model: Model, text: String, notify: Bool) -> Model {
   case lane_of(model, dir) {
     Error(_) -> model
     Ok(lane) ->
-      case json.parse(text, decode.at(["task"], task_decoder())) {
+      case json.parse(text, decode.at(["task"], solace_task.task_decoder())) {
         Ok(task) -> {
-          // Only the selected task's home project may refresh its details.
-          let #(selected, model) = case model.selected, model.selected_card {
-            Some(t), Some(#(home, id))
-              if t.id == task.id && id == task.id && home == dir
-            -> #(
-              // Events carry no `changes` (D-77): keep the list until it is fetched again.
-              Some(Task(..task, changes: t.changes)),
-              Model(..model, lane: dir),
-            )
-            other, _ -> #(other, model)
-          }
           let new = case
             list.find(lane.tasks, fn(t) { t.id == task.id }),
             notify
           {
             Ok(old), True ->
-              notices(old, task)
+              solace_task.notices(old, task)
               |> list.map(fn(n) {
-                let n = Notice(..n, dir: dir)
+                let n = solace_task.Notice(..n, dir: dir)
                 case model.workspace {
-                  True -> Notice(..n, heading: lane.label <> ": " <> n.heading)
+                  True ->
+                    solace_task.Notice(
+                      ..n,
+                      heading: lane.label <> ": " <> n.heading,
+                    )
                   False -> n
                 }
               })
             _, _ -> []
           }
           map_lane(
-            Model(
-              ..model,
-              selected: selected,
-              notices: list.append(model.notices, new),
-            ),
+            Model(..model, notices: list.append(model.notices, new)),
             dir,
             fn(l) {
               Lane(..l, tasks: [
@@ -1183,14 +615,19 @@ fn live(model: Model, text: String, notify: Bool) -> Model {
           )
         }
         Error(_) ->
-          case json.parse(text, decode.at(["workflow"], workflow_decoder())) {
+          case
+            json.parse(
+              text,
+              decode.at(["workflow"], solace_task.workflow_decoder()),
+            )
+          {
             Ok(w) -> map_lane(model, dir, fn(l) { Lane(..l, workflow: w) })
             Error(_) ->
               // A new connection starts from the project's tasks as they are.
               case
                 json.parse(
                   text,
-                  decode.at(["tasks"], decode.list(task_decoder())),
+                  decode.at(["tasks"], decode.list(solace_task.task_decoder())),
                 )
               {
                 Ok(tasks) ->
@@ -1244,7 +681,9 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Lane), List(Found))) {
     use name <- decode.field("name", decode.string)
     use base <- decode.field("base", decode.string)
     use target <- decode.optional_field("target", "", decode.string)
-    decode.success(Lane(dir, label, name, base, target, Workflow([]), []))
+    decode.success(
+      Lane(dir, label, name, base, target, solace_task.Workflow([]), []),
+    )
   }
   let found = {
     use dir <- decode.field("dir", decode.string)
@@ -1257,295 +696,6 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Lane), List(Found))) {
   use lanes <- decode.field("projects", decode.list(lane))
   use found <- decode.optional_field("found", [], decode.list(found))
   decode.success(#(workspace, lanes, found))
-}
-
-/// What the human should hear about in a live update: a run that ended, a
-/// discussion reply, or a question an agent asked.
-pub fn notices(old: Task, new: Task) -> List(Notice) {
-  let ended =
-    list.filter(new.runs, fn(r) {
-      r.state == "ended"
-      && r.kind != "discuss"
-      && list.any(old.runs, fn(o) { o.id == r.id && o.state != "ended" })
-    })
-    |> list.map(fn(r) {
-      // A run that left a note shows it; else its run is the place to look.
-      let tab = case list.any(new.notes, fn(n) { n.run == r.id }) {
-        True -> "notes"
-        False -> "runs"
-      }
-      let notice = fn(heading, text) {
-        Notice(heading <> new.title, text, "", new.id, tab)
-      }
-      case r.outcome {
-        "finished" -> notice("Finished ", "The agent finished its work.")
-        "reported" -> notice("Investigated ", "The agent's report is ready.")
-        "reviewed" -> notice("Reviewed ", "The review is ready.")
-        "" -> notice("Stopped ", "The " <> r.kind <> " run ended.")
-        outcome ->
-          notice(
-            "Stopped ",
-            "The " <> r.kind <> " run ended: " <> outcome <> ".",
-          )
-      }
-    })
-  let asked =
-    list.filter(new.questions, fn(q) {
-      q.answer == "" && !list.any(old.questions, fn(o) { o.id == q.id })
-    })
-    |> list.map(fn(q) {
-      Notice("Question on " <> new.title, q.text, "", new.id, "questions")
-    })
-  // An agent's reply sets its discussion run waiting in the same update that
-  // adds the note, so the run going waiting is the reply. Tasks loaded at
-  // startup come without their notes, so the run's state is what to watch.
-  let replied =
-    list.filter(new.runs, fn(r) {
-      r.kind == "discuss"
-      && r.state == "waiting"
-      && list.any(old.runs, fn(o) { o.id == r.id && o.state != "waiting" })
-    })
-    |> list.map(fn(r) {
-      let text = case
-        list.filter(new.notes, fn(n) { n.author == "agent" && n.run == r.id })
-        |> list.sort(fn(a, b) { int.compare(b.time, a.time) })
-        |> list.first
-      {
-        Ok(note) -> note.text
-        Error(_) -> "The agent replied."
-      }
-      Notice("Reply on " <> new.title, text, "", new.id, "notes")
-    })
-  list.flatten([ended, replied, asked])
-}
-
-/// The text an editor shows, and the message that changes it.
-fn field(model: Model, id: String) -> #(String, fn(String) -> Msg) {
-  case id {
-    "draft-body" -> #(model.draft_body, DraftBody)
-    "edit-body" -> #(model.body, Body)
-    _ -> #(model.text, Text)
-  }
-}
-
-pub fn task_decoder() -> decode.Decoder(Task) {
-  use id <- decode.field("id", decode.string)
-  use title <- decode.field("title", decode.string)
-  use body <- decode.field("body", decode.string)
-  use column <- decode.field("column", decode.string)
-  use rank <- decode.field("rank", decode.float)
-  use paused <- decode.optional_field(
-    "paused_from",
-    "",
-    decode.one_of(decode.string, [decode.success("")]),
-  )
-  use notes <- decode.optional_field("notes", [], decode.list(note_decoder()))
-  use questions <- decode.optional_field(
-    "questions",
-    [],
-    decode.list(question_decoder()),
-  )
-  use runs <- decode.optional_field("runs", [], decode.list(run_decoder()))
-  use links <- decode.optional_field("links", [], decode.list(link_decoder()))
-  use changes <- decode.optional_field(
-    "changes",
-    [],
-    decode.list({
-      use name <- decode.field("name", decode.string)
-      use entity <- decode.optional_field("entity", "", decode.string)
-      use project <- decode.optional_field("project", "", decode.string)
-      // A symbol's name is `module.symbol`, the symbol after the last dot; a
-      // file's is `file:path`, and anything else is shown whole.
-      let #(module, symbol) = case
-        entity,
-        list.reverse(string.split(name, "."))
-      {
-        "file:" <> path, _ -> #(files_heading, path)
-        "symbol:" <> _, [symbol, ..rest] if rest != [] -> #(
-          string.join(list.reverse(rest), "."),
-          symbol,
-        )
-        _, _ -> #(other_heading, name)
-      }
-      decode.success(Change(project, module, symbol))
-    }),
-  )
-  use stamps <- decode.optional_field(
-    "stamps",
-    [],
-    decode.dict(decode.string, decode.dynamic) |> decode.map(dict.keys),
-  )
-  use attention <- decode.optional_field(
-    "attention",
-    "",
-    decode.one_of(decode.at(["reason"], decode.string), [decode.success("")]),
-  )
-  use finished <- decode.optional_field(
-    "finished",
-    "",
-    decode.one_of(decode.at(["outcome"], decode.string), [decode.success("")]),
-  )
-  use unexpected <- decode.optional_field("unexpected", False, decode.bool)
-  use scope <- decode.optional_field("scope", [], decode.list(decode.string))
-  decode.success(Task(
-    id,
-    title,
-    body,
-    column,
-    rank,
-    paused,
-    notes,
-    questions,
-    runs,
-    links,
-    changes,
-    stamps,
-    attention,
-    finished,
-    unexpected,
-    scope,
-  ))
-}
-
-fn note_decoder() -> decode.Decoder(Note) {
-  use author <- decode.field("author", decode.string)
-  use run <- decode.optional_field(
-    "run",
-    "",
-    decode.one_of(decode.string, [decode.success("")]),
-  )
-  use text <- decode.field("text", decode.string)
-  use time <- decode.optional_field("time", 0, decode.int)
-  decode.success(Note(author, run, text, time))
-}
-
-fn entry_decoder() -> decode.Decoder(Entry) {
-  let text = fn(name, next) {
-    decode.optional_field(
-      name,
-      "",
-      decode.one_of(decode.string, [decode.success("")]),
-      next,
-    )
-  }
-  use kind <- decode.field("kind", decode.string)
-  use body <- text("text")
-  use title <- text("title")
-  use input <- text("input")
-  use output <- text("output")
-  use status <- text("status")
-  decode.success(Entry(kind, body, title, input, output, status))
-}
-
-fn question_decoder() -> decode.Decoder(Question) {
-  use id <- decode.field("id", decode.string)
-  use text <- decode.field("text", decode.string)
-  use options <- decode.field("options", decode.list(decode.string))
-  use answer <- decode.optional_field("answer", "", decode.string)
-  use settings <- decode.optional_field(
-    "settings",
-    None,
-    decode.optional({
-      use base <- decode.field("base", decode.string)
-      use proposed <- decode.field("proposed", decode.string)
-      decode.success(#(base, proposed))
-    }),
-  )
-  decode.success(Question(id, text, options, answer, settings))
-}
-
-fn run_decoder() -> decode.Decoder(Run) {
-  use id <- decode.field("id", decode.string)
-  use kind <- decode.field("kind", decode.string)
-  use state <- decode.field("state", decode.string)
-  use model <- decode.field("model", decode.string)
-  use effort <- decode.optional_field(
-    "effort",
-    "",
-    decode.one_of(decode.string, [decode.success("")]),
-  )
-  use log <- decode.field("log", decode.string)
-  use outcome <- decode.optional_field("outcome", "", decode.string)
-  use started <- decode.optional_field("started", 0, decode.int)
-  use ended <- decode.optional_field("ended", 0, decode.int)
-  decode.success(Run(
-    id,
-    kind,
-    state,
-    model,
-    effort,
-    log,
-    outcome,
-    started,
-    ended,
-  ))
-}
-
-fn link_decoder() -> decode.Decoder(Link) {
-  use name <- decode.field("name", decode.string)
-  use url <- decode.field("url", decode.string)
-  decode.success(Link(name, url))
-}
-
-fn agent_decoder() -> decode.Decoder(Agent) {
-  use id <- decode.field("id", decode.string)
-  use label <- decode.field("label", decode.string)
-  use available <- decode.optional_field("available", True, decode.bool)
-  use reason <- decode.optional_field(
-    "reason",
-    "",
-    decode.one_of(decode.string, [decode.success("")]),
-  )
-  use effort <- decode.optional_field(
-    "effort",
-    "",
-    decode.one_of(decode.string, [decode.success("")]),
-  )
-  use efforts <- decode.optional_field(
-    "efforts",
-    [],
-    decode.list(decode.string),
-  )
-  decode.success(Agent(id, label, available, reason, effort, efforts))
-}
-
-pub fn workflow_decoder() -> decode.Decoder(Workflow) {
-  use columns <- decode.field("columns", decode.list(column_decoder()))
-  decode.success(Workflow(columns))
-}
-
-fn column_decoder() -> decode.Decoder(Column) {
-  use id <- decode.field("id", decode.string)
-  use label <- decode.optional_field("label", id, decode.string)
-  use actions <- decode.optional_field(
-    "actions",
-    [],
-    decode.list(decode.string),
-  )
-  use final <- decode.optional_field("final", False, decode.bool)
-  decode.success(Column(id, label, actions, final))
-}
-
-pub fn actions(workflow: Workflow, task: Task) -> List(String) {
-  // Discuss starts between runs; stop ends any run, and a discussion can be ended.
-  let built_in = case list.find(task.runs, fn(r) { r.state != "ended" }) {
-    Error(_) -> ["discuss"]
-    Ok(r) if r.kind == "discuss" -> ["end_discussion", "stop"]
-    Ok(_) -> ["stop"]
-  }
-  case list.find(workflow.columns, fn(c) { c.id == task.column }) {
-    Ok(c) if c.final -> []
-    Ok(c) ->
-      list.flatten([
-        c.actions,
-        case task.paused {
-          "" -> ["pause"]
-          _ -> ["resume"]
-        },
-        built_in,
-      ])
-    Error(_) -> []
-  }
 }
 
 fn button(label: String, msg: Msg) -> Element(Msg) {
@@ -1648,11 +798,28 @@ pub fn view(model: Model) -> Element(Msg) {
       True ->
         h.section([a.class("editor")], [
           case model.workspace {
-            True -> projects_pick(model, model.draft_scope, False, DraftScope)
+            True ->
+              solace_task.projects_pick(
+                list.map(model.lanes, fn(l) { #(l.dir, l.label) }),
+                model.draft_scope,
+                False,
+                DraftScope,
+              )
             False -> h.text("")
           },
-          title_input(model.draft_title, DraftTitle),
-          editor(model, "draft-body", "", "Description"),
+          solace_task.title_input(model.draft_title, DraftTitle),
+          solace_task.editor(
+            "draft-body",
+            "",
+            base_of(model, draft_lane(model)),
+            "Description",
+            model.draft_body,
+            list.contains(model.previews, "draft-body"),
+            DraftBody,
+            Preview("draft-body", _),
+            fn(before, after) { Format("draft-body", before, after) },
+            Block("draft-body", _),
+          ),
           h.button([a.disabled(model.submitting), e.on_click(Create)], [
             h.text(case model.submitting {
               True -> "Creating…"
@@ -1662,9 +829,9 @@ pub fn view(model: Model) -> Element(Msg) {
         ])
     },
     lanes_view(model),
-    case model.selected {
+    case model.selected_card {
       None -> h.text("Select a task to see its details.")
-      Some(t) -> detail(model, t)
+      Some(#(dir, id)) -> task_view(model, dir, id)
     },
   ])
 }
@@ -1812,7 +979,7 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
                   ])
                 _ -> h.text("")
               },
-              status_badge(t),
+              solace_task.status_badge(t),
             ],
           )
         })
@@ -1908,508 +1075,6 @@ fn projects_view(model: Model) -> Element(Msg) {
   ])
 }
 
-fn detail(model: Model, t: Task) -> Element(Msg) {
-  let open_questions = list.any(t.questions, fn(q) { q.answer == "" })
-  let tabs = [
-    #("details", "Details"),
-    #("notes", "Notes (" <> int.to_string(list.length(t.notes)) <> ")"),
-    #(
-      "questions",
-      "Questions ("
-        <> int.to_string(list.length(t.questions))
-        <> ")"
-        <> case open_questions {
-        True -> " •"
-        False -> ""
-      },
-    ),
-    #("runs", "Runs (" <> int.to_string(list.length(t.runs)) <> ")"),
-    #("changes", "Changes (" <> int.to_string(list.length(t.changes)) <> ")"),
-  ]
-  let tabs = case model.workspace {
-    True -> list.append(tabs, [#("scope", "Scope")])
-    False -> tabs
-  }
-  h.section([a.class("detail")], [
-    h.h2([], [h.text(t.title)]),
-    h.p([a.class("meta")], [h.text(t.column), status_badge(t)]),
-    case t.attention {
-      "" -> h.text("")
-      reason ->
-        h.div([a.class("attention"), a.role("status")], [
-          h.strong([], [h.text("Needs attention")]),
-          md(base(model), reason),
-        ])
-    },
-    agent_choice(model),
-    composer(model, t),
-    case model.acting {
-      "" -> h.text("")
-      name ->
-        h.p([a.class("muted"), a.role("status")], [h.text(acting_text(t, name))])
-    },
-    h.div(
-      [a.class("actions")],
-      list.append(
-        list.map(actions(workflow(model), t), fn(name) {
-          action_button(name, model.acting != "")
-        }),
-        [button("Add note", AddNote)],
-      ),
-    ),
-    h.div(
-      [a.class("tabs"), a.role("tablist")],
-      list.map(tabs, fn(tab) {
-        h.button(
-          [
-            a.role("tab"),
-            a.aria_selected(model.tab == tab.0),
-            e.on_click(Tab(tab.0)),
-          ],
-          [h.text(tab.1)],
-        )
-      }),
-    ),
-    h.div([a.class("panel"), a.role("tabpanel")], case model.tab {
-      "notes" -> notes_view(base(model), t)
-      "questions" -> questions_view(base(model), t)
-      "runs" -> list.map(list.reverse(t.runs), fn(r) { run_view(model, r) })
-      "changes" -> [
-        case t.changes {
-          [] -> h.text("")
-          _ ->
-            h.p([], [
-              h.text(model.review_summary <> " "),
-              h.a([a.href(base(model) <> "/contracts?task=" <> t.id)], [
-                h.text("Contract view"),
-              ]),
-            ])
-        },
-        h.div(
-          [a.class("changes")],
-          list.map(change_groups(t.changes, list.length(t.scope) > 1), fn(g) {
-            h.section([], [
-              h.h4([], [h.text(g.0)]),
-              h.ul([], list.map(g.1, fn(n) { h.li([], [h.text(n)]) })),
-            ])
-          }),
-        ),
-      ]
-      "scope" -> [scope_view(model, t)]
-      _ -> details_view(model, t)
-    }),
-  ])
-}
-
-fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
-  case model.editing {
-    True -> [
-      title_input(model.title, Title),
-      editor(model, "edit-body", t.id, "Description"),
-      h.label([], [
-        h.text("Rank (lower comes first)"),
-        h.input([a.type_("number"), a.value(model.rank), e.on_input(Rank)]),
-      ]),
-      button("Save", Save),
-      button("Cancel", Edit(False)),
-    ]
-    False -> [
-      md(base(model), t.body),
-      h.div(
-        [],
-        list.map(t.links, fn(link) {
-          h.a([a.href(link.url)], [h.text(link.name)])
-        }),
-      ),
-      button("Edit", Edit(True)),
-    ]
-  }
-}
-
-fn agent_choice(model: Model) -> Element(Msg) {
-  let chosen = list.find(model.models, fn(m) { m.id == model.model })
-  h.div([a.class("agent")], [
-    h.label([], [
-      h.text("Agent model"),
-      h.select(
-        [a.value(model.model), e.on_input(AgentSelected)],
-        list.map(model.models, fn(m) {
-          case m.available {
-            True ->
-              h.option(
-                [a.value(m.id), a.selected(m.id == model.model)],
-                m.label,
-              )
-            False ->
-              h.option(
-                [
-                  a.value(m.id),
-                  a.disabled(True),
-                  a.selected(m.id == model.model),
-                ],
-                m.label <> " (unavailable: " <> m.reason <> ")",
-              )
-          }
-        }),
-      ),
-    ]),
-    case chosen {
-      Ok(m) if m.efforts != [] ->
-        h.label([], [
-          h.text("Effort"),
-          h.select([a.value(model.effort), e.on_input(EffortSelected)], [
-            h.option(
-              [a.value(""), a.selected(model.effort == "")],
-              case m.effort {
-                "" -> "Default"
-                effort -> "Default (" <> effort <> ")"
-              },
-            ),
-            ..list.map(m.efforts, fn(effort) {
-              h.option(
-                [a.value(effort), a.selected(effort == model.effort)],
-                effort,
-              )
-            })
-          ]),
-        ])
-      _ -> h.text("")
-    },
-  ])
-}
-
-fn title_input(value: String, msg: fn(String) -> Msg) -> Element(Msg) {
-  h.input([
-    a.class("title"),
-    a.placeholder("Title"),
-    a.attribute("aria-label", "Title"),
-    a.value(value),
-    e.on_input(msg),
-  ])
-}
-
-fn composer(model: Model, t: Task) -> Element(Msg) {
-  editor(model, "note-text", t.id, "Note, answer or instructions")
-}
-
-/// A markdown editor with Write/Preview and formatting tools; `id` names
-/// what it edits (see `field`). Images pasted, dropped or picked here are uploaded by
-/// `api.mjs` to `task` and inserted as markdown. A task not yet created has no
-/// image tool.
-fn editor(
-  model: Model,
-  id: String,
-  task: String,
-  label: String,
-) -> Element(Msg) {
-  let #(text, msg) = field(model, id)
-  let preview = list.contains(model.previews, id)
-  let tool = fn(label, title, before, after) {
-    h.button(
-      [a.type_("button"), a.title(title), e.on_click(Format(id, before, after))],
-      [h.text(label)],
-    )
-  }
-  let block_tool = fn(label, title, kind) {
-    h.button([a.type_("button"), a.title(title), e.on_click(Block(id, kind))], [
-      h.text(label),
-    ])
-  }
-  h.div([a.class("composer")], [
-    h.div([a.class("toolbar")], [
-      h.button(
-        [
-          a.type_("button"),
-          a.aria_pressed(bool_text(!preview)),
-          e.on_click(Preview(id, False)),
-        ],
-        [h.text("Write")],
-      ),
-      h.button(
-        [
-          a.type_("button"),
-          a.aria_pressed(bool_text(preview)),
-          e.on_click(Preview(id, True)),
-        ],
-        [h.text("Preview")],
-      ),
-      h.span([a.class("separator")], []),
-      block_tool("H", "Heading", "heading"),
-      tool("B", "Bold", "**", "**"),
-      tool("`code`", "Code", "`", "`"),
-      block_tool("Code block", "Code block", "code"),
-      block_tool("• List", "List", "list"),
-      block_tool("1. List", "Numbered list", "numbered"),
-      block_tool("Quote", "Quote", "quote"),
-      tool("Link", "Link", "[", "](https://)"),
-      case task {
-        "" -> h.text("")
-        _ ->
-          h.label([a.class("button"), a.title("Add an image")], [
-            h.text("Image"),
-            h.input([
-              a.type_("file"),
-              a.class("md-image sr-only"),
-              a.attribute("data-task", task),
-              a.attribute("data-base", base(model)),
-              a.attribute("data-for", id),
-              a.accept(["image/png", "image/jpeg", "image/gif", "image/webp"]),
-            ]),
-          ])
-      },
-    ]),
-    case preview {
-      True ->
-        h.div([a.class("preview")], [
-          case text {
-            "" -> h.p([a.class("muted")], [h.text("Nothing to preview.")])
-            text -> md(base(model), text)
-          },
-        ])
-      False ->
-        h.textarea(
-          [
-            a.id(id),
-            a.class("md-editor"),
-            a.attribute("data-task", task),
-            a.attribute("data-base", base(model)),
-            a.attribute("aria-label", label),
-            a.placeholder(
-              label
-              <> " (markdown)."
-              <> case task {
-                "" -> ""
-                _ -> " Paste or drop images here."
-              },
-            ),
-            a.value(text),
-            e.on_input(msg),
-          ],
-          text,
-        )
-    },
-  ])
-}
-
-fn bool_text(value: Bool) -> String {
-  case value {
-    True -> "true"
-    False -> "false"
-  }
-}
-
-fn questions_view(base: String, t: Task) -> List(Element(Msg)) {
-  list.map(list.reverse(t.questions), fn(q) {
-    let #(diff, other) = case q.settings {
-      Some(#(current, proposed)) -> #(
-        [h.pre([a.class("diff")], [h.text(settings_diff(current, proposed))])],
-        "Reject with the editor's text",
-      )
-      None -> #([], "Answer with the editor's text")
-    }
-    h.article([], [
-      md(base, q.text),
-      ..list.append(diff, [
-        case q.answer {
-          "" ->
-            h.div(
-              [],
-              list.append(
-                list.map(q.options, fn(o) { button(o, Answer(q.id, o)) }),
-                [button(other, Answer(q.id, ""))],
-              ),
-            )
-          answer -> h.p([], [h.text("Answer: " <> answer)])
-        },
-      ])
-    ])
-  })
-}
-
-/// Lines only in the old settings, then lines only in the proposed ones.
-/// ponytail: a line-set diff, not an LCS; fine for a short solace.toml.
-pub fn settings_diff(base: String, proposed: String) -> String {
-  let old = string.split(base, "\n")
-  let new = string.split(proposed, "\n")
-  list.append(
-    list.filter(old, fn(l) { !list.contains(new, l) })
-      |> list.map(fn(l) { "- " <> l }),
-    list.filter(new, fn(l) { !list.contains(old, l) })
-      |> list.map(fn(l) { "+ " <> l }),
-  )
-  |> string.join("\n")
-}
-
-/// Newest first. Each keeps its position, which names it to the API.
-fn notes_view(base: String, t: Task) -> List(Element(Msg)) {
-  t.notes
-  |> list.index_map(fn(n, i) { #(n, i) })
-  |> list.reverse
-  |> list.map(fn(pair) {
-    let #(n, i) = pair
-    h.details([a.class("note"), a.open(True)], [
-      h.summary([], [
-        h.strong([], [h.text(author(t, n))]),
-        h.small([], [h.text(clock(n.time))]),
-        h.button(
-          [
-            a.class("delete"),
-            a.attribute("aria-label", "Delete note"),
-            e.on_click(DeleteNote(i)) |> e.prevent_default,
-          ],
-          [h.text("Delete")],
-        ),
-      ]),
-      md(base, n.text),
-    ])
-  })
-}
-
-/// An agent note names its run, as the run list does.
-pub fn author(t: Task, n: Note) -> String {
-  case n.author, list.find(t.runs, fn(r) { r.id == n.run }) {
-    "agent", Ok(r) -> "agent · " <> run_label(r)
-    who, _ -> who
-  }
-}
-
-fn run_label(r: Run) -> String {
-  r.kind
-  <> " · "
-  <> r.model
-  <> case r.effort {
-    "" -> ""
-    effort -> " · " <> effort
-  }
-}
-
-/// What the task's agent is doing right now, or what it finished.
-pub fn status(t: Task) -> String {
-  case t.paused, list.find(t.runs, fn(r) { r.state != "ended" }) {
-    _, Error(_) ->
-      case t.finished {
-        "finished" -> "Agent finished"
-        "reported" -> "Report ready"
-        "reviewed" -> "Review ready"
-        _ -> ""
-      }
-    "", Ok(r) if r.state == "waiting" && r.kind == "discuss" ->
-      "Waiting for your reply"
-    "", Ok(r) if r.state == "waiting" -> "Waiting for your answer"
-    "", Ok(r) if r.kind == "discuss" -> "Agent discussing"
-    "", Ok(r) if r.kind == "review" -> "Agent reviewing"
-    "", Ok(r) if r.kind == "investigate" -> "Agent investigating"
-    "", Ok(_) -> "Agent working"
-    _, Ok(_) -> "Agent paused"
-  }
-}
-
-fn status_badge(t: Task) -> Element(Msg) {
-  case status(t) {
-    "" -> h.text("")
-    s -> {
-      let class = case s {
-        "Agent working" | "Agent reviewing" | "Agent investigating" ->
-          "status working"
-        "Agent finished" | "Report ready" | "Review ready" -> "status finished"
-        _ -> "status"
-      }
-      h.span([a.class(class), a.role("status")], [h.text(s)])
-    }
-  }
-}
-
-/// Markdown; images uploaded to the board load from the project at `base`.
-fn md(base: String, text: String) -> Element(Msg) {
-  element.unsafe_raw_html("", "div", [a.class("md")], markdown(text, base))
-}
-
-fn run_view(model: Model, r: Run) -> Element(Msg) {
-  let watching = model.watching == r.id
-  let when = case r.ended {
-    0 -> "started " <> clock(r.started)
-    ended -> clock(r.started) <> " – " <> clock(ended)
-  }
-  h.article([a.class("run")], [
-    h.header([], [
-      h.strong([], [h.text(run_label(r))]),
-      h.span([a.class("state " <> r.state)], [
-        h.text(case r.state, r.outcome {
-          "ended", "" -> "ended"
-          "ended", outcome -> "ended: " <> outcome
-          state, _ -> state
-        }),
-      ]),
-      case watching {
-        True -> button("Hide activity", Unwatch)
-        False ->
-          button(
-            case r.state {
-              "ended" -> "Show activity"
-              _ -> "Follow live"
-            },
-            Watch(r.id),
-          )
-      },
-    ]),
-    h.small([], [h.text(when <> " · log: " <> r.log)]),
-    case watching {
-      False -> h.text("")
-      True ->
-        case model.entries {
-          [] -> h.p([a.class("muted")], [h.text("No activity yet.")])
-          entries ->
-            h.div(
-              [a.class("transcript")],
-              list.map(entries, entry_view(base(model), _)),
-            )
-        }
-    },
-  ])
-}
-
-fn entry_view(base: String, e: Entry) -> Element(Msg) {
-  case e.kind {
-    "message" -> h.div([a.class("entry message")], [md(base, e.text)])
-    "thinking" ->
-      h.details([a.class("entry thinking")], [
-        h.summary([], [h.text("Thinking")]),
-        md(base, e.text),
-      ])
-    "tool" ->
-      h.details([a.class("entry tool " <> e.status)], [
-        h.summary([], [
-          h.span([a.class("icon")], [
-            h.text(case e.status {
-              "ok" -> "✓"
-              "failed" -> "✗"
-              _ -> "…"
-            }),
-          ]),
-          h.code([], [h.text(e.title)]),
-        ]),
-        case e.input {
-          "" -> h.text("")
-          input -> h.pre([a.class("input")], [h.text(input)])
-        },
-        h.pre([], [
-          h.text(case e.status, e.output {
-            "running", _ -> "Running…"
-            _, "" -> "(no output)"
-            _, output -> output
-          }),
-        ]),
-      ])
-    "usage" -> h.small([a.class("entry")], [h.text(e.text)])
-    "error" -> h.p([a.class("entry"), a.role("alert")], [h.text(e.text)])
-    _ ->
-      h.details([a.class("entry")], [
-        h.summary([], [h.text("Output")]),
-        h.pre([], [h.text(e.text)]),
-      ])
-  }
-}
-
 /// The hazard mark on an Unexpected Changes card (D-58).
 fn hazard() -> Element(Msg) {
   let what = "Unexpected changes: code changed outside Solace"
@@ -2440,7 +1105,7 @@ fn lane_name(lane: Lane) -> List(Element(Msg)) {
   ]
 }
 
-fn task_count(cards: List(#(String, Task))) -> Element(Msg) {
+fn task_count(cards: List(#(String, solace_task.Task))) -> Element(Msg) {
   let count = list.length(cards)
   h.small([], [
     h.text(
@@ -2454,7 +1119,7 @@ fn task_count(cards: List(#(String, Task))) -> Element(Msg) {
 }
 
 /// The projects a task covers; a task saved before D-61 covers its own.
-fn scope_of(home: String, t: Task) -> List(String) {
+fn scope_of(home: String, t: solace_task.Task) -> List(String) {
   case t.scope {
     [] -> [home]
     scope -> scope
@@ -2463,7 +1128,7 @@ fn scope_of(home: String, t: Task) -> List(String) {
 
 /// The tasks a lane shows, each with the project it is stored in: every task
 /// on the board whose projects include this lane's (D-61).
-fn cards(model: Model, lane: Lane) -> List(#(String, Task)) {
+fn cards(model: Model, lane: Lane) -> List(#(String, solace_task.Task)) {
   list.flat_map(model.lanes, fn(l) {
     l.tasks
     |> list.filter(fn(t) { list.contains(scope_of(l.dir, t), lane.dir) })
@@ -2492,29 +1157,6 @@ fn draft_home(model: Model) -> String {
   }
 }
 
-/// A switch per project on the board, for the projects a task can change.
-fn projects_pick(
-  model: Model,
-  chosen: List(String),
-  disabled: Bool,
-  msg: fn(String, Bool) -> Msg,
-) -> Element(Msg) {
-  h.fieldset([a.class("projects-pick"), a.disabled(disabled)], [
-    h.legend([], [h.text("Projects this task can change")]),
-    ..list.map(model.lanes, fn(l) {
-      h.label([], [
-        h.input([
-          a.type_("checkbox"),
-          a.role("switch"),
-          a.checked(list.contains(chosen, l.dir)),
-          e.on_check(msg(l.dir, _)),
-        ]),
-        h.text(l.label),
-      ])
-    })
-  ])
-}
-
 pub type Source
 
 @external(javascript, "./api.mjs", "close_events")
@@ -2524,6 +1166,8 @@ fn close_events(source: Source) -> Nil
 fn prevent_drag(root: dynamic.Dynamic) -> Nil
 
 pub fn register() -> Result(Nil, lustre.Error) {
+  // The open task's details are `<solace-task>`, registered once per page.
+  let _ = solace_task.register()
   lustre.register(
     lustre.component(init, update, view, [
       component.on_attribute_change("base", fn(base) { Ok(BaseChanged(base)) }),
@@ -2568,21 +1212,15 @@ article{border-bottom-color:var(--line)}.transcript{border-left:1px solid var(--
 .top a:hover,.lane-title a:hover{background:var(--hover)}
 .top a::after,.lane-title a::after{content:\"\";width:14px;height:14px;background:currentColor;-webkit-mask:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 5l7 7-7 7'/%3E%3C/svg%3E\") center/contain no-repeat;mask:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 5l7 7-7 7'/%3E%3C/svg%3E\") center/contain no-repeat}"
 
-/// Opens this instance's transport with its own `base`: the event stream, one
-/// the followed run's transcript and the first loads.
-/// Runs on connection and when `base` changes; the fresh stream replays what
-/// it missed.
+/// Opens this instance's transport with its own `base`: the event stream and
+/// the project list. Runs on connection and when `base` changes; the fresh
+/// stream replays what it missed.
 fn start(model: Model) -> #(Model, Effect(Msg)) {
   let model = Model(..stop(model), caught_up: False, replay: [])
   #(
     model,
     effect.batch([
       get(model, "/projects", ProjectsLoaded),
-      get(model, "/models", ModelsLoaded),
-      case model.watching {
-        "" -> effect.none()
-        rid -> transcript(model, rid)
-      },
       effect.from(fn(send) {
         send(
           Listening(
@@ -2596,13 +1234,13 @@ fn start(model: Model) -> #(Model, Effect(Msg)) {
   )
 }
 
-/// Closes the event stream and ends the transcript polling chain.
+/// Closes the event stream.
 fn stop(model: Model) -> Model {
   case model.source {
     Some(source) -> close_events(source)
     None -> Nil
   }
-  Model(..model, source: None, poll: model.poll + 1)
+  Model(..model, source: None)
 }
 
 @external(javascript, "./api.mjs", "no_root")
@@ -2611,86 +1249,21 @@ fn no_root() -> dynamic.Dynamic
 const selected_card_styles = "
 button.card[aria-current=true],button.card[aria-current=true]:hover{background:var(--hover);border-color:var(--ink);box-shadow:0 0 0 2px var(--ink),4px 6px 14px var(--shadow)}button.card[aria-current=true]:focus-visible{outline:3px solid var(--focus);outline-offset:5px}@media(forced-colors:active){button.card[aria-current=true],button.card[aria-current=true]:hover{border-color:Highlight;box-shadow:0 0 0 2px Highlight}}"
 
-/// The open task left its home project: if it moved to another project it
-/// covers (D-61), it is opened from there.
+/// The open task left its home project: if another project holds it now (it
+/// moved to another project it covers, D-61), it is opened from there.
 fn follow_move(model: Model, dir: String, id: String) -> Model {
-  case model.selected, model.selected_card {
-    Some(t), Some(#(home, card_id))
-      if home == dir && card_id == id && t.id == id
-    ->
+  case model.selected_card {
+    Some(#(home, card)) if home == dir && card == id ->
       case
-        list.find_map(model.lanes, fn(l) {
-          case l.dir != dir && list.contains(t.scope, l.dir) {
-            True ->
-              list.find(l.tasks, fn(x) { x.id == id })
-              |> result.map(fn(x) { #(l.dir, x) })
-            False -> Error(Nil)
-          }
+        list.find(model.lanes, fn(l) {
+          l.dir != dir && list.any(l.tasks, fn(t) { t.id == id })
         })
       {
-        Ok(#(to, task)) ->
-          Model(
-            ..model,
-            lane: to,
-            selected: Some(task),
-            selected_card: Some(#(to, id)),
-          )
+        Ok(l) -> Model(..model, selected_card: Some(#(l.dir, id)))
         Error(_) -> model
       }
-    _, _ -> model
+    _ -> model
   }
-}
-
-/// Browser storage keys for the last agent and effort chosen.
-const agent_key = "solace-board-agent"
-
-const effort_key = "solace-board-effort"
-
-/// One changed symbol, split so the Changes tab can group it.
-pub type Change {
-  Change(project: String, module: String, name: String)
-}
-
-/// Changes as an outline: source modules before test modules, each module's
-/// symbols alphabetical. Headings name the project too when `multi_project`.
-pub fn change_groups(
-  changes: List(Change),
-  multi_project: Bool,
-) -> List(#(String, List(String))) {
-  // Source, then tests, then files, then anything else.
-  let is_test = fn(c: Change) {
-    case c.module {
-      m if m == files_heading -> 2
-      m if m == other_heading -> 3
-      m ->
-        case string.ends_with(m, "_test") {
-          True -> 1
-          False -> 0
-        }
-    }
-  }
-  let sorted =
-    list.sort(changes, fn(a, b) {
-      string.compare(a.project, b.project)
-      |> order.break_tie(int.compare(is_test(a), is_test(b)))
-      |> order.break_tie(string.compare(a.module, b.module))
-      |> order.break_tie(string.compare(a.name, b.name))
-    })
-  let heading = fn(c: Change) {
-    case multi_project, c.project {
-      True, p if p != "" -> p <> " · " <> c.module
-      _, _ -> c.module
-    }
-  }
-  list.fold(sorted, [], fn(groups, c) {
-    let h = heading(c)
-    case groups {
-      [#(last, names), ..rest] if last == h -> [#(h, [c.name, ..names]), ..rest]
-      _ -> [#(h, [c.name]), ..groups]
-    }
-  })
-  |> list.map(fn(g) { #(g.0, list.reverse(g.1)) })
-  |> list.reverse
 }
 
 @external(javascript, "./api.mjs", "toggle_theme")
@@ -2699,7 +1272,7 @@ fn toggle_theme() -> Nil
 /// The column names as one bar, shared by lanes with one workflow or one per
 /// lane when they differ. It is the first thing in its container, so it sticks
 /// to the top of the page until the last lane in that container scrolls past.
-fn head_view(columns: List(Column)) -> Element(Msg) {
+fn head_view(columns: List(solace_task.Column)) -> Element(Msg) {
   h.div(
     [a.class("board lane-head"), a.attribute("aria-hidden", "true")],
     list.map(columns, fn(c) {
@@ -2774,25 +1347,6 @@ fn modal(body: List(Element(Msg))) -> Element(Msg) {
 @external(javascript, "./api.mjs", "request_id")
 fn request_id() -> String
 
-/// The Scope tab: a switch per project the task can change, locked while the
-/// agent works.
-fn scope_view(model: Model, t: Task) -> Element(Msg) {
-  let working =
-    t.paused == "" && list.any(t.runs, fn(r) { r.state == "running" })
-  h.div([], [
-    projects_pick(model, scope_of(model.lane, t), working, SetScope),
-    case working {
-      True ->
-        h.small([], [
-          h.text(
-            "You can change the projects once the agent stops working, is paused, or asks a question.",
-          ),
-        ])
-      False -> h.text("")
-    },
-  ])
-}
-
 /// The project a live message is for: the one it names, else the root's.
 fn event_dir(model: Model, text: String) -> String {
   case json.parse(text, decode.at(["project"], decode.string)) {
@@ -2821,60 +1375,96 @@ fn settle(model: Model) -> Model {
       list.fold(
         known,
         Model(..model, replay: list.reverse(unknown)),
-        fn(m, text) { live(m, text, False) },
+        fn(m, text) { hand(live(m, text, False), text) },
       )
     }
   }
 }
 
-/// What an action in flight is waiting for: with a work run going, a code
-/// change takes the project's lock, which the agent's command holds.
-pub fn acting_text(t: Task, name: String) -> String {
-  case list.any(t.runs, fn(r) { r.kind == "work" && r.state != "ended" }) {
-    True ->
-      "Waiting for the agent's current command to finish before " <> name <> "…"
-    False -> "Sending " <> name <> "…"
-  }
-}
-
-fn action_button(name: String, busy: Bool) -> Element(Msg) {
-  h.button([e.on_click(Action(name)), a.disabled(busy)], [h.text(name)])
-}
-
-/// Fetches the selected task's changes, which only its own GET carries (D-77).
-fn refresh_changes(model: Model) -> Effect(Msg) {
-  case model.selected, model.selected_card {
-    Some(t), Some(#(_, id)) if t.id == id ->
-      get(model, base(model) <> "/tasks/" <> id, ChangesLoaded(
-        model.selection_generation,
-        id,
-        _,
-      ))
-    _, _ -> effect.none()
-  }
-}
-
-/// The Changes tab heading for files, listed after the code.
-pub const files_heading = "Files"
-
-/// The Changes tab heading for changes that are neither symbols nor files.
-pub const other_heading = "Other"
-
-@external(javascript, "./api.mjs", "block")
-fn block(
-  root: dynamic.Dynamic,
-  id: String,
-  text: String,
-  kind: String,
-) -> String
-
-/// Scrolls the open task into view and puts focus on its selected tab, once
-/// the page has rendered.
-fn reveal() -> Effect(Msg) {
-  effect.before_paint(fn(_, root) { reveal_task(root) })
-}
-
-@external(javascript, "./api.mjs", "reveal_task")
-fn reveal_task(root: dynamic.Dynamic) -> Nil
-
 const notice_styles = ".notice .show{margin:8px 0 0;padding:4px 10px;background:transparent;color:var(--paper);border-color:var(--paper)}.notice .show:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .show:focus-visible{outline-color:var(--paper)}"
+
+/// Whether a live message is for the open task's details: its own update, or
+/// its project's workflow. Its removal is the board's to follow.
+fn for_detail(model: Model, text: String) -> Bool {
+  case model.selected_card {
+    None -> False
+    Some(#(home, id)) ->
+      event_dir(model, text) == home
+      && case json.parse(text, decode.at(["task", "id"], decode.string)) {
+        Ok(task) -> task == id
+        Error(_) ->
+          json.parse(text, decode.at(["workflow"], decode.dynamic))
+          |> result.is_ok
+      }
+  }
+}
+
+/// The API prefix the open task's project answers at: a workspace project's
+/// own `/p/<dir>`, else this board's.
+fn task_base(model: Model, dir: String) -> String {
+  let base = base_of(model, dir)
+  case string.starts_with(base, "/p/") {
+    True -> base
+    False -> model.prefix <> base
+  }
+}
+
+/// The open task's details: `<solace-task>` from the components project,
+/// which loads and changes the task itself. The board hands it the task's
+/// events (`live`) and a notice's request to show it (`reveal`), and follows
+/// it when it moves to another of its projects.
+fn task_view(model: Model, dir: String, id: String) -> Element(Msg) {
+  let #(tab, shown, asked) = model.reveal
+  element.element(
+    "solace-task",
+    [
+      a.attribute("base", task_base(model, dir)),
+      a.attribute("dir", dir),
+      a.attribute("task", id),
+      a.attribute("hosted", ""),
+      case model.workspace {
+        True -> a.attribute("workspace", "")
+        False -> a.none()
+      },
+      a.property(
+        "live",
+        json.array(model.live, fn(m) {
+          json.object([#("n", json.int(m.0)), #("text", json.string(m.1))])
+        }),
+      ),
+      a.property(
+        "reveal",
+        json.object([
+          #("tab", json.string(tab)),
+          #("id", json.string(shown)),
+          #("n", json.int(asked)),
+        ]),
+      ),
+      e.on("task-moved", {
+        use dir <- decode.subfield(["detail", "dir"], decode.string)
+        use id <- decode.subfield(["detail", "id"], decode.string)
+        decode.success(TaskMoved(dir, id))
+      }),
+    ],
+    [],
+  )
+}
+
+/// Adds a live message to those handed to the open task's details, if it is
+/// for them; only the last few are kept.
+fn hand(model: Model, text: String) -> Model {
+  case for_detail(model, text) {
+    False -> model
+    True -> {
+      let n = model.live_n + 1
+      Model(
+        ..model,
+        live_n: n,
+        live: list.append(model.live, [#(n, text)])
+          |> list.reverse
+          |> list.take(50)
+          |> list.reverse,
+      )
+    }
+  }
+}

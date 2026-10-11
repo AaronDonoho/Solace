@@ -10,12 +10,17 @@ from pathlib import Path
 prompt = sys.stdin.read()
 # The prompt is plain text for a model; this stand-in reads its steps from the task file.
 store = next(d / '.solace/tasks' for d in [Path.cwd(), *Path.cwd().parents] if (d / '.solace/tasks').is_dir())
-task = json.loads((store / (os.environ['SOLACE_TASK'] + '.json')).read_text())
 rid = os.environ['SOLACE_RUN']
+if os.environ['SOLACE_TASK'] == 'strategy':
+    # A strategy run (D-93) has no task: its steps are its first note.
+    run = json.loads((store.parent / 'strategy/runs' / (rid + '.json')).read_text())
+    steps = json.loads(run['notes'][0]['text'])
+else:
+    task = json.loads((store / (os.environ['SOLACE_TASK'] + '.json')).read_text())
+    steps = json.loads(task['body'])
 root = Path('.solace')
 (root / (rid + '.prompt')).write_text(prompt)
 (root / (rid + '.pid')).write_text(str(os.getpid()))
-steps = json.loads(task['body'])
 native = '--json' in sys.argv or '--output-format' in sys.argv
 claude = '--output-format' in sys.argv
 home = Path(os.environ['CLAUDE_CONFIG_DIR'] if claude else os.environ['CODEX_HOME'])

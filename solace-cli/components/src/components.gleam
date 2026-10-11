@@ -1,5 +1,7 @@
-import gleam/io
+import solace_task
 
+/// Registers the shared elements on their own: `<solace-task>`.
 pub fn main() -> Nil {
-  io.println("Hello from components!")
+  let assert Ok(_) = solace_task.register()
+  Nil
 }

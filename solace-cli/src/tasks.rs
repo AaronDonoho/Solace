@@ -120,10 +120,14 @@ fn write(top: &Path, t: &Value) -> Result<(), Failure> {
 /// Writes `<dir>/<id>.json` as `v`, synced like an inbox message and renamed
 /// into place, so a power loss never leaves an empty file.
 fn replace_file(dir: &Path, id: &str, v: &Value) -> Result<(), Failure> {
+    replace_bytes(dir, &format!("{id}.json"), &serde_json::to_vec_pretty(v).unwrap())
+}
+/// Writes `<dir>/<name>` as `bytes`, the same way.
+fn replace_bytes(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), Failure> {
     fs::create_dir_all(dir)?;
-    let (part, to) = (dir.join(format!("{id}.json.tmp")), dir.join(format!("{id}.json")));
+    let (part, to) = (dir.join(format!("{name}.tmp")), dir.join(name));
     let mut f = fs::File::create(&part)?;
-    f.write_all(&serde_json::to_vec_pretty(v).unwrap())?;
+    f.write_all(bytes)?;
     f.sync_all()?;
     fs::rename(&part, &to)?;
     fs::File::open(dir)?.sync_all()?;
@@ -146,6 +150,12 @@ fn rank_of(v: &Value) -> f64 {
 /// Every milestone (`kind` "milestones") or feature ("features") of the root, in
 /// rank order. A missing folder holds none, and an unreadable file is skipped.
 pub fn records(top: &Path, kind: &str) -> Vec<Value> {
+    let mut out = stored_records(top, kind);
+    out.sort_by(|a, b| rank_of(a).total_cmp(&rank_of(b)).then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
+    out
+}
+/// Every record file of `kind`, in no order; an unreadable one is skipped.
+fn stored_records(top: &Path, kind: &str) -> Vec<Value> {
     let mut out = vec![];
     let Ok(entries) = fs::read_dir(strategy_dir(top, kind)) else { return out };
     for p in entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")) {
@@ -154,7 +164,6 @@ pub fn records(top: &Path, kind: &str) -> Vec<Value> {
             Err(e) => eprintln!("skipping record file {}: {e}", p.display()),
         }
     }
-    out.sort_by(|a, b| rank_of(a).total_cmp(&rank_of(b)).then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
     out
 }
 pub(super) fn record(top: &Path, kind: &str, id: &str) -> Option<Value> {
@@ -246,6 +255,15 @@ fn linked(top: &Path, req: &Value, status: &mut u16) -> Result<Value, Failure> {
     }
 }
 fn create_record(top: &Path, kind: &str, req: &Value, status: &mut u16) -> Result<Value, Failure> {
+    let (v, new) = composed(top, kind, req, status)?;
+    if new {
+        put_record(top, kind, &v)?;
+    }
+    Ok(v)
+}
+/// The record a `POST` of `req` creates, checked and not yet written, and
+/// whether it is new: a `request` seen before gives its record.
+fn composed(top: &Path, kind: &str, req: &Value, status: &mut u16) -> Result<(Value, bool), Failure> {
     check_fields(kind, req)?;
     let Some(title) = req["title"].as_str() else { return board::err("E7001", "title required") };
     let request = match req.get("request") {
@@ -256,7 +274,7 @@ fn create_record(top: &Path, kind: &str, req: &Value, status: &mut u16) -> Resul
     if let Some(r) = &request
         && let Some(v) = records(top, kind).into_iter().find(|v| v["request"] == *r)
     {
-        return Ok(v);
+        return Ok((v, false));
     }
     let mut v = json!({"id": unique_id(), "title": title, "body": req["body"].as_str().unwrap_or(""),
         "state": req["state"].as_str().unwrap_or("proposed")});
@@ -269,10 +287,15 @@ fn create_record(top: &Path, kind: &str, req: &Value, status: &mut u16) -> Resul
     if let Some(r) = request {
         v["request"] = json!(r);
     }
+    Ok((v, true))
+}
+fn edit_record(top: &Path, kind: &str, id: &str, req: &Value, status: &mut u16) -> Result<Value, Failure> {
+    let v = edited(top, kind, id, req, status)?;
     put_record(top, kind, &v)?;
     Ok(v)
 }
-fn edit_record(top: &Path, kind: &str, id: &str, req: &Value, status: &mut u16) -> Result<Value, Failure> {
+/// Record `id` as a `PATCH` of `req` leaves it, checked and not yet written.
+fn edited(top: &Path, kind: &str, id: &str, req: &Value, status: &mut u16) -> Result<Value, Failure> {
     let Some(mut v) = record(top, kind, id) else { return unknown_id(kind, id, status, 404) };
     check_fields(kind, req)?;
     let link = if kind == "milestones" { "targetDate" } else { "milestone" };
@@ -289,7 +312,6 @@ fn edit_record(top: &Path, kind: &str, id: &str, req: &Value, status: &mut u16) 
     if moved && req.get("rank").is_none() {
         v["rank"] = json!(end_rank(top, kind, &v["milestone"], id));
     }
-    put_record(top, kind, &v)?;
     Ok(v)
 }
 /// Deletes a record. Its features and tasks lose their link first, so a crash
@@ -309,6 +331,420 @@ fn delete_record(top: &Path, kind: &str, id: &str, status: &mut u16) -> Result<V
     }
     remove_record(top, kind, id)?;
     Ok(v)
+}
+
+/// The most characters (Unicode scalar values) the vision may hold (D-92).
+pub const VISION_LIMIT: usize = 1000;
+
+/// The vision's file (D-91): internal, so agents can't reach it.
+fn vision_file(top: &Path) -> PathBuf {
+    top.join(".solace/strategy/vision.md")
+}
+/// The vision as it is, `{text, revision}`; none yet reads as "".
+pub fn vision(top: &Path) -> Value {
+    let text = fs::read_to_string(vision_file(top)).unwrap_or_default();
+    json!({"text": text, "revision": format!("sha256:{}", sha256(text.as_bytes()))})
+}
+/// `/vision` (D-91), at the root only. `PUT {text, base}` writes only over the
+/// revision the editor started from: another is `E7026` (409), and nothing is
+/// written. A malformed body is 400, and so is text over `VISION_LIMIT`
+/// characters (`E7027`, D-92).
+pub fn vision_api(top: &Path, method: &str, body: Value) -> Result<Value, (u16, Failure)> {
+    match method {
+        "GET" => Ok(vision(top)),
+        "PUT" => {
+            let (Some(text), Some(base)) = (body["text"].as_str(), body["base"].as_str()) else {
+                return board::err("E7001", "text and base must be strings").map_err(|e| (400, e));
+            };
+            within_limit(text).map_err(|e| (400, e))?;
+            let (root, text, base) = (top.to_path_buf(), text.to_string(), base.to_string());
+            op(top, move || {
+                if vision(&root)["revision"] != base.as_str() {
+                    return Ok(Err((409, Failure("E7026 the vision changed since this edit began; reload it".into(), 1))));
+                }
+                Ok(Ok(write_vision(&root, &text)?))
+            })
+            .map_err(|e| (409, e))?
+        }
+        _ => board::err("E7001", "unknown route").map_err(|e| (409, e)),
+    }
+}
+/// Refuses vision text over `VISION_LIMIT` characters (`E7027`, D-92).
+fn within_limit(text: &str) -> Result<(), Failure> {
+    let count = text.chars().count();
+    if count > VISION_LIMIT {
+        return board::err("E7027", format!("the vision is {count} characters; the limit is {VISION_LIMIT}"));
+    }
+    Ok(())
+}
+/// Writes the vision and logs it as a root event, inside the caller's operation.
+fn write_vision(top: &Path, text: &str) -> Result<Value, Failure> {
+    replace_bytes(vision_file(top).parent().unwrap(), "vision.md", text.as_bytes())?;
+    let v = vision(top);
+    log(top, "", &json!({"vision": v}));
+    Ok(v)
+}
+
+/// Every strategy run (D-93), oldest first, without its notes: the list
+/// `GET /strategy/runs` returns and a new connection's replay sends.
+pub fn strategy_runs(top: &Path) -> Vec<Value> {
+    let mut out = stored_records(top, "runs");
+    for r in out.iter_mut().filter_map(Value::as_object_mut) {
+        r.remove("notes");
+    }
+    out.sort_by(|a, b| a["started"].as_u64().cmp(&b["started"].as_u64()).then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
+    out
+}
+/// Writes a strategy run and logs it in full as a root event: no project.
+fn put_run(top: &Path, run: &Value) -> Result<(), Failure> {
+    replace_file(&strategy_dir(top, "runs"), run["id"].as_str().unwrap_or(""), run)?;
+    log(top, "", &json!({"strategyRun": run}));
+    Ok(())
+}
+/// One strategy run as its file holds it, if there is one.
+pub(super) fn strategy_run(top: &Path, rid: &str) -> Option<Value> {
+    record(top, "runs", rid)
+}
+/// Changes strategy run `rid` with `f`, read and written as one operation.
+pub(super) fn update_run<R: Send + 'static>(
+    top: &Path,
+    rid: &str,
+    f: impl FnOnce(&mut Value) -> Result<R, Failure> + Send + 'static,
+) -> Result<R, Failure> {
+    let (root, rid) = (top.to_path_buf(), rid.to_string());
+    op(top, move || {
+        let Some(mut run) = record(&root, "runs", &rid) else { return board::err("E7023", format!("unknown strategy run {rid}")) };
+        let out = f(&mut run)?;
+        put_run(&root, &run)?;
+        Ok(out)
+    })
+}
+/// Ends the strategy runs a previous server left going: their agents are gone.
+pub fn end_strategy_runs(top: &Path) -> Result<(), Failure> {
+    for run in stored_records(top, "runs").into_iter().filter(|r| r["state"] != "ended") {
+        let rid = run["id"].as_str().unwrap_or("").to_string();
+        update_run(top, &rid.clone(), move |r| {
+            if r["state"] != "ended" {
+                board::note(r, "solace", Some(&rid), "the Solace server restarted while an agent was working");
+                end_strategy(r, "stopped");
+            }
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+/// Ends strategy run `run` with `outcome`: its notes become one transcript
+/// note, as a discussion's do.
+pub(super) fn end_strategy(run: &mut Value, outcome: &str) {
+    let (model, rid) = (run["model"].as_str().unwrap_or("").to_string(), run["id"].as_str().unwrap_or("").to_string());
+    board::end_run(run, outcome);
+    let turns = run["notes"].as_array_mut().map(std::mem::take).unwrap_or_default();
+    if !turns.is_empty() {
+        board::note(run, "solace", Some(&rid), &board::conversation(&turns, &model));
+    }
+}
+/// `/strategy/runs...` (D-93), at the root only; `parts` are those after `runs`.
+/// Reads take nothing and a change is one operation. Starting a run records it;
+/// its agent is launched elsewhere, and stops when it sees the run ended. An
+/// error comes with its HTTP status: 404 for an unknown id in the path, 400 for
+/// a malformed body, else 409.
+pub fn strategy_runs_api(top: &Path, method: &str, parts: &[&str], body: Value) -> Result<Value, (u16, Failure)> {
+    runs_api(top, method, parts, body, board::system)
+}
+/// The system settings, with the models a run may choose: `board::system`, or
+/// a stand-in in tests.
+type System = fn() -> Result<Value, Failure>;
+fn runs_api(top: &Path, method: &str, parts: &[&str], body: Value, system: System) -> Result<Value, (u16, Failure)> {
+    match (method, parts) {
+        ("GET", []) => return Ok(json!(strategy_runs(top))),
+        ("GET", [rid]) => {
+            let Some(mut run) = record(top, "runs", rid) else { return board::err("E7023", format!("unknown strategy run {rid}")).map_err(|e| (404, e)) };
+            run["transcript"] = json!(board::transcript(Path::new(run["log"].as_str().unwrap_or(""))));
+            return Ok(run);
+        }
+        _ => {}
+    }
+    let (root, method) = (top.to_path_buf(), method.to_string());
+    let parts: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
+    op(top, move || {
+        let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+        let mut status = 409;
+        Ok(change_run(&root, &method, &parts, &body, system, &mut status).map_err(|e| (status, e)))
+    })
+    .map_err(|e| (409, e))?
+}
+fn change_run(top: &Path, method: &str, parts: &[&str], req: &Value, system: System, status: &mut u16) -> Result<Value, Failure> {
+    if method == "POST" && parts.is_empty() {
+        return start_run(top, req, system, status);
+    }
+    let rid = parts.first().copied().unwrap_or("");
+    let Some(mut run) = record(top, "runs", rid) else {
+        *status = 404;
+        return board::err("E7023", format!("unknown strategy run {rid}"));
+    };
+    let open = run["state"] != "ended";
+    match (method, &parts[1..]) {
+        ("POST", ["notes"]) => {
+            let Some(text) = req["text"].as_str().filter(|t| !t.trim().is_empty()) else {
+                *status = 400;
+                return board::err("E7001", "a note needs text");
+            };
+            if !open {
+                return board::err("E7003", "the strategy run has ended");
+            }
+            board::note(&mut run, "human", Some(rid), text);
+        }
+        // An approved proposal is applied in this same operation (D-93), and every
+        // answer to one is noted on the run.
+        ("POST", ["questions", qid]) => {
+            let Some(q) = run["questions"].as_array_mut().and_then(|qs| qs.iter_mut().find(|q| q["id"] == *qid)) else {
+                *status = 404;
+                return board::err("E7023", format!("unknown question {qid}"));
+            };
+            let Some(answer) = req.get("text").or_else(|| req.get("option")).and_then(Value::as_str) else {
+                *status = 400;
+                return board::err("E7001", "answer required");
+            };
+            let chosen = req.get("text").is_none();
+            if chosen && !q["options"].as_array().is_some_and(|o| o.contains(&json!(answer))) {
+                *status = 400;
+                return board::err("E7001", "option is not offered");
+            }
+            if !q["answer"].is_null() {
+                return board::err("E7003", "the question is already answered");
+            }
+            if !open {
+                return board::err("E7003", "the strategy run has ended");
+            }
+            let mut answer = answer.to_string();
+            if !q["proposal"].is_null() {
+                if chosen && answer == "Approve" {
+                    answer = apply_proposal(top, rid, &q["proposal"]).unwrap_or_else(|e| format!("Not applied: {}", e.0));
+                } else if !chosen {
+                    answer = format!("Not applied; the human answered: {answer}");
+                }
+            }
+            q["answer"] = json!(answer);
+            if !q["proposal"].is_null() {
+                let what = q["text"].as_str().unwrap_or("").lines().next().unwrap_or("").to_string();
+                board::note(&mut run, "solace", Some(rid), &format!("Proposal: {what}\n\nAnswer: {answer}"));
+            }
+        }
+        ("POST", ["end" | "stop"]) => {
+            if !open {
+                return board::err("E7003", "the strategy run has ended");
+            }
+            end_strategy(&mut run, if parts[1] == "end" { "planned" } else { "stopped" });
+        }
+        _ => return board::err("E7001", "unknown route"),
+    }
+    put_run(top, &run)?;
+    Ok(run)
+}
+/// Starts a strategy run: its first message is its first note. One open run per
+/// context; a context names the page, or a task, feature or milestone that exists.
+fn start_run(top: &Path, req: &Value, system: System, status: &mut u16) -> Result<Value, Failure> {
+    *status = 400;
+    let Some(text) = req["text"].as_str().filter(|t| !t.trim().is_empty()) else {
+        return board::err("E7001", "a strategy run starts with a message");
+    };
+    let c = &req["context"];
+    let context = match (c["kind"].as_str(), c["id"].as_str()) {
+        (Some("page"), _) => json!({"kind": "page"}),
+        (Some("task"), Some(id)) if board::all_tasks(top)?.iter().any(|t| t["id"] == id) => json!({"kind": "task", "id": id}),
+        (Some("task"), Some(id)) => return board::err("E7001", format!("unknown task {id}")),
+        (Some(kind @ ("feature" | "milestone")), Some(id)) => {
+            if record(top, &format!("{kind}s"), id).is_none() {
+                return board::err("E7023", format!("unknown {kind} {id}"));
+            }
+            json!({"kind": kind, "id": id})
+        }
+        _ => return board::err("E7001", "context must be {kind: page} or {kind: task|feature|milestone, id}"),
+    };
+    let m = board::chosen_model(&system()?, req).map_err(|e| {
+        if e.0.starts_with("E7011") {
+            *status = 409;
+        }
+        e
+    })?;
+    *status = 409;
+    if let Some(open) = stored_records(top, "runs").iter().find(|r| r["state"] != "ended" && r["context"] == context) {
+        return board::err("E7003", format!("strategy run {} on this context is open", open["id"].as_str().unwrap_or("")));
+    }
+    let id = unique_id();
+    let log = strategy_dir(top, "runs").join(format!("{id}.jsonl"));
+    let mut run = json!({"id": id, "kind": "strategy", "model": m["id"], "effort": m["effort"], "state": "running", "started": now(),
+        "log": log, "context": context, "notes": [], "questions": []});
+    board::note(&mut run, "human", Some(&id), text);
+    put_run(top, &run)?;
+    Ok(run)
+}
+
+/// What an approved strategy proposal (D-93) writes, built as its request
+/// would be and checked before anything is written.
+enum Built {
+    /// A feature or milestone (`kind` "features" or "milestones"), and whether it is new.
+    Record(&'static str, Value, bool),
+    /// A task, and whether it is new.
+    Task(Value, bool),
+    Vision(String),
+}
+/// Builds proposal `p` of strategy run `rid` against the records as they are
+/// now, writing nothing: a feature or milestone as `POST`/`PATCH` would, a task
+/// as `POST /tasks` or its `PATCH` would (with a `solace` note naming the run),
+/// or the vision's new text.
+fn build(top: &Path, rid: &str, p: &Value) -> Result<Built, Failure> {
+    let (fields, id) = (&p["fields"], p["id"].as_str());
+    let mut status = 409;
+    match p["kind"].as_str().unwrap_or("") {
+        kind @ ("feature" | "milestone") => {
+            let plural = if kind == "feature" { "features" } else { "milestones" };
+            Ok(match id {
+                Some(id) => Built::Record(plural, edited(top, plural, id, fields, &mut status)?, false),
+                None => {
+                    let (v, new) = composed(top, plural, fields, &mut status)?;
+                    Built::Record(plural, v, new)
+                }
+            })
+        }
+        "task" => match id {
+            Some(id) => {
+                let Some(t) = board::all_tasks(top)?.into_iter().find(|t| t["id"] == id) else { return board::err("E7023", format!("unknown task {id}")) };
+                let home = scope::path(top, t["home"].as_str().unwrap_or("."));
+                let (mut t, _) = board::change(&home, id, "PATCH", &[], fields)?;
+                board::note(&mut t, "solace", None, &format!("Changed by strategy run {rid}"));
+                Ok(Built::Task(t, false))
+            }
+            None => Ok(Built::Task(proposed_task(top, rid, fields)?, true)),
+        },
+        "vision" => {
+            let Some(text) = fields["text"].as_str() else { return board::err("E7001", "a vision proposal needs its text") };
+            within_limit(text)?;
+            Ok(Built::Vision(text.to_string()))
+        }
+        _ => board::err("E7001", "a proposal is for a task, feature, milestone or the vision"),
+    }
+}
+/// The task a strategy proposal creates: `POST /tasks` in the first project of
+/// its `scope` (the root's own without one), with `feature`, `milestone` and
+/// `dependsOn` set as `PATCH` sets them. A folder in `scope` may not be a project
+/// yet: a task none of whose folders is one has the first as its home, and is in
+/// no lane until that project exists.
+fn proposed_task(top: &Path, rid: &str, fields: &Value) -> Result<Value, Failure> {
+    let folders: Vec<String> = match fields.get("scope") {
+        None => vec![".".into()],
+        Some(v) => {
+            let ok = |d: &str| !d.is_empty() && !d.starts_with('/') && !d.split('/').any(|p| p == "..");
+            let named: Option<Vec<String>> = v.as_array().map(|a| a.iter().filter_map(Value::as_str).filter(|d| ok(d)).map(String::from).collect());
+            match named {
+                Some(n) if !n.is_empty() && n.len() == v.as_array().unwrap().len() => n,
+                _ => return board::err("E7001", "scope must be a list of project folders below the root"),
+            }
+        }
+    };
+    let members = workspace::members(top)?;
+    let projects: Vec<&String> = folders.iter().filter(|d| members.contains(d)).collect();
+    let mut body = fields.clone();
+    body.as_object_mut().map(|o| o.remove("scope"));
+    let root = match projects.first() {
+        Some(home) => {
+            body["scope"] = json!(projects);
+            scope::path(top, home)
+        }
+        None => top.to_path_buf(),
+    };
+    let mut t = board::created(&root, &body)?;
+    let mut all = folders.clone();
+    all.sort();
+    all.dedup();
+    t["scope"] = json!(all);
+    if projects.is_empty() {
+        t["home"] = json!(folders[0]);
+    }
+    board::set_links(top, &mut t, fields)?;
+    board::note(&mut t, "solace", None, &format!("Created by strategy run {rid}"));
+    Ok(t)
+}
+/// A strategy run's proposal (D-93) as the question its agent waits on:
+/// checked as its request would be, writing nothing. `fields` is the JSON
+/// object of the request, or for the vision its new text. The question names
+/// the `complete` or `canceled` feature and milestone a task proposal links to,
+/// which Approve also sets `planned`.
+pub(super) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text: &str) -> Result<Value, Failure> {
+    let fields = if kind == "vision" {
+        json!({"text": text})
+    } else {
+        match serde_json::from_str::<Value>(text) {
+            Ok(v) if v.is_object() => v,
+            _ => return board::err("E7001", "the proposal's fields go in `text`, as a JSON object"),
+        }
+    };
+    let mut p = json!({"kind": kind, "fields": fields});
+    if let Some(id) = id {
+        p["id"] = json!(id);
+    }
+    if kind == "vision" {
+        p["base"] = vision(top)["revision"].clone();
+    }
+    let built = build(top, rid, &p)?;
+    let mut reopens = vec![];
+    let mut says = String::new();
+    if let Built::Task(t, _) = &built {
+        let milestone = if fields.get("milestone").is_some() || fields.get("feature").is_some() { &t["milestone"] } else { &Value::Null };
+        for (kind, id) in [("feature", &fields["feature"]), ("milestone", milestone)] {
+            let Some(r) = id.as_str().and_then(|id| record(top, &format!("{kind}s"), id)) else { continue };
+            if matches!(r["state"].as_str(), Some("complete" | "canceled")) {
+                says += &format!("\n\nApproving also sets the {kind} {} (\"{}\", now {}) back to planned.", r["id"].as_str().unwrap_or(""),
+                    r["title"].as_str().unwrap_or(""), r["state"].as_str().unwrap_or(""));
+                reopens.push(json!({"kind": kind, "id": r["id"]}));
+            }
+        }
+    }
+    if !reopens.is_empty() {
+        p["reopens"] = json!(reopens);
+    }
+    let title = fields["title"].as_str().map(|t| format!(" \"{t}\"")).unwrap_or_default();
+    let what = match (kind, id) {
+        ("vision", _) => format!("Replace the vision\n\n{text}"),
+        (_, Some(id)) => format!("Change {kind} {id}{title}\n\n```json\n{}\n```", serde_json::to_string_pretty(&fields).unwrap()),
+        (_, None) => format!("Create {kind}{title}\n\n```json\n{}\n```", serde_json::to_string_pretty(&fields).unwrap()),
+    };
+    Ok(json!({"id": unique_id(), "text": format!("{what}{says}"), "options": ["Approve", "Reject"], "proposal": p, "answer": null}))
+}
+/// Applies strategy run `rid`'s approved proposal `p` as its request would be
+/// applied (D-93), with the same refusals. Everything is built and checked
+/// first, the vision's base among it, so a refused apply writes nothing. The
+/// answer to record: what was applied.
+fn apply_proposal(top: &Path, rid: &str, p: &Value) -> Result<String, Failure> {
+    if p["kind"] == "vision" && vision(top)["revision"] != p["base"] {
+        return board::err("E7026", "the vision changed since the proposal; it was not replaced");
+    }
+    let built = build(top, rid, p)?;
+    let mut status = 409;
+    let mut reopened = vec![];
+    for r in p["reopens"].as_array().into_iter().flatten() {
+        let plural = if r["kind"] == "milestone" { "milestones" } else { "features" };
+        reopened.push((plural, edited(top, plural, r["id"].as_str().unwrap_or(""), &json!({"state": "planned"}), &mut status)?));
+    }
+    let answer = match built {
+        Built::Record(plural, v, new) => {
+            put_record(top, plural, &v)?;
+            let created = format!(": created {} {}", singular(plural), v["id"].as_str().unwrap_or(""));
+            format!("Approved and applied{}", if new { created.as_str() } else { "" })
+        }
+        Built::Task(t, new) => {
+            write(top, &t)?;
+            format!("Approved and applied{}", if new { format!(": created task {}", t["id"].as_str().unwrap_or("")) } else { String::new() })
+        }
+        Built::Vision(text) => {
+            write_vision(top, &text)?;
+            "Approved and applied".into()
+        }
+    };
+    for (plural, v) in reopened {
+        put_record(top, plural, &v)?;
+    }
+    Ok(answer)
 }
 
 /// The task log `/events` reads: every change in order, with the project it
@@ -527,6 +963,33 @@ fn apply(top: &Path, m: &Value) -> Result<Option<String>, Failure> {
         let mut t = t.clone();
         t["inbox"] = json!(id);
         return write(top, &t).map(|_| None);
+    }
+    // A strategy run's agent (D-93): its reply or proposal waits for the human,
+    // whose next note or answer sets the run going again.
+    if let Some(kind @ ("strategy_note" | "strategy_propose" | "strategy_resume")) = m["kind"].as_str() {
+        let rid = m["run"].as_str().unwrap_or("");
+        let Some(mut run) = record(top, "runs", rid) else { return board::err("E7023", format!("unknown strategy run {rid}")) };
+        if run["inbox"].as_str().is_some_and(|last| last == id) {
+            return Ok(None);
+        }
+        let ended = run["state"] == "ended";
+        match kind {
+            "strategy_note" => board::note(&mut run, "agent", Some(rid), m["text"].as_str().unwrap_or("")),
+            // A proposal can no longer be answered once the run has ended.
+            "strategy_propose" if ended => {
+                let what = m["question"]["text"].as_str().unwrap_or("").lines().next().unwrap_or("").to_string();
+                board::note(&mut run, "solace", Some(rid), &format!("A proposal arrived after the run ended, so it was not asked: {what}"));
+            }
+            "strategy_propose" => run["questions"].as_array_mut().unwrap().push(m["question"].clone()),
+            _ => {}
+        }
+        // A run that ended keeps the note, but nothing wakes it.
+        if !ended {
+            run["state"] = json!(if kind == "strategy_resume" { "running" } else { "waiting" });
+        }
+        run["inbox"] = json!(id);
+        put_run(top, &run)?;
+        return Ok(None);
     }
     let tid = m["task"].as_str().unwrap_or("");
     // The id names the task's file, so one that could leave the store is refused.
@@ -776,6 +1239,346 @@ mod tests {
             .unwrap();
         let keys: Vec<String> = rows.iter().map(|d| serde_json::from_str::<Value>(d).unwrap().as_object().unwrap().keys().next().unwrap().clone()).collect();
         assert_eq!(keys, ["milestone", "feature", "feature", "removedMilestone"]);
+    }
+
+    /// D-91: the vision starts empty; a put over the current revision writes and
+    /// logs it, and one over an older revision is E7026 and writes nothing.
+    #[test]
+    fn a_vision_put_over_a_stale_revision_is_refused() {
+        let root = root();
+        let empty = vision_api(&root, "GET", json!({})).unwrap();
+        assert_eq!(empty["text"], "");
+        let base = empty["revision"].as_str().unwrap().to_string();
+        let saved = vision_api(&root, "PUT", json!({"text": "# Why\nFor teams.", "base": base})).unwrap();
+        assert_eq!(saved["text"], "# Why\nFor teams.");
+        assert_ne!(saved["revision"].as_str(), Some(base.as_str()));
+        assert_eq!(fs::read_to_string(vision_file(&root)).unwrap(), "# Why\nFor teams.");
+
+        let e = vision_api(&root, "PUT", json!({"text": "lost", "base": base})).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7026")), (409, true), "{}", e.1.0);
+        assert_eq!(vision(&root), saved, "nothing was written");
+        assert_eq!(vision_api(&root, "PUT", json!({"text": "x"})).unwrap_err().0, 400);
+        // D-92: at most VISION_LIMIT characters, counted as chars, not bytes.
+        let base = saved["revision"].as_str().unwrap();
+        let e = vision_api(&root, "PUT", json!({"text": "é".repeat(VISION_LIMIT + 1), "base": base})).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7027")), (400, true), "{}", e.1.0);
+        assert_eq!(vision(&root), saved, "nothing was written");
+
+        let rows: Vec<String> = events(&root)
+            .unwrap()
+            .prepare("SELECT data FROM events WHERE project='' ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows.iter().map(|d| serde_json::from_str::<Value>(d).unwrap()).collect::<Vec<_>>(), [json!({"vision": saved})]);
+        // Exactly at the limit is accepted, whatever its size in bytes.
+        let full = vision_api(&root, "PUT", json!({"text": "é".repeat(VISION_LIMIT), "base": base})).unwrap();
+        assert_eq!(full["text"].as_str().unwrap().chars().count(), VISION_LIMIT);
+    }
+
+    /// The models a strategy run may choose in these tests: one available, one not.
+    fn models() -> Result<Value, Failure> {
+        Ok(json!({"models": [
+            {"id": "fake", "label": "Fake", "agent": "codex", "run": ["sh"]},
+            {"id": "missing", "label": "Missing", "agent": "codex", "run": ["solace-no-such-program"]}
+        ]}))
+    }
+    fn root_events(root: &Path) -> Vec<Value> {
+        let rows: Vec<String> = events(root)
+            .unwrap()
+            .prepare("SELECT data FROM events WHERE project='' ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        rows.iter().map(|d| serde_json::from_str(d).unwrap()).collect()
+    }
+
+    /// D-93: a run starts with its first note; a second open run on the same
+    /// context is E7003, notes follow, and `end` ends it `planned` with one
+    /// transcript note, after which the context is free again.
+    #[test]
+    fn a_strategy_run_starts_takes_notes_and_ends() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| runs_api(&root, m, parts, body, models);
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "F"})).unwrap();
+        let on_f = json!({"kind": "feature", "id": f["id"]});
+        let run = call("POST", &[], json!({"model": "fake", "text": "Plan F", "context": on_f})).unwrap();
+        assert_eq!((run["kind"].as_str(), run["state"].as_str(), &run["context"]), (Some("strategy"), Some("running"), &on_f));
+        assert_eq!((run["notes"][0]["author"].as_str(), run["notes"][0]["text"].as_str()), (Some("human"), Some("Plan F")));
+        let rid = run["id"].as_str().unwrap();
+        let e = call("POST", &[], json!({"model": "fake", "text": "Again", "context": on_f})).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7003")), (409, true), "{}", e.1.0);
+        let page = call("POST", &[], json!({"model": "fake", "text": "Whole page", "context": {"kind": "page"}})).unwrap();
+        assert_eq!(page["context"], json!({"kind": "page"}));
+
+        let noted = call("POST", &[rid, "notes"], json!({"text": "And tasks"})).unwrap();
+        assert_eq!(noted["notes"].as_array().unwrap().len(), 2);
+        let ended = call("POST", &[rid, "end"], json!({})).unwrap();
+        assert_eq!((ended["state"].as_str(), ended["outcome"].as_str()), (Some("ended"), Some("planned")));
+        let notes = ended["notes"].as_array().unwrap();
+        assert_eq!((notes.len(), notes[0]["author"].as_str()), (1, Some("solace")));
+        let text = notes[0]["text"].as_str().unwrap();
+        assert!(text.contains("**Human:**\n\nPlan F") && text.contains("**Human:**\n\nAnd tasks"), "{text}");
+        for (parts, body) in [(vec![rid, "notes"], json!({"text": "late"})), (vec![rid, "end"], json!({})), (vec![rid, "stop"], json!({}))] {
+            let e = call("POST", &parts, body).unwrap_err();
+            assert_eq!((e.0, e.1.0.starts_with("E7003")), (409, true), "{parts:?}: {}", e.1.0);
+        }
+        assert_eq!(record(&root, "runs", rid).unwrap(), ended, "a refused change writes nothing");
+        // Once the first run has ended, the feature takes a new one.
+        call("POST", &[], json!({"model": "fake", "text": "Later", "context": on_f})).unwrap();
+        let stopped = call("POST", &[page["id"].as_str().unwrap(), "stop"], json!({})).unwrap();
+        assert_eq!(stopped["outcome"], "stopped");
+    }
+
+    /// D-93: a malformed start, an unknown record, model or effort is refused
+    /// and writes nothing; an unknown run is E7023 with 404.
+    #[test]
+    fn a_strategy_run_refuses_bad_requests() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| runs_api(&root, m, parts, body, models);
+        let page = json!({"kind": "page"});
+        for (body, status, code) in [
+            (json!({"model": "fake", "context": page}), 400, "E7001"),
+            (json!({"model": "fake", "text": " ", "context": page}), 400, "E7001"),
+            (json!({"model": "fake", "text": "x"}), 400, "E7001"),
+            (json!({"model": "fake", "text": "x", "context": {"kind": "feature", "id": "nope"}}), 400, "E7023"),
+            (json!({"model": "fake", "text": "x", "context": {"kind": "milestone", "id": "nope"}}), 400, "E7023"),
+            (json!({"model": "fake", "text": "x", "context": {"kind": "task", "id": "nope"}}), 400, "E7001"),
+            (json!({"model": "other", "text": "x", "context": page}), 400, "E7001"),
+            (json!({"model": "fake", "effort": "high", "text": "x", "context": page}), 400, "E7001"),
+            (json!({"model": "missing", "text": "x", "context": page}), 409, "E7011"),
+        ] {
+            let e = call("POST", &[], body.clone()).unwrap_err();
+            assert_eq!((e.0, &e.1.0[..5]), (status, code), "{body}: {}", e.1.0);
+        }
+        assert_eq!(strategy_runs(&root), Vec::<Value>::new());
+        let on_task = call("POST", &[], json!({"model": "fake", "text": "x", "context": {"kind": "task", "id": "t1"}})).unwrap();
+        assert_eq!(on_task["context"], json!({"kind": "task", "id": "t1"}));
+        for (m, parts) in [("GET", vec!["nope"]), ("POST", vec!["nope", "notes"]), ("POST", vec!["../x", "end"])] {
+            let e = call(m, &parts, json!({"text": "x"})).unwrap_err();
+            assert_eq!((e.0, e.1.0.starts_with("E7023")), (404, true), "{parts:?}: {}", e.1.0);
+        }
+        let rid = on_task["id"].as_str().unwrap();
+        assert_eq!(call("POST", &[rid, "notes"], json!({})).unwrap_err().0, 400);
+        assert_eq!(call("POST", &[rid, "questions", "q1"], json!({"option": "Approve"})).unwrap_err().0, 404);
+    }
+
+    /// D-93: an answer is recorded on its question once; the option must be offered.
+    #[test]
+    fn a_strategy_question_is_answered_once() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| runs_api(&root, m, parts, body, models);
+        let mut run = call("POST", &[], json!({"model": "fake", "text": "x", "context": {"kind": "page"}})).unwrap();
+        run["questions"] = json!([{"id": "q1", "text": "Create T?", "options": ["Approve", "Reject"], "answer": null}]);
+        put_run(&root, &run).unwrap();
+        let rid = run["id"].as_str().unwrap();
+        let e = call("POST", &[rid, "questions", "q1"], json!({"option": "Maybe"})).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7001")), (400, true), "{}", e.1.0);
+        let answered = call("POST", &[rid, "questions", "q1"], json!({"option": "Reject"})).unwrap();
+        assert_eq!(answered["questions"][0]["answer"], "Reject");
+        let e = call("POST", &[rid, "questions", "q1"], json!({"option": "Approve"})).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7003")), (409, true), "{}", e.1.0);
+    }
+
+    /// A strategy run on the whole page, for proposals.
+    fn page_run(root: &Path) -> String {
+        let run = runs_api(root, "POST", &[], json!({"model": "fake", "text": "x", "context": {"kind": "page"}}), models).unwrap();
+        run["id"].as_str().unwrap().to_string()
+    }
+    /// Puts a proposal on run `rid` as its agent's message would; its question id.
+    fn propose(root: &Path, rid: &str, kind: &str, id: Option<&str>, text: &str) -> String {
+        let q = proposal(root, rid, kind, id, text).unwrap();
+        let qid = q["id"].as_str().unwrap().to_string();
+        let mut run = record(root, "runs", rid).unwrap();
+        run["questions"].as_array_mut().unwrap().push(q);
+        put_run(root, &run).unwrap();
+        qid
+    }
+    /// The human's answer to question `qid`: the answer stored, and the run's last note.
+    fn answer(root: &Path, rid: &str, qid: &str, option: &str) -> (String, String) {
+        let run = runs_api(root, "POST", &[rid, "questions", qid], json!({"option": option}), models).unwrap();
+        let q = run["questions"].as_array().unwrap().iter().find(|q| q["id"] == qid).unwrap().clone();
+        let last = run["notes"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().to_string();
+        (q["answer"].as_str().unwrap().to_string(), last)
+    }
+
+    /// D-93: Approve creates a feature, a milestone or a task, says its id, and
+    /// notes the answer on the run; the task gets a note naming the run.
+    #[test]
+    fn an_approved_proposal_creates_the_record() {
+        let root = root();
+        let rid = page_run(&root);
+        for kind in ["feature", "milestone", "task"] {
+            let qid = propose(&root, &rid, kind, None, r#"{"title": "New one"}"#);
+            let (said, note) = answer(&root, &rid, &qid, "Approve");
+            let prefix = format!("Approved and applied: created {kind} ");
+            assert!(said.starts_with(&prefix), "{said}");
+            let id = &said[prefix.len()..];
+            assert!(note.contains(&format!("Create {kind} \"New one\"")) && note.contains(&said), "{note}");
+            let created = if kind == "task" { board::task(&root, id).unwrap() } else { record(&root, &format!("{kind}s"), id).unwrap() };
+            assert_eq!(created["title"], "New one");
+            if kind == "task" {
+                assert_eq!((created["home"].as_str(), created["column"].as_str()), (Some("."), Some("backlog")));
+                let n = created["notes"].as_array().unwrap().last().unwrap().clone();
+                assert_eq!((n["author"].as_str(), n["text"].as_str()), (Some("solace"), Some(format!("Created by strategy run {rid}").as_str())));
+            }
+        }
+        // An edit says nothing more, and the task notes the change.
+        let qid = propose(&root, &rid, "task", Some("t1"), r#"{"title": "Renamed"}"#);
+        assert_eq!(answer(&root, &rid, &qid, "Approve").0, "Approved and applied");
+        let t1 = board::task(&root, "t1").unwrap();
+        assert_eq!((t1["title"].as_str(), t1["notes"][0]["text"].as_str()), (Some("Renamed"), Some(format!("Changed by strategy run {rid}").as_str())));
+    }
+
+    /// D-93: a proposed task whose scope names no project yet still exists, at
+    /// home in the first folder named, so no lane shows it until that project does.
+    #[test]
+    fn a_proposed_task_may_name_a_project_that_does_not_exist_yet() {
+        let root = root();
+        let rid = page_run(&root);
+        let qid = propose(&root, &rid, "task", None, r#"{"title": "Later", "scope": ["web", "api"]}"#);
+        let said = answer(&root, &rid, &qid, "Approve").0;
+        let id = said.rsplit(' ').next().unwrap();
+        let t = board::all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == id).unwrap();
+        assert_eq!((&t["home"], &t["scope"]), (&json!("web"), &json!(["api", "web"])));
+        assert!(!board::tasks(&root).unwrap().iter().any(|x| x["id"] == t["id"]));
+        let e = proposal(&root, &rid, "task", None, r#"{"title": "Out", "scope": ["../x"]}"#).unwrap_err();
+        assert!(e.0.starts_with("E7001"), "{}", e.0);
+    }
+
+    /// D-93: Reject writes no record, task or vision; only the run changes, with
+    /// the answer on its notes.
+    #[test]
+    fn a_rejected_proposal_writes_nothing() {
+        let root = root();
+        let rid = page_run(&root);
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "F"})).unwrap();
+        let qs = [
+            propose(&root, &rid, "feature", None, r#"{"title": "No"}"#),
+            propose(&root, &rid, "feature", Some(f["id"].as_str().unwrap()), r#"{"title": "No"}"#),
+            propose(&root, &rid, "task", None, r#"{"title": "No"}"#),
+            propose(&root, &rid, "vision", None, "No"),
+        ];
+        let (before, tasks, events) = (records(&root, "features"), board::all_tasks(&root).unwrap(), root_events(&root).len());
+        for qid in &qs {
+            let (said, note) = answer(&root, &rid, qid, "Reject");
+            assert_eq!(said, "Reject");
+            assert!(note.starts_with("Proposal: ") && note.ends_with("Answer: Reject"), "{note}");
+        }
+        assert_eq!((records(&root, "features"), board::all_tasks(&root).unwrap(), vision(&root)["text"].as_str()), (before, tasks, Some("")));
+        assert!(root_events(&root)[events..].iter().all(|e| e.get("strategyRun").is_some()));
+    }
+
+    /// D-93: a vision proposal is applied only over the revision it was made
+    /// from; after a human edit it is not applied, and the answer says so.
+    #[test]
+    fn a_vision_proposal_applies_only_over_its_base() {
+        let root = root();
+        let rid = page_run(&root);
+        let qid = propose(&root, &rid, "vision", None, "For teams");
+        assert_eq!(answer(&root, &rid, &qid, "Approve").0, "Approved and applied");
+        assert_eq!(vision(&root)["text"], "For teams");
+        let qid = propose(&root, &rid, "vision", None, "For everyone");
+        let base = vision(&root)["revision"].as_str().unwrap().to_string();
+        vision_api(&root, "PUT", json!({"text": "Human's", "base": base})).unwrap();
+        let (said, note) = answer(&root, &rid, &qid, "Approve");
+        assert!(said.starts_with("Not applied: E7026"), "{said}");
+        assert!(note.contains(&said), "{note}");
+        assert_eq!(vision(&root)["text"], "Human's");
+        let e = proposal(&root, &rid, "vision", None, &"é".repeat(1001)).unwrap_err();
+        assert!(e.0.starts_with("E7027"), "{}", e.0);
+    }
+
+    /// D-93: a task proposal linked to a complete feature and milestone says so,
+    /// and sets them `planned` only on Approve.
+    #[test]
+    fn a_task_proposal_reopens_its_complete_feature_on_approve() {
+        let root = root();
+        let rid = page_run(&root);
+        let m = strategy_api(&root, "POST", &["milestones"], json!({"title": "M", "state": "complete"})).unwrap();
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "F", "state": "canceled", "milestone": m["id"]})).unwrap();
+        let fields = json!({"title": "More", "feature": f["id"]}).to_string();
+        let rejected = propose(&root, &rid, "task", None, &fields);
+        let q = record(&root, "runs", &rid).unwrap()["questions"][0].clone();
+        assert_eq!(q["proposal"]["reopens"], json!([{"kind": "feature", "id": f["id"]}, {"kind": "milestone", "id": m["id"]}]));
+        assert!(q["text"].as_str().unwrap().contains("back to planned"), "{}", q["text"]);
+        answer(&root, &rid, &rejected, "Reject");
+        let state = |kind: &str, v: &Value| record(&root, kind, v["id"].as_str().unwrap()).unwrap()["state"].clone();
+        assert_eq!((state("features", &f), state("milestones", &m)), (json!("canceled"), json!("complete")));
+        let approved = propose(&root, &rid, "task", None, &fields);
+        let said = answer(&root, &rid, &approved, "Approve").0;
+        assert_eq!((state("features", &f), state("milestones", &m)), (json!("planned"), json!("planned")));
+        let t = board::task(&root, said.rsplit(' ').next().unwrap()).unwrap();
+        assert_eq!((&t["feature"], &t["milestone"]), (&f["id"], &m["id"]));
+    }
+
+    /// D-93: an apply the request would refuse writes nothing and puts the code
+    /// in the answer: a task whose run started since (E7003), a dependsOn cycle
+    /// made since (E7025). An ended run takes no answer.
+    #[test]
+    fn a_refused_apply_changes_nothing() {
+        let root = root();
+        let rid = page_run(&root);
+        let mut t2 = board::created(&root, &json!({"title": "T2"})).unwrap();
+        write(&root, &t2).unwrap();
+        let t2_id = t2["id"].as_str().unwrap().to_string();
+        let cycle = propose(&root, &rid, "task", Some("t1"), &json!({"dependsOn": [t2_id]}).to_string());
+        let running = propose(&root, &rid, "task", Some(&t2_id), r#"{"title": "Busy"}"#);
+        t2["dependsOn"] = json!(["t1"]);
+        t2["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
+        write(&root, &t2).unwrap();
+        let before = (board::task(&root, "t1").unwrap(), board::task(&root, &t2_id).unwrap());
+        for (qid, code) in [(cycle, "E7025"), (running, "E7003")] {
+            let (said, note) = answer(&root, &rid, &qid, "Approve");
+            assert!(said.starts_with(&format!("Not applied: {code}")), "{said}");
+            assert!(note.contains(&said), "{note}");
+        }
+        assert_eq!((board::task(&root, "t1").unwrap(), board::task(&root, &t2_id).unwrap()), before);
+        let late = propose(&root, &rid, "feature", None, r#"{"title": "Late"}"#);
+        runs_api(&root, "POST", &[&rid, "end"], json!({}), models).unwrap();
+        let e = runs_api(&root, "POST", &[&rid, "questions", &late], json!({"option": "Approve"}), models).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7003")), (409, true), "{}", e.1.0);
+        assert!(records(&root, "features").is_empty());
+    }
+
+    /// D-93: a proposal message applied twice asks once and sets the run
+    /// waiting; one reaching an ended run is only noted.
+    #[test]
+    fn a_strategy_proposal_message_applies_once() {
+        let root = root();
+        let rid = page_run(&root);
+        let q = proposal(&root, &rid, "feature", None, r#"{"title": "F"}"#).unwrap();
+        let m = json!({"id": "m1", "kind": "strategy_propose", "run": rid, "question": q});
+        apply(&root, &m).unwrap();
+        apply(&root, &m).unwrap();
+        let run = record(&root, "runs", &rid).unwrap();
+        assert_eq!((run["questions"].as_array().unwrap().len(), run["state"].as_str()), (1, Some("waiting")));
+        runs_api(&root, "POST", &[&rid, "end"], json!({}), models).unwrap();
+        apply(&root, &json!({"id": "m2", "kind": "strategy_propose", "run": rid, "question": q})).unwrap();
+        let run = record(&root, "runs", &rid).unwrap();
+        assert_eq!((run["questions"].as_array().unwrap().len(), run["state"].as_str()), (1, Some("ended")));
+        assert!(run["notes"].as_array().unwrap().last().unwrap()["text"].as_str().unwrap().contains("after the run ended"));
+    }
+
+    /// D-93: every change is a root event with the run in full; the list leaves
+    /// out notes, and one run comes with its transcript.
+    #[test]
+    fn strategy_run_changes_are_root_events() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| runs_api(&root, m, parts, body, models);
+        let run = call("POST", &[], json!({"model": "fake", "text": "x", "context": {"kind": "page"}})).unwrap();
+        let rid = run["id"].as_str().unwrap();
+        let noted = call("POST", &[rid, "notes"], json!({"text": "y"})).unwrap();
+        let ended = call("POST", &[rid, "end"], json!({})).unwrap();
+        assert_eq!(root_events(&root), [json!({"strategyRun": run}), json!({"strategyRun": noted}), json!({"strategyRun": ended})]);
+        let listed = call("GET", &[], json!({})).unwrap();
+        assert_eq!((listed[0]["id"].as_str(), listed[0].get("notes")), (Some(rid), None));
+        let one = call("GET", &[rid], json!({})).unwrap();
+        assert_eq!((&one["notes"], &one["transcript"]), (&ended["notes"], &json!([])));
     }
 
     /// D-87: a task saved before the links loads with them empty; one already in a

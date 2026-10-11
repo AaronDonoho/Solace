@@ -36,11 +36,12 @@ fn build_release(project: &Path, watched: &[&str]) {
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let own = ["src", "solace.toml", "gleam.toml", "package.json"];
-    // The frontend bundles the board, the contract view and migration, so build the
-    // board first, and watch the frontend's path dependencies.
+    // The frontend bundles the board, the contract view, migration and strategy, so build the
+    // board first, and watch the frontend's path dependencies. The board and the shell take the
+    // task detail, <solace-task>, from components.
     build_release(&root.join("board"), &own);
     build_release(&root.join("frontend"), &own);
-    for dep in ["board", "contracts", "migration"] {
+    for dep in ["board", "components", "contracts", "migration", "strategy"] {
         for watched in ["src", "gleam.toml"] {
             println!("cargo:rerun-if-changed={}", root.join(dep).join(watched).display());
         }

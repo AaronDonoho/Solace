@@ -16,6 +16,8 @@ pub fn routes_test() {
     #("/contracts", Contracts("")),
     #("/p/web/contracts", Contracts("/p/web")),
     #("/contracts?task=t1", Contracts("")),
+    #("/strategy", frontend.Strategy),
+    #("/strategy?tab=tasks", frontend.Strategy),
     #("/view", Board),
     #("/migration", Board),
     #("/nope", Board),
@@ -38,6 +40,7 @@ pub fn page_elements_test() {
       "<solace-contracts base=\"/p/web\"></solace-contracts>",
     ),
     #(#(Board, False), "<solace-board hidden></solace-board>"),
+    #(#(frontend.Strategy, True), "<solace-strategy></solace-strategy>"),
     #(
       #(Contracts("/p/web"), False),
       "<solace-contracts base=\"/p/web\" hidden></solace-contracts>",
@@ -63,6 +66,15 @@ pub fn menu_current_test() {
   )
   assert string.contains(board, "<a href=\"/migrate\">Migration</a>")
   assert string.contains(board, "<a href=\"/contracts\">Contracts</a>")
+  assert string.contains(board, "<a href=\"/strategy\">Strategy</a>")
+  let strategy_page =
+    element.to_string(
+      frontend.view(frontend.Model(frontend.Strategy, [frontend.Strategy])),
+    )
+  assert string.contains(
+    strategy_page,
+    "<a aria-current=\"page\" class=\"current\" href=\"/strategy\">Strategy</a>",
+  )
   assert string.contains(migration, "<a href=\"/\">Board</a>")
   assert string.contains(
     migration,

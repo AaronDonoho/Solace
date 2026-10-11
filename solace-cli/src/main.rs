@@ -41,9 +41,13 @@ const REFERENCE: &str = include_str!("reference.txt");
 fn agent_reference() -> String {
     let (workflow, rest) = REFERENCE.split_once("\nCommands in full").unwrap();
     let (_, rest) = rest.split_once("\nTask runs").unwrap();
-    let (task, _host) = rest.split_once("\nHost commands").unwrap();
+    let (task, rest) = rest.split_once("\nStrategy runs").unwrap();
+    let (strategy, _host) = rest.split_once("\nHost commands").unwrap();
     if board::context().is_some() {
         format!("{workflow}\nTask runs{task}")
+    } else if board::strategy_context().is_some() {
+        // The workflow is for changing code, which a strategy run never does.
+        format!("Strategy runs{strategy}\nRun `help` for the read commands' options.\n")
     } else {
         // no task to ask or finish outside a board run (run 18)
         format!("{}\n", workflow.replace("ask with `task ask`, or say so", "say so"))
@@ -56,7 +60,17 @@ fn agent_reference() -> String {
 fn agent_help(topic: Option<&str>) -> String {
     let (_, full) = REFERENCE.split_once("Commands in full\n").unwrap();
     let (full, _host) = full.split_once("\nHost commands").unwrap();
-    let full = if board::context().is_some() { full } else { full.split_once("\nTask runs").unwrap().0 };
+    let (general, runs) = full.split_once("\nTask runs").unwrap();
+    let (task, strategy) = runs.split_once("\nStrategy runs").unwrap();
+    let full = if board::context().is_some() {
+        format!("{general}\nTask runs{task}")
+    } else if board::strategy_context().is_some() {
+        // Only what a strategy run may do: the reads, and its own commands.
+        let reading = general.split("\n\n").next().unwrap_or("");
+        format!("{reading}\n\nStrategy runs{strategy}")
+    } else {
+        general.to_string()
+    };
     let Some(topic) = topic else { return format!("{full}\n") };
     let paragraphs: Vec<&str> = full.split("\n\n").collect();
     let word = |p: &str, f: &dyn Fn(&str) -> bool| {
@@ -163,6 +177,9 @@ fn main() {
 /// `submit <name> --replace` replaces (MCP only); `budget`, the bytes left
 /// for this reply.
 fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str>, budget: usize, options: &[String]) -> Out {
+    if let Some(rid) = board::strategy_context() {
+        return strategy_run(&rid, args, input, budget);
+    }
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
     if a.first() == Some(&"serve") {
         if board::context().is_some() {
@@ -180,6 +197,9 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
             return lockdown::error("E7010", "migrate", "host command");
         }
         return migrate::command(&a[1..]);
+    }
+    if a.first() == Some(&"strategy") {
+        return lockdown::error("E7001", "strategy", "strategy commands work only in a strategy run started from the Strategy page");
     }
     if a.first() == Some(&"task") && board::context().is_none() {
         return lockdown::error("E7010", "task", "task commands work only in a run started from the task board; this session has no task");
@@ -326,6 +346,36 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     match result {
         Ok(out) => Ok(format!("{noticed}{out}{unread}")),
         Err(Failure(msg, code)) => Err(Failure(format!("{noticed}{msg}{unread}"), code)),
+    }
+}
+
+/// A command in strategy run `rid` (D-93): `strategy list | show | note`, and
+/// plain reads of any project under the root, taking no project lock. Any
+/// other command is refused (`E7010`): host commands, `task` commands and those
+/// that change a project.
+fn strategy_run(rid: &str, args: &[String], input: &mut dyn FnMut() -> Out, budget: usize) -> Out {
+    let a: Vec<&str> = args.iter().map(String::as_str).collect();
+    let command = a.first().copied().unwrap_or("");
+    if command != "strategy" && !READS.contains(&command) {
+        let why = match command {
+            "task" => "a strategy run replies with `strategy note`; task commands are refused",
+            c if HOST.contains(&c) => "host command is unavailable in a run",
+            _ => "a strategy run changes no code and only reads: strategy list | show | note, and view, inspect, refs, find, grep, files and read (with --project <folder> for another project)",
+        };
+        return lockdown::error("E7010", command, why);
+    }
+    let top = workspace::enclosing(&env::current_dir()?)?.ok_or_else(|| Failure("No Solace root here.".into(), 1))?;
+    board::strategy_guard(&top, rid, &a)?;
+    if command == "strategy" {
+        return board::strategy_command(&top, rid, &a, input, budget);
+    }
+    // A read, in the root's project or with `--project` in another.
+    match a.iter().position(|x| *x == "--project") {
+        Some(i) => {
+            let dir = a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder".into(), 2))?;
+            read_project(dir, &[&args[..i], &args[i + 2..]].concat(), budget)
+        }
+        None => read_project(".", args, budget),
     }
 }
 
@@ -580,12 +630,13 @@ thread_local! {
     static REASON: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-/// A command that asks the human something: `task ask`, or a run's write of a
-/// protected file (a settings proposal). It must be the only command in its call.
+/// A command that asks the human something: `task ask`, a strategy run's
+/// proposal (D-93), or a run's write of a protected file (a settings proposal).
+/// It must be the only command in its call.
 fn is_question(line: &str) -> bool {
     let w: Vec<&str> = line.strip_prefix("solace").unwrap_or(line).split_whitespace().collect();
     match w.as_slice() {
-        ["task", "ask", ..] => true,
+        ["task", "ask", ..] | ["strategy", "task" | "feature" | "milestone" | "vision", ..] => true,
         ["write", rest @ ..] if board::context().is_some() => rest.iter().any(|p| {
             let name = file_name(Path::new(p));
             name == "solace.toml" || name == "AGENTS.md" || lockdown::is_gitignore(&name)

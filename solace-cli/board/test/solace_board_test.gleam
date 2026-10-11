@@ -7,12 +7,13 @@ import gleeunit
 import gleeunit/should
 import lustre/element
 import solace_board as board
+import solace_task
 
 pub fn main() {
   gleeunit.main()
 }
 
-fn tasks(model: board.Model) -> List(board.Task) {
+fn tasks(model: board.Model) -> List(solace_task.Task) {
   let assert [lane, ..] = model.lanes
   lane.tasks
 }
@@ -29,194 +30,36 @@ pub fn workflow_and_live_task_test() {
     )
   let text =
     "{\"id\":\"1\",\"title\":\"Fix checkout\",\"body\":\"Details\",\"column\":\"triage\",\"rank\":1,\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[]}"
-  let assert Ok(task) = json.parse(text, board.task_decoder())
-  board.actions(board.workflow(model), task)
-  |> should.equal(["assign", "pause", "discuss"])
-  let #(model, _) = board.update(model, board.TaskLoaded(text))
-  model.selected |> should.equal(Some(task))
   let #(model, _) = board.update(model, board.CaughtUp)
   let #(model, _) = board.update(model, board.Live("{\"task\":" <> text <> "}"))
   list.length(tasks(model)) |> should.equal(1)
   let rendered = board.view(model) |> element.to_string
-  rendered |> should.not_equal("")
-  let #(model, _) =
-    board.update(
-      model,
-      board.Changed("{\"code\":\"E7006\",\"message\":\"Approval required\"}"),
-    )
-  model.error |> should.equal("Approval required")
-}
-
-pub fn attention_and_unavailable_models_test() {
-  let #(model, _) = board.init(Nil)
-  let #(model, _) =
-    board.update(
-      model,
-      board.ModelsLoaded(
-        "[{\"id\":\"gone\",\"label\":\"Gone\",\"available\":false,\"reason\":\"codex is not installed\"},{\"id\":\"ok\",\"label\":\"Ok\",\"available\":true,\"reason\":null}]",
-      ),
-    )
-  // The first available model is chosen by default.
-  model.model |> should.equal("ok")
-  let #(model, _) =
-    board.update(
-      model,
-      board.TaskLoaded(
-        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"attention\":{\"reason\":\"task timeout\",\"time\":1,\"hold\":true}}",
-      ),
-    )
-  let rendered = board.view(model) |> element.to_string
-  rendered |> string.contains("Needs attention</strong>") |> should.be_true
-  rendered |> string.contains("<p>task timeout</p>") |> should.be_true
-  rendered
-  |> string.contains("unavailable: codex is not installed")
-  |> should.be_true
-}
-
-pub fn working_status_notes_and_transcript_test() {
-  let #(model, _) = board.init(Nil)
-  let #(model, _) =
-    board.update(
-      model,
-      board.TaskLoaded(
-        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"notes\":[{\"author\":\"agent\",\"text\":\"Done: **five** tests <b>pass</b>\\n## Done\\n- fixed A\\n  - nested\",\"time\":1}],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\",\"started\":1}]}",
-      ),
-    )
-  let assert Some(task) = model.selected
-  board.status(task) |> should.equal("Agent working")
-  let #(model, _) = board.update(model, board.Tab("notes"))
-  let rendered = board.view(model) |> element.to_string
-  rendered |> string.contains("status working") |> should.be_true
-  // Markdown is formatted, and agent HTML is escaped.
-  rendered |> string.contains("<strong>five</strong>") |> should.be_true
-  rendered |> string.contains("&lt;b&gt;pass") |> should.be_true
-  rendered |> string.contains("<h4>Done</h4>") |> should.be_true
-  rendered |> string.contains("<ul><li>fixed A<ul><li>nested") |> should.be_true
-  let #(model, _) = board.update(model, board.Tab("runs"))
-  board.view(model)
-  |> element.to_string
-  |> string.contains("Follow live")
-  |> should.be_true
-  let #(model, _) = board.update(model, board.Watch("r1"))
-  let #(model, _) =
-    board.update(
-      model,
-      board.TranscriptLoaded(
-        "r1",
-        "{\"state\":\"running\",\"transcript\":[{\"kind\":\"message\",\"text\":\"Looking\"},{\"kind\":\"tool\",\"title\":\"solace view a\",\"input\":\"\",\"output\":\"pub fn a()\",\"status\":\"ok\"}]}",
-      ),
-    )
-  let rendered = board.view(model) |> element.to_string
-  rendered |> string.contains("solace view a") |> should.be_true
-  rendered |> string.contains("Hide activity") |> should.be_true
-  // A transcript for a run no longer watched is dropped.
-  let #(model, _) = board.update(model, board.Unwatch)
-  let #(model, _) =
-    board.update(
-      model,
-      board.TranscriptLoaded("r1", "{\"state\":\"running\",\"transcript\":[]}"),
-    )
-  model.entries |> should.equal([])
-}
-
-pub fn notes_newest_first_with_agent_and_finished_test() {
-  let #(model, _) = board.init(Nil)
-  let #(model, _) =
-    board.update(
-      model,
-      board.TaskLoaded(
-        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"needs_review\",\"rank\":1,\"finished\":{\"kind\":\"work\",\"outcome\":\"finished\",\"time\":3},\"notes\":[{\"author\":\"human\",\"run\":null,\"text\":\"older\",\"time\":1},{\"author\":\"agent\",\"run\":\"r1\",\"text\":\"newer\",\"time\":2}],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"claude-opus\",\"effort\":\"high\",\"log\":\"/l\",\"outcome\":\"finished\"}]}",
-      ),
-    )
-  let assert Some(task) = model.selected
-  board.status(task) |> should.equal("Agent finished")
-  let #(model, _) = board.update(model, board.Tab("notes"))
-  let rendered = board.view(model) |> element.to_string
-  rendered |> string.contains("status finished") |> should.be_true
-  rendered
-  |> string.contains("agent · work · claude-opus · high")
-  |> should.be_true
-  let assert [_, after] = string.split(rendered, "newer")
-  after |> string.contains("older") |> should.be_true
-}
-
-pub fn effort_and_create_draft_test() {
-  let #(model, _) = board.init(Nil)
-  let #(model, _) =
-    board.update(
-      model,
-      board.ModelsLoaded(
-        "[{\"id\":\"c\",\"label\":\"Claude\",\"effort\":\"medium\",\"efforts\":[\"low\",\"max\"]}]",
-      ),
-    )
-  let #(model, _) =
-    board.update(
-      model,
-      board.TaskLoaded(
-        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
-      ),
-    )
-  let rendered = board.view(model) |> element.to_string
-  rendered |> string.contains("Default (medium)") |> should.be_true
-  rendered |> string.contains(">max</option>") |> should.be_true
-  let #(model, _) = board.update(model, board.EffortSelected("max"))
-  model.effort |> should.equal("max")
-  let #(model, _) = board.update(model, board.AgentSelected("c"))
-  model.effort |> should.equal("")
-  // A failed create keeps the draft; a created task clears it.
-  let #(model, _) = board.update(model, board.NewTask)
-  let #(model, _) = board.update(model, board.DraftTitle("Draft"))
-  let #(model, _) =
-    board.update(
-      model,
-      board.Created("{\"code\":\"E7001\",\"message\":\"title required\"}"),
-    )
-  #(model.draft_title, model.creating) |> should.equal(#("Draft", True))
-  let #(model, _) =
-    board.update(
-      model,
-      board.Created(
-        "{\"id\":\"2\",\"title\":\"Draft\",\"body\":\"\",\"column\":\"backlog\",\"rank\":2}",
-      ),
-    )
-  #(model.draft_title, model.creating) |> should.equal(#("", False))
-}
-
-pub fn settings_question_shows_diff_and_approve_test() {
-  board.settings_diff("a=1\nb=2", "a=1\nb=3")
-  |> should.equal("- b=2\n+ b=3")
-  let #(model, _) = board.init(Nil)
-  let #(model, _) =
-    board.update(
-      model,
-      board.TaskLoaded(
-        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q\",\"text\":\"Change solace.toml\",\"options\":[\"Approve\",\"Reject\"],\"settings\":{\"base\":\"x=1\",\"proposed\":\"x=1\\n[commands]\"}}]}",
-      ),
-    )
-  let #(model, _) = board.update(model, board.Tab("questions"))
-  let rendered = board.view(model) |> element.to_string
-  rendered |> string.contains("+ [commands]") |> should.be_true
-  rendered |> string.contains(">Approve</button>") |> should.be_true
-  rendered |> string.contains("Reject with the editor") |> should.be_true
+  rendered |> string.contains("Fix checkout") |> should.be_true
+  rendered |> string.contains("<h2>Triage</h2>") |> should.be_true
 }
 
 pub fn notices_and_stamp_test() {
   let assert Ok(old) =
     json.parse(
       "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]}",
-      board.task_decoder(),
+      solace_task.task_decoder(),
     )
   let assert Ok(new) =
     json.parse(
       "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"needs_review\",\"rank\":1,\"stamps\":{\"approved\":{}},\"questions\":[{\"id\":\"q\",\"text\":\"Why?\",\"options\":[]}],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"finished\"}]}",
-      board.task_decoder(),
+      solace_task.task_decoder(),
     )
-  board.notices(old, new)
+  solace_task.notices(old, new)
   |> should.equal([
-    board.Notice("Finished T", "The agent finished its work.", "", "1", "runs"),
-    board.Notice("Question on T", "Why?", "", "1", "questions"),
+    solace_task.Notice(
+      "Finished T",
+      "The agent finished its work.",
+      "",
+      "1",
+      "runs",
+    ),
+    solace_task.Notice("Question on T", "Why?", "", "1", "questions"),
   ])
-  board.notices(new, new) |> should.equal([])
   let #(model, _) = board.init(Nil)
   let rendered =
     board.view(
@@ -227,8 +70,8 @@ pub fn notices_and_stamp_test() {
           "",
           "",
           "",
-          board.Workflow([
-            board.Column("needs_review", "Needs review", [], False),
+          solace_task.Workflow([
+            solace_task.Column("needs_review", "Needs review", [], False),
           ]),
           [new],
         ),
@@ -336,7 +179,7 @@ pub fn workspace_lanes_test() {
     )
   model.notices
   |> should.equal([
-    board.Notice(
+    solace_task.Notice(
       "web: Finished In web",
       "The agent finished its work.",
       "web",
@@ -378,7 +221,10 @@ pub fn workspace_lanes_test() {
   |> should.equal(2)
   // Its tasks go to the project's own API.
   let #(model, _) = board.update(model, board.Select("bench/pilot", "1"))
-  model.lane |> should.equal("bench/pilot")
+  board.view(model)
+  |> element.to_string
+  |> string.contains("<solace-task base=\"/p/bench%2Fpilot\"")
+  |> should.be_true
 }
 
 pub fn root_project_lane_test() {
@@ -502,8 +348,8 @@ pub fn task_across_projects_test() {
   |> list.length
   |> should.equal(3)
   rendered |> string.contains("<small>0 tasks</small>") |> should.be_true
-  let assert Ok(decoded) = json.parse(task, board.task_decoder())
-  decoded.changes |> should.equal([board.Change("b", "app", "one")])
+  let assert Ok(decoded) = json.parse(task, solace_task.task_decoder())
+  decoded.changes |> should.equal([solace_task.Change("b", "app", "one")])
   // The task moved out of a: a's lane drops it.
   let #(model, _) =
     board.update(model, board.Live("{\"project\":\"a\",\"removed\":\"t1\"}"))
@@ -556,22 +402,18 @@ pub fn selected_card_test() {
       model,
       board.Live("{\"project\":\"b\",\"task\":" <> other <> "}"),
     )
-  let rendered = board.view(model) |> element.to_string
-  string.split(rendered, "class=\"card selected\"")
-  |> list.length
-  |> should.equal(1)
+  let selected = fn(m) {
+    board.view(m)
+    |> element.to_string
+    |> string.split("class=\"card selected\"")
+    |> list.length
+  }
+  selected(model) |> should.equal(1)
+  // A task across a and b shows selected in both lanes.
   let #(model, _) = board.update(model, board.Select("a", "1"))
+  selected(model) |> should.equal(3)
   let rendered = board.view(model) |> element.to_string
-  string.split(rendered, "class=\"card selected\"")
-  |> list.length
-  |> should.equal(3)
   string.split(rendered, "aria-current=\"true\"")
-  |> list.length
-  |> should.equal(3)
-  let #(model, _) =
-    board.update(model, board.SelectedTaskLoaded(1, "a", "1", shared))
-  let rendered = board.view(model) |> element.to_string
-  string.split(rendered, "class=\"card selected\"")
   |> list.length
   |> should.equal(3)
   rendered
@@ -579,33 +421,11 @@ pub fn selected_card_test() {
     "button.card[aria-current=true],button.card[aria-current=true]:hover",
   )
   |> should.be_true
+  // Another task with the same id, stored in b: only its card.
   let #(model, _) = board.update(model, board.Select("b", "1"))
-  let #(model, _) =
-    board.update(model, board.SelectedTaskLoaded(1, "a", "1", shared))
-  model.selected |> should.equal(None)
-  let rendered = board.view(model) |> element.to_string
-  string.split(rendered, "class=\"card selected\"")
-  |> list.length
-  |> should.equal(2)
-  let #(model, _) =
-    board.update(model, board.SelectedTaskLoaded(2, "b", "1", other))
-  let assert Some(task) = model.selected
-  task.title |> should.equal("Other")
-  let rendered = board.view(model) |> element.to_string
-  string.split(rendered, "class=\"card selected\"")
-  |> list.length
-  |> should.equal(2)
+  selected(model) |> should.equal(2)
   let #(model, _) = board.update(model, board.Select("a", "1"))
-  let #(model, _) = board.update(model, board.Select("b", "1"))
-  let #(model, _) = board.update(model, board.Select("a", "1"))
-  let #(model, _) =
-    board.update(model, board.SelectedTaskLoaded(3, "a", "1", shared))
-  model.selected |> should.equal(None)
-  let #(model, _) =
-    board.update(model, board.SelectedTaskLoaded(5, "a", "1", shared))
-  let assert Some(task) = model.selected
-  task.title |> should.equal("Across")
-  // The open task moves from a to b: details and highlight follow it.
+  // The open task moves from a to b: the highlight and details follow it.
   let moved =
     "{\"id\":\"1\",\"title\":\"Moved\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"scope\":[\"b\",\"a\"]}"
   let #(model, _) =
@@ -617,90 +437,12 @@ pub fn selected_card_test() {
     )
   let #(model, _) =
     board.update(model, board.Live("{\"project\":\"a\",\"removed\":\"1\"}"))
-  let assert Some(task) = model.selected
-  task.title |> should.equal("Moved")
   model.selected_card |> should.equal(Some(#("b", "1")))
-  model.lane |> should.equal("b")
-  let rendered = board.view(model) |> element.to_string
-  string.split(rendered, "class=\"card selected\"")
-  |> list.length
-  |> should.equal(3)
-}
-
-pub fn models_loaded_keeps_choice_test() {
-  let list_json =
-    "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\",\"high\"]},{\"id\":\"c\",\"label\":\"C\",\"available\":false}]"
-  let #(base, _) = board.init(Nil)
-  let loaded = fn(model, text) {
-    let #(m, _) = board.update(model, board.ModelsLoaded(text))
-    m
-  }
-  // No choice yet: the first available agent.
-  let first = loaded(board.Model(..base, model: "", effort: ""), list_json)
-  assert first.model == "a"
-  // A remembered available agent and its effort are kept.
-  let kept = loaded(board.Model(..base, model: "b", effort: "high"), list_json)
-  assert kept.model == "b"
-  assert kept.effort == "high"
-  // An effort the agent doesn't offer is dropped.
-  let dropped =
-    loaded(board.Model(..base, model: "b", effort: "max"), list_json)
-  assert dropped.effort == ""
-  // An unavailable or unknown agent falls back to the first available one.
-  let unavailable =
-    loaded(board.Model(..base, model: "c", effort: "high"), list_json)
-  assert unavailable.model == "a"
-  assert unavailable.effort == ""
-  let unknown = loaded(board.Model(..base, model: "zzz", effort: ""), list_json)
-  assert unknown.model == "a"
-}
-
-/// Source modules come before test modules, symbols are alphabetical, and a
-/// task across projects names the project in each heading.
-pub fn change_groups_test() {
-  let changes = [
-    board.Change("a", "app_test", "t_test"),
-    board.Change("a", "util", "zed"),
-    board.Change("a", "app", "beta"),
-    board.Change("a", "app", "alpha"),
-  ]
-  board.change_groups(changes, False)
-  |> should.equal([
-    #("app", ["alpha", "beta"]),
-    #("util", ["zed"]),
-    #("app_test", ["t_test"]),
-  ])
-  board.change_groups([board.Change("b", "app", "one")], True)
-  |> should.equal([#("b · app", ["one"])])
-}
-
-pub fn stop_and_discussion_actions_test() {
-  let #(model, _) = board.init(Nil)
-  let #(model, _) =
-    board.update(
-      model,
-      board.WorkflowLoaded(
-        "",
-        "{\"columns\":[{\"id\":\"triage\",\"label\":\"Triage\",\"actions\":[\"assign\"]}]}",
-      ),
-    )
-  let task = fn(kind, state) {
-    let text =
-      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[{\"id\":\"r\",\"kind\":\""
-      <> kind
-      <> "\",\"model\":\"m\",\"state\":\""
-      <> state
-      <> "\",\"started\":1,\"log\":\"\"}]}"
-    let assert Ok(t) = json.parse(text, board.task_decoder())
-    t
-  }
-  board.actions(board.workflow(model), task("work", "running"))
-  |> should.equal(["assign", "pause", "stop"])
-  board.actions(board.workflow(model), task("discuss", "waiting"))
-  |> should.equal(["assign", "pause", "end_discussion", "stop"])
-  board.status(task("discuss", "waiting"))
-  |> should.equal("Waiting for your reply")
-  board.status(task("discuss", "running")) |> should.equal("Agent discussing")
+  selected(model) |> should.equal(3)
+  board.view(model)
+  |> element.to_string
+  |> string.contains("<solace-task base=\"/p/b\" dir=\"b\" hosted task=\"1\"")
+  |> should.be_true
 }
 
 pub fn removing_a_project_test() {
@@ -770,73 +512,6 @@ pub fn one_submit_creates_once_test() {
   #(model.submitting, model.draft_title) |> should.equal(#(False, "Once"))
 }
 
-/// The Scope tab sits right of Changes, with a vertical switch per project;
-/// Details no longer holds the projects, and a running task locks them.
-pub fn scope_tab_test() {
-  let #(model, _) = board.init(Nil)
-  let lane = fn(d) {
-    "{\"dir\":\""
-    <> d
-    <> "\",\"label\":\""
-    <> d
-    <> "\",\"name\":\""
-    <> d
-    <> "\",\"base\":\"/p/"
-    <> d
-    <> "\"}"
-  }
-  let #(model, _) =
-    board.update(
-      model,
-      board.ProjectsLoaded(
-        "{\"workspace\":true,\"projects\":["
-        <> string.join(list.map(["a", "b", "c"], lane), ",")
-        <> "],\"found\":[]}",
-      ),
-    )
-  let task =
-    "{\"id\":\"t1\",\"title\":\"Across\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"scope\":[\"a\",\"b\"]}"
-  let assert Ok(t) = json.parse(task, board.task_decoder())
-  let model =
-    board.Model(..model, selected: option.Some(t), lane: "a", tab: "details")
-  let body = fn(m) {
-    board.view(m)
-    |> element.to_string
-    |> string.split("</style>")
-    |> list.last
-    |> result.unwrap("")
-  }
-  let details = body(model)
-  let assert [_, after_changes] = string.split(details, ">Changes (0)</button>")
-  after_changes |> string.contains(">Scope</button>") |> should.be_true
-  details
-  |> string.contains("Projects this task can change")
-  |> should.be_false
-  let #(model, _) = board.update(model, board.Tab("scope"))
-  let scope = body(model)
-  scope |> string.contains("Projects this task can change") |> should.be_true
-  scope |> string.split("role=\"switch\"") |> list.length |> should.equal(4)
-  scope |> string.contains("You can change the projects") |> should.be_false
-  let running =
-    "{\"id\":\"t1\",\"title\":\"Across\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"scope\":[\"a\",\"b\"],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]}"
-  let assert Ok(r) = json.parse(running, board.task_decoder())
-  let locked = body(board.Model(..model, selected: option.Some(r)))
-  locked |> string.contains("You can change the projects") |> should.be_true
-  // Switches stack vertically.
-  let css =
-    board.view(model)
-    |> element.to_string
-    |> string.split("</style>")
-    |> list.first
-    |> result.unwrap("")
-  css
-  |> string.contains(".projects-pick label{display:flex;")
-  |> should.be_true
-  css
-  |> string.contains(".projects-pick input:checked::before{transform:")
-  |> should.be_true
-}
-
 /// D-78: a new stream starts from each project's tasks; a snapshot that comes
 /// before the project list names its lane is held until it does.
 pub fn snapshot_waits_for_its_lane_and_replaces_tasks_test() {
@@ -878,45 +553,8 @@ pub fn snapshot_waits_for_its_lane_and_replaces_tasks_test() {
   list.map(web.tasks, fn(t) { t.title }) |> should.equal(["Another"])
 }
 
-/// An action in flight disables the action buttons and says what it waits for;
-/// its reply clears that.
-pub fn an_action_waits_for_its_reply_test() {
-  let #(model, _) = board.init(Nil)
-  let #(model, _) =
-    board.update(
-      model,
-      board.WorkflowLoaded(
-        "",
-        "{\"columns\":[{\"id\":\"triage\",\"label\":\"Triage\",\"actions\":[\"assign\"]}]}",
-      ),
-    )
-  let text =
-    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[{\"id\":\"r\",\"kind\":\"work\",\"model\":\"m\",\"state\":\"running\",\"started\":1,\"log\":\"\"}]}"
-  let #(model, _) = board.update(model, board.TaskLoaded(text))
-  let #(model, _) = board.update(model, board.Action("assign"))
-  model.acting |> should.equal("assign")
-  let html = board.view(model) |> element.to_string
-  string.contains(html, "<button disabled>assign</button>") |> should.be_true
-  string.contains(html, "current command to finish before assign")
-  |> should.be_true
-  // A second click while waiting sends nothing more.
-  let #(again, _) = board.update(model, board.Action("assign"))
-  again |> should.equal(model)
-  let #(model, _) = board.update(model, board.Acted(text))
-  model.acting |> should.equal("")
-  let assert Ok(t) = json.parse(text, board.task_decoder())
-  board.acting_text(board.Task(..t, runs: []), "assign")
-  |> should.equal("Sending assign…")
-}
-
 pub fn typed_fields_and_toggles_update_the_model_test() {
   let #(model, _) = board.init(Nil)
-  let #(model, _) = board.update(model, board.Text("hello"))
-  let #(model, _) = board.update(model, board.Title("T2"))
-  let #(model, _) = board.update(model, board.Body("B2"))
-  let #(model, _) = board.update(model, board.Rank("3.5"))
-  #(model.text, model.title, model.body, model.rank)
-  |> should.equal(#("hello", "T2", "B2", "3.5"))
   let #(model, _) = board.update(model, board.ProjectName("web"))
   let #(model, _) = board.update(model, board.ProjectDir("apps/web"))
   let #(model, _) = board.update(model, board.ProjectTarget("javascript"))
@@ -925,10 +563,6 @@ pub fn typed_fields_and_toggles_update_the_model_test() {
   let open = model.projects_open
   let #(model, _) = board.update(model, board.ToggleProjects)
   model.projects_open |> should.equal(!open)
-  let #(model, _) = board.update(model, board.Tab("notes"))
-  model.tab |> should.equal("notes")
-  let #(model, _) = board.update(model, board.Failed("boom"))
-  model.error |> should.equal("boom")
 }
 
 pub fn previews_and_dismissed_notices_come_and_go_test() {
@@ -938,45 +572,13 @@ pub fn previews_and_dismissed_notices_come_and_go_test() {
   model.previews |> should.equal(["text", "body"])
   let #(model, _) = board.update(model, board.Preview("body", False))
   model.previews |> should.equal(["text"])
-  let one = board.Notice("Reviewed A", "done", "", "1", "runs")
-  let two = board.Notice("Reviewed B", "done", "", "2", "runs")
+  let one = solace_task.Notice("Reviewed A", "done", "", "1", "runs")
+  let two = solace_task.Notice("Reviewed B", "done", "", "2", "runs")
   let model = board.Model(..model, notices: [one, two])
   let #(model, _) = board.update(model, board.Dismiss(one))
   model.notices |> should.equal([two])
   let #(model, _) = board.update(model, board.Dismiss(one))
   model.notices |> should.equal([two])
-}
-
-pub fn editing_needs_a_selected_task_and_a_numeric_rank_test() {
-  let #(model, _) = board.init(Nil)
-  // With no task selected, these change nothing.
-  let #(same, _) = board.update(model, board.Edit(True))
-  same |> should.equal(model)
-  let #(same, _) = board.update(model, board.Save)
-  same |> should.equal(model)
-  let #(same, _) = board.update(model, board.AddNote)
-  same |> should.equal(model)
-  let #(same, _) = board.update(model, board.DeleteNote(0))
-  same |> should.equal(model)
-  let #(same, _) = board.update(model, board.Answer("q", "yes"))
-  same |> should.equal(model)
-  let #(same, _) = board.update(model, board.Action("assign"))
-  same |> should.equal(model)
-  let text =
-    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"B\",\"column\":\"triage\",\"rank\":1,\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[]}"
-  let #(model, _) = board.update(model, board.TaskLoaded(text))
-  // Editing starts from the task's own fields.
-  let #(model, _) = board.update(model, board.Title("changed"))
-  let #(model, _) = board.update(model, board.Edit(True))
-  #(model.editing, model.title, model.body, model.rank)
-  |> should.equal(#(True, "T", "B", "1.0"))
-  // A rank that is not a number is refused before anything is sent.
-  let #(model, _) = board.update(model, board.Rank("high"))
-  let #(model, _) = board.update(model, board.Save)
-  model.error |> should.equal("Rank must be a number")
-  // Adding a note shows the notes tab.
-  let #(model, _) = board.update(model, board.AddNote)
-  model.tab |> should.equal("notes")
 }
 
 pub fn removing_needs_the_second_step_and_the_exact_name_test() {
@@ -1006,53 +608,6 @@ pub fn removing_needs_the_second_step_and_the_exact_name_test() {
   same |> should.equal(model)
 }
 
-/// Events and action replies carry no `changes` (D-77): the selected task
-/// keeps its list, and a fetch of the task replaces it.
-pub fn changes_survive_events_and_replies_test() {
-  let #(model, _) = board.init(Nil)
-  let #(model, _) = board.update(model, board.CaughtUp)
-  let bare =
-    "{\"id\":\"t1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1}"
-  let full =
-    "{\"id\":\"t1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"changes\":[{\"entity\":\"symbol:x\",\"name\":\"app.one\",\"project\":\"\"}]}"
-  let #(model, _) = board.update(model, board.Select("", "t1"))
-  let #(model, _) =
-    board.update(
-      model,
-      board.SelectedTaskLoaded(model.selection_generation, "", "t1", full),
-    )
-  let changes = fn(m: board.Model) {
-    let assert Some(t) = m.selected
-    t.changes
-  }
-  let one = [board.Change("", "app", "one")]
-  changes(model) |> should.equal(one)
-  let #(model, _) = board.update(model, board.Live("{\"task\":" <> bare <> "}"))
-  changes(model) |> should.equal(one)
-  let #(model, _) = board.update(model, board.Changed(bare))
-  changes(model) |> should.equal(one)
-  let #(model, _) =
-    board.update(
-      model,
-      board.ChangesLoaded(model.selection_generation, "t1", bare),
-    )
-  changes(model) |> should.equal([])
-}
-
-/// A file is listed by its path under Files, after the code; an entry that
-/// is neither keeps its name under Other.
-pub fn file_changes_list_under_files_test() {
-  let text =
-    "{\"id\":\"t1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"changes\":[{\"entity\":\"file:src/api.mjs\",\"name\":\"file:src/api.mjs\"},{\"entity\":\"symbol:y\",\"name\":\"pilot/checkout.pay\"},{\"entity\":\"module:m\",\"name\":\"module:m\"}]}"
-  let assert Ok(t) = json.parse(text, board.task_decoder())
-  board.change_groups(t.changes, False)
-  |> should.equal([
-    #("pilot/checkout", ["pay"]),
-    #("Files", ["src/api.mjs"]),
-    #("Other", ["module:m"]),
-  ])
-}
-
 pub fn editor_toolbar_has_every_markdown_tool_test() {
   let #(model, _) = board.init(Nil)
   let #(model, _) = board.update(model, board.NewTask)
@@ -1065,124 +620,160 @@ pub fn editor_toolbar_has_every_markdown_tool_test() {
   |> list.each(fn(tool) { rendered |> string.contains(tool) |> should.be_true })
 }
 
-/// A notice's tab is the notes when the run left one, else the runs; a
-/// question opens the questions. Its button opens the task there.
+/// A notice's button opens its task and asks `<solace-task>` to show the
+/// notice's tab; asking again for the same is news too.
 pub fn notice_opens_task_on_its_tab_test() {
-  let task = fn(runs, notes, questions) {
-    let assert Ok(t) =
-      json.parse(
-        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"notes\":["
-          <> notes
-          <> "],\"questions\":["
-          <> questions
-          <> "],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\""
-          <> runs
-          <> "\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"finished\"}]}",
-        board.task_decoder(),
-      )
-    t
-  }
-  let note =
-    "{\"author\":\"agent\",\"run\":\"r1\",\"text\":\"Done\",\"time\":1}"
-  let assert [with_note] =
-    board.notices(task("running", "", ""), task("ended", note, ""))
-  with_note.tab |> should.equal("notes")
-  let assert [without] =
-    board.notices(task("running", "", ""), task("ended", "", ""))
-  without.tab |> should.equal("runs")
-  let asked = "{\"id\":\"q\",\"text\":\"Why?\",\"options\":[]}"
-  let assert [question] =
-    board.notices(task("running", "", ""), task("running", "", asked))
-  question.tab |> should.equal("questions")
+  let question =
+    solace_task.Notice("Question on T", "Why?", "", "1", "questions")
+  let without =
+    solace_task.Notice(
+      "Finished T",
+      "The agent finished its work.",
+      "",
+      "1",
+      "runs",
+    )
   let #(model, _) = board.init(Nil)
   let model = board.Model(..model, notices: [question, without])
-  let #(model, _) =
-    board.update(model, board.Open(board.Notice(..question, dir: "")))
-  model.tab |> should.equal("questions")
+  let #(model, _) = board.update(model, board.Open(question))
+  model.selected_card |> should.equal(Some(#("", "1")))
+  model.reveal |> should.equal(#("questions", "1", 1))
   model.notices |> should.equal([without])
-  model.revealing |> should.be_true
-  model.selected_card |> should.equal(option.Some(#("", "1")))
-  // A task that is already open only changes tab.
-  let #(model, _) = board.update(model, board.TaskLoaded(task_json()))
-  model.revealing |> should.be_false
-  let #(model, _) =
-    board.update(model, board.Open(board.Notice(..without, dir: "")))
-  model.tab |> should.equal("runs")
-  model.revealing |> should.be_false
+  let #(model, _) = board.update(model, board.Open(without))
+  model.reveal |> should.equal(#("runs", "1", 2))
   model.notices |> should.equal([])
 }
 
-fn task_json() -> String {
-  "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1}"
+/// A failed create keeps the draft; a created task clears it and opens.
+pub fn create_draft_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) = board.update(model, board.NewTask)
+  let #(model, _) = board.update(model, board.DraftTitle("Draft"))
+  let #(model, _) =
+    board.update(
+      model,
+      board.Created("{\"code\":\"E7001\",\"message\":\"title required\"}"),
+    )
+  #(model.draft_title, model.creating) |> should.equal(#("Draft", True))
+  model.error |> should.equal("title required")
+  let #(model, _) =
+    board.update(
+      model,
+      board.Created(
+        "{\"id\":\"2\",\"title\":\"Draft\",\"body\":\"\",\"column\":\"backlog\",\"rank\":2}",
+      ),
+    )
+  #(model.draft_title, model.creating) |> should.equal(#("", False))
+  model.selected_card |> should.equal(Some(#("", "2")))
 }
 
-/// A toast when the agent replies to a discussion; none when the discussion
-/// ends or is stopped; a finished work run still toasts.
-pub fn discussion_reply_notices_test() {
-  let task = fn(kind, state, notes, outcome) {
-    let assert Ok(t) =
-      json.parse(
-        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"notes\":["
-          <> notes
-          <> "],\"runs\":[{\"id\":\"r1\",\"kind\":\""
-          <> kind
-          <> "\",\"state\":\""
-          <> state
-          <> "\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\""
-          <> outcome
-          <> "\"}]}",
-        board.task_decoder(),
-      )
-    t
-  }
-  let reply =
-    "{\"author\":\"agent\",\"run\":\"r1\",\"text\":\"Here is my take\",\"time\":2}"
-  let human =
-    "{\"author\":\"human\",\"run\":null,\"text\":\"And also\",\"time\":3}"
-  // The agent replies: the toast shows its note on the notes tab.
-  let assert [toast] =
-    board.notices(
-      task("discuss", "running", "", ""),
-      task("discuss", "waiting", reply, ""),
+/// The open task's details are `<solace-task>`: it names the task, its
+/// project and its API prefix, and takes its events from the board.
+pub fn detail_is_a_solace_task_element_test() {
+  let #(model, _) = board.init(Nil)
+  board.view(model)
+  |> element.to_string
+  |> string.contains("Select a task to see its details.")
+  |> should.be_true
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\".\",\"label\":\"root\",\"name\":\"root\",\"base\":\"\"},{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"}],\"found\":[]}",
+      ),
     )
-  toast
-  |> should.equal(board.Notice(
-    "Reply on T",
-    "Here is my take",
-    "",
-    "1",
-    "notes",
-  ))
-  // A human note while the run stays waiting: no toast.
-  board.notices(
-    task("discuss", "waiting", reply, ""),
-    task("discuss", "waiting", reply <> "," <> human, ""),
+  let #(model, _) = board.update(model, board.Select("a", "t1"))
+  let rendered = board.view(model) |> element.to_string
+  rendered
+  |> string.contains(
+    "<solace-task base=\"/p/a\" dir=\"a\" hosted task=\"t1\" workspace>",
   )
-  |> should.equal([])
-  // The agent takes the human's turn: no toast.
-  board.notices(
-    task("discuss", "waiting", reply, ""),
-    task("discuss", "running", reply, ""),
-  )
-  |> should.equal([])
-  // Ending a discussion: no toast.
-  board.notices(
-    task("discuss", "waiting", reply, ""),
-    task("discuss", "ended", reply, "discussed"),
-  )
-  |> should.equal([])
-  // Stopping a discussion: no toast.
-  board.notices(
-    task("discuss", "waiting", reply, ""),
-    task("discuss", "ended", reply, "stopped"),
-  )
-  |> should.equal([])
-  // A work run that finishes still toasts.
-  board.notices(
-    task("work", "running", "", ""),
-    task("work", "ended", "", "finished"),
-  )
-  |> should.equal([
-    board.Notice("Finished T", "The agent finished its work.", "", "1", "runs"),
-  ])
+  |> should.be_true
+  rendered |> string.contains("class=\"detail\"") |> should.be_false
+  // The root's project answers at the board's own prefix.
+  let #(model, _) = board.update(model, board.BaseChanged("/x"))
+  let #(model, _) = board.update(model, board.Select(".", "t2"))
+  board.view(model)
+  |> element.to_string
+  |> string.contains("<solace-task base=\"/x\" dir=\".\" hosted task=\"t2\"")
+  |> should.be_true
+}
+
+/// The open task's own events, and its project's workflow, go to its
+/// details, numbered and in order; other tasks' and other projects' don't.
+/// Opening another card starts the list again.
+pub fn live_events_for_the_open_task_go_to_its_detail_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"},{\"dir\":\"b\",\"label\":\"b\",\"name\":\"b\",\"base\":\"/p/b\"}],\"found\":[]}",
+      ),
+    )
+  let #(model, _) = board.update(model, board.CaughtUp)
+  let #(model, _) = board.update(model, board.Select("a", "1"))
+  let task = fn(id) {
+    "{\"id\":\""
+    <> id
+    <> "\",\"title\":\"T\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1}"
+  }
+  let own = "{\"project\":\"a\",\"task\":" <> task("1") <> "}"
+  let #(model, _) = board.update(model, board.Live(own))
+  model.live |> should.equal([#(1, own)])
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live("{\"project\":\"a\",\"task\":" <> task("2") <> "}"),
+    )
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live("{\"project\":\"b\",\"task\":" <> task("1") <> "}"),
+    )
+  model.live |> should.equal([#(1, own)])
+  // A workflow change after a task update is kept too, not replaced by it.
+  let flow = "{\"project\":\"a\",\"workflow\":{\"columns\":[]}}"
+  let #(model, _) = board.update(model, board.Live(flow))
+  model.live |> should.equal([#(1, own), #(2, flow)])
+  // Another card starts the list again; numbers keep counting.
+  let #(model, _) = board.update(model, board.Select("a", "2"))
+  model.live |> should.equal([])
+  let #(model, _) = board.update(model, board.Live(flow))
+  model.live |> should.equal([#(3, flow)])
+}
+
+/// `<solace-task>` says the open task moved: the board opens it from there.
+pub fn task_moved_follows_the_open_task_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) = board.update(model, board.Select("a", "1"))
+  let #(model, _) = board.update(model, board.TaskMoved("b", "2"))
+  model.selected_card |> should.equal(Some(#("a", "1")))
+  let #(model, _) = board.update(model, board.TaskMoved("b", "1"))
+  model.selected_card |> should.equal(Some(#("b", "1")))
+}
+
+/// What a new connection replays is applied to the cards when it is caught
+/// up, and the open task's details get it too.
+pub fn a_replay_after_a_reconnect_reaches_the_open_detail_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"}],\"found\":[]}",
+      ),
+    )
+  let #(model, _) = board.update(model, board.Select("a", "1"))
+  let event = fn(title) {
+    "{\"project\":\"a\",\"task\":{\"id\":\"1\",\"title\":\""
+    <> title
+    <> "\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1}}"
+  }
+  // Held while the stream replays; nothing is handed down yet.
+  let #(model, _) = board.update(model, board.Live(event("Old")))
+  let #(model, _) = board.update(model, board.Live(event("New")))
+  model.live |> should.equal([])
+  let #(model, _) = board.update(model, board.CaughtUp)
+  model.live |> should.equal([#(1, event("Old")), #(2, event("New"))])
 }

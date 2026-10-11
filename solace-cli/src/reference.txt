@@ -167,6 +167,27 @@ run, except in a review for commands marked `allowed_in_reviews = true`.
   task done                     finish: a work run's summary goes to human
                                 review; an investigation's report stays on the task
 
+Strategy runs (planning with the human on the Strategy page): read only; any
+command not listed here is refused.
+  strategy list                 every task, feature and milestone, and the vision
+  strategy show <task|feature|milestone> <id>
+                                the ids the record links to, then the record
+                                in full
+  strategy note                 reply to the human, the reply in `text`; waits
+                                for their next message
+  strategy task|feature|milestone [<id>]
+                                propose creating one (no id) or editing one: the
+                                request's fields as a JSON object in `text`;
+                                waits for Approve or Reject. Alone in its call
+  strategy vision               propose a new vision, its text in `text`; waits
+                                the same way
+  view | inspect | refs | find  read code, as under Reading
+  grep <text>                   search watched files and settings
+  files [dir]                   tree with each file's category
+  read <path> [--lines a..b | --tail n]
+  ... --project <folder>        read in a project below the root; in a folder of
+                                projects, every read needs it
+
 Host commands (humans only, refused in a run)
   create <name> [--javascript] [--yes]
                                 create a new Gleam project below this folder;

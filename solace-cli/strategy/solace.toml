@@ -9,5 +9,4 @@ unwatched = []
 # "docs/**/*.json" = ["python3", "-m", "json.tool", "{file}"]
 
 [commands]
-# Optional commands agents may run, for example:
-# app = { run = ["gleam", "run", "--"], args = true }
+js_tests = { run = ["bun", "test", "test/api.test.mjs"] }
