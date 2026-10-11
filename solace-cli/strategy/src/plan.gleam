@@ -4,6 +4,7 @@
 //// the same record to reopen. The page keeps the state; this draws it.
 
 import gleam/dynamic/decode
+import gleam/float
 import gleam/int
 import gleam/json
 import gleam/list
@@ -225,6 +226,9 @@ pub type Panel(msg) {
     shown: Option(Run),
     entries: List(solace_task.Entry),
     collapsed: Bool,
+    /// The panel's width in pixels, and the widest the window allows.
+    width: Int,
+    max_width: Int,
     /// The message box.
     text: String,
     /// A request sent and not yet answered.
@@ -235,6 +239,10 @@ pub type Panel(msg) {
     effort: String,
     name: fn(String, String) -> String,
     on_collapse: msg,
+    /// A press on the resize handle, at this clientX.
+    on_drag: fn(Int) -> msg,
+    /// A resize key on the focused handle: the arrows, Home or End.
+    on_key: fn(String) -> msg,
     on_text: fn(String) -> msg,
     on_model: fn(String) -> msg,
     on_effort: fn(String) -> msg,
@@ -260,8 +268,14 @@ pub fn view(base: String, p: Panel(msg)) -> Element(msg) {
         False -> "plan"
       }),
       attribute.attribute("aria-label", "Planning"),
+      attribute.id("plan"),
+      attribute.style("--plan-width", int.to_string(p.width) <> "px"),
     ],
     [
+      case p.collapsed {
+        True -> element.none()
+        False -> resize_handle(p)
+      },
       html.header([], [
         html.h2([], [html.text("Plan")]),
         html.button(
@@ -302,9 +316,9 @@ fn summary(p: Panel(msg)) -> String {
 
 fn context_view(context: Context, name: fn(String, String) -> String) {
   case context.kind {
-    "page" -> [html.text("On the whole page")]
+    "page" -> [html.text("Planning Context: Whole Project")]
     kind -> [
-      html.text("On " <> kind <> " "),
+      html.text("Planning Context: " <> kind <> " "),
       html.em([], [
         html.text(case name(kind, context.id) {
           "" -> context.id
@@ -590,7 +604,9 @@ fn past_view(p: Panel(msg)) -> List(Element(msg)) {
 
 /// The panel's look; colours come from the page's custom properties.
 pub const styles =
-  ".plan{grid-column:2;grid-row:2;align-self:start;position:sticky;top:0;box-sizing:border-box;width:380px;max-height:calc(100dvh - 56px);overflow:auto;background:var(--paper);border-left:2px solid var(--edge);padding:12px 16px}.plan.collapsed{width:auto;min-width:160px}
+  ".plan{grid-column:2;grid-row:2;position:relative;display:flex;flex-direction:column;min-height:0;box-sizing:border-box;width:clamp(280px,var(--plan-width,380px),60vw);background:var(--paper);border-left:2px solid var(--edge);padding:12px 16px 0}.plan.collapsed{width:auto;min-width:160px;padding-bottom:12px}
+.plan>header{flex:none}.plan-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0 -16px;padding:0 16px 12px}
+.plan-resize{position:absolute;left:-7px;top:0;bottom:0;width:12px;cursor:col-resize;touch-action:none;z-index:1}.plan-resize:hover{background:var(--line);opacity:.6}.plan .plan-resize:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
 .plan header{display:flex;align-items:center;gap:8px}.plan h2{margin:0;font-size:17px;flex:1}.plan h3{font-size:14px;margin:16px 0 4px}
 .plan p{margin:6px 0}.plan .plan-summary,.plan .plan-context{color:var(--soft);font-size:13px}.plan-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .plan .edit,.plan .vision-actions button{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 10px;cursor:pointer}.plan .edit:hover,.plan .vision-actions button:hover{background:var(--hover)}.plan button:disabled{color:var(--soft);cursor:default}
@@ -602,6 +618,74 @@ pub const styles =
 .plan-runs{list-style:none;margin:0;padding:0}.plan-runs li{margin:2px 0}.plan-runs .open{font:inherit;font-size:13px;color:var(--ink);background:none;border:0;padding:0;text-align:left;cursor:pointer}.plan-runs .open:hover{text-decoration:underline}.plan-runs [aria-current=true]{font-weight:700}
 .working::before,.planning::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--entry);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before,.planning::before{animation:none}}
 .planning{font-size:11px;font-weight:400;text-transform:uppercase;letter-spacing:.08em;color:var(--ok-text);border:1px solid var(--ok-text);padding:1px 6px;margin-left:6px;white-space:nowrap}
-@media (max-width:900px){.plan{position:static;width:auto;max-height:none;border-left:0;border-top:2px solid var(--edge)}}
+@media (max-width:900px){.plan{display:block;width:auto;border-left:0;border-top:2px solid var(--edge);padding:12px 16px}.plan-body{overflow:visible;margin:0;padding:0}.plan-resize{display:none}}
 "
   <> solace_task.proposal_styles
+
+/// The narrowest the panel gets, in pixels.
+pub const min_width = 280
+
+/// The panel's width until one is chosen.
+pub const default_width = 380
+
+/// How much an arrow key on the resize handle changes the width.
+pub const key_step = 16
+
+/// The widest the panel gets in a `window` this wide: 60% of it, never under
+/// `min_width`.
+pub fn max_width(window: Int) -> Int {
+  int.max(window * 60 / 100, min_width)
+}
+
+/// `width` kept between `min_width` and `max_width(window)`; a `window` of 0
+/// (no page to measure) sets no upper bound.
+pub fn clamp(width: Int, window: Int) -> Int {
+  case window {
+    0 -> int.max(width, min_width)
+    _ -> int.clamp(width, min_width, max_width(window))
+  }
+}
+
+const resize_keys = ["ArrowLeft", "ArrowRight", "Home", "End"]
+
+/// The panel's left edge, a separator that sets its width: dragged, or with
+/// the arrow keys, Home and End while focused. Left widens the panel.
+fn resize_handle(p: Panel(msg)) -> Element(msg) {
+  html.div(
+    [
+      attribute.class("plan-resize"),
+      attribute.role("separator"),
+      attribute.attribute("aria-orientation", "vertical"),
+      attribute.attribute("aria-label", "Resize the planning panel"),
+      attribute.attribute("aria-controls", "plan"),
+      attribute.attribute("aria-valuenow", int.to_string(p.width)),
+      attribute.attribute("aria-valuemin", int.to_string(min_width)),
+      attribute.attribute("aria-valuemax", int.to_string(p.max_width)),
+      attribute.tabindex(0),
+      event.prevent_default(
+        event.on("pointerdown", {
+          use x <- decode.field(
+            "clientX",
+            decode.one_of(decode.int, [decode.map(decode.float, float.round)]),
+          )
+          decode.success(p.on_drag(x))
+        }),
+      ),
+      // Other keys, Tab among them, keep their default.
+      event.advanced("keydown", {
+        use key <- decode.field("key", decode.string)
+        let handler =
+          event.handler(
+            p.on_key(key),
+            prevent_default: True,
+            stop_propagation: False,
+          )
+        case list.contains(resize_keys, key) {
+          True -> decode.success(handler)
+          False -> decode.failure(handler, "a resize key")
+        }
+      }),
+    ],
+    [],
+  )
+}

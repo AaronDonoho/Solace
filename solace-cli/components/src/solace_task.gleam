@@ -173,6 +173,8 @@ pub type Task {
     unexpected: Bool,
     /// The projects the task may change (D-61); empty for a task saved before.
     scope: List(String),
+    /// Whether the task was archived: off the board, still in the archive (D-95).
+    archived: Bool,
   )
 }
 
@@ -248,6 +250,10 @@ pub type Model {
     /// The shadow root, once it has rendered.
     root: dynamic.Dynamic,
     connected: Bool,
+    /// Copy ID: how many copies were asked for (a reply or a timer for an
+    /// older one changes nothing), and what its label says for a moment
+    /// after the last: "Copied", "Copy failed", or "" for Copy ID.
+    copy: #(Int, String),
   )
 }
 
@@ -270,7 +276,8 @@ pub type Msg {
   Attached(dynamic.Dynamic)
   Listening(Source)
   TaskLoaded(Int, String)
-  ChangesLoaded(Int, String)
+  /// The task fetched again while it is shown (see `refresh`).
+  Refetched(Int, String)
   WorkflowLoaded(Int, String)
   ModelsLoaded(String)
   ProjectsLoaded(String)
@@ -302,6 +309,12 @@ pub type Msg {
   TranscriptLoaded(String, String)
   Refresh(Int, String)
   TranscriptPolled(Int, String, String)
+  /// Copy ID: the task's reference, `task:<id>`, goes to the clipboard (D-98).
+  CopyId
+  /// Copy number `n` is done: whether the clipboard took it.
+  CopyDone(Int, Bool)
+  /// Copy number `n`'s moment is over: the label says Copy ID again.
+  CopyReset(Int)
 }
 
 /// While a watched run is going, its transcript is fetched again this often.
@@ -390,6 +403,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       source: None,
       root: no_root(),
       connected: False,
+      copy: #(0, ""),
     ),
     // Attributes arrive before the element is added; nothing is asked until then.
     effect.none(),
@@ -458,6 +472,7 @@ fn open(model: Model) -> #(Model, Effect(Msg)) {
       previews: [],
       acting: "",
       error: "",
+      copy: #(model.copy.0 + 1, ""),
     )
   #(model, fetch(model))
 }
@@ -498,15 +513,6 @@ fn transcript(model: Model, rid: String) -> Effect(Msg) {
       get(model.base, "/tasks/" <> t.id <> "/runs/" <> rid, fn(text) {
         TranscriptPolled(model.poll, rid, text)
       })
-    None -> effect.none()
-  }
-}
-
-/// Fetches the task's changes, which only its own GET carries (D-77).
-fn refresh_changes(model: Model) -> Effect(Msg) {
-  case model.task {
-    Some(t) ->
-      get(model.base, "/tasks/" <> t.id, ChangesLoaded(model.generation, _))
     None -> effect.none()
   }
 }
@@ -599,17 +605,20 @@ fn notice(n: Notice) -> Effect(Msg) {
 }
 
 /// Applies one `/events` message about this task: its new state, its
-/// project's workflow, or its removal from the project. A workspace's
-/// messages name their `project`; one for another project is not this task's.
+/// project's workflow, or its removal from the project; a change to the
+/// workspace's list of projects fetches the Scope tab's again. A workspace's
+/// messages name their `project`; one for another project is not this task's,
+/// unless it names this task, which is then fetched again (see `stale`).
 fn live(model: Model, text: String) -> #(Model, Effect(Msg)) {
   let ours = case json.parse(text, decode.at(["project"], decode.string)) {
     Ok(dir) -> dir == model.dir
     Error(_) -> True
   }
   // What a new stream of its own replays is old: the task was fetched whole.
-  case ours && { model.hosted || model.caught_up } {
-    False -> #(model, effect.none())
-    True ->
+  case model.hosted || model.caught_up, stale(model, text), ours {
+    False, _, _ | True, False, False -> #(model, effect.none())
+    True, True, _ -> #(model, refresh(model))
+    True, False, True ->
       case json.parse(text, decode.at(["task"], task_decoder())) {
         Ok(task) if task.id == model.id -> {
           // Events carry no `changes` (D-77): keep the list until it is fetched again.
@@ -624,7 +633,7 @@ fn live(model: Model, text: String) -> #(Model, Effect(Msg)) {
             Some(t), False -> list.map(notices(t, task), notice)
             _, _ -> []
           }
-          #(model, effect.batch([refresh_changes(model), ..news]))
+          #(model, effect.batch([refresh(model), ..news]))
         }
         Ok(_) -> #(model, effect.none())
         Error(_) ->
@@ -633,7 +642,11 @@ fn live(model: Model, text: String) -> #(Model, Effect(Msg)) {
             Error(_) ->
               case json.parse(text, decode.at(["removed"], decode.string)) {
                 Ok(id) if id == model.id -> moved_away(model)
-                _ -> #(model, effect.none())
+                _ ->
+                  case projects_changed(text) {
+                    True -> #(model, get("", "/projects", ProjectsLoaded))
+                    False -> #(model, effect.none())
+                  }
               }
           }
       }
@@ -705,7 +718,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         #(next, effect.batch([fx, more]))
       })
     }
-    CaughtUp -> #(Model(..model, caught_up: True), effect.none())
+    // Its own stream (re)connected: anything missed meanwhile is fetched.
+    CaughtUp -> #(Model(..model, caught_up: True), refresh(model))
     Reveal("", _) -> #(model, effect.none())
     // The host may name the task before or after it opens it: an open task
     // shows now, another once it loads.
@@ -748,15 +762,13 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
     TaskLoaded(_, _) -> #(model, effect.none())
-    // Only the list of changes is taken, so fields being edited stay as typed.
-    ChangesLoaded(generation, text) ->
+    // The whole task is taken; fields being edited are the model's, so they
+    // stay as typed.
+    Refetched(generation, text) ->
       case model.task, json.parse(text, task_decoder()) {
         Some(t), Ok(fresh)
           if generation == model.generation && t.id == fresh.id
-        -> #(
-          Model(..model, task: Some(Task(..t, changes: fresh.changes))),
-          review(model, fresh),
-        )
+        -> #(Model(..model, task: Some(fresh)), review(model, fresh))
         _, _ -> #(model, effect.none())
       }
     WorkflowLoaded(generation, text) if generation == model.generation ->
@@ -835,7 +847,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               editing: False,
               previews: [],
             )
-          #(model, effect.batch([moved, refresh_changes(model)]))
+          #(model, effect.batch([moved, refresh(model)]))
         }
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
@@ -1073,6 +1085,35 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           )
         }
       }
+    // Pasted into any text, the reference is a link to the task (D-98).
+    CopyId ->
+      case model.task {
+        None -> #(model, effect.none())
+        Some(t) -> {
+          let n = model.copy.0 + 1
+          #(
+            Model(..model, copy: #(n, "")),
+            effect.from(fn(send) {
+              copy_text(reference(t.id), fn(ok) { send(CopyDone(n, ok)) })
+            }),
+          )
+        }
+      }
+    CopyDone(n, ok) if n == model.copy.0 -> #(
+      Model(
+        ..model,
+        copy: #(n, case ok {
+          True -> "Copied"
+          False -> "Copy failed"
+        }),
+      ),
+      effect.from(fn(send) { after(copied_ms, fn() { send(CopyReset(n)) }) }),
+    )
+    CopyReset(n) if n == model.copy.0 -> #(
+      Model(..model, copy: #(n, "")),
+      effect.none(),
+    )
+    CopyDone(_, _) | CopyReset(_) -> #(model, effect.none())
   }
 }
 
@@ -1091,17 +1132,17 @@ pub fn notices(old: Task, new: Task) -> List(Notice) {
         True -> "notes"
         False -> "runs"
       }
-      let notice = fn(heading, text) {
-        Notice(heading <> new.title, text, "", new.id, tab)
-      }
+      let notice = fn(heading, text) { Notice(heading, text, "", new.id, tab) }
       case r.outcome {
-        "finished" -> notice("Finished ", "The agent finished its work.")
-        "reported" -> notice("Investigated ", "The agent's report is ready.")
-        "reviewed" -> notice("Reviewed ", "The review is ready.")
-        "" -> notice("Stopped ", "The " <> r.kind <> " run ended.")
+        "finished" ->
+          notice("Finished " <> new.title, "The agent finished its work.")
+        "reported" ->
+          notice("Investigated " <> new.title, "The agent's report is ready.")
+        "reviewed" -> notice("Reviewed " <> new.title, "The review is ready.")
+        "" -> notice("Stopped " <> new.title, "The " <> r.kind <> " run ended.")
         outcome ->
           notice(
-            "Stopped ",
+            "Stopped " <> new.title <> ": " <> outcome,
             "The " <> r.kind <> " run ended: " <> outcome <> ".",
           )
       }
@@ -1195,6 +1236,13 @@ pub fn task_decoder() -> decode.Decoder(Task) {
   )
   use unexpected <- decode.optional_field("unexpected", False, decode.bool)
   use scope <- decode.optional_field("scope", [], decode.list(decode.string))
+  use archived <- decode.optional_field(
+    "archivedTime",
+    False,
+    decode.one_of(decode.int |> decode.map(fn(_) { True }), [
+      decode.success(False),
+    ]),
+  )
   decode.success(Task(
     id,
     title,
@@ -1212,6 +1260,7 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     finished,
     unexpected,
     scope,
+    archived,
   ))
 }
 
@@ -1412,13 +1461,7 @@ fn run_label(r: Run) -> String {
 /// What the task's agent is doing right now, or what it finished.
 pub fn status(t: Task) -> String {
   case t.paused, list.find(t.runs, fn(r) { r.state != "ended" }) {
-    _, Error(_) ->
-      case t.finished {
-        "finished" -> "Agent finished"
-        "reported" -> "Report ready"
-        "reviewed" -> "Review ready"
-        _ -> ""
-      }
+    _, Error(_) -> outcome(t)
     "", Ok(r) if r.state == "waiting" && r.kind == "discuss" ->
       "Waiting for your reply"
     "", Ok(r) if r.state == "waiting" -> "Waiting for your answer"
@@ -1506,8 +1549,30 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
     False -> tabs
   }
   h.section([a.class("detail")], [
-    h.h2([], [h.text(t.title)]),
-    h.p([a.class("meta")], [h.text(t.column), status_badge(t)]),
+    h.div([a.class("heading")], [
+      h.h2([], [h.text(t.title)]),
+      h.button(
+        [
+          a.class("copy-id"),
+          a.title(
+            "Copies "
+            <> reference(t.id)
+            <> ": pasted into any text, it links to this task",
+          ),
+          e.on_click(CopyId),
+        ],
+        [
+          h.text(case model.copy.1 {
+            "" -> "Copy ID"
+            said -> said
+          }),
+        ],
+      ),
+    ]),
+    h.p([a.class("meta")], [
+      h.text(t.column),
+      status_badge_in(model.workflow, t),
+    ]),
     case t.attention {
       "" -> h.text("")
       reason ->
@@ -1856,18 +1921,7 @@ fn notes_view(base: String, t: Task) -> List(Element(Msg)) {
 }
 
 pub fn status_badge(t: Task) -> Element(msg) {
-  case status(t) {
-    "" -> h.text("")
-    s -> {
-      let class = case s {
-        "Agent working" | "Agent reviewing" | "Agent investigating" ->
-          "status working"
-        "Agent finished" | "Report ready" | "Review ready" -> "status finished"
-        _ -> "status"
-      }
-      h.span([a.class(class), a.role("status")], [h.text(s)])
-    }
-  }
+  badge(status(t))
 }
 
 /// Markdown; images uploaded to the board load from the project at `base`.
@@ -2021,12 +2075,13 @@ pub const projects_pick_styles =
 const task_styles =
   projects_pick_styles
   <> editor_styles
-  <> ":host{display:block}input,textarea,pre,code,.md,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}
+  <> ":host{display:block}input,textarea,pre,code,.md,.detail > .heading > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}
 button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.detail{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}
 .meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}
 .tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}
 details.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}
 .title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}
+.heading{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px}.heading h2{margin:12px 0}.copy-id{flex:none;margin:0;padding:2px 10px;font-size:13px}
 *{scrollbar-color:var(--line) var(--paper)}::selection{background:var(--sel);color:var(--ink)}
 h1,h2,h3{line-height:1.2;letter-spacing:-.02em}a{color:var(--focus);text-underline-offset:3px}
 button,input,textarea,select{border:1px solid var(--edge);background:var(--paper);color:var(--ink);caret-color:var(--focus)}input::placeholder,textarea::placeholder{color:var(--soft);opacity:1}
@@ -2209,3 +2264,92 @@ pub fn proposal_view(
 /// it. Colours come from the page's custom properties.
 pub const proposal_styles =
   ".proposal{border:1px solid var(--edge);background:var(--paper);padding:8px 12px;margin:8px 0}.proposal h4{margin:0 0 6px;font-size:15px}.proposal dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 12px;margin:6px 0}.proposal dt{color:var(--soft);font-size:13px}.proposal dd{margin:0;overflow-wrap:anywhere}.proposal .reopens{color:var(--warn-text);font-weight:600}.proposal .actions{display:flex;gap:6px}.proposal .answer{font-weight:600}\n"
+
+/// What the task's last run finished with, "" when nothing is to be looked at.
+fn outcome(t: Task) -> String {
+  case t.finished {
+    "finished" -> "Agent finished"
+    "reported" -> "Report ready"
+    "reviewed" -> "Review ready"
+    _ -> ""
+  }
+}
+
+/// `status` for a task whose project's workflow is known: a task in a final
+/// column has no agent at work, whatever runs its copy still shows going.
+pub fn status_in(workflow: Workflow, t: Task) -> String {
+  case list.find(workflow.columns, fn(c) { c.id == t.column }) {
+    Ok(c) if c.final -> outcome(t)
+    _ -> status(t)
+  }
+}
+
+/// `status_badge` by `status_in`: no live agent in a final column.
+pub fn status_badge_in(workflow: Workflow, t: Task) -> Element(msg) {
+  badge(status_in(workflow, t))
+}
+
+fn badge(status: String) -> Element(msg) {
+  case status {
+    "" -> h.text("")
+    s -> {
+      let class = case s {
+        "Agent working" | "Agent reviewing" | "Agent investigating" ->
+          "status working"
+        "Agent finished" | "Report ready" | "Review ready" -> "status finished"
+        _ -> "status"
+      }
+      h.span([a.class(class), a.role("status")], [h.text(s)])
+    }
+  }
+}
+
+/// The message a host hands down once its stream has (re)connected and caught
+/// up: an event may have been lost meanwhile, so the task is fetched again.
+pub const resync = "{\"resync\":true}"
+
+/// Whether a live message puts this element's copy of the task in doubt, so
+/// it is fetched again rather than trusted: the host's `resync`, or an update
+/// of this task named under another project than the one it is opened from.
+pub fn stale(model: Model, text: String) -> Bool {
+  case json.parse(text, decode.at(["resync"], decode.bool)) {
+    Ok(_) -> True
+    Error(_) ->
+      case
+        json.parse(text, decode.at(["project"], decode.string)),
+        json.parse(text, decode.at(["task", "id"], decode.string))
+      {
+        Ok(dir), Ok(id) -> dir != model.dir && id == model.id
+        _, _ -> False
+      }
+  }
+}
+
+/// Fetches the task again: its GET is the whole task as the server has it
+/// now, the only one that carries its changes (D-77). Each event and reply
+/// ends with one, so a lost or late message can't leave the copy stale.
+fn refresh(model: Model) -> Effect(Msg) {
+  case model.task {
+    Some(t) ->
+      get(model.base, "/tasks/" <> t.id, Refetched(model.generation, _))
+    None -> effect.none()
+  }
+}
+
+/// A task's reference in text, `task:<id>`: markdown draws it as a link to
+/// the task (D-98).
+pub fn reference(id: String) -> String {
+  "task:" <> id
+}
+
+@external(javascript, "./task_api.mjs", "copy_text")
+fn copy_text(text: String, done: fn(Bool) -> Nil) -> Nil
+
+/// How long Copy ID says Copied, or Copy failed.
+const copied_ms = 2000
+
+/// Whether a live message says the workspace's list of projects changed.
+pub fn projects_changed(text: String) -> Bool {
+  json.parse(text, decode.at(["projects"], decode.list(decode.string)))
+  |> result.is_ok
+}

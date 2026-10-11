@@ -255,28 +255,6 @@ test('the project panel sends only the requests its buttons make', async () => {
   } finally { browser.restore(); }
 });
 
-test('the theme button flips the page theme and stores the choice', async () => {
-  const stored = new Map();
-  const saved = [globalThis.document, Object.getOwnPropertyDescriptor(globalThis, 'localStorage')];
-  globalThis.document = { documentElement: { dataset: {} } };
-  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
-    getItem: k => stored.get(k) ?? null, setItem: (k, v) => stored.set(k, v), removeItem: k => stored.delete(k) } });
-  try {
-    const b = mount(board);
-    b.dispatch(new board.ToggleTheme());
-    await settle();
-    expect(document.documentElement.dataset.theme).toBe('dark');
-    expect(stored.get('solace-theme')).toBe('dark');
-    b.dispatch(new board.ToggleTheme());
-    await settle();
-    expect(document.documentElement.dataset.theme).toBe('light');
-    expect(stored.get('solace-theme')).toBe('light');
-  } finally {
-    globalThis.document = saved[0];
-    saved[1] ? Object.defineProperty(globalThis, 'localStorage', saved[1]) : delete globalThis.localStorage;
-  }
-});
-
 test('the new task editor formats its selection, and notices come and go', async () => {
   const browser = fakeBrowser();
   const root = { addEventListener: () => {}, getElementById: () => ({ selectionStart: 1, selectionEnd: 2 }) };

@@ -389,8 +389,7 @@ pub fn changes_survive_events_and_replies_test() {
   changes(model) |> should.equal(one)
   let #(model, _) = task.update(model, task.Changed(bare))
   changes(model) |> should.equal(one)
-  let #(model, _) =
-    task.update(model, task.ChangesLoaded(model.generation, bare))
+  let #(model, _) = task.update(model, task.Refetched(model.generation, bare))
   changes(model) |> should.equal([])
 }
 
@@ -535,6 +534,25 @@ pub fn scope_tab_test() {
   let scope = body(model)
   scope |> string.contains("Projects this task can change") |> should.be_true
   scope |> string.split("role=\"switch\"") |> list.length |> should.equal(4)
+  // A change to the workspace's list fetches it again; a project added
+  // meanwhile gets its switch.
+  task.projects_changed("{\"projects\":[\"a\",\"b\",\"c\",\"d\"]}")
+  |> should.be_true
+  task.projects_changed("{\"project\":\"a\",\"workflow\":{\"columns\":[]}}")
+  |> should.be_false
+  let #(added, _) =
+    task.update(
+      model,
+      task.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":["
+        <> string.join(list.map(["a", "b", "c", "d"], lane), ",")
+        <> "]}",
+      ),
+    )
+  body(added)
+  |> string.split("role=\"switch\"")
+  |> list.length
+  |> should.equal(5)
   scope |> string.contains("You can change the projects") |> should.be_false
   let running =
     "{\"id\":\"t1\",\"title\":\"Across\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"scope\":[\"a\",\"b\"],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]}"
@@ -845,4 +863,182 @@ pub fn proposal_edit_and_vision_test() {
   |> element.to_string
   |> string.contains("Replace the vision")
   |> should.be_true
+}
+
+/// A run that ends with an outcome of its own says so in the notice's heading.
+pub fn ended_run_outcome_is_in_the_heading_test() {
+  let one = fn(state) {
+    let assert Ok(t) =
+      json.parse(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\""
+          <> state
+          <> "\",\"model\":\"m\",\"log\":\"/l\",\"outcome\":\"interrupted\"}]}",
+        task.task_decoder(),
+      )
+    t
+  }
+  let assert [notice] = task.notices(one("running"), one("ended"))
+  notice.heading |> should.equal("Stopped T: interrupted")
+  notice.text |> should.equal("The work run ended: interrupted.")
+}
+
+/// D-95: a task with an `archivedTime` is archived; null or missing is not.
+pub fn archived_time_decodes_to_archived_test() {
+  let base =
+    "\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"complete\",\"rank\":1"
+  let archived = fn(extra) {
+    let assert Ok(t) =
+      json.parse("{" <> base <> extra <> "}", task.task_decoder())
+    t.archived
+  }
+  archived(",\"archivedTime\":1700") |> should.be_true
+  archived(",\"archivedTime\":null") |> should.be_false
+  archived("") |> should.be_false
+}
+
+/// A task in a final column has no agent at work: a copy that still shows a
+/// run going says what the task finished with, and offers no buttons.
+pub fn a_final_column_shows_no_live_agent_test() {
+  let workflow =
+    task.Workflow([
+      task.Column("assigned", "Assigned", ["complete"], False),
+      task.Column("complete", "Complete", [], True),
+    ])
+  let one = fn(column, finished) {
+    let text =
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\""
+      <> column
+      <> "\",\"rank\":1,"
+      <> finished
+      <> "\"runs\":[{\"id\":\"r\",\"kind\":\"investigate\",\"model\":\"m\",\"state\":\"running\",\"started\":1,\"log\":\"\"}]}"
+    let assert Ok(t) = json.parse(text, task.task_decoder())
+    t
+  }
+  task.status_in(workflow, one("assigned", ""))
+  |> should.equal("Agent investigating")
+  task.status_in(workflow, one("complete", "")) |> should.equal("")
+  task.status_in(
+    workflow,
+    one(
+      "complete",
+      "\"finished\":{\"kind\":\"investigate\",\"outcome\":\"reported\",\"time\":3},",
+    ),
+  )
+  |> should.equal("Report ready")
+  task.actions(workflow, one("complete", "")) |> should.equal([])
+}
+
+/// The case reported: a task stored in one project and covering another,
+/// whose detail a host hands a running investigation and then the task
+/// completed. It shows completed, with no agent at work.
+pub fn a_hosted_detail_takes_the_completed_task_test() {
+  let one = fn(column, state) {
+    "{\"project\":\"solace-cli/board\",\"task\":{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\""
+    <> column
+    <> "\",\"rank\":1,\"scope\":[\"solace-cli/board\",\".\"],\"runs\":[{\"id\":\"r\",\"kind\":\"investigate\",\"model\":\"m\",\"state\":\""
+    <> state
+    <> "\",\"started\":1,\"log\":\"\"}]}}"
+  }
+  let workflow =
+    task.Workflow([
+      task.Column("assigned", "Assigned", ["complete"], False),
+      task.Column("complete", "Complete", [], True),
+    ])
+  let model =
+    task.Model(
+      ..loaded(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1}",
+      ),
+      hosted: True,
+      dir: "solace-cli/board",
+      workflow: workflow,
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.Handed([
+        #(1, one("assigned", "running")),
+        #(2, one("complete", "ended")),
+      ]),
+    )
+  let assert Some(t) = model.task
+  t.column |> should.equal("complete")
+  task.status_in(model.workflow, t) |> should.equal("")
+  task.status(t) |> should.equal("")
+  // A refetch takes the whole task, runs included.
+  let #(model, _) =
+    task.update(
+      task.Model(..model, task: Some(task.Task(..t, column: "assigned"))),
+      task.Refetched(
+        model.generation,
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"complete\",\"rank\":1,\"runs\":[]}",
+      ),
+    )
+  let assert Some(t) = model.task
+  t.column |> should.equal("complete")
+  t.runs |> should.equal([])
+}
+
+/// The host's `resync`, and this task's update named under another project,
+/// fetch the task again instead of being applied or dropped; the copy shown
+/// stays until the fetch answers.
+pub fn a_doubtful_message_fetches_the_task_again_test() {
+  let one = fn(project, id) {
+    "{\"project\":\""
+    <> project
+    <> "\",\"task\":{\"id\":\""
+    <> id
+    <> "\",\"title\":\"Other\",\"body\":\"\",\"column\":\"triage\",\"rank\":1}}"
+  }
+  let model =
+    task.Model(
+      ..loaded(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1}",
+      ),
+      hosted: True,
+      dir: "a",
+    )
+  task.stale(model, task.resync) |> should.be_true
+  task.stale(model, one(".", "1")) |> should.be_true
+  task.stale(model, one("a", "1")) |> should.be_false
+  task.stale(model, one(".", "2")) |> should.be_false
+  task.stale(model, "{\"project\":\".\",\"workflow\":{\"columns\":[]}}")
+  |> should.be_false
+  let #(after, _) = task.update(model, task.Live(task.resync))
+  after |> should.equal(model)
+  let #(after, _) = task.update(model, task.Live(one(".", "1")))
+  after |> should.equal(model)
+}
+
+/// Copy ID beside the title copies the task's reference, `task:<id>`, and
+/// says whether it copied until its moment passes or another task opens
+/// (D-98). A reply or a timer for an earlier click changes nothing.
+pub fn copy_id_beside_the_title_test() {
+  let model =
+    loaded(
+      "{\"id\":\"t1\",\"title\":\"Fix\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1}",
+    )
+  task.reference("t1") |> should.equal("task:t1")
+  let shown = body(model)
+  let assert [_, after_title] = string.split(shown, ">Fix</h2>")
+  after_title |> string.contains(">Copy ID</button>") |> should.be_true
+  shown |> string.contains("Copies task:t1") |> should.be_true
+  let #(asked, _) = task.update(model, task.CopyId)
+  body(asked) |> string.contains(">Copy ID</button>") |> should.be_true
+  let #(copied, _) = task.update(asked, task.CopyDone(1, True))
+  body(copied) |> string.contains(">Copied</button>") |> should.be_true
+  let #(later, _) = task.update(copied, task.CopyReset(1))
+  body(later) |> string.contains(">Copy ID</button>") |> should.be_true
+  // A copy that failed says so.
+  let #(failed, _) = task.update(asked, task.CopyDone(1, False))
+  body(failed) |> string.contains(">Copy failed</button>") |> should.be_true
+  // A second click: the first click's timer doesn't clear its label early.
+  let #(again, _) = task.update(copied, task.CopyId)
+  let #(again, _) = task.update(again, task.CopyDone(2, True))
+  let #(again, _) = task.update(again, task.CopyReset(1))
+  body(again) |> string.contains(">Copied</button>") |> should.be_true
+  // Another task opens: a late reply for this one shows nothing.
+  let #(other, _) = task.update(asked, task.TaskChanged("t2"))
+  let #(other, _) = task.update(other, task.CopyDone(1, True))
+  other.copy.1 |> should.equal("")
 }

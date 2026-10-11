@@ -1,3 +1,4 @@
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
@@ -699,9 +700,10 @@ pub fn detail_is_a_solace_task_element_test() {
   |> should.be_true
 }
 
-/// The open task's own events, and its project's workflow, go to its
-/// details, numbered and in order; other tasks' and other projects' don't.
-/// Opening another card starts the list again.
+/// The open task's own events, under any project, and its project's workflow
+/// go to its details, numbered and in order; other tasks' and other projects'
+/// workflows don't; a change to the list of projects does. Opening another
+/// card starts the list again.
 pub fn live_events_for_the_open_task_go_to_its_detail_test() {
   let #(model, _) = board.init(Nil)
   let #(model, _) =
@@ -731,16 +733,26 @@ pub fn live_events_for_the_open_task_go_to_its_detail_test() {
       model,
       board.Live("{\"project\":\"b\",\"task\":" <> task("1") <> "}"),
     )
-  model.live |> should.equal([#(1, own)])
+  let elsewhere = "{\"project\":\"b\",\"task\":" <> task("1") <> "}"
+  model.live |> should.equal([#(1, own), #(2, elsewhere)])
   // A workflow change after a task update is kept too, not replaced by it.
   let flow = "{\"project\":\"a\",\"workflow\":{\"columns\":[]}}"
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live("{\"project\":\"b\",\"workflow\":{\"columns\":[]}}"),
+    )
   let #(model, _) = board.update(model, board.Live(flow))
-  model.live |> should.equal([#(1, own), #(2, flow)])
+  model.live |> should.equal([#(1, own), #(2, elsewhere), #(3, flow)])
   // Another card starts the list again; numbers keep counting.
   let #(model, _) = board.update(model, board.Select("a", "2"))
   model.live |> should.equal([])
   let #(model, _) = board.update(model, board.Live(flow))
-  model.live |> should.equal([#(3, flow)])
+  model.live |> should.equal([#(4, flow)])
+  // The Scope tab lists the projects, so a change to the list goes too.
+  let projects = "{\"projects\":[\"a\",\"b\",\"c\"]}"
+  let #(model, _) = board.update(model, board.Live(projects))
+  model.live |> should.equal([#(4, flow), #(5, projects)])
 }
 
 /// `<solace-task>` says the open task moved: the board opens it from there.
@@ -754,7 +766,8 @@ pub fn task_moved_follows_the_open_task_test() {
 }
 
 /// What a new connection replays is applied to the cards when it is caught
-/// up, and the open task's details get it too.
+/// up, and the open task's details get it too, then `resync` to fetch the
+/// task again in case an event was lost.
 pub fn a_replay_after_a_reconnect_reaches_the_open_detail_test() {
   let #(model, _) = board.init(Nil)
   let #(model, _) =
@@ -775,5 +788,163 @@ pub fn a_replay_after_a_reconnect_reaches_the_open_detail_test() {
   let #(model, _) = board.update(model, board.Live(event("New")))
   model.live |> should.equal([])
   let #(model, _) = board.update(model, board.CaughtUp)
-  model.live |> should.equal([#(1, event("Old")), #(2, event("New"))])
+  model.live
+  |> should.equal([
+    #(1, event("Old")),
+    #(2, event("New")),
+    #(3, solace_task.resync),
+  ])
+}
+
+/// A toast has its heading and buttons, never the text of the question or
+/// note that raised it.
+pub fn notice_shows_only_its_heading_test() {
+  let question =
+    solace_task.Notice("Question on T", "Why this?", "", "1", "questions")
+  let reply =
+    solace_task.Notice("Reply on T", "Here is my answer", "", "1", "notes")
+  let stopped =
+    solace_task.Notice(
+      "Stopped T: interrupted",
+      "The work run ended: interrupted.",
+      "",
+      "1",
+      "runs",
+    )
+  let #(model, _) = board.init(Nil)
+  let rendered =
+    board.view(board.Model(..model, notices: [question, reply, stopped]))
+    |> element.to_string
+  rendered |> string.contains("Question on T") |> should.be_true
+  rendered |> string.contains("Reply on T") |> should.be_true
+  rendered |> string.contains("Stopped T: interrupted") |> should.be_true
+  rendered |> string.contains("Show task") |> should.be_true
+  rendered |> string.contains("Why this?") |> should.be_false
+  rendered |> string.contains("Here is my answer") |> should.be_false
+  rendered |> string.contains("run ended") |> should.be_false
+}
+
+/// Close All shows only when more than 5 toasts are showing, and dismisses
+/// every one.
+pub fn close_all_shows_above_five_toasts_test() {
+  let toast = fn(n) {
+    solace_task.Notice(
+      "Question on T" <> int.to_string(n),
+      "",
+      "",
+      int.to_string(n),
+      "questions",
+    )
+  }
+  let shows = fn(model) {
+    board.view(model) |> element.to_string |> string.contains("Close All")
+  }
+  let #(model, _) = board.init(Nil)
+  shows(board.Model(..model, notices: list.map([1, 2, 3, 4, 5], toast)))
+  |> should.be_false
+  let six = board.Model(..model, notices: list.map([1, 2, 3, 4, 5, 6], toast))
+  shows(six) |> should.be_true
+  let #(cleared, _) = board.update(six, board.DismissAll)
+  cleared.notices |> should.equal([])
+  shows(cleared) |> should.be_false
+}
+
+/// D-95: a card in a final column has an Archive button; an open one has none,
+/// and an archived task leaves the board and its count.
+pub fn archive_button_and_archived_cards_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.WorkflowLoaded(
+        "",
+        "{\"columns\":[{\"id\":\"triage\",\"label\":\"Triage\"},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true}]}",
+      ),
+    )
+  let task = fn(id, title, column, archived) {
+    "{\"task\":{\"id\":\""
+    <> id
+    <> "\",\"title\":\""
+    <> title
+    <> "\",\"body\":\"\",\"column\":\""
+    <> column
+    <> "\",\"rank\":1,\"archivedTime\":"
+    <> archived
+    <> "}}"
+  }
+  let #(model, _) = board.update(model, board.CaughtUp)
+  let #(model, _) =
+    board.update(model, board.Live(task("1", "Open", "triage", "null")))
+  let #(model, _) =
+    board.update(model, board.Live(task("2", "Done", "complete", "null")))
+  let rendered = board.view(model) |> element.to_string
+  rendered |> string.contains("aria-label=\"Archive Done\"") |> should.be_true
+  rendered |> string.contains("aria-label=\"Archive Open\"") |> should.be_false
+  rendered |> string.contains("2 tasks") |> should.be_true
+  let #(model, _) = board.update(model, board.Select("", "2"))
+  let #(model, _) =
+    board.update(model, board.Live(task("2", "Done", "complete", "1700")))
+  let rendered = board.view(model) |> element.to_string
+  rendered |> string.contains(">Done") |> should.be_false
+  rendered |> string.contains("1 task") |> should.be_true
+  // The server's reply closes the archived task's details.
+  let #(model, _) =
+    board.update(
+      model,
+      board.Archived(
+        "{\"id\":\"2\",\"title\":\"Done\",\"body\":\"\",\"column\":\"complete\",\"rank\":1,\"archivedTime\":1700}",
+      ),
+    )
+  model.selected_card |> should.equal(None)
+}
+
+/// The case reported: a task stored in `a` and covering the root's project
+/// too, opened from either lane, its detail handed a running investigation
+/// and then the task completed. Both reach it in order, and its card shows no
+/// agent at work.
+pub fn a_completed_task_across_two_lanes_reaches_its_detail_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\".\",\"label\":\"root\",\"name\":\"r\",\"base\":\"\"},{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"}],\"found\":[]}",
+      ),
+    )
+  let #(model, _) = board.update(model, board.CaughtUp)
+  let flow =
+    "{\"project\":\"a\",\"workflow\":{\"columns\":[{\"id\":\"assigned\",\"actions\":[\"complete\"]},{\"id\":\"complete\",\"actions\":[],\"final\":true}]}}"
+  let #(model, _) = board.update(model, board.Live(flow))
+  let one = fn(column, state) {
+    "{\"project\":\"a\",\"task\":{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\""
+    <> column
+    <> "\",\"rank\":1,\"scope\":[\"a\",\".\"],\"runs\":[{\"id\":\"r\",\"kind\":\"investigate\",\"model\":\"m\",\"state\":\""
+    <> state
+    <> "\",\"started\":1,\"log\":\"\"}]}}"
+  }
+  let running = one("assigned", "running")
+  let done = one("complete", "ended")
+  let #(model, _) = board.update(model, board.Live(running))
+  // Either lane's card opens the task from its home, `a`.
+  let html = element.to_string(board.view(model))
+  string.contains(html, "Agent investigating") |> should.be_true
+  let #(model, _) = board.update(model, board.Select("a", "1"))
+  let #(model, _) = board.update(model, board.Live(running))
+  let #(model, _) = board.update(model, board.Live(done))
+  model.live |> should.equal([#(1, running), #(2, done)])
+  string.contains(element.to_string(board.view(model)), "Agent investigating")
+  |> should.be_false
+}
+
+/// D-98: a task link opens the task and asks `<solace-task>` to show it, on
+/// its details; asking again for the same task is news too.
+pub fn a_task_link_opens_its_task_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) = board.update(model, board.Focus(".", "abc"))
+  model.selected_card |> should.equal(Some(#(".", "abc")))
+  model.reveal |> should.equal(#("details", "abc", 1))
+  let #(model, _) = board.update(model, board.Focus(".", "abc"))
+  model.reveal |> should.equal(#("details", "abc", 2))
+  let #(same, _) = board.update(model, board.Focus(".", ""))
+  same |> should.equal(model)
 }

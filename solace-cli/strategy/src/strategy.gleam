@@ -110,6 +110,8 @@ pub type Model {
     /// The run shown in the planning panel, "" for none.
     plan_open: String,
     plan_collapsed: Bool,
+    /// The planning panel's width in pixels, kept in the browser.
+    plan_width: Int,
     /// The panel's message box: a new run's first message, or the next one.
     plan_text: String,
     /// A start, message, answer, end or stop sent and not yet answered.
@@ -125,6 +127,9 @@ pub type Model {
     plan_effort: String,
     /// The shadow root, once it has rendered, for the editor's tools.
     root: dynamic.Dynamic,
+    /// The task a task link asked to show (D-98), and how many times one was
+    /// asked, so asking again is news to `<solace-task>`.
+    reveal: #(String, Int),
   )
 }
 
@@ -136,6 +141,9 @@ pub type Msg {
   CaughtUp
   /// A row: its task opens below the list.
   Open(String, String)
+  /// A task link (D-98): the shell asks to show this task, stored in project
+  /// `dir`, on the Tasks tab, scrolled into view.
+  Focus(String, String)
   /// `<solace-task>` says the open task now lives in another project.
   TaskMoved(String, String)
   Filter(Filters)
@@ -234,6 +242,14 @@ pub type Msg {
   Attached(dynamic.Dynamic)
   /// Collapses the planning panel, or opens it.
   PlanCollapse
+  /// A press on the panel's resize handle at this clientX: a drag begins.
+  PlanDrag(Int)
+  /// The panel's width during a drag.
+  PlanWidth(Int)
+  /// The drag ended: the width is stored.
+  PlanWidthDone
+  /// A key on the focused resize handle: the arrows, Home or End.
+  PlanKey(String)
   PlanText(String)
   PlanModel(String)
   PlanEffort(String)
@@ -316,7 +332,10 @@ fn ok_if_changed(rest: String, pair: String) -> Result(String, Nil) {
 
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   // The transport starts when the instance connects, once `base` is known.
-  #(new(tab_from(tab_query())), effect.none())
+  #(
+    Model(..new(tab_from(tab_query())), plan_width: stored_width()),
+    effect.none(),
+  )
 }
 
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
@@ -885,7 +904,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           effect.none(),
         )
       }
-    // Refused during a run (D-88, E7003), unlike the links.
+    // Refused during a run (D-100, E7003), unlike the links.
     SetDepends(dir, id, ids) -> #(
       Model(..model, milestone_error: ""),
       effect.from(fn(send) {
@@ -1040,11 +1059,41 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         False -> #(Model(..model, replay: [text, ..model.replay]), fx)
       }
     }
-    CaughtUp -> #(settle(Model(..model, caught_up: True)), effect.none())
+    CaughtUp -> #(
+      resync(settle(Model(..model, caught_up: True))),
+      effect.none(),
+    )
     PlanCollapse -> #(
       Model(..model, plan_collapsed: !model.plan_collapsed),
       effect.none(),
     )
+    PlanDrag(x) -> #(
+      model,
+      effect.from(fn(send) {
+        drag(x, model.plan_width, fn(w) { send(PlanWidth(w)) }, fn() {
+          send(PlanWidthDone)
+        })
+      }),
+    )
+    PlanWidth(width) -> #(
+      Model(..model, plan_width: plan.clamp(width, window_width())),
+      effect.none(),
+    )
+    PlanWidthDone -> #(model, store_width(model.plan_width))
+    // The handle is the panel's left edge: Left widens it.
+    PlanKey(key) -> {
+      let window = window_width()
+      let width =
+        case key {
+          "ArrowLeft" -> model.plan_width + plan.key_step
+          "ArrowRight" -> model.plan_width - plan.key_step
+          "Home" -> plan.min_width
+          "End" -> plan.max_width(window)
+          _ -> model.plan_width
+        }
+        |> plan.clamp(window)
+      #(Model(..model, plan_width: width), store_width(width))
+    }
     PlanText(text) -> #(Model(..model, plan_text: text), effect.none())
     // Efforts differ between models, so a new model starts at its default.
     PlanModel(id) -> #(
@@ -1215,6 +1264,21 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         _ -> effect.from(fn(_) { set_tab(tab_name(Tasks)) })
       },
     )
+    Focus(_, "") -> #(model, effect.none())
+    // `<solace-task>` scrolls into view now, or once the task loads.
+    Focus(dir, id) -> #(
+      Model(
+        ..model,
+        tab: Tasks,
+        selected: Some(#(dir, id)),
+        live: case model.selected == Some(#(dir, id)) {
+          True -> model.live
+          False -> []
+        },
+        reveal: #(id, model.reveal.1 + 1),
+      ),
+      effect.from(fn(_) { set_tab(tab_name(Tasks)) }),
+    )
     TaskMoved(dir, id) ->
       case model.selected {
         Some(#(_, shown)) if shown == id -> #(
@@ -1224,7 +1288,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         _ -> #(model, effect.none())
       }
     Filter(filters) -> #(Model(..model, filters: filters), effect.none())
-    // Allowed in final columns and during runs (D-87, D-88).
+    // Allowed in final columns and during runs (D-87, D-100).
     Link(dir, id, field, value) -> #(
       model,
       effect.from(fn(send) {
@@ -1318,9 +1382,9 @@ pub fn view(model: Model) -> Element(Msg) {
 /// shell's for `/strategy`).
 const view_styles =
   ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a}
-.strategy{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;min-height:calc(100dvh - 56px);background:var(--sheet);color:var(--ink);display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto 1fr}
-.strategy>.tabs{grid-column:1/-1}.strategy>[role=tabpanel]{grid-column:1;grid-row:2;min-width:0}
-@media (max-width:900px){.strategy{display:block}}
+.strategy{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;height:calc(100dvh - 56px);overflow:hidden;background:var(--sheet);color:var(--ink);display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto minmax(0,1fr)}
+.strategy>.tabs{grid-column:1/-1}.strategy>[role=tabpanel]{grid-column:1;grid-row:2;min-width:0;min-height:0;overflow:auto}
+@media (max-width:900px){.strategy{display:block;height:auto;overflow:visible}.strategy>[role=tabpanel]{overflow:visible}}
 .tabs{display:flex;background:var(--sheet);border-bottom:2px solid var(--edge)}
 .tabs button{font:inherit;color:inherit;border:0;border-right:1px solid var(--line);background:transparent;padding:10px 16px;cursor:pointer}
 .tabs button:hover{background:var(--hover)}
@@ -1381,6 +1445,12 @@ pub fn register() -> Result(Nil, lustre.Error) {
   lustre.register(
     lustre.component(init, update, view, [
       component.on_attribute_change("base", fn(base) { Ok(BaseChanged(base)) }),
+      // The shell's `focus` property, `{dir, id, n}`: `n` makes asking again news.
+      component.on_property_change("focus", {
+        use dir <- decode.field("dir", decode.string)
+        use id <- decode.field("id", decode.string)
+        decode.success(Focus(dir, id))
+      }),
       component.on_connect(Connected),
       component.on_disconnect(Disconnected),
       component.adopt_styles(False),
@@ -1497,6 +1567,7 @@ pub fn new(tab: Tab) -> Model {
     runs: [],
     plan_open: "",
     plan_collapsed: False,
+    plan_width: plan.default_width,
     plan_text: "",
     plan_sending: False,
     plan_error: "",
@@ -1506,6 +1577,7 @@ pub fn new(tab: Tab) -> Model {
     plan_model: "",
     plan_effort: "",
     root: no_root(),
+    reveal: #("", 0),
   )
 }
 
@@ -1743,16 +1815,20 @@ fn settle(model: Model) -> Model {
   }
 }
 
-/// Whether a live message is for the open task's details: its own update, or
-/// its project's workflow.
+/// Whether a live message is for the open task's details: its own update
+/// under any project (`<solace-task>` fetches itself again when one names
+/// another than its home, D-61), its project's workflow, or a change to the
+/// list of projects, which its Scope tab shows.
 fn for_detail(model: Model, text: String) -> Bool {
   case model.selected {
     None -> False
     Some(#(home, id)) ->
-      event_dir(model, text) == home
-      && case at(text, "task", decode.at(["id"], decode.string)) {
+      case at(text, "task", decode.at(["id"], decode.string)) {
         Ok(task) -> task == id
-        Error(_) -> result.is_ok(at(text, "workflow", decode.dynamic))
+        Error(_) ->
+          solace_task.projects_changed(text)
+          || event_dir(model, text) == home
+          && result.is_ok(at(text, "workflow", decode.dynamic))
       }
   }
 }
@@ -1762,17 +1838,7 @@ fn for_detail(model: Model, text: String) -> Bool {
 pub fn hand(model: Model, text: String) -> Model {
   case for_detail(model, text) {
     False -> model
-    True -> {
-      let n = model.live_n + 1
-      Model(
-        ..model,
-        live_n: n,
-        live: list.append(model.live, [#(n, text)])
-          |> list.reverse
-          |> list.take(50)
-          |> list.reverse,
-      )
-    }
+    True -> push(model, text)
   }
 }
 
@@ -2119,6 +2185,7 @@ fn task_base(model: Model, dir: String) -> String {
 /// which loads and changes the task itself. This page hands it the task's
 /// events (`live`) and follows it when it moves to another of its projects.
 fn task_view(model: Model, dir: String, id: String) -> Element(Msg) {
+  let #(shown, asked) = model.reveal
   element.element(
     "solace-task",
     [
@@ -2136,6 +2203,18 @@ fn task_view(model: Model, dir: String, id: String) -> Element(Msg) {
           json.object([#("n", json.int(m.0)), #("text", json.string(m.1))])
         }),
       ),
+      case shown {
+        "" -> attribute.none()
+        _ ->
+          attribute.property(
+            "reveal",
+            json.object([
+              #("tab", json.string("details")),
+              #("id", json.string(shown)),
+              #("n", json.int(asked)),
+            ]),
+          )
+      },
       event.on("task-moved", {
         use dir <- decode.subfield(["detail", "dir"], decode.string)
         use id <- decode.subfield(["detail", "id"], decode.string)
@@ -2542,6 +2621,8 @@ fn plan_view(model: Model) -> Element(Msg) {
       shown: plan_shown(model),
       entries: model.plan_entries,
       collapsed: model.plan_collapsed,
+      width: model.plan_width,
+      max_width: plan.max_width(window_width()),
       text: model.plan_text,
       sending: model.plan_sending,
       error: model.plan_error,
@@ -2550,6 +2631,8 @@ fn plan_view(model: Model) -> Element(Msg) {
       effort: model.plan_effort,
       name: fn(kind, id) { record_name(model, kind, id) },
       on_collapse: PlanCollapse,
+      on_drag: PlanDrag,
+      on_key: PlanKey,
       on_text: PlanText,
       on_model: PlanModel,
       on_effort: PlanEffort,
@@ -2562,3 +2645,52 @@ fn plan_view(model: Model) -> Element(Msg) {
     ),
   )
 }
+
+fn push(model: Model, text: String) -> Model {
+  let n = model.live_n + 1
+  Model(
+    ..model,
+    live_n: n,
+    live: list.append(model.live, [#(n, text)])
+      |> list.reverse
+      |> list.take(50)
+      |> list.reverse,
+  )
+}
+
+/// Once the stream has (re)connected and caught up, the open task's details
+/// fetch the task again: an event lost meanwhile can't leave them stale.
+fn resync(model: Model) -> Model {
+  case model.selected {
+    None -> model
+    Some(_) -> push(model, solace_task.resync)
+  }
+}
+
+/// Where the browser keeps the planning panel's width.
+const width_key = "solace-strategy-plan-width"
+
+/// The planning panel's stored width, else the default.
+fn stored_width() -> Int {
+  load(width_key)
+  |> int.parse
+  |> result.unwrap(plan.default_width)
+  |> plan.clamp(window_width())
+}
+
+fn store_width(width: Int) -> Effect(Msg) {
+  effect.from(fn(_) { store(width_key, int.to_string(width)) })
+}
+
+@external(javascript, "./api.mjs", "load")
+fn load(key: String) -> String
+
+@external(javascript, "./api.mjs", "store")
+fn store(key: String, value: String) -> Nil
+
+/// The window's width in pixels, 0 with no window.
+@external(javascript, "./api.mjs", "window_width")
+fn window_width() -> Int
+
+@external(javascript, "./api.mjs", "drag")
+fn drag(x: Int, width: Int, move: fn(Int) -> Nil, done: fn() -> Nil) -> Nil

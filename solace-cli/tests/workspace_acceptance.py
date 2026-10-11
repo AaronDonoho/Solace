@@ -367,6 +367,30 @@ class Root(unittest.TestCase):
         self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'cancel'})
         self.assertEqual((self.root/'DECISIONS.md').read_text(), '# Decisions\n')
 
+    def test_a_file_patch_changes_several_files_and_cancel_undoes_them(self):
+        # D-104: `write` with no path takes a patch of several files; the task records each, and cancel restores them.
+        project(self.root/'app')
+        (self.root/'DECISIONS.md').write_text('# Decisions\n')
+        (self.root/'old.txt').write_text('old\n')
+        self.migrate('--project', 'app')
+        self.start()
+        patch = ('*** Begin Patch\n*** Update File: DECISIONS.md\n@@ # Decisions\n+\n+## D-1 Patched\n'
+                 '*** Add File: docs/new.md\n+new\n*** Delete File: old.txt\n*** End Patch\n')
+        steps = [{'command': 'write', 'text': patch}, {'command': 'task done patched'}]
+        t = self.api('POST', '/tasks', {'title': 'Patch files', 'body': json.dumps(steps)})
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'plan'})
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        t = self.wait('', t, lambda x: x['column'] == 'needs_review')
+        replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(t['runs'][-1]['id'] + '.responses')).read_text().splitlines()]
+        self.assertIn('Wrote DECISIONS.md\nAdded docs/new.md\nRemoved old.txt\n', replies[0])
+        self.assertEqual((self.root/'DECISIONS.md').read_text(), '# Decisions\n\n## D-1 Patched\n')
+        self.assertEqual((self.root/'docs/new.md').read_text(), 'new\n')
+        self.assertFalse((self.root/'old.txt').exists())
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'cancel'})
+        self.assertEqual((self.root/'DECISIONS.md').read_text(), '# Decisions\n')
+        self.assertFalse((self.root/'docs/new.md').exists())
+        self.assertEqual((self.root/'old.txt').read_text(), 'old\n')
+
     def test_every_root_gets_its_own_lane(self):
         # A root from before D-60: its solace.toml only lists projects, and it has no store.
         project(self.root/'app')
@@ -445,7 +469,7 @@ class Root(unittest.TestCase):
         end = time.monotonic() + 20
         while self.api('GET', f'/strategy/runs/{rid}')['state'] != 'waiting' and time.monotonic() < end: time.sleep(.05)
         replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(rid + '.responses')).read_text().splitlines()]
-        self.assertEqual([x['id'] for x in json.loads(replies[0])['features']], [f['id']])
+        self.assertIn(f"Features:\n{f['id']} proposed m:- Feature F1", replies[0])
         # Serving makes the root a project of plain files too (D-60), so the root's decisions can be read.
         self.assertIn('## D-1 First thing', replies[1])
         self.assertIn('pub fn answer() { 42 }', replies[2])

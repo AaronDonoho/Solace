@@ -1,6 +1,9 @@
 import contracts
+import gleam/dynamic/decode
 import gleam/int
+import gleam/json
 import gleam/list
+import gleam/option.{None}
 import gleam/result
 import gleam/string
 import gleam/uri.{type Uri}
@@ -11,6 +14,7 @@ import lustre/element.{type Element}
 import lustre/element/html
 import migration
 import modem
+import settings
 import solace_board
 import strategy
 
@@ -19,6 +23,7 @@ pub fn main() -> Nil {
   let assert Ok(_) = contracts.register()
   let assert Ok(_) = strategy.register()
   let assert Ok(_) = migration.register()
+  let assert Ok(_) = settings.register()
   let assert Ok(_) =
     lustre.application(init, update, view)
     |> lustre.start("#app", Nil)
@@ -30,10 +35,18 @@ pub type Route {
   Migrate
   Contracts(base: String)
   Strategy
+  Settings
+  /// A task link's address, `/task/<id>` (D-98): resolved to the board or Strategy, never shown itself.
+  TaskLink(id: String)
 }
 
 pub type Msg {
   RouteChanged(Route)
+  /// A task link was clicked in a page: the task's id.
+  Follow(String)
+  /// The reply to `GET /tasks/find/{id}`: the id, the reply, and whether the task link's own address is
+  /// replaced in the history (it was loaded or reached by back or forward) rather than added to.
+  Found(String, String, Bool)
 }
 
 pub fn route(uri: Uri) -> Route {
@@ -42,16 +55,33 @@ pub fn route(uri: Uri) -> Route {
     ["migrate"] -> Migrate
     ["contracts"] -> Contracts("")
     ["strategy"] -> Strategy
+    ["settings"] -> Settings
     ["p", dir, "contracts"] -> Contracts("/p/" <> dir)
+    ["task", id] -> TaskLink(id)
     _ -> Board
   }
 }
 
 /// A route's page element, hidden unless it is the one shown.
-pub fn page(route: Route, shown: Bool) -> Element(msg) {
+/// The page a task link asked for gets the task in its `focus` property, `{dir, id, n}`.
+pub fn page(route: Route, shown: Bool, focus: Focus) -> Element(msg) {
   let attributes = case route {
     Contracts(base) if base != "" -> [attribute.attribute("base", base)]
     _ -> []
+  }
+  let attributes = case focus.page == page_of(route) && focus.id != "" {
+    True -> [
+      attribute.property(
+        "focus",
+        json.object([
+          #("dir", json.string(focus.dir)),
+          #("id", json.string(focus.id)),
+          #("n", json.int(focus.n)),
+        ]),
+      ),
+      ..attributes
+    ]
+    False -> attributes
   }
   let attributes = case shown {
     True -> attributes
@@ -65,24 +95,49 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     Ok(uri) -> route(uri)
     Error(_) -> Board
   }
+  // A task link's address shows the board until the task is found.
+  let #(shown, found) = case initial {
+    TaskLink(id) -> #(Board, find(id, True))
+    _ -> #(initial, effect.none())
+  }
   #(
-    Model(route: initial, opened: [initial]),
-    modem.init(fn(uri) { RouteChanged(route(uri)) }),
+    Model(route: shown, opened: [shown], focus: no_focus),
+    effect.batch([
+      modem.init(fn(uri) { RouteChanged(route(uri)) }),
+      effect.from(fn(send) { follow_links(fn(id) { send(Follow(id)) }) }),
+      found,
+    ]),
   )
 }
 
 /// Showing another page keeps the window's scroll of the one left, read before the view hides it, and
 /// puts back the scroll of the one shown once it is drawn.
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
-  let RouteChanged(route) = msg
-  let next = Model(route: route, opened: open(model.opened, route))
-  let entering = page_of(route)
-  case page_of(model.route) == entering {
-    True -> #(next, effect.none())
-    False -> {
-      leave_scroll(page_of(model.route))
-      #(next, effect.before_paint(fn(_, _) { enter_scroll(entering) }))
-    }
+  case msg {
+    RouteChanged(TaskLink(id)) -> #(model, find(id, True))
+    RouteChanged(route) -> show(model, route)
+    Follow(id) -> #(model, find(id, False))
+    Found(id, reply, replace) ->
+      case target(reply) {
+        OnBoard(dir) -> go(model, Board, "/", dir, id, replace)
+        InStrategy(dir) -> go(model, Strategy, "/strategy", dir, id, replace)
+        nowhere -> {
+          let text = case nowhere {
+            Missing -> missing_text
+            _ -> failed_text
+          }
+          #(
+            model,
+            effect.batch([
+              effect.from(fn(_) { toast(text) }),
+              case replace {
+                True -> modem.replace("/", None, None)
+                False -> effect.none()
+              },
+            ]),
+          )
+        }
+      }
   }
 }
 
@@ -102,12 +157,13 @@ pub fn view(model: Model) -> Element(msg) {
   let shown = page_of(model.route)
   element.fragment([
     html.nav([attribute.class("menu")], [
-      link("/", "Board", shown == page_of(Board)),
       link("/migrate", "Migration", shown == page_of(Migrate)),
-      link("/contracts", "Contracts", shown == page_of(Contracts(""))),
       link("/strategy", "Strategy", shown == page_of(Strategy)),
+      link("/", "Board", shown == page_of(Board)),
+      link("/contracts", "Contracts", shown == page_of(Contracts(""))),
+      link("/settings", "Settings", shown == page_of(Settings)),
     ]),
-    ..list.map(model.opened, fn(r) { page(r, page_of(r) == shown) })
+    ..list.map(model.opened, fn(r) { page(r, page_of(r) == shown, model.focus) })
   ])
 }
 
@@ -315,6 +371,11 @@ fn inline(nodes: List(Html)) -> String {
       Tag("a", attributes, children) ->
         case inline(children), list.key_find(attributes, "href") {
           "", _ -> ""
+          text, Ok("/task/" <> id) ->
+            case text == "task:" <> id {
+              True -> text
+              False -> "[" <> text <> "](task:" <> id <> ")"
+            }
           text, Ok(href) -> "[" <> text <> "](" <> href <> ")"
           text, Error(_) -> text
         }
@@ -359,8 +420,9 @@ fn first_number(attributes: List(#(String, String))) -> Int {
 
 /// The shell's state: the route shown, and every page opened so far, in the order first opened. A page
 /// stays in the document once opened, hidden while another shows, so its work is there when you come back.
+/// `focus` is the last task link followed.
 pub type Model {
-  Model(route: Route, opened: List(Route))
+  Model(route: Route, opened: List(Route), focus: Focus)
 }
 
 /// The page a route shows: its custom element. Routes to the same page share one element and its state.
@@ -370,6 +432,8 @@ pub fn page_of(route: Route) -> String {
     Migrate -> "solace-migration"
     Contracts(_) -> "solace-contracts"
     Strategy -> "solace-strategy"
+    Settings -> "solace-settings"
+    TaskLink(_) -> "solace-board"
   }
 }
 
@@ -394,3 +458,96 @@ fn leave_scroll(page: String) -> Nil
 
 @external(javascript, "./page_scroll.mjs", "enter")
 fn enter_scroll(page: String) -> Nil
+
+/// Shows a route's page.
+fn show(model: Model, route: Route) -> #(Model, Effect(Msg)) {
+  let next = Model(..model, route: route, opened: open(model.opened, route))
+  let entering = page_of(route)
+  case page_of(model.route) == entering {
+    True -> #(next, effect.none())
+    False -> {
+      leave_scroll(page_of(model.route))
+      #(next, effect.before_paint(fn(_, _) { enter_scroll(entering) }))
+    }
+  }
+}
+
+/// A task link's request to a page (D-98): the page's element, the project the task is stored in, its id,
+/// and how many links were followed, so following the same one again is news to the page.
+pub type Focus {
+  Focus(page: String, dir: String, id: String, n: Int)
+}
+
+/// No task link followed yet.
+pub const no_focus = Focus("", "", "", 0)
+
+/// Where a task link opens: on the board, on the Strategy page (an archived task is off the board, D-95),
+/// or nowhere: there is no such task, or the lookup failed (the server or the network), so whether there
+/// is one isn't known. The first two name the project the task is stored in.
+pub type Target {
+  OnBoard(dir: String)
+  InStrategy(dir: String)
+  Missing
+  Unknown
+}
+
+/// Where a task link opens, from the reply to `GET /tasks/find/{id}`: `{dir, archived}`; `E7023` for no
+/// such task; any other reply (another error, or a network failure's message) leaves it unknown.
+pub fn target(reply: String) -> Target {
+  let decoder = {
+    use dir <- decode.field("dir", decode.string)
+    use archived <- decode.field("archived", decode.bool)
+    decode.success(#(dir, archived))
+  }
+  case json.parse(reply, decoder) {
+    Ok(#(dir, False)) -> OnBoard(dir)
+    Ok(#(dir, True)) -> InStrategy(dir)
+    Error(_) ->
+      case json.parse(reply, decode.at(["code"], decode.string)) {
+        Ok("E7023") -> Missing
+        _ -> Unknown
+      }
+  }
+}
+
+/// The toast for a task link to no task.
+pub const missing_text = "Task does not exist"
+
+/// Opens a found task on `route`'s page: the page gets it in its `focus` property. The address changes to
+/// the page's, added to the history for a click, in place of the task link's own address otherwise; a click
+/// on the page shown changes nothing.
+fn go(
+  model: Model,
+  route: Route,
+  path: String,
+  dir: String,
+  id: String,
+  replace: Bool,
+) -> #(Model, Effect(Msg)) {
+  let model =
+    Model(..model, focus: Focus(page_of(route), dir, id, model.focus.n + 1))
+  case replace, page_of(model.route) == page_of(route) {
+    True, _ -> #(model, modem.replace(path, None, None))
+    False, True -> #(model, effect.none())
+    False, False -> #(model, modem.push(path, None, None))
+  }
+}
+
+/// Asks the server where task `id` is (D-98).
+fn find(id: String, replace: Bool) -> Effect(Msg) {
+  effect.from(fn(send) {
+    find_task(id, fn(reply) { send(Found(id, reply, replace)) })
+  })
+}
+
+@external(javascript, "./task_link.mjs", "find_task")
+fn find_task(id: String, receive: fn(String) -> Nil) -> Nil
+
+@external(javascript, "./task_link.mjs", "follow_links")
+fn follow_links(follow: fn(String) -> Nil) -> Nil
+
+@external(javascript, "./task_link.mjs", "toast")
+fn toast(text: String) -> Nil
+
+/// The toast for a task link whose lookup failed: the task may well exist.
+pub const failed_text = "Couldn't look up the task. Try again."

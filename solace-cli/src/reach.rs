@@ -583,6 +583,23 @@ pub fn suites(s: &Store, ix: &Index) -> Result<Vec<Suite>, Failure> {
     Ok(out)
 }
 
+/// Every entry point the declared suites name, resolved or not, as (suite,
+/// entry): `extract` lists those that stop resolving (`suites` skips them).
+pub fn entries(s: &Store) -> Result<Vec<(String, String)>, Failure> {
+    let settings = lockdown::settings(&s.root)?;
+    let mut out = vec![];
+    for (name, c) in settings.get("commands").and_then(|c| c.as_table()).into_iter().flatten() {
+        let Some(checks) = c.get("checks").and_then(|x| x.as_array()) else { continue };
+        let run: Vec<&str> = c["run"].as_array().into_iter().flatten().filter_map(|x| x.as_str()).collect();
+        let mut named: Vec<String> = checks.iter().filter_map(|x| x.as_str().map(String::from)).filter(|e| e != "*").collect();
+        if let ["gleam", "run", "-m", m, ..] = run.as_slice() {
+            named.push(format!("{m}.main"));
+        }
+        out.extend(named.into_iter().map(|e| (name.clone(), e)));
+    }
+    Ok(out)
+}
+
 /// The suites whose reach holds one of `syms`, as `e2e (`run e2e`)`.
 pub fn reached(suites: &[Suite], syms: &[usize]) -> Vec<String> {
     suites

@@ -84,7 +84,7 @@ The root's milestones, each with its features and their tasks, drawn by `src/roa
   It leaves out the task itself, its dependencies, and the tasks that depend on it, directly or through others,
   since those would make a cycle. **Add** or **Remove** sends `PATCH {base}/tasks/{id} {dependsOn}` with the whole
   list. The server's refusal shows in the alert above the groups: `E7024` (itself or a
-  missing task), `E7025` (a cycle), `E7003` (a run is going, D-88) or `E7004` (a final column).
+  missing task), `E7025` (a cycle), `E7003` (a run is going, D-100) or `E7004` (a final column).
 
 ## Tasks tab
 
@@ -99,7 +99,10 @@ Every task of every project, one row each: title, column, project (in a workspac
   the body. Notes and changes are not in `GET /tasks`, so they are not searched; a server search is left to the
   mass-edit/archive work.
 - **Inline links.** Each row's feature and milestone selects send `PATCH {base}/tasks/{id}` with that one field
-  (null clears it), allowed in final columns and during runs (D-87, D-88).
+  (null clears it), allowed in final columns and during runs (D-87, D-100).
+- **Task links (D-98).** The shell's `focus` property, `{dir, id, n}`, opens the task on this tab, from any tab,
+  and asks `<solace-task>` to scroll it into view (its `reveal`). The shell sends here a linked task that is
+  archived, so off the board.
 - **Details.** A row opens `<solace-task>` (components project) below the list, `hosted`: this page hands it the
   task's events in `live` and follows it when it moves to another project. The page defines the full colour set
   (light in the component's styles, dark in `index.html` and the shell), since `<solace-task>` sets none.
@@ -113,8 +116,17 @@ collapses it to one line: the shown run's state and model, or whether a run is o
 - **Data.** The root's `/events` replays `{strategyRuns}` (no notes) after `{vision}` and sends `{strategyRun}` in
   full after every change, with no `project`. A replayed run keeps the notes the page already has. The model list
   is `GET /models`; an unavailable model shows why and can't be picked.
-- **Context.** Start plans the task open on the Tasks tab, else the whole page (`{kind: "page"}`). A context with
-  an open run offers **Open it** instead of Start (the server allows one, `E7003`).
+- **Layout.** Below the shell's menu the page fills the window: the tab content scrolls on its own, and the panel
+  runs from under the tab bar to the bottom of the window whatever its content. Its body scrolls inside it
+  (`overscroll-behavior: contain`, so its scroll never moves the page). At 900px and narrower the panel stacks
+  below the tabs as before, with no resize handle.
+- **Width.** Drag the panel's left edge, or focus it (a `separator` with its value in pixels) and use the arrow
+  keys (Left widens by 16px, Right narrows), Home (narrowest) and End (widest). It stays between 280px and 60% of
+  the window. The width is kept in `localStorage` as `solace-strategy-plan-width`, stored when a drag ends or a
+  key is pressed, and read when the page loads; without storage the panel is 380px.
+- **Context.** Start plans the task open on the Tasks tab, else the whole project (`{kind: "page"}`). The panel
+  says which: "Planning Context: Whole Project", or "Planning Context: task *title*" (feature and milestone the
+  same way). A context with an open run offers **Open it** instead of Start (the server allows one, `E7003`).
 - **Start.** The model, its effort when it offers several, and the first message: `POST /strategy/runs {model,
   effort?, text, context}`. The reply's run is shown.
 - **A run** shows what it is on, its state ("Working", "Waiting for you", "Ended: planned"), its notes (You, Agent,

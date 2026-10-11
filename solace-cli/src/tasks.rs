@@ -224,6 +224,20 @@ fn strategy(top: &Path, method: &str, parts: &[&str], req: &Value, status: &mut 
         _ => board::err("E7001", "unknown route"),
     }
 }
+/// `GET /tasks/find/{id}` (D-98): the project that stores a task, whichever it
+/// is, and whether it is archived, so a task link opens it on the board or, off
+/// the board, on the Strategy page. 404 for no such task.
+pub fn find_task(top: &Path, id: &str) -> Result<Value, (u16, Failure)> {
+    if !board::valid_id(id) {
+        return board::err("E7001", "invalid task id").map_err(|e| (400, e));
+    }
+    let path = board::store_dir(top).join(format!("{id}.json"));
+    if !path.exists() {
+        return board::err("E7023", format!("unknown task {id}")).map_err(|e| (404, e));
+    }
+    let t = board::read_task(top, &path).map_err(|e| (409, e))?;
+    Ok(json!({"id": id, "dir": t["home"], "archived": !t["archivedTime"].is_null()}))
+}
 fn unknown_id<T>(kind: &str, id: &str, status: &mut u16, code: u16) -> Result<T, Failure> {
     *status = code;
     board::err("E7023", format!("unknown {} {id}", singular(kind)))
@@ -679,6 +693,21 @@ pub(super) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text
             _ => return board::err("E7001", "the proposal's fields go in `text`, as a JSON object"),
         }
     };
+    // D-105: a field the request doesn't take is refused, so a misspelt one isn't lost.
+    if kind != "vision" {
+        let allowed: &[&str] = match (kind, id.is_some()) {
+            ("task", false) => &["title", "body", "scope", "feature", "milestone", "dependsOn"],
+            ("task", true) => &["title", "body", "feature", "milestone", "dependsOn", "rank"],
+            ("feature", false) => &["title", "body", "milestone", "state"],
+            ("feature", true) => &["title", "body", "milestone", "state", "rank"],
+            ("milestone", false) => &["title", "body", "targetDate", "state"],
+            _ => &["title", "body", "targetDate", "state", "rank"],
+        };
+        if let Some(k) = fields.as_object().into_iter().flat_map(|o| o.keys()).find(|k| !allowed.contains(&k.as_str())) {
+            let edit = if id.is_some() { " that edits" } else { "" };
+            return board::err("E7001", format!("a {kind} proposal{edit} takes {}; not `{k}`", allowed.join(", ")));
+        }
+    }
     let mut p = json!({"kind": kind, "fields": fields});
     if let Some(id) = id {
         p["id"] = json!(id);
@@ -1450,6 +1479,24 @@ mod tests {
         assert!(e.0.starts_with("E7001"), "{}", e.0);
     }
 
+    /// D-105: a proposal naming a field its request doesn't take is refused,
+    /// naming the field and those it takes.
+    #[test]
+    fn a_proposal_refuses_a_field_it_does_not_take() {
+        let root = root();
+        let rid = page_run(&root);
+        for (kind, id, text, bad) in [
+            ("task", None, r#"{"title": "T", "dependson": ["t1"]}"#, "dependson"),
+            ("task", Some("t1"), r#"{"scope": ["web"]}"#, "scope"),
+            ("feature", None, r#"{"title": "F", "rank": 1}"#, "rank"),
+            ("milestone", None, r#"{"title": "M", "milestone": "x"}"#, "milestone"),
+        ] {
+            let e = proposal(&root, &rid, kind, id, text).unwrap_err();
+            assert!(e.0.starts_with("E7001") && e.0.contains(&format!("not `{bad}`")) && e.0.contains("title, body"), "{kind}: {}", e.0);
+        }
+        assert!(proposal(&root, &rid, "task", None, r#"{"title": "T", "dependsOn": []}"#).is_ok());
+    }
+
     /// D-93: Reject writes no record, task or vision; only the run changes, with
     /// the answer on its notes.
     #[test]
@@ -1611,6 +1658,27 @@ mod tests {
         board::move_to(&w, &mut t, &json!("cancelled")).unwrap();
         board::move_to(&w, &mut t, &json!("backlog")).unwrap();
         assert_eq!(t["closedTime"], json!(closed - 100));
+    }
+
+    /// D-95: only a task in a final column is archived, once; leaving the final
+    /// columns takes it out of the archive.
+    #[test]
+    fn archiving_takes_a_final_task_off_the_board() {
+        let root = root();
+        let archive = || api(&root, "POST", &["tasks", "t1", "archive"], json!({}));
+        assert_eq!(&archive().unwrap_err().0[..5], "E7001", "a task in backlog is not archived");
+        let w = board::flow(&root).unwrap();
+        let mut t = board::task(&root, "t1").unwrap();
+        board::move_to(&w, &mut t, &json!("complete")).unwrap();
+        write(&scope::top(&root), &t).unwrap();
+        let t = archive().unwrap();
+        let archived = t["archivedTime"].as_u64().expect("set on archiving");
+        let mut t = board::task(&root, "t1").unwrap();
+        t["archivedTime"] = json!(archived - 100);
+        write(&scope::top(&root), &t).unwrap();
+        assert_eq!(archive().unwrap()["archivedTime"], json!(archived - 100), "archiving again keeps the time");
+        board::move_to(&w, &mut t, &json!("backlog")).unwrap();
+        assert_eq!(t["archivedTime"], Value::Null);
     }
 
     /// D-87: a feature brings its milestone to a task with none; links are checked,

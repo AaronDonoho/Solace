@@ -826,7 +826,7 @@ class Board(unittest.TestCase):
         self.assertEqual((self.root/'priv/a').read_text(),'original');self.assertFalse((self.root/'priv/b').exists())
 
     def test_a11_embedded_client_and_internal_files(self):
-        for path,expected in [('/',b'Solace tasks'),('/migrate',b'Solace tasks'),('/strategy',b'Solace tasks'),('/strategy?tab=tasks',b'Solace tasks'),('/app.js',b'/workflow'),('/guide',b'Using Solace')]:
+        for path,expected in [('/',b'Solace tasks'),('/migrate',b'Solace tasks'),('/strategy',b'Solace tasks'),('/strategy?tab=tasks',b'Solace tasks'),('/settings',b'Solace tasks'),('/app.js',b'/workflow'),('/guide',b'Using Solace')]:
             c=http.client.HTTPConnection('127.0.0.1',self.port);c.request('GET',path);r=c.getresponse();self.assertEqual(r.status,200);self.assertIn(expected,r.read());c.close()
         for command in ['files','read','write','remove']:
             p=subprocess.run([BIN,command,'.solace/board'],cwd=self.root,env=self.env,input='x',text=True,capture_output=True)
@@ -965,6 +965,23 @@ class Board(unittest.TestCase):
         self.api('DELETE','/features/'+f['id'])
         t=self.api('GET','/tasks/'+t['id'])
         self.assertEqual((t['feature'],t['milestone'],t['closedTime'],t['archivedTime']),(None,m['id'],done['closedTime'],None))
+        # D-95: an archived task leaves the board but stays in the task list.
+        archived=self.api('POST','/tasks/'+t['id']+'/archive',{})
+        self.assertIsInstance(archived['archivedTime'],int)
+        listed=[x for x in self.api('GET','/tasks') if x['id']==t['id']]
+        self.assertEqual(listed[0]['archivedTime'],archived['archivedTime'])
+
+    def test_a_task_link_finds_its_task(self):  # D-98
+        t=self.completed([])
+        self.assertEqual(self.api('GET','/tasks/find/'+t['id']),{'id':t['id'],'dir':'.','archived':False})
+        self.action(t,'approve');self.action(t,'complete')
+        self.api('POST','/tasks/'+t['id']+'/archive',{})
+        self.assertEqual(self.api('GET','/tasks/find/'+t['id'])['archived'],True)
+        status,_,body=self.raw('GET','/tasks/find/0123456789abcdef')
+        self.assertEqual((status,json.loads(body)['code']),(404,'E7023'))
+        # The link's own address loads the shell, which resolves it.
+        status,kind,_=self.raw('GET','/task/'+t['id'])
+        self.assertEqual((status,kind),(200,'text/html'))
 
     def test_milestones_and_features_are_root_records(self):  # D-87
         stream=self.stream()
@@ -1037,10 +1054,17 @@ class Board(unittest.TestCase):
         t1,t2=self.create(),self.create()
         self.api('PATCH','/tasks/'+t1['id'],{'feature':f['id'],'milestone':None})
         self.api('PATCH','/tasks/'+t2['id'],{'feature':f['id'],'milestone':m['id']})
+        # A finished work run gives the agent a run log to read.
+        t3=self.completed([]);r3=t3['runs'][-1]['id'];t3id=t3['id']
         on_f={'kind':'feature','id':f['id']}
         # The fake agent's steps are the run's first message.
-        steps=[{'command':'strategy list'},{'command':f"strategy show feature {f['id']}"},{'command':f"strategy show milestone {m['id']}"},
+        long='A long note. '+'y'*200+'\nSecond line.';n=len(t3['notes'])+1
+        self.api('POST','/tasks/'+t3id+'/notes',{'text':long})
+        steps=[{'command':'strategy list'},{'command':'strategy list --archived'},{'command':f"strategy show feature {f['id']}"},{'command':f"strategy show milestone {m['id']}"},
                {'command':'submit app.one','text':'pub fn one() { 9 }'},{'command':'write priv/a','text':'changed'},{'command':'task done','text':'no'},
+               {'command':'read ../x'},{'command':'grep -i plan'},
+               {'command':f'strategy show run {t3id} {r3}'},{'command':f'strategy show run {t3id} {r3} 9999'},{'command':f'strategy show run {t3id} nope'},{'command':f'strategy show task {t3id}'},{'command':f"strategy show task {t1['id']} {t2['id']}"},
+               {'command':f'strategy show note {t3id} {n}'},{'command':f'strategy show note {t3id} 99'},{'command':'strategy show note nope 1'},
                {'command':'strategy note','text':'A first plan'},{'command':'strategy note','text':'A second plan'}]
         run=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':on_f})
         self.assertEqual((run['state'],run['context']),('running',on_f))
@@ -1054,25 +1078,50 @@ class Board(unittest.TestCase):
         waiting=self.wait_run(rid,lambda r:r['state']=='waiting')
         self.assertEqual([(n['author'],n['text']) for n in waiting['notes'][1:]],[('agent','A first plan')])
         out=self.replies(rid)
-        listed=json.loads(out[0])
-        self.assertEqual((sorted(t['id'] for t in listed['tasks']),[x['id'] for x in listed['features']],[x['id'] for x in listed['milestones']]),
-                         (sorted([t1['id'],t2['id']]),[f['id']],[m['id']]))
-        shown=json.loads(out[1])
+        listed=out[0]
+        self.assertTrue(all(x in listed for x in ('Tasks:',t1['id'],t2['id'],t3id,'Features:',f['id'],'Milestones:',m['id'],'Vision:')),listed)
+        self.assertIn(t3id,out[1])
+        shown=json.loads(out[2])
         self.assertEqual((shown['record']['title'],shown['links']['milestone'],sorted(shown['links']['tasks'])),('Feature F1',m['id'],sorted([t1['id'],t2['id']])))
-        self.assertEqual(json.loads(out[2])['links'],{'features':[f['id']],'tasks':[t2['id']]})
-        for r in out[3:6]:self.assertTrue(r.startswith('E7010'),r)
+        self.assertEqual(json.loads(out[3])['links'],{'features':[f['id']],'tasks':[t2['id']]})
+        for r in out[4:7]:self.assertTrue(r.startswith('E7010'),r)
         # Outside a strategy run, strategy commands are refused.
         p=subprocess.run([BIN,'strategy','list'],cwd=self.root,env=self.env,text=True,capture_output=True)
         self.assertTrue(p.stdout.startswith('E7001'),p.stdout)
-        self.assertEqual(len(out),6)
+        # Refusals give no task-run advice; grep explains its syntax.
+        self.assertIn('E6006',out[7]);self.assertIn('--project <folder>',out[7]);self.assertNotIn('task ask',out[7])
+        self.assertIn('literal text, already case-insensitive',out[8])
+        # A task's run log: its steps in outline, an unknown step or run refused, and the run listed on the task.
+        outline=json.loads(out[9]);self.assertEqual((outline['run']['id'],'log' in outline['run'],type(outline['steps'])),(r3,False,list))
+        self.assertTrue(out[10].startswith('E7001'),out[10]);self.assertTrue(out[11].startswith('E7023'),out[11])
+        # D-101: the task is compact, its notes one line each, and `strategy show note` gives them in full.
+        shown=json.loads(out[12])
+        self.assertEqual(shown['links']['runs'],[r3])
+        line=shown['record']['notes'][-1]
+        self.assertTrue(line.startswith(f'{n} human ') and line.split(': ',1)[1]==long.splitlines()[0][:100]+'…',line)
+        self.assertNotIn('conversation',shown['record'])
+        multi=json.loads(out[13])
+        self.assertEqual([r['record']['id'] for r in multi],[t1['id'],t2['id']])
+        self.assertEqual((multi[0]['links']['feature'],multi[1]['links']['milestone']),(f['id'],m['id']))
+        full=json.loads(out[14])
+        self.assertEqual((full['task'],full['notes'][0]['note'],full['notes'][0]['text']),(t3id,n,long))
+        self.assertTrue(out[15].startswith('E7001'),out[15]);self.assertTrue(out[16].startswith('E7023'),out[16])
+        self.assertEqual(len(out),17)
+        # The tool a strategy run's agent sees names only what it can do.
+        env={**self.env,'SOLACE_TASK':'strategy','SOLACE_RUN':rid}
+        p=subprocess.run([BIN,'mcp'],cwd=self.root,env=env,text=True,capture_output=True,input=json.dumps({'jsonrpc':'2.0','id':1,'method':'tools/list'})+'\n')
+        tool=json.dumps(json.loads(p.stdout)['result']['tools'][0])
+        self.assertIn('strategy note',tool)
+        for word in ['task ask','submit','`test`','session start','work add']:self.assertNotIn(word,tool)
         self.assertFalse((self.root/'.solace'/(rid+'.exited')).exists())
         self.assertEqual(((self.root/'priv/a').read_text(),(self.root/'src/app.gleam').read_text().splitlines()[0]),('original','pub fn one() { 1 }'))
         prompt=(self.root/'.solace'/(rid+'.prompt')).read_text()
         self.assertIn('Feature F1',prompt);self.assertIn('Reply only with `strategy note`',prompt)
+        for word in ['task ask','Start with `session start','`submit`','are refused']:self.assertNotIn(word,prompt)
         # The human's next note reaches the waiting agent, which replies again.
         self.api('POST',f'/strategy/runs/{rid}/notes',{'text':'And tasks'})
         self.wait_run(rid,lambda r:r['state']=='waiting' and r['notes'][-1]['text']=='A second plan')
-        self.assertEqual(self.replies(rid)[6],'The human replied:\n\nAnd tasks\n')
+        self.assertEqual(self.replies(rid)[17],'The human replied:\n\nAnd tasks\n')
         ended=self.api('POST',f'/strategy/runs/{rid}/end')
         self.assertEqual((ended['state'],ended['outcome'],len(ended['notes']),ended['notes'][0]['author']),('ended','planned',1,'solace'))
         self.assertIn('A second plan',ended['notes'][0]['text'])
@@ -1080,7 +1129,7 @@ class Board(unittest.TestCase):
         deadline=time.monotonic()+10
         while not (self.root/'.solace'/(rid+'.exited')).exists() and time.monotonic()<deadline:time.sleep(.05)
         self.assertTrue((self.root/'.solace'/(rid+'.exited')).exists())
-        self.assertIn('has ended',self.replies(rid)[7])
+        self.assertIn('has ended',self.replies(rid)[18])
         while 'strategyRun' not in (e:=self.next_event(stream)[1]) or e['strategyRun']['state']!='ended':pass
         self.assertEqual(e,{'strategyRun':ended})
         status,body=self.bare('POST',f'/strategy/runs/{rid}/notes',{'Content-Type':'application/json'},json.dumps({'text':'late'}))

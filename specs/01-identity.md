@@ -60,11 +60,11 @@ Each operation is one store command (Spec 3) and records one history entry.
 | --- | --- | --- |
 | Create | `submit --new <ns>` | New identity |
 | Edit | `submit <name>` | Same identity, new revision. The target named by the command decides identity, even if the text is completely rewritten |
-| Rename / move | `rename <name> <new qualified name>` | Same identity, same revision; history records the old name |
-| Extract | `extract <name> --into <new name>` (Phase 1b) | Source keeps its identity; new identity linked `derived-from` |
+| Rename | `rename <name> <new name>` | Same identity, same revision; history records the old name. Changes only the name (D-103) |
+| Extract | `extract <symbols…> --to <module> [--to-project <folder>]` | Same identity and revision; history records the old module. Private helpers only they use come along, references and imports are rewritten (a symbol whose text changes gets a new revision), and a module or package cycle is refused (`E5002`, naming the boundary uses) (D-103) |
 | Merge | `merge <survivor> <retired>` | Survivor keeps its identity; the other is retired, linked `merged-into`, and all references are redirected |
 | Copy | `copy <name> <new name>` | New identity linked `copied-from` |
-| Delete | `delete <name>` | Refused (`E5001`) while live references exist, listing them; otherwise retired, never erased |
+| Delete | `delete <name>…` | Each named symbol is retired in the order named, never erased. The reference check runs over the whole list first, so a symbol with live references from outside the list stops it and nothing is deleted (`E5001`, listing them) (D-102) |
 | Import from export | `import <dir>` | See Spec 2 §5 |
 
 A submitted text whose declared name differs from the target is an edit **and** a rename in one transaction.

@@ -146,6 +146,21 @@ test('markdown renders only images uploaded to the board, and http(s) links', as
   expect(markdown('[x](javascript:alert(1))')).not.toContain('<a');
 });
 
+test('markdown links a task by id, as [label](task:<id>) or a bare task:<id> (D-98)', async () => {
+  const { markdown } = await import('../src/task_api.mjs');
+  const id = '0123456789abcdef', link = label => `<a href="/task/${id}" data-task="${id}">${label}</a>`;
+  expect(markdown(`See [the fix](task:${id}).`)).toBe(`<p>See ${link('the fix')}.</p>`);
+  expect(markdown(`After task:${id}, then`)).toBe(`<p>After ${link(`task:${id}`)}, then</p>`);
+  expect(markdown(`- **[a](task:${id})**`)).toBe(`<ul><li><strong>${link('a')}</strong></li></ul>`);
+  // A reference in a link's label stays inside that one link.
+  expect(markdown(`[task:${id}](task:${id})`)).toBe(`<p>${link(`task:${id}`)}</p>`);
+  // Code keeps it literal; a wrong id, a longer word or an image form stays text.
+  expect(markdown(`\`task:${id}\``)).toBe(`<p><code>task:${id}</code></p>`);
+  for (const text of ['task:0123', `task:${id}0`, `mytask:${id}`, `![x](task:${id})`, '[x](task:../../a)'])
+    expect(markdown(text)).not.toContain('<a');
+  expect(markdown(`[x" onclick="y](task:${id})`)).not.toContain('" onclick="');
+});
+
 test('markdown applies headings and lists mixed with other lines, nests lists, and keeps code literal', async () => {
   const { markdown } = await import('../src/task_api.mjs');
   expect(markdown('Summary:\n- fixed A\n- tested B')).toBe('<p>Summary:</p><ul><li>fixed A</li><li>tested B</li></ul>');

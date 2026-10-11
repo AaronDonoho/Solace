@@ -14,14 +14,14 @@ turn that re-reads the conversation, so work in few calls:
 2. Change and test in one call: `command` is `submit`, then `test` on the next
    line. To edit code, `text` is a patch as `apply_patch` takes, naming a
    symbol or module instead of a file; send only what changes:
-     *** Begin Patch
-     *** Update: pilot/checkout.pay
-     @@
-     -  let total = sum(lines)
-     +  let total = sum(lines) + fee
-     *** Add: pilot/checkout_test.fee_test
-     +pub fn fee_test() { ... }
-     *** End Patch
+      *** Begin Patch
+      *** Update: pilot/checkout.pay
+      @@
+      -  let total = sum(lines)
+      +  let total = sum(lines) + fee
+      *** Add: pilot/checkout_test.fee_test
+      +pub fn fee_test() { ... }
+      *** End Patch
    Imports are added automatically. Work out expected values from the task's
    numbers and the rules the code documents, never from running the code.
 3. Fix only what the reply reports, again with `test` after. The reply lists
@@ -37,17 +37,26 @@ similar test> --context` shows its helpers; don't read whole test modules.
 Commands (`help` gives every option, `help <command>` one command's):
   inspect <name>... --context   symbols with what they use, callers and tests
   view <name|module>...         source, or a module's outline
-  refs <name>                   what uses a symbol
+  refs <name>...                what uses each symbol
   impact [name...]              what a change reaches, with its tests
-  find | grep <text>            search code | other files
+  find <text>                   search all code
+  grep <text>                   search other files and settings
   submit                        save a patch or blocks from `text`, type-checked
-  delete <name>                 remove an unused symbol
+  delete <name>...              remove unused symbols
+  extract <name>... --to <mod>  move symbols to another module
   test [<name>... | --all]      run the tests a change can affect
   check [--warnings]            type-check everything
   probe                         run throwaway code from `text`
   drafts                        rejected submits, kept to fix and retry
-  files | read | write | move   project files outside the store
+  files [dir]...                trees of files, each with its tier
+  read <path>...                read files
+  write [path]                  change a file; no path: several, by patch
+  move <from> <to>              move a file
   work add | list | done        work records, kept between sessions
+Files by tier: src/ and test/ *.gleam are symbols (`submit`, never `write`);
+solace.toml, AGENTS.md, .gitignore: `write` with `reason`, the human approves;
+.solace/ and nested projects: their own commands; any other file, ignored
+or not: `read`, `write`, `move`, `remove` (not gleam.toml). `help` has the table.
 
 Commands in full
 Reading
@@ -60,7 +69,8 @@ Reading
   view | inspect <dependency>   a dependency's module (`lustre/component`): its
                                 public signatures; `<module>.<name>`: one with
                                 its docs. Read from build/packages, never stored
-  refs <name>                   everything that uses a symbol
+  refs <name>...                everything that uses each named symbol, in the
+                                order named
   refs <module>.<Type>.<field>  code that reads a record field
   impact [name...]              what a change reaches: callers and readers of the
                                 fields it changes, nearest first, with their
@@ -69,7 +79,9 @@ Reading
   find <text>                   case-insensitive search of all code
   grep <text>                   case-insensitive search of watched files and
                                 settings (not unwatched files); lines shown
-                                with numbers for `read --lines`
+                                with numbers for `read --lines`. Literal text,
+                                one term per command: no options, regex or
+                                file arguments
   session start [--task]        this overview again (--task: for the task in `text`)
   session start [--scope <module>...]
                                 every symbol, and open work records with context
@@ -92,7 +104,8 @@ Changing (the new code is in `text`)
                                 applied in order like `apply_patch`; `*** Add:
                                 <module>.<name>` with `+` lines adds a symbol.
                                 Checked together; a hunk that doesn't match
-                                changes nothing (E0108)
+                                changes nothing (E0108). Other files change
+                                with `write`, not here
   submit <name>                 replace one symbol (may rename it)
   submit <name> --replace [--all]
                                 one exact change: `old` (must occur once, or
@@ -103,7 +116,22 @@ Changing (the new code is in `text`)
                                 name ends in `_test`)
   submit <module>               replace a whole module; it must keep every symbol
   submit --imports <module>     replace a module's imports and module comment
-  delete <name>                 remove a symbol (refused while anything uses it)
+  delete <name>...              removes each named symbol, in the order named; a
+                                symbol used outside the list stops the whole
+                                list, so nothing is deleted
+  extract <name>... --to <module>
+                                move symbols to another module of the project,
+                                keeping identity and revision. Private helpers
+                                only they use, tests that reach only them, and
+                                every reference and import come along; the
+                                result is type-checked or nothing changes.
+                                `--to solace_task.gleam` is read as solace_task;
+                                tests go only to a *_test module. Extract a
+                                cohesive set in one call; the refusal (E5002,
+                                a module cycle) lists everything to add:
+                                  extract board.Task --to solace_task
+                                  E5002 moved code uses 1 symbol that stays: lane_order (by Task.sort)
+                                  extract board.Task board.lane_order --to solace_task
 Every submit is type-checked. Missing imports are added and imports in `text`
 are merged. If the submitted code has errors, nothing is saved. If it breaks
 other symbols (e.g. callers of a changed signature), it is saved and those are
@@ -136,18 +164,54 @@ Checking
   probe --trace <fn>...         also show each call to these functions, with
                                 its arguments and result (combines with --from)
 
-Files: watched and unwatched files can be read and written; they never appear
-in symbol searches. gleam.toml is watched (new dependencies are fetched by
-check, test and build). solace.toml, AGENTS.md (the project's instructions
-for agents, shown at session start) and every .gitignore are human-owned: in a
-work run, `write` to one proposes a change and waits for the human; `write` the
-exact new text, alone in its call, with the why in `reason` (no `task note`
-beside it; don't ask in prose). It is this project's file. node_modules folders are never watched.
-  files [dir]                   tree with each file's category
-  read <path> [--lines a..b | --tail n]
-  write <path> [--all]          whole text, or with `old`, just `old` -> `text`;
-                                a settings file takes `reason` too
-  remove <path>
+Files: every file is in one tier, by the first rule that matches, and the tier
+is what says what you may do with the file. `files` prints each file's tier. A
+file you can't change with `write` isn't a file you can't change: graph files
+change with `submit`, protected ones with `write` and the human's approval.
+  graph     src/ and test/ *.gleam, the code in the store: `read` and `write`
+            are refused (E6001); change it with `submit` and `delete`
+  watched   every other text file within watch_limit, gleam.toml included (new
+            dependencies are fetched by check, test and build): `read`, `write`,
+            `remove` and `move` work; searched by `grep`; a task's changes to
+            them are recorded, and undone if the task is canceled
+  protected solace.toml, AGENTS.md (the project's instructions for agents, shown
+            at session start) and every .gitignore: the human owns them. In a
+            work run, `write` one alone, with the exact new text and the why in
+            `reason`; it waits for the human's approval (no `task note` beside
+            it; don't ask in prose)
+  unwatched .git, build and dependency output, .gitignore'd files, paths in the
+            `unwatched` list, node_modules, binary files and files over
+            watch_limit: `read`, `write`, `remove` and `move` work; listed by
+            `files` (folders as one line with a count), not searched by `grep`
+  internal  .solace/ and projects nested in this one: no reading, writing or
+            searching; work in them through their own commands
+  files [dir]...                tree with each file's tier; no path: the project
+  read <path>... [--lines 3,7,10..12 | --tail n]
+                                each path in order, headed by its path when
+                                several; paths past the size limit are named
+                                in a `Next: read` line. --lines takes lines and
+                                ranges, shown in file order; a --lines or --tail
+                                range takes one path
+  write <path> [--all]          one file: whole text, or with `old`, just `old`
+                                -> `text`; a settings file takes `reason` too
+  write                         several files at once: `text` is a patch, as
+                                submit takes, with a section per file:
+                                  *** Begin Patch
+                                  *** Update File: docs/guide.md
+                                  @@ ## Usage
+                                  -old line
+                                  +new line
+                                  *** Add File: docs/new.md
+                                  +every line of the new file
+                                  *** Delete File: docs/old.md
+                                  *** End Patch
+                                Update hunks match as submit's do, with no read
+                                first; added lines with no `@@` go at the end.
+                                Whole or nothing: any refused section (graph or
+                                protected file, unmatched hunk, failed
+                                validator) writes none, and each is named
+  remove <path>...              files, whole or nothing: any refused path
+                                removes none and is named
   move <from> <to> [--to-project <folder>]
                                 move a file or folder, whole or not at all, never
                                 onto anything that exists; graph, protected and
@@ -158,35 +222,68 @@ Project: build | format | run <name> [args...] (commands declared in solace.toml
 Work records, kept between sessions: work add (`text`) | work list | work done <id>
 
 Task runs (the note, summary or question in `text`). Reviews and investigations
-are read-only: submit, delete, write, remove, move and format are refused, and so is
+are read-only: submit, delete, extract, write, remove, move and format are refused, and so is
 run, except in a review for commands marked `allowed_in_reviews = true`.
-  task diff [name...]           what this task changed, against its state before
+  task diff [name...]           what this task changed, against its state before;
+                                `impact` with no names is the same
   task note                     add a note; completes a review run
   task ask                      a question, with 2–4 `options`; waits for the
                                 human's answer
   task done                     finish: a work run's summary goes to human
                                 review; an investigation's report stays on the task
+  In notes, cite code by name (`board.rs::within`, `checkout.pay`), not by
+  `file:line`: line numbers move.
 
 Strategy runs (planning with the human on the Strategy page): read only; any
 command not listed here is refused.
-  strategy list                 every task, feature and milestone, and the vision
-  strategy show <task|feature|milestone> <id>
-                                the ids the record links to, then the record
-                                in full
+  strategy list [--archived]    one line per task, feature and milestone, then
+                                the vision; --archived adds archived tasks
+  strategy show <task|feature|milestone> <id>...
+                                one id: the ids the record links to, then the
+                                record (a task in brief, its notes, questions and
+                                runs one line each; a feature or milestone in
+                                full); several ids: each record in one reply
+  strategy show note <task> <notes> [--from <n>]
+                                a task's notes in full, each with its number:
+                                3,7,10..12, or all; a reply stops at a whole
+                                note, and a `Next:` line names the rest. A note
+                                too long for one reply comes in parts: its
+                                `Next:` line ends in --from n, its next part
+  strategy show run <task> <run> [<steps>|all] [--from <n>]
+                                a task's run log: one line per step; with
+                                steps (3,7,10..12) or all, those steps in full,
+                                stopping at a whole step as notes do
   strategy note                 reply to the human, the reply in `text`; waits
-                                for their next message
+                                for their next message. Text outside it shows
+                                only in the run's live transcript on the page
   strategy task|feature|milestone [<id>]
                                 propose creating one (no id) or editing one: the
                                 request's fields as a JSON object in `text`;
-                                waits for Approve or Reject. Alone in its call
+                                waits for Approve or Reject. Alone in its call.
+                                task: title, body, feature, milestone,
+                                dependsOn (task ids), and scope (folders) only
+                                when creating. feature: title, body,
+                                milestone, state. milestone: title, body,
+                                targetDate, state. Any of them: rank only when
+                                editing. state: proposed|planned|active|
+                                complete|canceled. Other fields are refused.
+                                A title is the work in 3-7 words (`extract: JS FFI
+                                 files`); details go in body. The human sees
+                                 body as Markdown, the rest as
+                                text
   strategy vision               propose a new vision, its text in `text`; waits
                                 the same way
   view | inspect | refs | find  read code, as under Reading
-  grep <text>                   search watched files and settings
-  files [dir]                   tree with each file's category
-  read <path> [--lines a..b | --tail n]
+  grep <text>                   search watched files and settings: literal text,
+                                already case-insensitive, one term per command
+  files [dir]...                tree with each file's tier
+  read <path>... [--lines 3,7,10..12 | --tail n]
+                                each path in order; a --lines or --tail range
+                                takes one path
   ... --project <folder>        read in a project below the root; in a folder of
                                 projects, every read needs it
+  In notes and proposals, cite code by name (`board.rs::within`), not by
+  `file:line`: line numbers move.
 
 Host commands (humans only, refused in a run)
   create <name> [--javascript] [--yes]

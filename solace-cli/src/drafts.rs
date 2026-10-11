@@ -105,10 +105,10 @@ pub fn replace(text: &str, old: Option<&str>, new: &str, all: bool) -> Result<(S
     }
 }
 
-/// Text in `apply_patch` form: `*** Begin Patch`, or a first line `*** Update…`
-/// or `*** Add…`.
+/// Text in `apply_patch` form: `*** Begin Patch`, or a first line `*** Update…`,
+/// `*** Add…` or `*** Delete…`.
 pub fn is_patch(text: &str) -> bool {
-    text.trim_start().lines().next().is_some_and(|l| ["*** Begin Patch", "*** Update", "*** Add"].iter().any(|p| l.starts_with(p)))
+    text.trim_start().lines().next().is_some_and(|l| ["*** Begin Patch", "*** Update", "*** Add", "*** Delete"].iter().any(|p| l.starts_with(p)))
 }
 
 /// A section's target: `src/pilot/seed.gleam` or `pilot/seed`, or a symbol.
@@ -127,15 +127,27 @@ fn clip(line: &str) -> String {
     }
 }
 
-/// Blocks for a plain `submit` from a patch (D-47): `*** Update: <symbol or
-/// module>` sections of `@@` hunks (` ` context, `-` removed, `+` added) change
-/// stored symbols, applied in order as `apply_patch` does, each from where the
-/// last one ended; `*** Add: <module>.<name>` (or a new module) adds `+` lines.
-/// Returns one block per symbol changed or added.
-pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
+/// A patch's hunk: its `@@` context line, its lines (` `, `-` or `+` first),
+/// and its line in the patch.
+pub type Hunk = (Option<String>, Vec<String>, usize);
+
+/// What a patch section does to its target.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Section {
+    Update,
+    Add,
+    Delete,
+}
+
+/// A patch's sections: what each does, its target, the line of its header,
+/// and its hunks. `files`: a `write` patch (D-104), whose targets are paths
+/// (`*** Update File: <path>`) and which may delete a file; otherwise a
+/// `submit` patch (D-47), whose targets are symbols or modules.
+pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, Vec<Hunk>)>, Failure> {
     let bad = |m: String| Failure(format!("E0108 {m}"), 1);
-    // (update?, target, line of its header, hunks of (context line, lines, line))
-    let mut sections: Vec<(bool, String, usize, Vec<(Option<String>, Vec<String>, usize)>)> = vec![];
+    let head = if files { " File" } else { "" };
+    let path = |l: &str| l.split_once(':').map_or("", |p| p.1).trim().to_string();
+    let mut sections: Vec<(Section, String, usize, Vec<Hunk>)> = vec![];
     let mut prev = "";
     for (n, line) in raw.lines().enumerate().map(|(i, l)| (i + 1, l)) {
         // a refusal at this line, with the line before it, so a bare `}` can be placed
@@ -143,26 +155,38 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
             let before = if n > 1 { format!(" (line {} is `{}`)", n - 1, clip(prev)) } else { String::new() };
             bad(format!("line {n} of the patch: {m}{before}"))
         };
+        let target = |l: &str| if files { path(l) } else { patch_target(l) };
         match line {
             l if l.starts_with("*** Begin Patch") || l.starts_with("*** End") => {}
-            l if l.starts_with("*** Update") => sections.push((true, patch_target(l), n, vec![])),
-            l if l.starts_with("*** Add") => sections.push((false, patch_target(l), n, vec![(None, vec![], n + 1)])),
+            l if l.starts_with("*** Update") => sections.push((Section::Update, target(l), n, vec![])),
+            l if l.starts_with("*** Add") => sections.push((Section::Add, target(l), n, vec![(None, vec![], n + 1)])),
+            l if l.starts_with("*** Delete") && files => sections.push((Section::Delete, target(l), n, vec![])),
             l if l.starts_with("*** Delete") => return Err(here("a patch can't delete; use `delete <name>`.".into())),
+            l if l.starts_with("*** Move") && files => return Err(here("a patch can't move a file; use `move <from> <to>`.".into())),
             l if l.starts_with("*** Move") => return Err(here("a patch can't rename; submit the symbol under its new name.".into())),
             l => {
-                let Some((update, target, _, hunks)) = sections.last_mut() else {
-                    return Err(here("a patch starts with `*** Begin Patch`, then `*** Update: <name>` or `*** Add: <name>`.".into()));
+                let Some((kind, target, _, hunks)) = sections.last_mut() else {
+                    return Err(here(if files {
+                        "a file patch starts with `*** Begin Patch`, then `*** Add File: <path>`, `*** Update File: <path>` or `*** Delete File: <path>`.".into()
+                    } else {
+                        "a patch starts with `*** Begin Patch`, then `*** Update: <name>` or `*** Add: <name>`.".into()
+                    }));
                 };
-                if let Some(at) = l.strip_prefix("@@").filter(|_| *update) {
+                let update = *kind == Section::Update;
+                if *kind == Section::Delete {
+                    if !l.trim().is_empty() {
+                        return Err(here(format!("`*** Delete File: {target}` takes no lines; this one is `{}`", clip(l))));
+                    }
+                } else if let Some(at) = l.strip_prefix("@@").filter(|_| update) {
                     let at = at.trim().trim_end_matches("@@").trim();
                     // a unified diff's `@@ -3,4 +3,5 @@` gives no context line
                     let numbers = at.starts_with('-') && at[1..].starts_with(|c: char| c.is_ascii_digit());
                     hunks.push(((!at.is_empty() && !numbers).then(|| at.to_string()), vec![], n));
-                } else if !*update && !l.starts_with('+') {
-                    return Err(here(format!("in `*** Add: {target}` every line starts with `+`; this one doesn't: `{}`", clip(l))));
-                } else if *update && !l.is_empty() && !l.starts_with([' ', '-', '+']) {
+                } else if !update && !l.starts_with('+') {
+                    return Err(here(format!("in `*** Add{head}: {target}` every line starts with `+`; this one doesn't: `{}`", clip(l))));
+                } else if update && !l.is_empty() && !l.starts_with([' ', '-', '+']) {
                     return Err(here(format!(
-                        "in `*** Update: {target}` each line starts with ` `, `-` or `+` (or `@@`); this one doesn't: `{}`",
+                        "in `*** Update{head}: {target}` each line starts with ` `, `-` or `+` (or `@@`); this one doesn't: `{}`",
                         clip(l)
                     )));
                 } else {
@@ -176,8 +200,83 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
         prev = line;
     }
     if sections.is_empty() {
-        return Err(bad("the patch has no `*** Update: <name>` or `*** Add: <name>` section.".into()));
+        return Err(bad(if files {
+            "the patch has no `*** Add File: <path>`, `*** Update File: <path>` or `*** Delete File: <path>` section.".into()
+        } else {
+            "the patch has no `*** Update: <name>` or `*** Add: <name>` section.".into()
+        }));
     }
+    Ok(sections)
+}
+
+/// Applies a section's hunks to `lines` in order, as `apply_patch` does: each
+/// from where the last one ended, matched exactly, then ignoring trailing
+/// space, then trimmed. A hunk that only adds lines goes after its `@@` line;
+/// with none, it goes at the end if `at_end` (a file), else is refused (a
+/// symbol). `show` is the command that shows the target's current text.
+fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hunk>, at_end: bool) -> Result<(), Failure> {
+    let bad = |m: String| Failure(format!("E0108 {m}"), 1);
+    let mut cursor = 0;
+    for (at, hunk, hl) in hunks {
+        let old: Vec<&str> = hunk.iter().filter(|l| !l.starts_with('+')).map(|l| &l[1..]).collect();
+        let new: Vec<String> = hunk.iter().filter(|l| !l.starts_with('-')).map(|l| l[1..].to_string()).collect();
+        let mut from = cursor;
+        if let Some(at) = &at {
+            let found = (cursor..lines.len()).chain(0..cursor).find(|&k| lines[k].trim().starts_with(at.as_str()));
+            from = found.ok_or_else(|| bad(format!("in {target} (hunk at line {hl}), no line starts with `@@ {at}`; `{show}` shows the current text.")))? + 1;
+        }
+        let at_k = if old.is_empty() {
+            match at {
+                Some(_) => Some(from),
+                None if at_end => Some(lines.len()),
+                None => return Err(bad(format!("in {target} (hunk at line {hl}), a hunk that only adds lines needs `@@ <the line before them>`."))),
+            }
+        } else {
+            let same: [&dyn Fn(&str, &str) -> bool; 3] = [&|a, b| a == b, &|a, b| a.trim_end() == b.trim_end(), &|a, b| a.trim() == b.trim()];
+            let fits = |k: usize, eq: &dyn Fn(&str, &str) -> bool| k + old.len() <= lines.len() && old.iter().zip(&lines[k..]).all(|(o, l)| eq(o, l));
+            same.iter().find_map(|eq| (from..lines.len()).chain(0..from).find(|&k| fits(k, *eq)))
+        };
+        let Some(k) = at_k else {
+            let first = old.iter().find(|l| !l.trim().is_empty()).unwrap_or(&"");
+            return Err(bad(format!(
+                "in {target} (hunk at line {hl}), these lines weren't found: `{}`{}; copy them exactly from `{show}`.",
+                first.trim(),
+                if old.len() > 1 { format!(" (and {} more)", old.len() - 1) } else { String::new() }
+            )));
+        };
+        cursor = k + new.len();
+        lines.splice(k..k + old.len(), new);
+    }
+    Ok(())
+}
+
+/// A file's new text from a `write` patch section (D-104): an Add's `+` lines,
+/// an Update's hunks applied to `current`, or `None` for a Delete.
+pub fn file_text(path: &str, current: &str, kind: Section, hunks: Vec<Hunk>) -> Result<Option<String>, Failure> {
+    match kind {
+        Section::Delete => Ok(None),
+        Section::Add => Ok(Some(hunks[0].1.iter().map(|l| format!("{}\n", &l[1..])).collect())),
+        Section::Update => {
+            let mut lines: Vec<String> = current.lines().map(String::from).collect();
+            apply_hunks(path, &format!("read {path}"), &mut lines, hunks, true)?;
+            let mut text = lines.join("\n");
+            // the file keeps its last newline; one that had no text gets one
+            if !lines.is_empty() && (current.ends_with('\n') || current.is_empty()) {
+                text.push('\n');
+            }
+            Ok(Some(text))
+        }
+    }
+}
+
+/// Blocks for a plain `submit` from a patch (D-47): `*** Update: <symbol or
+/// module>` sections of `@@` hunks (` ` context, `-` removed, `+` added) change
+/// stored symbols, applied in order as `apply_patch` does, each from where the
+/// last one ended; `*** Add: <module>.<name>` (or a new module) adds `+` lines.
+/// Returns one block per symbol changed or added.
+pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
+    let bad = |m: String| Failure(format!("E0108 {m}"), 1);
+    let sections = sections(raw, false)?;
     let ix = s.index()?;
     let mut blocks = String::new();
     // Each item of `text` as a block in `module`, but for the one equal to
@@ -188,8 +287,17 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
             blocks += &format!("// ── {module}.{} ──\n{}{}\n", item.name, std::mem::take(&mut header), item.text);
         }
     };
-    for (update, target, at_line, hunks) in sections {
-        if !update {
+    for (kind, target, at_line, hunks) in sections {
+        // A `*** Update File:` header may name a symbol; one that names no code is a file, for `write`.
+        let header = raw.lines().nth(at_line - 1).unwrap_or("");
+        let not_code = |e: Failure| {
+            if !header.contains(" File:") {
+                return e;
+            }
+            let path = header.split_once(':').map_or("", |p| p.1).trim();
+            bad(format!("`{path}` (line {at_line}) is no symbol or module; a file other than code changes with `write` with no path, this patch as `text`."))
+        };
+        if kind == Section::Add {
             let text: String = hunks[0].1.iter().map(|l| format!("{}\n", &l[1..])).collect();
             let parsed = gleam::split(&text);
             let module = match target.rsplit_once('.') {
@@ -197,7 +305,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 _ => target.clone(),
             };
             if parsed.items.is_empty() {
-                return Err(bad(format!("`*** Add: {target}` (line {at_line}) defines no function, type or constant.")));
+                return Err(not_code(bad(format!("`*** Add: {target}` (line {at_line}) defines no function, type or constant."))));
             }
             emit(&module, &parsed.header, &text, "");
             continue;
@@ -211,7 +319,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                     .collect(),
             ),
             None => {
-                let i = s.resolve(&ix, &target)?;
+                let i = s.resolve(&ix, &target).map_err(not_code)?;
                 (ix.syms[i].module.clone(), vec![(Some(i), ix.syms[i].text.clone())])
             }
         };
@@ -219,41 +327,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
         const SEP: &str = "\u{0}";
         let mut lines: Vec<String> =
             units.iter().map(|u| u.1.clone()).collect::<Vec<_>>().join(&format!("\n{SEP}\n")).lines().map(String::from).collect();
-        let mut cursor = 0;
-        for (at, hunk, hl) in hunks {
-            let old: Vec<&str> = hunk.iter().filter(|l| !l.starts_with('+')).map(|l| &l[1..]).collect();
-            let new: Vec<String> = hunk.iter().filter(|l| !l.starts_with('-')).map(|l| l[1..].to_string()).collect();
-            let mut from = cursor;
-            if let Some(at) = &at {
-                let found = (cursor..lines.len()).chain(0..cursor).find(|&k| lines[k].trim().starts_with(at.as_str()));
-                from = found
-                    .ok_or_else(|| bad(format!("in {target} (hunk at line {hl}), no line starts with `@@ {at}`; `view {target}` shows the current text.")))?
-                    + 1;
-            }
-            let at_k = if old.is_empty() {
-                if at.is_none() {
-                    return Err(bad(format!("in {target} (hunk at line {hl}), a hunk that only adds lines needs `@@ <the line before them>`.")));
-                }
-                Some(from)
-            } else {
-                let same: [&dyn Fn(&str, &str) -> bool; 3] =
-                    [&|a, b| a == b, &|a, b| a.trim_end() == b.trim_end(), &|a, b| a.trim() == b.trim()];
-                let fits = |k: usize, eq: &dyn Fn(&str, &str) -> bool| {
-                    k + old.len() <= lines.len() && old.iter().zip(&lines[k..]).all(|(o, l)| eq(o, l))
-                };
-                same.iter().find_map(|eq| (from..lines.len()).chain(0..from).find(|&k| fits(k, *eq)))
-            };
-            let Some(k) = at_k else {
-                let first = old.iter().find(|l| !l.trim().is_empty()).unwrap_or(&"");
-                return Err(bad(format!(
-                    "in {target} (hunk at line {hl}), these lines weren't found: `{}`{}; copy them exactly from `view {target}`.",
-                    first.trim(),
-                    if old.len() > 1 { format!(" (and {} more)", old.len() - 1) } else { String::new() }
-                )));
-            };
-            cursor = k + new.len();
-            lines.splice(k..k + old.len(), new);
-        }
+        apply_hunks(&target, &format!("view {target}"), &mut lines, hunks, false)?;
         let joined = lines.join("\n");
         let texts: Vec<&str> = joined.split(&format!("\n{SEP}\n")).collect();
         if texts.len() != units.len() {

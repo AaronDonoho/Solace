@@ -10,6 +10,7 @@
 
 mod board;
 mod drafts;
+mod extract;
 mod gleam;
 mod lockdown;
 mod migrate;
@@ -260,6 +261,10 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         if a.starts_with(&["task", "diff"]) {
             return board::task_diff(&home, tid, &a[2..], budget);
         }
+        // In a task run, `impact` with no names is the task's own change list (D-102).
+        if a == ["impact"] {
+            return board::task_diff(&home, tid, &[], budget);
+        }
         if a.first() == Some(&"task") {
             return board::task_command(&home, tid, rid, &a, input, options, guard);
         }
@@ -282,9 +287,15 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
             return board::propose_settings(&home, &store.root, tid, rid, &file, &current, &proposed, reason.as_deref(), guard);
         }
     }
+    // A file patch (`write` with no path, D-104) names its files in `text`: it
+    // is read once, for the snapshots and for the command.
+    let patch = if a == ["write"] && context.is_some() { Some(input()?) } else { None };
+    let mut replay = || -> Out { Ok(patch.clone().unwrap_or_default()) };
+    let input: &mut dyn FnMut() -> Out = if patch.is_some() { &mut replay } else { input };
     let before = if a.first().is_some_and(|c| CHANGES.contains(c)) && context.is_some() {
         let mut v = board::snapshot(&store)?;
         v.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
+        v.as_object_mut().unwrap().extend(lockdown::patch_snapshot(&store.root, patch.as_deref()));
         Some(v)
     } else {
         None
@@ -330,6 +341,7 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     if let (Some(before), Some((tid, rid))) = (before, &context) {
         let mut after = board::snapshot(&store)?;
         after.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
+        after.as_object_mut().unwrap().extend(lockdown::patch_snapshot(&store.root, patch.as_deref()));
         board::record(&store, &tid, &rid, &before, &after)?;
         store.db.execute_batch("COMMIT")?;
         crash_after("commit");
@@ -406,7 +418,7 @@ fn crash_after(point: &str) {
 const READS: &[&str] = &["view", "inspect", "refs", "find", "grep", "files", "read"];
 /// May change the project: recorded on the task in a board run, and refused in
 /// read-only runs, except `build`, which reviews run to verify.
-const CHANGES: &[&str] = &["submit", "delete", "write", "remove", "move", "run", "format", "build"];
+const CHANGES: &[&str] = &["submit", "delete", "extract", "write", "remove", "move", "run", "format", "build"];
 /// Run a process that may change source; what it changed is read in after.
 const PROCESSES: &[&str] = &["format", "build", "run"];
 /// Results recorded as the task's verification.
@@ -414,7 +426,7 @@ const VERIFIES: &[&str] = &["check", "test", "build"];
 /// Only for the human, never in a board run.
 const HOST: &[&str] = &["agent-config", "serve", "create", "migrate"];
 /// Need Gleam code: refused in a project of plain files.
-const GLEAM: &[&str] = &["submit", "drafts", "view", "inspect", "refs", "impact", "find", "delete", "check", "test", "probe"];
+const GLEAM: &[&str] = &["submit", "drafts", "view", "inspect", "refs", "impact", "find", "delete", "extract", "check", "test", "probe"];
 
 /// A project folder as `--project` takes it.
 fn project_dir(dir: &str) -> &str {
@@ -478,7 +490,11 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
         return lockdown::error(
             "E6007",
             command,
-            "`--project` only reads (view, inspect, refs, find, grep, files, read) here; in a board run, it also changes the task's other projects",
+            if board::strategy_context().is_some() {
+                "`--project` only reads (view, inspect, refs, find, grep, files, read)"
+            } else {
+                "`--project` only reads (view, inspect, refs, find, grep, files, read) here; in a board run, it also changes the task's other projects"
+            },
         );
     }
     // From a project, or from a folder of projects with none at its root.
@@ -513,7 +529,7 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
     match a.as_slice() {
         ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
         ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
-        ["refs", name] => store.refs(name),
+        ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
         ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
         _ => usage(format!("{} --project {dir}: give what to read", a.join(" "))),
     }
@@ -554,10 +570,11 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
         ["session", rest @ ..] => store.session(&operands(rest.strip_prefix(&["start"]).unwrap_or(rest))),
         ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
         ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
-        ["refs", name] => store.refs(name),
+        ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
         ["impact", names @ ..] => store.impact(names, budget),
         ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
-        ["delete", name] => store.delete(name),
+        ["delete", names @ ..] if !names.is_empty() => store.delete_all(names, budget),
+        ["extract", rest @ ..] => store.extract(rest, budget),
         ["check"] => command_report(store.check(), budget),
         ["check", "--warnings"] => command_report(store.check_report(true), budget),
         ["test", rest @ ..] => command_report(store.test(rest), budget),
@@ -572,7 +589,7 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
         ["work", "list"] | ["work"] => store.work_list(),
         ["work", "done", id] => store.work_done(id),
         _ => usage(format!(
-            "Unknown command: {}\nCommands: session, inspect, view, refs, impact, find, submit, drafts, delete, check, test, probe, work, files, read, write, remove, move, build, format, run, task.",
+            "Unknown command: {}\nCommands: session, inspect, view, refs, impact, find, submit, drafts, delete, extract, check, test, probe, work, files, read, write, remove, move, build, format, run, task.",
             a.join(" ")
         )),
     }
@@ -657,13 +674,52 @@ fn stdin() -> Result<String, Failure> {
     Ok(text)
 }
 
+/// The one MCP tool `solace mcp` serves. A strategy run's agent only reads
+/// and plans (D-93), so it is told only those commands.
+fn tool_schema() -> Value {
+    if board::strategy_context().is_some() {
+        return json!({
+            "name": "solace",
+            "description": "Read this project's code and plan with the human; this run changes no code. Read with \
+                `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` (`--project <folder>` for a project below \
+                the root); read the plan with `strategy list [--archived]` and `strategy show <task|feature|milestone> <id>...` (one id, or several in one reply) \
+                (a task's notes in full: `strategy show note <task> <notes>`; a task's run log: `strategy show run <task> <run> [<steps>|all]`); propose \
+                a change with `strategy task|feature|milestone [<id>]` or `strategy vision`, alone in its call; reply with \
+                `strategy note`. Several reads go in one call, one per line, and run in order.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "One or more commands, one per line, e.g. `strategy show feature <id>` or `view app.main --project <folder>`"},
+                    "text": {"type": "string", "description": "The reply for `strategy note`; a proposal's fields as a JSON object (`help strategy` lists them per kind); the new vision for `strategy vision`"}
+                },
+                "required": ["command"]
+            }
+        });
+    }
+    json!({
+        "name": "solace",
+        "description": "Read, change and test this project's code. Start with `session start --task`, \
+            the task in `text`: it lists the symbols most likely relevant, the workflow and the commands. Several commands \
+            go in one call, one per line, and run in order: read everything you need in one call, and put \
+            `test` on the line after a `submit`.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "One or more commands, one per line, e.g. `inspect checkout.pay tax.quote --context`, or `submit` then `test`"},
+                "text": {"type": "string", "description": "For submit: a patch (`*** Begin Patch` / `*** Update: <symbol or module>` / `@@` hunks) or new code; for `write` with no path: a patch of files (`*** Update File: <path>`, `*** Add File: <path>`, `*** Delete File: <path>`); the task for `session start --task`; the record, note, summary or question for `work add` and `task note|done|ask`"},
+                "options": {"type": "array", "items": {"type": "string"}, "description": "2–4 options, for `task ask`"},
+                "reason": {"type": "string", "description": "For a settings `write` (solace.toml, AGENTS.md): why the change, shown with the question the human approves"},
+                "old": {"type": "string", "description": "For `--replace`: the exact text that `text` replaces"}
+            },
+            "required": ["command"]
+        }
+    })
+}
+
 /// `solace mcp`: the same commands as one MCP tool over stdio, so an agent
 /// can pass code without shell quoting and needs no shell at all.
 fn mcp(budget: usize) {
-    let description = "Read, change and test this project's code. Start with `session start --task`, \
-        the task in `text`: it lists the symbols most likely relevant, the workflow and the commands. Several commands \
-        go in one call, one per line, and run in order: read everything you need in one call, and put \
-        `test` on the line after a `submit`.";
+    let tool = tool_schema();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lines() {
@@ -680,21 +736,7 @@ fn mcp(budget: usize) {
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "solace", "version": env!("CARGO_PKG_VERSION")}
             }),
-            "tools/list" => json!({"tools": [{
-                "name": "solace",
-                "description": description,
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string", "description": "One or more commands, one per line, e.g. `inspect checkout.pay tax.quote --context`, or `submit` then `test`"},
-                        "text": {"type": "string", "description": "For submit: a patch (`*** Begin Patch` / `*** Update: <symbol or module>` / `@@` hunks) or new code; the task for `session start --task`; the record, note, summary or question for `work add` and `task note|done|ask`"},
-                        "options": {"type": "array", "items": {"type": "string"}, "description": "2–4 options, for `task ask`"},
-                        "reason": {"type": "string", "description": "For a settings `write` (solace.toml, AGENTS.md): why the change, shown with the question the human approves"},
-                        "old": {"type": "string", "description": "For `--replace`: the exact text that `text` replaces"}
-                    },
-                    "required": ["command"]
-                }
-            }]}),
+            "tools/list" => json!({"tools": [tool]}),
             "tools/call" => {
                 let args = &msg["params"]["arguments"];
                 let text = args["text"].as_str().map(String::from);
@@ -1852,6 +1894,15 @@ impl Store {
         Ok(out)
     }
 
+    /// `refs <name>...`: each symbol's users, in the order named (D-102).
+    fn refs_all(&self, names: &[&str], budget: usize) -> Out {
+        let mut out = String::new();
+        for name in names {
+            out += &self.refs(name)?;
+        }
+        Ok(lockdown::trim_output(&out, budget))
+    }
+
     fn refs(&self, name: &str) -> Out {
         let ix = self.index()?;
         // `refs <module>.<Type>.<field>`: the readers of one field (D-44)
@@ -2404,27 +2455,57 @@ impl Store {
         Ok(())
     }
 
-    fn delete(&self, name: &str) -> Out {
+    /// `delete <name>...`: deletes each named symbol in order (D-102). Nothing
+    /// is deleted when any named symbol is still used by a symbol outside the
+    /// list, so the check runs over the whole list first: uses only shrink as
+    /// symbols go, never grow.
+    fn delete_all(&self, names: &[&str], budget: usize) -> Out {
         let ix = self.index()?;
-        let i = self.resolve(&ix, name)?;
-        let before = self.broken()?;
-        let users: Vec<String> = ix.used_by[i].iter().map(|&j| ix.syms[j].qname()).collect();
-        if !users.is_empty() {
-            return fail(format!("E5001 {} is still used by:\n  {}", ix.syms[i].qname(), users.join("\n  ")));
+        let listed = names.iter().map(|name| self.resolve(&ix, name)).collect::<Result<Vec<_>, _>>()?;
+        let used: Vec<String> = listed
+            .iter()
+            .map(|&i| {
+                let users: Vec<String> = ix.used_by[i].iter().filter(|j| !listed.contains(j)).map(|&j| ix.syms[j].qname()).collect();
+                Ok::<String, Failure>(if users.is_empty() {
+                    String::new()
+                } else {
+                    format!("{} is still used by:\n  {}", ix.syms[i].qname(), users.join("\n  "))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let used: Vec<String> = used.into_iter().filter(|s| !s.is_empty()).collect();
+        if !used.is_empty() {
+            return if used.len() == 1 {
+                fail(format!("E5001 {}", used[0]))
+            } else {
+                fail(format!("E5001 nothing deleted.\n{}", used.join("\n")))
+            };
         }
-        self.retire(&ix.syms[i].id, "")?;
-        // The module goes with its last symbol, unless another module imports it.
-        let module = &ix.syms[i].module;
-        let last = !ix.syms.iter().enumerate().any(|(j, s)| j != i && s.module == *module);
-        let imported = ix.modules.iter().any(|m| gleam::imports(&m.header).iter().any(|imp| imp.module == *module));
-        let retired = if last && !imported {
-            self.db.execute("DELETE FROM modules WHERE path = ?1", [module])?;
-            format!("; module {module} retired")
-        } else {
-            String::new()
-        };
+        let before = self.broken()?;
+        let mut out = String::new();
+        for name in names {
+            let ix = self.index()?;
+            let i = self.resolve(&ix, name)?;
+            self.retire(&ix.syms[i].id, "")?;
+            // The module goes with its last symbol, unless another module imports it.
+            let module = &ix.syms[i].module;
+            let last = !ix.syms.iter().enumerate().any(|(j, s)| j != i && s.module == *module);
+            let imported = ix.modules.iter().any(|m| gleam::imports(&m.header).iter().any(|imp| imp.module == *module));
+            let retired = if last && !imported {
+                self.db.execute("DELETE FROM modules WHERE path = ?1", [module])?;
+                format!("; module {module} retired")
+            } else {
+                String::new()
+            };
+            out += &format!("Deleted {}{retired}.\n", ix.syms[i].qname());
+        }
         let diags = self.check_all(&self.index()?)?;
-        Ok(format!("Deleted {}{retired}.\n{}", ix.syms[i].qname(), broken_report(&before, &diags)))
+        Ok(lockdown::trim_output(&out, budget) + &broken_report(&before, &diags))
+    }
+
+    #[cfg(test)]
+    fn delete(&self, name: &str) -> Out {
+        self.delete_all(&[name], usize::MAX)
     }
 
     fn check(&self) -> Out {
@@ -3667,8 +3748,10 @@ mod tests {
         assert!(REFERENCE.contains("task done") && REFERENCE.contains("agent-config"));
         // D-46: session start gets the workflow, with the signature-change and
         // test examples (D-48: a test at the level reported, one per shifted
-        // behavior), in under 3k bytes; `help` keeps every option.
-        assert!(r.len() < 3000, "{}", r.len());
+        // behavior); D-102: under 3.6k bytes, for the file tiers and the split
+        // command lines; `help` keeps every option.
+        assert!(r.len() < 3600, "{}", r.len());
+        assert!(r.contains("Files by tier") && r.contains("ignored\nor not"));
         assert!(
             r.contains("Changing a signature or adding a field") && r.contains("one at the level the task reports") && r.contains("`help`")
         );
@@ -3770,6 +3853,9 @@ mod tests {
         assert!(r.contains("-- pilot/checkout.quote (above)\n  > line "), "{r}");
         SHOWN.with(|s| *s.borrow_mut() = None);
         assert!(ok(store.refs("pricing.quote")).contains("-- pilot/checkout.quote\n"));
+        // D-102: `refs <name>...` gives each symbol's users, in the order named
+        let many = ok(store.refs_all(&["pricing.quote", "checkout.quote"], usize::MAX));
+        assert!(many.starts_with("pilot/pricing.quote is used by") && many.contains("\npilot/checkout.quote is used by"), "{many}");
     }
 
     #[test]
@@ -4095,6 +4181,17 @@ mod tests {
         store.submit_symbols(None, Some("other"), "pub fn two() -> Int { 2 }").unwrap();
         let err = store.resolve(&store.index().unwrap(), "two").unwrap_err().0;
         assert!(err.starts_with("E1002 ambiguous name: two") && err.contains("calc.two") && err.contains("other.two"), "{err}");
+        // D-102: `delete <name>...` deletes each named symbol in order; a name
+        // used outside the list stops the whole list, so nothing is deleted.
+        let store = calc_project();
+        let err = store.delete_all(&["calc.add", "calc.one"], usize::MAX).unwrap_err().0;
+        assert!(err.starts_with("E5001 calc.add is still used by:") && err.contains("calc.three") && !err.contains("calc.one"), "{err}");
+        assert!(store.resolve(&store.index().unwrap(), "calc.one").is_ok());
+        let out = store.delete_all(&["calc.one", "calc.two"], usize::MAX).unwrap();
+        assert!(out.starts_with("Deleted calc.one.\nDeleted calc.two."), "{out}");
+        // A helper goes with its last caller in one list.
+        let out = store.delete_all(&["calc.add", "calc.three"], usize::MAX).unwrap();
+        assert!(out.starts_with("Deleted calc.add.\nDeleted calc.three"), "{out}");
     }
 
     fn module_paths(s: &Store) -> Vec<String> {

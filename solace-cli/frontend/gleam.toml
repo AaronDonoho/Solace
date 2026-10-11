@@ -4,6 +4,7 @@ target = "javascript"
 
 [dependencies]
 gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+gleam_json = ">= 3.0.0 and < 4.0.0"
 lustre = ">= 5.7.1 and < 6.0.0"
 modem = ">= 2.0.0 and < 3.0.0"
 solace_board = { path = "../board" }
@@ -11,6 +12,7 @@ components = { path = "../components" }
 migration = { path = "../migration" }
 contracts = { path = "../contracts" }
 strategy = { path = "../strategy" }
+settings = { path = "../settings" }
 
 [dev_dependencies]
 gleeunit = ">= 1.0.0 and < 2.0.0"

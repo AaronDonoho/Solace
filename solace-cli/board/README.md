@@ -7,6 +7,9 @@ The board holds the lanes, cards, new tasks, projects and notices. The open
 task's details are `<solace-task>` from `../components`: the board hands it the
 task's events and a notice's tab, and follows it when it moves project.
 
+A task link (D-98) reaches the board through the shell's `focus` property,
+`{dir, id, n}`: the task opens and its details scroll into view.
+
 Build after changing the client:
 
 ```

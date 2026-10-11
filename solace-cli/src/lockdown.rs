@@ -8,7 +8,8 @@ pub fn error<T>(code: &str, at: &str, message: impl std::fmt::Display) -> Result
 
 /// A Gleam command in a project of plain files (D-60).
 pub fn plain<T>(command: &str) -> Result<T, Failure> {
-    error("E6013", command, "this project has no Gleam code (no gleam.toml); use files, grep, read, write and run")
+    let use_ = if board::strategy_context().is_some() { "files, grep and read" } else { "files, grep, read, write and run" };
+    error("E6013", command, format!("this project has no Gleam code (no gleam.toml); use {use_}"))
 }
 
 /// The default `watch_limit`: text files up to this many bytes are watched.
@@ -266,17 +267,18 @@ pub fn watched_paths(root: &Path, v: &toml::Value) -> Result<Vec<String>, Failur
     tree_rows(root, v, root, &mut rows)?;
     Ok(rows.into_iter().filter(|(_, t)| t == "watched").map(|(n, _)| n).collect())
 }
+#[cfg(test)]
 fn read(root: &Path, name: &str, args: &[&str], budget: usize) -> Out {
+    Ok(read_part(root, name, args, budget)?.0)
+}
+/// A file's text within `budget`, and whether it was cut short.
+fn read_part(root: &Path, name: &str, args: &[&str], budget: usize) -> Result<(String, bool), Failure> {
     let file = fs::File::open(path(root, name)?)?;
-    let (mut start, mut end) = (1usize, usize::MAX);
+    // The lines asked for, in file order: the whole file without `--lines`.
+    let mut ranges = vec![(1usize, usize::MAX)];
     let mut reader = BufReader::new(file);
-    if let ["--lines", range] = args {
-        let (a, b) = range.split_once("..").ok_or_else(|| Failure("expected --lines a..b".into(), 2))?;
-        start = a.parse().unwrap_or(0);
-        end = b.parse().unwrap_or(0);
-        if start == 0 || end < start {
-            return usage("invalid line range");
-        }
+    if let ["--lines", spec] = args {
+        ranges = line_ranges(spec)?;
     } else if let ["--tail", n] = args {
         let n: usize = n.parse().map_err(|_| Failure("invalid tail count".into(), 2))?;
         let length = reader.get_ref().metadata()?.len();
@@ -301,13 +303,14 @@ fn read(root: &Path, name: &str, args: &[&str], budget: usize) -> Out {
         // A tail shows only the file's end, so it doesn't count as reading it
         // for a whole-file write.
         let text = lines.into_iter().collect::<Vec<_>>().join("\n") + "\n";
-        return Ok(trim_output(&text, budget));
+        return Ok((trim_output(&text, budget), false));
     } else if !args.is_empty() {
-        return usage("read <path> [--lines a..b | --tail n]");
+        return usage("read <path> [--lines 3,7,10..12 | --tail n]");
     }
     let mut out = String::new();
     let mut truncated = false;
     let mut n = 0;
+    let mut shown = 0;
     loop {
         let mut line = Vec::new();
         let mut oversized = false;
@@ -332,29 +335,63 @@ fn read(root: &Path, name: &str, args: &[&str], budget: usize) -> Out {
             break;
         }
         n += 1;
-        if n < start {
-            continue;
-        }
-        if n > end {
+        if n > ranges.last().unwrap().1 {
             break;
         }
+        let Some(r) = ranges.iter().position(|&(a, b)| a <= n && n <= b) else { continue };
         let line = String::from_utf8_lossy(&line);
-        let text = if args.is_empty() { line.to_string() } else { format!("{n}: {line}") };
+        // A gap between ranges is one `…` line.
+        let gap = if shown > 0 && n > shown + 1 { "…\n" } else { "" };
+        let text = if args.is_empty() { line.to_string() } else { format!("{gap}{n}: {line}") };
         if oversized || out.len() + text.len() + 100 > budget {
-            out += &format!("Next: read {name} --lines {n}..{}\n", n + 100);
+            let next = if args.is_empty() {
+                format!("{n}..{}", n + 100)
+            } else {
+                line_list(&[(n, ranges[r].1)].into_iter().chain(ranges[r + 1..].iter().copied()).collect::<Vec<_>>())
+            };
+            out += &format!("Next: read {name} --lines {next}\n");
             truncated = true;
             break;
         }
         out += &text;
+        shown = n;
     }
     // Watched files are bounded; unwatched logs are never hashed or loaded in full.
-    if fs::metadata(root.join(name))?.len() <= WATCH_LIMIT as u64 * 16 {
+    // A whole-file read cut short leaves the file unread for a whole-file write.
+    if (!truncated || !args.is_empty()) && fs::metadata(root.join(name))?.len() <= WATCH_LIMIT as u64 * 16 {
         remember(root, name, &fs::read(root.join(name))?)?;
     }
     if truncated && out.len() > budget {
         out.truncate(out.floor_char_boundary(budget));
     }
-    Ok(out)
+    Ok((out, truncated))
+}
+/// `--lines` (D-105): lines and ranges such as `150,156,200..210`, sorted and
+/// merged into file order.
+fn line_ranges(spec: &str) -> Result<Vec<(usize, usize)>, Failure> {
+    let bad = || Failure("invalid line range: --lines takes lines and ranges such as 150,156,200..210".into(), 2);
+    let mut asked = vec![];
+    for part in spec.split(',') {
+        let (a, b) = part.split_once("..").unwrap_or((part, part));
+        let (a, b): (usize, usize) = (a.trim().parse().map_err(|_| bad())?, b.trim().parse().map_err(|_| bad())?);
+        if a == 0 || b < a {
+            return Err(bad());
+        }
+        asked.push((a, b));
+    }
+    asked.sort();
+    let mut ranges: Vec<(usize, usize)> = vec![];
+    for (a, b) in asked {
+        match ranges.last_mut() {
+            Some(last) if a <= last.1.saturating_add(1) => last.1 = last.1.max(b),
+            _ => ranges.push((a, b)),
+        }
+    }
+    Ok(ranges)
+}
+/// Ranges in `--lines` form: `150,156,200..210`.
+fn line_list(ranges: &[(usize, usize)]) -> String {
+    ranges.iter().map(|&(a, b)| if a == b { a.to_string() } else { format!("{a}..{b}") }).collect::<Vec<_>>().join(",")
 }
 pub fn trim_output(text: &str, budget: usize) -> String {
     if text.len() <= budget {
@@ -440,6 +477,26 @@ pub fn edited(current: &[u8], new: &str, replace: bool, all: bool, old: Option<&
     let current = std::str::from_utf8(current).map_err(|_| Failure("E6002 text replacement requires a UTF-8 file".into(), 1))?;
     Ok(drafts::replace(current, old, new, all)?.0)
 }
+/// The paths a `write` or `remove` names (`remove` takes a list, D-102), for
+/// a task's snapshot of the files a command changes.
+pub fn paths<'a>(a: &[&'a str]) -> Vec<&'a str> {
+    if !matches!(a[0], "write" | "remove") {
+        return vec![];
+    }
+    a[1..].iter().copied().filter(|x| !x.starts_with("--")).collect()
+}
+/// The files a file patch (D-104) names, with their bytes now, for a task's
+/// snapshot; a path it can't reach is left out, and the command refuses it.
+pub fn patch_snapshot(root: &Path, patch: Option<&str>) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    for (_, name, ..) in patch.and_then(|t| drafts::sections(t, true).ok()).unwrap_or_default() {
+        let name = file_name(Path::new(&name));
+        if let Ok(p) = path(root, &name) {
+            out.insert(format!("file:{name}"), json!(fs::read(p).ok()));
+        }
+    }
+    out
+}
 /// Whether `journal` already holds an undo record from run `rid`.
 fn same_run(journal: &Path, rid: &serde_json::Value) -> bool {
     fs::read(journal).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).is_some_and(|r| &r["run"] == rid)
@@ -463,68 +520,207 @@ fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, all
     {
         return error("E6005", name, "file is unread or changed since last read; read it again or use --replace");
     }
+    let journal = journal(root, name, &before)?;
+    fs::create_dir_all(p.parent().unwrap())?;
+    let result = fs::write(&p, &text).map_err(Failure::from).and_then(|_| validate(root, v, name, &p, &text));
+    // A write that fails validation is put back and leaves no record, so
+    // a failed command keeps no undo for it; one that succeeded keeps its
+    // record until the outer transaction commits, even if the command then fails.
+    settle(root, name, &p, &before, Some(text.as_bytes()), &journal, result.is_ok())?;
+    result.map(|_| format!("Wrote {name}\n"))
+}
+/// Saves `name`'s bytes before a change in `.solace/pending/`. In a board run
+/// the record is an undo record: it stays until the command's outer
+/// transaction commits, and recovery adds the rows from it (D-77 point 7);
+/// otherwise it is the validator journal. Returns the record's path and
+/// whether this change wrote it: an earlier change to this file in the
+/// command keeps its record, which holds the original bytes.
+fn journal(root: &Path, name: &str, before: &Option<Vec<u8>>) -> Result<(PathBuf, bool), Failure> {
     fs::create_dir_all(root.join(".solace/pending"))?;
     let journal = root.join(".solace/pending").join(format!("{}.json", sha256(name.as_bytes())));
-    // In a board run the record is an undo record: it stays until the command's
-    // outer transaction commits, and recovery adds the rows from it (D-77 point 7).
     let record = match board::context() {
         Some((tid, rid)) => json!({"task":tid,"run":rid,"path":name,"bytes":before}),
         None => json!({"path":name,"bytes":before}),
     };
-    // An earlier change to this file in the command keeps its record: it holds the original bytes.
     let wrote = record["task"].is_null() || !same_run(&journal, &record["run"]);
     if wrote {
         write_atomic(&journal, record.to_string())?;
     }
-    fs::create_dir_all(p.parent().unwrap())?;
-    let result = (|| -> Out {
-        fs::write(&p, &text)?;
-        if name == "gleam.toml" {
-            let manifest = text.parse::<toml::Value>().map_err(|e| Failure(format!("E6003 invalid manifest\n  {e}"), 1))?;
-            if manifest.get("name").and_then(|x| x.as_str()).is_none_or(|s| !workspace::package_name(s))
-                || manifest.get("version").and_then(|x| x.as_str()).is_none_or(|v| {
-                    let core = v.split(['-', '+']).next().unwrap_or("");
-                    let parts: Vec<_> = core.split('.').collect();
-                    parts.len() != 3 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
-                })
-            {
-                return error("E6003", name, "manifest requires name and version");
-            }
+    Ok((journal, wrote))
+}
+/// Checks a file written at `p` with `text`: a manifest needs a name and a
+/// version, and each validator whose pattern matches must pass (E6003).
+fn validate(root: &Path, v: &toml::Value, name: &str, p: &Path, text: &str) -> Result<(), Failure> {
+    if name == "gleam.toml" {
+        let manifest = text.parse::<toml::Value>().map_err(|e| Failure(format!("E6003 invalid manifest\n  {e}"), 1))?;
+        if manifest.get("name").and_then(|x| x.as_str()).is_none_or(|s| !workspace::package_name(s))
+            || manifest.get("version").and_then(|x| x.as_str()).is_none_or(|v| {
+                let core = v.split(['-', '+']).next().unwrap_or("");
+                let parts: Vec<_> = core.split('.').collect();
+                parts.len() != 3 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+            })
+        {
+            return error("E6003", name, "manifest requires name and version");
         }
-        if let Some(validators) = v.get("validators").and_then(|x| x.as_table()) {
-            for (pattern, argv) in validators {
-                if matches(pattern, name) {
-                    let argv: Vec<String> =
-                        argv.as_array().unwrap().iter().map(|x| x.as_str().unwrap().replace("{file}", &p.to_string_lossy())).collect();
-                    let out = command(root, &argv, 120, BUDGET).map_err(|e| Failure(format!("E6003 validator failed\n  {}", e.0), 1))?;
-                    if !out.starts_with("exit code: 0\n") {
-                        return error("E6003", name, out);
-                    }
+    }
+    if let Some(validators) = v.get("validators").and_then(|x| x.as_table()) {
+        for (pattern, argv) in validators {
+            if matches(pattern, name) {
+                let argv: Vec<String> =
+                    argv.as_array().unwrap().iter().map(|x| x.as_str().unwrap().replace("{file}", &p.to_string_lossy())).collect();
+                let out = command(root, &argv, 120, BUDGET).map_err(|e| Failure(format!("E6003 validator failed\n  {}", e.0), 1))?;
+                if !out.starts_with("exit code: 0\n") {
+                    return error("E6003", name, out);
                 }
             }
         }
-        Ok(format!("Wrote {name}\n"))
-    })();
-    if result.is_err() {
-        // The write is refused: the file goes back, with no undo to record.
-        match &before {
-            Some(b) => fs::write(&p, b)?,
-            None => fs::remove_file(&p)?,
-        }
-        // An earlier change's record stays: that change still stands.
-        if wrote {
-            fs::remove_file(journal)?;
-        }
-    } else {
-        if record["task"].is_null() {
-            fs::remove_file(journal)?;
-        }
-        remember(root, name, text.as_bytes())?;
     }
-    // A write that fails validation is put back above and leaves no record, so
-    // a failed command keeps no undo for it; one that succeeded keeps its
-    // record until the outer transaction commits, even if the command then fails.
-    result
+    Ok(())
+}
+/// Ends a file change. A refused one puts the file back, with no undo to
+/// record, and drops the record if this change wrote it (an earlier change's
+/// record stays: that change still stands). A kept one drops the validator
+/// journal (an undo record stays) and remembers the new bytes as read.
+fn settle(
+    root: &Path,
+    name: &str,
+    p: &Path,
+    before: &Option<Vec<u8>>,
+    after: Option<&[u8]>,
+    (journal, wrote): &(PathBuf, bool),
+    kept: bool,
+) -> Result<(), Failure> {
+    if !kept {
+        match before {
+            Some(b) => fs::write(p, b)?,
+            None if p.exists() => fs::remove_file(p)?,
+            None => {}
+        }
+        if *wrote {
+            fs::remove_file(journal)?;
+        }
+        return Ok(());
+    }
+    if board::context().is_none() {
+        fs::remove_file(journal)?;
+    }
+    if let Some(after) = after {
+        remember(root, name, after)?;
+    }
+    Ok(())
+}
+/// One section of a `write` patch, checked and applied in memory: the file's
+/// path, its bytes now, and its new text (`None` to delete it).
+fn file_change(
+    root: &Path,
+    v: &toml::Value,
+    name: &str,
+    kind: drafts::Section,
+    hunks: Vec<drafts::Hunk>,
+) -> Result<(PathBuf, Option<Vec<u8>>, Option<String>), Failure> {
+    use drafts::Section;
+    let p = reachable(root, name)?;
+    let t = tier(root, v, name, None);
+    if t == "graph" {
+        let module = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/")).unwrap().trim_end_matches(".gleam");
+        return error("E6001", name, format!("source is held as symbols; change it with a `submit` patch (`*** Update: {module}`)"));
+    }
+    if t == "protected" {
+        return error("E6002", name, "protected files change only through a human-approved proposal: in a work run, `write` it alone, with the exact new text and `reason`");
+    }
+    if t != "watched" && !t.starts_with("unwatched") {
+        return error("E6002", name, format!("caught by tier rule: {t}"));
+    }
+    if p.is_dir() {
+        return error("E6002", name, "a folder; a patch changes files");
+    }
+    let before = fs::read(&p).ok();
+    match (kind, &before) {
+        (Section::Add, Some(_)) => return error("E6002", name, "already exists; change it with `*** Update File`"),
+        (Section::Update | Section::Delete, None) => return error("E6002", name, "no such file; create it with `*** Add File`"),
+        (Section::Delete, _) if name == "gleam.toml" => return error("E6002", name, "gleam.toml can't be removed"),
+        _ => {}
+    }
+    let current = match (kind, &before) {
+        (Section::Update, Some(b)) => std::str::from_utf8(b).map_err(|_| Failure(format!("E6002 {name}: a patch changes only UTF-8 text"), 1))?,
+        _ => "",
+    };
+    let text = drafts::file_text(name, current, kind, hunks)?;
+    if let Some(text) = &text {
+        if text.len() > limit(v) {
+            return error("E6004", name, "proposed text exceeds watch_limit");
+        }
+        let t = tier(root, v, name, Some(text.as_bytes()));
+        if t != "watched" && !t.starts_with("unwatched") {
+            return error("E6002", name, format!("caught by tier rule: {t}"));
+        }
+    }
+    Ok((p, before, text))
+}
+/// `write` with no path (D-104): a patch of `*** Add File`, `*** Update File`
+/// and `*** Delete File` sections changes several files, whole or nothing.
+/// Every section is checked and applied in memory before any file changes;
+/// then every file is written before any is validated, so a validator sees
+/// the project as it will be, and if one fails, every file goes back. An
+/// update needs no earlier `read`: its hunks matching is the check.
+fn write_patch(root: &Path, v: &toml::Value, raw: &str) -> Out {
+    let mut changes: Vec<(String, PathBuf, Option<Vec<u8>>, Option<String>)> = vec![];
+    let mut refused = vec![];
+    for (kind, target, _, hunks) in drafts::sections(raw, true)? {
+        let name = file_name(Path::new(&target));
+        if changes.iter().any(|(n, ..)| *n == name) {
+            refused.push(format!("E0108 the patch names {name} twice; give each file one section"));
+            continue;
+        }
+        match file_change(root, v, &name, kind, hunks) {
+            Ok((p, before, text)) => changes.push((name, p, before, text)),
+            Err(e) => refused.push(e.0),
+        }
+    }
+    if !refused.is_empty() {
+        return Err(Failure(format!("nothing written:\n{}", refused.join("\n")), 1));
+    }
+    let changes: Vec<_> = changes.into_iter().filter(|(_, _, before, text)| text.as_deref().map(str::as_bytes) != before.as_deref()).collect();
+    if changes.is_empty() {
+        return fail("E0108 the patch changes nothing.");
+    }
+    let mut journals = vec![];
+    let mut result = Ok(());
+    for (name, p, before, text) in &changes {
+        match journal(root, name, before) {
+            Ok(j) => journals.push(j),
+            Err(e) => {
+                result = Err(e);
+                break;
+            }
+        }
+        let wrote = match text {
+            Some(text) => fs::create_dir_all(p.parent().unwrap()).and_then(|_| fs::write(p, text)),
+            None => fs::remove_file(p),
+        };
+        if let Err(e) = wrote {
+            result = Err(e.into());
+            break;
+        }
+    }
+    if result.is_ok() {
+        result = changes.iter().filter_map(|(name, p, _, text)| Some(validate(root, v, name, p, text.as_ref()?))).collect();
+    }
+    let kept = result.is_ok();
+    for ((name, p, before, text), j) in changes.iter().zip(&journals) {
+        settle(root, name, p, before, text.as_deref().map(str::as_bytes), j, kept)?;
+    }
+    if let Err(e) = result {
+        return Err(Failure(format!("nothing written:\n{}", e.0), e.1));
+    }
+    Ok(changes
+        .iter()
+        .map(|(name, _, before, text)| match (before, text) {
+            (_, None) => format!("Removed {name}\n"),
+            (None, _) => format!("Added {name}\n"),
+            _ => format!("Wrote {name}\n"),
+        })
+        .collect())
 }
 fn tree_rows(root: &Path, v: &toml::Value, dir: &Path, out: &mut Vec<(String, String)>) -> Result<(), Failure> {
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
@@ -585,12 +781,13 @@ fn reachable(root: &Path, name: &str) -> Result<PathBuf, Failure> {
     }
     // A path out of the project, or into a project nested in it, is another project's.
     if internal(root, name) || name.split('/').any(|c| c == "..") {
-        return error(
-            "E6006",
-            name,
-            "outside this project: another project's files are reached with `--project <folder>`; \
-             to change a project this task doesn't cover, ask the human with `task ask` rather than putting the change elsewhere",
-        );
+        // A strategy run changes nothing and has no task to ask about (D-93).
+        let ask = if board::strategy_context().is_some() {
+            ""
+        } else {
+            "; to change a project this task doesn't cover, ask the human with `task ask` rather than putting the change elsewhere"
+        };
+        return error("E6006", name, format!("outside this project: another project's files are reached with `--project <folder>`{ask}"));
     }
     path(root, name)
 }
@@ -817,58 +1014,136 @@ pub fn dispatch(
         })());
     }
     if matches!(a[0], "files" | "read" | "write" | "remove") {
-        let name = a.get(1).copied().unwrap_or(".");
-        let name = file_name(Path::new(name));
-        return Some((|| {
-            let p = reachable(root, &name)?;
-            let t = tier(root, v, &name, None);
-            if a[0] != "files" && t == "graph" {
-                let module = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/")).unwrap().trim_end_matches(".gleam");
-                let fix = if p.exists() {
-                    format!("inspect {module}, view {module}, or submit {module}")
-                } else {
-                    format!("create the module by adding a symbol to it: submit --new {module}")
-                };
-                return error("E6001", &name, format!("source is held as symbols; fix: {fix}"));
+        // D-102: `files` and `read` take a list of paths, answered in order;
+        // `write` and `remove` change one file and refuse a list.
+        // A `--lines` or `--tail` range belongs to a single path.
+        let mut paths = vec![];
+        let mut flags = vec![];
+        let mut i = 1;
+        while i < a.len() {
+            if a[i] == "--lines" || a[i] == "--tail" {
+                let next = a.get(i + 1).copied().unwrap_or("");
+                flags.extend([a[i], next]);
+                i += 2;
+            } else if a[i].starts_with("--") {
+                flags.push(a[i]);
+                i += 1;
+            } else {
+                paths.push(a[i]);
+                i += 1;
             }
-            match a[0] {
-                "files" => {
-                    let mut out = String::new();
-                    if p.is_dir() {
-                        tree(root, v, &p, &mut out)?;
+        }
+        // `write` with no path takes a patch that changes several files (D-104).
+        if a[0] == "write" && paths.is_empty() {
+            return Some((|| {
+                let raw = input()?;
+                if !flags.is_empty() || !drafts::is_patch(&raw) {
+                    return usage(
+                        "write with no path takes a file patch in `text`: `*** Begin Patch`, then `*** Add File: <path>`, `*** Update File: <path>` or `*** Delete File: <path>` sections; `write <path>` changes one file",
+                    );
+                }
+                write_patch(root, v, &raw).map(|out| trim_output(&out, budget))
+            })());
+        }
+        if paths.is_empty() {
+            paths.push(".");
+        }
+        return Some((|| {
+            if paths.len() > 1 && a[0] == "write" {
+                return usage("write <path> changes one file; for several, `write` with no path takes a file patch (`*** Update File: <path>` sections)");
+            }
+            if paths.len() > 1 && !flags.is_empty() {
+                return usage("a --lines or --tail range takes one path: read <path> --lines 3,7,10..12");
+            }
+            // Several files share the reply: each is headed with its path, and
+            // the paths that don't fit are named for the next read.
+            let many = paths.len() > 1;
+            let mut out = String::new();
+            // `remove` checks every path before it removes any: whole or nothing.
+            let (mut doomed, mut refused) = (vec![], vec![]);
+            for (k, name) in paths.iter().enumerate() {
+                if a[0] == "read" && many && budget.saturating_sub(out.len()) < 400 {
+                    out += &format!("Next: read {}\n", paths[k..].join(" "));
+                    break;
+                }
+                let name = file_name(Path::new(name));
+                let p = reachable(root, &name)?;
+                let t = tier(root, v, &name, None);
+                if a[0] != "files" && t == "graph" {
+                    let module = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/")).unwrap().trim_end_matches(".gleam");
+                    let fix = if p.exists() {
+                        format!("inspect {module}, view {module}, or submit {module}")
                     } else {
-                        out = format!("{name} [{t}]\n");
+                        format!("create the module by adding a symbol to it: submit --new {module}")
+                    };
+                    let e = error("E6001", &name, format!("source is held as symbols; fix: {fix}"));
+                    if a[0] == "remove" {
+                        refused.extend(e.err());
+                        continue;
                     }
-                    Ok(out)
+                    return e;
                 }
-                "read" => read(root, &name, &a[2.min(a.len())..], budget),
-                "write" => {
-                    if t == "protected" {
-                        return error("E6002", &name, "protected files change only through a human-approved proposal: in a work run, `write` it with the exact new text");
-                    }
-                    write(root, v, &name, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old)
-                }
-                "remove" => {
-                    if name == "gleam.toml" || (t != "watched" && !t.starts_with("unwatched")) {
-                        return error(
-                            "E6002",
-                            &name,
-                            format!("only watched and unwatched files can be removed, and never gleam.toml; {t}"),
-                        );
-                    }
-                    if let Some((tid, rid)) = board::context() {
-                        fs::create_dir_all(root.join(".solace/pending"))?;
-                        let record = root.join(".solace/pending").join(format!("{}.json", sha256(name.as_bytes())));
-                        // An earlier change to this file in the command keeps its record: it holds the original bytes.
-                        if !same_run(&record, &json!(rid)) {
-                            write_atomic(&record, json!({"task":tid,"run":rid,"path":name,"bytes":fs::read(&p).ok()}).to_string())?;
+                match a[0] {
+                    "files" => {
+                        if p.is_dir() {
+                            tree(root, v, &p, &mut out)?;
+                        } else {
+                            out += &format!("{name} [{t}]\n");
                         }
                     }
-                    fs::remove_file(p)?;
-                    Ok(format!("Removed {name}\n"))
+                    "read" => {
+                        if many {
+                            out += &format!("==== {name} ====\n");
+                        }
+                        let (text, cut) = read_part(root, &name, &flags, if many { budget.saturating_sub(out.len() + 200) } else { budget })?;
+                        out += &text;
+                        if cut && k + 1 < paths.len() {
+                            out += &format!("Next: read {}\n", paths[k + 1..].join(" "));
+                            break;
+                        }
+                    }
+                    "write" => {
+                        if t == "protected" {
+                            return error("E6002", &name, "protected files change only through a human-approved proposal: in a work run, `write` it with the exact new text");
+                        }
+                        return write(root, v, &name, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old);
+                    }
+                    "remove" => {
+                        if name == "gleam.toml" || (t != "watched" && !t.starts_with("unwatched")) {
+                            refused.extend(
+                                error::<()>("E6002", &name, format!("only watched and unwatched files can be removed, and never gleam.toml; {t}")).err(),
+                            );
+                        } else if !p.is_file() {
+                            refused.extend(error::<()>("E6002", &name, "no such file").err());
+                        } else {
+                            doomed.push((name, p));
+                        }
+                    }
+                    _ => unreachable!(),
                 }
-                _ => unreachable!(),
             }
+            if let [one] = &refused[..]
+                && paths.len() == 1
+            {
+                return Err(Failure(one.0.clone(), one.1));
+            }
+            if !refused.is_empty() {
+                let all: Vec<String> = refused.iter().map(|f| f.0.clone()).collect();
+                return Err(Failure(format!("nothing removed:\n{}", all.join("\n")), refused[0].1));
+            }
+            for (name, p) in doomed {
+                if let Some((tid, rid)) = board::context() {
+                    fs::create_dir_all(root.join(".solace/pending"))?;
+                    let record = root.join(".solace/pending").join(format!("{}.json", sha256(name.as_bytes())));
+                    // An earlier change to this file in the command keeps its record: it holds the original bytes.
+                    if !same_run(&record, &json!(rid)) {
+                        write_atomic(&record, json!({"task":tid,"run":rid,"path":name,"bytes":fs::read(&p).ok()}).to_string())?;
+                    }
+                }
+                fs::remove_file(p)?;
+                out += &format!("Removed {name}\n");
+            }
+            Ok(trim_output(&out, budget))
         })());
     }
     if matches!(a[0], "build" | "format" | "run") {
@@ -960,7 +1235,7 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
         "claude" => {
             fs::write(
                 dir.join("mcp.json"),
-                json!({"mcpServers":{"solace":{"command":binary,"args":["mcp","--budget","80000"]}}}).to_string(),
+                json!({"mcpServers":{"solace":{"command":binary,"args":["mcp","--budget","40000"]}}}).to_string(),
             )?;
             fs::write(dir.join("settings.json"),json!({"disableAllHooks":true,"permissions":{"allow":["mcp__solace__solace","WebFetch","WebSearch"],"deny":["Bash","Read","Write","Edit","Glob","Grep","Agent","Task"]},"enabledPlugins":{}}).to_string())?;
             json!({"args":["--strict-mcp-config","--mcp-config",dir.join("mcp.json"),"--settings",dir.join("settings.json"),"--setting-sources","","--disable-slash-commands","--tools","WebFetch,WebSearch","--allowedTools","mcp__solace__solace","WebFetch","WebSearch"],"env":{"MCP_TOOL_TIMEOUT":(timeout.max(3600)*1000).to_string()},"config":"settings.json"})
@@ -971,13 +1246,24 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
     Ok(format!("{launch}\n"))
 }
 
+/// How `grep` reads its query, for its refusal, the reference and the briefs.
+pub const GREP_SYNTAX: &str =
+    "grep takes literal text, already case-insensitive; one term per command; `--project <folder>` picks the project (no options, regex or file arguments)";
+
 /// `grep <text>`: case-insensitive search of the files Solace watches, and the
 /// protected settings. Source symbols are `find`'s; unwatched files aren't
 /// searched (D-52).
 fn grep(root: &Path, v: &toml::Value, query: &str) -> Out {
+    let raw = query;
     let query = unquoted(query);
     if query.is_empty() {
         return Err(Failure("grep: give the text to search for\n\nRun `solace help` for usage.".into(), 2));
+    }
+    // Options, regex alternation or a file after a quoted term would be
+    // searched for literally and silently miss.
+    let trailing = raw.starts_with('"') && raw[1..].find('"').is_some_and(|i| i + 2 < raw.len());
+    if query.starts_with('-') || query.contains("\\|") || trailing {
+        return Err(Failure(format!("grep: {GREP_SYNTAX}\n"), 2));
     }
     let q = query.to_lowercase();
     let mut rows = vec![];
@@ -1084,6 +1370,12 @@ mod tests {
         assert!(!got.contains("generated") && !got.contains("main.gleam"), "{got}");
         assert!(got.lines().nth(3).unwrap().len() < 260, "{got}");
         assert!(call(&s, &v, &["grep", "absent"], "", None).unwrap().starts_with("No matches"));
+        // Options, alternation or a trailing file are refused with the syntax, not searched for.
+        for q in [&["grep", "-i", "\"needle\""][..], &["grep", "\"a\\|b\""], &["grep", "\"needle\"", "docs/a.md"]] {
+            let e = call(&s, &v, q, "", None).unwrap_err().0;
+            assert!(e.contains("literal text, already case-insensitive; one term per command"), "{e}");
+        }
+        assert!(call(&s, &v, &["grep", "\"The", "Needle\""], "", None).unwrap().starts_with("docs/a.md"));
     }
     #[test]
     fn a2_source_internal_and_path_aliases() {
@@ -1123,9 +1415,49 @@ mod tests {
         fs::write(s.root.join("notes"), "one\ntwo\nthree\nfour\n").unwrap();
         let out = read(&s.root, "notes", &["--lines", "2..3"], 1000).unwrap();
         assert!(out.contains("two") && out.contains("three") && !out.contains("one") && !out.contains("four"), "{out}");
-        for bad in ["3..2", "0..1", "x"] {
+        for bad in ["3..2", "0..1", "x", "1,,2", "2,"] {
             assert_eq!(read(&s.root, "notes", &["--lines", bad], 1000).unwrap_err().1, 2, "{bad}");
         }
+        // D-105: lines and ranges, in file order, merged, a gap shown as `…`.
+        assert_eq!(read(&s.root, "notes", &["--lines", "4,1..2"], 1000).unwrap(), "1: one\n2: two\n…\n4: four\n");
+        assert_eq!(read(&s.root, "notes", &["--lines", "2..3,3"], 1000).unwrap(), "2: two\n3: three\n");
+        // Cut at the limit, the rest is named in the same form.
+        assert_eq!(read(&s.root, "notes", &["--lines", "1,3..4"], 110).unwrap(), "1: one\nNext: read notes --lines 3..4\n");
+    }
+    /// D-102: `read` and `files` answer a list of paths in order; a `--lines`
+    /// or `--tail` range takes one path.
+    #[test]
+    fn read_and_files_take_several_paths() {
+        let (s, v) = fixture();
+        fs::write(s.root.join("notes"), "one\ntwo\n").unwrap();
+        fs::write(s.root.join("log"), "a\nb\n").unwrap();
+        let out = call(&s, &v, &["read", "notes", "log"], "", None).unwrap();
+        assert!(out.contains("==== notes ====\none\ntwo\n==== log ====\na\nb\n"), "{out}");
+        // Files past the budget are named, not cut silently, and stay unread.
+        fs::write(s.root.join("big"), "x\n".repeat(1000)).unwrap();
+        let out = call(&s, &v, &["read", "big", "notes"], "", None).unwrap();
+        assert!(out.len() <= 1000 && out.contains("==== big ====") && out.ends_with("Next: read notes\n"), "{out}");
+        assert!(call(&s, &v, &["write", "big"], "y", None).unwrap_err().0.contains("E6005"));
+        // `write` changes one file and refuses a list.
+        let err = call(&s, &v, &["write", "notes", "log"], "x", None).unwrap_err();
+        assert!(err.0.contains("changes one file") && err.1 == 2, "{err:?}");
+        // `remove` takes a list, whole or nothing: a refused path removes none.
+        let err = call(&s, &v, &["remove", "notes", "gleam.toml", "src/main.gleam", "gone"], "", None).unwrap_err();
+        assert!(err.0.starts_with("nothing removed:") && err.0.contains("gleam.toml") && err.0.contains("E6001"), "{err:?}");
+        assert!(err.0.contains("gone") && s.root.join("notes").exists(), "{err:?}");
+        let out = call(&s, &v, &["remove", "notes", "log"], "", None).unwrap();
+        assert_eq!(out, "Removed notes\nRemoved log\n");
+        assert!(!s.root.join("notes").exists() && !s.root.join("log").exists());
+        fs::write(s.root.join("notes"), "one\ntwo\n").unwrap();
+        fs::write(s.root.join("log"), "a\nb\n").unwrap();
+        let lines = call(&s, &v, &["read", "notes", "--lines", "2..2"], "", None).unwrap();
+        assert!(lines.contains("two") && !lines.contains("one"), "{lines}");
+        fs::create_dir_all(s.root.join("priv")).unwrap();
+        fs::write(s.root.join("priv/notes.txt"), "x\n").unwrap();
+        let many = call(&s, &v, &["files", "src", "priv"], "", None).unwrap();
+        assert!(many.contains("src/main.gleam") && many.contains("priv"), "{many}");
+        let err = call(&s, &v, &["read", "notes", "log", "--lines", "1..1"], "", None).unwrap_err();
+        assert!(err.0.contains("takes one path") && err.1 == 2, "{err:?}");
     }
     /// Command output over the budget keeps its first and last lines.
     #[test]
@@ -1261,6 +1593,81 @@ mod tests {
         fs::write(s.root.join(".solace/pending/test.json"), json!({"path":"priv/a","bytes":b"original".to_vec()}).to_string()).unwrap();
         recover(&s.root, &s, &[board::lock(&s.root).unwrap()]).unwrap();
         assert_eq!(fs::read(s.root.join("priv/a")).unwrap(), b"original");
+    }
+    /// D-104: `write` with no path takes a file patch that adds, updates and
+    /// deletes several files, with no earlier read, whole or nothing.
+    #[test]
+    fn a_file_patch_writes_several_files_whole_or_nothing() {
+        let (s, v) = fixture();
+        fs::write(s.root.join("notes"), "one\ntwo\nthree\n").unwrap();
+        fs::write(s.root.join("old"), "gone\n").unwrap();
+        let patch = "*** Begin Patch\n*** Update File: notes\n@@ one\n-two\n+2\n*** Add File: docs/new.md\n+# New\n+\n+text\n*** Delete File: old\n*** End Patch\n";
+        assert_eq!(call(&s, &v, &["write"], patch, None).unwrap(), "Wrote notes\nAdded docs/new.md\nRemoved old\n");
+        assert_eq!(fs::read_to_string(s.root.join("notes")).unwrap(), "one\n2\nthree\n");
+        assert_eq!(fs::read_to_string(s.root.join("docs/new.md")).unwrap(), "# New\n\ntext\n");
+        assert!(!s.root.join("old").exists());
+        // Lines added with no `@@` line go at the end of the file.
+        call(&s, &v, &["write"], "*** Begin Patch\n*** Update File: notes\n+four\n*** End Patch\n", None).unwrap();
+        assert_eq!(fs::read_to_string(s.root.join("notes")).unwrap(), "one\n2\nthree\nfour\n");
+        // Any refused section writes nothing, and each refusal is named.
+        let update = "*** Update File: notes\n-one\n+1\n";
+        for (section, why) in [
+            ("*** Update File: docs/new.md\n-nope\n+x\n", "E0108 in docs/new.md (hunk at line 6), these lines weren't found: `nope`"),
+            ("*** Update File: src/main.gleam\n-x\n+y\n", "E6001"),
+            ("*** Add File: solace.toml\n+x\n", "human-approved proposal"),
+            ("*** Add File: .solace/x\n+x\n", "E6006"),
+            ("*** Add File: docs/new.md\n+x\n", "already exists; change it with `*** Update File`"),
+            ("*** Delete File: missing\n", "no such file; create it with `*** Add File`"),
+            ("*** Delete File: gleam.toml\n", "can't be removed"),
+            ("*** Add File: priv/large\n+", "E6004"),
+            ("*** Update File: notes\n-two\n+3\n", "names notes twice"),
+        ] {
+            let section = if why == "E6004" { format!("{section}{}\n", "x".repeat(101)) } else { section.to_string() };
+            let e = call(&s, &v, &["write"], &format!("*** Begin Patch\n{update}{section}*** End Patch\n"), None).unwrap_err().0;
+            assert!(e.starts_with("nothing written:\n") && e.contains(why), "{why}: {e}");
+            assert_eq!(fs::read_to_string(s.root.join("notes")).unwrap(), "one\n2\nthree\nfour\n", "{why}");
+        }
+        for (patch, why) in [
+            ("*** Begin Patch\n*** Update File: notes\n-one\n+one\n*** End Patch\n", "E0108 the patch changes nothing"),
+            ("*** Begin Patch\n*** Update File: notes\n*** Move to: other\n*** End Patch\n", "use `move <from> <to>`"),
+            ("*** Begin Patch\n*** Delete File: notes\nx\n*** End Patch\n", "takes no lines"),
+            ("*** Begin Patch\n*** Add File: priv/x\nx\n*** End Patch\n", "in `*** Add File: priv/x` every line starts with `+`"),
+            ("*** Begin Patch\n*** End Patch\n", "the patch has no `*** Add File: <path>`"),
+        ] {
+            let e = call(&s, &v, &["write"], patch, None).unwrap_err().0;
+            assert!(e.contains(why), "{why}: {e}");
+        }
+        // With no path, `text` must be a file patch; with a list, `write` points to one.
+        let e = call(&s, &v, &["write"], "plain text", None).unwrap_err();
+        assert!(e.0.contains("takes a file patch") && e.1 == 2, "{e:?}");
+        let e = call(&s, &v, &["write", "notes", "docs/new.md"], "x", None).unwrap_err();
+        assert!(e.0.contains("changes one file") && e.0.contains("*** Update File"), "{e:?}");
+        // A `submit` patch that names a file other than code says to use `write`.
+        let e = drafts::patch_blocks(&s, "*** Begin Patch\n*** Update File: notes\n-one\n+1\n*** End Patch\n").unwrap_err().0;
+        assert!(e.contains("`notes` (line 2) is no symbol or module; a file other than code changes with `write`"), "{e}");
+        let e = drafts::patch_blocks(&s, "*** Begin Patch\n*** Add File: docs/x.md\n+# X\n*** End Patch\n").unwrap_err().0;
+        assert!(e.contains("`docs/x.md` (line 2) is no symbol or module"), "{e}");
+    }
+    /// A file patch writes every file before it validates any; one that fails
+    /// puts every file back and leaves no journal.
+    #[test]
+    fn a_file_patch_that_fails_validation_puts_every_file_back() {
+        let (s, _) = fixture();
+        let v: toml::Value = r#"[validators]
+"priv/**" = ["python3", "-c", "import pathlib,sys; p=pathlib.Path(sys.argv[1]); print('validator output'); assert p.read_text() == 'good\\n' and pathlib.Path('notes').read_text() == 'new\\n'", "{file}"]
+"#
+        .parse()
+        .unwrap();
+        fs::write(s.root.join("notes"), "old\n").unwrap();
+        let patch = |text: &str| format!("*** Begin Patch\n*** Update File: notes\n-old\n+new\n*** Add File: priv/a\n+{text}\n*** End Patch\n");
+        let e = call(&s, &v, &["write"], &patch("bad"), None).unwrap_err().0;
+        assert!(e.starts_with("nothing written:\nE6003") && e.contains("validator output"), "{e}");
+        assert_eq!(fs::read_to_string(s.root.join("notes")).unwrap(), "old\n");
+        assert!(!s.root.join("priv/a").exists());
+        assert!(fs::read_dir(s.root.join(".solace/pending")).unwrap().next().is_none());
+        // The validator sees the other file of the patch already written.
+        call(&s, &v, &["write"], &patch("good"), None).unwrap();
+        assert_eq!(fs::read_to_string(s.root.join("priv/a")).unwrap(), "good\n");
     }
     /// A pending undo record whose file changed: recovery adds the rows (D-77 point 7).
     #[test]

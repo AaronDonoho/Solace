@@ -23,6 +23,11 @@ choice, the note editor and the task's actions. It is `solace_task.gleam`, with 
   property, so the element opens no stream of its own. Without it, the element follows `{base}/events`.
 - `reveal` property, `{tab, id, n}`: show `tab` for task `id` and scroll it into view (a notice's button).
 
+**Copy ID**, beside the title, copies the task's reference, `task:<id>` (`solace_task.reference`), and says
+Copied for 2 s, or Copy failed when neither the clipboard nor the fallback took it. A later click's label isn't
+cleared early by an earlier click's timer. Pasted into any text Solace renders, it is a link to the task (D-98): `markdown` in
+`task_api.mjs` draws `task:<id>` and `[label](task:<id>)` as links to `/task/<id>`, which the shell follows.
+
 Events to the host: `task-moved` (`{id, dir, base}`: the task now lives in another of its projects)
 and `notice` (`{heading, text, id, tab}`, from its own stream only; a host raises its own).
 

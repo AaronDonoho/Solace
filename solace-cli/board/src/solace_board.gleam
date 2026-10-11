@@ -122,13 +122,15 @@ pub type Msg {
   Live(String)
   CaughtUp
   Select(String, String)
+  /// A finished card's Archive button: its task leaves the board (D-95).
+  Archive(String, String)
+  Archived(String)
   /// `<solace-task>` says the open task now lives in another project.
   TaskMoved(String, String)
   Collapse(String)
   NewTaskIn(String)
   DraftScope(String, Bool)
   ToggleProjects
-  ToggleTheme
   AddProject(String)
   RemoveProject(String)
   RemoveOnly
@@ -151,8 +153,13 @@ pub type Msg {
   /// "numbered", "quote" or "code" (see `block` in the components project).
   Block(String, String)
   Dismiss(solace_task.Notice)
+  /// Close All: every toast goes.
+  DismissAll
   /// A notice's button: its task opens on the notice's tab and scrolls into view.
   Open(solace_task.Notice)
+  /// A task link (D-98): the shell asks the board to open this task, stored
+  /// in project `dir`, and bring its details into view.
+  Focus(String, String)
   BaseChanged(String)
   Listening(Source)
   Attached(dynamic.Dynamic)
@@ -352,11 +359,42 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         False -> #(Model(..model, replay: [text, ..model.replay]), fx)
       }
     }
-    CaughtUp -> #(settle(Model(..model, caught_up: True)), effect.none())
+    CaughtUp -> #(
+      resync(settle(Model(..model, caught_up: True))),
+      effect.none(),
+    )
     Select(dir, id) -> #(
       Model(..model, selected_card: Some(#(dir, id)), live: []),
       effect.none(),
     )
+    // The task's live update takes the card off the board.
+    Archive(dir, id) -> #(
+      model,
+      effect.from(fn(dispatch) {
+        request(
+          model.prefix,
+          base_of(model, dir)
+            <> "/tasks/"
+            <> uri.percent_encode(id)
+            <> "/archive",
+          "POST",
+          "{}",
+          fn(text) { dispatch(Archived(text)) },
+        )
+      }),
+    )
+    // An archived open task closes its details.
+    Archived(text) ->
+      case json.parse(text, solace_task.task_decoder()) {
+        Ok(t) -> #(
+          Model(..model, error: "", selected_card: case model.selected_card {
+            Some(#(_, id)) if id == t.id -> None
+            other -> other
+          }),
+          effect.none(),
+        )
+        Error(_) -> #(Model(..model, error: error(text)), effect.none())
+      }
     TaskMoved(dir, id) ->
       case model.selected_card {
         Some(#(_, card)) if card == id -> #(
@@ -389,7 +427,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         effect.none(),
       )
     }
-    ToggleTheme -> #(model, effect.from(fn(_) { toggle_theme() }))
     ToggleProjects -> #(
       Model(..model, projects_open: !model.projects_open),
       effect.none(),
@@ -553,6 +590,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
       }),
     )
+    DismissAll -> #(Model(..model, notices: []), effect.none())
     Dismiss(notice) -> #(
       Model(..model, notices: list.filter(model.notices, fn(n) { n != notice })),
       effect.none(),
@@ -569,6 +607,20 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         },
         reveal: #(notice.tab, notice.id, model.reveal.2 + 1),
         notices: list.filter(model.notices, fn(n) { n != notice }),
+      ),
+      effect.none(),
+    )
+    Focus(_, "") -> #(model, effect.none())
+    // `<solace-task>` scrolls into view now, or once the task loads.
+    Focus(dir, id) -> #(
+      Model(
+        ..model,
+        selected_card: Some(#(dir, id)),
+        live: case model.selected_card == Some(#(dir, id)) {
+          True -> model.live
+          False -> []
+        },
+        reveal: #("details", id, model.reveal.2 + 1),
       ),
       effect.none(),
     )
@@ -706,7 +758,11 @@ pub fn view(model: Model) -> Element(Msg) {
   h.main([], [
     h.style(
       [],
-      board_styles <> selected_card_styles <> modal_styles <> notice_styles,
+      board_styles
+        <> selected_card_styles
+        <> modal_styles
+        <> notice_styles
+        <> archive_styles,
     ),
     h.header([a.class("top")], [
       h.h1([], [h.text("Solace tasks")]),
@@ -721,73 +777,45 @@ pub fn view(model: Model) -> Element(Msg) {
           False -> "New task"
         }),
       ]),
-      h.button(
-        [
-          a.class("theme"),
-          a.attribute("aria-label", "Switch between light and dark theme"),
-          a.title("Switch between light and dark theme"),
-          e.on_click(ToggleTheme),
-        ],
-        [
-          svg.svg(
-            [
-              a.class("sun"),
-              a.attribute("viewBox", "0 0 24 24"),
-              a.attribute("aria-hidden", "true"),
-            ],
-            [
-              svg.path([
-                a.attribute(
-                  "d",
-                  "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4",
-                ),
-              ]),
-            ],
-          ),
-          svg.svg(
-            [
-              a.class("moon"),
-              a.attribute("viewBox", "0 0 24 24"),
-              a.attribute("aria-hidden", "true"),
-            ],
-            [
-              svg.path([
-                a.attribute("d", "M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"),
-              ]),
-            ],
-          ),
-        ],
-      ),
     ]),
     h.p([a.role("alert")], [h.text(model.error)]),
     h.div(
       [a.class("notices")],
-      list.map(model.notices, fn(n) {
-        h.div([a.class("notice"), a.role("alert")], [
-          h.strong([], [h.text(n.heading)]),
-          h.p([], [h.text(n.text)]),
-          h.button([a.class("show"), e.on_click(Open(n))], [
-            h.text("Show task"),
-          ]),
-          h.button(
-            [
-              a.class("close"),
-              a.attribute("aria-label", "Dismiss"),
-              a.title("Dismiss"),
-              e.on_click(Dismiss(n)),
-            ],
-            [
-              svg.svg(
-                [
-                  a.attribute("viewBox", "0 0 24 24"),
-                  a.attribute("aria-hidden", "true"),
-                ],
-                [svg.path([a.attribute("d", "M6 6l12 12M18 6L6 18")])],
-              ),
-            ],
-          ),
-        ])
-      }),
+      list.append(
+        case list.length(model.notices) > 5 {
+          True -> [
+            h.button([a.class("close-all"), e.on_click(DismissAll)], [
+              h.text("Close All"),
+            ]),
+          ]
+          False -> []
+        },
+        list.map(model.notices, fn(n) {
+          h.div([a.class("notice"), a.role("alert")], [
+            h.strong([], [h.text(n.heading)]),
+            h.button([a.class("show"), e.on_click(Open(n))], [
+              h.text("Show task"),
+            ]),
+            h.button(
+              [
+                a.class("close"),
+                a.attribute("aria-label", "Dismiss"),
+                a.title("Dismiss"),
+                e.on_click(Dismiss(n)),
+              ],
+              [
+                svg.svg(
+                  [
+                    a.attribute("viewBox", "0 0 24 24"),
+                    a.attribute("aria-hidden", "true"),
+                  ],
+                  [svg.path([a.attribute("d", "M6 6l12 12M18 6L6 18")])],
+                ),
+              ],
+            ),
+          ])
+        }),
+      ),
     ),
     case model.projects_open {
       True -> projects_view(model)
@@ -911,7 +939,8 @@ fn lanes_view(model: Model) -> Element(Msg) {
 }
 
 /// A lane's columns, with every task that covers its project (D-61); a card
-/// opens its task from the project it is stored in.
+/// opens its task from the project it is stored in. A card in a final column
+/// has an Archive button in its upper right corner (D-95).
 fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
   h.div(
     [a.class("board")],
@@ -933,55 +962,72 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
         ..list.map(tasks, fn(card) {
           let #(home, t) = card
           let current = model.selected_card == Some(#(home, t.id))
-          h.button(
-            [
-              a.class(case current {
-                True -> "card selected"
-                False -> "card"
-              }),
-              a.attribute("aria-current", case current {
-                True -> "true"
-                False -> "false"
-              }),
-              e.on_click(Select(home, t.id)),
-            ],
-            [
-              case t.attention {
-                "" -> h.text("")
-                _ ->
-                  h.strong([a.class("attention")], [h.text("Needs attention ")])
-              },
-              case t.stamps {
-                [] -> h.text("")
-                stamps ->
-                  h.span(
-                    [a.class("stamp"), a.title(string.join(stamps, ", "))],
-                    [
-                      h.text("✓"),
-                      h.span([a.class("sr-only")], [
-                        h.text(" " <> string.join(stamps, ", ") <> ": "),
-                      ]),
-                    ],
-                  )
-              },
-              case t.unexpected {
-                False -> h.text("")
-                True -> hazard()
-              },
-              h.text(t.title),
-              case t.scope {
-                [_, _, ..] ->
-                  h.small([a.class("muted")], [
-                    h.text(string.join(
-                      list.map(t.scope, label_of(model, _)),
-                      " · ",
-                    )),
-                  ])
-                _ -> h.text("")
-              },
-              solace_task.status_badge(t),
-            ],
-          )
+          h.div([a.class("card-wrap")], [
+            h.button(
+              [
+                a.class(case current {
+                  True -> "card selected"
+                  False -> "card"
+                }),
+                a.attribute("aria-current", case current {
+                  True -> "true"
+                  False -> "false"
+                }),
+                e.on_click(Select(home, t.id)),
+              ],
+              [
+                case t.attention {
+                  "" -> h.text("")
+                  _ ->
+                    h.strong([a.class("attention")], [
+                      h.text("Needs attention "),
+                    ])
+                },
+                case t.stamps {
+                  [] -> h.text("")
+                  stamps ->
+                    h.span(
+                      [a.class("stamp"), a.title(string.join(stamps, ", "))],
+                      [
+                        h.text("✓"),
+                        h.span([a.class("sr-only")], [
+                          h.text(" " <> string.join(stamps, ", ") <> ": "),
+                        ]),
+                      ],
+                    )
+                },
+                case t.unexpected {
+                  False -> h.text("")
+                  True -> hazard()
+                },
+                h.text(t.title),
+                case t.scope {
+                  [_, _, ..] ->
+                    h.small([a.class("muted")], [
+                      h.text(string.join(
+                        list.map(t.scope, label_of(model, _)),
+                        " · ",
+                      )),
+                    ])
+                  _ -> h.text("")
+                },
+                solace_task.status_badge_in(lane.workflow, t),
+              ],
+            ),
+            case c.final {
+              True ->
+                h.button(
+                  [
+                    a.class("archive"),
+                    a.attribute("aria-label", "Archive " <> t.title),
+                    a.title("Remove from the board; it stays in the archive"),
+                    e.on_click(Archive(home, t.id)),
+                  ],
+                  [h.text("Archive")],
+                )
+              False -> h.text("")
+            },
+          ])
         })
       ])
     }),
@@ -1127,11 +1173,14 @@ fn scope_of(home: String, t: solace_task.Task) -> List(String) {
 }
 
 /// The tasks a lane shows, each with the project it is stored in: every task
-/// on the board whose projects include this lane's (D-61).
+/// on the board whose projects include this lane's (D-61), but not an archived
+/// one (D-95).
 fn cards(model: Model, lane: Lane) -> List(#(String, solace_task.Task)) {
   list.flat_map(model.lanes, fn(l) {
     l.tasks
-    |> list.filter(fn(t) { list.contains(scope_of(l.dir, t), lane.dir) })
+    |> list.filter(fn(t) {
+      !t.archived && list.contains(scope_of(l.dir, t), lane.dir)
+    })
     |> list.map(fn(t) { #(l.dir, t) })
   })
 }
@@ -1171,6 +1220,12 @@ pub fn register() -> Result(Nil, lustre.Error) {
   lustre.register(
     lustre.component(init, update, view, [
       component.on_attribute_change("base", fn(base) { Ok(BaseChanged(base)) }),
+      // The shell's `focus` property, `{dir, id, n}`: `n` makes asking again news.
+      component.on_property_change("focus", {
+        use dir <- decode.field("dir", decode.string)
+        use id <- decode.field("id", decode.string)
+        decode.success(Focus(dir, id))
+      }),
       component.on_disconnect(Disconnected),
       component.on_connect(Connected),
       component.adopt_styles(False),
@@ -1179,7 +1234,8 @@ pub fn register() -> Result(Nil, lustre.Error) {
   )
 }
 
-const board_styles = ".projects-pick{margin:8px 0}.projects-pick label{display:flex;align-items:center;gap:10px;margin:6px 0;cursor:pointer}.projects-pick input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:34px;height:20px;padding:0;margin:0;border:1px solid var(--edge);border-radius:10px;background:var(--well);cursor:pointer;transition:background .15s}.projects-pick input::before{content:\"\";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--paper);border:1px solid var(--edge);box-sizing:border-box;transition:transform .15s}.projects-pick input:checked{background:var(--focus)}.projects-pick input:checked::before{transform:translateX(14px)}.projects-pick input:focus-visible{outline:3px solid var(--focus);outline-offset:2px}.projects-pick[disabled] label,.projects-pick[disabled] input{opacity:.5;cursor:default}@media (prefers-reduced-motion:reduce){.projects-pick input,.projects-pick input::before{transition:none}}\n\n:host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sun:none;--moon:inline-block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 24px 48px;min-height:100dvh;user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;max-width:760px;background:var(--paper)}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid var(--line);border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}.toolbar [aria-pressed=true]{background:var(--well);font-weight:600}.separator{width:1px;align-self:stretch;background:var(--line);margin:0 6px}.preview{border-top:1px solid var(--line);padding:8px 12px;min-height:94px}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h2{margin-top:0}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{width:auto;flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice p{margin:4px 0 0;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
+const board_styles =
+  ".projects-pick{margin:8px 0}.projects-pick label{display:flex;align-items:center;gap:10px;margin:6px 0;cursor:pointer}.projects-pick input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:34px;height:20px;padding:0;margin:0;border:1px solid var(--edge);border-radius:10px;background:var(--well);cursor:pointer;transition:background .15s}.projects-pick input::before{content:\"\";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--paper);border:1px solid var(--edge);box-sizing:border-box;transition:transform .15s}.projects-pick input:checked{background:var(--focus)}.projects-pick input:checked::before{transform:translateX(14px)}.projects-pick input:focus-visible{outline:3px solid var(--focus);outline-offset:2px}.projects-pick[disabled] label,.projects-pick[disabled] input{opacity:.5;cursor:default}@media (prefers-reduced-motion:reduce){.projects-pick input,.projects-pick input::before{transition:none}}\n\n:host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 24px 48px;min-height:100dvh;user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;max-width:760px;background:var(--paper)}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid var(--line);border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}.toolbar [aria-pressed=true]{background:var(--well);font-weight:600}.separator{width:1px;align-self:stretch;background:var(--line);margin:0 6px}.preview{border-top:1px solid var(--line);padding:8px 12px;min-height:94px}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h2{margin-top:0}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{width:auto;flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
 :host{background:var(--sheet);color:var(--ink)}
 main{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;color:var(--ink);background:none}
 *{scrollbar-color:var(--line) var(--paper)}::selection{background:var(--sel);color:var(--ink)}
@@ -1189,7 +1245,6 @@ button:hover{background:var(--hover)}button:disabled{color:var(--soft)}button:fo
 textarea{font-family:inherit}
 .top{margin:0 -24px 24px;padding:12px 22px;background:var(--paper);border-bottom:2px solid var(--edge)}.top h1{font-size:28px}
 .primary{background:var(--ink);color:var(--paper);border-color:var(--edge);font-weight:700}.primary:hover{background:var(--focus);border-color:var(--focus);color:var(--paper)}
-.theme{margin:0 0 0 4px;padding:6px;line-height:0}.theme svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.theme .sun{display:var(--sun)}.theme .moon{display:var(--moon)}
 .column{background:var(--well);border:1px solid var(--line);padding:0 12px 12px}
 .column h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;margin:0 -12px 12px;padding:10px 12px;background:var(--paper);border-bottom:2px solid var(--edge)}
 .lanes{display:block;overflow:visible}.lane-head{position:sticky;top:0;z-index:5;background:var(--paper);border-bottom:2px solid var(--edge)}.lane-head .column{background:transparent;border:0}.lane-head h2{margin:0 -12px;border-bottom:0}.lane .lane-head{margin:0;padding:0}
@@ -1265,9 +1320,6 @@ fn follow_move(model: Model, dir: String, id: String) -> Model {
     _ -> model
   }
 }
-
-@external(javascript, "./api.mjs", "toggle_theme")
-fn toggle_theme() -> Nil
 
 /// The column names as one bar, shared by lanes with one workflow or one per
 /// lane when they differ. It is the first thing in its container, so it sticks
@@ -1381,19 +1433,24 @@ fn settle(model: Model) -> Model {
   }
 }
 
-const notice_styles = ".notice .show{margin:8px 0 0;padding:4px 10px;background:transparent;color:var(--paper);border-color:var(--paper)}.notice .show:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .show:focus-visible{outline-color:var(--paper)}"
+const notice_styles =
+  ".notice .show{margin:8px 0 0;padding:4px 10px;background:transparent;color:var(--paper);border-color:var(--paper)}.notice .show:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .show:focus-visible{outline-color:var(--paper)}.notices .close-all{justify-self:end;margin:0;padding:4px 10px;background:var(--ink);color:var(--paper);border-color:var(--paper)}.notices .close-all:hover{background:color-mix(in srgb,var(--paper) 20%,var(--ink))}.notices .close-all:focus-visible{outline-color:var(--paper)}"
 
-/// Whether a live message is for the open task's details: its own update, or
-/// its project's workflow. Its removal is the board's to follow.
+/// Whether a live message is for the open task's details: its own update
+/// under any project (`<solace-task>` fetches itself again when one names
+/// another than its home, D-61), its project's workflow, or a change to the
+/// list of projects, which its Scope tab shows. Its removal is the board's to
+/// follow.
 fn for_detail(model: Model, text: String) -> Bool {
   case model.selected_card {
     None -> False
     Some(#(home, id)) ->
-      event_dir(model, text) == home
-      && case json.parse(text, decode.at(["task", "id"], decode.string)) {
+      case json.parse(text, decode.at(["task", "id"], decode.string)) {
         Ok(task) -> task == id
         Error(_) ->
-          json.parse(text, decode.at(["workflow"], decode.dynamic))
+          projects_event(text)
+          || event_dir(model, text) == home
+          && json.parse(text, decode.at(["workflow"], decode.dynamic))
           |> result.is_ok
       }
   }
@@ -1455,16 +1512,30 @@ fn task_view(model: Model, dir: String, id: String) -> Element(Msg) {
 fn hand(model: Model, text: String) -> Model {
   case for_detail(model, text) {
     False -> model
-    True -> {
-      let n = model.live_n + 1
-      Model(
-        ..model,
-        live_n: n,
-        live: list.append(model.live, [#(n, text)])
-          |> list.reverse
-          |> list.take(50)
-          |> list.reverse,
-      )
-    }
+    True -> push(model, text)
+  }
+}
+
+const archive_styles =
+  ".card-wrap{position:relative}.card-wrap+.card-wrap{margin-top:8px}.card-wrap:has(.archive) .card{padding-right:84px}.card-wrap .archive{position:absolute;top:6px;right:6px;margin:0;padding:2px 8px;font-size:12px}"
+
+fn push(model: Model, text: String) -> Model {
+  let n = model.live_n + 1
+  Model(
+    ..model,
+    live_n: n,
+    live: list.append(model.live, [#(n, text)])
+      |> list.reverse
+      |> list.take(50)
+      |> list.reverse,
+  )
+}
+
+/// Once the stream has (re)connected and caught up, the open task's details
+/// fetch the task again: an event lost meanwhile can't leave them stale.
+fn resync(model: Model) -> Model {
+  case model.selected_card {
+    None -> model
+    Some(_) -> push(model, solace_task.resync)
   }
 }

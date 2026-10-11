@@ -577,10 +577,10 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     await until(() => html().includes('class="open">Index<') && panel().includes('Fake') && events);
     // Unavailable models say why and can't be picked.
     expect(panel()).toContain('Big (unavailable: no key)');
-    // Nothing selected: the whole page. Selecting a task plans it, and lists its past run.
-    expect(panel()).toContain('On the whole page');
+    // Nothing selected: the whole project. Selecting a task plans it, and lists its past run.
+    expect(panel()).toContain('Planning Context: Whole Project');
     dispatch(new strategy.Open('.', 't1'));
-    expect(panel()).toContain('On task <em>Index</em>');
+    expect(panel()).toContain('Planning Context: task <em>Index</em>');
     expect(panel()).toContain('Runs on this');
     expect(panel()).toContain('Ended: planned · fake');
     dispatch(new strategy.PlanText('Plan the index'));
@@ -600,7 +600,7 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     // Another tab: the panel and its run stay.
     dispatch(new strategy.Select(new strategy.Features()));
     expect(panel()).toContain('Shall I add a ranking task?');
-    expect(panel()).toContain('On task <em>Index</em>');
+    expect(panel()).toContain('Planning Context: task <em>Index</em>');
     dispatch(new strategy.AnswerPlan('q1', 'Approve'));
     await until(() => panel().includes('Answer: Created task t2'));
     expect(calls.at(-1)).toEqual(['/strategy/runs/r1/questions/q1', { option: 'Approve' }]);
@@ -626,6 +626,43 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     expect(panel()).toContain('aria-current="true"');
   } finally {
     controllers.forEach(c => c.abort()); server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
+  }
+});
+
+// The planning panel's width is kept in the browser and read on load; blocked storage leaves the default.
+test('Planning panel width is stored after a drag or a key and read back on load', () => {
+  const key = 'solace-strategy-plan-width';
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const values = new Map();
+  const noop = () => {};
+  const step = (model, msg) => { const [next, effect] = strategy.update(model, msg); perform(effect, noop, noop, noop, noop, noop, noop, noop); return next; };
+  try {
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, get() { throw new Error('blocked'); } });
+    expect(strategy.init(undefined)[0].plan_width).toBe(380);
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: k => values.get(k) ?? null, setItem: (k, v) => values.set(k, v), removeItem: k => values.delete(k) } });
+    expect(strategy.init(undefined)[0].plan_width).toBe(380);
+    values.set(key, 'wide');
+    expect(strategy.init(undefined)[0].plan_width).toBe(380);
+    values.set(key, '500');
+    let model = strategy.init(undefined)[0];
+    expect(model.plan_width).toBe(500);
+    expect(to_string(strategy.view(model))).toContain('--plan-width:500px');
+    expect(to_string(strategy.view(model))).toContain('aria-valuenow="500"');
+    // A drag stores its width once it ends.
+    model = step(model, new strategy.PlanWidth(450));
+    expect(values.get(key)).toBe('500');
+    model = step(model, new strategy.PlanWidthDone());
+    expect(values.get(key)).toBe('450');
+    // A key stores at once; Left widens.
+    model = step(model, new strategy.PlanKey('ArrowLeft'));
+    expect(values.get(key)).toBe('466');
+    expect(strategy.init(undefined)[0].plan_width).toBe(466);
+    // Never under the minimum.
+    model = step(model, new strategy.PlanWidth(100));
+    model = step(model, new strategy.PlanWidthDone());
+    expect(values.get(key)).toBe('280');
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'localStorage', original); else delete globalThis.localStorage;
   }
 });
 

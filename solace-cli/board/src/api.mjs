@@ -39,14 +39,6 @@ export function store(key, value) {
   try { value ? localStorage.setItem(key, value) : localStorage.removeItem(key); } catch {}
 }
 
-// Flips the page between light and dark; index.html applies the stored choice.
-export function toggle_theme() {
-  const root = globalThis.document.documentElement;
-  const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
-  root.dataset.theme = next;
-  store('solace-theme', next);
-}
-
 const dragRoots = new WeakSet();
 export function prevent_drag(target) {
   if (!target?.addEventListener || dragRoots.has(target)) return;

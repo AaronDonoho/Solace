@@ -225,10 +225,12 @@ pub fn imports(header: &str) -> Vec<Import> {
     out
 }
 
-/// Source with string literals and comments blanked out. Line breaks are
-/// kept, so lines still match the source's.
+/// Source with string literals and comments blanked out with spaces. Line
+/// breaks are kept and every dropped character becomes as many spaces as it
+/// has bytes, so lines, columns and byte offsets still match the source's.
 pub fn strip_comments(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
+    let pad = |out: &mut String, c: char| out.push_str(&" ".repeat(c.len_utf8()));
     let mut chars = source.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -236,21 +238,30 @@ pub fn strip_comments(source: &str) -> String {
                 out.push('"');
                 while let Some(c) = chars.next() {
                     if c == '\\' {
-                        chars.next();
+                        pad(&mut out, c);
+                        match chars.next() {
+                            Some('\n') => out.push('\n'),
+                            Some(e) => pad(&mut out, e),
+                            None => {}
+                        }
                     } else if c == '"' {
                         break;
                     } else if c == '\n' {
                         out.push('\n');
+                    } else {
+                        pad(&mut out, c);
                     }
                 }
                 out.push('"');
             }
             '/' if chars.peek() == Some(&'/') => {
+                pad(&mut out, c);
                 for c in chars.by_ref() {
                     if c == '\n' {
                         out.push('\n');
                         break;
                     }
+                    pad(&mut out, c);
                 }
             }
             _ => out.push(c),
@@ -278,7 +289,23 @@ pub fn references(code: &str) -> Vec<Ref> {
 
 /// `references`, each with the line (from 0) it is on.
 pub fn references_at(code: &str) -> Vec<(Ref, usize)> {
-    scan(code).0
+    scan(code).0.into_iter().map(|(r, line, _)| (r, line)).collect()
+}
+
+/// `references`, each with its byte span in `code`: `alias.name` as a whole, or
+/// the bare name.
+pub fn references_spans(code: &str) -> Vec<(Ref, usize, usize)> {
+    let stripped = strip_comments(code);
+    let at: Vec<usize> = stripped.char_indices().map(|(b, _)| b).chain([stripped.len()]).collect();
+    scan(code).0.into_iter().map(|(r, _, (a, b))| (r, at[a], at[b])).collect()
+}
+
+/// The names bound locally anywhere in `code`: parameters, `let`, `use` and
+/// case patterns.
+pub fn bound_names(code: &str) -> std::collections::HashSet<String> {
+    let chars: Vec<char> = strip_comments(code).chars().collect();
+    let line_end = |i: usize| chars[i..].iter().position(|&c| c == '\n').map_or(chars.len(), |p| i + p);
+    local_bindings(&chars, &line_end).into_iter().map(|(n, _, _)| n).collect()
 }
 
 /// The record fields a piece of code reads, each with its line: `x.field` on
@@ -289,7 +316,7 @@ pub fn field_reads(code: &str) -> Vec<(String, usize)> {
     scan(code).1
 }
 
-fn scan(code: &str) -> (Vec<(Ref, usize)>, Vec<(String, usize)>) {
+fn scan(code: &str) -> (Vec<(Ref, usize, (usize, usize))>, Vec<(String, usize)>) {
     let code = strip_comments(code);
     let chars: Vec<char> = code.chars().collect();
     let mut line_of = Vec::with_capacity(chars.len());
@@ -330,14 +357,14 @@ fn scan(code: &str) -> (Vec<(Ref, usize)>, Vec<(String, usize)>) {
         if j + 1 < chars.len() && chars[j] == '.' && chars[j + 1].is_alphabetic() && !after_dot {
             let (member, k) = word_at(j + 1);
             if !bound(&name, i) {
-                refs.push((Ref::Qualified(name, member), line_of[i]));
+                refs.push((Ref::Qualified(name, member), line_of[i], (i, k)));
             } else if lower(&member) {
                 reads.push((member, line_of[i]));
             }
             i = k;
         } else {
             if !after_dot && !label && !bound(&name, i) {
-                refs.push((Ref::Bare(name), line_of[i]));
+                refs.push((Ref::Bare(name), line_of[i], (i, j)));
             }
             i = j;
         }
@@ -605,6 +632,20 @@ mod tests {
         assert!(bare.iter().any(|b| b == "helper") && bare.iter().any(|b| b == "L") && !bare.iter().any(|b| b == "b"));
     }
 
+    /// Spans are byte offsets into the original text, also after a string
+    /// literal, a trailing comment and multibyte text.
+    #[test]
+    fn reference_spans_are_byte_offsets_of_the_source() {
+        let code = "pub fn f(t: Task) {\n  let s = \"é Task\" // Task\n  board.go(Task(1), s)\n}";
+        let spans: Vec<(String, &str)> = references_spans(code)
+            .into_iter()
+            .map(|(r, a, b)| (match r { Ref::Bare(n) => n, Ref::Qualified(a, m) => format!("{a}.{m}") }, &code[a..b]))
+            .filter(|(n, _)| n == "Task" || n == "board.go")
+            .collect();
+        assert_eq!(spans, [("Task".into(), "Task"), ("board.go".into(), "board.go"), ("Task".into(), "Task")]);
+        assert!(bound_names("pub fn f(task: Int) {\n  let x = 1\n  x\n}").is_superset(&["task".to_string(), "x".to_string()].into()));
+    }
+
     #[test]
     fn record_fields_and_field_reads() {
         let ty = "pub type Quote {\n  Quote(\n    /// the lines\n    lines: List(Line),\n    total_cents: Int,\n  )\n  Empty\n  Pair(Int, label: String)\n}";
@@ -700,10 +741,13 @@ mod tests {
     /// quote is skipped, so the string ends at the quote that closes it.
     #[test]
     fn strip_comments_blanks_strings_and_comments() {
-        assert_eq!(strip_comments("let s = \"a // b\""), "let s = \"\"");
-        assert_eq!(strip_comments("let s = \"\\\"\" // c\nx"), "let s = \"\" \nx");
-        assert_eq!(strip_comments("let s = \"a\nb\" // c\nx"), "let s = \"\n\" \nx");
-        assert_eq!(strip_comments("// whole\nx"), "\nx");
+        assert_eq!(strip_comments("let s = \"a // b\""), "let s = \"      \"");
+        assert_eq!(strip_comments("let s = \"\\\"\" // c\nx"), "let s = \"  \"     \nx");
+        assert_eq!(strip_comments("let s = \"a\nb\" // c\nx"), "let s = \" \n \"     \nx");
+        assert_eq!(strip_comments("// whole\nx"), "        \nx");
+        // offsets still match the source's, also after multibyte text
+        let s = "let s = \"é\" // ü\nx";
+        assert_eq!(strip_comments(s).len(), s.len());
     }
 
     /// `..base` in a record update names a value, not a field; `module::` is

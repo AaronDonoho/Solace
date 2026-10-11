@@ -1,0 +1,12 @@
+# Solace project settings. Protected: agents may read this file.
+# Text files up to this many bytes are watched; file writes are limited to it.
+watch_limit = 262144
+# Files Solace doesn't watch or search (agents can still read and write them).
+unwatched = []
+
+[validators]
+# Optional checks, for example:
+# "docs/**/*.json" = ["python3", "-m", "json.tool", "{file}"]
+
+[commands]
+js_tests = { run = ["bun", "test", "test/store.test.mjs"] }

@@ -276,7 +276,10 @@ pub fn the_open_task_gets_its_own_messages_test() {
         ]),
       ),
     )
-  assert list.map(model.live, fn(m) { m.0 }) == [1, 2]
+  // Its update under another project counts too (`<solace-task>` fetches
+  // itself again on it), and so does its home's workflow; another task's
+  // update doesn't.
+  assert list.map(model.live, fn(m) { m.0 }) == [1, 2, 3]
   let html = element.to_string(strategy.view(model))
   assert string.contains(html, "<solace-task")
   assert string.contains(html, "base=\"/p/web\"")
@@ -848,4 +851,106 @@ pub fn a_proposal_shows_and_one_answer_is_sent_at_a_time_test() {
     )
   let assert [r5] = replayed.runs
   assert list.length(r5.notes) == 2
+}
+
+/// The case reported, on the Tasks tab: a task stored in `web` and covering
+/// the root's project too, its detail handed a running investigation and then
+/// the task completed, in order; this task's update under the other project
+/// too, a change to the list of projects, and a `resync` once the stream
+/// catches up again.
+pub fn a_completed_task_reaches_its_detail_test() {
+  let one = fn(project, column, state) {
+    "{\"project\":\""
+    <> project
+    <> "\",\"task\":{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\""
+    <> column
+    <> "\",\"rank\":1,\"scope\":[\"web\",\".\"],\"runs\":[{\"id\":\"r\",\"kind\":\"investigate\",\"model\":\"m\",\"state\":\""
+    <> state
+    <> "\",\"started\":1,\"log\":\"\"}]}}"
+  }
+  let running = one("web", "assigned", "running")
+  let done = one("web", "complete", "ended")
+  let elsewhere = one(".", "complete", "ended")
+  let model =
+    workspace()
+    |> step(strategy.Open("web", "1"))
+    |> step(strategy.Live(running))
+    |> step(strategy.Live(done))
+    |> step(strategy.Live(elsewhere))
+    |> step(strategy.Live("{\"project\":\".\",\"workflow\":{\"columns\":[]}}"))
+    |> step(strategy.Live("{\"projects\":[\".\",\"web\",\"api\"]}"))
+  assert model.live
+    == [
+      #(1, running),
+      #(2, done),
+      #(3, elsewhere),
+      #(4, "{\"projects\":[\".\",\"web\",\"api\"]}"),
+    ]
+  let model = step(model, strategy.CaughtUp)
+  assert model.live
+    == [
+      #(1, running),
+      #(2, done),
+      #(3, elsewhere),
+      #(4, "{\"projects\":[\".\",\"web\",\"api\"]}"),
+      #(5, "{\"resync\":true}"),
+    ]
+}
+
+/// The panel's width: a separator on its left edge, kept between the
+/// minimum and the window's bound; Left widens it. Collapsed, no handle.
+pub fn the_panel_is_resized_within_its_bounds_test() {
+  assert plan.clamp(100, 1000) == 280
+  assert plan.clamp(900, 1000) == 600
+  assert plan.clamp(500, 1000) == 500
+  assert plan.clamp(500, 0) == 500
+  assert plan.max_width(300) == 280
+  let model = planned()
+  assert model.plan_width == 380
+  let html = element.to_string(strategy.view(model))
+  assert string.contains(html, "role=\"separator\"")
+  assert string.contains(html, "aria-valuenow=\"380\"")
+  assert string.contains(html, "tabindex=\"0\"")
+  assert string.contains(html, "--plan-width:380px")
+  assert step(model, strategy.PlanKey("ArrowLeft")).plan_width == 396
+  assert step(model, strategy.PlanKey("ArrowRight")).plan_width == 364
+  assert step(model, strategy.PlanKey("Home")).plan_width == 280
+  assert step(model, strategy.PlanKey("Tab")).plan_width == 380
+  assert step(model, strategy.PlanWidth(100)).plan_width == 280
+  assert step(model, strategy.PlanWidth(512)).plan_width == 512
+  let collapsed =
+    element.to_string(strategy.view(step(model, strategy.PlanCollapse)))
+  assert !string.contains(collapsed, "role=\"separator\"")
+}
+
+/// The panel says what it plans: the whole project, or the record by kind.
+pub fn the_panel_names_its_planning_context_test() {
+  let shown = fn(model) { element.to_string(strategy.view(model)) }
+  let model = planned()
+  assert string.contains(shown(model), "Planning Context: Whole Project")
+  let model = step(model, strategy.Open(".", "t1"))
+  assert string.contains(shown(model), "Planning Context: task <em>Index</em>")
+  assert string.contains(
+    shown(step(model, strategy.ShowPlan("r2"))),
+    "Planning Context: feature <em>Search</em>",
+  )
+  assert string.contains(
+    shown(step(model, strategy.ShowPlan("r3"))),
+    "Planning Context: milestone <em>Launch</em>",
+  )
+  assert !string.contains(shown(model), "On the whole page")
+}
+
+/// D-98: a task link opens the task on the Tasks tab, from any tab, and asks
+/// `<solace-task>` to show it; asking again for the same task is news too.
+pub fn a_task_link_opens_its_task_on_the_tasks_tab_test() {
+  let model = strategy.new(strategy.Roadmap)
+  let #(model, _) = strategy.update(model, strategy.Focus("a", "abc"))
+  assert model.tab == strategy.Tasks
+  assert model.selected == Some(#("a", "abc"))
+  assert model.reveal == #("abc", 1)
+  let #(model, _) = strategy.update(model, strategy.Focus("a", "abc"))
+  assert model.reveal == #("abc", 2)
+  let #(same, _) = strategy.update(model, strategy.Focus("a", ""))
+  assert same.reveal == #("abc", 2)
 }

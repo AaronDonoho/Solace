@@ -365,6 +365,10 @@ pub(super) fn move_to(w: &Value, t: &mut Value, to: &Value) -> Result<(), Failur
     if column(w, t)["final"] == true && t["closedTime"].is_null() {
         t["closedTime"] = json!(now());
     }
+    // A task that leaves the final columns is back on the board (D-95).
+    if column(w, t)["final"] != true {
+        t["archivedTime"] = Value::Null;
+    }
     Ok(())
 }
 /// Where run `rid` is in the task's runs.
@@ -975,9 +979,7 @@ pub fn files_under(root: &Path, name: &str) -> serde_json::Map<String, Value> {
 }
 pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
     let mut v = json!({});
-    if matches!(a[0], "write" | "remove")
-        && let Some(name) = a.get(1)
-    {
+    for name in lockdown::paths(a) {
         let p = lockdown::path(root, name)?;
         let name = file_name(p.strip_prefix(root).unwrap());
         v[format!("file:{name}")] = json!(fs::read(p).ok());
@@ -1744,7 +1746,7 @@ pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
         {
             match (method, rest) {
                 ("PATCH", []) => {
-                    // Links can change during a run and in a final column (D-87 point 4, D-88).
+                    // Links can change during a run and in a final column (D-87 point 4, D-100).
                     let links_only = body.as_object().is_some_and(|o| !o.is_empty() && o.keys().all(|k| k == "feature" || k == "milestone"));
                     if active(&t) && !links_only {
                         return err("E7003", "run going");
@@ -1766,6 +1768,15 @@ pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
                     }
                 }
                 ("POST", ["scope"]) => return set_scope(&s, &w, t, body),
+                // Takes a finished task off the board; it stays in the archive (D-95).
+                ("POST", ["archive"]) => {
+                    if column(&w, &t)["final"] != true {
+                        return err("E7001", "only a task in a final column can be archived");
+                    }
+                    if t["archivedTime"].is_null() {
+                        t["archivedTime"] = json!(now());
+                    }
+                }
                 ("POST", ["notes"]) => {
                     let text = body["text"].as_str().ok_or_else(|| Failure("E7001 text required".into(), 1))?;
                     // While a discussion is going, a human note is its next turn.
@@ -2553,7 +2564,7 @@ fn brief(t: &Value, kind: &str) -> String {
     let start = START;
     let ask = "If you need a decision from the human, ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
     let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); keep the options concise.";
-    let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `write`, `remove`, `format` and `run` are refused.";
+    let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `write`, `remove`, `format` and `run` are refused.";
     let role = match kind {
         "review" => format!(
             "Review the changes this task made (listed below) and give feedback. Follow the review context below: the first review assesses the whole task with `task diff`; follow-ups start with `task diff --since-review` when a completed checkpoint exists. Then read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. {read_only} In a review, `run <name>` is allowed for commands marked `allowed_in_reviews` in `solace.toml`; use those to verify (for example JavaScript tests). Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed."
@@ -3096,252 +3107,14 @@ fn wait_discussion(s: &Store, tid: &str, rid: &str) -> Out {
     }
 }
 
-// Strategy runs (D-93): an agent plans with the human on the Strategy page. The
-// run is a root record, not a task's; its agent reads and replies, and changes
-// no code.
-
-/// Launches strategy run `rid`'s agent on its own thread. A plain-text reply
-/// is its turn: a fresh agent, briefed with every note, takes the next one.
-pub(super) fn start_strategy(top: PathBuf, rid: String) {
-    std::thread::spawn(move || {
-        let result = (|| {
-            let mut result = strategy_process(&top, &rid);
-            while let Err(Failure(_, REPLIED)) = result {
-                wait_strategy(&top, &rid)?;
-                result = strategy_process(&top, &rid);
-            }
-            result
-        })();
-        if let Err(e) = result {
-            let _ = Watch::Strategy(&top).fail(&rid, &e.0);
-        }
-    });
-}
-/// Runs strategy run `rid`'s agent until it exits. It always starts a fresh
-/// conversation, in a folder beside the run's log, removed after.
-fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
-    let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
-    if run["state"] == "ended" {
-        return Ok(());
-    }
-    let config = system()?;
-    let m = chosen_model(&config, &run)?;
-    let timeout = config["task_timeout"].as_u64().unwrap_or(3600);
-    let log = PathBuf::from(run["log"].as_str().unwrap_or(""));
-    let dir = log.with_extension("");
-    fs::create_dir_all(&dir)?;
-    let prompt = strategy_brief(top, &run);
-    let launched = spawn_agent(top, &dir, &log, &m, &prompt, &[], None, persists(&m), [STRATEGY, rid], timeout);
-    let supervised = launched.and_then(|mut child| supervise(Watch::Strategy(top), rid, &mut child, &log, false, Duration::from_secs(timeout), GRACEFUL_EXIT));
-    if dir.exists() {
-        fs::remove_dir_all(&dir)?;
-    }
-    supervised.map(drop)
-}
-/// A strategy run's role (Spec 15 §6).
-const STRATEGY_ROLE: &str = "Plan with the human: the tasks, features, milestones and vision on the Strategy page. This run is read-only: it changes no code, and every change to the plan is the human's. To propose one, send `strategy task|feature|milestone` (with the id to edit one, none to create one) and the fields of the board's request as a JSON object in `text`, or `strategy vision` with the new vision in `text`, alone in its call; it waits for the human to approve or reject it, and the reply says which, with a new record's id. Read the plan with `strategy list` and `strategy show <task|feature|milestone> <id>`, and follow the ids each record links to. Read code with `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` (`help <command>` gives its options), adding `--project <folder>` for a project below the root. Other commands, `task` commands among them, are refused. The human's message is the last note. Reply only with `strategy note`: `command` is just `strategy note`, and the whole reply goes in `text`, in Markdown. The call waits and returns the human's next message. Keep replying until a call says the run has ended, then stop without further calls.";
-/// A strategy run's prompt: its role, the record it was started on in full,
-/// the vision, the decision titles from `DECISIONS.md` and its notes.
-fn strategy_brief(top: &Path, run: &Value) -> String {
-    let mut out = format!("You are planning with the human on this project's Strategy page. You work only through the Solace tool: there is no shell and no file access.\n{STRATEGY_ROLE}\n");
-    let c = &run["context"];
-    match (c["kind"].as_str(), c["id"].as_str()) {
-        (Some(kind @ ("task" | "feature" | "milestone")), Some(id)) => match strategy_show(top, kind, id) {
-            Ok(record) => out += &format!("\nThis run is about the {kind} {id}:\n{}\n", serde_json::to_string_pretty(&record).unwrap()),
-            Err(_) => out += &format!("\nThis run is about the {kind} {id}, which no longer exists.\n"),
-        },
-        _ => out += "\nThis run is about the whole Strategy page.\n",
-    }
-    let vision = tasks::vision(top)["text"].as_str().unwrap_or("").trim().to_string();
-    if !vision.is_empty() {
-        out += &format!("\nVision:\n{vision}\n");
-    }
-    // Reads without `--project` go to the root's own project; a folder of
-    // projects has none, so its files can't be read in a run.
-    let projects = workspace::members(top).unwrap_or_default();
-    let own = projects.iter().any(|p| p == ".");
-    if !own {
-        out += &format!("\nThe root is a folder of projects, not a project: add `--project <folder>` to every read. Its projects: {}.\n", projects.join(", "));
-    }
-    let decisions = fs::read_to_string(top.join("DECISIONS.md")).unwrap_or_default();
-    let titles: Vec<String> = decisions.lines().filter_map(|l| l.strip_prefix("## ")).filter(|l| l.starts_with("D-")).map(|l| format!("- {l}")).collect();
-    if !titles.is_empty() {
-        let how = if own { "`grep D-<n>`, then `read DECISIONS.md --lines a..b`, reads one" } else { "titles only: the file is in no project, so this run can't read it" };
-        out += &format!("\nDecisions (titles from DECISIONS.md; {how}):\n{}\n", titles.join("\n"));
-    }
-    let notes: Vec<String> = run["notes"]
-        .as_array()
-        .map(|ns| ns.iter().map(|n| format!("- {}: {}", n["author"].as_str().unwrap_or(""), n["text"].as_str().unwrap_or("").trim())).collect())
-        .unwrap_or_default();
-    if !notes.is_empty() {
-        out += &format!("\nNotes so far:\n{}\n", notes.join("\n"));
-    }
-    out
-}
-/// `strategy list`: every task, feature and milestone in brief, and the vision.
-fn strategy_list(top: &Path) -> Result<Value, Failure> {
-    let pick = |v: &Value, keys: &[&str]| -> Value { Value::Object(keys.iter().map(|k| (k.to_string(), v[*k].clone())).collect()) };
-    let records = |kind: &str, keys: &[&str]| -> Vec<Value> { tasks::records(top, kind).iter().map(|v| pick(v, keys)).collect() };
-    Ok(json!({
-        "tasks": all_tasks(top)?.iter().map(|t| pick(t, &["id", "title", "column", "feature", "milestone"])).collect::<Vec<_>>(),
-        "features": records("features", &["id", "title", "state", "milestone"]),
-        "milestones": records("milestones", &["id", "title", "state", "rank"]),
-        "vision": tasks::vision(top)["text"],
-    }))
-}
-/// `strategy show`: one task, feature or milestone in full as `record`, with
-/// `links`, the ids of the records it links to: a task's feature, milestone and
-/// `dependsOn`; a feature's milestone and tasks; a milestone's features (its
-/// own, and those holding one of its tasks) and tasks.
-fn strategy_show(top: &Path, kind: &str, id: &str) -> Result<Value, Failure> {
-    let all = all_tasks(top)?;
-    let ids = |of: &[&Value]| -> Vec<Value> { of.iter().map(|v| v["id"].clone()).collect() };
-    let (record, links) = match kind {
-        "task" => {
-            let Some(t) = all.iter().find(|t| t["id"] == id) else { return err("E7023", format!("unknown task {id}")) };
-            (t.clone(), json!({"feature": t["feature"], "milestone": t["milestone"], "dependsOn": t["dependsOn"]}))
-        }
-        "feature" => {
-            let Some(f) = tasks::record(top, "features", id) else { return err("E7023", format!("unknown feature {id}")) };
-            let held: Vec<&Value> = all.iter().filter(|t| t["feature"] == id).collect();
-            let links = json!({"milestone": f["milestone"], "tasks": ids(&held)});
-            (f, links)
-        }
-        "milestone" => {
-            let Some(m) = tasks::record(top, "milestones", id) else { return err("E7023", format!("unknown milestone {id}")) };
-            let held: Vec<&Value> = all.iter().filter(|t| t["milestone"] == id).collect();
-            let features = tasks::records(top, "features");
-            let features: Vec<&Value> = features.iter().filter(|f| f["milestone"] == id || held.iter().any(|t| t["feature"] == f["id"])).collect();
-            (m, json!({"features": ids(&features), "tasks": ids(&held)}))
-        }
-        _ => return err("E7001", "strategy show takes task, feature or milestone, and an id"),
-    };
-    // `links` sorts first, so a reply cut at its budget loses the record's end, never the links.
-    Ok(json!({"links": links, "record": record}))
-}
-/// A reply cut to `budget` bytes, saying so.
-fn within(text: String, budget: usize) -> String {
-    if text.len() <= budget {
-        return text;
-    }
-    let cut = (0..=budget.saturating_sub(120)).rev().find(|&i| text.is_char_boundary(i)).unwrap_or(0);
-    format!("{}\n… cut at the reply limit; `strategy show` reads one record at a time.\n", &text[..cut])
-}
-/// Waits until strategy run `rid`'s agent may act. It takes no project lock.
-/// An ended run runs nothing; while the run waits for the human, any command
-/// but `strategy` holds still, as `agent_guard` holds a task's run.
-pub fn strategy_guard(top: &Path, rid: &str, a: &[&str]) -> Result<(), Failure> {
-    loop {
-        let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
-        if run["state"] == "ended" {
-            return err("E7003", "run ended");
-        }
-        if run["state"] == "waiting" && a.first() != Some(&"strategy") {
-            if !tasks::serving(top) {
-                return err("E7003", "the run waits for the human and no board server is running; stop now");
-            }
-            std::thread::sleep(Duration::from_millis(50));
-            continue;
-        }
-        return Ok(());
-    }
-}
-/// `strategy list | show | note` in strategy run `rid`, which `strategy_guard`
-/// let act.
-pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut() -> Out, budget: usize) -> Out {
-    let pretty = |v: Value| within(format!("{}\n", serde_json::to_string_pretty(&v).unwrap()), budget);
-    match a {
-        ["strategy", "list"] => Ok(pretty(strategy_list(top)?)),
-        ["strategy", "show", kind, id] => Ok(pretty(strategy_show(top, kind, id)?)),
-        ["strategy", "note", rest @ ..] => {
-            if rest.first().is_some_and(|w| w.starts_with("--")) {
-                return err("E7015", "nothing was sent. Resend with `command` set to just `strategy note` and the whole reply in the `text` argument");
-            }
-            let text = if rest.is_empty() { input()? } else { rest.join(" ") };
-            if text.trim().is_empty() {
-                return err("E7001", "strategy note needs the reply in `text`");
-            }
-            // The agent sends the task server a message; the run waits for the human.
-            let sent = tasks::send(top, json!({"kind":"strategy_note","run":rid,"text":text}))?;
-            if !tasks::applied(top, &sent) {
-                return Ok(format!("{}\n", tasks::QUEUED));
-            }
-            if tasks::rejected(top, &sent) {
-                return err("E7001", REJECTED);
-            }
-            wait_strategy(top, rid)
-        }
-        ["strategy", kind @ ("task" | "feature" | "milestone" | "vision"), rest @ ..] => {
-            if rest.first().is_some_and(|w| w.starts_with("--")) {
-                return err("E7015", format!("nothing was sent. Resend with `command` set to just `strategy {kind}` (and the id to edit) and the proposal in the `text` argument"));
-            }
-            let id = match (*kind, rest) {
-                (_, []) => None,
-                ("task" | "feature" | "milestone", [id]) => Some(*id),
-                _ => return usage("strategy task|feature|milestone [<id>] with the fields as JSON in `text`, or strategy vision with the new text in `text`"),
-            };
-            let text = input()?;
-            if text.trim().is_empty() {
-                return err("E7001", format!("strategy {kind} needs the proposal in `text`"));
-            }
-            // Checked now as the request would be; applied only when the human approves.
-            let question = tasks::proposal(top, rid, kind, id, &text)?;
-            let qid = question["id"].as_str().unwrap_or("").to_string();
-            let sent = tasks::send(top, json!({"kind":"strategy_propose","run":rid,"question":question}))?;
-            if !tasks::applied(top, &sent) {
-                return Ok(format!("{}\n", tasks::QUEUED));
-            }
-            if tasks::rejected(top, &sent) {
-                return err("E7001", REJECTED);
-            }
-            wait_answer(top, rid, &qid)
-        }
-        _ => usage(
-            "strategy list | strategy show <task|feature|milestone> <id> | strategy note, with the reply in `text` | strategy task|feature|milestone [<id>] or strategy vision, with the proposal in `text`",
-        ),
-    }
-}
-/// Holds a strategy run's proposal until the human answers it or ends the run.
-/// Waiting doesn't count toward the timeout.
-fn wait_answer(top: &Path, rid: &str, qid: &str) -> Out {
-    loop {
-        std::thread::sleep(Duration::from_millis(50));
-        if !tasks::serving(top) {
-            return err("E7003", "the board server stopped while waiting");
-        }
-        let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
-        if run["state"] == "ended" {
-            return Ok("The strategy run has ended. Stop now, without further calls.\n".into());
-        }
-        let answer = run["questions"].as_array().and_then(|qs| qs.iter().find(|q| q["id"] == qid)).map(|q| q["answer"].clone());
-        if let Some(Value::String(a)) = answer {
-            tasks::send(top, json!({"kind":"strategy_resume","run":rid}))?;
-            return Ok(format!("The human answered the proposal: {a}\n"));
-        }
-    }
-}
-/// Holds a strategy run's reply until the human writes again or ends the run,
-/// as `wait_discussion` does. Waiting doesn't count toward the timeout.
-fn wait_strategy(top: &Path, rid: &str) -> Out {
-    loop {
-        std::thread::sleep(Duration::from_millis(50));
-        // No server, so the human can't reply: return rather than wait forever.
-        if !tasks::serving(top) {
-            return err("E7003", "the board server stopped while waiting");
-        }
-        let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
-        if run["state"] == "ended" {
-            return Ok("The strategy run has ended. Stop now, without further calls.\n".into());
-        }
-        let notes = run["notes"].as_array().cloned().unwrap_or_default();
-        let after = notes.iter().rposition(|n| n["author"] == "agent").map_or(0, |l| l + 1);
-        let new: Vec<&str> = notes[after..].iter().filter(|n| n["author"] == "human").filter_map(|n| n["text"].as_str()).collect();
-        if !new.is_empty() {
-            tasks::send(top, json!({"kind":"strategy_resume","run":rid}))?;
-            return Ok(format!("The human replied:\n\n{}\n", new.join("\n\n")));
-        }
-    }
-}
+// Strategy runs (D-93) are in `strategy.rs`, a module of this one, so they
+// share its helpers.
+#[path = "strategy.rs"]
+mod strategy;
+use strategy::start_strategy;
+pub use strategy::{strategy_command, strategy_guard};
+#[cfg(test)]
+use strategy::{strategy_brief, strategy_list, strategy_note_show, strategy_run_show, strategy_show};
 /// A work run's `write solace.toml` or `write AGENTS.md`: checked now, written
 /// only when a human approves it on the board (D-38, D-45).
 /// `project` is the folder whose settings change: the home, or another project in the task (D-61).
@@ -3794,6 +3567,13 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             // Milestones, features (D-87), the vision (D-91) and strategy runs (D-93)
             // are the root's: never under `/p/{dir}`.
             let strategy: Vec<&str> = path.trim_matches('/').split('/').collect();
+            // A task by id, whichever project stores it (D-98): a task link asks where to open it.
+            if let ("GET", ["tasks", "find", tid]) = (req.method().as_str(), strategy.as_slice()) {
+                return match tasks::find_task(&board.top, tid) {
+                    Ok(v) => respond(req, 200, v),
+                    Err((status, e)) => respond(req, status, error_json(&e)),
+                };
+            }
             let runs = strategy.len() >= 2 && strategy[..2] == ["strategy", "runs"];
             if matches!(strategy[0], "milestones" | "features") || strategy == ["vision"] || runs {
                 let result = match read_body(&mut req, BODY_LIMIT) {
@@ -3844,11 +3624,16 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 }
                 return;
             }
+            // A task link's address, `/task/{id}`, is the shell's to resolve (D-98).
+            let page = url.split('?').next().unwrap_or("");
+            let task_link = page.strip_prefix("/task/").is_some_and(valid_id);
             if req.method().as_str() == "GET"
-                && matches!(url.split('?').next().unwrap_or(""), "/" | "/migrate" | "/contracts" | "/strategy" | "/app.js" | "/guide" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2")
+                && (task_link
+                    || matches!(page, "/" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/app.js" | "/guide" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2"))
             {
-                let (data, kind) = match url.split('?').next().unwrap_or("") {
-                    "/" | "/migrate" | "/contracts" | "/strategy" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
+                let (data, kind) = match page {
+                    _ if task_link => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
+                    "/" | "/migrate" | "/contracts" | "/strategy" | "/settings" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
                     "/guide" => (include_bytes!("../board/guide.html").as_slice(), "text/html"),
                     "/fonts/sans-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-400-normal.woff2").as_slice(), "font/woff2"),
                     "/fonts/sans-700.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-700-normal.woff2").as_slice(), "font/woff2"),
@@ -4257,9 +4042,8 @@ mod tests {
         assert_eq!(view.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(1));
     }
 
-    /// D-93: a strategy run's guard takes no project lock and refuses an ended
-    /// run; `strategy show` follows links both ways; the brief carries the
-    /// record the run is about, the decision titles and the notes.
+    /// D-93: a strategy run's guard takes no project lock and refuses an ended run;
+    /// `strategy show` follows links; the brief carries the record, decisions and notes.
     #[test]
     fn strategy_runs_read_the_graph() {
         let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
@@ -4284,16 +4068,33 @@ mod tests {
         let (tid, fid, mid) = (t["id"].as_str().unwrap(), f["id"].as_str().unwrap(), m["id"].as_str().unwrap());
         assert_eq!(strategy_show(&top, "feature", fid).unwrap()["links"], json!({"milestone":mid,"tasks":[tid]}));
         assert_eq!(strategy_show(&top, "milestone", mid).unwrap()["links"], json!({"features":[fid],"tasks":[tid]}));
-        assert_eq!(strategy_show(&top, "task", tid).unwrap()["links"], json!({"feature":fid,"milestone":mid,"dependsOn":[]}));
+        assert_eq!(strategy_show(&top, "task", tid).unwrap()["links"], json!({"feature":fid,"milestone":mid,"dependsOn":[],"runs":[]}));
         assert!(strategy_show(&top, "feature", "nope").unwrap_err().0.starts_with("E7023"));
         assert!(strategy_show(&top, "vision", "x").unwrap_err().0.starts_with("E7001"));
-        assert_eq!(strategy_list(&top).unwrap()["tasks"], json!([{"id":tid,"title":"T","column":t["column"],"feature":fid,"milestone":mid}]));
+        let listed = strategy_list(&top, false).unwrap();
+        assert!(listed.contains(&format!("{tid} {} f:{fid} m:{mid} T", t["column"].as_str().unwrap()))
+            && listed.contains(&format!("Features:\n{fid} proposed m:{mid} F"))
+            && listed.contains(&format!("Milestones:\n{mid} proposed #1 M"))
+            && listed.contains("Vision:"), "{listed}");
+        fs::write(store_dir(&top).join("t9.json"), json!({"id":"t9","title":"Gone","column":"complete","closedTime":8,"archivedTime":9}).to_string()).unwrap();
+        assert!(!strategy_list(&top, false).unwrap().contains("t9") && strategy_list(&top, true).unwrap().contains("t9 complete f:- m:- Gone"));
         fs::write(top.join("DECISIONS.md"), "# Decisions\n## D-1 First thing\nWhy: x\n## Notes\n").unwrap();
         let brief = strategy_brief(&top, &json!({"context":{"kind":"feature","id":fid},"notes":[{"author":"human","text":"Plan F"}]}));
         assert!(brief.contains(&format!("This run is about the feature {fid}")) && brief.contains("\"title\": \"F\""), "{brief}");
+        assert!(brief.contains("A `title` names the work in a few words") && brief.contains("go in `body`"), "{brief}");
         assert!(brief.contains("- D-1 First thing") && !brief.contains("- Notes") && brief.contains("- human: Plan F"), "{brief}");
         // The root is a project itself, so the decisions can be read in full.
         assert!(brief.contains("`grep D-<n>`") && !brief.contains("folder of projects"), "{brief}");
+        // Only commands the run can use.
+        for word in ["task ask", "submit", "`test`", "session start", "are refused"] {
+            assert!(!brief.contains(word), "{word}: {brief}");
+        }
+        // Only the latest decisions, and how to find the rest.
+        let many: String = (1..=14).map(|n| format!("## D-{n} Thing {n}\n")).collect();
+        fs::write(top.join("DECISIONS.md"), many).unwrap();
+        let brief = strategy_brief(&top, &json!({"context":{"kind":"page"},"notes":[]}));
+        assert!(brief.contains("- D-5 Thing 5") && brief.contains("- D-14 Thing 14") && !brief.contains("- D-4 Thing"), "{brief}");
+        assert!(brief.contains("… 4 earlier decisions: `grep D-` lists them."), "{brief}");
     }
 
     /// A recorded file change stops being reviewable once the file is unwatched, and symbols always are.
@@ -4595,8 +4396,7 @@ mod tests {
         assert!(t["questions"].as_array().unwrap().is_empty());
         assert_eq!(t["notes"].as_array().unwrap().len(), 3);
     }
-    /// A crash between writing the store copy and removing the old file leaves
-    /// both; the move finishes. The same id under another project is an error.
+    /// A crash between the store copy and removing the old file leaves both; the move finishes.
     #[test]
     fn adopt_finishes_an_interrupted_move_and_refuses_a_reused_id() {
         let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
@@ -4610,6 +4410,64 @@ mod tests {
         let e = adopt_tasks(&root, &root).unwrap_err();
         assert!(e.0.contains("used twice") && e.0.contains("t1"));
         assert!(root.join(".solace/board/t1.json").exists());
+    }
+    /// `strategy show run` outlines a run's steps, then gives chosen ones in full.
+    #[test]
+    fn strategy_show_run_outlines_and_picks_steps() {
+        let root = testing::Scratch::new();
+        let log = root.join("run.jsonl");
+        let lines = [
+            json!({"type":"item.completed","item":{"id":"i1","type":"mcp_tool_call","tool":"solace","arguments":{"command":"view a"},"result":{"content":[{"type":"text","text":"pub fn a()"}]},"status":"completed"}}),
+            json!({"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"All done.\nSecond line."}}),
+            json!({"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}),
+        ];
+        fs::write(&log, lines.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+        let long = format!("{}.\nSecond line.", "x".repeat(120));
+        let task = json!({"id":"t1","column":"backlog","notes":[{"author":"human","time":7,"text":"A short note."},{"author":"agent","time":8,"text":long}],
+            "questions":[{"id":"q1","text":"Which one?","options":["A"],"answer":"A"},{"id":"q2","text":"Open","options":["A"]}],"conversation":[{"author":"human","text":"the thread"}],
+            "runs":[{"id":"r1","kind":"work","state":"ended","model":"fake","log":log.to_str().unwrap()}]});
+        let root = root.with(&[(".solace/board/t1.json", &task.to_string())]);
+        adopt_tasks(&root, &root).unwrap();
+        let shown = strategy_show(&root, "task", "t1").unwrap();
+        assert_eq!(shown["links"]["runs"], json!(["r1"]));
+        let rec = shown["record"].clone();
+        assert_eq!((rec["notes"].clone(), rec["questions"].clone(), rec["runs"].clone()), (json!(["1 human 7: A short note.", format!("2 agent 8: {}…", "x".repeat(100))]), json!(["1 Which one?: A", "2 Open: unanswered"]), json!(["r1 work ended fake"])));
+        assert!(rec.get("conversation").is_none());
+        let one = strategy_note_show(&root, "t1", "2").unwrap();
+        assert_eq!((one["task"].as_str(), one["notes"][0]["note"].as_u64(), one["notes"][0]["text"].as_str()), (Some("t1"), Some(2), Some(long.as_str())));
+        assert_eq!(strategy_note_show(&root, "t1", "all").unwrap()["notes"].as_array().unwrap().len(), 2);
+        for bad in ["0", "3", "2..1", "x", "1,,2"] { assert!(strategy_note_show(&root, "t1", bad).unwrap_err().0.starts_with("E7001"), "{bad}"); }
+        let outline = strategy_run_show(&root, "t1", "r1", None).unwrap();
+        assert_eq!(outline["run"]["id"], "r1");
+        assert!(outline["run"].get("log").is_none());
+        assert_eq!(outline["steps"][0], "1 tool: solace view a (ok)");
+        assert_eq!(outline["steps"][1], "2 message: All done.");
+        // The token-usage entry is not a step.
+        assert_eq!(outline["steps"].as_array().unwrap().len(), 2);
+        let picked = strategy_run_show(&root, "t1", "r1", Some("2,1")).unwrap();
+        let numbers: Vec<_> = picked["steps"].as_array().unwrap().iter().map(|s| s["step"].clone()).collect();
+        assert_eq!(numbers, [json!(2), json!(1)]);
+        assert_eq!(picked["steps"][1]["output"], "pub fn a()");
+        assert_eq!(picked["steps"][0]["text"], "All done.\nSecond line.");
+        assert_eq!(strategy_run_show(&root, "t1", "r1", Some("all")).unwrap()["steps"].as_array().unwrap().len(), 2);
+        // D-105: through the command, a reply of steps stops at a whole step and names the rest.
+        let one = format!("{}\n", serde_json::to_string_pretty(&strategy_run_show(&root, "t1", "r1", Some("1")).unwrap()).unwrap());
+        let next = "Next: strategy show run t1 r1 2\n";
+        let run = |a: &[&str], budget: usize| strategy_command(&root, "s1", a, &mut || Ok(String::new()), budget);
+        assert_eq!(run(&["strategy", "show", "run", "t1", "r1", "1,2"], one.len() + next.len()).unwrap(), one.clone() + next);
+        assert!(!run(&["strategy", "show", "run", "t1", "r1", "1,2"], 10_000).unwrap().contains("Next:"));
+        assert!(run(&["strategy", "show", "run", "t1", "r1", "1", "--from", "x"], 10_000).unwrap_err().0.starts_with("E7001"));
+        assert!(run(&["strategy", "show", "note", "t1", "2", "--from", "3"], 10_000).unwrap().contains("characters 3.."));
+        for bad in ["0", "3", "2..1", "x", "1,,2"] {
+            assert!(strategy_run_show(&root, "t1", "r1", Some(bad)).unwrap_err().0.starts_with("E7001"), "{bad}");
+        }
+        // A run whose log holds no steps says so.
+        let task = json!({"id":"t2","column":"backlog","runs":[{"id":"r2","kind":"work","state":"ended","log":"missing.jsonl"}]});
+        fs::write(store_dir(&root).join("t2.json"), task.to_string()).unwrap();
+        assert_eq!(strategy_run_show(&root, "t2", "r2", None).unwrap()["steps"], json!([]));
+        assert!(strategy_run_show(&root, "t2", "r2", Some("1")).unwrap_err().0.contains("no steps"));
+        assert!(strategy_run_show(&root, "t1", "nope", None).unwrap_err().0.starts_with("E7023"));
+        assert!(strategy_run_show(&root, "nope", "r1", None).unwrap_err().0.starts_with("E7023"));
     }
     /// One unreadable task file doesn't hide the others.
     #[test]
