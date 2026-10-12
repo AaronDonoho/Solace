@@ -502,6 +502,10 @@ fn same_run(journal: &Path, rid: &serde_json::Value) -> bool {
     fs::read(journal).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).is_some_and(|r| &r["run"] == rid)
 }
 fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, all: bool, old: Option<&str>) -> Out {
+    // D-109: patch text is for `write` with no path; here it would become the file.
+    if drafts::is_patch(new) {
+        return usage("this text is a patch; send it with `write` and no path, which applies its `*** Update File: <path>` sections");
+    }
     // `edited` treats a given `old` as a replacement; so does the read check.
     let replace = replace || old.is_some_and(|o| !o.is_empty());
     let p = path(root, name)?;
@@ -518,7 +522,23 @@ fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, all
         && let Some(ref b) = before
         && reads(root)[name].as_str() != Some(&sha256(b))
     {
-        return error("E6005", name, "file is unread or changed since last read; read it again or use --replace");
+        return error("E6005", name, "file is unread or changed since last read; `read` it again, or change part of it with `old` or a `write` patch (no path)");
+    }
+    // D-109: a whole-file write that would drop most of a long file is refused;
+    // a `--lines` read allows a whole write, so the size is the check.
+    let (was, now) = (before.as_deref().map(line_count), line_count(text.as_bytes()));
+    if !replace
+        && let Some(was) = was
+        && was >= 200
+        && now * 2 < was
+    {
+        return error(
+            "E6002",
+            name,
+            format!(
+                "would cut {name} from {was} lines to {now}; change part of it with `write` and a patch (no path), or `write {name}` with `old`; to replace it whole, `remove {name}` first, then `write {name}`"
+            ),
+        );
     }
     let journal = journal(root, name, &before)?;
     fs::create_dir_all(p.parent().unwrap())?;
@@ -527,7 +547,40 @@ fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, all
     // a failed command keeps no undo for it; one that succeeded keeps its
     // record until the outer transaction commits, even if the command then fails.
     settle(root, name, &p, &before, Some(text.as_bytes()), &journal, result.is_ok())?;
-    result.map(|_| format!("Wrote {name}\n"))
+    result.map(|_| match was {
+        Some(was) => format!("Wrote {name} ({was} → {})\n", count(now, "line")),
+        None => format!("Wrote {name} ({})\n", count(now, "line")),
+    })
+}
+/// A text's lines, the last one counted without its newline.
+fn line_count(b: &[u8]) -> usize {
+    b.iter().filter(|&&c| c == b'\n').count() + usize::from(!b.is_empty() && !b.ends_with(b"\n"))
+}
+/// D-109: a `read` path that doesn't exist, named with what it likely meant:
+/// a line range is `--lines`, and a bare name is a symbol.
+fn missing(root: &Path, name: &str, paths: &[&str]) -> Out {
+    let lines = |s: &str| -> Option<String> {
+        let (a, b) = s.split_once("..").or_else(|| s.split_once('-')).or_else(|| s.split_once(':')).unwrap_or((s, s));
+        let num = |x: &str| !x.is_empty() && x.bytes().all(|c| c.is_ascii_digit());
+        (num(a) && num(b)).then(|| if a == b { a.to_string() } else { format!("{a}..{b}") })
+    };
+    if let Some(range) = lines(name) {
+        let others: Vec<&str> = paths.iter().copied().filter(|p| *p != name).collect();
+        let file = if let [one] = others[..] { one } else { "<path>" };
+        return usage(format!("read: `{name}` is not a file; for lines use `read {file} --lines {range}`"));
+    }
+    if let Some((file, at)) = name.rsplit_once(':')
+        && let Some(range) = lines(at)
+        && root.join(file).is_file()
+    {
+        return usage(format!("read: no such file `{name}`; for lines use `read {file} --lines {range}`"));
+    }
+    let symbol = if name.contains('/') || name.contains('.') {
+        String::new()
+    } else {
+        format!("; read takes files, not symbols: `grep {name}` searches files, `find {name}` searches code in the store")
+    };
+    error("E6002", name, format!("no such file{symbol}"))
 }
 /// Saves `name`'s bytes before a change in `.solace/pending/`. In a board run
 /// the record is an undo record: it stays until the command's outer
@@ -1055,6 +1108,15 @@ pub fn dispatch(
             if paths.len() > 1 && !flags.is_empty() {
                 return usage("a --lines or --tail range takes one path: read <path> --lines 3,7,10..12");
             }
+            // D-109: a path that doesn't exist is named before anything is read.
+            if a[0] == "read" {
+                for name in &paths {
+                    let name = file_name(Path::new(name));
+                    if !reachable(root, &name)?.exists() && tier(root, v, &name, None) != "graph" {
+                        return missing(root, &name, &paths);
+                    }
+                }
+            }
             // Several files share the reply: each is headed with its path, and
             // the paths that don't fit are named for the next read.
             let many = paths.len() > 1;
@@ -1246,24 +1308,17 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
     Ok(format!("{launch}\n"))
 }
 
-/// How `grep` reads its query, for its refusal, the reference and the briefs.
-pub const GREP_SYNTAX: &str =
-    "grep takes literal text, already case-insensitive; one term per command; `--project <folder>` picks the project (no options, regex or file arguments)";
+/// How `grep` reads its query, for the hint after a miss that looks like a shell habit (D-109).
+pub const GREP_SYNTAX: &str = "grep takes literal text, already case-insensitive, searched as written; quotes around the whole query are dropped; no options or regex; `--project <folder>` picks the project";
 
 /// `grep <text>`: case-insensitive search of the files Solace watches, and the
 /// protected settings. Source symbols are `find`'s; unwatched files aren't
-/// searched (D-52).
+/// searched (D-52). The text is searched as written, never refused (D-109).
 fn grep(root: &Path, v: &toml::Value, query: &str) -> Out {
-    let raw = query;
-    let query = unquoted(query);
+    let raw = query.trim();
+    let query = one_quoted(raw);
     if query.is_empty() {
         return Err(Failure("grep: give the text to search for\n\nRun `solace help` for usage.".into(), 2));
-    }
-    // Options, regex alternation or a file after a quoted term would be
-    // searched for literally and silently miss.
-    let trailing = raw.starts_with('"') && raw[1..].find('"').is_some_and(|i| i + 2 < raw.len());
-    if query.starts_with('-') || query.contains("\\|") || trailing {
-        return Err(Failure(format!("grep: {GREP_SYNTAX}\n"), 2));
     }
     let q = query.to_lowercase();
     let mut rows = vec![];
@@ -1282,7 +1337,7 @@ fn grep(root: &Path, v: &toml::Value, query: &str) -> Out {
         }
     }
     if hits.is_empty() {
-        return Ok(format!("No matches for \"{query}\" in watched files.\n"));
+        return Ok(format!("No matches for \"{query}\" in watched files.\n{}", grep_hint(raw, query)));
     }
     let total = hits.len();
     let mut out: String = hits.into_iter().take(40).collect();
@@ -1291,6 +1346,40 @@ fn grep(root: &Path, v: &toml::Value, query: &str) -> Out {
     }
     Ok(out)
 }
+/// A query without the quotes around it, only when it is one quoted term:
+/// `"write" =>` keeps its quotes.
+fn one_quoted(query: &str) -> &str {
+    ['"', '\'', '`']
+        .iter()
+        .find_map(|&c| query.strip_prefix(c)?.strip_suffix(c).filter(|q| !q.is_empty() && !q.contains(c)))
+        .unwrap_or(query)
+}
+/// D-109: after a miss, one line for a query that looks like a shell habit: an
+/// option, `\|`, an escaped quote, a quoted term with more after it, or a path
+/// filter at the end. A plain miss gets nothing.
+fn grep_hint(raw: &str, query: &str) -> String {
+    let words: Vec<&str> = raw.split_whitespace().collect();
+    let n = words.len();
+    let option = raw.strip_prefix('-').is_some_and(|r| r.starts_with(|c: char| c.is_ascii_alphabetic() || c == '-'));
+    let quoted = ['"', '\''].iter().any(|&c| raw.starts_with(c) && raw[1..].find(c).is_some_and(|i| i + 2 < raw.len()));
+    // A path: only path characters, and a folder (`src/a`) or a file extension
+    // (`a.rs`); code such as `a.len` or `x /` is not one.
+    let path = |w: &str| {
+        let w = w.trim_matches(|c| c == '"' || c == '\'');
+        w.bytes().all(|c| c.is_ascii_alphanumeric() || b"_-./".contains(&c))
+            && (w.split('/').filter(|s| !s.is_empty()).count() > 1
+                || w.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && FILE_EXTENSIONS.contains(&ext)))
+    };
+    let filter = n >= 2 && (matches!(words[n - 2], "--path" | "--in") || path(words[n - 1]));
+    if !(option || quoted || filter || raw.contains("\\|") || raw.contains("\\\"")) {
+        return String::new();
+    }
+    let filter = if filter { " grep has no path filter; it searches every watched file." } else { "" };
+    format!("Searched for: {query}.{filter} {GREP_SYNTAX}\n")
+}
+/// Extensions that make a word a file path for `grep_hint`.
+const FILE_EXTENSIONS: &[&str] =
+    &["rs", "gleam", "md", "txt", "toml", "json", "js", "mjs", "ts", "py", "html", "css", "erl", "sh", "yml", "yaml", "lock", "csv"];
 /// A long line cut to about 200 characters around a match at byte `at`
 /// (lowercasing can shift bytes, so cuts snap to character boundaries).
 fn around(line: &str, at: usize, len: usize) -> String {
@@ -1369,13 +1458,91 @@ mod tests {
         assert!(got.contains("needle é") && got.contains("solace.toml\n     1: # needle in settings"), "{got}");
         assert!(!got.contains("generated") && !got.contains("main.gleam"), "{got}");
         assert!(got.lines().nth(3).unwrap().len() < 260, "{got}");
-        assert!(call(&s, &v, &["grep", "absent"], "", None).unwrap().starts_with("No matches"));
-        // Options, alternation or a trailing file are refused with the syntax, not searched for.
-        for q in [&["grep", "-i", "\"needle\""][..], &["grep", "\"a\\|b\""], &["grep", "\"needle\"", "docs/a.md"]] {
-            let e = call(&s, &v, q, "", None).unwrap_err().0;
-            assert!(e.contains("literal text, already case-insensitive; one term per command"), "{e}");
-        }
+        // A plain miss gets no hint.
+        assert_eq!(call(&s, &v, &["grep", "absent"], "", None).unwrap(), "No matches for \"absent\" in watched files.\n");
         assert!(call(&s, &v, &["grep", "\"The", "Needle\""], "", None).unwrap().starts_with("docs/a.md"));
+    }
+    /// D-109: grep searches code text as written, quotes included unless they
+    /// wrap the whole query, and a miss that looks like a shell habit gets a hint.
+    #[test]
+    fn grep_searches_code_text_and_hints_after_a_misuse() {
+        let (s, _) = fixture();
+        let v = "watch_limit = 2000\n".parse().unwrap();
+        fs::create_dir_all(s.root.join("docs")).unwrap();
+        fs::write(s.root.join("docs/code.rs"), "\"write\" => go(),\nlet x = \"write\" | y;\nfn f() -> Result<(), E>\n| a \\| b |\n").unwrap();
+        for (q, line) in [
+            (&["grep", "\"write\"", "=>"][..], 1),
+            (&["grep", "\"write\"", "|"], 2),
+            (&["grep", "->", "Result"], 3),
+            (&["grep", "a", "\\|", "b"], 4),
+        ] {
+            let got = call(&s, &v, q, "", None).unwrap();
+            assert!(got.starts_with("docs/code.rs\n") && got.contains(&format!("     {line}: ")), "{q:?}: {got}");
+        }
+        // One quoted term is searched without its quotes.
+        let got = call(&s, &v, &["grep", "\"write\""], "", None).unwrap();
+        assert!(got.contains("     1: ") && got.contains("     2: "), "{got}");
+        for (q, filter) in [
+            (&["grep", "-i", "needle"][..], false),
+            (&["grep", "\"x\"", "src/a.rs"], true),
+            (&["grep", "foo", "--path", "src"], true),
+        ] {
+            let got = call(&s, &v, q, "", None).unwrap();
+            assert!(got.starts_with("No matches") && got.contains("Searched for: ") && got.contains("literal text, already case-insensitive"), "{q:?}: {got}");
+            assert_eq!(got.contains("no path filter"), filter, "{q:?}: {got}");
+        }
+        assert!(call(&s, &v, &["grep", "-i", "needle"], "", None).unwrap().contains("Searched for: -i needle."));
+        // Code at the end of a query is not taken for a path: a plain miss.
+        for q in [&["grep", "let", "n", "=", "a.len"][..], &["grep", "x", "=", "a", "/"], &["grep", "self.name"]] {
+            assert_eq!(call(&s, &v, q, "", None).unwrap(), format!("No matches for \"{}\" in watched files.\n", q[1..].join(" ")), "{q:?}");
+        }
+        // A folder or a file is: the hint says grep has no path filter.
+        for q in [&["grep", "foo", "src/app"][..], &["grep", "foo", "notes.md"]] {
+            assert!(call(&s, &v, q, "", None).unwrap().contains("no path filter"), "{q:?}");
+        }
+    }
+    /// D-109: `write <path>` refuses patch text and a drastic shrink, and its
+    /// reply gives the file's lines before and after.
+    #[test]
+    fn write_refuses_a_patch_and_a_drastic_shrink() {
+        let (s, _) = fixture();
+        let v: toml::Value = "watch_limit = 100000\n".parse().unwrap();
+        fs::write(s.root.join("a.txt"), "one\ntwo\n").unwrap();
+        call(&s, &v, &["read", "a.txt"], "", None).unwrap();
+        let e = call(&s, &v, &["write", "a.txt"], "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+uno\n*** End Patch\n", None).unwrap_err();
+        assert!(e.0.contains("this text is a patch; send it with `write` and no path") && e.1 == 2, "{e:?}");
+        assert_eq!(fs::read_to_string(s.root.join("a.txt")).unwrap(), "one\ntwo\n");
+        assert_eq!(call(&s, &v, &["write", "a.txt"], "one\ntwo\nthree\n", None).unwrap(), "Wrote a.txt (2 → 3 lines)\n");
+        assert_eq!(call(&s, &v, &["write", "b.txt"], "x", None).unwrap(), "Wrote b.txt (1 line)\n");
+        // A partial read allows a whole write, so a shrink to under half of a long file is refused.
+        let long: String = (1..=300).map(|n| format!("line {n}\n")).collect();
+        fs::write(s.root.join("long.rs"), &long).unwrap();
+        call(&s, &v, &["read", "long.rs", "--lines", "1..5"], "", None).unwrap();
+        let e = call(&s, &v, &["write", "long.rs"], "fn main() {}\n", None).unwrap_err().0;
+        assert!(e.contains("would cut long.rs from 300 lines to 1") && e.contains("`remove long.rs` first"), "{e}");
+        assert_eq!(fs::read_to_string(s.root.join("long.rs")).unwrap(), long);
+        let half: String = long.lines().take(150).map(|l| format!("{l}\n")).collect();
+        assert_eq!(call(&s, &v, &["write", "long.rs"], &half, None).unwrap(), "Wrote long.rs (300 → 150 lines)\n");
+        // To replace it whole: remove it, then write it new.
+        call(&s, &v, &["remove", "long.rs"], "", None).unwrap();
+        assert_eq!(call(&s, &v, &["write", "long.rs"], "fn main() {}\n", None).unwrap(), "Wrote long.rs (1 line)\n");
+    }
+    /// D-109: a `read` path that doesn't exist is named with what it likely
+    /// meant, and nothing is read.
+    #[test]
+    fn read_names_a_missing_path() {
+        let (s, v) = fixture();
+        fs::write(s.root.join("a.rs"), "fn a() {}\n").unwrap();
+        for range in ["1340-1400", "1340..1400", "1340:1400"] {
+            let e = call(&s, &v, &["read", "a.rs", range], "", None).unwrap_err();
+            assert!(e.0.contains(&format!("`{range}` is not a file")) && e.0.contains("`read a.rs --lines 1340..1400`") && e.1 == 2, "{e:?}");
+        }
+        let e = call(&s, &v, &["read", "a.rs:3-4"], "", None).unwrap_err().0;
+        assert!(e.contains("`read a.rs --lines 3..4`"), "{e}");
+        let e = call(&s, &v, &["read", "some_fn"], "", None).unwrap_err().0;
+        assert!(e.contains("some_fn") && e.contains("not symbols") && e.contains("`grep some_fn`"), "{e}");
+        let e = call(&s, &v, &["read", "docs/gone.md"], "", None).unwrap_err().0;
+        assert!(e.contains("E6002") && e.contains("docs/gone.md") && e.contains("no such file") && !e.contains("symbols"), "{e}");
     }
     #[test]
     fn a2_source_internal_and_path_aliases() {

@@ -954,3 +954,66 @@ pub fn a_task_link_opens_its_task_on_the_tasks_tab_test() {
   let #(same, _) = strategy.update(model, strategy.Focus("a", ""))
   assert same.reveal == #("abc", 2)
 }
+
+/// A run that goes waiting has replied, and a new unanswered proposal asks
+/// the human; an answer, a run starting, or nothing new does not.
+pub fn attention_when_a_run_replies_or_proposes_test() {
+  let run = fn(state, questions) {
+    plan.Run(
+      id: "r1",
+      model: "m",
+      effort: "",
+      state: state,
+      started: 1,
+      ended: 0,
+      outcome: "",
+      context: plan.page,
+      notes: [],
+      questions: questions,
+    )
+  }
+  let ask = fn(id, answer) {
+    plan.Question(id, "Add a task?", ["Yes", "No"], answer, None)
+  }
+  assert strategy.needs_attention([run("running", [])], [run("waiting", [])])
+  assert !strategy.needs_attention([run("waiting", [])], [run("waiting", [])])
+  assert !strategy.needs_attention([], [run("running", [])])
+  assert !strategy.needs_attention([run("waiting", [])], [run("running", [])])
+  assert strategy.needs_attention([run("running", [])], [
+    run("running", [ask("q1", "")]),
+  ])
+  assert !strategy.needs_attention([run("running", [ask("q1", "")])], [
+    run("running", [ask("q1", "Yes")]),
+  ])
+  assert !strategy.needs_attention([run("running", [ask("q1", "")])], [
+    run("running", [ask("q1", "")]),
+  ])
+}
+
+/// The open task's Depends on line updates live: the update of a task it
+/// depends on, in another project, goes to its details; another task's
+/// doesn't.
+pub fn a_dependency_update_goes_to_the_open_task_test() {
+  let model =
+    workspace()
+    |> step(
+      strategy.Live(
+        message("web", [#("task", task("t1", "A", "", "done", "", 1))]),
+      ),
+    )
+    |> step(strategy.Open("web", "t1"))
+    |> step(
+      strategy.Live(
+        message(".", [#("task", task("t0", "Dep", "", "done", "", 1))]),
+      ),
+    )
+    |> step(
+      strategy.Live(
+        message(".", [#("task", task("t9", "Other", "", "done", "", 1))]),
+      ),
+    )
+  // `task` makes every task depend on t0.
+  assert list.map(model.live, fn(m) { m.0 }) == [1]
+  let assert [#(_, handed)] = model.live
+  assert string.contains(handed, "\"t0\"")
+}

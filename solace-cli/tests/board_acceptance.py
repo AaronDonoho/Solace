@@ -414,7 +414,8 @@ class Board(unittest.TestCase):
                 t=self.create([{'sleep':.2},{'command':'task done done'}])
                 t['column']=col['id'];t['home']='.'
                 (self.root/'.solace/tasks'/f'{t["id"]}.json').write_text(json.dumps(t))
-                allowed=[] if col['final'] else [*col['actions'],'pause','resume','discuss','stop','end_discussion']
+                # A final column offers only what it lists (D-108): cancelled's to_backlog, nothing in complete.
+                allowed=col['actions'] if col['final'] else [*col['actions'],'pause','resume','discuss','stop','end_discussion']
                 if name not in allowed:
                     e=self.action(t,name,'E7001',model='fake');self.assertEqual(e['allowed'],allowed)
                 elif name=='complete' and col.get('requires'):self.action(t,name,'E7006')
@@ -502,7 +503,7 @@ class Board(unittest.TestCase):
         custom=default.replace('actions = ["plan", "cancel"]','actions = ["triage", "plan", "cancel"]')+'\ntriage = {to="triage"}\n\n[[board.columns]]\nid="triage"\nlabel="Triage"\nactions=["plan"]\n'
         (self.root/'solace.toml').write_text(original+custom)
         t=self.create();self.assertEqual(self.action(t,'triage')['column'],'triage');self.assertEqual(self.action(t,'plan')['column'],'planning')
-        for broken in [default.replace('to = "planning"','to = "missing"'),default+'\nunused={to="backlog"}\n',default.replace('finished = "needs_review"',''),default.replace('events = {','events = { asked = "missing",'),default.replace('next = "complete"','next = "missing"'),default.replace('id = "complete"','id = "complete"\nactions=["plan"]')]:
+        for broken in [default.replace('to = "planning"','to = "missing"'),default+'\nunused={to="backlog"}\n',default.replace('finished = "needs_review"',''),default.replace('events = {','events = { asked = "missing",'),default.replace('next = "complete"','next = "missing"'),default.replace('label = "Back to backlog"','label = 1')]:
             (self.root/'solace.toml').write_text(original+broken);self.api('GET','/workflow',code='E6020')
         (self.root/'solace.toml').write_text(original)
     def test_stop_ends_running_and_paused_agents(self):
@@ -970,6 +971,25 @@ class Board(unittest.TestCase):
         self.assertIsInstance(archived['archivedTime'],int)
         listed=[x for x in self.api('GET','/tasks') if x['id']==t['id']]
         self.assertEqual(listed[0]['archivedTime'],archived['archivedTime'])
+
+    def test_a_canceled_task_goes_back_to_the_backlog(self):  # D-108
+        w=self.api('GET','/workflow')
+        self.assertEqual(w['actions']['to_backlog']['label'],'Back to backlog')
+        t=self.create();dep=self.create()
+        self.api('PATCH','/tasks/'+dep['id'],{'dependsOn':[t['id']]})
+        self.api('POST','/tasks/'+t['id']+'/notes',{'text':'Keep me'})
+        self.assertEqual(self.action(t,'to_backlog','E7001')['allowed'],['plan','cancel','pause','resume','discuss','stop','end_discussion'])
+        gone=self.action(t,'cancel');self.assertEqual(gone['column'],'cancelled');self.assertIsInstance(gone['closedTime'],int)
+        self.assertIsInstance(self.api('POST','/tasks/'+t['id']+'/archive',{})['archivedTime'],int)
+        back=self.action(t,'to_backlog')
+        self.assertEqual((back['column'],back['archivedTime'],back['closedTime'],back['title']),('backlog',None,gone['closedTime'],'Fixture'))
+        self.assertEqual(back['notes'][0]['text'],'Keep me')
+        self.assertEqual((back['notes'][-1]['author'],back['notes'][-1]['text']),('solace','The human brought this task back from canceled to backlog.'))
+        self.assertEqual([x['archivedTime'] for x in self.api('GET','/tasks') if x['id']==t['id']],[None])
+        self.assertEqual(self.get(dep)['dependsOn'],[t['id']])
+        # A complete task stays as it is.
+        done=self.completed([]);self.action(done,'approve');self.action(done,'complete')
+        self.assertEqual(self.action(done,'to_backlog','E7001')['allowed'],[])
 
     def test_a_task_link_finds_its_task(self):  # D-98
         t=self.completed([])

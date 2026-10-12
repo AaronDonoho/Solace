@@ -222,10 +222,8 @@ pub fn workflow(settings: &toml::Value) -> Result<Value, Failure> {
         if !ids.insert(id.to_string()) {
             return Err(invalid("duplicate column"));
         }
+        // A final column may list actions too (D-108), such as cancelled's way back to the backlog.
         let a = c.get("actions").and_then(|x| x.as_array()).cloned().unwrap_or_default();
-        if c["final"] == true && !a.is_empty() {
-            return Err(invalid("final column has actions"));
-        }
         for name in a {
             let n = name.as_str().ok_or_else(|| invalid("action name"))?;
             if !actions.contains_key(n) {
@@ -243,7 +241,7 @@ pub fn workflow(settings: &toml::Value) -> Result<Value, Failure> {
     }
     for (name, a) in actions {
         if !a.is_object()
-            || ["stamp", "unstamp"].iter().any(|k| a.get(*k).is_some_and(|v| !v.is_string()))
+            || ["stamp", "unstamp", "label"].iter().any(|k| a.get(*k).is_some_and(|v| !v.is_string()))
             || ["model", "revert"].iter().any(|k| a.get(*k).is_some_and(|v| !v.is_boolean()))
         {
             return Err(invalid("invalid action fields"));
@@ -283,11 +281,11 @@ pub(super) fn column<'a>(w: &'a Value, t: &Value) -> &'a Value {
 }
 fn allowed(w: &Value, t: &Value) -> Vec<String> {
     let c = column(w, t);
-    if c["final"] == true {
-        return vec![];
-    }
     let mut out = c["actions"].as_array().unwrap_or(&vec![]).iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>();
-    out.extend(["pause", "resume", "discuss", "stop", "end_discussion"].map(String::from));
+    // A final column offers only the actions it lists: no agent works there (D-108).
+    if c["final"] != true {
+        out.extend(["pause", "resume", "discuss", "stop", "end_discussion"].map(String::from));
+    }
     out
 }
 /// The task's discussion run that hasn't ended, if one is going.
@@ -1327,7 +1325,14 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
         revert(s, t)?;
         proposed["runs"] = t["runs"].clone();
     }
+    let left = (column(w, t)["final"] == true && column(w, &proposed)["final"] != true)
+        .then(|| (column(w, t)["label"].clone(), column(w, &proposed)["label"].clone()));
     *t = proposed;
+    // Leaving a final column says so on the task (D-108).
+    if let Some((from, to)) = left {
+        let text = format!("The human brought this task back from {} to {}.", from.as_str().unwrap_or(""), to.as_str().unwrap_or(""));
+        note(t, "solace", None, &text);
+    }
     if let Some(text) = body["text"].as_str()
         && run != "discuss"
     {
@@ -2655,6 +2660,15 @@ fn text_of(v: &Value) -> String {
         v => v.to_string(),
     }
 }
+/// D-109: a failed batch where only some commands failed, from the reply's
+/// last line (`1 of 3 commands failed: …`): `(1 of 3 failed)`, for the step's title.
+fn partly_failed(status: &str, output: &str) -> Option<String> {
+    let last = output.trim_end().lines().last()?;
+    let (n, rest) = last.split_once(" of ")?;
+    let (m, _) = rest.split_once(" commands failed: ")?;
+    let (n, m): (usize, usize) = (n.parse().ok()?, m.parse().ok()?);
+    (status == "failed" && n < m).then(|| format!("({n} of {m} failed)"))
+}
 /// A tool call's input for display: the command first, then any other arguments.
 fn tool_input(args: &Value) -> (String, String) {
     let command = args["command"].as_str().unwrap_or("").to_string();
@@ -2700,7 +2714,12 @@ pub fn transcript(log: &Path) -> Vec<Value> {
                     _ => "running",
                 };
                 let output = if item["error"].is_null() { text_of(&item["result"]["content"]) } else { text_of(&item["error"]["message"]) };
-                let entry = json!({"kind":"tool","title":format!("{} {command}", item["tool"].as_str().unwrap_or("tool")),"input":input,"output":output,"status":status});
+                let tool = item["tool"].as_str().unwrap_or("tool");
+                let title = match partly_failed(status, &output) {
+                    Some(p) => format!("{tool} {p} {command}"),
+                    None => format!("{tool} {command}"),
+                };
+                let entry = json!({"kind":"tool","title":title,"input":input,"output":output,"status":status});
                 let id = item["id"].as_str().unwrap_or("").to_string();
                 match tools.get(&id) {
                     Some(&i) => out[i] = entry,
@@ -2746,6 +2765,9 @@ pub fn transcript(log: &Path) -> Vec<Value> {
                     if let Some(&i) = c["tool_use_id"].as_str().and_then(|id| tools.get(id)) {
                         out[i]["output"] = json!(text_of(&c["content"]));
                         out[i]["status"] = json!(if c["is_error"] == true { "failed" } else { "ok" });
+                        if let Some(p) = partly_failed(out[i]["status"].as_str().unwrap_or(""), out[i]["output"].as_str().unwrap_or("")) {
+                            out[i]["title"] = json!(out[i]["title"].as_str().unwrap_or("").replacen(' ', &format!(" {p} "), 1));
+                        }
                     }
                 }
             }
@@ -4290,6 +4312,32 @@ mod tests {
         assert!(!lockdown::pending_for(&s.root, &tid));
     }
 
+    /// D-108: a canceled task goes back to the backlog, out of the archive, with
+    /// its closedTime and a note; no other column offers it, and complete offers nothing.
+    #[test]
+    fn a_canceled_task_goes_back_to_the_backlog() {
+        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let s = open(&p.root).unwrap();
+        let t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let act = |name: &str| api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": name}));
+        let refused = |r: Result<Value, Failure>| r.unwrap_err().0[..5].to_string();
+        assert_eq!(refused(act("to_backlog")), "E7001", "not offered in backlog");
+        let cancelled = act("cancel").unwrap();
+        assert_eq!(cancelled["column"], "cancelled");
+        assert_eq!(allowed(&flow(&s.root).unwrap(), &cancelled), ["to_backlog"]);
+        let archived = api(&s.root, "POST", &format!("/tasks/{tid}/archive"), json!({})).unwrap();
+        assert!(archived["archivedTime"].is_u64());
+        let back = act("to_backlog").unwrap();
+        assert_eq!((back["column"].as_str(), &back["archivedTime"], &back["closedTime"]), (Some("backlog"), &Value::Null, &cancelled["closedTime"]));
+        assert_eq!(back["title"], "Shapes");
+        let last = back["notes"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!((last["author"].as_str(), last["text"].as_str()), (Some("solace"), Some("The human brought this task back from canceled to backlog.")));
+        let mut done = back.clone();
+        done["column"] = json!("complete");
+        assert!(allowed(&flow(&s.root).unwrap(), &done).is_empty(), "complete offers nothing");
+    }
+
     /// A workflow whose `finished` event targets a final column, so `task done` settles.
     const DONE_IS_FINAL: &str = "[board]\nevents = { asked = \"todo\", finished = \"done\", failed = \"todo\" }\n[[board.columns]]\nid = \"todo\"\nactions = [\"cancel\"]\n[[board.columns]]\nid = \"done\"\nfinal = true\n[[board.columns]]\nid = \"gone\"\nfinal = true\n[board.actions]\ncancel = { revert = true, to = \"gone\" }\n";
 
@@ -4672,6 +4720,18 @@ mod tests {
             (t[0]["title"].as_str(), t[0]["status"].as_str(), t[0]["output"].as_str()),
             (Some("solace view a"), Some("ok"), Some("pub fn a()"))
         );
+        // D-109: Codex's failed call where only some commands failed says how many in its title.
+        let batch = json!({"type":"item.completed","item":{"id":"i3","type":"mcp_tool_call","tool":"solace","arguments":{"command":"read a\ngrep x"},"result":{"content":[{"type":"text","text":"E6002\ndocs/x\n1 of 2 commands failed: read a\n"}]},"status":"failed"}});
+        fs::write(&log, batch.to_string()).unwrap();
+        let t = transcript(&log);
+        assert_eq!((t[0]["title"].as_str(), t[0]["status"].as_str()), (Some("solace (1 of 2 failed) read a\ngrep x"), Some("failed")));
+        // Every command failed: the title stays as it was.
+        let all = batch.to_string().replace("1 of 2 commands", "2 of 2 commands");
+        fs::write(&log, all).unwrap();
+        assert_eq!(transcript(&log)[0]["title"], "solace read a\ngrep x");
+        let text = codex.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n") + "\nnot json\nstill not\n";
+        fs::write(&log, text).unwrap();
+        let t = transcript(&log);
         assert_eq!(t[0]["input"], "text:\nx");
         assert_eq!(t[3]["text"], "not json\nstill not");
         assert_eq!(last_words(&t).unwrap(), "All **done**.");
@@ -4685,6 +4745,14 @@ mod tests {
             (t[1]["title"].as_str(), t[1]["status"].as_str(), t[1]["output"].as_str()),
             (Some("solace test"), Some("failed"), Some("E1 failed"))
         );
+        // D-109: a batch where only some commands failed says how many in its title.
+        let batch = [
+            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"u2","name":"mcp__solace__solace","input":{"command":"read a\ngrep x"}}]}}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"u2","content":[{"type":"text","text":"==== solace read a ====\nE6002\n==== solace grep x ====\ndocs/x\n1 of 2 commands failed: read a\n"}],"is_error":true}]}}),
+        ];
+        fs::write(&log, batch.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+        let t = transcript(&log);
+        assert_eq!((t[0]["title"].as_str(), t[0]["status"].as_str()), (Some("solace (1 of 2 failed) read a\ngrep x"), Some("failed")));
         // Live usage: the latest call's context and output per call; Anthropic adds cache, LM Studio includes it.
         let call = |id: &str, u: Value| json!({"type":"assistant","message":{"id":id,"usage":u,"content":[]}}).to_string();
         let anthropic = json!({"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":5,"output_tokens":7});

@@ -39,6 +39,10 @@ The menu (Board, Migration, Contracts, Strategy, Settings) is on every page and
 highlights the current one; a workspace project's contract page highlights
 Contracts. The menu is 56px high, and the contract page fills the rest of the
 window (`--contracts-height`). Each app owns its styles and lifecycle.
+A page's `attention` event (D-107) flags its menu tab, unless it is the page
+shown: the tab flashes (lit without motion under reduced motion) and reads
+"(needs attention)" to screen readers until the page is shown. The board and
+Strategy are open from the start, hidden, so they hear of what needs attention.
 The shell owns the document font, base styles, menu and page-level drag rule.
 
 The theme is chosen on the Settings page (Dark mode). `index.html` applies the

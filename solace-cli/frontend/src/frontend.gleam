@@ -47,6 +47,8 @@ pub type Msg {
   /// The reply to `GET /tasks/find/{id}`: the id, the reply, and whether the task link's own address is
   /// replaced in the history (it was loaded or reached by back or forward) rather than added to.
   Found(String, String, Bool)
+  /// A page's `attention` event: something there needs the human. The page's element.
+  Attention(String)
 }
 
 pub fn route(uri: Uri) -> Route {
@@ -64,7 +66,8 @@ pub fn route(uri: Uri) -> Route {
 
 /// A route's page element, hidden unless it is the one shown.
 /// The page a task link asked for gets the task in its `focus` property, `{dir, id, n}`.
-pub fn page(route: Route, shown: Bool, focus: Focus) -> Element(msg) {
+/// Its `attention` event flags its menu tab.
+pub fn page(route: Route, shown: Bool, focus: Focus) -> Element(Msg) {
   let attributes = case route {
     Contracts(base) if base != "" -> [attribute.attribute("base", base)]
     _ -> []
@@ -87,7 +90,14 @@ pub fn page(route: Route, shown: Bool, focus: Focus) -> Element(msg) {
     True -> attributes
     False -> [attribute.attribute("hidden", ""), ..attributes]
   }
-  element.element(page_of(route), attributes, [])
+  element.element(
+    page_of(route),
+    [
+      event.on("attention", decode.success(Attention(page_of(route)))),
+      ..attributes
+    ],
+    [],
+  )
 }
 
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
@@ -100,8 +110,11 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     TaskLink(id) -> #(Board, find(id, True))
     _ -> #(initial, effect.none())
   }
+  // The board and Strategy are open from the start, hidden, so they hear of
+  // what needs the human and can flag their tab.
+  let opened = [shown] |> open(Board) |> open(Strategy)
   #(
-    Model(route: shown, opened: [shown], focus: no_focus),
+    Model(route: shown, opened: opened, focus: no_focus, attention: []),
     effect.batch([
       modem.init(fn(uri) { RouteChanged(route(uri)) }),
       effect.from(fn(send) { follow_links(fn(id) { send(Follow(id)) }) }),
@@ -110,10 +123,23 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   )
 }
 
+import lustre/event
+
 /// Showing another page keeps the window's scroll of the one left, read before the view hides it, and
 /// puts back the scroll of the one shown once it is drawn.
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
+    // The page shown is already in front of the human: its tab is never flagged.
+    Attention(page) ->
+      case
+        page == page_of(model.route) || list.contains(model.attention, page)
+      {
+        True -> #(model, effect.none())
+        False -> #(
+          Model(..model, attention: list.append(model.attention, [page])),
+          effect.none(),
+        )
+      }
     RouteChanged(TaskLink(id)) -> #(model, find(id, True))
     RouteChanged(route) -> show(model, route)
     Follow(id) -> #(model, find(id, False))
@@ -141,27 +167,46 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   }
 }
 
-fn link(path: String, label: String, current: Bool) -> Element(msg) {
-  let attributes = case current {
-    True -> [
+/// A menu tab: the current page's is marked; one that needs attention flashes and says so to screen readers.
+fn link(
+  path: String,
+  label: String,
+  current: Bool,
+  attention: Bool,
+) -> Element(msg) {
+  let attributes = case current, attention {
+    True, _ -> [
       attribute.href(path),
       attribute.class("current"),
       attribute.attribute("aria-current", "page"),
     ]
-    False -> [attribute.href(path)]
+    False, True -> [attribute.href(path), attribute.class("attention")]
+    False, False -> [attribute.href(path)]
   }
-  html.a(attributes, [html.text(label)])
+  html.a(attributes, case current, attention {
+    False, True -> [
+      html.text(label),
+      html.span([attribute.class("attention-note")], [
+        html.text(" (needs attention)"),
+      ]),
+    ]
+    _, _ -> [html.text(label)]
+  })
 }
 
-pub fn view(model: Model) -> Element(msg) {
+pub fn view(model: Model) -> Element(Msg) {
   let shown = page_of(model.route)
+  let link = fn(path, label, route) {
+    let page = page_of(route)
+    link(path, label, shown == page, list.contains(model.attention, page))
+  }
   element.fragment([
     html.nav([attribute.class("menu")], [
-      link("/migrate", "Migration", shown == page_of(Migrate)),
-      link("/strategy", "Strategy", shown == page_of(Strategy)),
-      link("/", "Board", shown == page_of(Board)),
-      link("/contracts", "Contracts", shown == page_of(Contracts(""))),
-      link("/settings", "Settings", shown == page_of(Settings)),
+      link("/migrate", "Migration", Migrate),
+      link("/strategy", "Strategy", Strategy),
+      link("/", "Board", Board),
+      link("/contracts", "Contracts", Contracts("")),
+      link("/settings", "Settings", Settings),
     ]),
     ..list.map(model.opened, fn(r) { page(r, page_of(r) == shown, model.focus) })
   ])
@@ -420,9 +465,15 @@ fn first_number(attributes: List(#(String, String))) -> Int {
 
 /// The shell's state: the route shown, and every page opened so far, in the order first opened. A page
 /// stays in the document once opened, hidden while another shows, so its work is there when you come back.
-/// `focus` is the last task link followed.
+/// `focus` is the last task link followed. `attention` holds the pages, by element, whose menu tab flashes:
+/// a page hidden at the time asked for it, and it hasn't been shown since.
 pub type Model {
-  Model(route: Route, opened: List(Route), focus: Focus)
+  Model(
+    route: Route,
+    opened: List(Route),
+    focus: Focus,
+    attention: List(String),
+  )
 }
 
 /// The page a route shows: its custom element. Routes to the same page share one element and its state.
@@ -459,10 +510,16 @@ fn leave_scroll(page: String) -> Nil
 @external(javascript, "./page_scroll.mjs", "enter")
 fn enter_scroll(page: String) -> Nil
 
-/// Shows a route's page.
+/// Shows a route's page; its tab no longer needs attention.
 fn show(model: Model, route: Route) -> #(Model, Effect(Msg)) {
-  let next = Model(..model, route: route, opened: open(model.opened, route))
   let entering = page_of(route)
+  let next =
+    Model(
+      ..model,
+      route: route,
+      opened: open(model.opened, route),
+      attention: list.filter(model.attention, fn(p) { p != entering }),
+    )
   case page_of(model.route) == entering {
     True -> #(next, effect.none())
     False -> {

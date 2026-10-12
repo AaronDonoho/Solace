@@ -69,8 +69,8 @@ Its scope is every task, feature and milestone and the vision; it reads code in 
 
 The `[board]` section of `solace.toml` (humans only, Spec 14 §2) defines the workflow from a fixed set of building blocks. Every project on a board shares one workflow, the root's (D-61): a project below a root ignores a `[board]` of its own.
 
-- **Columns**, each with an `id`, a `label`, the `actions` allowed there, whether it is `final`, and optionally a gate: a `next` column and the stamps it `requires` before a task may move on to `next`. Moves to other columns, such as back to work or to `cancelled`, are not gated. They do remove the stamps the gate requires: a task moved anywhere but `next` after approval loses its approval.
-- **Actions**, each a combination of these steps, applied in this order:
+- **Columns**, each with an `id`, a `label`, the `actions` allowed there, whether it is `final`, and optionally a gate: a `next` column and the stamps it `requires` before a task may move on to `next`. Moves to other columns, such as back to work or to `cancelled`, are not gated. They do remove the stamps the gate requires: a task moved anywhere but `next` after approval loses its approval. A final column offers only the actions it lists, none of the built-in ones (D-108). An action that moves a task out of a final column adds a `solace` note saying the human brought it back; the move clears `archivedTime` and keeps `closedTime`.
+- **Actions**, each with an optional `label` that its button shows instead of its name (D-108), and a combination of these steps, applied in this order:
   1. `revert`: undo the task's changes (§5);
   2. `stamp` / `unstamp`: add or remove a stamp. Stamps are only ever given by a human request;
   3. `to`: move to a column. Refused (`E7006`) if this is the current column's `next` and the task lacks a stamp it `requires`;
@@ -85,7 +85,7 @@ Five actions are built in and allowed in every column that isn't final:
 - `discuss` (D-72) starts a read-only `discuss` run with `{model, effort?, text}`; `text` is required (`E7001`) and is the discussion's first note. Refused while a run is open (`E7003`). The agent replies with `task note`, which waits for the human's next note (`task done` and `task ask` are refused); waiting doesn't count toward the timeout. An agent that instead replies in plain text and exits cleanly has taken its turn (D-76): the reply becomes its note, the run waits, and the human's next note starts a fresh agent briefed with every note. While it is open, a human note is the discussion's next turn.
 - `end_discussion` ends the open discussion with outcome `discussed` (`E7003` without one). When a discussion ends, by this or by `stop`, Solace replaces its notes with one `solace` note: a verbatim transcript, each turn labeled `**Human:**` or `**Agent (<model>):**` on its own line, followed by a blank line and the turn's text. A discussion's brief keeps every note whole, lists the decision titles from `DECISIONS.md`, and leaves out the verification record.
 
-Solace checks the configuration at start and on every change. An invalid workflow is `E6020` (Spec 14 §6): an unknown column, an action that is never allowed anywhere, an event with no target, a gate whose `next` is unknown, or a final column with actions.
+Solace checks the configuration at start and on every change. An invalid workflow is `E6020` (Spec 14 §6): an unknown column, an action that is never allowed anywhere, an event with no target, or a gate whose `next` is unknown.
 
 ## 3. Default workflow
 
@@ -118,10 +118,11 @@ final = true
 [[board.columns]]
 id = "cancelled"
 final = true
+actions = ["to_backlog"]   # a canceled task can come back (D-108)
 
 [board.actions]
 plan       = { to = "planning" }
-to_backlog = { to = "backlog" }
+to_backlog = { to = "backlog", label = "Back to backlog" }
 investigate = { run = "investigate", model = true }     # read-only; stays in its column
 review     = { run = "review" }                         # stays in its column
 assign     = { to = "assigned", run = "work", model = true }

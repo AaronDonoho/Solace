@@ -1,3 +1,4 @@
+import gleam/dict
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
@@ -35,7 +36,7 @@ pub fn workflow_actions_and_errors_test() {
       model,
       task.WorkflowLoaded(
         model.generation,
-        "{\"columns\":[{\"id\":\"triage\",\"label\":\"Triage\",\"actions\":[\"assign\"]},{\"id\":\"done\",\"final\":true}]}",
+        "{\"columns\":[{\"id\":\"triage\",\"label\":\"Triage\",\"actions\":[\"assign\"]},{\"id\":\"done\",\"final\":true},{\"id\":\"gone\",\"final\":true,\"actions\":[\"to_backlog\"]}],\"actions\":{\"assign\":{\"to\":\"triage\"},\"to_backlog\":{\"to\":\"triage\",\"label\":\"Back to backlog\"}}}",
       ),
     )
   let text =
@@ -45,9 +46,23 @@ pub fn workflow_actions_and_errors_test() {
   |> should.equal(["assign", "pause", "discuss"])
   task.actions(model.workflow, task.Task(..t, column: "done"))
   |> should.equal([])
+  task.actions(model.workflow, task.Task(..t, column: "gone"))
+  |> should.equal(["to_backlog"])
+  task.action_label(model.workflow, "to_backlog")
+  |> should.equal("Back to backlog")
+  task.action_label(model.workflow, "assign") |> should.equal("assign")
   let #(model, _) = task.update(model, task.TaskLoaded(model.generation, text))
   model.task |> should.equal(Some(t))
   html(model) |> string.contains("Fix checkout") |> should.be_true
+  let #(gone, _) =
+    task.update(
+      model,
+      task.TaskLoaded(
+        model.generation,
+        string.replace(text, "\"triage\"", "\"gone\""),
+      ),
+    )
+  html(gone) |> string.contains(">Back to backlog</button>") |> should.be_true
   let #(model, _) =
     task.update(
       model,
@@ -77,7 +92,7 @@ pub fn replies_for_another_opening_are_dropped_test() {
       model,
       task.WorkflowLoaded(old, "{\"columns\":[{\"id\":\"x\"}]}"),
     )
-  model.workflow |> should.equal(task.Workflow([]))
+  model.workflow |> should.equal(task.Workflow([], dict.new()))
   // The same value again opens nothing new.
   let #(same, _) = task.update(model, task.TaskChanged("2"))
   same |> should.equal(model)
@@ -268,7 +283,10 @@ pub fn file_changes_list_under_files_test() {
 
 pub fn stop_and_discussion_actions_test() {
   let workflow =
-    task.Workflow([task.Column("triage", "Triage", ["assign"], False)])
+    task.Workflow(
+      [task.Column("triage", "Triage", ["assign"], False)],
+      dict.new(),
+    )
   let one = fn(kind, state) {
     let text =
       "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[{\"id\":\"r\",\"kind\":\""
@@ -296,9 +314,10 @@ pub fn an_action_waits_for_its_reply_test() {
   let model =
     task.Model(
       ..loaded(text),
-      workflow: task.Workflow([
-        task.Column("triage", "Triage", ["assign"], False),
-      ]),
+      workflow: task.Workflow(
+        [task.Column("triage", "Triage", ["assign"], False)],
+        dict.new(),
+      ),
     )
   let #(model, _) = task.update(model, task.Action("assign"))
   model.acting |> should.equal("assign")
@@ -897,13 +916,18 @@ pub fn archived_time_decodes_to_archived_test() {
 }
 
 /// A task in a final column has no agent at work: a copy that still shows a
-/// run going says what the task finished with, and offers no buttons.
+/// run going says what the task finished with, and offers only the column's
+/// own actions (D-108): none in complete, the way back in canceled.
 pub fn a_final_column_shows_no_live_agent_test() {
   let workflow =
-    task.Workflow([
-      task.Column("assigned", "Assigned", ["complete"], False),
-      task.Column("complete", "Complete", [], True),
-    ])
+    task.Workflow(
+      [
+        task.Column("assigned", "Assigned", ["complete"], False),
+        task.Column("complete", "Complete", [], True),
+        task.Column("cancelled", "canceled", ["to_backlog"], True),
+      ],
+      dict.new(),
+    )
   let one = fn(column, finished) {
     let text =
       "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\""
@@ -926,6 +950,7 @@ pub fn a_final_column_shows_no_live_agent_test() {
   )
   |> should.equal("Report ready")
   task.actions(workflow, one("complete", "")) |> should.equal([])
+  task.actions(workflow, one("cancelled", "")) |> should.equal(["to_backlog"])
 }
 
 /// The case reported: a task stored in one project and covering another,
@@ -940,10 +965,13 @@ pub fn a_hosted_detail_takes_the_completed_task_test() {
     <> "\",\"started\":1,\"log\":\"\"}]}}"
   }
   let workflow =
-    task.Workflow([
-      task.Column("assigned", "Assigned", ["complete"], False),
-      task.Column("complete", "Complete", [], True),
-    ])
+    task.Workflow(
+      [
+        task.Column("assigned", "Assigned", ["complete"], False),
+        task.Column("complete", "Complete", [], True),
+      ],
+      dict.new(),
+    )
   let model =
     task.Model(
       ..loaded(
@@ -1041,4 +1069,167 @@ pub fn copy_id_beside_the_title_test() {
   let #(other, _) = task.update(asked, task.TaskChanged("t2"))
   let #(other, _) = task.update(other, task.CopyDone(1, True))
   other.copy.1 |> should.equal("")
+}
+
+/// D-87: a task's `dependsOn`, read as `[]` for a task saved before it.
+pub fn depends_on_decodes_test() {
+  let assert Ok(t) =
+    json.parse(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"dependsOn\":[\"a\",\"b\"]}",
+      task.task_decoder(),
+    )
+  t.depends |> should.equal(["a", "b"])
+  let assert Ok(old) =
+    json.parse(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1}",
+      task.task_decoder(),
+    )
+  old.depends |> should.equal([])
+}
+
+/// A workflow with an open column and two final ones, as the default's.
+const depends_flow =
+  "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\"]},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Cancelled\",\"final\":true}]}"
+
+/// Task `id` titled `title` in `column`, depending on `depends`.
+fn depends_task(
+  id: String,
+  title: String,
+  column: String,
+  depends: String,
+) -> String {
+  "{\"id\":\""
+  <> id
+  <> "\",\"title\":\""
+  <> title
+  <> "\",\"body\":\"\",\"column\":\""
+  <> column
+  <> "\",\"rank\":1,\"dependsOn\":["
+  <> depends
+  <> "]}"
+}
+
+/// The Details tab lists each dependency as a link with its title and
+/// column; an unfinished one is marked, a cancelled or complete one isn't,
+/// and one that can't be found shows its id. No dependencies, no line.
+pub fn depends_on_line_test() {
+  let none = loaded(depends_task("1", "T", "backlog", ""))
+  assert !string.contains(html(none), "Depends on")
+  let model =
+    loaded(depends_task("1", "T", "backlog", "\"d1\",\"d2\",\"d3\",\"d4\""))
+  let g = model.generation
+  let #(model, _) = task.update(model, task.WorkflowLoaded(g, depends_flow))
+  // Every dependency was asked for once it loaded.
+  assert list.map(model.deps, fn(d) { d.0 }) |> list.sort(string.compare)
+    == ["d1", "d2", "d3", "d4"]
+  let #(model, _) =
+    task.update(
+      model,
+      task.DepLoaded(g, "d1", depends_task("d1", "First", "backlog", "")),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.DepLoaded(g, "d2", depends_task("d2", "Second", "cancelled", "")),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.DepLoaded(g, "d3", depends_task("d3", "Third", "complete", "")),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.DepFound(
+        g,
+        "d4",
+        "{\"code\":\"E7023\",\"message\":\"no such task\"}",
+      ),
+    )
+  let page = html(model)
+  assert string.contains(page, "Depends on")
+  assert string.contains(page, "href=\"/task/d1\"")
+  assert string.contains(page, "data-task=\"d1\"")
+  assert string.contains(page, ">First</a> (Backlog, unfinished)")
+  assert string.contains(page, ">Second</a> (Cancelled)")
+  assert string.contains(page, ">Third</a> (Complete)")
+  assert string.contains(page, ">d4</a>")
+  assert list.length(string.split(page, ", unfinished)")) == 2
+  assert list.length(string.split(page, "class=\"dep unfinished\"")) == 2
+}
+
+/// A dependency's update under another project changes its line; another
+/// task's doesn't count. A change to `dependsOn` asks for the new one, and a
+/// reply for a task shown before is dropped.
+pub fn depends_on_line_updates_live_test() {
+  let model =
+    task.Model(
+      ..loaded(depends_task("1", "T", "backlog", "\"d1\"")),
+      dir: "a",
+      hosted: True,
+    )
+  let g = model.generation
+  let #(model, _) = task.update(model, task.WorkflowLoaded(g, depends_flow))
+  let #(model, _) =
+    task.update(
+      model,
+      task.DepLoaded(g, "d1", depends_task("d1", "First", "backlog", "")),
+    )
+  assert string.contains(html(model), "(Backlog, unfinished)")
+  let #(model, _) =
+    task.update(
+      model,
+      task.Handed([
+        #(
+          1,
+          "{\"project\":\"b\",\"task\":"
+            <> depends_task("d1", "Renamed", "complete", "")
+            <> "}",
+        ),
+        #(
+          2,
+          "{\"project\":\"b\",\"task\":"
+            <> depends_task("d9", "Other", "backlog", "")
+            <> "}",
+        ),
+      ]),
+    )
+  let page = html(model)
+  assert string.contains(page, ">Renamed</a> (Complete)")
+  assert !string.contains(page, ", unfinished)")
+  assert !string.contains(page, "class=\"dep unfinished\"")
+  assert !string.contains(page, "Other")
+  // Back out of a final column, it is unfinished again.
+  let #(model, _) =
+    task.update(
+      model,
+      task.Live(
+        "{\"project\":\"b\",\"task\":"
+        <> depends_task("d1", "Renamed", "backlog", "")
+        <> "}",
+      ),
+    )
+  assert string.contains(html(model), ">Renamed</a> (Backlog, unfinished)")
+  // `dependsOn` gains d2: it is asked for, and shows its id meanwhile.
+  let #(model, _) =
+    task.update(
+      model,
+      task.Handed([
+        #(
+          3,
+          "{\"project\":\"a\",\"task\":"
+            <> depends_task("1", "T", "backlog", "\"d1\",\"d2\"")
+            <> "}",
+        ),
+      ]),
+    )
+  assert list.key_find(model.deps, "d2") == Ok(None)
+  assert string.contains(html(model), ">d2</a>")
+  // A reply for the task shown before changes nothing.
+  let #(same, _) =
+    task.update(
+      model,
+      task.DepLoaded(g - 1, "d2", depends_task("d2", "Old", "backlog", "")),
+    )
+  assert same == model
 }

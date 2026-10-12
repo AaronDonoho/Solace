@@ -104,7 +104,8 @@ Every task of every project, one row each: title, column, project (in a workspac
   and asks `<solace-task>` to scroll it into view (its `reveal`). The shell sends here a linked task that is
   archived, so off the board.
 - **Details.** A row opens `<solace-task>` (components project) below the list, `hosted`: this page hands it the
-  task's events in `live` and follows it when it moves to another project. The page defines the full colour set
+  task's events in `live`, with the updates of the tasks it depends on (for its Depends on line, from any
+  project), and follows it when it moves to another project. The page defines the full colour set
   (light in the component's styles, dark in `index.html` and the shell), since `<solace-task>` sets none.
 
 ## Planning panel
@@ -116,6 +117,8 @@ collapses it to one line: the shown run's state and model, or whether a run is o
 - **Data.** The root's `/events` replays `{strategyRuns}` (no notes) after `{vision}` and sends `{strategyRun}` in
   full after every change, with no `project`. A replayed run keeps the notes the page already has. The model list
   is `GET /models`; an unavailable model shows why and can't be picked.
+- **Attention.** A live `{strategyRun}` where a run goes waiting (its agent replied) or asks a new proposal sends
+  the host `attention` (D-107), which flags the Strategy tab while another page shows; a replay sends nothing.
 - **Layout.** Below the shell's menu the page fills the window: the tab content scrolls on its own, and the panel
   runs from under the tab bar to the bottom of the window whatever its content. Its body scrolls inside it
   (`overscroll-behavior: contain`, so its scroll never moves the page). At 900px and narrower the panel stacks

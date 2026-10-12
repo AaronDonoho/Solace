@@ -23,6 +23,12 @@ solace-contracts{--contracts-height:calc(100dvh - 56px)}
 .menu a:hover{background:var(--hover)}
 .menu a.current{background:var(--ink);color:var(--paper)}
 .menu a:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+/* A tab whose page needs attention flashes until it is shown; with reduced motion it stays lit. */
+.menu a.attention{--flash:#f5c518;background:var(--flash);color:#172226;animation:attention 1.2s ease-in-out infinite alternate}
+@keyframes attention{from{background:var(--flash);color:#172226}to{background:transparent;color:inherit}}
+@media(prefers-reduced-motion:reduce){.menu a.attention{animation:none}}
+@media(forced-colors:active){.menu a.attention{animation:none;outline:3px solid Highlight}}
+.attention-note{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 /* Find in page (Ctrl+F): a bar below the menu, above the board's layers. */
 .find{position:fixed;top:64px;right:16px;z-index:30;display:flex;gap:6px;align-items:center;padding:6px 8px;background:var(--paper);color:var(--ink);border:2px solid var(--edge);box-shadow:0 4px 14px #00000033}
 .find[hidden]{display:none}

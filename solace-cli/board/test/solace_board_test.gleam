@@ -1,3 +1,4 @@
+import gleam/dict
 import gleam/int
 import gleam/json
 import gleam/list
@@ -71,9 +72,10 @@ pub fn notices_and_stamp_test() {
           "",
           "",
           "",
-          solace_task.Workflow([
-            solace_task.Column("needs_review", "Needs review", [], False),
-          ]),
+          solace_task.Workflow(
+            [solace_task.Column("needs_review", "Needs review", [], False)],
+            dict.new(),
+          ),
           [new],
         ),
       ]),
@@ -947,4 +949,163 @@ pub fn a_task_link_opens_its_task_test() {
   model.reveal |> should.equal(#("details", "abc", 2))
   let #(same, _) = board.update(model, board.Focus(".", ""))
   same |> should.equal(model)
+}
+
+/// A workspace with lanes a and b, whose workflow has two final columns.
+fn deps_board() -> board.Model {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"},{\"dir\":\"b\",\"label\":\"b\",\"name\":\"b\",\"base\":\"/p/b\"}],\"found\":[]}",
+      ),
+    )
+  let columns =
+    "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Cancelled\",\"final\":true}]}"
+  let #(model, _) = board.update(model, board.WorkflowLoaded("a", columns))
+  let #(model, _) = board.update(model, board.WorkflowLoaded("b", columns))
+  board.update(model, board.CaughtUp).0
+}
+
+/// A live update of a task stored in `dir`; `extra` adds JSON fields.
+fn put_task(
+  model: board.Model,
+  dir: String,
+  id: String,
+  title: String,
+  column: String,
+  extra: String,
+) -> board.Model {
+  board.update(
+    model,
+    board.Live(
+      "{\"project\":\""
+      <> dir
+      <> "\",\"task\":{\"id\":\""
+      <> id
+      <> "\",\"title\":\""
+      <> title
+      <> "\",\"body\":\"\",\"column\":\""
+      <> column
+      <> "\",\"rank\":1"
+      <> extra
+      <> "}}",
+    ),
+  ).0
+}
+
+/// The rendered card button whose text has `title`.
+fn card_of(model: board.Model, title: String) -> String {
+  let assert Ok(card) =
+    board.view(model)
+    |> element.to_string
+    |> string.split("<button")
+    |> list.find(fn(s) { string.contains(s, ">" <> title) })
+  card
+}
+
+/// Whether the card is dimmed and names what it waits on.
+fn dimmed(model: board.Model, title: String, waits: String) -> Bool {
+  let card = card_of(model, title)
+  string.contains(card, "class=\"card waiting\"")
+  && string.contains(card, "title=\"Waiting on " <> waits <> "\"")
+  && string.contains(card, ">Waiting on " <> waits <> "</small>")
+}
+
+/// A task with no `dependsOn` (saved before D-87) is shown as before.
+pub fn card_without_dependencies_is_not_dimmed_test() {
+  let model = deps_board() |> put_task("a", "1", "Card", "backlog", "")
+  let card = card_of(model, "Card")
+  string.contains(card, "waiting") |> should.be_false
+  string.contains(card, "Waiting on") |> should.be_false
+}
+
+/// A dependency outside a final column dims the card, which still opens; it
+/// brightens live once the dependency completes, and after its own
+/// `dependsOn` is cleared.
+pub fn unfinished_dependency_dims_the_card_test() {
+  let model =
+    deps_board()
+    |> put_task("a", "d1", "Dep", "backlog", "")
+    |> put_task("a", "d2", "Other dep", "complete", "")
+    |> put_task("a", "1", "Card", "backlog", ",\"dependsOn\":[\"d1\",\"d2\"]")
+  dimmed(model, "Card", "Dep") |> should.be_true
+  // Dimming is visual only: the card opens.
+  let #(open, _) = board.update(model, board.Select("a", "1"))
+  card_of(open, "Card")
+  |> string.contains("aria-current=\"true\" class=\"card selected waiting\"")
+  |> should.be_true
+  // Its dependency completes: the card brightens.
+  let done = put_task(model, "a", "d1", "Dep", "complete", "")
+  string.contains(card_of(done, "Card"), "waiting") |> should.be_false
+  // Strategy clears its dependencies.
+  let cleared =
+    put_task(model, "a", "1", "Card", "backlog", ",\"dependsOn\":[]")
+  string.contains(card_of(cleared, "Card"), "waiting") |> should.be_false
+}
+
+/// Complete and cancelled both count as finished.
+pub fn finished_or_cancelled_dependency_does_not_dim_test() {
+  let model =
+    deps_board()
+    |> put_task("a", "1", "Card", "backlog", ",\"dependsOn\":[\"d1\"]")
+  let complete = put_task(model, "a", "d1", "Dep", "complete", "")
+  string.contains(card_of(complete, "Card"), "waiting") |> should.be_false
+  let cancelled = put_task(model, "a", "d1", "Dep", "cancelled", "")
+  string.contains(card_of(cancelled, "Card"), "waiting") |> should.be_false
+}
+
+/// A dependency back out of a final column is unfinished again, though its
+/// `closedTime` stays set.
+pub fn reopened_dependency_dims_again_test() {
+  let model =
+    deps_board()
+    |> put_task("a", "d1", "Dep", "complete", ",\"closedTime\":1700")
+    |> put_task("a", "1", "Card", "backlog", ",\"dependsOn\":[\"d1\"]")
+  string.contains(card_of(model, "Card"), "waiting") |> should.be_false
+  let reopened =
+    put_task(model, "a", "d1", "Dep", "backlog", ",\"closedTime\":1700")
+  dimmed(reopened, "Card", "Dep") |> should.be_true
+}
+
+/// D-87: a dependency stored in another project is found in its lane.
+pub fn dependency_in_another_project_dims_the_card_test() {
+  let model =
+    deps_board()
+    |> put_task("b", "d1", "Dep", "backlog", "")
+    |> put_task("a", "1", "Card", "backlog", ",\"dependsOn\":[\"d1\"]")
+  dimmed(model, "Card", "Dep") |> should.be_true
+  let done = put_task(model, "b", "d1", "Dep", "complete", "")
+  string.contains(card_of(done, "Card"), "waiting") |> should.be_false
+}
+
+/// A live update that adds a notice asks for attention; one that adds none,
+/// such as a replay, doesn't.
+pub fn a_new_notice_raises_attention_test() {
+  let n = solace_task.Notice("Reply on Fix", "Done.", ".", "t1", "notes")
+  assert board.raised([], [n])
+  assert !board.raised([n], [n])
+  assert !board.raised([], [])
+}
+
+/// The open task's Depends on line updates live: a dependency's update,
+/// even in another project, goes to its details; another task's doesn't.
+pub fn a_dependency_update_goes_to_the_open_detail_test() {
+  let model =
+    deps_board()
+    |> put_task("b", "d1", "Dep", "backlog", "")
+    |> put_task("a", "1", "Card", "backlog", ",\"dependsOn\":[\"d1\"]")
+  let #(model, _) = board.update(model, board.Select("a", "1"))
+  let dep =
+    "{\"project\":\"b\",\"task\":{\"id\":\"d1\",\"title\":\"Dep\",\"body\":\"\",\"column\":\"complete\",\"rank\":1}}"
+  let #(model, _) = board.update(model, board.Live(dep))
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live(
+        "{\"project\":\"b\",\"task\":{\"id\":\"d2\",\"title\":\"Other\",\"body\":\"\",\"column\":\"complete\",\"rank\":1}}",
+      ),
+    )
+  model.live |> should.equal([#(1, dep)])
 }

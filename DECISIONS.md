@@ -528,3 +528,28 @@ Why: a strategy run planning the `extract` feature had to read the code to find 
 Amends Spec 15 §6 (Aaron, board task, 2026-10-11).
 1. The strategy brief and `help strategy` say a proposal's `title` names the work in a few words (about 3–7), prefixed with the feature's short name when that helps (`extract: JS FFI files`); mechanism, conditions, error codes and lists go in the `body`.
 Why: strategy agents wrote titles that summarised the body, which read badly on board cards and in `strategy list`.
+
+## D-107 A menu tab flashes when its page needs attention
+Aaron, board task, 2026-10-11.
+1. A page tells the shell something needs the human with an `attention` event on its element. The board sends it when a live update raises a notice; Strategy when a strategy run goes waiting (its agent replied) or asks a new proposal. A replay sends nothing.
+2. The shell flags that page's menu tab unless it is the page shown. A flagged tab flashes (steady under reduced motion) until its page is shown.
+3. The board and Strategy are open from the start, hidden, so each listens on its own stream; other pages still open on first visit.
+Why: an agent's reply on a page the human wasn't looking at went unnoticed. Each page keeps its own rules for what needs attention, and the shell opens no stream of its own (the human chose this over a shell stream).
+
+## D-108 A canceled task goes back to the backlog by a workflow action
+Amends Spec 15 §2 and §3 (Aaron, board task, 2026-10-11).
+1. A final column may list actions. It offers only those: no `pause`, `resume`, `discuss`, `stop` or `end_discussion`, since no agent works there. Edits there stay refused (`E7004`).
+2. The default `cancelled` column lists `to_backlog`; `complete` lists none, so a completed task stays as it is. Actions are per column, so nothing else is needed to keep it to `cancelled`.
+3. An action may have a `label`, which its button shows instead of its name; `to_backlog`'s is "Back to backlog".
+4. An action that moves a task out of a final column adds a `solace` note: "The human brought this task back from <column> to <column>." The move clears `archivedTime` (D-95) and keeps `closedTime` (D-87); the task keeps its notes, runs, links and `dependsOn`. Cancel already reverted and settled it, so nothing is undone and the next run starts fresh.
+Why: a canceled task couldn't come back. The human chose a workflow action over a dedicated request: the workflow already decides what each column offers.
+
+## D-109 Commands refuse misuse that loses work and say what to type instead
+Amends D-96 point 3, D-104 point 4 and Spec 14 §3 (Aaron, board task, 2026-10-11).
+1. `write <path>` refuses patch text (`drafts::is_patch`) with a usage error and changes nothing: "this text is a patch; send it with `write` and no path". It mirrors `write` with no path refusing text that isn't a patch (D-104).
+2. `write <path>` with a whole text refuses one that would leave fewer than half the lines of an existing file of 200 lines or more (`E6002`), and changes nothing. There is no flag to allow it: to replace such a file, `remove` it first, then `write` it new. A replacement with `old` and a `write` patch are not checked. A `--lines` read still allows a whole-file write, so the size is the check.
+3. A `write <path>` reply gives the file's lines before and after: `Wrote a.rs (1855 → 1860 lines)`, or `Wrote a.rs (43 lines)` for a new file.
+4. `read` checks every path before reading any. A path that doesn't exist is refused with what it likely meant: a line range (`1340-1400`, `1340..1400`, `1340:1400`) "is not a file; for lines use `read <file> --lines 1340..1400`"; `a.rs:5-9` the same, for `a.rs`; a name with no `/` and no `.` adds that `read` takes files, not symbols, and that `grep` and `find` find them; any other is named (`E6002`, no such file).
+5. `grep` searches its text as written and never refuses for syntax, replacing D-96 point 3. Quotes are dropped only when they wrap the whole query as one term (`"write" =>` keeps them). When nothing matches and the query looks like a shell habit (a leading option such as `-i`, `\|`, `\"`, a quoted term with more after it, or a query ending in `--path <x>`, `--in <x>` or a file path), the reply adds one line: the text searched, then the syntax; for the path forms it also says grep has no path filter and searches every watched file. A plain miss gets no hint.
+6. A batched call where commands failed ends its reply with `N of M commands failed: <commands>`. The run log keeps the step `failed` and, when only some failed, says so in its title: `solace (1 of 3 failed) …`. A new status would show as running in the shared transcript view, so the title carries it.
+Why: an agent's whole-file `write` with patch text replaced a 1,855-line file, and other replies to shell habits (`grep -i`, `read a.rs 1340-1400`) didn't say what to type; D-96's refusals also blocked real code (`"write" =>`, `-> Result`, Markdown tables). The human chose the shrink guard with no override flag.

@@ -221,6 +221,11 @@ class Root(unittest.TestCase):
         self.assertIn('==== solace view app.two ====', text)
         self.assertIn('==== solace refs app.one ====', text)
         self.assertIn('app.two', text.split('==== solace refs app.one ====')[1])
+        # D-109: a batch with a failed command names it on its last line.
+        text, error = call('view app.two\nread nowhere.md\nrefs app.one')
+        self.assertTrue(error)
+        self.assertIn('app.two', text.split('==== solace refs app.one ====')[1])
+        self.assertTrue(text.endswith('1 of 3 commands failed: read nowhere.md\n'), text)
         # Code in `command` runs nothing.
         text, error = call('let x = app.one()')
         self.assertTrue(error)

@@ -771,6 +771,7 @@ fn mcp(budget: usize) {
                 }
                 REASON.with(|r| *r.borrow_mut() = args["reason"].as_str().map(String::from).filter(|r| !r.trim().is_empty()));
                 let refused = is_error;
+                let mut failed = vec![];
                 for command in commands.iter().filter(|_| !refused) {
                     let command = command.strip_prefix("solace").map_or(*command, |c| c.trim_start());
                     let words: Vec<String> = command.split_whitespace().map(String::from).collect();
@@ -796,11 +797,21 @@ fn mcp(budget: usize) {
                         Err(Failure(msg, _)) => {
                             out += &msg;
                             is_error = true;
+                            failed.push(command);
                         }
                     }
                     if commands.len() > 1 && !out.ends_with('\n') {
                         out.push('\n');
                     }
+                }
+                // D-109: a batch names the commands that failed, for the agent and the run log.
+                if commands.len() > 1 && !failed.is_empty() {
+                    out += &format!(
+                        "{} of {} commands failed: {}\n",
+                        failed.len(),
+                        commands.len(),
+                        failed.iter().map(|c| c.to_string()).collect::<Vec<_>>().join("; ")
+                    );
                 }
                 if commands.is_empty() {
                     (out, is_error) = (format!("No command given.\n\n{}", agent_reference()), true);

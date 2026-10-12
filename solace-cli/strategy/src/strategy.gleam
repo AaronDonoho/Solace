@@ -1053,6 +1053,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       case knows(model, text) {
         True -> {
           let #(next, more) = plan_follow(model, hand(live(model, text), text))
+          let more = case needs_attention(model.runs, next.runs) {
+            True -> effect.batch([more, event.emit("attention", json.null())])
+            False -> more
+          }
           #(next, effect.batch([fx, more]))
         }
         // A project not listed yet: held until the list names it.
@@ -1817,14 +1821,15 @@ fn settle(model: Model) -> Model {
 
 /// Whether a live message is for the open task's details: its own update
 /// under any project (`<solace-task>` fetches itself again when one names
-/// another than its home, D-61), its project's workflow, or a change to the
-/// list of projects, which its Scope tab shows.
+/// another than its home, D-61), the update of a task it depends on, for its
+/// Depends on line, its project's workflow, or a change to the list of
+/// projects, which its Scope tab shows.
 fn for_detail(model: Model, text: String) -> Bool {
   case model.selected {
     None -> False
     Some(#(home, id)) ->
       case at(text, "task", decode.at(["id"], decode.string)) {
-        Ok(task) -> task == id
+        Ok(task) -> task == id || list.contains(depends_of(model, id), task)
         Error(_) ->
           solace_task.projects_changed(text)
           || event_dir(model, text) == home
@@ -2694,3 +2699,27 @@ fn window_width() -> Int
 
 @external(javascript, "./api.mjs", "drag")
 fn drag(x: Int, width: Int, move: fn(Int) -> Nil, done: fn() -> Nil) -> Nil
+
+/// Whether a live change of the strategy runs needs the human, which flags the
+/// Strategy tab while another page shows (the host hears `attention`): a run
+/// went waiting, so its agent replied, or a run asked a new proposal.
+pub fn needs_attention(old: List(plan.Run), new: List(plan.Run)) -> Bool {
+  list.any(new, fn(r) {
+    case list.find(old, fn(o) { o.id == r.id }) {
+      Ok(o) ->
+        { r.state == "waiting" && o.state != "waiting" }
+        || list.any(r.questions, fn(q) {
+          q.answer == "" && !list.any(o.questions, fn(p) { p.id == q.id })
+        })
+      Error(_) ->
+        r.state == "waiting" || list.any(r.questions, fn(q) { q.answer == "" })
+    }
+  })
+}
+
+/// The ids of the tasks task `id` depends on, as the rows hold it.
+fn depends_of(model: Model, id: String) -> List(String) {
+  list.find_map(model.rows, fn(p) { list.find(p.1, fn(r) { r.id == id }) })
+  |> result.map(fn(r) { r.depends })
+  |> result.unwrap([])
+}

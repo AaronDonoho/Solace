@@ -4,7 +4,7 @@
 //// sets `hosted` and hands the task's events down in the `live` property;
 //// otherwise the element follows its project's stream itself.
 
-import gleam/dict
+import gleam/dict.{type Dict}
 import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/float
@@ -15,6 +15,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/order
 import gleam/result
 import gleam/string
+import gleam/uri
 import lustre
 import lustre/attribute as a
 import lustre/component
@@ -101,7 +102,8 @@ pub type Column {
 }
 
 pub type Workflow {
-  Workflow(columns: List(Column))
+  /// `labels` names the actions that set a `label` (D-108); any other shows its name.
+  Workflow(columns: List(Column), labels: Dict(String, String))
 }
 
 pub type Note {
@@ -175,6 +177,8 @@ pub type Task {
     scope: List(String),
     /// Whether the task was archived: off the board, still in the archive (D-95).
     archived: Bool,
+    /// The ids of the tasks it depends on (D-87); empty for a task saved before.
+    depends: List(String),
   )
 }
 
@@ -254,6 +258,9 @@ pub type Model {
     /// older one changes nothing), and what its label says for a moment
     /// after the last: "Copied", "Copy failed", or "" for Copy ID.
     copy: #(Int, String),
+    /// The Details tab's **Depends on** line, by task id: None while a
+    /// dependency is asked for, or when it can't be found (its id shows).
+    deps: List(#(String, Option(Dep))),
   )
 }
 
@@ -315,6 +322,10 @@ pub type Msg {
   CopyDone(Int, Bool)
   /// Copy number `n`'s moment is over: the label says Copy ID again.
   CopyReset(Int)
+  /// Where dependency `id` is stored (`GET /tasks/find/{id}` at the root).
+  DepFound(Int, String, String)
+  /// Dependency `id` as its project has it.
+  DepLoaded(Int, String, String)
 }
 
 /// While a watched run is going, its transcript is fetched again this often.
@@ -379,7 +390,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       hosted: False,
       task: None,
       generation: 0,
-      workflow: Workflow([]),
+      workflow: Workflow([], dict.new()),
       projects: [],
       models: [],
       model: load(agent_key),
@@ -404,6 +415,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       root: no_root(),
       connected: False,
       copy: #(0, ""),
+      deps: [],
     ),
     // Attributes arrive before the element is added; nothing is asked until then.
     effect.none(),
@@ -463,7 +475,7 @@ fn open(model: Model) -> #(Model, Effect(Msg)) {
       ..stop(model),
       task: None,
       generation: model.generation + 1,
-      workflow: Workflow([]),
+      workflow: Workflow([], dict.new()),
       text: "",
       watching: "",
       entries: [],
@@ -473,6 +485,7 @@ fn open(model: Model) -> #(Model, Effect(Msg)) {
       acting: "",
       error: "",
       copy: #(model.copy.0 + 1, ""),
+      deps: [],
     )
   #(model, fetch(model))
 }
@@ -614,11 +627,39 @@ fn live(model: Model, text: String) -> #(Model, Effect(Msg)) {
     Ok(dir) -> dir == model.dir
     Error(_) -> True
   }
+  // A dependency's update counts under any project: it may live in another.
+  let dep = case
+    model.task,
+    json.parse(text, decode.at(["task"], task_decoder()))
+  {
+    Some(t), Ok(d) if d.id != t.id ->
+      case list.contains(t.depends, d.id) {
+        True -> Ok(d)
+        False -> Error(Nil)
+      }
+    _, _ -> Error(Nil)
+  }
   // What a new stream of its own replays is old: the task was fetched whole.
-  case model.hosted || model.caught_up, stale(model, text), ours {
-    False, _, _ | True, False, False -> #(model, effect.none())
-    True, True, _ -> #(model, refresh(model))
-    True, False, True ->
+  case model.hosted || model.caught_up, stale(model, text), ours, dep {
+    False, _, _, _ -> #(model, effect.none())
+    True, _, _, Ok(d) -> #(
+      Model(
+        ..model,
+        deps: list.key_set(model.deps, d.id, Some(Dep(d.title, d.column))),
+      ),
+      effect.none(),
+    )
+    True, False, False, _ -> #(model, effect.none())
+    True, True, _, _ -> {
+      // After a resync the dependencies may have changed too.
+      let model = case json.parse(text, decode.at(["resync"], decode.bool)) {
+        Ok(_) -> Model(..model, deps: [])
+        Error(_) -> model
+      }
+      let #(model, deps) = want_deps(model)
+      #(model, effect.batch([refresh(model), deps]))
+    }
+    True, False, True, _ ->
       case json.parse(text, decode.at(["task"], task_decoder())) {
         Ok(task) if task.id == model.id -> {
           // Events carry no `changes` (D-77): keep the list until it is fetched again.
@@ -628,12 +669,13 @@ fn live(model: Model, text: String) -> #(Model, Effect(Msg)) {
             None -> task
           }
           let model = Model(..model, task: Some(task))
+          let #(model, deps) = want_deps(model)
           // A host raises its own notices.
           let news = case old, model.hosted {
             Some(t), False -> list.map(notices(t, task), notice)
             _, _ -> []
           }
-          #(model, effect.batch([refresh(model), ..news]))
+          #(model, effect.batch([refresh(model), deps, ..news]))
         }
         Ok(_) -> #(model, effect.none())
         Error(_) ->
@@ -748,10 +790,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                 False -> model.revealing
               },
             )
+          let #(model, deps) = want_deps(model)
           #(
             model,
             effect.batch([
               review(model, task),
+              deps,
               case shown {
                 True -> reveal()
                 False -> effect.none()
@@ -768,7 +812,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       case model.task, json.parse(text, task_decoder()) {
         Some(t), Ok(fresh)
           if generation == model.generation && t.id == fresh.id
-        -> #(Model(..model, task: Some(fresh)), review(model, fresh))
+        -> {
+          let #(model, deps) = want_deps(Model(..model, task: Some(fresh)))
+          #(model, effect.batch([review(model, fresh), deps]))
+        }
         _, _ -> #(model, effect.none())
       }
     WorkflowLoaded(generation, text) if generation == model.generation ->
@@ -847,7 +894,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               editing: False,
               previews: [],
             )
-          #(model, effect.batch([moved, refresh(model)]))
+          let #(model, deps) = want_deps(model)
+          #(model, effect.batch([moved, refresh(model), deps]))
         }
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
@@ -1114,6 +1162,27 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       effect.none(),
     )
     CopyDone(_, _) | CopyReset(_) -> #(model, effect.none())
+    // A dependency that can't be found keeps None: its id shows.
+    DepFound(generation, id, text) if generation == model.generation ->
+      case json.parse(text, decode.at(["dir"], decode.string)) {
+        Ok(dir) -> #(
+          model,
+          get(base_of(model, dir), "/tasks/" <> id, DepLoaded(generation, id, _)),
+        )
+        Error(_) -> #(model, effect.none())
+      }
+    DepLoaded(generation, id, text) if generation == model.generation ->
+      case json.parse(text, task_decoder()) {
+        Ok(d) if d.id == id -> #(
+          Model(
+            ..model,
+            deps: list.key_set(model.deps, id, Some(Dep(d.title, d.column))),
+          ),
+          effect.none(),
+        )
+        _ -> #(model, effect.none())
+      }
+    DepFound(_, _, _) | DepLoaded(_, _, _) -> #(model, effect.none())
   }
 }
 
@@ -1243,6 +1312,11 @@ pub fn task_decoder() -> decode.Decoder(Task) {
       decode.success(False),
     ]),
   )
+  use depends <- decode.optional_field(
+    "dependsOn",
+    [],
+    decode.list(decode.string),
+  )
   decode.success(Task(
     id,
     title,
@@ -1261,6 +1335,7 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     unexpected,
     scope,
     archived,
+    depends,
   ))
 }
 
@@ -1368,7 +1443,13 @@ pub fn agent_decoder() -> decode.Decoder(Agent) {
 
 pub fn workflow_decoder() -> decode.Decoder(Workflow) {
   use columns <- decode.field("columns", decode.list(column_decoder()))
-  decode.success(Workflow(columns))
+  let label = decode.optional_field("label", "", decode.string, decode.success)
+  use labels <- decode.optional_field(
+    "actions",
+    dict.new(),
+    decode.dict(decode.string, label),
+  )
+  decode.success(Workflow(columns, dict.filter(labels, fn(_, l) { l != "" })))
 }
 
 fn column_decoder() -> decode.Decoder(Column) {
@@ -1402,7 +1483,8 @@ pub fn actions(workflow: Workflow, task: Task) -> List(String) {
     Ok(_) -> ["stop"]
   }
   case list.find(workflow.columns, fn(c) { c.id == task.column }) {
-    Ok(c) if c.final -> []
+    // A final column offers only what it lists: no agent works there (D-108).
+    Ok(c) if c.final -> c.actions
     Ok(c) ->
       list.flatten([
         c.actions,
@@ -1586,13 +1668,19 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
     case model.acting {
       "" -> h.text("")
       name ->
-        h.p([a.class("muted"), a.role("status")], [h.text(acting_text(t, name))])
+        h.p([a.class("muted"), a.role("status")], [
+          h.text(acting_text(t, action_label(model.workflow, name))),
+        ])
     },
     h.div(
       [a.class("actions")],
       list.append(
         list.map(actions(model.workflow, t), fn(name) {
-          action_button(name, model.acting != "")
+          action_button(
+            name,
+            action_label(model.workflow, name),
+            model.acting != "",
+          )
         }),
         [button("Add note", AddNote)],
       ),
@@ -1661,6 +1749,7 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
           h.a([a.href(link.url)], [h.text(link.name)])
         }),
       ),
+      depends_view(model, t),
       button("Edit", Edit(True)),
     ]
   }
@@ -1863,8 +1952,8 @@ fn button(label: String, msg: Msg) -> Element(Msg) {
   h.button([e.on_click(msg)], [h.text(label)])
 }
 
-fn action_button(name: String, busy: Bool) -> Element(Msg) {
-  h.button([e.on_click(Action(name)), a.disabled(busy)], [h.text(name)])
+fn action_button(name: String, label: String, busy: Bool) -> Element(Msg) {
+  h.button([e.on_click(Action(name)), a.disabled(busy)], [h.text(label)])
 }
 
 fn questions_view(base: String, t: Task) -> List(Element(Msg)) {
@@ -2087,6 +2176,7 @@ h1,h2,h3{line-height:1.2;letter-spacing:-.02em}a{color:var(--focus);text-underli
 button,input,textarea,select{border:1px solid var(--edge);background:var(--paper);color:var(--ink);caret-color:var(--focus)}input::placeholder,textarea::placeholder{color:var(--soft);opacity:1}
 button:hover{background:var(--hover)}button:disabled{color:var(--soft)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
 textarea{font-family:inherit}
+.depends .unfinished{color:var(--warn-text);font-weight:600}
 .attention{font-weight:700}
 .status{border:1px solid var(--line);background:var(--paper);font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:1px 8px}.status.finished{background:var(--add);color:var(--ok-text);border-color:var(--ok-text)}.working::before{background:var(--entry)}
 .detail,.composer,.note,.run{background:var(--paper);border-color:var(--edge)}.detail{padding:20px 24px}
@@ -2352,4 +2442,107 @@ const copied_ms = 2000
 pub fn projects_changed(text: String) -> Bool {
   json.parse(text, decode.at(["projects"], decode.list(decode.string)))
   |> result.is_ok
+}
+
+/// What an action's button says: its `label`, or else its name (D-108).
+pub fn action_label(workflow: Workflow, name: String) -> String {
+  result.unwrap(dict.get(workflow.labels, name), name)
+}
+
+/// A dependency's title and column, as the project that stores it has them.
+pub type Dep {
+  Dep(title: String, column: String)
+}
+
+/// Asks for the dependencies of the shown task not asked for yet, from the
+/// root: a dependency may be stored in any project.
+fn want_deps(model: Model) -> #(Model, Effect(Msg)) {
+  let missing = case model.task {
+    Some(t) ->
+      list.filter(t.depends, fn(id) {
+        result.is_error(list.key_find(model.deps, id))
+      })
+    None -> []
+  }
+  let generation = model.generation
+  #(
+    Model(
+      ..model,
+      deps: list.fold(missing, model.deps, fn(deps, id) {
+        list.key_set(deps, id, None)
+      }),
+    ),
+    effect.batch(
+      list.map(missing, fn(id) {
+        get("", "/tasks/find/" <> id, DepFound(generation, id, _))
+      }),
+    ),
+  )
+}
+
+/// The API prefix of project `dir`: as `GET /projects` lists it, else "" for
+/// the root's own and `/p/<dir>` for another.
+fn base_of(model: Model, dir: String) -> String {
+  case list.find(model.projects, fn(p) { p.dir == dir }), dir {
+    Ok(p), _ -> p.base
+    Error(_), "." -> ""
+    Error(_), _ -> "/p/" <> uri.percent_encode(dir)
+  }
+}
+
+/// Whether a task in `column` is finished: the column is final in the
+/// workflow, as `complete` and `cancelled` are (D-87).
+pub fn finished(workflow: Workflow, column: String) -> Bool {
+  list.any(workflow.columns, fn(c) { c.final && c.id == column })
+}
+
+/// The **Depends on** line: each dependency a link to the task (D-98) with
+/// its column, an unfinished one marked; one that can't be found shows its id.
+fn depends_view(model: Model, t: Task) -> Element(Msg) {
+  case t.depends {
+    [] -> h.text("")
+    ids ->
+      h.p([a.class("depends")], [
+        h.strong([], [h.text("Depends on ")]),
+        ..list.intersperse(
+          list.map(ids, fn(id) {
+            let link = fn(label) {
+              h.a([a.href("/task/" <> id), a.attribute("data-task", id)], [
+                h.text(label),
+              ])
+            }
+            case list.key_find(model.deps, id) {
+              Ok(Some(d)) -> {
+                let done = finished(model.workflow, d.column)
+                let column =
+                  list.find(model.workflow.columns, fn(c) { c.id == d.column })
+                  |> result.map(fn(c) { c.label })
+                  |> result.unwrap(d.column)
+                h.span(
+                  [
+                    a.class(case done {
+                      True -> "dep"
+                      False -> "dep unfinished"
+                    }),
+                  ],
+                  [
+                    link(d.title),
+                    h.text(
+                      " ("
+                      <> column
+                      <> case done {
+                        True -> ")"
+                        False -> ", unfinished)"
+                      },
+                    ),
+                  ],
+                )
+              }
+              _ -> h.span([a.class("dep")], [link(id)])
+            }
+          }),
+          h.text(", "),
+        )
+      ])
+  }
 }

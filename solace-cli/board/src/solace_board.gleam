@@ -1,3 +1,4 @@
+import gleam/dict
 import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/int
@@ -189,7 +190,9 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   let draft_body = load(draft_body_key)
   #(
     Model(
-      lanes: [Lane("", "", "", "", "", solace_task.Workflow([]), [])],
+      lanes: [
+        Lane("", "", "", "", "", solace_task.Workflow([], dict.new()), []),
+      ],
       workspace: False,
       listed: False,
       found: [],
@@ -353,6 +356,11 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       case knows(model, text) {
         True -> {
           let next = live(model, text, True)
+          // A new notice also flags the Board tab while another page shows.
+          let fx = case raised(model.notices, next.notices) {
+            True -> effect.batch([fx, e.emit("attention", json.null())])
+            False -> fx
+          }
           #(hand(next, text), fx)
         }
         // A project not listed yet: held until the list names it.
@@ -734,7 +742,15 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Lane), List(Found))) {
     use base <- decode.field("base", decode.string)
     use target <- decode.optional_field("target", "", decode.string)
     decode.success(
-      Lane(dir, label, name, base, target, solace_task.Workflow([]), []),
+      Lane(
+        dir,
+        label,
+        name,
+        base,
+        target,
+        solace_task.Workflow([], dict.new()),
+        [],
+      ),
     )
   }
   let found = {
@@ -762,7 +778,8 @@ pub fn view(model: Model) -> Element(Msg) {
         <> selected_card_styles
         <> modal_styles
         <> notice_styles
-        <> archive_styles,
+        <> archive_styles
+        <> waiting_styles,
     ),
     h.header([a.class("top")], [
       h.h1([], [h.text("Solace tasks")]),
@@ -941,6 +958,8 @@ fn lanes_view(model: Model) -> Element(Msg) {
 /// A lane's columns, with every task that covers its project (D-61); a card
 /// opens its task from the project it is stored in. A card in a final column
 /// has an Archive button in its upper right corner (D-95).
+/// A card waiting on an unfinished dependency is dimmed and says what it
+/// waits on; it still opens as any other.
 fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
   h.div(
     [a.class("board")],
@@ -962,19 +981,35 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
         ..list.map(tasks, fn(card) {
           let #(home, t) = card
           let current = model.selected_card == Some(#(home, t.id))
+          let waiting = case waiting_on(model, t) {
+            [] -> ""
+            titles -> "Waiting on " <> string.join(titles, ", ")
+          }
           h.div([a.class("card-wrap")], [
             h.button(
-              [
-                a.class(case current {
-                  True -> "card selected"
-                  False -> "card"
-                }),
-                a.attribute("aria-current", case current {
-                  True -> "true"
-                  False -> "false"
-                }),
-                e.on_click(Select(home, t.id)),
-              ],
+              list.append(
+                [
+                  a.class(
+                    case current {
+                      True -> "card selected"
+                      False -> "card"
+                    }
+                    <> case waiting {
+                      "" -> ""
+                      _ -> " waiting"
+                    },
+                  ),
+                  a.attribute("aria-current", case current {
+                    True -> "true"
+                    False -> "false"
+                  }),
+                  e.on_click(Select(home, t.id)),
+                ],
+                case waiting {
+                  "" -> []
+                  _ -> [a.title(waiting)]
+                },
+              ),
               [
                 case t.attention {
                   "" -> h.text("")
@@ -1010,6 +1045,10 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
                       )),
                     ])
                   _ -> h.text("")
+                },
+                case waiting {
+                  "" -> h.text("")
+                  _ -> h.small([a.class("waiting-on")], [h.text(waiting)])
                 },
                 solace_task.status_badge_in(lane.workflow, t),
               ],
@@ -1438,15 +1477,15 @@ const notice_styles =
 
 /// Whether a live message is for the open task's details: its own update
 /// under any project (`<solace-task>` fetches itself again when one names
-/// another than its home, D-61), its project's workflow, or a change to the
-/// list of projects, which its Scope tab shows. Its removal is the board's to
-/// follow.
+/// another than its home, D-61), the update of a task it depends on, for its
+/// Depends on line, its project's workflow, or a change to the list of
+/// projects, which its Scope tab shows. Its removal is the board's to follow.
 fn for_detail(model: Model, text: String) -> Bool {
   case model.selected_card {
     None -> False
     Some(#(home, id)) ->
       case json.parse(text, decode.at(["task", "id"], decode.string)) {
-        Ok(task) -> task == id
+        Ok(task) -> task == id || list.contains(depends_of(model, id), task)
         Error(_) ->
           projects_event(text)
           || event_dir(model, text) == home
@@ -1538,4 +1577,42 @@ fn resync(model: Model) -> Model {
     None -> model
     Some(_) -> push(model, solace_task.resync)
   }
+}
+
+/// The titles of the tasks `t` depends on that are unfinished: not in a final
+/// column of their lane's workflow now (D-87). The lanes hold every task of
+/// the root, so one in another project is found too; an id in no lane is left
+/// out, since its title is unknown.
+fn waiting_on(model: Model, t: solace_task.Task) -> List(String) {
+  list.filter_map(t.depends, fn(id) {
+    use #(lane, dep) <- result.try(
+      list.find_map(model.lanes, fn(l) {
+        list.find(l.tasks, fn(d) { d.id == id })
+        |> result.map(fn(d) { #(l, d) })
+      }),
+    )
+    case solace_task.finished(lane.workflow, dep.column) {
+      True -> Error(Nil)
+      False -> Ok(dep.title)
+    }
+  })
+}
+
+const waiting_styles =
+  ".card.waiting{opacity:.55}.card.waiting:hover,.card.waiting[aria-current=true],.card.waiting:focus-visible{opacity:.85}.card .waiting-on{font-size:13px}"
+
+/// Whether a live update raised a notice: the host hears `attention`, which
+/// flags the Board tab while another page shows. `live` only adds notices.
+pub fn raised(
+  old: List(solace_task.Notice),
+  new: List(solace_task.Notice),
+) -> Bool {
+  list.length(new) > list.length(old)
+}
+
+/// The ids of the tasks task `id` depends on, as the lanes hold it.
+fn depends_of(model: Model, id: String) -> List(String) {
+  list.find_map(model.lanes, fn(l) { list.find(l.tasks, fn(t) { t.id == id }) })
+  |> result.map(fn(t) { t.depends })
+  |> result.unwrap([])
 }

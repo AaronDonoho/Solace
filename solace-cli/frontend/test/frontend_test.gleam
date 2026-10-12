@@ -60,19 +60,22 @@ pub fn page_elements_test() {
 pub fn menu_current_test() {
   let board =
     element.to_string(
-      frontend.view(frontend.Model(Board, [Board], frontend.no_focus)),
+      frontend.view(frontend.Model(Board, [Board], frontend.no_focus, [])),
     )
   let migration =
     element.to_string(
-      frontend.view(frontend.Model(Migrate, [Migrate], frontend.no_focus)),
+      frontend.view(frontend.Model(Migrate, [Migrate], frontend.no_focus, [])),
     )
   let contract =
     element.to_string(
-      frontend.view(frontend.Model(
-        Contracts("/p/web"),
-        [Contracts("/p/web")],
-        frontend.no_focus,
-      )),
+      frontend.view(
+        frontend.Model(
+          Contracts("/p/web"),
+          [Contracts("/p/web")],
+          frontend.no_focus,
+          [],
+        ),
+      ),
     )
   assert string.contains(
     board,
@@ -91,11 +94,14 @@ pub fn menu_current_test() {
   assert order == list.sort(order, int.compare)
   let strategy_page =
     element.to_string(
-      frontend.view(frontend.Model(
-        frontend.Strategy,
-        [frontend.Strategy],
-        frontend.no_focus,
-      )),
+      frontend.view(
+        frontend.Model(
+          frontend.Strategy,
+          [frontend.Strategy],
+          frontend.no_focus,
+          [],
+        ),
+      ),
     )
   assert string.contains(
     strategy_page,
@@ -103,11 +109,14 @@ pub fn menu_current_test() {
   )
   let settings_page =
     element.to_string(
-      frontend.view(frontend.Model(
-        frontend.Settings,
-        [frontend.Settings],
-        frontend.no_focus,
-      )),
+      frontend.view(
+        frontend.Model(
+          frontend.Settings,
+          [frontend.Settings],
+          frontend.no_focus,
+          [],
+        ),
+      ),
     )
   assert string.contains(
     settings_page,
@@ -131,13 +140,15 @@ pub fn menu_current_test() {
 
 pub fn starts_on_the_board_outside_a_browser_test() {
   let #(model, _effect) = frontend.init(Nil)
-  assert model == frontend.Model(Board, [Board], frontend.no_focus)
+  // The board and Strategy are open from the start, hidden, to hear of what needs attention.
+  assert model
+    == frontend.Model(Board, [Board, frontend.Strategy], frontend.no_focus, [])
 }
 
 pub fn a_route_change_shows_the_new_page_test() {
   let #(model, _effect) =
     frontend.update(
-      frontend.Model(Migrate, [Migrate], frontend.no_focus),
+      frontend.Model(Migrate, [Migrate], frontend.no_focus, []),
       RouteChanged(Contracts("/p/web")),
     )
   assert model
@@ -145,6 +156,7 @@ pub fn a_route_change_shows_the_new_page_test() {
       Contracts("/p/web"),
       [Migrate, Contracts("/p/web")],
       frontend.no_focus,
+      [],
     )
 }
 
@@ -334,11 +346,11 @@ pub fn copy_markdown_quote_and_numbers_test() {
 pub fn a_page_left_stays_hidden_test() {
   let #(model, _) =
     frontend.update(
-      frontend.Model(Board, [Board], frontend.no_focus),
+      frontend.Model(Board, [Board], frontend.no_focus, []),
       RouteChanged(Migrate),
     )
   let #(model, _) = frontend.update(model, RouteChanged(Board))
-  assert model == frontend.Model(Board, [Board, Migrate], frontend.no_focus)
+  assert model == frontend.Model(Board, [Board, Migrate], frontend.no_focus, [])
   let html = element.to_string(frontend.view(model))
   assert string.contains(
     html,
@@ -349,7 +361,7 @@ pub fn a_page_left_stays_hidden_test() {
 pub fn a_page_not_opened_is_not_drawn_test() {
   let html =
     element.to_string(
-      frontend.view(frontend.Model(Migrate, [Migrate], frontend.no_focus)),
+      frontend.view(frontend.Model(Migrate, [Migrate], frontend.no_focus, [])),
     )
   assert !string.contains(html, "<solace-board")
   assert !string.contains(html, "<solace-contracts")
@@ -387,7 +399,12 @@ pub fn a_task_link_opens_where_its_task_is_test() {
 /// without changing the page model until the server answers, and no task changes nothing.
 pub fn a_found_task_is_focused_on_its_page_test() {
   let model =
-    frontend.Model(frontend.Strategy, [frontend.Strategy], frontend.no_focus)
+    frontend.Model(
+      frontend.Strategy,
+      [frontend.Strategy],
+      frontend.no_focus,
+      [],
+    )
   let #(clicked, _) = frontend.update(model, frontend.Follow("t1"))
   assert clicked == model
   let on_board = "{\"id\":\"t1\",\"dir\":\".\",\"archived\":false}"
@@ -429,4 +446,31 @@ pub fn copy_markdown_of_task_links_test() {
       ]),
     ])
     == "See [the fix](task:" <> id <> ") and task:" <> id
+}
+
+/// A hidden page's `attention` flashes its tab until it is shown; the page shown never flags its own.
+pub fn a_hidden_page_flags_its_tab_until_shown_test() {
+  let model =
+    frontend.Model(Board, [Board, frontend.Strategy], frontend.no_focus, [])
+  let #(same, _) = frontend.update(model, frontend.Attention("solace-board"))
+  assert same == model
+  let #(flagged, _) =
+    frontend.update(model, frontend.Attention("solace-strategy"))
+  assert flagged.attention == ["solace-strategy"]
+  let #(again, _) =
+    frontend.update(flagged, frontend.Attention("solace-strategy"))
+  assert again == flagged
+  let html = element.to_string(frontend.view(flagged))
+  assert string.contains(
+    html,
+    "<a class=\"attention\" href=\"/strategy\">Strategy<span class=\"attention-note\"> (needs attention)</span></a>",
+  )
+  assert string.contains(html, "<a href=\"/migrate\">Migration</a>")
+  let #(shown, _) = frontend.update(flagged, RouteChanged(frontend.Strategy))
+  assert shown.attention == []
+  let html = element.to_string(frontend.view(shown))
+  assert string.contains(
+    html,
+    "<a aria-current=\"page\" class=\"current\" href=\"/strategy\">Strategy</a>",
+  )
 }

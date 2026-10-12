@@ -47,12 +47,12 @@ Commands (`help` gives every option, `help <command>` one command's):
   test [<name>... | --all]      run the tests a change can affect
   check [--warnings]            type-check everything
   probe                         run throwaway code from `text`
-  drafts                        rejected submits, kept to fix and retry
-  files [dir]...                trees of files, each with its tier
-  read <path>...                read files
-  write [path]                  change a file; no path: several, by patch
+  drafts                        rejected submits, to fix and retry
+  files [dir]...                file trees with tiers
+  read <path>...                read files (--lines 5..9)
+  write [path]                  a file, whole or `old` -> `text`; no path: a patch
   move <from> <to>              move a file
-  work add | list | done        work records, kept between sessions
+  work add | list | done        work records, kept across sessions
 Files by tier: src/ and test/ *.gleam are symbols (`submit`, never `write`);
 solace.toml, AGENTS.md, .gitignore: `write` with `reason`, the human approves;
 .solace/ and nested projects: their own commands; any other file, ignored
@@ -79,9 +79,11 @@ Reading
   find <text>                   case-insensitive search of all code
   grep <text>                   case-insensitive search of watched files and
                                 settings (not unwatched files); lines shown
-                                with numbers for `read --lines`. Literal text,
-                                one term per command: no options, regex or
-                                file arguments
+                                with numbers for `read --lines`. The text is
+                                searched as written, code included (`"write"
+                                =>`, `-> Result`); quotes around the whole
+                                text are dropped. No options, regex or path
+                                filter: it searches every watched file
   session start [--task]        this overview again (--task: for the task in `text`)
   session start [--scope <module>...]
                                 every symbol, and open work records with context
@@ -191,9 +193,18 @@ change with `submit`, protected ones with `write` and the human's approval.
                                 several; paths past the size limit are named
                                 in a `Next: read` line. --lines takes lines and
                                 ranges, shown in file order; a --lines or --tail
-                                range takes one path
+                                range takes one path. A path that doesn't exist
+                                is refused and nothing is read: `read a.rs
+                                5-9` is `read a.rs --lines 5..9`, and symbols
+                                are found with `grep` or `find`, not `read`
   write <path> [--all]          one file: whole text, or with `old`, just `old`
-                                -> `text`; a settings file takes `reason` too
+                                -> `text`; a settings file takes `reason` too.
+                                Patch text is refused here: send it with
+                                `write` and no path. A whole text that would
+                                leave under half of a file of 200+ lines is
+                                refused: change part of it, or `remove` the
+                                file first, then `write` it new. The reply
+                                gives the file's lines before and after
   write                         several files at once: `text` is a patch, as
                                 submit takes, with a section per file:
                                   *** Begin Patch
@@ -274,8 +285,9 @@ command not listed here is refused.
   strategy vision               propose a new vision, its text in `text`; waits
                                 the same way
   view | inspect | refs | find  read code, as under Reading
-  grep <text>                   search watched files and settings: literal text,
-                                already case-insensitive, one term per command
+  grep <text>                   search watched files and settings: the text as
+                                written, already case-insensitive; no options,
+                                regex or path filter
   files [dir]...                tree with each file's tier
   read <path>... [--lines 3,7,10..12 | --tail n]
                                 each path in order; a --lines or --tail range

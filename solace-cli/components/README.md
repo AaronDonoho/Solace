@@ -28,6 +28,15 @@ Copied for 2 s, or Copy failed when neither the clipboard nor the fallback took 
 cleared early by an earlier click's timer. Pasted into any text Solace renders, it is a link to the task (D-98): `markdown` in
 `task_api.mjs` draws `task:<id>` and `[label](task:<id>)` as links to `/task/<id>`, which the shell follows.
 
+**Depends on.** When the task's `dependsOn` isn't empty, the Details tab lists each dependency as a link to
+`/task/<id>` (D-98), with its title and its column. A dependency not in a final column is marked
+unfinished, as on the board (`solace_task.finished`; cancelled counts as finished). It is display only: the
+Roadmap tab on Strategy edits dependencies. A dependency may be stored in any project, so the element asks
+the root's `GET /tasks/find/{id}` where it is, then `GET {base}/tasks/{id}` there. One that can't be found
+shows its id. The line follows a dependency's `{task}` updates under any project, and asks for a dependency
+added to `dependsOn`. A host hands those updates down (the board and Strategy do). Without `hosted`, the
+element's own `{base}/events` brings only its project's dependencies live; others refresh on a resync.
+
 Events to the host: `task-moved` (`{id, dir, base}`: the task now lives in another of its projects)
 and `notice` (`{heading, text, id, tab}`, from its own stream only; a host raises its own).
 

@@ -27,10 +27,11 @@ final = true
 id = "cancelled"
 label = "canceled"   # American spelling shown; the id stays for saved tasks
 final = true
+actions = ["to_backlog"]   # a canceled task can come back (D-108); complete has none
 
 [board.actions]
 plan       = { to = "planning" }
-to_backlog = { to = "backlog" }
+to_backlog = { to = "backlog", label = "Back to backlog" }
 investigate = { run = "investigate", model = true }     # read-only; stays in its column
 review     = { run = "review" }                         # stays in its column
 assign     = { to = "assigned", run = "work", model = true }
