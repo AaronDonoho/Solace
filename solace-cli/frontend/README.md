@@ -15,14 +15,15 @@ back/forward navigation.
 
 Unknown paths fall back to the board. /migration remains the JSON API.
 
-## Task links (D-98)
+## Task, feature and milestone links (D-98, D-122)
 
 Markdown on every page draws `task:<id>` and `[label](task:<id>)` as links to
-`/task/<id>`. A plain click on one is followed in-page by `src/task_link.mjs`
-(the links live in the pages' shadow roots, where modem doesn't route); a
-click with a modifier key held, or loading `/task/<id>` directly, reaches the
-shell at that address, which resolves it the same way and replaces it in the
-history. The shell asks `GET /tasks/find/{id}`:
+`/task/<id>`, and `feature:<id>`, `milestone:<id>` the same way, to
+`/feature/<id>` and `/milestone/<id>`. A plain click on one is followed in-page
+by `src/task_link.mjs` (the links live in the pages' shadow roots, where modem
+doesn't route); a click with a modifier key held, or loading the address
+directly, reaches the shell at that address, which resolves it the same way
+and replaces it in the history. For a task the shell asks `GET /tasks/find/{id}`:
 
 - on the board (not archived): the Board page shows, and `<solace-board>` gets
   the task in its `focus` property, `{dir, id, n}`;
@@ -33,12 +34,22 @@ history. The shell asks `GET /tasks/find/{id}`:
   says "Couldn't look up the task. Try again." instead, since the task may
   exist.
 
-`n` counts the links followed, so following the same one again is news to
-the page. Copying a task link gives its markdown back.
+For a feature or milestone it asks `GET /features/find/{id}` or
+`GET /milestones/find/{id}`; a found one opens on the Strategy page, whose
+`focus` property names its `kind`: a feature shows on the Features tab, a
+milestone on the Roadmap tab, its card scrolled into view and marked. An
+unknown one toasts "Feature does not exist" or "Milestone does not exist".
+
+The `focus` property is `{kind, dir, id, n}`; `n` counts the links followed, so
+following the same one again is news to the page. A bare link shows its
+record's title once the server gives it (kept 30 s), marked `data-bare`;
+copying any of these links gives its markdown back, a bare one still bare.
 The menu (Board, Migration, Contracts, Strategy, Settings) is on every page and
 highlights the current one; a workspace project's contract page highlights
 Contracts. The menu is 56px high, and the contract page fills the rest of the
-window (`--contracts-height`). Each app owns its styles and lifecycle.
+window (`--contracts-height`). The menu is sticky, always visible while a page
+scrolls, above the pages' layers and below the find bar and toasts. Each app
+owns its styles and lifecycle.
 A page's `attention` event (D-107) flags its menu tab, unless it is the page
 shown: the tab flashes (lit without motion under reduced motion) and reads
 "(needs attention)" to screen readers until the page is shown. The board and
@@ -80,7 +91,8 @@ current menu link. Component registration and modem require a browser.
 ## Server integration
 
 The server task must serve this index.html at /, /migrate, /contracts, /strategy,
-/settings, /task/<id> and /p/<dir>/contracts, and priv/app.js at /app.js, all on port 3030.
+/settings, /task/<id>, /feature/<id>, /milestone/<id> and /p/<dir>/contracts, and
+priv/app.js at /app.js, all on port 3030.
 
 priv/app.js is generated, not source: `cargo build` builds it through this
 project's `build-release` command before embedding it. The server must keep

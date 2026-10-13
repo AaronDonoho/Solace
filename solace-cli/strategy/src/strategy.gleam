@@ -114,6 +114,8 @@ pub type Model {
     plan_width: Int,
     /// The panel's message box: a new run's first message, or the next one.
     plan_text: String,
+    /// Whether the message box shows its Preview.
+    plan_preview: Bool,
     /// A start, message, answer, end or stop sent and not yet answered.
     plan_sending: Bool,
     plan_error: String,
@@ -147,9 +149,11 @@ pub type Msg {
   CaughtUp
   /// A row: its task opens below the list.
   Open(String, String)
-  /// A task link (D-98): the shell asks to show this task, stored in project
-  /// `dir`, on the Tasks tab, scrolled into view.
-  Focus(String, String)
+  /// A link (D-98, D-122): the shell asks to show a record, scrolled into
+  /// view: its kind ("task", "feature" or "milestone"), the project `dir` a
+  /// task is stored in, and its id. A task shows on the Tasks tab, a feature
+  /// on Features, a milestone on Roadmap.
+  Focus(String, String, String)
   /// `<solace-task>` says the open task now lives in another project.
   TaskMoved(String, String)
   Filter(Filters)
@@ -257,6 +261,9 @@ pub type Msg {
   /// A key on the focused resize handle: the arrows, Home or End.
   PlanKey(String)
   PlanText(String)
+  PlanPreview(Bool)
+  PlanFormat(String, String)
+  PlanBlock(String)
   PlanModel(String)
   PlanEffort(String)
   /// The reply to `GET /models`.
@@ -1117,7 +1124,35 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         |> plan.clamp(window)
       #(Model(..model, plan_width: width), store_width(width))
     }
-    PlanText(text) -> #(Model(..model, plan_text: text), effect.none())
+    PlanText(text) -> #(Model(..model, plan_text: text), plan_fit())
+    PlanPreview(on) -> #(Model(..model, plan_preview: on), plan_fit())
+    PlanFormat(before, after) -> #(
+      model,
+      effect.from(fn(send) {
+        send(
+          PlanText(solace_task.wrap(
+            model.root,
+            plan.text_id,
+            model.plan_text,
+            before,
+            after,
+          )),
+        )
+      }),
+    )
+    PlanBlock(kind) -> #(
+      model,
+      effect.from(fn(send) {
+        send(
+          PlanText(solace_task.block(
+            model.root,
+            plan.text_id,
+            model.plan_text,
+            kind,
+          )),
+        )
+      }),
+    )
     // Efforts differ between models, so a new model starts at its default.
     PlanModel(id) -> #(
       Model(..model, plan_model: id, plan_effort: ""),
@@ -1210,25 +1245,32 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     // The reply's run is shown, and its transcript fetched again.
     PlanReplied(clears, text) ->
       case json.parse(text, plan.decoder()) {
-        Ok(run) ->
-          plan_track(
-            model,
-            plan_fetch(
-              Model(
-                ..model,
-                runs: keep(model.runs, run, fn(r) { r.id }),
-                plan_open: run.id,
-                plan_sending: False,
-                plan_error: "",
-                plan_text: case clears {
-                  True -> ""
-                  False -> model.plan_text
-                },
-                plan_jump: model.plan_jump || run.id != model.plan_open,
+        Ok(run) -> {
+          let #(next, fx) =
+            plan_track(
+              model,
+              plan_fetch(
+                Model(
+                  ..model,
+                  runs: keep(model.runs, run, fn(r) { r.id }),
+                  plan_open: run.id,
+                  plan_sending: False,
+                  plan_error: "",
+                  plan_text: case clears {
+                    True -> ""
+                    False -> model.plan_text
+                  },
+                  plan_preview: model.plan_preview && !clears,
+                  plan_jump: model.plan_jump || run.id != model.plan_open,
+                ),
+                run.id,
               ),
-              run.id,
-            ),
-          )
+            )
+          #(next, case clears {
+            True -> effect.batch([fx, plan_fit()])
+            False -> fx
+          })
+        }
         Error(_) -> #(
           Model(..model, plan_sending: False, plan_error: error(text)),
           effect.none(),
@@ -1241,6 +1283,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           plan_open: rid,
           plan_entries: [],
           plan_error: "",
+          plan_preview: False,
           plan_collapsed: False,
           plan_at_bottom: True,
           plan_new: False,
@@ -1312,9 +1355,11 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         _ -> effect.from(fn(_) { set_tab(tab_name(Tasks)) })
       },
     )
-    Focus(_, "") -> #(model, effect.none())
+    Focus(_, _, "") -> #(model, effect.none())
+    Focus("feature", _, id) -> show_record(model, Features, "feature", id)
+    Focus("milestone", _, id) -> show_record(model, Roadmap, "milestone", id)
     // `<solace-task>` scrolls into view now, or once the task loads.
-    Focus(dir, id) -> #(
+    Focus(_, dir, id) -> #(
       Model(
         ..model,
         tab: Tasks,
@@ -1462,6 +1507,7 @@ solace-task{display:block;margin-top:16px}
 .feature-tasks{margin:6px 0 0;padding-left:20px}
 .feature .open{font:inherit;color:var(--ink);background:none;border:0;padding:0;text-align:left;cursor:pointer}.feature .open:hover{text-decoration:underline}
 .feature .open:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.feature.revealed,.milestone h3.revealed{outline:3px solid var(--focus);outline-offset:2px}
 "
   <> solace_task.editor_styles
   <> plan.styles
@@ -1493,11 +1539,13 @@ pub fn register() -> Result(Nil, lustre.Error) {
   lustre.register(
     lustre.component(init, update, view, [
       component.on_attribute_change("base", fn(base) { Ok(BaseChanged(base)) }),
-      // The shell's `focus` property, `{dir, id, n}`: `n` makes asking again news.
+      // The shell's `focus` property, `{kind, dir, id, n}`: `n` makes asking
+      // again news. Without a kind it is a task.
       component.on_property_change("focus", {
+        use kind <- decode.optional_field("kind", "task", decode.string)
         use dir <- decode.field("dir", decode.string)
         use id <- decode.field("id", decode.string)
-        decode.success(Focus(dir, id))
+        decode.success(Focus(kind, dir, id))
       }),
       component.on_connect(Connected),
       component.on_disconnect(Disconnected),
@@ -1617,6 +1665,7 @@ pub fn new(tab: Tab) -> Model {
     plan_collapsed: False,
     plan_width: plan.default_width,
     plan_text: "",
+    plan_preview: False,
     plan_sending: False,
     plan_error: "",
     plan_entries: [],
@@ -2676,6 +2725,7 @@ fn plan_view(model: Model) -> Element(Msg) {
       width: model.plan_width,
       max_width: plan.max_width(window_width()),
       text: model.plan_text,
+      preview: model.plan_preview,
       sending: model.plan_sending,
       error: model.plan_error,
       models: model.models,
@@ -2686,6 +2736,9 @@ fn plan_view(model: Model) -> Element(Msg) {
       on_drag: PlanDrag,
       on_key: PlanKey,
       on_text: PlanText,
+      on_preview: PlanPreview,
+      on_format: PlanFormat,
+      on_block: PlanBlock,
       on_model: PlanModel,
       on_effort: PlanEffort,
       on_start: StartPlan,
@@ -2800,3 +2853,32 @@ fn plan_scroll() -> Effect(Msg) {
 
 @external(javascript, "./api.mjs", "scroll_plan")
 fn scroll_plan(root: dynamic.Dynamic) -> Nil
+
+@external(javascript, "./api.mjs", "fit_plan_text")
+fn fit_plan_text(root: dynamic.Dynamic) -> Nil
+
+/// Sizes the panel's message box to its text, once it has rendered, where
+/// the browser can't (see `fit_plan_text` in api.mjs).
+fn plan_fit() -> Effect(Msg) {
+  effect.after_paint(fn(_, root) { fit_plan_text(root) })
+}
+
+/// A feature or milestone link (D-122): its tab opens, and its card scrolls
+/// into view once drawn; the stream may not have brought it yet.
+fn show_record(
+  model: Model,
+  tab: Tab,
+  kind: String,
+  id: String,
+) -> #(Model, Effect(Msg)) {
+  #(
+    Model(..model, tab: tab),
+    effect.batch([
+      effect.from(fn(_) { set_tab(tab_name(tab)) }),
+      effect.after_paint(fn(_, root) { reveal_card(root, kind, id) }),
+    ]),
+  )
+}
+
+@external(javascript, "./api.mjs", "reveal_card")
+fn reveal_card(root: dynamic.Dynamic, kind: String, id: String) -> Nil

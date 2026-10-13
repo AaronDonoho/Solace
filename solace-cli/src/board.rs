@@ -856,7 +856,7 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
                 (a, b) if a == b && baseline.is_some() => format!("## {shown} (metadata or binary content changed)\n"),
                 (a, b) if a == b => format!("## {shown} (back to its state before the task)\n"),
                 // an extract into another project: shown once, with the diff, where it landed
-                (Some(_), None) if let Some(there) = moved_to(&projects, dir, key) => format!("## {shown} (moved to {there})\n"),
+                (Some(_), None) if let Some(there) = moved_to(&projects, dir, key, tid) => format!("## {shown} (moved to {there})\n"),
                 (None, Some(b)) => format!("## {shown} (added)\n{}", line_diff("", &b)),
                 (Some(a), None) => format!("## {shown} (deleted)\n{}", line_diff(&a, "")),
                 (a, b) => format!("## {shown} (changed)\n{}", line_diff(&a.unwrap_or_default(), &b.unwrap_or_default())),
@@ -889,12 +889,17 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
     Ok(heading + &out)
 }
 /// The other project of `projects` where the symbol entity `key` is live: an
-/// extract into another project moved it there (D-103).
-fn moved_to(projects: &[(String, Store)], dir: &str, key: &str) -> Option<String> {
+/// extract into another project moved it there (D-103). One that gained it in
+/// task `tid` comes before one that held the same text all along.
+fn moved_to(projects: &[(String, Store)], dir: &str, key: &str, tid: &str) -> Option<String> {
     if !key.starts_with("symbol:") {
         return None;
     }
-    projects.iter().find(|(d, s)| d != dir && snapshot(s).is_ok_and(|c| c[key][7].as_i64() == Some(1))).map(|(d, _)| d.clone())
+    let live: Vec<&(String, Store)> = projects.iter().filter(|(d, s)| d != dir && snapshot(s).is_ok_and(|c| c[key][7].as_i64() == Some(1))).collect();
+    let gained = |s: &Store| {
+        s.db.query_row("SELECT data FROM board_before WHERE task=?1 AND entity=?2", [tid, key], |r| r.get::<_, String>(0)).is_ok_and(|d| d == "null")
+    };
+    live.iter().find(|(_, s)| gained(s)).or(live.first()).map(|(d, _)| d.clone())
 }
 /// Line diff with two lines of context; `…` marks skipped lines.
 fn line_diff(a: &str, b: &str) -> String {
@@ -1059,7 +1064,9 @@ pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failu
                 fs::create_dir_all(p.parent().unwrap())?;
                 fs::write(p, json_bytes(bytes))?;
             } else if p.exists() {
-                fs::remove_file(p)?;
+                fs::remove_file(&p)?;
+                // with the folders that leaves empty, such as those a carried file made (D-103)
+                outside::remove_empty_dirs(&s.root.join(name.split('/').next().unwrap_or_default()), p.parent());
             }
         }
     }
@@ -2086,18 +2093,25 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
             fs::remove_dir_all(old)?;
         }
     }
-    let (prompt, images) = continuation_brief(t, run, resume.is_some(), root, m["run"].is_array());
+    // A run starts in the project of its task holding the most symbols the
+    // task names (D-123); a resumed conversation stays where it was.
+    let here = match previous["project"].as_str() {
+        Some(p) if resume.is_some() => p.to_string(),
+        _ => start_project(root, t),
+    };
+    let at = scope::path(&scope::top(root), &here);
+    let (prompt, images) = continuation_brief(t, run, resume.is_some(), root, &at, m["run"].is_array());
     let timeout = system()?["task_timeout"].as_u64().unwrap_or(3600);
     if author {
         // Only an exited process has a reusable session; a server crash during
         // a turn falls back instead of resuming a possibly orphaned process.
-        let conversation = if persistent { json!({"home":home,"config":compatibility,"session":null}) } else { Value::Null };
+        let conversation = if persistent { json!({"home":home,"config":compatibility,"session":null,"project":here}) } else { Value::Null };
         tasks::update(root, tid, move |current| {
             current["conversation"] = conversation;
             Ok(())
         })?;
     }
-    let mut child = spawn_agent(root, &dir, &log, m, &prompt, &images, resume.as_deref(), persistent, [tid, rid], timeout)?;
+    let mut child = spawn_agent(&at, &dir, &log, m, &prompt, &images, resume.as_deref(), persistent, [tid, rid], timeout)?;
     let supervised = supervise(Watch::Task(root, tid), rid, &mut child, &log, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT);
     if !(author && persistent) && matches!(supervised, Err(Failure(_, REPLIED))) && dir.exists() {
         fs::remove_dir_all(&dir)?;
@@ -2144,6 +2158,30 @@ fn persists(m: &Value) -> bool {
             && m["endpoint"].is_null()
             && env::var_os("ANTHROPIC_API_KEY").is_none()
             && env::var_os("ANTHROPIC_AUTH_TOKEN").is_none())
+}
+/// The project task `t`, at home in `home`, starts its runs in (D-123): the
+/// one of its scope with the most symbols its title and body name as
+/// `module.name`; the home when none has more.
+fn start_project(home: &Path, t: &Value) -> String {
+    let top = scope::top(home);
+    let mine = scope::dir(&top, home);
+    let text = format!("{}\n{}", t["title"].as_str().unwrap_or(""), t["body"].as_str().unwrap_or(""));
+    let mut candidates = vec![mine.clone()];
+    candidates.extend(scope::of(t, &mine).into_iter().filter(|d| *d != mine));
+    let mut best = (0, mine);
+    for d in candidates {
+        let path = scope::path(&top, &d);
+        if !path.join("gleam.toml").exists() {
+            continue;
+        }
+        let Ok(s) = Store::peek(&path) else { continue };
+        let Ok(ix) = s.index() else { continue };
+        let n = s.named(&ix, &text).len();
+        if n > best.0 {
+            best = (n, d);
+        }
+    }
+    best.1
 }
 /// Starts model `m`'s agent with its settings in `dir`, its output in `log`
 /// and `prompt` (with `images`) on stdin: the launch every run shares, a
@@ -2470,7 +2508,8 @@ fn review_context(s: &Store, t: &Value) -> Out {
 }
 
 /// The brief, plus the images its notes reference, which are attached to the prompt.
-fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom: bool) -> (String, Vec<PathBuf>) {
+/// `here` is the project the run's agent works in (D-123).
+fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: &Path, custom: bool) -> (String, Vec<PathBuf>) {
     let kind = run["kind"].as_str().unwrap_or("");
     let mut packet = t.clone();
     if resumed {
@@ -2488,6 +2527,8 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
     packet["home"] = json!(scope::dir(&scope::top(root), root));
     // The task's changes come from the scope projects' stores (D-77 point 4).
     packet["changes"] = json!(open(root).map(|s| changes_of(&s, &packet).unwrap_or_default()).unwrap_or_default());
+    // The brief says where the agent works.
+    packet["home"] = json!(scope::dir(&scope::top(root), here));
     let mut out = brief(&packet, kind);
     if resumed {
         out = out.replace(START, "Use the continuation context below.");
@@ -2716,7 +2757,7 @@ const START: &str = "Start with `session start --task`, with the task's title an
 const TECH_DEBT_ASK: &str = "This task is part of a feature: put minor, non-blocking findings that later work in the feature should fix under a `### Tech debt` heading in the feedback, one finding per bullet with its location (`module.name` or a file). When the task is completed, Solace files each on the feature's Tech Debt task; findings that block this task belong in the findings, not there.";
 fn brief(t: &Value, kind: &str) -> String {
     let start = START;
-    let ask = "If you need a decision from the human, check the Notes so far and Questions below for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
+    let ask = "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
     let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); keep the options concise.";
     let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `merge`, `write`, `remove`, `format` and `run` are refused.";
     // A task in a feature files its review's minor findings as the feature's tech debt (D-112).
@@ -2813,16 +2854,19 @@ fn text_of(v: &Value) -> String {
 }
 /// D-109: a failed batch where only some commands failed, from the reply's
 /// last line (`1 of 3 commands failed: …`): `(1 of 3 failed)`, for the step's title.
-/// D-119: a call that stopped at a failed change (`…; skipped: a; b`) adds `, 2 skipped`.
+/// D-119: a call that stopped at a failed change (`…; skipped: a; b`) adds `, 2 skipped`;
+/// the count is capped at the commands the reply says were left, since a command's
+/// text can itself hold `; `.
 fn partly_failed(status: &str, output: &str) -> Option<String> {
     let last = output.trim_end().lines().last()?;
-    let (last, skipped) = match last.rsplit_once("; skipped: ") {
+    let (last, listed) = match last.rsplit_once("; skipped: ") {
         Some((l, s)) => (l, s.split("; ").count()),
         None => (last, 0),
     };
     let (n, rest) = last.split_once(" of ")?;
     let (m, _) = rest.split_once(" commands failed: ")?;
     let (n, m): (usize, usize) = (n.parse().ok()?, m.parse().ok()?);
+    let skipped = listed.min(m.saturating_sub(n));
     let skipped = if skipped > 0 { format!(", {skipped} skipped") } else { String::new() };
     (status == "failed" && n < m).then(|| format!("({n} of {m} failed{skipped})"))
 }
@@ -3753,6 +3797,13 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                     Err((status, e)) => respond(req, status, error_json(&e)),
                 };
             }
+            // A feature or milestone by id (D-122): a link to it asks for its title.
+            if let ("GET", [kind @ ("features" | "milestones"), "find", id]) = (req.method().as_str(), strategy.as_slice()) {
+                return match tasks::find_record(&board.top, kind, id) {
+                    Ok(v) => respond(req, 200, v),
+                    Err((status, e)) => respond(req, status, error_json(&e)),
+                };
+            }
             let runs = strategy.len() >= 2 && strategy[..2] == ["strategy", "runs"];
             if matches!(strategy[0], "milestones" | "features") || strategy == ["vision"] || runs {
                 let result = match read_body(&mut req, BODY_LIMIT) {
@@ -3803,15 +3854,16 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 }
                 return;
             }
-            // A task link's address, `/task/{id}`, is the shell's to resolve (D-98).
+            // A link's address, `/task/{id}` (D-98), `/feature/{id}` or `/milestone/{id}`
+            // (D-122), is the shell's to resolve.
             let page = url.split('?').next().unwrap_or("");
-            let task_link = page.strip_prefix("/task/").is_some_and(valid_id);
+            let record_link = ["/task/", "/feature/", "/milestone/"].iter().any(|p| page.strip_prefix(p).is_some_and(valid_id));
             if req.method().as_str() == "GET"
-                && (task_link
+                && (record_link
                     || matches!(page, "/" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/app.js" | "/guide" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2"))
             {
                 let (data, kind) = match page {
-                    _ if task_link => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
+                    _ if record_link => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
                     "/" | "/migrate" | "/contracts" | "/strategy" | "/settings" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
                     "/guide" => (include_bytes!("../board/guide.html").as_slice(), "text/html"),
                     "/fonts/sans-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-400-normal.woff2").as_slice(), "font/woff2"),

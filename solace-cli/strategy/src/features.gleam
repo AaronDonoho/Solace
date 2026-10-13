@@ -154,6 +154,8 @@ fn feature_view(
   html.article(
     [
       attribute.class("feature"),
+      // A feature link (D-122) finds its card by this.
+      attribute.attribute("data-feature-id", feature.id),
       case color {
         "" -> attribute.none()
         _ -> attribute.style("border-left", "8px solid " <> color)

@@ -299,7 +299,8 @@ fn strategy(top: &Path, method: &str, parts: &[&str], req: &Value, status: &mut 
 }
 /// `GET /tasks/find/{id}` (D-98): the project that stores a task, whichever it
 /// is, and whether it is archived, so a task link opens it on the board or, off
-/// the board, on the Strategy page. 404 for no such task.
+/// the board, on the Strategy page; and its title, which a bare link shows
+/// (D-122). 404 for no such task.
 pub fn find_task(top: &Path, id: &str) -> Result<Value, (u16, Failure)> {
     if !board::valid_id(id) {
         return board::err("E7001", "invalid task id").map_err(|e| (400, e));
@@ -309,7 +310,18 @@ pub fn find_task(top: &Path, id: &str) -> Result<Value, (u16, Failure)> {
         return board::err("E7023", format!("unknown task {id}")).map_err(|e| (404, e));
     }
     let t = board::read_task(top, &path).map_err(|e| (409, e))?;
-    Ok(json!({"id": id, "dir": t["home"], "archived": !t["archivedTime"].is_null()}))
+    Ok(json!({"id": id, "dir": t["home"], "archived": !t["archivedTime"].is_null(), "title": t["title"]}))
+}
+/// `GET /features/find/{id}` and `GET /milestones/find/{id}` (D-122): a
+/// record's title, which a bare link to it shows. 404 for no such record.
+pub fn find_record(top: &Path, kind: &str, id: &str) -> Result<Value, (u16, Failure)> {
+    if !board::valid_id(id) {
+        return board::err("E7001", format!("invalid {} id", singular(kind))).map_err(|e| (400, e));
+    }
+    match record(top, kind, id) {
+        Some(r) => Ok(json!({"id": id, "title": r["title"]})),
+        None => board::err("E7023", format!("unknown {} {id}", singular(kind))).map_err(|e| (404, e)),
+    }
 }
 fn unknown_id<T>(kind: &str, id: &str, status: &mut u16, code: u16) -> Result<T, Failure> {
     *status = code;
@@ -1685,6 +1697,20 @@ mod tests {
         }
         assert_eq!((records(&root, "features"), board::all_tasks(&root).unwrap(), vision(&root)["text"].as_str()), (before, tasks, Some("")));
         assert!(root_events(&root)[events..].iter().all(|e| e.get("strategyRun").is_some()));
+    }
+    /// D-122: a feature or milestone link asks for its record's title; an
+    /// unknown id is 404, a malformed one 400.
+    #[test]
+    fn a_record_link_finds_its_title() {
+        let root = root();
+        let m = strategy_api(&root, "POST", &["milestones"], json!({"title": "1.0"})).unwrap();
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "F"})).unwrap();
+        for (kind, r, title) in [("milestones", &m, "1.0"), ("features", &f, "F")] {
+            let id = r["id"].as_str().unwrap();
+            assert_eq!(find_record(&root, kind, id).unwrap(), json!({"id": id, "title": title}));
+            assert_eq!(find_record(&root, kind, "0123456789abcdef").unwrap_err().0, 404);
+            assert_eq!(find_record(&root, kind, "../x").unwrap_err().0, 400);
+        }
     }
 
     /// D-93: a vision proposal is applied only over the revision it was made

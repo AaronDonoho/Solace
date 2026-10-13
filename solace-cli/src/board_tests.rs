@@ -871,6 +871,9 @@ fn transcripts_read_codex_and_claude_logs() {
     assert_eq!(transcript(&log)[0]["title"], "solace (1 of 3 failed, 2 skipped) read a\ngrep x");
     assert_eq!(partly_failed("failed", "E\n1 of 2 commands failed: write a; skipped: run t\n").as_deref(), Some("(1 of 2 failed, 1 skipped)"));
     assert_eq!(partly_failed("failed", "E\n1 of 2 commands failed: read a\n").as_deref(), Some("(1 of 2 failed)"));
+    // D-119 point 5: a command's text can hold "; ", so the count is capped at the
+    // commands the reply says were left after the failure.
+    assert_eq!(partly_failed("failed", "E\n1 of 2 commands failed: write a; skipped: read x; grep y\n").as_deref(), Some("(1 of 2 failed, 1 skipped)"));
     let text = codex.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n") + "\nnot json\nstill not\n";
     fs::write(&log, text).unwrap();
     let t = transcript(&log);
@@ -946,8 +949,8 @@ fn briefs_name_unfinished_dependencies() {
     // The run prompt carries it; one with only finished dependencies doesn't.
     let task = |id: &str| all_tasks(&top).unwrap().into_iter().find(|t| t["id"] == id).unwrap();
     let run = json!({"id":"r1","kind":"work"});
-    assert!(continuation_brief(&task("t"), &run, false, &p.root, false).0.contains(&w));
-    let finished = continuation_brief(&task("f"), &run, false, &p.root, false).0;
+    assert!(continuation_brief(&task("t"), &run, false, &p.root, &p.root, false).0.contains(&w));
+    let finished = continuation_brief(&task("f"), &run, false, &p.root, &p.root, false).0;
     assert!(!finished.contains("Depends on:") && !finished.contains(WAITING), "{finished}");
     // A task brought back to the backlog counts as unfinished again.
     put("b", &home, "backlog", &[]);
@@ -989,7 +992,7 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     }
     // D-119 point 6: check what is already answered before asking.
     for kind in ["work", "investigate"] {
-        assert!(brief(&t, kind).contains("check the Notes so far and Questions below"), "{kind}");
+        assert!(brief(&t, kind).contains("check the Notes so far and Questions below, if any"), "{kind}");
     }
     assert!(brief(&t, "investigate").contains("Investigate this task"));
     // Only a work run changes code, so only it is told to run every test before finishing.
@@ -1069,4 +1072,72 @@ fn revert_restores_every_project_before_checking_any() {
     api(&web.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap();
     assert_eq!(text(&web, "app.f"), "pub fn f() -> Int {\n  lib.z()\n}");
     assert_eq!(text(&comp, "lib.z"), "pub fn z() -> Int {\n  0\n}");
+}
+
+/// D-123: a run starts in the project of its task that holds the most
+/// symbols the task names; on a tie, or with none, at home.
+#[test]
+fn a_run_starts_where_the_named_symbols_are() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"a\", \"b\"]\n"),
+        ("a/gleam.toml", "name = \"alpha\"\nversion = \"1.0.0\"\n"),
+        ("a/src/app.gleam", "pub fn one() -> Int {\n  1\n}\n"),
+        ("b/gleam.toml", "name = \"beta\"\nversion = \"1.0.0\"\n"),
+        ("b/src/plan.gleam", "pub fn answer() -> Int {\n  42\n}\n"),
+    ]);
+    for d in ["a", "b"] {
+        crate::import(&root.join(d)).unwrap();
+    }
+    let t = |body: &str| json!({"title": "T", "body": body, "scope": ["a", "b"]});
+    let a = root.join("a");
+    assert_eq!(start_project(&a, &t("Change `plan.answer`.")), "b");
+    assert_eq!(start_project(&a, &t("app.one and plan.answer")), "a", "a tie stays home");
+    assert_eq!(start_project(&a, &t("No names here")), "a");
+    assert_eq!(start_project(&a, &json!({"title": "plan.answer"})), "a", "outside its scope");
+}
+
+/// D-103: a moved symbol's heading names the project that gained it, not
+/// another one that held a symbol of the same id all along.
+#[test]
+fn moved_to_names_the_project_that_gained_the_symbol() {
+    let lib = "pub fn z() -> Int {\n  0\n}\n";
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"a\", \"b\", \"c\"]\n"),
+        ("a/gleam.toml", "name = \"a\"\nversion = \"1.0.0\"\n"),
+        ("a/src/app.gleam", "pub fn one() -> Int {\n  1\n}\n"),
+        ("b/gleam.toml", "name = \"b\"\nversion = \"1.0.0\"\n"),
+        ("b/src/lib.gleam", lib),
+        ("c/gleam.toml", "name = \"c\"\nversion = \"1.0.0\"\n"),
+        ("c/src/lib.gleam", lib),
+    ]);
+    let projects: Vec<(String, Store)> = ["a", "b", "c"]
+        .into_iter()
+        .map(|d| {
+            crate::import(&root.join(d)).unwrap();
+            (d.to_string(), open(&root.join(d)).unwrap())
+        })
+        .collect();
+    let key = |s: &Store| {
+        let ix = s.index().unwrap();
+        format!("symbol:{}", ix.syms[s.resolve(&ix, "lib.z").unwrap()].id)
+    };
+    let k = key(&projects[1].1);
+    let id = |k: &str| k.strip_prefix("symbol:").unwrap().to_string();
+    projects[2].1.db.execute("UPDATE symbols SET id=?1 WHERE id=?2", [id(&k), id(&key(&projects[2].1))]).unwrap();
+    assert_eq!(moved_to(&projects, "a", &k, "t1").as_deref(), Some("b"));
+    projects[2].1.db.execute("INSERT INTO board_before VALUES ('t1',?1,'null')", [&k]).unwrap();
+    assert_eq!(moved_to(&projects, "a", &k, "t1").as_deref(), Some("c"));
+}
+
+/// Putting back a file the task added removes the folders that leaves empty,
+/// as those a file `extract` carried made (D-103), and keeps `src/`.
+#[test]
+fn restoring_an_added_file_removes_the_folders_it_leaves_empty() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    fs::create_dir_all(s.root.join("src/ui/ffi")).unwrap();
+    fs::write(s.root.join("src/ui/ffi/x.mjs"), "export const x = 1\n").unwrap();
+    restore(&s, &[("file:src/ui/ffi/x.mjs".to_string(), json!(null))]).unwrap();
+    assert!(!s.root.join("src/ui").exists());
+    assert!(s.root.join("src/app.gleam").exists());
 }

@@ -237,8 +237,12 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         }
         _ => None,
     };
-    // The task's home: where the run's agent works, and where the task is stored.
-    let home = Store::root().ok();
+    // The task's home, where the task is stored. Its agent works in the
+    // project its run started in (D-123), which may be another of its projects.
+    let home = match (Store::root().ok(), board::context()) {
+        (Some(here), Some((tid, _))) => Some(scope::home(&here, &tid).unwrap_or(here)),
+        (here, _) => here,
+    };
     let _within = cross.as_deref().map(Within::enter).transpose()?;
     let Ok(root) = Store::root() else {
         board::flow(&env::current_dir()?)?;
@@ -258,7 +262,9 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         _ => vec![],
     };
     let guard = if let Some((tid, rid)) = &context {
-        let also: Vec<&Path> = cross.iter().chain(&dest).chain(&deps).map(PathBuf::as_path).collect();
+        // Away from home, the project the agent works in is locked too.
+        let away = (cross.is_none() && !lockdown::same_project(&root, &home)).then(|| root.clone());
+        let also: Vec<&Path> = cross.iter().chain(&away).chain(&dest).chain(&deps).map(PathBuf::as_path).collect();
         board::agent_guard(&home, tid, rid, if a.is_empty() { &["help"] } else { &a }, &also)?
     } else {
         vec![board::lock(&root)?]
@@ -449,7 +455,7 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
             lockdown::drop_records(&d.root, rid)?;
         }
     }
-    match result {
+    match hinted(result, &store.root) {
         Ok(out) => Ok(format!("{noticed}{out}{unread}")),
         Err(Failure(msg, code)) => Err(Failure(format!("{noticed}{msg}{unread}"), code)),
     }
@@ -601,10 +607,11 @@ fn project_dir(dir: &str) -> &str {
 /// reads, and commands outside a run, go to `read_project`.
 fn scoped(dir: &str, args: &[String]) -> Result<Option<PathBuf>, Failure> {
     let command = args.first().map(String::as_str).unwrap_or("");
-    let (Some((tid, _)), Ok(own)) = (board::context(), Store::root()) else { return Ok(None) };
+    let (Some((tid, _)), Ok(here)) = (board::context(), Store::root()) else { return Ok(None) };
     if READS.contains(&command) && !args.iter().any(|x| x == "--draft") {
         return Ok(None);
     }
+    let own = scope::home(&here, &tid)?;
     let top = scope::top(&own);
     let dir = project_dir(dir);
     let projects = scope::of(&board::task(&own, &tid)?, &scope::dir(&top, &own));
@@ -672,13 +679,10 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
     let target = scope::path(&root, dir);
     // A board run's agent must still be running, as for any command.
     let _guard = match (board::context(), &own) {
-        (Some((tid, rid)), Some(own)) => Some(board::agent_guard(own, &tid, &rid, &a, &[])?),
+        (Some((tid, rid)), Some(own)) => Some(board::agent_guard(&scope::home(own, &tid)?, &tid, &rid, &a, &[])?),
         _ => None,
     };
-    // A plain connection: a read creates no tables in another project.
-    let db = Connection::open(target.join(".solace/store.db"))?;
-    db.busy_timeout(Duration::from_secs(10))?;
-    let store = Store { db: Rc::new(db), root: target };
+    let store = Store::peek(&target)?;
     let settings = lockdown::settings(&store.root)?;
     if let Some(out) = lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
         return out;
@@ -686,13 +690,52 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
     if !store.root.join("gleam.toml").exists() {
         return lockdown::plain(command);
     }
-    match a.as_slice() {
+    let out = match a.as_slice() {
         ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
         ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
         ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
         ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
         _ => usage(format!("{} --project {dir}: give what to read", a.join(" "))),
+    };
+    hinted(out, &store.root)
+}
+
+/// Each `E1001 unknown name` line of a reply, followed by the project that
+/// has the name when another one does (D-123).
+fn hinted(out: Out, here: &Path) -> Out {
+    const MARK: &str = "E1001 unknown name: ";
+    let add = |text: String| -> String {
+        if !text.contains(MARK) {
+            return text;
+        }
+        let lines: Vec<String> = text
+            .split('\n')
+            .map(|line| match line.split_once(MARK).and_then(|(_, rest)| rest.split_whitespace().next()).and_then(|name| elsewhere(here, name)) {
+                Some(d) => format!("{line}\nfound in {d}: add --project {d}"),
+                None => line.to_string(),
+            })
+            .collect();
+        lines.join("\n")
+    };
+    match out {
+        Ok(text) => Ok(add(text)),
+        Err(Failure(msg, code)) => Err(Failure(add(msg), code)),
     }
+}
+
+/// The first project other than `here` with exactly one symbol `name`: the
+/// run's task's projects first, then the others under the Solace root (D-123).
+fn elsewhere(here: &Path, name: &str) -> Option<String> {
+    let top = workspace::enclosing(here).ok().flatten()?;
+    let mine = scope::dir(&top, here);
+    let mut order = scope::of_run(here).unwrap_or_default();
+    let rest: Vec<String> = workspace::members(&top).ok()?.into_iter().filter(|m| !order.contains(m)).collect();
+    order.extend(rest);
+    let has = |d: &str| -> Option<usize> {
+        let s = Store::peek(&scope::path(&top, d)).ok()?;
+        s.resolve(&s.index().ok()?, name).ok()
+    };
+    order.into_iter().filter(|d| *d != mine).find(|d| has(d).is_some())
 }
 
 fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>, old: Option<&str>, budget: usize) -> Out {
@@ -1320,6 +1363,18 @@ impl Store {
         Store::at(&Store::root()?)
     }
 
+    /// Another project's store, only to read: a plain connection, which
+    /// creates no tables and takes no lock (D-57).
+    fn peek(root: &Path) -> Result<Store, Failure> {
+        let file = root.join(".solace/store.db");
+        if !file.exists() {
+            return fail(format!("no Solace store in {}", root.display()));
+        }
+        let db = Connection::open(file)?;
+        db.busy_timeout(Duration::from_secs(10))?;
+        Ok(Store { db: Rc::new(db), root: root.into() })
+    }
+
     /// The project the working folder is in: the nearest folder up with a store.
     fn root() -> Result<PathBuf, Failure> {
         let mut dir = env::current_dir()?;
@@ -1573,30 +1628,55 @@ impl Store {
         named
     }
 
-    /// The other projects under this project's Solace root, which reads can
-    /// reach with `--project` (D-57).
+    /// Where the agent is, and the other projects under this project's Solace
+    /// root, which reads reach with `--project` (D-57): in a task run, those
+    /// its task may change apart from those it only reads, and the rules for
+    /// `--project` and paths (D-123).
     fn other_projects(&self) -> String {
         let Ok(Some(root)) = workspace::enclosing(&self.root) else { return String::new() };
         let Ok(members) = workspace::members(&root) else { return String::new() };
-        let me = self.root.strip_prefix(&root).map(|p| p.to_string_lossy().to_string()).unwrap_or_default();
-        let me = if me.is_empty() { ".".to_string() } else { me };
-        let others: Vec<String> = members
-            .into_iter()
-            .filter(|m| *m != me)
-            .map(|m| match workspace::name(&scope::path(&root, &m)) {
-                name if name.is_empty() => m,
-                name => format!("{m} ({name})"),
-            })
-            .collect();
+        let me = scope::dir(&root, &self.root);
+        let label = |m: &str| match workspace::name(&scope::path(&root, m)) {
+            name if name.is_empty() && m == "." => ". (the root)".to_string(),
+            name if name.is_empty() => m.to_string(),
+            name => format!("{m} ({name})"),
+        };
+        // The root itself last: it is rarely where code lives.
+        let mut others: Vec<&String> = members.iter().filter(|m| **m != me).collect();
+        others.sort_by_key(|m| *m == ".");
         if others.is_empty() {
             return String::new();
         }
-        format!(
-            "\nOther projects under this Solace root (add `--project <folder>` to view, inspect, refs, find, files or read): {}\n\
-             This task can change only the projects it covers. If it needs a change in another project (or the root, `.`), \
-             ask the human with `task ask` to add that project; never put the change somewhere else instead.\n",
-            others.join(", ")
-        )
+        let labels = |ms: Vec<&String>| ms.into_iter().map(|m| label(m)).collect::<Vec<_>>().join(", ");
+        let task = scope::of_run(&self.root);
+        let mut out = format!("\nYou are in {}.\n", label(&me));
+        match &task {
+            Some(scoped) => {
+                out += &format!("This task can change: {}.\n", labels(scoped.iter().collect()));
+                let read: Vec<&String> = others.iter().copied().filter(|m| !scoped.contains(m)).collect();
+                if !read.is_empty() {
+                    out += &format!("Read only: {}.\n", labels(read));
+                }
+            }
+            None => out += &format!("Other projects under this Solace root (read only): {}.\n", labels(others.clone())),
+        }
+        let example = task.as_ref().and_then(|s| others.iter().copied().find(|m| s.contains(m))).unwrap_or(others[0]);
+        let not = match example.rsplit('/').next() {
+            Some(short) if example != "." => format!(", not `../{short}`"),
+            _ => String::new(),
+        };
+        out += &format!(
+            "`--project <folder>` runs one line in another project: its folder as listed, from the Solace root \
+             (`--project {example}`{not}), for that line only. Reads (view, inspect, refs, find, grep, files, read) \
+             reach every project listed{}.\n\
+             Paths in `read`, `grep --in`, `files`, `write` and `move` are relative to the project the line runs in.\n",
+            if task.is_some() { "; other commands, only this task's" } else { "" }
+        );
+        if task.is_some() {
+            out += "If the task needs a change in a read-only project (or the root, `.`), ask the human with `task ask` \
+                    to add that project; never put the change somewhere else instead.\n";
+        }
+        out
     }
 
     /// The project's AGENTS.md, which its humans write for agents (D-45), cut
@@ -1651,7 +1731,22 @@ impl Store {
             return self.plain_session(&deps);
         }
         let ix = self.index()?;
-        let n = ix.syms.len();
+        // The task's other projects with Gleam code, by folder: the list of
+        // symbols draws on them too (D-123).
+        let top = scope::top(&self.root);
+        let mine = scope::dir(&top, &self.root);
+        let others: Vec<(String, Store, Index)> = scope::of_run(&self.root)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|d| *d != mine && scope::path(&top, d).join("gleam.toml").exists())
+            .filter_map(|d| {
+                let s = Store::peek(&scope::path(&top, &d)).ok()?;
+                let ix = s.index().ok()?;
+                Some((d, s, ix))
+            })
+            .collect();
+        let projects: Vec<(Option<&str>, &Store, &Index)> =
+            std::iter::once((None, self, &ix)).chain(others.iter().map(|(d, s, x)| (Some(d.as_str()), s, x))).collect();
         let mut modules = String::from("Modules (`view <module>` for an outline):\n");
         let mut tests = vec![];
         for m in &ix.modules {
@@ -1664,73 +1759,84 @@ impl Store {
         modules += &format!("Test modules: {}\n", tests.join(", "));
 
         // Direct matches: rare task words weigh more; a word in the name
-        // counts 3, in the doc line 2, anywhere else in the code 1.
-        let fields: Vec<[HashSet<String>; 3]> = ix
-            .syms
+        // counts 3, in the doc line 2, anywhere else in the code 1. Words are
+        // counted over all the task's projects.
+        let fields: Vec<Vec<[HashSet<String>; 3]>> = projects
             .iter()
-            .map(|s| {
-                let doc: String = s.text.lines().filter(|l| l.trim_start().starts_with("///")).collect::<Vec<_>>().join(" ");
-                [words(&s.name).into_iter().collect(), words(&doc).into_iter().collect(), words(&s.text).into_iter().collect()]
+            .map(|(_, _, ix)| {
+                ix.syms
+                    .iter()
+                    .map(|s| {
+                        let doc: String = s.text.lines().filter(|l| l.trim_start().starts_with("///")).collect::<Vec<_>>().join(" ");
+                        [words(&s.name).into_iter().collect(), words(&doc).into_iter().collect(), words(&s.text).into_iter().collect()]
+                    })
+                    .collect()
             })
             .collect();
+        let n: usize = fields.iter().map(Vec::len).sum();
         let mut terms = words(task);
         terms.sort();
         terms.dedup();
-        let mut score = vec![0.0f64; n];
+        let mut scores: Vec<Vec<f64>> = fields.iter().map(|f| vec![0.0f64; f.len()]).collect();
         let mut rare: Vec<(f64, String)> = vec![];
         for t in &terms {
-            let df = fields.iter().filter(|f| f.iter().any(|w| w.contains(t))).count();
+            let df = fields.iter().flatten().filter(|f| f.iter().any(|w| w.contains(t))).count();
             if df == 0 {
                 continue;
             }
             // squared, so one rare word (a code, a name) outweighs several common ones
             let idf = (1.0 + n as f64 / df as f64).ln().powi(2);
             rare.push((idf, t.clone()));
-            for (i, f) in fields.iter().enumerate() {
-                if let Some(k) = f.iter().position(|w| w.contains(t)) {
-                    let w = idf * [3.0, 2.0, 1.0][k];
-                    score[i] += w;
-                }
-            }
-        }
-        let direct = score.clone();
-
-        // One hop from the best matches: callers, callees and covering tests;
-        // then the non-test symbols (fixtures) the top covering tests use.
-        let mut seeds: Vec<usize> = (0..n).filter(|&i| direct[i] > 0.0).collect();
-        seeds.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]));
-        seeds.truncate(10);
-        let boost = |j: usize, s: f64, score: &mut Vec<f64>| {
-            if direct[j] + s > score[j] {
-                score[j] = direct[j] + s;
-            }
-        };
-        for &s in &seeds {
-            for &j in &ix.uses[s] {
-                boost(j, direct[s] / 4.0, &mut score);
-            }
-            let mut covering = vec![];
-            for &j in &ix.used_by[s] {
-                if is_test(&ix, j) {
-                    covering.push(j);
-                }
-                boost(j, direct[s] / 4.0, &mut score);
-            }
-            covering.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]).then(ix.syms[a].text.len().cmp(&ix.syms[b].text.len())));
-            for &t in covering.iter().take(2) {
-                for &j in ix.uses[t].iter().filter(|&&j| !is_test(&ix, j)) {
-                    boost(j, direct[s] / 8.0, &mut score);
+            for (score, fields) in scores.iter_mut().zip(&fields) {
+                for (i, f) in fields.iter().enumerate() {
+                    if let Some(k) = f.iter().position(|w| w.contains(t)) {
+                        score[i] += idf * [3.0, 2.0, 1.0][k];
+                    }
                 }
             }
         }
 
-        // Symbols the task names (`module.name`) are listed first.
-        let named = self.named(&ix, task);
-        for &i in &named {
-            score[i] = f64::MAX;
+        // One hop from each project's best matches: callers, callees and
+        // covering tests; then the non-test symbols (fixtures) the top
+        // covering tests use. Symbols the task names (`module.name`) come first.
+        for (&(_, store, ix), score) in projects.iter().zip(scores.iter_mut()) {
+            let direct = score.clone();
+            let mut seeds: Vec<usize> = (0..direct.len()).filter(|&i| direct[i] > 0.0).collect();
+            seeds.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]));
+            seeds.truncate(10);
+            let boost = |j: usize, s: f64, score: &mut Vec<f64>| {
+                if direct[j] + s > score[j] {
+                    score[j] = direct[j] + s;
+                }
+            };
+            for &s in &seeds {
+                for &j in &ix.uses[s] {
+                    boost(j, direct[s] / 4.0, &mut *score);
+                }
+                let mut covering = vec![];
+                for &j in &ix.used_by[s] {
+                    if is_test(ix, j) {
+                        covering.push(j);
+                    }
+                    boost(j, direct[s] / 4.0, &mut *score);
+                }
+                covering.sort_by(|&a, &b| direct[b].total_cmp(&direct[a]).then(ix.syms[a].text.len().cmp(&ix.syms[b].text.len())));
+                for &t in covering.iter().take(2) {
+                    for &j in ix.uses[t].iter().filter(|&&j| !is_test(ix, j)) {
+                        boost(j, direct[s] / 8.0, &mut *score);
+                    }
+                }
+            }
+            for i in store.named(ix, task) {
+                score[i] = f64::MAX;
+            }
         }
-        let mut ranked: Vec<usize> = (0..n).filter(|&i| score[i] > 0.0).collect();
-        ranked.sort_by(|&a, &b| score[b].total_cmp(&score[a]).then(ix.syms[a].text.len().cmp(&ix.syms[b].text.len())));
+        // Each entry is (project, symbol), the current project's first.
+        let mut ranked: Vec<(usize, usize)> =
+            scores.iter().enumerate().flat_map(|(p, s)| (0..s.len()).filter(move |&i| s[i] > 0.0).map(move |i| (p, i))).collect();
+        let size = |(p, i): (usize, usize)| projects[p].2.syms[i].text.len();
+        ranked.sort_by(|&a, &b| scores[b.0][b.1].total_cmp(&scores[a.0][a.1]).then(size(a).cmp(&size(b))));
+        let score = &scores[0];
 
         // The task's own terms in string literals are evidence (D-44): its rarest
         // words, quoted phrases and capitalized names such as "Desk Lamp".
@@ -1741,7 +1847,8 @@ impl Store {
         // A test that reaches the top code symbols reproduces the task's case.
         let code: Vec<usize> = ranked
             .iter()
-            .copied()
+            .filter(|&&(p, _)| p == 0)
+            .map(|&(_, i)| i)
             .filter(|&i| !is_test(&ix, i) && ix.syms[i].kind == Kind::Fn && !ix.syms[i].text.contains("@external"))
             .take(2)
             .collect();
@@ -1771,11 +1878,14 @@ impl Store {
             .unwrap_or_default();
         let mut packet = String::new();
         let mut room = BUDGET.saturating_sub(modules.len() + repro.len());
-        for &i in &ranked {
+        for &(p, i) in &ranked {
             // whole entries only: skip one that doesn't fit, try smaller ones
-            let entry = format!("-- {}\n{}\n", ix.syms[i].qname(), gleam::signature(&ix.syms[i].item()));
+            let (folder, _, pix) = projects[p];
+            let s = &pix.syms[i];
+            let at = folder.map(|d| format!(" ({d})")).unwrap_or_default();
+            let entry = format!("-- {}{at}\n{}\n", s.qname(), gleam::signature(&s.item()));
             let mut quoted = String::new();
-            for e in evidence(&ix.syms[i].text, &evidence_terms) {
+            for e in evidence(&s.text, &evidence_terms) {
                 let line = format!("  > {e}\n");
                 if quoted.len() + line.len() <= 300 {
                     quoted += &line;
@@ -1791,8 +1901,9 @@ impl Store {
         }
         let mut out = self.project_instructions();
         out += &deps;
+        let marked = if others.is_empty() { "" } else { "; one marked `(<folder>)` is in that project: add `--project <folder>`" };
         out += &format!(
-            "Symbols most likely relevant to the task, best first (signatures; `>` lines quote code that names the task's terms; `inspect` for code):\n{packet}{repro}\n{modules}"
+            "Symbols most likely relevant to the task, best first (signatures; `>` lines quote code that names the task's terms; `inspect` for code{marked}):\n{packet}{repro}\n{modules}"
         );
         out += &self.session_end(&ix)?;
         Ok(out)
@@ -3925,23 +4036,55 @@ mod tests {
         assert!(REFERENCE.contains("task done") && REFERENCE.contains("agent-config"));
         // D-46: session start gets the workflow, with the signature-change and
         // test examples (D-48: a test at the level reported, one per shifted
-        // behavior); D-102: under 3.6k bytes, for the file tiers and the split
-        // command lines, and D-117: 3.7k, for `merge`; `help` keeps every option.
-        assert!(r.len() < 3700, "{}", r.len());
+        // behavior); D-102: the file tiers. D-123: no byte cap; it is kept as
+        // brief as understanding it allows, and `help` keeps every option.
         assert!(r.contains("Files by tier") && r.contains("ignored\nor not"));
         assert!(
-            r.contains("Changing a signature or adding a field") && r.contains("one at the level the task reports") && r.contains("`help`")
+            r.contains("Changing a signature or adding a field") && r.contains("one at the level the task reports") && r.contains("`help <command>`")
         );
         assert!(!r.contains("probe --from <fn>") && REFERENCE.contains("probe --from <fn>") && REFERENCE.contains("--replace [--all]"));
         assert!(r.contains("Imports are added") && !r.contains("task ask"));
         // D-119 point 5: plain-file projects batch too, every edit in one patch.
         assert!(r.contains("then `run <name>`") && r.contains("go in one patch") && r.contains("a patch of many edits"));
+        // D-123: where a line runs, and that options belong to one command.
+        assert!(r.contains("Each line runs in one project") && r.contains("`--lines` is `read`'s") && r.contains("`help <command>`\nlists them"));
         // `help` for agents: every option, but no host or task commands here.
         let h = agent_help(None);
         assert!(h.contains("probe --from <fn>") && !h.contains("task diff") && !h.contains("agent-config"));
         let s = agent_help(Some("submit"));
         assert!(s.contains("--replace [--all]") && s.contains("draft") && !s.contains("probe --from"), "{s}");
         assert!(agent_help(Some("work")).contains("work done") && agent_help(Some("nope")).starts_with("No command"));
+    }
+
+    /// D-123: an unknown name another project has says where it is, and the
+    /// session start says where the agent is and how `--project` and paths work.
+    #[test]
+    fn a_name_in_another_project_says_where_it_is() {
+        let root = testing::Scratch::new().with(&[
+            ("solace.toml", "projects = [\"a\", \"b\"]\n"),
+            ("a/gleam.toml", "name = \"alpha\"\nversion = \"1.0.0\"\n"),
+            ("a/src/app.gleam", "pub fn one() -> Int {\n  1\n}\n"),
+            ("b/gleam.toml", "name = \"beta\"\nversion = \"1.0.0\"\n"),
+            ("b/src/plan.gleam", "pub fn answer() -> Int {\n  42\n}\n"),
+        ]);
+        for d in ["a", "b"] {
+            import(&root.join(d)).unwrap();
+        }
+        let a = Store::at(&root.join("a")).unwrap();
+        let e = hinted(a.view(&["plan.answer"], false, BUDGET), &a.root).unwrap_err().0;
+        assert!(e.contains("E1001 unknown name: plan.answer\nfound in b: add --project b"), "{e}");
+        let e = hinted(a.view(&["plan.nope"], false, BUDGET), &a.root).unwrap_err().0;
+        assert!(e.contains("E1001") && !e.contains("found in"), "{e}");
+        let s = a.other_projects();
+        for part in [
+            "You are in a (alpha).\n",
+            "Other projects under this Solace root (read only): b (beta).",
+            "(`--project b`, not `../b`), for that line only",
+            "grep",
+            "relative to the project the line runs in",
+        ] {
+            assert!(s.contains(part), "{part} missing from:\n{s}");
+        }
     }
 
     #[test]

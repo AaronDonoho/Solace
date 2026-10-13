@@ -71,10 +71,18 @@ fn view_files(root: &Path, watched: &[String], ops: &[&str], files: &[bool], fla
             Some((p, n)) => (p, Some(n)),
             None => (op, None),
         };
+        // A refusal of one operand is that operand's part of the reply, as `read`'s
+        // is, so the other operands are still answered (D-119 point 5).
         let file = match matching(watched, path).as_slice() {
             [one] => one.clone(),
-            [] => return lockdown::error("E1001", op, format!("no watched file `{path}`; `files` lists them")),
-            many => return lockdown::error("E1002", op, format!("`{path}` could be {}; name one", many.join(", "))),
+            [] => {
+                out += &lockdown::error::<()>("E1001", op, format!("no watched file `{path}`; `files` lists them")).unwrap_err().0;
+                continue;
+            }
+            many => {
+                out += &lockdown::error::<()>("E1002", op, format!("`{path}` could be {}; name one", many.join(", "))).unwrap_err().0;
+                continue;
+            }
         };
         let text = fs::read_to_string(root.join(&file))?;
         let (items, sep) = if file.ends_with(".rs") {
@@ -82,7 +90,8 @@ fn view_files(root: &Path, watched: &[String], ops: &[&str], files: &[bool], fla
         } else if file.ends_with(".py") {
             (python(&text), ".")
         } else {
-            return usage(format!("view lists the items of .rs and .py files; `read {file}` reads this one"));
+            out += &usage::<()>(format!("view lists the items of .rs and .py files; `read {file}` reads this one")).unwrap_err().0;
+            continue;
         };
         let room = budget.saturating_sub(out.len());
         let Some(name) = name else {
@@ -93,15 +102,13 @@ fn view_files(root: &Path, watched: &[String], ops: &[&str], files: &[bool], fla
         match find(&items, &name, sep).as_slice() {
             [it] => out += &source_of(&file, &text, it, room),
             [] => {
-                return lockdown::error(
-                    "E1001",
-                    op,
-                    format!("no item `{name}` in {file}; `view {file}` lists its items, `grep {name} --in {file} --context 3` finds other text"),
-                );
+                out += &lockdown::error::<()>("E1001", op, format!("no item `{name}` in {file}; `view {file}` lists its items, `grep {name} --in {file} --context 3` finds other text")).unwrap_err().0;
+                continue;
             }
             many => {
                 let list: Vec<String> = many.iter().map(|it| format!("    {file}::{} ({}..{})", it.name, it.start, it.end)).collect();
-                return lockdown::error("E1002", op, format!("`{name}` could be:\n{}", list.join("\n")));
+                out += &lockdown::error::<()>("E1002", op, format!("`{name}` could be:\n{}", list.join("\n"))).unwrap_err().0;
+                continue;
             }
         }
     }
@@ -394,7 +401,20 @@ fn rust_block(lines: &[&str], lex: &[Line], range: std::ops::Range<usize>, depth
         } {
             start -= 1;
         }
-        let above = &lines[start..i];
+        // A plain `//` comment is not the item's: the item starts at its doc, and a
+        // plain comment between the doc and the head is left out (D-119 point 4).
+        let plain = |l: &str| {
+            let t = l.trim_start();
+            t.starts_with("//") && !t.starts_with("///") && !t.starts_with("//!")
+        };
+        while start < i && plain(lines[start]) {
+            start += 1;
+        }
+        let mut above_end = i;
+        while above_end > start && plain(lines[above_end - 1]) {
+            above_end -= 1;
+        }
+        let above = &lines[start..above_end];
         let doc = above.iter().find_map(|l| l.trim_start().strip_prefix("///")).unwrap_or("").trim().to_string();
         let mut sig = signature(&lines[i..=end], kind);
         // `#[path = "x.rs"] mod x;`: the module is in that file.
@@ -414,20 +434,48 @@ fn rust_block(lines: &[&str], lex: &[Line], range: std::ops::Range<usize>, depth
 /// (`Class.method`), each up to the next line no deeper than its head.
 fn python(text: &str) -> Vec<Item> {
     let lines: Vec<&str> = text.lines().collect();
-    // Whether each line starts outside a triple-quoted string.
+    // Whether each line starts outside a triple-quoted string, scanned by byte: a
+    // `#` comment can't open a string, and a lone quote in one is not a string's
+    // start (D-119 point 4).
     let mut code = vec![];
-    let mut open: Option<&str> = None;
+    let mut open: Option<u8> = None;
     for line in &lines {
         code.push(open.is_none());
-        let mut rest = *line;
-        loop {
-            let next = match open {
-                Some(q) => rest.find(q).map(|p| (p, None)),
-                None => ["\"\"\"", "'''"].iter().filter_map(|&q| Some((rest.find(q)?, Some(q)))).min(),
-            };
-            let Some((p, q)) = next else { break };
-            rest = &rest[p + 3..];
-            open = q;
+        let b = line.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            let c = b[i];
+            if let Some(q) = open {
+                if c == q && b[i..].starts_with(&[q; 3]) {
+                    open = None;
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            } else if c == b'#' {
+                break;
+            } else if c == b'"' || c == b'\'' {
+                if b[i..].starts_with(&[c; 3]) {
+                    open = Some(c);
+                    i += 3;
+                } else {
+                    // A one-line string: it ends at the next same quote that
+                    // is not escaped; `\"` inside a string is not its end.
+                    let mut j = i + 1;
+                    while j < b.len() {
+                        if b[j] == b'\\' {
+                            j += 2;
+                        } else if b[j] == c {
+                            break;
+                        } else {
+                            j += 1;
+                        }
+                    }
+                    i = if j < b.len() { j + 1 } else { i + 1 };
+                }
+            } else {
+                i += 1;
+            }
         }
     }
     let indent = |l: &str| l.len() - l.trim_start().len();
@@ -548,7 +596,7 @@ mod tests {
 }
 "####;
 
-    const PY: &str = "import os\n\n\nclass View(unittest.TestCase):\n    \"\"\"Views.\"\"\"\n\n    def setUp(self):\n        self.x = '''\ndef fake():\n'''\n\n    @skip\n    def test_one(self):\n        def inner():\n            pass\n        inner()\n\n\ndef helper(a,\n           b):\n    \"\"\"Helps.\"\"\"\n    return a\n";
+    const PY: &str = "import os\n\n\nclass View(unittest.TestCase):\n    \"\"\"Views.\"\"\"\n\n    def setUp(self):\n        self.x = '''\ndef fake():\n'''\n        x = \"'''\"\n\n    @skip\n    def test_one(self):\n        def inner():\n            pass\n        inner()\n\n\ndef helper(a,\n           b):\n    \"\"\"Helps.\"\"\"\n    return a\n";
 
     #[test]
     fn rust_items_take_their_docs_and_skip_strings_and_nested_fns() {
@@ -582,6 +630,13 @@ mod tests {
 
     #[test]
     fn names_match_in_full_or_by_suffix() {
+        // A plain `//` comment above an item's doc is not part of the item (D-119 point 4).
+        let store = |t: &str| {
+            let i = rust(t).into_iter().find(|i| i.kind == "struct").unwrap();
+            (i.start, i.end, i.doc)
+        };
+        assert_eq!(store("// A note.\n/// The store.\npub struct Store {\n}\n"), (2, 4, "The store.".to_string()));
+        assert_eq!(store("/// The store.\n// a note\npub struct Store {\n}\n"), (1, 4, "The store.".to_string()));
         let items = rust(SAMPLE);
         let one = |n: &str| find(&items, n, "::").iter().map(|i| (i.name.clone(), i.kind)).collect::<Vec<_>>();
         assert_eq!(one("Store"), [("Store".to_string(), "struct")], "the type, not its impl");
@@ -597,8 +652,25 @@ mod tests {
     fn python_items_follow_indentation() {
         let items = python(PY);
         let got: Vec<(&str, usize, usize, usize)> = items.iter().map(|i| (i.name.as_str(), i.start, i.end, i.level)).collect();
-        assert_eq!(got, [("View", 4, 16, 0), ("View.setUp", 7, 10, 1), ("View.test_one", 12, 16, 1), ("helper", 19, 22, 0)]);
+        assert_eq!(got, [("View", 4, 17, 0), ("View.setUp", 7, 11, 1), ("View.test_one", 13, 17, 1), ("helper", 20, 23, 0)]);
         assert_eq!((items[0].doc.as_str(), items[3].doc.as_str(), items[3].sig.as_str()), ("Views.", "Helps.", "def helper(a, b)"));
+    }
+
+    #[test]
+    fn a_quote_in_a_comment_opens_no_string() {
+        // A quote in a comment opens no string, so the line below it is code.
+        let items = python("x = 1 # '''\ndef a():\n    pass\n");
+        let got: Vec<(&str, usize, usize, usize)> = items.iter().map(|i| (i.name.as_str(), i.start, i.end, i.level)).collect();
+        assert_eq!(got, [("a", 2, 3, 0)]);
+    }
+
+    #[test]
+    fn an_escaped_quote_closes_no_string() {
+        // `\"` in a one-line string is not its end, so the `'''` after it
+        // opens no string and the line below is code.
+        let items = python("x = \"a\\\"b'''\"\ndef a():\n    pass\n");
+        let got: Vec<(&str, usize, usize, usize)> = items.iter().map(|i| (i.name.as_str(), i.start, i.end, i.level)).collect();
+        assert_eq!(got, [("a", 2, 3, 0)]);
     }
 
     #[test]
@@ -616,11 +688,17 @@ mod tests {
             item,
             "src/lib.rs:11..16\n11:     /// Opens it.\n12:     pub fn open() -> Self {\n13:         let brace = '{';\n14:         let s = \"}\";\n15:         Store { root: PathBuf::new() }\n16:     }\n"
         );
-        let e = run(&["view", "lib.rs"], 32_000).unwrap_err().0;
+        let e = run(&["view", "lib.rs"], 32_000).unwrap();
         assert!(e.contains("E1002") && e.contains("src/other/lib.rs"), "{e}");
-        let e = run(&["view", "src/lib.rs::nested"], 32_000).unwrap_err().0;
+        let e = run(&["view", "src/lib.rs::nested"], 32_000).unwrap();
         assert!(e.contains("E1001") && e.contains("grep nested --in src/lib.rs --context 3"), "{e}");
-        assert!(run(&["view", "check.py::test_one"], 32_000).unwrap().starts_with("tests/check.py:12..16\n12:     @skip\n"));
+        // A refusal of one operand is its own part of the reply: the other is answered.
+        let mixed = run(&["view", "src/lib.rs::nested", "src/other/lib.rs"], 32_000).unwrap();
+        assert!(
+            mixed.contains("E1001") && mixed.contains("grep nested --in src/lib.rs --context 3") && mixed.contains("src/other/lib.rs: 1 lines, 1 items\n"),
+            "{mixed}"
+        );
+        assert!(run(&["view", "check.py::test_one"], 32_000).unwrap().starts_with("tests/check.py:13..17\n13:     @skip\n"));
         // Over the budget: names only, then a cut at a whole line.
         let short = run(&["view", "src/lib.rs"], outline.len() - 1).unwrap();
         assert!(short.contains("  4..8 struct Store\n") && short.contains("    11..16 fn Store::open\n"), "{short}");

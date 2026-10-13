@@ -209,7 +209,8 @@ fn js_imports(text: &str) -> Vec<JsImport> {
                     && let Some(alias) = rest.split_whitespace().next()
                 {
                     for (i, _) in text.match_indices(&format!("{alias}.")) {
-                        if text[..i].chars().last().is_some_and(word) {
+                        // `obj.m.name` and `obj?.m.name` are another object's property
+                        if text[..i].chars().last().is_some_and(|c| word(c) || c == '.') {
                             continue;
                         }
                         let member: String = text[i + alias.len() + 1..].chars().take_while(|c| word(*c)).collect();
@@ -331,6 +332,114 @@ fn end_all<F: FnOnce(bool) -> Result<(), Failure>>(ends: Vec<F>, kept: bool) -> 
         }
     }
     first.map_or(Ok(()), Err)
+}
+
+/// The failure `e`, with the error of putting back what came before it, if any.
+fn with_put_back(e: Failure, ended: Result<(), Failure>) -> Failure {
+    match ended {
+        Ok(()) => e,
+        Err(end) => Failure(format!("{}\n\nPutting back also failed: {}", e.0, end.0), e.1),
+    }
+}
+
+/// Whether the reference at `a..b` in `text` names a type rather than a value:
+/// anywhere before `head` (a signature, a type's body, a constant's
+/// annotation), and in a body after `:`, as a `-> T {` return type, or as an
+/// argument of a type that is itself in a type position.
+fn type_position(text: &str, a: usize, b: usize, head: usize) -> bool {
+    if a < head {
+        return true;
+    }
+    // strings and comments blanked, so their brackets and words count for nothing; offsets stay
+    let text = &gleam::strip_comments(text);
+    let before = text[..a].trim_end();
+    if before.ends_with("::") {
+        return false;
+    }
+    if before.ends_with(':') {
+        return !is_label(&before[..before.len() - 1]);
+    }
+    if before.ends_with("->") {
+        // an anonymous function's return type, its arguments skipped, comes before its body
+        let mut rest = text[b..].trim_start();
+        if rest.starts_with('(') {
+            let mut depth = 0;
+            for (i, c) in rest.char_indices() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            rest = &rest[i + 1..];
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        return rest.trim_start().starts_with('{');
+    }
+    if !(before.ends_with('(') || before.ends_with(',')) {
+        return false;
+    }
+    // the bracket the reference is an argument of
+    let mut depth = 0;
+    let mut open = None;
+    for (i, c) in text[..a].char_indices().rev() {
+        match c {
+            ')' | ']' => depth += 1,
+            '(' | '[' if depth > 0 => depth -= 1,
+            '(' => {
+                open = Some(i);
+                break;
+            }
+            '[' | '{' => return false,
+            _ => {}
+        }
+    }
+    let Some(p) = open else { return false };
+    let start = text[..p].trim_end_matches(|c: char| c.is_alphanumeric() || c == '_' || c == '.').len();
+    let name = &text[start..p];
+    if name == "fn" {
+        // a function type's arguments; an anonymous function's are lowercase names
+        return true;
+    }
+    if name.is_empty() && text[..p].ends_with('#') {
+        return type_position(text, p - 1, p, head);
+    }
+    name.rsplit('.').next().is_some_and(|n| n.starts_with(|c: char| c.is_uppercase())) && type_position(text, start, p, head)
+}
+
+/// Whether the `:` that follows `before` ends a label of a call, a record update
+/// or a pattern (`f(state: x)`) rather than a parameter or `let` annotation
+/// (`fn f(state: T)`, `fn(state: T)`, `let state: T`).
+fn is_label(before: &str) -> bool {
+    let mut depth = 0;
+    for (i, c) in before.char_indices().rev() {
+        match c {
+            ')' | ']' | '}' => depth += 1,
+            '(' | '[' | '{' if depth > 0 => depth -= 1,
+            '(' => {
+                let head = before[..i].trim_end();
+                if head.ends_with('#') {
+                    return false;
+                }
+                let word_start = head.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_').len();
+                let word = &head[word_start..];
+                if word.is_empty() || word == "fn" {
+                    return false;
+                }
+                // after the keyword `fn`, not a word that ends in it
+                let kw = head[..word_start].trim_end();
+                let is_fn = kw.strip_suffix("fn").is_some_and(|r| !r.ends_with(|c: char| c.is_alphanumeric() || c == '_'));
+                return !is_fn;
+            }
+            '[' | '{' => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Text with `edits` (span, replacement) applied.
@@ -810,6 +919,12 @@ impl Plan<'_> {
             let imps = self.old_imports(&oh);
             let header = ix.modules.iter().find(|m| m.path == oh).map_or("", |m| m.header.as_str());
             let text = ix.syms[h].text.clone();
+            // where the declaration's types end and its values begin
+            let head = match ix.syms[h].kind {
+                Kind::Fn => fn_body_start(&ix.syms[h]).unwrap_or(text.len()),
+                Kind::Type => text.len(),
+                Kind::Const => text.find('=').unwrap_or(text.len()),
+            };
             let mut bound: Option<HashSet<String>> = None;
             let mut edits: Vec<(usize, usize, String)> = vec![];
             for (r, a, b) in gleam::references_spans(&text) {
@@ -821,10 +936,10 @@ impl Plan<'_> {
                 {
                     res.x = Some(keep);
                     // a constructor named like the retired type keeps its name (the
-                    // survivor's constructors match); one followed by `(` is a call or pattern
+                    // survivor's constructors match): one in a value or pattern, not a type
                     let ctor_alike = ix.syms[gone].kind == Kind::Type
                         && gleam::constructors(&ix.syms[gone].text).contains(&ix.syms[gone].name)
-                        && text[b..].trim_start().starts_with('(');
+                        && !type_position(&text, a, b, head);
                     if res.member == ix.syms[gone].name && ix.syms[keep].name != ix.syms[gone].name && !ctor_alike {
                         res.member = ix.syms[keep].name.clone();
                         renamed = true;
@@ -1591,8 +1706,7 @@ impl Store {
                 match lockdown::carry_file(&self.root, &c.from, &tgt.root, &c.to, c.text.clone()) {
                     Ok(end) => carried.push(end),
                     Err(e) => {
-                        let _ = end_all(carried, false);
-                        return Err(e);
+                        return Err(with_put_back(e, end_all(carried, false)));
                     }
                 }
             }
@@ -1614,9 +1728,8 @@ impl Store {
                 match changed {
                     Ok(end) => tomls.push(end),
                     Err(e) => {
-                        let _ = end_all(tomls, false);
-                        let _ = end_all(carried, false);
-                        return Err(e);
+                        let (a, b) = (end_all(tomls, false), end_all(carried, false));
+                        return Err(with_put_back(e, a.and(b)));
                     }
                 }
             }
@@ -2196,7 +2309,9 @@ mod tests {
         let store = Store::at(&root.join("web")).unwrap();
         let out = extract(&store, &["board.Task", "board.new_task", "board.bump", "board.lane", "--to", "solace_task", "--to-project", "components"]).unwrap();
         assert!(out.contains("Retired module board"), "{out}");
-        assert!(out.contains("Dependency added: web -> components\n") || !out.contains("Dependency added: components"), "{out}");
+        // the test goes too, so nothing left in web uses components
+        assert!(!out.contains("Dependency added"), "{out}");
+        assert_eq!(fs::read_to_string(root.join("web/gleam.toml")).unwrap(), "name = \"web\"\nversion = \"1.0.0\"\n\n[dependencies]\n\n[dev-dependencies]\n");
         let ix = store.index().unwrap();
         assert!(ix.modules.iter().all(|m| m.path != "board"), "board should be gone");
         let dest = Store::at(&root.join("components")).unwrap();
@@ -2233,6 +2348,15 @@ mod tests {
         assert!(ffi_spans("@external(javascript, \"lib\", \"f\")\npub fn f() -> Int").is_empty());
     }
 
+    /// A failure keeps its message and code; a failed put-back is added to it.
+    #[test]
+    fn a_failed_put_back_is_named() {
+        let e = || Failure("E6002 x: no file there".into(), 1);
+        assert_eq!(with_put_back(e(), Ok(())).0, "E6002 x: no file there");
+        let both = with_put_back(e(), Err(Failure("disk full".into(), 1)));
+        assert_eq!((both.0.as_str(), both.1), ("E6002 x: no file there\n\nPutting back also failed: disk full", 1));
+    }
+
     /// Relative specifiers of every import form, with their lines and brace names.
     #[test]
     fn js_imports_are_found() {
@@ -2254,7 +2378,7 @@ mod tests {
     /// names what it uses as `m.name`, and a `$`-escaped name matches its plain one.
     #[test]
     fn js_imports_skip_noise_and_read_namespaces() {
-        let js = "// import { a } from \"./c.mjs\";\n/* from \"./d.mjs\" */\nconst s = \"import x from './e.mjs'\";\nconst t = Array.from(\"./f.mjs\");\nimport * as m from \"./board.mjs\";\nimport { type$ } from \"./g.mjs\";\nm.abs(1);\n";
+        let js = "// import { a } from \"./c.mjs\";\n/* from \"./d.mjs\" */\nconst s = \"import x from './e.mjs'\";\nconst t = Array.from(\"./f.mjs\");\nimport * as m from \"./board.mjs\";\nimport { type$ } from \"./g.mjs\";\nm.abs(1);\nobj.m.name;\nobj?.m.other;\n";
         let found: Vec<(String, Vec<String>)> = js_imports(js).into_iter().map(|i| (js[i.start..i.end].to_string(), i.names)).collect();
         assert_eq!(found, vec![("./board.mjs".to_string(), vec!["abs".to_string()]), ("./g.mjs".to_string(), vec!["type".to_string()])]);
     }

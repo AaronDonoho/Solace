@@ -161,6 +161,21 @@ test('markdown links a task by id, as [label](task:<id>) or a bare task:<id> (D-
   expect(markdown(`[x" onclick="y](task:${id})`)).not.toContain('" onclick="');
 });
 
+test('markdown links a feature or milestone by id as it does a task (D-122)', async () => {
+  const { markdown } = await import('../src/task_api.mjs');
+  const id = '0123456789abcdef';
+  for (const kind of ['feature', 'milestone']) {
+    const link = label => `<a href="/${kind}/${id}" data-${kind}="${id}">${label}</a>`;
+    expect(markdown(`See [the plan](${kind}:${id}).`)).toBe(`<p>See ${link('the plan')}.</p>`);
+    expect(markdown(`After ${kind}:${id}, then`)).toBe(`<p>After ${link(`${kind}:${id}`)}, then</p>`);
+    expect(markdown(`[${kind}:${id}](${kind}:${id})`)).toBe(`<p>${link(`${kind}:${id}`)}</p>`);
+    expect(markdown(`\`${kind}:${id}\``)).toBe(`<p><code>${kind}:${id}</code></p>`);
+    for (const text of [`${kind}:0123`, `${kind}:${id}0`, `my${kind}:${id}`, `![x](${kind}:${id})`, `[x](${kind}:../../a)`])
+      expect(markdown(text)).not.toContain('<a');
+  }
+  expect(markdown(`epic:${id}`)).not.toContain('<a');
+});
+
 test('markdown applies headings and lists mixed with other lines, nests lists, and keeps code literal', async () => {
   const { markdown } = await import('../src/task_api.mjs');
   expect(markdown('Summary:\n- fixed A\n- tested B')).toBe('<p>Summary:</p><ul><li>fixed A</li><li>tested B</li></ul>');

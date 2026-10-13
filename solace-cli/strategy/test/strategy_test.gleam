@@ -649,10 +649,13 @@ pub fn start_takes_its_context_from_the_selection_test() {
     == "{\"model\":\"fake\",\"text\":\"Plan it\",\"context\":{\"kind\":\"task\",\"id\":\"t1\"}}"
   assert json.to_string(plan.start_body("", "high", "Go", plan.page))
     == "{\"effort\":\"high\",\"text\":\"Go\",\"context\":{\"kind\":\"page\"}}"
-  // A task with an open run offers it instead of a new start.
+  // A task with an open run offers it instead of a new start: New run
+  // shows it.
   let shown = element.to_string(strategy.view(model))
   assert string.contains(shown, "A planning run on this is open.")
-  assert !string.contains(shown, ">Start</button>")
+  assert !string.contains(shown, "id=\"plan-text\"")
+  assert plan.new_run(model.runs, strategy.plan_context(model)) == "r1"
+  assert plan.new_run(model.runs, plan.page) == ""
 }
 
 /// A task row, a feature and a milestone with an open run show a marker; it
@@ -674,7 +677,8 @@ pub fn open_runs_mark_their_records_until_they_end_test() {
   )
   assert string.contains(
     page(model),
-    "<h3>Launch <span class=\"state\">proposed</span>" <> marker,
+    "<h3 data-milestone-id=\"m1\">Launch <span class=\"state\">proposed</span>"
+      <> marker,
   )
   let ended =
     model
@@ -700,12 +704,14 @@ pub fn open_runs_mark_their_records_until_they_end_test() {
   assert markers(ended) == 1
   assert string.contains(
     page(ended),
-    "<h3>Launch <span class=\"state\">proposed</span>" <> marker,
+    "<h3 data-milestone-id=\"m1\">Launch <span class=\"state\">proposed</span>"
+      <> marker,
   )
 }
 
 /// The shown run stays in the panel across tab switches; the panel lists
-/// the runs on its context newest first, and Close returns to Start.
+/// the runs on its context newest first under Earlier runs, and New run
+/// returns to the start form.
 pub fn the_panel_stays_across_tabs_and_lists_past_runs_test() {
   let model =
     planned()
@@ -733,10 +739,11 @@ pub fn the_panel_stays_across_tabs_and_lists_past_runs_test() {
   assert string.contains(shown(model), "id=\"plan-text\"")
   let model = step(model, strategy.ShowPlan(""))
   let page = shown(model)
-  assert string.contains(page, ">Start</button>")
+  assert string.contains(page, "id=\"plan-text\"")
+  assert string.contains(page, ">Send</button>")
   assert list.map(plan.past(model.runs, plan.page), fn(r) { r.id })
     == ["r4", "r0"]
-  let assert [_, after] = string.split(page, "Runs on this")
+  let assert Ok(#(_, after)) = string.split_once(page, "Earlier runs")
   assert string.contains(after, "Ended: stopped")
   assert string.contains(after, "Ended: planned")
   // An ended run opens read-only.
@@ -745,7 +752,7 @@ pub fn the_panel_stays_across_tabs_and_lists_past_runs_test() {
   // Collapsed, the panel keeps one line.
   let collapsed = shown(step(model, strategy.PlanCollapse))
   assert string.contains(collapsed, "No run open")
-  assert !string.contains(collapsed, ">Start</button>")
+  assert !string.contains(collapsed, "id=\"plan-text\"")
 }
 
 /// A reply's run is shown with its notes and proposals; an answer is sent
@@ -977,13 +984,13 @@ pub fn the_panel_names_its_planning_context_test() {
 /// `<solace-task>` to show it; asking again for the same task is news too.
 pub fn a_task_link_opens_its_task_on_the_tasks_tab_test() {
   let model = strategy.new(strategy.Roadmap)
-  let #(model, _) = strategy.update(model, strategy.Focus("a", "abc"))
+  let #(model, _) = strategy.update(model, strategy.Focus("task", "a", "abc"))
   assert model.tab == strategy.Tasks
   assert model.selected == Some(#("a", "abc"))
   assert model.reveal == #("abc", 1)
-  let #(model, _) = strategy.update(model, strategy.Focus("a", "abc"))
+  let #(model, _) = strategy.update(model, strategy.Focus("task", "a", "abc"))
   assert model.reveal == #("abc", 2)
-  let #(same, _) = strategy.update(model, strategy.Focus("a", ""))
+  let #(same, _) = strategy.update(model, strategy.Focus("task", "a", ""))
   assert same.reveal == #("abc", 2)
 }
 
@@ -1226,4 +1233,74 @@ pub fn new_messages_follow_the_human_or_wait_test() {
   )
   // Scrolling back to the end clears the button too.
   assert !step(waiting, strategy.PlanScrolled(True)).plan_new
+}
+
+/// The run bar sits above the conversation, the message box below it. An
+/// open run's bar has End, Stop, Earlier runs and New run, and its box is the
+/// markdown editor with Send; an ended run's bar has no End or Stop and there
+/// is no box; with no run shown, the box starts one.
+pub fn the_run_bar_holds_the_run_controls_test() {
+  let shown = fn(model) { element.to_string(strategy.view(model)) }
+  let open = shown(step(planned(), strategy.ShowPlan("r3")))
+  assert in_order(open, [
+    "class=\"plan-bar\"",
+    "Waiting for you · fake",
+    ">End</button>",
+    ">Stop</button>",
+    "Earlier runs",
+    ">New run</button>",
+    "class=\"plan-body\"",
+    "class=\"plan-compose\"",
+    "class=\"composer\"",
+    ">Write</button>",
+    ">Preview</button>",
+    "id=\"plan-text\"",
+    ">Send</button>",
+  ])
+  assert !string.contains(open, "Runs on this")
+  let ended = shown(step(planned(), strategy.ShowPlan("r0")))
+  assert in_order(ended, [
+    "class=\"plan-bar\"",
+    "Ended: planned",
+    "Earlier runs",
+    ">New run</button>",
+    "class=\"plan-body\"",
+  ])
+  assert !string.contains(ended, ">End</button>")
+  assert !string.contains(ended, ">Stop</button>")
+  assert !string.contains(ended, "id=\"plan-text\"")
+  let none = shown(planned())
+  assert in_order(none, [
+    "class=\"plan-bar\"",
+    "No run open",
+    ">New run</button>",
+    "class=\"plan-body\"",
+    "class=\"plan-compose\"",
+    "class=\"composer\"",
+    "id=\"plan-text\"",
+    ">Send</button>",
+  ])
+  assert !string.contains(none, ">End</button>")
+  // The box's Preview shows the typed message; showing a run resets it.
+  let previewed =
+    planned()
+    |> step(strategy.PlanText("**Plan** search"))
+    |> step(strategy.PlanPreview(True))
+  assert string.contains(shown(previewed), "<strong>Plan</strong> search")
+  assert !step(previewed, strategy.ShowPlan("r3")).plan_preview
+}
+
+/// D-122: a feature link opens the Features tab, a milestone link the
+/// Roadmap tab; neither opens a task.
+pub fn a_feature_or_milestone_link_opens_its_tab_test() {
+  let model = strategy.new(strategy.Tasks)
+  let #(model, _) = strategy.update(model, strategy.Focus("feature", "", "f1"))
+  assert model.tab == strategy.Features
+  let #(model, _) =
+    strategy.update(model, strategy.Focus("milestone", "", "m1"))
+  assert model.tab == strategy.Roadmap
+  assert model.selected == None
+  assert model.reveal == #("", 0)
+  let #(same, _) = strategy.update(model, strategy.Focus("feature", "", ""))
+  assert same.tab == strategy.Roadmap
 }

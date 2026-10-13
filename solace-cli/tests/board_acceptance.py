@@ -1021,7 +1021,7 @@ class Board(unittest.TestCase):
 
     def test_a_task_link_finds_its_task(self):  # D-98
         t=self.completed([])
-        self.assertEqual(self.api('GET','/tasks/find/'+t['id']),{'id':t['id'],'dir':'.','archived':False})
+        self.assertEqual(self.api('GET','/tasks/find/'+t['id']),{'id':t['id'],'dir':'.','archived':False,'title':t['title']})
         self.action(t,'approve');self.action(t,'complete')
         self.api('POST','/tasks/'+t['id']+'/archive',{})
         self.assertEqual(self.api('GET','/tasks/find/'+t['id'])['archived'],True)
@@ -1030,6 +1030,20 @@ class Board(unittest.TestCase):
         # The link's own address loads the shell, which resolves it.
         status,kind,_=self.raw('GET','/task/'+t['id'])
         self.assertEqual((status,kind),(200,'text/html'))
+
+    def test_a_feature_or_milestone_link_finds_its_title(self):  # D-122
+        m=self.api('POST','/milestones',{'title':'1.0'})
+        f=self.api('POST','/features',{'title':'F','milestone':m['id']})
+        for kind,r in (('milestones',m),('features',f)):
+            self.assertEqual(self.api('GET','/%s/find/%s'%(kind,r['id'])),{'id':r['id'],'title':r['title']})
+            status,_,body=self.raw('GET','/%s/find/0123456789abcdef'%kind)
+            self.assertEqual((status,json.loads(body)['code']),(404,'E7023'))
+            status,_,body=self.raw('GET','/%s/find/bad.id'%kind)
+            self.assertEqual((status,json.loads(body)['code']),(400,'E7001'))
+        # The links' own addresses load the shell, which resolves them.
+        for page in ('/feature/'+f['id'],'/milestone/'+m['id']):
+            status,kind,_=self.raw('GET',page)
+            self.assertEqual((status,kind),(200,'text/html'))
 
     def test_milestones_and_features_are_root_records(self):  # D-87
         stream=self.stream()

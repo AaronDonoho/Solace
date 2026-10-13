@@ -142,37 +142,42 @@ fn dependencies(name: &str) -> bool {
     name.split('/').any(|c| c == "node_modules")
 }
 pub fn tier(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -> String {
+    tier_and_bytes(root, v, name, proposed).0
+}
+
+/// `tier`, with the file's bytes when they were read to decide the tier, so a
+/// caller that wants a size reads the file once (D-119 point 4).
+fn tier_and_bytes(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -> (String, Option<Vec<u8>>) {
     // A project of plain files holds no symbols (D-60).
     if root.join("gleam.toml").exists() && (name.starts_with("src/") || name.starts_with("test/")) && name.ends_with(".gleam") {
-        return "graph".into();
+        return ("graph".into(), None);
     }
     if name == "solace.toml" || name == "AGENTS.md" {
-        return "protected".into();
+        return ("protected".into(), None);
     }
     if internal(root, name) {
-        return "internal".into();
+        return ("internal".into(), None);
     }
     if is_gitignore(name) {
-        return "protected".into();
+        return ("protected".into(), None);
     }
     if dependencies(name) {
-        return "unwatched".into();
+        return ("unwatched".into(), None);
     }
     if name == ".git" || name.starts_with(".git/") || name == "build" || name.starts_with("build/") || name == "manifest.toml" {
-        return "unwatched".into();
+        return ("unwatched".into(), None);
     }
     if gitignored(root, name) || patterns(v, "unwatched", name) {
-        return "unwatched".into();
-    }
-    let size = proposed.map(|b| b.len() as u64).unwrap_or_else(|| fs::metadata(root.join(name)).map_or(0, |m| m.len()));
-    if size > limit(v) as u64 {
-        return "unwatched (over limit)".into();
+        return ("unwatched".into(), None);
     }
     let bytes = proposed.map(Vec::from).unwrap_or_else(|| fs::read(root.join(name)).unwrap_or_default());
-    if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
-        return "unwatched (binary)".into();
+    if bytes.len() as u64 > limit(v) as u64 {
+        return ("unwatched (over limit)".into(), Some(bytes));
     }
-    "watched".into()
+    if bytes.contains(&0) || std::str::from_utf8(&bytes).is_err() {
+        return ("unwatched (binary)".into(), Some(bytes));
+    }
+    ("watched".into(), Some(bytes))
 }
 fn session_file(root: &Path) -> PathBuf {
     let session = env::var("SOLACE_SESSION")
@@ -271,7 +276,7 @@ pub fn drop_records(root: &Path, rid: &str) -> Result<(), Failure> {
 pub fn watched_paths(root: &Path, v: &toml::Value) -> Result<Vec<String>, Failure> {
     let mut rows = vec![];
     tree_rows(root, v, root, &mut rows)?;
-    Ok(rows.into_iter().filter(|(_, t)| t == "watched").map(|(n, _)| n).collect())
+    Ok(rows.into_iter().filter(|(_, t, _)| t == "watched").map(|(n, _, _)| n).collect())
 }
 #[cfg(test)]
 fn read(root: &Path, name: &str, args: &[&str], budget: usize) -> Out {
@@ -898,32 +903,33 @@ fn patch_with_draft(store: &Store, v: &toml::Value, id: Option<&str>, raw: &str,
         }
     }
 }
-fn tree_rows(root: &Path, v: &toml::Value, dir: &Path, out: &mut Vec<(String, String)>) -> Result<(), Failure> {
+fn tree_rows(root: &Path, v: &toml::Value, dir: &Path, out: &mut Vec<(String, String, Option<String>)>) -> Result<(), Failure> {
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let p = e.path();
         let name = p.strip_prefix(root).unwrap().to_string_lossy().to_string();
-        let t = tier(root, v, &name, None);
+        let (t, bytes) = tier_and_bytes(root, v, &name, None);
         if e.file_type()?.is_symlink() {
-            out.push((name, "unwatched (symlink)".into()));
+            out.push((name, "unwatched (symlink)".into(), None));
         } else if e.file_type()?.is_dir() {
             if t == "internal" {
-                out.push((format!("{name}/"), "internal".into()));
+                out.push((format!("{name}/"), "internal".into(), None));
             } else if name == "build" || name == ".git" || dependencies(&name) || patterns(v, "unwatched", &name) || gitignored(root, &name) {
-                out.push((format!("{name}/"), format!("unwatched; {} files", count_files(&p)?)));
+                out.push((format!("{name}/"), format!("unwatched; {} files", count_files(&p)?), None));
             } else {
                 let mut children = vec![];
                 tree_rows(root, v, &p, &mut children)?;
-                if children.iter().any(|(_, tier): &(String, String)| tier == "graph" || tier == "watched" || tier == "protected") {
-                    out.push((format!("{name}/"), String::new()));
+                if children.iter().any(|(_, tier, _): &(String, String, Option<String>)| tier == "graph" || tier == "watched" || tier == "protected") {
+                    out.push((format!("{name}/"), String::new(), None));
                     out.extend(children);
                 } else {
-                    out.push((format!("{name}/"), format!("unwatched; {} files", count_files(&p)?)));
+                    out.push((format!("{name}/"), format!("unwatched; {} files", count_files(&p)?), None));
                 }
             }
         } else {
-            out.push((name, t));
+            let size = measure(root, v, &name, &t, bytes.as_deref());
+            out.push((name, t, size));
         }
     }
     Ok(())
@@ -931,18 +937,18 @@ fn tree_rows(root: &Path, v: &toml::Value, dir: &Path, out: &mut Vec<(String, St
 fn tree(root: &Path, v: &toml::Value, dir: &Path, out: &mut String) -> Result<(), Failure> {
     let mut rows = vec![];
     tree_rows(root, v, dir, &mut rows)?;
-    for (name, tier) in rows {
-        *out += &listed(root, v, &name, &tier);
+    for (name, tier, size) in rows {
+        *out += &listed(&name, &tier, size.as_deref());
     }
     Ok(())
 }
 /// One line of `files`: an expanded folder alone, any other entry with its
 /// tier, and a file other than graph source with its size (D-119).
-fn listed(root: &Path, v: &toml::Value, name: &str, tier: &str) -> String {
+fn listed(name: &str, tier: &str, size: Option<&str>) -> String {
     if tier.is_empty() {
         return format!("{name}\n");
     }
-    match measure(root, v, name, tier) {
+    match size {
         Some(n) => format!("{name} [{tier}; {n}]\n"),
         None => format!("{name} [{tier}]\n"),
     }
@@ -950,16 +956,28 @@ fn listed(root: &Path, v: &toml::Value, name: &str, tier: &str) -> String {
 /// A file's line count when it is UTF-8 text, else its size in bytes, as is
 /// one over `watch_limit`, which is not read. Folders, graph source, symlinks
 /// and Solace's own files have none.
-fn measure(root: &Path, v: &toml::Value, name: &str, tier: &str) -> Option<String> {
+/// `bytes` is the file's content when the caller already read it, so a file
+/// listed by `files` is read once (D-119 point 4).
+fn measure(root: &Path, v: &toml::Value, name: &str, tier: &str, bytes: Option<&[u8]>) -> Option<String> {
     if name.ends_with('/') || tier == "graph" || tier == "internal" || tier.contains("symlink") {
         return None;
     }
-    let size = fs::metadata(root.join(name)).ok()?.len();
+    let size = match bytes {
+        Some(b) => b.len() as u64,
+        None => fs::metadata(root.join(name)).ok()?.len(),
+    };
     if size > limit(v) as u64 {
         return Some(format!("{size} bytes"));
     }
-    let bytes = fs::read(root.join(name)).ok()?;
-    match std::str::from_utf8(&bytes) {
+    let read;
+    let bytes = match bytes {
+        Some(b) => b,
+        None => {
+            read = fs::read(root.join(name)).ok()?;
+            &read
+        }
+    };
+    match std::str::from_utf8(bytes) {
         Ok(text) if !bytes.contains(&0) => Some(format!("{} lines", text.lines().count())),
         _ => Some(format!("{size} bytes")),
     }
@@ -1353,7 +1371,7 @@ pub fn dispatch(
                 }
                 let name = file_name(Path::new(name));
                 let p = reachable(root, &name)?;
-                let t = tier(root, v, &name, None);
+                let (t, bytes) = tier_and_bytes(root, v, &name, None);
                 if a[0] != "files" && t == "graph" {
                     let module = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/")).unwrap().trim_end_matches(".gleam");
                     let fix = if p.exists() {
@@ -1373,7 +1391,7 @@ pub fn dispatch(
                         if p.is_dir() {
                             tree(root, v, &p, &mut out)?;
                         } else {
-                            out += &listed(root, v, &name, &t);
+                            out += &listed(&name, &t, measure(root, v, &name, &t, bytes.as_deref()).as_deref());
                         }
                     }
                     "read" => {
@@ -1556,7 +1574,7 @@ fn grep(root: &Path, v: &toml::Value, query: &str, budget: usize) -> Out {
         None => "watched files".into(),
     };
     let mut hits = vec![];
-    for (name, _) in rows.into_iter().filter(|(_, t)| t == "watched" || t == "protected") {
+    for (name, _, _) in rows.into_iter().filter(|(_, t, _)| t == "watched" || t == "protected") {
         let Ok(text) = fs::read_to_string(root.join(&name)) else { continue };
         hits.extend(grep_file(&name, &text, &q, context));
     }
@@ -1574,7 +1592,22 @@ fn grep(root: &Path, v: &toml::Value, query: &str, budget: usize) -> Out {
         shown += 1;
     }
     if shown < hits.len() {
-        out += &format!("… {} more files match, not shown; narrow with `--in <path>`.\n", hits.len() - shown);
+        // The files left out, named so the agent narrows (D-119 point 2): the
+        // grammar follows the count, and a budget that fits no file says so.
+        // When `--in` already names the only place searched, narrowing is
+        // circular, so the tail points at the rest of the call and `--context`.
+        let left = hits.len() - shown;
+        let more = if left == 1 { "file matches" } else { "files match" };
+        let narrow = if within.is_some() {
+            "run grep alone in the call, or drop `--context`"
+        } else {
+            "narrow with `--in <path>`"
+        };
+        out += &if shown == 0 {
+            format!("… the budget fits no file; {} {more}, {narrow}.\n", left)
+        } else {
+            format!("… {} more {more}, not shown; {narrow}.\n", left)
+        };
     }
     Ok(out)
 }
@@ -1606,7 +1639,7 @@ fn grep_options(raw: &str) -> Result<(&str, Option<&str>, usize), Failure> {
 /// Narrows `rows` to the path of `--in`, checked as `read` checks a path, and
 /// gives its name. A path that exists but isn't searched is named instead (the
 /// inner `Err`); one that doesn't exist is refused.
-fn grep_in(root: &Path, v: &toml::Value, p: &str, rows: &mut Vec<(String, String)>) -> Result<Result<String, String>, Failure> {
+fn grep_in(root: &Path, v: &toml::Value, p: &str, rows: &mut Vec<(String, String, Option<String>)>) -> Result<Result<String, String>, Failure> {
     let name = file_name(Path::new(p));
     if name.is_empty() {
         return Ok(Ok("watched files".into()));
@@ -1621,8 +1654,8 @@ fn grep_in(root: &Path, v: &toml::Value, p: &str, rows: &mut Vec<(String, String
     let held = |t: &str| t == "watched" || t == "protected";
     if target.is_dir() {
         let dir = format!("{name}/");
-        rows.retain(|(n, _)| n.starts_with(&dir));
-        if !rows.iter().any(|(_, t)| held(t)) {
+        rows.retain(|(n, _, _)| n.starts_with(&dir));
+        if !rows.iter().any(|(_, t, _)| held(t)) {
             return Ok(Err(format!("{name}/ holds no watched or protected files; not searched\n")));
         }
     } else {
@@ -1631,22 +1664,26 @@ fn grep_in(root: &Path, v: &toml::Value, p: &str, rows: &mut Vec<(String, String
             let why = if t == "graph" { "source held as symbols (use `find`)".to_string() } else { t };
             return Ok(Err(format!("{name} is {why}; not searched\n")));
         }
-        rows.retain(|(n, _)| *n == name);
+        rows.retain(|(n, _, _)| *n == name);
     }
     Ok(Ok(name))
 }
 /// A file's matching lines (up to 10) with `context` lines around them, as
 /// the reply shows them; `None` when nothing matches `q`.
 fn grep_file(name: &str, text: &str, q: &str, context: usize) -> Option<String> {
-    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    // Matching is on the trimmed line; the reply shows the line as written, so
+    // a match's indentation is kept (D-119 point 1).
+    let raw: Vec<&str> = text.lines().collect();
+    let lines: Vec<&str> = raw.iter().map(|l| l.trim()).collect();
     let found: Vec<Option<usize>> = lines.iter().map(|l| l.to_lowercase().find(q)).collect();
     let hits: Vec<usize> = (0..lines.len()).filter(|&i| found[i].is_some()).collect();
     if hits.is_empty() {
         return None;
     }
+    let shown = &hits[..hits.len().min(10)];
     // Windows around the shown matches; those that touch merge.
     let mut windows: Vec<(usize, usize)> = vec![];
-    for &i in &hits[..hits.len().min(10)] {
+    for &i in shown {
         let w = (i.saturating_sub(context), (i + context).min(lines.len() - 1));
         match windows.last_mut() {
             Some(last) if w.0 <= last.1 + 1 => last.1 = w.1,
@@ -1659,9 +1696,11 @@ fn grep_file(name: &str, text: &str, q: &str, context: usize) -> Option<String> 
             out += "  …\n";
         }
         for j in a..=b {
-            let (mark, line) = match found[j] {
-                Some(at) => (':', around(lines[j], at, q.len())),
-                None => ('-', around(lines[j], 0, 0)),
+            // A line that matches but is past the 10 shown is context, not a
+            // match line (D-119 point 2).
+            let (mark, line) = match found[j].filter(|_| shown.binary_search(&j).is_ok()) {
+                Some(at) => (':', around(raw[j], at + raw[j].len() - raw[j].trim_start().len(), q.len())),
+                None => ('-', around(raw[j], 0, 0)),
             };
             out += &format!("  {:>4}{mark} {line}\n", j + 1);
         }
@@ -1715,7 +1754,7 @@ fn around(line: &str, at: usize, len: usize) -> String {
 pub fn tree_files(root: &Path, settings: &toml::Value) -> Result<Vec<(String, String)>, Failure> {
     let mut rows = vec![];
     tree_rows(root, settings, root, &mut rows)?;
-    Ok(rows.into_iter().filter(|(_, tier)| !tier.is_empty() && tier != "internal" && tier != "graph").collect())
+    Ok(rows.into_iter().filter(|(_, tier, _)| !tier.is_empty() && tier != "internal" && tier != "graph").map(|(n, t, _)| (n, t)).collect())
 }
 
 #[cfg(test)]
@@ -1851,6 +1890,13 @@ mod tests {
         // A long context line is cut around its start; the reply stays short.
         let got = call(&s, &v, &["grep", "hit", "five", "--context", "5"], "", None).unwrap();
         assert!(got.contains("    10- x x") && got.lines().all(|l| l.len() < 260), "{got}");
+        // A match past the 10 shown, inside a window, is context, not a match line.
+        fs::write(s.root.join("docs/b.txt"), (1..=12).map(|n| format!("hit {n}")).collect::<Vec<_>>().join("\n") + "\n").unwrap();
+        let got = call(&s, &v, &["grep", "hit", "--in", "docs/b.txt", "--context", "1"], "", None).unwrap();
+        assert!(got.starts_with("docs/b.txt (12 matches, showing 10)\n") && got.contains("    10: hit 10\n") && got.contains("    11- hit 11\n"), "{got}");
+        // A context line keeps its indentation, as the line is written.
+        fs::write(s.root.join("docs/c.txt"), "    ind hit\n        deep\n").unwrap();
+        assert_eq!(call(&s, &v, &["grep", "hit", "--in", "docs/c.txt", "--context", "1"], "", None).unwrap(), "docs/c.txt\n     1:     ind hit\n     2-         deep\n");
         for bad in ["0", "6", "x", "-1"] {
             let e = call(&s, &v, &["grep", "hit", "--context", bad], "", None).unwrap_err();
             assert!(e.0.contains("--context takes a number from 1 to 5") && e.1 == 2, "{bad}: {e:?}");
@@ -1939,9 +1985,27 @@ mod tests {
         assert!(got.len() <= 3_000 && (1..40).contains(&shown), "{} {shown}", got.len());
         assert!(got.ends_with(&format!("… {} more files match, not shown; narrow with `--in <path>`.\n", 45 - shown)), "{got}");
         assert_eq!(got.matches("needle").count(), shown * 6, "every shown file is whole");
-        // A budget below one file shows none and names them all.
+        // One file left out: the tail says "file matches".
+        for n in 0..45 {
+            fs::remove_file(s.root.join(format!("docs/f{n:02}.md"))).unwrap();
+        }
+        for n in 0..3 {
+            fs::write(s.root.join(format!("docs/g{n}.md")), (1..=30).map(|k| format!("needle {k}\n")).collect::<String>()).unwrap();
+        }
+        // Two of the three fit the budget, so the tail names one file.
+        let got = grep(&s.root, &v, "needle", 600).unwrap();
+        assert_eq!(got.matches("docs/g").count(), 2, "{got}");
+        assert!(got.ends_with("… 1 more file matches, not shown; narrow with `--in <path>`.\n"), "{got}");
+        // A budget below one file shows none and says so.
         let got = grep(&s.root, &v, "needle", 100).unwrap();
-        assert_eq!(got, "… 45 more files match, not shown; narrow with `--in <path>`.\n");
+        assert_eq!(got, "… the budget fits no file; 3 files match, narrow with `--in <path>`.\n");
+        // `--in` already names the only place searched, so the tail can't
+        // repeat it: it points at the rest of the call and `--context`.
+        let got = grep(&s.root, &v, "needle --in docs --context 1", 100).unwrap();
+        assert_eq!(got, "… the budget fits no file; 3 files match, run grep alone in the call, or drop `--context`.\n");
+        let got = grep(&s.root, &v, "needle --in docs --context 1", 500).unwrap();
+        assert_eq!(got.matches("docs/g").count(), 1, "{got}");
+        assert!(got.ends_with("… 2 more files match, not shown; run grep alone in the call, or drop `--context`.\n"), "{got}");
     }
     /// D-109: `write <path>` refuses patch text and a drastic shrink, and its
     /// reply gives the file's lines before and after.

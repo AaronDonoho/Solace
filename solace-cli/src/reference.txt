@@ -1,41 +1,44 @@
-Solace keeps this project's code as symbols; you read and change it by symbol
-through this tool, with no file access or shell. If it can't do what the task
+Solace keeps this project's code as symbols, read and changed by symbol
+through this tool (no file access or shell). If it can't do what the task
 needs, don't work around it: ask with `task ask`, or say so in your summary.
 Names: `module.name`, e.g. `pilot/checkout.pay`, or any unambiguous suffix
-(`checkout.pay`). Tests are symbols in test modules (`checkout_test`).
+(`checkout.pay`). Tests are symbols in test modules (`x_test`).
+Each line runs in one project: yours (session start names it) or its
+`--project <folder>`. Paths are relative to that project.
 
 Several commands go in one call, one per line, run in order. Each call is a
 turn that re-reads the conversation, so work in few calls:
 1. Read once: `inspect checkout.pay payments.capture --context` gives each
    symbol with the signatures it uses, its callers and a test. Don't ask again
-   for anything a reply showed. To reproduce a reported case:
+   for anything a reply showed. To reproduce a case:
    `probe --from checkout_test.pay_test --trace checkout.pay`.
 2. Change and test in one call: `submit` then `test`, or for other files
-   `write` (no path) then `run <name>`. All the edits of one change, in one
-   file or several, go in one patch as `apply_patch` takes, naming a symbol,
-   module or file (`*** Update File: <path>`), an `@@` hunk per edit; send
-   only what changes:
-      *** Begin Patch
-      *** Update: pilot/checkout.pay
-      @@
-      -  let total = sum(lines)
-      +  let total = sum(lines) + fee
-      *** Add: pilot/checkout_test.fee_test
-      +pub fn fee_test() { ... }
-      *** End Patch
+   `write` (no path) then `run <name>`. All the edits, in one
+   file or several, go in one patch, one header per symbol, module or file
+   (`*** Update: <module.name>`, `*** Add: <name>`, `*** Update File: <path>`),
+   an `@@` hunk per edit; send only what changes:
+    *** Begin Patch
+    *** Update: pilot/checkout.pay
+    @@
+    -  let total = sum(lines)
+    +  let total = sum(lines) + fee
+    *** Add: pilot/checkout_test.fee_test
+    +pub fn fee_test() { ... }
+    *** End Patch
    Imports are added automatically. Work out expected values from the task's
-   numbers and the rules the code documents, never from running the code.
+   numbers and the code's own rules, never from running the code.
 3. Fix only what the reply reports, then `test` again; look at what it lists
    as reached by no test. Once `test` passes, the code is done (it type-checks
    first; no `check`).
 Changing a signature or adding a field: `inspect <type or fn> --context` lists
 every construction or call site; patch the type or function and every site in
-one `submit` (`*** Update: <module>` holds several symbols' hunks), then `test`.
+one `submit` (`*** Update: <module>` holds several hunks), then `test`.
 Tests: one at the level the task reports (a checkout ticket gets a checkout
 test), and one per behavior the change shifts (a cap, a boundary). `inspect <a
 similar test> --context` shows its helpers; don't read whole test modules.
 
-Commands (`help [command]` gives every option):
+Commands (options are per command: `--lines` is `read`'s; `help <command>`
+lists them):
   inspect <name>... --context   symbols with what they use, callers and tests
   view <name|module|file>...    source, or an outline
   refs <name>...                what uses each symbol
@@ -49,16 +52,16 @@ Commands (`help [command]` gives every option):
   test [<name>... | --all]      run the tests a change can affect
   check [--warnings]            type-check everything
   probe                         run throwaway code from `text`
-  drafts                        rejected submits, to fix and retry
+  drafts                        rejected submits and writes, to fix and retry
   files [dir]...                trees: tiers, line counts
-  read <path>...                read files (--lines 5..9)
+  read <path> [--lines a..b]    a file, or some of its lines
   write [path]                  one replacement, or no path: a patch of many edits
   move <from> <to>              move a file
   work add | list | done        work records, kept across sessions
 Files by tier: src/ and test/ *.gleam are symbols (`submit`, never `write`);
 solace.toml, AGENTS.md, .gitignore: `write` with `reason`, the human approves;
 .solace/ and nested projects: their own commands; any other file, ignored
-or not: `read`, `write`, `move`, `remove` (not gleam.toml). `help` has the table.
+or not: `read`, `write`, `move`, `remove` (not gleam.toml).
 
 Commands in full
 Reading
@@ -100,11 +103,11 @@ Reading
   session start [--task]        this overview again (--task: for the task in `text`)
   session start [--scope <module>...]
                                 every symbol, and open work records with context
-  ... --project <folder>        view, inspect, refs, find, grep, files and read in
-                                another project under the same Solace root
-                                (session start lists them); any command in
-                                another project the task covers (its brief
-                                lists them), so it changes that project too
+  ... --project <folder>        this line only, in another project: its folder
+                                as session start lists it, from the Solace root
+                                (not `../x`). Reads (view, inspect, refs, find,
+                                grep, files, read) reach any project there;
+                                other commands, the projects the task covers
 Replies have a size limit: a signature is printed once per reply, and a reply
 that would be larger says what it left out and the command that shows it.
 

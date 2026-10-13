@@ -55,8 +55,8 @@ export function drag(x, width, move, done) {
   globalThis.addEventListener('pointerup', onUp);
   globalThis.addEventListener('pointercancel', onUp);
 }
-// The planning panel follows its newest message (D-118): the run's end (its
-// message box while open) is kept at the bottom of the panel's scroll area.
+// The planning panel follows its newest message (D-118): the run's end, right
+// above the pinned message box, is kept at the bottom of the panel's scroll area.
 const reach = 48;
 export function near_end(body) {
   const end = body?.querySelector?.('.plan-end');
@@ -68,6 +68,32 @@ export function scroll_plan(root) {
   const end = body?.querySelector('.plan-end');
   if (!body || !end) return;
   body.scrollTop += end.getBoundingClientRect().bottom - body.getBoundingClientRect().bottom;
+}
+// Shows the feature or milestone a link asked for (D-122): scrolls its card into view, focuses it and
+// marks it for a moment. The stream may not have drawn it yet, so it is looked for again a few times.
+export function reveal_card(root, kind, id, tries = 20) {
+  if (!/^[\w-]+$/.test(id)) return;
+  const card = root?.querySelector?.(`[data-${kind}-id="${id}"]`);
+  if (!card) {
+    if (root && tries > 0) setTimeout(() => reveal_card(root, kind, id, tries - 1), 150);
+    return;
+  }
+  const calm = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+  card.scrollIntoView?.({ block: 'start', behavior: calm ? 'auto' : 'smooth' });
+  if (!card.hasAttribute?.('tabindex')) card.setAttribute?.('tabindex', '-1');
+  card.focus?.({ preventScroll: true });
+  card.classList?.add('revealed');
+  setTimeout(() => card.classList?.remove('revealed'), 2000);
+}
+// The planning panel's message box grows with its text up to its CSS
+// max-height, then scrolls. Where the browser has no `field-sizing`, its
+// height is set from the text here.
+export function fit_plan_text(root) {
+  if (globalThis.CSS?.supports?.('field-sizing', 'content')) return;
+  const box = root?.querySelector?.('#plan-text');
+  if (!box) return;
+  box.style.height = 'auto';
+  box.style.height = box.scrollHeight + 2 + 'px';
 }
 // The shadow root before the page has rendered: the editor's tools do nothing yet.
 export function no_root() { return null; }

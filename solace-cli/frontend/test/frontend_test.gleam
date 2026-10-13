@@ -377,22 +377,33 @@ pub fn a_reopened_page_keeps_its_place_test() {
 /// D-98: a task link's address is resolved, never shown; the server's reply says where the task opens.
 pub fn a_task_link_opens_where_its_task_is_test() {
   let assert Ok(link) = uri.parse("/task/0123456789abcdef")
-  assert frontend.route(link) == frontend.TaskLink("0123456789abcdef")
-  assert frontend.target("{\"id\":\"t\",\"dir\":\".\",\"archived\":false}")
+  assert frontend.route(link) == frontend.RecordLink("task", "0123456789abcdef")
+  assert frontend.target(
+      "task",
+      "{\"id\":\"t\",\"dir\":\".\",\"archived\":false}",
+    )
     == frontend.OnBoard(".")
-  assert frontend.target("{\"id\":\"t\",\"dir\":\"web\",\"archived\":true}")
+  assert frontend.target(
+      "task",
+      "{\"id\":\"t\",\"dir\":\"web\",\"archived\":true}",
+    )
     == frontend.InStrategy("web")
   assert frontend.target(
+      "task",
       "{\"code\":\"E7023\",\"message\":\"E7023 unknown task t\"}",
     )
     == frontend.Missing
   // A network failure or another error (an unreadable task file is E7001 with 409) says nothing about the task.
-  assert frontend.target("{\"message\":\"TypeError: Failed to fetch\"}")
+  assert frontend.target("task", "{\"message\":\"TypeError: Failed to fetch\"}")
     == frontend.Unknown
-  assert frontend.target("{\"code\":\"E7001\",\"message\":\"E7001 bad json\"}")
+  assert frontend.target(
+      "task",
+      "{\"code\":\"E7001\",\"message\":\"E7001 bad json\"}",
+    )
     == frontend.Unknown
-  assert frontend.target("not json") == frontend.Unknown
-  assert frontend.missing_text == "Task does not exist"
+  assert frontend.target("task", "not json") == frontend.Unknown
+  assert frontend.missing_text("task") == "Task does not exist"
+  assert frontend.failed_text("task") == "Couldn't look up the task. Try again."
 }
 
 /// A found task goes to its page's `focus`, counted so the same link again is news; a click is followed
@@ -405,27 +416,31 @@ pub fn a_found_task_is_focused_on_its_page_test() {
       frontend.no_focus,
       [],
     )
-  let #(clicked, _) = frontend.update(model, frontend.Follow("t1"))
+  let #(clicked, _) = frontend.update(model, frontend.Follow("task", "t1"))
   assert clicked == model
   let on_board = "{\"id\":\"t1\",\"dir\":\".\",\"archived\":false}"
   let #(model, _) =
-    frontend.update(model, frontend.Found("t1", on_board, False))
-  assert model.focus == frontend.Focus("solace-board", ".", "t1", 1)
+    frontend.update(model, frontend.Found("task", "t1", on_board, False))
+  assert model.focus == frontend.Focus("solace-board", "task", ".", "t1", 1)
   let archived = "{\"id\":\"t1\",\"dir\":\"a\",\"archived\":true}"
   let #(model, _) =
-    frontend.update(model, frontend.Found("t1", archived, False))
-  assert model.focus == frontend.Focus("solace-strategy", "a", "t1", 2)
+    frontend.update(model, frontend.Found("task", "t1", archived, False))
+  assert model.focus == frontend.Focus("solace-strategy", "task", "a", "t1", 2)
   let #(same, _) =
-    frontend.update(model, frontend.Found("t9", "{\"code\":\"E7023\"}", False))
+    frontend.update(
+      model,
+      frontend.Found("task", "t9", "{\"code\":\"E7023\"}", False),
+    )
   assert same == model
   let #(same, _) =
     frontend.update(
       model,
-      frontend.Found("t9", "{\"message\":\"down\"}", False),
+      frontend.Found("task", "t9", "{\"message\":\"down\"}", False),
     )
   assert same == model
   // A task link's own address, reached again, shows nothing new until the task is found.
-  let #(back, _) = frontend.update(model, RouteChanged(frontend.TaskLink("t1")))
+  let #(back, _) =
+    frontend.update(model, RouteChanged(frontend.RecordLink("task", "t1")))
   assert back == model
 }
 
@@ -473,4 +488,75 @@ pub fn a_hidden_page_flags_its_tab_until_shown_test() {
     html,
     "<a aria-current=\"page\" class=\"current\" href=\"/strategy\">Strategy</a>",
   )
+}
+
+/// D-122: feature and milestone links are resolved as task links are; both open on the Strategy page, and
+/// an unknown one says which kind it was.
+pub fn a_feature_or_milestone_link_opens_on_strategy_test() {
+  let id = "0123456789abcdef"
+  let assert Ok(feature) = uri.parse("/feature/" <> id)
+  let assert Ok(milestone) = uri.parse("/milestone/" <> id)
+  let assert Ok(other) = uri.parse("/epic/" <> id)
+  assert frontend.route(feature) == frontend.RecordLink("feature", id)
+  assert frontend.route(milestone) == frontend.RecordLink("milestone", id)
+  assert frontend.route(other) == frontend.Board
+  let found = "{\"id\":\"" <> id <> "\",\"title\":\"Search\"}"
+  assert frontend.target("feature", found) == frontend.InStrategy("")
+  assert frontend.target("milestone", found) == frontend.InStrategy("")
+  assert frontend.target("feature", "{\"code\":\"E7023\"}") == frontend.Missing
+  assert frontend.target("milestone", "{\"message\":\"down\"}")
+    == frontend.Unknown
+  assert frontend.missing_text("feature") == "Feature does not exist"
+  assert frontend.missing_text("milestone") == "Milestone does not exist"
+  assert frontend.failed_text("milestone")
+    == "Couldn't look up the milestone. Try again."
+  let model =
+    frontend.Model(frontend.Board, [frontend.Board], frontend.no_focus, [])
+  let #(model, _) =
+    frontend.update(model, frontend.Found("feature", "f1", found, False))
+  assert model.focus
+    == frontend.Focus("solace-strategy", "feature", "", "f1", 1)
+  let #(model, _) =
+    frontend.update(model, frontend.Found("milestone", "m1", found, True))
+  assert model.focus
+    == frontend.Focus("solace-strategy", "milestone", "", "m1", 2)
+}
+
+/// D-122: copying a feature or milestone link gives its markdown back, and a bare link showing its record's
+/// title (marked `data-bare`) is still copied bare.
+pub fn copy_markdown_of_feature_and_milestone_links_test() {
+  let id = "0123456789abcdef"
+  let link = fn(kind, label, bare) {
+    frontend.Tag(
+      "a",
+      [
+        #("href", "/" <> kind <> "/" <> id),
+        #("data-" <> kind, id),
+        ..case bare {
+          True -> [#("data-bare", "")]
+          False -> []
+        }
+      ],
+      [frontend.Text(label)],
+    )
+  }
+  assert frontend.to_markdown([
+      frontend.Tag("p", [], [
+        link("feature", "the plan", False),
+        frontend.Text(", "),
+        link("milestone", "milestone:" <> id, False),
+        frontend.Text(", "),
+        link("task", "Fix the cache", True),
+        frontend.Text(", "),
+        link("feature", "Search", True),
+      ]),
+    ])
+    == "[the plan](feature:"
+    <> id
+    <> "), milestone:"
+    <> id
+    <> ", task:"
+    <> id
+    <> ", feature:"
+    <> id
 }

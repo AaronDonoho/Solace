@@ -548,14 +548,45 @@ class Root(unittest.TestCase):
             rid = t['runs'][-1]['id']
             replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/d/'.solace'/(rid + '.responses')).read_text().splitlines()]
             if d == 'a':
-                self.assertIn('Other projects under this Solace root', replies[0])
-                self.assertIn('b (beta)', replies[0])
+                self.assertIn('You are in a (alpha).', replies[0])
+                self.assertIn('Read only: b (beta), . (the root).', replies[0])
+                self.assertIn('(`--project b`, not `../b`)', replies[0])
                 self.assertIn('ask the human with `task ask` to add that project', replies[0])
             self.assertIn('pub fn answer() { 42 }', replies[1])
             self.assertIn('The answer', replies[2])
             # A task changes the projects it covers (D-61): a's doesn't cover b; b's own is b.
             self.assertIn('E6007' if d == 'a' else 'Saved app.answer', replies[3])
         self.assertNotIn('42', (self.root/'b/src/app.gleam').read_text())
+
+    def test_a_task_across_projects_starts_where_its_symbols_are(self):  # D-123
+        project(self.root/'a', 'alpha', 'pub fn ledger() { 1 }\n')
+        project(self.root/'b', 'beta', 'pub fn two() { 2 }\n')
+        (self.root/'b/src/plan.gleam').write_text('/// The plan.\npub fn answer() { 42 }\n')
+        self.migrate()
+        self.start()
+        # The task is at home in a, but names a symbol only b has.
+        steps = [{'command': 'session start --task', 'text': 'Change plan.answer; see ledger'},
+                 {'command': 'view plan.answer'}, {'command': 'view ledger'}, {'command': 'task done looked'}]
+        t = self.api('POST', '/p/a/tasks', {'title': 'Plan', 'body': json.dumps(steps), 'scope': ['a', 'b']})
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'plan'})
+        self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        t = self.wait('/p/a', t, lambda x: x['column'] == 'needs_review')
+        rid = t['runs'][-1]['id']
+        self.assertFalse((self.root/'a/.solace'/(rid + '.prompt')).exists())
+        self.assertIn('You work in b', (self.root/'b/.solace'/(rid + '.prompt')).read_text())
+        replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'b/.solace'/(rid + '.responses')).read_text().splitlines()]
+        # The session says where the agent is, what it may change, and how to reach the rest.
+        self.assertIn('You are in b (beta).', replies[0])
+        self.assertIn('This task can change: a (alpha), b (beta).', replies[0])
+        self.assertIn('(`--project a`, not `../a`), for that line only', replies[0])
+        self.assertIn('relative to the project the line runs in', replies[0])
+        # Its symbols come from both projects, the other one's labelled.
+        self.assertIn('-- plan.answer\n', replies[0])
+        self.assertIn('-- app.ledger (a)\n', replies[0])
+        self.assertIn('pub fn answer() { 42 }', replies[1])
+        # A name from the other project says where it is.
+        self.assertIn('E1001 unknown name: ledger\nfound in a: add --project a', replies[2])
+        self.assertEqual(t['column'], 'needs_review')
 
     def test_a_strategy_run_in_a_folder_of_projects(self):  # D-93
         project(self.root/'a', 'alpha', 'pub fn one() { 1 }\n')

@@ -14,7 +14,7 @@ try { document.documentElement.dataset.theme = localStorage.getItem('solace-them
 @font-face{font-family:"IBM Plex Mono";font-weight:400;src:url("/fonts/mono-400.woff2") format("woff2");font-display:swap}
 html{background:#f7f6f0;color-scheme:light;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78}
 body{font:16px system-ui,sans-serif;margin:0;color:var(--ink);background:var(--sheet)}
-.menu{display:flex;gap:8px;align-items:center;box-sizing:border-box;height:56px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--paper)}
+.menu{display:flex;gap:8px;align-items:center;box-sizing:border-box;height:56px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--paper);position:sticky;top:0;z-index:26}
 /* The contract page fills the window below the menu. */
 solace-contracts{--contracts-height:calc(100dvh - 56px)}
 /* A page you left stays in the document, hidden, so its state is there when you come back. */

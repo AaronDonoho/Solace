@@ -387,7 +387,8 @@ fn milestone_view(
     )
   }
   [
-    html.h3([], [
+    // A milestone link (D-122) finds its heading by this.
+    html.h3([attribute.attribute("data-milestone-id", milestone.id)], [
       html.text(milestone.title),
       html.text(" "),
       html.span([attribute.class("state")], [html.text(milestone.state)]),

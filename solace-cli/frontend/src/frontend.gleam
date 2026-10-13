@@ -36,17 +36,18 @@ pub type Route {
   Contracts(base: String)
   Strategy
   Settings
-  /// A task link's address, `/task/<id>` (D-98): resolved to the board or Strategy, never shown itself.
-  TaskLink(id: String)
+  /// A link's address, `/task/<id>` (D-98), `/feature/<id>` or `/milestone/<id>` (D-122): resolved to the
+  /// board or Strategy, never shown itself. `kind` is "task", "feature" or "milestone".
+  RecordLink(kind: String, id: String)
 }
 
 pub type Msg {
   RouteChanged(Route)
-  /// A task link was clicked in a page: the task's id.
-  Follow(String)
-  /// The reply to `GET /tasks/find/{id}`: the id, the reply, and whether the task link's own address is
-  /// replaced in the history (it was loaded or reached by back or forward) rather than added to.
-  Found(String, String, Bool)
+  /// A link was clicked in a page: the record's kind and id.
+  Follow(String, String)
+  /// The reply to `GET /<kind>s/find/{id}`: the kind, the id, the reply, and whether the link's own address
+  /// is replaced in the history (it was loaded or reached by back or forward) rather than added to.
+  Found(String, String, String, Bool)
   /// A page's `attention` event: something there needs the human. The page's element.
   Attention(String)
 }
@@ -59,13 +60,15 @@ pub fn route(uri: Uri) -> Route {
     ["strategy"] -> Strategy
     ["settings"] -> Settings
     ["p", dir, "contracts"] -> Contracts("/p/" <> dir)
-    ["task", id] -> TaskLink(id)
+    ["task" as kind, id]
+    | ["feature" as kind, id]
+    | ["milestone" as kind, id] -> RecordLink(kind, id)
     _ -> Board
   }
 }
 
 /// A route's page element, hidden unless it is the one shown.
-/// The page a task link asked for gets the task in its `focus` property, `{dir, id, n}`.
+/// The page a link asked for gets the record in its `focus` property, `{kind, dir, id, n}`.
 /// Its `attention` event flags its menu tab.
 pub fn page(route: Route, shown: Bool, focus: Focus) -> Element(Msg) {
   let attributes = case route {
@@ -77,6 +80,7 @@ pub fn page(route: Route, shown: Bool, focus: Focus) -> Element(Msg) {
       attribute.property(
         "focus",
         json.object([
+          #("kind", json.string(focus.kind)),
           #("dir", json.string(focus.dir)),
           #("id", json.string(focus.id)),
           #("n", json.int(focus.n)),
@@ -105,9 +109,9 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     Ok(uri) -> route(uri)
     Error(_) -> Board
   }
-  // A task link's address shows the board until the task is found.
+  // A link's address shows the board until the record is found.
   let #(shown, found) = case initial {
-    TaskLink(id) -> #(Board, find(id, True))
+    RecordLink(kind, id) -> #(Board, find(kind, id, True))
     _ -> #(initial, effect.none())
   }
   // The board and Strategy are open from the start, hidden, so they hear of
@@ -117,7 +121,11 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     Model(route: shown, opened: opened, focus: no_focus, attention: []),
     effect.batch([
       modem.init(fn(uri) { RouteChanged(route(uri)) }),
-      effect.from(fn(send) { follow_links(fn(id) { send(Follow(id)) }) }),
+      effect.from(fn(send) {
+        follow_links(fn(kind, id) { send(Follow(kind, id)) })
+      }),
+      // A bare link shows its record's title (D-122), in every page.
+      effect.from(fn(_) { watch_titles() }),
       found,
     ]),
   )
@@ -140,17 +148,18 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           effect.none(),
         )
       }
-    RouteChanged(TaskLink(id)) -> #(model, find(id, True))
+    RouteChanged(RecordLink(kind, id)) -> #(model, find(kind, id, True))
     RouteChanged(route) -> show(model, route)
-    Follow(id) -> #(model, find(id, False))
-    Found(id, reply, replace) ->
-      case target(reply) {
-        OnBoard(dir) -> go(model, Board, "/", dir, id, replace)
-        InStrategy(dir) -> go(model, Strategy, "/strategy", dir, id, replace)
+    Follow(kind, id) -> #(model, find(kind, id, False))
+    Found(kind, id, reply, replace) ->
+      case target(kind, reply) {
+        OnBoard(dir) -> go(model, Board, "/", kind, dir, id, replace)
+        InStrategy(dir) ->
+          go(model, Strategy, "/strategy", kind, dir, id, replace)
         nowhere -> {
           let text = case nowhere {
-            Missing -> missing_text
-            _ -> failed_text
+            Missing -> missing_text(kind)
+            _ -> failed_text(kind)
           }
           #(
             model,
@@ -273,7 +282,8 @@ pub type Html {
 /// renderer (`markdown` in the board's api.mjs): paragraphs and line breaks, headings (the renderer draws every
 /// level as h4, so they come back as ####), blockquotes, nested lists (a numbered one from its start), code blocks
 /// and spans, bold, links, and task images,
-/// whose src loses the project's prefix. Other elements give their text.
+/// whose src loses the project's prefix. Other elements give their text. A task, feature or milestone link
+/// gives its reference back: bare when it was drawn bare, though it shows the record's title (D-122).
 pub fn to_markdown(nodes: List(Html)) -> String {
   blocks(nodes) |> string.join("\n\n")
 }
@@ -416,12 +426,18 @@ fn inline(nodes: List(Html)) -> String {
       Tag("a", attributes, children) ->
         case inline(children), list.key_find(attributes, "href") {
           "", _ -> ""
-          text, Ok("/task/" <> id) ->
-            case text == "task:" <> id {
-              True -> text
-              False -> "[" <> text <> "](task:" <> id <> ")"
+          text, Ok(href) ->
+            case record_ref(href) {
+              Ok(ref) ->
+                case
+                  text == ref
+                  || result.is_ok(list.key_find(attributes, "data-bare"))
+                {
+                  True -> ref
+                  False -> "[" <> text <> "](" <> ref <> ")"
+                }
+              Error(_) -> "[" <> text <> "](" <> href <> ")"
             }
-          text, Ok(href) -> "[" <> text <> "](" <> href <> ")"
           text, Error(_) -> text
         }
       Tag(_, _, children) -> inline(children)
@@ -465,7 +481,7 @@ fn first_number(attributes: List(#(String, String))) -> Int {
 
 /// The shell's state: the route shown, and every page opened so far, in the order first opened. A page
 /// stays in the document once opened, hidden while another shows, so its work is there when you come back.
-/// `focus` is the last task link followed. `attention` holds the pages, by element, whose menu tab flashes:
+/// `focus` is the last link followed. `attention` holds the pages, by element, whose menu tab flashes:
 /// a page hidden at the time asked for it, and it hasn't been shown since.
 pub type Model {
   Model(
@@ -484,7 +500,7 @@ pub fn page_of(route: Route) -> String {
     Contracts(_) -> "solace-contracts"
     Strategy -> "solace-strategy"
     Settings -> "solace-settings"
-    TaskLink(_) -> "solace-board"
+    RecordLink(_, _) -> "solace-board"
   }
 }
 
@@ -529,18 +545,20 @@ fn show(model: Model, route: Route) -> #(Model, Effect(Msg)) {
   }
 }
 
-/// A task link's request to a page (D-98): the page's element, the project the task is stored in, its id,
-/// and how many links were followed, so following the same one again is news to the page.
+/// A link's request to a page (D-98, D-122): the page's element, the record's kind, the project a task is
+/// stored in ("" for a feature or milestone), its id, and how many links were followed, so following the
+/// same one again is news to the page.
 pub type Focus {
-  Focus(page: String, dir: String, id: String, n: Int)
+  Focus(page: String, kind: String, dir: String, id: String, n: Int)
 }
 
-/// No task link followed yet.
-pub const no_focus = Focus("", "", "", 0)
+/// No link followed yet.
+pub const no_focus = Focus("", "", "", "", 0)
 
-/// Where a task link opens: on the board, on the Strategy page (an archived task is off the board, D-95),
-/// or nowhere: there is no such task, or the lookup failed (the server or the network), so whether there
-/// is one isn't known. The first two name the project the task is stored in.
+/// Where a link opens: on the board, on the Strategy page (an archived task is off the board, D-95, and
+/// features and milestones are only there, D-122), or nowhere: there is no such record, or the lookup failed
+/// (the server or the network), so whether there is one isn't known. The first two name the project a task
+/// is stored in, "" for a feature or milestone.
 pub type Target {
   OnBoard(dir: String)
   InStrategy(dir: String)
@@ -548,13 +566,20 @@ pub type Target {
   Unknown
 }
 
-/// Where a task link opens, from the reply to `GET /tasks/find/{id}`: `{dir, archived}`; `E7023` for no
-/// such task; any other reply (another error, or a network failure's message) leaves it unknown.
-pub fn target(reply: String) -> Target {
-  let decoder = {
-    use dir <- decode.field("dir", decode.string)
-    use archived <- decode.field("archived", decode.bool)
-    decode.success(#(dir, archived))
+/// Where a link to a record of `kind` opens, from the reply to `GET /<kind>s/find/{id}`: a task's
+/// `{dir, archived}`, a feature's or milestone's `{id, title}`; `E7023` for no such record; any other reply
+/// (another error, or a network failure's message) leaves it unknown.
+pub fn target(kind: String, reply: String) -> Target {
+  let decoder = case kind {
+    "task" -> {
+      use dir <- decode.field("dir", decode.string)
+      use archived <- decode.field("archived", decode.bool)
+      decode.success(#(dir, archived))
+    }
+    _ -> {
+      use _ <- decode.field("id", decode.string)
+      decode.success(#("", True))
+    }
   }
   case json.parse(reply, decoder) {
     Ok(#(dir, False)) -> OnBoard(dir)
@@ -567,22 +592,28 @@ pub fn target(reply: String) -> Target {
   }
 }
 
-/// The toast for a task link to no task.
-pub const missing_text = "Task does not exist"
+/// The toast for a link to no record of `kind`: "Task does not exist".
+pub fn missing_text(kind: String) -> String {
+  string.capitalise(kind) <> " does not exist"
+}
 
-/// Opens a found task on `route`'s page: the page gets it in its `focus` property. The address changes to
+/// Opens a found record on `route`'s page: the page gets it in its `focus` property. The address changes to
 /// the page's, added to the history for a click, in place of the task link's own address otherwise; a click
 /// on the page shown changes nothing.
 fn go(
   model: Model,
   route: Route,
   path: String,
+  kind: String,
   dir: String,
   id: String,
   replace: Bool,
 ) -> #(Model, Effect(Msg)) {
   let model =
-    Model(..model, focus: Focus(page_of(route), dir, id, model.focus.n + 1))
+    Model(
+      ..model,
+      focus: Focus(page_of(route), kind, dir, id, model.focus.n + 1),
+    )
   case replace, page_of(model.route) == page_of(route) {
     True, _ -> #(model, modem.replace(path, None, None))
     False, True -> #(model, effect.none())
@@ -590,21 +621,38 @@ fn go(
   }
 }
 
-/// Asks the server where task `id` is (D-98).
-fn find(id: String, replace: Bool) -> Effect(Msg) {
+/// Asks the server about record `id` of `kind`: where a task is (D-98), whether a feature or milestone is
+/// (D-122).
+fn find(kind: String, id: String, replace: Bool) -> Effect(Msg) {
   effect.from(fn(send) {
-    find_task(id, fn(reply) { send(Found(id, reply, replace)) })
+    find_record(kind, id, fn(reply) { send(Found(kind, id, reply, replace)) })
   })
 }
 
-@external(javascript, "./task_link.mjs", "find_task")
-fn find_task(id: String, receive: fn(String) -> Nil) -> Nil
-
 @external(javascript, "./task_link.mjs", "follow_links")
-fn follow_links(follow: fn(String) -> Nil) -> Nil
+fn follow_links(follow: fn(String, String) -> Nil) -> Nil
 
 @external(javascript, "./task_link.mjs", "toast")
 fn toast(text: String) -> Nil
 
-/// The toast for a task link whose lookup failed: the task may well exist.
-pub const failed_text = "Couldn't look up the task. Try again."
+/// The toast for a link whose lookup failed: the record may well exist.
+pub fn failed_text(kind: String) -> String {
+  "Couldn't look up the " <> kind <> ". Try again."
+}
+
+/// The markdown reference a link's address stands for (D-98, D-122): `task:<id>` for `/task/<id>`, and
+/// so for a feature or a milestone.
+fn record_ref(href: String) -> Result(String, Nil) {
+  case href {
+    "/task/" <> id -> Ok("task:" <> id)
+    "/feature/" <> id -> Ok("feature:" <> id)
+    "/milestone/" <> id -> Ok("milestone:" <> id)
+    _ -> Error(Nil)
+  }
+}
+
+@external(javascript, "./task_link.mjs", "find_record")
+fn find_record(kind: String, id: String, receive: fn(String) -> Nil) -> Nil
+
+@external(javascript, "./task_link.mjs", "watch_titles")
+fn watch_titles() -> Nil

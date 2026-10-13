@@ -239,6 +239,8 @@ pub type Panel(msg) {
     max_width: Int,
     /// The message box.
     text: String,
+    /// Whether the message box shows its Preview.
+    preview: Bool,
     /// A request sent and not yet answered.
     sending: Bool,
     error: String,
@@ -252,6 +254,11 @@ pub type Panel(msg) {
     /// A resize key on the focused handle: the arrows, Home or End.
     on_key: fn(String) -> msg,
     on_text: fn(String) -> msg,
+    on_preview: fn(Bool) -> msg,
+    /// A formatting tool: the markup before and after the selection.
+    on_format: fn(String, String) -> msg,
+    /// A block tool: "heading", "list", "numbered", "quote" or "code".
+    on_block: fn(String) -> msg,
     on_model: fn(String) -> msg,
     on_effort: fn(String) -> msg,
     on_start: msg,
@@ -314,6 +321,10 @@ pub fn view(base: String, p: Panel(msg)) -> Element(msg) {
         ),
       ]),
       case p.collapsed {
+        True -> element.none()
+        False -> bar(p)
+      },
+      case p.collapsed {
         True ->
           html.p([attribute.class("plan-summary")], [html.text(summary(p))])
         False ->
@@ -321,6 +332,10 @@ pub fn view(base: String, p: Panel(msg)) -> Element(msg) {
             [attribute.class("plan-body"), event.on("scroll", scrolled(p))],
             body(base, p),
           )
+      },
+      case p.collapsed {
+        True -> element.none()
+        False -> compose(base, p)
       },
     ],
   )
@@ -350,20 +365,13 @@ fn context_view(context: Context, name: fn(String, String) -> String) {
   }
 }
 
+/// The conversation, between the run bar and the message box: the only part
+/// of the panel that scrolls.
 fn body(base: String, p: Panel(msg)) -> List(Element(msg)) {
-  list.flatten([
-    [
-      case p.error {
-        "" -> element.none()
-        message -> html.p([attribute.role("alert")], [html.text(message)])
-      },
-    ],
-    case p.shown {
-      Some(run) -> run_view(base, p, run)
-      None -> start_view(p)
-    },
-    past_view(p),
-  ])
+  case p.shown {
+    Some(run) -> run_view(base, p, run)
+    None -> start_view(p)
+  }
 }
 
 fn small(label: String, disabled: Bool, msg: msg) -> Element(msg) {
@@ -378,31 +386,13 @@ fn small(label: String, disabled: Bool, msg: msg) -> Element(msg) {
   )
 }
 
-/// The open run: what it is on and doing, the agent's transcript (collapsed),
-/// its conversation and proposals in the order they happened (D-118), then
-/// the message box with End and Stop while it is open. An ended run is
-/// read-only. The newest message sits right above the box, at the run's end.
+/// The shown run's conversation: the agent's transcript (collapsed), then its
+/// notes and proposals in the order they happened (D-118). The newest message
+/// sits at the run's end, right above the message box. An ended run's
+/// proposals can't be answered.
 fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
   let open = run.state != "ended"
   list.flatten([
-    [
-      html.p(
-        [attribute.class("plan-context")],
-        context_view(run.context, p.name),
-      ),
-      html.p([attribute.class("plan-meta")], [
-        html.span(
-          [
-            attribute.class(case run.state {
-              "running" -> "state working"
-              _ -> "state"
-            }),
-          ],
-          [html.text(state_text(run))],
-        ),
-        small("Close", False, p.on_show("")),
-      ]),
-    ],
     case p.entries {
       [] -> []
       entries -> [
@@ -451,46 +441,6 @@ fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
           ])
       }
     }),
-    case open {
-      False -> []
-      True -> [
-        html.label([attribute.for(text_id)], [html.text("Message")]),
-        html.textarea(
-          [
-            attribute.id(text_id),
-            attribute.value(p.text),
-            event.on_input(p.on_text),
-          ],
-          p.text,
-        ),
-        html.div([attribute.class("vision-actions")], [
-          html.button(
-            [
-              attribute.type_("button"),
-              attribute.disabled(p.sending || string.trim(p.text) == ""),
-              event.on_click(p.on_send),
-            ],
-            [html.text("Send")],
-          ),
-          html.button(
-            [
-              attribute.type_("button"),
-              attribute.disabled(p.sending),
-              event.on_click(p.on_end),
-            ],
-            [html.text("End")],
-          ),
-          html.button(
-            [
-              attribute.type_("button"),
-              attribute.disabled(p.sending),
-              event.on_click(p.on_stop),
-            ],
-            [html.text("Stop")],
-          ),
-        ]),
-      ]
-    },
     [
       case p.new_message {
         True ->
@@ -509,39 +459,17 @@ fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
   ])
 }
 
-/// Nothing shown: the open run on the context to open, or the form that
-/// starts one with a first message.
+/// Nothing shown: the open run on the context to open, or a hint that the
+/// message box below starts a run.
 fn start_view(p: Panel(msg)) -> List(Element(msg)) {
-  let context =
-    html.p([attribute.class("plan-context")], context_view(p.context, p.name))
   case open_on(p.runs, p.context) {
     Some(run) -> [
-      context,
       html.p([], [html.text("A planning run on this is open.")]),
       small("Open it", False, p.on_show(run.id)),
     ]
     None -> [
-      context,
-      agent_choice(p),
-      html.label([attribute.for(text_id)], [html.text("First message")]),
-      html.textarea(
-        [
-          attribute.id(text_id),
-          attribute.value(p.text),
-          attribute.placeholder("What should we plan?"),
-          event.on_input(p.on_text),
-        ],
-        p.text,
-      ),
-      html.div([attribute.class("vision-actions")], [
-        html.button(
-          [
-            attribute.type_("button"),
-            attribute.disabled(p.sending || string.trim(p.text) == ""),
-            event.on_click(p.on_start),
-          ],
-          [html.text("Start")],
-        ),
+      html.p([attribute.class("plan-context")], [
+        html.text("Write what to plan below; Send starts a new run on this."),
       ]),
     ]
   }
@@ -605,53 +533,21 @@ fn agent_choice(p: Panel(msg)) -> Element(msg) {
   }
 }
 
-/// The runs on the context, newest first, each reopened by its button.
-fn past_view(p: Panel(msg)) -> List(Element(msg)) {
-  case past(p.runs, p.context) {
-    [] -> []
-    runs -> [
-      html.h3([], [html.text("Runs on this")]),
-      html.ul(
-        [attribute.class("plan-runs")],
-        list.map(runs, fn(run) {
-          let current = case p.shown {
-            Some(shown) -> shown.id == run.id
-            None -> False
-          }
-          html.li([], [
-            html.button(
-              [
-                attribute.type_("button"),
-                attribute.class("open"),
-                case current {
-                  True -> attribute.attribute("aria-current", "true")
-                  False -> attribute.none()
-                },
-                event.on_click(p.on_show(run.id)),
-              ],
-              [html.text(clock(run.started) <> " · " <> state_text(run))],
-            ),
-          ])
-        }),
-      ),
-    ]
-  }
-}
-
 /// The panel's look; colors come from the page's custom properties.
 pub const styles =
   ".plan{grid-column:2;grid-row:2;position:relative;display:flex;flex-direction:column;min-height:0;box-sizing:border-box;width:clamp(280px,var(--plan-width,380px),60vw);background:var(--paper);border-left:2px solid var(--edge);padding:12px 16px 0}.plan.collapsed{width:auto;min-width:160px;padding-bottom:12px}
-.plan>header{flex:none}.plan-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0 -16px;padding:0 16px 12px}
+.plan>header,.plan-bar,.plan-compose{flex:none}.plan-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0 -16px;padding:0 16px 12px}
+.plan-bar{border-bottom:1px solid var(--edge);padding:0 0 8px;margin-bottom:4px}.plan-bar .plan-context{margin:6px 0 4px}.plan-bar select{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;max-width:100%}
+.plan-compose{border-top:1px solid var(--edge);padding:8px 0 12px}.plan-compose .filters{margin:0 0 8px}.plan-compose .vision-actions{margin:8px 0 0}
+.plan .composer{margin:0;max-width:none}.plan .composer textarea{display:block;font:inherit;color:var(--ink);background:var(--paper);field-sizing:content;min-height:calc(5lh + 12px);max-height:40dvh;padding:6px 8px;overflow:auto;resize:none}.plan .preview{min-height:5lh;max-height:40dvh;overflow:auto}
 .plan-resize{position:absolute;left:-7px;top:0;bottom:0;width:12px;cursor:col-resize;touch-action:none;z-index:1}.plan-resize:hover{background:var(--line);opacity:.6}.plan .plan-resize:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
 .plan header{display:flex;align-items:center;gap:8px}.plan h2{margin:0;font-size:17px;flex:1}.plan h3{font-size:14px;margin:16px 0 4px}
 .plan p{margin:6px 0}.plan .plan-summary,.plan .plan-context{color:var(--soft);font-size:13px}.plan-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .plan .edit,.plan .vision-actions button{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 10px;cursor:pointer}.plan .edit:hover,.plan .vision-actions button:hover{background:var(--hover)}.plan button:disabled{color:var(--soft);cursor:default}
 .plan label{display:block;font-size:13px;color:var(--soft);margin:8px 0 2px}.plan .filters label{margin:0}.plan .filters select{max-width:100%}
-.plan textarea{display:block;box-sizing:border-box;width:100%;min-height:90px;font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:6px 8px;resize:vertical}
 .plan :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .plan-note{border-top:1px solid var(--line);padding:6px 0}.plan-note.human strong{color:var(--focus)}.plan-note .md p{color:var(--ink)}
 .plan-transcript{margin:8px 0;border-left:1px solid var(--edge);padding-left:8px}.plan-transcript>summary{cursor:pointer;color:var(--soft)}.plan-transcript pre{background:var(--code);padding:6px;white-space:pre-wrap;overflow:auto;max-height:240px;font:12px 'IBM Plex Mono',ui-monospace,monospace}.plan-transcript .entry{margin:4px 0}.plan-transcript .tool.ok .icon{color:var(--ok-text)}.plan-transcript .tool.failed .icon{color:var(--revision)}
-.plan-runs{list-style:none;margin:0;padding:0}.plan-runs li{margin:2px 0}.plan-runs .open{font:inherit;font-size:13px;color:var(--ink);background:none;border:0;padding:0;text-align:left;cursor:pointer}.plan-runs .open:hover{text-decoration:underline}.plan-runs [aria-current=true]{font-weight:700}
 .working::before,.planning::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--entry);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before,.planning::before{animation:none}}
 .planning{font-size:11px;font-weight:400;text-transform:uppercase;letter-spacing:.08em;color:var(--ok-text);border:1px solid var(--ok-text);padding:1px 6px;margin-left:6px;white-space:nowrap}
 .plan .plan-new{position:sticky;bottom:8px;display:block;margin:8px 0 0 auto;font:inherit;font-size:13px;color:var(--paper);background:var(--focus);border:1px solid var(--focus);border-radius:0;padding:4px 12px;cursor:pointer;z-index:1}
@@ -768,3 +664,143 @@ fn scrolled(p: Panel(msg)) -> decode.Decoder(msg) {
 
 @external(javascript, "./api.mjs", "near_end")
 fn near_end(body: dynamic.Dynamic) -> Bool
+
+/// The run New run shows: the open run on `context`, since the server allows
+/// one, else "" for the form that starts one.
+pub fn new_run(runs: List(Run), context: Context) -> String {
+  case open_on(runs, context) {
+    Some(run) -> run.id
+    None -> ""
+  }
+}
+
+/// The run bar, pinned above the conversation: what the shown run is on (else
+/// what a new run would plan), its state and model, End and Stop while it is
+/// open, the Earlier runs on the same record, newest first, and New run.
+fn bar(p: Panel(msg)) -> Element(msg) {
+  let current = case p.shown {
+    Some(run) -> run.id
+    None -> ""
+  }
+  let context = case p.shown {
+    Some(run) -> run.context
+    None -> p.context
+  }
+  let #(class, state) = case p.shown, open_on(p.runs, p.context) {
+    Some(Run(state: "running", ..) as run), _ -> #(
+      "state working",
+      state_text(run),
+    )
+    Some(run), _ -> #("state", state_text(run))
+    None, Some(_) -> #("state", "A run on this is open")
+    None, None -> #("state", "No run open")
+  }
+  let target = new_run(p.runs, p.context)
+  html.div([attribute.class("plan-bar")], [
+    html.p([attribute.class("plan-context")], context_view(context, p.name)),
+    html.div(
+      [attribute.class("plan-meta")],
+      list.flatten([
+        [html.span([attribute.class(class)], [html.text(state)])],
+        case p.shown {
+          Some(run) if run.state != "ended" -> [
+            small("End", p.sending, p.on_end),
+            small("Stop", p.sending, p.on_stop),
+          ]
+          _ -> []
+        },
+        case past(p.runs, context) {
+          [] -> []
+          runs -> [
+            html.select(
+              [
+                attribute.class("plan-earlier"),
+                attribute.attribute("aria-label", "Earlier runs"),
+                event.on_input(p.on_show),
+              ],
+              [
+                html.option(
+                  [
+                    attribute.value(""),
+                    attribute.disabled(True),
+                    attribute.selected(current == ""),
+                  ],
+                  "Earlier runs",
+                ),
+                ..list.map(runs, fn(run) {
+                  html.option(
+                    [
+                      attribute.value(run.id),
+                      attribute.selected(run.id == current),
+                    ],
+                    clock(run.started) <> " · " <> state_text(run),
+                  )
+                })
+              ],
+            ),
+          ]
+        },
+        // Nothing to change when New run would show what is shown.
+        [small("New run", target == current, p.on_show(target))],
+      ]),
+    ),
+    case p.error {
+      "" -> element.none()
+      message -> html.p([attribute.role("alert")], [html.text(message)])
+    },
+  ])
+}
+
+/// The message box, pinned below the conversation: the markdown editor and
+/// Send, which Ctrl or Cmd+Enter presses too. For the shown open run it sends
+/// a message; with nothing shown and no open run on the context, the model
+/// choice sits above it and Send starts a run. Otherwise there is none.
+fn compose(base: String, p: Panel(msg)) -> Element(msg) {
+  let box = fn(label, send, choice) {
+    html.div(
+      [attribute.class("plan-compose"), event.on("keydown", send_key(send))],
+      [
+        choice,
+        solace_task.editor(
+          text_id,
+          "",
+          base,
+          label,
+          p.text,
+          p.preview,
+          p.on_text,
+          p.on_preview,
+          p.on_format,
+          p.on_block,
+        ),
+        html.div([attribute.class("vision-actions")], [
+          html.button(
+            [
+              attribute.type_("button"),
+              attribute.disabled(p.sending || string.trim(p.text) == ""),
+              event.on_click(send),
+            ],
+            [html.text("Send")],
+          ),
+        ]),
+      ],
+    )
+  }
+  case p.shown, open_on(p.runs, p.context) {
+    Some(run), _ if run.state != "ended" ->
+      box("Message", p.on_send, element.none())
+    None, None -> box("First message", p.on_start, agent_choice(p))
+    _, _ -> element.none()
+  }
+}
+
+/// Ctrl or Cmd+Enter in the message box: `send`. Other keys pass.
+fn send_key(send: msg) -> decode.Decoder(msg) {
+  use key <- decode.field("key", decode.string)
+  use ctrl <- decode.field("ctrlKey", decode.bool)
+  use meta <- decode.field("metaKey", decode.bool)
+  case key == "Enter" && { ctrl || meta } {
+    True -> decode.success(send)
+    False -> decode.failure(send, "not a send")
+  }
+}

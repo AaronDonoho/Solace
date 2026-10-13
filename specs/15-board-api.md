@@ -187,13 +187,15 @@ These answer at the root only, not under `/p/{dir}`.
 
 An unknown feature or milestone id, in a path or a body, is `E7023`.
 
-### Task links (D-98)
+### Task, feature and milestone links (D-98, D-122)
 
 | Request | Effect |
 | --- | --- |
-| `GET /tasks/find/{id}` | At the root only: `{id, dir, archived}`, the project folder the task is stored in (`.` for the root's own) and whether it is archived, whichever project that is. An unknown id is 404 with `E7023` |
+| `GET /tasks/find/{id}` | At the root only: `{id, dir, archived, title}`, the project folder the task is stored in (`.` for the root's own), whether it is archived, whichever project that is, and its title. An unknown id is 404 with `E7023` |
+| `GET /features/find/{id}` | `{id, title}` of the feature. An unknown id is 404 with `E7023`; a malformed one is 400 with `E7001` |
+| `GET /milestones/find/{id}` | `{id, title}` of the milestone, as for a feature |
 
-The server serves the shell at `/task/{id}`, the address a task link (`task:<id>` in markdown) points to; the shell opens the task on the board, or on the Strategy page when it is archived.
+The server serves the shell at `/task/{id}`, `/feature/{id}` and `/milestone/{id}`, the addresses a link (`task:<id>`, `feature:<id>` or `milestone:<id>` in markdown) points to. The shell opens a task on the board, or on the Strategy page when it is archived; a feature on the Strategy page's Features tab, a milestone on its Roadmap tab. A bare link shows the record's title.
 
 | Request (D-91) | Effect |
 | --- | --- |

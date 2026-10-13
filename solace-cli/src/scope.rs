@@ -61,6 +61,14 @@ pub fn home(project: &Path, tid: &str) -> Result<PathBuf, Failure> {
         .ok_or_else(|| Failure("E7001 unknown task".into(), 1))
 }
 
+/// The projects the board run's task may change, found from `project`, any
+/// project of its scope (D-123); none outside a task run.
+pub fn of_run(project: &Path) -> Option<Vec<String>> {
+    let (tid, _) = board::context()?;
+    let h = home(project, &tid).ok()?;
+    Some(of(&board::task(&h, &tid).ok()?, &dir(&top(&h), &h)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

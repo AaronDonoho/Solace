@@ -140,8 +140,7 @@ impl Store {
                 Err(e) if e.0.starts_with("E1001") => {
                     // a survivor in exactly one other project: say how to name it
                     // (in a board run, only the task's own projects: others are refused)
-                    let scope_of: Option<Vec<String>> =
-                        board::context().and_then(|(tid, _)| Some(scope::of(&board::task(&self.root, &tid).ok()?, &mine)));
+                    let scope_of: Option<Vec<String>> = scope::of_run(&self.root);
                     let found: Vec<&String> = members
                         .iter()
                         .filter(|d| **d != mine && scope_of.as_ref().is_none_or(|ps| ps.contains(d)) && scope::path(&top, d).join("gleam.toml").exists())
@@ -521,6 +520,43 @@ mod tests {
         ]);
         merge(&store, &["card.Card", "board.Task"]).unwrap();
         assert_eq!(text(&store, "board.mk"), "pub fn mk(x: Int) -> card.Card {\n  card.Task(x)\n}");
+    }
+
+    /// A bare constructor named like the retired type keeps its name in values
+    /// and patterns; the type is renamed in signatures, annotations and type arguments.
+    #[test]
+    fn a_bare_constructor_named_like_the_retired_type_keeps_its_name() {
+        let board = "pub type Idle {\n  Idle\n}\n\npub fn rank(s: Idle) -> Int {\n  case s {\n    Idle -> 1\n  }\n}\n\npub fn all() -> List(Idle) {\n  let xs: List(Idle) = [Idle]\n  xs\n}\n";
+        let store = project(&[("src/board.gleam", board), ("src/state.gleam", "pub type State {\n  Idle\n}\n")]);
+        merge(&store, &["state.State", "board.Idle"]).unwrap();
+        assert_eq!(text(&store, "board.rank"), "pub fn rank(s: state.State) -> Int {\n  case s {\n    state.Idle -> 1\n  }\n}");
+        assert_eq!(text(&store, "board.all"), "pub fn all() -> List(state.State) {\n  let xs: List(state.State) = [state.Idle]\n  xs\n}");
+    }
+
+    /// A label (`state: Idle`) in a call, a record update or a pattern is a value,
+    /// not an annotation, so the constructor keeps its name.
+    #[test]
+    fn a_label_before_a_bare_constructor_is_not_an_annotation() {
+        let board = "pub type Idle {\n  Idle\n}\n\npub type Box {\n  Box(state: Idle)\n}\n\npub fn mk(b: Box) -> Box {\n  let c = Box(state: Idle)\n  let d = Box(..b, state: Idle)\n  c\n}\n";
+        let store = project(&[("src/board.gleam", board), ("src/state.gleam", "pub type State {\n  Idle\n}\n")]);
+        merge(&store, &["state.State", "board.Idle"]).unwrap();
+        assert_eq!(
+            text(&store, "board.mk"),
+            "pub fn mk(b: Box) -> Box {\n  let c = Box(state: state.Idle)\n  let d = Box(..b, state: state.Idle)\n  c\n}"
+        );
+    }
+
+    /// A word ending in `fn` before a call is not the keyword, and brackets in a
+    /// string do not change what a label is; a label in a pattern is a value too.
+    #[test]
+    fn labels_ignore_words_ending_in_fn_strings_and_patterns() {
+        let board = "pub type Idle {\n  Idle\n}\n\npub type Box {\n  Box(phase: Idle)\n}\n\npub fn mk(b: Box, dofn: Int) -> Int {\n  let s = \"(\"\n  let c = Box(phase: Idle)\n  case b {\n    Box(phase: Idle) -> dofn\n  }\n}\n";
+        let store = project(&[("src/board.gleam", board), ("src/state.gleam", "pub type State {\n  Idle\n}\n")]);
+        merge(&store, &["state.State", "board.Idle"]).unwrap();
+        assert_eq!(
+            text(&store, "board.mk"),
+            "pub fn mk(b: Box, dofn: Int) -> Int {\n  let s = \"(\"\n  let c = Box(phase: state.Idle)\n  case b {\n    Box(phase: state.Idle) -> dofn\n  }\n}"
+        );
     }
 
     #[test]

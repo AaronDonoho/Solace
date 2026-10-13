@@ -9,6 +9,49 @@ import { to_string } from '../build/dev/javascript/lustre/lustre/element.mjs';
 const frame = (data, id = 0) => 'id: ' + id + '\ndata: ' + JSON.stringify(data) + '\n\n';
 const encode = text => new TextEncoder().encode(text);
 
+// The message box grows with its text where the browser has no `field-sizing`.
+// D-122: a feature or milestone link's card is scrolled to, focused and marked, once it is drawn.
+test('a linked card is revealed once it is drawn', async () => {
+  const { reveal_card } = await import('../src/api.mjs');
+  const classes = new Set(), attrs = {};
+  let scrolled = false, focused = false, drawn = false;
+  const card = {
+    scrollIntoView: () => { scrolled = true; }, focus: () => { focused = true; },
+    hasAttribute: n => n in attrs, setAttribute: (n, v) => { attrs[n] = v; },
+    classList: { add: c => classes.add(c), remove: c => classes.delete(c) },
+  };
+  const asked = [];
+  const root = { querySelector: s => { asked.push(s); return drawn ? card : null; } };
+  reveal_card(root, 'feature', 'f1');
+  expect(scrolled).toBe(false);
+  drawn = true;
+  await new Promise(r => setTimeout(r, 200));
+  expect(asked[0]).toBe('[data-feature-id="f1"]');
+  expect([scrolled, focused, attrs.tabindex, classes.has('revealed')]).toEqual([true, true, '-1', true]);
+  asked.length = 0;
+  reveal_card(root, 'milestone', 'a"]');
+  expect(asked).toEqual([]);
+});
+
+test('the planning message box is sized from its text without field-sizing', async () => {
+  const { fit_plan_text } = await import('../src/api.mjs');
+  const box = { style: {}, scrollHeight: 140 };
+  const root = { querySelector: s => (s === '#plan-text' ? box : null) };
+  const css = globalThis.CSS;
+  try {
+    globalThis.CSS = { supports: () => false };
+    fit_plan_text(root);
+    expect(box.style.height).toBe('142px');
+    box.style = {};
+    globalThis.CSS = { supports: (p, v) => p === 'field-sizing' && v === 'content' };
+    fit_plan_text(root);
+    expect(box.style.height).toBeUndefined();
+    fit_plan_text(null);
+  } finally {
+    globalThis.CSS = css;
+  }
+});
+
 // A workspace root: its own `/tasks` holds only its project, so the list comes from the merged stream.
 test('Tasks tab merges every project, sorts and filters, opens a task and links it inline', async () => {
   const requests = [];
@@ -581,7 +624,8 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     expect(panel()).toContain('Planning Context: Whole Project');
     dispatch(new strategy.Open('.', 't1'));
     expect(panel()).toContain('Planning Context: task <em>Index</em>');
-    expect(panel()).toContain('Runs on this');
+    expect(panel()).toContain('aria-label="Earlier runs"');
+    expect(panel()).not.toContain('Runs on this');
     expect(panel()).toContain('Ended: planned · fake');
     dispatch(new strategy.PlanText('Plan the index'));
     dispatch(new strategy.StartPlan());
@@ -614,16 +658,19 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     expect(calls.at(-1)).toEqual(['/strategy/runs/r1/end', {}]);
     expect(panel()).not.toContain('id="plan-text"');
     expect(html()).not.toContain('class="planning"');
-    // Back on the task: both runs, newest first; the past one reopens read-only.
+    // Back on the task: both runs under Earlier runs, newest first; the past
+    // one reopens read-only, selected in the menu.
     dispatch(new strategy.Select(new strategy.Tasks()));
     dispatch(new strategy.ShowPlan(''));
-    const runs = panel().slice(panel().indexOf('Runs on this'));
+    const runs = panel().slice(panel().indexOf('aria-label="Earlier runs"'), panel().indexOf('</select>'));
     expect(runs.indexOf('Ended: planned')).toBeGreaterThan(-1);
-    expect(runs.split('<li>').length - 1).toBe(2);
+    expect(runs.split('<option value=').length - 1).toBe(2);
+    expect(runs.indexOf('value="r1"')).toBeLessThan(runs.indexOf('value="r0"'));
     dispatch(new strategy.ShowPlan('r0'));
     await until(() => panel().includes('An earlier plan'));
     expect(panel()).not.toContain('id="plan-text"');
-    expect(panel()).toContain('aria-current="true"');
+    expect(panel()).toContain('<option selected value="r0">');
+    expect(panel()).toContain('>New run</button>');
   } finally {
     controllers.forEach(c => c.abort()); server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
   }

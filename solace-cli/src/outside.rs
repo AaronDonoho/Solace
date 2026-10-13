@@ -101,17 +101,20 @@ impl Written {
             }
             drop_build_output(&self.root, &rel)?;
             // Up to, not including, `src/` or `test/`.
-            let top = self.root.join(rel.split('/').next().unwrap_or_default());
-            let mut dir = path.parent();
-            while let Some(d) = dir.filter(|d| d.starts_with(&top) && *d != top) {
-                if fs::remove_dir(d).is_err() {
-                    break;
-                }
-                dir = d.parent();
-            }
+            remove_empty_dirs(&self.root.join(rel.split('/').next().unwrap_or_default()), path.parent());
             self.forget(&rel);
         }
         Ok(())
+    }
+}
+
+/// Removes `dir` and each parent it leaves empty, up to, not including, `top`.
+pub fn remove_empty_dirs(top: &Path, mut dir: Option<&Path>) {
+    while let Some(d) = dir.filter(|d| d.starts_with(top) && *d != top) {
+        if fs::remove_dir(d).is_err() {
+            break;
+        }
+        dir = d.parent();
     }
 }
 

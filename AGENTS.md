@@ -14,7 +14,7 @@ A semantic programming system: programs are a store of identified, typed, verifi
 - Write American English ("color", "neighbor"). Change British spellings you come across to American when they are in your task's scope.
 - Where applicable, tests should be kept in separate files from runtime code.
 - Practice domain-driven development.
-- If this or any file or any solace command appears out-of-date, unclear, or causes mistakes, say so.
+- If this or any file or any solace command appears out-of-date, unclear, or causes mistakes: say so.
 
 ## Layout
 - `solace-cli/`: the Rust CLI and server; `board/`, `migration/` and `frontend/` below it are Gleam projects of their own.

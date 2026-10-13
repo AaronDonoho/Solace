@@ -45,12 +45,12 @@ export function store(key, value) {
 // Quotes nest at most `maxQuotes` deep; a deeper `>` stays text, so untrusted
 // text can't exhaust the stack. `depth` is the quotes already open.
 const maxQuotes = 100;
-// A task reference (D-98): `[label](task:<id>)`, or a bare `task:<id>` shown as itself, links to
-// `/task/<id>`, which the shell opens on the board, else on the Strategy page. The id is a task's 16 hex
-// digits. A link already made is skipped whole, so a reference inside its label isn't nested in it; an image
-// form (`![x](task:<id>)`) stays text.
-const taskRef = /(<a [^>]*>[\s\S]*?<\/a>)|(!?)\[([^\]]+)\]\(task:([0-9a-f]{16})\)|(^|[^\w/])task:([0-9a-f]{16})(?!\w)/g;
-const taskLink = (id, label) => `<a href="/task/${id}" data-task="${id}">${label}</a>`;
+// A task, feature or milestone reference (D-98, D-122): `[label](<kind>:<id>)`, or a bare `<kind>:<id>`
+// shown as itself until the shell puts the record's title in its place, links to `/<kind>/<id>`, which the
+// shell opens on the board or the Strategy page. The id is a record's 16 hex digits. A link already made is
+// skipped whole, so a reference inside its label isn't nested in it; an image form (`![x](task:<id>)`) stays text.
+const taskRef = /(<a [^>]*>[\s\S]*?<\/a>)|(!?)\[([^\]]+)\]\((task|feature|milestone):([0-9a-f]{16})\)|(^|[^\w/])(task|feature|milestone):([0-9a-f]{16})(?!\w)/g;
+const taskLink = (kind, id, label) => `<a href="/${kind}/${id}" data-${kind}="${id}">${label}</a>`;
 export function markdown(text, base = '', depth = 0) {
   const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   // Code spans are lifted out first so bold and links leave them literal.
@@ -60,8 +60,8 @@ export function markdown(text, base = '', depth = 0) {
       .replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>')
       .replace(/!\[([^\]]*)\]\((\/tasks\/[\w-]+\/files\/[0-9a-f]{16}\.(?:png|jpg|gif|webp))\)/g, `<img alt="$1" src="${escape(base)}$2">`)
       .replace(/(^|[^!])\[([^\]]+)\]\((https?:\/\/[^\s)\u0000]+)\)/g, '$1<a href="$3" rel="noopener noreferrer">$2</a>')
-      .replace(taskRef, (all, link, bang, label, id, before, bare) =>
-        link ? link : label ? (bang ? all : taskLink(id, label)) : before + taskLink(bare, `task:${bare}`))
+      .replace(taskRef, (all, link, bang, label, kind, id, before, bareKind, bare) =>
+        link ? link : label ? (bang ? all : taskLink(kind, id, label)) : before + taskLink(bareKind, bare, `${bareKind}:${bare}`))
       .replace(/\u0000(\d+)\u0000/g, (_, n) => `<code>${codes[n]}</code>`);
   };
   const item = /^(\s*)([-*]|\d+[.)])\s+(.*)/, heading = /^(#{1,4})\s+(.*)/, quote = /^ {0,3}>[ \t]?/;
