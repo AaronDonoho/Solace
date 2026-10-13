@@ -855,6 +855,8 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
             let part = match (text(key, old), text(key, &new)) {
                 (a, b) if a == b && baseline.is_some() => format!("## {shown} (metadata or binary content changed)\n"),
                 (a, b) if a == b => format!("## {shown} (back to its state before the task)\n"),
+                // an extract into another project: shown once, with the diff, where it landed
+                (Some(_), None) if let Some(there) = moved_to(&projects, dir, key) => format!("## {shown} (moved to {there})\n"),
                 (None, Some(b)) => format!("## {shown} (added)\n{}", line_diff("", &b)),
                 (Some(a), None) => format!("## {shown} (deleted)\n{}", line_diff(&a, "")),
                 (a, b) => format!("## {shown} (changed)\n{}", line_diff(&a.unwrap_or_default(), &b.unwrap_or_default())),
@@ -885,6 +887,14 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
         );
     }
     Ok(heading + &out)
+}
+/// The other project of `projects` where the symbol entity `key` is live: an
+/// extract into another project moved it there (D-103).
+fn moved_to(projects: &[(String, Store)], dir: &str, key: &str) -> Option<String> {
+    if !key.starts_with("symbol:") {
+        return None;
+    }
+    projects.iter().find(|(d, s)| d != dir && snapshot(s).is_ok_and(|c| c[key][7].as_i64() == Some(1))).map(|(d, _)| d.clone())
 }
 /// Line diff with two lines of context; `…` marks skipped lines.
 fn line_diff(a: &str, b: &str) -> String {
@@ -1016,7 +1026,7 @@ pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
     }
     Ok(v)
 }
-fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failure> {
+pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failure> {
     for (key, v) in states {
         if let Some(id) = key.strip_prefix("symbol:") {
             if v.is_null() {
@@ -1090,11 +1100,15 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
     if !conflicts.is_empty() {
         return err("E7007", conflicts.join(", "));
     }
+    // Every project is restored before any is checked: one reads another from
+    // disk through a path dependency, as an extract's dependents do (D-103).
     let mut done: Vec<(&Store, Vec<(String, Value)>)> = vec![];
-    for (dir, st, states) in plans.into_iter().filter(|p| !p.2.is_empty()) {
+    let mut failed: Option<(&str, &Store, Failure)> = None;
+    let plans: Vec<_> = plans.into_iter().filter(|p| !p.2.is_empty()).collect();
+    for (dir, st, states) in &plans {
         let current = snapshot(st)?;
         let mut undo = vec![];
-        for (key, _) in &states {
+        for (key, _) in states {
             let v = if let Some(name) = key.strip_prefix("file:") {
                 json!(fs::read(lockdown::path(&st.root, name)?).ok())
             } else {
@@ -1103,18 +1117,27 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
             undo.push((key.clone(), v));
         }
         st.db.execute_batch("SAVEPOINT revert_task")?;
-        let checked = (|| -> Result<(), Failure> {
-            restore(st, &states)?;
+        done.push((*st, undo));
+        if let Err(e) = restore(st, states) {
+            failed = Some((dir.as_str(), *st, e));
+            break;
+        }
+    }
+    if failed.is_none() {
+        for (dir, st, _) in &plans {
             // A project of plain files (D-60) has no code to type-check.
-            if st.root.join("gleam.toml").exists() {
-                st.check()?;
+            if st.root.join("gleam.toml").exists()
+                && let Err(e) = st.check()
+            {
+                failed = Some((dir.as_str(), *st, e));
+                break;
             }
-            Ok(())
-        })();
-        if let Err(e) = checked {
-            st.db.execute_batch("ROLLBACK TO revert_task; RELEASE revert_task")?;
-            restore(st, &undo)?;
+        }
+    }
+    match failed {
+        Some((dir, st, e)) => {
             for (earlier, undo) in done.iter().rev() {
+                earlier.db.execute_batch("ROLLBACK TO revert_task; RELEASE revert_task")?;
                 restore(earlier, undo)?;
             }
             let other = tasks(&st.root)?
@@ -1129,8 +1152,11 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
             let place = if projects.len() > 1 { format!("in {dir}: ") } else { String::new() };
             return err("E7008", format!("{place}{}\n{other}", e.0));
         }
-        st.db.execute_batch("RELEASE revert_task")?;
-        done.push((st, undo));
+        None => {
+            for (st, _) in &done {
+                st.db.execute_batch("RELEASE revert_task")?;
+            }
+        }
     }
     for (_, st) in &projects {
         st.db.execute("DELETE FROM board_touches WHERE task=?", [&tid])?;
@@ -1151,6 +1177,78 @@ fn settle(s: &Store, t: &Value) -> Result<(), Failure> {
         drop_before(&st, tid)?;
     }
     Ok(())
+}
+/// The body of a feature's Tech Debt task (D-112).
+const TECH_DEBT_BODY: &str = "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.";
+/// The findings of a note's `### Tech debt` section (D-112): one per top-level
+/// bullet (`-`, `*`, `+` or `1.`), with the indented lines below it. The
+/// section ends at the next heading; no section gives none.
+pub(super) fn tech_debt_items(text: &str) -> Vec<String> {
+    let (mut items, mut inside): (Vec<String>, bool) = (vec![], false);
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            inside = trimmed.trim_start_matches('#').trim().trim_end_matches(':').eq_ignore_ascii_case("tech debt");
+            continue;
+        }
+        if !inside || trimmed.is_empty() {
+            continue;
+        }
+        let numbered = line.split_once(". ").filter(|(n, _)| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())).map(|(_, rest)| rest);
+        match ["- ", "* ", "+ "].iter().find_map(|b| line.strip_prefix(b)).or(numbered) {
+            Some(item) => items.push(item.trim().to_string()),
+            None => {
+                if let Some(last) = items.last_mut() {
+                    *last += "\n";
+                    *last += line.trim_end();
+                }
+            }
+        }
+    }
+    items.retain(|i| !i.is_empty());
+    items
+}
+/// The task's last review: the run id and the agent's note of its last review
+/// run that ended `reviewed`.
+fn last_review(t: &Value) -> Option<(String, String)> {
+    let r = t["runs"].as_array()?.iter().rev().find(|r| r["kind"] == "review" && r["outcome"] == "reviewed")?;
+    let rid = r["id"].as_str()?;
+    let n = t["notes"].as_array()?.iter().rev().find(|n| n["run"] == rid && n["author"] == "agent")?;
+    Some((rid.to_string(), n["text"].as_str()?.to_string()))
+}
+/// What completing task `t` files as tech debt (D-112): its feature's open Tech
+/// Debt task (`techDebt: true`, not in a final column) with one `solace` note per
+/// finding of the last review's `### Tech debt`, naming the task they came from.
+/// With no open one, a new one is made in the first column of `t`'s home, with
+/// its scope, titled `<feature title>: Tech Debt`. None when the task has no
+/// feature or the review lists no tech debt. Nothing is written here.
+pub(super) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize)>, Failure> {
+    let Some(fid) = t["feature"].as_str() else { return Ok(None) };
+    let Some((rid, text)) = last_review(t) else { return Ok(None) };
+    let items = tech_debt_items(&text);
+    let Some(feature) = tasks::record(top, "features", fid).filter(|_| !items.is_empty()) else { return Ok(None) };
+    let tid = t["id"].as_str().unwrap_or("");
+    let open = |o: &Value| flow(&scope::path(top, o["home"].as_str().unwrap_or("."))).is_ok_and(|w| column(&w, o)["final"] != true);
+    let found = all_tasks(top)?.into_iter().find(|o| o["techDebt"] == true && o["feature"] == fid && o["id"] != tid && open(o));
+    let mut debt = match found {
+        Some(d) => d,
+        None => {
+            let home = scope::path(top, t["home"].as_str().unwrap_or("."));
+            let rank = tasks(&home)?.iter().filter_map(|x| x["rank"].as_f64()).fold(0., f64::max) + 1.;
+            let title = format!("{}: Tech Debt", feature["title"].as_str().unwrap_or("").trim());
+            let mut d = new_task(&title, TECH_DEBT_BODY, &flow(&home)?["columns"][0]["id"], rank);
+            d["techDebt"] = json!(true);
+            d["feature"] = json!(fid);
+            d["milestone"] = feature["milestone"].clone();
+            d["scope"] = t["scope"].clone();
+            d["home"] = t["home"].clone();
+            d
+        }
+    };
+    for item in &items {
+        note(&mut debt, "solace", None, &format!("Tech debt from the review of task:{tid} (review run {rid}):\n\n{item}"));
+    }
+    Ok(Some((debt, items.len())))
 }
 /// Settles task `tid` once the task server has moved it into a final column
 /// (D-77 point 5, Option B): a step of its own, never on the server's thread, that
@@ -1662,15 +1760,17 @@ pub(super) enum After {
     Nothing,
     /// Launch the run `(rid, model)`.
     Start(String, Value),
-    /// The task reached a final column: its conversation goes.
-    Clean,
+    /// The task reached a final column: its conversation goes. A task
+    /// completed with its last review's tech debt carries the feature's Tech
+    /// Debt task to write with it (D-112).
+    Clean(Option<Value>),
     /// The task's home left its scope; the board's lane for this one drops it (D-61).
     Removed(String),
 }
 pub(super) fn after(root: &Path, t: &Value, after: After) {
     match after {
         After::Start(rid, m) => start(root.to_path_buf(), t.clone(), rid, m),
-        After::Clean => {
+        After::Clean(_) => {
             let root = root.to_path_buf();
             let tid = t["id"].as_str().unwrap().to_string();
             std::thread::spawn(move || {
@@ -1816,6 +1916,7 @@ pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
                     continue_answered(&mut t);
                 }
                 ("POST", ["actions"]) => {
+                    let was_final = column(&w, &t)["final"] == true;
                     let launch = action(&s, &w, &mut t, body)?;
                     // A held question or a stopped work run stays flagged until the run
                     // continues, restarts, stops or the task settles (D-82).
@@ -1831,7 +1932,23 @@ pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
                     t["finished"] = Value::Null;
                     let after = match launch {
                         Some((rid, m)) => After::Start(rid, m),
-                        None if column(&w, &t)["final"] == true => After::Clean,
+                        None if column(&w, &t)["final"] == true => {
+                            // Completed with its changes kept, not canceled: the last
+                            // review's tech debt goes to the feature (D-112).
+                            let debt = if !was_final && a["revert"] != true {
+                                tech_debt(&scope::top(root), &t).unwrap_or_else(|e| {
+                                    eprintln!("filing tech debt of task {tid}: {}", e.0);
+                                    None
+                                })
+                            } else {
+                                None
+                            };
+                            if let Some((d, n)) = &debt {
+                                let items = if *n == 1 { "1 tech-debt item".to_string() } else { format!("{n} tech-debt items") };
+                                note(&mut t, "solace", None, &format!("Filed {items} from the last review on task:{}.", d["id"].as_str().unwrap_or("")));
+                            }
+                            After::Clean(debt.map(|(d, _)| d))
+                        }
                         None => After::Nothing,
                     };
                     return Ok((t, after));
@@ -2375,6 +2492,7 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
     if resumed {
         out = out.replace(START, "Use the continuation context below.");
     }
+    out += &waiting_on(&scope::top(root), tid);
     if !matches!(kind, "review" | "discuss") && t["runs"].as_array().is_some_and(|r| r.len() > 1) {
         if resumed {
             out += "\nContinue the author's conversation. The role and permissions above replace those of earlier runs. Skip broad orientation; inspect current versions of symbols you need before editing.\n";
@@ -2439,6 +2557,35 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, custom
 /// The most of the vision a brief carries (D-91): all of it, since a save is
 /// held to the same limit (D-92). Only a vision saved before the limit is cut.
 const VISION_CAP: usize = tasks::VISION_LIMIT;
+
+/// What a brief says when a dependency is unfinished (D-110): advice, nothing is refused.
+const WAITING: &str = "This task depends on unfinished work. Check whether you can do your part without it. If you can't, ask the human (`task ask`) before building on code that doesn't exist yet.";
+
+/// Task `tid`'s dependencies for its brief and `session start --task` (D-110):
+/// each with its id, title and column, from any project of the root, the
+/// unfinished ones marked, then advice. Unfinished is as on the board: not in a
+/// final column, so complete and canceled are finished. Empty when no
+/// dependency is unfinished, so the brief stays short.
+pub fn waiting_on(top: &Path, tid: &str) -> String {
+    let (Ok(all), Ok(w)) = (all_tasks(top), flow(top)) else { return String::new() };
+    let Some(t) = all.iter().find(|o| o["id"] == tid) else { return String::new() };
+    let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
+    let (mut lines, mut unfinished) = (vec![], false);
+    for id in t["dependsOn"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        // A deleted task is no work to wait for.
+        let Some(d) = all.iter().find(|o| o["id"] == id) else { continue };
+        let c = column(&w, d);
+        let open = c["final"] != true;
+        unfinished |= open;
+        let shown = c["label"].as_str().or(c["id"].as_str()).or(d["column"].as_str()).unwrap_or("");
+        let project = if d["home"] != t["home"] { format!(", in {}", text(&d["home"])) } else { String::new() };
+        lines.push(format!("- {id} {} ({shown}{project}){}", text(&d["title"]), if open { " — unfinished" } else { "" }));
+    }
+    if !unfinished {
+        return String::new();
+    }
+    format!("\nDepends on:\n{}\n{WAITING}\n", lines.join("\n"))
+}
 
 /// The root's vision for an investigate, work or discuss brief (D-91): the
 /// whole text, or for an older, longer one its first `VISION_CAP` characters,
@@ -2565,14 +2712,18 @@ pub fn record_verification(s: &Store, tid: &str, command: &str, result: &Out) ->
 /// what it needs from the task (Spec 15 §6), as plain text.
 /// A fresh run's first step; a resumed run continues instead.
 const START: &str = "Start with `session start --task`, with the task's title and description as `text`.";
+/// What a review of a task in a feature is asked to add (D-112).
+const TECH_DEBT_ASK: &str = "This task is part of a feature: put minor, non-blocking findings that later work in the feature should fix under a `### Tech debt` heading in the feedback, one finding per bullet with its location (`module.name` or a file). When the task is completed, Solace files each on the feature's Tech Debt task; findings that block this task belong in the findings, not there.";
 fn brief(t: &Value, kind: &str) -> String {
     let start = START;
-    let ask = "If you need a decision from the human, ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
+    let ask = "If you need a decision from the human, check the Notes so far and Questions below for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
     let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); keep the options concise.";
-    let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `write`, `remove`, `format` and `run` are refused.";
+    let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `merge`, `write`, `remove`, `format` and `run` are refused.";
+    // A task in a feature files its review's minor findings as the feature's tech debt (D-112).
+    let debt = if t["feature"].is_string() { format!(" {TECH_DEBT_ASK}") } else { String::new() };
     let role = match kind {
         "review" => format!(
-            "Review the changes this task made (listed below) and give feedback. Follow the review context below: the first review assesses the whole task with `task diff`; follow-ups start with `task diff --since-review` when a completed checkpoint exists. Then read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. {read_only} In a review, `run <name>` is allowed for commands marked `allowed_in_reviews` in `solace.toml`; use those to verify (for example JavaScript tests). Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed."
+            "Review the changes this task made (listed below) and give feedback. Follow the review context below: the first review assesses the whole task with `task diff`; follow-ups start with `task diff --since-review` when a completed checkpoint exists. Then read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. {read_only} In a review, `run <name>` is allowed for commands marked `allowed_in_reviews` in `solace.toml`; use those to verify (for example JavaScript tests). Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
         ),
         "discuss" => format!(
             "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
@@ -2662,12 +2813,18 @@ fn text_of(v: &Value) -> String {
 }
 /// D-109: a failed batch where only some commands failed, from the reply's
 /// last line (`1 of 3 commands failed: …`): `(1 of 3 failed)`, for the step's title.
+/// D-119: a call that stopped at a failed change (`…; skipped: a; b`) adds `, 2 skipped`.
 fn partly_failed(status: &str, output: &str) -> Option<String> {
     let last = output.trim_end().lines().last()?;
+    let (last, skipped) = match last.rsplit_once("; skipped: ") {
+        Some((l, s)) => (l, s.split("; ").count()),
+        None => (last, 0),
+    };
     let (n, rest) = last.split_once(" of ")?;
     let (m, _) = rest.split_once(" commands failed: ")?;
     let (n, m): (usize, usize) = (n.parse().ok()?, m.parse().ok()?);
-    (status == "failed" && n < m).then(|| format!("({n} of {m} failed)"))
+    let skipped = if skipped > 0 { format!(", {skipped} skipped") } else { String::new() };
+    (status == "failed" && n < m).then(|| format!("({n} of {m} failed{skipped})"))
 }
 /// A tool call's input for display: the command first, then any other arguments.
 fn tool_input(args: &Value) -> (String, String) {
@@ -3933,920 +4090,6 @@ impl Read for Events {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A task with one run `r1` in `run`'s state, and a hung agent in its own process group.
-    fn supervised(run: Value) -> (testing::Project, String, std::process::Child) {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Supervise"})).unwrap();
-        t["runs"] = json!([run]);
-        tasks::put(&s, &t).unwrap();
-        let child = Command::new("sleep").arg("45").process_group(0).spawn().unwrap();
-        (p, t["id"].as_str().unwrap().to_string(), child)
-    }
-
-    /// D-78: the file is the record, so a log that can't take the change doesn't fail it.
-    #[test]
-    fn a_task_is_written_when_the_log_cannot_take_it() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Logged"})).unwrap();
-        let log = store_dir(&scope::top(&s.root)).join("events.db");
-        fs::remove_file(&log).unwrap();
-        fs::create_dir(&log).unwrap();
-        t["title"] = json!("Edited");
-        tasks::put(&s, &t).unwrap();
-        assert_eq!(task(&s.root, t["id"].as_str().unwrap()).unwrap()["title"], "Edited");
-    }
-
-    /// D-91: investigate, work and discuss briefs carry the vision, cut at a line
-    /// end within the cap; a review's doesn't, and no vision adds nothing.
-    #[test]
-    fn a_brief_carries_the_vision_up_to_the_cap() {
-        let root = testing::Scratch::new();
-        assert_eq!(vision_section(&root, "work"), "");
-        let line = format!("{}\n", "v".repeat(99));
-        let long = line.repeat(12);
-        fs::create_dir_all(root.join(".solace/strategy")).unwrap();
-        fs::write(root.join(".solace/strategy/vision.md"), &long).unwrap();
-        for kind in ["investigate", "work", "discuss"] {
-            let s = vision_section(&root, kind);
-            assert!(s.starts_with("\nVision ("), "{kind}: {s}");
-            assert_eq!(s.matches(&"v".repeat(99)).count(), 10, "{kind}: ten whole lines fit in {VISION_CAP} characters");
-            assert!(s.contains("(cut short;"), "{kind}");
-        }
-        assert_eq!(vision_section(&root, "review"), "");
-        fs::write(root.join(".solace/strategy/vision.md"), "For teams.\n").unwrap();
-        assert!(vision_section(&root, "work").ends_with(":\nFor teams.\n"));
-    }
-
-    /// A finished agent that hangs is killed once the grace period passes, not before.
-    #[test]
-    fn hung_shutdown_is_killed_after_the_grace_period() {
-        let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"ended","outcome":"finished"}));
-        let log = p.root.join(".solace/r1.log");
-        let start = Instant::now();
-        let forced = supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), Duration::from_millis(300)).unwrap();
-        assert!(forced);
-        assert!(start.elapsed() >= Duration::from_millis(300) && start.elapsed() < Duration::from_secs(10));
-        assert!(child.try_wait().unwrap().is_some());
-        assert_eq!(GRACEFUL_EXIT, Duration::from_secs(30));
-    }
-
-    /// A finished agent that exits within the grace period isn't killed.
-    #[test]
-    fn graceful_exit_is_not_forced() {
-        let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"ended","outcome":"finished"}));
-        lockdown::kill_group(&mut child);
-        let mut child = Command::new("sleep").arg("0.2").process_group(0).spawn().unwrap();
-        let log = p.root.join(".solace/r1.log");
-        let start = Instant::now();
-        assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
-        assert!(start.elapsed() < Duration::from_secs(10));
-    }
-
-    /// An interrupted run's agent is killed at once; a running one past its timeout ends the run.
-    #[test]
-    fn interrupted_and_timed_out_agents_are_killed() {
-        let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"ended","outcome":"interrupted"}));
-        let log = p.root.join(".solace/r1.log");
-        let start = Instant::now();
-        assert!(supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
-        assert!(start.elapsed() < Duration::from_secs(10));
-        let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"running"}));
-        let log = p.root.join(".solace/r1.log");
-        assert!(supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_millis(200), GRACEFUL_EXIT).unwrap());
-        assert!(child.try_wait().unwrap().is_some());
-        let t = task(&p.root, &tid).unwrap();
-        assert_eq!(t["runs"][0]["state"], "ended");
-        assert!(t["notes"].as_array().unwrap().iter().any(|n| n["text"] == "task timeout"));
-    }
-
-    /// A review or investigation run reads but doesn't change (it may build to
-    /// verify); host commands never run in a run; an ended run runs nothing.
-    #[test]
-    fn agent_guard_follows_the_run() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Look"})).unwrap();
-        t["runs"] = json!([{"id":"r1","kind":"review","state":"running"},{"id":"r2","kind":"work","state":"ended"}]);
-        tasks::put(&s, &t).unwrap();
-        let tid = t["id"].as_str().unwrap();
-        let guard = |rid: &str, a: &[&str]| agent_guard(&s.root, tid, rid, a, &[]).map(drop).map_err(|e| e.0);
-        assert!(guard("r1", &["view", "app"]).is_ok() && guard("r1", &["build"]).is_ok());
-        std::fs::write(
-            s.root.join("solace.toml"),
-            "[commands]\nsafe = { run = [\"true\"], allowed_in_reviews = true }\ne2e = { run = [\"true\"] }\n",
-        )
-        .unwrap();
-        assert!(guard("r1", &["run", "safe"]).is_ok());
-        assert!(guard("r1", &["run", "e2e"]).unwrap_err().contains("allowed_in_reviews"));
-        for a in [["submit", "app.main"], ["write", "x"]] {
-            assert!(guard("r1", &a).unwrap_err().contains("this run is read-only"), "{a:?}");
-        }
-        assert!(guard("r1", &["migrate", "--yes"]).unwrap_err().contains("host command"));
-        assert!(guard("r2", &["view", "app"]).unwrap_err().contains("run ended"));
-        assert!(guard("r9", &["view", "app"]).unwrap_err().starts_with("E7003 unknown run"));
-        // A `task` command takes no project lock (D-77 point 5); any other waits for it.
-        let held = lock(&s.root).unwrap();
-        let waits = |a: &'static [&'static str]| {
-            let (root, tid) = (s.root.clone(), tid.to_string());
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || drop(tx.send(agent_guard(&root, &tid, "r1", a, &[]).map(|g| g.len()).map_err(|e| e.0))));
-            rx
-        };
-        assert_eq!(waits(&["task", "note", "x"]).recv_timeout(Duration::from_secs(1)).unwrap(), Ok(0));
-        let view = waits(&["view", "app"]);
-        assert!(view.recv_timeout(Duration::from_millis(300)).is_err());
-        drop(held);
-        assert_eq!(view.recv_timeout(Duration::from_secs(5)).unwrap(), Ok(1));
-    }
-
-    /// D-93: a strategy run's guard takes no project lock and refuses an ended run;
-    /// `strategy show` follows links; the brief carries the record, decisions and notes.
-    #[test]
-    fn strategy_runs_read_the_graph() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let top = scope::top(&p.root);
-        let runs = top.join(".solace/strategy/runs");
-        fs::create_dir_all(&runs).unwrap();
-        for (id, state) in [("r1", "running"), ("r2", "ended")] {
-            let run = json!({"id":id,"kind":"strategy","state":state,"context":{"kind":"page"},"notes":[],"questions":[]});
-            fs::write(runs.join(format!("{id}.json")), run.to_string()).unwrap();
-        }
-        let held = lock(&p.root).unwrap();
-        assert!(strategy_guard(&top, "r1", &["view", "app"]).is_ok());
-        assert!(strategy_guard(&top, "r2", &["view", "app"]).unwrap_err().0.starts_with("E7003"));
-        assert!(strategy_guard(&top, "r9", &["view", "app"]).unwrap_err().0.starts_with("E7023"));
-        drop(held);
-        let m = tasks::strategy_api(&top, "POST", &["milestones"], json!({"title":"M"})).unwrap();
-        let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"F","milestone":m["id"]})).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
-        (t["feature"], t["milestone"]) = (f["id"].clone(), m["id"].clone());
-        tasks::put(&s, &t).unwrap();
-        let (tid, fid, mid) = (t["id"].as_str().unwrap(), f["id"].as_str().unwrap(), m["id"].as_str().unwrap());
-        assert_eq!(strategy_show(&top, "feature", fid).unwrap()["links"], json!({"milestone":mid,"tasks":[tid]}));
-        assert_eq!(strategy_show(&top, "milestone", mid).unwrap()["links"], json!({"features":[fid],"tasks":[tid]}));
-        assert_eq!(strategy_show(&top, "task", tid).unwrap()["links"], json!({"feature":fid,"milestone":mid,"dependsOn":[],"runs":[]}));
-        assert!(strategy_show(&top, "feature", "nope").unwrap_err().0.starts_with("E7023"));
-        assert!(strategy_show(&top, "vision", "x").unwrap_err().0.starts_with("E7001"));
-        let listed = strategy_list(&top, false).unwrap();
-        assert!(listed.contains(&format!("{tid} {} f:{fid} m:{mid} T", t["column"].as_str().unwrap()))
-            && listed.contains(&format!("Features:\n{fid} proposed m:{mid} F"))
-            && listed.contains(&format!("Milestones:\n{mid} proposed #1 M"))
-            && listed.contains("Vision:"), "{listed}");
-        fs::write(store_dir(&top).join("t9.json"), json!({"id":"t9","title":"Gone","column":"complete","closedTime":8,"archivedTime":9}).to_string()).unwrap();
-        assert!(!strategy_list(&top, false).unwrap().contains("t9") && strategy_list(&top, true).unwrap().contains("t9 complete f:- m:- Gone"));
-        fs::write(top.join("DECISIONS.md"), "# Decisions\n## D-1 First thing\nWhy: x\n## Notes\n").unwrap();
-        let brief = strategy_brief(&top, &json!({"context":{"kind":"feature","id":fid},"notes":[{"author":"human","text":"Plan F"}]}));
-        assert!(brief.contains(&format!("This run is about the feature {fid}")) && brief.contains("\"title\": \"F\""), "{brief}");
-        assert!(brief.contains("A `title` names the work in a few words") && brief.contains("go in `body`"), "{brief}");
-        assert!(brief.contains("- D-1 First thing") && !brief.contains("- Notes") && brief.contains("- human: Plan F"), "{brief}");
-        // The root is a project itself, so the decisions can be read in full.
-        assert!(brief.contains("`grep D-<n>`") && !brief.contains("folder of projects"), "{brief}");
-        // Only commands the run can use.
-        for word in ["task ask", "submit", "`test`", "session start", "are refused"] {
-            assert!(!brief.contains(word), "{word}: {brief}");
-        }
-        // Only the latest decisions, and how to find the rest.
-        let many: String = (1..=14).map(|n| format!("## D-{n} Thing {n}\n")).collect();
-        fs::write(top.join("DECISIONS.md"), many).unwrap();
-        let brief = strategy_brief(&top, &json!({"context":{"kind":"page"},"notes":[]}));
-        assert!(brief.contains("- D-5 Thing 5") && brief.contains("- D-14 Thing 14") && !brief.contains("- D-4 Thing"), "{brief}");
-        assert!(brief.contains("… 4 earlier decisions: `grep D-` lists them."), "{brief}");
-    }
-
-    /// A recorded file change stops being reviewable once the file is unwatched, and symbols always are.
-    #[test]
-    fn reviewable_follows_the_current_tier() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("a.txt", "x")]);
-        let s = open(&p.root).unwrap();
-        assert!(reviewable(&s.root, "file:a.txt") && reviewable(&s.root, "symbol:1"));
-        assert!(!reviewable(&s.root, "file:node_modules/x/index.js"));
-        std::fs::write(s.root.join(".gitignore"), "a.txt\n").unwrap();
-        assert!(!reviewable(&s.root, "file:a.txt"));
-    }
-
-    /// Records a work run's change, as a command does. The task lists its changes
-    /// from the committed rows (D-77 point 4), so nothing is written to the task.
-    fn record_listed(s: &Store, tid: &str, before: &Value, after: &Value) {
-        record(s, tid, "work", before, after).unwrap();
-    }
-
-    #[test]
-    fn review_delta_keeps_module_headers_budget_and_completed_baseline() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Review headers"})).unwrap();
-        let tid = t["id"].as_str().unwrap().to_string();
-        t["runs"] = json!([{"id":"work","kind":"work","state":"ended"}]);
-        tasks::put(&s, &t).unwrap();
-        let before = snapshot(&s).unwrap();
-        s.db.execute("UPDATE modules SET header='//// Reviewed header' WHERE path='app'", []).unwrap();
-        record_listed(&s, &tid, &before, &snapshot(&s).unwrap());
-        t = task(&s.root, &tid).unwrap();
-        t["runs"].as_array_mut().unwrap().push(json!({"id":"review","kind":"review","state":"ended","outcome":"reviewed"}));
-        let mut checkpoint = review_state(&s, &t).unwrap();
-        checkpoint["run"] = json!("review");
-        checkpoint["changed_during_review"] = json!(false);
-        let path = review_path(&s.root, &tid, "review").unwrap();
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
-        write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
-        // A later interrupted run must not displace the completed review.
-        t["runs"].as_array_mut().unwrap().push(json!({"id":"interrupted","kind":"review","state":"ended","outcome":"interrupted"}));
-        tasks::put(&s, &t).unwrap();
-        assert!(task_diff(&s, &tid, &["--since-review"], 1000).unwrap().contains("No task entity changes"));
-        s.db.execute("UPDATE modules SET header='//// Repaired header' WHERE path='app'", []).unwrap();
-        fs::write(s.root.join("later.txt"), "later").unwrap();
-        record_listed(&s, &tid, &json!({"file:later.txt":null}), &json!({"file:later.txt":b"later".to_vec()}));
-        let delta = task_diff(&s, &tid, &["--since-review"], 1).unwrap();
-        assert!(delta.contains("Since completed review review"));
-        assert!(delta.contains("- //// Reviewed header") && delta.contains("+ //// Repaired header"));
-        assert!(delta.contains("Left out to fit the reply") && delta.contains("task diff --since-review <name>"));
-        let filtered = task_diff(&s, &tid, &["--since-review", "file:later.txt"], 1000).unwrap();
-        assert!(filtered.contains("file:later.txt (added)") && !filtered.contains("module:app"));
-    }
-
-    /// Canceling a task puts back what it changed: a module it created goes,
-    /// with its file.
-    #[test]
-    fn cancel_removes_a_module_the_task_created() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Shapes"})).unwrap();
-        t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
-        tasks::put(&s, &t).unwrap();
-        let tid = t["id"].as_str().unwrap();
-        let before = snapshot(&s).unwrap();
-        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-        record(&s, tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
-        assert!(s.root.join("src/geo.gleam").exists());
-        let mut t = task(&s.root, tid).unwrap();
-        end_runs(&mut t, "finished");
-        tasks::put(&s, &t).unwrap();
-        api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
-        assert!(!s.root.join("src/geo.gleam").exists());
-        assert!(s.resolve_module(&s.index().unwrap(), "geo").is_none());
-        assert_eq!(snapshot(&s).unwrap(), before);
-    }
-
-    /// Canceling does not delete a created module's file that was edited
-    /// outside Solace and not yet read in; the next read-in reports it.
-    #[test]
-    fn cancel_keeps_an_edited_file_of_a_module_the_task_created() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Shapes"})).unwrap();
-        t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
-        tasks::put(&s, &t).unwrap();
-        let tid = t["id"].as_str().unwrap();
-        let before = snapshot(&s).unwrap();
-        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-        record(&s, tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
-        let file = s.root.join("src/geo.gleam");
-        fs::write(&file, "pub fn side() {\n  22\n}\n").unwrap();
-        let mut t = task(&s.root, tid).unwrap();
-        end_runs(&mut t, "finished");
-        tasks::put(&s, &t).unwrap();
-        api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
-        assert_eq!(fs::read_to_string(&file).unwrap(), "pub fn side() {\n  22\n}\n");
-    }
-
-    /// D-77 point 4: a `changes` message left in an old inbox adds nothing. The
-    /// board_touches rows are the task's changes, so a revert followed by the
-    /// pending message leaves the task with none.
-    #[test]
-    fn a_pending_changes_message_adds_nothing_after_a_revert() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
-        t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
-        tasks::put(&s, &t).unwrap();
-        let tid = t["id"].as_str().unwrap().to_string();
-        let before = snapshot(&s).unwrap();
-        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-        record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
-        assert!(!changes_of(&s, &task(&s.root, &tid).unwrap()).unwrap().is_empty());
-        // A changes message from before D-77 point 4 waits in the inbox.
-        let top = scope::top(&s.root);
-        let inbox = store_dir(&top).join("inbox");
-        fs::create_dir_all(&inbox).unwrap();
-        let id = "0000000000000000000000000001";
-        let msg = json!({"id": id, "kind": "changes", "task": tid, "run": "r1",
-            "changes": [{"entity": "symbol:1", "name": "geo.side", "run": "r1"}]});
-        fs::write(inbox.join(format!("{id}.json")), msg.to_string().as_bytes()).unwrap();
-        // Cancel reverts the task: its rows go, so it has no changes.
-        end_runs(&mut t, "finished");
-        tasks::put(&s, &t).unwrap();
-        api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap();
-        assert!(changes_of(&s, &task(&s.root, &tid).unwrap()).unwrap().is_empty());
-        // Applying the pending message adds nothing.
-        tasks::drain(&top);
-        let t = task(&s.root, &tid).unwrap();
-        assert_eq!(t["inbox"], json!(id), "the pending message was applied");
-        assert!(!inbox.join(format!("{id}.json")).exists(), "the inbox is drained");
-        assert!(changes_of(&s, &t).unwrap().is_empty());
-        assert!(t["changes"].is_null(), "{}", t);
-    }
-
-    /// D-77 point 5: only a change to code takes the project locks.
-    #[test]
-    fn needs_lock_only_for_changes_to_code() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
-        let tid = t["id"].as_str().unwrap().to_string();
-        let needs = |rest: &[&str], body: Value| {
-            let parts: Vec<&str> = ["tasks", tid.as_str()].into_iter().chain(rest.iter().copied()).collect();
-            needs_lock(&s.root, &parts, &body).unwrap()
-        };
-        assert!(!needs_lock(&s.root, &["tasks"], &json!({"title": "x"})).unwrap());
-        assert!(!needs(&["notes"], json!({"text": "x"})));
-        assert!(!needs(&["actions"], json!({"action": "stop"})));
-        assert!(!needs(&["actions"], json!({"action": "cancel"})), "a task that never had changes");
-        t["questions"] = json!([{"id": "q1", "options": ["Approve", "Reject"], "answer": null,
-            "settings": {"file": "solace.toml", "base": "", "proposed": ""}}]);
-        t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
-        tasks::put(&s, &t).unwrap();
-        assert!(needs(&["questions", "q1"], json!({"option": "Approve"})));
-        assert!(!needs(&["questions", "q1"], json!({"option": "Reject"})));
-        assert!(needs(&["actions"], json!({"action": "cancel"})), "a work run may be mid-command");
-        let before = snapshot(&s).unwrap();
-        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-        record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
-        assert!(needs(&["actions"], json!({"action": "cancel"})));
-        assert!(!needs(&["actions"], json!({"action": "stop"})));
-    }
-
-    /// A run stopped mid-write leaves a record and no rows; cancelling must still lock and undo.
-    #[test]
-    fn a_pending_record_alone_needs_the_locks() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
-        let tid = t["id"].as_str().unwrap();
-        let cancel = |tid: &str| needs_lock(&s.root, &["tasks", tid, "actions"], &json!({"action": "cancel"})).unwrap();
-        assert!(!cancel(tid));
-        lockdown::mark(&s.root, "other", "r9").unwrap();
-        assert!(!cancel(tid), "another task's record is not this task's");
-        lockdown::mark(&s.root, tid, "r1").unwrap();
-        assert!(cancel(tid));
-    }
-
-    /// Stop then Cancel while a write was under way: the record is adopted under the
-    /// locks first, so cancelling restores the file instead of leaving it to recovery.
-    #[test]
-    fn cancel_undoes_a_write_a_stopped_run_left_pending() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("notes.txt", "old\n")]);
-        let s = open(&p.root).unwrap();
-        let t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
-        let tid = t["id"].as_str().unwrap().to_string();
-        lockdown::mark(&s.root, &tid, "r1").unwrap();
-        fs::write(s.root.join(".solace/pending/notes.json"), json!({"task": tid, "run": "r1", "path": "notes.txt", "bytes": b"old\n".to_vec()}).to_string()).unwrap();
-        fs::write(s.root.join("notes.txt"), "new\n").unwrap();
-        api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap();
-        assert_eq!(fs::read_to_string(s.root.join("notes.txt")).unwrap(), "old\n");
-        assert!(!lockdown::pending_for(&s.root, &tid));
-    }
-
-    /// D-108: a canceled task goes back to the backlog, out of the archive, with
-    /// its closedTime and a note; no other column offers it, and complete offers nothing.
-    #[test]
-    fn a_canceled_task_goes_back_to_the_backlog() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
-        let tid = t["id"].as_str().unwrap().to_string();
-        let act = |name: &str| api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": name}));
-        let refused = |r: Result<Value, Failure>| r.unwrap_err().0[..5].to_string();
-        assert_eq!(refused(act("to_backlog")), "E7001", "not offered in backlog");
-        let cancelled = act("cancel").unwrap();
-        assert_eq!(cancelled["column"], "cancelled");
-        assert_eq!(allowed(&flow(&s.root).unwrap(), &cancelled), ["to_backlog"]);
-        let archived = api(&s.root, "POST", &format!("/tasks/{tid}/archive"), json!({})).unwrap();
-        assert!(archived["archivedTime"].is_u64());
-        let back = act("to_backlog").unwrap();
-        assert_eq!((back["column"].as_str(), &back["archivedTime"], &back["closedTime"]), (Some("backlog"), &Value::Null, &cancelled["closedTime"]));
-        assert_eq!(back["title"], "Shapes");
-        let last = back["notes"].as_array().unwrap().last().unwrap().clone();
-        assert_eq!((last["author"].as_str(), last["text"].as_str()), (Some("solace"), Some("The human brought this task back from canceled to backlog.")));
-        let mut done = back.clone();
-        done["column"] = json!("complete");
-        assert!(allowed(&flow(&s.root).unwrap(), &done).is_empty(), "complete offers nothing");
-    }
-
-    /// A workflow whose `finished` event targets a final column, so `task done` settles.
-    const DONE_IS_FINAL: &str = "[board]\nevents = { asked = \"todo\", finished = \"done\", failed = \"todo\" }\n[[board.columns]]\nid = \"todo\"\nactions = [\"cancel\"]\n[[board.columns]]\nid = \"done\"\nfinal = true\n[[board.columns]]\nid = \"gone\"\nfinal = true\n[board.actions]\ncancel = { revert = true, to = \"gone\" }\n";
-
-    /// A `done` from a live run, applied by the server, settles: the move and the settle both happen.
-    #[test]
-    fn a_done_applied_by_the_server_settles() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", DONE_IS_FINAL)]);
-        let s = open(&p.root).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
-        let tid = t["id"].as_str().unwrap().to_string();
-        t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
-        tasks::put(&s, &t).unwrap();
-        let before = snapshot(&s).unwrap();
-        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-        record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
-        let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
-        assert!(has_before());
-        testing::inbox_file(&s.root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"done"}));
-        tasks::drain(&s.root);
-        assert_eq!(task(&s.root, &tid).unwrap()["column"], "done");
-        assert!(!has_before(), "applying the move settled the task");
-    }
-
-    /// `serve` settles a task left final with undo records (a crash between move and settle).
-    #[test]
-    fn resettle_settles_a_final_task_left_unsettled() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", DONE_IS_FINAL)]);
-        let s = open(&p.root).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
-        let tid = t["id"].as_str().unwrap().to_string();
-        let before = snapshot(&s).unwrap();
-        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-        record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
-        let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
-        resettle(&s.root);
-        assert!(has_before(), "a task not in a final column is left alone");
-        t["column"] = json!("done");
-        tasks::put(&s, &t).unwrap();
-        resettle(&s.root);
-        assert!(!has_before());
-    }
-
-    /// `task done` from a run that ended before the server applied it neither moves
-    /// the task nor settles it: its undo records stay.
-    #[test]
-    fn a_late_done_does_not_settle_and_a_real_one_does() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
-        let tid = t["id"].as_str().unwrap().to_string();
-        t["runs"] = json!([{"id": "r1", "kind": "work", "state": "ended", "outcome": "stopped"}]);
-        tasks::put(&s, &t).unwrap();
-        let before = snapshot(&s).unwrap();
-        s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-        record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
-        let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
-        assert!(has_before());
-        testing::inbox_file(&s.root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"late"}));
-        tasks::drain(&s.root);
-        assert!(has_before(), "the late done must not drop the undo records");
-        // The server itself moving the task into a final column settles it.
-        let w = flow(&s.root).unwrap();
-        let last = w["columns"].as_array().unwrap().iter().find(|c| c["final"] == true).unwrap()["id"].clone();
-        tasks::update(&s.root, &tid, move |t| {
-            t["column"] = last;
-            Ok(())
-        })
-        .unwrap();
-        settle_final(&s.root, &tid).unwrap();
-        assert!(!has_before());
-    }
-
-    #[test]
-    fn note_images_are_checked_numbered_and_encoded() {
-        assert_eq!(base64(b"Man"), "TWFu");
-        assert_eq!(base64(b"Ma"), "TWE=");
-        assert_eq!(base64(b"M"), "TQ==");
-        assert_eq!(image_kind(b"\x89PNG\r\n\x1a\nrest"), Some("png"));
-        assert_eq!(image_kind(b"<svg onload=alert(1)>"), None);
-        assert_eq!(image_type("0123456789abcdef.png"), Some("image/png"));
-        for bad in ["../x.png", "0123456789abcdef.svg", "x.png"] {
-            assert_eq!(image_type(bad), None);
-        }
-        let a = "/tasks/t1/files/0123456789abcdef.png";
-        let mut found = vec![];
-        let text = note_images(&format!("see ![one]({a}) and ![x](http://e/x.png) ![again]({a}) ![broken"), "/tasks/t1/files/", &mut found);
-        assert_eq!(text, "see [image 1] and ![x](http://e/x.png) [image 1] ![broken");
-        assert_eq!(found, ["0123456789abcdef.png"]);
-    }
-
-    /// A message for a run that has ended keeps its note and changes nothing else.
-    #[test]
-    fn a_late_agent_message_does_not_wake_an_ended_run() {
-        let w = workflow(&toml::Value::Table(Default::default())).unwrap();
-        let mut t = new_task("T", "", &w["columns"][0]["id"], 1.);
-        t["runs"] = json!([{"id":"r1","kind":"work","state":"ended","outcome":"stopped"}]);
-        let before = t["column"].clone();
-        for command in ["ask", "done", "note"] {
-            let m = json!({"kind":"agent","task":"t","run":"r1","command":command,"text":"late","question":{"id":"q","text":"?","options":["a","b"]}});
-            message(&w, &mut t, &m).unwrap();
-        }
-        assert_eq!(t["runs"][0]["state"], "ended");
-        assert_eq!(t["column"], before);
-        assert!(t["questions"].as_array().unwrap().is_empty());
-        assert_eq!(t["notes"].as_array().unwrap().len(), 3);
-    }
-    /// A crash between the store copy and removing the old file leaves both; the move finishes.
-    #[test]
-    fn adopt_finishes_an_interrupted_move_and_refuses_a_reused_id() {
-        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
-        fs::create_dir_all(store_dir(&root)).unwrap();
-        fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"backlog","home":".","runs":[],"notes":[],"questions":[],"links":[]}"#).unwrap();
-        adopt_tasks(&root, &root).unwrap();
-        assert!(!root.join(".solace/board/t1.json").exists());
-        fs::create_dir_all(root.join(".solace/board")).unwrap();
-        fs::write(root.join(".solace/board/t1.json"), r#"{"id":"t1","column":"backlog"}"#).unwrap();
-        fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"backlog","home":"other"}"#).unwrap();
-        let e = adopt_tasks(&root, &root).unwrap_err();
-        assert!(e.0.contains("used twice") && e.0.contains("t1"));
-        assert!(root.join(".solace/board/t1.json").exists());
-    }
-    /// `strategy show run` outlines a run's steps, then gives chosen ones in full.
-    #[test]
-    fn strategy_show_run_outlines_and_picks_steps() {
-        let root = testing::Scratch::new();
-        let log = root.join("run.jsonl");
-        let lines = [
-            json!({"type":"item.completed","item":{"id":"i1","type":"mcp_tool_call","tool":"solace","arguments":{"command":"view a"},"result":{"content":[{"type":"text","text":"pub fn a()"}]},"status":"completed"}}),
-            json!({"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"All done.\nSecond line."}}),
-            json!({"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}),
-        ];
-        fs::write(&log, lines.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
-        let long = format!("{}.\nSecond line.", "x".repeat(120));
-        let task = json!({"id":"t1","column":"backlog","notes":[{"author":"human","time":7,"text":"A short note."},{"author":"agent","time":8,"text":long}],
-            "questions":[{"id":"q1","text":"Which one?","options":["A"],"answer":"A"},{"id":"q2","text":"Open","options":["A"]}],"conversation":[{"author":"human","text":"the thread"}],
-            "runs":[{"id":"r1","kind":"work","state":"ended","model":"fake","log":log.to_str().unwrap()}]});
-        let root = root.with(&[(".solace/board/t1.json", &task.to_string())]);
-        adopt_tasks(&root, &root).unwrap();
-        let shown = strategy_show(&root, "task", "t1").unwrap();
-        assert_eq!(shown["links"]["runs"], json!(["r1"]));
-        let rec = shown["record"].clone();
-        assert_eq!((rec["notes"].clone(), rec["questions"].clone(), rec["runs"].clone()), (json!(["1 human 7: A short note.", format!("2 agent 8: {}…", "x".repeat(100))]), json!(["1 Which one?: A", "2 Open: unanswered"]), json!(["r1 work ended fake"])));
-        assert!(rec.get("conversation").is_none());
-        let one = strategy_note_show(&root, "t1", "2").unwrap();
-        assert_eq!((one["task"].as_str(), one["notes"][0]["note"].as_u64(), one["notes"][0]["text"].as_str()), (Some("t1"), Some(2), Some(long.as_str())));
-        assert_eq!(strategy_note_show(&root, "t1", "all").unwrap()["notes"].as_array().unwrap().len(), 2);
-        for bad in ["0", "3", "2..1", "x", "1,,2"] { assert!(strategy_note_show(&root, "t1", bad).unwrap_err().0.starts_with("E7001"), "{bad}"); }
-        let outline = strategy_run_show(&root, "t1", "r1", None).unwrap();
-        assert_eq!(outline["run"]["id"], "r1");
-        assert!(outline["run"].get("log").is_none());
-        assert_eq!(outline["steps"][0], "1 tool: solace view a (ok)");
-        assert_eq!(outline["steps"][1], "2 message: All done.");
-        // The token-usage entry is not a step.
-        assert_eq!(outline["steps"].as_array().unwrap().len(), 2);
-        let picked = strategy_run_show(&root, "t1", "r1", Some("2,1")).unwrap();
-        let numbers: Vec<_> = picked["steps"].as_array().unwrap().iter().map(|s| s["step"].clone()).collect();
-        assert_eq!(numbers, [json!(2), json!(1)]);
-        assert_eq!(picked["steps"][1]["output"], "pub fn a()");
-        assert_eq!(picked["steps"][0]["text"], "All done.\nSecond line.");
-        assert_eq!(strategy_run_show(&root, "t1", "r1", Some("all")).unwrap()["steps"].as_array().unwrap().len(), 2);
-        // D-105: through the command, a reply of steps stops at a whole step and names the rest.
-        let one = format!("{}\n", serde_json::to_string_pretty(&strategy_run_show(&root, "t1", "r1", Some("1")).unwrap()).unwrap());
-        let next = "Next: strategy show run t1 r1 2\n";
-        let run = |a: &[&str], budget: usize| strategy_command(&root, "s1", a, &mut || Ok(String::new()), budget);
-        assert_eq!(run(&["strategy", "show", "run", "t1", "r1", "1,2"], one.len() + next.len()).unwrap(), one.clone() + next);
-        assert!(!run(&["strategy", "show", "run", "t1", "r1", "1,2"], 10_000).unwrap().contains("Next:"));
-        assert!(run(&["strategy", "show", "run", "t1", "r1", "1", "--from", "x"], 10_000).unwrap_err().0.starts_with("E7001"));
-        assert!(run(&["strategy", "show", "note", "t1", "2", "--from", "3"], 10_000).unwrap().contains("characters 3.."));
-        for bad in ["0", "3", "2..1", "x", "1,,2"] {
-            assert!(strategy_run_show(&root, "t1", "r1", Some(bad)).unwrap_err().0.starts_with("E7001"), "{bad}");
-        }
-        // A run whose log holds no steps says so.
-        let task = json!({"id":"t2","column":"backlog","runs":[{"id":"r2","kind":"work","state":"ended","log":"missing.jsonl"}]});
-        fs::write(store_dir(&root).join("t2.json"), task.to_string()).unwrap();
-        assert_eq!(strategy_run_show(&root, "t2", "r2", None).unwrap()["steps"], json!([]));
-        assert!(strategy_run_show(&root, "t2", "r2", Some("1")).unwrap_err().0.contains("no steps"));
-        assert!(strategy_run_show(&root, "t1", "nope", None).unwrap_err().0.starts_with("E7023"));
-        assert!(strategy_run_show(&root, "nope", "r1", None).unwrap_err().0.starts_with("E7023"));
-    }
-    /// One unreadable task file doesn't hide the others.
-    #[test]
-    fn all_tasks_skips_an_unreadable_file() {
-        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
-        adopt_tasks(&root, &root).unwrap();
-        fs::write(store_dir(&root).join("empty.json"), "").unwrap();
-        let all = all_tasks(&root).unwrap();
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0]["id"], "t1");
-    }
-    /// A run that waits for an answer lets no command through: it holds still
-    /// while a server runs and stops when none does.
-    #[test]
-    fn agent_guard_holds_a_run_that_waits() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        let s = open(&p.root).unwrap();
-        let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Ask"})).unwrap();
-        t["runs"] = json!([{"id":"r1","kind":"work","state":"waiting"}]);
-        tasks::put(&s, &t).unwrap();
-        let tid = t["id"].as_str().unwrap().to_string();
-        let guard = |a: &'static [&'static str]| {
-            let (root, tid) = (s.root.clone(), tid.clone());
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || drop(tx.send(agent_guard(&root, &tid, "r1", a, &[]).map(drop).map_err(|e| e.0))));
-            rx
-        };
-        // No server: stop.
-        assert!(guard(&["view", "app"]).recv_timeout(Duration::from_secs(2)).unwrap().unwrap_err().contains("waits for an answer"));
-        // A `task` command is not held.
-        assert!(guard(&["task", "note", "x"]).recv_timeout(Duration::from_secs(2)).unwrap().is_ok());
-        // A server runs: the command waits until the run is answered.
-        let _server = try_lock_file(&store_dir(&s.root).join("server.lock")).unwrap().unwrap();
-        let view = guard(&["view", "app"]);
-        assert!(view.recv_timeout(Duration::from_millis(300)).is_err());
-        t["runs"][0]["state"] = json!("running");
-        tasks::put(&s, &t).unwrap();
-        assert!(view.recv_timeout(Duration::from_secs(5)).unwrap().is_ok());
-    }
-    #[test]
-    fn tasks_saved_in_done_load_as_complete() {
-        let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"done"}"#)]);
-        adopt_tasks(&root, &root).unwrap();
-        assert_eq!(task(&root, "t1").unwrap()["column"], "complete");
-        // A custom workflow that still has a `done` column keeps it.
-        fs::write(root.join("solace.toml"), include_str!("default-board.toml").replace("= \"complete\"", "= \"done\"")).unwrap();
-        assert_eq!(tasks(&root).unwrap()[0]["column"], "done");
-    }
-    /// D-82: the default workflow has no `blocked` column.
-    #[test]
-    fn tasks_saved_in_blocked_load_as_assigned_and_held() {
-        let root = testing::Scratch::new().with(&[
-            (".solace/board/t1.json", r#"{"id":"t1","column":"blocked","attention":{"reason":"an agent asked a question","time":1}}"#),
-            (".solace/board/t2.json", r#"{"id":"t2","column":"blocked"}"#),
-        ]);
-        adopt_tasks(&root, &root).unwrap();
-        let (a, b) = (task(&root, "t1").unwrap(), task(&root, "t2").unwrap());
-        assert_eq!((a["column"].as_str(), a["attention"]["reason"].as_str(), a["attention"]["hold"].as_bool()), (Some("assigned"), Some("an agent asked a question"), Some(true)));
-        assert_eq!((b["column"].as_str(), b["attention"]["hold"].as_bool()), (Some("assigned"), Some(true)));
-        // `asked` and `failed` need no target; `finished` does, and a target must exist.
-        let default = include_str!("default-board.toml");
-        let w = |text: String| workflow(&text.parse::<toml::Value>().unwrap());
-        assert!(w(default.to_string()).is_ok());
-        assert!(w(default.replace("finished = \"needs_review\"", "")).is_err());
-        assert!(w(default.replace("events = {", "events = { asked = \"missing\",")).is_err());
-    }
-    #[test]
-    fn tasks_move_once_into_the_root_store() {
-        let root = testing::Scratch::new().with(&[
-            (".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#),
-            (".solace/board/t1/r1.jsonl", "{}\n"),
-        ]);
-        adopt_tasks(&root, &root).unwrap();
-        assert!(!root.join(".solace/board/t1.json").exists());
-        assert!(root.join(".solace/board/t1/r1.jsonl").exists(), "run logs stay in the project");
-        let t = task(&root, "t1").unwrap();
-        assert_eq!(t["home"], ".");
-        assert_eq!(scope::home(&root, "t1").unwrap(), root.to_path_buf());
-        // A leftover copy of a task already moved from this project is dropped, not merged.
-        fs::write(root.join(".solace/board/t1.json"), r#"{"id":"t1"}"#).unwrap();
-        adopt_tasks(&root, &root).unwrap();
-        assert!(!root.join(".solace/board/t1.json").exists());
-        assert_eq!(task(&root, "t1").unwrap()["home"], ".");
-    }
-    #[test]
-    fn presets_merge_with_configured_models() {
-        let v = parse_system("").unwrap();
-        let ids: Vec<&str> = v["models"].as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap()).collect();
-        assert!(ids.contains(&"codex-gpt-6-astra") && ids.contains(&"claude-opus-5-5"));
-        assert_eq!(v["task_timeout"], 3600);
-        let v = parse_system(
-            "[[models]]\nid = \"claude-opus-5-5\"\nlabel = \"Mine\"\nagent = \"claude\"\nmodel = \"x\"\n\
-             [[models]]\nid = \"local\"\nlabel = \"Local\"\nagent = \"codex\"\nmodel = \"qwen\"\n\
-             endpoint = { kind = \"openai\", base_url = \"http://localhost:11434/v1\", key_env = \"LOCAL_KEY\" }\n",
-        )
-        .unwrap();
-        let models = v["models"].as_array().unwrap();
-        assert_eq!(models.iter().find(|m| m["id"] == "claude-opus-5-5").unwrap()["label"], "Mine");
-        assert_eq!(models.last().unwrap()["id"], "local");
-        assert!(parse_system("presets = false\n").unwrap()["models"].as_array().unwrap().is_empty());
-    }
-
-    #[test]
-    fn endpoints_are_checked_and_passed_to_codex() {
-        // An endpoint's kind must match its agent.
-        let wrong = "[[models]]\nid = \"x\"\nlabel = \"X\"\nagent = \"claude\"\nmodel = \"m\"\nendpoint = { kind = \"openai\", base_url = \"http://h\" }\n";
-        assert!(parse_system(wrong).unwrap_err().0.starts_with("E6020"));
-        let m =
-            json!({"label":"Local","endpoint":{"kind":"openai","base_url":"http://localhost:11434/v1","key_env":"SOLACE_TEST_UNSET_KEY"}});
-        let args = endpoint_args(&m);
-        assert_eq!(args[1], "model_provider=\"solace_endpoint\"");
-        let provider: toml::Value = format!("p = {}", args[3].split_once('=').unwrap().1).parse().unwrap();
-        assert_eq!(provider["p"]["base_url"].as_str(), Some("http://localhost:11434/v1"));
-        assert_eq!(provider["p"]["env_key"].as_str(), Some("SOLACE_TEST_UNSET_KEY"));
-        assert_eq!(provider["p"]["wire_api"].as_str(), Some("responses"));
-        assert!(endpoint_args(&json!({"label":"No endpoint"})).is_empty());
-    }
-
-    /// A line diff keeps two lines around each change and marks the lines it
-    /// skips, between changes and after the last one.
-    #[test]
-    fn line_diff_marks_the_lines_it_skips() {
-        let lines = |f: &dyn Fn(usize) -> String| (1..=12).map(|n| format!("{}\n", f(n))).collect::<String>();
-        let a = lines(&|n| format!("l{n}"));
-        let b = lines(&|n| if n == 2 || n == 10 { format!("L{n}") } else { format!("l{n}") });
-        assert_eq!(line_diff(&a, &b), "  l1\n- l2\n+ L2\n  l3\n  l4\n  …\n  l8\n  l9\n- l10\n+ L10\n  l11\n  l12\n");
-        let first = lines(&|n| if n == 1 { "L1".into() } else { format!("l{n}") });
-        assert_eq!(line_diff(&a, &first), "- l1\n+ L1\n  l2\n  l3\n  …\n");
-        assert_eq!(line_diff("", ""), "");
-        assert_eq!(line_diff("x\ny\n", "x\ny\n"), "  …\n");
-        assert_eq!(diff_ops("a\nb", "a\nb"), [(' ', "a"), (' ', "b")]);
-    }
-
-    /// The marked lines are numbered in the new text; a removal marks the line it left.
-    #[test]
-    fn changed_lines_number_the_new_text() {
-        let lines = |f: &dyn Fn(usize) -> String| (1..=12).map(|n| format!("{}\n", f(n))).collect::<String>();
-        let a = lines(&|n| format!("l{n}"));
-        let b = lines(&|n| if n == 2 || n == 10 { format!("L{n}") } else { format!("l{n}") });
-        assert_eq!(changed_lines(&a, &b), [1, 9]);
-        assert_eq!(changed_lines("x\ny\nz", "x\ny"), [1], "a removal at the end marks the last line there is");
-        assert_eq!(changed_lines("b", "a\nb"), [0]);
-        assert!(changed_lines("a\nb", "a\nb").is_empty());
-    }
-
-    /// Anthropic reports cache creation, so cached input is added; an endpoint
-    /// that omits it counts the cache in `input_tokens` already.
-    #[test]
-    fn context_tokens_adds_the_cache_only_when_creation_is_reported() {
-        assert_eq!(context_tokens(&json!({"input_tokens": 1, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 100})), 111);
-        assert_eq!(context_tokens(&json!({"input_tokens": 3, "cache_read_input_tokens": 4, "cache_creation_input_tokens": null})), 7);
-        assert_eq!(context_tokens(&json!({"input_tokens": 5, "cache_read_input_tokens": 10})), 5);
-        assert_eq!(context_tokens(&json!({})), 0);
-    }
-
-    #[test]
-    fn percent_encode_keeps_unreserved_and_escapes_the_rest() {
-        assert_eq!(percent_encode("a b/é~-_.9"), "a%20b%2F%C3%A9~-_.9");
-        assert_eq!(percent_encode(""), "");
-    }
-
-    #[test]
-    fn endpoint_context_is_read_from_the_server() {
-        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
-        let base = format!("http://{}", server.server_addr().to_ip().unwrap());
-        let replies = [
-            r#"{"data":[{"id":"served-name","meta":{"n_ctx":131072}}]}"#,
-            r#"{"data":[{"id":"a","meta":{"n_ctx":1}},{"id":"b","meta":{"n_ctx":2}}]}"#,
-            r#"{"data":[{"id":"a","meta":{"n_ctx":1}},{"id":"b","meta":{"n_ctx":2}}]}"#,
-        ];
-        let t = std::thread::spawn(move || {
-            for body in replies {
-                let rq = server.recv().unwrap();
-                assert_eq!(rq.url(), "/v1/models");
-                rq.respond(tiny_http::Response::from_string(body)).unwrap();
-            }
-        });
-        // One model: used whatever it's called. Several: matched by name, or unknown.
-        assert_eq!(endpoint_context(&base, "configured-name"), Some(131072));
-        assert_eq!(endpoint_context(&base, "b"), Some(2));
-        assert_eq!(endpoint_context(&base, "c"), None);
-        t.join().unwrap();
-        assert_eq!(endpoint_context("https://example.com", "m"), None);
-    }
-
-    #[test]
-    fn transcripts_read_codex_and_claude_logs() {
-        let dir = testing::Scratch::new();
-        let log = dir.join("log.jsonl");
-        let codex = [
-            json!({"type":"item.started","item":{"id":"i1","type":"mcp_tool_call","tool":"solace","arguments":{"command":"view a"},"status":"in_progress"}}),
-            json!({"type":"item.completed","item":{"id":"i1","type":"mcp_tool_call","tool":"solace","arguments":{"command":"view a","text":"x"},"result":{"content":[{"type":"text","text":"pub fn a()"}]},"status":"completed"}}),
-            json!({"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"All **done**."}}),
-            json!({"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}),
-        ];
-        let text = codex.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n") + "\nnot json\nstill not\n";
-        fs::write(&log, text).unwrap();
-        let t = transcript(&log);
-        let kinds: Vec<&str> = t.iter().map(|e| e["kind"].as_str().unwrap()).collect();
-        assert_eq!(kinds, ["tool", "message", "usage", "output"]);
-        assert_eq!(
-            (t[0]["title"].as_str(), t[0]["status"].as_str(), t[0]["output"].as_str()),
-            (Some("solace view a"), Some("ok"), Some("pub fn a()"))
-        );
-        // D-109: Codex's failed call where only some commands failed says how many in its title.
-        let batch = json!({"type":"item.completed","item":{"id":"i3","type":"mcp_tool_call","tool":"solace","arguments":{"command":"read a\ngrep x"},"result":{"content":[{"type":"text","text":"E6002\ndocs/x\n1 of 2 commands failed: read a\n"}]},"status":"failed"}});
-        fs::write(&log, batch.to_string()).unwrap();
-        let t = transcript(&log);
-        assert_eq!((t[0]["title"].as_str(), t[0]["status"].as_str()), (Some("solace (1 of 2 failed) read a\ngrep x"), Some("failed")));
-        // Every command failed: the title stays as it was.
-        let all = batch.to_string().replace("1 of 2 commands", "2 of 2 commands");
-        fs::write(&log, all).unwrap();
-        assert_eq!(transcript(&log)[0]["title"], "solace read a\ngrep x");
-        let text = codex.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n") + "\nnot json\nstill not\n";
-        fs::write(&log, text).unwrap();
-        let t = transcript(&log);
-        assert_eq!(t[0]["input"], "text:\nx");
-        assert_eq!(t[3]["text"], "not json\nstill not");
-        assert_eq!(last_words(&t).unwrap(), "All **done**.");
-        let claude = [
-            json!({"type":"assistant","message":{"content":[{"type":"text","text":"Looking."},{"type":"tool_use","id":"u1","name":"mcp__solace__solace","input":{"command":"test"}}]}}),
-            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"u1","content":[{"type":"text","text":"E1 failed"}],"is_error":true}]}}),
-        ];
-        fs::write(&log, claude.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
-        let t = transcript(&log);
-        assert_eq!(
-            (t[1]["title"].as_str(), t[1]["status"].as_str(), t[1]["output"].as_str()),
-            (Some("solace test"), Some("failed"), Some("E1 failed"))
-        );
-        // D-109: a batch where only some commands failed says how many in its title.
-        let batch = [
-            json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"u2","name":"mcp__solace__solace","input":{"command":"read a\ngrep x"}}]}}),
-            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"u2","content":[{"type":"text","text":"==== solace read a ====\nE6002\n==== solace grep x ====\ndocs/x\n1 of 2 commands failed: read a\n"}],"is_error":true}]}}),
-        ];
-        fs::write(&log, batch.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
-        let t = transcript(&log);
-        assert_eq!((t[0]["title"].as_str(), t[0]["status"].as_str()), (Some("solace (1 of 2 failed) read a\ngrep x"), Some("failed")));
-        // Live usage: the latest call's context and output per call; Anthropic adds cache, LM Studio includes it.
-        let call = |id: &str, u: Value| json!({"type":"assistant","message":{"id":id,"usage":u,"content":[]}}).to_string();
-        let anthropic = json!({"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":5,"output_tokens":7});
-        let lines = [
-            call("m1", anthropic.clone()),
-            call("m1", anthropic),
-            call("m2", json!({"input_tokens":300,"cache_read_input_tokens":250,"output_tokens":2})),
-        ];
-        fs::write(&log, lines.join("\n")).unwrap();
-        assert_eq!(transcript(&log).last().unwrap()["text"], "Context 300 tokens; 9 output tokens so far");
-        let result = json!({"type":"result","usage":{"input_tokens":310,"cache_read_input_tokens":350,"output_tokens":9}}).to_string();
-        fs::write(&log, [lines.join("\n"), result].join("\n")).unwrap();
-        let usage: Vec<Value> = transcript(&log).into_iter().filter(|e| e["kind"] == "usage").collect();
-        assert_eq!(usage.len(), 1);
-        assert_eq!(usage[0]["text"], "310 input tokens (350 read from cache), 9 output tokens; last context 300 tokens");
-        // Anthropic reports input outside the cache: the total adds reads and writes.
-        let result = json!({"type":"result","usage":{"input_tokens":16,"cache_read_input_tokens":166278,"cache_creation_input_tokens":34062,"output_tokens":4040}}).to_string();
-        fs::write(&log, [lines.join("\n"), result].join("\n")).unwrap();
-        let usage: Vec<Value> = transcript(&log).into_iter().filter(|e| e["kind"] == "usage").collect();
-        assert_eq!(usage[0]["text"], "200356 input tokens (166278 read from cache, 34062 written to cache), 4040 output tokens; last context 300 tokens");
-        assert_eq!(last_words(&[json!({"kind":"message","text":"é".repeat(600)})]).unwrap().chars().count(), 501);
-    }
-
-    #[test]
-    fn briefs_hold_what_the_agent_needs_as_text() {
-        let t = json!({"id":"t1","title":"Add coolcalc","body":"A CLI calculator.","rank":3,"stamps":{},
-            "links":[{"name":"spec","url":"http://x"}],"notes":[{"author":"human","text":"Keep it small","time":1,"run":null}],
-            "questions":[{"id":"q","text":"Syntax?","options":["a","b"],"answer":"b"}],"runs":[{"id":"r1"}],"changes":[{"entity":"symbol:x","name":"calc.add","run":"r1"}]});
-        let b = brief(&t, "work");
-        for part in [
-            "Make the change",
-            "`task done`, a summary in `text`",
-            "Task: Add coolcalc\n\nA CLI calculator.\n",
-            "- spec: http://x",
-            "- human: Keep it small",
-            "- Syntax?\n  Answer: b",
-        ] {
-            assert!(b.contains(part), "{part} missing from:\n{b}");
-        }
-        for noise in ["{", "r1", "rank"] {
-            assert!(!b.contains(noise), "{noise} in:\n{b}");
-        }
-        for kind in ["work", "investigate", "review"] {
-            let prompt = brief(&t, kind);
-            for guidance in [
-                "Write human-facing task messages in Markdown",
-                "including the text sent to task tools",
-                "relevant sections with short headings",
-                "blank lines around headings and lists",
-                "explain what you need and why it matters",
-            ] {
-                assert!(prompt.contains(guidance), "{kind}: missing {guidance}");
-            }
-            assert_eq!(prompt.contains("**Assessment: Looks good**"), kind == "review");
-            assert_eq!(prompt.contains("**Assessment: Needs work**"), kind == "review");
-        }
-        assert!(brief(&t, "investigate").contains("Investigate this task"));
-        // Only a work run changes code, so only it is told to run every test before finishing.
-        for kind in ["work", "investigate", "review", "discuss"] {
-            assert_eq!(brief(&t, kind).contains("Before `task done`, run all tests of the projects this task covers"), kind == "work", "{kind}");
-        }
-        // A discussion keeps every note whole: no command reads a cut note's full text.
-        let mut talk = t.clone();
-        talk["notes"] = json!([
-            {"author":"agent","text":"### Summary\n\nPlan A.\n\n### Details\n\nLong A.","run":null},
-            {"author":"human","text":"### Mine\n\nKeep.\n\n### All\n\nOf it.","run":null},
-            {"author":"agent","text":"### Summary\n\nPlan B.\n\n### Details\n\nLong B.","run":null}
-        ]);
-        let d = brief(&talk, "discuss");
-        assert!(d.contains("Long A.") && d.contains("Keep.\n\n### All\n\nOf it.") && d.contains("Long B."), "{d}");
-        let r = brief(&t, "review");
-        assert!(
-            r.contains("Task changes:\n- calc.add")
-                && r.contains("`task note`, the feedback in `text`")
-                && r.contains("`run` are refused")
-                && !r.contains("task done")
-        );
-        assert!(!b.contains("Projects:"), "one project needs no Projects section");
-        // A task across projects (D-61) says where the agent works and how it reaches the rest.
-        let mut wide = t.clone();
-        wide["scope"] = json!(["a", "web"]);
-        wide["home"] = json!("a");
-        wide["changes"][0]["project"] = json!("web");
-        let w = brief(&wide, "work");
-        assert!(w.contains("covers the projects a, web. You work in a; for another of them, add `--project <folder>`"), "{w}");
-        assert!(w.contains("Task changes:\n- web: calc.add"), "{w}");
-    }
-
-    #[test]
-    fn unavailable_models_say_why() {
-        let missing = json!({"agent":"codex","run":["solace-no-such-program"]});
-        assert_eq!(unavailable(&missing).unwrap(), "solace-no-such-program is not installed");
-        assert!(unavailable(&json!({"agent":"codex","run":["sh"]})).is_none());
-        let agent = json!({"agent":"solace-no-such-agent","model":"m"});
-        assert!(unavailable(&agent).unwrap().contains("not installed"));
-    }
-}
+// The unit tests are in their own file, so this one stays within watch_limit.
+#[path = "board_tests.rs"]
+mod tests;

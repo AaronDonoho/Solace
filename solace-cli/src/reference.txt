@@ -1,7 +1,6 @@
-Solace: this project's code lives in a store of symbols. You read and change it
-by symbol through this tool; you cannot open files or run a shell. If it can't
-do what the task needs, don't work around it: ask with `task ask`, or say so in
-your summary.
+Solace keeps this project's code as symbols; you read and change it by symbol
+through this tool, with no file access or shell. If it can't do what the task
+needs, don't work around it: ask with `task ask`, or say so in your summary.
 Names: `module.name`, e.g. `pilot/checkout.pay`, or any unambiguous suffix
 (`checkout.pay`). Tests are symbols in test modules (`checkout_test`).
 
@@ -11,9 +10,11 @@ turn that re-reads the conversation, so work in few calls:
    symbol with the signatures it uses, its callers and a test. Don't ask again
    for anything a reply showed. To reproduce a reported case:
    `probe --from checkout_test.pay_test --trace checkout.pay`.
-2. Change and test in one call: `command` is `submit`, then `test` on the next
-   line. To edit code, `text` is a patch as `apply_patch` takes, naming a
-   symbol or module instead of a file; send only what changes:
+2. Change and test in one call: `submit` then `test`, or for other files
+   `write` (no path) then `run <name>`. All the edits of one change, in one
+   file or several, go in one patch as `apply_patch` takes, naming a symbol,
+   module or file (`*** Update File: <path>`), an `@@` hunk per edit; send
+   only what changes:
       *** Begin Patch
       *** Update: pilot/checkout.pay
       @@
@@ -24,9 +25,9 @@ turn that re-reads the conversation, so work in few calls:
       *** End Patch
    Imports are added automatically. Work out expected values from the task's
    numbers and the rules the code documents, never from running the code.
-3. Fix only what the reply reports, again with `test` after. The reply lists
-   what else the change reaches that no test checks; look at those.
-4. Once `test` passes, the code is done (it type-checks first; no `check`).
+3. Fix only what the reply reports, then `test` again; look at what it lists
+   as reached by no test. Once `test` passes, the code is done (it type-checks
+   first; no `check`).
 Changing a signature or adding a field: `inspect <type or fn> --context` lists
 every construction or call site; patch the type or function and every site in
 one `submit` (`*** Update: <module>` holds several symbols' hunks), then `test`.
@@ -34,23 +35,24 @@ Tests: one at the level the task reports (a checkout ticket gets a checkout
 test), and one per behavior the change shifts (a cap, a boundary). `inspect <a
 similar test> --context` shows its helpers; don't read whole test modules.
 
-Commands (`help` gives every option, `help <command>` one command's):
+Commands (`help [command]` gives every option):
   inspect <name>... --context   symbols with what they use, callers and tests
-  view <name|module>...         source, or a module's outline
+  view <name|module|file>...    source, or an outline
   refs <name>...                what uses each symbol
   impact [name...]              what a change reaches, with its tests
   find <text>                   search all code
-  grep <text>                   search other files and settings
+  grep <text> [--in <path>]     search other files and settings
   submit                        save a patch or blocks from `text`, type-checked
   delete <name>...              remove unused symbols
   extract <name>... --to <mod>  move symbols to another module
+  merge <keep> <drop>           fold a duplicate symbol into its copy
   test [<name>... | --all]      run the tests a change can affect
   check [--warnings]            type-check everything
   probe                         run throwaway code from `text`
   drafts                        rejected submits, to fix and retry
-  files [dir]...                file trees with tiers
+  files [dir]...                trees: tiers, line counts
   read <path>...                read files (--lines 5..9)
-  write [path]                  a file, whole or `old` -> `text`; no path: a patch
+  write [path]                  one replacement, or no path: a patch of many edits
   move <from> <to>              move a file
   work add | list | done        work records, kept across sessions
 Files by tier: src/ and test/ *.gleam are symbols (`submit`, never `write`);
@@ -66,6 +68,12 @@ Reading
   view <name>...                symbols' source
   view <module>...              outlines: signatures and doc lines
   view <module> --bodies        whole module; only for one you will rewrite
+  view <file>                   a .rs or .py file's outline: each item (fn,
+                                struct, `Type::method`, test) with its line
+                                range, signature and first doc line
+  view <file>::<name>           one item's source with its docs, numbered for
+                                `read --lines` and `write` (`board.rs::within`,
+                                `board.rs::Store::view`: a path or name suffix)
   view | inspect <dependency>   a dependency's module (`lustre/component`): its
                                 public signatures; `<module>.<name>`: one with
                                 its docs. Read from build/packages, never stored
@@ -77,13 +85,18 @@ Reading
                                 tests (no name: what changed since tests last
                                 passed, or in this task)
   find <text>                   case-insensitive search of all code
-  grep <text>                   case-insensitive search of watched files and
+  grep <text> [--in <path>] [--context n]
+                                case-insensitive search of watched files and
                                 settings (not unwatched files); lines shown
                                 with numbers for `read --lines`. The text is
                                 searched as written, code included (`"write"
                                 =>`, `-> Result`); quotes around the whole
-                                text are dropped. No options, regex or path
-                                filter: it searches every watched file
+                                text are dropped. No regex. The options count
+                                only as the last words: --in limits it to one
+                                file or folder; --context n (1 to 5) adds n
+                                lines around each match, marked `12-`. Up to
+                                10 lines per file; the reply stops at a whole
+                                file and says how many it left out
   session start [--task]        this overview again (--task: for the task in `text`)
   session start [--scope <module>...]
                                 every symbol, and open work records with context
@@ -106,8 +119,9 @@ Changing (the new code is in `text`)
                                 applied in order like `apply_patch`; `*** Add:
                                 <module>.<name>` with `+` lines adds a symbol.
                                 Checked together; a hunk that doesn't match
-                                changes nothing (E0108). Other files change
-                                with `write`, not here
+                                changes nothing (E0108). A patch line is a
+                                whole line: for part of one, use --replace.
+                                Other files change with `write`, not here
   submit <name>                 replace one symbol (may rename it)
   submit <name> --replace [--all]
                                 one exact change: `old` (must occur once, or
@@ -121,12 +135,14 @@ Changing (the new code is in `text`)
   delete <name>...              removes each named symbol, in the order named; a
                                 symbol used outside the list stops the whole
                                 list, so nothing is deleted
-  extract <name>... --to <module>
+  extract <name>... --to <module> [--to-project <folder>]
                                 move symbols to another module of the project,
                                 keeping identity and revision. Private helpers
                                 only they use, tests that reach only them, and
                                 every reference and import come along; the
                                 result is type-checked or nothing changes.
+                                --to-project: a module of another project of
+                                the task; this project gains a dependency on it.
                                 `--to solace_task.gleam` is read as solace_task;
                                 tests go only to a *_test module. Extract a
                                 cohesive set in one call; the refusal (E5002,
@@ -134,6 +150,31 @@ Changing (the new code is in `text`)
                                   extract board.Task --to solace_task
                                   E5002 moved code uses 1 symbol that stays: lane_order (by Task.sort)
                                   extract board.Task board.lane_order --to solace_task
+                                JavaScript FFI paths (`@external(javascript,
+                                "./x.mjs", …)`) follow the module to its new
+                                folder; with --to-project the .mjs goes along
+                                (E5007 names what keeps it). FFI paths are not
+                                type-checked: run the suite the reply names.
+                                Projects that depend on this one and use moved
+                                public symbols are rewritten with --to-project
+                                when the task covers them; others are refused
+                                (E5003).
+  merge <keep> <drop> [--to-project <folder>]
+                                fold a duplicate into its copy: <keep> keeps its
+                                identity, <drop> is retired (history:
+                                merged-into), and every use of it, tests and
+                                the task's dependent projects too, goes to
+                                <keep>; the result is type-checked or nothing
+                                changes. Same kind; a type's constructors match
+                                by name, arity and labels. --to-project: <keep>
+                                is in that project, which every project using
+                                <drop> must depend on. When extract finds the
+                                name taken, it says so:
+                                  extract board.Task --to solace_task --to-project components
+                                  E1004 solace_task.Task already exists in solace_task (components); … use merge solace_task.Task board.Task --to-project components
+                                  merge solace_task.Task board.Task --to-project components
+                                Private helpers only <drop> used are named as
+                                now unused, not deleted.
 Every submit is type-checked. Missing imports are added and imports in `text`
 are merged. If the submitted code has errors, nothing is saved. If it breaks
 other symbols (e.g. callers of a changed signature), it is saved and those are
@@ -187,7 +228,9 @@ change with `submit`, protected ones with `write` and the human's approval.
             `files` (folders as one line with a count), not searched by `grep`
   internal  .solace/ and projects nested in this one: no reading, writing or
             searching; work in them through their own commands
-  files [dir]...                tree with each file's tier; no path: the project
+  files [dir]...                tree with each file's tier and line count (bytes
+                                if binary or over watch_limit); no path: the
+                                project
   read <path>... [--lines 3,7,10..12 | --tail n]
                                 each path in order, headed by its path when
                                 several; paths past the size limit are named
@@ -197,16 +240,19 @@ change with `submit`, protected ones with `write` and the human's approval.
                                 is refused and nothing is read: `read a.rs
                                 5-9` is `read a.rs --lines 5..9`, and symbols
                                 are found with `grep` or `find`, not `read`
-  write <path> [--all]          one file: whole text, or with `old`, just `old`
-                                -> `text`; a settings file takes `reason` too.
+  write <path> [--all]          one file: whole text, or with `old`, one
+                                replacement, `old` -> `text`, for a single
+                                edit (more edits: one patch, below); a
+                                settings file takes `reason` too.
                                 Patch text is refused here: send it with
                                 `write` and no path. A whole text that would
                                 leave under half of a file of 200+ lines is
                                 refused: change part of it, or `remove` the
                                 file first, then `write` it new. The reply
                                 gives the file's lines before and after
-  write                         several files at once: `text` is a patch, as
-                                submit takes, with a section per file:
+  write                         several edits at once, in one file or more:
+                                `text` is a patch, as submit takes, with a
+                                section per file and an `@@` hunk per edit:
                                   *** Begin Patch
                                   *** Update File: docs/guide.md
                                   @@ ## Usage
@@ -220,7 +266,12 @@ change with `submit`, protected ones with `write` and the human's approval.
                                 first; added lines with no `@@` go at the end.
                                 Whole or nothing: any refused section (graph or
                                 protected file, unmatched hunk, failed
-                                validator) writes none, and each is named
+                                validator) writes none, and each is named.
+                                The patch is kept as a draft: fix its bad line
+                                with `write --draft <id> --replace` (`old`,
+                                `text`), not by resending it. A patch line is
+                                a whole line; for part of one, `write <path>`
+                                with `old`
   remove <path>...              files, whole or nothing: any refused path
                                 removes none and is named
   move <from> <to> [--to-project <folder>]
@@ -233,13 +284,15 @@ Project: build | format | run <name> [args...] (commands declared in solace.toml
 Work records, kept between sessions: work add (`text`) | work list | work done <id>
 
 Task runs (the note, summary or question in `text`). Reviews and investigations
-are read-only: submit, delete, extract, write, remove, move and format are refused, and so is
+are read-only: submit, delete, extract, merge, write, remove, move and format are refused, and so is
 run, except in a review for commands marked `allowed_in_reviews = true`.
   task diff [name...]           what this task changed, against its state before;
                                 `impact` with no names is the same
   task note                     add a note; completes a review run
   task ask                      a question, with 2–4 `options`; waits for the
-                                human's answer
+                                human's answer. Check the task's Questions and
+                                Notes first for what is already answered (a
+                                discussion's answers are notes)
   task done                     finish: a work run's summary goes to human
                                 review; an investigation's report stays on the task
   In notes, cite code by name (`board.rs::within`, `checkout.pay`), not by
@@ -285,10 +338,11 @@ command not listed here is refused.
   strategy vision               propose a new vision, its text in `text`; waits
                                 the same way
   view | inspect | refs | find  read code, as under Reading
-  grep <text>                   search watched files and settings: the text as
-                                written, already case-insensitive; no options,
-                                regex or path filter
-  files [dir]...                tree with each file's tier
+  grep <text> [--in <path>] [--context n]
+                                search watched files and settings: the text as
+                                written, already case-insensitive, no regex;
+                                the options only as the last words
+  files [dir]...                tree with each file's tier and line count
   read <path>... [--lines 3,7,10..12 | --tail n]
                                 each path in order; a --lines or --tail range
                                 takes one path

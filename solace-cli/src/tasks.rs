@@ -151,6 +151,9 @@ fn rank_of(v: &Value) -> f64 {
 /// rank order. A missing folder holds none, and an unreadable file is skipped.
 pub fn records(top: &Path, kind: &str) -> Vec<Value> {
     let mut out = stored_records(top, kind);
+    if kind == "features" {
+        out = with_slots(out);
+    }
     out.sort_by(|a, b| rank_of(a).total_cmp(&rank_of(b)).then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
     out
 }
@@ -160,7 +163,7 @@ fn stored_records(top: &Path, kind: &str) -> Vec<Value> {
     let Ok(entries) = fs::read_dir(strategy_dir(top, kind)) else { return out };
     for p in entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "json")) {
         match fs::read(&p).map_err(|e| e.to_string()).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|e| e.to_string())) {
-            Ok(v) => out.push(v),
+            Ok(v) => out.push(stored(kind, v, &p)),
             Err(e) => eprintln!("skipping record file {}: {e}", p.display()),
         }
     }
@@ -170,7 +173,71 @@ pub(super) fn record(top: &Path, kind: &str, id: &str) -> Option<Value> {
     if !board::valid_id(id) {
         return None;
     }
-    serde_json::from_slice(&fs::read(strategy_dir(top, kind).join(format!("{id}.json"))).ok()?).ok()
+    if kind == "features" {
+        return records(top, kind).into_iter().find(|v| v["id"] == id);
+    }
+    let path = strategy_dir(top, kind).join(format!("{id}.json"));
+    Some(stored(kind, serde_json::from_slice(&fs::read(&path).ok()?).ok()?, &path))
+}
+/// A record as read from `path`. A feature saved before `startTime` has none:
+/// one already active or complete takes its file's time as when it started.
+fn stored(kind: &str, mut v: Value, path: &Path) -> Value {
+    if kind == "features" && v.get("startTime").is_none() {
+        v["startTime"] = if v["state"] == "active" || v["state"] == "complete" {
+            let modified = fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok());
+            json!(modified.map_or(0, |d| d.as_secs()))
+        } else {
+            Value::Null
+        };
+    }
+    v
+}
+/// Fills in the color slot (D-114) of each started feature saved before slots
+/// were kept: one after every kept slot, in `startTime` order (ties by id).
+fn with_slots(mut fs: Vec<Value>) -> Vec<Value> {
+    let mut next = next_slot(&fs);
+    let mut old: Vec<usize> = (0..fs.len()).filter(|&i| fs[i].get("colorSlot").is_none()).collect();
+    old.sort_by(|&a, &b| fs[a]["startTime"].as_u64().cmp(&fs[b]["startTime"].as_u64()).then_with(|| fs[a]["id"].as_str().cmp(&fs[b]["id"].as_str())));
+    for i in old {
+        fs[i]["colorSlot"] = if fs[i]["startTime"].is_null() {
+            Value::Null
+        } else {
+            next += 1;
+            json!(next - 1)
+        };
+    }
+    fs
+}
+/// The slot the next feature to start takes: one past the highest kept.
+fn next_slot(fs: &[Value]) -> u64 {
+    fs.iter().filter_map(|f| f["colorSlot"].as_u64()).max().map_or(0, |m| m + 1)
+}
+/// Saves the slots `with_slots` fills in, so a later change can't move them
+/// (D-114 point 2). Called before a feature is written or deleted.
+fn keep_slots(top: &Path) -> Result<(), Failure> {
+    let stored = stored_records(top, "features");
+    for (was, f) in stored.iter().zip(with_slots(stored.clone())) {
+        let id = f["id"].as_str().unwrap_or("");
+        if was.get("colorSlot").is_none() && !f["colorSlot"].is_null() && board::valid_id(id) {
+            replace_file(&strategy_dir(top, "features"), id, &f)?;
+        }
+    }
+    Ok(())
+}
+/// A feature's `startTime` is when it first became `active`; it is never
+/// cleared. Its `colorSlot` is set with it, one past the highest any other
+/// feature holds, and never changes (D-114).
+fn mark_start(top: &Path, kind: &str, v: &mut Value) {
+    if kind != "features" {
+        return;
+    }
+    if v["state"] == "active" && v["startTime"].is_null() {
+        v["startTime"] = json!(now());
+    }
+    if !v["startTime"].is_null() && v["colorSlot"].is_null() {
+        let others: Vec<Value> = records(top, kind).into_iter().filter(|f| f["id"] != v["id"]).collect();
+        v["colorSlot"] = json!(next_slot(&others));
+    }
 }
 /// Writes a record and logs it as a root event: no project (D-87 point 7).
 fn put_record(top: &Path, kind: &str, v: &Value) -> Result<(), Failure> {
@@ -178,12 +245,18 @@ fn put_record(top: &Path, kind: &str, v: &Value) -> Result<(), Failure> {
     if !board::valid_id(id) {
         return board::err("E7001", "invalid id");
     }
+    if kind == "features" {
+        keep_slots(top)?;
+    }
     replace_file(&strategy_dir(top, kind), id, v)?;
     let event = if kind == "milestones" { json!({"milestone": v}) } else { json!({"feature": v}) };
     log(top, "", &event);
     Ok(())
 }
 fn remove_record(top: &Path, kind: &str, id: &str) -> Result<(), Failure> {
+    if kind == "features" {
+        keep_slots(top)?;
+    }
     let dir = strategy_dir(top, kind);
     fs::remove_file(dir.join(format!("{id}.json")))?;
     fs::File::open(&dir)?.sync_all()?;
@@ -296,6 +369,9 @@ fn composed(top: &Path, kind: &str, req: &Value, status: &mut u16) -> Result<(Va
         v["targetDate"] = req.get("targetDate").cloned().unwrap_or(Value::Null);
     } else {
         v["milestone"] = linked(top, req, status)?;
+        v["startTime"] = Value::Null;
+        v["colorSlot"] = Value::Null;
+        mark_start(top, kind, &mut v);
     }
     v["rank"] = json!(end_rank(top, kind, &v["milestone"], ""));
     if let Some(r) = request {
@@ -326,6 +402,7 @@ fn edited(top: &Path, kind: &str, id: &str, req: &Value, status: &mut u16) -> Re
     if moved && req.get("rank").is_none() {
         v["rank"] = json!(end_rank(top, kind, &v["milestone"], id));
     }
+    mark_start(top, kind, &mut v);
     Ok(v)
 }
 /// Deletes a record. Its features and tasks lose their link first, so a crash
@@ -709,8 +786,25 @@ pub(super) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text
         }
     }
     let mut p = json!({"kind": kind, "fields": fields});
+    // D-115: the record's current value of each proposed field, as the human
+    // sees only what changes. The vision's is its text.
+    let current = match (kind, id) {
+        ("vision", _) => Some(vision(top)),
+        (_, Some(id)) => match kind {
+            "task" => board::all_tasks(top)?.into_iter().find(|t| t["id"] == id),
+            k => record(top, &format!("{k}s"), id),
+        },
+        (_, None) => None,
+    };
     if let Some(id) = id {
         p["id"] = json!(id);
+    }
+    if let Some(r) = &current {
+        let mut before = serde_json::Map::new();
+        for k in p["fields"].as_object().into_iter().flat_map(|o| o.keys()) {
+            before.insert(k.clone(), r.get(k).cloned().unwrap_or(Value::Null));
+        }
+        p["before"] = Value::Object(before);
     }
     if kind == "vision" {
         p["base"] = vision(top)["revision"].clone();
@@ -1009,7 +1103,12 @@ fn apply(top: &Path, m: &Value) -> Result<Option<String>, Failure> {
                 let what = m["question"]["text"].as_str().unwrap_or("").lines().next().unwrap_or("").to_string();
                 board::note(&mut run, "solace", Some(rid), &format!("A proposal arrived after the run ended, so it was not asked: {what}"));
             }
-            "strategy_propose" => run["questions"].as_array_mut().unwrap().push(m["question"].clone()),
+            // A question's time is when it is asked, so it orders among the notes.
+            "strategy_propose" => {
+                let mut q = m["question"].clone();
+                q["time"] = json!(now());
+                run["questions"].as_array_mut().unwrap().push(q);
+            }
             _ => {}
         }
         // A run that ended keeps the note, but nothing wakes it.
@@ -1108,6 +1207,10 @@ fn change(root: &Path, method: &str, parts: &[&str], body: &Value, held: bool, n
         }
         let tid = parts[1];
         let (t, after) = board::change(&root, tid, &method, &parts[2..], &body)?;
+        // The feature's Tech Debt task first (D-112): its notes name this task.
+        if let board::After::Clean(Some(debt)) = &after {
+            write(&top, debt)?;
+        }
         write(&top, &t)?;
         if let board::After::Removed(dir) = &after {
             log(&top, dir, &json!({"removed":tid}));
@@ -1220,6 +1323,22 @@ mod tests {
         assert_eq!(ranked["rank"].as_f64(), Some(7.));
         let canceled = call("PATCH", &["features", f3id], json!({"state": "canceled", "body": "no"})).unwrap();
         assert_eq!((canceled["state"].as_str(), canceled["body"].as_str()), (Some("canceled"), Some("no")));
+        // A feature's startTime is set when it first becomes active, and kept after.
+        assert!(f1["startTime"].is_null() && canceled["startTime"].is_null());
+        let active = call("PATCH", &["features", f1id], json!({"state": "active"})).unwrap();
+        let started = active["startTime"].as_u64().expect("set on becoming active");
+        let done = call("PATCH", &["features", f1id], json!({"state": "complete"})).unwrap();
+        let again = call("PATCH", &["features", f1id], json!({"state": "active", "startTime": 1, "colorSlot": 9})).unwrap();
+        assert_eq!((done["startTime"].as_u64(), again["startTime"].as_u64()), (Some(started), Some(started)));
+        let born = call("POST", &["features"], json!({"title": "F4", "state": "active"})).unwrap();
+        assert!(born["startTime"].as_u64().is_some(), "created active");
+        // D-114: each started feature keeps a color slot, one past the highest; a delete moves no other's.
+        assert!(f1["colorSlot"].is_null() && canceled["colorSlot"].is_null());
+        let f2on = call("PATCH", &["features", f2id], json!({"state": "active"})).unwrap();
+        let slots = (active["colorSlot"].as_u64(), again["colorSlot"].as_u64(), born["colorSlot"].as_u64(), f2on["colorSlot"].as_u64());
+        assert_eq!(slots, (Some(0), Some(0), Some(1), Some(2)));
+        call("DELETE", &["features", born["id"].as_str().unwrap()], json!({})).unwrap();
+        assert_eq!(record(&root, "features", f2id).unwrap()["colorSlot"].as_u64(), Some(2));
 
         call("DELETE", &["features", f3id], json!({})).unwrap();
         assert_eq!(titles("features"), ["F1", "F2"]);
@@ -1227,6 +1346,28 @@ mod tests {
         assert_eq!(titles("milestones"), ["1.0 final"]);
         assert!(!strategy_dir(&root, "milestones").join(format!("{bid}.json")).exists());
         assert!(!strategy_dir(&root, "features").read_dir().unwrap().any(|e| e.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+    }
+
+    /// D-114: a started feature saved before color slots were kept takes one
+    /// after every kept slot, in start order, and keeps it from the next write.
+    #[test]
+    fn an_old_started_feature_takes_a_slot_after_the_kept_ones() {
+        let root = root();
+        let dir = strategy_dir(&root, "features");
+        let put = |v: Value| replace_file(&dir, v["id"].as_str().unwrap(), &v).unwrap();
+        put(json!({"id": "old2", "title": "O2", "state": "active", "rank": 1, "startTime": 20}));
+        put(json!({"id": "old1", "title": "O1", "state": "complete", "rank": 2, "startTime": 10}));
+        put(json!({"id": "kept", "title": "K", "state": "active", "rank": 3, "startTime": 30, "colorSlot": 3}));
+        put(json!({"id": "idle", "title": "I", "state": "proposed", "rank": 4}));
+        let slot = |id: &str| record(&root, "features", id).unwrap()["colorSlot"].as_u64();
+        assert_eq!((slot("old1"), slot("old2"), slot("kept"), slot("idle")), (Some(4), Some(5), Some(3), None));
+        let born = strategy_api(&root, "POST", &["features"], json!({"title": "New", "state": "active"})).unwrap();
+        assert_eq!(born["colorSlot"].as_u64(), Some(6));
+        let saved: Value = serde_json::from_slice(&fs::read(dir.join("old1.json")).unwrap()).unwrap();
+        assert_eq!(saved["colorSlot"].as_u64(), Some(4), "saved at the next write");
+        strategy_api(&root, "DELETE", &["features", born["id"].as_str().unwrap()], json!({})).unwrap();
+        strategy_api(&root, "DELETE", &["features", "kept"], json!({})).unwrap();
+        assert_eq!((slot("old1"), slot("old2"), slot("idle")), (Some(4), Some(5), None));
     }
 
     /// D-87: deleting a milestone clears the link on its features; an unknown
@@ -1497,6 +1638,32 @@ mod tests {
         assert!(proposal(&root, &rid, "task", None, r#"{"title": "T", "dependsOn": []}"#).is_ok());
     }
 
+    /// D-115: an edit proposal carries the record's current value of each field
+    /// it proposes, as `before`, so the human sees only what changes; a create
+    /// carries none, and the vision carries its text.
+    #[test]
+    fn an_edit_proposal_carries_the_current_values() {
+        let root = root();
+        let rid = page_run(&root);
+        let asked = |qid: &str| {
+            let run = record(&root, "runs", &rid).unwrap();
+            run["questions"].as_array().unwrap().iter().find(|q| q["id"] == qid).unwrap()["proposal"].clone()
+        };
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "F", "body": "a"})).unwrap();
+        let qid = propose(&root, &rid, "feature", Some(f["id"].as_str().unwrap()), r#"{"title": "F2", "body": "a"}"#);
+        assert_eq!(asked(&qid)["before"], json!({"title": "F", "body": "a"}));
+        let qid = propose(&root, &rid, "feature", None, r#"{"title": "New"}"#);
+        assert!(asked(&qid).get("before").is_none(), "a create carries none");
+        let t = board::task(&root, "t1").unwrap();
+        let text = json!({"feature": f["id"].clone(), "dependsOn": []}).to_string();
+        let qid = propose(&root, &rid, "task", Some("t1"), &text);
+        let before = asked(&qid)["before"].clone();
+        assert_eq!((&before["feature"], &before["dependsOn"]), (&t["feature"], &t["dependsOn"]), "{before}");
+        let qid = propose(&root, &rid, "vision", None, "For teams");
+        let p = asked(&qid);
+        assert_eq!((p["before"]["text"].as_str(), p["base"].is_string()), (Some(""), true), "{p}");
+    }
+
     /// D-93: Reject writes no record, task or vision; only the run changes, with
     /// the answer on its notes.
     #[test]
@@ -1604,6 +1771,7 @@ mod tests {
         apply(&root, &m).unwrap();
         let run = record(&root, "runs", &rid).unwrap();
         assert_eq!((run["questions"].as_array().unwrap().len(), run["state"].as_str()), (1, Some("waiting")));
+        assert!(run["questions"][0]["time"].as_u64().is_some_and(|t| t > 0));
         runs_api(&root, "POST", &[&rid, "end"], json!({}), models).unwrap();
         apply(&root, &json!({"id": "m2", "kind": "strategy_propose", "run": rid, "question": q})).unwrap();
         let run = record(&root, "runs", &rid).unwrap();

@@ -23,6 +23,9 @@ pub type Feature {
     milestone: Option(String),
     rank: Float,
     state: String,
+    /// The color slot the server kept when it first became `active`; None
+    /// until then (D-114, `solace_task.feature_colors`).
+    slot: Option(Int),
   )
 }
 
@@ -56,7 +59,12 @@ pub fn decoder() -> decode.Decoder(Feature) {
   )
   use rank <- decode.optional_field("rank", 0.0, decode.float)
   use state <- decode.optional_field("state", "proposed", decode.string)
-  decode.success(Feature(id, title, body, milestone, rank, state))
+  use slot <- decode.optional_field(
+    "colorSlot",
+    None,
+    decode.optional(decode.int),
+  )
+  decode.success(Feature(id, title, body, milestone, rank, state, slot))
 }
 
 /// A milestone in the stream. A new record starts `proposed` (D-87).
@@ -112,6 +120,7 @@ pub fn groups(
 fn feature_view(
   base: String,
   feature: Feature,
+  color: String,
   group: List(Feature),
   tasks: List(#(String, String, String, Option(String))),
   open: fn(String, String) -> msg,
@@ -142,86 +151,95 @@ fn feature_view(
       editor.on_move(feature.id, option.unwrap(rank, feature.rank)),
     )
   }
-  html.article([attribute.class("feature")], [
-    html.h4([], [
-      html.text(feature.title),
-      html.text(" "),
-      html.span([attribute.class("state")], [html.text(feature.state)]),
-      case planning {
-        True -> plan.marker()
-        False -> element.none()
+  html.article(
+    [
+      attribute.class("feature"),
+      case color {
+        "" -> attribute.none()
+        _ -> attribute.style("border-left", "8px solid " <> color)
       },
-      html.text(" "),
-      html.button(
-        [
-          attribute.type_("button"),
-          attribute.class("edit"),
-          attribute.disabled(busy),
-          event.on_click(editor.on_edit(feature.id)),
-        ],
-        [html.text("Edit")],
-      ),
-      move("Up", "Move up", True),
-      move("Down", "Move down", False),
-      small(
-        "Delete",
-        "Delete " <> feature.title,
-        True,
-        editor.on_delete(feature.id),
-      ),
-    ]),
-    case editor.deleting == Some(feature.id) {
-      False -> element.none()
-      True ->
-        html.div([attribute.role("alertdialog"), attribute.class("confirm")], [
-          html.p([], [
-            html.text("Delete "),
-            html.em([], [html.text(feature.title)]),
-            html.text("? " <> delete_text(list.length(linked))),
-          ]),
-          html.div([attribute.class("vision-actions")], [
-            html.button(
-              [
-                attribute.type_("button"),
-                event.on_click(editor.on_confirm_delete),
-              ],
-              [html.text("Delete")],
-            ),
-            html.button(
-              [
-                attribute.type_("button"),
-                event.on_click(editor.on_cancel_delete),
-              ],
-              [html.text("Cancel")],
-            ),
-          ]),
-        ])
-    },
-    case feature.body {
-      "" -> element.none()
-      body -> solace_task.md(base, body)
-    },
-    case linked {
-      [] -> html.p([], [html.text("No tasks.")])
-      _ ->
-        html.ul(
-          [attribute.class("feature-tasks")],
-          list.map(linked, fn(t) {
-            html.li([], [
+    ],
+    [
+      html.h4([], [
+        html.text(feature.title),
+        html.text(" "),
+        html.span([attribute.class("state")], [html.text(feature.state)]),
+        case planning {
+          True -> plan.marker()
+          False -> element.none()
+        },
+        html.text(" "),
+        html.button(
+          [
+            attribute.type_("button"),
+            attribute.class("edit"),
+            attribute.disabled(busy),
+            event.on_click(editor.on_edit(feature.id)),
+          ],
+          [html.text("Edit")],
+        ),
+        move("Up", "Move up", True),
+        move("Down", "Move down", False),
+        small(
+          "Delete",
+          "Delete " <> feature.title,
+          True,
+          editor.on_delete(feature.id),
+        ),
+      ]),
+      case editor.deleting == Some(feature.id) {
+        False -> element.none()
+        True ->
+          html.div([attribute.role("alertdialog"), attribute.class("confirm")], [
+            html.p([], [
+              html.text("Delete "),
+              html.em([], [html.text(feature.title)]),
+              html.text("? " <> delete_text(list.length(linked))),
+            ]),
+            html.div([attribute.class("vision-actions")], [
               html.button(
                 [
                   attribute.type_("button"),
-                  attribute.class("open"),
-                  event.on_click(open(t.0, t.1)),
+                  event.on_click(editor.on_confirm_delete),
                 ],
-                [html.text(t.2)],
+                [html.text("Delete")],
               ),
-            ])
-          }),
-        )
-    },
-    task_form(feature, busy, new_task),
-  ])
+              html.button(
+                [
+                  attribute.type_("button"),
+                  event.on_click(editor.on_cancel_delete),
+                ],
+                [html.text("Cancel")],
+              ),
+            ]),
+          ])
+      },
+      case feature.body {
+        "" -> element.none()
+        body -> solace_task.md(base, body)
+      },
+      case linked {
+        [] -> html.p([], [html.text("No tasks.")])
+        _ ->
+          html.ul(
+            [attribute.class("feature-tasks")],
+            list.map(linked, fn(t) {
+              html.li([], [
+                html.button(
+                  [
+                    attribute.type_("button"),
+                    attribute.class("open"),
+                    event.on_click(open(t.0, t.1)),
+                  ],
+                  [html.text(t.2)],
+                ),
+              ])
+            }),
+          )
+      },
+      task_form(feature, busy, new_task),
+    ],
+  )
 }
 
 /// The Features tab: a group per milestone, then "No milestone". `tasks` are
@@ -229,7 +247,8 @@ fn feature_view(
 /// sends `open(project, id)`. The form for a new feature shows above the
 /// groups; an edited feature's form shows in its place. Each feature ends
 /// with a form for a new task linked to it. `planning` are the features with
-/// an open planning run, which show a marker.
+/// an open planning run, which show a marker. A started feature's edge has
+/// the color its tasks' cards show on the board.
 pub fn view(
   base: String,
   milestones: List(Milestone),
@@ -240,6 +259,8 @@ pub fn view(
   new_task: TaskForm(msg),
   planning: List(String),
 ) -> List(Element(msg)) {
+  let colors =
+    solace_task.feature_colors(list.map(features, fn(f) { #(f.id, f.slot) }))
   let top = case editor.draft {
     Some(Draft(id: None, ..) as draft) -> [
       form(base, milestones, editor, draft),
@@ -270,6 +291,7 @@ pub fn view(
         feature_view(
           base,
           f,
+          list.key_find(colors, f.id) |> result.unwrap(""),
           group,
           tasks,
           open,
@@ -507,8 +529,8 @@ fn form(
 }
 
 /// The rank that moves the feature `id` one place up or down in `group`, its
-/// group's features in order: the midpoint of its new neighbours, or the
-/// neighbour's rank ∓ 1 at either end. None when it can't move that way.
+/// group's features in order: the midpoint of its new neighbors, or the
+/// neighbor's rank ∓ 1 at either end. None when it can't move that way.
 pub fn move_rank(group: List(Feature), id: String, up: Bool) -> Option(Float) {
   rank_move(list.map(group, fn(f) { #(f.id, f.rank) }), id, up)
 }

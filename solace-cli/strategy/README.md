@@ -136,9 +136,11 @@ collapses it to one line: the shown run's state and model, or whether a run is o
   Solace), its proposals and the agent's transcript (`GET /strategy/runs/{rid}`, fetched again every 1.5 s while
   the agent works, in one chain that a reconnect or another run ends). While open: the message box, **Send**
   (`POST .../notes {text}`), **End** (`.../end`) and **Stop** (`.../stop`). An ended run is read-only.
-- **Proposals** show with `solace_task.proposal_view` (components project): what is created or changed, its
-  fields, the feature or milestone Approve sets back to `planned`, and **Approve**/**Reject**, which send `POST
-  .../questions/{qid} {option}`; answered, the answer the server recorded.
+- **Proposals** show with `solace_task.proposal_view` (components project): what is created or changed — an
+  edit shows only the fields that change, as `old → new` with the body as a line diff, and says "No change"
+  when none do (D-115, D-116) — the feature or milestone Approve sets back to `planned`, and
+  **Approve**/**Reject**, which send `POST .../questions/{qid} {option}`; answered, the answer the server
+  recorded.
 - One request at a time; a refusal shows in the panel's alert.
 - **Past runs.** "Runs on this" lists the runs on the context, newest first; each reopens.
 - **Markers.** A task row, a feature card and a milestone heading with an open run show a pulsing "Planning" badge.

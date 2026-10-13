@@ -637,7 +637,7 @@ pub fn run_tests(root: PathBuf, tid: String) {
                 })?;
                 (base, r["tests"].as_array().cloned().unwrap_or_default())
             };
-            let output = lockdown::command(&dir, &["gleam".into(), "test".into()], 300, 100_000);
+            let output = lockdown::command(&dir, &["gleam".into(), "test".into()], 300, 100_000, false);
             let _ = fs::remove_dir_all(&dir);
             let (state, results) = match output {
                 Ok(log) => {
@@ -882,7 +882,9 @@ pub fn main_test() {
             .map(|s| listing = s)
             .unwrap();
         for (name, tier) in files {
-            assert!(listing.contains(&format!("{name} [{tier}]\n")));
+            // A file's tier may be followed by its line count or size (D-119).
+            let (whole, counted) = (format!("{name} [{tier}]"), format!("{name} [{tier}; "));
+            assert!(listing.lines().any(|l| l == whole || l.starts_with(&counted)), "{listing}");
         }
     }
     #[test]

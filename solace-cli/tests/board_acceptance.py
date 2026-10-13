@@ -247,6 +247,34 @@ class Board(unittest.TestCase):
         self.action(t, 'approve'); self.action(t, 'complete')
         self.assertFalse(checkpoint.parent.exists())
 
+    def test_completed_reviews_file_tech_debt_on_the_feature(self):  # D-112
+        f = self.api('POST', '/features', {'title':'Search'})
+        def reviewed(feature, finding):
+            t = self.completed([])
+            if feature: self.api('PATCH', '/tasks/'+t['id'], {'feature':f['id']})
+            note = '**Assessment: Looks good**\n\n### Tech debt\n\n- `app.one`: '+finding+'\n\n### Verification\n\n- ok\n'
+            t, prompt, _ = self.review(t, [{'command':'task note','text':note}])
+            # Only a task in a feature is asked for tech debt (the steps in its body name the heading either way).
+            self.assertEqual('This task is part of a feature' in prompt, feature)
+            self.action(t, 'approve'); return self.action(t, 'complete')
+        debts = lambda: [t for t in self.api('GET', '/tasks') if t.get('techDebt')]
+        # A review's tech debt waits for completion, then makes the feature's Tech Debt task once.
+        a = reviewed(True, 'first finding')
+        [debt] = debts()
+        self.assertEqual((debt['title'], debt['column'], debt['feature']), ('Search: Tech Debt', 'backlog', f['id']))
+        notes = self.get(debt)['notes']
+        self.assertEqual(len(notes), 1)
+        self.assertIn('task:'+a['id'], notes[0]['text']); self.assertIn('first finding', notes[0]['text'])
+        self.assertIn('task:'+debt['id'], a['notes'][-1]['text'])
+        # A second review in the feature appends to it.
+        b = reviewed(True, 'second finding')
+        [again] = debts()
+        self.assertEqual(again['id'], debt['id'])
+        self.assertEqual([('task:'+x) in n['text'] for n, x in zip(self.get(debt)['notes'], [a['id'], b['id']])], [True, True])
+        # A review of a task with no feature files nothing.
+        reviewed(False, 'lost finding')
+        self.assertEqual(len(self.get(debt)['notes']), 2); self.assertEqual(len(debts()), 1)
+
     def test_review_delta_add_remove_revert_and_context(self):
         t = self.completed([
             {'command':'read priv/a'}, {'command':'write priv/a','text':'reviewed'},

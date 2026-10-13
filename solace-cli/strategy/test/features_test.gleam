@@ -13,18 +13,20 @@ fn feature(id: String, milestone: String, rank: Float) -> features.Feature {
     },
     rank,
     "planned",
+    None,
   )
 }
 
 pub fn the_decoder_defaults_everything_but_the_id_test() {
   let assert Ok(f) =
     json.parse(
-      "{\"id\":\"f1\",\"title\":\"Search\",\"body\":\"b\",\"milestone\":\"m1\",\"rank\":2,\"state\":\"active\"}",
+      "{\"id\":\"f1\",\"title\":\"Search\",\"body\":\"b\",\"milestone\":\"m1\",\"rank\":2,\"state\":\"active\",\"startTime\":40,\"colorSlot\":5}",
       features.decoder(),
     )
-  assert f == features.Feature("f1", "Search", "b", Some("m1"), 2.0, "active")
+  assert f
+    == features.Feature("f1", "Search", "b", Some("m1"), 2.0, "active", Some(5))
   let assert Ok(bare) = json.parse("{\"id\":\"f2\"}", features.decoder())
-  assert bare == features.Feature("f2", "", "", None, 0.0, "proposed")
+  assert bare == features.Feature("f2", "", "", None, 0.0, "proposed", None)
   let assert Ok(cleared) =
     json.parse("{\"id\":\"f3\",\"milestone\":null}", features.decoder())
   assert cleared.milestone == None
@@ -112,7 +114,8 @@ pub fn create_body_names_the_request_and_the_milestone_test() {
 }
 
 pub fn an_edit_sends_only_the_changed_fields_test() {
-  let f = features.Feature("f1", "Search", "Body", Some("m1"), 1.0, "proposed")
+  let f =
+    features.Feature("f1", "Search", "Body", Some("m1"), 1.0, "proposed", None)
   let draft = features.draft_of(f)
   assert features.changes(f, draft) == []
   let changed = features.Draft(..draft, title: "Find", state: "active")
@@ -132,7 +135,7 @@ pub fn a_move_takes_the_midpoint_or_one_past_the_end_test() {
   ]
   // To the first position: one below the first.
   assert features.move_rank(group, "b", True) == Some(0.0)
-  // To a middle position: the midpoint of the new neighbours.
+  // To a middle position: the midpoint of the new neighbors.
   assert features.move_rank(group, "c", True) == Some(1.5)
   assert features.move_rank(group, "a", False) == Some(3.0)
   // To the last position: one above the last.

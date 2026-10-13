@@ -9,7 +9,13 @@ pub fn error<T>(code: &str, at: &str, message: impl std::fmt::Display) -> Result
 /// A Gleam command in a project of plain files (D-60).
 pub fn plain<T>(command: &str) -> Result<T, Failure> {
     let use_ = if board::strategy_context().is_some() { "files, grep and read" } else { "files, grep, read, write and run" };
-    error("E6013", command, format!("this project has no Gleam code (no gleam.toml); use {use_}"))
+    // D-121: Rust and Python files are read by item.
+    let files = if matches!(command, "view" | "inspect" | "refs") {
+        "; a .rs or .py file: `view <file>` lists its items, `view <file>::<name>` shows one"
+    } else {
+        ""
+    };
+    error("E6013", command, format!("this project has no Gleam code (no gleam.toml); use {use_}{files}"))
 }
 
 /// The default `watch_limit`: text files up to this many bytes are watched.
@@ -421,6 +427,85 @@ pub fn trim_output(text: &str, budget: usize) -> String {
     let result = format!("{head}... {} lines omitted ...\n{}\n", lines.len() - kept - tail.len(), tail.join("\n"));
     result[..result.floor_char_boundary(budget.min(result.len()))].into()
 }
+/// A `run` or `build` reply's output (D-111): failures, errors, panics and
+/// summaries, in order. Build progress, passing tests and the text of
+/// warnings are left out; warnings stay as cargo's count line, or a count.
+/// Only cargo's, libtest's and Gleam's own forms match, so other programs'
+/// output passes through.
+pub fn condense(output: &str) -> String {
+    const PROGRESS: [&str; 13] = [
+        "Compiling ", "Compiled ", "Checking ", "Finished ", "Running ", "Doc-tests ", "Downloading ", "Downloaded ", "Blocking ", "Updating ",
+        "Locking ", "Adding ", "Fresh ",
+    ];
+    let (mut out, mut warnings, mut counted) = (String::new(), 0, false);
+    // `None` outside a warning; `Some(true)` in one of Gleam's, framed by `┌─`
+    let mut warning: Option<bool> = None;
+    // a `test result` with nothing run is kept only when no other is
+    let (mut results, mut empty) = (false, None);
+    for l in output.lines() {
+        let t = l.trim();
+        // cargo's and Gleam's status lines are indented, the verb right-aligned
+        let progress = l.starts_with(' ') && PROGRESS.iter().any(|p| t.starts_with(p));
+        // libtest's `running 3 tests`
+        let header = l
+            .strip_prefix("running ")
+            .and_then(|r| r.strip_suffix(" tests").or_else(|| r.strip_suffix(" test")))
+            .is_some_and(|n| n.parse::<usize>().is_ok());
+        if l.starts_with("warning:") {
+            // cargo's `warning: `x` (bin "x") generated 3 warnings`
+            if l.contains(" generated ") && l.contains(" warning") {
+                counted = true;
+                warning = None;
+                out += &format!("{l}\n");
+            } else {
+                warning = Some(false);
+                warnings += 1;
+            }
+            continue;
+        }
+        match warning {
+            // Gleam's has blank lines in its text: it runs until the build goes on
+            Some(true) if !(progress || l.starts_with("error") || t.starts_with("test ")) => continue,
+            Some(false) if t.contains('┌') => {
+                warning = Some(true);
+                continue;
+            }
+            // cargo's is its indented or numbered lines, up to a blank line
+            Some(false) if t.is_empty() => {
+                warning = None;
+                continue;
+            }
+            Some(false) if l.starts_with(|c: char| c.is_whitespace() || c.is_ascii_digit()) => continue,
+            _ => warning = None,
+        }
+        if progress || header {
+            continue;
+        }
+        if t.starts_with("test result: ok. 0 passed; 0 failed;") {
+            empty = Some(l);
+            continue;
+        }
+        let passed = (t.starts_with("test") && (t.ends_with(" ... ok") || t.ends_with(" ... ignored")))
+            || l.starts_with("ok    ")
+            || (!t.is_empty() && t.chars().all(|c| c == '.'));
+        if passed || (t.is_empty() && (out.is_empty() || out.ends_with("\n\n"))) {
+            continue;
+        }
+        results |= t.starts_with("test result:");
+        out += &format!("{l}\n");
+    }
+    let mut out = out.trim_end().to_string();
+    if let Some(l) = empty.filter(|_| !results) {
+        out = if out.is_empty() { l.to_string() } else { format!("{out}\n{l}") };
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    if warnings > 0 && !counted {
+        out += &format!("{warnings} warning{} not shown\n", if warnings == 1 { "" } else { "s" });
+    }
+    out
+}
 /// Kills `child` and every process it started (its process group).
 pub fn kill_group(child: &mut std::process::Child) {
     let _ = Command::new("kill").args(["-KILL", "--", &format!("-{}", child.id())]).status();
@@ -444,7 +529,9 @@ pub fn wait_or_kill(child: &mut std::process::Child, timeout: Duration) -> std::
     }
 }
 
-pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize) -> Out {
+/// Runs `argv` in `root`: the exit code, then the output within `budget`,
+/// `condense`d for a `run` or `build` reply (D-111).
+pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize, condensed: bool) -> Out {
     use std::os::unix::process::CommandExt;
     fs::create_dir_all(root.join(".solace"))?;
     let log = root.join(".solace").join(format!("command-{}.log", unique_id()));
@@ -461,6 +548,7 @@ pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize) -> Out
     };
     let output = fs::read_to_string(&log)?;
     fs::remove_file(log)?;
+    let output = if condensed { condense(&output) } else { output };
     match result {
         Ok(prefix) => Ok(prefix.clone() + &trim_output(&output, budget.saturating_sub(prefix.len()))),
         Err(Failure(message, code)) => Err(Failure(message + &trim_output(&output, budget), code)),
@@ -480,7 +568,8 @@ pub fn edited(current: &[u8], new: &str, replace: bool, all: bool, old: Option<&
 /// The paths a `write` or `remove` names (`remove` takes a list, D-102), for
 /// a task's snapshot of the files a command changes.
 pub fn paths<'a>(a: &[&'a str]) -> Vec<&'a str> {
-    if !matches!(a[0], "write" | "remove") {
+    // a kept file patch (D-120) names its files in its draft
+    if !matches!(a[0], "write" | "remove") || a.get(1) == Some(&"--draft") {
         return vec![];
     }
     a[1..].iter().copied().filter(|x| !x.starts_with("--")).collect()
@@ -621,7 +710,7 @@ fn validate(root: &Path, v: &toml::Value, name: &str, p: &Path, text: &str) -> R
             if matches(pattern, name) {
                 let argv: Vec<String> =
                     argv.as_array().unwrap().iter().map(|x| x.as_str().unwrap().replace("{file}", &p.to_string_lossy())).collect();
-                let out = command(root, &argv, 120, BUDGET).map_err(|e| Failure(format!("E6003 validator failed\n  {}", e.0), 1))?;
+                let out = command(root, &argv, 120, BUDGET, false).map_err(|e| Failure(format!("E6003 validator failed\n  {}", e.0), 1))?;
                 if !out.starts_with("exit code: 0\n") {
                     return error("E6003", name, out);
                 }
@@ -661,6 +750,20 @@ fn settle(
         remember(root, name, after)?;
     }
     Ok(())
+}
+/// A file Solace changes itself for a command (`extract`'s gleam.toml
+/// dependency, D-103), its undo record written ahead as for `write`. The
+/// function returned ends the change: kept, or put back.
+pub fn change_file(root: &Path, name: &str, text: &str) -> Result<impl FnOnce(bool) -> Result<(), Failure> + use<>, Failure> {
+    let p = path(root, name)?;
+    let before = fs::read(&p).ok();
+    let journal = journal(root, name, &before)?;
+    if let Err(e) = fs::write(&p, text) {
+        settle(root, name, &p, &before, None, &journal, false)?;
+        return Err(e.into());
+    }
+    let (root, name, text) = (root.to_path_buf(), name.to_string(), text.to_string());
+    Ok(move |kept: bool| settle(&root, &name, &p, &before, Some(text.as_bytes()), &journal, kept))
 }
 /// One section of a `write` patch, checked and applied in memory: the file's
 /// path, its bytes now, and its new text (`None` to delete it).
@@ -775,6 +878,26 @@ fn write_patch(root: &Path, v: &toml::Value, raw: &str) -> Out {
         })
         .collect())
 }
+/// A file patch whose refusal is kept as a draft (D-120), so a bad line is
+/// fixed with `write --draft <id> --replace` rather than by resending the
+/// patch. A retry is the whole patch again, whole or nothing (D-104).
+fn patch_with_draft(store: &Store, v: &toml::Value, id: Option<&str>, raw: &str, budget: usize) -> Out {
+    match write_patch(&store.root, v, raw) {
+        Ok(out) => {
+            if let Some(id) = id {
+                drafts::discard(store, id)?;
+            }
+            Ok(trim_output(&out, budget))
+        }
+        Err(Failure(message, code)) => {
+            let id = drafts::keep_file_patch(store, id, raw)?;
+            Err(Failure(
+                format!("{message}\n\nDraft {id} retained. Read: `view --draft {id}`. Fix and retry: `write --draft {id} --replace` with `old` and `text`. List: `drafts`."),
+                code,
+            ))
+        }
+    }
+}
 fn tree_rows(root: &Path, v: &toml::Value, dir: &Path, out: &mut Vec<(String, String)>) -> Result<(), Failure> {
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
     entries.sort_by_key(|e| e.file_name());
@@ -809,13 +932,37 @@ fn tree(root: &Path, v: &toml::Value, dir: &Path, out: &mut String) -> Result<()
     let mut rows = vec![];
     tree_rows(root, v, dir, &mut rows)?;
     for (name, tier) in rows {
-        if tier.is_empty() {
-            *out += &format!("{name}\n");
-        } else {
-            *out += &format!("{name} [{tier}]\n");
-        }
+        *out += &listed(root, v, &name, &tier);
     }
     Ok(())
+}
+/// One line of `files`: an expanded folder alone, any other entry with its
+/// tier, and a file other than graph source with its size (D-119).
+fn listed(root: &Path, v: &toml::Value, name: &str, tier: &str) -> String {
+    if tier.is_empty() {
+        return format!("{name}\n");
+    }
+    match measure(root, v, name, tier) {
+        Some(n) => format!("{name} [{tier}; {n}]\n"),
+        None => format!("{name} [{tier}]\n"),
+    }
+}
+/// A file's line count when it is UTF-8 text, else its size in bytes, as is
+/// one over `watch_limit`, which is not read. Folders, graph source, symlinks
+/// and Solace's own files have none.
+fn measure(root: &Path, v: &toml::Value, name: &str, tier: &str) -> Option<String> {
+    if name.ends_with('/') || tier == "graph" || tier == "internal" || tier.contains("symlink") {
+        return None;
+    }
+    let size = fs::metadata(root.join(name)).ok()?.len();
+    if size > limit(v) as u64 {
+        return Some(format!("{size} bytes"));
+    }
+    let bytes = fs::read(root.join(name)).ok()?;
+    match std::str::from_utf8(&bytes) {
+        Ok(text) if !bytes.contains(&0) => Some(format!("{} lines", text.lines().count())),
+        _ => Some(format!("{size} bytes")),
+    }
 }
 fn count_files(p: &Path) -> Result<usize, Failure> {
     let mut n = 0;
@@ -1047,6 +1194,66 @@ pub fn move_files(src: &Path, sv: &toml::Value, from: &str, dst: &Path, dv: &tom
     Ok(format!("Moved {shown_from} to {shown_to}{what}\n"))
 }
 
+/// A file `extract` takes into another project with the code that uses it
+/// (D-103, by D-84's rules): checked as a move is, undo records first, one
+/// rename that never replaces, then `text` written at the destination when
+/// given. The function returned ends it: kept, or put back with its records dropped.
+pub fn carry_file(src: &Path, from: &str, dst: &Path, to: &str, text: Option<String>) -> Result<impl FnOnce(bool) -> Result<(), Failure> + use<>, Failure> {
+    let (sv, dv) = (settings(src)?, settings(dst)?);
+    let (p, q) = (reachable(src, from)?, reachable(dst, to)?);
+    if !fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) {
+        return error("E6002", from, "no file there to take along");
+    }
+    if fs::symlink_metadata(&q).is_ok() {
+        return error("E6002", to, "something already exists there; a move never replaces a file or folder");
+    }
+    movable(src, &sv, from)?;
+    movable(dst, &dv, to)?;
+    let bytes = fs::read(&p)?;
+    let mut records = vec![];
+    records.extend(undo_record(src, from, Some(bytes.clone()))?);
+    records.extend(undo_record(dst, to, None)?);
+    fn drop_records(records: &[PathBuf]) -> Result<(), Failure> {
+        for r in records {
+            fs::remove_file(r)?;
+        }
+        Ok(())
+    }
+    // Folders made for the destination go again with the file.
+    let mut made = vec![];
+    let mut parent = q.parent().unwrap().to_path_buf();
+    while fs::symlink_metadata(&parent).is_err() {
+        made.push(parent.clone());
+        parent.pop();
+    }
+    let moved = fs::create_dir_all(q.parent().unwrap()).and_then(|_| rename_new(&p, &q)).and_then(|_| match &text {
+        Some(t) => fs::write(&q, t),
+        None => Ok(()),
+    });
+    if let Err(e) = moved {
+        if fs::symlink_metadata(&p).is_err() {
+            fs::write(&q, &bytes)?;
+            rename_new(&q, &p)?;
+        }
+        for d in &made {
+            let _ = fs::remove_dir(d);
+        }
+        drop_records(&records)?;
+        return Err(e.into());
+    }
+    Ok(move |kept: bool| {
+        if kept {
+            return Ok(());
+        }
+        fs::write(&q, &bytes)?;
+        rename_new(&q, &p)?;
+        for d in &made {
+            let _ = fs::remove_dir(d);
+        }
+        drop_records(&records)
+    })
+}
+
 pub fn dispatch(
     store: &Store,
     v: &toml::Value,
@@ -1056,8 +1263,12 @@ pub fn dispatch(
     budget: usize,
 ) -> Option<Out> {
     let root = &store.root;
+    // D-121: `view <file>` and `view <file>::<name>` read Rust and Python files.
+    if let Some(out) = orientation::view(root, v, a, budget) {
+        return Some(out);
+    }
     if a[0] == "grep" {
-        return Some(grep(root, v, &a[1..].join(" ")));
+        return Some(grep(root, v, &a[1..].join(" "), budget));
     }
     if a[0] == "move" {
         return Some((|| {
@@ -1067,6 +1278,18 @@ pub fn dispatch(
         })());
     }
     if matches!(a[0], "files" | "read" | "write" | "remove") {
+        // `write --draft <id> [--replace [--all]]` retries a kept file patch (D-120).
+        if a[0] == "write" && a.get(1) == Some(&"--draft") {
+            return Some((|| {
+                let rest: Vec<&str> = a[2..].iter().copied().filter(|x| *x != "--all").collect();
+                let (id, raw) = match rest.as_slice() {
+                    [id] => (*id, drafts::file_patch(store, id)?),
+                    [id, "--replace"] => (*id, drafts::replace(&drafts::file_patch(store, id)?, old, &input()?, a.contains(&"--all"))?.0),
+                    _ => return usage("write --draft <id> [--replace [--all]], with `old` and `text` for --replace"),
+                };
+                patch_with_draft(store, v, Some(id), &raw, budget)
+            })());
+        }
         // D-102: `files` and `read` take a list of paths, answered in order;
         // `write` and `remove` change one file and refuse a list.
         // A `--lines` or `--tail` range belongs to a single path.
@@ -1095,7 +1318,7 @@ pub fn dispatch(
                         "write with no path takes a file patch in `text`: `*** Begin Patch`, then `*** Add File: <path>`, `*** Update File: <path>` or `*** Delete File: <path>` sections; `write <path>` changes one file",
                     );
                 }
-                write_patch(root, v, &raw).map(|out| trim_output(&out, budget))
+                patch_with_draft(store, v, None, &raw, budget)
             })());
         }
         if paths.is_empty() {
@@ -1150,7 +1373,7 @@ pub fn dispatch(
                         if p.is_dir() {
                             tree(root, v, &p, &mut out)?;
                         } else {
-                            out += &format!("{name} [{t}]\n");
+                            out += &listed(root, v, &name, &t);
                         }
                     }
                     "read" => {
@@ -1245,7 +1468,7 @@ pub fn dispatch(
                 write_atomic(&root.join(".solace/pending").join(format!("run-{rid}.json")), json!({"task":tid,"run":rid,"files":files}).to_string())?;
             }
             store.materialize(&store.index()?)?;
-            let out = command(root, &argv, timeout, budget)?;
+            let out = command(root, &argv, timeout, budget, a[0] != "format")?;
             if out.starts_with("exit code: 0\n") { Ok(out) } else { fail(out) }
         })());
     }
@@ -1309,13 +1532,15 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
 }
 
 /// How `grep` reads its query, for the hint after a miss that looks like a shell habit (D-109).
-pub const GREP_SYNTAX: &str = "grep takes literal text, already case-insensitive, searched as written; quotes around the whole query are dropped; no options or regex; `--project <folder>` picks the project";
+pub const GREP_SYNTAX: &str = "grep takes literal text, already case-insensitive, searched as written; quotes around the whole query are dropped; no regex; the only options, at the end: `--in <path>` (one file or folder), `--context n` (1 to 5); `--project <folder>` picks the project";
 
-/// `grep <text>`: case-insensitive search of the files Solace watches, and the
-/// protected settings. Source symbols are `find`'s; unwatched files aren't
-/// searched (D-52). The text is searched as written, never refused (D-109).
-fn grep(root: &Path, v: &toml::Value, query: &str) -> Out {
-    let raw = query.trim();
+/// `grep <text> [--in <path>] [--context n]`: case-insensitive search of the
+/// files Solace watches, and the protected settings. Source symbols are
+/// `find`'s; unwatched files aren't searched (D-52). The text is searched as
+/// written, never refused (D-109); the options count only as its last words
+/// (D-119). The reply stops at a whole file within `budget`.
+fn grep(root: &Path, v: &toml::Value, query: &str, budget: usize) -> Out {
+    let (raw, within, context) = grep_options(query.trim())?;
     let query = one_quoted(raw);
     if query.is_empty() {
         return Err(Failure("grep: give the text to search for\n\nRun `solace help` for usage.".into(), 2));
@@ -1323,28 +1548,125 @@ fn grep(root: &Path, v: &toml::Value, query: &str) -> Out {
     let q = query.to_lowercase();
     let mut rows = vec![];
     tree_rows(root, v, root, &mut rows)?;
+    let place = match within {
+        Some(p) => match grep_in(root, v, p, &mut rows)? {
+            Ok(name) => name,
+            Err(not_searched) => return Ok(not_searched),
+        },
+        None => "watched files".into(),
+    };
     let mut hits = vec![];
     for (name, _) in rows.into_iter().filter(|(_, t)| t == "watched" || t == "protected") {
         let Ok(text) = fs::read_to_string(root.join(&name)) else { continue };
-        let lines: Vec<String> = text
-            .lines()
-            .enumerate()
-            .filter_map(|(n, l)| Some(format!("  {:>4}: {}", n + 1, around(l.trim(), l.trim().to_lowercase().find(&q)?, q.len()))))
-            .collect();
-        if !lines.is_empty() {
-            let more = if lines.len() > 6 { format!("\n  … {} more lines", lines.len() - 6) } else { String::new() };
-            hits.push(format!("{name}\n{}{more}\n", lines[..lines.len().min(6)].join("\n")));
-        }
+        hits.extend(grep_file(&name, &text, &q, context));
     }
     if hits.is_empty() {
-        return Ok(format!("No matches for \"{query}\" in watched files.\n{}", grep_hint(raw, query)));
+        return Ok(format!("No matches for \"{query}\" in {place}.\n{}", grep_hint(raw, query)));
     }
-    let total = hits.len();
-    let mut out: String = hits.into_iter().take(40).collect();
-    if total > 40 {
-        out += &format!("… {} more files match; narrow the search.\n", total - 40);
+    let (mut out, mut shown) = (String::new(), 0);
+    for (k, block) in hits.iter().enumerate() {
+        // Room for the line that names the files left out, unless this is the last.
+        let room = if k + 1 == hits.len() { 0 } else { 140 };
+        if shown == 40 || out.len() + block.len() + room > budget {
+            break;
+        }
+        out += block;
+        shown += 1;
+    }
+    if shown < hits.len() {
+        out += &format!("… {} more files match, not shown; narrow with `--in <path>`.\n", hits.len() - shown);
     }
     Ok(out)
+}
+/// The options at the end of a grep query, in either order: the text before
+/// them, `--in <path>` and `--context n` (1 to 5; 0 for none). Anywhere else
+/// they are part of the text.
+fn grep_options(raw: &str) -> Result<(&str, Option<&str>, usize), Failure> {
+    let words: Vec<&str> = raw.split_whitespace().collect();
+    let (mut n, mut within, mut context) = (words.len(), None, None);
+    while n >= 2 {
+        match words[n - 2] {
+            "--in" if within.is_none() => within = Some(words[n - 1]),
+            "--context" if context.is_none() => context = Some(words[n - 1]),
+            _ => break,
+        }
+        n -= 2;
+    }
+    // The words are slices of `raw`: the text ends where the last of them does.
+    let text = if n == 0 { "" } else { &raw[..words[n - 1].as_ptr() as usize - raw.as_ptr() as usize + words[n - 1].len()] };
+    let context = match context {
+        None => 0,
+        Some(c) => match c.parse::<usize>() {
+            Ok(c @ 1..=5) => c,
+            _ => return usage(format!("grep: --context takes a number from 1 to 5, not `{c}`")),
+        },
+    };
+    Ok((text, within, context))
+}
+/// Narrows `rows` to the path of `--in`, checked as `read` checks a path, and
+/// gives its name. A path that exists but isn't searched is named instead (the
+/// inner `Err`); one that doesn't exist is refused.
+fn grep_in(root: &Path, v: &toml::Value, p: &str, rows: &mut Vec<(String, String)>) -> Result<Result<String, String>, Failure> {
+    let name = file_name(Path::new(p));
+    if name.is_empty() {
+        return Ok(Ok("watched files".into()));
+    }
+    if Path::new(&name).components().any(|c| c.as_os_str() == ".solace") {
+        return Ok(Err(format!("{name} is Solace's own files; not searched\n")));
+    }
+    let target = reachable(root, &name)?;
+    if !target.exists() {
+        return error("E6002", &name, "no such file or folder");
+    }
+    let held = |t: &str| t == "watched" || t == "protected";
+    if target.is_dir() {
+        let dir = format!("{name}/");
+        rows.retain(|(n, _)| n.starts_with(&dir));
+        if !rows.iter().any(|(_, t)| held(t)) {
+            return Ok(Err(format!("{name}/ holds no watched or protected files; not searched\n")));
+        }
+    } else {
+        let t = tier(root, v, &name, None);
+        if !held(&t) {
+            let why = if t == "graph" { "source held as symbols (use `find`)".to_string() } else { t };
+            return Ok(Err(format!("{name} is {why}; not searched\n")));
+        }
+        rows.retain(|(n, _)| *n == name);
+    }
+    Ok(Ok(name))
+}
+/// A file's matching lines (up to 10) with `context` lines around them, as
+/// the reply shows them; `None` when nothing matches `q`.
+fn grep_file(name: &str, text: &str, q: &str, context: usize) -> Option<String> {
+    let lines: Vec<&str> = text.lines().map(str::trim).collect();
+    let found: Vec<Option<usize>> = lines.iter().map(|l| l.to_lowercase().find(q)).collect();
+    let hits: Vec<usize> = (0..lines.len()).filter(|&i| found[i].is_some()).collect();
+    if hits.is_empty() {
+        return None;
+    }
+    // Windows around the shown matches; those that touch merge.
+    let mut windows: Vec<(usize, usize)> = vec![];
+    for &i in &hits[..hits.len().min(10)] {
+        let w = (i.saturating_sub(context), (i + context).min(lines.len() - 1));
+        match windows.last_mut() {
+            Some(last) if w.0 <= last.1 + 1 => last.1 = w.1,
+            _ => windows.push(w),
+        }
+    }
+    let mut out = if hits.len() > 10 { format!("{name} ({} matches, showing 10)\n", hits.len()) } else { format!("{name}\n") };
+    for (k, &(a, b)) in windows.iter().enumerate() {
+        if k > 0 && context > 0 {
+            out += "  …\n";
+        }
+        for j in a..=b {
+            let (mark, line) = match found[j] {
+                Some(at) => (':', around(lines[j], at, q.len())),
+                None => ('-', around(lines[j], 0, 0)),
+            };
+            out += &format!("  {:>4}{mark} {line}\n", j + 1);
+        }
+    }
+    Some(out)
 }
 /// A query without the quotes around it, only when it is one quoted term:
 /// `"write" =>` keeps its quotes.
@@ -1370,11 +1692,11 @@ fn grep_hint(raw: &str, query: &str) -> String {
             && (w.split('/').filter(|s| !s.is_empty()).count() > 1
                 || w.rsplit_once('.').is_some_and(|(stem, ext)| !stem.is_empty() && FILE_EXTENSIONS.contains(&ext)))
     };
-    let filter = n >= 2 && (matches!(words[n - 2], "--path" | "--in") || path(words[n - 1]));
+    let filter = n >= 2 && (words[n - 2] == "--path" || path(words[n - 1]));
     if !(option || quoted || filter || raw.contains("\\|") || raw.contains("\\\"")) {
         return String::new();
     }
-    let filter = if filter { " grep has no path filter; it searches every watched file." } else { "" };
+    let filter = if filter { " To search one file or folder, end the query with `--in <path>`." } else { "" };
     format!("Searched for: {query}.{filter} {GREP_SYNTAX}\n")
 }
 /// Extensions that make a word a file path for `grep_hint`.
@@ -1417,6 +1739,8 @@ mod tests {
             ("priv/a.html", b"ok".as_slice()),
             ("priv/b.bin", b"\0"),
             ("priv/large", &[b'x'; 101]),
+            ("priv/latin", b"\xe9t\xe9\n"),
+            ("docs.md", b"a\n\nb"),
             ("priv/ignored", b"x"),
             ("manifest.toml", b"x"),
             ("solace.toml", b""),
@@ -1435,7 +1759,9 @@ mod tests {
         let got = call(&s, &v, &["files"], "", None).unwrap();
         assert_eq!(
             got,
-            ".git/ [unwatched; 1 files]\n.gitignore [protected]\n.solace/ [internal]\nAGENTS.md [protected]\ngleam.toml [watched]\nmanifest.toml [unwatched]\nmisc [watched]\nnode_modules/ [unwatched; 1 files]\npriv/\npriv/a.html [watched]\npriv/b.bin [unwatched (binary)]\npriv/generated/ [unwatched; 1 files]\npriv/ignored [unwatched]\npriv/large [unwatched (over limit)]\nsolace.toml [protected]\nsrc/\nsrc/main.gleam [graph]\nsub/\nsub/.gitignore [protected]\nsub/node_modules/ [unwatched; 1 files]\n"
+            // D-119: lines for UTF-8 text, bytes for any other file or one over
+            // watch_limit; collapsed folders keep their file count.
+            ".git/ [unwatched; 1 files]\n.gitignore [protected; 1 lines]\n.solace/ [internal]\nAGENTS.md [protected; 1 lines]\ndocs.md [watched; 3 lines]\ngleam.toml [watched; 2 lines]\nmanifest.toml [unwatched; 1 lines]\nmisc [watched; 1 lines]\nnode_modules/ [unwatched; 1 files]\npriv/\npriv/a.html [watched; 1 lines]\npriv/b.bin [unwatched (binary); 1 bytes]\npriv/generated/ [unwatched; 1 files]\npriv/ignored [unwatched; 1 lines]\npriv/large [unwatched (over limit); 101 bytes]\npriv/latin [unwatched (binary); 4 bytes]\nsolace.toml [protected; 0 lines]\nsrc/\nsrc/main.gleam [graph]\nsub/\nsub/.gitignore [protected; 1 lines]\nsub/node_modules/ [unwatched; 1 files]\n"
         );
     }
     #[test]
@@ -1489,17 +1815,133 @@ mod tests {
         ] {
             let got = call(&s, &v, q, "", None).unwrap();
             assert!(got.starts_with("No matches") && got.contains("Searched for: ") && got.contains("literal text, already case-insensitive"), "{q:?}: {got}");
-            assert_eq!(got.contains("no path filter"), filter, "{q:?}: {got}");
+            assert_eq!(got.contains("end the query with `--in <path>`"), filter, "{q:?}: {got}");
+            assert!(!got.contains("no path filter"), "{q:?}: {got}");
         }
         assert!(call(&s, &v, &["grep", "-i", "needle"], "", None).unwrap().contains("Searched for: -i needle."));
         // Code at the end of a query is not taken for a path: a plain miss.
         for q in [&["grep", "let", "n", "=", "a.len"][..], &["grep", "x", "=", "a", "/"], &["grep", "self.name"]] {
             assert_eq!(call(&s, &v, q, "", None).unwrap(), format!("No matches for \"{}\" in watched files.\n", q[1..].join(" ")), "{q:?}");
         }
-        // A folder or a file is: the hint says grep has no path filter.
+        // A folder or a file is: the hint says to use `--in <path>`.
         for q in [&["grep", "foo", "src/app"][..], &["grep", "foo", "notes.md"]] {
-            assert!(call(&s, &v, q, "", None).unwrap().contains("no path filter"), "{q:?}");
+            assert!(call(&s, &v, q, "", None).unwrap().contains("end the query with `--in <path>`"), "{q:?}");
         }
+        // `--in` with no path after it is text, not an option.
+        assert_eq!(call(&s, &v, &["grep", "foo", "--in"], "", None).unwrap(), "No matches for \"foo --in\" in watched files.\n");
+    }
+    /// D-119: `--context` merges touching windows, shows gaps, marks context
+    /// lines `-`, cuts long ones, and takes only 1 to 5.
+    #[test]
+    fn grep_context_merges_windows_and_takes_one_to_five() {
+        let (s, _) = fixture();
+        let v = "watch_limit = 20000\n".parse().unwrap();
+        fs::create_dir_all(s.root.join("docs")).unwrap();
+        let mut text: Vec<String> = (1..=20).map(|n| format!("line {n}")).collect();
+        text[2] = "hit three".into();
+        text[4] = "hit five".into();
+        text[14] = "hit fifteen".into();
+        text[9] = format!("{}{}", "x ".repeat(300), "tail");
+        fs::write(s.root.join("docs/a.txt"), text.join("\n") + "\n").unwrap();
+        let got = call(&s, &v, &["grep", "hit", "--context", "1"], "", None).unwrap();
+        // 3 and 5 are two lines apart: windows 2..4 and 4..6 touch and merge; 15 is apart.
+        assert_eq!(got, "docs/a.txt\n     2- line 2\n     3: hit three\n     4- line 4\n     5: hit five\n     6- line 6\n  …\n    14- line 14\n    15: hit fifteen\n    16- line 16\n");
+        // Without context, no gap marker and no context lines.
+        assert_eq!(call(&s, &v, &["grep", "hit"], "", None).unwrap(), "docs/a.txt\n     3: hit three\n     5: hit five\n    15: hit fifteen\n");
+        // A long context line is cut around its start; the reply stays short.
+        let got = call(&s, &v, &["grep", "hit", "five", "--context", "5"], "", None).unwrap();
+        assert!(got.contains("    10- x x") && got.lines().all(|l| l.len() < 260), "{got}");
+        for bad in ["0", "6", "x", "-1"] {
+            let e = call(&s, &v, &["grep", "hit", "--context", bad], "", None).unwrap_err();
+            assert!(e.0.contains("--context takes a number from 1 to 5") && e.1 == 2, "{bad}: {e:?}");
+        }
+        assert!(call(&s, &v, &["grep", "hit", "--context", "5"], "", None).is_ok());
+        // The options count only at the end, in either order.
+        let a = call(&s, &v, &["grep", "hit", "--in", "docs", "--context", "1"], "", None).unwrap();
+        assert_eq!(a, call(&s, &v, &["grep", "hit", "--context", "1", "--in", "docs"], "", None).unwrap());
+        assert!(a.starts_with("docs/a.txt\n     2- line 2"), "{a}");
+        assert_eq!(
+            call(&s, &v, &["grep", "--context", "3", "hit"], "", None).unwrap(),
+            "No matches for \"--context 3 hit\" in watched files.\nSearched for: --context 3 hit. ".to_string() + GREP_SYNTAX + "\n"
+        );
+    }
+    /// D-119: `--in` takes a file or a folder, checked as `read` checks a path;
+    /// a missing path is refused, an unwatched or internal one named.
+    #[test]
+    fn grep_in_takes_a_file_or_a_folder() {
+        let (s, _) = fixture();
+        let v: toml::Value = "watch_limit = 20000\nunwatched = [\"priv/generated/\"]\n".parse().unwrap();
+        for (p, b) in [
+            ("docs/a.md", "needle a\n"),
+            ("docs/deep/b.md", "needle b\n"),
+            ("docs2/c.md", "needle c\n"),
+            ("priv/generated/out", "needle\n"),
+            ("priv/blob.bin", "needle\0"),
+        ] {
+            fs::create_dir_all(s.root.join(p).parent().unwrap()).unwrap();
+            fs::write(s.root.join(p), b).unwrap();
+        }
+        let file = call(&s, &v, &["grep", "needle", "--in", "docs/a.md"], "", None).unwrap();
+        assert_eq!(file, "docs/a.md\n     1: needle a\n");
+        // A folder takes its files at any depth, and not a folder that shares its prefix.
+        let dir = call(&s, &v, &["grep", "needle", "--in", "docs"], "", None).unwrap();
+        assert_eq!(dir, "docs/a.md\n     1: needle a\ndocs/deep/b.md\n     1: needle b\n");
+        assert_eq!(call(&s, &v, &["grep", "needle", "--in", "./docs/"], "", None).unwrap(), dir);
+        assert_eq!(
+            call(&s, &v, &["grep", "absent", "--in", "docs"], "", None).unwrap(),
+            "No matches for \"absent\" in docs.\n"
+        );
+        // A path that is not there is refused and named.
+        let e = call(&s, &v, &["grep", "needle", "--in", "docs/gone.md"], "", None).unwrap_err().0;
+        assert!(e.contains("E6002") && e.contains("docs/gone.md") && e.contains("no such file or folder"), "{e}");
+        let e = call(&s, &v, &["grep", "needle", "--in", "../x"], "", None).unwrap_err().0;
+        assert!(e.contains("E6006") || e.contains("E6002"), "{e}");
+        // Unwatched, binary, source and internal paths are named as not searched.
+        for (p, why) in [
+            ("priv/generated/out", "unwatched"),
+            ("priv/generated", "holds no watched or protected files"),
+            ("priv/blob.bin", "unwatched (binary)"),
+            ("src/main.gleam", "source held as symbols"),
+            (".solace", "Solace's own files"),
+        ] {
+            let got = call(&s, &v, &["grep", "needle", "--in", p], "", None).unwrap();
+            assert!(got.starts_with(&format!("{p}")) && got.contains(why) && got.contains("not searched"), "{p}: {got}");
+        }
+    }
+    /// D-119: a file with more than 10 matches shows 10 and its count; at most
+    /// 40 files; the reply stops at a whole file within the budget and says
+    /// how many files it left out.
+    #[test]
+    fn grep_counts_matches_and_stops_at_a_whole_file_within_the_budget() {
+        let (s, _) = fixture();
+        let v: toml::Value = "watch_limit = 100000\n".parse().unwrap();
+        fs::create_dir_all(s.root.join("docs")).unwrap();
+        let many: String = (1..=14).map(|n| format!("needle {n}\n")).collect();
+        fs::write(s.root.join("docs/many.md"), &many).unwrap();
+        let got = grep(&s.root, &v, "needle --in docs/many.md", 10_000).unwrap();
+        assert!(got.starts_with("docs/many.md (14 matches, showing 10)\n"), "{got}");
+        assert_eq!(got.matches("needle").count(), 10, "{got}");
+        assert!(got.contains("    10: needle 10\n") && !got.contains("needle 11"), "{got}");
+        fs::remove_file(s.root.join("docs/many.md")).unwrap();
+        // 45 files: 40 shown, 5 left out.
+        for n in 0..45 {
+            fs::write(s.root.join(format!("docs/f{n:02}.md")), "needle\n").unwrap();
+        }
+        let got = grep(&s.root, &v, "needle", 100_000).unwrap();
+        assert_eq!(got.matches(".md\n").count(), 40, "{got}");
+        assert!(got.ends_with("… 5 more files match, not shown; narrow with `--in <path>`.\n"), "{got}");
+        // Files of about 1 KB each against a budget of 3,000: whole files only.
+        for n in 0..45 {
+            fs::write(s.root.join(format!("docs/f{n:02}.md")), format!("needle {}\n", "w".repeat(150)).repeat(6)).unwrap();
+        }
+        let got = grep(&s.root, &v, "needle", 3_000).unwrap();
+        let shown = got.matches(".md\n").count();
+        assert!(got.len() <= 3_000 && (1..40).contains(&shown), "{} {shown}", got.len());
+        assert!(got.ends_with(&format!("… {} more files match, not shown; narrow with `--in <path>`.\n", 45 - shown)), "{got}");
+        assert_eq!(got.matches("needle").count(), shown * 6, "every shown file is whole");
+        // A budget below one file shows none and names them all.
+        let got = grep(&s.root, &v, "needle", 100).unwrap();
+        assert_eq!(got, "… 45 more files match, not shown; narrow with `--in <path>`.\n");
     }
     /// D-109: `write <path>` refuses patch text and a drastic shrink, and its
     /// reply gives the file's lines before and after.
@@ -1636,12 +2078,193 @@ mod tests {
         assert!(out.contains(" lines omitted ..."), "{out}");
         assert_eq!(trim_output("short\n", 500), "short\n");
     }
+    /// A failing cargo test run keeps the failure, its panic, the summaries
+    /// and cargo's warning count, and nothing that passed (D-111).
+    #[test]
+    fn condense_cargo_failure() {
+        let output = "   Compiling solace v0.1.0 (/x/solace-cli)
+warning: unused variable: `x`
+  --> src/main.rs:3:9
+   |
+3  |     let x = 1;
+   |         ^ help: if this is intentional, prefix it with an underscore: `_x`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: `solace` (bin \"solace\" test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.20s
+     Running unittests src/main.rs (target/debug/deps/solace-1a2b)
+
+running 3 tests
+test board::tests::a ... ok
+test board::tests::b ... FAILED
+test board::tests::c ... ignored
+
+failures:
+
+---- board::tests::b stdout ----
+
+thread 'board::tests::b' panicked at src/board.rs:10:5:
+assertion `left == right` failed
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    board::tests::b
+
+test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--bin solace`
+";
+        let expected = "warning: `solace` (bin \"solace\" test) generated 1 warning
+
+test board::tests::b ... FAILED
+
+failures:
+
+---- board::tests::b stdout ----
+
+thread 'board::tests::b' panicked at src/board.rs:10:5:
+assertion `left == right` failed
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    board::tests::b
+
+test result: FAILED. 1 passed; 1 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--bin solace`
+";
+        assert_eq!(condense(output), expected);
+    }
+    /// `run_parallel.py`: the failing test with its unittest output and the
+    /// totals; passing tests are left out.
+    #[test]
+    fn condense_acceptance_failure() {
+        let output = "    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running tests/acceptance.rs (target/debug/deps/acceptance-9f)
+
+running 1 test
+ok    board_acceptance.BoardTest.test_a (2.1s)
+FAIL  view_acceptance.ViewTest.test_b (3.4s)
+F
+======================================================================
+FAIL: test_b (view_acceptance.ViewTest.test_b)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File \"view_acceptance.py\", line 9, in test_b
+    self.assertEqual(1, 2)
+AssertionError: 1 != 2
+
+----------------------------------------------------------------------
+Ran 1 test in 3.400s
+
+FAILED (failures=1)
+
+
+ok    workspace_acceptance.WorkspaceTest.test_c (1.0s)
+3 tests, 1 failed, 4.2s with 8 workers
+test acceptance ... FAILED
+";
+        let expected = "FAIL  view_acceptance.ViewTest.test_b (3.4s)
+F
+======================================================================
+FAIL: test_b (view_acceptance.ViewTest.test_b)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File \"view_acceptance.py\", line 9, in test_b
+    self.assertEqual(1, 2)
+AssertionError: 1 != 2
+
+----------------------------------------------------------------------
+Ran 1 test in 3.400s
+
+FAILED (failures=1)
+
+3 tests, 1 failed, 4.2s with 8 workers
+test acceptance ... FAILED
+";
+        assert_eq!(condense(output), expected);
+    }
+    /// A passing run is its summaries and a warning count; a filter that
+    /// matched nothing still says so.
+    #[test]
+    fn condense_passing_run() {
+        let output = "   Compiling a v0.1.0
+warning: unused import
+ --> src/a.rs:1:5
+
+warning: dead code
+ --> src/a.rs:2:4
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.00s
+     Running unittests src/main.rs (target/debug/deps/a-1)
+
+running 2 tests
+test a ... ok
+test b ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/a-2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+";
+        assert_eq!(
+            condense(output),
+            "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n2 warnings not shown\n"
+        );
+        let none = "running 0 tests\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n";
+        assert_eq!(condense(none), "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n");
+        assert_eq!(condense("hello\n"), "hello\n");
+    }
+    /// Gleam's warnings, blank lines and all, become a count.
+    #[test]
+    fn condense_gleam_warning() {
+        let output = "  Compiling pilot
+warning: Todo found
+  ┌─ /project/test/app_test.gleam:4:22
+  │
+4 │ pub fn todo_test() { todo }
+  │                      ^^^^ This code is incomplete
+
+This code will crash if it is run. Be sure to finish it before
+running your program.
+
+   Compiled in 0.20s
+    Running pilot_test.main
+1 passed, no failures
+";
+        assert_eq!(condense(output), "1 passed, no failures\n1 warning not shown\n");
+    }
+    /// Another program's lines that look like cargo's pass through.
+    #[test]
+    fn condense_keeps_other_programs_output() {
+        let output = "Running step 3\nChecking config\nwarning: low disk\nstill here\nrunning late\nConnecting ... ok\n";
+        assert_eq!(condense(output), "Running step 3\nChecking config\nstill here\nrunning late\nConnecting ... ok\n1 warning not shown\n");
+    }
+    /// `run` replies with the exit code and the condensed output.
+    #[test]
+    fn run_reply_is_condensed() {
+        let (s, _) = fixture();
+        let v: toml::Value =
+            "[commands]\nsuite = { run = [\"sh\", \"-c\", \"printf 'running 2 tests\\\\ntest a ... ok\\\\ntest b ... FAILED\\\\n'; exit 1\"] }\n".parse().unwrap();
+        let err = call(&s, &v, &["run", "suite"], "", None).unwrap_err();
+        assert_eq!(err.0, "exit code: 1\ntest b ... FAILED\n");
+    }
     #[test]
     fn a4_new_watched_file_and_size() {
         let (s, v) = fixture();
         call(&s, &v, &["write", "README.md"], "usage", None).unwrap();
         call(&s, &v, &["write", "bin/coolcalc"], "#!/bin/sh\ngleam run -- \"$@\"\n", None).unwrap();
-        assert!(call(&s, &v, &["files", "README.md"], "", None).unwrap().contains("[watched]"));
+        assert_eq!(call(&s, &v, &["files", "README.md"], "", None).unwrap(), "README.md [watched; 1 lines]\n");
         assert!(s.find("usage").unwrap().contains("No matches"));
         call(&s, &v, &["read", "README.md"], "", None).unwrap();
         fs::write(s.root.join("README.md"), "usage changed").unwrap();
@@ -1780,6 +2403,7 @@ mod tests {
         let update = "*** Update File: notes\n-one\n+1\n";
         for (section, why) in [
             ("*** Update File: docs/new.md\n-nope\n+x\n", "E0108 in docs/new.md (hunk at line 6), these lines weren't found: `nope`"),
+            ("*** Update File: docs/new.md\n-ext\n+x\n", "`ext` is only part of line 3: `text`"),
             ("*** Update File: src/main.gleam\n-x\n+y\n", "E6001"),
             ("*** Add File: solace.toml\n+x\n", "human-approved proposal"),
             ("*** Add File: .solace/x\n+x\n", "E6006"),
@@ -1814,6 +2438,36 @@ mod tests {
         assert!(e.contains("`notes` (line 2) is no symbol or module; a file other than code changes with `write`"), "{e}");
         let e = drafts::patch_blocks(&s, "*** Begin Patch\n*** Add File: docs/x.md\n+# X\n*** End Patch\n").unwrap_err().0;
         assert!(e.contains("`docs/x.md` (line 2) is no symbol or module"), "{e}");
+    }
+    /// D-120: a refused file patch is kept as a draft; `write --draft <id>
+    /// --replace` fixes its bad line and retries the whole patch, matched
+    /// against the files as they are then.
+    #[test]
+    fn a_refused_file_patch_is_fixed_in_its_draft() {
+        let (s, v) = fixture();
+        fs::write(s.root.join("notes"), "one\n").unwrap();
+        fs::write(s.root.join("spec"), "A failed read does not stop the call (D-109).\n").unwrap();
+        let patch = "*** Begin Patch\n*** Update File: notes\n-one\n+1\n*** Update File: spec\n-does not stop the call (D-109).\n+does not stop the call (D-119).\n*** End Patch\n";
+        let e = call(&s, &v, &["write"], patch, None).unwrap_err().0;
+        assert!(e.starts_with("nothing written:\n") && e.contains("is only part of line 1: `A failed read") && e.contains("write --draft"), "{e}");
+        let id = e.split("Draft ").nth(1).and_then(|r| r.split(' ').next()).unwrap().to_string();
+        assert_eq!(drafts::view(&s, &id).unwrap(), patch);
+        assert!(drafts::list(&s).unwrap().contains(&format!("{id}: [\"write\"] (current)")));
+        // `submit --draft` names the command that retries it.
+        let e = drafts::submit(&s, &["submit", "--draft", &id], &mut || Ok(String::new()), None).unwrap_err().0;
+        assert!(e.contains("is a file patch; retry it with `write --draft"), "{e}");
+        // A retry matches the files as they are: a changed one refuses it, and the fixed draft stays.
+        let (old, fix) = ("-does not stop the call (D-109).\n+does", "-A failed read does not stop the call (D-109).\n+A failed read does");
+        fs::write(s.root.join("notes"), "uno\n").unwrap();
+        let e = call(&s, &v, &["write", "--draft", &id, "--replace"], fix, Some(old)).unwrap_err().0;
+        assert!(e.contains("these lines weren't found: `one`") && e.contains(&format!("Draft {id} retained")), "{e}");
+        assert_eq!(fs::read_to_string(s.root.join("spec")).unwrap(), "A failed read does not stop the call (D-109).\n");
+        fs::write(s.root.join("notes"), "one\n").unwrap();
+        assert_eq!(call(&s, &v, &["write", "--draft", &id], "", None).unwrap(), "Wrote notes\nWrote spec\n");
+        assert_eq!(fs::read_to_string(s.root.join("notes")).unwrap(), "1\n");
+        assert_eq!(fs::read_to_string(s.root.join("spec")).unwrap(), "A failed read does not stop the call (D-119).\n");
+        // A retry that applies removes the draft.
+        assert!(call(&s, &v, &["write", "--draft", &id], "", None).unwrap_err().0.contains("E0106"));
     }
     /// A file patch writes every file before it validates any; one that fails
     /// puts every file back and leaves no journal.
@@ -2013,7 +2667,7 @@ mod tests {
         let mut out = String::new();
         tree(&root, &v, &root, &mut out).unwrap();
         assert!(out.contains("src/nested/source.gleam [graph]"));
-        assert!(out.contains("priv/nested/index.html [watched]"));
+        assert!(out.contains("priv/nested/index.html [watched; 1 lines]"));
         fs::write(root.join(".gitignore"), "priv/nested/\n").unwrap();
         out.clear();
         tree(&root, &v, &root, &mut out).unwrap();

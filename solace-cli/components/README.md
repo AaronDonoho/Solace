@@ -40,7 +40,7 @@ element's own `{base}/events` brings only its project's dependencies live; other
 Events to the host: `task-moved` (`{id, dir, base}`: the task now lives in another of its projects)
 and `notice` (`{heading, text, id, tab}`, from its own stream only; a host raises its own).
 
-Its styles set no colours: the page's custom properties (`--paper`, `--ink`, ...) reach it from its host,
+Its styles set no colors: the page's custom properties (`--paper`, `--ink`, ...) reach it from its host,
 so the board's dark theme applies. A page that hosts it outside the board defines them.
 
 The last agent and effort chosen are kept in the browser under `solace-board-agent` and
@@ -50,11 +50,15 @@ The last agent and effort chosen are kept in the browser under `solace-board-age
 
 `solace_task.proposal_view` shows a strategy run's proposal (D-93, Spec 15 §6) in human terms, for the
 Strategy page's planning panel: "Create task *Index*", "Change feature *Search*" or "Replace the vision",
-the proposed fields (title first, the body and the vision's text as Markdown), a line for each record
-Approve also sets back to `planned`, then the question's options until it is answered and the answer
-after. `proposal_decoder` reads `{kind, id?, fields, base?, reopens?}`; `proposal_styles` is its look,
-with colours from the page. `entry_view`, `entry_decoder`, `note_decoder` and `agent_decoder` are public
-for the same panel.
+then a line for each record Approve also sets back to `planned`, the question's options until it is
+answered and the answer after. An edit shows only the fields that change (D-115): a short one as
+`old → new`, a record id by its title, and the body as a line diff in its order — shared lines collapsed,
+removed lines struck, added ones marked, ignoring the space around lines and blank lines — with a toggle
+showing the new body as Markdown; the vision's text diffs against the vision the same way. A proposal with
+nothing to change, the vision included, says "No change". A create, and a proposal saved before `before`
+was kept, show every field, the body (and the vision's text) as Markdown. `proposal_decoder` reads
+`{kind, id?, fields, base?, reopens?, before?}`; `proposal_styles` is its look, with colors from the
+page. `entry_view`, `entry_decoder`, `note_decoder` and `agent_decoder` are public for the same panel.
 
 ## Checks
 

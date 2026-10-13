@@ -55,6 +55,20 @@ export function drag(x, width, move, done) {
   globalThis.addEventListener('pointerup', onUp);
   globalThis.addEventListener('pointercancel', onUp);
 }
+// The planning panel follows its newest message (D-118): the run's end (its
+// message box while open) is kept at the bottom of the panel's scroll area.
+const reach = 48;
+export function near_end(body) {
+  const end = body?.querySelector?.('.plan-end');
+  if (!end) return true;
+  return end.getBoundingClientRect().bottom - body.getBoundingClientRect().bottom < reach;
+}
+export function scroll_plan(root) {
+  const body = root?.querySelector?.('.plan-body');
+  const end = body?.querySelector('.plan-end');
+  if (!body || !end) return;
+  body.scrollTop += end.getBoundingClientRect().bottom - body.getBoundingClientRect().bottom;
+}
 // The shadow root before the page has rendered: the editor's tools do nothing yet.
 export function no_root() { return null; }
 // A task's closedTime, in seconds, as the reader's local date and time.

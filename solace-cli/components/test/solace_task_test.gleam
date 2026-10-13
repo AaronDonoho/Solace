@@ -1,4 +1,5 @@
 import gleam/dict
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
@@ -587,15 +588,6 @@ pub fn scope_tab_test() {
   css
   |> string.contains(".projects-pick input:checked::before{transform:")
   |> should.be_true
-}
-
-/// The detail's styles set no colours of their own: a nested shadow root
-/// inherits them from its host, so the board's dark theme reaches it.
-pub fn styles_inherit_the_hosts_colours_test() {
-  let assert [css, ..] = string.split(html(fresh("1")), "</style>")
-  css |> string.contains("--paper:") |> should.be_false
-  css |> string.contains("--ink:") |> should.be_false
-  css |> string.contains(":host{display:block}") |> should.be_true
 }
 
 /// A notice's button names a tab and a task: an open task shows it now,
@@ -1232,4 +1224,298 @@ pub fn depends_on_line_updates_live_test() {
       task.DepLoaded(g - 1, "d2", depends_task("d2", "Old", "backlog", "")),
     )
   assert same == model
+}
+
+/// D-112: a task with `techDebt: true` is a feature's Tech Debt task; a
+/// missing field is not.
+pub fn tech_debt_decodes_test() {
+  let base =
+    "\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1"
+  let debt = fn(extra) {
+    let assert Ok(t) =
+      json.parse("{" <> base <> extra <> "}", task.task_decoder())
+    t.tech_debt
+  }
+  debt(",\"techDebt\":true") |> should.be_true
+  debt("") |> should.be_false
+}
+
+/// Features take colors by their slots, 5 places apart along the 16-color
+/// rainbow; all 16 come before one repeats.
+pub fn feature_colors_skip_four_in_rainbow_order_test() {
+  list.map([0, 1, 2, 3, 4], task.feature_color)
+  |> should.equal(["#d7263d", "#5f9a1a", "#2f72d8", "#d93a7f", "#9a9200"])
+  int.range(from: 0, to: 16, with: [], run: fn(acc, i) { [i, ..acc] })
+  |> list.map(task.feature_color)
+  |> list.unique
+  |> list.length
+  |> should.equal(16)
+  task.feature_color(16) |> should.equal(task.feature_color(0))
+  // A feature not started has no color; a gap left by a deleted one stays.
+  task.feature_colors([
+    #("late", Some(17)),
+    #("idle", None),
+    #("b", Some(2)),
+    #("a", Some(0)),
+  ])
+  |> should.equal([
+    #("late", "#5f9a1a"),
+    #("b", "#2f72d8"),
+    #("a", "#d7263d"),
+  ])
+}
+
+pub fn a_task_names_its_feature_test() {
+  let base =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1"
+  let assert Ok(t) =
+    json.parse(base <> ",\"feature\":\"f1\"}", task.task_decoder())
+  t.feature |> should.equal(Some("f1"))
+  let assert Ok(t) =
+    json.parse(base <> ",\"feature\":null}", task.task_decoder())
+  t.feature |> should.equal(None)
+  let assert Ok(t) = json.parse(base <> "}", task.task_decoder())
+  t.feature |> should.equal(None)
+}
+
+/// The detail's styles set no colors of their own: a nested shadow root
+/// inherits them from its host, so the board's dark theme reaches it.
+pub fn styles_inherit_the_hosts_colors_test() {
+  let assert [css, ..] = string.split(html(fresh("1")), "</style>")
+  css |> string.contains("--paper:") |> should.be_false
+  css |> string.contains("--ink:") |> should.be_false
+  css |> string.contains(":host{display:block}") |> should.be_true
+}
+
+/// D-115: an edit proposal carries the record's current values as `before`;
+/// a field whose value doesn't change isn't shown.
+pub fn proposal_unchanged_fields_are_hidden_test() {
+  let assert Ok(p) =
+    json.parse(
+      "{\"kind\":\"feature\",\"id\":\"f1\",\"fields\":{\"title\":\"Search\",\"state\":\"active\"},\"before\":{\"title\":\"Search\",\"state\":\"planned\"}}",
+      task.proposal_decoder(),
+    )
+  let shown =
+    task.proposal_view(
+      "",
+      p,
+      ["Approve", "Reject"],
+      "",
+      fn(_, _) { "Search" },
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  shown |> string.contains("<dt>title</dt>") |> should.be_false
+  shown
+  |> string.contains("<dt>state</dt><dd>planned → active</dd>")
+  |> should.be_true
+}
+
+/// A changed short field shows `old → new`, a record id by its title.
+pub fn proposal_short_field_shows_old_to_new_test() {
+  let assert Ok(p) =
+    json.parse(
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"feature\":\"f1\",\"dependsOn\":[\"t2\"]},\"before\":{\"feature\":\"f0\",\"dependsOn\":[]}}",
+      task.proposal_decoder(),
+    )
+  let name = fn(kind, id) {
+    case kind, id {
+      "feature", "f1" -> "Search"
+      "feature", "f0" -> "Old"
+      "task", "t2" -> "Index"
+      _, _ -> ""
+    }
+  }
+  let shown =
+    task.proposal_view("", p, ["Approve", "Reject"], "", name, False, fn(o) {
+      o
+    })
+    |> element.to_string
+  shown
+  |> string.contains("<dt>feature</dt><dd>Old → Search</dd>")
+  |> should.be_true
+  shown
+  |> string.contains("<dt>dependsOn</dt><dd>(none) → Index</dd>")
+  |> should.be_true
+}
+
+/// The body shows as a line diff: lines the two bodies share collapse to one
+/// muted line, a removed line is struck, an added one marked, in the body's
+/// order, and a toggle shows the new body as Markdown; the vision's new text
+/// diffs the same way.
+pub fn proposal_body_shows_as_a_diff_test() {
+  let assert Ok(p) =
+    json.parse(
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"Keep me\\n\\nAdd me\"},\"before\":{\"body\":\"Keep me\\n\\nDrop me\"}}",
+      task.proposal_decoder(),
+    )
+  let shown =
+    task.proposal_view(
+      "",
+      p,
+      ["Approve", "Reject"],
+      "",
+      fn(_, _) { "Index" },
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  shown |> string.contains("1 line unchanged") |> should.be_true
+  shown |> string.contains("<del>- Drop me</del>") |> should.be_true
+  shown |> string.contains("+ Add me") |> should.be_true
+  shown |> string.contains("<summary>New body</summary>") |> should.be_true
+  let assert Ok(vision) =
+    json.parse(
+      "{\"kind\":\"vision\",\"fields\":{\"text\":\"Keep me\\n\\nAdd me\"},\"before\":{\"text\":\"Keep me\\n\\nDrop me\"}}",
+      task.proposal_decoder(),
+    )
+  task.proposal_view(
+    "",
+    vision,
+    ["Approve", "Reject"],
+    "",
+    fn(_, _) { "" },
+    False,
+    fn(o) { o },
+  )
+  |> element.to_string
+  |> string.contains("<del>- Drop me</del>")
+  |> should.be_true
+}
+
+/// An edit whose fields all match the record's current values says "No
+/// change" and shows none of them.
+pub fn proposal_that_changes_nothing_says_so_test() {
+  let assert Ok(p) =
+    json.parse(
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"title\":\"Index\"},\"before\":{\"title\":\"Index\"}}",
+      task.proposal_decoder(),
+    )
+  let shown =
+    task.proposal_view(
+      "",
+      p,
+      ["Approve", "Reject"],
+      "",
+      fn(_, _) { "Index" },
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  shown |> string.contains("No change") |> should.be_true
+  shown |> string.contains("<dt>title</dt>") |> should.be_false
+}
+
+/// The line diff keeps the body's order: a line edited in the middle shows
+/// where it is, between the muted lines before it and after it.
+pub fn proposal_body_shows_a_change_in_its_place_test() {
+  let assert Ok(p) =
+    json.parse(
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"One\\n\\nTwo edited\\n\\nThree\"},\"before\":{\"body\":\"One\\n\\nTwo\\n\\nThree\"}}",
+      task.proposal_decoder(),
+    )
+  let shown =
+    task.proposal_view(
+      "",
+      p,
+      ["Approve", "Reject"],
+      "",
+      fn(_, _) { "Index" },
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  // The struck line comes after the muted line for the lines before it, the
+  // added line after the struck one, and the muted line for the lines after
+  // it after the added one.
+  case string.split(shown, "<del>- Two</del>") {
+    [before, after] -> {
+      before |> string.contains("1 line unchanged") |> should.be_true
+      case string.split(after, "+ Two edited") {
+        [_, tail] ->
+          tail |> string.contains("1 line unchanged") |> should.be_true
+        _ -> should.be_true(False)
+      }
+    }
+    _ -> should.be_true(False)
+  }
+}
+
+/// A vision proposal whose text is the vision's says "No change", as an edit
+/// whose fields all match does.
+pub fn a_vision_proposal_that_changes_nothing_says_so_test() {
+  let assert Ok(v) =
+    json.parse(
+      "{\"kind\":\"vision\",\"fields\":{\"text\":\"For teams\"},\"before\":{\"text\":\"For teams\"}}",
+      task.proposal_decoder(),
+    )
+  let shown =
+    task.proposal_view(
+      "",
+      v,
+      ["Approve", "Reject"],
+      "",
+      fn(_, _) { "" },
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  shown |> string.contains("No change") |> should.be_true
+  shown |> string.contains("lines unchanged") |> should.be_false
+}
+
+/// A body that differs only in the space around its lines, or in blank lines,
+/// is not a change; a changed line beside respaced ones shows only that line.
+pub fn proposal_body_that_only_changes_spacing_says_no_change_test() {
+  let show = fn(json_text) {
+    let assert Ok(p) = json.parse(json_text, task.proposal_decoder())
+    task.proposal_view(
+      "",
+      p,
+      ["Approve", "Reject"],
+      "",
+      fn(_, _) { "Index" },
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  }
+  let same =
+    show(
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"One\\n\\nTwo\"},\"before\":{\"body\":\"One \\n  Two\"}}",
+    )
+  same |> string.contains("No change") |> should.be_true
+  same |> string.contains("<dt>body</dt>") |> should.be_false
+  let one =
+    show(
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"One\\nTwo\\nThree\"},\"before\":{\"body\":\"One \\n  Two\\nFour\"}}",
+    )
+  one |> string.contains("2 lines unchanged") |> should.be_true
+  one |> string.contains("<del>- Four</del>") |> should.be_true
+  one |> string.contains("+ Three") |> should.be_true
+}
+
+/// A vision proposal saved without `before` shows its text as Markdown under
+/// "Replace the vision", not as a field list.
+pub fn a_vision_proposal_saved_before_before_shows_markdown_test() {
+  let assert Ok(vision) =
+    json.parse(
+      "{\"kind\":\"vision\",\"fields\":{\"text\":\"# For teams\"},\"base\":\"r1\"}",
+      task.proposal_decoder(),
+    )
+  let shown =
+    task.proposal_view(
+      "",
+      vision,
+      ["Approve", "Reject"],
+      "",
+      fn(_, _) { "" },
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  shown |> string.contains("Replace the vision") |> should.be_true
+  shown |> string.contains("<div class=\"md\">") |> should.be_true
+  shown |> string.contains("<dt>text</dt>") |> should.be_false
 }

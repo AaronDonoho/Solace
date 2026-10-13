@@ -19,6 +19,7 @@ fn feature(id: String, target: String, rank: Float) -> features.Feature {
     },
     rank,
     "planned",
+    None,
   )
 }
 

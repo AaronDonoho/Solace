@@ -7,6 +7,7 @@ import gleeunit
 import lustre/element
 import plan
 import roadmap
+import solace_task
 import strategy
 
 pub fn main() -> Nil {
@@ -208,7 +209,7 @@ pub fn features_and_milestones_follow_the_stream_test() {
     ))
     |> step(strategy.Live("{\"removedFeature\":\"f1\"}"))
   assert model.features
-    == [features.Feature("f2", "Export", "", None, 0.0, "proposed")]
+    == [features.Feature("f2", "Export", "", None, 0.0, "proposed", None)]
   assert model.milestones
     == [
       features.Milestone(
@@ -432,7 +433,7 @@ pub fn a_feature_save_refused_keeps_the_draft_and_a_saved_one_ends_the_edit_test
   assert saved.feature_draft == None
   assert saved.feature_error == ""
   assert saved.features
-    == [features.Feature("f1", "Search", "", None, 0.0, "active")]
+    == [features.Feature("f1", "Search", "", None, 0.0, "active", None)]
   // A new feature's form starts proposed, with no milestone, and a request id.
   let new = step(workspace(), strategy.NewFeature)
   assert new.feature_draft == Some(features.new_draft())
@@ -797,6 +798,33 @@ pub fn a_proposal_shows_and_one_answer_is_sent_at_a_time_test() {
                 ]),
               ),
             ]),
+            json.object([
+              #("id", json.string("q2")),
+              #("text", json.string("Set feature f1 active")),
+              #("options", json.array(["Approve", "Reject"], json.string)),
+              #("answer", json.null()),
+              #(
+                "proposal",
+                json.object([
+                  #("kind", json.string("feature")),
+                  #("id", json.string("f1")),
+                  #(
+                    "fields",
+                    json.object([
+                      #("title", json.string("Search")),
+                      #("state", json.string("active")),
+                    ]),
+                  ),
+                  #(
+                    "before",
+                    json.object([
+                      #("title", json.string("Search")),
+                      #("state", json.string("planned")),
+                    ]),
+                  ),
+                ]),
+              ),
+            ]),
           ]),
         ),
       ]),
@@ -816,6 +844,10 @@ pub fn a_proposal_shows_and_one_answer_is_sent_at_a_time_test() {
     "Approving also sets the feature <em>Search</em> back to planned.",
   )
   assert string.contains(page, ">Approve</button>")
+  // D-115: an edit shows only the fields that change, a short one as old →
+  // new; a field that still matches the record's value isn't shown.
+  assert string.contains(page, "<dt>state</dt><dd>planned → active</dd>")
+  assert !string.contains(page, "<dt>title</dt><dd>Search</dd>")
   let sent = step(model, strategy.AnswerPlan("q1", "Approve"))
   assert sent.plan_sending
   assert step(sent, strategy.AnswerPlan("q1", "Reject")) == sent
@@ -973,7 +1005,7 @@ pub fn attention_when_a_run_replies_or_proposes_test() {
     )
   }
   let ask = fn(id, answer) {
-    plan.Question(id, "Add a task?", ["Yes", "No"], answer, None)
+    plan.Question(id, "Add a task?", ["Yes", "No"], answer, None, 0)
   }
   assert strategy.needs_attention([run("running", [])], [run("waiting", [])])
   assert !strategy.needs_attention([run("waiting", [])], [run("waiting", [])])
@@ -1016,4 +1048,182 @@ pub fn a_dependency_update_goes_to_the_open_task_test() {
   assert list.map(model.live, fn(m) { m.0 }) == [1]
   let assert [#(_, handed)] = model.live
   assert string.contains(handed, "\"t0\"")
+}
+
+/// A started feature's edge has the color its tasks' cards show on the board,
+/// by its kept slot (D-114); a feature not started has none.
+pub fn a_started_feature_shows_its_color_test() {
+  let html =
+    workspace()
+    |> step(strategy.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Late\",\"colorSlot\":1},{\"id\":\"f2\",\"title\":\"Early\",\"colorSlot\":0},{\"id\":\"f3\",\"title\":\"Idle\"}]}",
+    ))
+    |> step(strategy.Select(strategy.Features))
+    |> strategy.view
+    |> element.to_string
+  let article = fn(title) {
+    let assert Ok(a) =
+      string.split(html, "<article")
+      |> list.find(fn(s) { string.contains(s, "<h4>" <> title) })
+    a
+  }
+  assert string.contains(
+    article("Early"),
+    "8px solid " <> solace_task.feature_color(0),
+  )
+  assert string.contains(
+    article("Late"),
+    "8px solid " <> solace_task.feature_color(1),
+  )
+  assert !string.contains(article("Idle"), "8px solid")
+}
+
+/// Whether each of `parts` is in `page`, each after the one before.
+fn in_order(page: String, parts: List(String)) -> Bool {
+  case parts {
+    [] -> True
+    [part, ..rest] ->
+      case string.split_once(page, part) {
+        Ok(#(_, after)) -> in_order(after, rest)
+        Error(_) -> False
+      }
+  }
+}
+
+/// A run's note and question as the stream or a reply carries them; a
+/// question with time 0 has none, as one saved before D-118.
+fn said(text: String, time: Int) -> json.Json {
+  json.object([
+    #("author", json.string("agent")),
+    #("text", json.string(text)),
+    #("time", json.int(time)),
+  ])
+}
+
+fn asked(id: String, text: String, time: Int) -> json.Json {
+  json.object([
+    #("id", json.string(id)),
+    #("text", json.string(text)),
+    #("options", json.array(["Yes", "No"], json.string)),
+    #("answer", json.null()),
+    ..case time {
+      0 -> []
+      t -> [#("time", json.int(t))]
+    }
+  ])
+}
+
+/// D-118: a run's notes and proposals are drawn as one conversation by time:
+/// a proposal between the notes around it, a note after a proposal after it,
+/// and a question with no time after every note.
+pub fn notes_and_proposals_are_one_conversation_in_order_test() {
+  let reply =
+    json.to_string(
+      run("r5", "waiting", #("page", ""), 60, [
+        #(
+          "notes",
+          json.preprocessed_array([
+            said("First note", 10),
+            said("Second note", 30),
+            said("Last note", 40),
+          ]),
+        ),
+        #(
+          "questions",
+          json.preprocessed_array([
+            asked("q1", "Between question", 20),
+            asked("q2", "Untimed question", 0),
+          ]),
+        ),
+      ]),
+    )
+  let model =
+    planned()
+    |> step(strategy.PlanText("Plan search"))
+    |> step(strategy.StartPlan)
+    |> step(strategy.PlanReplied(True, reply))
+  let page = element.to_string(strategy.view(model))
+  assert in_order(page, [
+    "First note",
+    "Between question",
+    "Second note",
+    "Last note",
+    "Untimed question",
+    "plan-end",
+  ])
+  assert !in_order(page, ["Second note", "Between question"])
+}
+
+/// D-118: opening a run starts at its newest message; a new one follows
+/// while the human is at the run's end, and while they read further up it
+/// shows "New message ↓" instead, which scrolls down.
+pub fn new_messages_follow_the_human_or_wait_test() {
+  let with_notes = fn(texts: List(String)) {
+    run("r5", "waiting", #("page", ""), 60, [
+      #(
+        "notes",
+        json.preprocessed_array(
+          list.index_map(texts, fn(t, i) { said(t, 10 + i) }),
+        ),
+      ),
+      #("questions", json.preprocessed_array([])),
+    ])
+  }
+  let arrive = fn(model, run) {
+    step(
+      model,
+      strategy.Live(json.to_string(json.object([#("strategyRun", run)]))),
+    )
+  }
+  let model =
+    planned()
+    |> step(strategy.PlanText("Hi"))
+    |> step(strategy.StartPlan)
+    |> step(strategy.PlanReplied(True, json.to_string(with_notes(["Hi"]))))
+  assert model.plan_jump
+  let loaded =
+    step(
+      model,
+      strategy.PlanLoaded(
+        model.plan_poll,
+        "r5",
+        json.to_string(
+          json.object([
+            #("id", json.string("r5")),
+            #("kind", json.string("strategy")),
+            #("model", json.string("fake")),
+            #("state", json.string("waiting")),
+            #("started", json.int(60)),
+            #("context", json.object([#("kind", json.string("page"))])),
+            #("notes", json.preprocessed_array([said("Hi", 10)])),
+            #("questions", json.preprocessed_array([])),
+            #("transcript", json.preprocessed_array([])),
+          ]),
+        ),
+      ),
+    )
+  assert !loaded.plan_jump && loaded.plan_at_bottom && !loaded.plan_new
+  // At the end: the reply follows, with no button.
+  let followed = arrive(loaded, with_notes(["Hi", "Reply"]))
+  assert followed.plan_at_bottom && !followed.plan_new
+  assert !string.contains(
+    element.to_string(strategy.view(followed)),
+    "New message ↓",
+  )
+  // Scrolled up to read: no jump, the button shows.
+  let reading = step(followed, strategy.PlanScrolled(False))
+  let waiting = arrive(reading, with_notes(["Hi", "Reply", "Another"]))
+  assert waiting.plan_new && !waiting.plan_at_bottom
+  let page = element.to_string(strategy.view(waiting))
+  assert in_order(page, ["Another", "New message ↓", "plan-end"])
+  // The same run again adds nothing new.
+  assert !arrive(reading, with_notes(["Hi", "Reply"])).plan_new
+  let back = step(waiting, strategy.PlanNewest)
+  assert back.plan_at_bottom && !back.plan_new
+  assert !string.contains(
+    element.to_string(strategy.view(back)),
+    "New message ↓",
+  )
+  // Scrolling back to the end clears the button too.
+  assert !step(waiting, strategy.PlanScrolled(True)).plan_new
 }

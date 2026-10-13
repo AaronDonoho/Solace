@@ -3,6 +3,7 @@
 //// proposals and transcript with a message box, and lists the past runs on
 //// the same record to reopen. The page keeps the state; this draws it.
 
+import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/float
 import gleam/int
@@ -25,6 +26,7 @@ pub type Context {
 pub const page = Context("page", "")
 
 /// A run's question: each is a proposal (Spec 15 §6), answered with an option.
+/// `time` is when it was asked (D-118), 0 for one saved before it was kept.
 pub type Question {
   Question(
     id: String,
@@ -32,6 +34,7 @@ pub type Question {
     options: List(String),
     answer: String,
     proposal: Option(solace_task.Proposal),
+    time: Int,
   )
 }
 
@@ -80,7 +83,12 @@ fn question_decoder() -> decode.Decoder(Question) {
     None,
     decode.optional(solace_task.proposal_decoder()),
   )
-  decode.success(Question(id, text, options, answer, proposal))
+  use time <- decode.optional_field(
+    "time",
+    0,
+    decode.one_of(decode.int, [decode.success(0)]),
+  )
+  decode.success(Question(id, text, options, answer, proposal, time))
 }
 
 /// A run in `GET /strategy/runs...`, a reply or the stream.
@@ -254,6 +262,15 @@ pub type Panel(msg) {
     on_show: fn(String) -> msg,
     on_end: msg,
     on_stop: msg,
+    /// Whether the run's end is in reach in the panel, so a new message
+    /// scrolls to it (D-118).
+    at_bottom: Bool,
+    /// A message arrived while the human had scrolled up to read.
+    new_message: Bool,
+    /// A scroll: whether the run's end is now in reach.
+    on_scroll: fn(Bool) -> msg,
+    /// "New message ↓": scrolls to the newest.
+    on_newest: msg,
   )
 }
 
@@ -299,7 +316,11 @@ pub fn view(base: String, p: Panel(msg)) -> Element(msg) {
       case p.collapsed {
         True ->
           html.p([attribute.class("plan-summary")], [html.text(summary(p))])
-        False -> html.div([attribute.class("plan-body")], body(base, p))
+        False ->
+          html.div(
+            [attribute.class("plan-body"), event.on("scroll", scrolled(p))],
+            body(base, p),
+          )
       },
     ],
   )
@@ -357,9 +378,10 @@ fn small(label: String, disabled: Bool, msg: msg) -> Element(msg) {
   )
 }
 
-/// The open run: what it is on and doing, its conversation and proposals, the
-/// agent's transcript, then the message box with End and Stop while it is
-/// open. An ended run is read-only.
+/// The open run: what it is on and doing, the agent's transcript (collapsed),
+/// its conversation and proposals in the order they happened (D-118), then
+/// the message box with End and Stop while it is open. An ended run is
+/// read-only. The newest message sits right above the box, at the run's end.
 fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
   let open = run.state != "ended"
   list.flatten([
@@ -381,21 +403,29 @@ fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
         small("Close", False, p.on_show("")),
       ]),
     ],
-    list.map(run.notes, fn(n) {
-      html.article([attribute.class("plan-note " <> n.author)], [
-        html.strong([], [
-          html.text(case n.author {
-            "human" -> "You"
-            "solace" -> "Solace"
-            _ -> "Agent"
-          }),
+    case p.entries {
+      [] -> []
+      entries -> [
+        html.details([attribute.class("plan-transcript")], [
+          html.summary([], [html.text("Agent transcript")]),
+          ..list.map(entries, solace_task.entry_view(base, _))
         ]),
-        solace_task.md(base, n.text),
-      ])
-    }),
-    list.map(run.questions, fn(q) {
-      case q.proposal {
-        Some(proposal) ->
+      ]
+    },
+    list.map(conversation(run), fn(said) {
+      case said {
+        Wrote(n) ->
+          html.article([attribute.class("plan-note " <> n.author)], [
+            html.strong([], [
+              html.text(case n.author {
+                "human" -> "You"
+                "solace" -> "Solace"
+                _ -> "Agent"
+              }),
+            ]),
+            solace_task.md(base, n.text),
+          ])
+        Asked(Question(proposal: Some(proposal), ..) as q) ->
           solace_task.proposal_view(
             base,
             proposal,
@@ -405,7 +435,7 @@ fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
             p.sending || !open,
             p.on_answer(q.id, _),
           )
-        None ->
+        Asked(q) ->
           html.article([attribute.class("proposal")], [
             solace_task.md(base, q.text),
             case q.answer {
@@ -421,15 +451,6 @@ fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
           ])
       }
     }),
-    case p.entries {
-      [] -> []
-      entries -> [
-        html.details([attribute.class("plan-transcript")], [
-          html.summary([], [html.text("Agent transcript")]),
-          ..list.map(entries, solace_task.entry_view(base, _))
-        ]),
-      ]
-    },
     case open {
       False -> []
       True -> [
@@ -470,6 +491,21 @@ fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
         ]),
       ]
     },
+    [
+      case p.new_message {
+        True ->
+          html.button(
+            [
+              attribute.type_("button"),
+              attribute.class("plan-new"),
+              event.on_click(p.on_newest),
+            ],
+            [html.text("New message ↓")],
+          )
+        False -> element.none()
+      },
+      html.div([attribute.class("plan-end")], []),
+    ],
   ])
 }
 
@@ -602,7 +638,7 @@ fn past_view(p: Panel(msg)) -> List(Element(msg)) {
   }
 }
 
-/// The panel's look; colours come from the page's custom properties.
+/// The panel's look; colors come from the page's custom properties.
 pub const styles =
   ".plan{grid-column:2;grid-row:2;position:relative;display:flex;flex-direction:column;min-height:0;box-sizing:border-box;width:clamp(280px,var(--plan-width,380px),60vw);background:var(--paper);border-left:2px solid var(--edge);padding:12px 16px 0}.plan.collapsed{width:auto;min-width:160px;padding-bottom:12px}
 .plan>header{flex:none}.plan-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0 -16px;padding:0 16px 12px}
@@ -618,6 +654,7 @@ pub const styles =
 .plan-runs{list-style:none;margin:0;padding:0}.plan-runs li{margin:2px 0}.plan-runs .open{font:inherit;font-size:13px;color:var(--ink);background:none;border:0;padding:0;text-align:left;cursor:pointer}.plan-runs .open:hover{text-decoration:underline}.plan-runs [aria-current=true]{font-weight:700}
 .working::before,.planning::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--entry);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before,.planning::before{animation:none}}
 .planning{font-size:11px;font-weight:400;text-transform:uppercase;letter-spacing:.08em;color:var(--ok-text);border:1px solid var(--ok-text);padding:1px 6px;margin-left:6px;white-space:nowrap}
+.plan .plan-new{position:sticky;bottom:8px;display:block;margin:8px 0 0 auto;font:inherit;font-size:13px;color:var(--paper);background:var(--focus);border:1px solid var(--focus);border-radius:0;padding:4px 12px;cursor:pointer;z-index:1}
 @media (max-width:900px){.plan{display:block;width:auto;border-left:0;border-top:2px solid var(--edge);padding:12px 16px}.plan-body{overflow:visible;margin:0;padding:0}.plan-resize{display:none}}
 "
   <> solace_task.proposal_styles
@@ -689,3 +726,45 @@ fn resize_handle(p: Panel(msg)) -> Element(msg) {
     [],
   )
 }
+
+/// One message of a run's conversation: a note, or a question.
+type Said {
+  Wrote(solace_task.Note)
+  Asked(Question)
+}
+
+/// The run's notes and questions as one conversation, in the order they
+/// happened (D-118); at the same time a note comes first. A question saved
+/// without a time comes after the notes, in the questions' order.
+fn conversation(run: Run) -> List(Said) {
+  let #(timed, untimed) = list.partition(run.questions, fn(q) { q.time > 0 })
+  list.append(
+    list.map(run.notes, fn(n) { #(n.time, Wrote(n)) }),
+    list.map(timed, fn(q) { #(q.time, Asked(q)) }),
+  )
+  |> list.index_map(fn(said, i) { #(said.0, i, said.1) })
+  |> list.sort(fn(a, b) {
+    int.compare(a.0, b.0) |> order.break_tie(int.compare(a.1, b.1))
+  })
+  |> list.map(fn(said) { said.2 })
+  |> list.append(list.map(untimed, Asked))
+}
+
+/// How many messages a run's conversation holds: its notes and questions.
+pub fn size(run: Run) -> Int {
+  list.length(run.notes) + list.length(run.questions)
+}
+
+/// A scroll of the panel: whether the run's end is now in reach, sent only
+/// when that changes.
+fn scrolled(p: Panel(msg)) -> decode.Decoder(msg) {
+  use body <- decode.field("target", decode.dynamic)
+  let near = near_end(body)
+  case near == p.at_bottom {
+    True -> decode.failure(p.on_scroll(near), "no change")
+    False -> decode.success(p.on_scroll(near))
+  }
+}
+
+@external(javascript, "./api.mjs", "near_end")
+fn near_end(body: dynamic.Dynamic) -> Bool

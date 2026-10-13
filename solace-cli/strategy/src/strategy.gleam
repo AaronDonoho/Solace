@@ -121,6 +121,12 @@ pub type Model {
     plan_entries: List(solace_task.Entry),
     /// The transcript polling chain; an ended chain schedules nothing.
     plan_poll: Int,
+    /// Whether the shown run's end is in reach in the panel, so a new message
+    /// scrolls to it; else "New message ↓" shows (D-118).
+    plan_at_bottom: Bool,
+    plan_new: Bool,
+    /// A run was opened: once it loads, the panel shows its newest message.
+    plan_jump: Bool,
     /// The models a run may use, from `GET /models`, and the one picked.
     models: List(solace_task.Agent),
     plan_model: String,
@@ -273,6 +279,10 @@ pub type Msg {
   PlanLoaded(Int, String, String)
   /// The next step of a polling chain: the chain and the run's id.
   PlanRefresh(Int, String)
+  /// The panel was scrolled: whether the shown run's end is in reach.
+  PlanScrolled(Bool)
+  /// "New message ↓": scrolls to the shown run's newest message.
+  PlanNewest
 }
 
 @external(javascript, "./api.mjs", "tab_query")
@@ -564,7 +574,15 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               // A feature removed meanwhile: the server says so (E7023).
               let before =
                 list.find(model.features, fn(f) { f.id == id })
-                |> result.unwrap(features.Feature(id, "", "", None, 0.0, ""))
+                |> result.unwrap(features.Feature(
+                  id,
+                  "",
+                  "",
+                  None,
+                  0.0,
+                  "",
+                  None,
+                ))
               case features.changes(before, d) {
                 [] -> #(
                   Model(..model, feature_draft: None, feature_error: ""),
@@ -1052,7 +1070,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
       case knows(model, text) {
         True -> {
-          let #(next, more) = plan_follow(model, hand(live(model, text), text))
+          let #(next, more) =
+            plan_track(model, plan_follow(model, hand(live(model, text), text)))
           let more = case needs_attention(model.runs, next.runs) {
             True -> effect.batch([more, event.emit("attention", json.null())])
             False -> more
@@ -1192,19 +1211,23 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     PlanReplied(clears, text) ->
       case json.parse(text, plan.decoder()) {
         Ok(run) ->
-          plan_fetch(
-            Model(
-              ..model,
-              runs: keep(model.runs, run, fn(r) { r.id }),
-              plan_open: run.id,
-              plan_sending: False,
-              plan_error: "",
-              plan_text: case clears {
-                True -> ""
-                False -> model.plan_text
-              },
+          plan_track(
+            model,
+            plan_fetch(
+              Model(
+                ..model,
+                runs: keep(model.runs, run, fn(r) { r.id }),
+                plan_open: run.id,
+                plan_sending: False,
+                plan_error: "",
+                plan_text: case clears {
+                  True -> ""
+                  False -> model.plan_text
+                },
+                plan_jump: model.plan_jump || run.id != model.plan_open,
+              ),
+              run.id,
             ),
-            run.id,
           )
         Error(_) -> #(
           Model(..model, plan_sending: False, plan_error: error(text)),
@@ -1219,6 +1242,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           plan_entries: [],
           plan_error: "",
           plan_collapsed: False,
+          plan_at_bottom: True,
+          plan_new: False,
+          plan_jump: rid != "",
         )
       case rid {
         "" -> #(Model(..model, plan_poll: model.plan_poll + 1), effect.none())
@@ -1238,20 +1264,30 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         decode.success(#(run, entries))
       }
       case json.parse(text, decoder) {
-        Ok(#(run, entries)) -> #(
-          Model(
-            ..model,
-            runs: keep(model.runs, run, fn(r) { r.id }),
-            plan_entries: entries,
-          ),
-          case run.state == "running" && model.connected {
+        Ok(#(run, entries)) -> {
+          let next =
+            Model(
+              ..model,
+              runs: keep(model.runs, run, fn(r) { r.id }),
+              plan_entries: entries,
+              plan_jump: False,
+            )
+          let poll_fx = case run.state == "running" && model.connected {
             True ->
               effect.from(fn(send) {
                 after(refresh_ms, fn() { send(PlanRefresh(poll, rid)) })
               })
             False -> effect.none()
-          },
-        )
+          }
+          // An opened run starts at its newest message.
+          case model.plan_jump {
+            True -> #(
+              Model(..next, plan_at_bottom: True, plan_new: False),
+              effect.batch([poll_fx, plan_scroll()]),
+            )
+            False -> plan_track(model, #(next, poll_fx))
+          }
+        }
         Error(_) -> #(Model(..model, plan_error: error(text)), effect.none())
       }
     }
@@ -1260,6 +1296,14 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       if poll == model.plan_poll && rid == model.plan_open
     -> #(model, plan_get(model, poll, rid))
     PlanRefresh(_, _) -> #(model, effect.none())
+    PlanScrolled(near) -> #(
+      Model(..model, plan_at_bottom: near, plan_new: model.plan_new && !near),
+      effect.none(),
+    )
+    PlanNewest -> #(
+      Model(..model, plan_at_bottom: True, plan_new: False),
+      plan_scroll(),
+    )
     // From the Features tab the task shows on the Tasks tab.
     Open(dir, id) -> #(
       Model(..model, tab: Tasks, selected: Some(#(dir, id)), live: []),
@@ -1381,8 +1425,8 @@ pub fn view(model: Model) -> Element(Msg) {
   ])
 }
 
-/// The full light colour set: `<solace-task>` sets none of its own, so its
-/// colours come from here. The dark set is the page's (`index.html`, and the
+/// The full light color set: `<solace-task>` sets none of its own, so its
+/// colors come from here. The dark set is the page's (`index.html`, and the
 /// shell's for `/strategy`).
 const view_styles =
   ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a}
@@ -1577,6 +1621,9 @@ pub fn new(tab: Tab) -> Model {
     plan_error: "",
     plan_entries: [],
     plan_poll: 0,
+    plan_at_bottom: True,
+    plan_new: False,
+    plan_jump: False,
     models: [],
     plan_model: "",
     plan_effort: "",
@@ -2647,6 +2694,10 @@ fn plan_view(model: Model) -> Element(Msg) {
       on_show: ShowPlan,
       on_end: EndPlan,
       on_stop: StopPlan,
+      at_bottom: model.plan_at_bottom,
+      new_message: model.plan_new,
+      on_scroll: PlanScrolled,
+      on_newest: PlanNewest,
     ),
   )
 }
@@ -2723,3 +2774,29 @@ fn depends_of(model: Model, id: String) -> List(String) {
   |> result.map(fn(r) { r.depends })
   |> result.unwrap([])
 }
+
+/// A new message or proposal in the shown run (D-118) scrolls to it when the
+/// human was at the run's end; else "New message ↓" shows, with no jump.
+fn plan_track(
+  old: Model,
+  step: #(Model, Effect(Msg)),
+) -> #(Model, Effect(Msg)) {
+  let #(new, fx) = step
+  case plan_shown(old), plan_shown(new) {
+    Some(a), Some(b) if a.id == b.id && !new.plan_jump ->
+      case plan.size(b) > plan.size(a), new.plan_at_bottom {
+        True, True -> #(new, effect.batch([fx, plan_scroll()]))
+        True, False -> #(Model(..new, plan_new: True), fx)
+        False, _ -> step
+      }
+    _, _ -> step
+  }
+}
+
+/// Scrolls the planning panel to the shown run's end, once it has rendered.
+fn plan_scroll() -> Effect(Msg) {
+  effect.after_paint(fn(_, root) { scroll_plan(root) })
+}
+
+@external(javascript, "./api.mjs", "scroll_plan")
+fn scroll_plan(root: dynamic.Dynamic) -> Nil

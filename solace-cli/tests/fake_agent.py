@@ -44,7 +44,10 @@ if 'SOLACE_FAIL_AFTER' in os.environ:
     mcp_env['SOLACE_FAIL_AFTER'] = os.environ['SOLACE_FAIL_AFTER']
 mcp = subprocess.Popen([config['command'], *config['args']], env=mcp_env,
                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+# `{draft}` in a step is the draft the last refusal kept, whose id a script can't know (D-120).
+draft = ''
 for i, step in enumerate(steps):
+    step = {k: v.replace('{draft}', draft) if isinstance(v, str) else v for k, v in step.items()}
     if 'exit' in step:
         if 'error' in step:
             print(json.dumps({'type':'error', 'message':step['error']}), flush=True)
@@ -60,6 +63,9 @@ for i, step in enumerate(steps):
     mcp.stdin.write(json.dumps({'jsonrpc': '2.0', 'id': i, 'method': 'tools/call', 'params': {'name': 'solace', 'arguments': step}}) + '\n')
     mcp.stdin.flush()
     response = json.loads(mcp.stdout.readline())
+    text = (response.get('result', {}).get('content') or [{}])[0].get('text', '')
+    if 'Draft ' in text:
+        draft = text.split('Draft ')[1].split()[0]
     with (root / (rid + '.responses')).open('a') as f:
         f.write(json.dumps(response) + '\n')
 # A real provider still needs to receive task done and persist the conversation.

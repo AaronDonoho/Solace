@@ -153,51 +153,93 @@ function find(doc) {
   let index = -1;
   let returnTo = null;
   let timer = 0;
+  // Whether the page shown changed since the last search: the next one starts from what's on screen, as a new
+  // query does, since the current match went with the page left.
+  let switched = false;
+  // When the first change still waiting for a search came, so a steady stream of changes still re-searches.
+  let waiting = 0;
   let frame = 0;
+  // The per-frame check for movement, and where the current match was last drawn.
+  let following = 0;
+  let drawnAt = '';
   const watched = new WeakSet();
 
   // Each open shadow root gets its own observer; a change inside one re-runs the search. Attributes count too:
   // opening or closing a <details> (notes, transcript entries) shows or hides text without a childList change.
-  const shadowObserver = new MutationObserver(() => { if (!bar.hidden) { redraw(); schedule(); } });
+  // A component drawn inside a page later (a task's <solace-task> in the board) brings its own root to watch.
+  // Text changing where nothing is drawn (a hidden page, a closed <details>) can't move a match: it is ignored.
+  const shadowObserver = new MutationObserver(records => {
+    for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) watch(n);
+    if (!bar.hidden && records.some(r => r.type === 'attributes' || drawn(r.target))) { redraw(); schedule(); }
+  });
   // Layout can shift with no mutation at all (images loading, fonts swapping): the boxes follow.
   const resized = new ResizeObserver(() => redraw());
+  // Watches an element's shadow root, once; whether it was new.
+  const watchHost = el => {
+    const shadow = el.shadowRoot;
+    if (!shadow || watched.has(shadow)) return false;
+    watched.add(shadow);
+    shadowObserver.observe(shadow, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['open', 'hidden', 'class', 'style'] });
+    resized.observe(el);
+    // Scroll and toggle events aren't composed: they never leave the shadow root.
+    shadow.addEventListener('scroll', redraw, { capture: true, passive: true });
+    shadow.addEventListener('toggle', () => { if (!bar.hidden) { redraw(); schedule(); } }, true);
+    return true;
+  };
   const watch = node => {
     const all = node.querySelectorAll ? [node, ...node.querySelectorAll('*')] : [];
-    for (const el of all) {
-      const shadow = el.shadowRoot;
-      if (shadow && !watched.has(shadow)) {
-        watched.add(shadow);
-        shadowObserver.observe(shadow, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['open', 'hidden', 'class', 'style'] });
-        resized.observe(el);
-        // Scroll and toggle events aren't composed: they never leave the shadow root.
-        shadow.addEventListener('scroll', redraw, { capture: true, passive: true });
-        shadow.addEventListener('toggle', () => { if (!bar.hidden) { redraw(); schedule(); } }, true);
-        watch(shadow);
-      }
-    }
+    for (const el of all) if (watchHost(el)) watch(el.shadowRoot);
   };
-  // The document observer only discovers new components; the bar's and the marks' changes never trigger a search.
+  // The document observer discovers new components, and sees a page shown or hidden (a menu tab switched: the
+  // shell sets `hidden` on its pages, outside any shadow root). The bar's and the marks' changes never trigger a search.
   new MutationObserver(records => {
     let changed = false;
     for (const r of records) {
       if (bar.contains(r.target) || marks.contains(r.target)) continue;
+      if (r.type === 'attributes') { changed = true; switched = true; continue; }
       for (const n of r.addedNodes) if (n.nodeType === 1 && n !== marks && n !== bar) { watch(n); changed = true; }
     }
     if (changed && !bar.hidden) schedule();
-  }).observe(document.body, { childList: true, subtree: true });
+  }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'] });
 
-  const schedule = () => { clearTimeout(timer); timer = setTimeout(search, 120); };
+  // A search 120 ms after the last change, but no later than 500 ms after the first: a run's transcript can
+  // change more often than every 120 ms for as long as it runs.
+  const schedule = () => {
+    clearTimeout(timer);
+    const now = performance.now();
+    if (!waiting) waiting = now;
+    timer = setTimeout(search, Math.max(0, Math.min(120, waiting + 500 - now)));
+  };
 
+  // Whether a node is drawn: not in a hidden page, a closed <details>, or anything else display:none. An element
+  // with display:contents has no box of its own, so its parent answers for it.
+  const drawn = node => {
+    let el = node.nodeType === 1 ? node : node.parentElement || node.host || node.parentNode?.host;
+    while (el && getComputedStyle(el).display === 'contents') el = up(el);
+    return !el || !el.checkVisibility || el.checkVisibility();
+  };
+
+  // The text nodes that can be drawn: hidden pages, display:none elements and the inside of a closed <details>
+  // (all but its summary) aren't searched.
   const collect = (node, out) => {
+    const closed = node.tagName === 'DETAILS' && !node.open;
     for (let child = node.firstChild; child; child = child.nextSibling) {
+      if (closed && child.tagName !== 'SUMMARY') continue;
       if (child.nodeType === 3) out.push(child);
       else if (child.nodeType === 1) {
         if (child === bar || child === marks || SKIP.has(child.tagName)) continue;
-        if (child.shadowRoot) collect(child.shadowRoot, out);
+        if (getComputedStyle(child).display === 'none') continue;
+        if (child.shadowRoot) { watchHost(child); collect(child.shadowRoot, out); }
         collect(child, out);
       }
     }
     return out;
+  };
+
+  // Where the current match's text is now, to tell when it moved.
+  const place = () => {
+    const r = ranges[index]?.getBoundingClientRect();
+    return r ? `${r.left},${r.top},${r.width},${r.height}` : '';
   };
 
   // Draws a box over each visible part of each match, clipped to the scroll areas around it.
@@ -222,13 +264,26 @@ function find(doc) {
       }
     });
     marks.replaceChildren(...boxes);
+    drawnAt = place();
   };
   const redraw = () => { if (!frame && ranges.length) frame = requestAnimationFrame(draw); };
+  // Movement nothing reports (a transition, an element sliding in) shows as the current match no longer being
+  // where it was drawn; checked every frame, only while the bar is open and there are matches.
+  const follow = () => {
+    following = requestAnimationFrame(follow);
+    if (!frame && place() !== drawnAt) draw();
+  };
+  const track = () => {
+    const wanted = !bar.hidden && ranges.length > 0;
+    if (wanted && !following) following = requestAnimationFrame(follow);
+    else if (!wanted && following) { cancelAnimationFrame(following); following = 0; }
+  };
 
   const paint = () => {
     counter.textContent = count_text(input.value, index, ranges.length);
     cancelAnimationFrame(frame);
     draw();
+    track();
   };
 
   const reveal = () => {
@@ -241,6 +296,8 @@ function find(doc) {
 
   function search(keepPlace = true) {
     clearTimeout(timer);
+    waiting = 0;
+    if (switched) { keepPlace = false; switched = false; }
     const query = input.value.toLowerCase();
     const found = [];
     if (query) {
@@ -303,6 +360,7 @@ function find(doc) {
   const close = () => {
     bar.hidden = true;
     clearTimeout(timer);
+    waiting = 0;
     ranges = [];
     index = -1;
     paint();

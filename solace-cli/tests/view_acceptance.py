@@ -2,6 +2,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -93,7 +94,9 @@ pub fn main_test() {
         self.assertTrue(any(e['kind'] == 'tests' and e['to'] == main['id'] for e in graph['edges']))
         files = {n['name']: n['tier'] for n in nodes.values() if n['kind'] == 'file'}
         listed = dict(line.rsplit(' [', 1) for line in self.cli('files').splitlines() if line.endswith(']') and not line.endswith('[internal]') and not line.endswith('[graph]') and not line.startswith('src/') and not line.startswith('test/'))
-        listed = {k: v[:-1] for k, v in listed.items()}
+        # D-119: a file's tier is followed by its line count or size.
+        self.assertRegex(listed['gleam.toml'], r'^watched; \d+ lines\]$')
+        listed = {k: re.sub(r'; \d+ (lines|bytes)$', '', v[:-1]) for k, v in listed.items()}
         self.assertEqual(files, listed)
 
     def test_c3_task_review(self):
@@ -129,9 +132,10 @@ pub fn main_test() {
             (['session', 'start'], None), (['inspect', 'app.main'], None), (['view', 'app.main'], None),
             (['refs', 'app.main'], None), (['impact'], None), (['find', 'main'], None),
             (['submit', 'app.main'], 'pub fn main() {\n  let _ = args()\n  io.println("hello")\n  write("out", "hi")\n}'),
-            (['drafts'], None), (['delete', 'app.nosuch'], None), (['extract', 'app.nosuch', '--to', 'other'], None), (['check'], None), (['test', 'app_test.main_test'], None),
+            (['drafts'], None), (['delete', 'app.nosuch'], None), (['extract', 'app.nosuch', '--to', 'other'], None), (['merge', 'app.main', 'app.nosuch'], None), (['check'], None), (['test', 'app_test.main_test'], None),
             (['probe'], 'let x = 1'), (['work', 'list'], None), (['files'], None), (['read', 'gleam.toml'], None),
-            (['write', 'notes.txt'], 'notes\n'), (['move', 'notes.txt', 'moved.txt'], None), (['remove', 'moved.txt'], None), (['build'], None), (['format'], None),
+            (['write', 'notes.txt'], 'notes\n'), (['write', 'lib.rs'], 'pub fn one() {}\n'), (['view', 'lib.rs::one'], None),
+            (['move', 'notes.txt', 'moved.txt'], None), (['remove', 'moved.txt'], None), (['build'], None), (['format'], None),
             (['run', 'nosuch'], None), (['task', 'diff'], None),
         ]
         usage = subprocess.run([BIN, 'nosuchcommand'], cwd=self.root, env=self.env, input='', capture_output=True, text=True)
@@ -140,6 +144,35 @@ pub fn main_test() {
         for args, text in shapes:
             p = subprocess.run([BIN, *args], cwd=self.root, env=self.env, input=text or '', capture_output=True, text=True, timeout=120)
             self.assertNotIn('Unknown command', p.stdout + p.stderr, args)
+
+    def test_view_reads_rust_and_python_files_by_item(self):
+        (self.root / 'tool').mkdir()
+        (self.root / 'tool/lib.rs').write_text('/// Adds.\npub fn add(a: u32, b: u32) -> u32 {\n    a + b\n}\n\nimpl Calc {\n    pub fn new() -> Self {\n        Calc\n    }\n}\n\nimpl Other {\n    pub fn new() -> Self {\n        Other\n    }\n}\n')
+        (self.root / 'tool/check.py').write_text('class Check:\n    def test_add(self):\n        assert True\n')
+        outline = self.cli('view', 'lib.rs')
+        self.assertIn('tool/lib.rs: 16 lines, 5 items\n', outline)
+        self.assertIn('  1..4 pub fn add(a: u32, b: u32) -> u32 — Adds.\n', outline)
+        self.assertIn('    7..9 pub fn new() -> Self\n', outline)
+        self.assertIn('tool/lib.rs:1..4\n1: /// Adds.\n2: pub fn add(a: u32, b: u32) -> u32 {\n3:     a + b\n4: }\n', self.cli('view', 'lib.rs::add'))
+        self.assertIn('tool/check.py:2..3\n', self.cli('view', 'check.py::test_add'))
+        refused = lambda name: (lambda p: p.stdout + p.stderr)(subprocess.run([BIN, 'view', name], cwd=self.root, env=self.env, capture_output=True, text=True))
+        ambiguous = refused('lib.rs::new')
+        self.assertIn('E1002', ambiguous)
+        self.assertIn('tool/lib.rs::Calc::new (7..9)', ambiguous)
+        missing = refused('lib.rs::sub')
+        self.assertIn('E1001', missing)
+        self.assertIn('grep sub --in tool/lib.rs --context 3', missing)
+        # Over the command line's 32,000-byte reply budget: names only, then a cut at a whole line.
+        doc = 'Explains the item at some length, so that the outline grows. ' * 2
+        (self.root / 'tool/long.rs').write_text(''.join(f'/// {doc}\nfn item_{i}() {{}}\n' for i in range(400)))
+        long = self.cli('view', 'long.rs')
+        self.assertIn('Signatures left out to fit the reply', long)
+        self.assertIn('  1..2 fn item_0\n', long)
+        self.assertNotIn('Explains', long)
+        (self.root / 'tool/many.rs').write_text(''.join(f'fn f{i}() {{}}\n' for i in range(2500)))
+        many = self.cli('view', 'many.rs')
+        self.assertIn('more items left out to fit the reply', many)
+        self.assertLess(len(many.encode()), 32_000)
 
     def test_c3_tests_that_cannot_compile_are_reported_as_such(self):
         self.cli('submit', 'app.main', input_text='pub fn main() { let _ = args()\n write("out", "hi") }')

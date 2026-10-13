@@ -114,6 +114,9 @@ pub type Model {
     /// The tab and task a notice's button asked to show, and how many times
     /// one was asked, so asking again is news to `<solace-task>`.
     reveal: #(String, String, Int),
+    /// The root's features as (id, title, colorSlot), which name and color
+    /// their tasks' cards (D-114).
+    features: List(#(String, String, Option(Int))),
   )
 }
 
@@ -222,6 +225,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       live: [],
       live_n: 0,
       reveal: #("", "", 0),
+      features: [],
     ),
     // Lustre runs init once for every instance, before its `base` is set:
     // the transport starts when the instance connects.
@@ -637,76 +641,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
 /// Applies one `/events` message; a workspace's name their `project`.
 fn live(model: Model, text: String, notify: Bool) -> Model {
-  // A project on its own sends no `project`: it is the root's.
-  let dir = event_dir(model, text)
-  case lane_of(model, dir) {
-    Error(_) -> model
-    Ok(lane) ->
-      case json.parse(text, decode.at(["task"], solace_task.task_decoder())) {
-        Ok(task) -> {
-          let new = case
-            list.find(lane.tasks, fn(t) { t.id == task.id }),
-            notify
-          {
-            Ok(old), True ->
-              solace_task.notices(old, task)
-              |> list.map(fn(n) {
-                let n = solace_task.Notice(..n, dir: dir)
-                case model.workspace {
-                  True ->
-                    solace_task.Notice(
-                      ..n,
-                      heading: lane.label <> ": " <> n.heading,
-                    )
-                  False -> n
-                }
-              })
-            _, _ -> []
-          }
-          map_lane(
-            Model(..model, notices: list.append(model.notices, new)),
-            dir,
-            fn(l) {
-              Lane(..l, tasks: [
-                task,
-                ..list.filter(l.tasks, fn(t) { t.id != task.id })
-              ])
-            },
-          )
-        }
-        Error(_) ->
-          case
-            json.parse(
-              text,
-              decode.at(["workflow"], solace_task.workflow_decoder()),
-            )
-          {
-            Ok(w) -> map_lane(model, dir, fn(l) { Lane(..l, workflow: w) })
-            Error(_) ->
-              // A new connection starts from the project's tasks as they are.
-              case
-                json.parse(
-                  text,
-                  decode.at(["tasks"], decode.list(solace_task.task_decoder())),
-                )
-              {
-                Ok(tasks) ->
-                  map_lane(model, dir, fn(l) { Lane(..l, tasks: tasks) })
-                Error(_) ->
-                  case json.parse(text, decode.at(["removed"], decode.string)) {
-                    Ok(id) ->
-                      map_lane(model, dir, fn(l) {
-                        Lane(
-                          ..l,
-                          tasks: list.filter(l.tasks, fn(t) { t.id != id }),
-                        )
-                      })
-                      |> follow_move(dir, id)
-                    Error(_) -> model
-                  }
-              }
-          }
-      }
+  case features_event(model, text) {
+    Ok(model) -> model
+    Error(_) -> task_event(model, text, notify)
   }
 }
 
@@ -960,7 +897,13 @@ fn lanes_view(model: Model) -> Element(Msg) {
 /// has an Archive button in its upper right corner (D-95).
 /// A card waiting on an unfinished dependency is dimmed and says what it
 /// waits on; it still opens as any other.
+/// A card's stripe is its feature's color, gray with no feature or one not
+/// started yet; its tooltip and screen-reader text name the feature, so color
+/// is not its only sign (D-114).
 fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
+  let colors =
+    solace_task.feature_colors(list.map(model.features, fn(f) { #(f.0, f.2) }))
+  let names = list.map(model.features, fn(f) { #(f.0, f.1) })
   h.div(
     [a.class("board")],
     list.map(lane.workflow.columns, fn(c) {
@@ -985,6 +928,22 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
             [] -> ""
             titles -> "Waiting on " <> string.join(titles, ", ")
           }
+          let color = case t.feature {
+            Some(f) -> list.key_find(colors, f) |> result.unwrap("")
+            None -> ""
+          }
+          let feature = case t.feature {
+            Some(f) ->
+              case list.key_find(names, f) {
+                Ok(name) if name != "" -> "Feature: " <> name
+                _ -> ""
+              }
+            None -> ""
+          }
+          let tip =
+            [waiting, feature]
+            |> list.filter(fn(s) { s != "" })
+            |> string.join("\n")
           h.div([a.class("card-wrap")], [
             h.button(
               list.append(
@@ -1005,10 +964,16 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
                   }),
                   e.on_click(Select(home, t.id)),
                 ],
-                case waiting {
-                  "" -> []
-                  _ -> [a.title(waiting)]
-                },
+                list.append(
+                  case tip {
+                    "" -> []
+                    _ -> [a.title(tip)]
+                  },
+                  case color {
+                    "" -> []
+                    _ -> [a.style("--tab", color)]
+                  },
+                ),
               ),
               [
                 case t.attention {
@@ -1035,7 +1000,15 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
                   False -> h.text("")
                   True -> hazard()
                 },
+                case t.tech_debt {
+                  False -> h.text("")
+                  True -> debt_mark()
+                },
                 h.text(t.title),
+                case feature {
+                  "" -> h.text("")
+                  _ -> h.span([a.class("sr-only")], [h.text(" · " <> feature)])
+                },
                 case t.scope {
                   [_, _, ..] ->
                     h.small([a.class("muted")], [
@@ -1288,11 +1261,11 @@ textarea{font-family:inherit}
 .column h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;margin:0 -12px 12px;padding:10px 12px;background:var(--paper);border-bottom:2px solid var(--edge)}
 .lanes{display:block;overflow:visible}.lane-head{position:sticky;top:0;z-index:5;background:var(--paper);border-bottom:2px solid var(--edge)}.lane-head .column{background:transparent;border:0}.lane-head h2{margin:0 -12px;border-bottom:0}.lane .lane-head{margin:0;padding:0}
 .lane{border-color:var(--edge);background:var(--paper)}.lane-title{padding:6px 0}.lane-toggle{font-weight:700;background:transparent}.lane-toggle:hover{background:var(--hover)}
-.card{position:relative;background:var(--paper);border-color:var(--edge);padding:10px 12px 10px 22px;line-height:1.35;--tab:var(--file)}
+.card{position:relative;background:var(--paper);border-color:var(--edge);padding:10px 12px 10px 22px;line-height:1.35;--tab:#999999}
 .card::before{content:\"\";position:absolute;inset:0 auto 0 0;width:8px;background:var(--tab)}
-.card:has(.working){--tab:var(--logic)}.card:has(.stamp){--tab:var(--entry)}.card:has(.attention){--tab:var(--effect)}.card:has(.hazard){--tab:var(--revision)}
 .card:hover{background:var(--hover)}.card+.card{margin-top:8px}
 .attention{font-weight:700}.stamp{margin-right:6px}
+.debt{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;border:1px solid var(--test);color:var(--test);padding:0 6px;margin-right:6px}.card:has(.debt){--tab:var(--test)}
 .status{border:1px solid var(--line);background:var(--paper);font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:1px 8px}.status.finished{background:var(--add);color:var(--ok-text);border-color:var(--ok-text)}.working::before{background:var(--entry)}
 .detail,.editor,.composer,.note,.run,.projects{background:var(--paper);border-color:var(--edge)}.detail{padding:20px 24px}
 .tabs{border-bottom:2px solid var(--edge)}.tabs button{border:0;border-right:1px solid var(--line);background:transparent;margin:0;padding:10px 16px}.tabs [aria-selected=true]{background:var(--paper);box-shadow:inset 0 -3px var(--ink);border-color:var(--line)}
@@ -1450,9 +1423,11 @@ fn event_dir(model: Model, text: String) -> String {
 }
 
 /// Whether a live message can be applied now: its lane is loaded, or it is
-/// the list of projects, which names no lane.
+/// the list of projects or about the root's features, which name no lane.
 fn knows(model: Model, text: String) -> Bool {
-  projects_event(text) || result.is_ok(lane_of(model, event_dir(model, text)))
+  projects_event(text)
+  || result.is_ok(lane_of(model, event_dir(model, text)))
+  || result.is_ok(features_event(model, text))
 }
 
 /// Applies the held messages whose lane is loaded; the others wait for the
@@ -1615,4 +1590,117 @@ fn depends_of(model: Model, id: String) -> List(String) {
   list.find_map(model.lanes, fn(l) { list.find(l.tasks, fn(t) { t.id == id }) })
   |> result.map(fn(t) { t.depends })
   |> result.unwrap([])
+}
+
+/// The mark on a feature's Tech Debt card (D-112).
+fn debt_mark() -> Element(Msg) {
+  h.span(
+    [
+      a.class("debt"),
+      a.title("Tech debt: minor findings from this feature's reviews"),
+    ],
+    [h.text("Tech debt")],
+  )
+}
+
+/// Applies a message about the root's features, which names no project
+/// (D-87); an error for any other message.
+fn features_event(model: Model, text: String) -> Result(Model, Nil) {
+  let feature = {
+    use id <- decode.field("id", decode.string)
+    use title <- decode.optional_field("title", "", decode.string)
+    use slot <- decode.optional_field(
+      "colorSlot",
+      None,
+      decode.optional(decode.int),
+    )
+    decode.success(#(id, title, slot))
+  }
+  let without = fn(id) { list.filter(model.features, fn(f) { f.0 != id }) }
+  case json.parse(text, decode.at(["features"], decode.list(feature))) {
+    Ok(fs) -> Ok(Model(..model, features: fs))
+    Error(_) ->
+      case json.parse(text, decode.at(["feature"], feature)) {
+        Ok(f) -> Ok(Model(..model, features: [f, ..without(f.0)]))
+        Error(_) ->
+          json.parse(text, decode.at(["removedFeature"], decode.string))
+          |> result.map(fn(id) { Model(..model, features: without(id)) })
+          |> result.replace_error(Nil)
+      }
+  }
+}
+
+/// Applies one `/events` message about a project's tasks or workflow.
+fn task_event(model: Model, text: String, notify: Bool) -> Model {
+  // A project on its own sends no `project`: it is the root's.
+  let dir = event_dir(model, text)
+  case lane_of(model, dir) {
+    Error(_) -> model
+    Ok(lane) ->
+      case json.parse(text, decode.at(["task"], solace_task.task_decoder())) {
+        Ok(task) -> {
+          let new = case
+            list.find(lane.tasks, fn(t) { t.id == task.id }),
+            notify
+          {
+            Ok(old), True ->
+              solace_task.notices(old, task)
+              |> list.map(fn(n) {
+                let n = solace_task.Notice(..n, dir: dir)
+                case model.workspace {
+                  True ->
+                    solace_task.Notice(
+                      ..n,
+                      heading: lane.label <> ": " <> n.heading,
+                    )
+                  False -> n
+                }
+              })
+            _, _ -> []
+          }
+          map_lane(
+            Model(..model, notices: list.append(model.notices, new)),
+            dir,
+            fn(l) {
+              Lane(..l, tasks: [
+                task,
+                ..list.filter(l.tasks, fn(t) { t.id != task.id })
+              ])
+            },
+          )
+        }
+        Error(_) ->
+          case
+            json.parse(
+              text,
+              decode.at(["workflow"], solace_task.workflow_decoder()),
+            )
+          {
+            Ok(w) -> map_lane(model, dir, fn(l) { Lane(..l, workflow: w) })
+            Error(_) ->
+              // A new connection starts from the project's tasks as they are.
+              case
+                json.parse(
+                  text,
+                  decode.at(["tasks"], decode.list(solace_task.task_decoder())),
+                )
+              {
+                Ok(tasks) ->
+                  map_lane(model, dir, fn(l) { Lane(..l, tasks: tasks) })
+                Error(_) ->
+                  case json.parse(text, decode.at(["removed"], decode.string)) {
+                    Ok(id) ->
+                      map_lane(model, dir, fn(l) {
+                        Lane(
+                          ..l,
+                          tasks: list.filter(l.tasks, fn(t) { t.id != id }),
+                        )
+                      })
+                      |> follow_move(dir, id)
+                    Error(_) -> model
+                  }
+              }
+          }
+      }
+  }
 }

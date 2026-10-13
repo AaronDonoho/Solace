@@ -1109,3 +1109,70 @@ pub fn a_dependency_update_goes_to_the_open_detail_test() {
     )
   model.live |> should.equal([#(1, dep)])
 }
+
+/// D-112: a feature's Tech Debt card carries its mark; another card doesn't.
+pub fn tech_debt_card_is_marked_test() {
+  let model =
+    deps_board()
+    |> put_task("a", "1", "Search: Tech Debt", "backlog", ",\"techDebt\":true")
+    |> put_task("a", "2", "Card", "backlog", "")
+  string.contains(card_of(model, "Search: Tech Debt"), "class=\"debt\"")
+  |> should.be_true
+  string.contains(card_of(model, "Card"), "class=\"debt\"") |> should.be_false
+}
+
+/// A card's stripe is its feature's color, by the slot the server kept when
+/// the feature started (D-114); a task with no feature, or one not started,
+/// keeps the gray stripe, and the agent's status no longer colors it. The
+/// card names its feature in its tooltip and for screen readers.
+pub fn a_card_takes_its_feature_color_test() {
+  let model =
+    deps_board()
+    |> board.update(board.Live(
+      "{\"features\":[{\"id\":\"f2\",\"title\":\"Export\",\"colorSlot\":1},{\"id\":\"f1\",\"title\":\"Search\",\"colorSlot\":0},{\"id\":\"f3\",\"colorSlot\":null}]}",
+    ))
+    |> fn(r) { r.0 }
+    |> put_task("a", "1", "One", "backlog", ",\"feature\":\"f1\"")
+    |> put_task("a", "2", "Two", "backlog", ",\"feature\":\"f2\"")
+    |> put_task("a", "3", "Idle", "backlog", ",\"feature\":\"f3\"")
+    |> put_task("a", "4", "Loose", "backlog", "")
+  card_of(model, "One")
+  |> string.contains("style=\"--tab:" <> solace_task.feature_color(0))
+  |> should.be_true
+  card_of(model, "Two")
+  |> string.contains("style=\"--tab:" <> solace_task.feature_color(1))
+  |> should.be_true
+  card_of(model, "Two")
+  |> string.contains("title=\"Feature: Export\"")
+  |> should.be_true
+  card_of(model, "Two")
+  |> string.contains("<span class=\"sr-only\"> · Feature: Export</span>")
+  |> should.be_true
+  string.contains(card_of(model, "Idle"), "--tab") |> should.be_false
+  string.contains(card_of(model, "Loose"), "--tab") |> should.be_false
+  string.contains(card_of(model, "Loose"), "Feature:") |> should.be_false
+  // A feature that starts takes the slot the server gives it; a removed one
+  // moves no other feature's color.
+  let model =
+    board.update(
+      model,
+      board.Live("{\"feature\":{\"id\":\"f3\",\"colorSlot\":2}}"),
+    ).0
+  card_of(model, "Idle")
+  |> string.contains("style=\"--tab:" <> solace_task.feature_color(2))
+  |> should.be_true
+  let model = board.update(model, board.Live("{\"removedFeature\":\"f1\"}")).0
+  card_of(model, "Two")
+  |> string.contains("style=\"--tab:" <> solace_task.feature_color(1))
+  |> should.be_true
+  string.contains(board.view(model) |> element.to_string, ".card:has(.working)")
+  |> should.be_false
+}
+
+/// A card with no feature, or one not started, has a gray stripe that no
+/// feature color shares.
+pub fn a_card_without_a_feature_is_gray_test() {
+  let html = board.view(deps_board()) |> element.to_string
+  string.contains(html, "--tab:#999999") |> should.be_true
+  string.contains(html, "--tab:var(--file)") |> should.be_false
+}

@@ -67,7 +67,9 @@ pub fn list_for(s: &Store, task: &str) -> Out {
     let mut out = vec![];
     let ix = s.index()?;
     for (id, args, text, then) in rows {
-        let current = base(s, &ix, &serde_json::from_str::<Vec<String>>(&args).unwrap_or_default(), &text)? == then;
+        let parsed = serde_json::from_str::<Vec<String>>(&args).unwrap_or_default();
+        // a kept `write` patch has no base: its hunks are matched again when it is retried (D-120)
+        let current = parsed.first().is_some_and(|c| c == "write") || base(s, &ix, &parsed, &text)? == then;
         let status = if current { "current" } else { "stale: what it replaces changed since; check it isn't superseded" };
         out.push(format!("{id}: {args} ({status})"));
     }
@@ -238,8 +240,26 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
         };
         let Some(k) = at_k else {
             let first = old.iter().find(|l| !l.trim().is_empty()).unwrap_or(&"");
+            // a line that is only part of one longer line: patch lines are whole lines (D-120)
+            let part = old.iter().map(|l| l.trim()).find(|l| !l.is_empty() && !lines.iter().any(|x| x.trim() == *l));
+            let within: Vec<usize> = part.map_or(vec![], |p| (0..lines.len()).filter(|&k| lines[k].contains(p)).collect());
+            let hint = match (part, within.as_slice()) {
+                (Some(p), [k]) => {
+                    let (line, fix) = if at_end {
+                        (format!("line {}", k + 1), format!("`write {target}`"))
+                    } else {
+                        ("a longer line".to_string(), "`submit <name> --replace`".to_string())
+                    };
+                    format!(
+                        " `{}` is only part of {line}: `{}`. A patch line is a whole line: copy all of it, or change just that text with {fix} and `old` and `text`.",
+                        clip(p),
+                        clip(lines[*k].trim())
+                    )
+                }
+                _ => String::new(),
+            };
             return Err(bad(format!(
-                "in {target} (hunk at line {hl}), these lines weren't found: `{}`{}; copy them exactly from `{show}`.",
+                "in {target} (hunk at line {hl}), these lines weren't found: `{}`{}; copy them exactly from `{show}`.{hint}",
                 first.trim(),
                 if old.len() > 1 { format!(" (and {} more)", old.len() - 1) } else { String::new() }
             )));
@@ -375,6 +395,9 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
     let (id, args, raw) = match a.as_slice() {
         ["submit", "--draft", id] | ["submit", "--draft", id, "--replace"] => {
             let (args, text, expected) = load(s, id)?;
+            if args.first().is_some_and(|c| c == "write") {
+                return fail(format!("E0106 draft {id} is a file patch; retry it with `write --draft {id}`"));
+            }
             if base(s, &ix, &args, &text)? != expected {
                 return fail(format!(
                     "E0107 draft {id} is stale: a symbol it replaces (or its module's imports) changed since it was created. `view --draft {id}` preserves your text; inspect current source and make a new submission."
@@ -457,6 +480,33 @@ pub fn clear(s: &Store, task: &str) -> Result<(), Failure> {
     Ok(())
 }
 
+/// A refused `write` patch (D-120), kept as written under `id` (a new one if
+/// none) so a bad line is fixed in place. It has no base: a retry matches its
+/// hunks against the files as they are then.
+pub fn keep_file_patch(s: &Store, id: Option<&str>, raw: &str) -> Result<String, Failure> {
+    let id = id.map_or_else(unique_id, str::to_string);
+    s.db.execute(
+        "INSERT OR REPLACE INTO drafts(id,owner,args,text,base) VALUES (?,?,?,?,'')",
+        params![id, owner(), json!(["write"]).to_string(), raw],
+    )?;
+    Ok(id)
+}
+
+/// A kept `write` patch's text; a `submit` draft says how it is retried.
+pub fn file_patch(s: &Store, id: &str) -> Result<String, Failure> {
+    let (args, text, _) = load(s, id)?;
+    if args.first().is_none_or(|c| c != "write") {
+        return fail(format!("E0106 draft {id} is a submit; retry it with `submit --draft {id}`"));
+    }
+    Ok(text)
+}
+
+/// Removes a draft once its retry applies.
+pub fn discard(s: &Store, id: &str) -> Result<(), Failure> {
+    s.db.execute("DELETE FROM drafts WHERE id=? AND owner=?", params![id, owner()])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -527,7 +577,7 @@ mod tests {
     fn patch_refusals_name_the_problem() {
         let s = board_project(&[("src/app.gleam", "import gleam/int\n\npub fn main() {\n  let x = 1\n  x\n}\n\npub fn other() {\n  2\n}\n")]);
         let original = board::snapshot(&s).unwrap();
-        let cases: [(&str, &str); 14] = [
+        let cases: [(&str, &str); 15] = [
             ("*** Begin Patch\n*** Delete: app.main\n*** End Patch\n", "a patch can't delete"),
             ("*** Begin Patch\n*** Move: app.main\n*** End Patch\n", "a patch can't rename"),
             ("+pub fn x() { 1 }\n", "a patch starts with `*** Begin Patch`"),
@@ -539,6 +589,7 @@ mod tests {
             ("*** Begin Patch\n*** Update: app.main\n@@ nosuchline\n+  let y = 2\n*** End Patch\n", "no line starts with `@@ nosuchline`"),
             ("*** Begin Patch\n*** Update: app.main\n-  let z = 9\n+  let z = 8\n*** End Patch\n", "these lines weren't found: `let z = 9`"),
             ("*** Begin Patch\n*** Update: app.main\n-  let z = 9\n-  let w = 9\n*** End Patch\n", "(and 1 more)"),
+            ("*** Begin Patch\n*** Update: app.main\n-x = 1\n+x = 2\n*** End Patch\n", "`x = 1` is only part of a longer line: `let x = 1`"),
             ("*** Begin Patch\n*** Update: app.main\n-  let x = 1\n+  let x = 1\n*** End Patch\n", "the patch changes nothing"),
             ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-  let x = 1\n-  x\n-}\n*** End Patch\n", "leaves nothing of app.main"),
             ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n+pub fn primary() {\n*** End Patch\n", "renames app.main"),

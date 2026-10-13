@@ -173,12 +173,16 @@ pub type Task {
     attention: String,
     finished: String,
     unexpected: Bool,
+    /// A feature's Tech Debt task, which reviews' tech debt is filed on (D-112).
+    tech_debt: Bool,
     /// The projects the task may change (D-61); empty for a task saved before.
     scope: List(String),
     /// Whether the task was archived: off the board, still in the archive (D-95).
     archived: Bool,
     /// The ids of the tasks it depends on (D-87); empty for a task saved before.
     depends: List(String),
+    /// The id of the feature it belongs to, None for none (D-87).
+    feature: Option(String),
   )
 }
 
@@ -1304,6 +1308,7 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     decode.one_of(decode.at(["outcome"], decode.string), [decode.success("")]),
   )
   use unexpected <- decode.optional_field("unexpected", False, decode.bool)
+  use tech_debt <- decode.optional_field("techDebt", False, decode.bool)
   use scope <- decode.optional_field("scope", [], decode.list(decode.string))
   use archived <- decode.optional_field(
     "archivedTime",
@@ -1316,6 +1321,11 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     "dependsOn",
     [],
     decode.list(decode.string),
+  )
+  use feature <- decode.optional_field(
+    "feature",
+    None,
+    decode.optional(decode.string),
   )
   decode.success(Task(
     id,
@@ -1333,9 +1343,11 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     attention,
     finished,
     unexpected,
+    tech_debt,
     scope,
     archived,
     depends,
+    feature,
   ))
 }
 
@@ -2158,7 +2170,7 @@ pub fn projects_pick(
 pub const projects_pick_styles =
   ".projects-pick{margin:8px 0}.projects-pick label{display:flex;align-items:center;gap:10px;margin:6px 0;cursor:pointer}.projects-pick input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:34px;height:20px;padding:0;margin:0;border:1px solid var(--edge);border-radius:10px;background:var(--well);cursor:pointer;transition:background .15s}.projects-pick input::before{content:\"\";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--paper);border:1px solid var(--edge);box-sizing:border-box;transition:transform .15s}.projects-pick input:checked{background:var(--focus)}.projects-pick input:checked::before{transform:translateX(14px)}.projects-pick input:focus-visible{outline:3px solid var(--focus);outline-offset:2px}.projects-pick[disabled] label,.projects-pick[disabled] input{opacity:.5;cursor:default}@media (prefers-reduced-motion:reduce){.projects-pick input,.projects-pick input::before{transition:none}}\n"
 
-/// The detail's look. Colours come from the page's custom properties, which
+/// The detail's look. Colors come from the page's custom properties, which
 /// a nested shadow root inherits from its host: none are set here, so the
 /// board's dark theme reaches the detail.
 const task_styles =
@@ -2186,7 +2198,7 @@ article{border-bottom-color:var(--line)}.transcript{border-left:1px solid var(--
 @media(prefers-reduced-motion:no-preference){button{transition:background-color .12s ease-out}}"
 
 /// The markdown editor's look (`editor`), shared with the pages that use it.
-/// Colours come from the page's custom properties.
+/// Colors come from the page's custom properties.
 pub const editor_styles =
   ".composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;max-width:760px;background:var(--paper)}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid var(--line);border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}.toolbar [aria-pressed=true]{background:var(--well);font-weight:600}.separator{width:1px;align-self:stretch;background:var(--line);margin:0 6px}.preview{border-top:1px solid var(--line);padding:8px 12px;min-height:94px}
 .composer textarea{border:0;border-top:1px solid var(--edge)}.toolbar .button{border-color:var(--edge);background:var(--paper)}.toolbar .button:hover{background:var(--hover)}.toolbar [aria-pressed=true]{background:var(--ink);color:var(--paper)}
@@ -2196,7 +2208,8 @@ pub const editor_styles =
 /// "") or change, or the vision's new text (`fields` holds `text`). `fields`
 /// are the request's, each value as text, the title first; `base` is the
 /// vision's revision when proposed; `reopens` are the `complete` or
-/// `canceled` records, as (kind, id), that Approve also sets `planned`.
+/// `canceled` records, as (kind, id), that Approve also sets `planned`;
+/// `before` is the record's value of each proposed field when it was made.
 pub type Proposal {
   Proposal(
     kind: String,
@@ -2204,6 +2217,10 @@ pub type Proposal {
     fields: List(#(String, String)),
     base: String,
     reopens: List(#(String, String)),
+    /// The record's current value of each proposed field, as text; the
+    /// vision's text under `text`. Empty for a create, and for a proposal
+    /// saved before D-115.
+    before: Dict(String, String),
   )
 }
 
@@ -2234,7 +2251,12 @@ pub fn proposal_decoder() -> decode.Decoder(Proposal) {
       decode.success(#(kind, id))
     }),
   )
-  decode.success(Proposal(kind, id, fields, base, reopens))
+  use before <- decode.optional_field(
+    "before",
+    dict.new(),
+    decode.dict(decode.string, field_text()),
+  )
+  decode.success(Proposal(kind, id, fields, base, reopens, before))
 }
 
 /// A proposed field's value as text: a list joined, null as "(none)".
@@ -2269,10 +2291,17 @@ fn field_order(a: #(String, String), b: #(String, String)) -> order.Order {
   }
 }
 
-/// A strategy run's proposal in human terms: what it creates or changes, its
-/// fields (the vision's text as Markdown), the records Approve also sets
-/// `planned`, then its options until it is answered, and the answer after.
-/// `name(kind, id)` is a record's title, "" when it isn't loaded.
+/// A strategy run's proposal in human terms: what it creates or changes. An
+/// edit shows only the fields that change, a short one as `old → new` with a
+/// record titled by `name`, and the body as a diff, with a toggle to see the
+/// new body as Markdown; the vision's new text diffs against the vision. A
+/// body or text that differs only in the space around its lines, or in blank
+/// lines, counts as unchanged. One that changes nothing, the vision included,
+/// says "No change". A create, and a proposal saved before `before`, show
+/// every field, the vision its text as Markdown; the records Approve
+/// also sets `planned` follow, then its options until it is answered, and the
+/// answer after. `name(kind, id)` is a record's title, "" when it isn't
+/// loaded.
 pub fn proposal_view(
   base: String,
   p: Proposal,
@@ -2300,60 +2329,122 @@ pub fn proposal_view(
       },
     ]
   }
+  // D-115: a proposal that knows the record's current values shows only the
+  // fields that change, the vision's text among them; a create, and a
+  // proposal saved before, show all.
+  let comparing = !dict.is_empty(p.before)
+  let changed = case comparing {
+    True ->
+      list.filter(p.fields, fn(f) {
+        case dict.get(p.before, f.0), f.0 {
+          Ok(old), "body" | Ok(old), "text" ->
+            text_lines(old) != text_lines(f.1)
+          old, _ -> old != Ok(f.1)
+        }
+      })
+    False -> p.fields
+  }
+  let fields_view = case comparing, changed, p.kind {
+    False, _, "vision" ->
+      case list.key_find(p.fields, "text") {
+        Ok(text) -> [md(base, text)]
+        Error(_) -> []
+      }
+    False, _, _ -> [
+      h.dl(
+        [],
+        list.flat_map(p.fields, fn(f) {
+          [
+            h.dt([], [h.text(f.0)]),
+            h.dd([], [
+              case f.0 {
+                "body" -> md(base, f.1)
+                _ -> h.text(f.1)
+              },
+            ]),
+          ]
+        }),
+      ),
+    ]
+    True, [], _ -> [h.p([a.class("nochange")], [h.text("No change")])]
+    True, fields, _ ->
+      case p.kind {
+        "vision" ->
+          case list.key_find(p.fields, "text") {
+            Ok(new) -> [
+              body_diff(dict.get(p.before, "text") |> result.unwrap(""), new),
+              new_body(base, new),
+            ]
+            Error(_) -> []
+          }
+        _ ->
+          list.append(
+            [
+              h.dl(
+                [],
+                list.flat_map(fields, fn(f) {
+                  [
+                    h.dt([], [h.text(f.0)]),
+                    h.dd([], [
+                      case f.0 {
+                        "body" ->
+                          body_diff(
+                            dict.get(p.before, "body") |> result.unwrap(""),
+                            f.1,
+                          )
+                        _ -> h.text(old_to_new(p, f, name))
+                      },
+                    ]),
+                  ]
+                }),
+              ),
+            ],
+            case list.key_find(p.fields, "body") {
+              Ok(new) -> [new_body(base, new)]
+              Error(_) -> []
+            },
+          )
+      }
+  }
   h.article([a.class("proposal")], [
     h.h4([], heading),
-    case p.kind {
-      "vision" -> md(base, list.key_find(p.fields, "text") |> result.unwrap(""))
-      _ ->
-        h.dl(
-          [],
-          list.flat_map(p.fields, fn(f) {
-            [
-              h.dt([], [h.text(f.0)]),
-              h.dd([], [
-                case f.0 {
-                  "body" -> md(base, f.1)
-                  _ -> h.text(f.1)
-                },
-              ]),
-            ]
-          }),
-        )
-    },
     ..list.append(
-      list.map(p.reopens, fn(r) {
-        let shown = case name(r.0, r.1) {
-          "" -> r.1
-          title -> title
-        }
-        h.p([a.class("reopens")], [
-          h.text("Approving also sets the " <> r.0 <> " "),
-          h.em([], [h.text(shown)]),
-          h.text(" back to planned."),
-        ])
-      }),
-      [
-        case answer {
-          "" ->
-            h.div(
-              [a.class("actions")],
-              list.map(options, fn(o) {
-                h.button([a.disabled(busy), e.on_click(on_answer(o))], [
-                  h.text(o),
-                ])
-              }),
-            )
-          answer -> h.p([a.class("answer")], [h.text("Answer: " <> answer)])
-        },
-      ],
+      fields_view,
+      list.append(
+        list.map(p.reopens, fn(r) {
+          let shown = case name(r.0, r.1) {
+            "" -> r.1
+            title -> title
+          }
+          h.p([a.class("reopens")], [
+            h.text("Approving also sets the " <> r.0 <> " "),
+            h.em([], [h.text(shown)]),
+            h.text(" back to planned."),
+          ])
+        }),
+        [
+          case answer {
+            "" ->
+              h.div(
+                [a.class("actions")],
+                list.map(options, fn(o) {
+                  h.button([a.disabled(busy), e.on_click(on_answer(o))], [
+                    h.text(o),
+                  ])
+                }),
+              )
+            answer -> h.p([a.class("answer")], [h.text("Answer: " <> answer)])
+          },
+        ],
+      ),
     )
   ])
 }
 
 /// The proposal display's look (`proposal_view`), for the pages that show
-/// it. Colours come from the page's custom properties.
+/// it. Colors come from the page's custom properties.
 pub const proposal_styles =
-  ".proposal{border:1px solid var(--edge);background:var(--paper);padding:8px 12px;margin:8px 0}.proposal h4{margin:0 0 6px;font-size:15px}.proposal dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 12px;margin:6px 0}.proposal dt{color:var(--soft);font-size:13px}.proposal dd{margin:0;overflow-wrap:anywhere}.proposal .reopens{color:var(--warn-text);font-weight:600}.proposal .actions{display:flex;gap:6px}.proposal .answer{font-weight:600}\n"
+  ".proposal{border:1px solid var(--edge);background:var(--paper);padding:8px 12px;margin:8px 0}.proposal h4{margin:0 0 6px;font-size:15px}.proposal dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 12px;margin:6px 0}.proposal dt{color:var(--soft);font-size:13px}.proposal dd{margin:0;overflow-wrap:anywhere}.proposal .reopens{color:var(--warn-text);font-weight:600}.proposal .actions{display:flex;gap:6px}.proposal .answer{font-weight:600}.proposal .nochange{color:var(--soft);font-style:italic}.proposal .body-diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;max-width:760px}.proposal .body-diff p.same{color:var(--soft);margin:4px 0}.proposal .body-diff .para{margin:4px 0}.proposal .body-diff pre{margin:0;white-space:pre-wrap}.proposal .body-diff del{color:var(--revision);text-decoration:line-through}.proposal .body-diff .add{color:var(--ok-text)}.proposal details.new-body{margin:6px 0}.proposal details.new-body>summary{cursor:pointer;color:var(--soft)}\n"
 
 /// What the task's last run finished with, "" when nothing is to be looked at.
 fn outcome(t: Task) -> String {
@@ -2545,4 +2636,169 @@ fn depends_view(model: Model, t: Task) -> Element(Msg) {
         )
       ])
   }
+}
+
+/// The 16 feature colors in rainbow order, red to rose; each is readable as a
+/// stripe on the light and dark themes, at least 3:1 against white (D-114).
+pub const feature_palette = [
+  "#d7263d", "#e8571e", "#d97400", "#b08600", "#9a9200", "#5f9a1a", "#3fa34d",
+  "#16a37a", "#0f9696", "#1c9ad6", "#2f72d8", "#3f4fd1", "#6a3fd1", "#9440c9",
+  "#c23ab2", "#d93a7f",
+]
+
+/// The color of the feature that started `index`th (from 0): each next one is
+/// 5 places on along the rainbow, skipping 4, so features started one after
+/// another are easy to tell apart. As 5 and 16 share no factor, all 16 colors
+/// come before one repeats.
+pub fn feature_color(index: Int) -> String {
+  let at = { index * 5 } % 16
+  case list.drop(feature_palette, at) {
+    [color, ..] -> color
+    [] -> ""
+  }
+}
+
+/// Each started feature's id with its color, given the features as (id,
+/// colorSlot): the slot the server kept when it started (D-114), so deleting
+/// one moves no other's color. A feature not yet started has none.
+pub fn feature_colors(
+  features: List(#(String, Option(Int))),
+) -> List(#(String, String)) {
+  features
+  |> list.filter_map(fn(f) {
+    case f.1 {
+      Some(slot) -> Ok(#(f.0, feature_color(slot)))
+      None -> Error(Nil)
+    }
+  })
+}
+
+/// A changed short field as `old → new`: a record id shows as its title,
+/// falling back to the id.
+fn old_to_new(
+  p: Proposal,
+  f: #(String, String),
+  name: fn(String, String) -> String,
+) -> String {
+  let titled = fn(kind, id) {
+    case name(kind, id) {
+      "" -> id
+      title -> title
+    }
+  }
+  let shown = fn(value: String) {
+    case f.0 {
+      "feature" | "milestone" -> titled(f.0, value)
+      "dependsOn" ->
+        string.split(value, ", ")
+        |> list.map(fn(id) { titled("task", id) })
+        |> string.join(", ")
+      _ -> value
+    }
+  }
+  shown(dict.get(p.before, f.0) |> result.unwrap("(none)"))
+  <> " → "
+  <> shown(f.1)
+}
+
+/// The proposed body against the record's current one, as a line diff in the
+/// body's order: the lines the two share at the start and at the end collapse
+/// to one muted line each, a line only in the old body is struck, one only in
+/// the new one is marked, in place. Lines are compared with their surrounding
+/// space removed, and blank lines are left out, so a paragraph break added or
+/// removed doesn't show; moving a line break does.
+/// ponytail: common prefix and suffix, not an LCS; fine for a task body.
+fn body_diff(old: String, new: String) -> Element(msg) {
+  let o = text_lines(old)
+  let n = text_lines(new)
+  let prefix = shared_lines(o, n)
+  let suffix =
+    int.min(
+      shared_lines(list.reverse(o), list.reverse(n)),
+      int.min(list.length(o), list.length(n)) - prefix,
+    )
+  let dropped =
+    o |> list.drop(prefix) |> list.take(list.length(o) - prefix - suffix)
+  let added =
+    n |> list.drop(prefix) |> list.take(list.length(n) - prefix - suffix)
+  let muted = fn(count: Int) {
+    h.p([a.class("same")], [
+      h.text(
+        "… "
+        <> int.to_string(count)
+        <> " "
+        <> case count {
+          1 -> "line"
+          _ -> "lines"
+        }
+        <> " unchanged",
+      ),
+    ])
+  }
+  let block = fn(ls: List(String), mark: String) {
+    h.div([a.class("para " <> mark)], [
+      h.pre(
+        [],
+        list.map(ls, fn(l) {
+          case mark {
+            "add" -> h.span([a.class("add")], [h.text("+ " <> string.trim(l))])
+            _ -> h.del([], [h.text("- " <> string.trim(l))])
+          }
+        }),
+      ),
+    ])
+  }
+  h.div(
+    [a.class("body-diff")],
+    list.append(
+      case prefix {
+        0 -> []
+        _ -> [muted(prefix)]
+      },
+      list.append(
+        case list.length(dropped) {
+          0 -> []
+          _ -> [block(dropped, "del")]
+        },
+        list.append(
+          case list.length(added) {
+            0 -> []
+            _ -> [block(added, "add")]
+          },
+          case suffix {
+            0 -> []
+            _ -> [muted(suffix)]
+          },
+        ),
+      ),
+    ),
+  )
+}
+
+/// The toggle to see the proposed body rendered as Markdown.
+fn new_body(base: String, text: String) -> Element(msg) {
+  h.details([a.class("new-body")], [
+    h.summary([], [h.text("New body")]),
+    md(base, text),
+  ])
+}
+
+/// How many lines at the start of the two lists match, compared with their
+/// surrounding space removed.
+fn shared_lines(a: List(String), b: List(String)) -> Int {
+  case a, b {
+    [x, ..rest_a], [y, ..rest_b] ->
+      case string.trim(x) == string.trim(y) {
+        True -> 1 + shared_lines(rest_a, rest_b)
+        False -> 0
+      }
+    _, _ -> 0
+  }
+}
+
+/// A body's lines as `body_diff` compares them: trimmed, blank ones left out.
+fn text_lines(text: String) -> List(String) {
+  string.split(text, "\n")
+  |> list.map(string.trim)
+  |> list.filter(fn(l) { l != "" })
 }
