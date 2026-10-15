@@ -53,7 +53,8 @@ The root's features grouped by target milestone (D-87), with a form to create an
   succeeds, so a retry makes one task. In a workspace a project select picks `base`, defaulting to the root's own
   project; with a single project there is no picker. One create at a time. Each step reports on its feature: a
   refused create keeps the title ("Couldn't create the task: …"), and a refused link says "The task was created
-  without the link to this feature: …".
+  without the link to this feature: …". The Tasks tab has its own **New task** form (below), and the two share
+  the one-create-at-a-time limit.
 
 ## Roadmap tab
 
@@ -91,6 +92,10 @@ The root's milestones, each with its features and their tasks, drawn by `src/roa
 Every task of every project, one row each: title, column, project (in a workspace), feature, milestone,
 `createdTime` (D-130) and `closedTime`, both as the reader's local date and time.
 
+Backlog tasks are listed here too: the board leaves Backlog out (D-133), so this page is where a
+Backlog task is planned (**Plan**, D-132) and where a planned one goes back on hold (**Back to
+backlog**). A task's details offer **Back to planning** from Assigned, Needs review and Canceled (D-133).
+
 - **Data.** `GET /projects`, each project's `GET {base}/workflow`, and the root's `/events`. A workspace root's own
   `GET /tasks` holds only its project, so the list comes from the merged stream: its replay sends each project's
   `{tasks}` (with `project`), then the root's `{milestones}` and `{features}`, and the root task store's tasks
@@ -99,10 +104,17 @@ Every task of every project, one row each: title, column, project (in a workspac
   workspace: it is in no board lane. The tab lists it with its project cell reading "No project", the project
   filter offers "(no project)", and a task link opens it below the list with its details read from the root;
   the human can cancel and archive it there. Its column labels come from the root's workflow.
-- **Sort and filter on the client.** Closed tasks newest first, then open ones by title. Filters for column,
-  project, feature and milestone ("(none)" keeps tasks without one); the search needs every word in the title or
-  the body. Notes and changes are not in `GET /tasks`, so they are not searched; a server search is left to the
-  mass-edit/archive work.
+- **Sort and filter on the client.** Filters for column, project, feature and milestone ("(none)" keeps tasks
+  without one); the search needs every word in the title or the body. Notes and changes are not in `GET /tasks`,
+  so they are not searched; a server search is left to the mass-edit/archive work. Filters and search apply
+  first, then the sort, then paging.
+- **Sort by a heading.** Until a heading is clicked: closed tasks newest first, then open ones by title. Every
+  heading is a button (`SortBy`): the first click sorts ascending, the next descending, and so on; the sorted
+  heading alone shows ▲ or ▼ and sets `aria-sort`. Column follows the workflow's column order; project sorts by
+  label with "No project" last; feature and milestone by title; created and closed by time. A task without the
+  value (no feature, milestone or time) goes last either way, and ties fall back to the title, then the id. A
+  new sort goes back to page 1. The sort stays across filter changes and tab switches for the page session, not
+  across reloads; the open row stays open and its details stay below the table.
 - **Inline links.** Each row's feature and milestone selects send `PATCH {base}/tasks/{id}` with that one field
   (null clears it), allowed in final columns and during runs (D-87, D-100).
 - **New task.** **New task** above the filters opens a form there: a title, the description in
@@ -131,7 +143,9 @@ collapses it to one line: the shown run's state and model, or whether a run is o
 
 - **Data.** The root's `/events` replays `{strategyRuns}` (no notes) after `{vision}` and sends `{strategyRun}` in
   full after every change, with no `project`. A replayed run keeps the notes the page already has. The model list
-  is `GET /models`; an unavailable model shows why and can't be picked.
+  is `GET /models`. The pick offers only models that can start; under it, `solace_task.unavailable_view` gives the
+  others' reasons, with Try again (`POST /models/try-again`) for a usage limit, and with none that can start,
+  `solace_task.no_agents_view` says what to set up.
 - **Attention.** A live `{strategyRun}` where a run goes waiting (its agent replied) or asks a new proposal sends
   the host `attention` (D-107), which flags the Strategy tab while another page shows; a replay sends nothing.
 - **Layout.** Below the shell's menu the page fills the window: the tab content scrolls on its own, and the panel

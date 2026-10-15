@@ -85,12 +85,17 @@ impl Written {
 
     /// Removes each file Solace wrote that no module in `keep` holds any more,
     /// with the folders that leaves empty. A file edited since stays, for
-    /// `absorb` to read in and report; files Solace never wrote are not its own.
-    pub fn prune(&mut self, keep: &HashSet<String>) -> Result<(), Failure> {
+    /// `absorb` to read in and report; files Solace never wrote are not its own,
+    /// and a file an interrupted extract created is its rollback's (D-135).
+    /// `stops` holds, for module files an undo is deleting, the folder recorded
+    /// as there before the task (D-136): removing empty folders stops there.
+    pub fn prune(&mut self, keep: &HashSet<String>, stops: &HashMap<String, String>) -> Result<(), Failure> {
         if !self.known {
             return Ok(());
         }
-        let gone: Vec<String> = self.files.keys().filter(|rel| !keep.contains(*rel) && !self.bad.contains_key(*rel)).cloned().collect();
+        let extract = crate::extract::ahead::created(&self.root);
+        let gone: Vec<String> =
+            self.files.keys().filter(|rel| !keep.contains(*rel) && !self.bad.contains_key(*rel) && !extract.contains(*rel)).cloned().collect();
         for rel in gone {
             if !self.unchanged(&rel) {
                 continue;
@@ -100,8 +105,11 @@ impl Written {
                 fs::remove_file(&path)?;
             }
             drop_build_output(&self.root, &rel)?;
-            // Up to, not including, `src/` or `test/`.
-            remove_empty_dirs(&self.root.join(rel.split('/').next().unwrap_or_default()), path.parent());
+            // Up to, not including, `src/` or `test/`, or the folder an undo
+            // recorded as there before the task (D-136).
+            let top = rel.split('/').next().unwrap_or_default().to_string();
+            let stop = stops.get(&rel).cloned().filter(|k| k.len() > top.len()).unwrap_or(top);
+            remove_empty_dirs(&self.root.join(stop), path.parent());
             self.forget(&rel);
         }
         Ok(())
@@ -415,7 +423,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
     // Tasks change through the task server (D-77).
     if let Some((_, tid, rid)) = running {
         if !unexpected.is_empty() {
-            board::record(s, &tid, &rid, &bf, &af)?;
+            board::record(s, &tid, &rid, &bf, &af, None)?;
         }
         let text = format!(
             "{}{unreadable_note}",
@@ -449,7 +457,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         }
     };
     if !unexpected.is_empty() {
-        board::record(s, &tid, "outside", &bf, &af)?;
+        board::record(s, &tid, "outside", &bf, &af, None)?;
     }
     let compiled = match s.check() {
         Ok(out) => out,

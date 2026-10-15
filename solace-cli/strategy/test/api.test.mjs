@@ -105,7 +105,7 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     expect(page).toContain('Backlog');
     // D-130: a Created column, in the closed column's format.
     const { clock } = await import('../src/api.mjs');
-    expect(page).toContain('>Created</th>');
+    expect(page).toContain('<button class="sort">Created</button></th>');
     expect(page).toContain('<td class="created">' + clock(50) + '</td>');
     // D-129: a task with no project shows on the Tasks tab, marked, and the Project filter offers it.
     expect(page).toContain('Homeless task');
@@ -706,8 +706,9 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     model = strategy.new$(new strategy.Tasks());
     dispatch(new strategy.Connected());
     await until(() => html().includes('class="open">Index<') && panel().includes('Fake') && events);
-    // Unavailable models say why and can't be picked.
-    expect(panel()).toContain('Big (unavailable: no key)');
+    // Unavailable models aren't offered; the line under the pick says why.
+    expect(panel()).not.toContain('value="big"');
+    expect(panel()).toContain('<summary>1 more model unavailable</summary><ul><li>Big: no key</li></ul>');
     // Nothing selected: the whole project. Selecting a task plans it, and lists its past run.
     expect(panel()).toContain('Plan context: Whole Project');
     dispatch(new strategy.Open('.', 't1'));

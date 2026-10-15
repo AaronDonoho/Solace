@@ -396,7 +396,8 @@ fn version(s: &Store, v: Version<'_>) -> Result<Index, Failure> {
     let mut syms = vec![];
     let mut modules = vec![];
     for (key, row) in rows.as_object().unwrap() {
-        if row.is_null() {
+        // Absent: `null`, or where undo stops removing folders (D-136).
+        if !row.is_array() {
             continue;
         }
         if key.starts_with("symbol:") {
@@ -596,7 +597,7 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), Failure> {
 }
 /// A copy of the project as it is now, for running review tests away from the real one.
 fn scratch(s: &Store, dir: &Path) -> Result<(), Failure> {
-    s.materialize_to(&version(s, Version::Current)?, dir)?;
+    s.materialize_to(&version(s, Version::Current)?, dir, &HashMap::new())?;
     for name in ["gleam.toml", "manifest.toml"] {
         if s.root.join(name).exists() {
             fs::copy(s.root.join(name), dir.join(name))?;

@@ -43,11 +43,11 @@ pub fn workflow_actions_and_errors_test() {
   let text =
     "{\"id\":\"1\",\"title\":\"Fix checkout\",\"body\":\"Details\",\"column\":\"triage\",\"rank\":1,\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[]}"
   let assert Ok(t) = json.parse(text, task.task_decoder())
-  task.actions(model.workflow, t)
+  task.actions(model.workflow, t, False)
   |> should.equal(["assign", "pause", "discuss"])
-  task.actions(model.workflow, task.Task(..t, column: "done"))
+  task.actions(model.workflow, task.Task(..t, column: "done"), False)
   |> should.equal([])
-  task.actions(model.workflow, task.Task(..t, column: "gone"))
+  task.actions(model.workflow, task.Task(..t, column: "gone"), False)
   |> should.equal(["to_backlog"])
   task.action_label(model.workflow, "to_backlog")
   |> should.equal("Back to backlog")
@@ -121,8 +121,14 @@ pub fn attention_and_unavailable_models_test() {
   let rendered = html(model)
   rendered |> string.contains("Needs attention</strong>") |> should.be_true
   rendered |> string.contains("<p>task timeout</p>") |> should.be_true
+  // Only the model that can start is offered; the other is under the pick, with why.
+  rendered |> string.contains("value=\"gone\"") |> should.be_false
+  rendered |> string.contains(">Ok</option>") |> should.be_true
   rendered
-  |> string.contains("unavailable: codex is not installed")
+  |> string.contains("<summary>1 more model unavailable</summary>")
+  |> should.be_true
+  rendered
+  |> string.contains("<li>Gone: codex is not installed</li>")
   |> should.be_true
 }
 
@@ -298,9 +304,9 @@ pub fn stop_and_discussion_actions_test() {
     let assert Ok(t) = json.parse(text, task.task_decoder())
     t
   }
-  task.actions(workflow, one("work", "running"))
+  task.actions(workflow, one("work", "running"), False)
   |> should.equal(["assign", "pause", "stop"])
-  task.actions(workflow, one("discuss", "waiting"))
+  task.actions(workflow, one("discuss", "waiting"), False)
   |> should.equal(["assign", "pause", "end_discussion", "stop"])
   task.status(one("discuss", "waiting"))
   |> should.equal("Waiting for your reply")
@@ -452,7 +458,8 @@ pub fn live_takes_only_this_tasks_events_test() {
       ),
     )
   let assert Some(t) = model.task
-  task.actions(model.workflow, t) |> should.equal(["plan", "pause", "discuss"])
+  task.actions(model.workflow, t, False)
+  |> should.equal(["plan", "pause", "discuss"])
 }
 
 /// A task whose home leaves its projects lives in the first one left
@@ -784,7 +791,8 @@ pub fn handed_messages_apply_in_order_once_test() {
   title(model) |> should.equal("Third")
   model.seen |> should.equal(3)
   let assert Some(t) = model.task
-  task.actions(model.workflow, t) |> should.equal(["plan", "pause", "discuss"])
+  task.actions(model.workflow, t, False)
+  |> should.equal(["plan", "pause", "discuss"])
   // The same list again changes nothing; a longer one applies only the new.
   let #(same, _) =
     task.update(model, task.Handed([#(2, flow), #(3, one("Third"))]))
@@ -941,8 +949,9 @@ pub fn a_final_column_shows_no_live_agent_test() {
     ),
   )
   |> should.equal("Report ready")
-  task.actions(workflow, one("complete", "")) |> should.equal([])
-  task.actions(workflow, one("cancelled", "")) |> should.equal(["to_backlog"])
+  task.actions(workflow, one("complete", ""), False) |> should.equal([])
+  task.actions(workflow, one("cancelled", ""), False)
+  |> should.equal(["to_backlog"])
 }
 
 /// The case reported: a task stored in one project and covering another,
@@ -1521,7 +1530,9 @@ pub fn a_vision_proposal_saved_before_before_shows_markdown_test() {
 }
 
 /// The default workflow's action buttons show their labels, not the action
-/// names (D-108), and the fixed buttons read `ui_labels`.
+/// names (D-108), and the fixed buttons read `ui_labels`. Back to backlog
+/// shows from Planning only with the `strategy` attribute (D-132). Back to
+/// planning shows from Needs review and Canceled, feature or not (D-133).
 pub fn default_workflow_buttons_show_their_labels_test() {
   let model = fresh("1")
   let #(model, _) =
@@ -1529,7 +1540,7 @@ pub fn default_workflow_buttons_show_their_labels_test() {
       model,
       task.WorkflowLoaded(
         model.generation,
-        "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\",\"cancel\"]},{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\",\"complete\",\"to_backlog\",\"cancel\"]},{\"id\":\"assigned\",\"label\":\"Assigned\",\"actions\":[\"reassign\",\"new_agent\",\"review\",\"cancel\"]},{\"id\":\"needs_review\",\"label\":\"Needs review\",\"actions\":[\"approve\",\"complete\",\"review\",\"reassign\",\"start_over\",\"cancel\"]},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true,\"actions\":[\"to_backlog\"]}],\"actions\":{\"plan\":{\"to\":\"planning\",\"label\":\"Plan\"},\"to_backlog\":{\"to\":\"backlog\",\"label\":\"Back to backlog\"},\"investigate\":{\"run\":\"investigate\",\"model\":true,\"label\":\"Investigate\"},\"review\":{\"run\":\"review\",\"label\":\"Review\"},\"assign\":{\"to\":\"assigned\",\"run\":\"work\",\"model\":true,\"label\":\"Assign\"},\"new_agent\":{\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"New agent\"},\"approve\":{\"stamp\":\"approved\",\"label\":\"Approve\"},\"complete\":{\"to\":\"complete\",\"label\":\"Complete\"},\"reassign\":{\"unstamp\":\"approved\",\"to\":\"assigned\",\"run\":\"work\",\"label\":\"Reassign\"},\"start_over\":{\"revert\":true,\"unstamp\":\"approved\",\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"Start over\"},\"cancel\":{\"revert\":true,\"to\":\"cancelled\",\"label\":\"Cancel\"}}}",
+        "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\",\"cancel\"]},{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\",\"complete\",\"to_backlog\",\"cancel\"]},{\"id\":\"assigned\",\"label\":\"Assigned\",\"actions\":[\"reassign\",\"new_agent\",\"review\",\"to_planning\",\"cancel\"]},{\"id\":\"needs_review\",\"label\":\"Needs review\",\"actions\":[\"approve\",\"complete\",\"review\",\"reassign\",\"start_over\",\"to_planning\",\"cancel\"]},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true,\"actions\":[\"to_planning\"]}],\"actions\":{\"plan\":{\"to\":\"planning\",\"label\":\"Plan\"},\"to_backlog\":{\"to\":\"backlog\",\"label\":\"Back to backlog\"},\"to_planning\":{\"unstamp\":\"approved\",\"to\":\"planning\",\"label\":\"Back to planning\"},\"investigate\":{\"run\":\"investigate\",\"model\":true,\"label\":\"Investigate\"},\"review\":{\"run\":\"review\",\"label\":\"Review\"},\"assign\":{\"to\":\"assigned\",\"run\":\"work\",\"model\":true,\"label\":\"Assign\"},\"new_agent\":{\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"New agent\"},\"approve\":{\"stamp\":\"approved\",\"label\":\"Approve\"},\"complete\":{\"to\":\"complete\",\"label\":\"Complete\"},\"reassign\":{\"unstamp\":\"approved\",\"to\":\"assigned\",\"run\":\"work\",\"label\":\"Reassign\"},\"start_over\":{\"revert\":true,\"unstamp\":\"approved\",\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"Start over\"},\"cancel\":{\"revert\":true,\"to\":\"cancelled\",\"label\":\"Cancel\"}}}",
       ),
     )
   let #(model, _) =
@@ -1544,11 +1555,39 @@ pub fn default_workflow_buttons_show_their_labels_test() {
   rendered |> string.contains(">Investigate</button>") |> should.be_true
   rendered |> string.contains(">Assign</button>") |> should.be_true
   rendered |> string.contains(">Complete</button>") |> should.be_true
-  rendered |> string.contains(">Back to backlog</button>") |> should.be_true
+  rendered |> string.contains(">Back to backlog</button>") |> should.be_false
+  let #(on_strategy, _) = task.update(model, task.StrategyChanged(True))
+  html(on_strategy)
+  |> string.contains(">Back to backlog</button>")
+  |> should.be_true
   rendered |> string.contains(">Cancel</button>") |> should.be_true
   rendered |> string.contains(">assign</button>") |> should.be_false
   rendered |> string.contains(">Add note</button>") |> should.be_true
   rendered |> string.contains(">Copy ID</button>") |> should.be_true
+  rendered |> string.contains(">Back to planning</button>") |> should.be_false
+  let in_column = fn(column, feature) {
+    task.update(
+      model,
+      task.TaskLoaded(
+        model.generation,
+        "{\"id\":\"1\",\"title\":\"Fix checkout\",\"body\":\"\",\"column\":\""
+          <> column
+          <> "\",\"rank\":1,\"feature\":"
+          <> feature
+          <> ",\"notes\":[],\"questions\":[],\"runs\":[]}",
+      ),
+    ).0
+    |> html
+  }
+  in_column("needs_review", "null")
+  |> string.contains(">Back to planning</button>")
+  |> should.be_true
+  let cancelled = in_column("cancelled", "\"f1\"")
+  cancelled |> string.contains(">Back to planning</button>") |> should.be_true
+  cancelled |> string.contains(">Back to backlog</button>") |> should.be_false
+  in_column("complete", "null")
+  |> string.contains(">Back to planning</button>")
+  |> should.be_false
 }
 
 /// The task detail's fixed buttons, the model picker and the scope legend
@@ -1751,4 +1790,129 @@ pub fn a_task_with_no_project_stays_where_it_is_opened_test() {
     "{\"project\":\"web\",\"noProject\":true,\"task\":{\"id\":\"1\"}}",
   )
   assert task.stale(model, "{\"project\":\"web\",\"task\":{\"id\":\"1\"}}")
+}
+
+/// D-132: Plan shows for a backlog task anywhere. Back to backlog shows from
+/// Planning only on the Strategy page, from Canceled on any page, and never
+/// for a task with a feature.
+pub fn back_to_backlog_needs_the_strategy_page_and_no_feature_test() {
+  let workflow =
+    task.Workflow(
+      [
+        task.Column("backlog", "Backlog", ["plan", "cancel"], False),
+        task.Column("planning", "Planning", ["assign", "to_backlog"], False),
+        task.Column("cancelled", "Canceled", ["to_backlog"], True),
+      ],
+      dict.new(),
+    )
+  let one = fn(column, feature) {
+    let text =
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\""
+      <> column
+      <> "\",\"rank\":1,\"feature\":"
+      <> feature
+      <> ",\"runs\":[]}"
+    let assert Ok(t) = json.parse(text, task.task_decoder())
+    t
+  }
+  let offers = fn(t, strategy, name) {
+    list.contains(task.actions(workflow, t, strategy), name)
+  }
+  offers(one("backlog", "null"), False, "plan") |> should.be_true
+  offers(one("backlog", "\"f\""), True, "plan") |> should.be_true
+  offers(one("planning", "null"), True, "to_backlog") |> should.be_true
+  offers(one("planning", "null"), False, "to_backlog") |> should.be_false
+  offers(one("planning", "\"f\""), True, "to_backlog") |> should.be_false
+  offers(one("cancelled", "null"), False, "to_backlog") |> should.be_true
+  offers(one("cancelled", "\"f\""), True, "to_backlog") |> should.be_false
+}
+
+/// A dependency is asked for at its project's base; one with no project
+/// (D-129) at the root's base as `GET /projects` lists it; one not found,
+/// nowhere.
+pub fn a_dependency_is_asked_for_where_it_is_stored_test() {
+  let model =
+    task.Model(..loaded(depends_task("1", "T", "backlog", "")), projects: [
+      task.Project(".", "root", "/hosted"),
+      task.Project("shop", "shop", "/p/shop"),
+    ])
+  assert task.dep_base(model, "{\"dir\":\"shop\",\"project\":true}")
+    == Ok("/p/shop")
+  assert task.dep_base(model, "{\"dir\":\"shop\",\"project\":false}")
+    == Ok("/hosted")
+  assert task.dep_base(model, "{\"dir\":\"web\"}") == Ok("/p/web")
+  // A root that isn't listed is asked at "".
+  assert task.dep_base(
+      task.Model(..model, projects: []),
+      "{\"dir\":\"shop\",\"project\":false}",
+    )
+    == Ok("")
+  assert task.dep_base(
+      model,
+      "{\"code\":\"E7023\",\"message\":\"no such task\"}",
+    )
+    == Error(Nil)
+}
+
+pub fn usage_limits_can_be_tried_again_test() {
+  let model = fresh("1")
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded(
+        "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached (resets 3:45 PM)\",\"limit\":true},{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"codex\",\"available\":false,\"reason\":\"codex is not installed\",\"limit\":false}]",
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.TaskLoaded(
+        model.generation,
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
+      ),
+    )
+  let rendered = html(model)
+  // No model can start: what to set up, instead of an empty pick.
+  rendered |> string.contains("No model can start yet") |> should.be_true
+  rendered |> string.contains("claude.ai/install.sh") |> should.be_true
+  rendered |> string.contains("<select") |> should.be_false
+  rendered
+  |> string.contains("<summary>2 models unavailable</summary>")
+  |> should.be_true
+  // Only the usage limit has Try again.
+  rendered
+  |> string.contains(
+    "Sol: Codex usage limit reached (resets 3:45 PM)<button type=\"button\">Try again</button>",
+  )
+  |> should.be_true
+  rendered
+  |> string.contains("<li>Luna: codex is not installed</li>")
+  |> should.be_true
+  // Try again's reply is the model list as it is now: the cleared model is offered.
+  let #(model, _) = task.update(model, task.TryAgain("codex"))
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded(
+        "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":true,\"limit\":false}]",
+      ),
+    )
+  model.model |> should.equal("sol")
+  html(model) |> string.contains("unavailable</summary>") |> should.be_false
+}
+
+/// A run shows the model its agent used, when its start event named one;
+/// an alias says which model it resolved to.
+pub fn a_run_names_the_model_it_used_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"needs_review\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"claude-opus\",\"effort\":\"high\",\"log\":\"/l\",\"outcome\":\"finished\",\"used\":\"claude-opus-5-5\"}]}",
+    )
+  let assert Some(t) = model.task
+  let assert [run] = t.runs
+  run.used |> should.equal("claude-opus-5-5")
+  let #(model, _) = task.update(model, task.Tab("runs"))
+  html(model)
+  |> string.contains("work · claude-opus · high · claude-opus-5-5")
+  |> should.be_true
 }

@@ -602,9 +602,13 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
 
 /// Applies one `/events` message; a workspace's name their `project`.
 fn live(model: Model, text: String, notify: Bool) -> Model {
-  case features_event(model, text) {
-    Ok(model) -> model
-    Error(_) -> task_event(model, text, notify)
+  case no_project(text) {
+    True -> model
+    False ->
+      case features_event(model, text) {
+        Ok(model) -> model
+        Error(_) -> task_event(model, text, notify)
+      }
   }
 }
 
@@ -796,7 +800,7 @@ fn lanes_view(model: Model) -> Element(Msg) {
     _, lanes ->
       h.div([a.class("lanes")], [
         case shared, lanes {
-          True, [first, ..] -> head_view(first.workflow.columns)
+          True, [first, ..] -> head_view(board_columns(first.workflow))
           _, _ -> h.text("")
         },
         ..list.map(lanes, fn(lane) {
@@ -825,7 +829,7 @@ fn lanes_view(model: Model) -> Element(Msg) {
             ..case open, shared {
               True, True -> [columns_view(model, lane, False)]
               True, False -> [
-                head_view(lane.workflow.columns),
+                head_view(board_columns(lane.workflow)),
                 columns_view(model, lane, False),
               ]
               False, _ -> []
@@ -850,7 +854,7 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
   let names = list.map(model.features, fn(f) { #(f.0, f.1) })
   h.div(
     [a.class("board")],
-    list.map(lane.workflow.columns, fn(c) {
+    list.map(board_columns(lane.workflow), fn(c) {
       let tasks =
         cards(model, lane)
         |> list.filter(fn(card) { { card.1 }.column == c.id })
@@ -1132,9 +1136,10 @@ fn scope_of(home: String, t: solace_task.Task) -> List(String) {
 
 /// The tasks a lane shows, each with the project it is stored in: every task
 /// on the board whose projects include this lane's (D-61), but not an archived
-/// one (D-95), nor one whose feature is proposed, upcoming or canceled: its
-/// tasks show once it is active, and stay when it completes (D-128). A task
-/// whose feature isn't known (not loaded yet) shows.
+/// one (D-95), nor one in Backlog, which means not active (D-133), nor one
+/// whose feature is proposed, upcoming or canceled: its tasks show once it is
+/// active, and stay when it completes (D-128). A task whose feature isn't
+/// known (not loaded yet) shows.
 fn cards(model: Model, lane: Lane) -> List(#(String, solace_task.Task)) {
   let waiting =
     model.features
@@ -1144,6 +1149,7 @@ fn cards(model: Model, lane: Lane) -> List(#(String, solace_task.Task)) {
     l.tasks
     |> list.filter(fn(t) {
       !t.archived
+      && t.column != backlog
       && list.contains(scope_of(l.dir, t), lane.dir)
       && !list.contains(waiting, t.feature)
     })
@@ -1190,7 +1196,6 @@ const board_styles =
 main{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;color:var(--ink);background:none}
 *{scrollbar-color:var(--line) var(--paper)}::selection{background:var(--sel);color:var(--ink)}
 h1,h2,h3{line-height:1.2;letter-spacing:-.02em}a{color:var(--focus);text-underline-offset:3px}
-button,input,textarea,select{border:1px solid var(--edge);background:var(--paper);color:var(--ink);caret-color:var(--focus)}input::placeholder,textarea::placeholder{color:var(--soft);opacity:1}
 button:disabled{color:var(--soft)}a:focus-visible,summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
 textarea{font-family:inherit}
 .top{margin:0 -24px 24px;padding:12px 22px;background:var(--paper);border-bottom:2px solid var(--edge)}.top h1{font-size:28px}
@@ -1357,9 +1362,12 @@ fn event_dir(model: Model, text: String) -> String {
 }
 
 /// Whether a live message can be applied now: its lane is loaded, or it is
-/// the list of projects or about the root's features, which name no lane.
+/// the list of projects or about the root's features, which name no lane,
+/// or about the tasks in no project, which `live` ignores and so are never
+/// held.
 fn knows(model: Model, text: String) -> Bool {
-  projects_event(text)
+  no_project(text)
+  || projects_event(text)
   || result.is_ok(lane_of(model, event_dir(model, text)))
   || result.is_ok(features_event(model, text))
 }
@@ -1802,3 +1810,21 @@ fn detail_min() -> Int
 /// The band's task height now, for a key step from the CSS default.
 @external(javascript, "./api.mjs", "detail_now")
 fn detail_now(root: dynamic.Dynamic) -> Int
+
+/// The column a task waits in while it is not active. The board leaves it
+/// out, with its tasks; the Strategy page shows them (D-133).
+const backlog = "backlog"
+
+/// The columns the board draws: the workflow's, without Backlog (D-133), so
+/// Planning comes first in the default workflow.
+pub fn board_columns(
+  workflow: solace_task.Workflow,
+) -> List(solace_task.Column) {
+  list.filter(workflow.columns, fn(c) { c.id != backlog })
+}
+
+/// Whether a live message is about the tasks in no project (D-129), which
+/// only the Strategy page shows; the board ignores it.
+fn no_project(text: String) -> Bool {
+  json.parse(text, decode.at(["noProject"], decode.bool)) == Ok(True)
+}

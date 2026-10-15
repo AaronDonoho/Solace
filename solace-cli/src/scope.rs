@@ -123,7 +123,15 @@ mod tests {
         assert_eq!(held.len(), 2);
         assert!(try_lock_file(&a.join(".solace/lock")).unwrap().is_none());
         drop(held);
-        assert!(try_lock_file(&a.join(".solace/lock")).unwrap().is_some());
+        // Another test's process spawn can briefly hold a copy of the lock's
+        // file (between its fork and exec), so the release is waited for.
+        let free = (0..100).any(|_| {
+            try_lock_file(&a.join(".solace/lock")).unwrap().is_some() || {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                false
+            }
+        });
+        assert!(free);
     }
 
     #[test]

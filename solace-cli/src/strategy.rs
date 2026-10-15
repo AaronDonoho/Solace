@@ -37,6 +37,7 @@ fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
     let prompt = strategy_brief(top, &run);
     let launched = spawn_agent(top, &dir, &log, &m, &prompt, &[], None, persists(&m), [STRATEGY, rid], timeout);
     let supervised = launched.and_then(|mut child| supervise(Watch::Strategy(top), rid, &mut child, &log, false, Duration::from_secs(timeout), GRACEFUL_EXIT));
+    agents::after_run(&m, &log);
     if dir.exists() {
         fs::remove_dir_all(&dir)?;
     }

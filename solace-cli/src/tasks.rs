@@ -109,46 +109,92 @@ pub fn update<R: Send + 'static>(
 }
 
 fn write(top: &Path, t: &Value) -> Result<(), Failure> {
-    let id = t["id"].as_str().unwrap_or("");
-    if !board::valid_id(id) {
+    let id = t["id"].as_str().unwrap_or("").to_string();
+    if !board::valid_id(&id) {
         return board::err("E7001", "invalid task id");
     }
+    // An active feature's tasks are never in Backlog (D-134).
+    let mut t = t.clone();
+    plan(top, &mut t);
     let path = board::store_dir(top).join(format!("{id}.json"));
     let was: Option<Value> = fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok());
-    replace_file(&board::store_dir(top), id, t)?;
-    log(top, t["home"].as_str().unwrap_or("."), &json!({"task":t}));
     // A feature follows its tasks (D-128): only a new task, a moved one or a
-    // changed link can change it.
+    // changed link can change it. It is worked out with this save in place, so
+    // a save that makes its own feature active again is planned before the
+    // task is written, once (D-134). The feature is saved after the task, so a
+    // failed task save leaves it as it was.
+    let mut changed = Vec::new();
     if was.as_ref().is_none_or(|w| w["feature"] != t["feature"] || w["column"] != t["column"]) {
         let old = was.as_ref().map_or(Value::Null, |w| w["feature"].clone());
-        let mut fids: Vec<&str> = [&old, &t["feature"]].into_iter().filter_map(Value::as_str).collect();
+        let mut fids: Vec<String> = [&old, &t["feature"]].into_iter().filter_map(Value::as_str).map(String::from).collect();
         fids.dedup();
         for fid in fids {
-            if let Err(e) = follow_tasks(top, fid) {
-                eprintln!("updating feature {fid}: {}", e.0);
+            match follow_tasks(top, &fid, &t) {
+                Ok(Some(f)) => {
+                    if t["feature"] == fid.as_str() {
+                        board::plan_for_feature(top, &mut t, &f);
+                    }
+                    changed.push(f);
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("updating feature {fid}: {}", e.0),
             }
+        }
+    }
+    replace_file(&board::store_dir(top), &id, &t)?;
+    log(top, t["home"].as_str().unwrap_or("."), &json!({"task":t}));
+    for f in changed {
+        if let Err(e) = save_record(top, "features", &f) {
+            eprintln!("updating feature {}: {}", f["id"].as_str().unwrap_or(""), e.0);
         }
     }
     Ok(())
 }
+/// Moves task `t` from Backlog to Planning when its feature is `active`
+/// (D-134), as `board::plan_for_feature` says. Whether it moved.
+fn plan(top: &Path, t: &mut Value) -> bool {
+    let Some(f) = t["feature"].as_str().and_then(|id| record(top, "features", id)) else { return false };
+    board::plan_for_feature(top, t, &f)
+}
+/// Plans every Backlog task whose feature is `active` (D-134), as one
+/// operation of the task server: run when the server starts, so tasks stored
+/// before the rule move without a click.
+pub fn plan_active(top: &Path) -> Result<(), Failure> {
+    let root = top.to_path_buf();
+    op(top, move || {
+        for mut t in board::all_tasks(&root)? {
+            if plan(&root, &mut t) {
+                write(&root, &t)?;
+            }
+        }
+        Ok(())
+    })
+}
 /// A feature follows its tasks (D-128): an `active` feature whose tasks are all
 /// in a final column, its Tech Debt tasks too, becomes `complete`; a `complete`
 /// one with a task out of the final columns is `active` again. No other state
-/// changes by itself, and a feature with no tasks stays as it is.
-fn follow_tasks(top: &Path, fid: &str) -> Result<(), Failure> {
-    let Some(mut f) = record(top, "features", fid) else { return Ok(()) };
-    let held: Vec<Value> = board::all_tasks(top)?.into_iter().filter(|t| t["feature"] == fid).collect();
+/// changes by itself, and a feature with no tasks stays as it is. Task `saving`
+/// counts as it is about to be stored. The feature, when it changed, not yet
+/// saved: `write` saves it after the task.
+fn follow_tasks(top: &Path, fid: &str, saving: &Value) -> Result<Option<Value>, Failure> {
+    let Some(mut f) = record(top, "features", fid) else { return Ok(None) };
+    let mut held: Vec<Value> = board::all_tasks(top)?.into_iter().filter(|t| t["feature"] == fid && t["id"] != saving["id"]).collect();
+    if saving["feature"] == fid {
+        held.push(saving.clone());
+    }
     // A task whose home has no workflow (not a project yet) is in no column: open.
     let closed = |t: &Value| board::flow(&scope::path(top, t["home"].as_str().unwrap_or("."))).is_ok_and(|w| board::column(&w, t)["final"] == true);
     let open = held.iter().any(|t| !closed(t));
     let state = match f["state"].as_str() {
         Some("active") if !held.is_empty() && !open => "complete",
         Some("complete") if open => "active",
-        _ => return Ok(()),
+        _ => return Ok(None),
     };
     f["state"] = json!(state);
     mark_start(top, "features", &mut f);
-    put_record(top, "features", &f)
+    // The task whose save made it active again is planned by `write` (D-134);
+    // a complete feature's other tasks are all in a final column.
+    Ok(Some(f))
 }
 /// Writes `<dir>/<id>.json` as `v`, synced like an inbox message and renamed
 /// into place, so a power loss never leaves an empty file.
@@ -277,8 +323,23 @@ fn mark_start(top: &Path, kind: &str, v: &mut Value) {
         v["colorSlot"] = json!(next_slot(&others));
     }
 }
-/// Writes a record and logs it as a root event: no project (D-87 point 7).
+/// Writes a record and logs it as a root event, as `save_record` does; a
+/// feature saved `active` plans its Backlog tasks (D-134).
 fn put_record(top: &Path, kind: &str, v: &Value) -> Result<(), Failure> {
+    let id = v["id"].as_str().unwrap_or("");
+    let active = kind == "features" && v["state"] == "active";
+    save_record(top, kind, v)?;
+    if active {
+        for mut t in board::all_tasks(top)?.into_iter().filter(|t| t["feature"] == id) {
+            if board::plan_for_feature(top, &mut t, v) {
+                write(top, &t)?;
+            }
+        }
+    }
+    Ok(())
+}
+/// Writes a record and logs it as a root event: no project (D-87 point 7).
+fn save_record(top: &Path, kind: &str, v: &Value) -> Result<(), Failure> {
     let id = v["id"].as_str().unwrap_or("");
     if !board::valid_id(id) {
         return board::err("E7001", "invalid id");
@@ -790,8 +851,8 @@ fn proposed_task(top: &Path, rid: &str, fields: &Value) -> Result<Value, Failure
     let mut body = fields.clone();
     body["scope"] = json!(folders);
     let mut t = board::created(&scope::path(top, &folders[0]), &body)?;
-    board::set_links(top, &mut t, fields)?;
     board::note(&mut t, "solace", None, &format!("Created by strategy run {rid}"));
+    board::set_links(top, &mut t, fields)?;
     Ok(t)
 }
 /// A strategy run's proposal (D-93) as the question its agent waits on:
@@ -887,6 +948,11 @@ fn apply_proposal(top: &Path, rid: &str, p: &Value) -> Result<String, Failure> {
         let plural = if r["kind"] == "milestone" { "milestones" } else { "features" };
         reopened.push((plural, edited(top, plural, r["id"].as_str().unwrap_or(""), &json!({"state": "upcoming"}), &mut status)?));
     }
+    // Set once all are checked, and before the task is written, so the task
+    // never sees its feature reopen as `active` and is planned (D-134).
+    for (plural, v) in reopened {
+        put_record(top, plural, &v)?;
+    }
     let answer = match built {
         Built::Record(plural, v, new) => {
             put_record(top, plural, &v)?;
@@ -902,9 +968,6 @@ fn apply_proposal(top: &Path, rid: &str, p: &Value) -> Result<String, Failure> {
             "Approved and applied".into()
         }
     };
-    for (plural, v) in reopened {
-        put_record(top, plural, &v)?;
-    }
     Ok(answer)
 }
 
@@ -1143,6 +1206,9 @@ fn apply(top: &Path, m: &Value) -> Result<Option<String>, Failure> {
             }
             // A question's time is when it is asked, so it orders among the notes;
             // `after`, the notes before it, orders it among those of the same second.
+            // Run notes are never removed or reordered: `plan.conversation` matches
+            // `after` against note indexes, so pruning run notes would need `after`
+            // rewritten, or a note id instead.
             "strategy_propose" => {
                 let mut q = m["question"].clone();
                 q["time"] = json!(now());
@@ -1786,6 +1852,22 @@ mod tests {
         assert_eq!((&t["feature"], &t["milestone"]), (&f["id"], &m["id"]));
     }
 
+    /// D-93, D-134: a reopen refused for one record (its milestone is gone)
+    /// leaves the other as it was: every reopen is checked before any is saved.
+    #[test]
+    fn a_refused_reopen_changes_nothing() {
+        let root = root();
+        let rid = page_run(&root);
+        let m = strategy_api(&root, "POST", &["milestones"], json!({"title": "M", "state": "complete"})).unwrap();
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "F", "state": "complete", "milestone": m["id"]})).unwrap();
+        let qid = propose(&root, &rid, "task", None, &json!({"title": "More", "feature": f["id"]}).to_string());
+        fs::remove_file(strategy_dir(&root, "milestones").join(format!("{}.json", m["id"].as_str().unwrap()))).unwrap();
+        let said = answer(&root, &rid, &qid, "Approve").0;
+        assert!(said.starts_with("Not applied") && said.contains(m["id"].as_str().unwrap()), "the milestone's reopen is refused: {said}");
+        assert_eq!(record(&root, "features", f["id"].as_str().unwrap()).unwrap()["state"], json!("complete"));
+        assert!(!board::all_tasks(&root).unwrap().iter().any(|t| t["title"] == "More"));
+    }
+
     /// D-93: an apply the request would refuse writes nothing and puts the code
     /// in the answer: a task whose run started since (E7003), a dependsOn cycle
     /// made since (E7025). An ended run takes no answer.
@@ -1892,7 +1974,7 @@ mod tests {
         assert_eq!(created("t5"), json!(modified));
     }
 
-    /// D-130: a new task records when it was created; moving it keeps the time.
+    /// D-130: a new task records when it was created; cancelling and restoring it keeps the time.
     #[test]
     fn a_new_task_gets_a_created_time_once() {
         let root = root();
@@ -2028,6 +2110,195 @@ mod tests {
         assert_eq!(state(&f), json!("complete"), "t2 is still final");
         api(&root, "PATCH", &["tasks", "t2"], json!({"feature": null})).unwrap();
         assert_eq!(state(&f), json!("complete"), "with no tasks left it stays");
+    }
+
+    /// D-132, D-134: a feature that becomes active, by an edit or an approved
+    /// proposal, moves its Backlog tasks to Planning, each with a note naming
+    /// it; tasks in other columns or of other features stay. A task linked to
+    /// or proposed in an active feature is planned; in another state it isn't.
+    #[test]
+    fn an_active_feature_plans_its_tasks() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body).unwrap();
+        let column = |tid: &str| board::task(&root, tid).unwrap()["column"].as_str().unwrap().to_string();
+        let notes = |tid: &str| board::task(&root, tid).unwrap()["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let new_task = |title: &str, feature: &Value| {
+            let id = api(&root, "POST", &["tasks"], json!({"title": title})).unwrap()["id"].as_str().unwrap().to_string();
+            api(&root, "PATCH", &["tasks", &id], json!({"feature": feature})).unwrap();
+            id
+        };
+        let f = call("POST", &["features"], json!({"title": "Search", "state": "upcoming"}));
+        let other = call("POST", &["features"], json!({"title": "Other", "state": "upcoming"}));
+        api(&root, "PATCH", &["tasks", "t1"], json!({"feature": f["id"]})).unwrap();
+        assert_eq!(column("t1"), "backlog", "an upcoming feature's task stays in Backlog");
+        let busy = new_task("Busy", &f["id"]);
+        let mut t = board::task(&root, &busy).unwrap();
+        t["column"] = json!("assigned");
+        write(&root, &t).unwrap();
+        let waits = new_task("Waits", &other["id"]);
+
+        call("PATCH", &["features", f["id"].as_str().unwrap()], json!({"state": "active"}));
+        assert_eq!(column("t1"), "planning");
+        let moved = notes("t1");
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0], format!("Moved to Planning: its feature feature:{} is active.", f["id"].as_str().unwrap()));
+        assert_eq!((column(&busy), notes(&busy).len()), ("assigned".to_string(), 0), "only Backlog tasks move");
+        assert_eq!(column(&waits), "backlog", "another feature's task stays");
+        call("PATCH", &["features", f["id"].as_str().unwrap()], json!({"title": "Search 2"}));
+        assert_eq!(notes("t1").len(), 1, "an edit that keeps it active moves nothing");
+
+        let linked = new_task("Linked", &f["id"]);
+        assert_eq!(column(&linked), "planning", "a task linked to an active feature is planned");
+        assert_eq!(notes(&linked).len(), 1);
+
+        let rid = page_run(&root);
+        let qid = propose(&root, &rid, "task", None, &json!({"title": "Proposed", "feature": f["id"]}).to_string());
+        let said = answer(&root, &rid, &qid, "Approve").0;
+        let id = said.rsplit(' ').next().unwrap();
+        assert_eq!(column(id), "planning");
+        let n = notes(id);
+        assert!(n[0].starts_with("Created by strategy run") && n[1].starts_with("Moved to Planning"), "{n:?}");
+
+        let qid = propose(&root, &rid, "feature", other["id"].as_str(), r#"{"state": "active"}"#);
+        assert_eq!(answer(&root, &rid, &qid, "Approve").0, "Approved and applied");
+        assert_eq!(column(&waits), "planning", "an approved proposal plans the tasks too");
+    }
+
+    /// Writes task `id` straight into the store, a copy of t1 in Backlog under
+    /// `feature`, as a file saved before D-134 would be.
+    fn stored_backlog_task(root: &Path, id: &str, feature: &Value) {
+        let mut t = board::task(root, "t1").unwrap();
+        t["id"] = json!(id);
+        t["title"] = json!(id);
+        t["column"] = json!("backlog");
+        t["feature"] = feature.clone();
+        fs::write(board::store_dir(root).join(format!("{id}.json")), t.to_string()).unwrap();
+    }
+    fn column_of(root: &Path, id: &str) -> String {
+        board::task(root, id).unwrap()["column"].as_str().unwrap().to_string()
+    }
+    fn notes_of(root: &Path, id: &str) -> Vec<String> {
+        let t = board::task(root, id).unwrap();
+        t["notes"].as_array().map_or(vec![], |ns| ns.iter().map(|n| n["text"].as_str().unwrap().to_string()).collect())
+    }
+
+    /// D-134: a task already stored in Backlog under an active feature moves to
+    /// Planning when the server starts, once, with a note naming the feature;
+    /// saving the feature or the task moves one too.
+    #[test]
+    fn an_existing_backlog_task_under_an_active_feature_is_planned() {
+        let root = root();
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "Search", "state": "active"})).unwrap();
+        let fid = f["id"].as_str().unwrap();
+        stored_backlog_task(&root, "old", &f["id"]);
+        assert_eq!(column_of(&root, "old"), "backlog");
+        plan_active(&root).unwrap();
+        assert_eq!(column_of(&root, "old"), "planning");
+        let n = notes_of(&root, "old");
+        assert_eq!(n.len(), 1, "{n:?}");
+        assert!(n[0].contains(&format!("feature:{fid}")), "{n:?}");
+        plan_active(&root).unwrap();
+        assert_eq!(notes_of(&root, "old").len(), 1, "a second start adds nothing");
+
+        stored_backlog_task(&root, "second", &f["id"]);
+        strategy_api(&root, "PATCH", &["features", fid], json!({"title": "Search 2"})).unwrap();
+        assert_eq!(column_of(&root, "second"), "planning", "saving the active feature plans it");
+        assert_eq!(notes_of(&root, "old").len(), 1);
+
+        stored_backlog_task(&root, "third", &f["id"]);
+        api(&root, "PATCH", &["tasks", "third"], json!({"title": "Renamed"})).unwrap();
+        assert_eq!(column_of(&root, "third"), "planning", "saving the task plans it");
+        assert_eq!(notes_of(&root, "third").len(), 1);
+    }
+
+    /// D-134: a Backlog task linked to a complete feature reopens it as
+    /// `active` (D-128), and is planned in the same save.
+    #[test]
+    fn a_task_that_reopens_its_feature_is_planned() {
+        let root = root();
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "Done", "state": "complete"})).unwrap();
+        let before = task_events(&root, "t1");
+        api(&root, "PATCH", &["tasks", "t1"], json!({"feature": f["id"]})).unwrap();
+        assert_eq!(task_events(&root, "t1"), before + 1, "the save is logged once (D-134)");
+        assert_eq!(record(&root, "features", f["id"].as_str().unwrap()).unwrap()["state"], json!("active"));
+        assert_eq!(column_of(&root, "t1"), "planning");
+        let n = notes_of(&root, "t1");
+        assert!(n.len() == 1 && n[0].contains(&format!("feature:{}", f["id"].as_str().unwrap())), "{n:?}");
+        let order: Vec<Value> = all_events(&root).into_iter().filter(|e| e["task"]["id"] == "t1" || e["feature"]["id"] == f["id"]).collect();
+        assert!(order.last().is_some_and(|e| e["feature"]["state"] == "active"), "the feature is saved after its task");
+    }
+
+    /// Every task log entry's data, in `seq` order.
+    fn all_events(root: &Path) -> Vec<Value> {
+        let rows: Vec<String> = events(root).unwrap().prepare("SELECT data FROM events ORDER BY seq").unwrap().query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        rows.iter().map(|d| serde_json::from_str(d).unwrap()).collect()
+    }
+    /// How many task log entries record task `id`.
+    fn task_events(root: &Path, id: &str) -> usize {
+        all_events(root).iter().filter(|e| e["task"]["id"] == id).count()
+    }
+
+    /// An archived task stays where it is, in Backlog under a feature that
+    /// becomes active, when the server starts and when it is saved.
+    #[test]
+    fn an_archived_task_is_not_planned() {
+        let root = root();
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "Search", "state": "upcoming"})).unwrap();
+        stored_backlog_task(&root, "old", &f["id"]);
+        let path = board::store_dir(&root).join("old.json");
+        let mut t: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        t["archivedTime"] = json!(now());
+        fs::write(&path, t.to_string()).unwrap();
+        strategy_api(&root, "PATCH", &["features", f["id"].as_str().unwrap()], json!({"state": "active"})).unwrap();
+        plan_active(&root).unwrap();
+        api(&root, "PATCH", &["tasks", "old"], json!({"title": "Renamed"})).unwrap();
+        assert_eq!((column_of(&root, "old"), notes_of(&root, "old").len()), ("backlog".to_string(), 0));
+    }
+
+    /// D-134: a task with no feature, or whose feature is not active, stays in
+    /// Backlog when the server starts and when it is saved.
+    #[test]
+    fn a_feature_that_is_not_active_leaves_its_tasks_alone() {
+        let root = root();
+        let mut ids = vec![("none".to_string(), Value::Null)];
+        for state in ["proposed", "upcoming", "complete", "canceled"] {
+            let f = strategy_api(&root, "POST", &["features"], json!({"title": state, "state": state})).unwrap();
+            ids.push((state.to_string(), f["id"].clone()));
+        }
+        for (id, f) in &ids {
+            stored_backlog_task(&root, id, f);
+        }
+        plan_active(&root).unwrap();
+        for (id, _) in &ids {
+            api(&root, "PATCH", &["tasks", id], json!({"title": "Renamed"})).unwrap();
+            assert_eq!((column_of(&root, id), notes_of(&root, id).len()), ("backlog".to_string(), 0), "{id}");
+        }
+    }
+
+    /// D-134: columns are found by id; a workflow without both `backlog` and
+    /// `planning` leaves an active feature's task where it is.
+    #[test]
+    fn a_workflow_without_the_columns_is_left_alone() {
+        for columns in [["backlog", "doing"], ["waiting", "planning"]] {
+            let root = root();
+            let toml = format!(
+                "[board]\nevents = {{ finished = \"{1}\" }}\n[[board.columns]]\nid = \"{0}\"\n[[board.columns]]\nid = \"{1}\"\n[[board.columns]]\nid = \"backlog_done\"\nfinal = true\n[board.actions]\n",
+                columns[0], columns[1]
+            );
+            fs::write(root.join("solace.toml"), toml).unwrap();
+            let f = strategy_api(&root, "POST", &["features"], json!({"title": "Search", "state": "active"})).unwrap();
+            stored_backlog_task(&root, "old", &f["id"]);
+            plan_active(&root).unwrap();
+            let mut t = board::task(&root, "old").unwrap();
+            t["title"] = json!("Renamed");
+            write(&root, &t).unwrap();
+            assert_eq!((column_of(&root, "old"), notes_of(&root, "old").len()), ("backlog".to_string(), 0), "{columns:?}");
+            // A feature that becomes active moves none of its tasks either.
+            let g = strategy_api(&root, "POST", &["features"], json!({"title": "Later", "state": "upcoming"})).unwrap();
+            stored_backlog_task(&root, "later", &g["id"]);
+            strategy_api(&root, "PATCH", &["features", g["id"].as_str().unwrap()], json!({"state": "active"})).unwrap();
+            assert_eq!((column_of(&root, "later"), notes_of(&root, "later").len()), ("backlog".to_string(), 0), "{columns:?}");
+        }
     }
 
     /// D-128: a record saved `planned` reads as `upcoming`; `planned` is refused.
@@ -2497,7 +2768,7 @@ mod tests {
         let s = board::open(&root).unwrap();
         let before = board::snapshot(&s).unwrap();
         s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-        board::record(&s, &tid, "r1", &before, &board::snapshot(&s).unwrap()).unwrap();
+        board::record(&s, &tid, "r1", &before, &board::snapshot(&s).unwrap(), None).unwrap();
         let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
         assert!(has_before(), "the change is recorded");
         testing::inbox_file(&root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"done"}));

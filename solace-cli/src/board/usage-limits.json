@@ -1,0 +1,28 @@
+{
+  "about": "What agents say when a usage limit is reached, as they say it. Codex: UsageLimitReachedError in codex-rs/protocol/src/error.rs and its tests (openai/codex), with a time where they format one. Claude Code: its messages as reported in anthropics/claude-code issues 24428, 42261, 89863 and 9236, and its older pipe form. `resets` is the reset time the message names, null when none. `not_limits` are errors that must not mark a sign-in.",
+  "codex": [
+    {"said": "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again later.", "resets": null},
+    {"said": "You’ve hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again later.", "resets": null},
+    {"said": "You’ve hit your usage limit. Try again later.", "resets": null},
+    {"said": "You’ve hit your usage limit. To get more access now, send a request to your admin or try again at 3:45 PM.", "resets": "3:45 PM"},
+    {"said": "You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Oct 15th, 2026 9:05 AM.", "resets": "Oct 15th, 2026 9:05 AM"},
+    {"said": "You’ve hit your usage limit for codex_other. Switch to another model now, or try again at 3:45 PM.", "resets": "3:45 PM"},
+    {"said": "Your workspace is out of credits. Add credits to continue.", "resets": null},
+    {"said": "You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.", "resets": null},
+    {"said": "Quota exceeded. Check your plan and billing details.", "resets": null}
+  ],
+  "claude": [
+    {"said": "You've hit your limit · resets 2pm (UTC)", "resets": "2pm (UTC)"},
+    {"said": "You've hit your limit · resets 1am (Europe/London)", "resets": "1am (Europe/London)"},
+    {"said": "You've hit your limit · resets 2:50pm (America/Toronto)", "resets": "2:50pm (America/Toronto)"},
+    {"said": "Claude usage limit reached. Your limit will reset at 3pm", "resets": "3pm"},
+    {"said": "Claude AI usage limit reached|1760000000", "resets": "Oct 9, 2025 8:53 AM (UTC)"}
+  ],
+  "not_limits": [
+    "shared rollout token budget exhausted",
+    "rate limit exceeded: Rate limit reached for gpt-6-sol",
+    "stream disconnected before completion",
+    "API Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit. Please try again later.\"}}",
+    "session not found"
+  ]
+}

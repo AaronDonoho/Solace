@@ -76,7 +76,7 @@ Solace doesn't contain a model. The board hands tasks to an agent program that y
 - **Claude Code:** `curl -fsSL https://claude.ai/install.sh | bash`, then run `claude`.
 - **Codex CLI:** `brew install codex` on macOS, or a release binary from the [Codex releases page](https://github.com/openai/codex/releases), then run `codex`.
 
-Agent runs use those services and may cost money. You can install and look around the board without an agent, but no task will run until one is signed in. A model that can't start is greyed out on the board with the reason.
+Agent runs use those services and may cost money. You can install and look around the board without an agent, but no task will run until one is signed in. The board offers only the models that can start; a line under the list says why the others can't (not installed, not signed in, or a usage limit reached), and **Try again** brings back a model held by a usage limit.
 
 ### 3. Get the code
 
@@ -131,6 +131,23 @@ Then open Solace from your launcher and choose your project's folder.
 ### 6. Optional: bubblewrap
 
 On Linux, install bubblewrap (`bwrap`; the Ubuntu line above already includes it) so your folder is read-only to every command Solace runs during a migration. Without it the migration still works, but without that protection.
+
+### 7. For working on Solace itself: test tools
+
+Using Solace doesn't need these. Developing it does: the acceptance tests and the layout audit (`layout_audit`, which measures the pages and takes screenshots of them) are Python scripts, and the audit drives a headless Chromium through Playwright.
+
+| Tool | What it's for |
+| --- | --- |
+| Python 3 and pip | runs the acceptance tests and the layout audit |
+| Playwright for Python | lets the layout audit drive a browser |
+| Chromium for Playwright | the browser the layout audit loads the pages in |
+
+```sh
+python3 -m pip install playwright
+python3 -m playwright install chromium
+```
+
+Install them for the same `python3` that Solace finds on your `PATH`. If pip refuses with "externally-managed-environment", create a virtual environment (`python3 -m venv ~/.venvs/solace`), install into it, and activate it before starting Solace. When either is missing, `layout_audit` stops with one line saying which.
 
 ### Troubleshooting
 
@@ -191,6 +208,8 @@ Every project on the board uses the root's workflow (the `[board]` section of th
 
 Solace runs models through agent programs you already have installed and signed in to: the Codex CLI for OpenAI models, and Claude Code for Claude models. It stores no credentials. The current major models are built in, so the board has a list with no configuration. A model that can't start (its program is missing, isn't signed in, or its key variable isn't set) is greyed out with the reason, and assigning it is refused.
 
+Solace also asks each agent program which models it offers, so a model the agent added shows in the list with no rebuild and no config edit. Codex answers `codex app-server`'s `model/list`, which names the efforts each model supports; models Codex marks hidden are left out. Claude Code has no command that lists models without starting one, so Solace offers its aliases — `opus`, `sonnet`, `haiku` and `fable`, each naming the latest of its family — and once a run's log names the model the agent used, the run shows it and the model's label names it. With `ANTHROPIC_API_KEY` set, Solace also reads the provider's models endpoint for the exact ids, active ones only; it stores no key and uses only the variable that is already set. The answers are asked at startup, about every 15 minutes, and when a run says its model is no longer offered, all in the background, so the board always shows the last list. A model that leaves an agent's offer keeps working for the tasks already using it, with the reason `no longer offered by …`, and isn't offered for a new run. A listed model isn't proof your account may run it: usage limits are shown separately.
+
 To add models or change the built-in ones, edit `~/.config/solace/config.toml` (or the file named by `SOLACE_CONFIG`):
 
 ```toml
@@ -212,7 +231,7 @@ model = "claude-sonnet-5-5"
 endpoint = { kind = "anthropic", base_url = "https://llm-proxy.example.com", key_env = "PROXY_KEY" }
 ```
 
-An entry with the same `id` as a built-in model replaces it. `key_env` names the environment variable that holds the endpoint's key, which Solace reads when it starts the agent. Codex reaches OpenAI-compatible endpoints through the Responses API, so the endpoint has to support it. The built-in list is in [solace-cli/src/default-models.toml](solace-cli/src/default-models.toml).
+An entry with the same `id` as a built-in model — or as a model Solace discovered — replaces it: your config wins. `key_env` names the environment variable that holds the endpoint's key, which Solace reads when it starts the agent. Codex reaches OpenAI-compatible endpoints through the Responses API, so the endpoint has to support it. The built-in list is in [solace-cli/src/default-models.toml](solace-cli/src/default-models.toml), and each agent's last answer is kept in `agent-models.json` beside your config file.
 
 ### Project settings
 

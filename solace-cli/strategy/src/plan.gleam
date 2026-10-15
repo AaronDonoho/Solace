@@ -56,6 +56,9 @@ pub type Run {
     context: Context,
     notes: List(solace_task.Note),
     questions: List(Question),
+    /// The model the agent's start event named, when it named one: an alias
+    /// shows the model the run used.
+    used: String,
   )
 }
 
@@ -135,6 +138,7 @@ pub fn decoder() -> decode.Decoder(Run) {
     [],
     decode.list(question_decoder()),
   )
+  use used <- text("used")
   decode.success(Run(
     id,
     model,
@@ -146,6 +150,7 @@ pub fn decoder() -> decode.Decoder(Run) {
     context,
     notes,
     questions,
+    used,
   ))
 }
 
@@ -230,6 +235,10 @@ pub fn state_text(run: Run) -> String {
   }
   <> " · "
   <> run.model
+  <> case run.used {
+    "" -> ""
+    used -> " · " <> used
+  }
 }
 
 /// What the panel shows and what it sends. `shown` is the run open in it;
@@ -266,6 +275,8 @@ pub type Panel(msg) {
     on_block: fn(String) -> msg,
     on_model: fn(String) -> msg,
     on_effort: fn(String) -> msg,
+    /// A usage limit's Try again: the agent kind whose limit to clear.
+    on_try_again: fn(String) -> msg,
     on_start: msg,
     on_send: msg,
     /// A question's id and the option chosen.
@@ -479,13 +490,20 @@ fn start_view(p: Panel(msg)) -> List(Element(msg)) {
   }
 }
 
-/// The model, and its effort when it offers several; unavailable models
-/// show why and can't be picked. A pick shows what is chosen, so it names
-/// itself; while none is, a placeholder says what to pick.
+/// The model, and its effort when it offers several. Only models that can
+/// start are offered; a line under the pick says why the others can't, and
+/// with none that can, what to set up. A pick shows what is chosen, so it
+/// names itself; while none is, a placeholder says what to pick.
 fn agent_choice(p: Panel(msg)) -> Element(msg) {
-  case p.models {
-    [] -> element.none()
-    models ->
+  let ready = list.filter(p.models, fn(m) { m.available })
+  case p.models, ready {
+    [], _ -> element.none()
+    _, [] ->
+      html.div([attribute.class("filters")], [
+        solace_task.no_agents_view(),
+        solace_task.unavailable_view(p.models, p.on_try_again),
+      ])
+    _, models ->
       html.div([attribute.class("filters")], [
         html.select(
           [
@@ -500,15 +518,8 @@ fn agent_choice(p: Panel(msg)) -> Element(msg) {
             ),
             list.map(models, fn(m) {
               html.option(
-                [
-                  attribute.value(m.id),
-                  attribute.selected(m.id == p.model),
-                  attribute.disabled(!m.available),
-                ],
-                case m.available {
-                  True -> m.label
-                  False -> m.label <> " (unavailable: " <> m.reason <> ")"
-                },
+                [attribute.value(m.id), attribute.selected(m.id == p.model)],
+                m.label,
               )
             }),
           ),
@@ -549,6 +560,7 @@ fn agent_choice(p: Panel(msg)) -> Element(msg) {
             )
           _ -> element.none()
         },
+        solace_task.unavailable_view(p.models, p.on_try_again),
       ])
   }
 }
@@ -574,6 +586,7 @@ pub const styles =
 @media (max-width:900px){.plan{display:block;width:auto;border-left:0;border-top:2px solid var(--edge);padding:12px 16px}.plan-body{overflow:visible;margin:0;padding:0}.plan-resize{display:none}}
 "
   <> solace_task.proposal_styles
+  <> solace_task.model_styles
 
 /// The narrowest the panel gets, in pixels.
 pub const min_width = 280

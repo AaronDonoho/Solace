@@ -35,6 +35,13 @@ class Board(unittest.TestCase):
             program.write_text('#!/usr/bin/env python3\n' + Path(FAKE).read_text())
             program.chmod(0o755)
         self.env['PATH'] = str(programs) + os.pathsep + os.environ['PATH']
+        # Discovery: the fake Codex answers `model/list` from this fixture; the
+        # fake agents' start events name this model as the one their run used;
+        # an empty key keeps Claude's aliases without a network call.
+        self.env['SOLACE_FAKE_MODELS']=str(Path(FAKE).with_name('fake_models.json'))
+        self.env['SOLACE_FAKE_USED_MODEL']='claude-opus-5-5'
+        self.env['OPENAI_API_KEY']='fixture-key'
+        self.env['ANTHROPIC_API_KEY']=''
         with config.open('a') as f:
             for name, agent, model in [('native', 'codex', 'fixture'), ('native-other', 'codex', 'other'), ('native-claude', 'claude', 'fixture')]:
                 kind = 'openai' if agent == 'codex' else 'anthropic'
@@ -256,12 +263,14 @@ class Board(unittest.TestCase):
             t, prompt, _ = self.review(t, [{'command':'task note','text':note}])
             # Only a task in a feature is asked for tech debt (the steps in its body name the heading either way).
             self.assertEqual('This task is part of a feature' in prompt, feature)
+            # D-138: the prompt names the task's feature.
+            self.assertEqual('\nFeature (the feature this task is part of; its latest direction):\n- Search\n' in prompt, feature)
             self.action(t, 'approve'); return self.action(t, 'complete')
         debts = lambda: [t for t in self.api('GET', '/tasks') if t.get('techDebt')]
         # A review's tech debt waits for completion, then makes the feature's Tech Debt task once.
         a = reviewed(True, 'first finding')
         [debt] = debts()
-        self.assertEqual((debt['title'], debt['column'], debt['feature']), ('Search: Tech Debt', 'backlog', f['id']))
+        self.assertEqual((debt['title'], debt['column'], debt['feature']), ('Search: Tech Debt', 'planning', f['id']))
         notes = self.get(debt)['notes']
         self.assertEqual(len(notes), 1)
         self.assertIn('task:'+a['id'], notes[0]['text']); self.assertIn('first finding', notes[0]['text'])
@@ -274,6 +283,15 @@ class Board(unittest.TestCase):
         # A review of a task with no feature files nothing.
         reviewed(False, 'lost finding')
         self.assertEqual(len(self.get(debt)['notes']), 2); self.assertEqual(len(debts()), 1)
+
+    def test_a_work_prompt_carries_the_features_assignment_note(self):  # D-138
+        f = self.api('POST', '/features', {'title':'Search'})
+        t = self.create([{'command':'task done done'}])
+        self.api('PATCH', '/tasks/'+t['id'], {'feature':f['id']})
+        self.action(t, 'plan'); t = self.action(t, 'assign', model='fake', text='keep it without a shell')
+        t = self.wait(t, lambda x: x['column']=='needs_review')
+        prompt = (self.root/'.solace'/(t['runs'][-1]['id']+'.prompt')).read_text()
+        self.assertIn('\nFeature (the feature this task is part of; its latest direction):\n- Search\n- assignment: keep it without a shell\n', prompt)
 
     def test_review_delta_add_remove_revert_and_context(self):
         t = self.completed([
@@ -442,7 +460,7 @@ class Board(unittest.TestCase):
                 t=self.create([{'sleep':.2},{'command':'task done done'}])
                 t['column']=col['id'];t['home']='.'
                 (self.root/'.solace/tasks'/f'{t["id"]}.json').write_text(json.dumps(t))
-                # A final column offers only what it lists (D-108): cancelled's to_backlog, nothing in complete.
+                # A final column offers only what it lists (D-108): cancelled's to_planning (D-133), nothing in complete.
                 allowed=col['actions'] if col['final'] else [*col['actions'],'pause','resume','discuss','stop','end_discussion']
                 if name not in allowed:
                     e=self.action(t,name,'E7001',model='fake');self.assertEqual(e['allowed'],allowed)
@@ -880,6 +898,33 @@ class Board(unittest.TestCase):
         asked=self.action(asked,'pause');self.assertTrue(asked['attention']['hold']);asked=self.action(asked,'resume');self.assertTrue(asked['attention']['hold'])
         self.assertIsNone(self.action(asked,'cancel')['attention'])
 
+    def test_a_model_the_fake_codex_reports_is_offered(self):
+        # The fake Codex answers `model/list`: its model shows in /models with
+        # no config change, with the efforts Codex names, and its hidden model stays out.
+        end=time.monotonic()+15;models={}
+        while time.monotonic()<end:
+            models={m['id']:m for m in self.api('GET','/models')}
+            if 'codex-gpt-6-fake' in models:break
+            time.sleep(.2)
+        self.assertIn('codex-gpt-6-fake',models,json.dumps(sorted(models)))
+        self.assertEqual(models['codex-gpt-6-fake']['label'],'Codex · GPT-6 Fake')
+        self.assertEqual(models['codex-gpt-6-fake']['efforts'],['low','medium','high'])
+        self.assertTrue(models['codex-gpt-6-fake']['available'],json.dumps(models['codex-gpt-6-fake']))
+        self.assertNotIn('codex-gpt-6-fake-hidden',models,'a hidden model is left out')
+        self.assertNotIn('gpt-6-fake',(self.root/'system.toml').read_text(),'no config change asked for the model')
+        # Claude Code has no list command: its aliases are offered.
+        self.assertIn('claude-opus',models)
+        self.assertIn('Claude Code · Opus',models['claude-opus']['label'])
+
+    def test_a_run_shows_the_model_it_used(self):
+        t=self.create([{'command':'task done done'}])
+        self.action(t,'plan')
+        t=self.action(t,'assign',model='native-claude')
+        t=self.wait(t,lambda x:x['column']=='needs_review')
+        self.assertEqual(t['runs'][-1]['used'],'claude-opus-5-5')
+        models={m['id']:m for m in self.api('GET','/models')}
+        self.assertEqual(models['native-claude']['label'],'Fixture · claude-opus-5-5')
+
     def test_a10_events_reconnect(self):
         stream=self.stream()
         while stream.readline()!=b'event: ready\n':pass  # after the replay, once
@@ -991,24 +1036,37 @@ class Board(unittest.TestCase):
         listed=[x for x in self.api('GET','/tasks') if x['id']==t['id']]
         self.assertEqual(listed[0]['archivedTime'],archived['archivedTime'])
 
-    def test_a_canceled_task_goes_back_to_the_backlog(self):  # D-108
+    def test_a_canceled_task_goes_back_to_planning(self):  # D-108, D-133
         w=self.api('GET','/workflow')
-        self.assertEqual(w['actions']['to_backlog']['label'],'Back to backlog')
+        self.assertEqual(w['actions']['to_planning']['label'],'Back to planning')
         t=self.create();dep=self.create()
         self.api('PATCH','/tasks/'+dep['id'],{'dependsOn':[t['id']]})
         self.api('POST','/tasks/'+t['id']+'/notes',{'text':'Keep me'})
-        self.assertEqual(self.action(t,'to_backlog','E7001')['allowed'],['plan','cancel','pause','resume','discuss','stop','end_discussion'])
+        self.assertEqual(self.action(t,'to_planning','E7001')['allowed'],['plan','cancel','pause','resume','discuss','stop','end_discussion'])
         gone=self.action(t,'cancel');self.assertEqual(gone['column'],'cancelled');self.assertIsInstance(gone['closedTime'],int)
         self.assertIsInstance(self.api('POST','/tasks/'+t['id']+'/archive',{})['archivedTime'],int)
-        back=self.action(t,'to_backlog')
-        self.assertEqual((back['column'],back['archivedTime'],back['closedTime'],back['title']),('backlog',None,gone['closedTime'],'Fixture'))
+        back=self.action(t,'to_planning')
+        self.assertEqual((back['column'],back['archivedTime'],back['closedTime'],back['title']),('planning',None,gone['closedTime'],'Fixture'))
         self.assertEqual(back['notes'][0]['text'],'Keep me')
-        self.assertEqual((back['notes'][-1]['author'],back['notes'][-1]['text']),('solace','The human brought this task back from Canceled to Backlog.'))
+        self.assertEqual((back['notes'][-1]['author'],back['notes'][-1]['text']),('solace','The human brought this task back from Canceled to Planning.'))
         self.assertEqual([x['archivedTime'] for x in self.api('GET','/tasks') if x['id']==t['id']],[None])
         self.assertEqual(self.get(dep)['dependsOn'],[t['id']])
         # A complete task stays as it is.
         done=self.completed([]);self.action(done,'approve');self.action(done,'complete')
-        self.assertEqual(self.action(done,'to_backlog','E7001')['allowed'],[])
+        self.assertEqual(self.action(done,'to_planning','E7001')['allowed'],[])
+
+    def test_back_to_planning_waits_for_the_run_and_keeps_changes(self):  # D-133
+        working=self.assign([{'sleep':3}])
+        self.assertIn('stop',self.action(working,'to_planning','E7001')['message'])
+        self.action(working,'stop')
+        self.assertEqual(self.action(working,'to_planning')['column'],'planning')
+        # From Needs review: the changes stay and the approval goes, as Reassign does.
+        t=self.completed([{'command':'read priv/a'},{'command':'write priv/a','text':'keep this'}])
+        before=self.get(t)['changes'];self.assertTrue(before)
+        self.action(t,'approve')
+        back=self.action(t,'to_planning')
+        self.assertEqual((back['column'],back['stamps']),('planning',{}))
+        self.assertEqual(self.get(t)['changes'],before)
 
     def test_a_task_link_finds_its_task(self):  # D-98
         t=self.completed([])
@@ -1268,4 +1326,43 @@ class Board(unittest.TestCase):
         self.assertFalse((self.root/'solace-cli').exists(),'no store at the refused folder')
         self.api('POST',f'/strategy/runs/{rid}/end')
 
+    def test_a_usage_limit_makes_its_sign_ins_models_unavailable(self):
+        # A model on Codex's own sign-in (the fake codex, signed in by its key variable).
+        with (self.root/'system.toml').open('a') as f:
+            f.write('\n[[models]]\nid="signed-in"\nlabel="Signed in"\nagent="codex"\nmodel="fixture"\n')
+        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        self.env['OPENAI_API_KEY']='test-key'
+        self.serve()
+        models={m['id']:m for m in self.api('GET','/models')}
+        self.assertTrue(models['signed-in']['available'],models['signed-in'])
+        # Codex's own words (src/board/usage-limits.json), as its `exec --json` error event.
+        said='You’ve hit your usage limit. To get more access now, send a request to your admin or try again later.'
+        t=self.create([{'exit':1,'error':said}]);self.action(t,'plan')
+        t=self.action(t,'assign',model='signed-in')
+        self.wait(t,lambda x:(x['attention'] or {}).get('hold'))
+        def listed():
+            end=time.monotonic()+5
+            while True:
+                models={m['id']:m for m in self.api('GET','/models')}
+                if not models['signed-in']['available'] or time.monotonic()>end:return models
+                time.sleep(.05)
+        models=listed()
+        # Every model on the sign-in is unavailable, with the reason; the list stays complete.
+        for id in ['signed-in','codex-gpt-6-sol']:
+            self.assertEqual((models[id]['available'],models[id]['reason'],models[id]['limit']),(False,'Codex usage limit reached',True),id)
+        self.assertIn('codex-gpt-6-astra',models)
+        # A model on its own endpoint or program isn't on the sign-in.
+        for id in ['native','fake']:self.assertTrue(models[id]['available'],models[id])
+        again=self.create();self.action(again,'plan')
+        e=self.action(again,'assign','E7011',model='signed-in');self.assertIn('usage limit',e['message'])
+        # The mark outlasts a restart.
+        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        self.serve()
+        self.assertFalse({m['id']:m for m in self.api('GET','/models')}['signed-in']['available'])
+        # Try again clears it; the reply is the list as it is now.
+        models={m['id']:m for m in self.api('POST','/models/try-again',{'agent':'codex'})}
+        self.assertTrue(models['signed-in']['available'],models['signed-in'])
+        self.assertEqual(self.api('POST','/models/try-again',{'agent':'nobody'},'E7001')['code'],'E7001')
+
 if __name__=='__main__':unittest.main()
+

@@ -1,4 +1,5 @@
 import features
+import gleam/bool
 import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/int
@@ -45,6 +46,9 @@ pub type Model {
     filters: Filters,
     /// The Tasks tab's page, from 1.
     page: Int,
+    /// The Tasks tab's sort: the heading clicked and whether it is ascending,
+    /// None for the default order. Kept for the page session.
+    sort: Option(#(SortKey, Bool)),
     /// The task open below the list: the project it is stored in, and its id.
     selected: Option(#(String, String)),
     error: String,
@@ -167,6 +171,8 @@ pub type Msg {
   Filter(Filters)
   /// The Tasks tab's Prev or Next: the page to show.
   Page(Int)
+  /// A Tasks tab heading: sorts by it ascending, or flips its direction.
+  SortBy(SortKey)
   /// An inline link: the task's project and id, "feature" or "milestone",
   /// and the record's id, "" for none.
   Link(String, String, String, String)
@@ -174,7 +180,11 @@ pub type Msg {
   /// record's id, "" for none.
   Links(String, String, List(#(String, String)))
   /// The reply to a link: the task's project, and the task as it is now.
-  Patched(String, String)
+  Patched(String, String, String)
+  /// A row's Plan (D-132): the task's project and id.
+  PlanTask(String, String)
+  /// The reply to a row's Plan: the task's project, and the task or a refusal.
+  Planned(String, String)
   BaseChanged(String)
   Listening(Source)
   Connected
@@ -292,6 +302,8 @@ pub type Msg {
   PlanEffort(String)
   /// The reply to `GET /models`.
   ModelsLoaded(String)
+  /// A usage limit's Try again: the agent kind whose limit to clear.
+  TryAgainModel(String)
   /// Starts a strategy run on the panel's context with the typed message.
   StartPlan
   /// Sends the typed message to the shown run.
@@ -1297,6 +1309,18 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     PlanEffort(effort) -> #(Model(..model, plan_effort: effort), effect.none())
     // The model picked stays while it is available; without the list the
     // server takes its default.
+    TryAgainModel(agent) -> #(
+      model,
+      effect.from(fn(send) {
+        request(
+          model.prefix,
+          "/models/try-again",
+          "POST",
+          json.to_string(json.object([#("agent", json.string(agent))])),
+          fn(text) { send(ModelsLoaded(text)) },
+        )
+      }),
+    )
     ModelsLoaded(text) ->
       case json.parse(text, decode.list(solace_task.agent_decoder())) {
         Ok(models) -> {
@@ -1533,9 +1557,34 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       effect.none(),
     )
     Page(n) -> #(Model(..model, page: n), effect.none())
+    SortBy(key) -> {
+      let ascending = case model.sort {
+        Some(#(k, asc)) if k == key -> !asc
+        _ -> True
+      }
+      #(Model(..model, sort: Some(#(key, ascending)), page: 1), effect.none())
+    }
     // Allowed in final columns and during runs (D-87, D-100).
     Link(dir, id, field, value) ->
       update(model, Links(dir, id, [#(field, value)]))
+    // Through the board's actions API, as the task's details send it.
+    PlanTask(dir, id) -> #(
+      model,
+      effect.from(fn(send) {
+        request(
+          model.prefix,
+          base_of(model, dir) <> "/tasks/" <> id <> "/actions",
+          "POST",
+          json.to_string(json.object([#("action", json.string("plan"))])),
+          fn(text) { send(Planned(dir, text)) },
+        )
+      }),
+    )
+    Planned(dir, text) ->
+      case json.parse(text, row_decoder()) {
+        Ok(row) -> #(Model(..put(model, dir, row), error: ""), effect.none())
+        Error(_) -> #(Model(..model, error: error(text)), effect.none())
+      }
     Links(dir, id, fields) -> #(
       model,
       effect.from(fn(send) {
@@ -1544,13 +1593,14 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           base_of(model, dir) <> "/tasks/" <> id,
           "PATCH",
           json.to_string(links_body(fields)),
-          fn(text) { send(Patched(dir, text)) },
+          fn(text) { send(Patched(dir, id, text)) },
         )
       }),
     )
     // The link after a new task's create reports on its feature, or in the
-    // Tasks tab's form ("" for the feature).
-    Patched(dir, text) ->
+    // Tasks tab's form ("" for the feature). A refusal is matched by its
+    // task, so another task's refused PATCH isn't reported there.
+    Patched(dir, pid, text) ->
       case json.parse(text, row_decoder()), model.task_linking {
         Ok(row), Some(#(d, id, "")) if d == dir && row.id == id -> #(
           new_task_done(put(model, dir, row), dir, id),
@@ -1558,7 +1608,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
         // The task exists without its links: it opens, and the form stays
         // with a fresh draft so a retry doesn't make it again.
-        Error(_), Some(#(d, id, "")) if d == dir -> {
+        Error(_), Some(#(d, id, "")) if d == dir && id == pid -> {
           let #(picked, project) = case model.new_task {
             Some(t) -> #(
               case t.feature, t.milestone {
@@ -1588,7 +1638,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           effect.none(),
         )
         Ok(row), _ -> #(Model(..put(model, dir, row), error: ""), effect.none())
-        Error(_), Some(#(d, _, feature)) if d == dir -> #(
+        Error(_), Some(#(d, id, feature)) if d == dir && id == pid -> #(
           Model(
             ..model,
             task_saving: None,
@@ -1677,11 +1727,14 @@ const view_styles =
 .filters :focus-visible,.tasks :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .tasks{width:100%;border-collapse:collapse;background:var(--paper);border:1px solid var(--edge)}
 .tasks th{text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.08em;padding:8px 10px;border-bottom:2px solid var(--edge)}
+.tasks th .sort{font:inherit;font-weight:700;color:var(--ink);text-transform:inherit;letter-spacing:inherit;background:none;border:0;padding:0;text-align:left;cursor:pointer;white-space:nowrap}.tasks th .sort:hover{text-decoration:underline}
 .tasks td{padding:6px 10px;border-top:1px solid var(--line);vertical-align:middle}
 .tasks tr:hover td{background:var(--hover)}.tasks tr[aria-current=true] td{background:var(--sel)}
 .tasks .open{font:inherit;font-weight:600;color:var(--ink);background:none;border:0;padding:0;text-align:left;cursor:pointer}
 .tasks .open:hover{text-decoration:underline}
+.tasks .act{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 8px;margin-left:8px;cursor:pointer}.tasks .act:hover{background:var(--hover)}
 .tasks .created,.tasks .closed{white-space:nowrap;color:var(--soft)}
+.tasks .homeless{font-size:13px;color:var(--soft);margin-left:6px;white-space:nowrap}
 solace-task{display:block;margin-top:16px}
 .milestone{margin:0 0 20px}.milestone h3{margin:0 0 8px;font-size:16px;border-bottom:1px solid var(--line)}
 .feature{background:var(--paper);border:1px solid var(--edge);padding:8px 14px;margin:0 0 10px}
@@ -1705,8 +1758,7 @@ solace-task{display:block;margin-top:16px}
 .vision-actions button:focus-visible,.toolbar button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .composer solace-md-editor{--md-min-height:320px}
 .feature-form{background:var(--paper);border:1px solid var(--edge);padding:12px 14px;margin:0 0 16px}.feature-form h3{margin:0 0 10px;font-size:16px}.feature-form .filters{margin:10px 0}
-.feature .edit{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 8px;margin-left:6px;cursor:pointer}.feature .edit:hover{background:var(--hover)}.feature .edit:disabled{color:var(--soft);cursor:default}.feature .edit:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.feature .toggle{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 8px;margin-left:6px;cursor:pointer}.feature .toggle:hover{background:var(--hover)}.feature .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.feature .edit,.feature .toggle{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 8px;margin-left:6px;cursor:pointer}.feature .edit:hover,.feature .toggle:hover{background:var(--hover)}.feature .edit:disabled{color:var(--soft);cursor:default}.feature .edit:focus-visible,.feature .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .new-task{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 2px}.new-task input,.new-task select{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px}.new-task input{min-width:220px}.new-task input::placeholder{color:var(--soft);opacity:1}.new-task :focus-visible{outline:3px solid var(--focus);outline-offset:2px}.new-task .edit{margin-left:0}.new-task [role=alert]{flex-basis:100%;margin:2px 0}
 .milestone h3 .edit{font:inherit;font-size:13px;font-weight:400;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 8px;margin-left:6px;cursor:pointer}.milestone h3 .edit:hover{background:var(--hover)}.milestone h3 .edit:disabled{color:var(--soft);cursor:default}
 .milestone .target{font-size:13px;font-weight:400;color:var(--soft);margin-left:6px}
@@ -1817,6 +1869,7 @@ pub fn new(tab: Tab) -> Model {
     milestones: [],
     filters: Filters("", "", "", "", ""),
     page: 1,
+    sort: None,
     selected: None,
     error: "",
     source: None,
@@ -2211,15 +2264,15 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Project))) {
 }
 
 /// The tasks the list shows, each with its project: those the filters keep,
-/// in the default order. Tasks with no project (D-129) show too, in the
-/// homeless bucket.
+/// in the heading's sort or the default order. Tasks with no project (D-129)
+/// show too, in the homeless bucket.
 pub fn visible(model: Model) -> List(#(String, Row)) {
   task_dirs(model)
   |> list.flat_map(fn(dir) {
     list.map(rows_of(model, dir), fn(r) { #(dir, r) })
   })
   |> list.filter(fn(pair) { keeps(model.filters, pair.0, pair.1) })
-  |> sorted
+  |> sort_rows(model, _)
 }
 
 /// Closed tasks newest first, then open tasks by title.
@@ -2229,7 +2282,7 @@ pub fn sorted(rows: List(#(String, Row))) -> List(#(String, Row)) {
       Some(x), Some(y) -> int.compare(y, x)
       Some(_), None -> order.Lt
       None, Some(_) -> order.Gt
-      None, None -> string.compare({ a.1 }.title, { b.1 }.title)
+      None, None -> compare_text({ a.1 }.title, { b.1 }.title)
     }
   })
 }
@@ -2314,9 +2367,7 @@ fn tasks_view(model: Model) -> List(Element(Msg)) {
           html.thead([], [
             html.tr(
               [],
-              list.map(headings(model), fn(h) {
-                html.th([attribute.attribute("scope", "col")], [html.text(h)])
-              }),
+              list.map(headings(model), fn(h) { heading_view(model, h) }),
             ),
           ]),
           html.tbody(
@@ -2357,12 +2408,26 @@ fn tasks_view(model: Model) -> List(Element(Msg)) {
   ]
 }
 
-fn headings(model: Model) -> List(String) {
+/// The Tasks tab's headings, each with what it sorts by.
+fn headings(model: Model) -> List(#(String, SortKey)) {
   case model.workspace {
     True -> [
-      "Title", "Column", "Project", "Feature", "Milestone", "Created", "Closed",
+      #("Title", ByTitle),
+      #("Column", ByColumn),
+      #("Project", ByProject),
+      #("Feature", ByFeature),
+      #("Milestone", ByMilestone),
+      #("Created", ByCreated),
+      #("Closed", ByClosed),
     ]
-    False -> ["Title", "Column", "Feature", "Milestone", "Created", "Closed"]
+    False -> [
+      #("Title", ByTitle),
+      #("Column", ByColumn),
+      #("Feature", ByFeature),
+      #("Milestone", ByMilestone),
+      #("Created", ByCreated),
+      #("Closed", ByClosed),
+    ]
   }
 }
 
@@ -2453,6 +2518,7 @@ fn row_view(model: Model, dir: String, row: Row) -> Element(Msg) {
             html.span([attribute.class("homeless")], [html.text("No project")])
           False -> element.none()
         },
+        plan_button(model, dir, row),
       ]),
       html.td([], [html.text(column_label(model, dir, row.column))]),
       case model.workspace {
@@ -2548,6 +2614,8 @@ fn task_view(model: Model, dir: String, id: String) -> Element(Msg) {
       attribute.attribute("dir", dir),
       attribute.attribute("task", id),
       attribute.attribute("hosted", ""),
+      // Back to backlog is offered from Planning only here (D-132).
+      attribute.attribute("strategy", ""),
       case model.workspace {
         True -> attribute.attribute("workspace", "")
         False -> attribute.none()
@@ -2990,6 +3058,7 @@ fn plan_view(model: Model) -> Element(Msg) {
       on_block: PlanBlock,
       on_model: PlanModel,
       on_effort: PlanEffort,
+      on_try_again: TryAgainModel,
       on_start: StartPlan,
       on_send: SendPlan,
       on_answer: AnswerPlan,
@@ -3267,7 +3336,7 @@ fn new_task_view(model: Model) -> Element(Msg) {
           NewTaskBlock,
         ),
         html.div([attribute.class("filters")], [
-          case model.workspace {
+          case model.workspace && list.length(model.projects) > 1 {
             True ->
               select(
                 "Project",
@@ -3382,4 +3451,164 @@ fn page_of(
     -1 -> fallback
     i -> i / page_size + 1
   }
+}
+
+/// A Tasks tab column the table can be sorted on.
+pub type SortKey {
+  ByTitle
+  ByColumn
+  ByProject
+  ByFeature
+  ByMilestone
+  ByCreated
+  ByClosed
+}
+
+/// What a row is sorted by: text, or a number (a column's place, a time).
+type SortValue {
+  Text(String)
+  Number(Int)
+}
+
+/// The rows in the Tasks tab's order: by the heading clicked, else the
+/// default. Missing values go last either way; ties fall back to the title,
+/// then the id, then the project.
+pub fn sort_rows(
+  model: Model,
+  rows: List(#(String, Row)),
+) -> List(#(String, Row)) {
+  case model.sort {
+    None -> sorted(rows)
+    Some(#(key, ascending)) -> {
+      let ranks = list.map(columns(model), fn(c) { c.id })
+      list.sort(rows, fn(a, b) {
+        case
+          sort_value(model, ranks, key, a),
+          sort_value(model, ranks, key, b)
+        {
+          Some(x), Some(y) ->
+            case ascending {
+              True -> compare_values(x, y)
+              False -> order.negate(compare_values(x, y))
+            }
+          Some(_), None -> order.Lt
+          None, Some(_) -> order.Gt
+          None, None -> order.Eq
+        }
+        |> order.lazy_break_tie(fn() {
+          compare_text({ a.1 }.title, { b.1 }.title)
+        })
+        |> order.lazy_break_tie(fn() { string.compare({ a.1 }.id, { b.1 }.id) })
+        |> order.lazy_break_tie(fn() { string.compare(a.0, b.0) })
+      })
+    }
+  }
+}
+
+/// A row's value for `key`, None when it has none. `ranks` are the column
+/// ids in workflow order.
+fn sort_value(
+  model: Model,
+  ranks: List(String),
+  key: SortKey,
+  pair: #(String, Row),
+) -> Option(SortValue) {
+  let #(dir, row) = pair
+  let title = fn(pairs, id) {
+    Text(list.key_find(pairs, id) |> result.unwrap(id))
+  }
+  case key {
+    ByTitle -> Some(Text(row.title))
+    ByColumn -> rank(ranks, row.column, 0) |> option.map(Number)
+    ByProject ->
+      case dir == homeless_dir {
+        True -> None
+        False -> Some(Text(label_of(model, dir)))
+      }
+    ByFeature -> option.map(row.feature, title(feature_pairs(model), _))
+    ByMilestone -> option.map(row.milestone, title(milestone_pairs(model), _))
+    ByCreated -> option.map(row.created, Number)
+    ByClosed -> option.map(row.closed, Number)
+  }
+}
+
+/// The place of `id` in `ids`, counting from `at`; None when absent.
+fn rank(ids: List(String), id: String, at: Int) -> Option(Int) {
+  case ids {
+    [] -> None
+    [first, ..] if first == id -> Some(at)
+    [_, ..rest] -> rank(rest, id, at + 1)
+  }
+}
+
+fn compare_values(a: SortValue, b: SortValue) -> order.Order {
+  case a, b {
+    Text(x), Text(y) -> compare_text(x, y)
+    Number(x), Number(y) -> int.compare(x, y)
+    Text(_), Number(_) -> order.Lt
+    Number(_), Text(_) -> order.Gt
+  }
+}
+
+/// A Tasks tab heading: a button that sorts by it. The sorted one shows its
+/// direction, as an arrow and in `aria-sort`.
+fn heading_view(model: Model, heading: #(String, SortKey)) -> Element(Msg) {
+  let #(label, key) = heading
+  let #(sort, arrow) = case model.sort {
+    Some(#(k, True)) if k == key -> #("ascending", " ▲")
+    Some(#(k, False)) if k == key -> #("descending", " ▼")
+    _ -> #("", "")
+  }
+  html.th(
+    [
+      attribute.attribute("scope", "col"),
+      case sort {
+        "" -> attribute.none()
+        s -> attribute.attribute("aria-sort", s)
+      },
+    ],
+    [
+      html.button([attribute.class("sort"), event.on_click(SortBy(key))], [
+        html.text(label),
+        case arrow {
+          "" -> element.none()
+          a ->
+            html.span([attribute.attribute("aria-hidden", "true")], [
+              html.text(a),
+            ])
+        },
+      ]),
+    ],
+  )
+}
+
+/// A row's Plan (D-132): shown when its project's workflow offers `plan` in
+/// the row's column. A task with no project (D-129) has no workflow, so none.
+fn plan_button(model: Model, dir: String, row: Row) -> Element(Msg) {
+  case list.key_find(model.workflows, dir) {
+    Ok(w) -> {
+      let offered =
+        list.any(w.columns, fn(c) {
+          c.id == row.column && list.contains(c.actions, "plan")
+        })
+      use <- bool.guard(!offered, element.none())
+      let label = solace_task.action_label(w, "plan")
+      html.button(
+        [
+          attribute.class("act"),
+          attribute.attribute("aria-label", label <> " " <> row.title),
+          event.on_click(PlanTask(dir, row.id)),
+        ],
+        [html.text(label)],
+      )
+    }
+    Error(_) -> element.none()
+  }
+}
+
+/// Text in the order a person expects: letters compare without regard to
+/// case, and only equal-looking texts fall back to the exact comparison.
+fn compare_text(a: String, b: String) -> order.Order {
+  string.compare(string.lowercase(a), string.lowercase(b))
+  |> order.lazy_break_tie(fn() { string.compare(a, b) })
 }

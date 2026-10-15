@@ -120,7 +120,7 @@ pub fn workspace_lanes_test() {
         "{\"workspace\":true,\"projects\":[{\"dir\":\"bench/pilot\",\"name\":\"pilot\",\"base\":\"/p/bench%2Fpilot\"},{\"dir\":\"web\",\"name\":\"web\",\"base\":\"/p/web\"}],\"found\":[{\"dir\":\"tools\",\"name\":\"tools\",\"imported\":false,\"member\":false}]}",
       ),
     )
-  let columns = "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"}]}"
+  let columns = "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\"}]}"
   let #(model, _) =
     board.update(model, board.WorkflowLoaded("bench/pilot", columns))
   let #(model, _) = board.update(model, board.WorkflowLoaded("web", columns))
@@ -128,7 +128,7 @@ pub fn workspace_lanes_test() {
   let task = fn(title) {
     "{\"id\":\"1\",\"title\":\""
     <> title
-    <> "\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]}"
+    <> "\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]}"
   }
   let #(model, _) = board.update(model, board.CaughtUp)
   let #(model, _) =
@@ -169,7 +169,7 @@ pub fn workspace_lanes_test() {
     ".lanes-area{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain}",
   )
   |> should.be_true
-  rendered |> string.contains("<h2>Backlog</h2>") |> should.be_true
+  rendered |> string.contains("<h2>Planning</h2>") |> should.be_true
   rendered
   |> string.contains("href=\"/p/bench%2Fpilot/contracts\"")
   |> should.be_true
@@ -336,14 +336,14 @@ pub fn task_across_projects_test() {
         <> "],\"found\":[]}",
       ),
     )
-  let columns = "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"}]}"
+  let columns = "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\"}]}"
   let model =
     list.fold(["a", "b", "c"], model, fn(m, d) {
       board.update(m, board.WorkflowLoaded(d, columns)).0
     })
   let #(model, _) = board.update(model, board.CaughtUp)
   let task =
-    "{\"id\":\"t1\",\"title\":\"Across\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"scope\":[\"a\",\"b\"],\"changes\":[{\"entity\":\"symbol:x\",\"name\":\"app.one\",\"project\":\"b\"}]}"
+    "{\"id\":\"t1\",\"title\":\"Across\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"scope\":[\"a\",\"b\"],\"changes\":[{\"entity\":\"symbol:x\",\"name\":\"app.one\",\"project\":\"b\"}]}"
   let #(model, _) =
     board.update(
       model,
@@ -382,13 +382,13 @@ pub fn selected_card_test() {
         "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"},{\"dir\":\"b\",\"label\":\"b\",\"name\":\"b\",\"base\":\"/p/b\"}],\"found\":[]}",
       ),
     )
-  let columns = "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"}]}"
+  let columns = "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\"}]}"
   let #(model, _) = board.update(model, board.WorkflowLoaded("a", columns))
   let #(model, _) = board.update(model, board.WorkflowLoaded("b", columns))
   let shared =
-    "{\"id\":\"1\",\"title\":\"Across\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"scope\":[\"a\",\"b\"]}"
+    "{\"id\":\"1\",\"title\":\"Across\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"scope\":[\"a\",\"b\"]}"
   let other =
-    "{\"id\":\"1\",\"title\":\"Other\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1}"
+    "{\"id\":\"1\",\"title\":\"Other\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}"
   let #(model, _) = board.update(model, board.CaughtUp)
   let #(model, _) =
     board.update(
@@ -425,7 +425,7 @@ pub fn selected_card_test() {
   let #(model, _) = board.update(model, board.Select("a", "1"))
   // The open task moves from a to b: the highlight and details follow it.
   let moved =
-    "{\"id\":\"1\",\"title\":\"Moved\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"scope\":[\"b\",\"a\"]}"
+    "{\"id\":\"1\",\"title\":\"Moved\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"scope\":[\"b\",\"a\"]}"
   let #(model, _) =
     board.update(model, board.Live("{\"project\":\"b\",\"removed\":\"1\"}"))
   let #(model, _) =
@@ -884,7 +884,7 @@ fn deps_board() -> board.Model {
       ),
     )
   let columns =
-    "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Cancelled\",\"final\":true}]}"
+    "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"},{\"id\":\"planning\",\"label\":\"Planning\"},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Cancelled\",\"final\":true}]}"
   let #(model, _) = board.update(model, board.WorkflowLoaded("a", columns))
   let #(model, _) = board.update(model, board.WorkflowLoaded("b", columns))
   board.update(model, board.CaughtUp).0
@@ -937,7 +937,7 @@ fn dimmed(model: board.Model, title: String, waits: String) -> Bool {
 
 /// A task with no `dependsOn` (saved before D-87) is shown as before.
 pub fn card_without_dependencies_is_not_dimmed_test() {
-  let model = deps_board() |> put_task("a", "1", "Card", "backlog", "")
+  let model = deps_board() |> put_task("a", "1", "Card", "planning", "")
   let card = card_of(model, "Card")
   string.contains(card, "waiting") |> should.be_false
   string.contains(card, "Waiting on") |> should.be_false
@@ -949,9 +949,9 @@ pub fn card_without_dependencies_is_not_dimmed_test() {
 pub fn unfinished_dependency_dims_the_card_test() {
   let model =
     deps_board()
-    |> put_task("a", "d1", "Dep", "backlog", "")
+    |> put_task("a", "d1", "Dep", "planning", "")
     |> put_task("a", "d2", "Other dep", "complete", "")
-    |> put_task("a", "1", "Card", "backlog", ",\"dependsOn\":[\"d1\",\"d2\"]")
+    |> put_task("a", "1", "Card", "planning", ",\"dependsOn\":[\"d1\",\"d2\"]")
   dimmed(model, "Card", "Dep") |> should.be_true
   // Dimming is visual only: the card opens.
   let #(open, _) = board.update(model, board.Select("a", "1"))
@@ -963,7 +963,7 @@ pub fn unfinished_dependency_dims_the_card_test() {
   string.contains(card_of(done, "Card"), "waiting") |> should.be_false
   // Strategy clears its dependencies.
   let cleared =
-    put_task(model, "a", "1", "Card", "backlog", ",\"dependsOn\":[]")
+    put_task(model, "a", "1", "Card", "planning", ",\"dependsOn\":[]")
   string.contains(card_of(cleared, "Card"), "waiting") |> should.be_false
 }
 
@@ -971,7 +971,7 @@ pub fn unfinished_dependency_dims_the_card_test() {
 pub fn finished_or_cancelled_dependency_does_not_dim_test() {
   let model =
     deps_board()
-    |> put_task("a", "1", "Card", "backlog", ",\"dependsOn\":[\"d1\"]")
+    |> put_task("a", "1", "Card", "planning", ",\"dependsOn\":[\"d1\"]")
   let complete = put_task(model, "a", "d1", "Dep", "complete", "")
   string.contains(card_of(complete, "Card"), "waiting") |> should.be_false
   let cancelled = put_task(model, "a", "d1", "Dep", "cancelled", "")
@@ -984,10 +984,10 @@ pub fn reopened_dependency_dims_again_test() {
   let model =
     deps_board()
     |> put_task("a", "d1", "Dep", "complete", ",\"closedTime\":1700")
-    |> put_task("a", "1", "Card", "backlog", ",\"dependsOn\":[\"d1\"]")
+    |> put_task("a", "1", "Card", "planning", ",\"dependsOn\":[\"d1\"]")
   string.contains(card_of(model, "Card"), "waiting") |> should.be_false
   let reopened =
-    put_task(model, "a", "d1", "Dep", "backlog", ",\"closedTime\":1700")
+    put_task(model, "a", "d1", "Dep", "planning", ",\"closedTime\":1700")
   dimmed(reopened, "Card", "Dep") |> should.be_true
 }
 
@@ -995,8 +995,8 @@ pub fn reopened_dependency_dims_again_test() {
 pub fn dependency_in_another_project_dims_the_card_test() {
   let model =
     deps_board()
-    |> put_task("b", "d1", "Dep", "backlog", "")
-    |> put_task("a", "1", "Card", "backlog", ",\"dependsOn\":[\"d1\"]")
+    |> put_task("b", "d1", "Dep", "planning", "")
+    |> put_task("a", "1", "Card", "planning", ",\"dependsOn\":[\"d1\"]")
   dimmed(model, "Card", "Dep") |> should.be_true
   let done = put_task(model, "b", "d1", "Dep", "complete", "")
   string.contains(card_of(done, "Card"), "waiting") |> should.be_false
@@ -1036,8 +1036,8 @@ pub fn a_dependency_update_goes_to_the_open_detail_test() {
 pub fn tech_debt_card_is_marked_test() {
   let model =
     deps_board()
-    |> put_task("a", "1", "Search: Tech Debt", "backlog", ",\"techDebt\":true")
-    |> put_task("a", "2", "Card", "backlog", "")
+    |> put_task("a", "1", "Search: Tech Debt", "planning", ",\"techDebt\":true")
+    |> put_task("a", "2", "Card", "planning", "")
   string.contains(card_of(model, "Search: Tech Debt"), "class=\"debt\"")
   |> should.be_true
   string.contains(card_of(model, "Card"), "class=\"debt\"") |> should.be_false
@@ -1054,10 +1054,10 @@ pub fn a_card_takes_its_feature_color_test() {
       "{\"features\":[{\"id\":\"f2\",\"title\":\"Export\",\"colorSlot\":1,\"state\":\"active\"},{\"id\":\"f1\",\"title\":\"Search\",\"colorSlot\":0,\"state\":\"complete\"},{\"id\":\"f3\",\"colorSlot\":null,\"state\":\"active\"}]}",
     ))
     |> fn(r) { r.0 }
-    |> put_task("a", "1", "One", "backlog", ",\"feature\":\"f1\"")
-    |> put_task("a", "2", "Two", "backlog", ",\"feature\":\"f2\"")
-    |> put_task("a", "3", "Idle", "backlog", ",\"feature\":\"f3\"")
-    |> put_task("a", "4", "Loose", "backlog", "")
+    |> put_task("a", "1", "One", "planning", ",\"feature\":\"f1\"")
+    |> put_task("a", "2", "Two", "planning", ",\"feature\":\"f2\"")
+    |> put_task("a", "3", "Idle", "planning", ",\"feature\":\"f3\"")
+    |> put_task("a", "4", "Loose", "planning", "")
   card_of(model, "One")
   |> string.contains("style=\"--tab:" <> solace_task.feature_color(0))
   |> should.be_true
@@ -1103,7 +1103,7 @@ pub fn a_card_without_a_feature_is_gray_test() {
 
 /// The default workflow's column names show their labels in the headings and
 /// the column sections, not the ids, and a final column's card has its
-/// Archive button.
+/// Archive button. Backlog is not drawn, so Planning comes first (D-133).
 pub fn default_workflow_shows_its_column_labels_test() {
   let #(model, _) = board.init(Nil)
   let #(model, _) =
@@ -1111,7 +1111,7 @@ pub fn default_workflow_shows_its_column_labels_test() {
       model,
       board.WorkflowLoaded(
         "",
-        "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\",\"cancel\"]},{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\",\"complete\",\"to_backlog\",\"cancel\"]},{\"id\":\"assigned\",\"label\":\"Assigned\",\"actions\":[\"reassign\",\"new_agent\",\"review\",\"cancel\"]},{\"id\":\"needs_review\",\"label\":\"Needs review\",\"actions\":[\"approve\",\"complete\",\"review\",\"reassign\",\"start_over\",\"cancel\"]},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true,\"actions\":[\"to_backlog\"]}]}",
+        "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\",\"cancel\"]},{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\",\"complete\",\"to_backlog\",\"cancel\"]},{\"id\":\"assigned\",\"label\":\"Assigned\",\"actions\":[\"reassign\",\"new_agent\",\"review\",\"to_planning\",\"cancel\"]},{\"id\":\"needs_review\",\"label\":\"Needs review\",\"actions\":[\"approve\",\"complete\",\"review\",\"reassign\",\"start_over\",\"to_planning\",\"cancel\"]},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true,\"actions\":[\"to_planning\"]}]}",
       ),
     )
   let #(model, _) = board.update(model, board.CaughtUp)
@@ -1129,8 +1129,12 @@ pub fn default_workflow_shows_its_column_labels_test() {
   let #(model, _) =
     board.update(model, board.Live(card("2", "Done", "complete")))
   let rendered = board.view(model) |> element.to_string
-  rendered |> string.contains("<h2>Backlog</h2>") |> should.be_true
-  rendered |> string.contains("<h2>Planning</h2>") |> should.be_true
+  rendered |> string.contains("<h2>Backlog</h2>") |> should.be_false
+  rendered
+  |> string.contains(
+    "<div class=\"board\"><section aria-label=\"Planning\" class=\"column\"><h2>Planning</h2>",
+  )
+  |> should.be_true
   rendered |> string.contains("<h2>Assigned</h2>") |> should.be_true
   rendered |> string.contains("<h2>Needs review</h2>") |> should.be_true
   rendered |> string.contains("<h2>Complete</h2>") |> should.be_true
@@ -1438,12 +1442,12 @@ pub fn only_active_features_show_their_tasks_test() {
       "{\"features\":[{\"id\":\"f1\",\"state\":\"proposed\"},{\"id\":\"f2\",\"state\":\"upcoming\"},{\"id\":\"f3\",\"state\":\"canceled\"},{\"id\":\"f4\",\"state\":\"complete\"}]}",
     ))
     |> fn(r) { r.0 }
-    |> put_task("a", "1", "Idea", "backlog", ",\"feature\":\"f1\"")
-    |> put_task("a", "2", "Queued", "backlog", ",\"feature\":\"f2\"")
-    |> put_task("a", "3", "Dropped", "backlog", ",\"feature\":\"f3\"")
-    |> put_task("a", "4", "Shipped", "backlog", ",\"feature\":\"f4\"")
-    |> put_task("a", "5", "Loose", "backlog", "")
-    |> put_task("a", "6", "Unknown", "backlog", ",\"feature\":\"f9\"")
+    |> put_task("a", "1", "Idea", "planning", ",\"feature\":\"f1\"")
+    |> put_task("a", "2", "Queued", "planning", ",\"feature\":\"f2\"")
+    |> put_task("a", "3", "Dropped", "complete", ",\"feature\":\"f3\"")
+    |> put_task("a", "4", "Shipped", "planning", ",\"feature\":\"f4\"")
+    |> put_task("a", "5", "Loose", "planning", "")
+    |> put_task("a", "6", "Unknown", "planning", ",\"feature\":\"f9\"")
   shown(model, "Idea") |> should.be_false
   shown(model, "Queued") |> should.be_false
   shown(model, "Dropped") |> should.be_false
@@ -1464,4 +1468,69 @@ pub fn page_uses_the_shared_control_styles_test() {
   let html = board.view(deps_board()) |> element.to_string
   string.contains(html, "option,optgroup{background:var(--paper)")
   |> should.be_true
+}
+
+/// D-133: Backlog means not active, so the board shows none of its tasks,
+/// with or without a feature, and doesn't count them; the same task in
+/// Planning shows.
+pub fn backlog_tasks_are_off_the_board_test() {
+  let shown = fn(model, title) {
+    string.contains(element.to_string(board.view(model)), title)
+  }
+  let model =
+    deps_board()
+    |> board.update(board.Live(
+      "{\"features\":[{\"id\":\"f1\",\"state\":\"active\"}]}",
+    ))
+    |> fn(r) { r.0 }
+    |> put_task("a", "1", "Loose", "backlog", "")
+    |> put_task("a", "2", "Featured", "backlog", ",\"feature\":\"f1\"")
+  shown(model, "Loose") |> should.be_false
+  shown(model, "Featured") |> should.be_false
+  shown(model, "<h2>Backlog</h2>") |> should.be_false
+  // Neither lane counts them.
+  element.to_string(board.view(model))
+  |> string.split("<small>0 tasks</small>")
+  |> list.length
+  |> should.equal(3)
+  let model = put_task(model, "a", "1", "Loose", "planning", "")
+  shown(model, "Loose") |> should.be_true
+  shown(model, "Featured") |> should.be_false
+}
+
+/// D-129: the tasks in no project are the Strategy page's. Their list, sent
+/// at the end of every new stream without a `project`, doesn't replace the
+/// root lane's tasks, and a single one isn't added to it, replayed or live.
+pub fn no_project_messages_leave_the_root_lane_test() {
+  let titles = fn(model: board.Model) {
+    let assert [root, _] = model.lanes
+    list.map(root.tasks, fn(t) { t.title })
+  }
+  let loose =
+    "{\"task\":{\"id\":\"9\",\"title\":\"Loose\",\"body\":\"\",\"column\":\"planning\",\"rank\":1},\"noProject\":true}"
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\".\",\"label\":\"root\",\"name\":\"root\",\"base\":\"\"},{\"dir\":\"web\",\"label\":\"web\",\"name\":\"web\",\"base\":\"/p/web\"}],\"found\":[]}",
+      ),
+    )
+  let #(model, _) = board.update(model, board.CaughtUp)
+  let model = put_task(model, ".", "1", "Root", "planning", "")
+  // Live.
+  let #(model, _) =
+    board.update(model, board.Live("{\"tasks\":[],\"noProject\":true}"))
+  titles(model) |> should.equal(["Root"])
+  let #(model, _) = board.update(model, board.Live(loose))
+  titles(model) |> should.equal(["Root"])
+  model.replay |> should.equal([])
+  // Replayed when a new stream catches up.
+  let model = board.Model(..model, caught_up: False)
+  let #(model, _) =
+    board.update(model, board.Live("{\"tasks\":[],\"noProject\":true}"))
+  let #(model, _) = board.update(model, board.Live(loose))
+  let #(model, _) = board.update(model, board.CaughtUp)
+  titles(model) |> should.equal(["Root"])
+  model.replay |> should.equal([])
 }

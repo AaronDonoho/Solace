@@ -125,15 +125,50 @@ fn internal(root: &Path, name: &str) -> bool {
         c.as_os_str() == ".solace" || dir.join(".solace/store.db").exists()
     })
 }
-fn gitignored(root: &Path, name: &str) -> bool {
-    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
-    let mut parent = root.to_path_buf();
-    builder.add(parent.join(".gitignore"));
-    for c in Path::new(name).parent().unwrap_or(Path::new("")).components() {
-        parent.push(c);
-        builder.add(parent.join(".gitignore"));
+/// The `.gitignore` files of a project, each read once and matched from its
+/// own folder, as git does: a walk keeps one and asks it for every entry.
+pub(crate) struct Ignores {
+    root: PathBuf,
+    folders: HashMap<PathBuf, Option<ignore::gitignore::Gitignore>>,
+}
+impl Ignores {
+    pub(crate) fn new(root: &Path) -> Ignores {
+        Ignores { root: root.to_path_buf(), folders: HashMap::new() }
     }
-    builder.build().is_ok_and(|g| g.matched_path_or_any_parents(root.join(name), root.join(name).is_dir()).is_ignore())
+    /// Whether `name`, relative to the root, is ignored. As in git, a path in
+    /// an ignored folder stays ignored: no `!pattern` below re-includes it.
+    pub(crate) fn ignored(&mut self, name: &str) -> bool {
+        let parts: Vec<&str> = name.split('/').collect();
+        (1..=parts.len()).any(|k| self.decides(&parts[..k].join("/")))
+    }
+    /// Whether `name` itself is ignored: the deepest `.gitignore` that names
+    /// it, or a folder above it, decides.
+    fn decides(&mut self, name: &str) -> bool {
+        let path = self.root.join(name);
+        let is_dir = path.is_dir();
+        let mut folders = vec![self.root.clone()];
+        for c in Path::new(name).parent().unwrap_or(Path::new("")).components() {
+            let next = folders.last().unwrap().join(c);
+            folders.push(next);
+        }
+        for dir in folders.into_iter().rev() {
+            let g = self.folders.entry(dir.clone()).or_insert_with(|| {
+                let mut builder = ignore::gitignore::GitignoreBuilder::new(&dir);
+                builder.add(dir.join(".gitignore"));
+                builder.build().ok().filter(|g| !g.is_empty())
+            });
+            if let Some(g) = g {
+                let m = g.matched_path_or_any_parents(&path, is_dir);
+                if m.is_ignore() {
+                    return true;
+                }
+                if m.is_whitelist() {
+                    return false;
+                }
+            }
+        }
+        false
+    }
 }
 /// A `.gitignore` anywhere in a project: what it ignores is unwatched, so only a human changes it.
 pub fn is_gitignore(name: &str) -> bool {
@@ -144,12 +179,12 @@ fn dependencies(name: &str) -> bool {
     name.split('/').any(|c| c == "node_modules")
 }
 pub fn tier(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -> String {
-    tier_and_bytes(root, v, name, proposed).0
+    tier_and_bytes(root, v, &mut Ignores::new(root), name, proposed).0
 }
 
 /// `tier`, with the file's bytes when they were read to decide the tier, so a
 /// caller that wants a size reads the file once (D-119 point 4).
-fn tier_and_bytes(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -> (String, Option<Vec<u8>>) {
+fn tier_and_bytes(root: &Path, v: &toml::Value, ignores: &mut Ignores, name: &str, proposed: Option<&[u8]>) -> (String, Option<Vec<u8>>) {
     // A project of plain files holds no symbols (D-60).
     if root.join("gleam.toml").exists() && (name.starts_with("src/") || name.starts_with("test/")) && name.ends_with(".gleam") {
         return ("graph".into(), None);
@@ -169,7 +204,7 @@ fn tier_and_bytes(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u
     if name == ".git" || name.starts_with(".git/") || name == "build" || name.starts_with("build/") || name == "manifest.toml" {
         return ("unwatched".into(), None);
     }
-    if gitignored(root, name) || patterns(v, "unwatched", name) {
+    if ignores.ignored(name) || patterns(v, "unwatched", name) {
         return ("unwatched".into(), None);
     }
     let bytes = proposed.map(Vec::from).unwrap_or_else(|| fs::read(root.join(name)).unwrap_or_default());
@@ -693,7 +728,13 @@ fn journal(root: &Path, name: &str, before: &Option<Vec<u8>>) -> Result<(PathBuf
     fs::create_dir_all(root.join(".solace/pending"))?;
     let journal = root.join(".solace/pending").join(format!("{}.json", sha256(name.as_bytes())));
     let record = match board::context() {
-        Some((tid, rid)) => json!({"task":tid,"run":rid,"path":name,"bytes":before}),
+        Some((tid, rid)) => {
+            let mut r = json!({"task":tid,"run":rid,"path":name,"bytes":before});
+            if before.is_none() {
+                r["kept"] = board::kept_on_disk(root, name)["kept"].clone();
+            }
+            r
+        }
         None => json!({"path":name,"bytes":before}),
     };
     let wrote = record["task"].is_null() || !same_run(&journal, &record["run"]);
@@ -912,22 +953,26 @@ fn patch_with_draft(store: &Store, v: &toml::Value, id: Option<&str>, raw: &str,
     }
 }
 fn tree_rows(root: &Path, v: &toml::Value, dir: &Path, out: &mut Vec<(String, String, Option<String>)>) -> Result<(), Failure> {
+    rows_in(root, v, &mut Ignores::new(root), dir, out)
+}
+/// `tree_rows`, with one `Ignores` for the whole walk.
+fn rows_in(root: &Path, v: &toml::Value, ignores: &mut Ignores, dir: &Path, out: &mut Vec<(String, String, Option<String>)>) -> Result<(), Failure> {
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let p = e.path();
         let name = p.strip_prefix(root).unwrap().to_string_lossy().to_string();
-        let (t, bytes) = tier_and_bytes(root, v, &name, None);
+        let (t, bytes) = tier_and_bytes(root, v, ignores, &name, None);
         if e.file_type()?.is_symlink() {
             out.push((name, "unwatched (symlink)".into(), None));
         } else if e.file_type()?.is_dir() {
             if t == "internal" {
                 out.push((format!("{name}/"), "internal".into(), None));
-            } else if name == "build" || name == ".git" || dependencies(&name) || patterns(v, "unwatched", &name) || gitignored(root, &name) {
+            } else if name == "build" || name == ".git" || dependencies(&name) || patterns(v, "unwatched", &name) || ignores.ignored(&name) {
                 out.push((format!("{name}/"), format!("unwatched; {} files", count_files(&p)?), None));
             } else {
                 let mut children = vec![];
-                tree_rows(root, v, &p, &mut children)?;
+                rows_in(root, v, ignores, &p, &mut children)?;
                 if children.iter().any(|(_, tier, _): &(String, String, Option<String>)| tier == "graph" || tier == "watched" || tier == "protected") {
                     out.push((format!("{name}/"), String::new(), None));
                     out.extend(children);
@@ -1143,7 +1188,11 @@ fn undo_record(root: &Path, name: &str, bytes: Option<Vec<u8>>) -> Result<Option
     if same_run(&record, &json!(rid)) {
         return Ok(None);
     }
-    write_atomic(&record, json!({"task":tid,"run":rid,"path":name,"bytes":bytes}).to_string())?;
+    let mut r = json!({"task":tid,"run":rid,"path":name,"bytes":bytes});
+    if bytes.is_none() {
+        r["kept"] = board::kept_on_disk(root, name)["kept"].clone();
+    }
+    write_atomic(&record, r.to_string())?;
     Ok(Some(record))
 }
 
@@ -1457,7 +1506,7 @@ pub fn dispatch(
                 }
                 let name = file_name(Path::new(name));
                 let p = reachable(root, &name)?;
-                let (t, bytes) = tier_and_bytes(root, v, &name, None);
+                let (t, bytes) = tier_and_bytes(root, v, &mut Ignores::new(root), &name, None);
                 if a[0] != "files" && t == "graph" {
                     let module = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/")).unwrap().trim_end_matches(".gleam");
                     let fix = if p.exists() {
@@ -1577,7 +1626,11 @@ pub fn dispatch(
                     .into_iter()
                     .map(|name| json!({"path": name, "bytes": fs::read(root.join(&name)).ok()}))
                     .collect();
-                write_atomic(&root.join(".solace/pending").join(format!("run-{rid}.json")), json!({"task":tid,"run":rid,"files":files}).to_string())?;
+                let folders: Vec<String> = board::existing_folders(root).into_iter().collect();
+                write_atomic(
+                    &root.join(".solace/pending").join(format!("run-{rid}.json")),
+                    json!({"task":tid,"run":rid,"files":files,"folders":folders}).to_string(),
+                )?;
             }
             store.materialize(&store.index()?)?;
             let out = command(root, &argv, timeout, budget, a[0] != "format")?;
@@ -1871,6 +1924,30 @@ mod tests {
     }
     fn call(s: &Store, v: &toml::Value, args: &[&str], text: &str, old: Option<&str>) -> Out {
         dispatch(s, v, args, &mut || Ok(text.into()), old, 1000).unwrap()
+    }
+    /// A folder's `.gitignore` is matched from that folder: `/gen` in
+    /// `src/.gitignore` ignores `src/gen`, not a `gen` at the root.
+    #[test]
+    fn a_nested_gitignore_is_anchored_at_its_folder() {
+        let (p, v) = fixture();
+        fs::create_dir_all(p.root.join("src/gen")).unwrap();
+        fs::create_dir_all(p.root.join("gen")).unwrap();
+        fs::write(p.root.join("src/.gitignore"), "/gen\n").unwrap();
+        fs::write(p.root.join("src/gen/x.txt"), "x\n").unwrap();
+        fs::write(p.root.join("gen/x.txt"), "x\n").unwrap();
+        assert_eq!(tier(&p.root, &v, "src/gen/x.txt", None), "unwatched");
+        assert_eq!(tier(&p.root, &v, "gen/x.txt", None), "watched");
+    }
+    /// A `!pattern` in an ignored folder's `.gitignore` doesn't re-include its
+    /// files: git never reads it.
+    #[test]
+    fn an_ignored_folder_stays_ignored_whatever_its_gitignore_says() {
+        let (p, v) = fixture();
+        fs::create_dir_all(p.root.join("out")).unwrap();
+        fs::write(p.root.join(".gitignore"), "out/\n").unwrap();
+        fs::write(p.root.join("out/.gitignore"), "!keep.txt\n").unwrap();
+        fs::write(p.root.join("out/keep.txt"), "x\n").unwrap();
+        assert_eq!(tier(&p.root, &v, "out/keep.txt", None), "unwatched");
     }
     /// A path from the Solace root reads another project's file; a write to it
     /// is refused with the `--project` form, and E6002 names the base.
@@ -2761,6 +2838,40 @@ running your program.
             .unwrap();
         assert_eq!(entities, ["file:priv/a", "file:priv/created"]);
         assert_eq!(fs::read(board::before_file(&s.root, "t1", "priv/created").with_extension("absent")).unwrap(), b"");
+    }
+    /// D-136 after a crash: a recovered record that names the folders before
+    /// stores where undo stops, not `null`; an old record still stores `null`.
+    #[test]
+    fn recovered_records_keep_the_folders_that_were_there() {
+        let (s, _) = fixture();
+        fs::create_dir_all(s.root.join("priv/empty")).unwrap();
+        fs::create_dir_all(s.root.join(".solace/pending")).unwrap();
+        let manifest = fs::read(s.root.join("gleam.toml")).unwrap();
+        let files = json!([{"path":"gleam.toml","bytes":manifest}]);
+        fs::write(s.root.join(".solace/pending/run-r1.json"), json!({"task":"t1","run":"r1","files":files,"folders":["priv","priv/empty"]}).to_string()).unwrap();
+        fs::write(s.root.join(".solace/pending/x.json"), json!({"task":"t2","run":"r2","path":"priv/one/b","bytes":null,"kept":"priv"}).to_string()).unwrap();
+        fs::write(s.root.join(".solace/pending/y.json"), json!({"task":"t3","run":"r3","path":"priv/old/c","bytes":null}).to_string()).unwrap();
+        fs::create_dir_all(s.root.join("priv/empty/new")).unwrap();
+        fs::write(s.root.join("priv/empty/new/a"), "new").unwrap();
+        fs::create_dir_all(s.root.join("priv/one")).unwrap();
+        fs::write(s.root.join("priv/one/b"), "new").unwrap();
+        fs::create_dir_all(s.root.join("priv/old")).unwrap();
+        fs::write(s.root.join("priv/old/c"), "new").unwrap();
+        recover(&s.root, &s, &[board::lock(&s.root).unwrap()]).unwrap();
+        let before = |t: &str, e: &str| -> String {
+            s.db.query_row("SELECT data FROM board_before WHERE task=?1 AND entity=?2", params![t, e], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(before("t1", "file:priv/empty/new/a"), json!({"kept":"priv/empty"}).to_string());
+        assert_eq!(before("t2", "file:priv/one/b"), json!({"kept":"priv"}).to_string());
+        assert_eq!(before("t3", "file:priv/old/c"), "null");
+    }
+    /// An undo record for a file that doesn't exist yet names the nearest folder that does.
+    #[test]
+    fn kept_on_disk_names_the_nearest_existing_folder() {
+        let (s, _) = fixture();
+        fs::create_dir_all(s.root.join("priv/empty")).unwrap();
+        assert_eq!(board::kept_on_disk(&s.root, "priv/empty/a/b/c"), json!({"kept":"priv/empty"}));
+        assert_eq!(board::kept_on_disk(&s.root, "none/x"), json!({"kept":""}));
     }
     /// A second change to a file keeps only its own run's record, so a refused
     /// write never deletes the earlier change's record.

@@ -256,7 +256,7 @@ pub fn workflow(settings: &toml::Value) -> Result<Value, Failure> {
         if !ids.insert(id.to_string()) {
             return Err(invalid("duplicate column"));
         }
-        // A final column may list actions too (D-108), such as cancelled's way back to the backlog.
+        // A final column may list actions too (D-108), such as cancelled's way back to planning (D-133).
         let a = c.get("actions").and_then(|x| x.as_array()).cloned().unwrap_or_default();
         for name in a {
             let n = name.as_str().ok_or_else(|| invalid("action name"))?;
@@ -320,7 +320,15 @@ fn allowed(w: &Value, t: &Value) -> Vec<String> {
     if c["final"] != true {
         out.extend(["pause", "resume", "discuss", "stop", "end_discussion"].map(String::from));
     }
+    // A task with a feature goes back to the backlog only through its feature (D-132).
+    out.retain(|a| !held_by_feature(w, t, a));
     out
+}
+/// Whether the task's column offers action `name` but the task's feature
+/// holds it back: a task with a feature goes back to the backlog only through
+/// its feature (D-132 point 1).
+fn held_by_feature(w: &Value, t: &Value, name: &str) -> bool {
+    name == "to_backlog" && t["feature"].is_string() && column(w, t)["actions"].as_array().is_some_and(|a| a.iter().any(|x| x == name))
 }
 /// The task's discussion run that hasn't ended, if one is going.
 fn discussion(t: &Value) -> Option<String> {
@@ -411,6 +419,25 @@ pub(super) fn end_run(r: &mut Value, outcome: &str) {
     r["state"] = json!("ended");
     r["ended"] = json!(now());
     r["outcome"] = json!(outcome);
+    // The model the agent's start event names, when it names one: an alias
+    // shows the model the run used, in the run and in its label.
+    let log = PathBuf::from(r["log"].as_str().unwrap_or(""));
+    if let Some(used) = used_model(&log) {
+        r["used"] = json!(used);
+        agents::record_used(r["model"].as_str().unwrap_or(""), &used);
+    }
+}
+
+/// The model a run's log start event names, when it names one: Codex in its
+/// `thread.started`, Claude Code in its `system`/`init` event.
+fn used_model(log: &Path) -> Option<String> {
+    fs::read_to_string(log).ok()?.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|e| {
+        if e["type"] == "thread.started" || (e["type"] == "system" && e["subtype"] == "init") {
+            e["model"].as_str().map(String::from)
+        } else {
+            None
+        }
+    })
 }
 fn end_runs(t: &mut Value, outcome: &str) {
     for r in t["runs"].as_array_mut().unwrap() {
@@ -420,11 +447,19 @@ fn end_runs(t: &mut Value, outcome: &str) {
     }
     t["paused_from"] = Value::Null;
 }
-pub fn system() -> Result<Value, Failure> {
-    let p = env::var_os("SOLACE_CONFIG")
+/// The system settings file: `SOLACE_CONFIG`, else `~/.config/solace/config.toml`.
+fn config_path() -> PathBuf {
+    env::var_os("SOLACE_CONFIG")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".config/solace/config.toml"));
-    parse_system(&if p.exists() { fs::read_to_string(p)? } else { String::new() })
+        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".config/solace/config.toml"))
+}
+pub fn system() -> Result<Value, Failure> {
+    let p = config_path();
+    let mut v = parse_system(&if p.exists() { fs::read_to_string(p)? } else { String::new() })?;
+    // Each agent's discovered models merge in: presets, then discovery, then
+    // the human's config, which wins for the same id.
+    v["models"] = json!(agents::merge(&v["models"]));
+    Ok(v)
 }
 fn parse_system(text: &str) -> Result<Value, Failure> {
     let v: toml::Value = text.parse().map_err(|e| Failure(format!("E6020 system settings: {e}"), 1))?;
@@ -444,7 +479,9 @@ fn parse_system(text: &str) -> Result<Value, Failure> {
         let presets: toml::Value = include_str!("default-models.toml").parse().unwrap();
         serde_json::to_value(presets).unwrap()["models"].as_array().unwrap().clone()
     };
-    for m in v.get("models").map(|m| m.as_array().cloned().ok_or_else(invalid)).transpose()?.unwrap_or_default() {
+    for mut m in v.get("models").map(|m| m.as_array().cloned().ok_or_else(invalid)).transpose()?.unwrap_or_default() {
+        // A configured model keeps its entry when a discovery names its id.
+        m["configured"] = json!(true);
         match models.iter().position(|x| x["id"] == m["id"]) {
             Some(i) => models[i] = m,
             None => models.push(m),
@@ -536,30 +573,10 @@ fn on_path(program: &str) -> bool {
     env::var_os("PATH").is_some_and(|p| env::split_paths(&p).any(|d| d.join(program).is_file()))
 }
 
-/// Why a model can't be started right now, if it can't. Checks only what is
-/// local (the program, its sign-in, the endpoint's key variable), so it costs
-/// nothing; an endpoint that is down shows up as a failed run.
-pub fn unavailable(m: &Value) -> Option<String> {
-    let home = PathBuf::from(env::var_os("HOME").unwrap_or_default());
-    if let Some(argv) = m["run"].as_array() {
-        let program = argv[0].as_str().unwrap_or("");
-        return (!on_path(program)).then(|| format!("{program} is not installed"));
-    }
-    let agent = m["agent"].as_str().unwrap_or("");
-    if !on_path(agent) {
-        return Some(format!("{agent} is not installed (not on PATH)"));
-    }
-    if let Some(e) = m.get("endpoint") {
-        let key = e["key_env"].as_str()?;
-        return env::var(key).is_err().then(|| format!("the endpoint's key variable {key} is not set"));
-    }
-    let signed_in = match agent {
-        "codex" => home.join(".codex/auth.json").exists() || env::var("OPENAI_API_KEY").is_ok(),
-        // Claude Code keeps its sign-in in the macOS keychain, which isn't checked.
-        _ => cfg!(target_os = "macos") || home.join(".claude/.credentials.json").exists() || env::var("ANTHROPIC_API_KEY").is_ok(),
-    };
-    (!signed_in).then(|| format!("{agent} is not signed in"))
-}
+// Whether a model can start: its agent kind's checks and usage-limit marks.
+// An endpoint that is down shows up as a failed run.
+mod agents;
+pub use agents::unavailable;
 fn model(config: &Value, name: &str) -> Result<Value, Failure> {
     config["models"]
         .as_array()
@@ -576,7 +593,7 @@ pub(super) fn chosen_model(config: &Value, body: &Value) -> Result<Value, Failur
     if let Some(e) = body.get("effort").filter(|e| !e.is_null()) {
         let e = e
             .as_str()
-            .filter(|e| efforts(&m).contains(e))
+            .filter(|e| efforts(&m).iter().any(|x| x == e))
             .ok_or_else(|| Failure(format!("E7001 effort not offered by {id}; offered: {}", efforts(&m).join(", ")), 1))?;
         m["effort"] = json!(e);
     }
@@ -585,13 +602,19 @@ pub(super) fn chosen_model(config: &Value, body: &Value) -> Result<Value, Failur
     }
     Ok(m)
 }
-/// Efforts an action may choose for a model. Custom runners take none.
-fn efforts(m: &Value) -> &'static [&'static str] {
-    match (m["run"].is_null(), m["agent"].as_str()) {
+/// Efforts an action may choose for a model. Custom runners take none. A
+/// discovered model carries the efforts its agent says it supports; the fixed
+/// lists stand behind the presets and the aliases.
+fn efforts(m: &Value) -> Vec<String> {
+    if let Some(e) = m["efforts"].as_array() {
+        return e.iter().filter_map(|e| e.as_str().map(String::from)).collect();
+    }
+    let fixed: &[&str] = match (m["run"].is_null(), m["agent"].as_str()) {
         (true, Some("codex")) => &["low", "medium", "high", "xhigh"],
         (true, Some("claude")) => &["low", "medium", "high", "xhigh", "max"],
         _ => &[],
-    }
+    };
+    fixed.iter().map(|e| e.to_string()).collect()
 }
 
 // Snapshot live rows only. Before-state rows never enter the semantic index.
@@ -643,9 +666,59 @@ pub fn new_task(title: &str, body: &str, column: &Value, rank: f64) -> Value {
 /// Records what a command changed in `s` on the task stored in `home`. The rows
 /// commit inside the command's outer transaction (D-77 point 7); the task's
 /// change list comes from the committed rows after the release (D-77 point 4).
-pub fn record(s: &Store, tid: &str, rid: &str, before: &Value, after: &Value) -> Result<(), Failure> {
-    touch(s, tid, rid, before, after)?;
+/// `folders` are the project's folders before the command (`existing_folders`);
+/// with none, as for an outside edit, undo removes every folder left empty.
+pub fn record(s: &Store, tid: &str, rid: &str, before: &Value, after: &Value, folders: Option<&HashSet<String>>) -> Result<(), Failure> {
+    touch(s, tid, rid, before, after, folders)?;
     Ok(())
+}
+/// The project's folders, relative to `root`, as a command finds them before
+/// it runs, skipping what `snapshot` skips: undo removes only the folders a
+/// task made (D-136). A folder the project ignores (`target/`) is listed but
+/// not walked: undo stops at it, and its contents can be large.
+pub fn existing_folders(root: &Path) -> HashSet<String> {
+    fn walk(root: &Path, ignores: &mut lockdown::Ignores, dir: &Path, out: &mut HashSet<String>) {
+        for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let p = e.path();
+            let name = file_name(p.strip_prefix(root).unwrap());
+            if !e.file_type().is_ok_and(|t| t.is_dir()) || [".solace", ".git", "build"].contains(&name.as_str()) || e.file_name() == "node_modules" {
+                continue;
+            }
+            if !ignores.ignored(&name) {
+                walk(root, ignores, &p, out);
+            }
+            out.insert(name);
+        }
+    }
+    let mut out = HashSet::new();
+    walk(root, &mut lockdown::Ignores::new(root), root, &mut out);
+    out
+}
+/// The before-state of file `name` when it didn't exist (D-136): the nearest
+/// folder above it that did (`""`, the project's own), where undo stops
+/// removing the folders it leaves empty.
+pub fn absent(name: &str, folders: &HashSet<String>) -> Value {
+    let mut dir = name;
+    while let Some((up, _)) = dir.rsplit_once('/') {
+        if folders.contains(up) {
+            return json!({ "kept": up });
+        }
+        dir = up;
+    }
+    json!({ "kept": "" })
+}
+/// `absent`, read from the disk just before file `name` is written: the
+/// nearest folder above it that exists now. An undo record taken before the
+/// write carries it, so recovery after a crash keeps D-136.
+pub fn kept_on_disk(root: &Path, name: &str) -> Value {
+    let mut dir = name;
+    while let Some((up, _)) = dir.rsplit_once('/') {
+        if root.join(up).is_dir() {
+            return json!({ "kept": up });
+        }
+        dir = up;
+    }
+    json!({ "kept": "" })
 }
 /// The task's changes, computed from each scope project's store (D-77 point 4):
 /// `board_touches` rows by task id, in insertion order, one entry per entity and
@@ -685,6 +758,10 @@ pub fn adopt_pending(s: &Store, record: &Value) -> Result<(), Failure> {
         return Ok(());
     }
     let listed: HashSet<String> = files.iter().map(|(p, _)| p.clone()).collect();
+    // A record taken before the write says where undo stops removing folders
+    // (D-136): a file's own `kept`, or a run's folders; an old record has neither.
+    let folders: Option<HashSet<String>> =
+        record["folders"].as_array().map(|a| a.iter().filter_map(|f| f.as_str().map(String::from)).collect());
     if record.get("files").is_some() {
         let v = lockdown::settings(&s.root)?;
         for name in lockdown::watched_paths(&s.root, &v)? {
@@ -713,14 +790,19 @@ pub fn adopt_pending(s: &Store, record: &Value) -> Result<(), Failure> {
                 None => fs::write(file.with_extension("absent"), b"")?,
             }
         }
-        s.db.execute("INSERT OR IGNORE INTO board_before VALUES (?1,?2,?3)", params![tid, key, bytes.to_string()])?;
+        let stored = match (&bytes, &folders) {
+            (Value::Null, _) if record["kept"].is_string() => json!({ "kept": record["kept"] }),
+            (Value::Null, Some(f)) => absent(&name, f),
+            _ => bytes.clone(),
+        };
+        s.db.execute("INSERT OR IGNORE INTO board_before VALUES (?1,?2,?3)", params![tid, key, stored.to_string()])?;
         s.db.execute("INSERT INTO board_touches(task,entity,run,name) VALUES (?1,?2,?3,?4)", params![tid, key, rid, key])?;
     }
     Ok(())
 }
 /// Records in `s` how to undo what a command changed there for task `tid`,
 /// and returns the task's change entries for it.
-pub fn touch(s: &Store, tid: &str, rid: &str, before: &Value, after: &Value) -> Result<Vec<Value>, Failure> {
+pub fn touch(s: &Store, tid: &str, rid: &str, before: &Value, after: &Value, folders: Option<&HashSet<String>>) -> Result<Vec<Value>, Failure> {
     let mut out = vec![];
     let here = scope::dir(&scope::top(&s.root), &s.root);
     let keys: HashSet<_> = before.as_object().unwrap().keys().chain(after.as_object().unwrap().keys()).collect();
@@ -748,7 +830,15 @@ pub fn touch(s: &Store, tid: &str, rid: &str, before: &Value, after: &Value) -> 
         } else {
             key.clone()
         };
-        s.db.execute("INSERT OR IGNORE INTO board_before VALUES (?1,?2,?3)", params![tid, key, data.to_string()])?;
+        let stored = match (key.strip_prefix("file:"), folders) {
+            (Some(name), Some(f)) if data.is_null() => absent(name, f),
+            // A module the command added: its file's folders count too (D-136).
+            (None, Some(f)) if data.is_null() && key.starts_with("module:") && after[key].is_array() => {
+                absent(&outside::file_of(after[key][1].as_str().unwrap_or(""), after[key][0].as_str().unwrap_or("")), f)
+            }
+            _ => data.clone(),
+        };
+        s.db.execute("INSERT OR IGNORE INTO board_before VALUES (?1,?2,?3)", params![tid, key, stored.to_string()])?;
         s.db.execute("INSERT INTO board_touches(task,entity,run,name) VALUES (?1,?2,?3,?4)", params![tid, key, rid, name])?;
         out.push(json!({"entity":key,"name":name,"run":rid,"project":here}));
     }
@@ -1067,6 +1157,7 @@ pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
     Ok(v)
 }
 pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failure> {
+    let mut kept = HashMap::new();
     for (key, v) in states {
         if let Some(id) = key.strip_prefix("symbol:") {
             if v.is_null() {
@@ -1087,7 +1178,14 @@ pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failu
                 )?;
             }
         } else if let Some(name) = key.strip_prefix("module:") {
-            if v.is_null() {
+            if !v.is_array() {
+                // Where its file's folders stop going, when recorded (D-136).
+                if let Some(k) = v["kept"].as_str() {
+                    let dir: Option<String> = s.db.query_row("SELECT dir FROM modules WHERE path=?", [name], |r| r.get(0)).ok();
+                    if let Some(dir) = dir {
+                        kept.insert(outside::file_of(&dir, name), k.to_string());
+                    }
+                }
                 // Its file goes in the `materialize` below, which keeps one edited outside Solace (D-58).
                 s.db.execute("DELETE FROM modules WHERE path=?", [name])?;
             } else {
@@ -1100,12 +1198,16 @@ pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failu
                 fs::write(p, json_bytes(bytes))?;
             } else if p.exists() {
                 fs::remove_file(&p)?;
-                // with the folders that leaves empty, such as those a carried file made (D-103)
-                outside::remove_empty_dirs(&s.root.join(name.split('/').next().unwrap_or_default()), p.parent());
+                // with the folders that leaves empty, such as those a carried file made (D-103),
+                // up to the top folder or the one recorded as there before (D-136)
+                let top = name.split('/').next().unwrap_or_default();
+                let stop = v["kept"].as_str().filter(|k| k.len() > top.len()).unwrap_or(top);
+                outside::remove_empty_dirs(&s.root.join(stop), p.parent());
             }
         }
     }
-    s.materialize(&s.index()?)?;
+    let ix = s.index()?;
+    s.materialize_to(&ix, &s.root, &kept)?;
     Ok(())
 }
 /// Undoes a task's changes in every project of its scope (D-61): each is
@@ -1113,8 +1215,7 @@ pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failu
 fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap().to_string();
     let projects = scope_stores(s, t)?;
-    // An extract a stopped run left between its projects' commits is finished or
-    // rolled back first; one changed on both sides since waits for a human.
+    // An extract a stopped run left between its projects' commits is undone first (D-135).
     extract::ahead::recover(&projects.iter().map(|(_, st)| st.root.clone()).collect::<Vec<_>>())?;
     // Under the locks, what a stopped run left half-written becomes the task's own rows first.
     for (_, st) in &projects {
@@ -1152,10 +1253,12 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
     let plans: Vec<_> = plans.into_iter().filter(|p| !p.2.is_empty()).collect();
     for (dir, st, states) in &plans {
         let current = snapshot(st)?;
+        let here = existing_folders(&st.root);
         let mut undo = vec![];
         for (key, _) in states {
             let v = if let Some(name) = key.strip_prefix("file:") {
-                json!(fs::read(lockdown::path(&st.root, name)?).ok())
+                // a rollback keeps the folders there now (D-136)
+                fs::read(lockdown::path(&st.root, name)?).map_or_else(|_| absent(name, &here), |b| json!(b))
             } else {
                 current[key].clone()
             };
@@ -1264,9 +1367,10 @@ fn last_review(t: &Value) -> Option<(String, String)> {
 /// What completing task `t` files as tech debt (D-112): its feature's open Tech
 /// Debt task (`techDebt: true`, not in a final column) with one `solace` note per
 /// finding of the last review's `### Tech debt`, naming the task they came from.
-/// With no open one, a new one is made in the first column of `t`'s home, with
-/// its scope, titled `<feature title>: Tech Debt`. None when the task has no
-/// feature or the review lists no tech debt. Nothing is written here.
+/// With no open one, a new one is made in Planning of `t`'s home (its first
+/// column if it has none, D-132), with its scope, titled `<feature title>: Tech
+/// Debt`. None when the task has no feature or the review lists no tech debt.
+/// Nothing is written here.
 pub(super) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize)>, Failure> {
     let Some(fid) = t["feature"].as_str() else { return Ok(None) };
     let Some((rid, text)) = last_review(t) else { return Ok(None) };
@@ -1281,7 +1385,9 @@ pub(super) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize)>,
             let home = scope::path(top, t["home"].as_str().unwrap_or("."));
             let rank = tasks(&home)?.iter().filter_map(|x| x["rank"].as_f64()).fold(0., f64::max) + 1.;
             let title = format!("{}: Tech Debt", feature["title"].as_str().unwrap_or("").trim());
-            let mut d = new_task(&title, TECH_DEBT_BODY, &flow(&home)?["columns"][0]["id"], rank);
+            let w = flow(&home)?;
+            let first = if has_column(&w, PLANNING) { json!(PLANNING) } else { w["columns"][0]["id"].clone() };
+            let mut d = new_task(&title, TECH_DEBT_BODY, &first, rank);
             d["techDebt"] = json!(true);
             d["feature"] = json!(fid);
             d["milestone"] = feature["milestone"].clone();
@@ -1376,8 +1482,15 @@ fn continue_answered(t: &mut Value) {
 fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(String, Value)>, Failure> {
     let name = body["action"].as_str().unwrap_or("");
     let allowed = allowed(w, t);
+    if held_by_feature(w, t, name) {
+        return err("E7001", "a task with a feature goes back to the backlog only through its feature");
+    }
     if !allowed.iter().any(|x| x == name) {
         return err("E7001", format!("not allowed; allowed: {}", allowed.join(", ")));
+    }
+    // Back to planning leaves no agent behind: the human stops it first (D-133).
+    if name == "to_planning" && active(t) {
+        return err("E7001", "a run is open on this task; stop it before bringing the task back to planning");
     }
     if name == "pause" {
         if t["paused_from"].is_null() {
@@ -1448,11 +1561,11 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     if let Some(m) = selected.as_mut() {
         // A chosen effort must be offered; the task's remembered one applies only when still offered.
         if let Some(e) = body.get("effort").filter(|e| !e.is_null()) {
-            let e = e.as_str().filter(|e| efforts(m).contains(e)).ok_or_else(|| {
+            let e = e.as_str().filter(|e| efforts(m).iter().any(|x| x == e)).ok_or_else(|| {
                 Failure(format!("E7001 effort not offered by {}; offered: {}", m["id"].as_str().unwrap_or(""), efforts(m).join(", ")), 1)
             })?;
             m["effort"] = json!(e);
-        } else if body.get("model").is_none() && t["effort"].as_str().is_some_and(|e| efforts(m).contains(&e)) {
+        } else if body.get("model").is_none() && t["effort"].as_str().is_some_and(|e| efforts(m).iter().any(|x| x == e)) {
             m["effort"] = t["effort"].clone();
         }
     }
@@ -1535,16 +1648,22 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     Ok(None)
 }
 
-/// The models this Solace install knows; the same for every project.
+/// The models this Solace install knows; the same for every project. Every
+/// model is listed, with why it can't start; `limit`: the reason is a usage
+/// limit a human may clear ("Try again", `POST /models/try-again`).
 fn models() -> Result<Value, Failure> {
+    // Serve the last list; ask a kind whose answer is stale, in the background.
+    agents::refresh_stale();
     Ok(json!(
         system()?["models"]
             .as_array()
             .unwrap_or(&vec![])
             .iter()
             .map(|m| {
-                let reason = unavailable(m);
-                json!({"id":m["id"],"label":m["label"],"agent":m["agent"],"effort":m["effort"],"efforts":efforts(m),"available":reason.is_none(),"reason":reason})
+                let status = agents::availability(m);
+                let limit = status.as_ref().is_some_and(|s| s.1);
+                let reason = status.map(|s| s.0);
+                json!({"id":m["id"],"label":m["label"],"agent":m["agent"],"effort":m["effort"],"efforts":efforts(m),"available":reason.is_none(),"reason":reason,"limit":limit})
             })
             .collect::<Vec<_>>()
     ))
@@ -1753,6 +1872,7 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
     match (method, parts.as_slice()) {
         ("GET", ["workflow"]) => Ok(w),
         ("GET", ["models"]) => models(),
+        ("POST", ["models", "try-again"]) => agents::try_again(&body).and_then(|_| models()),
         _ => err("E7001", "unknown route"),
     }
 }
@@ -1835,9 +1955,35 @@ pub(super) fn after(root: &Path, t: &Value, after: After) {
         After::Nothing | After::Removed(_) => {}
     }
 }
+/// The column a task waits in while it is not active, and the one it is
+/// planned into (D-132): found by id, so a workflow without them is left alone.
+const BACKLOG: &str = "backlog";
+const PLANNING: &str = "planning";
+/// Whether workflow `w` has a column with id `id`.
+fn has_column(w: &Value, id: &str) -> bool {
+    w["columns"].as_array().is_some_and(|cs| cs.iter().any(|c| c["id"] == id))
+}
+/// Moves task `t` from Backlog to Planning when feature `f` is `active` and
+/// the task's workflow has both columns, with a `solace` note naming the
+/// feature (D-132). An archived task is left where it is. Whether it moved;
+/// nothing is written here.
+pub(super) fn plan_for_feature(top: &Path, t: &mut Value, f: &Value) -> bool {
+    if f["state"] != "active" || t["column"] != BACKLOG || !t["archivedTime"].is_null() {
+        return false;
+    }
+    let Ok(w) = flow(&scope::path(top, t["home"].as_str().unwrap_or("."))) else { return false };
+    if !has_column(&w, BACKLOG) || !has_column(&w, PLANNING) {
+        return false;
+    }
+    t["column"] = json!(PLANNING);
+    // The board shows a `feature:<id>` link with the feature's title (D-122).
+    let id = f["id"].as_str().unwrap_or("");
+    note(t, "solace", None, &format!("Moved to Planning: its feature feature:{id} is active."));
+    true
+}
 /// Sets a task's `feature`, `milestone` and `dependsOn` from a `PATCH` (D-87).
 /// A feature given to a task with no milestone brings its own, unless the
-/// request names one.
+/// request names one, and a task given an `active` feature is planned (D-132).
 pub(super) fn set_links(top: &Path, t: &mut Value, body: &Value) -> Result<(), Failure> {
     for (k, kind) in [("feature", "features"), ("milestone", "milestones")] {
         match body.get(k) {
@@ -1855,6 +2001,9 @@ pub(super) fn set_links(top: &Path, t: &mut Value, body: &Value) -> Result<(), F
             t["milestone"] = tasks::record(top, "features", id).map_or(Value::Null, |r| r["milestone"].clone());
         }
         t["feature"] = f.clone();
+        if let Some(r) = f.as_str().and_then(|id| tasks::record(top, "features", id)) {
+            plan_for_feature(top, t, &r);
+        }
     }
     if let Some(m) = body.get("milestone") {
         t["milestone"] = m.clone();
@@ -2162,6 +2311,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     }
     let mut child = spawn_agent(&at, &dir, &log, m, &prompt, &images, resume.as_deref(), persistent, [tid, rid], timeout)?;
     let supervised = supervise(Watch::Task(root, tid), rid, &mut child, &log, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT);
+    agents::after_run(m, &log);
     if !(author && persistent) && matches!(supervised, Err(Failure(_, REPLIED))) && dir.exists() {
         fs::remove_dir_all(&dir)?;
     }
@@ -2591,6 +2741,7 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
     // The brief says where the agent works.
     packet["home"] = json!(scope::dir(&scope::top(root), here));
     let mut out = brief(&packet, kind);
+    out += &feature_section(&scope::top(root), t);
     if resumed {
         out = out.replace(START, "Use the continuation context below.");
     }
@@ -2659,6 +2810,48 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
 /// The most of the vision a brief carries (D-91): all of it, since a save is
 /// held to the same limit (D-92). Only a vision saved before the limit is cut.
 const VISION_CAP: usize = tasks::VISION_LIMIT;
+
+/// The most of a feature note a brief carries (D-138), as for the vision.
+const FEATURE_CAP: usize = VISION_CAP;
+
+/// Task `t`'s feature for its brief and `session start --task` (D-138): the
+/// feature's title, then the most recent of the task's investigation report,
+/// assignment note (the human's, outside any run) and review feedback, cut at
+/// a line end within `FEATURE_CAP` characters. Empty when the task has no
+/// feature, or its feature is gone.
+pub fn feature_section(top: &Path, t: &Value) -> String {
+    let Some(f) = t["feature"].as_str().and_then(|fid| tasks::record(top, "features", fid)) else { return String::new() };
+    let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
+    let runs = t["runs"].as_array().cloned().unwrap_or_default();
+    let kind_of = |n: &Value| runs.iter().find(|r| r["id"] == n["run"]).map(|r| text(&r["kind"])).unwrap_or_default();
+    let label = |n: &Value| match (n["author"].as_str(), n["run"].as_str(), kind_of(n).as_str()) {
+        (Some("agent"), Some(rid), "investigate") => Some(format!("investigation report (run {rid})")),
+        (Some("agent"), Some(rid), "review") => Some(format!("review feedback (run {rid})")),
+        (Some("human"), None, _) => Some("assignment".to_string()),
+        _ => None,
+    };
+    let mut out = format!("\nFeature (the feature this task is part of; its latest direction):\n- {}\n", text(&f["title"]));
+    // An empty note gives no direction, so the next one is used.
+    let latest = t["notes"].as_array().into_iter().flatten().rev().find_map(|n| Some((label(n)?, text(&n["text"]))).filter(|(_, x)| !x.is_empty()));
+    if let Some((label, note)) = latest {
+        let mut shown = note.clone();
+        if note.chars().count() > FEATURE_CAP {
+            let cut: String = note.chars().take(FEATURE_CAP).collect();
+            shown = match cut.rfind('\n') {
+                Some(i) if i > 0 => cut[..i].trim_end().to_string(),
+                _ => cut,
+            };
+            shown += "\n(cut short; the whole note is in the task's notes on the board)";
+        }
+        out += &format!("- {label}: {shown}\n");
+    }
+    out
+}
+
+/// `feature_section` for task `tid` of the root `top`.
+pub fn feature_of(top: &Path, tid: &str) -> String {
+    all_tasks(top).ok().and_then(|all| all.into_iter().find(|o| o["id"] == tid)).map(|t| feature_section(top, &t)).unwrap_or_default()
+}
 
 /// What a brief says when a dependency is unfinished (D-110): advice, nothing is refused.
 const WAITING: &str = "This task depends on unfinished work. Check whether you can do your part without it. If you can't, ask the human (`task ask`) before building on code that doesn't exist yet.";
@@ -3651,6 +3844,7 @@ impl Board {
         match (method, path) {
             ("GET", "/projects") => return self.listing(),
             ("GET", "/models") => return models(),
+            ("POST", "/models/try-again") => return agents::try_again(body).and_then(|_| models()),
             (_, p) if p == "/migration" || p.starts_with("/migration/") => return self.migration(method, p, body),
             _ => {}
         }
@@ -3784,6 +3978,10 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
     // applies what its inbox holds and takes over (D-77).
     tasks::start(&board.top)?;
     tasks::end_strategy_runs(&board.top)?;
+    // Tasks stored before D-134 in Backlog under an active feature move now.
+    tasks::plan_active(&board.top)?;
+    // Ask each agent which models it offers, so the list is ready when asked.
+    std::thread::spawn(agents::refresh_all);
     // A migration's folder is held too, so a shell can't move it from under the board.
     let _migration = match migrate::load(&board.top) {
         Some(_) if !board.held.lock().unwrap().contains_key(&board.top) => {

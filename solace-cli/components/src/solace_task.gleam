@@ -144,6 +144,9 @@ pub type Run {
     outcome: String,
     started: Int,
     ended: Int,
+    /// The model the agent's start event named, when it named one: an alias
+    /// shows the model the run used.
+    used: String,
   )
 }
 
@@ -196,6 +199,10 @@ pub type Agent {
     reason: String,
     effort: String,
     efforts: List(String),
+    /// The agent kind whose sign-in it uses, "" when not given.
+    agent: String,
+    /// Unavailable for a usage limit, which Try again clears.
+    limit: Bool,
   )
 }
 
@@ -226,6 +233,9 @@ pub type Model {
     /// The `hosted` attribute: the host hands down the task's events, so no
     /// stream of its own is opened.
     hosted: Bool,
+    /// The `strategy` attribute: the Strategy page shows the task, so a task
+    /// in Planning may go back to the backlog there (D-132).
+    strategy: Bool,
     task: Option(Task),
     /// Counts the tasks opened, so a reply for one shown before is dropped.
     generation: Int,
@@ -275,6 +285,7 @@ pub type Msg {
   DirChanged(String)
   WorkspaceChanged(Bool)
   HostedChanged(Bool)
+  StrategyChanged(Bool)
   /// One `/events` message, from the host or from this element's stream.
   Live(String)
   /// Numbered `/events` messages from the host, oldest first; the ones past
@@ -292,6 +303,8 @@ pub type Msg {
   Refetched(Int, String)
   WorkflowLoaded(Int, String)
   ModelsLoaded(String)
+  /// A usage limit's Try again: the agent kind whose limit to clear.
+  TryAgain(String)
   ProjectsLoaded(String)
   ReviewLoaded(String)
   Changed(String)
@@ -362,6 +375,9 @@ pub fn register() -> Result(Nil, lustre.Error) {
       component.on_attribute_change("hosted", fn(v) {
         Ok(HostedChanged(v != "false"))
       }),
+      component.on_attribute_change("strategy", fn(v) {
+        Ok(StrategyChanged(v != "false"))
+      }),
       component.on_property_change(
         "live",
         decode.list({
@@ -394,6 +410,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       dir: "",
       workspace: False,
       hosted: False,
+      strategy: False,
       task: None,
       generation: 0,
       workflow: Workflow([], dict.new()),
@@ -745,6 +762,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     BaseChanged(base) -> open(Model(..model, base: base))
     DirChanged(dir) -> #(Model(..model, dir: dir), effect.none())
     WorkspaceChanged(on) -> #(Model(..model, workspace: on), effect.none())
+    StrategyChanged(on) -> #(Model(..model, strategy: on), effect.none())
     HostedChanged(True) -> #(Model(..close(model), hosted: True), effect.none())
     HostedChanged(False) -> {
       let model = Model(..model, hosted: False)
@@ -830,6 +848,18 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
     WorkflowLoaded(_, _) -> #(model, effect.none())
+    TryAgain(agent) -> #(
+      model,
+      effect.from(fn(send) {
+        request(
+          "",
+          "/models/try-again",
+          "POST",
+          json.to_string(json.object([#("agent", json.string(agent))])),
+          fn(text) { send(ModelsLoaded(text)) },
+        )
+      }),
+    )
     ModelsLoaded(text) ->
       case json.parse(text, decode.list(agent_decoder())) {
         Ok(models) -> {
@@ -1165,19 +1195,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     // A dependency that can't be found keeps None: its id shows.
     // One with no project (D-129) is asked for at the root.
     DepFound(generation, id, text) if generation == model.generation ->
-      case
-        json.parse(text, decode.at(["dir"], decode.string)),
-        json.parse(text, decode.at(["project"], decode.bool))
-      {
-        Ok(_), Ok(False) -> #(
+      case dep_base(model, text) {
+        Ok(base) -> #(
           model,
-          get("", "/tasks/" <> id, DepLoaded(generation, id, _)),
+          get(base, "/tasks/" <> id, DepLoaded(generation, id, _)),
         )
-        Ok(dir), _ -> #(
-          model,
-          get(base_of(model, dir), "/tasks/" <> id, DepLoaded(generation, id, _)),
-        )
-        Error(_), _ -> #(model, effect.none())
+        Error(_) -> #(model, effect.none())
       }
     DepLoaded(generation, id, text) if generation == model.generation ->
       case json.parse(text, task_decoder()) {
@@ -1418,6 +1441,11 @@ fn run_decoder() -> decode.Decoder(Run) {
   use outcome <- decode.optional_field("outcome", "", decode.string)
   use started <- decode.optional_field("started", 0, decode.int)
   use ended <- decode.optional_field("ended", 0, decode.int)
+  use used <- decode.optional_field(
+    "used",
+    "",
+    decode.one_of(decode.string, [decode.success("")]),
+  )
   decode.success(Run(
     id,
     kind,
@@ -1428,6 +1456,7 @@ fn run_decoder() -> decode.Decoder(Run) {
     outcome,
     started,
     ended,
+    used,
   ))
 }
 
@@ -1456,7 +1485,22 @@ pub fn agent_decoder() -> decode.Decoder(Agent) {
     [],
     decode.list(decode.string),
   )
-  decode.success(Agent(id, label, available, reason, effort, efforts))
+  use agent <- decode.optional_field(
+    "agent",
+    "",
+    decode.one_of(decode.string, [decode.success("")]),
+  )
+  use limit <- decode.optional_field("limit", False, decode.bool)
+  decode.success(Agent(
+    id,
+    label,
+    available,
+    reason,
+    effort,
+    efforts,
+    agent,
+    limit,
+  ))
 }
 
 pub fn workflow_decoder() -> decode.Decoder(Workflow) {
@@ -1493,14 +1537,17 @@ fn projects_decoder() -> decode.Decoder(List(Project)) {
   decode.at(["projects"], decode.list(project))
 }
 
-pub fn actions(workflow: Workflow, task: Task) -> List(String) {
+/// `strategy`: the Strategy page shows the task (D-132).
+pub fn actions(workflow: Workflow, task: Task, strategy: Bool) -> List(String) {
   // Discuss starts between runs; stop ends any run, and a discussion can be ended.
   let built_in = case list.find(task.runs, fn(r) { r.state != "ended" }) {
     Error(_) -> ["discuss"]
     Ok(r) if r.kind == "discuss" -> ["end_discussion", "stop"]
     Ok(_) -> ["stop"]
   }
-  case list.find(workflow.columns, fn(c) { c.id == task.column }) {
+  let offered = case
+    list.find(workflow.columns, fn(c) { c.id == task.column })
+  {
     // A final column offers only what it lists: no agent works there (D-108).
     Ok(c) if c.final -> c.actions
     Ok(c) ->
@@ -1514,6 +1561,17 @@ pub fn actions(workflow: Workflow, task: Task) -> List(String) {
       ])
     Error(_) -> []
   }
+  // A task with a feature goes back to the backlog only through its feature,
+  // and from Planning only on the Strategy page (D-132).
+  let back = case
+    task.feature,
+    list.find(workflow.columns, fn(c) { c.id == task.column })
+  {
+    Some(_), _ -> False
+    None, Ok(c) -> c.final || strategy
+    None, Error(_) -> False
+  }
+  list.filter(offered, fn(name) { name != "to_backlog" || back })
 }
 
 /// What an action in flight is waiting for: with a work run going, a code
@@ -1555,6 +1613,10 @@ fn run_label(r: Run) -> String {
   <> case r.effort {
     "" -> ""
     effort -> " · " <> effort
+  }
+  <> case r.used {
+    "" -> ""
+    used -> " · " <> used
   }
 }
 
@@ -1697,7 +1759,7 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
     h.div(
       [a.class("actions")],
       list.append(
-        list.map(actions(model.workflow, t), fn(name) {
+        list.map(actions(model.workflow, t, model.strategy), fn(name) {
           action_button(
             name,
             action_label(model.workflow, name),
@@ -1778,65 +1840,20 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
 }
 
 /// The model and its effort. A pick shows what is chosen, so it names
-/// itself; while none is, a placeholder says what to pick.
+/// itself; while none is, a placeholder says what to pick. Only models that
+/// can start are offered; a line under the pick says why the others can't,
+/// and with none that can, what to set up.
 fn agent_choice(model: Model) -> Element(Msg) {
   let chosen = list.find(model.models, fn(m) { m.id == model.model })
-  h.div([a.class("agent")], [
-    h.select(
-      [
-        a.value(model.model),
-        a.attribute("aria-label", ui_label("model")),
-        e.on_input(AgentSelected),
-      ],
-      list.append(
-        placeholder_option(ui_label("pick_model"), model.model),
-        list.map(model.models, fn(m) {
-          case m.available {
-            True ->
-              h.option(
-                [a.value(m.id), a.selected(m.id == model.model)],
-                m.label,
-              )
-            False ->
-              h.option(
-                [
-                  a.value(m.id),
-                  a.disabled(True),
-                  a.selected(m.id == model.model),
-                ],
-                m.label <> " (unavailable: " <> m.reason <> ")",
-              )
-          }
-        }),
-      ),
-    ),
-    case chosen {
-      Ok(m) if m.efforts != [] ->
-        h.select(
-          [
-            a.value(model.effort),
-            a.attribute("aria-label", ui_label("effort")),
-            e.on_input(EffortSelected),
-          ],
-          [
-            h.option(
-              [a.value(""), a.selected(model.effort == "")],
-              case m.effort {
-                "" -> ui_label("default_effort")
-                effort -> ui_label("default_effort") <> " (" <> effort <> ")"
-              },
-            ),
-            ..list.map(m.efforts, fn(effort) {
-              h.option(
-                [a.value(effort), a.selected(effort == model.effort)],
-                effort,
-              )
-            })
-          ],
-        )
-      _ -> h.text("")
-    },
-  ])
+  let ready = list.filter(model.models, fn(m) { m.available })
+  case model.models, ready {
+    [_, ..], [] ->
+      h.div([a.class("agent")], [
+        no_agents_view(),
+        unavailable_view(model.models, TryAgain),
+      ])
+    _, _ -> agent_pick(model, ready, chosen)
+  }
 }
 
 pub fn title_input(value: String, msg: fn(String) -> msg) -> Element(msg) {
@@ -2161,6 +2178,7 @@ const task_styles =
   control_styles
   <> projects_pick_styles
   <> editor_styles
+  <> model_styles
   <> ":host{display:block}input,textarea,pre,code,.md,.detail > .heading > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}
 button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.detail{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}
 .meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}
@@ -2834,6 +2852,7 @@ pub const ui_labels: List(#(String, String)) = [
   #("effort", "Effort"),
   #("default_effort", "Default"),
   #("pick_model", "Select a model"),
+  #("try_again", "Try again"),
   #("project", "Project"),
   #("remove_only", "Remove only"),
   #("delete_permanently", "Delete permanently"),
@@ -2885,3 +2904,148 @@ fn define_editor() -> Nil
 fn homeless_event(text: String) -> Bool {
   json.parse(text, decode.at(["noProject"], decode.bool)) == Ok(True)
 }
+
+/// Where a dependency is asked for, from its `GET /tasks/find/{id}` reply:
+/// the root's base for one with no project (D-129), else its project's.
+/// An error when the reply names no project folder (the task wasn't found).
+pub fn dep_base(model: Model, text: String) -> Result(String, Nil) {
+  case
+    json.parse(text, decode.at(["dir"], decode.string)),
+    json.parse(text, decode.at(["project"], decode.bool))
+  {
+    Ok(_), Ok(False) -> Ok(base_of(model, "."))
+    Ok(dir), _ -> Ok(base_of(model, dir))
+    Error(_), _ -> Error(Nil)
+  }
+}
+
+fn agent_pick(
+  model: Model,
+  ready: List(Agent),
+  chosen: Result(Agent, Nil),
+) -> Element(Msg) {
+  h.div([a.class("agent")], [
+    h.select(
+      [
+        a.value(model.model),
+        a.attribute("aria-label", ui_label("model")),
+        e.on_input(AgentSelected),
+      ],
+      list.append(
+        placeholder_option(ui_label("pick_model"), model.model),
+        list.map(ready, fn(m) {
+          h.option([a.value(m.id), a.selected(m.id == model.model)], m.label)
+        }),
+      ),
+    ),
+    case chosen {
+      Ok(m) if m.efforts != [] ->
+        h.select(
+          [
+            a.value(model.effort),
+            a.attribute("aria-label", ui_label("effort")),
+            e.on_input(EffortSelected),
+          ],
+          [
+            h.option(
+              [a.value(""), a.selected(model.effort == "")],
+              case m.effort {
+                "" -> ui_label("default_effort")
+                effort -> ui_label("default_effort") <> " (" <> effort <> ")"
+              },
+            ),
+            ..list.map(m.efforts, fn(effort) {
+              h.option(
+                [a.value(effort), a.selected(effort == model.effort)],
+                effort,
+              )
+            })
+          ],
+        )
+      _ -> h.text("")
+    },
+    unavailable_view(model.models, TryAgain),
+  ])
+}
+
+/// Under a model pick: how many models can't start now, opening why each
+/// can't, so the human knows what to install or sign in to. A usage limit
+/// has Try again, which sends `try_again(agent)`.
+pub fn unavailable_view(
+  models: List(Agent),
+  try_again: fn(String) -> msg,
+) -> Element(msg) {
+  let any_ready = list.any(models, fn(m) { m.available })
+  case list.filter(models, fn(m) { !m.available }) {
+    [] -> h.text("")
+    gone ->
+      h.details([a.class("unavailable")], [
+        h.summary([], [
+          h.text(unavailable_count(list.length(gone), any_ready)),
+        ]),
+        h.ul(
+          [],
+          list.map(gone, fn(m) {
+            h.li([], [
+              h.text(m.label <> ": " <> m.reason),
+              case m.limit {
+                True ->
+                  h.button([a.type_("button"), e.on_click(try_again(m.agent))], [
+                    h.text(ui_label("try_again")),
+                  ])
+                False -> h.text("")
+              },
+            ])
+          }),
+        ),
+      ])
+  }
+}
+
+/// "2 more models unavailable" under a pick; without one, "2 models unavailable".
+pub fn unavailable_count(n: Int, more: Bool) -> String {
+  int.to_string(n)
+  <> case more {
+    True -> " more "
+    False -> " "
+  }
+  <> case n {
+    1 -> "model unavailable"
+    _ -> "models unavailable"
+  }
+}
+
+/// What to set up when no model can start: an agent program, signed in
+/// (the README's "Get an AI agent").
+pub fn no_agents_view() -> Element(msg) {
+  h.div([a.class("no-agents"), a.role("status")], [
+    h.p([], [
+      h.text(
+        "No model can start yet. Install one of these agents, run it once and sign in, then reload this page:",
+      ),
+    ]),
+    h.ul([], [
+      h.li([], [
+        h.strong([], [h.text("Claude Code: ")]),
+        h.code([], [h.text("curl -fsSL https://claude.ai/install.sh | bash")]),
+        h.text(", then run "),
+        h.code([], [h.text("claude")]),
+        h.text("."),
+      ]),
+      h.li([], [
+        h.strong([], [h.text("Codex CLI: ")]),
+        h.code([], [h.text("brew install codex")]),
+        h.text(
+          " on macOS, or a release binary from github.com/openai/codex/releases, then run ",
+        ),
+        h.code([], [h.text("codex")]),
+        h.text("."),
+      ]),
+    ]),
+  ])
+}
+
+/// The model pick's lines: the unavailable models and what to set up. Pages
+/// with a pick add it to their styles; colors come from the page.
+pub const model_styles =
+  ".unavailable,.no-agents{flex-basis:100%;font-size:13px;color:var(--soft);margin:2px 0}.unavailable>summary{cursor:pointer}.unavailable ul,.no-agents ul{margin:4px 0;padding-left:20px}.unavailable li,.no-agents li{white-space:normal;margin:2px 0}.unavailable button{font-size:13px;padding:1px 8px;margin:0 0 0 8px}.no-agents{color:var(--ink)}\n"

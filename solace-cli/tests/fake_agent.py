@@ -7,6 +7,17 @@ import time
 import tomllib
 from pathlib import Path
 
+if len(sys.argv) > 1 and sys.argv[1] == 'app-server':
+    # Solace asks which models Codex offers: answer `model/list` from the fixture.
+    models = json.loads(Path(os.environ.get('SOLACE_FAKE_MODELS', Path(__file__).with_name('fake_models.json'))).read_text())
+    for line in sys.stdin:
+        msg = json.loads(line)
+        if msg.get('method') == 'initialize':
+            print(json.dumps({'jsonrpc': '2.0', 'id': msg.get('id'), 'result': {'userAgent': 'solace-fake'}}), flush=True)
+        elif msg.get('method') == 'model/list':
+            print(json.dumps({'jsonrpc': '2.0', 'id': msg.get('id'), 'result': {'data': models}}), flush=True)
+    sys.exit(0)
+
 prompt = sys.stdin.read()
 # The prompt is plain text for a model; this stand-in reads its steps from the task file.
 store = next(d / '.solace/tasks' for d in [Path.cwd(), *Path.cwd().parents] if (d / '.solace/tasks').is_dir())
@@ -34,7 +45,11 @@ if native:
             print(json.dumps({'type': 'error', 'message': 'session not found'}), flush=True)
             sys.exit(1)
     (root / (rid + '.launch')).write_text(json.dumps({'session': session, 'home': str(home), 'argv': sys.argv}))
-    print(json.dumps({'type': 'system', 'subtype': 'init', 'session_id': session} if claude else {'type': 'thread.started', 'thread_id': session}), flush=True)
+    init = {'type': 'system', 'subtype': 'init', 'session_id': session} if claude else {'type': 'thread.started', 'thread_id': session}
+    if os.environ.get('SOLACE_FAKE_USED_MODEL'):
+        # The start event names the model the run used, as a real agent's does.
+        init['model'] = os.environ['SOLACE_FAKE_USED_MODEL']
+    print(json.dumps(init), flush=True)
 # Model Codex's MCP environment boundary: Solace variables need explicit forwarding.
 config = json.loads((home / 'mcp.json').read_text())['mcpServers']['solace'] if claude else tomllib.loads((home / 'config.toml').read_text())['mcp_servers']['solace']
 mcp_env = {k: v for k, v in os.environ.items() if not k.startswith('SOLACE_')}

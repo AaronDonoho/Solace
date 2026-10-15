@@ -1,0 +1,7 @@
+[
+  {"id": "gpt-6-fake", "model": "gpt-6-fake", "displayName": "GPT-6 Fake", "hidden": false,
+   "supportedReasoningEfforts": [{"effort": "low", "description": "Low"}, {"effort": "medium", "description": "Medium"}, {"effort": "high", "description": "High"}],
+   "defaultReasoningEffort": "medium", "isDefault": true},
+  {"id": "gpt-6-fake-hidden", "model": "gpt-6-fake-hidden", "displayName": "GPT-6 Fake Hidden", "hidden": true,
+   "supportedReasoningEfforts": [], "defaultReasoningEffort": "low"}
+]

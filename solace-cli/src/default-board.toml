@@ -14,12 +14,12 @@ actions = ["investigate", "assign", "complete", "to_backlog", "cancel"]
 [[board.columns]]
 id = "assigned"
 label = "Assigned"
-actions = ["reassign", "new_agent", "review", "cancel"]
+actions = ["reassign", "new_agent", "review", "to_planning", "cancel"]
 
 [[board.columns]]
 id = "needs_review"
 label = "Needs review"
-actions = ["approve", "complete", "review", "reassign", "start_over", "cancel"]
+actions = ["approve", "complete", "review", "reassign", "start_over", "to_planning", "cancel"]
 next = "complete"
 requires = ["approved"]                # an agent's result is on the task: a human signs it off
 
@@ -32,11 +32,12 @@ final = true
 id = "cancelled"
 label = "Canceled"   # American spelling shown; the id stays for saved tasks
 final = true
-actions = ["to_backlog"]   # a canceled task can come back (D-108); complete has none
+actions = ["to_planning"]   # a canceled task can come back (D-133); complete has none
 
 [board.actions]
 plan       = { to = "planning", label = "Plan" }
-to_backlog = { to = "backlog", label = "Back to backlog" }
+to_backlog = { to = "backlog", label = "Back to backlog" }              # the Strategy page's, from Planning (D-132)
+to_planning = { unstamp = "approved", to = "planning", label = "Back to planning" } # keep changes; refused while a run is open
 investigate = { run = "investigate", model = true, label = "Investigate" } # read-only; stays in its column
 review     = { run = "review", label = "Review" }                         # stays in its column
 assign     = { to = "assigned", run = "work", model = true, label = "Assign" }

@@ -738,3 +738,65 @@ Amends Spec 14 §2 and Spec 15 §4 (Aaron, board task, 2026-10-14). First task o
 5. `build plan` (CLI) and `GET /build/plan` (root only) give the plan, each recipe marked declared or default. `build plan` only reads: it is no change, verification or process, and works in read-only runs. `build` with any other argument is refused.
 6. Not yet moved: the frontend projects' `build-release` commands and `solace-cli/build.rs` stay as they are. Their default (`bun install` then `gleam build`) is not their release build, which also bundles `priv/app.js`; the self-build feature declares their `[build]`. Solace's own Rust crate is in `solace-cli/`, which is not a project, so it has no default; the root will declare it.
 Why: the Build tab must run any project, so each project needs one place that says how it builds, readable by the page.
+
+## D-132 The Strategy page plans tasks and puts them back on hold; a task with a feature stays with its feature
+Amends D-108, D-112 point 3 and D-128 (Aaron, board task, 2026-10-14). Part of the Backlog-off-the-board change.
+1. `to_backlog` is refused (`E7001`) for a task with a feature, in any column: Planning and Canceled alike. It is not among the actions the server lists as allowed for such a task. A canceled task with a feature comes back through its feature, such as a strategy proposal; one with no feature comes back as D-108 says.
+2. `<solace-task>` takes a `strategy` attribute, which the Strategy page sets. Back to backlog shows from a non-final column (Planning) only with it, and never for a task with a feature; from Canceled it shows on any page for a task with no feature.
+3. The Strategy page's Tasks tab row shows **Plan** when its project's workflow offers `plan` in the row's column; a task with no project (D-129) has none. It sends the board's actions API, as the task's details do, which also offer Plan.
+4. An active feature plans its tasks: when a feature becomes `active` by a human edit or an approved proposal, each of its tasks in `backlog` moves to `planning`, with a `solace` note naming the feature. A task linked to, or proposed in, a feature that is already `active` moves the same way. A state the feature's tasks set (D-128 point 3) moves none. Columns are found by id: a workflow without both `backlog` and `planning` is left alone.
+5. A feature's Tech Debt task (D-112 point 3) is created in `planning`, or in the first column of a workflow without one.
+Why: once the board no longer shows Backlog, the Strategy page is where a task goes active or back on hold; a feature's tasks follow their feature (D-128). Backlog is a status meaning *not active*, so an active feature's tasks belong in Planning, the board's first column.
+
+## D-133 The board leaves out Backlog; a task goes back to planning
+Amends D-108 points 2 and 3, D-128 point 4, D-132 points 1 and 2, and Spec 15 §1 and §3 (Aaron, board task, 2026-10-14). Part of the Backlog-off-the-board change.
+1. `backlog` stays a task status, meaning *not active*. The board draws no `backlog` column and shows none of its tasks, with or without a feature, so `planning` is its first column. The Strategy page's Tasks tab lists every task, Backlog ones included, and plans them (D-132).
+2. D-128 point 4 still holds in every column: a task of a `proposed`, `upcoming` or `canceled` feature is off the board.
+3. New action `to_planning`, labeled "Back to planning", listed on `assigned`, `needs_review` and `cancelled` in the default workflow. It replaces `cancelled`'s `to_backlog`; `complete` lists none, so a completed task stays as it is. `to_backlog` stays on `planning` for the Strategy page; the board's details don't show it there (D-132 point 2).
+4. It is offered to every task, with or without a feature. It keeps the task's changes and clears `approved`, as `reassign` does. It is refused (`E7001`) while any run of the task is open, running or waiting: the human stops it first. From `cancelled` it brings the task back as D-108 point 4 says.
+5. A canceled task with a feature also comes back through Back to planning, not only through its feature as D-132 point 1 says (Aaron, Tech Debt task, 2026-10-14).
+Why: the human wanted a task with no feature to become active without giving it a feature. Backlog means *not active*, so the board, which shows active work, leaves it out; a task that was moving on comes back to Planning rather than to a hidden column.
+
+## D-134 An active feature's tasks are never in Backlog
+Amends D-132 point 4 and Spec 15 §1 (Aaron, board task, 2026-10-14). Part of the Backlog-off-the-board change.
+1. A task whose feature is `active` is never in `backlog`. When the server starts, and whenever a task or a feature is saved, such a task moves to `planning` with a `solace` note naming the feature, as D-132 point 4 does. This covers tasks already stored, and a task whose own save makes its feature `active` again (D-128 point 3). An approved task proposal that sets a complete feature back to `upcoming` sets that state before it writes the task, so that task stays in Backlog.
+2. Columns are found by id: a workflow without both `backlog` and `planning` is left alone. A task with no feature, or whose feature is not `active`, is untouched.
+3. D-132 point 1 still holds: Back to backlog is refused for a task with a feature.
+Why: Backlog is off the board (D-133), so tasks stored before their feature went active, or linked to it some other way, stayed invisible. Planning by state, not only by the feature's change, moves them without a click.
+
+## D-135 An interrupted extract is always undone
+Amends D-103 and D-77 point 4 for extract records, and Spec 3 §4 (Aaron, board task, 2026-10-14).
+1. An extract into another project is written ahead: a record in each of its projects before any file changes. If it doesn't finish, the next command, revert or cancel in any of those projects undoes it in all of them, as if it never ran. Solace never finishes a stopped extract and never holds one for a human; `E7029` is removed.
+2. Undo puts back only what the extract wrote. Files edited outside Solace while it was stopped are kept, and read in as any outside change (D-58).
+3. The task gets a note: the extract was interrupted and undone, run it again if still needed, and which files were kept.
+4. When another command holds one of the projects, recovery refuses with `E7028` (try again), as before.
+5. Files the extract created are deleted only by its rollback; the general cleanup of written files skips them.
+Why: the human decided (task 6c746fe1f9058f87, note 18) that a half-done extract must never be finished or left frozen; undoing it is simple to understand and always safe to retry.
+
+## D-136 Undo keeps folders that were there before the task
+Amends D-103 (Aaron, board task, 2026-10-14).
+1. Undoing a task leaves alone any folder that existed before the task, even an empty one. Removing a file the task added still removes the folders that leaves empty, but only those the task made, and never the top folder (`src/`, `test/`).
+2. The saved before-state of a file that didn't exist becomes `{"kept": "<folder>"}`: the nearest folder above it that existed before the command (`""` is the project's own folder), taken from the project's folders listed before each command. Undo stops removing folders there.
+3. An old record (`null`), or a change made outside Solace, has no folder entry; its undo removes every folder left empty, as before.
+Why: the human agreed (task 6c746fe1f9058f87, note 18) that undo must not remove what the task didn't make.
+
+## D-137 Undo keeps folders for module files and after a crash too
+Amends D-136 (Aaron, board task, 2026-10-14).
+1. D-136 covers Gleam module files as well as plain files: a module the task added is saved before as `{"kept": "<folder>"}`, and undo stops removing the folders its file leaves empty there.
+2. An undo record written before a change (a file's, or a declared run's) carries the folders as they were, so a change recovered after a crash keeps D-136 too.
+3. A folder the project ignores (such as `target/`) is listed as there but not looked inside: undo stops at it.
+Why: the human answered (this task's question) that D-136 should apply to module files too; the rest closes gaps the reviews found.
+
+## D-138 A run's brief names the task's feature and its latest direction
+Amends D-91, D-110 and Spec 15 §6 (Aaron, board task, 2026-10-14).
+1. A task with a feature gets a **Feature** section in its brief, after the task and before the vision: the feature's title, then the most recent of the task's investigation report (the agent's note from an investigate run), assignment note (the human's note outside any run) and review feedback (the agent's note from a review run), labeled by kind.
+2. The note is cut at a line end within 1,000 characters (as the vision, D-91), ending "(cut short; the whole note is in the task's notes on the board)". With none of the three notes, the section is the title alone. A task with no feature, or whose feature is gone, gets no section.
+3. Every run kind gets it (work, investigate, review, discuss), and so does `session start --task` in a board run, beside Depends on (D-110). The feature's body, milestone and other tasks are not inlined.
+4. Like D-110, this is task data, outside D-102 point 5's 3,600-byte reference cap.
+Why: constraints written for a feature never reached the agent doing the work. The human chose the latest direction note over measuring feature sizes and past runs.
+
+## D-139 The layout audit runs in reviews; the root's `solace.toml` holds commands too
+Amends D-38 and D-71 (Aaron, approved on board task "ui: Layout audit command", 2026-10-14).
+1. The root `layout_audit` command (`solace-cli/tests/layout_audit.py`) unsets `SOLACE_TASK`, `SOLACE_RUN`, `SOLACE_SESSION`, `SOLACE_CONFIG` and `SOLACE_BIN` as `rust-acceptance` does (D-71), takes an argument (one page), and is allowed in reviews. Like `rust-acceptance`, it runs with normal host permissions: it runs `cargo build` (unless `SOLACE_TEST_BIN` names a binary), starts a fixture `solace serve`, and drives a headless Chromium through Playwright. It writes only its temp fixture and the screenshots under `solace-cli/target/layout-audit/`.
+2. D-38's "the root's `solace.toml`, which only lists projects" is out of date: the root's `solace.toml` also holds `[commands]` (and its other settings). When a task's own project is the root (`.`), the root's `solace.toml` is the task's own file, and a work run proposes changes to it the D-38 way. A task in another project still never proposes to the root's file.
+Why: the human approved `layout_audit` with `allowed_in_reviews = true` so reviewers can compare measurements, and approved its line in the root's `solace.toml`; D-38's wording could make an agent refuse that proposal.

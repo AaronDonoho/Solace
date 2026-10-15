@@ -6,9 +6,9 @@ import { to_string } from '../build/dev/javascript/lustre/lustre/element.mjs';
 // This server has no Solace store, process runner or filesystem access.
 test('A11: Lustre board uses only the HTTP API, including live task and workflow updates', async () => {
   const requests = [];
-  let task = { id: 't1', title: 'Initial', body: 'Description', column: 'backlog', rank: 1,
+  let task = { id: 't1', title: 'Initial', body: 'Description', column: 'planning', rank: 1,
     type: 'implementation', paused_from: null, notes: [], questions: [], runs: [], changes: [], stamps: {}, links: [] };
-  let workflow = { columns: [{ id: 'backlog', label: 'Backlog', actions: ['plan'], final: false }]};
+  let workflow = { columns: [{ id: 'planning', label: 'Planning', actions: ['assign'], final: false }]};
   let events;
   const server = Bun.serve({ port: 0, fetch: async req => {
     const path = new URL(req.url).pathname;
@@ -66,9 +66,9 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     task.runs = [{ ...task.runs[0], state: 'ended', outcome: 'finished' }];
     events.enqueue(new TextEncoder().encode('id: 2\ndata: ' + JSON.stringify({ task }) + '\n\n'));
     await until(() => to_string(board.view(model)).includes('<strong>Finished Initial</strong>'));
-    workflow.columns.push({ id: 'planning', label: 'Custom planning', actions: ['review'], final: false });
+    workflow.columns.push({ id: 'assigned', label: 'Custom assigned', actions: ['review'], final: false });
     events.enqueue(new TextEncoder().encode('id: 3\ndata: ' + JSON.stringify({ workflow }) + '\n\n'));
-    await until(() => to_string(board.view(model)).includes('Custom planning'));
+    await until(() => to_string(board.view(model)).includes('Custom assigned'));
     for (const pair of [['GET', '/projects'], ['GET', '/workflow'], ['GET', '/events']]) expect(requests).toContainEqual(pair);
     // Tasks are created on the Strategy page: the board posts none.
     expect(requests).not.toContainEqual(['POST', '/tasks']);
@@ -287,13 +287,13 @@ test('the page registers the board and the task detail as elements', async () =>
   const tags = [];
   const saved = [globalThis.document, globalThis.HTMLElement, globalThis.customElements, globalThis.location];
   globalThis.location = { pathname: '/', search: '' };
-  globalThis.document = { documentElement: { dataset: {} } };
+  globalThis.document = { documentElement: { dataset: {}, style: {} } };
   globalThis.HTMLElement = class {};
   globalThis.customElements = { get: name => tags.includes(name) ? class {} : undefined, define: name => tags.push(name) };
   try {
     await import('../src/main.mjs');
     await settle();
-    expect(tags.sort()).toEqual(['solace-board', 'solace-task']);
+    expect(tags.sort()).toEqual(['solace-board', 'solace-md-editor', 'solace-task']);
   } finally {
     [globalThis.document, globalThis.HTMLElement, globalThis.customElements, globalThis.location] = saved;
   }

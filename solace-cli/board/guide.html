@@ -69,12 +69,14 @@ table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid 
 <h3>The default columns</h3>
 <table>
 <tr><th>Column</th><th>What it means</th><th>What you can do</th></tr>
-<tr><td>Backlog</td><td>Written, not yet being planned</td><td>Plan it, or cancel it</td></tr>
-<tr><td>Planning</td><td>You're shaping the task</td><td>Ask an agent to investigate it, assign it to a model, complete it (when it only needed an answer), send it back, or cancel it</td></tr>
-<tr><td>Assigned</td><td>An agent is working, or needs your answer or stopped (the card is marked <em>Needs attention</em>)</td><td>Answer it, reassign it, start a new agent, ask for a review, or cancel it</td></tr>
-<tr><td>Needs review</td><td>The agent says it's finished</td><td>Approve it, then complete it; ask for an agent review; reassign it for fixes; start over; or cancel it</td></tr>
-<tr><td>Complete, Canceled</td><td>Finished either way</td><td>Nothing</td></tr>
+<tr><td>Planning</td><td>You're shaping the task</td><td>Ask an agent to investigate it, assign it to a model, complete it (when it only needed an answer), or cancel it</td></tr>
+<tr><td>Assigned</td><td>An agent is working, or needs your answer or stopped (the card is marked <em>Needs attention</em>)</td><td>Answer it, reassign it, start a new agent, ask for a review, send it back to planning (once no agent is on it), or cancel it</td></tr>
+<tr><td>Needs review</td><td>The agent says it's finished</td><td>Approve it, then complete it; ask for an agent review; reassign it for fixes; start over; send it back to planning; or cancel it</td></tr>
+<tr><td>Complete</td><td>Finished</td><td>Nothing</td></tr>
+<tr><td>Canceled</td><td>Dropped</td><td>Send it back to planning</td></tr>
 </table>
+<p>A task can also be in the <strong>Backlog</strong>: written, but not active yet. The board doesn't show Backlog tasks; they are on the <strong>Strategy</strong> page, where <em>Plan</em> brings one to Planning and <em>Back to backlog</em> puts a planned one on hold. When a feature becomes active, its Backlog tasks move to Planning by themselves.</p>
+<p><em>Back to planning</em> keeps the task's changes and clears any approval, as reassign does. Stop the task's agent first: it is refused while one is working.</p>
 <p>A task with an agent on it says so on its card: <em>Agent investigating</em>, <em>Agent working</em>, <em>Agent reviewing</em>, <em>Waiting for your answer</em> or <em>Agent paused</em>.</p>
 <p>If a review finds problems, enter any additional instructions in the editor and choose <em>reassign</em>. The task returns to Assigned and a work agent gets the review feedback and notes. Existing changes are kept, and any approval is cleared. You can select another model first. Wait for an active review to finish before reassigning. <em>Start over</em> instead undoes the task's changes before starting another agent.</p>
 <p>You can pause any task that isn't finished, and resume it later. A paused agent stops at its next step and keeps what it knows.</p>
@@ -102,7 +104,10 @@ table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid 
 
 <h2>Models</h2>
 <p>You choose a model each time you assign a task or start a new agent. Solace runs the model through an agent program you already have installed and signed in to: the <strong>Codex CLI</strong> for OpenAI models, or <strong>Claude Code</strong> for Claude models. Solace doesn't store any credentials itself.</p>
-<p>A list of current major models is built in. A model that can't be started right now is greyed out in the list, with the reason: the agent program isn't installed, it isn't signed in, or a key it needs isn't set.</p>
+<p>A list of current major models is built in, and Solace asks each agent program which models it offers, so a model the agent added shows in the list with no rebuild and no config edit. Only the models that can start right now are offered. Under the list, a line such as <em>2 more models unavailable</em> opens the reasons for the others: the agent program isn't installed, it isn't signed in or its sign-in has expired, a key it needs isn't set, its usage limit was reached, or its agent no longer offers it. If no model can start, the board shows how to install and sign in to an agent instead of an empty list.</p>
+<p>Codex answers Solace's question <code>codex app-server</code>: its <code>model/list</code> gives the models, the efforts each one supports, and its default. Models Codex marks hidden are left out. Claude Code has no command that lists models without starting one, so Solace offers its aliases — <em>Opus</em>, <em>Sonnet</em>, <em>Haiku</em> and <em>Fable</em>, each naming the latest of its family — and when a run's log names the model the agent actually used, the run shows it and the model's label names it. With <code>ANTHROPIC_API_KEY</code> set, Solace also reads the provider's models endpoint for the exact ids, active ones only; it stores no key, and uses only the variable that is already set.</p>
+<p>Solace asks at startup, again about every 15 minutes, and again when a run says the model it asked for is no longer offered. The asking happens in the background: the board always shows the last list it has. A model that comes back onto its agent's offer is offered again. A model that leaves keeps working for the tasks already using it, with the reason <em>no longer offered by …</em>, and is not offered for a new run. A model on the list isn't proof your account may run it: usage limits are shown separately, below.</p>
+<p>When a run stops because the agent's plan reached its usage limit, Solace remembers it. Every model on that sign-in becomes unavailable, with a reason such as <em>Codex usage limit reached (resets 3:45 PM)</em>. They come back at that time when the agent said when its limit resets, or after a later run on that sign-in gets an answer. <em>Try again</em> beside the reason brings them back by hand. A model with its own endpoint and key isn't affected. Solace checks only what is on this computer, without asking a model: on macOS that includes Claude Code's keychain sign-in, which it finds without reading it. It checks again every few seconds.</p>
 <p>Add your own models, or change the built-in ones, in <code>~/.config/solace/config.toml</code>:</p>
 <pre>task_timeout = 3600            # seconds an agent may work; time spent waiting for you doesn't count
 
@@ -128,6 +133,7 @@ model = "claude-sonnet-5-5"
 endpoint = { kind = "anthropic", base_url = "https://llm-proxy.example.com", key_env = "PROXY_KEY" }</pre>
 <ul>
 <li><code>effort</code> is the model's default. The board lets you pick another effort for each action: low, medium, high or xhigh for Codex, and also max for Claude Code. Changing it starts the agent's conversation afresh, with a handoff.</li>
+<li>A model Solace discovered offers the efforts its agent names for it; the built-in list and the aliases use the fixed ones above.</li>
 <li>An entry with the same <code>id</code> as a built-in model replaces it. Add <code>presets = false</code> at the top to hide the built-in list.</li>
 <li>An endpoint's key is never written in the file. <code>key_env</code> names an environment variable that holds it, and Solace reads that variable when it starts the agent. Leave <code>key_env</code> out for an endpoint that needs no key.</li>
 <li>Codex talks to OpenAI-compatible endpoints through the Responses API, so the endpoint has to support it.</li>

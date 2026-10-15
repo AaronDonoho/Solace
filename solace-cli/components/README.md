@@ -19,9 +19,19 @@ choice, the note editor and the task's actions. It is `solace_task.gleam`, with 
   workspace's merged stream and anchors the Scope tab.
 - `task`: the task's id. `workspace`: show the Scope tab.
 - The model list comes from `GET /models` and the Scope tab's projects from `GET /projects`.
+- The model pick offers only models that can start. Under it, `unavailable_view` ("2 more models unavailable")
+  opens the others' reasons; a usage limit (`limit` in the list) has Try again, `POST /models/try-again {agent}`,
+  whose reply is the list as it is now. With none that can start, `no_agents_view` shows how to install and sign
+  in to an agent instead. Strategy's plan panel uses both; `model_styles` is their look.
 - `hosted`: the host already follows `/events` and hands the task's messages down in the `live`
   property, so the element opens no stream of its own. Without it, the element follows `{base}/events`.
 - `reveal` property, `{tab, id, n}`: show `tab` for task `id` and scroll it into view (a notice's button).
+
+**Actions.** The task's buttons are the workflow's actions for its column (Spec 15 §3). **Back to
+planning** (`to_planning`, D-133) brings a task from Assigned, Needs review or Canceled back to
+Planning: it keeps the task's changes and clears approval, as Reassign does, and the server refuses
+it while an agent is working. **Back to backlog** shows from Planning only on the Strategy page (the
+`strategy` attribute) and never for a task with a feature (D-132, D-133).
 
 **Copy ID**, beside the title, copies the task's reference, `task:<id>` (`solace_task.reference`), and says
 Copied for 2 s, or Copy failed when neither the clipboard nor the fallback took it. A later click's label isn't

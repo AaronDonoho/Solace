@@ -900,22 +900,28 @@ class Root(unittest.TestCase):
         self.assertEqual(self.live('components', 'Task'), [])
         self.assertFalse((self.root/'components/test/solace_task_test.gleam').exists())
 
-    def test_an_extract_stopped_after_the_destination_commit_finishes_at_the_next_open(self):
+    def undone_note(self, t):
+        return self.wait('/p/web', t, lambda x: [n for n in x['notes'] if 'was interrupted and has been undone' in n['text']])
+
+    def test_an_extract_stopped_after_the_destination_commit_is_undone_and_runs_again(self):
         files, tomls, t, task_id = self.extract_stopped('destination')
         self.assertEqual(self.live('components', 'Task'), task_id)
         self.assertEqual(self.live('web', 'Task'), task_id)  # the source has not committed
         self.cli('files', cwd=self.root/'web')
+        self.assert_unchanged(files, tomls, task_id)
+        self.assertEqual(self.extract_records(), [])
+        self.assertEqual(self.api('GET', f'/p/web/tasks/{t["id"]}')['changes'], [])
+        self.undone_note(t)
+        # Running it again, with no fault, succeeds.
+        for s in self.servers:
+            s.terminate(); s.wait(timeout=3)
+        del self.env['SOLACE_FAIL_AFTER']
+        self.start()
+        self.api('POST', f'/p/web/tasks/{t["id"]}/actions', {'action': 'reassign', 'model': 'fake'})
+        self.wait('/p/web', t, lambda x: len(x['runs']) == 2 and x['runs'][-1]['state'] == 'ended')
         self.assertEqual(self.live('components', 'Task'), task_id)
         self.assertEqual(self.live('web', 'Task'), [])
         self.assertIn('solace_task', (self.root/'front/src/front.gleam').read_text())
-        self.assertIn('components', (self.root/'front/gleam.toml').read_text())
-        self.assertEqual(self.extract_records(), [])
-        changes = self.api('GET', f'/p/web/tasks/{t["id"]}')['changes']
-        self.assertEqual(len({(c['project'], c['entity']) for c in changes}), len(changes))
-        self.assertEqual({c['project'] for c in changes}, {'web', 'components', 'front'})
-        # Cancel then puts every project back.
-        self.api('POST', f'/p/web/tasks/{t["id"]}/actions', {'action': 'cancel'})
-        self.assert_unchanged(files, tomls, task_id)
 
     def test_an_extract_stopped_before_the_destination_commit_rolls_back_at_the_next_open(self):
         # Stopped with the record complete, the destination not yet committed.
@@ -941,6 +947,7 @@ class Root(unittest.TestCase):
             self.assertEqual((self.root/d/'gleam.toml').read_text(), text, d)
         self.assertEqual(self.extract_records(), [])
         self.assertEqual([c for c in self.api('GET', f'/p/web/tasks/{t["id"]}')['changes'] if c['project'] == 'components'], [])
+        self.undone_note(t)
 
     def test_an_outside_edit_after_the_source_commit_undoes_every_committed_part(self):
         files, tomls, t, task_id = self.extract_stopped('source')
@@ -957,30 +964,37 @@ class Root(unittest.TestCase):
             self.assertEqual((self.root/d/'gleam.toml').read_text(), text, d)
         self.assertEqual(self.extract_records(), [])
         self.assertEqual([c for c in self.api('GET', f'/p/web/tasks/{t["id"]}')['changes'] if c['project'] != 'web' or c['entity'].startswith('symbol:')], [])
+        self.undone_note(t)
 
-    def test_a_stopped_extract_edited_on_both_sides_waits_for_a_human(self):
-        files, tomls, t, task_id = self.extract_stopped('destination')
-        source = files['web/src/board.gleam'] + '\npub fn extra() -> Int {\n  1\n}\n'
-        (self.root/'web/src/board.gleam').write_text(source)
+    def test_a_stopped_extract_is_undone_keeping_the_other_sides_outside_edit(self):
+        files, tomls, t, task_id = self.extract_stopped('source')
+        self.assertEqual(self.live('web', 'Task'), [])  # the source committed
         dest = self.root/'components/src/solace_task.gleam'
         dest.write_text(dest.read_text() + '\npub fn other() -> Int {\n  2\n}\n')
         dest_text = dest.read_text()
-        for _ in range(2):
-            self.assertIn('E7029', self.cli('files', cwd=self.root/'web', ok=False))
-        # Nothing changed: the record stays, the stores and the edited files are as they were.
-        self.assertEqual(len(self.extract_records()), 3)
+        self.cli('files', cwd=self.root/'web')
+        # Undone in both projects; the outside edit stays as it was.
+        self.assertEqual(self.extract_records(), [])
         self.assertEqual(self.live('web', 'Task'), task_id)
-        self.assertEqual(self.live('components', 'Task'), task_id)
-        self.assertEqual((self.root/'web/src/board.gleam').read_text(), source)
+        self.assertEqual((self.root/'web/src/board.gleam').read_text(), files['web/src/board.gleam'])
         self.assertEqual(dest.read_text(), dest_text)
-        flagged = lambda x: [n for n in x['notes'] if 'both sides were changed' in n['text']]
-        x = self.wait('/p/web', t, flagged)
-        self.assertEqual(len(flagged(x)), 1)
-        self.assertEqual((x['attention']['hold'], x['attention']['reason']), (True, 'an interrupted extract needs a decision'))
-        self.refused('POST', f'/p/web/tasks/{t["id"]}/actions', {'action': 'cancel'}, 'E7029')
-        self.assertEqual(len(self.extract_records()), 3)
+        self.assertEqual((self.root/'front/src/front.gleam').read_text(), files['front/src/front.gleam'])
+        self.assertFalse((self.root/'components/test/solace_task_test.gleam').exists())
+        x = self.undone_note(t)
+        self.assertTrue(any('solace_task.gleam' in n['text'] for n in x['notes']))
+        self.assertNotEqual((x.get('attention') or {}).get('reason'), 'an interrupted extract needs a decision')
+        # The hold left is the failed run's own (D-82), not a held extract decision.
+        self.assertNotIn('extract', (x.get('attention') or {}).get('reason') or '')
+        self.cli('files', cwd=self.root/'web')
+        # The kept destination file is read in as an outside edit by the next
+        # command there, so the moved symbols now live in both projects, as planned.
+        self.cli('files', cwd=self.root/'components')
+        self.assertNotEqual(self.live('components', 'Task'), [])
+        self.assertNotEqual(self.live('components', 'other'), [])
+        self.assertEqual(self.live('web', 'Task'), task_id)
+        self.api('POST', f'/p/web/tasks/{t["id"]}/actions', {'action': 'cancel'})
 
-    def test_cancel_finishes_a_stopped_extract_before_undoing_it(self):
+    def test_cancel_undoes_a_stopped_extract(self):
         files, tomls, t, task_id = self.extract_stopped('destination')
         # Stopped between the commits: the destination has Task, the source's store
         # still has it, the dependent's files are written, and every project holds the record.

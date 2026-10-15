@@ -70,6 +70,7 @@ Several names give one document (D-14): each signature appears once, and later b
 - `commit` publishes the change to the main line. If another commit changed any base revision in the meantime, the commit is rejected with `E5101`, listing the symbols and a semantic diff of what changed. Nothing is merged silently.
 - **Semantic conflicts:** if another commit changed the signature, effects or contracts of a symbol this change *uses*, even one it didn't edit, `commit` re-runs the fast check on the change and rejects it on failure (`E5102`).
 - Phase 1 has no write-scope declaration; the base revisions serve that role. Declared scopes arrive with multi-agent work in Phase 6.
+- An `extract` into another project is written ahead: a record in each of its projects before any file changes. If it is interrupted, the next command, revert or cancel in any of those projects undoes it in all of them, keeping files edited outside Solace since, and notes the task (D-135). When another command holds one of those projects, the command is refused with `E7028`; try again.
 
 ## 5. Work records and decisions
 

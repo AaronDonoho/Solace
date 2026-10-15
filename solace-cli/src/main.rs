@@ -291,8 +291,8 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         }
     }
     // Every guard here holds the lock of `store`'s project.
-    // An extract stopped between its projects' commits is finished or rolled back
-    // first, under every lock of its projects (D-103).
+    // An extract stopped between its projects' commits is undone first, under
+    // every lock of its projects (D-135).
     let mut held = vec![store.root.clone(), home.root.clone()];
     held.extend(dest.iter().chain(&deps).map(|d| d.root.clone()));
     extract::ahead::recover(&held)?;
@@ -374,6 +374,10 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     } else {
         vec![]
     };
+    // The folders each project had, so undo removes only those the task made (D-136).
+    let folders = before.as_ref().map(|_| board::existing_folders(&store.root));
+    let d_folders = dest_before.as_ref().map(|(d, ..)| board::existing_folders(&d.root));
+    let deps_folders: Vec<_> = deps_before.iter().map(|(d, _)| board::existing_folders(&d.root)).collect();
     // A code change and its undo rows commit together (D-77 point 7): one outer
     // transaction around the command and `record`. A process runs outside it, so
     // a long `run` holds the store's write lock only for the rows; the ahead
@@ -454,29 +458,29 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
             stores.extend(deps_before.iter().zip(&deps_after).map(|((d, b), a)| (*d, b, a)));
             extract::ahead::complete(record, &stores)?;
             crash_after("complete");
-            board::record(d, tid, rid, d_before, &d_after)?;
+            board::record(d, tid, rid, d_before, &d_after, d_folders.as_ref())?;
             d.db.execute_batch("COMMIT")?;
             crash_after("destination");
-            board::record(&store, tid, rid, &before, &after)?;
+            board::record(&store, tid, rid, &before, &after, folders.as_ref())?;
             store.db.execute_batch("COMMIT")?;
             crash_after("source");
-            for ((d, d_before), d_after) in deps_before.iter().zip(&deps_after) {
-                board::record(d, tid, rid, d_before, d_after)?;
+            for (((d, d_before), d_after), f) in deps_before.iter().zip(&deps_after).zip(&deps_folders) {
+                board::record(d, tid, rid, d_before, d_after, Some(f))?;
                 d.db.execute_batch("COMMIT")?;
             }
             extract::ahead::end(record)?;
             crash_after("commit");
         } else {
             // A merge's dependents commit before the source.
-            for (d, d_before) in &deps_before {
-                board::record(d, tid, rid, d_before, &with_toml(d)?)?;
+            for ((d, d_before), f) in deps_before.iter().zip(&deps_folders) {
+                board::record(d, tid, rid, d_before, &with_toml(d)?, Some(f))?;
                 d.db.execute_batch("COMMIT")?;
                 lockdown::drop_records(&d.root, rid)?;
             }
             if !deps_before.is_empty() {
                 crash_after("others");
             }
-            board::record(&store, &tid, &rid, &before, &after)?;
+            board::record(&store, &tid, &rid, &before, &after, folders.as_ref())?;
             store.db.execute_batch("COMMIT")?;
             crash_after("commit");
             // The task lists its changes from the rows that committed (D-77 point 4),
@@ -485,7 +489,7 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         }
         if let Some((d, Some(to), files)) = dest_before {
             d.db.execute_batch("BEGIN IMMEDIATE")?;
-            board::record(d, tid, rid, &files, &Value::Object(board::files_under(&d.root, to)))?;
+            board::record(d, tid, rid, &files, &Value::Object(board::files_under(&d.root, to)), d_folders.as_ref())?;
             d.db.execute_batch("COMMIT")?;
             lockdown::drop_records(&d.root, rid)?;
         }
@@ -1533,10 +1537,12 @@ impl Store {
     /// Writes every module's file from the store. Returns, per file, the line
     /// range of each symbol, for mapping compiler output back to symbols.
     fn materialize(&self, ix: &Index) -> Result<Vec<FileMap>, Failure> {
-        self.materialize_to(ix, &self.root)
+        self.materialize_to(ix, &self.root, &HashMap::new())
     }
 
-    fn materialize_to(&self, ix: &Index, target: &Path) -> Result<Vec<FileMap>, Failure> {
+    /// `stops`: where an undo stops removing the folders a deleted module file
+    /// leaves empty (D-136; `Written::prune`).
+    fn materialize_to(&self, ix: &Index, target: &Path, stops: &HashMap<String, String>) -> Result<Vec<FileMap>, Failure> {
         // A file changed outside Solace is never written over (D-58); the next command reads it in.
         let mut written = (target == self.root).then(|| outside::Written::load(&self.root));
         let mut maps = vec![];
@@ -1559,7 +1565,7 @@ impl Store {
         }
         if let Some(w) = written.as_mut() {
             // A file whose module is gone goes with it, unless edited since.
-            w.prune(&ix.modules.iter().map(|m| outside::file_of(&m.dir, &m.path)).collect())?;
+            w.prune(&ix.modules.iter().map(|m| outside::file_of(&m.dir, &m.path)).collect(), stops)?;
             w.save()?;
         }
         Ok(maps)
@@ -1844,10 +1850,15 @@ impl Store {
     /// `session start --task`: instead of the full index, the symbols most
     /// likely relevant to the task (signature and why each was picked),
     /// within a fixed budget, plus the module list. In a board run it also
-    /// names the task's unfinished dependencies (D-110).
+    /// names the task's feature (D-138) and unfinished dependencies (D-110).
     fn session_task(&self, task: &str) -> Out {
         const BUDGET: usize = 6500; // bytes, about 1.6k tokens
-        let deps = board::context().map(|(tid, _)| board::waiting_on(&scope::top(&self.root), &tid)).unwrap_or_default();
+        let deps = board::context()
+            .map(|(tid, _)| {
+                let top = scope::top(&self.root);
+                board::feature_of(&top, &tid) + &board::waiting_on(&top, &tid)
+            })
+            .unwrap_or_default();
         if !self.root.join("gleam.toml").exists() {
             return self.plain_session(&deps);
         }

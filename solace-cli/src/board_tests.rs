@@ -59,6 +59,38 @@ fn a_brief_carries_the_vision_up_to_the_cap() {
     assert!(vision_section(&root, "work").ends_with(":\nFor teams.\n"));
 }
 
+/// D-138: a task's feature section names the feature and carries the latest
+/// of its investigation report, assignment note and review feedback, cut at
+/// a line end within the cap; no feature, no section.
+#[test]
+fn a_brief_carries_the_features_latest_direction() {
+    let top = testing::Scratch::new();
+    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1 .0).unwrap();
+    let runs = json!([{"id":"i1","kind":"investigate"},{"id":"w1","kind":"work"},{"id":"r1","kind":"review"},{"id":"d1","kind":"discuss"}]);
+    let mut t = json!({"id":"t","runs":runs,"notes":[]});
+    assert_eq!(feature_section(&top, &t), "");
+    t["feature"] = json!("gone");
+    assert_eq!(feature_section(&top, &t), "");
+    t["feature"] = f["id"].clone();
+    assert_eq!(feature_section(&top, &t), "\nFeature (the feature this task is part of; its latest direction):\n- Search\n");
+    let note = |author: &str, run: Value, text: &str| json!({"author":author,"run":run,"text":text});
+    t["notes"] = json!([note("agent", json!("i1"), "plan"), note("solace", Value::Null, "exited")]);
+    assert!(feature_section(&top, &t).ends_with("- Search\n- investigation report (run i1): plan\n"));
+    t["notes"].as_array_mut().unwrap().push(note("human", Value::Null, "go"));
+    t["notes"].as_array_mut().unwrap().push(note("agent", json!("w1"), "done"));
+    assert!(feature_section(&top, &t).ends_with("- assignment: go\n"));
+    t["notes"].as_array_mut().unwrap().push(note("agent", json!("r1"), "looks good"));
+    t["notes"].as_array_mut().unwrap().push(note("human", json!("d1"), "chat"));
+    assert!(feature_section(&top, &t).ends_with("- review feedback (run r1): looks good\n"));
+    t["notes"].as_array_mut().unwrap().push(note("human", Value::Null, "  "));
+    assert!(feature_section(&top, &t).ends_with("- review feedback (run r1): looks good\n"), "an empty note is skipped");
+    let line = format!("{}\n", "n".repeat(99));
+    t["notes"].as_array_mut().unwrap().push(note("human", Value::Null, &line.repeat(12)));
+    let s = feature_section(&top, &t);
+    assert_eq!(s.matches(&"n".repeat(99)).count(), 10, "ten whole lines fit in {FEATURE_CAP} characters");
+    assert!(s.ends_with("\n(cut short; the whole note is in the task's notes on the board)\n"), "{s}");
+}
+
 /// D-112: a `### Tech debt` section gives one finding per top-level bullet,
 /// with its indented lines, and ends at the next heading.
 #[test]
@@ -102,7 +134,7 @@ fn completing_a_task_files_its_reviews_tech_debt() {
     let done = act(&a, "complete");
     let [debt] = debts().try_into().unwrap();
     let did = debt["id"].as_str().unwrap().to_string();
-    assert_eq!((debt["title"].as_str(), debt["column"].as_str(), debt["feature"].as_str()), (Some("Search: Tech Debt"), Some("backlog"), Some(fid.as_str())));
+    assert_eq!((debt["title"].as_str(), debt["column"].as_str(), debt["feature"].as_str()), (Some("Search: Tech Debt"), Some("planning"), Some(fid.as_str())));
     assert_eq!(debt["scope"], done["scope"]);
     let notes = texts(&debt);
     assert_eq!(notes.len(), 2);
@@ -122,12 +154,11 @@ fn completing_a_task_files_its_reviews_tech_debt() {
     let [debt] = debts().try_into().unwrap();
     assert_eq!(texts(&debt).len(), 3);
     // A completed Tech Debt task is not reopened: the next finding makes a new one.
-    act(&did, "plan");
     act(&did, "complete");
     act(&reviewed("F", true, two), "complete");
     let open: Vec<Value> = debts().into_iter().filter(|d| d["id"] != did.as_str()).collect();
     assert_eq!(open.len(), 1);
-    assert_eq!((open[0]["column"].as_str(), texts(&open[0]).len()), (Some("backlog"), 2));
+    assert_eq!((open[0]["column"].as_str(), texts(&open[0]).len()), (Some("planning"), 2));
     assert_eq!(task(&s.root, &did).unwrap()["column"], "complete");
 }
 
@@ -282,7 +313,7 @@ fn reviewable_follows_the_current_tier() {
 /// Records a work run's change, as a command does. The task lists its changes
 /// from the committed rows (D-77 point 4), so nothing is written to the task.
 fn record_listed(s: &Store, tid: &str, before: &Value, after: &Value) {
-    record(s, tid, "work", before, after).unwrap();
+    record(s, tid, "work", before, after, None).unwrap();
 }
 
 #[test]
@@ -331,7 +362,7 @@ fn cancel_removes_a_module_the_task_created() {
     let tid = t["id"].as_str().unwrap();
     let before = snapshot(&s).unwrap();
     s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-    record(&s, tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+    record(&s, tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
     assert!(s.root.join("src/geo.gleam").exists());
     let mut t = task(&s.root, tid).unwrap();
     end_runs(&mut t, "finished");
@@ -354,7 +385,7 @@ fn cancel_keeps_an_edited_file_of_a_module_the_task_created() {
     let tid = t["id"].as_str().unwrap();
     let before = snapshot(&s).unwrap();
     s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-    record(&s, tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+    record(&s, tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
     let file = s.root.join("src/geo.gleam");
     fs::write(&file, "pub fn side() {\n  22\n}\n").unwrap();
     let mut t = task(&s.root, tid).unwrap();
@@ -377,7 +408,7 @@ fn a_pending_changes_message_adds_nothing_after_a_revert() {
     let tid = t["id"].as_str().unwrap().to_string();
     let before = snapshot(&s).unwrap();
     s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
     assert!(!changes_of(&s, &task(&s.root, &tid).unwrap()).unwrap().is_empty());
     // A changes message from before D-77 point 4 waits in the inbox.
     let top = scope::top(&s.root);
@@ -434,7 +465,7 @@ fn needs_lock_only_for_changes_to_code() {
     assert!(needs(&["actions"], json!({"action": "cancel"})), "a work run may be mid-command");
     let before = snapshot(&s).unwrap();
     s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
     assert!(needs(&["actions"], json!({"action": "cancel"})));
     assert!(!needs(&["actions"], json!({"action": "stop"})));
 }
@@ -470,36 +501,113 @@ fn cancel_undoes_a_write_a_stopped_run_left_pending() {
     assert!(!lockdown::pending_for(&s.root, &tid));
 }
 
-/// D-108: a canceled task goes back to the backlog, out of the archive, with
-/// its closedTime and a note; no other column offers it, and complete offers nothing.
+/// D-108, D-133: a canceled task goes back to planning, out of the archive,
+/// with its closedTime and a note; complete offers nothing.
 #[test]
-fn a_canceled_task_goes_back_to_the_backlog() {
+fn a_canceled_task_goes_back_to_planning() {
     let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
     let s = open(&p.root).unwrap();
     let t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
     let tid = t["id"].as_str().unwrap().to_string();
     let act = |name: &str| api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": name}));
     let refused = |r: Result<Value, Failure>| r.unwrap_err().0[..5].to_string();
-    assert_eq!(refused(act("to_backlog")), "E7001", "not offered in backlog");
+    assert_eq!(refused(act("to_planning")), "E7001", "not offered in backlog");
     let cancelled = act("cancel").unwrap();
     assert_eq!(cancelled["column"], "cancelled");
-    assert_eq!(allowed(&flow(&s.root).unwrap(), &cancelled), ["to_backlog"]);
+    assert_eq!(allowed(&flow(&s.root).unwrap(), &cancelled), ["to_planning"]);
     let archived = api(&s.root, "POST", &format!("/tasks/{tid}/archive"), json!({})).unwrap();
     assert!(archived["archivedTime"].is_u64());
-    let back = act("to_backlog").unwrap();
-    assert_eq!((back["column"].as_str(), &back["archivedTime"], &back["closedTime"]), (Some("backlog"), &Value::Null, &cancelled["closedTime"]));
+    let back = act("to_planning").unwrap();
+    assert_eq!((back["column"].as_str(), &back["archivedTime"], &back["closedTime"]), (Some("planning"), &Value::Null, &cancelled["closedTime"]));
     assert!(t["createdTime"].is_u64());
     assert_eq!(back["createdTime"], t["createdTime"], "D-130: bringing it back keeps when it was created");
     assert_eq!(back["title"], "Shapes");
     let last = back["notes"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!((last["author"].as_str(), last["text"].as_str()), (Some("solace"), Some("The human brought this task back from Canceled to Backlog.")));
+    assert_eq!((last["author"].as_str(), last["text"].as_str()), (Some("solace"), Some("The human brought this task back from Canceled to Planning.")));
     let mut done = back.clone();
     done["column"] = json!("complete");
     assert!(allowed(&flow(&s.root).unwrap(), &done).is_empty(), "complete offers nothing");
 }
 
+/// D-132: a task with a feature can't go back to the backlog from Planning;
+/// without its feature it can again. From Canceled it goes back to planning,
+/// feature or not (D-133).
+#[test]
+fn a_task_with_a_feature_is_refused_back_to_the_backlog() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let top = scope::top(&s.root);
+    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1 .0).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    api(&s.root, "PATCH", &format!("/tasks/{tid}"), json!({"feature": f["id"]})).unwrap();
+    let act = |name: &str| api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": name}));
+    let refused = |r: Result<Value, Failure>| r.unwrap_err().0;
+    let planned = act("plan").unwrap();
+    assert_eq!(planned["column"], "planning");
+    assert!(!allowed(&flow(&s.root).unwrap(), &planned).contains(&"to_backlog".to_string()));
+    let e = refused(act("to_backlog"));
+    assert!(e.starts_with("E7001") && e.contains("feature"), "{e}");
+    let cancelled = act("cancel").unwrap();
+    assert_eq!(allowed(&flow(&s.root).unwrap(), &cancelled), ["to_planning"]);
+    assert!(refused(act("to_backlog")).starts_with("E7001"));
+    let back = act("to_planning").unwrap();
+    assert_eq!((back["column"].as_str(), &back["feature"]), (Some("planning"), &f["id"]));
+    api(&s.root, "PATCH", &format!("/tasks/{tid}"), json!({"feature": null})).unwrap();
+    assert_eq!(act("to_backlog").unwrap()["column"], "backlog");
+}
+
+/// D-133: back to planning from Assigned is refused while a run is open, and
+/// from Needs review it keeps the task's changes and clears its approval.
+#[test]
+fn back_to_planning_waits_for_the_run_and_keeps_changes() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let put = |column: &str, state: &str, stamped: bool| {
+        let mut v = task(&s.root, &tid).unwrap();
+        v["column"] = json!(column);
+        v["runs"] = json!([{"id": "r1", "kind": "work", "state": state, "model": "m", "log": "/l"}]);
+        v["stamps"] = if stamped { json!({"approved": {"who": "human", "time": 1}}) } else { json!({}) };
+        tasks::put(&s, &v).unwrap();
+    };
+    let act = || api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "to_planning"}));
+    for state in ["running", "waiting"] {
+        put("assigned", state, false);
+        let e = act().unwrap_err().0;
+        assert!(e.starts_with("E7001") && e.contains("stop"), "{e}");
+    }
+    let before = snapshot(&s).unwrap();
+    s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
+    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
+    put("assigned", "ended", false);
+    assert_eq!(act().unwrap()["column"], "planning");
+    put("needs_review", "ended", true);
+    let back = act().unwrap();
+    assert_eq!(back["column"], "planning");
+    assert!(back["stamps"].get("approved").is_none(), "approval cleared");
+    assert!(!changes_of(&s, &task(&s.root, &tid).unwrap()).unwrap().is_empty(), "changes kept");
+}
+
 /// A workflow whose `finished` event targets a final column, so `task done` settles.
 const DONE_IS_FINAL: &str = "[board]\nevents = { asked = \"todo\", finished = \"done\", failed = \"todo\" }\n[[board.columns]]\nid = \"todo\"\nactions = [\"cancel\"]\n[[board.columns]]\nid = \"done\"\nfinal = true\n[[board.columns]]\nid = \"gone\"\nfinal = true\n[board.actions]\ncancel = { revert = true, to = \"gone\" }\n";
+
+/// D-132 point 5: in a workflow with no `planning` column, a new Tech Debt task
+/// is made in its first column.
+#[test]
+fn tech_debt_goes_to_the_first_column_without_planning() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", DONE_IS_FINAL)]);
+    let s = open(&p.root).unwrap();
+    let top = scope::top(&s.root);
+    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1 .0).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"A"})).unwrap();
+    t["feature"] = f["id"].clone();
+    t["runs"].as_array_mut().unwrap().push(json!({"id":"rv","kind":"review","state":"ended","outcome":"reviewed"}));
+    note(&mut t, "agent", Some("rv"), "### Tech debt\n- `app.main`: name the constant\n");
+    let (debt, n) = tech_debt(&top, &t).unwrap().unwrap();
+    assert_eq!((debt["column"].as_str(), n), (Some("todo"), 1));
+}
 
 /// A `done` from a live run, applied by the server, settles: the move and the settle both happen.
 #[test]
@@ -512,7 +620,7 @@ fn a_done_applied_by_the_server_settles() {
     tasks::put(&s, &t).unwrap();
     let before = snapshot(&s).unwrap();
     s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
     let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
     assert!(has_before());
     testing::inbox_file(&s.root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"done"}));
@@ -530,7 +638,7 @@ fn resettle_settles_a_final_task_left_unsettled() {
     let tid = t["id"].as_str().unwrap().to_string();
     let before = snapshot(&s).unwrap();
     s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
     let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
     resettle(&s.root);
     assert!(has_before(), "a task not in a final column is left alone");
@@ -552,7 +660,7 @@ fn a_late_done_does_not_settle_and_a_real_one_does() {
     tasks::put(&s, &t).unwrap();
     let before = snapshot(&s).unwrap();
     s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
-    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap()).unwrap();
+    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
     let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
     assert!(has_before());
     testing::inbox_file(&s.root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"late"}));
@@ -775,7 +883,116 @@ fn presets_merge_with_configured_models() {
     let models = v["models"].as_array().unwrap();
     assert_eq!(models.iter().find(|m| m["id"] == "claude-opus-5-5").unwrap()["label"], "Mine");
     assert_eq!(models.last().unwrap()["id"], "local");
+    assert_eq!(models.last().unwrap()["configured"], true, "a configured model keeps its entry over a discovery");
+    assert!(models.iter().find(|m| m["id"] == "codex-gpt-6-astra").unwrap().get("configured").is_none(), "a preset is not configured");
     assert!(parse_system("presets = false\n").unwrap()["models"].as_array().unwrap().is_empty());
+}
+
+/// Presets, then discovery, then the human's config: a discovered model
+/// replaces a preset of the same id and adds new ones; a configured model
+/// keeps its entry; no discovery leaves the presets standing.
+#[test]
+fn discovered_models_merge_after_presets() {
+    let configured = json!([
+        {"id":"codex-gpt-6-astra","label":"Preset","agent":"codex","model":"gpt-6-astra"},
+        {"id":"mine","label":"Mine","agent":"claude","model":"opus","configured":true},
+    ]);
+    let all = json!({"codex":{"time":100,"models":[
+        {"id":"codex-gpt-6-astra","label":"Codex · GPT-6 Astra","agent":"codex","model":"gpt-6-astra","effort":"medium","efforts":["low","medium"]},
+        {"id":"codex-new-1","label":"Codex · New 1","agent":"codex","model":"new-1","effort":"high","efforts":["high"]},
+    ]}});
+    let m = agents::merge_from(&configured, &all);
+    assert_eq!(m.iter().find(|x| x["id"] == "codex-gpt-6-astra").unwrap()["label"], "Codex · GPT-6 Astra", "discovery replaces a preset");
+    assert!(m.iter().any(|x| x["id"] == "codex-new-1"), "a model the agent reports is offered");
+    assert_eq!(m.iter().find(|x| x["id"] == "mine").unwrap()["label"], "Mine", "the human's config wins for the same id");
+    assert_eq!(agents::merge_from(&configured, &json!({})).len(), 2, "presets stand when discovery fails");
+}
+
+/// A recorded `model/list` answer: hidden models are left out, and each model
+/// keeps its slug (what `-m` takes), its efforts and its default effort.
+#[test]
+fn codex_answers_offer_their_models_and_efforts() {
+    let r = json!({"data":[
+        {"id":"gpt-6-sol","model":"gpt-6-sol","displayName":"GPT-6 Sol","hidden":false,
+         "supportedReasoningEfforts":[{"effort":"low","description":"Low"},{"effort":"medium","description":"Medium"},{"effort":"high","description":"High"}],
+         "defaultReasoningEffort":"medium","isDefault":true},
+        {"id":"gpt-6-sol-mini","model":"gpt-6-sol-mini","displayName":"GPT-6 Sol Mini","hidden":true,"supportedReasoningEfforts":[],"defaultReasoningEffort":"medium"},
+        {"id":"gpt-5.6-terra","model":"gpt-5.6-terra","displayName":"GPT-5.6 Terra","supportedReasoningEfforts":[{"effort":"medium"}],"defaultReasoningEffort":"medium"}
+    ]});
+    let models = agents::codex_page(&r);
+    assert_eq!(models.len(), 2, "a hidden model is left out");
+    assert_eq!(models[0]["id"], "codex-gpt-6-sol");
+    assert_eq!(models[0]["label"], "Codex · GPT-6 Sol");
+    assert_eq!(models[0]["model"], "gpt-6-sol", "the slug is what the run passes to -m");
+    assert_eq!(models[0]["efforts"], json!(["low", "medium", "high"]));
+    assert_eq!(models[0]["effort"], "medium");
+    assert_eq!(efforts(&models[1]), ["medium"], "efforts come from the answer, not the fixed list");
+}
+
+/// Claude Code has no list command: its aliases name the latest of each family.
+#[test]
+fn claude_falls_back_to_its_aliases() {
+    let a = agents::claude_aliases();
+    let ids: Vec<&str> = a.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["claude-opus", "claude-sonnet", "claude-haiku", "claude-fable"]);
+    assert_eq!(a[0]["model"], "opus", "the alias is what the run passes to --model");
+    assert_eq!(a[0]["label"], "Claude Code · Opus (latest)");
+    assert_eq!(efforts(&a[0]), ["low", "medium", "high", "xhigh", "max"], "an alias takes the fixed Claude efforts");
+}
+
+/// With an API key, the provider's models endpoint lists exact ids: active
+/// ones, with the efforts its capability flags name.
+#[test]
+fn the_models_endpoint_lists_active_ids() {
+    let body = json!({"data":[
+        {"id":"claude-opus-5-5","display_name":"Opus 5.5","lifecycle":"active","capabilities":{"effort":{"low":true,"medium":true,"high":true,"xhigh":true,"max":true}}},
+        {"id":"claude-old-1","display_name":"Old 1","lifecycle":"deprecated","capabilities":{"effort":{"low":true}}},
+        {"id":"claude-haiku-5","display_name":"Haiku 5","capabilities":{}}
+    ]});
+    let models = agents::api_page(&body);
+    assert_eq!(models.len(), 2, "a retired model is left out");
+    assert_eq!(models[0]["id"], "claude-opus-5-5");
+    assert_eq!(models[0]["label"], "Claude Code · Opus 5.5");
+    assert_eq!(models[0]["efforts"], json!(["low", "medium", "high", "xhigh", "max"]));
+    assert_eq!(models[1]["efforts"], json!([]), "no effort flags: no efforts to choose");
+}
+
+/// A model a discovery dropped stays in the list, so tasks already using it
+/// keep working, and is not offered for a new run.
+#[test]
+fn a_model_off_the_offer_stays_for_the_tasks_using_it() {
+    let configured = json!([{"id":"claude-opus-5-5","label":"Preset","agent":"claude","model":"claude-opus-5-5"}]);
+    let all = json!({"claude":{"time":100,"models":[]},"gone":{"claude-opus":{"id":"claude-opus","label":"Claude Code · Opus (latest)","agent":"claude","model":"opus","reason":"no longer offered by Claude Code"}}});
+    let m = agents::merge_from(&configured, &all);
+    assert_eq!(m.len(), 2, "the model stays in the list");
+    let gone = m.iter().find(|x| x["id"] == "claude-opus").unwrap();
+    assert_eq!(gone["gone"], true);
+    assert_eq!(agents::availability(gone), Some(("no longer offered by Claude Code".to_string(), false)), "it is not offered for a new run");
+}
+
+#[test]
+fn a_model_error_names_the_offer_as_out_of_date() {
+    assert!(agents::model_gone("Error: Model 'gpt-9-pro' not found."));
+    assert!(agents::model_gone("unknown model claude-opus-9"));
+    assert!(agents::model_gone("The model gpt-6-new does not exist"));
+    assert!(!agents::model_gone("You've hit your usage limit; try again at 3pm"));
+    assert!(!agents::model_gone("stream disconnected before completion"));
+}
+
+/// The model a run used comes from its log's start event, and an alias's
+/// label names it once known.
+#[test]
+fn a_run_shows_the_model_it_used() {
+    let dir = testing::Scratch::new();
+    let log = dir.join("log.jsonl");
+    fs::write(&log, "{\"type\":\"assistant\"}\n{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\",\"model\":\"claude-opus-5-5\"}\n").unwrap();
+    assert_eq!(used_model(&log).as_deref(), Some("claude-opus-5-5"));
+    fs::write(&log, "not json\n{\"type\":\"thread.started\",\"thread_id\":\"t1\"}\n").unwrap();
+    assert_eq!(used_model(&log), None, "a start event naming no model names none");
+    let configured = json!([{"id":"claude-opus","label":"Claude Code · Opus (latest)","agent":"claude","model":"opus"}]);
+    let m = agents::merge_from(&configured, &json!({"used":{"claude-opus":"claude-opus-5-5"}}));
+    assert_eq!(m[0]["label"], "Claude Code · Opus (latest) · claude-opus-5-5");
+    assert_eq!(m[0]["model"], "opus", "the alias is what runs");
 }
 
 #[test]
@@ -1059,6 +1276,154 @@ fn unavailable_models_say_why() {
     assert!(unavailable(&agent).unwrap().contains("not installed"));
 }
 
+/// What agents say when a usage limit is reached, as they say it (see its `about`).
+const USAGE_LIMITS: &str = include_str!("board/usage-limits.json");
+/// 2026-10-14 12:00 UTC.
+const NOON: u64 = 1_791_979_200;
+/// Time zones for the tests, so no process is spawned: offsets on `NOON`.
+fn zones(z: Option<&str>) -> Option<i64> {
+    match z {
+        Some("Europe/London") => Some(3600),
+        Some("America/Toronto") => Some(-4 * 3600),
+        Some("UTC") | None => Some(0),
+        _ => None,
+    }
+}
+
+#[test]
+fn agents_say_when_a_usage_limit_is_reached_and_when_it_resets() {
+    let fixture: Value = serde_json::from_str(USAGE_LIMITS).unwrap();
+    for k in agents::KINDS {
+        for case in fixture[k.name].as_array().unwrap() {
+            let said = case["said"].as_str().unwrap();
+            assert_eq!((k.limit)(said), Some(case["resets"].as_str().map(String::from)), "{said}");
+        }
+        for said in fixture["not_limits"].as_array().unwrap() {
+            assert_eq!((k.limit)(said.as_str().unwrap()), None, "{said}");
+        }
+    }
+    let at = |said: &str, now: u64| agents::reset_time(said, now, &zones);
+    // A time alone is its next coming: later today, else tomorrow.
+    assert_eq!(at("3:45 PM", NOON), Some(1_791_992_700));
+    assert_eq!(at("3:45 PM", NOON + 5 * 3600), Some(1_792_079_100));
+    assert_eq!(at("3pm", NOON), Some(1_791_990_000));
+    assert_eq!(at("Oct 15th, 2026 9:05 AM", NOON), Some(1_792_055_100));
+    // A zone in parentheses: its own clock, not this computer's.
+    assert_eq!(at("2pm (UTC)", NOON), Some(1_791_986_400));
+    assert_eq!(at("1am (Europe/London)", NOON), Some(1_792_022_400));
+    assert_eq!(at("2:50pm (America/Toronto)", NOON), Some(1_792_003_800));
+    assert_eq!(at("Oct 9, 2025 8:53 AM (UTC)", NOON), Some(1_759_999_980));
+    // A reset that can't be read, or in an unknown zone, has no time.
+    assert_eq!(at("soon", NOON), None);
+    assert_eq!(at("2pm (Mars/Olympus)", NOON), None);
+    assert_eq!(agents::zone_offset(Some("UTC")), Some(0));
+}
+
+#[test]
+fn a_usage_limit_marks_the_sign_in_until_it_resets_or_a_run_succeeds() {
+    let fixture: Value = serde_json::from_str(USAGE_LIMITS).unwrap();
+    let dir = testing::Scratch::new();
+    let (path, log) = (dir.join("agent-limits.json"), dir.join("log.jsonl"));
+    let codex = json!({"agent":"codex","model":"m"});
+    let said = fixture["codex"][3]["said"].as_str().unwrap();
+    fs::write(&log, json!({"type":"error","message":said}).to_string()).unwrap();
+    agents::observe(&path, &codex, &log, NOON, &zones).unwrap();
+    let reason = "Codex usage limit reached (resets 3:45 PM)";
+    assert_eq!(agents::limited(&path, "codex", NOON).as_deref(), Some(reason));
+    assert_eq!(agents::limited(&path, "codex", 1_791_992_699).as_deref(), Some(reason));
+    // It lifts at the reset time, and holds only Codex's sign-in.
+    assert_eq!(agents::limited(&path, "codex", 1_791_992_700), None);
+    assert_eq!(agents::limited(&path, "claude", NOON), None);
+    // A model on its own endpoint, or with its own program, isn't on the sign-in.
+    let other = dir.join("other.json");
+    for m in [json!({"agent":"codex","model":"m","endpoint":{"base_url":"http://x"}}), json!({"agent":"codex","run":["sh"]})] {
+        agents::observe(&other, &m, &log, NOON, &zones).unwrap();
+    }
+    assert!(!other.exists());
+    // Claude Code's limit, in its stream-json result, with a reset it can't read: held until cleared.
+    let claude = json!({"agent":"claude","model":"m"});
+    fs::write(&log, json!({"type":"result","is_error":true,"result":"You've hit your limit · resets soon","usage":{}}).to_string()).unwrap();
+    agents::observe(&path, &claude, &log, NOON, &zones).unwrap();
+    assert_eq!(agents::limited(&path, "claude", NOON + 365 * 86400).as_deref(), Some("Claude Code usage limit reached (resets soon)"));
+    // The mark is on disk, not only in memory.
+    agents::forget_marks();
+    assert!(agents::limited(&path, "claude", NOON).is_some());
+    // A run that got no answer leaves it; a run whose agent answered clears it.
+    fs::write(&log, "").unwrap();
+    agents::observe(&path, &claude, &log, NOON, &zones).unwrap();
+    assert!(agents::limited(&path, "claude", NOON).is_some());
+    fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}).to_string()).unwrap();
+    agents::observe(&path, &claude, &log, NOON, &zones).unwrap();
+    assert_eq!(agents::limited(&path, "claude", NOON), None);
+    // Try again clears a mark.
+    assert!(agents::clear(&path, "codex").unwrap());
+    assert!(!agents::clear(&path, "codex").unwrap());
+    // Errors that aren't usage limits mark nothing.
+    let none = dir.join("none.json");
+    for e in fixture["not_limits"].as_array().unwrap() {
+        fs::write(&log, json!({"type":"error","message":e}).to_string()).unwrap();
+        agents::observe(&none, &codex, &log, NOON, &zones).unwrap();
+    }
+    assert!(!none.exists());
+}
+
+#[test]
+fn sign_ins_are_detected_without_a_model_call() {
+    let home = testing::Scratch::new();
+    let none = |_: &str| false;
+    let now = NOON * 1000;
+    let check = |m: &Value, var: &dyn Fn(&str) -> bool| agents::local(m, &agents::Here { home: &home, var, installed: &|_| true, now });
+    let (codex, claude) = (json!({"agent":"codex","model":"m"}), json!({"agent":"claude","model":"m"}));
+    let missing = agents::Here { home: &home, var: &none, installed: &|_| false, now };
+    assert_eq!(agents::local(&codex, &missing).unwrap(), "codex is not installed (not on PATH)");
+    assert_eq!(check(&codex, &none).unwrap(), "codex is not signed in");
+    // The keychain is asked on macOS only; elsewhere no file and no key is no sign-in.
+    if !cfg!(target_os = "macos") {
+        assert_eq!(check(&claude, &none).unwrap(), "claude is not signed in");
+    }
+    // A key variable is a sign-in.
+    assert!(check(&codex, &|v| v == "OPENAI_API_KEY").is_none());
+    assert!(check(&claude, &|v| v == "ANTHROPIC_API_KEY").is_none());
+    // An endpoint needs only its own key.
+    let endpoint = json!({"agent":"codex","model":"m","endpoint":{"base_url":"http://x","key_env":"LOCAL_KEY"}});
+    assert_eq!(check(&endpoint, &none).unwrap(), "the endpoint's key variable LOCAL_KEY is not set");
+    assert!(check(&endpoint, &|v| v == "LOCAL_KEY").is_none());
+    // Codex's file: a token it can renew is a sign-in; neither key nor token has expired.
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(home.join(".codex/auth.json"), json!({"OPENAI_API_KEY":null,"tokens":{"refresh_token":"r"}}).to_string()).unwrap();
+    assert!(check(&codex, &none).is_none());
+    fs::write(home.join(".codex/auth.json"), json!({"OPENAI_API_KEY":null,"tokens":{}}).to_string()).unwrap();
+    assert_eq!(check(&codex, &none).unwrap(), "Codex's sign-in has expired; sign in again");
+    // Claude Code's file: a token past its time is renewed while there is a refresh token.
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    let credentials = home.join(".claude/.credentials.json");
+    fs::write(&credentials, json!({"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":now - 1}}).to_string()).unwrap();
+    assert!(check(&claude, &none).is_none());
+    fs::write(&credentials, json!({"claudeAiOauth":{"accessToken":"a","expiresAt":now + 1}}).to_string()).unwrap();
+    assert!(check(&claude, &none).is_none());
+    if !cfg!(target_os = "macos") {
+        fs::write(&credentials, json!({"claudeAiOauth":{"accessToken":"a","expiresAt":now - 1}}).to_string()).unwrap();
+        assert_eq!(check(&claude, &none).unwrap(), "Claude Code's sign-in has expired; sign in again");
+    }
+    // A file that says nothing about expiry counts as a sign-in.
+    fs::write(&credentials, "not json").unwrap();
+    assert!(check(&claude, &none).is_none());
+}
+
+#[test]
+fn detections_are_cached_for_a_while() {
+    let key = format!("test:{}", unique_id());
+    let n = std::cell::Cell::new(0);
+    let work = || {
+        n.set(n.get() + 1);
+        json!(n.get())
+    };
+    let minute = Duration::from_secs(60);
+    assert_eq!(agents::cached_for(&key, minute, work), json!(1));
+    assert_eq!(agents::cached_for(&key, minute, work), json!(1));
+    assert_eq!(agents::cached_for(&key, Duration::ZERO, work), json!(2));
+}
+
 /// D-103: a revert restores every project before it checks any. Here `web`'s
 /// restored code calls `components`' restored `lib.z`, and `web` is checked
 /// first: checked before `components` was restored, it would not type-check.
@@ -1089,8 +1454,8 @@ fn revert_restores_every_project_before_checking_any() {
     let (bw, bc) = (snapshot(&web).unwrap(), snapshot(&comp).unwrap());
     web.submit_symbols(Some("app.f"), None, "pub fn f() -> Int {\n  1\n}").unwrap();
     comp.submit_symbols(Some("lib.z"), None, "pub fn z() -> String {\n  \"0\"\n}").unwrap();
-    record(&web, &tid, "r1", &bw, &snapshot(&web).unwrap()).unwrap();
-    record(&comp, &tid, "r1", &bc, &snapshot(&comp).unwrap()).unwrap();
+    record(&web, &tid, "r1", &bw, &snapshot(&web).unwrap(), None).unwrap();
+    record(&comp, &tid, "r1", &bc, &snapshot(&comp).unwrap(), None).unwrap();
     end_runs(&mut t, "finished");
     tasks::put(&web, &t).unwrap();
     api(&web.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap();
@@ -1169,6 +1534,121 @@ fn restoring_an_added_file_removes_the_folders_it_leaves_empty() {
     restore(&s, &[("file:src/ui/ffi/x.mjs".to_string(), json!(null))]).unwrap();
     assert!(!s.root.join("src/ui").exists());
     assert!(s.root.join("src/app.gleam").exists());
+}
+
+/// A task adds `file`, recorded with the folders found before it or, as an old
+/// record, without; then it is canceled.
+fn cancel_an_added_file(s: &Store, file: &str, folders: bool) {
+    let t = api(&s.root, "POST", "/tasks", json!({"title": "Folders"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let found = folders.then(|| existing_folders(&s.root));
+    let key = format!("file:{file}");
+    let (mut before, mut after) = (json!({}), json!({}));
+    before[&key] = Value::Null;
+    fs::create_dir_all(s.root.join(file).parent().unwrap()).unwrap();
+    fs::write(s.root.join(file), "export const x = 1\n").unwrap();
+    after[&key] = json!(b"export const x = 1\n".to_vec());
+    record(s, &tid, "r1", &before, &after, found.as_ref()).unwrap();
+    api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap();
+    assert!(!s.root.join(file).exists());
+}
+
+/// D-136: undo keeps a folder that was there before the task, even empty.
+#[test]
+fn reverting_keeps_an_empty_folder_that_was_there_before() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    fs::create_dir_all(s.root.join("src/ui")).unwrap();
+    cancel_an_added_file(&s, "src/ui/x.mjs", true);
+    assert!(s.root.join("src/ui").is_dir());
+}
+
+/// D-136: a folder the task made still goes; the one above it, there before, stays.
+#[test]
+fn reverting_removes_a_folder_the_task_made() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    fs::create_dir_all(s.root.join("src/ui")).unwrap();
+    cancel_an_added_file(&s, "src/ui/ffi/x.mjs", true);
+    assert!(!s.root.join("src/ui/ffi").exists());
+    assert!(s.root.join("src/ui").is_dir());
+}
+
+/// D-136: an old record, with no folders, removes every folder left empty.
+#[test]
+fn reverting_an_old_record_removes_every_empty_folder() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    fs::create_dir_all(s.root.join("src/ui")).unwrap();
+    cancel_an_added_file(&s, "src/ui/x.mjs", false);
+    assert!(!s.root.join("src/ui").exists());
+    assert!(s.root.join("src/app.gleam").exists());
+}
+
+/// A task adds module `ui/deep/new` (its file `src/ui/deep/new.gleam`), recorded
+/// with the folders found before it; then it is canceled.
+fn cancel_an_added_module(s: &Store) {
+    let t = api(&s.root, "POST", "/tasks", json!({"title": "Module folders"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let found = existing_folders(&s.root);
+    let before = snapshot(s).unwrap();
+    s.db.execute("INSERT INTO modules SELECT 'ui/deep/new',dir,header FROM modules WHERE path='app'", []).unwrap();
+    s.db.execute("INSERT INTO symbols(id,module,name,kind,text,ord,revision,live) SELECT 'new1','ui/deep/new',name,kind,text,ord,revision,live FROM symbols WHERE module='app'", []).unwrap();
+    s.materialize(&s.index().unwrap()).unwrap();
+    assert!(s.root.join("src/ui/deep/new.gleam").exists());
+    let after = snapshot(s).unwrap();
+    record(s, &tid, "r1", &before, &after, Some(&found)).unwrap();
+    api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap();
+    assert!(!s.root.join("src/ui/deep/new.gleam").exists());
+}
+
+/// D-136 for module files: undo keeps an empty folder that was there before
+/// the task, and removes the one the task made below it.
+#[test]
+fn reverting_an_added_module_keeps_the_folder_that_was_there() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    fs::create_dir_all(s.root.join("src/ui")).unwrap();
+    cancel_an_added_module(&s);
+    assert!(!s.root.join("src/ui/deep").exists());
+    assert!(s.root.join("src/ui").is_dir());
+}
+
+/// D-136 for module files: folders the task made all go, up to `src/`.
+#[test]
+fn reverting_an_added_module_removes_the_folders_it_made() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    cancel_an_added_module(&s);
+    assert!(!s.root.join("src/ui").exists());
+    assert!(s.root.join("src/app.gleam").exists());
+}
+
+/// An ignored folder is listed but not walked: undo stops at it, and its
+/// contents, which can be large (`target/`), aren't read.
+#[test]
+fn existing_folders_lists_an_ignored_folder_without_its_contents() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    fs::write(s.root.join(".gitignore"), "target/\n").unwrap();
+    fs::create_dir_all(s.root.join("target/a/b")).unwrap();
+    fs::create_dir_all(s.root.join("src/x")).unwrap();
+    let found = existing_folders(&s.root);
+    assert!(found.contains("target") && found.contains("src/x") && found.contains("src"));
+    assert!(!found.contains("target/a") && !found.contains("target/a/b"));
+}
+
+/// A folder's `.gitignore` is matched from that folder: `/gen` in
+/// `src/.gitignore` ignores `src/gen`, which is listed but not walked.
+#[test]
+fn existing_folders_reads_a_nested_gitignore_from_its_folder() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    fs::write(s.root.join("src/.gitignore"), "/gen\n").unwrap();
+    fs::create_dir_all(s.root.join("src/gen/a")).unwrap();
+    let found = existing_folders(&s.root);
+    assert!(found.contains("src/gen"));
+    assert!(!found.contains("src/gen/a"));
 }
 
 /// D-127: while its agent works, a task's scope widens, and the run claims

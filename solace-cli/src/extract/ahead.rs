@@ -1,10 +1,10 @@
 //! A cross-project extract, written ahead (D-103): one record, a copy in each
 //! of its projects' `.solace/pending/`, written before the command changes any
 //! file and completed with the computed result (each project's changed rows
-//! and files, before and after, and the gleam.toml lines it gains) before the
-//! first commit. The destination commits first, then the source and the
-//! dependents. A crash anywhere in between is finished or rolled back at the
-//! next open, so an extract never stays half-applied.
+//! and files, before and after) before the first commit. The destination
+//! commits first, then the source and the dependents. A crash anywhere in
+//! between is undone in every project at the next open, as if the extract never
+//! ran (D-135), so an extract never stays half-applied.
 use super::*;
 use std::collections::{BTreeSet, HashSet};
 
@@ -87,21 +87,27 @@ fn gained(before: &str, after: &str) -> Vec<String> {
     after.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('[') && !had.contains(l.trim())).map(String::from).collect()
 }
 
-/// Adds to `root`'s gleam.toml each line it lacks; the rest of the file, edited
-/// outside Solace or not, stays as it is.
-fn merge_lines(root: &Path, lines: &Value) -> Result<(), Failure> {
-    let p = root.join("gleam.toml");
-    let Ok(now) = fs::read_to_string(&p) else { return Ok(()) };
-    let mut text = now.clone();
-    for line in lines.as_array().into_iter().flatten().filter_map(Value::as_str) {
-        if !text.lines().any(|l| l.trim() == line.trim()) {
-            text = add_dependency(&text, line);
+/// The files an extract record in project `root` shows the command created:
+/// only its rollback deletes them (D-135), so the general cleanup leaves them.
+pub(crate) fn created(root: &Path) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for e in fs::read_dir(root.join(".solace/pending")).into_iter().flatten().flatten() {
+        if !e.file_name().to_string_lossy().starts_with("extract-") {
+            continue;
+        }
+        let Some(r) = fs::read(e.path()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { continue };
+        for p in r["extract"]["projects"].as_array().into_iter().flatten() {
+            if !p["root"].as_str().is_some_and(|x| lockdown::same_project(Path::new(x), root)) {
+                continue;
+            }
+            for (k, _) in p["files_after"].as_object().into_iter().flatten() {
+                if p["files_before"][k.as_str()].is_null() {
+                    out.insert(k.clone());
+                }
+            }
         }
     }
-    if text != now {
-        fs::write(p, text)?;
-    }
-    Ok(())
+    out
 }
 
 /// Step 1, before the command writes any file: the record, with each
@@ -113,9 +119,9 @@ pub(crate) fn begin(tid: &str, rid: &str, roots: &[&Path]) -> Result<Value, Fail
     Ok(record)
 }
 
-/// Before the first commit: the computed result, so finishing replays it and
-/// never computes another plan. `stores` in `begin`'s order, each with its
-/// snapshots before and after; its files are written out first.
+/// Before the first commit: the computed result, so recovery can undo the
+/// parts that committed. `stores` in `begin`'s order, each with its snapshots
+/// before and after; its files are written out first.
 pub(crate) fn complete(record: &mut Value, stores: &[(&Store, &Value, &Value)]) -> Result<(), Failure> {
     for (i, (s, before, after)) in stores.iter().enumerate() {
         s.materialize(&s.index()?)?;
@@ -130,31 +136,25 @@ pub(crate) fn complete(record: &mut Value, stores: &[(&Store, &Value, &Value)]) 
         let p = &mut record["extract"]["projects"][i];
         p["before"] = Value::Object(b);
         p["after"] = Value::Object(a);
-        p["toml"] = json!(gained(&text(&before["file:gleam.toml"]), &text(&after["file:gleam.toml"])));
         p["files_after"] = hashes(&s.root);
     }
     record["extract"]["complete"] = json!(true);
     put(record)
 }
 
-/// The last steps, after every commit: the gleam.toml lines are merged, and the
-/// run's undo records and this record go.
+/// The last step, after every commit: the run's undo records and this record go.
 pub(crate) fn end(record: &Value) -> Result<(), Failure> {
     for p in record["extract"]["projects"].as_array().into_iter().flatten() {
-        let root = PathBuf::from(p["root"].as_str().unwrap_or(""));
-        merge_lines(&root, &p["toml"])?;
-        lockdown::drop_records(&root, run(record))?;
+        lockdown::drop_records(Path::new(p["root"].as_str().unwrap_or("")), run(record))?;
     }
     clear(record)
 }
 
-/// Settles every extract record in the projects `held`, whose locks the caller
+/// Undoes every extract record in the projects `held`, whose locks the caller
 /// holds; another project of the record is locked here without waiting, so two
-/// holders never wait on each other (`E7028` when one is busy). A record kept
-/// for a human, both sides having changed outside Solace, refuses (`E7029`):
-/// nothing may change those projects, or read their edits in, until one decides.
+/// holders never wait on each other (`E7028` when one is busy).
 pub(crate) fn recover(held: &[PathBuf]) -> Result<(), Failure> {
-    let (mut seen, mut kept) = (HashSet::new(), vec![]);
+    let mut seen = HashSet::new();
     for root in held {
         let Ok(dir) = fs::read_dir(root.join(".solace/pending")) else { continue };
         let mut found = vec![];
@@ -185,10 +185,10 @@ pub(crate) fn recover(held: &[PathBuf]) -> Result<(), Failure> {
                     }
                 }
             }
-            kept.extend(settle(&r)?);
+            settle(&r)?;
         }
     }
-    if kept.is_empty() { Ok(()) } else { Err(Failure(format!("E7029 {}", kept.join("\n")), 1)) }
+    Ok(())
 }
 
 /// The files of project `p` that match neither its state before the extract
@@ -220,91 +220,38 @@ fn done(s: &Store, p: &Value, tid: &str, rid: &str) -> Result<bool, Failure> {
     Ok(true)
 }
 
-/// One record, under every lock of its projects: finished, rolled back, or kept
-/// for a human (returned as text).
-fn settle(r: &Value) -> Result<Option<String>, Failure> {
+/// One record, under every lock of its projects: undone in every project, as if
+/// the extract never ran (D-135). Files edited outside Solace since stay, to be
+/// read in as any outside change (D-58), and the task gets a note.
+fn settle(r: &Value) -> Result<(), Failure> {
     let (tid, rid) = (r["task"].as_str().unwrap_or(""), run(r));
     let ps: Vec<Value> = r["extract"]["projects"].as_array().cloned().unwrap_or_default();
     let stores: Vec<Store> = ps.iter().map(|p| board::open(Path::new(p["root"].as_str().unwrap_or("")))).collect::<Result<_, _>>()?;
-    // The destination never committed: the extract never happened.
-    if r["extract"]["complete"] != true || stores.len() < 2 || !done(&stores[1], &ps[1], tid, rid)? {
-        for (s, p) in stores.iter().zip(&ps) {
-            roll_back(s, p, rid, &[])?;
-        }
-        return clear(r).map(|_| None);
-    }
-    // The source and the dependents are one side, the destination the other.
-    let edits: Vec<Vec<String>> = ps.iter().map(edited).collect();
-    let named = |i: usize| edits[i].iter().map(|f| format!("{}/{f}", ps[i]["root"].as_str().unwrap_or(""))).collect::<Vec<_>>();
-    let source_side = edits.iter().enumerate().any(|(i, e)| i != 1 && !e.is_empty());
-    if source_side && !edits[1].is_empty() {
-        let rows: Vec<&String> = ps.iter().flat_map(|p| p["after"].as_object().into_iter().flatten().map(|(k, _)| k)).collect();
-        let files: Vec<String> = (0..ps.len()).flat_map(named).collect();
-        let what = format!(
-            "An extract of run {rid} was stopped between its projects' commits, and both sides were changed outside Solace since: {}. Its rows: {}. Nothing was changed; commands in these projects, revert and cancel refuse until a human decides.",
-            files.join(", "),
-            rows.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", ")
-        );
-        if r["extract"]["flagged"] != true {
-            let top = scope::top(&stores[0].root);
-            tasks::send(&top, json!({"kind":"note","task":tid,"author":"solace","text":what,"flag":"an interrupted extract needs a decision","hold":true}))?;
-            let mut flagged = r.clone();
-            flagged["extract"]["flagged"] = json!(true);
-            put(&flagged)?;
-        }
-        return Ok(Some(what));
-    }
-    if source_side {
-        // The source or a dependent was edited outside Solace: every part that
-        // committed is undone, the extract never happened, and the edits stay.
-        let committed: Vec<bool> = stores.iter().zip(&ps).map(|(s, p)| done(s, p, tid, rid)).collect::<Result<_, _>>()?;
-        for (((s, p), keep), c) in stores.iter().zip(&ps).zip(&edits).zip(&committed) {
-            if *c {
+    // Before `complete` nothing committed, and the record can't tell an outside edit.
+    let complete = r["extract"]["complete"] == true;
+    let edits: Vec<Vec<String>> = ps.iter().map(|p| if complete { edited(p) } else { vec![] }).collect();
+    if complete {
+        for ((s, p), keep) in stores.iter().zip(&ps).zip(&edits) {
+            if done(s, p, tid, rid)? {
                 undo(s, p, tid, rid, keep)?;
             }
         }
-        for ((s, p), keep) in stores.iter().zip(&ps).zip(&edits) {
-            roll_back(s, p, rid, keep)?;
-        }
-        return clear(r).map(|_| None);
     }
-    finish(&stores, &ps, tid, rid)?;
-    end(r).map(|_| None)
-}
-
-/// Commits each project's part that didn't, from the record's rows, with its undo rows.
-fn finish(stores: &[Store], ps: &[Value], tid: &str, rid: &str) -> Result<(), Failure> {
-    for (i, (s, p)) in stores.iter().zip(ps).enumerate() {
-        if i == 1 || done(s, p, tid, rid)? {
-            continue;
-        }
-        s.db.execute_batch("BEGIN IMMEDIATE")?;
-        let applied = (|| -> Result<(), Failure> {
-            let mut states = vec![];
-            for (k, v) in p["after"].as_object().into_iter().flatten() {
-                match k.strip_prefix("symbol:") {
-                    // the source keeps a moved symbol's row, retired
-                    Some(id) if v.is_null() => {
-                        s.db.execute("UPDATE symbols SET live = 0 WHERE id = ?1", [id])?;
-                    }
-                    // files are on disk already
-                    _ if k.starts_with("file:") => {}
-                    _ => states.push((k.clone(), v.clone())),
-                }
-            }
-            board::restore(s, &states)?;
-            board::touch(s, tid, rid, &p["before"], &p["after"])?;
-            Ok(())
-        })();
-        match applied {
-            Ok(()) => s.db.execute_batch("COMMIT")?,
-            Err(e) => {
-                let _ = s.db.execute_batch("ROLLBACK");
-                return Err(e);
-            }
-        }
+    for ((s, p), keep) in stores.iter().zip(&ps).zip(&edits) {
+        roll_back(s, p, rid, keep)?;
     }
-    Ok(())
+    let kept: Vec<String> =
+        ps.iter().zip(&edits).flat_map(|(p, e)| e.iter().map(move |f| format!("{}/{f}", p["root"].as_str().unwrap_or("")))).collect();
+    let mut text = format!("An extract of run {rid} was interrupted and has been undone; run it again if it is still needed.");
+    if !kept.is_empty() {
+        text += &format!(" Files changed outside Solace since were kept: {}.", kept.join(", "));
+    }
+    // The note goes before the record: a send that fails leaves the record for
+    // the next recovery, and a crash between the two at worst repeats the note.
+    if let Some(s) = stores.first() {
+        tasks::send(&scope::top(&s.root), json!({"kind":"note","task":tid,"author":"solace","text":text}))?;
+    }
+    clear(r)
 }
 
 /// Undoes a project's committed part: its rows as before, and the extract's undo
@@ -393,15 +340,11 @@ mod tests {
     }
 
     #[test]
-    fn merging_lines_keeps_an_outside_edit_and_adds_a_line_once() {
+    fn created_lists_only_files_the_extract_added() {
         let dir = tempfile_dir();
-        fs::write(dir.join("gleam.toml"), "name=\"web\"\n# edited\n").unwrap();
-        let lines = json!(["components = { path = \"../components\" }"]);
-        merge_lines(&dir, &lines).unwrap();
-        merge_lines(&dir, &lines).unwrap();
-        let text = fs::read_to_string(dir.join("gleam.toml")).unwrap();
-        assert!(text.contains("# edited"));
-        assert_eq!(text.matches("components = ").count(), 1);
+        let p = json!({"root": dir, "files_before": {"src/a.gleam": "x"}, "files_after": {"src/a.gleam": "y", "test/b_test.gleam": "z"}});
+        put(&json!({"task": "t", "run": "r", "extract": {"projects": [p], "complete": true}})).unwrap();
+        assert_eq!(created(&dir), HashSet::from(["test/b_test.gleam".to_string()]));
     }
 
     #[test]

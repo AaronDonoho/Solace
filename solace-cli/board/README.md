@@ -21,12 +21,18 @@ card opens as any other. The root's event stream already brings every
 project's tasks, so a dependency in another project needs no request of its
 own, and the card follows each change live.
 
-A canceled task's details offer **Back to backlog**, the workflow's
-`to_backlog` action on the `cancelled` column (D-108); a complete task's offer
-nothing. The task returns to the backlog with its notes, runs and links, comes
-out of the archive, and gets a note saying the human brought it back; cards
-that depend on it dim again. A button shows its action's `label` when the
-workflow gives one, and the action's name otherwise.
+The board leaves out the `backlog` column and its tasks (D-133): Backlog means
+*not active*, so Planning is the first column. Backlog tasks are on the
+Strategy page, which plans them. A task of a proposed, upcoming or canceled
+feature stays off the board in any column (D-128).
+
+Assigned, Needs review and Canceled offer **Back to planning**, the workflow's
+`to_planning` action (D-133); a complete task's details offer nothing. The task
+keeps its changes and loses its approval, and the server refuses it while an
+agent is working. From Canceled the task returns with its notes, runs and
+links, comes out of the archive, and gets a note saying the human brought it
+back; cards that depend on it dim again. A button shows its action's `label`
+when the workflow gives one, and the action's name otherwise.
 
 Build after changing the client:
 

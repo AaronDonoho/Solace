@@ -310,6 +310,7 @@ pub fn an_inline_link_patches_one_field_test() {
     workspace()
     |> step(strategy.Patched(
       "web",
+      "t1",
       json.to_string(task("t1", "A", "", "done", "f1", 3)),
     ))
   let assert [#("web", row)] = strategy.visible(model)
@@ -503,6 +504,7 @@ pub fn a_new_task_reports_each_step_test() {
     model
     |> step(strategy.Patched(
       "web",
+      "t9",
       "{\"code\":\"E7023\",\"message\":\"E7023 unknown feature f1\"}",
     ))
   assert model.task_errors
@@ -1030,6 +1032,7 @@ pub fn attention_when_a_run_replies_or_proposes_test() {
       context: plan.page,
       notes: [],
       questions: questions,
+      used: "",
     )
   }
   let ask = fn(id, answer) {
@@ -1626,6 +1629,8 @@ pub fn a_single_project_marks_a_task_with_no_project_test() {
   let page = element.to_string(strategy.view(model))
   assert string.contains(page, ">No project</span>")
   assert !string.contains(page, ">No project</td>")
+  // The mark is styled, set apart from the title.
+  assert string.contains(page, ".tasks .homeless{")
 }
 
 /// D-118: in the same second, a proposal comes after the notes the server
@@ -1712,7 +1717,15 @@ pub fn the_new_task_form_disables_create_while_the_title_is_blank_test() {
   assert step(model, strategy.CreateTask).task_saving == None
   let model = step(model, strategy.NewTaskTitle("Index"))
   assert !create_disabled(model)
-  assert step(model, strategy.CreateTask).task_saving == Some("")
+  let saving = step(model, strategy.CreateTask)
+  assert saving.task_saving == Some("")
+  // While its create is in flight, Cancel is disabled and does nothing.
+  let assert Ok(#(before, _)) =
+    element.to_string(strategy.view(saving))
+    |> string.split_once("Cancel</button>")
+  let assert Ok(cancel) = string.split(before, "<button") |> list.last
+  assert string.contains(cancel, "disabled")
+  assert step(saving, strategy.NewTaskCancel).new_task != None
   // Cancel closes the form.
   assert step(model, strategy.NewTaskCancel).new_task == None
 }
@@ -1786,6 +1799,7 @@ pub fn the_new_task_links_only_what_was_picked_test() {
       model,
       strategy.Patched(
         "web",
+        "t9",
         json.to_string(task("t9", "Index", "", "backlog", "f1", 0)),
       ),
     )
@@ -1799,6 +1813,7 @@ pub fn the_new_task_links_only_what_was_picked_test() {
       model,
       strategy.Patched(
         "web",
+        "t9",
         "{\"code\":\"E7023\",\"message\":\"E7023 unknown feature f1\"}",
       ),
     )
@@ -1810,6 +1825,19 @@ pub fn the_new_task_links_only_what_was_picked_test() {
   assert refused.error == ""
   let assert Some(fresh) = refused.new_task
   assert fresh.title == ""
+  // Another task's refused PATCH in the same project isn't the form's.
+  let other =
+    step(
+      model,
+      strategy.Patched(
+        "web",
+        "t1",
+        "{\"code\":\"E7023\",\"message\":\"E7023 unknown feature f1\"}",
+      ),
+    )
+  assert other.task_linking == Some(#("web", "t9", ""))
+  assert other.new_task_error == ""
+  assert other.error == "E7023 unknown feature f1"
 }
 
 /// The numbers from `from` to `to`, both included.
@@ -1918,4 +1946,381 @@ pub fn a_task_link_opens_the_page_holding_the_task_test() {
   assert model.page == 2
   let page = element.to_string(strategy.view(model))
   assert string.contains(page, "task-27")
+}
+
+/// D-118: a longer transcript with the same conversation never shows "New
+/// message ↓": at the run's end the human stays there, and scrolled up
+/// nothing changes.
+pub fn transcript_growth_keeps_the_model_test() {
+  let entry = fn(t: String) {
+    json.object([#("kind", json.string("text")), #("text", json.string(t))])
+  }
+  let reply = fn(entries: List(json.Json)) {
+    json.to_string(
+      json.object([
+        #("id", json.string("r5")),
+        #("kind", json.string("strategy")),
+        #("model", json.string("fake")),
+        #("state", json.string("waiting")),
+        #("started", json.int(60)),
+        #("context", json.object([#("kind", json.string("page"))])),
+        #("notes", json.preprocessed_array([said("Hi", 10)])),
+        #("questions", json.preprocessed_array([])),
+        #("transcript", json.preprocessed_array(entries)),
+      ]),
+    )
+  }
+  let started =
+    run("r5", "waiting", #("page", ""), 60, [
+      #("notes", json.preprocessed_array([said("Hi", 10)])),
+      #("questions", json.preprocessed_array([])),
+    ])
+  let model =
+    planned()
+    |> step(strategy.PlanText("Hi"))
+    |> step(strategy.StartPlan)
+    |> step(strategy.PlanReplied(True, json.to_string(started)))
+  let loaded =
+    step(model, strategy.PlanLoaded(model.plan_poll, "r5", reply([])))
+  assert loaded.plan_at_bottom && !loaded.plan_new
+  let more = reply([entry("Reading"), entry("Thinking")])
+  let grown = step(loaded, strategy.PlanLoaded(loaded.plan_poll, "r5", more))
+  assert list.length(grown.plan_entries) == 2
+  assert grown.plan_at_bottom && !grown.plan_new
+  let reading = step(loaded, strategy.PlanScrolled(False))
+  let waited = step(reading, strategy.PlanLoaded(reading.plan_poll, "r5", more))
+  assert list.length(waited.plan_entries) == 2
+  assert !waited.plan_new && !waited.plan_at_bottom
+}
+
+/// A workspace whose tasks differ in every sortable column: `a`, `b` in the
+/// root's project, `c`, `d` in `web` (`b` and `d` share a title and created
+/// time), and `e` with no project, created at no known time.
+fn sortable() -> strategy.Model {
+  let t = fn(id, title, column, feature, milestone, created, closed) {
+    let opt = fn(v) {
+      case v {
+        "" -> json.null()
+        s -> json.string(s)
+      }
+    }
+    let time = fn(v) {
+      case v {
+        0 -> json.null()
+        n -> json.int(n)
+      }
+    }
+    json.object([
+      #("id", json.string(id)),
+      #("title", json.string(title)),
+      #("body", json.string("")),
+      #("column", json.string(column)),
+      #("feature", opt(feature)),
+      #("milestone", opt(milestone)),
+      #("dependsOn", json.array([], json.string)),
+      #("createdTime", time(created)),
+      #("closedTime", time(closed)),
+    ])
+  }
+  let tasks = fn(list) { #("tasks", json.array(list, fn(x) { x })) }
+  workspace()
+  |> step(strategy.WorkflowLoaded(
+    ".",
+    "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"},{\"id\":\"doing\",\"label\":\"Doing\"},{\"id\":\"done\",\"label\":\"Done\",\"final\":true}]}",
+  ))
+  |> step(strategy.Live(
+    "{\"features\":[{\"id\":\"f1\",\"title\":\"Beta\"},{\"id\":\"f2\",\"title\":\"Alpha\"}]}",
+  ))
+  |> step(strategy.Live(
+    "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Later\"},{\"id\":\"m2\",\"title\":\"Soon\"}]}",
+  ))
+  |> step(
+    strategy.Live(
+      message(".", [
+        tasks([
+          t("a", "Write docs", "done", "f1", "m1", 300, 400),
+          t("b", "Add search", "backlog", "f2", "", 100, 0),
+        ]),
+      ]),
+    ),
+  )
+  |> step(
+    strategy.Live(
+      message("web", [
+        tasks([
+          t("c", "Fix login", "doing", "f1", "m2", 200, 500),
+          t("d", "Add search", "doing", "", "m1", 100, 0),
+        ]),
+      ]),
+    ),
+  )
+  |> step(
+    strategy.Live(
+      json.to_string(
+        json.object([
+          #("project", json.string("web")),
+          #("noProject", json.bool(True)),
+          tasks([t("e", "Lost", "backlog", "", "", 0, 0)]),
+        ]),
+      ),
+    ),
+  )
+}
+
+/// The visible ids after clicking `key` once (ascending) and twice (descending).
+fn sorted_by(key: strategy.SortKey) -> #(List(String), List(String)) {
+  let once = step(sortable(), strategy.SortBy(key))
+  #(ids(once), ids(step(once, strategy.SortBy(key))))
+}
+
+/// Each heading's order, both ways: the column by workflow order, the
+/// project by label, the feature and milestone by title, the times by time.
+/// Missing values (no project, feature, milestone or time) go last either
+/// way, and ties fall back to the title, then the id.
+pub fn each_column_sorts_by_its_own_order_test() {
+  assert sorted_by(strategy.ByTitle)
+    == #(["b", "d", "c", "e", "a"], ["a", "e", "c", "b", "d"])
+  assert sorted_by(strategy.ByColumn)
+    == #(["b", "e", "d", "c", "a"], ["a", "d", "c", "b", "e"])
+  assert sorted_by(strategy.ByProject)
+    == #(["b", "a", "d", "c", "e"], ["d", "c", "b", "a", "e"])
+  assert sorted_by(strategy.ByFeature)
+    == #(["b", "c", "a", "d", "e"], ["c", "a", "b", "d", "e"])
+  assert sorted_by(strategy.ByMilestone)
+    == #(["d", "a", "c", "b", "e"], ["c", "d", "a", "b", "e"])
+  assert sorted_by(strategy.ByCreated)
+    == #(["b", "d", "c", "a", "e"], ["a", "c", "b", "d", "e"])
+  assert sorted_by(strategy.ByClosed)
+    == #(["a", "c", "b", "d", "e"], ["c", "a", "b", "d", "e"])
+}
+
+/// The same heading flips the direction each click; another heading starts
+/// ascending. A new sort goes back to page 1.
+pub fn a_heading_click_flips_its_direction_test() {
+  let model = step(sortable(), strategy.SortBy(strategy.ByTitle))
+  assert model.sort == Some(#(strategy.ByTitle, True))
+  let model = step(model, strategy.SortBy(strategy.ByTitle))
+  assert model.sort == Some(#(strategy.ByTitle, False))
+  let model = step(model, strategy.SortBy(strategy.ByTitle))
+  assert model.sort == Some(#(strategy.ByTitle, True))
+  let model =
+    model
+    |> step(strategy.SortBy(strategy.ByTitle))
+    |> step(strategy.SortBy(strategy.ByClosed))
+  assert model.sort == Some(#(strategy.ByClosed, True))
+  let paged =
+    many(30)
+    |> step(strategy.Page(2))
+    |> step(strategy.SortBy(strategy.ByTitle))
+  assert paged.page == 1
+}
+
+/// Before any click the table keeps the default order: closed newest first,
+/// then open ones by title.
+pub fn the_default_order_holds_until_a_heading_is_clicked_test() {
+  let model = sortable()
+  assert model.sort == None
+  assert ids(model) == ["c", "a", "b", "d", "e"]
+}
+
+/// Filters apply first, then the sort, which stays across filter changes and
+/// tab switches; the open row stays open, its details below the table.
+pub fn the_sort_stays_across_filters_tabs_and_the_open_row_test() {
+  let model =
+    sortable()
+    |> step(strategy.Open("web", "c"))
+    |> step(strategy.SortBy(strategy.ByCreated))
+    |> step(strategy.SortBy(strategy.ByCreated))
+    |> step(strategy.Filter(strategy.Filters("", "web", "", "", "")))
+  assert ids(model) == ["c", "d"]
+  assert model.sort == Some(#(strategy.ByCreated, False))
+  let model =
+    model
+    |> step(strategy.Select(strategy.Features))
+    |> step(strategy.Select(strategy.Tasks))
+  assert model.sort == Some(#(strategy.ByCreated, False))
+  assert model.selected == Some(#("web", "c"))
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "aria-current=\"true\"")
+  let assert Ok(#(before, _)) = string.split_once(page, "<solace-task")
+  assert string.contains(before, "</table>")
+}
+
+/// The sorted heading alone shows ▲ or ▼ and sets `aria-sort`; before any
+/// click no heading does. Every heading is a button.
+pub fn only_the_sorted_heading_shows_its_direction_test() {
+  let count = fn(page, needle) { list.length(string.split(page, needle)) - 1 }
+  let page = element.to_string(strategy.view(sortable()))
+  assert count(page, "aria-sort") == 0
+  assert count(page, "▲") == 0 && count(page, "▼") == 0
+  assert count(page, "class=\"sort\"") == 7
+  let model = step(sortable(), strategy.SortBy(strategy.ByColumn))
+  let page = element.to_string(strategy.view(model))
+  assert count(page, "aria-sort") == 1
+  assert count(page, "▲") == 1 && count(page, "▼") == 0
+  let assert Ok(#(_, after)) =
+    string.split_once(page, "aria-sort=\"ascending\"")
+  let assert Ok(#(heading, _)) = string.split_once(after, "</th>")
+  assert string.contains(heading, "Column")
+  let page =
+    element.to_string(
+      strategy.view(step(model, strategy.SortBy(strategy.ByColumn))),
+    )
+  assert count(page, "aria-sort=\"descending\"") == 1
+  assert count(page, "▼") == 1 && count(page, "▲") == 0
+}
+
+/// D-132: a row whose project's workflow offers `plan` in its column shows
+/// Plan; a Planning row, and a row whose project's workflow isn't loaded,
+/// don't. The reply moves the row; a refusal shows. The open task's details
+/// are told they are on the Strategy page.
+pub fn a_backlog_row_offers_plan_test() {
+  let t = fn(id, title, column) {
+    json.object([
+      #("id", json.string(id)),
+      #("title", json.string(title)),
+      #("body", json.string("")),
+      #("column", json.string(column)),
+    ])
+  }
+  let tasks = fn(list) { #("tasks", json.array(list, fn(x) { x })) }
+  let model =
+    workspace()
+    |> step(strategy.WorkflowLoaded(
+      ".",
+      "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\",\"cancel\"]},{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"to_backlog\"]}],\"actions\":{\"plan\":{\"to\":\"planning\",\"label\":\"Plan\"},\"to_backlog\":{\"to\":\"backlog\",\"label\":\"Back to backlog\"}}}",
+    ))
+    |> step(
+      strategy.Live(
+        message(".", [
+          tasks([t("a", "Draft spec", "backlog"), t("b", "Ship it", "planning")]),
+        ]),
+      ),
+    )
+    |> step(
+      strategy.Live(message("web", [tasks([t("c", "Web task", "backlog")])])),
+    )
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "aria-label=\"Plan Draft spec\"")
+  assert string.contains(page, ">Plan</button>")
+  assert !string.contains(page, "aria-label=\"Plan Ship it\"")
+  assert !string.contains(page, "aria-label=\"Plan Web task\"")
+  let planned =
+    model
+    |> step(strategy.Planned(
+      ".",
+      json.to_string(t("a", "Draft spec", "planning")),
+    ))
+  let page = element.to_string(strategy.view(planned))
+  assert !string.contains(page, "aria-label=\"Plan Draft spec\"")
+  let refused =
+    model
+    |> step(strategy.Planned(
+      ".",
+      "{\"code\":\"E7001\",\"message\":\"not allowed\"}",
+    ))
+  assert refused.error != ""
+  let opened =
+    element.to_string(strategy.view(step(model, strategy.Open(".", "b"))))
+  assert string.contains(opened, "hosted strategy task=\"b\"")
+}
+
+pub fn titles_sort_without_regard_to_case_test() {
+  let row = fn(id, title) {
+    #("web", strategy.Row(id, title, "", "backlog", None, None, None, None, []))
+  }
+  let rows = [row("1", "Zebra"), row("2", "add x"), row("3", "Apple")]
+  let titles = fn(rows: List(#(String, strategy.Row))) {
+    list.map(rows, fn(r) { { r.1 }.title })
+  }
+  assert titles(strategy.sorted(rows)) == ["add x", "Apple", "Zebra"]
+  let model =
+    workspace()
+    |> step(strategy.SortBy(strategy.ByTitle))
+  assert titles(strategy.sort_rows(model, rows)) == ["add x", "Apple", "Zebra"]
+}
+
+pub fn a_single_project_new_task_form_has_no_project_picker_test() {
+  let one = fn(workspace) {
+    strategy.new(strategy.Tasks)
+    |> step(strategy.ProjectsLoaded(
+      "{\"workspace\":"
+      <> workspace
+      <> ",\"projects\":[{\"dir\":\".\",\"label\":\"root\",\"name\":\"r\",\"base\":\"\"}]}",
+    ))
+    |> step(strategy.CaughtUp)
+    |> step(strategy.NewTaskOpen)
+  }
+  let page = fn(model) { element.to_string(strategy.view(model)) }
+  list.each(["false", "true"], fn(flag) {
+    let html = page(one(flag))
+    assert !string.contains(html, "name=\"project\"")
+    assert string.contains(html, "name=\"feature\"")
+    assert string.contains(html, "name=\"milestone\"")
+  })
+  // Two projects in a workspace do show it.
+  assert string.contains(
+    page(step(workspace(), strategy.NewTaskOpen)),
+    "name=\"project\"",
+  )
+}
+
+/// Unavailable models aren't offered: a line under the pick says why, with
+/// Try again for a usage limit, and with none that can start, what to set up.
+pub fn the_plan_offers_only_models_that_can_start_test() {
+  let shown = fn(model) { element.to_string(strategy.view(model)) }
+  let sol =
+    "{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached\",\"limit\":true}"
+  let model =
+    planned()
+    |> step(strategy.ModelsLoaded(
+      "[{\"id\":\"m\",\"label\":\"M\",\"available\":true}," <> sol <> "]",
+    ))
+  assert string.contains(shown(model), ">M</option>")
+  assert !string.contains(shown(model), "value=\"sol\"")
+  assert string.contains(
+    shown(model),
+    "<summary>1 more model unavailable</summary>",
+  )
+  assert string.contains(
+    shown(model),
+    "Sol: Codex usage limit reached<button type=\"button\">Try again</button>",
+  )
+  assert !string.contains(shown(model), "No model can start yet")
+  // None can start: what to set up instead of the pick.
+  let none = step(model, strategy.ModelsLoaded("[" <> sol <> "]"))
+  assert string.contains(shown(none), "No model can start yet")
+  assert string.contains(shown(none), "<summary>1 model unavailable</summary>")
+  // Try again's reply is the list as it is now: the model is offered again.
+  let again =
+    none
+    |> step(strategy.TryAgainModel("codex"))
+    |> step(strategy.ModelsLoaded(
+      "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":true}]",
+    ))
+  assert string.contains(shown(again), ">Sol</option>")
+  assert !string.contains(shown(again), "unavailable</summary>")
+}
+
+/// A plan run names the model its agent used, when its start event named
+/// one; an alias says which model it resolved to.
+pub fn a_plan_run_names_the_model_it_used_test() {
+  let run = fn(used) {
+    plan.Run(
+      id: "r1",
+      model: "claude-opus",
+      effort: "",
+      state: "ended",
+      started: 1,
+      ended: 2,
+      outcome: "planned",
+      context: plan.page,
+      notes: [],
+      questions: [],
+      used: used,
+    )
+  }
+  assert plan.state_text(run("")) == "Ended: planned · claude-opus"
+  assert plan.state_text(run("claude-opus-5-5"))
+    == "Ended: planned · claude-opus · claude-opus-5-5"
 }
