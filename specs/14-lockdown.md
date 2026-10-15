@@ -42,9 +42,19 @@ unwatched = ["priv/generated/", "data/dumps/"]
 smoke   = { run = ["gleam", "run", "-m", "smoke"], timeout = 60, checks = [] }
 migrate = { run = ["gleam", "run", "-m", "migrate"], args = true }
 e2e     = { run = ["npx", "playwright", "test"], timeout = 600, checks = ["api.handle"] }
+
+[build]                          # the project's build recipe (D-131)
+after   = ["solace-cli/board"]   # projects built first
+outputs = ["priv/app.js"]        # artifacts, from the project
+steps   = [
+  { name = "install", run = ["bun", "install"] },
+  { name = "e2e", command = "e2e" },
+]
 ```
 
 `checks` (optional, D-44) marks a command as a test suite outside `gleam test` and lists the entry points it drives, by symbol name, or `"*"` for all. For `gleam run -m <module>`, that module's `main` is added, so `checks = []` is enough. A suite's reach is everything its entry points can run. `test`, `impact` and a submit's note name a suite that reaches a change ("Also reached: e2e (`run e2e`)"); Solace never runs a suite unasked. `checks` that isn't an array of strings is invalid (`E6020`).
+
+`[build]` (optional, D-131) is how the project builds: `steps` run in order, each a `name` with `run` (an argument vector) or `command` (an entry of `[commands]`, reused), and an optional `timeout` (else the command's, else 120 s). `after` names the projects built before it; `outputs` lists its artifacts. A fault is `E6020` naming the field. A project without `[build]` gets a default from `package.json`, `gleam.toml` and `Cargo.toml`, or none. `build plan` lists every project's recipe in build order.
 
 Solace rereads the file whenever a command starts, so a change takes effect with no restart.
 

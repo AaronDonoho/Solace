@@ -27,6 +27,8 @@ pub const page = Context("page", "")
 
 /// A run's question: each is a proposal (Spec 15 §6), answered with an option.
 /// `time` is when it was asked (D-118), 0 for one saved before it was kept.
+/// `after` is how many of the run's notes came before it, which orders it
+/// among notes of the same second; -1 for one saved before it was kept.
 pub type Question {
   Question(
     id: String,
@@ -35,6 +37,7 @@ pub type Question {
     answer: String,
     proposal: Option(solace_task.Proposal),
     time: Int,
+    after: Int,
   )
 }
 
@@ -88,7 +91,12 @@ fn question_decoder() -> decode.Decoder(Question) {
     0,
     decode.one_of(decode.int, [decode.success(0)]),
   )
-  decode.success(Question(id, text, options, answer, proposal, time))
+  use after <- decode.optional_field(
+    "after",
+    -1,
+    decode.one_of(decode.int, [decode.success(-1)]),
+  )
+  decode.success(Question(id, text, options, answer, proposal, time, after))
 }
 
 /// A run in `GET /strategy/runs...`, a reply or the stream.
@@ -203,9 +211,9 @@ pub fn marker() -> Element(msg) {
   html.span(
     [
       attribute.class("planning"),
-      attribute.title("A planning run is open on this"),
+      attribute.title(solace_task.ui_label("plan_marker")),
     ],
-    [html.text("Planning")],
+    [html.text(solace_task.ui_label("plan"))],
   )
 }
 
@@ -239,8 +247,6 @@ pub type Panel(msg) {
     max_width: Int,
     /// The message box.
     text: String,
-    /// Whether the message box shows its Preview.
-    preview: Bool,
     /// A request sent and not yet answered.
     sending: Bool,
     error: String,
@@ -254,7 +260,6 @@ pub type Panel(msg) {
     /// A resize key on the focused handle: the arrows, Home or End.
     on_key: fn(String) -> msg,
     on_text: fn(String) -> msg,
-    on_preview: fn(Bool) -> msg,
     /// A formatting tool: the markup before and after the selection.
     on_format: fn(String, String) -> msg,
     /// A block tool: "heading", "list", "numbered", "quote" or "code".
@@ -291,7 +296,7 @@ pub fn view(base: String, p: Panel(msg)) -> Element(msg) {
         True -> "plan collapsed"
         False -> "plan"
       }),
-      attribute.attribute("aria-label", "Planning"),
+      attribute.attribute("aria-label", solace_task.ui_label("plan")),
       attribute.id("plan"),
       attribute.style("--plan-width", int.to_string(p.width) <> "px"),
     ],
@@ -301,7 +306,7 @@ pub fn view(base: String, p: Panel(msg)) -> Element(msg) {
         False -> resize_handle(p)
       },
       html.header([], [
-        html.h2([], [html.text("Plan")]),
+        html.h2([], [html.text(solace_task.ui_label("plan"))]),
         html.button(
           [
             attribute.type_("button"),
@@ -314,8 +319,8 @@ pub fn view(base: String, p: Panel(msg)) -> Element(msg) {
           ],
           [
             html.text(case p.collapsed {
-              True -> "Show"
-              False -> "Hide"
+              True -> solace_task.ui_label("show")
+              False -> solace_task.ui_label("hide")
             }),
           ],
         ),
@@ -352,9 +357,11 @@ fn summary(p: Panel(msg)) -> String {
 
 fn context_view(context: Context, name: fn(String, String) -> String) {
   case context.kind {
-    "page" -> [html.text("Planning Context: Whole Project")]
+    "page" -> [
+      html.text(solace_task.ui_label("plan_context") <> ": Whole Project"),
+    ]
     kind -> [
-      html.text("Planning Context: " <> kind <> " "),
+      html.text(solace_task.ui_label("plan_context") <> ": " <> kind <> " "),
       html.em([], [
         html.text(case name(kind, context.id) {
           "" -> context.id
@@ -464,28 +471,33 @@ fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
 fn start_view(p: Panel(msg)) -> List(Element(msg)) {
   case open_on(p.runs, p.context) {
     Some(run) -> [
-      html.p([], [html.text("A planning run on this is open.")]),
-      small("Open it", False, p.on_show(run.id)),
+      html.p([], [html.text(solace_task.ui_label("plan_open_here"))]),
+      small(solace_task.ui_label("open_run"), False, p.on_show(run.id)),
     ]
-    None -> [
-      html.p([attribute.class("plan-context")], [
-        html.text("Write what to plan below; Send starts a new run on this."),
-      ]),
-    ]
+    // Nothing open: the box below starts the run, and its Start button says so.
+    None -> []
   }
 }
 
 /// The model, and its effort when it offers several; unavailable models
-/// show why and can't be picked.
+/// show why and can't be picked. A pick shows what is chosen, so it names
+/// itself; while none is, a placeholder says what to pick.
 fn agent_choice(p: Panel(msg)) -> Element(msg) {
   case p.models {
     [] -> element.none()
     models ->
       html.div([attribute.class("filters")], [
-        html.label([], [
-          html.text("Model"),
-          html.select(
-            [attribute.value(p.model), event.on_input(p.on_model)],
+        html.select(
+          [
+            attribute.value(p.model),
+            attribute.attribute("aria-label", solace_task.ui_label("model")),
+            event.on_input(p.on_model),
+          ],
+          list.append(
+            solace_task.placeholder_option(
+              solace_task.ui_label("pick_model"),
+              p.model,
+            ),
             list.map(models, fn(m) {
               html.option(
                 [
@@ -500,33 +512,41 @@ fn agent_choice(p: Panel(msg)) -> Element(msg) {
               )
             }),
           ),
-        ]),
+        ),
         case list.find(models, fn(m) { m.id == p.model }) {
           Ok(m) if m.efforts != [] ->
-            html.label([], [
-              html.text("Effort"),
-              html.select(
-                [attribute.value(p.effort), event.on_input(p.on_effort)],
-                [
+            html.select(
+              [
+                attribute.value(p.effort),
+                attribute.attribute(
+                  "aria-label",
+                  solace_task.ui_label("effort"),
+                ),
+                event.on_input(p.on_effort),
+              ],
+              [
+                html.option(
+                  [attribute.value(""), attribute.selected(p.effort == "")],
+                  case m.effort {
+                    "" -> solace_task.ui_label("default_effort")
+                    effort ->
+                      solace_task.ui_label("default_effort")
+                      <> " ("
+                      <> effort
+                      <> ")"
+                  },
+                ),
+                ..list.map(m.efforts, fn(effort) {
                   html.option(
-                    [attribute.value(""), attribute.selected(p.effort == "")],
-                    case m.effort {
-                      "" -> "Default"
-                      effort -> "Default (" <> effort <> ")"
-                    },
-                  ),
-                  ..list.map(m.efforts, fn(effort) {
-                    html.option(
-                      [
-                        attribute.value(effort),
-                        attribute.selected(effort == p.effort),
-                      ],
-                      effort,
-                    )
-                  })
-                ],
-              ),
-            ])
+                    [
+                      attribute.value(effort),
+                      attribute.selected(effort == p.effort),
+                    ],
+                    effort,
+                  )
+                })
+              ],
+            )
           _ -> element.none()
         },
       ])
@@ -539,7 +559,7 @@ pub const styles =
 .plan>header,.plan-bar,.plan-compose{flex:none}.plan-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0 -16px;padding:0 16px 12px}
 .plan-bar{border-bottom:1px solid var(--edge);padding:0 0 8px;margin-bottom:4px}.plan-bar .plan-context{margin:6px 0 4px}.plan-bar select{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;max-width:100%}
 .plan-compose{border-top:1px solid var(--edge);padding:8px 0 12px}.plan-compose .filters{margin:0 0 8px}.plan-compose .vision-actions{margin:8px 0 0}
-.plan .composer{margin:0;max-width:none}.plan .composer textarea{display:block;font:inherit;color:var(--ink);background:var(--paper);field-sizing:content;min-height:calc(5lh + 12px);max-height:40dvh;padding:6px 8px;overflow:auto;resize:none}.plan .preview{min-height:5lh;max-height:40dvh;overflow:auto}
+.plan .composer{margin:0}.plan .composer solace-md-editor{--md-min-height:5lh;--md-max-height:40dvh}
 .plan-resize{position:absolute;left:-7px;top:0;bottom:0;width:12px;cursor:col-resize;touch-action:none;z-index:1}.plan-resize:hover{background:var(--line);opacity:.6}.plan .plan-resize:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
 .plan header{display:flex;align-items:center;gap:8px}.plan h2{margin:0;font-size:17px;flex:1}.plan h3{font-size:14px;margin:16px 0 4px}
 .plan p{margin:6px 0}.plan .plan-summary,.plan .plan-context{color:var(--soft);font-size:13px}.plan-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
@@ -630,19 +650,33 @@ type Said {
 }
 
 /// The run's notes and questions as one conversation, in the order they
-/// happened (D-118); at the same time a note comes first. A question saved
-/// without a time comes after the notes, in the questions' order.
+/// happened (D-118). In the same second, a question comes after the notes the
+/// server had when it was asked, and before the rest; one saved without that
+/// count comes after the notes. A question saved without a time comes after
+/// the notes, in the questions' order.
 fn conversation(run: Run) -> List(Said) {
   let #(timed, untimed) = list.partition(run.questions, fn(q) { q.time > 0 })
+  let notes = list.length(run.notes)
   list.append(
-    list.map(run.notes, fn(n) { #(n.time, Wrote(n)) }),
-    list.map(timed, fn(q) { #(q.time, Asked(q)) }),
+    list.index_map(run.notes, fn(n, i) { #(n.time, i, 1, Wrote(n)) }),
+    list.map(timed, fn(q) {
+      let place = case q.after >= 0 {
+        True -> q.after
+        False -> notes
+      }
+      #(q.time, place, 0, Asked(q))
+    }),
   )
-  |> list.index_map(fn(said, i) { #(said.0, i, said.1) })
+  |> list.index_map(fn(said, i) { #(said, i) })
   |> list.sort(fn(a, b) {
-    int.compare(a.0, b.0) |> order.break_tie(int.compare(a.1, b.1))
+    let #(#(time_a, place_a, kind_a, _), i) = a
+    let #(#(time_b, place_b, kind_b, _), j) = b
+    int.compare(time_a, time_b)
+    |> order.break_tie(int.compare(place_a, place_b))
+    |> order.break_tie(int.compare(kind_a, kind_b))
+    |> order.break_tie(int.compare(i, j))
   })
-  |> list.map(fn(said) { said.2 })
+  |> list.map(fn(said) { said.0.3 })
   |> list.append(list.map(untimed, Asked))
 }
 
@@ -704,8 +738,8 @@ fn bar(p: Panel(msg)) -> Element(msg) {
         [html.span([attribute.class(class)], [html.text(state)])],
         case p.shown {
           Some(run) if run.state != "ended" -> [
-            small("End", p.sending, p.on_end),
-            small("Stop", p.sending, p.on_stop),
+            small(solace_task.ui_label("end"), p.sending, p.on_end),
+            small(solace_task.ui_label("stop"), p.sending, p.on_stop),
           ]
           _ -> []
         },
@@ -741,7 +775,13 @@ fn bar(p: Panel(msg)) -> Element(msg) {
           ]
         },
         // Nothing to change when New run would show what is shown.
-        [small("New run", target == current, p.on_show(target))],
+        [
+          small(
+            solace_task.ui_label("new_run"),
+            target == current,
+            p.on_show(target),
+          ),
+        ],
       ]),
     ),
     case p.error {
@@ -752,11 +792,12 @@ fn bar(p: Panel(msg)) -> Element(msg) {
 }
 
 /// The message box, pinned below the conversation: the markdown editor and
-/// Send, which Ctrl or Cmd+Enter presses too. For the shown open run it sends
-/// a message; with nothing shown and no open run on the context, the model
-/// choice sits above it and Send starts a run. Otherwise there is none.
+/// its button, which Ctrl or Cmd+Enter presses too. For the shown open run
+/// the button is Send and sends a message; with nothing shown and no open
+/// run on the context, the model choice sits above it and the button is
+/// Start, which starts a run. Otherwise there is none.
 fn compose(base: String, p: Panel(msg)) -> Element(msg) {
-  let box = fn(label, send, choice) {
+  let box = fn(label, send, choice, text) {
     html.div(
       [attribute.class("plan-compose"), event.on("keydown", send_key(send))],
       [
@@ -767,9 +808,7 @@ fn compose(base: String, p: Panel(msg)) -> Element(msg) {
           base,
           label,
           p.text,
-          p.preview,
           p.on_text,
-          p.on_preview,
           p.on_format,
           p.on_block,
         ),
@@ -780,7 +819,7 @@ fn compose(base: String, p: Panel(msg)) -> Element(msg) {
               attribute.disabled(p.sending || string.trim(p.text) == ""),
               event.on_click(send),
             ],
-            [html.text("Send")],
+            [html.text(text)],
           ),
         ]),
       ],
@@ -788,8 +827,14 @@ fn compose(base: String, p: Panel(msg)) -> Element(msg) {
   }
   case p.shown, open_on(p.runs, p.context) {
     Some(run), _ if run.state != "ended" ->
-      box("Message", p.on_send, element.none())
-    None, None -> box("First message", p.on_start, agent_choice(p))
+      box("Message", p.on_send, element.none(), solace_task.ui_label("send"))
+    None, None ->
+      box(
+        "First message",
+        p.on_start,
+        agent_choice(p),
+        solace_task.ui_label("start"),
+      )
     _, _ -> element.none()
   }
 }

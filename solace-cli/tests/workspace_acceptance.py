@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import shutil
 import subprocess
 import tempfile
 import time
@@ -35,9 +36,20 @@ class Root(unittest.TestCase):
         for s in self.servers:
             s.terminate(); s.wait(timeout=3)
             s.stdout.close(); s.stderr.close()
+        # The server's last writes can land after it exits; retry the fixture
+        # removal before the TemporaryDirectory cleanup, so a late write
+        # doesn't fail tearDown with "Directory not empty".
+        for _ in range(20):
+            try:
+                shutil.rmtree(self.root)
+                break
+            except FileNotFoundError:
+                break
+            except OSError:
+                time.sleep(0.1)
         self.tmp.cleanup()
     def cli(self, *args, cwd=None, input=None, ok=True):
-        p = subprocess.run([BIN, *args], cwd=cwd or self.root, env=self.env, input=input, text=True, capture_output=True)
+        p = subprocess.run([BIN, *args], cwd=cwd or self.root, env=self.env, input=input, text=True, capture_output=True, timeout=60)
         if ok: self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         else: self.assertNotEqual(p.returncode, 0, p.stdout + p.stderr)
         return p.stdout + p.stderr
@@ -118,6 +130,8 @@ class Root(unittest.TestCase):
         self.assertEqual(self.next_event(events)[1], {'features': []})
         self.assertEqual(self.next_event(events)[1]['vision']['text'], '')
         self.assertEqual(self.next_event(events)[1], {'strategyRuns': []})
+        # D-129: the tasks with no project follow the runs, marked.
+        self.assertEqual(self.next_event(events)[1], {'noProject': True, 'tasks': []})
         # D-78: the project that came back follows with its workflow and tasks as they are.
         self.assertEqual(self.next_event(events)[1]['project'], 'b')
         ident, data = self.next_event(events)
@@ -372,12 +386,23 @@ class Root(unittest.TestCase):
             ident, data = self.next_event(events)
             if ident == 'ready': break
             # D-87: the root's records come with the snapshot, with no project to name.
-            if 'milestones' in data or 'features' in data or 'vision' in data or 'strategyRuns' in data: continue
+            if 'milestones' in data or 'features' in data or 'vision' in data or 'strategyRuns' in data or data.get('noProject'): continue
             projects.add(data['project'])
         self.assertEqual(projects, {'.', 'frontend'})
         # The root project's agents can't reach into the project below it, only read it.
-        self.assertIn('E6006', self.cli('read', 'frontend/gleam.toml', ok=False))
+        self.assertIn('==== gleam.toml (frontend) ====', self.cli('read', 'frontend/gleam.toml'))
+        refused = self.cli('remove', 'frontend/gleam.toml', ok=False)
+        self.assertIn('E6006', refused)
+        self.assertIn('add --project frontend', refused)
         self.assertIn('pub fn main()', self.cli('view', 'frontend.main', '--project', 'frontend'))
+
+    def test_project_takes_a_folder_relative_to_this_project(self):
+        for d in ['app', 'web']: project(self.root/d)
+        self.migrate('--project', 'app', '--project', 'web')
+        self.assertIn('name', self.cli('read', 'gleam.toml', '--project', '../web', cwd=self.root/'app'))
+        refused = self.cli('read', 'gleam.toml', '--project', '../nope', cwd=self.root/'app', ok=False)
+        self.assertIn('`--project` takes a folder from the Solace root', refused)
+        self.assertIn('app, web', refused)
 
     def test_a_root_without_gleam_is_a_project_of_plain_files(self):
         project(self.root/'app')
@@ -550,7 +575,7 @@ class Root(unittest.TestCase):
             if d == 'a':
                 self.assertIn('You are in a (alpha).', replies[0])
                 self.assertIn('Read only: b (beta), . (the root).', replies[0])
-                self.assertIn('(`--project b`, not `../b`)', replies[0])
+                self.assertIn('(`--project b`)', replies[0])
                 self.assertIn('ask the human with `task ask` to add that project', replies[0])
             self.assertIn('pub fn answer() { 42 }', replies[1])
             self.assertIn('The answer', replies[2])
@@ -578,7 +603,7 @@ class Root(unittest.TestCase):
         # The session says where the agent is, what it may change, and how to reach the rest.
         self.assertIn('You are in b (beta).', replies[0])
         self.assertIn('This task can change: a (alpha), b (beta).', replies[0])
-        self.assertIn('(`--project a`, not `../a`), for that line only', replies[0])
+        self.assertIn('(`--project a`), for that line only', replies[0])
         self.assertIn('relative to the project the line runs in', replies[0])
         # Its symbols come from both projects, the other one's labelled.
         self.assertIn('-- plan.answer\n', replies[0])
@@ -681,9 +706,9 @@ class Root(unittest.TestCase):
         for x, base in [(t, '/p/a'), (other, '/p/b')]:
             self.api('POST', f'{base}/tasks/{x["id"]}/actions', {'action': 'plan'})
         self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
-        # The run holds both projects: b's other task can't start work, and the scope can't change mid-run.
+        # The run holds both projects: b's other task can't start work, and the scope can't narrow mid-run.
         self.refused('POST', f'/p/b/tasks/{other["id"]}/actions', {'action': 'assign', 'model': 'fake'}, 'another task has a work run')
-        self.refused('POST', f'/p/a/tasks/{t["id"]}/scope', {'scope': ['a', 'b', 'c']}, 'an agent is working')
+        self.refused('POST', f'/p/a/tasks/{t["id"]}/scope', {'scope': ['a']}, 'you can add projects now')
         t = self.wait('/p/a', t, lambda x: x['column'] == 'needs_review')
         rid = t['runs'][-1]['id']
         replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'a/.solace'/(rid + '.responses')).read_text().splitlines()]
@@ -744,9 +769,11 @@ class Root(unittest.TestCase):
         for d in 'abc': project(self.root/d, d, 'pub fn one() { 1 }\n')
         self.migrate()
         (self.root/'a/notes.txt').write_text('notes')
+        (self.root/'a/extra.txt').write_text('extra')
         self.start()
         steps = [{'command': 'move notes.txt docs/notes.txt --to-project b'},
                  {'command': 'move notes.txt docs/notes.txt --to-project b'},
+                 {'command': 'move extra.txt more.txt --to-project ../b'},
                  {'command': 'move docs/notes.txt notes.txt --project b --to-project c'},
                  {'command': 'task diff'},
                  {'command': 'task done moved'}]
@@ -758,14 +785,18 @@ class Root(unittest.TestCase):
         replies = [json.loads(l)['result']['content'][0]['text'] for l in (self.root/'a/.solace'/(rid + '.responses')).read_text().splitlines()]
         self.assertIn('Moved a: notes.txt to b: docs/notes.txt', replies[0])
         self.assertIn('Already moved', replies[1])
-        self.assertIn("not one of this task's projects (a, b)", replies[2])
-        self.assertIn('a: file:notes.txt (deleted)', replies[3])
-        self.assertIn('b: file:docs/notes.txt (added)', replies[3])
+        self.assertIn('Moved a: extra.txt to b: more.txt', replies[2])
+        self.assertIn("not one of this task's projects (a, b)", replies[3])
+        self.assertIn('a: file:notes.txt (deleted)', replies[4])
+        self.assertIn('b: file:docs/notes.txt (added)', replies[4])
         self.assertEqual((self.root/'b/docs/notes.txt').read_text(), 'notes')
+        self.assertEqual((self.root/'b/more.txt').read_text(), 'extra')
         self.assertFalse((self.root/'c/notes.txt').exists())
         self.api('POST', f'/p/a/tasks/{t["id"]}/actions', {'action': 'cancel'})
         self.assertEqual((self.root/'a/notes.txt').read_text(), 'notes')
+        self.assertEqual((self.root/'a/extra.txt').read_text(), 'extra')
         self.assertFalse((self.root/'b/docs/notes.txt').exists())
+        self.assertFalse((self.root/'b/more.txt').exists())
 
     def test_an_extract_into_another_project_of_the_task(self):
         # D-103: extract --to-project moves symbols with their identity into a project the task
@@ -787,7 +818,7 @@ class Root(unittest.TestCase):
         web_toml = (self.root/'web/gleam.toml').read_text()
         self.migrate()
         self.start()
-        steps = [{'command': 'extract board.Task board.new_task board.lane --to solace_task --to-project components'},
+        steps = [{'command': 'extract board.Task board.new_task board.lane --to solace_task --to-project ../components'},
                  {'command': 'extract board.Task board.new_task --to solace_task --to-project components'},
                  {'command': 'check'},
                  {'command': 'task diff'},
@@ -826,9 +857,10 @@ class Root(unittest.TestCase):
         self.assertEqual(live('web'), task_id)
         self.assertEqual(live('components'), [])
 
-    def test_a_crash_between_an_extracts_projects_is_undone_by_cancel(self):
-        # D-103: the destination and a dependent the task covers commit before the source;
-        # a crash between them leaves their changes recorded, and cancel puts all three back.
+    def extract_stopped(self, point):
+        """An extract from web into components that front depends on (D-103), its
+        command stopped at the test-only fault point `point`. Returns the files and
+        gleam.tomls as they were, the task and Task's id."""
         board = ('pub type Task {\n  Task(id: Int, lane: Int)\n}\n\npub fn new_task(id: Int) -> Task {\n  Task(id, 0)\n}\n\n'
                  'pub fn lane(t: Task) -> Int {\n  t.lane\n}\n')
         front = 'import board\n\npub fn view(t: board.Task) -> Int {\n  board.lane(t)\n}\n'
@@ -843,29 +875,124 @@ class Root(unittest.TestCase):
         with open(self.root/'front/gleam.toml', 'a') as f: f.write('\n[dependencies]\nweb = { path = "../web" }\n')
         tomls = {d: (self.root/d/'gleam.toml').read_text() for d in ['web', 'components', 'front']}
         self.migrate()
-        self.env['SOLACE_FAIL_AFTER'] = 'others'
+        self.env['SOLACE_FAIL_AFTER'] = point
         self.start()
-        db = lambda d: sqlite3.connect(self.root/d/'.solace/store.db')
-        live = lambda d, name: db(d).execute("SELECT id FROM symbols WHERE name=? AND live=1", [name]).fetchall()
-        task_id = live('web', 'Task')
+        task_id = self.live('web', 'Task')
         steps = [{'command': 'extract board.Task board.new_task board.lane --to solace_task --to-project components'}]
         t = self.api('POST', '/p/web/tasks', {'title': 'Extract', 'body': json.dumps(steps), 'scope': ['web', 'components', 'front']})
         self.api('POST', f'/p/web/tasks/{t["id"]}/actions', {'action': 'plan'})
         self.api('POST', f'/p/web/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
-        self.wait('/p/web', t, lambda x: x['runs'] and x['runs'][-1]['state'] == 'ended')
-        # The destination and the dependent committed; the source did not.
-        self.assertEqual(live('components', 'Task'), task_id)
-        self.assertIn('solace_task', db('front').execute("SELECT text FROM symbols WHERE name='view' AND live=1").fetchone()[0])
-        self.assertEqual(live('web', 'Task'), task_id)
-        # Cancel puts every project back: code, files and gleam.toml.
-        self.api('POST', f'/p/web/tasks/{t["id"]}/actions', {'action': 'cancel'})
+        t = self.wait('/p/web', t, lambda x: x['runs'] and x['runs'][-1]['state'] == 'ended')
+        return files, tomls, t, task_id
+
+    def live(self, d, name):
+        return sqlite3.connect(self.root/d/'.solace/store.db').execute("SELECT id FROM symbols WHERE name=? AND live=1", [name]).fetchall()
+
+    def extract_records(self):
+        return [p for d in ['web', 'components', 'front'] for p in (self.root/d/'.solace/pending').glob('extract-*.json')]
+
+    def assert_unchanged(self, files, tomls, task_id):
         for path, text in files.items():
             self.assertEqual((self.root/path).read_text(), text, path)
         for d, text in tomls.items():
             self.assertEqual((self.root/d/'gleam.toml').read_text(), text, d)
-        self.assertEqual(live('web', 'Task'), task_id)
-        self.assertEqual(live('components', 'Task'), [])
+        self.assertEqual(self.live('web', 'Task'), task_id)
+        self.assertEqual(self.live('components', 'Task'), [])
         self.assertFalse((self.root/'components/test/solace_task_test.gleam').exists())
+
+    def test_an_extract_stopped_after_the_destination_commit_finishes_at_the_next_open(self):
+        files, tomls, t, task_id = self.extract_stopped('destination')
+        self.assertEqual(self.live('components', 'Task'), task_id)
+        self.assertEqual(self.live('web', 'Task'), task_id)  # the source has not committed
+        self.cli('files', cwd=self.root/'web')
+        self.assertEqual(self.live('components', 'Task'), task_id)
+        self.assertEqual(self.live('web', 'Task'), [])
+        self.assertIn('solace_task', (self.root/'front/src/front.gleam').read_text())
+        self.assertIn('components', (self.root/'front/gleam.toml').read_text())
+        self.assertEqual(self.extract_records(), [])
+        changes = self.api('GET', f'/p/web/tasks/{t["id"]}')['changes']
+        self.assertEqual(len({(c['project'], c['entity']) for c in changes}), len(changes))
+        self.assertEqual({c['project'] for c in changes}, {'web', 'components', 'front'})
+        # Cancel then puts every project back.
+        self.api('POST', f'/p/web/tasks/{t["id"]}/actions', {'action': 'cancel'})
+        self.assert_unchanged(files, tomls, task_id)
+
+    def test_an_extract_stopped_before_the_destination_commit_rolls_back_at_the_next_open(self):
+        # Stopped with the record complete, the destination not yet committed.
+        files, tomls, t, task_id = self.extract_stopped('complete')
+        human = self.root/'components/src/notes.gleam'
+        human.write_text('pub fn note() -> Int {\n  1\n}\n')
+        self.cli('files', cwd=self.root/'components')
+        human.unlink()  # a file a human made after the stop stays
+        self.assert_unchanged(files, tomls, task_id)
+        self.assertEqual(self.extract_records(), [])
+        self.assertEqual(self.api('GET', f'/p/web/tasks/{t["id"]}')['changes'], [])
+
+    def test_an_outside_edit_to_the_source_undoes_a_stopped_extracts_destination(self):
+        files, tomls, t, task_id = self.extract_stopped('destination')
+        edited = files['web/src/board.gleam'] + '\npub fn extra() -> Int {\n  1\n}\n'
+        (self.root/'web/src/board.gleam').write_text(edited)
+        self.cli('files', cwd=self.root/'components')
+        self.assertEqual((self.root/'web/src/board.gleam').read_text(), edited)
+        self.assertEqual(self.live('components', 'Task'), [])
+        self.assertEqual((self.root/'components/src/solace_task.gleam').read_text(), files['components/src/solace_task.gleam'])
+        self.assertEqual((self.root/'front/src/front.gleam').read_text(), files['front/src/front.gleam'])
+        for d, text in tomls.items():
+            self.assertEqual((self.root/d/'gleam.toml').read_text(), text, d)
+        self.assertEqual(self.extract_records(), [])
+        self.assertEqual([c for c in self.api('GET', f'/p/web/tasks/{t["id"]}')['changes'] if c['project'] == 'components'], [])
+
+    def test_an_outside_edit_after_the_source_commit_undoes_every_committed_part(self):
+        files, tomls, t, task_id = self.extract_stopped('source')
+        self.assertEqual(self.live('web', 'Task'), [])  # the source committed, front did not
+        edited = files['web/src/board.gleam'] + '\npub fn extra() -> Int {\n  1\n}\n'
+        (self.root/'web/src/board.gleam').write_text(edited)
+        self.cli('files', cwd=self.root/'components')
+        self.assertEqual((self.root/'web/src/board.gleam').read_text(), edited)
+        self.assertEqual(self.live('web', 'Task'), task_id)
+        self.assertEqual(self.live('components', 'Task'), [])
+        self.assertEqual((self.root/'components/src/solace_task.gleam').read_text(), files['components/src/solace_task.gleam'])
+        self.assertEqual((self.root/'front/src/front.gleam').read_text(), files['front/src/front.gleam'])
+        for d, text in tomls.items():
+            self.assertEqual((self.root/d/'gleam.toml').read_text(), text, d)
+        self.assertEqual(self.extract_records(), [])
+        self.assertEqual([c for c in self.api('GET', f'/p/web/tasks/{t["id"]}')['changes'] if c['project'] != 'web' or c['entity'].startswith('symbol:')], [])
+
+    def test_a_stopped_extract_edited_on_both_sides_waits_for_a_human(self):
+        files, tomls, t, task_id = self.extract_stopped('destination')
+        source = files['web/src/board.gleam'] + '\npub fn extra() -> Int {\n  1\n}\n'
+        (self.root/'web/src/board.gleam').write_text(source)
+        dest = self.root/'components/src/solace_task.gleam'
+        dest.write_text(dest.read_text() + '\npub fn other() -> Int {\n  2\n}\n')
+        dest_text = dest.read_text()
+        for _ in range(2):
+            self.assertIn('E7029', self.cli('files', cwd=self.root/'web', ok=False))
+        # Nothing changed: the record stays, the stores and the edited files are as they were.
+        self.assertEqual(len(self.extract_records()), 3)
+        self.assertEqual(self.live('web', 'Task'), task_id)
+        self.assertEqual(self.live('components', 'Task'), task_id)
+        self.assertEqual((self.root/'web/src/board.gleam').read_text(), source)
+        self.assertEqual(dest.read_text(), dest_text)
+        flagged = lambda x: [n for n in x['notes'] if 'both sides were changed' in n['text']]
+        x = self.wait('/p/web', t, flagged)
+        self.assertEqual(len(flagged(x)), 1)
+        self.assertEqual((x['attention']['hold'], x['attention']['reason']), (True, 'an interrupted extract needs a decision'))
+        self.refused('POST', f'/p/web/tasks/{t["id"]}/actions', {'action': 'cancel'}, 'E7029')
+        self.assertEqual(len(self.extract_records()), 3)
+
+    def test_cancel_finishes_a_stopped_extract_before_undoing_it(self):
+        files, tomls, t, task_id = self.extract_stopped('destination')
+        # Stopped between the commits: the destination has Task, the source's store
+        # still has it, the dependent's files are written, and every project holds the record.
+        self.assertEqual(self.live('components', 'Task'), task_id)
+        self.assertEqual(self.live('web', 'Task'), task_id)
+        self.assertIn('solace_task', (self.root/'front/src/front.gleam').read_text())
+        self.assertIn('components', (self.root/'front/gleam.toml').read_text())
+        self.assertEqual(len(self.extract_records()), 3)
+        self.assertEqual({c['project'] for c in self.api('GET', f'/p/web/tasks/{t["id"]}')['changes']}, {'components'})
+        self.api('POST', f'/p/web/tasks/{t["id"]}/actions', {'action': 'cancel'})
+        self.assert_unchanged(files, tomls, task_id)
+        self.assertEqual(self.extract_records(), [])
 
     def test_a_merge_folds_a_duplicate_into_another_project(self):
         # D-117: extract refuses a name the target has and names merge; merge redirects every use,
@@ -891,7 +1018,7 @@ class Root(unittest.TestCase):
         live = lambda d: sqlite3.connect(self.root/d/'.solace/store.db').execute("SELECT id FROM symbols WHERE name='Task' AND live=1").fetchall()
         web_task, components_task = live('web'), live('components')
         steps = [{'command': 'extract board.Task --to solace_task --to-project components'},
-                 {'command': 'merge solace_task.Task board.Task --to-project components'},
+                 {'command': 'merge solace_task.Task board.Task --to-project ../components'},
                  {'command': 'check'},
                  {'command': 'task done merged'}]
         t = self.api('POST', '/p/web/tasks', {'title': 'Merge', 'body': json.dumps(steps), 'scope': ['web', 'components', 'front']})
@@ -1060,6 +1187,49 @@ class Root(unittest.TestCase):
         self.assertEqual((self.root/'b/src/app.gleam').read_text(), body)
         # A command in the project sees nothing new.
         self.assertNotIn('outside Solace', self.cli('check', cwd=self.root/'b'))
+
+    def test_a_request_creates_one_task(self):
+        # D-77: Strategy's New task names a request; a repeated create, in turn or at once, returns the first one's task.
+        project(self.root/'a')
+        self.migrate('--project', 'a')
+        self.start()
+        body = {'title': 'Once', 'request': 'r-1'}
+        first = self.api('POST', '/p/a/tasks', body); again = self.api('POST', '/p/a/tasks', body)
+        self.assertEqual(again['id'], first['id']); self.assertEqual(first['request'], 'r-1')
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(8) as pool:
+            made = list(pool.map(lambda _: self.api('POST', '/p/a/tasks', {'title': 'Burst', 'request': 'r-2'})['id'], range(8)))
+        self.assertEqual(len(set(made)), 1)
+        self.assertEqual(sorted(t['title'] for t in self.api('GET', '/p/a/tasks')), ['Burst', 'Once'])
+        status, v = self.call('POST', '/p/a/tasks', {'title': 'Bad', 'request': 7})
+        self.assertEqual((status, v.get('code')), (409, 'E7001'), v)
+
+    def test_a_task_made_on_strategy_shows_on_the_board(self):
+        # Tasks are created on the Strategy page only; the board shows them.
+        for d in ['a', 'b']: project(self.root/d)
+        self.migrate('--project', 'a', '--project', 'b')
+        self.start()
+        f = self.api('POST', '/features', {'title': 'Search'})
+        events = self.stream()
+        self.until_ready(events)
+        # Strategy's New task under a feature: a create naming its request, then the feature link.
+        t = self.api('POST', '/p/b/tasks', {'title': 'Find fast', 'body': '', 'request': 'r-1'})
+        linked = self.api('PATCH', f'/p/b/tasks/{t["id"]}', {'feature': f['id']})
+        self.assertEqual(linked['feature'], f['id'])
+        # The board's live stream brings the task to b's lane, with its feature.
+        while True:
+            _, data = self.next_event(events)
+            task = data.get('task') or {}
+            if data.get('project') == 'b' and task.get('id') == t['id'] and task.get('feature') == f['id']: break
+        self.assertEqual(task['title'], 'Find fast')
+        events.close()
+        # A board opened later has it in b's snapshot, and only there.
+        snapshot = self.stream()
+        lanes = {}
+        while (e := self.next_event(snapshot))[0] != 'ready':
+            if 'tasks' in e[1] and 'project' in e[1]: lanes[e[1]['project']] = [(x['title'], x.get('feature')) for x in e[1]['tasks']]
+        self.assertEqual(lanes['b'], [('Find fast', f['id'])])
+        self.assertEqual(lanes['a'], [])
 
 if __name__ == '__main__':
     unittest.main()

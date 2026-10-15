@@ -3,41 +3,46 @@ events = { finished = "needs_review" }   # asked and failed leave the task where
 
 [[board.columns]]
 id = "backlog"
+label = "Backlog"
 actions = ["plan", "cancel"]
 
 [[board.columns]]
 id = "planning"
+label = "Planning"
 actions = ["investigate", "assign", "complete", "to_backlog", "cancel"]
 
 [[board.columns]]
 id = "assigned"
+label = "Assigned"
 actions = ["reassign", "new_agent", "review", "cancel"]
 
 [[board.columns]]
 id = "needs_review"
+label = "Needs review"
 actions = ["approve", "complete", "review", "reassign", "start_over", "cancel"]
 next = "complete"
 requires = ["approved"]                # an agent's result is on the task: a human signs it off
 
 [[board.columns]]
 id = "complete"
+label = "Complete"
 final = true
 
 [[board.columns]]
 id = "cancelled"
-label = "canceled"   # American spelling shown; the id stays for saved tasks
+label = "Canceled"   # American spelling shown; the id stays for saved tasks
 final = true
 actions = ["to_backlog"]   # a canceled task can come back (D-108); complete has none
 
 [board.actions]
-plan       = { to = "planning" }
+plan       = { to = "planning", label = "Plan" }
 to_backlog = { to = "backlog", label = "Back to backlog" }
-investigate = { run = "investigate", model = true }     # read-only; stays in its column
-review     = { run = "review" }                         # stays in its column
-assign     = { to = "assigned", run = "work", model = true }
-new_agent  = { to = "assigned", run = "new_work" }     # a fresh agent, with the notes so far
-approve    = { stamp = "approved" }
-complete   = { to = "complete" }
-reassign   = { unstamp = "approved", to = "assigned", run = "work" } # keep changes; fix review findings
-start_over = { revert = true, unstamp = "approved", to = "assigned", run = "new_work" }
-cancel     = { revert = true, to = "cancelled" }
+investigate = { run = "investigate", model = true, label = "Investigate" } # read-only; stays in its column
+review     = { run = "review", label = "Review" }                         # stays in its column
+assign     = { to = "assigned", run = "work", model = true, label = "Assign" }
+new_agent  = { to = "assigned", run = "new_work", label = "New agent" }   # a fresh agent, with the notes so far
+approve    = { stamp = "approved", label = "Approve" }
+complete   = { to = "complete", label = "Complete" }
+reassign   = { unstamp = "approved", to = "assigned", run = "work", label = "Reassign" } # keep changes; fix review findings
+start_over = { revert = true, unstamp = "approved", to = "assigned", run = "new_work", label = "Start over" }
+cancel     = { revert = true, to = "cancelled", label = "Cancel" }

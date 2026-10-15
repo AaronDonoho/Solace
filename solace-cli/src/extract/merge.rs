@@ -96,6 +96,152 @@ fn plan_for(x: &Index, upto: usize, headers: HashMap<String, String>, r: usize, 
 }
 
 impl Store {
+    /// The other projects of the run's scope, each with its folder and index:
+    /// where a type's copies outside this project are. Built once per hint.
+    fn scope_indexes(&self) -> Vec<(String, Index)> {
+        let top = scope::top(&self.root);
+        let mine = scope::dir(&top, &self.root);
+        let scope_of: Option<Vec<String>> = scope::of_run(&self.root);
+        let mut out = vec![];
+        for d in workspace::members(&top).unwrap_or_default() {
+            let dir = scope::path(&top, &d);
+            if d == mine || !scope_of.as_ref().is_none_or(|ps| ps.contains(&d)) || !dir.join("gleam.toml").exists() {
+                continue;
+            }
+            if let Some(other) = board::open(&dir).ok().and_then(|st| st.index().ok()) {
+                out.push((d, other));
+            }
+        }
+        out
+    }
+
+    /// Types named as `gone` is: in this project's other modules, then in the
+    /// other projects of the run's scope (`others`), with their folder.
+    /// Functions and constants get none: a shared name like `new` rarely means
+    /// a duplicate.
+    fn copies(ix: &Index, others: &[(String, Index)], gone: &Sym) -> Vec<(Option<String>, Sym)> {
+        if gone.kind != Kind::Type {
+            return vec![];
+        }
+        let same = |x: &Sym| x.name == gone.name && x.kind == Kind::Type;
+        let mut out: Vec<(Option<String>, Sym)> = ix.syms.iter().filter(|x| same(x) && x.module != gone.module).map(|x| (None, x.clone())).collect();
+        for (d, other) in others {
+            out.extend(other.syms.iter().filter(|x| same(x)).map(|x| (Some(d.clone()), x.clone())));
+        }
+        out
+    }
+
+    /// For a refused delete or a rejected submit: the `merge` that folds `gone`
+    /// into its same-name copy, or what to make match first; empty with no copy.
+    pub(crate) fn merge_hint(&self, ix: &Index, gone: &Sym, uses: usize) -> String {
+        if gone.kind != Kind::Type {
+            return String::new();
+        }
+        Self::hint_among(ix, &self.scope_indexes(), gone, uses)
+    }
+
+    /// `merge_hint` with the other projects of the scope already indexed.
+    fn hint_among(ix: &Index, others: &[(String, Index)], gone: &Sym, uses: usize) -> String {
+        let copies = Self::copies(ix, others, gone);
+        let at = |d: &Option<String>| d.as_ref().map_or(String::new(), |d| format!(" ({d})"));
+        let flag = |d: &Option<String>| d.as_ref().map_or(String::new(), |d| format!(" --to-project {d}"));
+        let g = gone.qname();
+        match copies.as_slice() {
+            [] => String::new(),
+            [(d, keep)] => {
+                let k = keep.qname();
+                let diffs = constructor_differences(keep, gone);
+                if !is_pub_text(&keep.text) && !diffs.is_empty() {
+                    format!(
+                        "\n\nHint: {k}{} has the same name but is private, and their constructors differ: {}. Make it pub and make them match, then use merge {k} {g}{}",
+                        at(d),
+                        diffs.join("; "),
+                        flag(d)
+                    )
+                } else if !is_pub_text(&keep.text) {
+                    format!("\n\nHint: {k}{} has the same name but is private. Make it pub, then use merge {k} {g}{}", at(d), flag(d))
+                } else if diffs.is_empty() {
+                    let noun = if uses == 1 { "use" } else { "uses" };
+                    format!("\n\nHint: {k}{} has the same name. To fold {g} into it and redirect its {uses} {noun}, use merge {k} {g}{}", at(d), flag(d))
+                } else {
+                    format!("\n\nHint: {k}{} has the same name, but their constructors differ: {}. Make them match, then use merge {k} {g}{}", at(d), diffs.join("; "), flag(d))
+                }
+            }
+            _ => {
+                let mark = |k: &Sym| match (is_pub_text(&k.text), constructor_differences(k, gone).is_empty()) {
+                    (true, true) => "",
+                    (false, true) => " (private)",
+                    (true, false) => " (constructors differ)",
+                    (false, false) => " (private, constructors differ)",
+                };
+                let names: Vec<String> = copies.iter().map(|(d, k)| format!("{}{}{}", k.qname(), at(d), mark(k))).collect();
+                format!("\n\nHint: {} have the same name as {g}. To fold {g} into one and redirect its uses, use merge <copy> {g} [--to-project <folder>]", names.join(", "))
+            }
+        }
+    }
+
+    /// For a rejected submit whose errors name two types of one name (`Task` or
+    /// `board.Task` beside `solace_task.Task`): the merge hint, once. `ix` is
+    /// the index the errors were checked against.
+    ///
+    /// It reads the Gleam compiler's error text word by word: a type from
+    /// another module is written `module.Type` (the module's last path part),
+    /// and a type of the failing symbol's own module may be written bare. Two
+    /// such words for one type name, from different modules, make the pair:
+    ///
+    /// ```text
+    /// Type mismatch
+    ///
+    /// Expected type:
+    ///
+    ///     Task
+    ///
+    /// Found type:
+    ///
+    ///     solace_task.Task
+    /// ```
+    pub(crate) fn same_name_hint(&self, ix: &Index, errors: &[&Diag]) -> String {
+        // the scope's other projects, indexed once and only when a pair is found
+        let others = std::cell::OnceCell::new();
+        for d in errors {
+            let here = d.symbol.as_deref().and_then(|q| ix.syms.iter().find(|s| s.qname() == q)).map(|s| s.module.clone());
+            let words: Vec<&str> = d.text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '/')).map(|w| w.trim_matches('.')).collect();
+            let qualified: Vec<(&str, &str)> = words
+                .iter()
+                .filter_map(|w| w.rsplit_once('.'))
+                .filter(|(m, t)| !m.is_empty() && m.starts_with(|c: char| c.is_ascii_lowercase()) && t.starts_with(|c: char| c.is_ascii_uppercase()))
+                .collect();
+            for &(_, t) in &qualified {
+                let last = |m: &str| m.rsplit('/').next().unwrap_or(m).to_string();
+                let mut mods: Vec<String> = vec![];
+                if let Some(h) = &here
+                    && words.contains(&t)
+                {
+                    mods.push(last(h));
+                }
+                for &(m, u) in &qualified {
+                    if u == t && !mods.contains(&last(m)) {
+                        mods.push(last(m));
+                    }
+                }
+                if mods.len() < 2 {
+                    continue;
+                }
+                // the one in the failing symbol's module goes first: it is the one left behind
+                mods.sort_by_key(|m| here.as_ref().is_none_or(|h| last(h) != *m));
+                for m in &mods {
+                    let Some(i) = ix.syms.iter().position(|s| last(&s.module) == *m && s.name == t && s.kind == Kind::Type) else { continue };
+                    let others = others.get_or_init(|| self.scope_indexes());
+                    let copies = Self::copies(ix, others, &ix.syms[i]);
+                    if copies.iter().any(|(_, c)| mods.contains(&last(&c.module))) {
+                        return Self::hint_among(ix, others, &ix.syms[i], ix.used_by[i].len());
+                    }
+                }
+            }
+        }
+        String::new()
+    }
+
     /// `merge <survivor> <retired> [--to-project <folder>]` (D-117).
     pub(crate) fn merge(&self, args: &[&str], budget: usize) -> Out {
         let p = parse(args)?;
@@ -109,11 +255,12 @@ impl Store {
         let dest = match &p.to_project {
             None => None,
             Some(d) => {
-                let d = project_dir(d);
-                if !members.iter().any(|m| m == d) {
+                // `../x` and `./x` resolve against this project, as `--project` does (D-126 point 3).
+                let d = project_folder(&top, Some(&self.root), d, &members);
+                if !members.iter().any(|m| *m == d) {
                     return fail(format!("E6007 {d} is not a project under this Solace root; its projects: {}", members.join(", ")));
                 }
-                let dir = scope::path(&top, d);
+                let dir = scope::path(&top, &d);
                 if lockdown::same_project(&dir, &self.root) {
                     None
                 } else if !dir.join("gleam.toml").exists() {
@@ -546,16 +693,30 @@ mod tests {
         );
     }
 
-    /// A word ending in `fn` before a call is not the keyword, and brackets in a
-    /// string do not change what a label is; a label in a pattern is a value too.
+    /// A bracket in a string before a call does not change what a label is; a
+    /// label in a pattern is a value too.
     #[test]
-    fn labels_ignore_words_ending_in_fn_strings_and_patterns() {
+    fn labels_ignore_strings_before_a_call_and_patterns() {
         let board = "pub type Idle {\n  Idle\n}\n\npub type Box {\n  Box(phase: Idle)\n}\n\npub fn mk(b: Box, dofn: Int) -> Int {\n  let s = \"(\"\n  let c = Box(phase: Idle)\n  case b {\n    Box(phase: Idle) -> dofn\n  }\n}\n";
         let store = project(&[("src/board.gleam", board), ("src/state.gleam", "pub type State {\n  Idle\n}\n")]);
         merge(&store, &["state.State", "board.Idle"]).unwrap();
         assert_eq!(
             text(&store, "board.mk"),
             "pub fn mk(b: Box, dofn: Int) -> Int {\n  let s = \"(\"\n  let c = Box(phase: state.Idle)\n  case b {\n    Box(phase: state.Idle) -> dofn\n  }\n}"
+        );
+    }
+
+    /// A word ending in `fn` on the line before a record update is not the
+    /// keyword, and a `)` in a string between a call's `(` and the reference
+    /// does not close the call.
+    #[test]
+    fn labels_ignore_words_ending_in_fn_and_brackets_in_strings_on_the_scan_path() {
+        let board = "pub type Idle {\n  Idle\n}\n\npub type Box {\n  Box(phase: Idle)\n}\n\npub fn f(s: String, i: Idle) -> Idle {\n  i\n}\n\npub fn mk(b: Box, dofn: Int) -> Box {\n  let d = dofn\n  let e = f(\")\", Idle)\n  Box(..b, phase: Idle)\n}\n";
+        let store = project(&[("src/board.gleam", board), ("src/state.gleam", "pub type State {\n  Idle\n}\n")]);
+        merge(&store, &["state.State", "board.Idle"]).unwrap();
+        assert_eq!(
+            text(&store, "board.mk"),
+            "pub fn mk(b: Box, dofn: Int) -> Box {\n  let d = dofn\n  let e = f(\")\", state.Idle)\n  Box(..b, phase: state.Idle)\n}"
         );
     }
 
@@ -573,6 +734,91 @@ mod tests {
         assert!(merge(&store, &["a.Task"]).unwrap_err().0.contains("merge takes two names"));
         assert!(merge(&store, &["a.nothing", "board.Task"]).unwrap_err().0.starts_with("E1001"));
         assert!(store.resolve(&store.index().unwrap(), "board.Task").is_ok(), "nothing changed");
+    }
+
+    const COPY: &str = "pub type Task {\n  Task(id: Int, lane: Int)\n}\n";
+
+    /// A refused delete of a used symbol with a same-name copy names the merge.
+    #[test]
+    fn a_refused_delete_with_a_copy_names_merge() {
+        let store = project(&[("src/a.gleam", COPY), ("src/board.gleam", BOARD)]);
+        let err = store.delete("board.Task").unwrap_err().0;
+        assert!(err.starts_with("E5001 board.Task is still used by:"), "{err}");
+        assert!(err.ends_with("\n\nHint: a.Task has the same name. To fold board.Task into it and redirect its 3 uses, use merge a.Task board.Task"), "{err}");
+        assert_eq!(err.matches("Hint:").count(), 1);
+
+        let store = project(&[("src/a.gleam", "pub type Task {\n  Task(id: Int, column: Int)\n}\n"), ("src/board.gleam", BOARD)]);
+        let err = store.delete("board.Task").unwrap_err().0;
+        assert!(
+            err.ends_with("Hint: a.Task has the same name, but their constructors differ: Task field 2: column in a.Task, lane in board.Task. Make them match, then use merge a.Task board.Task"),
+            "{err}"
+        );
+
+        let store = project(&[("src/board.gleam", BOARD)]);
+        let err = store.delete("board.Task").unwrap_err().0;
+        assert!(err.starts_with("E5001") && !err.contains("Hint:"), "{err}");
+    }
+
+    /// A copy in another project of the scope: the hint adds --to-project.
+    #[test]
+    fn a_refused_delete_with_a_copy_in_another_project() {
+        let plain = |name: &str| format!("name = \"{name}\"\nversion = \"1.0.0\"\n");
+        let root = two_projects(&plain("web"), &plain("components"));
+        let store = Store::at(&root.join("web")).unwrap();
+        let err = store.delete("board.Task").unwrap_err().0;
+        assert!(err.contains("Hint: solace_task.Task (components) has the same name."), "{err}");
+        assert!(err.ends_with("use merge solace_task.Task board.Task --to-project components"), "{err}");
+        // the board case: a submit in web mixing board.Task with solace_task.Task
+        let root = two_projects(&format!("{}\n[dependencies]\ncomponents = {{ path = \"../components\" }}\n", plain("web")), &plain("components"));
+        let store = Store::at(&root.join("web")).unwrap();
+        let err = store.submit_symbols(Some("board.bump"), None, "import solace_task\n\npub fn bump(t: solace_task.Task) -> Task {\n  t\n}").unwrap_err().0;
+        assert!(err.starts_with("Not saved"), "{err}");
+        assert!(err.contains("Hint: solace_task.Task (components) has the same name.") && err.contains("--to-project components"), "{err}");
+        assert!(!err.contains("Unknown module"), "{err}");
+        assert_eq!(err.matches("Hint: solace_task.Task").count(), 1, "{err}");
+    }
+
+    /// Only types: a same-name function gets no hint; a private copy is named as private;
+    /// several refused symbols give one hint.
+    #[test]
+    fn the_hint_is_for_public_types_once() {
+        let store = project(&[("src/a.gleam", "pub fn lane(x: Int) -> Int {\n  x\n}\n"), ("src/board.gleam", BOARD), ("src/app.gleam", "import board\n\npub fn l(t: board.Task) -> Int {\n  board.lane(t)\n}\n")]);
+        let err = store.delete("board.lane").unwrap_err().0;
+        assert!(err.starts_with("E5001") && !err.contains("Hint:"), "{err}");
+
+        let store = project(&[("src/a.gleam", "type Task {\n  Task(id: Int, lane: Int)\n}\n"), ("src/board.gleam", BOARD)]);
+        let err = store.delete("board.Task").unwrap_err().0;
+        assert!(err.ends_with("Hint: a.Task has the same name but is private. Make it pub, then use merge a.Task board.Task"), "{err}");
+
+        // private and differing: both fixes are named
+        let store = project(&[("src/a.gleam", "type Task {\n  Task(id: Int, column: Int)\n}\n"), ("src/board.gleam", BOARD)]);
+        let err = store.delete("board.Task").unwrap_err().0;
+        assert!(
+            err.ends_with("Hint: a.Task has the same name but is private, and their constructors differ: Task field 2: column in a.Task, lane in board.Task. Make it pub and make them match, then use merge a.Task board.Task"),
+            "{err}"
+        );
+
+        // several copies: the private one is marked
+        let store = project(&[("src/a.gleam", COPY), ("src/c.gleam", "type Task {\n  Task(id: Int, lane: Int)\n}\n"), ("src/board.gleam", BOARD)]);
+        let err = store.delete("board.Task").unwrap_err().0;
+        assert!(err.contains("c.Task (private)") && !err.contains("a.Task (") && err.contains("have the same name as board.Task"), "{err}");
+
+        let store = project(&[("src/a.gleam", COPY), ("src/board.gleam", BOARD), ("src/app.gleam", "import board\n\npub fn l(t: board.Task) -> Int {\n  board.lane(t)\n}\n")]);
+        let err = store.delete_all(&["board.Task", "board.lane"], usize::MAX).unwrap_err().0;
+        assert!(err.starts_with("E5001 nothing deleted."), "{err}");
+        assert_eq!(err.matches("Hint:").count(), 1, "{err}");
+    }
+
+    /// A submit rejected for mixing two same-name types gets the hint; a plain type error doesn't.
+    #[test]
+    fn a_rejected_submit_mixing_same_name_types_names_merge() {
+        let store = project(&[("src/a.gleam", COPY), ("src/board.gleam", BOARD)]);
+        let err = store.submit_symbols(Some("board.bump"), None, "pub fn bump(t: a.Task) -> Task {\n  t\n}").unwrap_err().0;
+        assert!(err.starts_with("Not saved"), "{err}");
+        assert!(err.contains("Hint: a.Task has the same name. To fold board.Task into it"), "{err}");
+        assert_eq!(err.matches("Hint:").count(), 1, "{err}");
+        let err = store.submit_symbols(Some("board.bump"), None, "pub fn bump(t: Task) -> Task {\n  1\n}").unwrap_err().0;
+        assert!(err.starts_with("Not saved") && !err.contains("Hint:"), "{err}");
     }
 
     /// Redirecting a use that would make two modules import each other is refused, naming the use.

@@ -388,6 +388,18 @@ pub fn a_task_link_opens_where_its_task_is_test() {
       "{\"id\":\"t\",\"dir\":\"web\",\"archived\":true}",
     )
     == frontend.InStrategy("web")
+  // D-129: a task whose home is no project opens on the Strategy page, marked
+  // `project` false; a reply without `project` (an older server) is as before.
+  assert frontend.target(
+      "task",
+      "{\"id\":\"t\",\"dir\":\"web\",\"archived\":false,\"project\":false}",
+    )
+    == frontend.InStrategy("web")
+  assert frontend.target(
+      "task",
+      "{\"id\":\"t\",\"dir\":\".\",\"archived\":false,\"project\":true}",
+    )
+    == frontend.OnBoard(".")
   assert frontend.target(
       "task",
       "{\"code\":\"E7023\",\"message\":\"E7023 unknown task t\"}",

@@ -59,21 +59,19 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     // A card opens the task's details, which load it themselves.
     dispatch(new board.Select('', 't1'));
     expect(to_string(board.view(model))).toContain('<solace-task base dir hosted task="t1">');
-    dispatch(new board.NewTask()); dispatch(new board.DraftTitle('New task')); dispatch(new board.DraftBody('Human description')); dispatch(new board.Create());
-    await until(() => task.title === 'New task' && !model.creating && model.draft_title === '');
-    // The created task opens.
-    expect(to_string(board.view(model))).toContain('task="t2"');
     // A live update of the open task goes to its details, and a run that ended raises a notice.
     task.runs = [{ id: 'r1', kind: 'work', state: 'running', model: 'fake', log: '/logs/r1' }];
     events.enqueue(new TextEncoder().encode('id: 1\ndata: ' + JSON.stringify({ task }) + '\n\n'));
     await until(() => Array.from(model.live).some(m => m[1].includes('"running"')));
     task.runs = [{ ...task.runs[0], state: 'ended', outcome: 'finished' }];
     events.enqueue(new TextEncoder().encode('id: 2\ndata: ' + JSON.stringify({ task }) + '\n\n'));
-    await until(() => to_string(board.view(model)).includes('<strong>Finished New task</strong>'));
+    await until(() => to_string(board.view(model)).includes('<strong>Finished Initial</strong>'));
     workflow.columns.push({ id: 'planning', label: 'Custom planning', actions: ['review'], final: false });
     events.enqueue(new TextEncoder().encode('id: 3\ndata: ' + JSON.stringify({ workflow }) + '\n\n'));
     await until(() => to_string(board.view(model)).includes('Custom planning'));
-    for (const pair of [['GET', '/projects'], ['GET', '/workflow'], ['GET', '/events'], ['POST', '/tasks']]) expect(requests).toContainEqual(pair);
+    for (const pair of [['GET', '/projects'], ['GET', '/workflow'], ['GET', '/events']]) expect(requests).toContainEqual(pair);
+    // Tasks are created on the Strategy page: the board posts none.
+    expect(requests).not.toContainEqual(['POST', '/tasks']);
     // The board asks for nothing that belongs to one task's details.
     expect(requests.filter(([, path]) => path === '/models' || path.startsWith('/tasks/'))).toEqual([]);
   } finally {
@@ -130,6 +128,20 @@ test('dragging is stopped once per root, wherever the board is nested', async ()
   api.prevent_drag(root);
   api.prevent_drag(root);
   expect([...listeners.entries()]).toEqual([['dragstart', 1]]);
+});
+
+test('text dragged within a text box or a markdown editor moves; anything else stays put', async () => {
+  const api = await import('../src/api.mjs');
+  let drag;
+  api.prevent_drag({ addEventListener: (name, fn) => { drag = fn; } });
+  const stopped = path => { let prevented = false; drag({ composedPath: () => path, preventDefault() { prevented = true; } }); return prevented; };
+  const card = { closest: () => null, classList: { contains: () => false } };
+  const box = { closest: s => (s === 'input,textarea' ? box : null) };
+  // The selected text inside the editor's own shadow root: a text node, then CodeMirror's content, then the editor.
+  const editor = { closest: () => null, classList: { contains: name => name === 'md-editor' } };
+  expect(stopped([card])).toBe(true);
+  expect(stopped([box])).toBe(false);
+  expect(stopped([{}, card, {}, editor])).toBe(false);
 });
 
 // A browser without a DOM for the component tests: requests and event streams
@@ -255,24 +267,11 @@ test('the project panel sends only the requests its buttons make', async () => {
   } finally { browser.restore(); }
 });
 
-test('the new task editor formats its selection, and notices come and go', async () => {
+test('notices come and go', async () => {
   const browser = fakeBrowser();
-  const root = { addEventListener: () => {}, getElementById: () => ({ selectionStart: 1, selectionEnd: 2 }) };
   try {
     const b = mount(board);
-    b.dispatch(new board.Attached(root));
-    b.dispatch(new board.DraftBody('xy'));
-    b.dispatch(new board.Format('draft-body', '*', '*'));
-    await settle();
-    expect(b.model.draft_body).toBe('x*y*');
-    b.dispatch(new board.Block('draft-body', 'list'));
-    await settle();
-    expect(b.model.draft_body).toBe('- x*y*');
-    // Previews add and remove; a notice from a run that ended is dismissed.
-    b.dispatch(new board.Preview('draft-body', true));
-    expect(Array.from(b.model.previews)).toEqual(['draft-body']);
-    b.dispatch(new board.Preview('draft-body', false));
-    expect(Array.from(b.model.previews)).toEqual([]);
+    // A notice from a run that ended is dismissed.
     const task = run => JSON.stringify({ task: { id: 't1', title: 'T', body: '', column: 'assigned', rank: 1,
       runs: [{ id: 'r1', kind: 'work', state: run, model: 'm', log: '', outcome: run === 'ended' ? 'finished' : '' }] } });
     b.dispatch(new board.CaughtUp());

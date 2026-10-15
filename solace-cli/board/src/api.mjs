@@ -23,10 +23,6 @@ export function events(base, receive, ready = () => {}) {
   return source;
 }
 export function close_events(source) { source?.close(); }
-export function request_id() {
-  return crypto.randomUUID();
-}
-
 export function reload() {
   globalThis.location?.reload();
 }
@@ -43,8 +39,39 @@ const dragRoots = new WeakSet();
 export function prevent_drag(target) {
   if (!target?.addEventListener || dragRoots.has(target)) return;
   dragRoots.add(target);
+  // A markdown editor, <solace-md-editor>, keeps its text in a shadow root of its own: it is found on the path.
   target.addEventListener('dragstart', e => {
     const el = e.composedPath?.()[0] || e.target;
-    if (!el?.closest?.('input,textarea')) e.preventDefault();
+    const editor = e.composedPath?.().some(n => n?.classList?.contains?.('md-editor'));
+    if (!el?.closest?.('input,textarea') && !editor) e.preventDefault();
   });
+}
+
+// The detail band's resize handle. The band sits at the page's bottom edge,
+// so the handle drags from the top, which CSS `resize` cannot do: the
+// browser keeps the pointer on the handle (`setPointerCapture`), so its
+// pointermove and pointerup keep arriving as the pointer travels over the
+// page. The heights are px; the largest keeps the board's column bar on
+// screen. Outside a browser (tests), the sizes fall back.
+const detailMin = 120, detailKeep = 160;
+export function detail_max() {
+  return Math.max(detailMin, (globalThis.innerHeight || 800) - detailKeep);
+}
+export function detail_min() { return detailMin; }
+// The band's task height now: a key step starts from it while the height
+// is still the CSS default (45dvh). Outside a browser, 45% of 800px.
+export function detail_now(root) {
+  const task = root?.querySelector?.('.detail-band > solace-task');
+  const height = task ? task.getBoundingClientRect().height : 0;
+  return Math.round(height || 0.45 * (globalThis.innerHeight || 800));
+}
+export function begin_resize(root, pointerId, clientY) {
+  try { root?.querySelector?.('.detail-resize')?.setPointerCapture?.(pointerId); } catch {}
+  const task = root?.querySelector?.('.detail-band > solace-task');
+  const height = task ? task.getBoundingClientRect().height : 0;
+  return [Number(clientY) || 0, Number(height) || 0, detail_max()];
+}
+export function resize_height(startY, startH, y, max) {
+  const height = Math.round(startH + (startY - y));
+  return Math.min(Math.max(height, detailMin), Math.max(max, detailMin));
 }

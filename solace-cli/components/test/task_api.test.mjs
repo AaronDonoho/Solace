@@ -310,6 +310,62 @@ test('editor helpers act on the shadow root they are given, and only on its own 
   } finally { globalThis.fetch = oldFetch; }
 });
 
+test('an image pasted or dropped inside an editor\'s own shadow root uploads to its task, once', async () => {
+  const oldFetch = globalThis.fetch;
+  const uploads = [], inserted = [];
+  const makeRoot = () => { const listeners = new Map(); return { listeners, addEventListener: (name, fn) => listeners.set(name, fn) }; };
+  const page = makeRoot(), outer = makeRoot();
+  // <solace-md-editor> in the page's root; CodeMirror's content in the editor's own root.
+  const editor = { id: 'note-text', classList: { contains: name => name === 'md-editor' }, dataset: { task: 't1', base: '/p/shop' }, getRootNode: () => page };
+  const inner = {}, content = { classList: { contains: () => false }, getRootNode: () => inner };
+  const files = [{ type: 'image/png', name: 'shot.png' }];
+  let prevented = 0;
+  const event = { composedPath: () => [content, inner, editor, page, outer], clipboardData: { files }, dataTransfer: { files }, preventDefault() { prevented++; } };
+  globalThis.fetch = async path => { uploads.push(path); return Response.json({ url: '/tasks/t1/files/0123456789abcdef.png' }); };
+  try {
+    const api = await import('../src/task_api.mjs');
+    api.images(page, (id, image) => inserted.push([id, image]), () => {});
+    api.images(outer, (id, image) => inserted.push(['outer', image]), () => {});
+    for (const name of ['paste', 'drop']) { page.listeners.get(name)(event); outer.listeners.get(name)(event); }
+    page.listeners.get('dragover')(event);
+    outer.listeners.get('dragover')(event);
+    for (let i = 0; i < 20 && inserted.length < 2; i++) await Bun.sleep(1);
+    expect(uploads).toEqual(['/p/shop/tasks/t1/files', '/p/shop/tasks/t1/files']);
+    expect(inserted).toEqual([['note-text', '![shot](/tasks/t1/files/0123456789abcdef.png)'], ['note-text', '![shot](/tasks/t1/files/0123456789abcdef.png)']]);
+    // paste, drop and dragover, each by the page's root only.
+    expect(prevented).toBe(3);
+    // An editor of no task yet uploads nothing.
+    delete editor.dataset.task;
+    page.listeners.get('paste')(event);
+    await settle();
+    expect(uploads.length).toBe(2);
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+test('a text set on the editor from outside replaces only what differs, and keeps the selection sensible', async () => {
+  const { replacement } = await import('../src/task_api.mjs');
+  // Bold round "bc": the selection stays on "bc".
+  expect(replacement('abcd', 'a**bc**d', 1, 3)).toEqual({ from: 1, to: 3, insert: '**bc**', anchor: 3, head: 5 });
+  // Bold with nothing selected: the cursor goes between the marks; code the same.
+  expect(replacement('ab', 'a****b', 1, 1)).toEqual({ from: 1, to: 1, insert: '****', anchor: 3, head: 3 });
+  expect(replacement('ab', 'a``b', 1, 1)).toEqual({ from: 1, to: 1, insert: '``', anchor: 2, head: 2 });
+  // An image or a link with nothing selected: the cursor ends it.
+  expect(replacement('ab', 'a![x](/u)b', 1, 1)).toEqual({ from: 1, to: 1, insert: '![x](/u)', anchor: 9, head: 9 });
+  // A list made of the selected line: only the new marks go in, and the cursor ends them.
+  expect(replacement('one\ntwo', 'one\n\n- two', 4, 7)).toEqual({ from: 4, to: 4, insert: '\n- ', anchor: 7, head: 7 });
+  // A box cleared after a send.
+  expect(replacement('sent', '', 4, 4)).toEqual({ from: 0, to: 4, insert: '', anchor: 0, head: 0 });
+  // The same text changes nothing.
+  expect(replacement('same', 'same', 2, 2)).toEqual({ from: 4, to: 4, insert: '', anchor: 4, head: 4 });
+});
+
+test('the editor element is defined only where there is a browser', async () => {
+  const { define_editor } = await import('../src/task_api.mjs');
+  // No customElements here: CodeMirror, which this project doesn't install, is never loaded.
+  expect(globalThis.customElements).toBeUndefined();
+  expect(() => define_editor()).not.toThrow();
+});
+
 // A browser without a DOM: requests and event streams are recorded, and
 // timers wait until the test fires them.
 function fakeBrowser(replies = {}) {

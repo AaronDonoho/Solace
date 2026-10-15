@@ -154,10 +154,38 @@ export function block(root, id, text, kind) {
   return before + marked.join('\n') + after;
 }
 
+// Defines <solace-md-editor> (md_editor.mjs, CodeMirror) once, in a browser. Elsewhere, as in the tests, it
+// does nothing, and CodeMirror is never loaded.
+export function define_editor() {
+  if (!globalThis.customElements || customElements.get('solace-md-editor')) return;
+  import('./md_editor.mjs').then(editor => editor.define());
+}
+
+// How the markdown editor takes a text set from outside it (a tool, an image, a box cleared after a send):
+// only the part that differs, `from` to `to` of `old`, is replaced by `insert`, so the cursor and undo keep the
+// rest. The selection before, `start` to `end`, becomes `anchor` to `head`: the selected text again where the
+// new part holds it; between a pair of marks put round no selection (`****` or two backticks); else the end of
+// the new part.
+export function replacement(old, next, start, end) {
+  const most = Math.min(old.length, next.length);
+  let from = 0;
+  while (from < most && old[from] === next[from]) from++;
+  let tail = 0;
+  while (tail < most - from && old[old.length - 1 - tail] === next[next.length - 1 - tail]) tail++;
+  const to = old.length - tail, insert = next.slice(from, next.length - tail);
+  const selected = old.slice(start, end);
+  const at = selected ? insert.indexOf(selected) : -1;
+  if (at >= 0) return { from, to, insert, anchor: from + at, head: from + at + selected.length };
+  const cursor = !selected && /^(\*\*\*\*|``)$/.test(insert) ? from + insert.length / 2 : from + insert.length;
+  return { from, to, insert, anchor: cursor, head: cursor };
+}
+
 // Images pasted, dropped or picked into a markdown editor are uploaded to its
 // task; `insert` gets the editor's id and each image's markdown. Only editors in
 // `target` itself count: an event from a shadow root nested inside it belongs to
-// that root's own listener, so an image is uploaded once.
+// that root's own listener, so an image is uploaded once. An editor,
+// <solace-md-editor>, keeps its text in a shadow root of its own, so it is
+// found on the event's path.
 const imageRoots = new WeakSet();
 export function images(target, insert, fail) {
   if (!target?.addEventListener || imageRoots.has(target)) return;
@@ -179,10 +207,14 @@ export function images(target, insert, fail) {
   };
   const from = e => e.composedPath?.()[0] || e.target;
   const own = e => { const root = from(e)?.getRootNode?.(); return !root || root === target; };
-  const inEditor = e => own(e) && from(e)?.classList?.contains('md-editor') && from(e).dataset.task;
-  target.addEventListener('paste', e => { const el = from(e); if (inEditor(e)) take(e, e.clipboardData?.files, el.dataset.task, el.id, el.dataset.base); });
-  target.addEventListener('dragover', e => inEditor(e) && e.preventDefault());
-  target.addEventListener('drop', e => { const el = from(e); if (inEditor(e)) take(e, e.dataTransfer?.files, el.dataset.task, el.id, el.dataset.base); });
+  const editorOf = e => {
+    const el = (e.composedPath?.() || [e.target]).find(n => n?.classList?.contains('md-editor'));
+    const root = el?.getRootNode?.();
+    return el?.dataset?.task && (!root || root === target) ? el : null;
+  };
+  target.addEventListener('paste', e => { const el = editorOf(e); if (el) take(e, e.clipboardData?.files, el.dataset.task, el.id, el.dataset.base); });
+  target.addEventListener('dragover', e => editorOf(e) && e.preventDefault());
+  target.addEventListener('drop', e => { const el = editorOf(e); if (el) take(e, e.dataTransfer?.files, el.dataset.task, el.id, el.dataset.base); });
   target.addEventListener('change', e => {
     const el = from(e);
     if (!own(e) || !el?.classList?.contains('md-image')) return;

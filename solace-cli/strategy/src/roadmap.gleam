@@ -142,7 +142,6 @@ pub type Draft {
 pub type Editor(msg) {
   Editor(
     draft: Option(Draft),
-    preview: Bool,
     /// A save sent and not yet answered.
     saving: Bool,
     error: String,
@@ -153,7 +152,6 @@ pub type Editor(msg) {
     /// The date as the input gives it ("2027-01-01"), "" for none.
     on_target_date: fn(String) -> msg,
     on_state: fn(String) -> msg,
-    on_preview: fn(Bool) -> msg,
     on_format: fn(String, String) -> msg,
     on_block: fn(String) -> msg,
     on_save: msg,
@@ -294,7 +292,7 @@ pub fn view(
             attribute.disabled(editor.draft != None),
             event.on_click(editor.on_new),
           ],
-          [html.text("New milestone")],
+          [html.text(solace_task.ui_label("new_milestone"))],
         ),
       ]),
     ]
@@ -401,16 +399,16 @@ fn milestone_view(
         None -> element.none()
       },
       small(
-        "Edit",
-        "Edit " <> milestone.title,
+        solace_task.ui_label("edit"),
+        solace_task.ui_label("edit") <> " " <> milestone.title,
         True,
         editor.on_edit(milestone.id),
       ),
       move("Up", "Move up", True),
       move("Down", "Move down", False),
       small(
-        "Delete",
-        "Delete " <> milestone.title,
+        solace_task.ui_label("delete"),
+        solace_task.ui_label("delete") <> " " <> milestone.title,
         True,
         editor.on_delete(milestone.id),
       ),
@@ -430,7 +428,7 @@ fn milestone_view(
                 attribute.type_("button"),
                 event.on_click(editor.on_confirm_delete),
               ],
-              [html.text("Delete")],
+              [html.text(solace_task.ui_label("delete"))],
             ),
             html.button(
               [
@@ -547,7 +545,7 @@ fn task_list(
                 attribute.disabled(busy),
                 event.on_click(editor.on_depends_open(t.dir, t.id)),
               ],
-              [html.text("Dependencies")],
+              [html.text(solace_task.ui_label("dependencies"))],
             ),
             case editing {
               True -> depends_editor(t, all, name, editor, busy)
@@ -575,8 +573,8 @@ fn form(base: String, editor: Editor(msg), draft: Draft) -> Element(msg) {
   html.div([attribute.class("feature-form")], [
     html.h3([], [
       html.text(case draft.id {
-        None -> "New milestone"
-        Some(_) -> "Edit milestone"
+        None -> solace_task.ui_label("new_milestone")
+        Some(_) -> solace_task.ui_label("edit_milestone")
       }),
     ]),
     html.div([attribute.class("filters")], [
@@ -603,9 +601,7 @@ fn form(base: String, editor: Editor(msg), draft: Draft) -> Element(msg) {
       base,
       "Description",
       draft.body,
-      editor.preview,
       editor.on_text,
-      editor.on_preview,
       editor.on_format,
       editor.on_block,
     ),
@@ -628,8 +624,8 @@ fn form(base: String, editor: Editor(msg), draft: Draft) -> Element(msg) {
       message -> html.p([attribute.role("alert")], [html.text(message)])
     },
     html.div([attribute.class("vision-actions")], [
-      button("Save", editor.on_save),
-      button("Cancel", editor.on_cancel),
+      button(solace_task.ui_label("save"), editor.on_save),
+      button(solace_task.ui_label("cancel"), editor.on_cancel),
     ]),
   ])
 }
@@ -669,7 +665,7 @@ fn depends_editor(
             html.li([], [
               html.text(name(d) <> " "),
               small(
-                "Remove",
+                solace_task.ui_label("remove"),
                 "Remove " <> name(d),
                 editor.on_depends(
                   task.dir,
@@ -687,7 +683,7 @@ fn depends_editor(
         "aria-label",
         "Find a task " <> task.title <> " depends on",
       ),
-      attribute.placeholder("Find a task"),
+      attribute.placeholder(solace_task.ui_label("find_task")),
       attribute.value(editor.depends_query),
       attribute.disabled(busy),
       event.on_input(editor.on_depends_query),
@@ -706,7 +702,7 @@ fn depends_editor(
           list.map(shown, fn(o) {
             html.li([], [
               small(
-                "Add",
+                solace_task.ui_label("add"),
                 "Depend on " <> name(o.id),
                 editor.on_depends(
                   task.dir,

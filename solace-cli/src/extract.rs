@@ -9,6 +9,7 @@
 use super::*;
 use std::collections::BTreeSet;
 
+pub(crate) mod ahead;
 mod merge;
 
 const MODULE_HINT: &str = "to move a whole module, use move src/x.gleam src/y.gleam";
@@ -347,11 +348,15 @@ fn with_put_back(e: Failure, ended: Result<(), Failure>) -> Failure {
 /// annotation), and in a body after `:`, as a `-> T {` return type, or as an
 /// argument of a type that is itself in a type position.
 fn type_position(text: &str, a: usize, b: usize, head: usize) -> bool {
+    // strings and comments blanked once, so their brackets and words count for nothing; offsets stay
+    a < head || in_type_position(&gleam::strip_comments(text), a, b, head)
+}
+
+/// `type_position` on `text` with its strings and comments already blanked.
+fn in_type_position(text: &str, a: usize, b: usize, head: usize) -> bool {
     if a < head {
         return true;
     }
-    // strings and comments blanked, so their brackets and words count for nothing; offsets stay
-    let text = &gleam::strip_comments(text);
     let before = text[..a].trim_end();
     if before.ends_with("::") {
         return false;
@@ -406,9 +411,9 @@ fn type_position(text: &str, a: usize, b: usize, head: usize) -> bool {
         return true;
     }
     if name.is_empty() && text[..p].ends_with('#') {
-        return type_position(text, p - 1, p, head);
+        return in_type_position(text, p - 1, p, head);
     }
-    name.rsplit('.').next().is_some_and(|n| n.starts_with(|c: char| c.is_uppercase())) && type_position(text, start, p, head)
+    name.rsplit('.').next().is_some_and(|n| n.starts_with(|c: char| c.is_uppercase())) && in_type_position(text, start, p, head)
 }
 
 /// Whether the `:` that follows `before` ends a label of a call, a record update
@@ -1149,14 +1154,12 @@ impl Store {
         let dest = match &p.to_project {
             None => None,
             Some(d) => {
-                let d = match d.trim_end_matches('/') {
-                    "" => ".",
-                    d => d.strip_prefix("./").unwrap_or(d),
-                };
-                if !members.iter().any(|m| m == d) {
+                // `../x` and `./x` resolve against this project, as `--project` does (D-126 point 3).
+                let d = project_folder(&top, Some(&self.root), d, &members);
+                if !members.iter().any(|m| *m == d) {
                     return fail(format!("E6007 {d} is not a project under this Solace root; its projects: {}", members.join(", ")));
                 }
-                let dir = scope::path(&top, d);
+                let dir = scope::path(&top, &d);
                 if lockdown::same_project(&dir, &self.root) {
                     None
                 } else if !dir.join("gleam.toml").exists() {

@@ -18,7 +18,7 @@ fn feature(id: String, target: String, rank: Float) -> features.Feature {
       m -> Some(m)
     },
     rank,
-    "planned",
+    "upcoming",
     None,
   )
 }
@@ -90,7 +90,7 @@ pub fn create_body_names_the_request_and_the_target_date_test() {
 
 pub fn an_edit_sends_only_the_changed_fields_test() {
   let m =
-    features.Milestone("m1", "1.0", 1.0, "b", Some("2027-01-01"), "planned")
+    features.Milestone("m1", "1.0", 1.0, "b", Some("2027-01-01"), "upcoming")
   let draft = roadmap.draft_of(m)
   assert roadmap.changes(m, draft) == []
   let changed = roadmap.Draft(..draft, title: "1.1", state: "active")

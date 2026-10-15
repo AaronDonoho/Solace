@@ -113,9 +113,42 @@ fn write(top: &Path, t: &Value) -> Result<(), Failure> {
     if !board::valid_id(id) {
         return board::err("E7001", "invalid task id");
     }
+    let path = board::store_dir(top).join(format!("{id}.json"));
+    let was: Option<Value> = fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok());
     replace_file(&board::store_dir(top), id, t)?;
     log(top, t["home"].as_str().unwrap_or("."), &json!({"task":t}));
+    // A feature follows its tasks (D-128): only a new task, a moved one or a
+    // changed link can change it.
+    if was.as_ref().is_none_or(|w| w["feature"] != t["feature"] || w["column"] != t["column"]) {
+        let old = was.as_ref().map_or(Value::Null, |w| w["feature"].clone());
+        let mut fids: Vec<&str> = [&old, &t["feature"]].into_iter().filter_map(Value::as_str).collect();
+        fids.dedup();
+        for fid in fids {
+            if let Err(e) = follow_tasks(top, fid) {
+                eprintln!("updating feature {fid}: {}", e.0);
+            }
+        }
+    }
     Ok(())
+}
+/// A feature follows its tasks (D-128): an `active` feature whose tasks are all
+/// in a final column, its Tech Debt tasks too, becomes `complete`; a `complete`
+/// one with a task out of the final columns is `active` again. No other state
+/// changes by itself, and a feature with no tasks stays as it is.
+fn follow_tasks(top: &Path, fid: &str) -> Result<(), Failure> {
+    let Some(mut f) = record(top, "features", fid) else { return Ok(()) };
+    let held: Vec<Value> = board::all_tasks(top)?.into_iter().filter(|t| t["feature"] == fid).collect();
+    // A task whose home has no workflow (not a project yet) is in no column: open.
+    let closed = |t: &Value| board::flow(&scope::path(top, t["home"].as_str().unwrap_or("."))).is_ok_and(|w| board::column(&w, t)["final"] == true);
+    let open = held.iter().any(|t| !closed(t));
+    let state = match f["state"].as_str() {
+        Some("active") if !held.is_empty() && !open => "complete",
+        Some("complete") if open => "active",
+        _ => return Ok(()),
+    };
+    f["state"] = json!(state);
+    mark_start(top, "features", &mut f);
+    put_record(top, "features", &f)
 }
 /// Writes `<dir>/<id>.json` as `v`, synced like an inbox message and renamed
 /// into place, so a power loss never leaves an empty file.
@@ -134,8 +167,9 @@ fn replace_bytes(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The states of a milestone or a feature (D-87 point 8).
-const STATES: [&str; 5] = ["proposed", "planned", "active", "complete", "canceled"];
+/// The states of a milestone or a feature (D-87 point 8; `upcoming` was
+/// `planned` before D-128).
+const STATES: [&str; 5] = ["proposed", "upcoming", "active", "complete", "canceled"];
 
 fn strategy_dir(top: &Path, kind: &str) -> PathBuf {
     top.join(".solace/strategy").join(kind)
@@ -181,7 +215,11 @@ pub(super) fn record(top: &Path, kind: &str, id: &str) -> Option<Value> {
 }
 /// A record as read from `path`. A feature saved before `startTime` has none:
 /// one already active or complete takes its file's time as when it started.
+/// A record saved `planned` reads as `upcoming` (D-128).
 fn stored(kind: &str, mut v: Value, path: &Path) -> Value {
+    if v["state"] == "planned" {
+        v["state"] = json!("upcoming");
+    }
     if kind == "features" && v.get("startTime").is_none() {
         v["startTime"] = if v["state"] == "active" || v["state"] == "complete" {
             let modified = fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok());
@@ -310,7 +348,7 @@ pub fn find_task(top: &Path, id: &str) -> Result<Value, (u16, Failure)> {
         return board::err("E7023", format!("unknown task {id}")).map_err(|e| (404, e));
     }
     let t = board::read_task(top, &path).map_err(|e| (409, e))?;
-    Ok(json!({"id": id, "dir": t["home"], "archived": !t["archivedTime"].is_null(), "title": t["title"]}))
+    Ok(json!({"id": id, "dir": t["home"], "archived": !t["archivedTime"].is_null(), "title": t["title"], "project": !board::homeless(top, t["home"].as_str().unwrap_or("."))}))
 }
 /// `GET /features/find/{id}` and `GET /milestones/find/{id}` (D-122): a
 /// record's title, which a bare link to it shows. 404 for no such record.
@@ -713,7 +751,7 @@ fn build(top: &Path, rid: &str, p: &Value) -> Result<Built, Failure> {
         "task" => match id {
             Some(id) => {
                 let Some(t) = board::all_tasks(top)?.into_iter().find(|t| t["id"] == id) else { return board::err("E7023", format!("unknown task {id}")) };
-                let home = scope::path(top, t["home"].as_str().unwrap_or("."));
+                let home = board::task_root(top, &t);
                 let (mut t, _) = board::change(&home, id, "PATCH", &[], fields)?;
                 board::note(&mut t, "solace", None, &format!("Changed by strategy run {rid}"));
                 Ok(Built::Task(t, false))
@@ -730,9 +768,9 @@ fn build(top: &Path, rid: &str, p: &Value) -> Result<Built, Failure> {
 }
 /// The task a strategy proposal creates: `POST /tasks` in the first project of
 /// its `scope` (the root's own without one), with `feature`, `milestone` and
-/// `dependsOn` set as `PATCH` sets them. A folder in `scope` may not be a project
-/// yet: a task none of whose folders is one has the first as its home, and is in
-/// no lane until that project exists.
+/// `dependsOn` set as `PATCH` sets them. Every folder in `scope` must be a
+/// project (D-129): a proposal naming one that isn't is refused here, when the
+/// proposal is sent, before the human is asked.
 fn proposed_task(top: &Path, rid: &str, fields: &Value) -> Result<Value, Failure> {
     let folders: Vec<String> = match fields.get("scope") {
         None => vec![".".into()],
@@ -746,24 +784,12 @@ fn proposed_task(top: &Path, rid: &str, fields: &Value) -> Result<Value, Failure
         }
     };
     let members = workspace::members(top)?;
-    let projects: Vec<&String> = folders.iter().filter(|d| members.contains(d)).collect();
-    let mut body = fields.clone();
-    body.as_object_mut().map(|o| o.remove("scope"));
-    let root = match projects.first() {
-        Some(home) => {
-            body["scope"] = json!(projects);
-            scope::path(top, home)
-        }
-        None => top.to_path_buf(),
-    };
-    let mut t = board::created(&root, &body)?;
-    let mut all = folders.clone();
-    all.sort();
-    all.dedup();
-    t["scope"] = json!(all);
-    if projects.is_empty() {
-        t["home"] = json!(folders[0]);
+    if let Some(d) = folders.iter().find(|d| !members.contains(d)) {
+        return board::err("E7001", format!("{d} is not a project; scope takes project folders: {}", members.join(", ")));
     }
+    let mut body = fields.clone();
+    body["scope"] = json!(folders);
+    let mut t = board::created(&scope::path(top, &folders[0]), &body)?;
     board::set_links(top, &mut t, fields)?;
     board::note(&mut t, "solace", None, &format!("Created by strategy run {rid}"));
     Ok(t)
@@ -772,7 +798,7 @@ fn proposed_task(top: &Path, rid: &str, fields: &Value) -> Result<Value, Failure
 /// checked as its request would be, writing nothing. `fields` is the JSON
 /// object of the request, or for the vision its new text. The question names
 /// the `complete` or `canceled` feature and milestone a task proposal links to,
-/// which Approve also sets `planned`.
+/// which Approve also sets `upcoming`.
 pub(super) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text: &str) -> Result<Value, Failure> {
     let fields = if kind == "vision" {
         json!({"text": text})
@@ -829,7 +855,7 @@ pub(super) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text
         for (kind, id) in [("feature", &fields["feature"]), ("milestone", milestone)] {
             let Some(r) = id.as_str().and_then(|id| record(top, &format!("{kind}s"), id)) else { continue };
             if matches!(r["state"].as_str(), Some("complete" | "canceled")) {
-                says += &format!("\n\nApproving also sets the {kind} {} (\"{}\", now {}) back to planned.", r["id"].as_str().unwrap_or(""),
+                says += &format!("\n\nApproving also sets the {kind} {} (\"{}\", now {}) back to upcoming.", r["id"].as_str().unwrap_or(""),
                     r["title"].as_str().unwrap_or(""), r["state"].as_str().unwrap_or(""));
                 reopens.push(json!({"kind": kind, "id": r["id"]}));
             }
@@ -859,7 +885,7 @@ fn apply_proposal(top: &Path, rid: &str, p: &Value) -> Result<String, Failure> {
     let mut reopened = vec![];
     for r in p["reopens"].as_array().into_iter().flatten() {
         let plural = if r["kind"] == "milestone" { "milestones" } else { "features" };
-        reopened.push((plural, edited(top, plural, r["id"].as_str().unwrap_or(""), &json!({"state": "planned"}), &mut status)?));
+        reopened.push((plural, edited(top, plural, r["id"].as_str().unwrap_or(""), &json!({"state": "upcoming"}), &mut status)?));
     }
     let answer = match built {
         Built::Record(plural, v, new) => {
@@ -1115,10 +1141,12 @@ fn apply(top: &Path, m: &Value) -> Result<Option<String>, Failure> {
                 let what = m["question"]["text"].as_str().unwrap_or("").lines().next().unwrap_or("").to_string();
                 board::note(&mut run, "solace", Some(rid), &format!("A proposal arrived after the run ended, so it was not asked: {what}"));
             }
-            // A question's time is when it is asked, so it orders among the notes.
+            // A question's time is when it is asked, so it orders among the notes;
+            // `after`, the notes before it, orders it among those of the same second.
             "strategy_propose" => {
                 let mut q = m["question"].clone();
                 q["time"] = json!(now());
+                q["after"] = json!(run["notes"].as_array().map_or(0, Vec::len));
                 run["questions"].as_array_mut().unwrap().push(q);
             }
             _ => {}
@@ -1200,7 +1228,7 @@ fn api_with(root: &Path, method: &str, parts: &[&str], body: Value, needs: Needs
             change(root, method, parts, &body, true, needs)?.ok_or_else(|| Failure("the task's projects were not locked".into(), 1))?
         }
     };
-    board::after(&scope::path(&scope::top(root), t["home"].as_str().unwrap_or(".")), &t, after);
+    board::after(&board::task_root(&scope::top(root), &t), &t, after);
     drop(guard);
     Ok(t)
 }
@@ -1238,6 +1266,7 @@ mod tests {
     /// A root whose task store holds t1, in `backlog`.
     fn root() -> testing::Scratch {
         let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
+        board::open(&root).unwrap();
         board::adopt_tasks(&root, &root).unwrap();
         root
     }
@@ -1309,8 +1338,8 @@ mod tests {
         assert_eq!(call("GET", &["milestones"], json!({})).unwrap(), json!([]));
         assert_eq!(call("GET", &["features"], json!({})).unwrap(), json!([]));
         let a = call("POST", &["milestones"], json!({"title": "1.0"})).unwrap();
-        let b = call("POST", &["milestones"], json!({"title": "2.0", "state": "planned", "targetDate": "2027-01-01"})).unwrap();
-        assert_eq!((a["state"].as_str(), b["state"].as_str(), b["targetDate"].as_str()), (Some("proposed"), Some("planned"), Some("2027-01-01")));
+        let b = call("POST", &["milestones"], json!({"title": "2.0", "state": "upcoming", "targetDate": "2027-01-01"})).unwrap();
+        assert_eq!((a["state"].as_str(), b["state"].as_str(), b["targetDate"].as_str()), (Some("proposed"), Some("upcoming"), Some("2027-01-01")));
         assert_eq!((a["rank"].as_f64(), b["rank"].as_f64()), (Some(1.), Some(2.)));
         let (aid, bid) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
         let edited = call("PATCH", &["milestones", aid], json!({"title": "1.0 final", "rank": 3})).unwrap();
@@ -1616,18 +1645,19 @@ mod tests {
         assert_eq!((t1["title"].as_str(), t1["notes"][0]["text"].as_str()), (Some("Renamed"), Some(format!("Changed by strategy run {rid}").as_str())));
     }
 
-    /// D-93: a proposed task whose scope names no project yet still exists, at
-    /// home in the first folder named, so no lane shows it until that project does.
+    /// D-129: a proposed task whose scope names a folder that isn't a project is
+    /// refused when the proposal is sent, naming the folder and the projects, and
+    /// nothing is written. A folder that is a project is accepted.
     #[test]
-    fn a_proposed_task_may_name_a_project_that_does_not_exist_yet() {
+    fn a_proposal_scope_must_name_projects() {
         let root = root();
         let rid = page_run(&root);
-        let qid = propose(&root, &rid, "task", None, r#"{"title": "Later", "scope": ["web", "api"]}"#);
-        let said = answer(&root, &rid, &qid, "Approve").0;
-        let id = said.rsplit(' ').next().unwrap();
-        let t = board::all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == id).unwrap();
-        assert_eq!((&t["home"], &t["scope"]), (&json!("web"), &json!(["api", "web"])));
-        assert!(!board::tasks(&root).unwrap().iter().any(|x| x["id"] == t["id"]));
+        for text in [r#"{"title": "Later", "scope": ["web", "api"]}"#, r#"{"title": "Half", "scope": [".", "web"]}"#] {
+            let e = proposal(&root, &rid, "task", None, text).unwrap_err();
+            assert!(e.0.starts_with("E7001") && e.0.contains("is not a project") && e.0.contains("web") && e.0.contains("."), "{text}: {}", e.0);
+        }
+        assert_eq!(board::all_tasks(&root).unwrap().len(), 1, "the refused proposals wrote nothing");
+        assert!(proposal(&root, &rid, "task", None, r#"{"title": "Here", "scope": ["."], "dependsOn": ["t1"]}"#).is_ok());
         let e = proposal(&root, &rid, "task", None, r#"{"title": "Out", "scope": ["../x"]}"#).unwrap_err();
         assert!(e.0.starts_with("E7001"), "{}", e.0);
     }
@@ -1734,7 +1764,7 @@ mod tests {
     }
 
     /// D-93: a task proposal linked to a complete feature and milestone says so,
-    /// and sets them `planned` only on Approve.
+    /// and sets them `upcoming` only on Approve.
     #[test]
     fn a_task_proposal_reopens_its_complete_feature_on_approve() {
         let root = root();
@@ -1745,13 +1775,13 @@ mod tests {
         let rejected = propose(&root, &rid, "task", None, &fields);
         let q = record(&root, "runs", &rid).unwrap()["questions"][0].clone();
         assert_eq!(q["proposal"]["reopens"], json!([{"kind": "feature", "id": f["id"]}, {"kind": "milestone", "id": m["id"]}]));
-        assert!(q["text"].as_str().unwrap().contains("back to planned"), "{}", q["text"]);
+        assert!(q["text"].as_str().unwrap().contains("back to upcoming"), "{}", q["text"]);
         answer(&root, &rid, &rejected, "Reject");
         let state = |kind: &str, v: &Value| record(&root, kind, v["id"].as_str().unwrap()).unwrap()["state"].clone();
         assert_eq!((state("features", &f), state("milestones", &m)), (json!("canceled"), json!("complete")));
         let approved = propose(&root, &rid, "task", None, &fields);
         let said = answer(&root, &rid, &approved, "Approve").0;
-        assert_eq!((state("features", &f), state("milestones", &m)), (json!("planned"), json!("planned")));
+        assert_eq!((state("features", &f), state("milestones", &m)), (json!("upcoming"), json!("upcoming")));
         let t = board::task(&root, said.rsplit(' ').next().unwrap()).unwrap();
         assert_eq!((&t["feature"], &t["milestone"]), (&f["id"], &m["id"]));
     }
@@ -1798,6 +1828,7 @@ mod tests {
         let run = record(&root, "runs", &rid).unwrap();
         assert_eq!((run["questions"].as_array().unwrap().len(), run["state"].as_str()), (1, Some("waiting")));
         assert!(run["questions"][0]["time"].as_u64().is_some_and(|t| t > 0));
+        assert_eq!(run["questions"][0]["after"], json!(run["notes"].as_array().unwrap().len()));
         runs_api(&root, "POST", &[&rid, "end"], json!({}), models).unwrap();
         apply(&root, &json!({"id": "m2", "kind": "strategy_propose", "run": rid, "question": q})).unwrap();
         let run = record(&root, "runs", &rid).unwrap();
@@ -1838,6 +1869,40 @@ mod tests {
         assert_eq!(board::task(&root, "t2").unwrap()["closedTime"], json!(70));
         let modified = fs::metadata(dir.join("t3.json")).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         assert_eq!(board::task(&root, "t3").unwrap()["closedTime"], json!(modified));
+    }
+
+    /// D-130: a task saved before createdTime takes the earlier of its first note's
+    /// time and its first run's start, or else its file's.
+    #[test]
+    fn an_old_task_loads_with_a_created_time() {
+        let root = root();
+        let dir = board::store_dir(&root);
+        let old = [
+            ("t2", r#"{"id":"t2","column":"backlog","home":".","notes":[{"time":40},{"time":10}],"runs":[]}"#),
+            ("t3", r#"{"id":"t3","column":"backlog","home":".","notes":[],"runs":[{"started":60},{"started":5}]}"#),
+            ("t4", r#"{"id":"t4","column":"backlog","home":".","notes":[{"time":40}],"runs":[{"started":30}]}"#),
+            ("t5", r#"{"id":"t5","column":"backlog","home":".","notes":[],"runs":[]}"#),
+        ];
+        for (id, text) in old {
+            fs::write(dir.join(format!("{id}.json")), text).unwrap();
+        }
+        let created = |id: &str| board::task(&root, id).unwrap()["createdTime"].clone();
+        assert_eq!((created("t2"), created("t3"), created("t4")), (json!(40), json!(60), json!(30)));
+        let modified = fs::metadata(dir.join("t5.json")).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        assert_eq!(created("t5"), json!(modified));
+    }
+
+    /// D-130: a new task records when it was created; moving it keeps the time.
+    #[test]
+    fn a_new_task_gets_a_created_time_once() {
+        let root = root();
+        let w = board::flow(&root).unwrap();
+        let mut t = api(&root, "POST", &["tasks"], json!({"title": "T"})).unwrap();
+        let created = t["createdTime"].as_u64().expect("set on create");
+        t["createdTime"] = json!(created - 100);
+        board::move_to(&w, &mut t, &json!("cancelled")).unwrap();
+        board::move_to(&w, &mut t, &json!("backlog")).unwrap();
+        assert_eq!(t["createdTime"], json!(created - 100));
     }
 
     /// D-87: entering a final column sets closedTime once; later moves keep it.
@@ -1923,6 +1988,57 @@ mod tests {
         assert_eq!(board::task(&root, t1).unwrap()["milestone"], m2["id"], "the milestone stays");
         call("DELETE", &["milestones", m2["id"].as_str().unwrap()], json!({}));
         assert_eq!(board::task(&root, t1).unwrap()["milestone"], Value::Null);
+    }
+
+    /// D-128: an active feature completes when every task it has is in a final
+    /// column, a canceled or Tech Debt task too, and is active again when one
+    /// leaves; a feature in another state, or with no tasks, never changes.
+    #[test]
+    fn a_feature_follows_its_tasks() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body).unwrap();
+        let state = |f: &Value| record(&root, "features", f["id"].as_str().unwrap()).unwrap()["state"].clone();
+        let move_to = |tid: &str, column: &str| {
+            let mut t = board::task(&root, tid).unwrap();
+            t["column"] = json!(column);
+            write(&root, &t).unwrap();
+        };
+        let f = call("POST", &["features"], json!({"title": "F", "state": "active"}));
+        let empty = call("POST", &["features"], json!({"title": "Empty", "state": "active"}));
+        api(&root, "PATCH", &["tasks", "t1"], json!({"feature": f["id"]})).unwrap();
+        assert_eq!(state(&f), json!("active"), "an open task keeps it active");
+        let mut debt = board::task(&root, "t1").unwrap();
+        debt["id"] = json!("t2");
+        debt["techDebt"] = json!(true);
+        write(&root, &debt).unwrap();
+        move_to("t1", "complete");
+        assert_eq!(state(&f), json!("active"), "an open Tech Debt task counts");
+        move_to("t2", "cancelled");
+        assert_eq!(state(&f), json!("complete"));
+        assert!(!record(&root, "features", f["id"].as_str().unwrap()).unwrap()["startTime"].is_null());
+        move_to("t1", "backlog");
+        assert_eq!(state(&f), json!("active"), "a reopened task makes it active again");
+        move_to("t1", "complete");
+        assert_eq!(state(&f), json!("complete"));
+        assert_eq!(state(&empty), json!("active"), "no tasks: no change");
+
+        let upcoming = call("POST", &["features"], json!({"title": "U", "state": "upcoming"}));
+        api(&root, "PATCH", &["tasks", "t1"], json!({"feature": upcoming["id"]})).unwrap();
+        assert_eq!(state(&upcoming), json!("upcoming"), "only active and complete features follow");
+        assert_eq!(state(&f), json!("complete"), "t2 is still final");
+        api(&root, "PATCH", &["tasks", "t2"], json!({"feature": null})).unwrap();
+        assert_eq!(state(&f), json!("complete"), "with no tasks left it stays");
+    }
+
+    /// D-128: a record saved `planned` reads as `upcoming`; `planned` is refused.
+    #[test]
+    fn planned_reads_as_upcoming() {
+        let root = root();
+        fs::create_dir_all(strategy_dir(&root, "milestones")).unwrap();
+        fs::write(strategy_dir(&root, "milestones").join("m1.json"), r#"{"id":"m1","title":"M","state":"planned"}"#).unwrap();
+        assert_eq!(record(&root, "milestones", "m1").unwrap()["state"], json!("upcoming"));
+        let refused = strategy_api(&root, "POST", &["features"], json!({"title": "F", "state": "planned"})).unwrap_err();
+        assert!(refused.1.0.starts_with("E7001"), "{}", refused.1.0);
     }
 
     /// An update whose change fails writes nothing.
@@ -2320,6 +2436,35 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert!(rows.iter().any(|(p, d)| p == "." && d.contains(r#""removed":"t1"#)), "{rows:?}");
+    }
+
+    /// D-129: a task stored with a home that is no project is listed marked
+    /// `noProject`, opens from the root, is found with `project` false, can be
+    /// planned, canceled and archived, and settles without a store at its home.
+    #[test]
+    fn a_task_with_no_project_shows_at_the_root() {
+        let root = workspace();
+        let mut t = board::new_task("Orphan", "", &json!("backlog"), 1.);
+        t["home"] = json!("web");
+        t["scope"] = json!(["web"]);
+        write(&root, &t).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let listed = board::all_tasks(&root).unwrap().into_iter().find(|x| x["id"] == tid).unwrap();
+        assert_eq!(listed["noProject"], json!(true), "listed marked");
+        assert!(!board::tasks(&root).unwrap().iter().any(|x| x["id"] == tid), "in no lane");
+        assert_eq!(board::task(&root, &tid).unwrap()["noProject"], json!(true), "opens from the root");
+        let found = find_task(&root, &tid).unwrap();
+        assert_eq!((&found["dir"], &found["project"]), (&json!("web"), &json!(false)));
+        let t = api(&root, "POST", &["tasks", &tid, "actions"], json!({"action": "plan"})).unwrap();
+        assert_eq!(t["column"], "planning");
+        let e = api(&root, "POST", &["tasks", &tid, "actions"], json!({"action": "assign"})).unwrap_err();
+        assert!(e.0.contains("needs a project"), "{}", e.0);
+        let t = api(&root, "POST", &["tasks", &tid, "actions"], json!({"action": "cancel"})).unwrap();
+        assert_eq!(t["column"], "cancelled");
+        let t = api(&root, "POST", &["tasks", &tid, "archive"], json!({})).unwrap();
+        assert!(!t["archivedTime"].is_null(), "archived");
+        board::settle_final(&root, &tid).unwrap();
+        assert!(!root.join("web").join(".solace").exists(), "no store at its home");
     }
 
     /// A workflow whose `finished` event targets a final column, so `task done` settles.

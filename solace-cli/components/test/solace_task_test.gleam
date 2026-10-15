@@ -142,7 +142,7 @@ pub fn working_status_notes_and_transcript_test() {
   rendered |> string.contains("<h4>Done</h4>") |> should.be_true
   rendered |> string.contains("<ul><li>fixed A<ul><li>nested") |> should.be_true
   let #(model, _) = task.update(model, task.Tab("runs"))
-  html(model) |> string.contains("Follow live") |> should.be_true
+  html(model) |> string.contains(">Watch</button>") |> should.be_true
   let #(model, _) = task.update(model, task.Watch("r1"))
   let #(model, _) =
     task.update(
@@ -349,11 +349,6 @@ pub fn typed_fields_tabs_and_previews_update_the_model_test() {
   model.tab |> should.equal("notes")
   let #(model, _) = task.update(model, task.Failed("boom"))
   model.error |> should.equal("boom")
-  let #(model, _) = task.update(model, task.Preview("edit-body", True))
-  let #(model, _) = task.update(model, task.Preview("note-text", True))
-  model.previews |> should.equal(["note-text", "edit-body"])
-  let #(model, _) = task.update(model, task.Preview("edit-body", False))
-  model.previews |> should.equal(["note-text"])
 }
 
 pub fn editing_needs_a_task_and_a_numeric_rank_test() {
@@ -573,13 +568,20 @@ pub fn scope_tab_test() {
   |> string.split("role=\"switch\"")
   |> list.length
   |> should.equal(5)
-  scope |> string.contains("You can change the projects") |> should.be_false
+  scope |> string.contains("You can add projects") |> should.be_false
   let running =
     "{\"id\":\"t1\",\"title\":\"Across\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"scope\":[\"a\",\"b\"],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]}"
   let assert Ok(r) = json.parse(running, task.task_decoder())
-  body(task.Model(..model, task: Some(r)))
-  |> string.contains("You can change the projects")
-  |> should.be_true
+  let working = body(task.Model(..model, task: Some(r)))
+  working |> string.contains("You can add projects now") |> should.be_true
+  // While the agent works, the chosen projects (a, b) are locked on; c can be added.
+  let assert [_, switches] = string.split(working, "projects-pick")
+  let assert [_, a, b, c] = string.split(switches, "<input")
+  let locked = fn(rest) {
+    let assert [input, ..] = string.split(rest, ">")
+    string.contains(input, "disabled")
+  }
+  #(locked(a), locked(b), locked(c)) |> should.equal(#(True, True, False))
   // Switches stack vertically.
   let assert [css, ..] = string.split(html(model), "</style>")
   css
@@ -623,8 +625,6 @@ pub fn editor_toolbar_has_every_markdown_tool_test() {
       "/p/a",
       "Description",
       "",
-      False,
-      fn(_) { Nil },
       fn(_) { Nil },
       fn(_, _) { Nil },
       fn(_) { Nil },
@@ -825,7 +825,7 @@ pub fn proposal_display_test() {
   open |> string.contains("Create task<em> Index</em>") |> should.be_true
   open
   |> string.contains(
-    "Approving also sets the feature <em>Search</em> back to planned.",
+    "Approving also sets the feature <em>Search</em> back to upcoming.",
   )
   |> should.be_true
   open |> string.contains(">Approve</button>") |> should.be_true
@@ -1518,4 +1518,237 @@ pub fn a_vision_proposal_saved_before_before_shows_markdown_test() {
   shown |> string.contains("Replace the vision") |> should.be_true
   shown |> string.contains("<div class=\"md\">") |> should.be_true
   shown |> string.contains("<dt>text</dt>") |> should.be_false
+}
+
+/// The default workflow's action buttons show their labels, not the action
+/// names (D-108), and the fixed buttons read `ui_labels`.
+pub fn default_workflow_buttons_show_their_labels_test() {
+  let model = fresh("1")
+  let #(model, _) =
+    task.update(
+      model,
+      task.WorkflowLoaded(
+        model.generation,
+        "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\",\"cancel\"]},{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\",\"complete\",\"to_backlog\",\"cancel\"]},{\"id\":\"assigned\",\"label\":\"Assigned\",\"actions\":[\"reassign\",\"new_agent\",\"review\",\"cancel\"]},{\"id\":\"needs_review\",\"label\":\"Needs review\",\"actions\":[\"approve\",\"complete\",\"review\",\"reassign\",\"start_over\",\"cancel\"]},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true,\"actions\":[\"to_backlog\"]}],\"actions\":{\"plan\":{\"to\":\"planning\",\"label\":\"Plan\"},\"to_backlog\":{\"to\":\"backlog\",\"label\":\"Back to backlog\"},\"investigate\":{\"run\":\"investigate\",\"model\":true,\"label\":\"Investigate\"},\"review\":{\"run\":\"review\",\"label\":\"Review\"},\"assign\":{\"to\":\"assigned\",\"run\":\"work\",\"model\":true,\"label\":\"Assign\"},\"new_agent\":{\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"New agent\"},\"approve\":{\"stamp\":\"approved\",\"label\":\"Approve\"},\"complete\":{\"to\":\"complete\",\"label\":\"Complete\"},\"reassign\":{\"unstamp\":\"approved\",\"to\":\"assigned\",\"run\":\"work\",\"label\":\"Reassign\"},\"start_over\":{\"revert\":true,\"unstamp\":\"approved\",\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"Start over\"},\"cancel\":{\"revert\":true,\"to\":\"cancelled\",\"label\":\"Cancel\"}}}",
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.TaskLoaded(
+        model.generation,
+        "{\"id\":\"1\",\"title\":\"Fix checkout\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[]}",
+      ),
+    )
+  let rendered = html(model)
+  rendered |> string.contains(">Investigate</button>") |> should.be_true
+  rendered |> string.contains(">Assign</button>") |> should.be_true
+  rendered |> string.contains(">Complete</button>") |> should.be_true
+  rendered |> string.contains(">Back to backlog</button>") |> should.be_true
+  rendered |> string.contains(">Cancel</button>") |> should.be_true
+  rendered |> string.contains(">assign</button>") |> should.be_false
+  rendered |> string.contains(">Add note</button>") |> should.be_true
+  rendered |> string.contains(">Copy ID</button>") |> should.be_true
+}
+
+/// The task detail's fixed buttons, the model picker and the scope legend
+/// say the shared names from `ui_labels`, so one rename in the map moves them.
+pub fn shared_labels_on_the_task_test() {
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\",\"started\":1}],\"changes\":[{\"name\":\"app.alpha\",\"entity\":\"symbol:app.alpha\",\"project\":\"a\"}]}"
+  let base =
+    task.Model(
+      ..loaded(text),
+      dir: "a",
+      workspace: True,
+      workflow: task.Workflow(
+        [task.Column("planning", "Needs review", [], False)],
+        dict.new(),
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      base,
+      task.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"}]}",
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded("[{\"id\":\"m\",\"label\":\"M\",\"available\":true}]"),
+    )
+  // The task's column shows the workflow's label, not its id.
+  body(base)
+  |> string.contains("Needs review")
+  |> should.be_true
+  body(base)
+  |> string.contains("needs_review")
+  |> should.be_false
+  // The model picker names itself to readers, and says what to pick.
+  body(model)
+  |> string.contains("aria-label=\"" <> task.ui_label("model") <> "\"")
+  |> should.be_true
+  // Editing Details saves with Save and closes with Cancel.
+  let #(editing, _) = task.update(model, task.Edit(True))
+  let page = body(editing)
+  page
+  |> string.contains(">" <> task.ui_label("save") <> "</button>")
+  |> should.be_true
+  page
+  |> string.contains(">" <> task.ui_label("cancel") <> "</button>")
+  |> should.be_true
+  // The runs tab watches and hides with the shared pair.
+  let #(runs, _) = task.update(model, task.Tab("runs"))
+  body(runs)
+  |> string.contains(">" <> task.ui_label("watch") <> "</button>")
+  |> should.be_true
+  let #(watched, _) = task.update(runs, task.Watch("r1"))
+  body(watched)
+  |> string.contains(">" <> task.ui_label("hide_activity") <> "</button>")
+  |> should.be_true
+  // The scope legend names the projects the task can change.
+  let #(scope, _) = task.update(model, task.Tab("scope"))
+  body(scope)
+  |> string.contains(task.ui_label("scope_projects"))
+  |> should.be_true
+  // The changes tab links to the contract page by its shared name.
+  let #(changes, _) = task.update(model, task.Tab("changes"))
+  body(changes)
+  |> string.contains(">" <> task.ui_label("contract_view") <> "</a>")
+  |> should.be_true
+}
+
+/// Text areas and inputs fill their container: `width:100%` with
+/// `box-sizing:border-box`, no percentage cap; the composer box and the
+/// title have no `max-width` of their own.
+pub fn textareas_fill_their_container_test() {
+  let assert [css, ..] = string.split(html(fresh("1")), "</style>")
+  css
+  |> string.contains(
+    "textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}",
+  )
+  |> should.be_true
+  css
+  |> string.contains("input{width:100%;box-sizing:border-box}")
+  |> should.be_true
+  css |> string.contains("min(95%") |> should.be_false
+  css |> string.contains("min(80%") |> should.be_false
+  css
+  |> string.contains(
+    ".composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}",
+  )
+  |> should.be_true
+  css
+  |> string.contains(
+    ".title{display:block;box-sizing:border-box;width:calc(100% - 8px);margin:8px 4px}",
+  )
+  |> should.be_true
+}
+
+/// The controls' styles name no color of their own, only the theme's
+/// tokens, and give the option list of a select the page's colors.
+pub fn control_styles_use_only_tokens_test() {
+  let styles = task.control_styles
+  assert !string.contains(styles, "#")
+  assert !string.contains(styles, "rgb")
+  assert !string.contains(styles, "hsl")
+  assert string.contains(
+    styles,
+    "option,optgroup{background:var(--paper);color:var(--ink)}",
+  )
+  assert string.contains(styles, "select:hover")
+}
+
+/// An unknown label key never reaches a button: it says nothing.
+pub fn unknown_label_says_nothing_test() {
+  task.ui_label("no_such_button") |> should.equal("")
+  task.ui_label("copy_id") |> should.equal("Copy ID")
+}
+
+/// D-129: a task whose home is no project decodes `noProject`, and its
+/// detail says "no project"; a task with a project doesn't.
+pub fn a_task_with_no_project_shows_a_marker_test() {
+  let base =
+    "\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1"
+  let homeless = fn(extra) {
+    let assert Ok(t) =
+      json.parse("{" <> base <> extra <> "}", task.task_decoder())
+    t.no_project
+  }
+  homeless(",\"noProject\":true") |> should.be_true
+  homeless("") |> should.be_false
+  let shown = body(loaded("{" <> base <> ",\"noProject\":true}"))
+  shown |> string.contains("no project") |> should.be_true
+  let plain = body(loaded("{" <> base <> "}"))
+  plain |> string.contains("no project") |> should.be_false
+}
+
+/// The editor is one `<solace-md-editor>` that styles the markdown as it is
+/// written: no Write or Preview tab. It is named, labelled and placeholdered
+/// as the textarea was, and carries the task and base for images.
+pub fn editor_styles_markdown_as_it_is_written_test() {
+  let rendered =
+    task.editor(
+      "body",
+      "t1",
+      "/p/a",
+      "Description",
+      "**hi**",
+      fn(_) { Nil },
+      fn(_, _) { Nil },
+      fn(_) { Nil },
+    )
+    |> element.to_string
+  [
+    "<solace-md-editor", "id=\"body\"", "class=\"md-editor\"",
+    "data-task=\"t1\"", "data-base=\"/p/a\"", "label=\"Description\"",
+    "placeholder=\"Description (markdown). Paste or drop images here.\"",
+  ]
+  |> list.each(fn(part) { rendered |> string.contains(part) |> should.be_true })
+  ["<textarea", ">Write<", ">Preview<", "class=\"preview\""]
+  |> list.each(fn(part) { rendered |> string.contains(part) |> should.be_false })
+  // A task not yet created has no image tool, and its placeholder no images.
+  let draft =
+    task.editor(
+      "body",
+      "",
+      "",
+      "Vision",
+      "",
+      fn(_) { Nil },
+      fn(_, _) { Nil },
+      fn(_) { Nil },
+    )
+    |> element.to_string
+  draft
+  |> string.contains("placeholder=\"Vision (markdown).\"")
+  |> should.be_true
+  draft |> string.contains("title=\"Add an image\"") |> should.be_false
+}
+
+/// D-129: a task with no project is not followed to a project of its scope,
+/// and its own updates, named under its home folder, are not in doubt.
+pub fn a_task_with_no_project_stays_where_it_is_opened_test() {
+  let model =
+    task.Model(
+      ..loaded(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"scope\":[\"a\"],\"noProject\":true}",
+      ),
+      dir: ".",
+      base: "",
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.Changed(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"scope\":[\"b\"],\"noProject\":true}",
+      ),
+    )
+  #(model.dir, model.base) |> should.equal(#(".", ""))
+  assert !task.stale(
+    model,
+    "{\"project\":\"web\",\"noProject\":true,\"task\":{\"id\":\"1\"}}",
+  )
+  assert task.stale(model, "{\"project\":\"web\",\"task\":{\"id\":\"1\"}}")
 }

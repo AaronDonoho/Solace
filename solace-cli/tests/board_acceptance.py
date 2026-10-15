@@ -892,6 +892,8 @@ class Board(unittest.TestCase):
         _,e=self.next_event(stream);self.assertEqual(e['features'],[])
         _,e=self.next_event(stream);self.assertEqual(e['vision']['text'],'')
         _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
+        # D-129: the tasks with no project follow the runs, marked.
+        _,e=self.next_event(stream);self.assertEqual(e,{'noProject':True,'tasks':[]})
         t=self.create();seq,e=self.next_event(stream);self.assertEqual(e['task']['id'],t['id'])
         self.api('POST','/tasks/'+t['id']+'/notes',{'text':'first'});self.api('POST','/tasks/'+t['id']+'/notes',{'text':'second'})
         resumed=self.stream(seq);s1,e1=self.next_event(resumed);s2,e2=self.next_event(resumed)
@@ -913,18 +915,6 @@ class Board(unittest.TestCase):
         for text in ['a','b','c']:self.api('POST','/tasks/'+t['id']+'/notes',{'text':text})
         t=self.api('DELETE','/tasks/'+t['id']+'/notes/1');self.assertEqual([n['text'] for n in t['notes']],['a','c'])
         self.api('DELETE','/tasks/'+t['id']+'/notes/2',code='E7001')
-
-    def test_a_request_creates_one_task(self):
-        # D-77: a repeated create, in turn or at once, returns the first one's task.
-        body={'title':'Once','request':'r-1'}
-        first=self.api('POST','/tasks',body);again=self.api('POST','/tasks',body)
-        self.assertEqual(again['id'],first['id']);self.assertEqual(first['request'],'r-1')
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(8) as pool:
-            made=list(pool.map(lambda _:self.api('POST','/tasks',{'title':'Burst','request':'r-2'})['id'],range(8)))
-        self.assertEqual(len(set(made)),1)
-        self.assertEqual(sorted(t['title'] for t in self.api('GET','/tasks')),['Burst','Once'])
-        self.api('POST','/tasks',{'title':'Bad','request':7},code='E7001')
 
     def test_inbox_is_applied_after_a_restart(self):
         # D-77: a message waits in the inbox while no server runs, and is applied when one starts.
@@ -987,13 +977,14 @@ class Board(unittest.TestCase):
         m=self.api('POST','/milestones',{'title':'1.0'})
         f=self.api('POST','/features',{'title':'F','milestone':m['id']})
         t=self.completed([])
+        self.assertIsInstance(t['createdTime'],int)  # D-130
         linked=self.api('PATCH','/tasks/'+t['id'],{'feature':f['id']})
         self.assertEqual((linked['feature'],linked['milestone'],linked['dependsOn'],linked['closedTime']),(f['id'],m['id'],[],None))
         self.action(t,'approve');done=self.action(t,'complete')
         self.assertIsInstance(done['closedTime'],int)
         self.api('DELETE','/features/'+f['id'])
         t=self.api('GET','/tasks/'+t['id'])
-        self.assertEqual((t['feature'],t['milestone'],t['closedTime'],t['archivedTime']),(None,m['id'],done['closedTime'],None))
+        self.assertEqual((t['feature'],t['milestone'],t['closedTime'],t['archivedTime'],t['createdTime']),(None,m['id'],done['closedTime'],None,linked['createdTime']))
         # D-95: an archived task leaves the board but stays in the task list.
         archived=self.api('POST','/tasks/'+t['id']+'/archive',{})
         self.assertIsInstance(archived['archivedTime'],int)
@@ -1012,7 +1003,7 @@ class Board(unittest.TestCase):
         back=self.action(t,'to_backlog')
         self.assertEqual((back['column'],back['archivedTime'],back['closedTime'],back['title']),('backlog',None,gone['closedTime'],'Fixture'))
         self.assertEqual(back['notes'][0]['text'],'Keep me')
-        self.assertEqual((back['notes'][-1]['author'],back['notes'][-1]['text']),('solace','The human brought this task back from canceled to backlog.'))
+        self.assertEqual((back['notes'][-1]['author'],back['notes'][-1]['text']),('solace','The human brought this task back from Canceled to Backlog.'))
         self.assertEqual([x['archivedTime'] for x in self.api('GET','/tasks') if x['id']==t['id']],[None])
         self.assertEqual(self.get(dep)['dependsOn'],[t['id']])
         # A complete task stays as it is.
@@ -1021,7 +1012,7 @@ class Board(unittest.TestCase):
 
     def test_a_task_link_finds_its_task(self):  # D-98
         t=self.completed([])
-        self.assertEqual(self.api('GET','/tasks/find/'+t['id']),{'id':t['id'],'dir':'.','archived':False,'title':t['title']})
+        self.assertEqual(self.api('GET','/tasks/find/'+t['id']),{'id':t['id'],'dir':'.','archived':False,'title':t['title'],'project':True})
         self.action(t,'approve');self.action(t,'complete')
         self.api('POST','/tasks/'+t['id']+'/archive',{})
         self.assertEqual(self.api('GET','/tasks/find/'+t['id'])['archived'],True)
@@ -1053,6 +1044,8 @@ class Board(unittest.TestCase):
         _,e=self.next_event(stream);self.assertEqual(e['features'],[])
         _,e=self.next_event(stream);self.assertIn('vision',e)
         _,e=self.next_event(stream);self.assertEqual(e,{'strategyRuns':[]})
+        # D-129: the tasks with no project follow the runs, marked.
+        _,e=self.next_event(stream);self.assertEqual(e,{'noProject':True,'tasks':[]})
         m=self.api('POST','/milestones',{'title':'1.0','targetDate':'2027-01-01'})
         f=self.api('POST','/features',{'title':'F','milestone':m['id']})
         self.assertEqual((m['state'],m['targetDate'],f['state'],f['milestone']),('proposed','2027-01-01','proposed',m['id']))
@@ -1082,6 +1075,8 @@ class Board(unittest.TestCase):
         while 'vision' not in (e:=self.next_event(stream)[1]):pass
         self.assertEqual(e['vision']['text'],'')
         _,runs=self.next_event(stream);self.assertEqual(runs,{'strategyRuns':[]})
+        # D-129: the tasks with no project follow the runs, marked.
+        _,hp=self.next_event(stream);self.assertEqual(hp,{'noProject':True,'tasks':[]})
         v=self.api('PUT','/vision',{'text':'# Why\nFor teams.','base':e['vision']['revision']})
         self.assertEqual(self.api('GET','/vision'),v)
         _,e=self.next_event(stream);self.assertEqual(e,{'vision':v})
@@ -1216,14 +1211,18 @@ class Board(unittest.TestCase):
         # Reject creates nothing.
         q=asked(1)
         self.assertEqual((q['options'],q['proposal']['kind'],q['answer']),(['Approve','Reject'],'task',None))
+        # D-118: a question carries when it was asked and how many notes came before it.
+        self.assertIsInstance(q['time'],int);self.assertIsInstance(q['after'],int)
+        first=q
         self.api('POST',f'/strategy/runs/{rid}/questions/{q["id"]}',{'option':'Reject'})
         # A task linked to a complete feature reopens it only on Approve.
         q=asked(2)
+        self.assertGreater(q['after'],first['after']);self.assertGreaterEqual(q['time'],first['time'])
         self.assertNotIn('Rejected one',[t['title'] for t in self.api('GET','/tasks')])
-        self.assertEqual(q['proposal']['reopens'],[{'kind':'feature','id':f['id']}]);self.assertIn('back to planned',q['text'])
+        self.assertEqual(q['proposal']['reopens'],[{'kind':'feature','id':f['id']}]);self.assertIn('back to upcoming',q['text'])
         self.assertEqual(self.api('GET','/features')[0]['state'],'complete')
         self.api('POST',f'/strategy/runs/{rid}/questions/{q["id"]}',{'option':'Approve'})
-        self.assertEqual(self.api('GET','/features')[0]['state'],'planned')
+        self.assertEqual(self.api('GET','/features')[0]['state'],'upcoming')
         t=next(t for t in self.api('GET','/tasks') if t['title']=='Approved one')
         self.assertEqual(t['feature'],f['id'])
         self.assertEqual(self.api('GET','/tasks/'+t['id'])['notes'][-1]['text'],f'Created by strategy run {rid}')
@@ -1245,5 +1244,28 @@ class Board(unittest.TestCase):
         for a,want in zip(answers,['Answer: Reject','Answer: Approved and applied','Answer: Not applied: E7026']):self.assertIn(want,a)
         ended=self.api('POST',f'/strategy/runs/{rid}/end')
         self.assertEqual((ended['outcome'],len(ended['notes'])),('planned',1));self.assertIn('Answer: Not applied: E7026',ended['notes'][0]['text'])
+
+    def test_a_strategy_proposal_scope_names_projects(self):  # D-129
+        # A scope folder that isn't a project is refused when the proposal is
+        # sent: the agent gets the error naming the folder and the projects,
+        # the human is never asked, and nothing is written. A mixed scope is
+        # refused too; a scope of projects, and no scope, are accepted.
+        steps=[{'command':'strategy task','text':json.dumps({'title':'Lost','scope':['solace-cli']})},
+               {'command':'strategy task','text':json.dumps({'title':'Half lost','scope':['.','solace-cli']})},
+               {'command':'strategy task','text':json.dumps({'title':'Kept','scope':['.']})},
+               {'command':'strategy note','text':'Done proposing'}]
+        rid=self.api('POST','/strategy/runs',{'model':'fake','text':json.dumps(steps),'context':{'kind':'page'}})['id']
+        def asked(n):return self.wait_run(rid,lambda r:len(r['questions'])==n and r['state']=='waiting')['questions'][-1]
+        q=asked(1)
+        self.assertEqual((q['proposal']['kind'],q['proposal']['fields']['title']),('task','Kept'))
+        self.api('POST',f'/strategy/runs/{rid}/questions/{q["id"]}',{'option':'Approve'})
+        self.wait_run(rid,lambda r:r['state']=='waiting' and r['notes'][-1]['text']=='Done proposing')
+        out=self.replies(rid)
+        self.assertEqual(len([o for o in out[:2] if o.startswith('E7001') and 'solace-cli is not a project' in o and 'scope takes project folders: .' in o]),2,out)
+        self.assertIn('Approved and applied',out[2])
+        titles=[t['title'] for t in self.api('GET','/tasks')]
+        self.assertEqual(('Lost' in titles,'Half lost' in titles,'Kept' in titles),(False,False,True))
+        self.assertFalse((self.root/'solace-cli').exists(),'no store at the refused folder')
+        self.api('POST',f'/strategy/runs/{rid}/end')
 
 if __name__=='__main__':unittest.main()

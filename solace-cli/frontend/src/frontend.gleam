@@ -567,23 +567,26 @@ pub type Target {
 }
 
 /// Where a link to a record of `kind` opens, from the reply to `GET /<kind>s/find/{id}`: a task's
-/// `{dir, archived}`, a feature's or milestone's `{id, title}`; `E7023` for no such record; any other reply
-/// (another error, or a network failure's message) leaves it unknown.
+/// `{dir, archived, project}`, a feature's or milestone's `{id, title}`; `E7023` for no such record; any
+/// other reply (another error, or a network failure's message) leaves it unknown.
 pub fn target(kind: String, reply: String) -> Target {
   let decoder = case kind {
     "task" -> {
       use dir <- decode.field("dir", decode.string)
       use archived <- decode.field("archived", decode.bool)
-      decode.success(#(dir, archived))
+      use project <- decode.optional_field("project", True, decode.bool)
+      decode.success(#(dir, archived, project))
     }
     _ -> {
       use _ <- decode.field("id", decode.string)
-      decode.success(#("", True))
+      decode.success(#("", True, True))
     }
   }
   case json.parse(reply, decoder) {
-    Ok(#(dir, False)) -> OnBoard(dir)
-    Ok(#(dir, True)) -> InStrategy(dir)
+    // A task with no project (D-129) opens on the Strategy page, like an
+    // archived one.
+    Ok(#(dir, False, True)) -> OnBoard(dir)
+    Ok(#(dir, _, _)) -> InStrategy(dir)
     Error(_) ->
       case json.parse(reply, decode.at(["code"], decode.string)) {
         Ok("E7023") -> Missing

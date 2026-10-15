@@ -1,4 +1,5 @@
 import features
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
@@ -57,6 +58,7 @@ fn task(
     }),
     #("milestone", json.null()),
     #("dependsOn", json.array(["t0"], json.string)),
+    #("createdTime", json.int(60)),
     #("closedTime", case closed {
       0 -> json.null()
       c -> json.int(c)
@@ -88,20 +90,30 @@ pub fn row_decoder_reads_links_and_closed_time_test() {
       strategy.row_decoder(),
     )
   assert row
-    == strategy.Row("t1", "A", "b", "done", Some("f1"), None, Some(70), ["t0"])
+    == strategy.Row(
+      "t1",
+      "A",
+      "b",
+      "done",
+      Some("f1"),
+      None,
+      Some(60),
+      Some(70),
+      ["t0"],
+    )
   // A task saved before D-87 has none of the fields.
   let assert Ok(old) =
     json.parse(
       "{\"id\":\"t2\",\"title\":\"Old\",\"body\":\"\",\"column\":\"backlog\"}",
       strategy.row_decoder(),
     )
-  assert #(old.feature, old.milestone, old.closed, old.depends)
-    == #(None, None, None, [])
+  assert #(old.feature, old.milestone, old.created, old.closed, old.depends)
+    == #(None, None, None, None, [])
 }
 
 pub fn closed_tasks_come_newest_first_then_open_ones_test() {
   let row = fn(id, title, closed) {
-    #(".", strategy.Row(id, title, "", "done", None, None, closed, []))
+    #(".", strategy.Row(id, title, "", "done", None, None, None, closed, []))
   }
   let order =
     strategy.sorted([
@@ -123,6 +135,7 @@ pub fn filters_keep_column_project_links_and_words_test() {
       "done",
       Some("f1"),
       None,
+      Some(1),
       Some(5),
       [],
     )
@@ -652,7 +665,7 @@ pub fn start_takes_its_context_from_the_selection_test() {
   // A task with an open run offers it instead of a new start: New run
   // shows it.
   let shown = element.to_string(strategy.view(model))
-  assert string.contains(shown, "A planning run on this is open.")
+  assert string.contains(shown, solace_task.ui_label("plan_open_here"))
   assert !string.contains(shown, "id=\"plan-text\"")
   assert plan.new_run(model.runs, strategy.plan_context(model)) == "r1"
   assert plan.new_run(model.runs, plan.page) == ""
@@ -664,12 +677,14 @@ pub fn open_runs_mark_their_records_until_they_end_test() {
   let model = planned()
   let page = fn(model) { element.to_string(strategy.view(model)) }
   let markers = fn(model) {
-    list.length(string.split(page(model), ">Planning</span>")) - 1
+    list.length(string.split(page(model), ">Plan</span>")) - 1
   }
   assert plan.open_ids(model.runs, "task") == ["t1"]
   assert markers(model) == 3
   let marker =
-    "<span class=\"planning\" title=\"A planning run is open on this\">"
+    "<span class=\"planning\" title=\""
+    <> solace_task.ui_label("plan_marker")
+    <> "\">"
   assert string.contains(page(model), "Index</button>" <> marker)
   assert string.contains(
     page(model),
@@ -740,7 +755,7 @@ pub fn the_panel_stays_across_tabs_and_lists_past_runs_test() {
   let model = step(model, strategy.ShowPlan(""))
   let page = shown(model)
   assert string.contains(page, "id=\"plan-text\"")
-  assert string.contains(page, ">Send</button>")
+  assert string.contains(page, ">Start</button>")
   assert list.map(plan.past(model.runs, plan.page), fn(r) { r.id })
     == ["r4", "r0"]
   let assert Ok(#(_, after)) = string.split_once(page, "Earlier runs")
@@ -826,7 +841,7 @@ pub fn a_proposal_shows_and_one_answer_is_sent_at_a_time_test() {
                     "before",
                     json.object([
                       #("title", json.string("Search")),
-                      #("state", json.string("planned")),
+                      #("state", json.string("upcoming")),
                     ]),
                   ),
                 ]),
@@ -848,12 +863,12 @@ pub fn a_proposal_shows_and_one_answer_is_sent_at_a_time_test() {
   assert string.contains(page, "Create task<em> Index</em>")
   assert string.contains(
     page,
-    "Approving also sets the feature <em>Search</em> back to planned.",
+    "Approving also sets the feature <em>Search</em> back to upcoming.",
   )
   assert string.contains(page, ">Approve</button>")
   // D-115: an edit shows only the fields that change, a short one as old →
   // new; a field that still matches the record's value isn't shown.
-  assert string.contains(page, "<dt>state</dt><dd>planned → active</dd>")
+  assert string.contains(page, "<dt>state</dt><dd>upcoming → active</dd>")
   assert !string.contains(page, "<dt>title</dt><dd>Search</dd>")
   let sent = step(model, strategy.AnswerPlan("q1", "Approve"))
   assert sent.plan_sending
@@ -966,16 +981,22 @@ pub fn the_panel_is_resized_within_its_bounds_test() {
 pub fn the_panel_names_its_planning_context_test() {
   let shown = fn(model) { element.to_string(strategy.view(model)) }
   let model = planned()
-  assert string.contains(shown(model), "Planning Context: Whole Project")
+  assert string.contains(
+    shown(model),
+    solace_task.ui_label("plan_context") <> ": Whole Project",
+  )
   let model = step(model, strategy.Open(".", "t1"))
-  assert string.contains(shown(model), "Planning Context: task <em>Index</em>")
+  assert string.contains(
+    shown(model),
+    solace_task.ui_label("plan_context") <> ": task <em>Index</em>",
+  )
   assert string.contains(
     shown(step(model, strategy.ShowPlan("r2"))),
-    "Planning Context: feature <em>Search</em>",
+    solace_task.ui_label("plan_context") <> ": feature <em>Search</em>",
   )
   assert string.contains(
     shown(step(model, strategy.ShowPlan("r3"))),
-    "Planning Context: milestone <em>Launch</em>",
+    solace_task.ui_label("plan_context") <> ": milestone <em>Launch</em>",
   )
   assert !string.contains(shown(model), "On the whole page")
 }
@@ -1012,7 +1033,7 @@ pub fn attention_when_a_run_replies_or_proposes_test() {
     )
   }
   let ask = fn(id, answer) {
-    plan.Question(id, "Add a task?", ["Yes", "No"], answer, None, 0)
+    plan.Question(id, "Add a task?", ["Yes", "No"], answer, None, 0, -1)
   }
   assert strategy.needs_attention([run("running", [])], [run("waiting", [])])
   assert !strategy.needs_attention([run("waiting", [])], [run("waiting", [])])
@@ -1237,8 +1258,9 @@ pub fn new_messages_follow_the_human_or_wait_test() {
 
 /// The run bar sits above the conversation, the message box below it. An
 /// open run's bar has End, Stop, Earlier runs and New run, and its box is the
-/// markdown editor with Send; an ended run's bar has no End or Stop and there
-/// is no box; with no run shown, the box starts one.
+/// markdown editor, which styles as it is written, with Send; an ended run's
+/// bar has no End or Stop and there is no box; with no run shown, the box
+/// starts one.
 pub fn the_run_bar_holds_the_run_controls_test() {
   let shown = fn(model) { element.to_string(strategy.view(model)) }
   let open = shown(step(planned(), strategy.ShowPlan("r3")))
@@ -1252,11 +1274,11 @@ pub fn the_run_bar_holds_the_run_controls_test() {
     "class=\"plan-body\"",
     "class=\"plan-compose\"",
     "class=\"composer\"",
-    ">Write</button>",
-    ">Preview</button>",
+    "<solace-md-editor",
     "id=\"plan-text\"",
     ">Send</button>",
   ])
+  assert !string.contains(open, ">Preview</button>")
   assert !string.contains(open, "Runs on this")
   let ended = shown(step(planned(), strategy.ShowPlan("r0")))
   assert in_order(ended, [
@@ -1278,16 +1300,12 @@ pub fn the_run_bar_holds_the_run_controls_test() {
     "class=\"plan-compose\"",
     "class=\"composer\"",
     "id=\"plan-text\"",
-    ">Send</button>",
+    ">Start</button>",
   ])
   assert !string.contains(none, ">End</button>")
-  // The box's Preview shows the typed message; showing a run resets it.
-  let previewed =
-    planned()
-    |> step(strategy.PlanText("**Plan** search"))
-    |> step(strategy.PlanPreview(True))
-  assert string.contains(shown(previewed), "<strong>Plan</strong> search")
-  assert !step(previewed, strategy.ShowPlan("r3")).plan_preview
+  // The box keeps the typed message; a sent one clears it.
+  let typed = planned() |> step(strategy.PlanText("**Plan** search"))
+  assert typed.plan_text == "**Plan** search"
 }
 
 /// D-122: a feature link opens the Features tab, a milestone link the
@@ -1303,4 +1321,601 @@ pub fn a_feature_or_milestone_link_opens_its_tab_test() {
   assert model.reveal == #("", 0)
   let #(same, _) = strategy.update(model, strategy.Focus("feature", "", ""))
   assert same.tab == strategy.Roadmap
+}
+
+/// The Tasks tab's Column filter shows the workflow's labels, not the column
+/// ids, as the board's column bar does.
+pub fn the_column_filter_shows_the_workflow_labels_test() {
+  let model =
+    workspace()
+    |> step(strategy.WorkflowLoaded(
+      ".",
+      "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"},{\"id\":\"planning\",\"label\":\"Planning\"},{\"id\":\"assigned\",\"label\":\"Assigned\"},{\"id\":\"needs_review\",\"label\":\"Needs review\"},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true}]}",
+    ))
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, ">Backlog</option>")
+  assert string.contains(page, ">Planning</option>")
+  assert string.contains(page, ">Assigned</option>")
+  assert string.contains(page, ">Needs review</option>")
+  assert string.contains(page, ">Complete</option>")
+  assert string.contains(page, ">Canceled</option>")
+  assert !string.contains(page, ">needs_review</option>")
+}
+
+/// Every page names its controls with the shared words from `ui_labels`, so
+/// a rename is one edit in the label map.
+pub fn shared_labels_on_the_pages_test() {
+  let shown = fn(model) { element.to_string(strategy.view(model)) }
+  let button = fn(name) { ">" <> solace_task.ui_label(name) <> "</button>" }
+  let model =
+    planned()
+    |> step(strategy.ModelsLoaded(
+      "[{\"id\":\"m\",\"label\":\"M\",\"available\":true}]",
+    ))
+  // The panel is Plan, and says what it plans with the same word.
+  assert string.contains(
+    shown(model),
+    ">" <> solace_task.ui_label("plan") <> "</h2>",
+  )
+  assert string.contains(
+    shown(model),
+    "aria-label=\"" <> solace_task.ui_label("plan") <> "\"",
+  )
+  assert string.contains(
+    shown(model),
+    solace_task.ui_label("plan_context") <> ": Whole Project",
+  )
+  assert string.contains(
+    shown(model),
+    ">" <> solace_task.ui_label("plan") <> "</span>",
+  )
+  assert string.contains(
+    shown(model),
+    "aria-label=\"" <> solace_task.ui_label("model") <> "\"",
+  )
+  // The open run on the selection is offered by name.
+  let model = step(model, strategy.Open(".", "t1"))
+  assert string.contains(shown(model), button("open_run"))
+  // Features: New feature, its form's Create task, and the project picker.
+  let model = step(model, strategy.Select(strategy.Features))
+  // The new-task form shows on the focused feature only.
+  assert !string.contains(shown(model), button("create_task"))
+  let model = step(model, strategy.FocusFeature("f1"))
+  assert string.contains(shown(model), button("new_feature"))
+  assert string.contains(shown(model), button("create_task"))
+  assert string.contains(
+    shown(model),
+    "aria-label=\"" <> solace_task.ui_label("project") <> "\"",
+  )
+  // Roadmap: New milestone, and the dependency editor's words.
+  // A task reaches the roadmap by its feature, so link t1 to f1.
+  let model =
+    step(
+      model,
+      strategy.Live(
+        message(".", [
+          #(
+            "tasks",
+            json.array([task("t1", "Index", "", "backlog", "f1", 0)], fn(t) {
+              t
+            }),
+          ),
+        ]),
+      ),
+    )
+  let model = step(model, strategy.Select(strategy.Roadmap))
+  assert string.contains(shown(model), button("new_milestone"))
+  assert string.contains(shown(model), button("dependencies"))
+  // Vision: Save and Cancel.
+  let model = step(model, strategy.Select(strategy.Vision))
+  let model = step(model, strategy.EditVision)
+  assert string.contains(shown(model), button("save"))
+  assert string.contains(shown(model), button("cancel"))
+}
+
+/// Text areas fill their container: the composer's markdown editor is a
+/// block, so it fills the box; the plan panel's is shorter and scrolls past
+/// 40dvh; and the composer box, the plan panel's composer, and the feature,
+/// vision, feature-form and depends-edit panels have no `max-width` of their
+/// own.
+pub fn textareas_fill_their_container_test() {
+  let assert [css, ..] =
+    element.to_string(strategy.view(planned())) |> string.split("</style>")
+  assert string.contains(
+    css,
+    ".composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}",
+  )
+  assert string.contains(
+    css,
+    ".composer solace-md-editor{display:block;border-top:1px solid var(--line)}",
+  )
+  assert string.contains(css, ".plan .composer{margin:0}")
+  assert string.contains(
+    css,
+    ".plan .composer solace-md-editor{--md-min-height:5lh;--md-max-height:40dvh}",
+  )
+  // Each panel is checked for a cap of its own, so a `max-width` added
+  // elsewhere in the page can't fail this test.
+  assert !string.contains(css, ".composer{max-width")
+  assert !string.contains(css, ".plan .composer{max-width")
+  assert !string.contains(css, ".feature{max-width")
+  assert !string.contains(css, ".vision{max-width")
+  assert !string.contains(css, ".feature-form{max-width")
+  assert !string.contains(css, ".depends-edit{max-width")
+  assert string.contains(
+    css,
+    ".feature{background:var(--paper);border:1px solid var(--edge);padding:8px 14px;margin:0 0 10px}",
+  )
+  assert string.contains(
+    css,
+    ".vision{background:var(--paper);border:1px solid var(--edge);padding:12px 20px}",
+  )
+  assert string.contains(
+    css,
+    ".feature-form{background:var(--paper);border:1px solid var(--edge);padding:12px 14px;margin:0 0 16px}",
+  )
+  assert string.contains(
+    css,
+    ".depends-edit{border:1px solid var(--line);margin:4px 0 8px;padding:6px 10px}",
+  )
+}
+
+/// The tab bar names each panel, so no panel repeats its tab's name as a heading.
+pub fn tabs_have_no_heading_of_their_own_test() {
+  let page = element.to_string(strategy.view(planned()))
+  // Any heading level counts: a tab's name must not return as one.
+  assert !string.contains(page, ">Tasks</h")
+  assert !string.contains(page, ">Vision</h")
+  assert !string.contains(page, ">Features</h")
+  assert !string.contains(page, ">Roadmap</h")
+  // The plan panel's heading names the panel, not a tab, and stays.
+  assert string.contains(page, ">" <> solace_task.ui_label("plan") <> "</h2>")
+}
+
+/// A feature card is compact (a "final / total final" count line)
+/// until it is focused, by a link or its More button; then it shows its body
+/// and task list. More again compacts it.
+pub fn only_the_focused_feature_shows_its_body_and_tasks_test() {
+  let model =
+    workspace()
+    |> step(
+      strategy.Live(
+        message(".", [
+          #(
+            "tasks",
+            json.preprocessed_array([
+              task("t1", "Index", "", "done", "f1", 10),
+              task("t2", "Rank", "", "backlog", "f1", 0),
+              task("t3", "Query", "", "backlog", "f1", 0),
+            ]),
+          ),
+        ]),
+      ),
+    )
+    |> step(strategy.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\",\"body\":\"Find things fast\",\"milestone\":\"m1\"},{\"id\":\"f2\",\"title\":\"Other\",\"body\":\"Second body\"}]}",
+    ))
+    |> step(strategy.Live(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\"}]}",
+    ))
+    |> step(strategy.Select(strategy.Features))
+  let article = fn(model, title) {
+    let html = element.to_string(strategy.view(model))
+    let assert Ok(a) =
+      string.split(html, "<article")
+      |> list.find(fn(s) { string.contains(s, "<h4>" <> title) })
+    a
+  }
+  let compact = article(model, "Search")
+  assert string.contains(compact, "1 / 3 final")
+  assert !string.contains(compact, "Find things fast")
+  assert !string.contains(compact, "feature-tasks")
+  let #(model, _) = strategy.update(model, strategy.Focus("feature", "", "f1"))
+  let full = article(model, "Search")
+  assert string.contains(full, "Find things fast")
+  assert string.contains(full, "feature-tasks")
+  assert string.contains(full, ">Rank</button>")
+  assert !string.contains(full, " final</p>")
+  let other = article(model, "Other")
+  assert string.contains(other, "0 / 0 final")
+  assert !string.contains(other, "Second body")
+  let model = step(model, strategy.FocusFeature("f1"))
+  assert !string.contains(article(model, "Search"), "Find things fast")
+}
+
+/// The page carries the shared control styles, so its controls and the
+/// option lists of its selects follow the theme.
+pub fn page_uses_the_shared_control_styles_test() {
+  let page = element.to_string(strategy.view(planned()))
+  assert string.contains(page, "option,optgroup{background:var(--paper)")
+}
+
+/// A filter input fills its label: `width:100%` with no side margins, so
+/// it stays inside the label's edge.
+pub fn filters_inputs_fill_their_labels_test() {
+  let assert [css, ..] =
+    element.to_string(strategy.view(planned())) |> string.split("</style>")
+  assert string.contains(css, ".filters input{min-width:240px;margin:0}")
+}
+
+/// D-129: a task event marked `noProject` lands in the homeless bucket,
+/// whatever home it names: it shows on the Tasks tab, the Project filter
+/// keeps it alone, its row says "No project", and a link naming its home
+/// folder opens it there. The root's homeless snapshot replaces the bucket.
+pub fn a_task_with_no_project_shows_on_the_tasks_tab_test() {
+  let homeless = fn(fields: List(#(String, json.Json))) {
+    json.to_string(
+      json.object([
+        #("project", json.string("web")),
+        #("noProject", json.bool(True)),
+        ..fields
+      ]),
+    )
+  }
+  let model =
+    workspace()
+    |> step(
+      strategy.Live(
+        message(".", [
+          #(
+            "tasks",
+            json.array([task("t1", "Root", "", "done", "", 10)], fn(t) { t }),
+          ),
+        ]),
+      ),
+    )
+    |> step(
+      strategy.Live(
+        homeless([
+          #(
+            "tasks",
+            json.array([task("t8", "Lost", "", "backlog", "", 0)], fn(t) { t }),
+          ),
+        ]),
+      ),
+    )
+    |> step(
+      strategy.Live(
+        homeless([#("task", task("t9", "Orphan", "", "backlog", "", 0))]),
+      ),
+    )
+  assert ids(model) == ["t1", "t8", "t9"]
+  let filtered =
+    step(
+      model,
+      strategy.Filter(strategy.Filters(..model.filters, project: "no-project")),
+    )
+  assert ids(filtered) == ["t8", "t9"]
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, ">No project</td>")
+  // A link naming the task's home folder opens the homeless row.
+  let #(opened, _) = strategy.update(model, strategy.Focus("task", "web", "t9"))
+  assert opened.selected == Some(#("no-project", "t9"))
+  // A task event without the mark stays in the project it names.
+  let model =
+    step(
+      model,
+      strategy.Live(
+        message("web", [#("task", task("t2", "Web", "", "done", "", 5))]),
+      ),
+    )
+  assert ids(model) == ["t1", "t2", "t8", "t9"]
+}
+
+/// D-129: a root with one project has no Project column, so a task with no
+/// project says so beside its title.
+pub fn a_single_project_marks_a_task_with_no_project_test() {
+  let model =
+    strategy.new(strategy.Tasks)
+    |> step(strategy.ProjectsLoaded(
+      "{\"workspace\":false,\"projects\":[{\"dir\":\".\",\"label\":\"root\",\"name\":\"r\",\"base\":\"\"}]}",
+    ))
+    |> step(strategy.CaughtUp)
+    |> step(
+      strategy.Live(
+        json.to_string(
+          json.object([
+            #("project", json.string("web")),
+            #("noProject", json.bool(True)),
+            #("task", task("t9", "Orphan", "", "backlog", "", 0)),
+          ]),
+        ),
+      ),
+    )
+  assert ids(model) == ["t9"]
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, ">No project</span>")
+  assert !string.contains(page, ">No project</td>")
+}
+
+/// D-118: in the same second, a proposal comes after the notes the server
+/// had when it was asked and before the note after it; one saved without
+/// that count comes after the notes of its second.
+pub fn a_proposal_and_a_note_in_one_second_keep_their_order_test() {
+  let reply =
+    json.to_string(
+      run("r5", "waiting", #("page", ""), 60, [
+        #(
+          "notes",
+          json.preprocessed_array([
+            said("Human asks", 20),
+            said("Agent follows up", 20),
+          ]),
+        ),
+        #(
+          "questions",
+          json.preprocessed_array([
+            json.object([
+              #("id", json.string("q1")),
+              #("text", json.string("Counted proposal")),
+              #("options", json.array(["Approve", "Reject"], json.string)),
+              #("answer", json.null()),
+              #("time", json.int(20)),
+              #("after", json.int(1)),
+            ]),
+            asked("q2", "Uncounted proposal", 20),
+          ]),
+        ),
+      ]),
+    )
+  let model =
+    planned()
+    |> step(strategy.PlanText("Plan search"))
+    |> step(strategy.StartPlan)
+    |> step(strategy.PlanReplied(True, reply))
+  assert in_order(element.to_string(strategy.view(model)), [
+    "Human asks",
+    "Counted proposal",
+    "Agent follows up",
+    "Uncounted proposal",
+    "plan-end",
+  ])
+}
+
+import lustre/dev/query
+import lustre/dev/simulate
+import lustre/effect
+
+/// With a task open that has an open run, the bar's New run shows that run.
+pub fn the_bar_new_run_shows_the_open_run_test() {
+  let model = step(planned(), strategy.Open(".", "t1"))
+  let sim =
+    simulate.application(
+      init: fn(_) { #(model, effect.none()) },
+      update: strategy.update,
+      view: strategy.view,
+    )
+    |> simulate.start(Nil)
+    |> simulate.click(on: query.element(
+      matching: query.tag("button") |> query.and(query.text("New run")),
+    ))
+  assert simulate.model(sim).plan_open == "r1"
+}
+
+pub fn the_new_task_form_disables_create_while_the_title_is_blank_test() {
+  let create_disabled = fn(model) {
+    let assert Ok(#(before, _)) =
+      element.to_string(strategy.view(model))
+      |> string.split_once("Create task</button>")
+    let assert Ok(button) = string.split(before, "<button") |> list.last
+    string.contains(button, "disabled")
+  }
+  let model = workspace()
+  assert model.new_task == None
+  assert string.contains(element.to_string(strategy.view(model)), "New task")
+  let model =
+    model |> step(strategy.NewTaskOpen) |> step(strategy.NewTaskTitle("  "))
+  // In a workspace the project defaults to the root's own.
+  let assert Some(draft) = model.new_task
+  assert draft.project == "."
+  assert create_disabled(model)
+  assert step(model, strategy.CreateTask).task_saving == None
+  let model = step(model, strategy.NewTaskTitle("Index"))
+  assert !create_disabled(model)
+  assert step(model, strategy.CreateTask).task_saving == Some("")
+  // Cancel closes the form.
+  assert step(model, strategy.NewTaskCancel).new_task == None
+}
+
+pub fn the_new_task_request_is_kept_across_a_refused_create_test() {
+  let model =
+    workspace()
+    |> step(strategy.NewTaskOpen)
+    |> step(strategy.NewTaskTitle("Index"))
+    |> step(strategy.NewTaskText("Some **text**"))
+  let rid = model.new_task_request
+  assert rid != ""
+  let model =
+    model
+    |> step(strategy.CreateTask)
+    |> step(strategy.TaskCreated(
+      ".",
+      "",
+      "{\"code\":\"E7001\",\"message\":\"E7001 no title\"}",
+    ))
+  assert model.new_task_error == "Couldn't create the task: E7001 no title"
+  assert model.task_saving == None
+  assert model.new_task_request == rid
+  let assert Some(draft) = model.new_task
+  assert draft.title == "Index"
+  assert draft.body == "Some **text**"
+  // The retry sends the same request.
+  let model = step(model, strategy.CreateTask)
+  assert model.new_task_request == rid
+  assert model.task_saving == Some("")
+}
+
+pub fn the_new_task_links_only_what_was_picked_test() {
+  let draft = strategy.NewTask("Index", "", "web", "", "")
+  assert strategy.new_task_links(draft) == []
+  assert strategy.new_task_links(strategy.NewTask(..draft, feature: "f1"))
+    == [#("feature", "f1")]
+  let both = strategy.NewTask(..draft, feature: "f1", milestone: "m1")
+  assert strategy.new_task_links(both)
+    == [#("feature", "f1"), #("milestone", "m1")]
+  assert json.to_string(strategy.links_body(strategy.new_task_links(both)))
+    == "{\"feature\":\"f1\",\"milestone\":\"m1\"}"
+  let created = json.to_string(task("t9", "Index", "", "backlog", "", 0))
+  // Nothing picked: no link, the form closes and the task opens.
+  let model =
+    workspace()
+    |> step(strategy.NewTaskOpen)
+    |> step(strategy.NewTaskProject("web"))
+    |> step(strategy.NewTaskTitle("Index"))
+    |> step(strategy.CreateTask)
+    |> step(strategy.TaskCreated("web", "", created))
+  assert model.task_linking == None
+  assert model.task_saving == None
+  assert model.new_task == None
+  assert model.selected == Some(#("web", "t9"))
+  // A feature picked: the link goes out, and the form waits for it.
+  let model =
+    workspace()
+    |> step(strategy.NewTaskOpen)
+    |> step(strategy.NewTaskProject("web"))
+    |> step(strategy.NewTaskTitle("Index"))
+    |> step(strategy.NewTaskFeature("f1"))
+    |> step(strategy.CreateTask)
+    |> step(strategy.TaskCreated("web", "", created))
+  assert model.task_linking == Some(#("web", "t9", ""))
+  assert model.new_task != None
+  assert model.selected == None
+  // The link's reply closes the form and opens the task.
+  let linked =
+    step(
+      model,
+      strategy.Patched(
+        "web",
+        json.to_string(task("t9", "Index", "", "backlog", "f1", 0)),
+      ),
+    )
+  assert linked.new_task == None
+  assert linked.task_linking == None
+  assert linked.task_saving == None
+  assert linked.selected == Some(#("web", "t9"))
+  // A refused link says the task exists without it; the task still opens.
+  let refused =
+    step(
+      model,
+      strategy.Patched(
+        "web",
+        "{\"code\":\"E7023\",\"message\":\"E7023 unknown feature f1\"}",
+      ),
+    )
+  assert refused.new_task_error
+    == "The task was created without its feature: E7023 unknown feature f1"
+  assert refused.task_saving == None
+  assert refused.task_linking == None
+  assert refused.selected == Some(#("web", "t9"))
+  assert refused.error == ""
+  let assert Some(fresh) = refused.new_task
+  assert fresh.title == ""
+}
+
+/// The numbers from `from` to `to`, both included.
+fn numbers(from: Int, to: Int) -> List(Int) {
+  case from > to {
+    True -> []
+    _ -> [from, ..numbers(from + 1, to)]
+  }
+}
+
+/// A workspace with `n` open tasks in the root's project, titled so the
+/// default order is the tasks' own.
+fn many(n: Int) -> strategy.Model {
+  let tasks =
+    numbers(1, n)
+    |> list.map(fn(i) {
+      task("t" <> int.to_string(i), title_of(i), "", "backlog", "", 0)
+    })
+  workspace()
+  |> step(
+    strategy.Live(message(".", [#("tasks", json.array(tasks, fn(t) { t }))])),
+  )
+}
+
+/// A title that sorts in the same order as the task's number.
+fn title_of(i: Int) -> String {
+  case i < 10 {
+    True -> "task-0" <> int.to_string(i)
+    False -> "task-" <> int.to_string(i)
+  }
+}
+
+pub fn the_tasks_tab_pages_its_rows_test() {
+  assert strategy.pages(0) == 1
+  assert strategy.pages(25) == 1
+  assert strategy.pages(26) == 2
+  assert strategy.pages(96) == 4
+  let rows = strategy.visible(many(96))
+  let ids_on = fn(page: Int) {
+    strategy.page_rows(rows, page) |> list.map(fn(pair) { pair.1.id })
+  }
+  let named = fn(from: Int, to: Int) {
+    numbers(from, to) |> list.map(fn(i) { "t" <> int.to_string(i) })
+  }
+  assert ids_on(1) == named(1, 25)
+  assert ids_on(2) == named(26, 50)
+  assert ids_on(4) == named(76, 96)
+  // Past the end: the last page, never an empty one.
+  assert ids_on(9) == named(76, 96)
+  assert strategy.page_text(2, 96) == "page 2 of 4, 96 tasks"
+  assert strategy.page_text(1, 1) == "page 1 of 1, 1 task"
+  assert strategy.page_text(9, 0) == "page 1 of 1, 0 tasks"
+}
+
+pub fn the_tasks_tab_shows_one_page_with_its_count_test() {
+  let model = many(30) |> step(strategy.Page(2))
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "task-26")
+  assert !string.contains(page, "task-01")
+  assert string.contains(page, "page 2 of 2, 30 tasks")
+  // Prev is greyed out on the first page, Next on the last.
+  let first = element.to_string(strategy.view(many(30)))
+  assert string.contains(first, "page 1 of 2, 30 tasks")
+  // A button's own tag: the `<button` opening its label.
+  let tag_of = fn(html: String, label: String) {
+    let assert Ok(#(before, _)) = string.split_once(html, label)
+    let assert Ok(tag) = string.split(before, "<button") |> list.last
+    tag
+  }
+  assert string.contains(tag_of(first, "← Prev"), "disabled")
+  assert !string.contains(tag_of(first, "Next →"), "disabled")
+  assert !string.contains(tag_of(page, "← Prev"), "disabled")
+  assert string.contains(tag_of(page, "Next →"), "disabled")
+}
+
+pub fn a_filter_change_resets_to_the_first_page_test() {
+  let model = many(30) |> step(strategy.Page(2))
+  assert model.page == 2
+  let model =
+    step(model, strategy.Filter(strategy.Filters("", "", "", "", "task-05")))
+  assert model.page == 1
+  assert ids(model) == ["t5"]
+}
+
+pub fn the_task_detail_stays_below_the_table_and_pager_test() {
+  let model =
+    many(30)
+    |> step(strategy.Open(".", "t3"))
+    |> step(strategy.Page(2))
+  let page = element.to_string(strategy.view(model))
+  let at = fn(needle: String) {
+    let assert Ok(#(before, _)) = string.split_once(page, needle)
+    string.byte_size(before)
+  }
+  let table = at("</table>")
+  let count = at("page 2 of 2, 30 tasks")
+  let detail = at("<solace-task")
+  assert table < count && count < detail
+  // The detail shows even when its row is on another page.
+  assert string.contains(page, "task-03")
+}
+
+pub fn a_task_link_opens_the_page_holding_the_task_test() {
+  let model = many(30) |> step(strategy.Focus("task", ".", "t27"))
+  assert model.selected == Some(#(".", "t27"))
+  assert model.page == 2
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "task-27")
 }

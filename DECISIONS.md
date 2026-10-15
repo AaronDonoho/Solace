@@ -680,3 +680,61 @@ Amends Spec 1 §5 and Spec 3 §2 (Aaron, board task, 2026-10-13).
 1. `E5007`: into another project, `extract` refuses when it can't carry a JavaScript file that a moved FFI function uses: the path leaves the package, or the file is in neither `src/` nor `test/`; two files would land on one path; the destination already has a file there; staying code uses a file the moved code takes; a file that stays imports one that goes, or one that goes imports one that stays (a relative import can't reach another package). Each refusal names the files and what to do.
 2. The reply names each carried file, `Moved file <from> to <project>: <to>`, adding `(its imports rewritten)` when its relative imports changed for its new folder, and each FFI path that follows its module, `Rewrote FFI paths: <name> <old> -> <new>, …`. FFI paths aren't type-checked, so the reply names the declared suites that reach moved code (`Also reached: …`); when FFI paths or files moved and none does, it says so and asks to run the JavaScript tests or declare them with `checks` (D-44).
 Why: these came with the JavaScript FFI work on `extract` and were recorded only in the code; a review filed them as tech debt. Splitting `E5008` and `E5009` by case was declined: each message already names its case and what to do.
+
+## D-125 A refused delete or rejected submit with a same-name copy names `merge`
+Amends D-117 (Aaron, board task, 2026-10-13).
+1. `delete`'s `E5001` ends with one hint when a refused type has a type of the same name in another module of this project or in another project of the run's scope: `Hint: <copy> [(<folder>)] has the same name. To fold <gone> into it and redirect its N uses, use merge <copy> <gone> [--to-project <folder>]`. Functions and constants get none: shared names like `new` rarely mean duplicates, and `merge` checks no signature.
+2. A submit rejected with errors that name two types of one name (`Task` or `board.Task` beside `solace_task.Task`) ends with the same hint, once per reply.
+3. When the two types' constructors differ, the hint lists the differences and says to make them match, then gives the merge; a private copy is named as private, to make pub first (`merge` refuses it, `E5009`). Several copies are listed with `merge <copy> …`.
+4. The hint names only `merge`: both triggers need the copy to exist, so an `extract` hint for a free name could never show.
+Why: an agent that rewrote references by hand to a copy got errors that didn't point to `merge`. The human chose a merge-only hint that names what to fix when `merge` would refuse.
+
+## D-126 Paths: root paths for reads, refusals that name the base
+Amends D-123 point 3 (Aaron, board task, 2026-10-13).
+1. `read`, `files` and `grep --in` take a path from the Solace root into another project (`solace-cli/strategy/src/api.mjs`) when it isn't in the current project, including a nested project's path read from the root; it is read there, headed `==== <path> (<folder>) ====`. `write`, a file patch's sections, `remove` and both ends of `move` refuse it, naming `add --project <folder>`.
+2. An `E6002` for a missing path says `(paths are relative to <folder>)` and, when another project has it, `it is <path> in <folder>: add --project <folder>`.
+3. `--project ../x` or `./x` resolves against the current project when that lands on a project under the root; otherwise as a folder from the root. The refusal says `--project` takes a folder from the Solace root and lists them. Session start no longer names `../x` as wrong.
+4. `view`, `inspect`, `refs`, `files` and `read` refuse an option they don't take by name (`view has no --lines; read takes --lines`), listing their options from the reference's syntax lines. `grep` and `find` search their text as written and are not checked.
+Why: an agent in `components` had six commands refused while guessing what paths and `--project` were relative to.
+
+## D-127 A task's scope widens at any time and narrows only while no agent works
+Amends D-61 point 2 (Aaron, board task, 2026-10-13). The human adds projects to a task's scope at any time, during a run too; an open work run claims each added project at once (`E7005` if another task's work run holds it). Projects are removed only while no agent is working: between runs, paused, or waiting on a question or a discussion reply (`E7003` otherwise). A project the task changed, the last project, and the home while a run is open still can't be removed. The Scope tab disables only the switches that are on while the agent works.
+Why: an agent that asks for another project should get it without the human stopping its run.
+
+## D-128 A feature's state follows its tasks; its tasks show on the board once it is active
+Amends D-87 point 8, D-93 and Spec 15 §1 (Aaron, board task, 2026-10-13).
+1. `planned` is renamed `upcoming`, for features and milestones: "plan" already names other things here. A record saved `planned` reads as `upcoming`; a request naming `planned` is refused (`E7001`). A strategy run's outcome `planned` is unchanged.
+2. The states mean: **proposed**, suggested and not agreed; **upcoming**, agreed and queued, waiting its turn (a manual gate before `active` may come later); **active**, work has started; **complete**; **canceled**.
+3. An `active` feature with at least one task becomes `complete` by itself when every task linked to it is in a final column: canceled tasks and its Tech Debt tasks (D-112) count, so an open Tech Debt task keeps the feature active. A `complete` feature with a task out of the final columns, reopened or newly linked, is `active` again. Nothing else changes a state by itself; a feature with no tasks stays as it is. It is checked when a task is created, moves column or changes feature.
+4. The board shows a task with a feature only while that feature is `active` or `complete`: tasks of a `proposed`, `upcoming` or `canceled` feature are off the board, and stay on the Strategy page's Features tab. A task whose feature isn't loaded yet shows.
+5. A task proposal linked to a `complete` or `canceled` feature or milestone sets it back to `upcoming` on Approve, as D-93 set it `planned`.
+Why: the human wanted features to finish without being closed by hand, and a feature's tasks kept off the board until work on it starts.
+
+## D-129 A proposed task's scope names projects; a task with no project shows on the Strategy page
+Amends D-94 (Aaron, board task, 2026-10-13).
+1. Every folder in a proposed task's `scope` must be a project of the workspace. A proposal naming a folder that isn't one is refused when it is sent, before the human is asked, naming the folder and the workspace's projects. To plan for a project that doesn't exist yet, leave `scope` out, or use `.` and name the future project in the body.
+2. A task whose home is not a project is in no lane on the board. The Strategy page lists every task in the root's store whatever its home: such a task shows on the Tasks tab and in search, opens from a link, and is marked as having no project. The human can cancel and archive it; changing its scope comes in a later decision.
+Why: a strategy run proposed tasks with a scope folder that isn't a project; under D-94 they were created with a home in no lane, invisible on the board and the Strategy page, and links to them were refused.
+
+## D-130 A task records when it was created
+Amends Spec 15 §1 (Aaron, board task, 2026-10-14). A task gets `createdTime` (seconds) when it is created; edits, moves between projects, bringing it back and archiving never change it. A task saved before this gets it when it loads: the earlier of its first note's time and its first run's start, or else its file's modified time. A strategy run's task brief carries it, and the Strategy page's Tasks tab shows it in a **Created** column.
+Why: the human wanted to see when each task was made.
+
+## D-131 A project declares its build in `solace.toml`'s `[build]`
+Amends Spec 14 §2 and Spec 15 §4 (Aaron, board task, 2026-10-14). First task of the Build tab feature.
+1. A project's `solace.toml` may hold a `[build]` table, its recipe: `steps`, an array of at least one `{name, run}` or `{name, command}`, run in order; `after`, the projects built before this one, as the root lists them; `outputs`, artifact paths in the project. A `command` step reuses that entry of `[commands]`, so today's `build-release` commands are named, not copied. A step may set `timeout` (seconds); otherwise it takes its command's, else 120 s, as `run` does.
+   ```toml
+   [build]
+   after = ["solace-cli/board"]
+   outputs = ["priv/app.js"]
+   steps = [
+     { name = "install", run = ["bun", "install"] },
+     { name = "bundle",  command = "bundle" },
+   ]
+   ```
+2. `E6020` names the field at fault (`build.steps[1].name`): an unknown field; a step without a name, with a repeated name, with neither or both of `run` and `command`, with an empty `run`, a `command` that `[commands]` doesn't have, or a timeout that isn't positive; `after` and `outputs` that aren't paths inside the root and project. Every command checks the shape. Whether `after` names other projects of the workspace is checked when an agent proposes the file and when the plan is read, since the file alone doesn't know the workspace.
+3. A project with no `[build]` gets a default from its files, in this order: `package.json` → install (`bun install` with a `bun.lock`, else `npm ci` with a `package-lock.json`, else `npm install`); `gleam.toml` → `gleam build --target <its target>`; a `build` script in `package.json` → run it with the same tool; `Cargo.toml` → `cargo build --release --locked`. A project with none of these has no recipe and is skipped. A default has no `after` and no `outputs`.
+4. The plan is every project's recipe, each after the projects its `after` names, else in the root's order. A cycle is refused with `E6020`, naming it (`a → b → a`).
+5. `build plan` (CLI) and `GET /build/plan` (root only) give the plan, each recipe marked declared or default. `build plan` only reads: it is no change, verification or process, and works in read-only runs. `build` with any other argument is refused.
+6. Not yet moved: the frontend projects' `build-release` commands and `solace-cli/build.rs` stay as they are. Their default (`bun install` then `gleam build`) is not their release build, which also bundles `priv/app.js`; the self-build feature declares their `[build]`. Solace's own Rust crate is in `solace-cli/`, which is not a project, so it has no default; the root will declare it.
+Why: the Build tab must run any project, so each project needs one place that says how it builds, readable by the page.

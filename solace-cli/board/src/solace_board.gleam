@@ -77,20 +77,18 @@ pub type Model {
     /// Its details are `<solace-task>`, which loads them itself.
     selected_card: Option(#(String, String)),
     error: String,
-    creating: Bool,
-    draft_title: String,
-    draft_body: String,
-    previews: List(String),
     notices: List(solace_task.Notice),
     caught_up: Bool,
     replay: List(String),
     collapsed: List(String),
-    draft_lane: String,
-    /// The projects a new task covers; empty means the draft lane alone.
-    draft_scope: List(String),
-    /// Whether a create is waiting for the server; Create task is disabled
-    /// meanwhile, so one submit makes one task (D-77).
-    submitting: Bool,
+    /// Whether the detail band is collapsed to its one-line bar.
+    detail_collapsed: Bool,
+    /// The detail band's task height in pixels; 0 is the CSS default.
+    detail_height: Int,
+    /// A drag of the resize handle in progress: the pointer's start, the
+    /// band's height then, and the largest height that keeps the board's
+    /// column bar on screen.
+    resizing: Option(#(Float, Float, Int)),
     projects_open: Bool,
     project_name: String,
     project_dir: String,
@@ -114,9 +112,9 @@ pub type Model {
     /// The tab and task a notice's button asked to show, and how many times
     /// one was asked, so asking again is news to `<solace-task>`.
     reveal: #(String, String, Int),
-    /// The root's features as (id, title, colorSlot), which name and color
-    /// their tasks' cards (D-114).
-    features: List(#(String, String, Option(Int))),
+    /// The root's features as (id, title, colorSlot, state), which name and
+    /// color their tasks' cards (D-114) and decide whether they show (D-128).
+    features: List(#(String, String, Option(Int), String)),
   )
 }
 
@@ -132,8 +130,19 @@ pub type Msg {
   /// `<solace-task>` says the open task now lives in another project.
   TaskMoved(String, String)
   Collapse(String)
-  NewTaskIn(String)
-  DraftScope(String, Bool)
+  /// Collapse the detail band to its bar, or expand it back.
+  ToggleDetail
+  /// The resize handle's pointerdown: the pointer's y and id.
+  ResizeStart(Float, Int)
+  /// A drag has begun: the pointer's y, the band's height then, and the
+  /// largest height that keeps the board's column bar on screen.
+  ResizeBegin(Float, Float, Int)
+  /// The handle's pointermove: the pointer's y.
+  ResizeMove(Float)
+  /// The drag ends: the height is kept.
+  ResizeEnd
+  /// The handle's keydown: the key's name.
+  ResizeKey(String)
   ToggleProjects
   AddProject(String)
   RemoveProject(String)
@@ -146,16 +155,6 @@ pub type Msg {
   ProjectDir(String)
   ProjectTarget(String)
   CreateProject
-  NewTask
-  DraftTitle(String)
-  DraftBody(String)
-  Create
-  Created(String)
-  Preview(String, Bool)
-  Format(String, String, String)
-  /// The editor's selected lines become a block: "heading", "list",
-  /// "numbered", "quote" or "code" (see `block` in the components project).
-  Block(String, String)
   Dismiss(solace_task.Notice)
   /// Close All: every toast goes.
   DismissAll
@@ -181,16 +180,9 @@ fn get(model: Model, path: String, msg: fn(String) -> Msg) -> Effect(Msg) {
   })
 }
 
-/// Browser storage keys for the unsent new-task draft.
-const draft_title_key = "solace-board-draft-title"
-
-const draft_body_key = "solace-board-draft-body"
-
 const collapsed_key = "solace-board-collapsed"
 
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
-  let draft_title = load(draft_title_key)
-  let draft_body = load(draft_body_key)
   #(
     Model(
       lanes: [
@@ -201,18 +193,14 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       found: [],
       selected_card: None,
       error: "",
-      creating: draft_title != "" || draft_body != "",
-      draft_title: draft_title,
-      draft_body: draft_body,
-      previews: [],
       notices: [],
       caught_up: False,
       replay: [],
       collapsed: string.split(load(collapsed_key), "\n")
         |> list.filter(fn(d) { d != "" }),
-      draft_lane: "",
-      draft_scope: [],
-      submitting: False,
+      detail_collapsed: load(detail_key) == "1",
+      detail_height: load(detail_height_key) |> int.parse |> result.unwrap(0),
+      resizing: None,
       projects_open: False,
       project_name: "",
       project_dir: "",
@@ -256,15 +244,6 @@ fn map_lane(model: Model, dir: String, f: fn(Lane) -> Lane) -> Model {
       }
     }),
   )
-}
-
-/// The lane a new task goes to: the one chosen, else the first.
-fn draft_lane(model: Model) -> String {
-  case lane_of(model, model.draft_lane), model.lanes {
-    Ok(l), _ -> l.dir
-    _, [l, ..] -> l.dir
-    _, [] -> ""
-  }
 }
 
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
@@ -376,7 +355,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       effect.none(),
     )
     Select(dir, id) -> #(
-      Model(..model, selected_card: Some(#(dir, id)), live: []),
+      expanded(Model(..model, selected_card: Some(#(dir, id)), live: [])),
       effect.none(),
     )
     // The task's live update takes the card off the board.
@@ -423,22 +402,84 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       store(collapsed_key, string.join(collapsed, "\n"))
       #(Model(..model, collapsed: collapsed), effect.none())
     }
-    NewTaskIn(dir) -> #(
-      Model(..model, creating: True, draft_lane: dir, draft_scope: [dir]),
+    ToggleDetail -> {
+      let collapsed = !model.detail_collapsed
+      store(detail_key, case collapsed {
+        True -> "1"
+        False -> "0"
+      })
+      #(Model(..model, detail_collapsed: collapsed), effect.none())
+    }
+    // The handle's drag: the browser captures the pointer on the handle, so
+    // its moves keep arriving as the pointer travels over the page, and
+    // answers the band's height now and the largest height that leaves the
+    // board its column bar.
+    ResizeStart(y, pointer_id) ->
+      case model.selected_card, model.detail_collapsed {
+        Some(_), False -> #(
+          model,
+          effect.from(fn(dispatch) {
+            let #(start_y, height, max) =
+              begin_resize(model.root, pointer_id, y)
+            dispatch(ResizeBegin(start_y, height, max))
+          }),
+        )
+        _, _ -> #(model, effect.none())
+      }
+    ResizeBegin(y, height, max) -> #(
+      Model(..model, resizing: Some(#(y, height, max))),
       effect.none(),
     )
-    DraftScope(dir, on) -> {
-      let chosen = case on {
-        True -> [dir, ..model.draft_scope]
-        False -> list.filter(model.draft_scope, fn(d) { d != dir })
+    // Dragging up (a smaller y) grows the band; the height is clamped so
+    // the board always keeps its column bar.
+    ResizeMove(y) ->
+      case model.resizing {
+        Some(#(start_y, start_h, max)) -> #(
+          Model(
+            ..model,
+            detail_height: clamp_height(
+              resize_height(start_y, start_h, y, max),
+              max,
+            ),
+          ),
+          effect.none(),
+        )
+        None -> #(model, effect.none())
       }
-      // None chosen is allowed while editing, so the starting lane can be
-      // swapped for another; the server refuses a task with no project.
-      #(
-        Model(..model, draft_scope: in_lane_order(model, chosen)),
-        effect.none(),
-      )
-    }
+    ResizeEnd ->
+      case model.resizing {
+        Some(_) -> #(
+          Model(..model, resizing: None),
+          effect.from(fn(_) {
+            store(detail_height_key, int.to_string(model.detail_height))
+          }),
+        )
+        None -> #(model, effect.none())
+      }
+    // The handle's keys: the arrows step the height, Home returns the
+    // default.
+    ResizeKey(key) ->
+      case key {
+        "ArrowUp" | "ArrowDown" | "Home" -> {
+          // The default height is the CSS's: a step starts from what shows.
+          let now = case model.detail_height {
+            0 -> detail_now(model.root)
+            h -> h
+          }
+          let height = case key {
+            "ArrowUp" -> clamp_height(now + 24, detail_max())
+            "ArrowDown" -> clamp_height(now - 24, detail_max())
+            _ -> 0
+          }
+          #(
+            Model(..model, detail_height: height),
+            effect.from(fn(_) {
+              store(detail_height_key, int.to_string(height))
+            }),
+          )
+        }
+        _ -> #(model, effect.none())
+      }
     ToggleProjects -> #(
       Model(..model, projects_open: !model.projects_open),
       effect.none(),
@@ -518,90 +559,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         #("target", json.string(model.project_target)),
       ]),
     )
-    NewTask -> #(Model(..model, creating: !model.creating), effect.none())
-    DraftTitle(text) -> {
-      store(draft_title_key, text)
-      #(Model(..model, draft_title: text), effect.none())
-    }
-    DraftBody(text) -> {
-      store(draft_body_key, text)
-      #(Model(..model, draft_body: text), effect.none())
-    }
-    Create if model.submitting -> #(model, effect.none())
-    // One request id per submit: the server returns the same task for a repeat of it.
-    Create -> #(
-      Model(..model, submitting: True),
-      effect.from(fn(dispatch) {
-        let body =
-          json.object([
-            #("title", json.string(model.draft_title)),
-            #("body", json.string(model.draft_body)),
-            #("scope", json.array(model.draft_scope, json.string)),
-            #("request", json.string(request_id())),
-          ])
-        request(
-          model.prefix,
-          base_of(model, draft_home(model)) <> "/tasks",
-          "POST",
-          json.to_string(body),
-          fn(text) { dispatch(Created(text)) },
-        )
-      }),
-    )
-    // Only a task that was really created clears the draft; it opens.
-    Created(text) -> {
-      let model = Model(..model, submitting: False)
-      case json.parse(text, solace_task.task_decoder()) {
-        Ok(t) -> {
-          store(draft_title_key, "")
-          store(draft_body_key, "")
-          #(
-            Model(
-              ..model,
-              selected_card: Some(#(draft_home(model), t.id)),
-              draft_scope: [],
-              creating: False,
-              draft_title: "",
-              draft_body: "",
-              previews: [],
-              error: "",
-            ),
-            effect.none(),
-          )
-        }
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
-      }
-    }
-    Preview(id, on) -> #(
-      Model(..model, previews: case on {
-        True -> [id, ..model.previews]
-        False -> list.filter(model.previews, fn(p) { p != id })
-      }),
-      effect.none(),
-    )
-    // The board's one editor is the new task's description.
-    Format(id, before, after) -> #(
-      model,
-      effect.from(fn(send) {
-        send(
-          DraftBody(solace_task.wrap(
-            model.root,
-            id,
-            model.draft_body,
-            before,
-            after,
-          )),
-        )
-      }),
-    )
-    Block(id, kind) -> #(
-      model,
-      effect.from(fn(send) {
-        send(
-          DraftBody(solace_task.block(model.root, id, model.draft_body, kind)),
-        )
-      }),
-    )
     DismissAll -> #(Model(..model, notices: []), effect.none())
     Dismiss(notice) -> #(
       Model(..model, notices: list.filter(model.notices, fn(n) { n != notice })),
@@ -610,29 +567,33 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     // `<solace-task>` shows the notice's tab and scrolls into view, now or
     // once the task loads.
     Open(notice) -> #(
-      Model(
-        ..model,
-        selected_card: Some(#(notice.dir, notice.id)),
-        live: case model.selected_card == Some(#(notice.dir, notice.id)) {
-          True -> model.live
-          False -> []
-        },
-        reveal: #(notice.tab, notice.id, model.reveal.2 + 1),
-        notices: list.filter(model.notices, fn(n) { n != notice }),
+      expanded(
+        Model(
+          ..model,
+          selected_card: Some(#(notice.dir, notice.id)),
+          live: case model.selected_card == Some(#(notice.dir, notice.id)) {
+            True -> model.live
+            False -> []
+          },
+          reveal: #(notice.tab, notice.id, model.reveal.2 + 1),
+          notices: list.filter(model.notices, fn(n) { n != notice }),
+        ),
       ),
       effect.none(),
     )
     Focus(_, "") -> #(model, effect.none())
     // `<solace-task>` scrolls into view now, or once the task loads.
     Focus(dir, id) -> #(
-      Model(
-        ..model,
-        selected_card: Some(#(dir, id)),
-        live: case model.selected_card == Some(#(dir, id)) {
-          True -> model.live
-          False -> []
-        },
-        reveal: #("details", id, model.reveal.2 + 1),
+      expanded(
+        Model(
+          ..model,
+          selected_card: Some(#(dir, id)),
+          live: case model.selected_card == Some(#(dir, id)) {
+            True -> model.live
+            False -> []
+          },
+          reveal: #("details", id, model.reveal.2 + 1),
+        ),
       ),
       effect.none(),
     )
@@ -712,6 +673,7 @@ pub fn view(model: Model) -> Element(Msg) {
     h.style(
       [],
       board_styles
+        <> detail_band_styles
         <> selected_card_styles
         <> modal_styles
         <> notice_styles
@@ -723,23 +685,22 @@ pub fn view(model: Model) -> Element(Msg) {
       h.a([a.href("/guide")], [h.text("Guide")]),
       h.button(
         [a.aria_expanded(model.projects_open), e.on_click(ToggleProjects)],
-        [h.text("Projects")],
+        [h.text(solace_task.ui_label("projects"))],
       ),
-      h.button([a.class("primary"), e.on_click(NewTask)], [
-        h.text(case model.creating {
-          True -> "Close new task"
-          False -> "New task"
-        }),
-      ]),
     ]),
-    h.p([a.role("alert")], [h.text(model.error)]),
+    // The error line shows only with an error: an empty paragraph in the
+    // page's flex column takes a line between the header and the lanes.
+    case model.error {
+      "" -> h.text("")
+      _ -> h.p([a.role("alert")], [h.text(model.error)])
+    },
     h.div(
       [a.class("notices")],
       list.append(
         case list.length(model.notices) > 5 {
           True -> [
             h.button([a.class("close-all"), e.on_click(DismissAll)], [
-              h.text("Close All"),
+              h.text(solace_task.ui_label("close_all")),
             ]),
           ]
           False -> []
@@ -748,13 +709,13 @@ pub fn view(model: Model) -> Element(Msg) {
           h.div([a.class("notice"), a.role("alert")], [
             h.strong([], [h.text(n.heading)]),
             h.button([a.class("show"), e.on_click(Open(n))], [
-              h.text("Show task"),
+              h.text(solace_task.ui_label("show_task")),
             ]),
             h.button(
               [
                 a.class("close"),
-                a.attribute("aria-label", "Dismiss"),
-                a.title("Dismiss"),
+                a.attribute("aria-label", solace_task.ui_label("dismiss")),
+                a.title(solace_task.ui_label("dismiss")),
                 e.on_click(Dismiss(n)),
               ],
               [
@@ -775,46 +736,27 @@ pub fn view(model: Model) -> Element(Msg) {
       True -> projects_view(model)
       False -> h.text("")
     },
-    case model.creating {
-      False -> h.text("")
-      True ->
-        h.section([a.class("editor")], [
-          case model.workspace {
-            True ->
-              solace_task.projects_pick(
-                list.map(model.lanes, fn(l) { #(l.dir, l.label) }),
-                model.draft_scope,
-                False,
-                DraftScope,
-              )
-            False -> h.text("")
-          },
-          solace_task.title_input(model.draft_title, DraftTitle),
-          solace_task.editor(
-            "draft-body",
-            "",
-            base_of(model, draft_lane(model)),
-            "Description",
-            model.draft_body,
-            list.contains(model.previews, "draft-body"),
-            DraftBody,
-            Preview("draft-body", _),
-            fn(before, after) { Format("draft-body", before, after) },
-            Block("draft-body", _),
-          ),
-          h.button([a.disabled(model.submitting), e.on_click(Create)], [
-            h.text(case model.submitting {
-              True -> "Creating…"
-              False -> "Create task"
-            }),
-          ]),
-        ])
-    },
-    lanes_view(model),
-    case model.selected_card {
-      None -> h.text("Select a task to see its details.")
-      Some(#(dir, id)) -> task_view(model, dir, id)
-    },
+    h.div([a.class("lanes-area")], [lanes_view(model)]),
+    h.div(
+      [
+        a.class(case model.detail_collapsed, model.resizing {
+          True, _ -> "detail-band collapsed"
+          False, Some(_) -> "detail-band resizing"
+          False, None -> "detail-band"
+        }),
+      ],
+      [
+        detail_resize(model),
+        detail_bar(model),
+        case model.selected_card, model.detail_collapsed {
+          // The task element stays in the band when it is collapsed, hidden
+          // by its CSS, so its loaded task and live events survive.
+          None, True -> h.text("")
+          None, False -> h.text("Select a task to see its details.")
+          Some(#(dir, id)), _ -> task_view(model, dir, id)
+        },
+      ],
+    ),
   ])
 }
 
@@ -826,10 +768,11 @@ pub fn shared_columns(lanes: List(Lane)) -> Bool {
   }
 }
 
-/// One lane per project. A single project's header has no toggle and no
-/// + Task, since the New task button is above. Lanes with the same workflow
+/// One lane per project. A single project's header has no toggle. Tasks are
+/// created on the Strategy page, not here. Lanes with the same workflow
 /// share one header row; otherwise each lane names its own columns. A header
-/// row is a bar that sticks to the top while its lanes are on screen.
+/// row is a bar that sticks to the top of the lanes area, the board page's
+/// scroll area, while its lanes are on screen.
 fn lanes_view(model: Model) -> Element(Msg) {
   let shared = model.workspace && shared_columns(model.lanes)
   case model.workspace, model.lanes {
@@ -838,7 +781,9 @@ fn lanes_view(model: Model) -> Element(Msg) {
         h.header([a.class("lane-title")], [
           h.span([], lane_name(lane)),
           task_count(cards(model, lane)),
-          h.a([a.href(lane.base <> "/contracts")], [h.text("Contract view")]),
+          h.a([a.href(lane.base <> "/contracts")], [
+            h.text(solace_task.ui_label("contract_view")),
+          ]),
         ]),
         columns_view(model, lane, True),
       ])
@@ -873,9 +818,8 @@ fn lanes_view(model: Model) -> Element(Msg) {
                 ],
               ),
               task_count(cards(model, lane)),
-              h.button([e.on_click(NewTaskIn(lane.dir))], [h.text("+ Task")]),
               h.a([a.href(lane.base <> "/contracts")], [
-                h.text("Contract view"),
+                h.text(solace_task.ui_label("contract_view")),
               ]),
             ]),
             ..case open, shared {
@@ -1031,11 +975,14 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
                 h.button(
                   [
                     a.class("archive"),
-                    a.attribute("aria-label", "Archive " <> t.title),
+                    a.attribute(
+                      "aria-label",
+                      solace_task.ui_label("archive") <> " " <> t.title,
+                    ),
                     a.title("Remove from the board; it stays in the archive"),
                     e.on_click(Archive(home, t.id)),
                   ],
-                  [h.text("Archive")],
+                  [h.text(solace_task.ui_label("archive"))],
                 )
               False -> h.text("")
             },
@@ -1051,7 +998,6 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
 fn projects_view(model: Model) -> Element(Msg) {
   let others = list.filter(model.found, fn(f) { !f.member })
   h.section([a.class("editor projects")], [
-    h.h2([], [h.text("Projects")]),
     h.ul(
       [],
       list.map(model.lanes, fn(l) {
@@ -1061,7 +1007,7 @@ fn projects_view(model: Model) -> Element(Msg) {
           // The root's own project always stays on its board.
           case l.dir {
             "." -> h.small([], [h.text("(this folder)")])
-            dir -> button("Remove", RemoveProject(dir))
+            dir -> button(solace_task.ui_label("remove"), RemoveProject(dir))
           },
         ])
       }),
@@ -1091,7 +1037,7 @@ fn projects_view(model: Model) -> Element(Msg) {
                   },
                 ),
                 case f.imported {
-                  True -> button("Add", AddProject(f.dir))
+                  True -> button(solace_task.ui_label("add"), AddProject(f.dir))
                   False ->
                     h.small([], [
                       h.text("Existing code is brought in on the "),
@@ -1128,7 +1074,7 @@ fn projects_view(model: Model) -> Element(Msg) {
           h.option([a.value("javascript")], "JavaScript"),
         ]),
       ]),
-      button("Create project", CreateProject),
+      button(solace_task.ui_label("create_project"), CreateProject),
     ]),
   ])
 }
@@ -1186,12 +1132,20 @@ fn scope_of(home: String, t: solace_task.Task) -> List(String) {
 
 /// The tasks a lane shows, each with the project it is stored in: every task
 /// on the board whose projects include this lane's (D-61), but not an archived
-/// one (D-95).
+/// one (D-95), nor one whose feature is proposed, upcoming or canceled: its
+/// tasks show once it is active, and stay when it completes (D-128). A task
+/// whose feature isn't known (not loaded yet) shows.
 fn cards(model: Model, lane: Lane) -> List(#(String, solace_task.Task)) {
+  let waiting =
+    model.features
+    |> list.filter(fn(f) { f.3 != "active" && f.3 != "complete" })
+    |> list.map(fn(f) { Some(f.0) })
   list.flat_map(model.lanes, fn(l) {
     l.tasks
     |> list.filter(fn(t) {
-      !t.archived && list.contains(scope_of(l.dir, t), lane.dir)
+      !t.archived
+      && list.contains(scope_of(l.dir, t), lane.dir)
+      && !list.contains(waiting, t.feature)
     })
     |> list.map(fn(t) { #(l.dir, t) })
   })
@@ -1199,23 +1153,6 @@ fn cards(model: Model, lane: Lane) -> List(#(String, solace_task.Task)) {
 
 fn label_of(model: Model, dir: String) -> String {
   lane_of(model, dir) |> result.map(fn(l) { l.label }) |> result.unwrap(dir)
-}
-
-/// Project folders in the order the lanes show them, each once.
-fn in_lane_order(model: Model, dirs: List(String)) -> List(String) {
-  model.lanes
-  |> list.map(fn(l) { l.dir })
-  |> list.filter(list.contains(dirs, _))
-}
-
-/// The project a new task is stored in: the draft lane when it is one of the
-/// task's projects, else the first of them.
-fn draft_home(model: Model) -> String {
-  let chosen = model.draft_scope
-  case list.contains(chosen, draft_lane(model)), chosen {
-    True, _ | _, [] -> draft_lane(model)
-    False, [first, ..] -> first
-  }
 }
 
 pub type Source
@@ -1247,13 +1184,14 @@ pub fn register() -> Result(Nil, lustre.Error) {
 }
 
 const board_styles =
-  ".projects-pick{margin:8px 0}.projects-pick label{display:flex;align-items:center;gap:10px;margin:6px 0;cursor:pointer}.projects-pick input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:34px;height:20px;padding:0;margin:0;border:1px solid var(--edge);border-radius:10px;background:var(--well);cursor:pointer;transition:background .15s}.projects-pick input::before{content:\"\";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--paper);border:1px solid var(--edge);box-sizing:border-box;transition:transform .15s}.projects-pick input:checked{background:var(--focus)}.projects-pick input:checked::before{transform:translateX(14px)}.projects-pick input:focus-visible{outline:3px solid var(--focus);outline-offset:2px}.projects-pick[disabled] label,.projects-pick[disabled] input{opacity:.5;cursor:default}@media (prefers-reduced-motion:reduce){.projects-pick input,.projects-pick input::before{transition:none}}\n\n:host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 24px 48px;min-height:100dvh;user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;max-width:760px;background:var(--paper)}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid var(--line);border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}.toolbar [aria-pressed=true]{background:var(--well);font-weight:600}.separator{width:1px;align-self:stretch;background:var(--line);margin:0 6px}.preview{border-top:1px solid var(--line);padding:8px 12px;min-height:94px}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h2{margin-top:0}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{width:auto;flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
+  solace_task.control_styles
+  <> ":host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 24px 0;height:calc(100dvh - 56px);user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
 :host{background:var(--sheet);color:var(--ink)}
 main{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;color:var(--ink);background:none}
 *{scrollbar-color:var(--line) var(--paper)}::selection{background:var(--sel);color:var(--ink)}
 h1,h2,h3{line-height:1.2;letter-spacing:-.02em}a{color:var(--focus);text-underline-offset:3px}
 button,input,textarea,select{border:1px solid var(--edge);background:var(--paper);color:var(--ink);caret-color:var(--focus)}input::placeholder,textarea::placeholder{color:var(--soft);opacity:1}
-button:hover{background:var(--hover)}button:disabled{color:var(--soft)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+button:disabled{color:var(--soft)}a:focus-visible,summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
 textarea{font-family:inherit}
 .top{margin:0 -24px 24px;padding:12px 22px;background:var(--paper);border-bottom:2px solid var(--edge)}.top h1{font-size:28px}
 .primary{background:var(--ink);color:var(--paper);border-color:var(--edge);font-weight:700}.primary:hover{background:var(--focus);border-color:var(--focus);color:var(--paper)}
@@ -1267,9 +1205,8 @@ textarea{font-family:inherit}
 .attention{font-weight:700}.stamp{margin-right:6px}
 .debt{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;border:1px solid var(--test);color:var(--test);padding:0 6px;margin-right:6px}.card:has(.debt){--tab:var(--test)}
 .status{border:1px solid var(--line);background:var(--paper);font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:1px 8px}.status.finished{background:var(--add);color:var(--ok-text);border-color:var(--ok-text)}.working::before{background:var(--entry)}
-.detail,.editor,.composer,.note,.run,.projects{background:var(--paper);border-color:var(--edge)}.detail{padding:20px 24px}
+.detail,.editor,.note,.run,.projects{background:var(--paper);border-color:var(--edge)}.detail{padding:20px 24px}
 .tabs{border-bottom:2px solid var(--edge)}.tabs button{border:0;border-right:1px solid var(--line);background:transparent;margin:0;padding:10px 16px}.tabs [aria-selected=true]{background:var(--paper);box-shadow:inset 0 -3px var(--ink);border-color:var(--line)}
-.composer textarea{border:0;border-top:1px solid var(--edge)}.toolbar .button{border-color:var(--edge);background:var(--paper)}.toolbar .button:hover{background:var(--hover)}.toolbar [aria-pressed=true]{background:var(--ink);color:var(--paper)}
 article{border-bottom-color:var(--line)}.transcript{border-left:1px solid var(--edge)}
 .md pre,.transcript pre,.diff,code{background:var(--code);color:var(--ink)}
 .notices .notice{background:var(--ink);color:var(--paper);box-shadow:4px 8px 24px var(--shadow)}.notice .close{color:var(--paper)}
@@ -1359,9 +1296,9 @@ fn removal_view(model: Model) -> Element(Msg) {
             <> " from this board? Its tasks and Solace setup stay in its folder, and it can be added again. Should its folder and files be deleted too?",
           ),
         ]),
-        button("Remove only", RemoveOnly),
+        button(solace_task.ui_label("remove_only"), RemoveOnly),
         button("Remove and delete files…", RemoveFiles),
-        button("Cancel", RemoveCancel),
+        button(solace_task.ui_label("cancel"), RemoveCancel),
       ])
     Some(#(dir, True, typed)) ->
       modal([
@@ -1384,14 +1321,15 @@ fn removal_view(model: Model) -> Element(Msg) {
           ]),
         ]),
         h.button([a.disabled(typed != dir), e.on_click(RemoveDelete)], [
-          h.text("Delete permanently"),
+          h.text(solace_task.ui_label("delete_permanently")),
         ]),
-        button("Cancel", RemoveCancel),
+        button(solace_task.ui_label("cancel"), RemoveCancel),
       ])
   }
 }
 
-const modal_styles = ".modal-backdrop{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:var(--shadow);padding:16px}.removal{background:var(--paper);color:var(--ink);border:2px solid var(--edge);box-shadow:0 8px 32px var(--shadow);padding:20px 24px;width:min(480px,100%);max-height:100%;overflow:auto}.removal p{margin:0 0 12px;overflow-wrap:anywhere}.removal input{width:calc(100% - 8px);box-sizing:border-box}.removal button:disabled{opacity:.5;cursor:not-allowed}"
+const modal_styles =
+  ".modal-backdrop{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:var(--shadow);padding:16px}.removal{background:var(--paper);color:var(--ink);border:2px solid var(--edge);box-shadow:0 8px 32px var(--shadow);padding:20px 24px;width:min(480px,100%);max-height:100%;overflow:auto}.removal p{margin:0 0 12px;overflow-wrap:anywhere}.removal input{margin:0}.removal button:disabled{opacity:.5;cursor:not-allowed}"
 
 /// A modal dialog: a backdrop over the page that blocks the board behind it.
 fn modal(body: List(Element(Msg))) -> Element(Msg) {
@@ -1406,10 +1344,6 @@ fn modal(body: List(Element(Msg))) -> Element(Msg) {
     ),
   ])
 }
-
-/// A new id for a request, so the server can tell a repeat of it.
-@external(javascript, "./api.mjs", "request_id")
-fn request_id() -> String
 
 /// The project a live message is for: the one it names, else the root's.
 fn event_dir(model: Model, text: String) -> String {
@@ -1496,6 +1430,12 @@ fn task_view(model: Model, dir: String, id: String) -> Element(Msg) {
       case model.workspace {
         True -> a.attribute("workspace", "")
         False -> a.none()
+      },
+      // A dragged height is the task element's own; 0 leaves the CSS
+      // default.
+      case model.detail_height {
+        0 -> a.none()
+        h -> a.style("height", int.to_string(h) <> "px")
       },
       a.property(
         "live",
@@ -1614,7 +1554,8 @@ fn features_event(model: Model, text: String) -> Result(Model, Nil) {
       None,
       decode.optional(decode.int),
     )
-    decode.success(#(id, title, slot))
+    use state <- decode.optional_field("state", "proposed", decode.string)
+    decode.success(#(id, title, slot, state))
   }
   let without = fn(id) { list.filter(model.features, fn(f) { f.0 != id }) }
   case json.parse(text, decode.at(["features"], decode.list(feature))) {
@@ -1704,3 +1645,160 @@ fn task_event(model: Model, text: String, notify: Bool) -> Model {
       }
   }
 }
+
+const detail_key = "solace-board-detail"
+
+const detail_band_styles =
+  "
+main{display:flex;flex-direction:column;height:100%}
+.lanes-area{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.lanes-area{scrollbar-gutter:stable}
+.lanes-area > .lanes{margin:0}
+.lanes-area .board{margin:0}
+.lane-head{box-shadow:0 -10px 0 var(--paper)}
+.detail-band{flex:none;display:flex;flex-direction:column;border-top:2px solid var(--edge);background:var(--paper)}
+.detail-band > solace-task{flex:none;height:min(45dvh,calc(100dvh - 190px));min-height:0;overflow-y:auto;visibility:visible;transition:height .18s ease-out,visibility .18s}
+.detail-band.collapsed > solace-task{height:0 !important;overflow:hidden;visibility:hidden}
+.detail-band.resizing > solace-task{transition:none}
+.detail-resize{height:12px;margin:0;cursor:ns-resize;touch-action:none;display:flex;align-items:center;justify-content:center;color:var(--line)}
+.detail-resize::before{content:\"\";width:40px;height:4px;border-top:2px solid currentColor;border-bottom:2px solid currentColor}
+.detail-resize:hover::before,.detail-resize:focus-visible::before{color:var(--ink)}
+.detail-bar{display:flex;gap:8px;align-items:center;padding:10px 0}
+.detail-toggle{border:0;background:transparent;font-weight:700;font-size:17px;margin:0;padding:4px 10px}
+.detail-toggle:hover{background:var(--hover)}
+"
+
+/// The detail band's bar: the open task's title with the collapse control,
+/// the same glyph pattern as a lane's toggle. With no task open the bar is
+/// empty: there is nothing to collapse.
+fn detail_bar(model: Model) -> Element(Msg) {
+  case model.selected_card {
+    None -> h.header([a.class("detail-bar")], [])
+    Some(_) ->
+      h.header([a.class("detail-bar")], [
+        h.button(
+          [
+            a.class("detail-toggle"),
+            a.aria_expanded(!model.detail_collapsed),
+            e.on_click(ToggleDetail),
+          ],
+          [
+            h.text(case model.detail_collapsed {
+              True -> "▸ "
+              False -> "▾ "
+            }),
+            h.text(detail_title(model)),
+          ],
+        ),
+      ])
+  }
+}
+
+/// The open task's title, taken from the lane that stores it; its id when
+/// the task is not listed.
+fn detail_title(model: Model) -> String {
+  case model.selected_card {
+    None -> ""
+    Some(#(dir, id)) ->
+      case
+        list.find(model.lanes, fn(l: Lane) { l.dir == dir })
+        |> result.try(fn(l: Lane) { list.find(l.tasks, fn(t) { t.id == id }) })
+      {
+        Ok(t) -> t.title
+        Error(_) -> id
+      }
+  }
+}
+
+/// Asking to show a task opens the detail band if it was collapsed.
+fn expanded(model: Model) -> Model {
+  case model.detail_collapsed {
+    True -> {
+      store(detail_key, "0")
+      Model(..model, detail_collapsed: False)
+    }
+    False -> model
+  }
+}
+
+/// The band's height for a pointer at `y` in a drag that began at `start_y`
+/// with the band `start_h` high; the browser rounds the pixel.
+@external(javascript, "./api.mjs", "resize_height")
+fn resize_height(start_y: Float, start_h: Float, y: Float, max: Int) -> Int
+
+const detail_height_key = "solace-board-detail-height"
+
+/// The detail band keeps a readable height, and leaves the board room for
+/// its column bar: `max` comes from the browser.
+fn clamp_height(height: Int, max: Int) -> Int {
+  let min = detail_min()
+  case height {
+    _ if height < min -> min
+    _ if height > max -> max
+    _ -> height
+  }
+}
+
+/// Starts a drag of the detail band's handle: the browser keeps the pointer
+/// on the handle, so its pointermove and pointerup keep arriving as the
+/// pointer travels over the page, and answers the pointer's y, the band's
+/// height now, and the largest height that keeps the board's column bar on
+/// screen.
+@external(javascript, "./api.mjs", "begin_resize")
+fn begin_resize(
+  root: dynamic.Dynamic,
+  pointer_id: Int,
+  y: Float,
+) -> #(Float, Float, Int)
+
+/// The largest detail height that keeps the board's column bar on screen.
+@external(javascript, "./api.mjs", "detail_max")
+fn detail_max() -> Int
+
+/// The detail band's resize handle: a grip at its top edge, dragged with
+/// the pointer or stepped with the arrow keys, Home for the default height.
+/// It shows only when the band is open on a task: a collapsed band has no
+/// height to change.
+fn detail_resize(model: Model) -> Element(Msg) {
+  case model.selected_card, model.detail_collapsed {
+    Some(_), False ->
+      h.div(
+        [
+          a.class("detail-resize"),
+          a.role("separator"),
+          a.attribute("aria-orientation", "horizontal"),
+          a.attribute("aria-label", "Resize the task details"),
+          a.attribute("aria-valuenow", int.to_string(model.detail_height)),
+          a.attribute("tabindex", "0"),
+          a.title("Drag to resize, or press arrow keys"),
+          e.prevent_default(
+            e.on("pointerdown", {
+              use y <- decode.field("clientY", decode.float)
+              use id <- decode.field("pointerId", decode.int)
+              decode.success(ResizeStart(y, id))
+            }),
+          ),
+          e.on("pointermove", {
+            use y <- decode.field("clientY", decode.float)
+            decode.success(ResizeMove(y))
+          }),
+          e.on("pointerup", decode.success(ResizeEnd)),
+          e.on("pointercancel", decode.success(ResizeEnd)),
+          e.on("keydown", {
+            use key <- decode.field("key", decode.string)
+            decode.success(ResizeKey(key))
+          }),
+        ],
+        [],
+      )
+    _, _ -> h.text("")
+  }
+}
+
+/// The smallest detail height, shared with the drag's arithmetic.
+@external(javascript, "./api.mjs", "detail_min")
+fn detail_min() -> Int
+
+/// The band's task height now, for a key step from the CSS default.
+@external(javascript, "./api.mjs", "detail_now")
+fn detail_now(root: dynamic.Dynamic) -> Int

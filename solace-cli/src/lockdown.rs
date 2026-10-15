@@ -84,6 +84,8 @@ pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
             }
         }
     }
+    // `[build]`: the project's build recipe (D-131).
+    recipe::check(&v)?;
     Ok(v)
 }
 fn limit(v: &toml::Value) -> usize {
@@ -218,6 +220,11 @@ pub fn recover(root: &Path, store: &Store, _held: &[fs::File]) -> Result<(), Fai
             }
         }
     }
+    // An extract's record, and every record of its run, wait for `extract::ahead`,
+    // which settles all of the extract's projects together.
+    let waiting: HashSet<String> =
+        records.iter().filter(|(_, r)| extract::ahead::is_record(r)).filter_map(|(_, r)| r["run"].as_str().map(String::from)).collect();
+    records.retain(|(_, r)| !r["run"].as_str().is_some_and(|x| waiting.contains(x)));
     if records.iter().any(|(_, r)| r["task"].is_string() && r["run"].is_string()) {
         // A command's outer transaction never committed: the code files go back
         // to the store, which is the source of truth.
@@ -265,7 +272,7 @@ pub fn drop_records(root: &Path, rid: &str) -> Result<(), Failure> {
     for entry in fs::read_dir(&dir)? {
         let p = entry?.path();
         if p.extension().is_some_and(|e| e == "json")
-            && fs::read(&p).is_ok_and(|b| serde_json::from_slice::<Value>(&b).is_ok_and(|v| v["run"].as_str() == Some(rid)))
+            && fs::read(&p).is_ok_and(|b| serde_json::from_slice::<Value>(&b).is_ok_and(|v| v["run"].as_str() == Some(rid) && !extract::ahead::is_record(&v)))
         {
             fs::remove_file(p)?;
         }
@@ -674,7 +681,7 @@ fn missing(root: &Path, name: &str, paths: &[&str]) -> Out {
     } else {
         format!("; read takes files, not symbols: `grep {name}` searches files, `find {name}` searches code in the store")
     };
-    error("E6002", name, format!("no such file{symbol}"))
+    error("E6002", name, format!("{}{symbol}", not_found(root, name, "no such file")))
 }
 /// Saves `name`'s bytes before a change in `.solace/pending/`. In a board run
 /// the record is an undo record: it stays until the command's outer
@@ -781,6 +788,7 @@ fn file_change(
 ) -> Result<(PathBuf, Option<Vec<u8>>, Option<String>), Failure> {
     use drafts::Section;
     let p = reachable(root, name)?;
+    not_here(root, name)?;
     let t = tier(root, v, name, None);
     if t == "graph" {
         let module = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/")).unwrap().trim_end_matches(".gleam");
@@ -1005,13 +1013,60 @@ fn reachable(root: &Path, name: &str) -> Result<PathBuf, Failure> {
         } else {
             "; to change a project this task doesn't cover, ask the human with `task ask` rather than putting the change elsewhere"
         };
-        return error("E6006", name, format!("outside this project: another project's files are reached with `--project <folder>`{ask}"));
+        let form = match elsewhere(root, name, false) {
+            Some((dir, _, rest)) => format!("; it is {rest} in {dir}: add --project {dir}"),
+            None => String::new(),
+        };
+        return error("E6006", name, format!("outside this project: another project's files are reached with `--project <folder>`{form}{ask}"));
     }
     path(root, name)
 }
 
+/// The project a path names from the Solace root (`solace-cli/strategy/src/x`)
+/// when the path isn't in `root`'s own project: the project's folder, its
+/// root, and the path inside it (`.` for the folder itself). With `exists`,
+/// only when the path is there.
+fn elsewhere(root: &Path, name: &str, exists: bool) -> Option<(String, PathBuf, String)> {
+    if name.is_empty() || (root.join(name).exists() && !internal(root, name)) {
+        return None;
+    }
+    let top = scope::top(root);
+    let here = scope::dir(&top, root);
+    let mut members = workspace::members(&top).ok()?;
+    members.sort_by_key(|m| std::cmp::Reverse(m.len()));
+    members.into_iter().filter(|m| m != "." && *m != here).find_map(|m| {
+        let rest = if name == m { ".".to_string() } else { name.strip_prefix(&format!("{m}/"))?.to_string() };
+        let there = scope::path(&top, &m);
+        (!exists || path(&there, &rest).ok()?.exists()).then_some((m, there, rest))
+    })
+}
+
+/// A refusal for a path that isn't there: what it was resolved against and,
+/// when another project has it, the form that reaches it.
+fn not_found(root: &Path, name: &str, what: &str) -> String {
+    let mut s = format!("{what} (paths are relative to {})", scope::dir(&scope::top(root), root));
+    if let Some((dir, _, rest)) = elsewhere(root, name, true) {
+        s += &format!("; it is {rest} in {dir}: add --project {dir}");
+    }
+    s
+}
+
+/// A change to a path that isn't in `root` but names another project from the
+/// Solace root is refused: making it here would put a copy inside this project.
+fn not_here(root: &Path, name: &str) -> Result<(), Failure> {
+    if fs::symlink_metadata(root.join(name)).is_err()
+        && let Some((dir, _, rest)) = elsewhere(root, name, false)
+    {
+        let base = scope::dir(&scope::top(root), root);
+        return error("E6002", name, format!("no such file (paths are relative to {base}); it is {rest} in {dir}: add --project {dir}"));
+    }
+    Ok(())
+}
+
 /// `move <from> <to> [--to-project <folder>]`: the source, the destination, and
 /// the destination's project, `root` itself without `--to-project` (D-84).
+/// `--to-project` takes the folder as `--project` does: from the Solace root,
+/// or `../x` from this project (D-126 point 3).
 pub fn move_args<'a>(root: &Path, a: &[&'a str]) -> Result<(&'a str, &'a str, PathBuf), Failure> {
     let (mut operands, mut project) = (vec![], None);
     let mut rest = a[1..].iter();
@@ -1023,12 +1078,14 @@ pub fn move_args<'a>(root: &Path, a: &[&'a str]) -> Result<(&'a str, &'a str, Pa
         }
     }
     let [from, to] = operands[..] else { return usage("move <from> <to> [--to-project <folder>]") };
-    let Some(dir) = project.map(project_dir) else { return Ok((from, to, root.to_path_buf())) };
+    let Some(dir) = project else { return Ok((from, to, root.to_path_buf())) };
     let top = scope::top(root);
-    if !workspace::members(&top)?.iter().any(|m| m == dir) {
-        return error("E6007", dir, "not a project under this Solace root");
+    let members = workspace::members(&top)?;
+    let dir = project_folder(&top, Some(root), dir, &members);
+    if !members.iter().any(|m| *m == dir) {
+        return error("E6007", dir.as_str(), "not a project under this Solace root");
     }
-    Ok((from, to, scope::path(&top, dir)))
+    Ok((from, to, scope::path(&top, &dir)))
 }
 
 /// Whether two folders are the same project.
@@ -1134,6 +1191,8 @@ pub fn move_files(src: &Path, sv: &toml::Value, from: &str, dst: &Path, dv: &tom
         return error("E6002", "move", "name a file or folder inside the project on both sides");
     }
     let (p, q) = (reachable(src, &from)?, reachable(dst, &to)?);
+    not_here(src, &from)?;
+    not_here(dst, &to)?;
     let same = same_project(src, dst);
     let shown = |root: &Path, name: &str| if same { name.to_string() } else { format!("{}: {name}", scope::dir(&scope::top(root), root)) };
     let (shown_from, shown_to) = (shown(src, &from), shown(dst, &to));
@@ -1342,6 +1401,33 @@ pub fn dispatch(
         if paths.is_empty() {
             paths.push(".");
         }
+        // A path from the Solace root into another project is read there, as
+        // with `--project`; each reply is headed with the project.
+        if matches!(a[0], "read" | "files") && paths.iter().any(|p| elsewhere(root, &file_name(Path::new(p)), true).is_some()) {
+            return Some((|| {
+                let mut out = String::new();
+                for p in &paths {
+                    let name = file_name(Path::new(p));
+                    let left = budget.saturating_sub(out.len());
+                    match elsewhere(root, &name, true) {
+                        Some((dir, there, rest)) => {
+                            let (s, sv) = (Store::peek(&there)?, settings(&there)?);
+                            let mut line = vec![a[0], rest.as_str()];
+                            line.extend(&flags);
+                            out += &format!("==== {rest} ({dir}) ====\n");
+                            out += &dispatch(&s, &sv, &line, input, old, left).unwrap()?;
+                        }
+                        None => {
+                            let mut line = vec![a[0], name.as_str()];
+                            line.extend(&flags);
+                            out += &format!("==== {name} ====\n");
+                            out += &dispatch(store, v, &line, input, old, left).unwrap()?;
+                        }
+                    }
+                }
+                Ok(out)
+            })());
+        }
         return Some((|| {
             if paths.len() > 1 && a[0] == "write" {
                 return usage("write <path> changes one file; for several, `write` with no path takes a file patch (`*** Update File: <path>` sections)");
@@ -1409,6 +1495,7 @@ pub fn dispatch(
                         if t == "protected" {
                             return error("E6002", &name, "protected files change only through a human-approved proposal: in a work run, `write` it with the exact new text");
                         }
+                        not_here(root, &name)?;
                         return write(root, v, &name, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old);
                     }
                     "remove" => {
@@ -1417,7 +1504,7 @@ pub fn dispatch(
                                 error::<()>("E6002", &name, format!("only watched and unwatched files can be removed, and never gleam.toml; {t}")).err(),
                             );
                         } else if !p.is_file() {
-                            refused.extend(error::<()>("E6002", &name, "no such file").err());
+                            refused.extend(error::<()>("E6002", &name, not_found(root, &name, "no such file")).err());
                         } else {
                             doomed.push((name, p));
                         }
@@ -1448,6 +1535,13 @@ pub fn dispatch(
             }
             Ok(trim_output(&out, budget))
         })());
+    }
+    // D-131: `build plan` reads every project's build recipe; it runs nothing.
+    if matches!(a, ["build", "plan"]) {
+        return Some(recipe::plan_text(&scope::top(root)));
+    }
+    if a[0] == "build" && a.len() > 1 {
+        return Some(usage("build takes no arguments; `build plan` lists every project's build recipe, in order"));
     }
     if matches!(a[0], "build" | "format" | "run") {
         return Some((|| {
@@ -1559,6 +1653,12 @@ pub const GREP_SYNTAX: &str = "grep takes literal text, already case-insensitive
 /// (D-119). The reply stops at a whole file within `budget`.
 fn grep(root: &Path, v: &toml::Value, query: &str, budget: usize) -> Out {
     let (raw, within, context) = grep_options(query.trim())?;
+    // `--in` from the Solace root into another project searches there.
+    if let Some((dir, there, rest)) = within.and_then(|p| elsewhere(root, &file_name(Path::new(p)), true)) {
+        let more = if context > 0 { format!(" --context {context}") } else { String::new() };
+        let out = grep(&there, &settings(&there)?, &format!("{raw} --in {rest}{more}"), budget)?;
+        return Ok(format!("==== {rest} ({dir}) ====\n{out}"));
+    }
     let query = one_quoted(raw);
     if query.is_empty() {
         return Err(Failure("grep: give the text to search for\n\nRun `solace help` for usage.".into(), 2));
@@ -1595,13 +1695,14 @@ fn grep(root: &Path, v: &toml::Value, query: &str, budget: usize) -> Out {
         // The files left out, named so the agent narrows (D-119 point 2): the
         // grammar follows the count, and a budget that fits no file says so.
         // When `--in` already names the only place searched, narrowing is
-        // circular, so the tail points at the rest of the call and `--context`.
+        // circular: the tail points at the rest of the call, and names
+        // `--context` only when the agent used it.
         let left = hits.len() - shown;
         let more = if left == 1 { "file matches" } else { "files match" };
-        let narrow = if within.is_some() {
-            "run grep alone in the call, or drop `--context`"
-        } else {
-            "narrow with `--in <path>`"
+        let narrow = match (within, context) {
+            (Some(_), 0) => "run grep alone in the call",
+            (Some(_), _) => "run grep alone in the call, or drop `--context`",
+            (None, _) => "narrow with `--in <path>`",
         };
         out += &if shown == 0 {
             format!("… the budget fits no file; {} {more}, {narrow}.\n", left)
@@ -1649,7 +1750,7 @@ fn grep_in(root: &Path, v: &toml::Value, p: &str, rows: &mut Vec<(String, String
     }
     let target = reachable(root, &name)?;
     if !target.exists() {
-        return error("E6002", &name, "no such file or folder");
+        return error("E6002", &name, not_found(root, &name, "no such file or folder"));
     }
     let held = |t: &str| t == "watched" || t == "protected";
     if target.is_dir() {
@@ -1770,6 +1871,50 @@ mod tests {
     }
     fn call(s: &Store, v: &toml::Value, args: &[&str], text: &str, old: Option<&str>) -> Out {
         dispatch(s, v, args, &mut || Ok(text.into()), old, 1000).unwrap()
+    }
+    /// A path from the Solace root reads another project's file; a write to it
+    /// is refused with the `--project` form, and E6002 names the base.
+    #[test]
+    fn a_root_path_reads_through_another_project() {
+        let root = Scratch::new().with(&[
+            ("solace.toml", "projects = [\"a\", \"b\"]\n"),
+            ("a/gleam.toml", "name = \"alpha\"\nversion = \"1.0.0\"\n"),
+            ("a/src/app.gleam", "pub fn one() -> Int {\n  1\n}\n"),
+            ("b/gleam.toml", "name = \"beta\"\nversion = \"1.0.0\"\n"),
+            ("b/src/plan.gleam", "pub fn answer() -> Int {\n  42\n}\n"),
+            ("b/docs/notes.md", "needle here\n"),
+        ]);
+        for d in ["a", "b"] {
+            import(&root.join(d)).unwrap();
+        }
+        let s = Store::at(&root.join("a")).unwrap();
+        let v = settings(&s.root).unwrap();
+        let r = call(&s, &v, &["read", "b/docs/notes.md"], "", None).unwrap();
+        assert!(r.starts_with("==== docs/notes.md (b) ====\n") && r.contains("needle here"), "{r}");
+        let g = call(&s, &v, &["grep", "needle", "--in", "b/docs"], "", None).unwrap();
+        assert!(g.starts_with("==== docs (b) ====\n") && g.contains("docs/notes.md"), "{g}");
+        let f = call(&s, &v, &["files", "b/docs"], "", None).unwrap();
+        assert!(f.starts_with("==== docs (b) ====\n") && f.contains("notes.md"), "{f}");
+        // Writes stay in their project: the refusal names the form that works.
+        let w = call(&s, &v, &["write", "b/docs/new.md"], "x\n", None).unwrap_err().0;
+        assert!(w.contains("E6002") && w.contains("(paths are relative to a); it is docs/new.md in b: add --project b"), "{w}");
+        assert!(!s.root.join("b").exists());
+        // A move to or from a root path is refused the same way, and moves nothing.
+        fs::write(s.root.join("x.md"), "x\n").unwrap();
+        let m = call(&s, &v, &["move", "x.md", "b/docs/x.md"], "", None).unwrap_err().0;
+        assert!(m.contains("E6002") && m.contains("it is docs/x.md in b: add --project b"), "{m}");
+        let m = call(&s, &v, &["move", "b/docs/notes.md", "y.md"], "", None).unwrap_err().0;
+        assert!(m.contains("(paths are relative to a); it is docs/notes.md in b: add --project b"), "{m}");
+        assert!(s.root.join("x.md").exists() && !s.root.join("b").exists());
+        // So is a file patch's `*** Add File:`.
+        let patch = "*** Begin Patch\n*** Add File: b/docs/new.md\n+x\n*** End Patch\n";
+        let w = call(&s, &v, &["write"], patch, None).unwrap_err().0;
+        assert!(w.contains("it is docs/new.md in b: add --project b"), "{w}");
+        assert!(!s.root.join("b").exists());
+        let e = call(&s, &v, &["remove", "b/docs/notes.md"], "", None).unwrap_err().0;
+        assert!(e.contains("no such file (paths are relative to a); it is docs/notes.md in b: add --project b"), "{e}");
+        let e = call(&s, &v, &["read", "docs/notes.md"], "", None).unwrap_err().0;
+        assert!(e.contains("E6002") && e.contains("no such file (paths are relative to a)") && !e.contains("it is"), "{e}");
     }
     #[test]
     fn a1_tiers_golden() {
@@ -2006,6 +2151,11 @@ mod tests {
         let got = grep(&s.root, &v, "needle --in docs --context 1", 500).unwrap();
         assert_eq!(got.matches("docs/g").count(), 1, "{got}");
         assert!(got.ends_with("… 2 more files match, not shown; run grep alone in the call, or drop `--context`.\n"), "{got}");
+        // `--in` without `--context`: the tail names only the rest of the call.
+        let got = grep(&s.root, &v, "needle --in docs", 100).unwrap();
+        assert_eq!(got, "… the budget fits no file; 3 files match, run grep alone in the call.\n");
+        let got = grep(&s.root, &v, "needle --in docs", 500).unwrap();
+        assert!(got.ends_with("… 2 more files match, not shown; run grep alone in the call.\n"), "{got}");
     }
     /// D-109: `write <path>` refuses patch text and a drastic shrink, and its
     /// reply gives the file's lines before and after.

@@ -25,10 +25,11 @@ doesn't route); a click with a modifier key held, or loading the address
 directly, reaches the shell at that address, which resolves it the same way
 and replaces it in the history. For a task the shell asks `GET /tasks/find/{id}`:
 
-- on the board (not archived): the Board page shows, and `<solace-board>` gets
-  the task in its `focus` property, `{dir, id, n}`;
-- archived: the Strategy page shows, and `<solace-strategy>` gets it the same
-  way and opens it on its Tasks tab;
+- on the board (not archived, in a project): the Board page shows, and
+  `<solace-board>` gets the task in its `focus` property, `{dir, id, n}`;
+- archived, or with no project of the workspace (D-129): the Strategy page
+  shows, and `<solace-strategy>` gets it the same way and opens it on its
+  Tasks tab;
 - no such task: the page stays, and a toast at the bottom says "Task does not
   exist" for 4 s. A lookup that fails (the network, or another server error)
   says "Couldn't look up the task. Try again." instead, since the task may
@@ -77,7 +78,9 @@ bun build src/main.mjs --outfile priv/app.js --minify --target browser
 
 In Solace, use run install, then run build-release. The frontend needs its own
 @dagrejs/dagre dependency because the contract view's JavaScript FFI is copied
-into the frontend build tree.
+into the frontend build tree. The `@codemirror/*` packages are there for the
+same reason: they are the markdown editor, `<solace-md-editor>`, in
+components' `md_editor.mjs`.
 
 ## Tests
 
@@ -112,4 +115,16 @@ textarea; typing shows "n of m" and a card title is marked; marks follow lane
 and page scrolling and are clipped to the lane; cards still click and drag,
 and stay unselectable; Enter/Shift+Enter step and scroll; Esc closes and
 clears; a query with no matches clears the marks; a live board update and a
-switch between pages re-run the search.
+switch between pages re-run the search; collapsing a lane, closing a note,
+transcript entry, plan transcript or New body, and a task's details closing
+clear their marks and the count.
+
+The markdown editor needs a DOM too. Check it by hand on a task's description
+and note box and on Strategy's vision, a feature, a milestone and the plan box:
+typing styles headings, bold, code, quotes, lists and links, and their marks
+show only on the cursor's lines; each toolbar tool works on a selection and on
+none; pasting, dropping and picking an image uploads it once and shows it in
+place; undo works; Ctrl+Enter sends in Plan without a new line; Ctrl+F opens
+the find bar from the editor; Tab leaves the editor; a screen reader reads its
+label; dark mode colours it; the cursor stays put while the board's live
+updates arrive; and text can be dragged within the editor.

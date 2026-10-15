@@ -25,6 +25,19 @@ fn a_task_is_written_when_the_log_cannot_take_it() {
     assert_eq!(task(&s.root, t["id"].as_str().unwrap()).unwrap()["title"], "Edited");
 }
 
+/// D-129: a home the root lists is a project, one it doesn't is not, and a
+/// project list that can't be read counts every home as a project.
+#[test]
+fn a_home_is_a_project_unless_the_root_lists_otherwise() {
+    let root = testing::Scratch::new();
+    fs::create_dir_all(root.join("a")).unwrap();
+    fs::write(root.join("solace.toml"), "projects = [\"a\"]\n").unwrap();
+    assert!(!homeless(&root, "a"));
+    assert!(homeless(&root, "b"));
+    fs::write(root.join("solace.toml"), "projects = 5\n").unwrap();
+    assert!(!homeless(&root, "b"));
+}
+
 /// D-91: investigate, work and discuss briefs carry the vision, cut at a line
 /// end within the cap; a review's doesn't, and no vision adds nothing.
 #[test]
@@ -374,11 +387,20 @@ fn a_pending_changes_message_adds_nothing_after_a_revert() {
     let msg = json!({"id": id, "kind": "changes", "task": tid, "run": "r1",
         "changes": [{"entity": "symbol:1", "name": "geo.side", "run": "r1"}]});
     fs::write(inbox.join(format!("{id}.json")), msg.to_string().as_bytes()).unwrap();
-    // Cancel reverts the task: its rows go, so it has no changes.
+    // Cancel reverts the task: its rows go, so it has no changes. It also clears
+    // the task's conversation on a thread of its own; with no task server to
+    // order the two, that write and the drain's would race, so the drain waits
+    // for it (the conversation gone).
     end_runs(&mut t, "finished");
+    t["conversation"] = json!({"home": tid.as_str()});
     tasks::put(&s, &t).unwrap();
     api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap();
     assert!(changes_of(&s, &task(&s.root, &tid).unwrap()).unwrap().is_empty());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !task(&s.root, &tid).unwrap()["conversation"].is_null() {
+        assert!(std::time::Instant::now() < deadline, "the conversation was never cleared");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     // Applying the pending message adds nothing.
     tasks::drain(&top);
     let t = task(&s.root, &tid).unwrap();
@@ -466,9 +488,11 @@ fn a_canceled_task_goes_back_to_the_backlog() {
     assert!(archived["archivedTime"].is_u64());
     let back = act("to_backlog").unwrap();
     assert_eq!((back["column"].as_str(), &back["archivedTime"], &back["closedTime"]), (Some("backlog"), &Value::Null, &cancelled["closedTime"]));
+    assert!(t["createdTime"].is_u64());
+    assert_eq!(back["createdTime"], t["createdTime"], "D-130: bringing it back keeps when it was created");
     assert_eq!(back["title"], "Shapes");
     let last = back["notes"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!((last["author"].as_str(), last["text"].as_str()), (Some("solace"), Some("The human brought this task back from canceled to backlog.")));
+    assert_eq!((last["author"].as_str(), last["text"].as_str()), (Some("solace"), Some("The human brought this task back from Canceled to Backlog.")));
     let mut done = back.clone();
     done["column"] = json!("complete");
     assert!(allowed(&flow(&s.root).unwrap(), &done).is_empty(), "complete offers nothing");
@@ -942,7 +966,7 @@ fn briefs_name_unfinished_dependencies() {
     put("f", &home, "planning", &["b", "c"]);
     put("n", &home, "backlog", &[]);
     let w = waiting_on(&top, "t");
-    for part in ["Depends on:\n", "- a Task a (assigned, in lib) — unfinished", "- b Task b (complete)\n", "- c Task c (canceled)\n", WAITING] {
+    for part in ["Depends on:\n", "- a Task a (Assigned, in lib) — unfinished", "- b Task b (Complete)\n", "- c Task c (Canceled)\n", WAITING] {
         assert!(w.contains(part), "{part} missing from:\n{w}");
     }
     assert_eq!((waiting_on(&top, "f"), waiting_on(&top, "n")), (String::new(), String::new()));
@@ -954,7 +978,7 @@ fn briefs_name_unfinished_dependencies() {
     assert!(!finished.contains("Depends on:") && !finished.contains(WAITING), "{finished}");
     // A task brought back to the backlog counts as unfinished again.
     put("b", &home, "backlog", &[]);
-    assert!(waiting_on(&top, "f").contains("- b Task b (backlog) — unfinished"));
+    assert!(waiting_on(&top, "f").contains("- b Task b (Backlog) — unfinished"));
 }
 
 #[test]
@@ -1075,7 +1099,9 @@ fn revert_restores_every_project_before_checking_any() {
 }
 
 /// D-123: a run starts in the project of its task that holds the most
-/// symbols the task names; on a tie, or with none, at home.
+/// symbols the task names; on a tie, or with none, at home. A resumed
+/// conversation keeps its recorded project; one saved before projects were
+/// recorded restarts at the home, where its session began.
 #[test]
 fn a_run_starts_where_the_named_symbols_are() {
     let root = testing::Scratch::new().with(&[
@@ -1094,6 +1120,9 @@ fn a_run_starts_where_the_named_symbols_are() {
     assert_eq!(start_project(&a, &t("app.one and plan.answer")), "a", "a tie stays home");
     assert_eq!(start_project(&a, &t("No names here")), "a");
     assert_eq!(start_project(&a, &json!({"title": "plan.answer"})), "a", "outside its scope");
+    assert_eq!(run_project(&json!({"project": "a"}), true, &a, &t("Change `plan.answer`.")), "a", "a resumed run keeps its recorded project");
+    assert_eq!(run_project(&json!({}), true, &a, &t("Change `plan.answer`.")), "a", "a conversation saved before projects were recorded restarts at the home");
+    assert_eq!(run_project(&json!({}), false, &a, &t("Change `plan.answer`.")), "b", "a fresh run starts where its symbols are");
 }
 
 /// D-103: a moved symbol's heading names the project that gained it, not
@@ -1140,4 +1169,49 @@ fn restoring_an_added_file_removes_the_folders_it_leaves_empty() {
     restore(&s, &[("file:src/ui/ffi/x.mjs".to_string(), json!(null))]).unwrap();
     assert!(!s.root.join("src/ui").exists());
     assert!(s.root.join("src/app.gleam").exists());
+}
+
+/// D-127: while its agent works, a task's scope widens, and the run claims
+/// the added project, but doesn't narrow.
+#[test]
+fn a_working_tasks_scope_widens_but_does_not_narrow() {
+    let dirs = ["web", "components", "busy", "free"];
+    let mut files = vec![("solace.toml".to_string(), "projects = [\"web\", \"components\", \"busy\", \"free\"]\n".to_string())];
+    for d in dirs {
+        files.push((format!("{d}/gleam.toml"), format!("name = \"{d}\"\nversion = \"1.0.0\"\n")));
+        files.push((format!("{d}/src/{d}.gleam"), "pub fn f() -> Int {\n  1\n}\n".to_string()));
+    }
+    let files: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let root = testing::Scratch::new().with(&files);
+    for d in dirs {
+        crate::import(&root.join(d)).unwrap();
+    }
+    let (web, busy) = (open(&root.join("web")).unwrap(), open(&root.join("busy")).unwrap());
+    let mut other = api(&busy.root, "POST", "/tasks", json!({"title": "Busy"})).unwrap();
+    other["runs"] = json!([{"id": "r0", "kind": "work", "state": "running"}]);
+    tasks::put(&busy, &other).unwrap();
+    let mut t = api(&web.root, "POST", "/tasks", json!({"title": "Wide"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let created = t["createdTime"].clone();
+    t["scope"] = json!(["components", "web"]);
+    t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
+    tasks::put(&web, &t).unwrap();
+    let url = format!("/tasks/{tid}/scope");
+    let narrow = api(&web.root, "POST", &url, json!({"scope": ["web"]})).unwrap_err().0;
+    assert!(narrow.contains("E7003") && narrow.contains("you can add projects now"), "{narrow}");
+    let held = api(&web.root, "POST", &url, json!({"scope": ["busy", "components", "web"]})).unwrap_err().0;
+    assert!(held.contains("E7005"), "{held}");
+    let wide = api(&web.root, "POST", &url, json!({"scope": ["components", "free", "web"]})).unwrap();
+    assert_eq!(wide["scope"], json!(["components", "free", "web"]));
+    // Waiting on a question, it narrows again.
+    let mut t = task(&web.root, &tid).unwrap();
+    t["runs"][0]["state"] = json!("waiting");
+    tasks::put(&web, &t).unwrap();
+    assert_eq!(api(&web.root, "POST", &url, json!({"scope": ["web"]})).unwrap()["scope"], json!(["web"]));
+    // D-130: once the run ends, a move to another project keeps when the task was created.
+    let mut t = task(&web.root, &tid).unwrap();
+    t["runs"][0]["state"] = json!("ended");
+    tasks::put(&web, &t).unwrap();
+    let moved = api(&web.root, "POST", &url, json!({"scope": ["components"]})).unwrap();
+    assert_eq!((&moved["home"], &moved["createdTime"]), (&json!("components"), &created));
 }

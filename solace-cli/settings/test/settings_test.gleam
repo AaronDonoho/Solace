@@ -3,6 +3,7 @@ import gleam/string
 import gleeunit
 import lustre/element
 import settings
+import solace_task
 
 pub fn main() -> Nil {
   gleeunit.main()
@@ -23,7 +24,8 @@ pub fn the_page_holds_the_dark_mode_switch_test() {
     element.to_string(
       settings.view(settings.Model(dark: True, unsubscribe: None)),
     )
-  assert string.contains(page, "<h1>Settings</h1>")
+  // The menu names the page, so it has no Settings heading of its own.
+  assert !string.contains(page, "<h1>Settings</h1>")
   assert string.contains(page, "Appearance</h2>")
   assert string.contains(page, element.to_string(settings.theme_control(True)))
 }
@@ -48,4 +50,32 @@ pub fn listening_follows_the_element_in_and_out_of_the_page_test() {
   assert settings.update(listening, settings.Connected).0 == listening
   assert settings.update(listening, settings.Disconnected).0 == off
   assert settings.update(off, settings.Disconnected).0 == off
+}
+
+/// The controls' styles name no color of their own, and the page uses them.
+pub fn control_styles_use_only_tokens_test() {
+  let styles = solace_task.control_styles
+  assert !string.contains(styles, "#")
+  assert !string.contains(styles, "rgb")
+  assert !string.contains(styles, "hsl")
+  assert string.contains(styles, "option,optgroup{background:var(--paper)")
+  let page =
+    element.to_string(
+      settings.view(settings.Model(dark: True, unsubscribe: None)),
+    )
+  assert string.contains(page, "option,optgroup{background:var(--paper)")
+}
+
+/// The settings section fills the page: it has no width cap of its own.
+pub fn section_fills_the_page_test() {
+  let page =
+    element.to_string(
+      settings.view(settings.Model(dark: True, unsubscribe: None)),
+    )
+  let assert [css, ..] = page |> string.split("</style>")
+  assert string.contains(
+    css,
+    ".settings section{background:var(--paper);border:1px solid var(--edge);padding:12px 20px}",
+  )
+  assert !string.contains(css, ".settings section{max-width")
 }

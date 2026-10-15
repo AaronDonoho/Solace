@@ -8,7 +8,7 @@ pub fn lock(root: &Path) -> Result<fs::File, Failure> {
     lock_file(&root.join(".solace/lock"))
 }
 /// The project lock when it is free right now; the board's poll skips a busy project.
-fn try_lock(root: &Path) -> Option<fs::File> {
+pub(crate) fn try_lock(root: &Path) -> Option<fs::File> {
     try_lock_file(&root.join(".solace/lock")).ok()?
 }
 pub fn open(root: &Path) -> Result<Store, Failure> {
@@ -40,18 +40,39 @@ fn task_dir(root: &Path, id: &str) -> Result<PathBuf, Failure> {
     let _ = task_path(root, id)?;
     Ok(root.join(".solace/board").join(id))
 }
-/// A task whose home is the project `root`.
+/// A task whose home is the project `root`. A task whose home is no project
+/// (D-129) is opened from the root, which stores it, and says `noProject`.
 pub(super) fn task(root: &Path, id: &str) -> Result<Value, Failure> {
     let path = task_path(root, id)?;
     let top = scope::top(root);
     if !path.exists() {
         return err("E7001", "unknown task");
     }
-    let t = read_task(&top, &path)?;
-    if t["home"] != scope::dir(&top, root) {
-        return err("E7001", "unknown task");
+    let mut t = read_task(&top, &path)?;
+    let dir = scope::dir(&top, root);
+    if t["home"] != dir {
+        if dir != "." || !homeless(&top, t["home"].as_str().unwrap_or("")) {
+            return err("E7001", "unknown task");
+        }
+        t["noProject"] = json!(true);
     }
     Ok(t)
+}
+/// Whether `home` names no project of the workspace (D-129): the task at that
+/// home is in no lane, and opening it at its home would create a store there.
+/// A project list that can't be read counts every home as a project.
+pub(super) fn homeless(top: &Path, home: &str) -> bool {
+    workspace::members(top).is_ok_and(|ms| !ms.iter().any(|m| m == home))
+}
+/// The project to open task `t` from: its home, or the root when its home is
+/// no project (D-129).
+pub(super) fn task_root(top: &Path, t: &Value) -> PathBuf {
+    let home = t["home"].as_str().unwrap_or(".");
+    if homeless(top, home) {
+        top.to_path_buf()
+    } else {
+        scope::path(top, home)
+    }
 }
 /// The tasks whose home is the project `root`, in rank order.
 pub(super) fn tasks(root: &Path) -> Result<Vec<Value>, Failure> {
@@ -68,12 +89,18 @@ pub(super) fn all_tasks(top: &Path) -> Result<Vec<Value>, Failure> {
     }
     // Each home's workflow is read at most once per listing.
     let mut flows = HashMap::new();
+    let members = workspace::members(top).unwrap_or_default();
     for entry in fs::read_dir(dir)? {
         let p = entry?.path();
         if p.extension().is_some_and(|x| x == "json") {
             // One unreadable file (empty after a crash) must not hide the rest.
             match read_task_with(top, &p, &mut flows) {
-                Ok(t) => out.push(t),
+                Ok(mut t) => {
+                    if !members.iter().any(|m| m == t["home"].as_str().unwrap_or("")) {
+                        t["noProject"] = json!(true);
+                    }
+                    out.push(t);
+                }
                 Err(e) => eprintln!("skipping task file {}: {}", p.display(), e.0),
             }
         }
@@ -112,6 +139,9 @@ fn read_task_with(top: &Path, path: &Path, flows: &mut HashMap<PathBuf, Value>) 
     }
     // Tasks saved before D-87 have no links; one already in a final column takes the
     // time it last finished, or else its file's, as when it closed.
+    let modified = || {
+        fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
+    };
     if t.get("closedTime").is_none() {
         for k in ["feature", "milestone", "closedTime", "archivedTime"] {
             t[k] = Value::Null;
@@ -122,11 +152,15 @@ fn read_task_with(top: &Path, path: &Path, flows: &mut HashMap<PathBuf, Value>) 
         if column(&workflow(&home)?, &t)["final"] == true {
             let ended = t["runs"].as_array().into_iter().flatten().filter_map(|r| r["ended"].as_u64());
             let last = ended.chain(t["finished"]["time"].as_u64()).max();
-            let modified = || {
-                fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
-            };
             t["closedTime"] = json!(last.unwrap_or_else(modified));
         }
+    }
+    // Tasks saved before D-130 have no createdTime: the earlier of their first note's
+    // time and their first run's start, or else their file's.
+    if t.get("createdTime").is_none() {
+        let first_note = t["notes"][0]["time"].as_u64();
+        let first_run = t["runs"][0]["started"].as_u64();
+        t["createdTime"] = json!(first_note.into_iter().chain(first_run).min().unwrap_or_else(modified));
     }
     Ok(t)
 }
@@ -599,11 +633,12 @@ pub fn scope_stores(s: &Store, t: &Value) -> Result<Vec<(String, Store)>, Failur
         .collect()
 }
 /// A new task in `column`, with nothing done on it yet. Its changes are computed
-/// from the scope projects' stores (D-77 point 4), so the task holds none.
+/// from the scope projects' stores (D-77 point 4), so the task holds none. Its
+/// `createdTime` is set here, once (D-130).
 pub fn new_task(title: &str, body: &str, column: &Value, rank: f64) -> Value {
     json!({"id":unique_id(),"title":title,"body":body,"links":[],"column":column,"rank":rank,"paused_from":null,"attention":null,
         "stamps":{},"model":null,"notes":[],"questions":[],"runs":[],
-        "feature":null,"milestone":null,"dependsOn":[],"closedTime":null,"archivedTime":null})
+        "feature":null,"milestone":null,"dependsOn":[],"createdTime":now(),"closedTime":null,"archivedTime":null})
 }
 /// Records what a command changed in `s` on the task stored in `home`. The rows
 /// commit inside the command's outer transaction (D-77 point 7); the task's
@@ -1078,6 +1113,9 @@ pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failu
 fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap().to_string();
     let projects = scope_stores(s, t)?;
+    // An extract a stopped run left between its projects' commits is finished or
+    // rolled back first; one changed on both sides since waits for a human.
+    extract::ahead::recover(&projects.iter().map(|(_, st)| st.root.clone()).collect::<Vec<_>>())?;
     // Under the locks, what a stopped run left half-written becomes the task's own rows first.
     for (_, st) in &projects {
         lockdown::recover(&st.root, st, &[])?;
@@ -1263,7 +1301,13 @@ pub(super) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize)>,
 /// under them, so a task that has left the final column since is not settled, and
 /// it can run again: approving and dropping records twice changes nothing.
 pub(super) fn settle_final(top: &Path, tid: &str) -> Result<(), Failure> {
-    let home = scope::path(top, task(top, tid)?["home"].as_str().unwrap_or("."));
+    // A task with no project (D-129) has no scope to settle, and settling it
+    // at its home would create a store there.
+    let t = task(top, tid)?;
+    if t["noProject"] == true {
+        return Ok(());
+    }
+    let home = scope::path(top, t["home"].as_str().unwrap_or("."));
     let _held = guard(&home, vec!["tasks", tid, "settle"], &json!({}))?;
     let t = task(&home, tid)?;
     if column(&flow(&home)?, &t)["final"] == true {
@@ -1626,15 +1670,10 @@ fn claim_projects(root: &Path, w: &Value, tid: &Value, dirs: &[String]) -> Resul
     }
     Ok(())
 }
-/// `POST /tasks/{id}/scope` (D-61): the human changes a task's projects while
-/// no agent of it is working: between runs, paused, or waiting on a question.
+/// `POST /tasks/{id}/scope` (D-61, D-127): the human adds projects to a task at
+/// any time, and removes them while no agent of it is working: between runs,
+/// paused, or waiting on a question or a discussion reply.
 fn set_scope(s: &Store, w: &Value, mut t: Value, body: &Value) -> Result<(Value, After), Failure> {
-    if t["runs"].as_array().unwrap().iter().any(|r| r["state"] == "running") && t["paused_from"].is_null() {
-        return err(
-            "E7003",
-            "an agent is working on this task; change its projects between runs, while it is paused, or while it waits on a question",
-        );
-    }
     if column(w, &t)["final"] == true {
         return err("E7004", "final task");
     }
@@ -1642,6 +1681,13 @@ fn set_scope(s: &Store, w: &Value, mut t: Value, body: &Value) -> Result<(Value,
     let home = scope::dir(&top, &s.root);
     let old = scope::of(&t, &home);
     let new = checked_scope(&s.root, &body["scope"])?;
+    let working = t["runs"].as_array().unwrap().iter().any(|r| r["state"] == "running") && t["paused_from"].is_null();
+    if working && old.iter().any(|d| !new.contains(d)) {
+        return err(
+            "E7003",
+            "an agent is working on this task; you can add projects now, and remove them between runs, while it is paused, or while it waits on a question",
+        );
+    }
     // Takes no lock (D-77 point 5): a paused run could still record in a project
     // after this check and before it leaves the scope. The project's lock goes
     // with it; telling apart which task changed what is later work.
@@ -1651,7 +1697,7 @@ fn set_scope(s: &Store, w: &Value, mut t: Value, body: &Value) -> Result<(Value,
             return err("E7013", format!("this task has changed {d}; undo its changes before taking {d} out of its projects"));
         }
     }
-    // A paused or waiting run already holds its projects; one added joins them now.
+    // An open work run already holds its projects; one added joins them now.
     if t["runs"].as_array().unwrap().iter().any(|r| r["kind"] == "work" && r["state"] != "ended") {
         let added: Vec<String> = new.iter().filter(|d| !old.contains(d)).cloned().collect();
         claim_projects(&s.root, w, &t["id"], &added)?;
@@ -1923,11 +1969,17 @@ pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
                     continue_answered(&mut t);
                 }
                 ("POST", ["actions"]) => {
+                    let name = body["action"].as_str().unwrap_or("");
+                    // A task with no project (D-129) can't run: no project has
+                    // an agent to work on it. Cancel, archive and editing are
+                    // the human's own, and need no project.
+                    if t["noProject"] == true && !w["actions"][name]["run"].is_null() {
+                        return err("E7003", format!("{name} needs a project; this task has none"));
+                    }
                     let was_final = column(&w, &t)["final"] == true;
                     let launch = action(&s, &w, &mut t, body)?;
                     // A held question or a stopped work run stays flagged until the run
                     // continues, restarts, stops or the task settles (D-82).
-                    let name = body["action"].as_str().unwrap_or("");
                     let a = &w["actions"][name];
                     let resolves = matches!(a["run"].as_str(), Some("work" | "new_work" | "investigate"))
                         || a["revert"] == true
@@ -2095,10 +2147,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     }
     // A run starts in the project of its task holding the most symbols the
     // task names (D-123); a resumed conversation stays where it was.
-    let here = match previous["project"].as_str() {
-        Some(p) if resume.is_some() => p.to_string(),
-        _ => start_project(root, t),
-    };
+    let here = run_project(previous, resume.is_some(), root, t);
     let at = scope::path(&scope::top(root), &here);
     let (prompt, images) = continuation_brief(t, run, resume.is_some(), root, &at, m["run"].is_array());
     let timeout = system()?["task_timeout"].as_u64().unwrap_or(3600);
@@ -2182,6 +2231,18 @@ fn start_project(home: &Path, t: &Value) -> String {
         }
     }
     best.1
+}
+
+/// The project a run starts in: a resumed conversation keeps the project its
+/// session began in — the one recorded with it, or the task's home for a
+/// conversation saved before projects were recorded. A fresh run starts where
+/// its task's symbols are (D-123).
+fn run_project(previous: &Value, resume: bool, home: &Path, t: &Value) -> String {
+    match previous["project"].as_str() {
+        Some(p) if resume => p.to_string(),
+        None if resume => scope::dir(&scope::top(home), home),
+        _ => start_project(home, t),
+    }
 }
 /// Starts model `m`'s agent with its settings in `dir`, its output in `log`
 /// and `prompt` (with `images`) on stdin: the launch every run shares, a
@@ -2822,7 +2883,7 @@ fn brief(t: &Value, kind: &str) -> String {
         section(
             "Projects",
             vec![format!(
-                "This task covers the projects {}. You work in {home}; for another of them, add `--project <folder>` to any command (`inspect`, `submit`, `test`, `write`...). A project not listed is out of this task's reach: if you need it, ask the human with `task ask`.",
+                "This task covers the projects {}. You work in {home}; for another of them, add `--project <folder>` (its folder as listed, from the Solace root) to any command (`inspect`, `submit`, `test`, `write`...). A project not listed is out of this task's reach: if you need it, ask the human with `task ask`.",
                 projects.join(", ")
             )],
         );
@@ -3275,7 +3336,7 @@ pub(super) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
         "note" => {
             note(t, m["author"].as_str().unwrap_or("solace"), rid, text);
             if let Some(reason) = m["flag"].as_str() {
-                flag(t, reason);
+                if m["hold"] == true { hold(t, reason) } else { flag(t, reason) }
             }
         }
         _ => return err("E7001", "unknown task message"),
@@ -3354,7 +3415,11 @@ pub fn propose_settings(
     guard: Vec<fs::File>,
 ) -> Out {
     if file == "solace.toml" {
-        workflow(&lockdown::parse_settings(proposed)?)?;
+        let v = lockdown::parse_settings(proposed)?;
+        workflow(&v)?;
+        // `[build] after` names projects of the workspace (D-131).
+        let top = scope::top(project);
+        recipe::check_after(&top, &scope::dir(&top, project), &v)?;
         // Which projects share the board is the humans' choice (D-57).
         let projects = |text: &[u8]| std::str::from_utf8(text).ok()?.parse::<toml::Value>().ok()?.get("projects").cloned();
         if projects(base) != projects(proposed.as_bytes()) {
@@ -3749,6 +3814,8 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 // About once a second, read in code changed outside Solace (D-58).
                 if tick % 10 == 1
                     && let Some(_guard) = try_lock(&root)
+                    // an extract's half-written files are not outside changes
+                    && !extract::ahead::waiting(&root)
                     && let Ok(s) = open(&root)
                 {
                     let _ = outside::absorb(&s, outside::Mode::Notice);
@@ -3802,6 +3869,13 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                 return match tasks::find_record(&board.top, kind, id) {
                     Ok(v) => respond(req, 200, v),
                     Err((status, e)) => respond(req, status, error_json(&e)),
+                };
+            }
+            // Every project's build recipe, in build order (D-131).
+            if let ("GET", ["build", "plan"]) = (req.method().as_str(), strategy.as_slice()) {
+                return match recipe::plan_json(&board.top) {
+                    Ok(v) => respond(req, 200, v),
+                    Err(e) => respond(req, 409, error_json(&e)),
                 };
             }
             let runs = strategy.len() >= 2 && strategy[..2] == ["strategy", "runs"];
@@ -3992,7 +4066,10 @@ impl Events {
         let (milestones, features) = (json!({"milestones":tasks::records(top, "milestones")}), json!({"features":tasks::records(top, "features")}));
         let vision = json!({"vision": tasks::vision(top)});
         let runs = json!({"strategyRuns": tasks::strategy_runs(top)});
-        format!("id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {runs}\n\n")
+        // Tasks with no project (D-129) ride on the root's streams, marked so
+        // the Strategy page can list them whatever their home.
+        let homeless = json!({"tasks": all_tasks(top).unwrap_or_default().into_iter().filter(|t| t["noProject"] == true).collect::<Vec<_>>(), "noProject": true});
+        format!("id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {runs}\n\nid: {id}\ndata: {homeless}\n\n")
     }
     /// The workflow and tasks of the streams at `which`, as events.
     fn state_of(&self, which: &[usize]) -> String {
@@ -4026,6 +4103,7 @@ impl Events {
             return Ok(None);
         }
         let db = tasks::events(&self.board.top).map_err(|e| std::io::Error::other(e.0))?;
+        let members = workspace::members(&self.board.top).unwrap_or_default();
         loop {
             let row = db
                 .query_row("SELECT seq,project,data FROM events WHERE seq>? ORDER BY seq LIMIT 1", [self.tasks], |r| {
@@ -4035,14 +4113,20 @@ impl Events {
                 .map_err(std::io::Error::other)?;
             let Some((seq, project, data)) = row else { return Ok(None) };
             self.tasks = seq;
-            // A row with no project is a root record's (D-87).
-            let shown = if project.is_empty() { self.at_root() } else { self.streams.iter().any(|s| s.0 == project) };
+            // A row with no project is a root record's (D-87); a row whose
+            // project is no member is a task with no project (D-129), shown
+            // on the root's streams and marked.
+            let homeless = !project.is_empty() && !members.iter().any(|m| m == &project);
+            let shown = if project.is_empty() { self.at_root() } else { self.streams.iter().any(|s| s.0 == project) || (self.at_root() && homeless) };
             if !shown {
                 continue;
             }
             let mut v: Value = serde_json::from_str(&data).map_err(std::io::Error::other)?;
             if self.merged && !project.is_empty() {
                 v["project"] = json!(project);
+            }
+            if homeless {
+                v["noProject"] = json!(true);
             }
             return Ok(Some(format!("id: {}\ndata: {v}\n\n", self.id())));
         }

@@ -12,7 +12,7 @@ fn feature(id: String, milestone: String, rank: Float) -> features.Feature {
       m -> Some(m)
     },
     rank,
-    "planned",
+    "upcoming",
     None,
   )
 }
@@ -36,11 +36,11 @@ pub fn the_decoder_defaults_everything_but_the_id_test() {
   assert m == features.Milestone("m1", "", 1.5, "", None, "proposed")
   let assert Ok(full) =
     json.parse(
-      "{\"id\":\"m2\",\"title\":\"1.0\",\"body\":\"b\",\"rank\":2,\"targetDate\":\"2027-01-01\",\"state\":\"planned\"}",
+      "{\"id\":\"m2\",\"title\":\"1.0\",\"body\":\"b\",\"rank\":2,\"targetDate\":\"2027-01-01\",\"state\":\"upcoming\"}",
       features.milestone_decoder(),
     )
   assert full
-    == features.Milestone("m2", "1.0", 2.0, "b", Some("2027-01-01"), "planned")
+    == features.Milestone("m2", "1.0", 2.0, "b", Some("2027-01-01"), "upcoming")
 }
 
 pub fn groups_follow_milestone_rank_then_feature_rank_then_id_test() {
@@ -105,9 +105,9 @@ fn list_len(groups: List(features.Group)) -> Int {
 
 pub fn create_body_names_the_request_and_the_milestone_test() {
   let draft =
-    features.Draft(None, "Search", "Find **fast**", "planned", Some("m1"))
+    features.Draft(None, "Search", "Find **fast**", "upcoming", Some("m1"))
   assert json.to_string(features.create_body(draft, "r1"))
-    == "{\"title\":\"Search\",\"body\":\"Find **fast**\",\"state\":\"planned\",\"milestone\":\"m1\",\"request\":\"r1\"}"
+    == "{\"title\":\"Search\",\"body\":\"Find **fast**\",\"state\":\"upcoming\",\"milestone\":\"m1\",\"request\":\"r1\"}"
   // No milestone: the field is left out.
   assert json.to_string(features.create_body(features.new_draft(), "r2"))
     == "{\"title\":\"\",\"body\":\"\",\"state\":\"proposed\",\"request\":\"r2\"}"

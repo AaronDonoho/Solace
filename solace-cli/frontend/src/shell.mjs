@@ -3,9 +3,10 @@ import { blocks_drag, keeps_new_tab, find_opens, next_match, count_text, to_mark
 import { toList } from '../build/dev/javascript/frontend/gleam.mjs';
 
 export function guard(root) {
+  // A markdown editor, <solace-md-editor>, keeps its text in a shadow root of its own: it is found on the path.
   root.addEventListener('dragstart', e => {
     const el = e.composedPath?.()[0] || e.target;
-    if (blocks_drag(!!el?.closest?.('input,textarea'))) e.preventDefault();
+    if (blocks_drag(!!el?.closest?.('input,textarea') || inEditor(e))) e.preventDefault();
   });
 
   // modem's click handler routes every link in-page; let modified clicks keep the browser's new-tab behavior.
@@ -16,6 +17,8 @@ export function guard(root) {
   find(root);
   copy(root);
 }
+
+const inEditor = e => !!e.composedPath?.().some(n => n?.classList?.contains?.('md-editor'));
 
 // Copy keeps markdown: a selection that touches rendered markdown (.md, from the board's renderer) goes to the
 // clipboard as its markdown source, with the HTML beside it for rich paste. Any other selection copies as usual.
@@ -57,7 +60,7 @@ const tree = node => toList([...node.childNodes].flatMap(child =>
 
 function copy(doc) {
   doc.addEventListener('copy', e => {
-    if ((e.composedPath?.()[0] || e.target)?.closest?.('input,textarea') || !e.clipboardData) return;
+    if ((e.composedPath?.()[0] || e.target)?.closest?.('input,textarea') || inEditor(e) || !e.clipboardData) return;
     const range = selected();
     if (!range) return;
     const inMarkdown = node => !!elementOf(node)?.closest?.('.md');
@@ -190,14 +193,16 @@ function find(doc) {
     const all = node.querySelectorAll ? [node, ...node.querySelectorAll('*')] : [];
     for (const el of all) if (watchHost(el)) watch(el.shadowRoot);
   };
-  // The document observer discovers new components, and sees a page shown or hidden (a menu tab switched: the
-  // shell sets `hidden` on its pages, outside any shadow root). The bar's and the marks' changes never trigger a search.
+  // The document observer discovers new components, sees a page shown or hidden (a menu tab switched: the
+  // shell sets `hidden` on its pages, outside any shadow root), and sees text taken out of the page (a lane
+  // collapsed): the count drops with the marks. The bar's and the marks' changes never trigger a search.
   new MutationObserver(records => {
     let changed = false;
     for (const r of records) {
       if (bar.contains(r.target) || marks.contains(r.target)) continue;
       if (r.type === 'attributes') { changed = true; switched = true; continue; }
       for (const n of r.addedNodes) if (n.nodeType === 1 && n !== marks && n !== bar) { watch(n); changed = true; }
+      for (const n of r.removedNodes) changed = true;
     }
     if (changed && !bar.hidden) schedule();
   }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'] });
@@ -211,12 +216,12 @@ function find(doc) {
     timer = setTimeout(search, Math.max(0, Math.min(120, waiting + 500 - now)));
   };
 
-  // Whether a node is drawn: not in a hidden page, a closed <details>, or anything else display:none. An element
-  // with display:contents has no box of its own, so its parent answers for it.
+  // Whether a node is drawn: not in a hidden page, a closed <details>, or anything else display:none,
+  // visibility:hidden or opacity:0. An element with display:contents has no box of its own, so its parent answers for it.
   const drawn = node => {
     let el = node.nodeType === 1 ? node : node.parentElement || node.host || node.parentNode?.host;
     while (el && getComputedStyle(el).display === 'contents') el = up(el);
-    return !el || !el.checkVisibility || el.checkVisibility();
+    return !el || !el.checkVisibility || el.checkVisibility({ visibilityProperty: true, opacityProperty: true });
   };
 
   // The text nodes that can be drawn: hidden pages, display:none elements and the inside of a closed <details>
@@ -236,20 +241,23 @@ function find(doc) {
     return out;
   };
 
-  // Where the current match's text is now, to tell when it moved.
+  // Where the current match's text is now, and which matches are still in the page, to tell when to redraw:
+  // collapsing a lane or closing a <details> takes text out, and its marks must go with it.
   const place = () => {
     const r = ranges[index]?.getBoundingClientRect();
     return r ? `${r.left},${r.top},${r.width},${r.height}` : '';
   };
+  const seen = () => ranges.map(r => r.startContainer.parentElement?.isConnected ? 1 : 0).join('');
 
-  // Draws a box over each visible part of each match, clipped to the scroll areas around it.
+  // Draws a box over each visible part of each match, clipped to the scroll areas around it. Text taken out
+  // of the page, or made invisible since the search, gets no box.
   const draw = () => {
     frame = 0;
     const boxes = [];
     const cache = new Map();
     ranges.forEach((range, i) => {
       const parent = range.startContainer.parentElement;
-      if (!parent?.isConnected) return;
+      if (!parent?.isConnected || !drawn(range.startContainer)) return;
       const clip = clipOf(parent, cache);
       for (const r of range.getClientRects()) {
         const top = Math.max(r.top, clip.top), left = Math.max(r.left, clip.left);
@@ -264,14 +272,16 @@ function find(doc) {
       }
     });
     marks.replaceChildren(...boxes);
-    drawnAt = place();
+    drawnAt = place() + '|' + seen();
   };
   const redraw = () => { if (!frame && ranges.length) frame = requestAnimationFrame(draw); };
   // Movement nothing reports (a transition, an element sliding in) shows as the current match no longer being
-  // where it was drawn; checked every frame, only while the bar is open and there are matches.
+  // where it was drawn, and a match taken out of the page (a lane collapsed, a card removed) shows as it no
+  // longer being there; the bar between them keeps a match moving from looking like one vanishing. Checked
+  // every frame, only while the bar is open and there are matches.
   const follow = () => {
     following = requestAnimationFrame(follow);
-    if (!frame && place() !== drawnAt) draw();
+    if (!frame && place() + '|' + seen() !== drawnAt) draw();
   };
   const track = () => {
     const wanted = !bar.hidden && ranges.length > 0;
@@ -308,9 +318,10 @@ function find(doc) {
           range.setStart(text, at);
           range.setEnd(text, at + query.length);
           // Hidden text (display:none, collapsed) has no boxes and can't be seen or scrolled to.
-          // Visually hidden labels (.sr-only, 1px and clipped) can't be seen either.
+          // Visually hidden labels (.sr-only, 1px and clipped) can't be seen either, and text made invisible
+          // (visibility:hidden, opacity:0) has boxes but is never marked.
           const box = text.parentElement?.getBoundingClientRect();
-          if (range.getClientRects().length && box && box.width > 1 && box.height > 1) found.push(range);
+          if (range.getClientRects().length && box && box.width > 1 && box.height > 1 && drawn(text)) found.push(range);
         }
         if (found.length >= LIMIT) break;
       }

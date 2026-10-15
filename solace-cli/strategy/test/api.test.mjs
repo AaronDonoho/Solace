@@ -33,33 +33,15 @@ test('a linked card is revealed once it is drawn', async () => {
   expect(asked).toEqual([]);
 });
 
-test('the planning message box is sized from its text without field-sizing', async () => {
-  const { fit_plan_text } = await import('../src/api.mjs');
-  const box = { style: {}, scrollHeight: 140 };
-  const root = { querySelector: s => (s === '#plan-text' ? box : null) };
-  const css = globalThis.CSS;
-  try {
-    globalThis.CSS = { supports: () => false };
-    fit_plan_text(root);
-    expect(box.style.height).toBe('142px');
-    box.style = {};
-    globalThis.CSS = { supports: (p, v) => p === 'field-sizing' && v === 'content' };
-    fit_plan_text(root);
-    expect(box.style.height).toBeUndefined();
-    fit_plan_text(null);
-  } finally {
-    globalThis.CSS = css;
-  }
-});
-
 // A workspace root: its own `/tasks` holds only its project, so the list comes from the merged stream.
 test('Tasks tab merges every project, sorts and filters, opens a task and links it inline', async () => {
   const requests = [];
   const workflow = { columns: [{ id: 'backlog', label: 'Backlog', actions: [], final: false }, { id: 'done', label: 'Done', actions: [], final: true }] };
   const blank = { body: '', rank: 1, paused_from: null, stamps: {}, links: [], runs: [], questions: [], feature: null, milestone: null, dependsOn: [], closedTime: null };
-  const older = { ...blank, id: 't1', title: 'Older', column: 'done', closedTime: 100 };
+  const older = { ...blank, id: 't1', title: 'Older', column: 'done', createdTime: 50, closedTime: 100 };
   let newer = { ...blank, id: 't2', title: 'Newer', column: 'done', closedTime: 200 };
   const open = { ...blank, id: 't3', title: 'Still open', body: 'needs a search box', column: 'backlog' };
+  const orphan = { ...blank, id: 't9', title: 'Homeless task', body: 'no project of its own', column: 'backlog' };
   let events, patch;
   const server = Bun.serve({ port: 0, fetch: async req => {
     const path = new URL(req.url).pathname;
@@ -67,6 +49,7 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     if (path === '/events') return new Response(new ReadableStream({ start(c) { events = c; c.enqueue(encode(
       frame({ project: '.', workflow }) + frame({ project: '.', tasks: [older, open] }) +
       frame({ project: 'web', workflow }) + frame({ project: 'web', tasks: [newer] }) +
+      frame({ project: 'web', noProject: true, task: orphan }) +
       frame({ milestones: [{ id: 'm2', title: 'Empty', rank: 2 }, { id: 'm1', title: 'Launch', rank: 1 }] }) +
       frame({ features: [{ id: 'f2', title: 'Loose', body: '', milestone: null, rank: 1, state: 'proposed' }, { id: 'f1', title: 'Search', body: 'A **fast** lookup', milestone: 'm1', rank: 1, state: 'active' }] }) +
       'event: ready\ndata: {}\n\n')); } }), { headers: { 'Content-Type': 'text/event-stream' } });
@@ -120,9 +103,24 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     expect(page.indexOf('Newer')).toBeLessThan(page.indexOf('Older'));
     expect(page.indexOf('Older')).toBeLessThan(page.indexOf('Still open'));
     expect(page).toContain('Backlog');
+    // D-130: a Created column, in the closed column's format.
+    const { clock } = await import('../src/api.mjs');
+    expect(page).toContain('>Created</th>');
+    expect(page).toContain('<td class="created">' + clock(50) + '</td>');
+    // D-129: a task with no project shows on the Tasks tab, marked, and the Project filter offers it.
+    expect(page).toContain('Homeless task');
+    expect(page).toContain('>No project</td>');
+    expect(page).toContain('(no project)');
     // Filters and search run on the client.
     dispatch(new strategy.Filter(new strategy.Filters('', 'web', '', '', '')));
     expect(html()).not.toContain('Older');
+    expect(html()).not.toContain('Homeless task');
+    dispatch(new strategy.Filter(new strategy.Filters('', 'no-project', '', '', '')));
+    expect(html()).toContain('Homeless task');
+    expect(html()).not.toContain('Older');
+    dispatch(new strategy.Filter(new strategy.Filters('', '', '', '', 'homeless')));
+    expect(html()).toContain('Homeless task');
+    expect(html()).not.toContain('Still open');
     dispatch(new strategy.Filter(new strategy.Filters('', '', '', '', 'SEARCH box')));
     expect(html()).toContain('Still open');
     expect(html()).not.toContain('Newer');
@@ -131,7 +129,11 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     dispatch(new strategy.Open('web', 't2'));
     expect(html()).toMatch(/<solace-task [^>]*base="\/p\/web"[^>]*dir="web"/);
     expect(html()).toMatch(/<solace-task [^>]*task="t2"/);
+    // D-129: a task with no project opens at the root, in the homeless bucket.
+    dispatch(new strategy.Open('no-project', 't9'));
+    expect(html()).toMatch(/<solace-task [^>]*base dir="no-project"[^>]*task="t9"/);
     // A live update of the open task reaches its details and its row.
+    dispatch(new strategy.Open('web', 't2'));
     events.enqueue(encode(frame({ project: 'web', task: { ...newer, title: 'Newer, renamed' } }, 1)));
     await until(() => Array.from(model.live).some(m => m[1].includes('renamed')));
     expect(html()).toContain('Newer, renamed');
@@ -141,6 +143,8 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     expect(patch).toEqual({ feature: 'f1' });
     // The Features tab groups by milestone in rank order, then "No milestone"; a feature lists its tasks from every project.
     dispatch(new strategy.Select(new strategy.Features()));
+    // A compact card shows its body, tasks and new-task form only while focused.
+    dispatch(new strategy.FocusFeature('f1'));
     const list = html();
     const at = text => list.indexOf(text, list.indexOf('id="panel-features"'));
     expect(at('Launch')).toBeGreaterThan(-1);
@@ -226,7 +230,8 @@ test('Vision tab shows the document, edits it and saves over its revision', asyn
     await until(() => html().includes('E7026'));
     expect(put).toEqual({ text: 'Late', base: 'r2' });
     expect(html()).toContain('id="vision-text"');
-    expect(html()).toContain('Late');
+    // The editor holds the draft in its `value` property, which the HTML string doesn't show.
+    expect(model.draft[0][0]).toBe('Late');
   } finally {
     server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
   }
@@ -293,7 +298,9 @@ test('Features tab creates a feature and edits it with only the changed fields',
     dispatch(new strategy.Connected());
     await until(() => html().includes('Search'));
     // With a single project, a feature's new-task form has no project picker.
-    await until(() => html().includes('Add task'));
+    // The form shows only on the focused feature's card.
+    dispatch(new strategy.FocusFeature('f1'));
+    await until(() => html().includes('Create task'));
     expect(html()).not.toContain('name="project"');
     // Create: the form has its own textarea, a state and a milestone select with "(none)".
     dispatch(new strategy.NewFeature());
@@ -356,7 +363,7 @@ test('Roadmap tab edits milestones, retargets a feature and sets dependencies, s
     t2: { ...task, id: 't2', title: 'Csv', feature: 'f2', milestone: 'm1', dependsOn: [] },
     t3: { ...task, id: 't3', title: 'Docs', feature: null, milestone: 'm2', dependsOn: [] },
   };
-  const milestones = { m1: { id: 'm1', title: 'Launch', body: '', rank: 1, state: 'proposed' }, m2: { id: 'm2', title: 'Later', body: '', rank: 2, targetDate: '2027-06-01', state: 'planned' } };
+  const milestones = { m1: { id: 'm1', title: 'Launch', body: '', rank: 1, state: 'proposed' }, m2: { id: 'm2', title: 'Later', body: '', rank: 2, targetDate: '2027-06-01', state: 'upcoming' } };
   const records = { f1: { id: 'f1', title: 'Search', body: '', milestone: 'm1', rank: 1, state: 'proposed' }, f2: { id: 'f2', title: 'Export', body: '', milestone: 'm2', rank: 1, state: 'proposed' } };
   const calls = [];
   const server = Bun.serve({ port: 0, fetch: async req => {
@@ -523,6 +530,8 @@ test('Features tab adds a task to a feature, then links it; a refused link says 
   try {
     model = strategy.new$(new strategy.Features());
     dispatch(new strategy.Connected());
+    // The new-task form shows only on the focused feature's card.
+    dispatch(new strategy.FocusFeature('f1'));
     await until(() => html().includes('Search') && html().includes('name="project"'));
     // In a workspace the picker defaults to the root's project.
     expect(html()).toContain('<option selected value=".">root</option>');
@@ -541,6 +550,85 @@ test('Features tab adds a task to a feature, then links it; a refused link says 
     expect(calls.filter(c => c[0] === 'POST').length).toBe(2);
     expect(calls.at(-1)).toEqual(['PATCH', '/p/web/tasks/t2', { feature: 'f1' }]);
     expect(html()).toContain('The task was created without the link to this feature: E7023 unknown feature f1');
+  } finally {
+    server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
+  }
+});
+
+// The Tasks tab's own new task: POST to the picked project, then one PATCH with the feature and milestone picked;
+// with none picked no PATCH goes out. Either way the form closes and the task opens below the list.
+test('Tasks tab creates a task, links its feature and milestone in one PATCH, then opens it', async () => {
+  const calls = [];
+  let n = 0;
+  const blank = { body: '', rank: 1, column: 'backlog', paused_from: null, stamps: {}, links: [], runs: [], questions: [], feature: null, milestone: null, dependsOn: [], closedTime: null };
+  const server = Bun.serve({ port: 0, fetch: async req => {
+    const path = new URL(req.url).pathname;
+    if (path === '/events') return new Response(encode(frame({ features: [{ id: 'f1', title: 'Search', body: '', milestone: null, rank: 1, state: 'active' }] }) +
+      frame({ project: '.', workflow: { columns: [] } }) + frame({ project: 'web', workflow: { columns: [] } }) + 'event: ready\ndata: {}\n\n'), { headers: { 'Content-Type': 'text/event-stream' } });
+    if (path === '/projects') return Response.json({ workspace: true, projects: [{ dir: '.', label: 'root', name: 'root', base: '' }, { dir: 'web', label: 'web', name: 'web', base: '/p/web' }], found: [] });
+    if (path.endsWith('/workflow')) return Response.json({ columns: [] });
+    if (req.method === 'POST' && path === '/p/web/tasks') {
+      const body = await req.json(); calls.push(['POST', path, body]);
+      return Response.json({ ...blank, id: 't' + ++n, title: body.title, body: body.body });
+    }
+    if (req.method === 'PATCH' && path.startsWith('/p/web/tasks/')) {
+      const body = await req.json(); calls.push(['PATCH', path, body]);
+      return Response.json({ ...blank, id: path.split('/').at(-1), title: 'Index', ...body });
+    }
+    return Response.json({ message: 'unexpected ' + path }, { status: 404 });
+  }});
+  const fetchOriginal = globalThis.fetch;
+  globalThis.fetch = (path, options) => fetchOriginal(new URL(path, server.url), options);
+  globalThis.EventSource = class {
+    listeners = {};
+    addEventListener(name, f) { this.listeners[name] = f; }
+    close() {}
+    constructor(path) {
+      fetch(path).then(r => r.text()).then(text => {
+        for (const block of text.split('\n\n')) {
+          const data = block.split('\n').find(line => line.startsWith('data: '));
+          const name = block.split('\n').find(line => line.startsWith('event: '));
+          if (name) this.listeners[name.slice(7)]?.({ data: data?.slice(6) });
+          else if (data) this.onmessage?.({ data: data.slice(6) });
+        }
+      }).catch(() => {});
+    }
+  };
+  let model;
+  const noop = () => {};
+  const dispatch = msg => { let effect; [model, effect] = strategy.update(model, msg); perform(effect, dispatch, noop, noop, noop, noop, noop, noop); };
+  const html = () => to_string(strategy.view(model));
+  const until = async predicate => {
+    for (let i = 0; i < 200; i++) { if (predicate()) return; await Bun.sleep(10); }
+    throw new Error('UI did not reach expected state: ' + html());
+  };
+  try {
+    model = strategy.new$(new strategy.Tasks());
+    dispatch(new strategy.Connected());
+    await until(() => model.workspace && model.features.toArray().length === 1);
+    dispatch(new strategy.NewTaskOpen());
+    // In a workspace the picker defaults to the root's project; features list with "(none)".
+    expect(html()).toContain('<option selected value=".">root</option>');
+    expect(html()).toContain('<option value="f1">Search</option>');
+    dispatch(new strategy.NewTaskProject('web'));
+    dispatch(new strategy.NewTaskTitle('Index'));
+    dispatch(new strategy.NewTaskText('Some **text**'));
+    dispatch(new strategy.NewTaskFeature('f1'));
+    dispatch(new strategy.NewTaskMilestone('m1'));
+    dispatch(new strategy.CreateTask());
+    await until(() => calls.length === 2 && /<solace-task [^>]*task="t1"/.test(html()));
+    expect(calls[0]).toEqual(['POST', '/p/web/tasks', { title: 'Index', body: 'Some **text**', request: expect.any(String) }]);
+    expect(calls[1]).toEqual(['PATCH', '/p/web/tasks/t1', { feature: 'f1', milestone: 'm1' }]);
+    expect(model.new_task instanceof None).toBe(true);
+    // Nothing picked: the create alone, and the task opens.
+    dispatch(new strategy.NewTaskOpen());
+    dispatch(new strategy.NewTaskProject('web'));
+    dispatch(new strategy.NewTaskTitle('Plain'));
+    dispatch(new strategy.CreateTask());
+    await until(() => /<solace-task [^>]*task="t2"/.test(html()));
+    await Bun.sleep(30);
+    expect(calls.map(c => c[0])).toEqual(['POST', 'PATCH', 'POST']);
+    expect(model.new_task instanceof None).toBe(true);
   } finally {
     server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
   }
@@ -621,9 +709,9 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     // Unavailable models say why and can't be picked.
     expect(panel()).toContain('Big (unavailable: no key)');
     // Nothing selected: the whole project. Selecting a task plans it, and lists its past run.
-    expect(panel()).toContain('Planning Context: Whole Project');
+    expect(panel()).toContain('Plan context: Whole Project');
     dispatch(new strategy.Open('.', 't1'));
-    expect(panel()).toContain('Planning Context: task <em>Index</em>');
+    expect(panel()).toContain('Plan context: task <em>Index</em>');
     expect(panel()).toContain('aria-label="Earlier runs"');
     expect(panel()).not.toContain('Runs on this');
     expect(panel()).toContain('Ended: planned · fake');
@@ -640,11 +728,11 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     events.enqueue(encode(frame({ strategyRun: r1 }, 1)));
     await until(() => panel().includes('Shall I add a ranking task?'));
     expect(panel()).toContain('Create task<em> Ranking</em>');
-    expect(panel()).toContain('Approving also sets the feature <em>Search</em> back to planned.');
+    expect(panel()).toContain('Approving also sets the feature <em>Search</em> back to upcoming.');
     // Another tab: the panel and its run stay.
     dispatch(new strategy.Select(new strategy.Features()));
     expect(panel()).toContain('Shall I add a ranking task?');
-    expect(panel()).toContain('Planning Context: task <em>Index</em>');
+    expect(panel()).toContain('Plan context: task <em>Index</em>');
     dispatch(new strategy.AnswerPlan('q1', 'Approve'));
     await until(() => panel().includes('Answer: Created task t2'));
     expect(calls.at(-1)).toEqual(['/strategy/runs/r1/questions/q1', { option: 'Approve' }]);

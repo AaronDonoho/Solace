@@ -77,6 +77,7 @@ Reading
   view <file>::<name>           one item's source with its docs, numbered for
                                 `read --lines` and `write` (`board.rs::within`,
                                 `board.rs::Store::view`: a path or name suffix)
+  view --draft <id>             a kept draft's text, from `drafts`
   view | inspect <dependency>   a dependency's module (`lustre/component`): its
                                 public signatures; `<module>.<name>`: one with
                                 its docs. Read from build/packages, never stored
@@ -104,8 +105,8 @@ Reading
   session start [--scope <module>...]
                                 every symbol, and open work records with context
   ... --project <folder>        this line only, in another project: its folder
-                                as session start lists it, from the Solace root
-                                (not `../x`). Reads (view, inspect, refs, find,
+                                as session start lists it, from the Solace root,
+                                or `../x` from this project. Reads (view, inspect, refs, find,
                                 grep, files, read) reach any project there;
                                 other commands, the projects the task covers
 Replies have a size limit: a signature is printed once per reply, and a reply
@@ -284,6 +285,9 @@ change with `submit`, protected ones with `write` and the human's approval.
                                 project of this task. A repeated move changes
                                 nothing
 Project: build | format | run <name> [args...] (commands declared in solace.toml)
+  build plan                    every project's build recipe ([build] in its
+                                solace.toml, or the default from its files), in
+                                build order; reads only
 Work records, kept between sessions: work add (`text`) | work list | work done <id>
 
 Task runs (the note, summary or question in `text`). Reviews and investigations
@@ -328,11 +332,12 @@ command not listed here is refused.
                                 request's fields as a JSON object in `text`;
                                 waits for Approve or Reject. Alone in its call.
                                 task: title, body, feature, milestone,
-                                dependsOn (task ids), and scope (folders) only
-                                when creating. feature: title, body,
+                                dependsOn (task ids), and scope (project folders, as
+                                the brief lists them; every one must be a project)
+                                only when creating. feature: title, body,
                                 milestone, state. milestone: title, body,
                                 targetDate, state. Any of them: rank only when
-                                editing. state: proposed|planned|active|
+                                editing. state: proposed|upcoming|active|
                                 complete|canceled. Other fields are refused.
                                 A title is the work in 3-7 words (`extract: JS FFI
                                  files`); details go in body. The human sees

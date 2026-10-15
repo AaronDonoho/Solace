@@ -183,6 +183,8 @@ pub type Task {
     depends: List(String),
     /// The id of the feature it belongs to, None for none (D-87).
     feature: Option(String),
+    /// Whether the task's home is no project of the board (D-129).
+    no_project: Bool,
   )
 }
 
@@ -239,7 +241,6 @@ pub type Model {
     error: String,
     editing: Bool,
     tab: String,
-    previews: List(String),
     /// The action sent and not yet answered: its buttons are disabled
     /// meanwhile, so one click makes one request. "" when none.
     acting: String,
@@ -303,7 +304,6 @@ pub type Msg {
   Rank(String)
   Edit(Bool)
   Tab(String)
-  Preview(String, Bool)
   Format(String, String, String)
   /// The editor's selected lines become a block: "heading", "list",
   /// "numbered", "quote" or "code" (see `block` in task_api.mjs).
@@ -346,9 +346,11 @@ pub const files_heading = "Files"
 /// The Changes tab heading for changes that are neither symbols nor files.
 pub const other_heading = "Other"
 
-/// Registers `<solace-task>`. A page whose other parts registered it already
-/// is fine: the board, the shell and Strategy may each ask.
+/// Registers `<solace-task>`, and `<solace-md-editor>` for every page's
+/// markdown editors. A page whose other parts registered them already is
+/// fine: the board, the shell and Strategy may each ask.
 pub fn register() -> Result(Nil, lustre.Error) {
+  define_editor()
   let app =
     lustre.component(init, update, view, [
       component.on_attribute_change("task", fn(v) { Ok(TaskChanged(v)) }),
@@ -406,7 +408,6 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       error: "",
       editing: False,
       tab: "details",
-      previews: [],
       acting: "",
       watching: "",
       entries: [],
@@ -485,7 +486,6 @@ fn open(model: Model) -> #(Model, Effect(Msg)) {
       entries: [],
       review_summary: "",
       editing: False,
-      previews: [],
       acting: "",
       error: "",
       copy: #(model.copy.0 + 1, ""),
@@ -627,8 +627,10 @@ fn notice(n: Notice) -> Effect(Msg) {
 /// messages name their `project`; one for another project is not this task's,
 /// unless it names this task, which is then fetched again (see `stale`).
 fn live(model: Model, text: String) -> #(Model, Effect(Msg)) {
+  // A task with no project (D-129) is named under its home folder, which is
+  // no project to open it from: its messages are this element's all the same.
   let ours = case json.parse(text, decode.at(["project"], decode.string)) {
-    Ok(dir) -> dir == model.dir
+    Ok(dir) -> dir == model.dir || homeless_event(text)
     Error(_) -> True
   }
   // A dependency's update counts under any project: it may live in another.
@@ -878,8 +880,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             _ -> task
           }
           // A task whose home left its projects now lives in the first one left (D-61).
+          // A task with no project (D-129) has no projects to follow.
           let #(model, moved) = case
-            model.dir != ""
+            !task.no_project
+            && model.dir != ""
             && !list.contains(scope_of(model.dir, task), model.dir),
             task.scope
           {
@@ -896,7 +900,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               text: "",
               error: "",
               editing: False,
-              previews: [],
             )
           let #(model, deps) = want_deps(model)
           #(model, effect.batch([moved, refresh(model), deps]))
@@ -973,13 +976,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         None -> #(model, effect.none())
       }
     Tab(tab) -> #(Model(..model, tab: tab), effect.none())
-    Preview(id, on) -> #(
-      Model(..model, previews: case on {
-        True -> [id, ..model.previews]
-        False -> list.filter(model.previews, fn(p) { p != id })
-      }),
-      effect.none(),
-    )
     Format(id, before, after) -> {
       let #(text, msg) = field(model, id)
       #(
@@ -1167,13 +1163,21 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     )
     CopyDone(_, _) | CopyReset(_) -> #(model, effect.none())
     // A dependency that can't be found keeps None: its id shows.
+    // One with no project (D-129) is asked for at the root.
     DepFound(generation, id, text) if generation == model.generation ->
-      case json.parse(text, decode.at(["dir"], decode.string)) {
-        Ok(dir) -> #(
+      case
+        json.parse(text, decode.at(["dir"], decode.string)),
+        json.parse(text, decode.at(["project"], decode.bool))
+      {
+        Ok(_), Ok(False) -> #(
+          model,
+          get("", "/tasks/" <> id, DepLoaded(generation, id, _)),
+        )
+        Ok(dir), _ -> #(
           model,
           get(base_of(model, dir), "/tasks/" <> id, DepLoaded(generation, id, _)),
         )
-        Error(_) -> #(model, effect.none())
+        Error(_), _ -> #(model, effect.none())
       }
     DepLoaded(generation, id, text) if generation == model.generation ->
       case json.parse(text, task_decoder()) {
@@ -1327,6 +1331,7 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     None,
     decode.optional(decode.string),
   )
+  use no_project <- decode.optional_field("noProject", False, decode.bool)
   decode.success(Task(
     id,
     title,
@@ -1348,6 +1353,7 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     archived,
     depends,
     feature,
+    no_project,
   ))
 }
 
@@ -1657,15 +1663,19 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
         ],
         [
           h.text(case model.copy.1 {
-            "" -> "Copy ID"
+            "" -> ui_label("copy_id")
             said -> said
           }),
         ],
       ),
     ]),
     h.p([a.class("meta")], [
-      h.text(t.column),
+      h.text(column_label(model.workflow, t.column)),
       status_badge_in(model.workflow, t),
+      case t.no_project {
+        True -> h.text(" • no project")
+        False -> h.text("")
+      },
     ]),
     case t.attention {
       "" -> h.text("")
@@ -1694,7 +1704,7 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
             model.acting != "",
           )
         }),
-        [button("Add note", AddNote)],
+        [button(ui_label("add_note"), AddNote)],
       ),
     ),
     h.div(
@@ -1721,7 +1731,7 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
             h.p([], [
               h.text(model.review_summary <> " "),
               h.a([a.href(model.base <> "/contracts?task=" <> t.id)], [
-                h.text("Contract view"),
+                h.text(ui_label("contract_view")),
               ]),
             ])
         },
@@ -1750,8 +1760,8 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
         h.text("Rank (lower comes first)"),
         h.input([a.type_("number"), a.value(model.rank), e.on_input(Rank)]),
       ]),
-      button("Save", Save),
-      button("Cancel", Edit(False)),
+      button(ui_label("save"), Save),
+      button(ui_label("cancel"), Edit(False)),
     ]
     False -> [
       md(model.base, t.body),
@@ -1762,18 +1772,24 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
         }),
       ),
       depends_view(model, t),
-      button("Edit", Edit(True)),
+      button(ui_label("edit"), Edit(True)),
     ]
   }
 }
 
+/// The model and its effort. A pick shows what is chosen, so it names
+/// itself; while none is, a placeholder says what to pick.
 fn agent_choice(model: Model) -> Element(Msg) {
   let chosen = list.find(model.models, fn(m) { m.id == model.model })
   h.div([a.class("agent")], [
-    h.label([], [
-      h.text("Agent model"),
-      h.select(
-        [a.value(model.model), e.on_input(AgentSelected)],
+    h.select(
+      [
+        a.value(model.model),
+        a.attribute("aria-label", ui_label("model")),
+        e.on_input(AgentSelected),
+      ],
+      list.append(
+        placeholder_option(ui_label("pick_model"), model.model),
         list.map(model.models, fn(m) {
           case m.available {
             True ->
@@ -1793,17 +1809,21 @@ fn agent_choice(model: Model) -> Element(Msg) {
           }
         }),
       ),
-    ]),
+    ),
     case chosen {
       Ok(m) if m.efforts != [] ->
-        h.label([], [
-          h.text("Effort"),
-          h.select([a.value(model.effort), e.on_input(EffortSelected)], [
+        h.select(
+          [
+            a.value(model.effort),
+            a.attribute("aria-label", ui_label("effort")),
+            e.on_input(EffortSelected),
+          ],
+          [
             h.option(
               [a.value(""), a.selected(model.effort == "")],
               case m.effort {
-                "" -> "Default"
-                effort -> "Default (" <> effort <> ")"
+                "" -> ui_label("default_effort")
+                effort -> ui_label("default_effort") <> " (" <> effort <> ")"
               },
             ),
             ..list.map(m.efforts, fn(effort) {
@@ -1812,8 +1832,8 @@ fn agent_choice(model: Model) -> Element(Msg) {
                 effort,
               )
             })
-          ]),
-        ])
+          ],
+        )
       _ -> h.text("")
     },
   ])
@@ -1842,27 +1862,25 @@ fn task_editor(model: Model, id: String, label: String) -> Element(Msg) {
     model.base,
     label,
     text,
-    list.contains(model.previews, id),
     msg,
-    Preview(id, _),
     fn(before, after) { Format(id, before, after) },
     Block(id, _),
   )
 }
 
-/// A markdown editor with Write/Preview and formatting tools; `id` names the
-/// textarea. Images pasted, dropped or picked here are uploaded by
-/// `task_api.mjs` to `task` in the project at `base` and inserted as
-/// markdown. A task not yet created has no image tool.
+/// A markdown editor with formatting tools, which styles the markdown as it
+/// is written: `<solace-md-editor>` (`md_editor.mjs`, CodeMirror), named by
+/// `id`. Its marks show on the lines being edited and hide elsewhere. Images
+/// pasted, dropped or picked here are uploaded by `task_api.mjs` to `task` in
+/// the project at `base` and inserted as markdown. A task not yet created has
+/// no image tool.
 pub fn editor(
   id: String,
   task: String,
   base: String,
   label: String,
   text: String,
-  preview: Bool,
   on_input: fn(String) -> msg,
-  on_preview: fn(Bool) -> msg,
   on_format: fn(String, String) -> msg,
   on_block: fn(String) -> msg,
 ) -> Element(msg) {
@@ -1879,23 +1897,6 @@ pub fn editor(
   }
   h.div([a.class("composer")], [
     h.div([a.class("toolbar")], [
-      h.button(
-        [
-          a.type_("button"),
-          a.aria_pressed(bool_text(!preview)),
-          e.on_click(on_preview(False)),
-        ],
-        [h.text("Write")],
-      ),
-      h.button(
-        [
-          a.type_("button"),
-          a.aria_pressed(bool_text(preview)),
-          e.on_click(on_preview(True)),
-        ],
-        [h.text("Preview")],
-      ),
-      h.span([a.class("separator")], []),
       block_tool("H", "Heading", "heading"),
       tool("B", "Bold", "**", "**"),
       tool("`code`", "Code", "`", "`"),
@@ -1920,44 +1921,32 @@ pub fn editor(
           ])
       },
     ]),
-    case preview {
-      True ->
-        h.div([a.class("preview")], [
-          case text {
-            "" -> h.p([a.class("muted")], [h.text("Nothing to preview.")])
-            text -> md(base, text)
+    element.element(
+      "solace-md-editor",
+      [
+        a.id(id),
+        a.class("md-editor"),
+        a.attribute("data-task", task),
+        a.attribute("data-base", base),
+        a.attribute("label", label),
+        a.attribute(
+          "placeholder",
+          label
+            <> " (markdown)."
+            <> case task {
+            "" -> ""
+            _ -> " Paste or drop images here."
           },
-        ])
-      False ->
-        h.textarea(
-          [
-            a.id(id),
-            a.class("md-editor"),
-            a.attribute("data-task", task),
-            a.attribute("data-base", base),
-            a.attribute("aria-label", label),
-            a.placeholder(
-              label
-              <> " (markdown)."
-              <> case task {
-                "" -> ""
-                _ -> " Paste or drop images here."
-              },
-            ),
-            a.value(text),
-            e.on_input(on_input),
-          ],
-          text,
-        )
-    },
+        ),
+        a.property("value", json.string(text)),
+        e.on(
+          "md-input",
+          decode.at(["detail"], decode.string) |> decode.map(on_input),
+        ),
+      ],
+      [],
+    ),
   ])
-}
-
-fn bool_text(value: Bool) -> String {
-  case value {
-    True -> "true"
-    False -> "false"
-  }
 }
 
 fn button(label: String, msg: Msg) -> Element(Msg) {
@@ -1975,7 +1964,7 @@ fn questions_view(base: String, t: Task) -> List(Element(Msg)) {
         [h.pre([a.class("diff")], [h.text(settings_diff(current, proposed))])],
         "Reject with the editor's text",
       )
-      None -> #([], "Answer with the editor's text")
+      None -> #([], ui_label("answer"))
     }
     h.article([], [
       md(base, q.text),
@@ -2010,10 +1999,10 @@ fn notes_view(base: String, t: Task) -> List(Element(Msg)) {
         h.button(
           [
             a.class("delete"),
-            a.attribute("aria-label", "Delete note"),
+            a.attribute("aria-label", ui_label("delete_note")),
             e.on_click(DeleteNote(i)) |> e.prevent_default,
           ],
-          [h.text("Delete")],
+          [h.text(ui_label("delete"))],
         ),
       ]),
       md(base, n.text),
@@ -2047,15 +2036,8 @@ fn run_view(model: Model, r: Run) -> Element(Msg) {
         }),
       ]),
       case watching {
-        True -> button("Hide activity", Unwatch)
-        False ->
-          button(
-            case r.state {
-              "ended" -> "Show activity"
-              _ -> "Follow live"
-            },
-            Watch(r.id),
-          )
+        True -> button(ui_label("hide_activity"), Unwatch)
+        False -> button(ui_label("watch"), Watch(r.id))
       },
     ]),
     h.small([], [h.text(when <> " · log: " <> r.log)]),
@@ -2117,8 +2099,8 @@ pub fn entry_view(base: String, e: Entry) -> Element(msg) {
   }
 }
 
-/// The Scope tab: a switch per project the task can change, locked while the
-/// agent works.
+/// The Scope tab: a switch per project the task can change. While the agent
+/// works, projects can be added but not removed (D-127).
 fn scope_view(model: Model, t: Task) -> Element(Msg) {
   let working =
     t.paused == "" && list.any(t.runs, fn(r) { r.state == "running" })
@@ -2133,7 +2115,7 @@ fn scope_view(model: Model, t: Task) -> Element(Msg) {
       True ->
         h.small([], [
           h.text(
-            "You can change the projects once the agent stops working, is paused, or asks a question.",
+            "You can add projects now; remove them once the agent stops working, is paused, or asks a question.",
           ),
         ])
       False -> h.text("")
@@ -2142,22 +2124,24 @@ fn scope_view(model: Model, t: Task) -> Element(Msg) {
 }
 
 /// A switch per project, each a folder and its name on screen, for the
-/// projects a task can change.
+/// projects a task can change. `locked`: the chosen ones can't be turned off.
 pub fn projects_pick(
   projects: List(#(String, String)),
   chosen: List(String),
-  disabled: Bool,
+  locked: Bool,
   msg: fn(String, Bool) -> msg,
 ) -> Element(msg) {
-  h.fieldset([a.class("projects-pick"), a.disabled(disabled)], [
-    h.legend([], [h.text("Projects this task can change")]),
+  h.fieldset([a.class("projects-pick")], [
+    h.legend([], [h.text(ui_label("scope_projects"))]),
     ..list.map(projects, fn(p) {
       let #(dir, label) = p
+      let on = list.contains(chosen, dir)
       h.label([], [
         h.input([
           a.type_("checkbox"),
           a.role("switch"),
-          a.checked(list.contains(chosen, dir)),
+          a.checked(on),
+          a.disabled(locked && on),
           e.on_check(msg(dir, _)),
         ]),
         h.text(label),
@@ -2174,14 +2158,15 @@ pub const projects_pick_styles =
 /// a nested shadow root inherits from its host: none are set here, so the
 /// board's dark theme reaches the detail.
 const task_styles =
-  projects_pick_styles
+  control_styles
+  <> projects_pick_styles
   <> editor_styles
   <> ":host{display:block}input,textarea,pre,code,.md,.detail > .heading > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}
-button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:min(95%,700px);min-height:70px}input{width:min(80%,600px)}.detail{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}
+button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.detail{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}
 .meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}
 .tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}
 details.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}
-.title{display:block;box-sizing:border-box;width:calc(100% - 8px);max-width:762px;margin:8px 4px}
+.title{display:block;box-sizing:border-box;width:calc(100% - 8px);margin:8px 4px}
 .heading{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px}.heading h2{margin:12px 0}.copy-id{flex:none;margin:0;padding:2px 10px;font-size:13px}
 *{scrollbar-color:var(--line) var(--paper)}::selection{background:var(--sel);color:var(--ink)}
 h1,h2,h3{line-height:1.2;letter-spacing:-.02em}a{color:var(--focus);text-underline-offset:3px}
@@ -2200,8 +2185,8 @@ article{border-bottom-color:var(--line)}.transcript{border-left:1px solid var(--
 /// The markdown editor's look (`editor`), shared with the pages that use it.
 /// Colors come from the page's custom properties.
 pub const editor_styles =
-  ".composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;max-width:760px;background:var(--paper)}.composer textarea{width:100%;max-width:none;box-sizing:border-box;border:0;border-top:1px solid var(--line);border-radius:0 0 6px 6px;margin:0;min-height:110px}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}.toolbar [aria-pressed=true]{background:var(--well);font-weight:600}.separator{width:1px;align-self:stretch;background:var(--line);margin:0 6px}.preview{border-top:1px solid var(--line);padding:8px 12px;min-height:94px}
-.composer textarea{border:0;border-top:1px solid var(--edge)}.toolbar .button{border-color:var(--edge);background:var(--paper)}.toolbar .button:hover{background:var(--hover)}.toolbar [aria-pressed=true]{background:var(--ink);color:var(--paper)}
+  ".composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}.composer solace-md-editor{display:block;border-top:1px solid var(--line)}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}
+.composer solace-md-editor{border-top:1px solid var(--edge)}.toolbar .button{border-color:var(--edge);background:var(--paper)}.toolbar .button:hover{background:var(--hover)}
 "
 
 /// A strategy run's proposal (D-93, Spec 15 §6): a record to create (`id`
@@ -2299,7 +2284,7 @@ fn field_order(a: #(String, String), b: #(String, String)) -> order.Order {
 /// lines, counts as unchanged. One that changes nothing, the vision included,
 /// says "No change". A create, and a proposal saved before `before`, show
 /// every field, the vision its text as Markdown; the records Approve
-/// also sets `planned` follow, then its options until it is answered, and the
+/// also sets `upcoming` follow, then its options until it is answered, and the
 /// answer after. `name(kind, id)` is a record's title, "" when it isn't
 /// loaded.
 pub fn proposal_view(
@@ -2419,7 +2404,7 @@ pub fn proposal_view(
           h.p([a.class("reopens")], [
             h.text("Approving also sets the " <> r.0 <> " "),
             h.em([], [h.text(shown)]),
-            h.text(" back to planned."),
+            h.text(" back to upcoming."),
           ])
         }),
         [
@@ -2491,7 +2476,8 @@ pub const resync = "{\"resync\":true}"
 
 /// Whether a live message puts this element's copy of the task in doubt, so
 /// it is fetched again rather than trusted: the host's `resync`, or an update
-/// of this task named under another project than the one it is opened from.
+/// of this task named under another project than the one it is opened from,
+/// unless it has no project (D-129) and so is named under its home folder.
 pub fn stale(model: Model, text: String) -> Bool {
   case json.parse(text, decode.at(["resync"], decode.bool)) {
     Ok(_) -> True
@@ -2500,7 +2486,8 @@ pub fn stale(model: Model, text: String) -> Bool {
         json.parse(text, decode.at(["project"], decode.string)),
         json.parse(text, decode.at(["task", "id"], decode.string))
       {
-        Ok(dir), Ok(id) -> dir != model.dir && id == model.id
+        Ok(dir), Ok(id) ->
+          dir != model.dir && id == model.id && !homeless_event(text)
         _, _ -> False
       }
   }
@@ -2801,4 +2788,100 @@ fn text_lines(text: String) -> List(String) {
   string.split(text, "\n")
   |> list.map(string.trim)
   |> list.filter(fn(l) { l != "" })
+}
+
+/// The text of the fixed buttons the pages share: the board's, the task
+/// detail's, Strategy's and Settings' buttons read these, not inline strings.
+/// Keys name the button; an action's own label (D-108) comes from the
+/// workflow, not from here.
+pub const ui_labels: List(#(String, String)) = [
+  #("new_task", "New task"),
+  #("create_task", "Create task"),
+  #("archive", "Archive"),
+  #("show_task", "Show task"),
+  #("close_all", "Close All"),
+  #("dismiss", "Dismiss"),
+  #("save", "Save"),
+  #("edit", "Edit"),
+  #("add_note", "Add note"),
+  #("delete", "Delete"),
+  #("copy_id", "Copy ID"),
+  #("answer", "Answer"),
+  #("watch", "Watch"),
+  #("start", "Start"),
+  #("send", "Send"),
+  #("end", "End"),
+  #("stop", "Stop"),
+  #("new_run", "New run"),
+  #("cancel", "Cancel"),
+  #("new_feature", "New feature"),
+  #("new_milestone", "New milestone"),
+  #("hide_activity", "Hide activity"),
+  #("open_run", "Open run"),
+  #("show", "Show"),
+  #("hide", "Hide"),
+  #("model", "Model"),
+  #("plan", "Plan"),
+  #("plan_context", "Plan context"),
+  #("projects", "Projects"),
+  #("scope_projects", "Projects this task can change"),
+  #("contract_view", "Contract view"),
+  #("remove", "Remove"),
+  #("add", "Add"),
+  #("create_project", "Create project"),
+  #("find_task", "Find a task"),
+  #("dependencies", "Dependencies"),
+  #("effort", "Effort"),
+  #("default_effort", "Default"),
+  #("pick_model", "Select a model"),
+  #("project", "Project"),
+  #("remove_only", "Remove only"),
+  #("delete_permanently", "Delete permanently"),
+  #("edit_feature", "Edit feature"),
+  #("edit_milestone", "Edit milestone"),
+  #("delete_note", "Delete note"),
+  #("plan_marker", "A plan run is open on this"),
+  #("plan_open_here", "A plan run on this is open."),
+]
+
+/// What a shared button says: its text in `ui_labels`. An unknown key
+/// says nothing, so a raw key never reaches a button.
+pub fn ui_label(key: String) -> String {
+  result.unwrap(list.key_find(ui_labels, key), "")
+}
+
+/// What a column is called: its label from the workflow, or its id when the
+/// workflow doesn't list it.
+fn column_label(workflow: Workflow, id: String) -> String {
+  case list.find(workflow.columns, fn(c) { c.id == id }) {
+    Ok(c) -> c.label
+    Error(_) -> id
+  }
+}
+
+/// Buttons, inputs, text areas, selects and their option lists, in the
+/// theme's tokens only, so the dark theme reaches the open list of a select
+/// too. Pages put it first, so their own rules for a control win.
+pub const control_styles =
+  "button,input,textarea,select{border:1px solid var(--edge);background:var(--paper);color:var(--ink);caret-color:var(--focus)}option,optgroup{background:var(--paper);color:var(--ink)}option:disabled{color:var(--soft)}input::placeholder,textarea::placeholder{color:var(--soft);opacity:1}button:hover,select:hover{background:var(--hover)}button:disabled{color:var(--soft)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+"
+
+/// A select's placeholder option: shown only while nothing is picked, it
+/// names the choice and can't be pressed. Pages share it for their model
+/// picks.
+pub fn placeholder_option(text: String, picked: String) -> List(Element(msg)) {
+  case picked {
+    "" -> [h.option([a.value(""), a.disabled(True), a.selected(True)], text)]
+    _ -> []
+  }
+}
+
+/// Defines `<solace-md-editor>` in a browser, loading CodeMirror; elsewhere
+/// it does nothing.
+@external(javascript, "./task_api.mjs", "define_editor")
+fn define_editor() -> Nil
+
+/// Whether a live message marks a task with no project (D-129).
+fn homeless_event(text: String) -> Bool {
+  json.parse(text, decode.at(["noProject"], decode.bool)) == Ok(True)
 }

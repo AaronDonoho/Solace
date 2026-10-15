@@ -43,6 +43,8 @@ pub type Model {
     features: List(features.Feature),
     milestones: List(features.Milestone),
     filters: Filters,
+    /// The Tasks tab's page, from 1.
+    page: Int,
     /// The task open below the list: the project it is stored in, and its id.
     selected: Option(#(String, String)),
     error: String,
@@ -61,13 +63,11 @@ pub type Model {
     /// The vision being edited: its text, and the revision the edit began
     /// from, which a save names as its `base`. None when not editing.
     draft: Option(#(String, String)),
-    preview: Bool,
     /// A save sent and not yet answered.
     saving: Bool,
     vision_error: String,
     /// The feature being written on the Features tab, None when no form is open.
     feature_draft: Option(features.Draft),
-    feature_preview: Bool,
     /// A feature save sent and not yet answered.
     feature_saving: Bool,
     feature_error: String,
@@ -78,7 +78,6 @@ pub type Model {
     feature_deleting: Option(String),
     /// The milestone being written on the Roadmap tab, None when no form is open.
     milestone_draft: Option(roadmap.Draft),
-    milestone_preview: Bool,
     /// A milestone save sent and not yet answered.
     milestone_saving: Bool,
     /// The Roadmap tab's refusal: a save, move or delete, a feature's target
@@ -105,6 +104,13 @@ pub type Model {
     task_linking: Option(#(String, String, String)),
     /// Each feature's new-task error, by feature id.
     task_errors: List(#(String, String)),
+    /// The Tasks tab's new task, None when its form is closed. Its create and
+    /// link use `task_saving` and `task_linking` with "" for the feature.
+    new_task: Option(NewTask),
+    /// The `request` id of the Tasks tab's create, chosen when the form opens
+    /// and kept until a create succeeds (Spec 15).
+    new_task_request: String,
+    new_task_error: String,
     /// The root's strategy runs (D-93), oldest first.
     runs: List(plan.Run),
     /// The run shown in the planning panel, "" for none.
@@ -114,8 +120,6 @@ pub type Model {
     plan_width: Int,
     /// The panel's message box: a new run's first message, or the next one.
     plan_text: String,
-    /// Whether the message box shows its Preview.
-    plan_preview: Bool,
     /// A start, message, answer, end or stop sent and not yet answered.
     plan_sending: Bool,
     plan_error: String,
@@ -138,6 +142,8 @@ pub type Model {
     /// The task a task link asked to show (D-98), and how many times one was
     /// asked, so asking again is news to `<solace-task>`.
     reveal: #(String, Int),
+    /// The feature the Features tab shows in full, None for none.
+    focused_feature: Option(String),
   )
 }
 
@@ -154,12 +160,19 @@ pub type Msg {
   /// task is stored in, and its id. A task shows on the Tasks tab, a feature
   /// on Features, a milestone on Roadmap.
   Focus(String, String, String)
+  /// A feature card's More or Less: shows the feature in full, or compacts it.
+  FocusFeature(String)
   /// `<solace-task>` says the open task now lives in another project.
   TaskMoved(String, String)
   Filter(Filters)
+  /// The Tasks tab's Prev or Next: the page to show.
+  Page(Int)
   /// An inline link: the task's project and id, "feature" or "milestone",
   /// and the record's id, "" for none.
   Link(String, String, String, String)
+  /// Links as one PATCH: the task's project and id, and each field with its
+  /// record's id, "" for none.
+  Links(String, String, List(#(String, String)))
   /// The reply to a link: the task's project, and the task as it is now.
   Patched(String, String)
   BaseChanged(String)
@@ -170,7 +183,6 @@ pub type Msg {
   EditVision
   CancelVision
   Draft(String)
-  VisionPreview(Bool)
   VisionFormat(String, String)
   VisionBlock(String)
   SaveVision
@@ -188,7 +200,6 @@ pub type Msg {
   FeatureState(String)
   /// The milestone's id, "" for none.
   FeatureMilestone(String)
-  FeaturePreview(Bool)
   FeatureFormat(String, String)
   FeatureBlock(String)
   SaveFeature
@@ -213,6 +224,21 @@ pub type Msg {
   /// The reply to a create: the task's project, the feature, and the task or
   /// a refusal.
   TaskCreated(String, String, String)
+  /// Opens the Tasks tab's new-task form.
+  NewTaskOpen
+  NewTaskCancel
+  NewTaskTitle(String)
+  NewTaskText(String)
+  /// The folder the new task goes to.
+  NewTaskProject(String)
+  /// The feature's id, "" for none.
+  NewTaskFeature(String)
+  /// The milestone's id, "" for none.
+  NewTaskMilestone(String)
+  NewTaskFormat(String, String)
+  NewTaskBlock(String)
+  /// Creates the Tasks tab's new task, then links what was picked.
+  CreateTask
   /// Opens the form for a new milestone.
   NewMilestone
   /// Opens the form on the milestone with this id.
@@ -223,7 +249,6 @@ pub type Msg {
   /// The target date as the input gives it, "" for none.
   MilestoneTargetDate(String)
   MilestoneState(String)
-  MilestonePreview(Bool)
   MilestoneFormat(String, String)
   MilestoneBlock(String)
   SaveMilestone
@@ -261,7 +286,6 @@ pub type Msg {
   /// A key on the focused resize handle: the arrows, Home or End.
   PlanKey(String)
   PlanText(String)
-  PlanPreview(Bool)
   PlanFormat(String, String)
   PlanBlock(String)
   PlanModel(String)
@@ -381,7 +405,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(
         ..model,
         draft: Some(#(model.vision.text, model.vision.revision)),
-        preview: False,
         vision_error: "",
       ),
       effect.none(),
@@ -406,7 +429,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
         None -> #(model, effect.none())
       }
-    VisionPreview(on) -> #(Model(..model, preview: on), effect.none())
     VisionFormat(before, after) ->
       case model.draft {
         Some(#(text, _)) -> #(
@@ -459,7 +481,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             ..model,
             vision: v,
             draft: None,
-            preview: False,
             saving: False,
             vision_error: "",
           ),
@@ -478,7 +499,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(
         ..model,
         feature_draft: Some(features.new_draft()),
-        feature_preview: False,
         feature_error: "",
         feature_request: request_id(),
       ),
@@ -490,7 +510,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           Model(
             ..model,
             feature_draft: Some(features.draft_of(f)),
-            feature_preview: False,
             feature_error: "",
           ),
           effect.none(),
@@ -515,7 +534,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           id -> Some(id)
         })
       })
-    FeaturePreview(on) -> #(Model(..model, feature_preview: on), effect.none())
     FeatureFormat(before, after) ->
       case model.feature_draft {
         Some(d) -> #(
@@ -609,7 +627,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             ..model,
             features: keep(model.features, f, fn(f) { f.id }),
             feature_draft: None,
-            feature_preview: False,
             feature_saving: False,
             feature_error: "",
           ),
@@ -688,7 +705,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(
         ..model,
         milestone_draft: Some(roadmap.new_draft()),
-        milestone_preview: False,
         milestone_error: "",
         milestone_request: request_id(),
       ),
@@ -700,7 +716,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           Model(
             ..model,
             milestone_draft: Some(roadmap.draft_of(m)),
-            milestone_preview: False,
             milestone_error: "",
           ),
           effect.none(),
@@ -725,10 +740,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           date -> Some(date)
         })
       })
-    MilestonePreview(on) -> #(
-      Model(..model, milestone_preview: on),
-      effect.none(),
-    )
     MilestoneFormat(before, after) ->
       case model.milestone_draft {
         Some(d) -> #(
@@ -815,7 +826,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             ..model,
             milestones: keep(model.milestones, m, fn(m) { m.id }),
             milestone_draft: None,
-            milestone_preview: False,
             milestone_saving: False,
             milestone_error: "",
           ),
@@ -1010,6 +1020,132 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         }
       }
     }
+    NewTaskOpen if model.new_task == None -> #(
+      Model(
+        ..model,
+        new_task: Some(NewTask("", "", root_dir(model), "", "")),
+        new_task_error: "",
+        new_task_request: request_id(),
+      ),
+      effect.none(),
+    )
+    NewTaskOpen -> #(model, effect.none())
+    // A create or its link in flight finishes in the form.
+    NewTaskCancel if model.task_saving != Some("") -> #(
+      Model(..model, new_task: None, new_task_error: ""),
+      effect.none(),
+    )
+    NewTaskCancel -> #(model, effect.none())
+    NewTaskTitle(title) ->
+      edit_new_task(model, fn(d) { NewTask(..d, title: title) })
+    NewTaskText(body) ->
+      edit_new_task(model, fn(d) { NewTask(..d, body: body) })
+    NewTaskProject(dir) ->
+      edit_new_task(model, fn(d) { NewTask(..d, project: dir) })
+    NewTaskFeature(id) ->
+      edit_new_task(model, fn(d) { NewTask(..d, feature: id) })
+    NewTaskMilestone(id) ->
+      edit_new_task(model, fn(d) { NewTask(..d, milestone: id) })
+    NewTaskFormat(before, after) ->
+      case model.new_task {
+        Some(d) -> #(
+          model,
+          effect.from(fn(send) {
+            send(
+              NewTaskText(solace_task.wrap(
+                model.root,
+                new_task_id,
+                d.body,
+                before,
+                after,
+              )),
+            )
+          }),
+        )
+        None -> #(model, effect.none())
+      }
+    NewTaskBlock(kind) ->
+      case model.new_task {
+        Some(d) -> #(
+          model,
+          effect.from(fn(send) {
+            send(
+              NewTaskText(solace_task.block(
+                model.root,
+                new_task_id,
+                d.body,
+                kind,
+              )),
+            )
+          }),
+        )
+        None -> #(model, effect.none())
+      }
+    // One create at a time, under the request chosen when the form opened.
+    CreateTask ->
+      case model.new_task, model.task_saving {
+        Some(d), None ->
+          case string.trim(d.title) {
+            "" -> #(model, effect.none())
+            title -> {
+              let rid = case model.new_task_request {
+                "" -> request_id()
+                rid -> rid
+              }
+              #(
+                Model(
+                  ..model,
+                  task_saving: Some(""),
+                  new_task_request: rid,
+                  new_task_error: "",
+                ),
+                effect.from(fn(send) {
+                  request(
+                    model.prefix,
+                    base_of(model, d.project) <> "/tasks",
+                    "POST",
+                    json.to_string(
+                      json.object([
+                        #("title", json.string(title)),
+                        #("body", json.string(d.body)),
+                        #("request", json.string(rid)),
+                      ]),
+                    ),
+                    fn(reply) { send(TaskCreated(d.project, "", reply)) },
+                  )
+                }),
+              )
+            }
+          }
+        _, _ -> #(model, effect.none())
+      }
+    // The Tasks tab's create: the links picked go in one `Links`, whose
+    // `Patched` reports in the form; with none the task opens now.
+    TaskCreated(dir, "", text) ->
+      case json.parse(text, row_decoder()) {
+        Ok(row) -> {
+          let model = Model(..put(model, dir, row), new_task_request: "")
+          let fields = case model.new_task {
+            Some(d) -> new_task_links(d)
+            None -> []
+          }
+          case fields {
+            [] -> #(new_task_done(model, dir, row.id), effect.none())
+            _ -> #(
+              Model(..model, task_linking: Some(#(dir, row.id, ""))),
+              effect.from(fn(send) { send(Links(dir, row.id, fields)) }),
+            )
+          }
+        }
+        Error(_) -> #(
+          Model(
+            ..model,
+            task_saving: None,
+            new_task_error: "Couldn't create the task: " <> error(text),
+          ),
+          effect.none(),
+        )
+      }
     TaskCreated(dir, feature, text) ->
       case json.parse(text, row_decoder()) {
         Ok(row) -> #(
@@ -1124,8 +1260,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         |> plan.clamp(window)
       #(Model(..model, plan_width: width), store_width(width))
     }
-    PlanText(text) -> #(Model(..model, plan_text: text), plan_fit())
-    PlanPreview(on) -> #(Model(..model, plan_preview: on), plan_fit())
+    // The message box grows with its text by itself (`<solace-md-editor>`).
+    PlanText(text) -> #(Model(..model, plan_text: text), effect.none())
     PlanFormat(before, after) -> #(
       model,
       effect.from(fn(send) {
@@ -1246,30 +1382,24 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     PlanReplied(clears, text) ->
       case json.parse(text, plan.decoder()) {
         Ok(run) -> {
-          let #(next, fx) =
-            plan_track(
-              model,
-              plan_fetch(
-                Model(
-                  ..model,
-                  runs: keep(model.runs, run, fn(r) { r.id }),
-                  plan_open: run.id,
-                  plan_sending: False,
-                  plan_error: "",
-                  plan_text: case clears {
-                    True -> ""
-                    False -> model.plan_text
-                  },
-                  plan_preview: model.plan_preview && !clears,
-                  plan_jump: model.plan_jump || run.id != model.plan_open,
-                ),
-                run.id,
+          plan_track(
+            model,
+            plan_fetch(
+              Model(
+                ..model,
+                runs: keep(model.runs, run, fn(r) { r.id }),
+                plan_open: run.id,
+                plan_sending: False,
+                plan_error: "",
+                plan_text: case clears {
+                  True -> ""
+                  False -> model.plan_text
+                },
+                plan_jump: model.plan_jump || run.id != model.plan_open,
               ),
-            )
-          #(next, case clears {
-            True -> effect.batch([fx, plan_fit()])
-            False -> fx
-          })
+              run.id,
+            ),
+          )
         }
         Error(_) -> #(
           Model(..model, plan_sending: False, plan_error: error(text)),
@@ -1283,7 +1413,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           plan_open: rid,
           plan_entries: [],
           plan_error: "",
-          plan_preview: False,
           plan_collapsed: False,
           plan_at_bottom: True,
           plan_new: False,
@@ -1356,47 +1485,104 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       },
     )
     Focus(_, _, "") -> #(model, effect.none())
-    Focus("feature", _, id) -> show_record(model, Features, "feature", id)
-    Focus("milestone", _, id) -> show_record(model, Roadmap, "milestone", id)
-    // `<solace-task>` scrolls into view now, or once the task loads.
-    Focus(_, dir, id) -> #(
-      Model(
-        ..model,
-        tab: Tasks,
-        selected: Some(#(dir, id)),
-        live: case model.selected == Some(#(dir, id)) {
-          True -> model.live
-          False -> []
-        },
-        reveal: #(id, model.reveal.1 + 1),
-      ),
-      effect.from(fn(_) { set_tab(tab_name(Tasks)) }),
+    Focus("feature", _, id) ->
+      show_record(
+        Model(..model, focused_feature: Some(id)),
+        Features,
+        "feature",
+        id,
+      )
+    FocusFeature(id) -> #(
+      Model(..model, focused_feature: case model.focused_feature == Some(id) {
+        True -> None
+        False -> Some(id)
+      }),
+      effect.none(),
     )
+    Focus("milestone", _, id) -> show_record(model, Roadmap, "milestone", id)
+    // `<solace-task>` scrolls into view now, or once the task loads. A link
+    // names the task's home folder; a homeless task's row (D-129) lives in
+    // the homeless bucket.
+    Focus(_, named, id) -> {
+      let dir = bucket_of(model, named, id)
+      #(
+        Model(
+          ..model,
+          tab: Tasks,
+          selected: Some(#(dir, id)),
+          page: page_of(visible(model), dir, id, model.page),
+          live: case model.selected == Some(#(dir, id)) {
+            True -> model.live
+            False -> []
+          },
+          reveal: #(id, model.reveal.1 + 1),
+        ),
+        effect.from(fn(_) { set_tab(tab_name(Tasks)) }),
+      )
+    }
     TaskMoved(dir, id) ->
       case model.selected {
         Some(#(_, shown)) if shown == id -> #(
-          Model(..model, selected: Some(#(dir, id))),
+          Model(..model, selected: Some(#(bucket_of(model, dir, id), id))),
           effect.none(),
         )
         _ -> #(model, effect.none())
       }
-    Filter(filters) -> #(Model(..model, filters: filters), effect.none())
+    Filter(filters) -> #(
+      Model(..model, filters: filters, page: 1),
+      effect.none(),
+    )
+    Page(n) -> #(Model(..model, page: n), effect.none())
     // Allowed in final columns and during runs (D-87, D-100).
-    Link(dir, id, field, value) -> #(
+    Link(dir, id, field, value) ->
+      update(model, Links(dir, id, [#(field, value)]))
+    Links(dir, id, fields) -> #(
       model,
       effect.from(fn(send) {
         request(
           model.prefix,
           base_of(model, dir) <> "/tasks/" <> id,
           "PATCH",
-          json.to_string(link_body(field, value)),
+          json.to_string(links_body(fields)),
           fn(text) { send(Patched(dir, text)) },
         )
       }),
     )
-    // The link after a new task's create reports on its feature.
+    // The link after a new task's create reports on its feature, or in the
+    // Tasks tab's form ("" for the feature).
     Patched(dir, text) ->
       case json.parse(text, row_decoder()), model.task_linking {
+        Ok(row), Some(#(d, id, "")) if d == dir && row.id == id -> #(
+          new_task_done(put(model, dir, row), dir, id),
+          effect.none(),
+        )
+        // The task exists without its links: it opens, and the form stays
+        // with a fresh draft so a retry doesn't make it again.
+        Error(_), Some(#(d, id, "")) if d == dir -> {
+          let #(picked, project) = case model.new_task {
+            Some(t) -> #(
+              case t.feature, t.milestone {
+                "", _ -> "milestone"
+                _, "" -> "feature"
+                _, _ -> "feature and milestone"
+              },
+              t.project,
+            )
+            None -> #("feature/milestone", root_dir(model))
+          }
+          #(
+            Model(
+              ..new_task_done(model, dir, id),
+              new_task: Some(NewTask("", "", project, "", "")),
+              new_task_request: request_id(),
+              new_task_error: "The task was created without its "
+                <> picked
+                <> ": "
+                <> error(text),
+            ),
+            effect.none(),
+          )
+        }
         Ok(row), Some(#(d, id, _)) if d == dir && row.id == id -> #(
           Model(..put(model, dir, row), task_saving: None, task_linking: None),
           effect.none(),
@@ -1456,15 +1642,12 @@ pub fn view(model: Model) -> Element(Msg) {
           attribute.attribute("aria-labelledby", "tab-" <> tab_name(tab)),
           attribute.hidden(tab != model.tab),
         ],
-        [
-          html.h2([], [html.text(label(tab))]),
-          ..case tab {
-            Tasks -> tasks_view(model)
-            Vision -> vision_view(model)
-            Features -> features_view(model)
-            Roadmap -> roadmap_view(model)
-          }
-        ],
+        case tab {
+          Tasks -> tasks_view(model)
+          Vision -> vision_view(model)
+          Features -> features_view(model)
+          Roadmap -> roadmap_view(model)
+        },
       )
     })
   ])
@@ -1474,7 +1657,8 @@ pub fn view(model: Model) -> Element(Msg) {
 /// colors come from here. The dark set is the page's (`index.html`, and the
 /// shell's for `/strategy`).
 const view_styles =
-  ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a}
+  solace_task.control_styles
+  <> ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a}
 .strategy{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;height:calc(100dvh - 56px);overflow:hidden;background:var(--sheet);color:var(--ink);display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto minmax(0,1fr)}
 .strategy>.tabs{grid-column:1/-1}.strategy>[role=tabpanel]{grid-column:1;grid-row:2;min-width:0;min-height:0;overflow:auto}
 @media (max-width:900px){.strategy{display:block;height:auto;overflow:visible}.strategy>[role=tabpanel]{overflow:visible}}
@@ -1484,13 +1668,12 @@ const view_styles =
 .tabs button[aria-selected=true]{background:var(--paper);font-weight:700;box-shadow:inset 0 -3px var(--ink)}
 .tabs button:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
 [role=tabpanel]{padding:24px}
-[role=tabpanel] h2{margin:0 0 10px;font-size:19px}
 [role=tabpanel] p{color:var(--soft);margin:8px 0}
 [role=alert]{color:var(--revision)}
 .filters{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:flex-end;margin:0 0 16px}
 .filters label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--soft)}
 .filters input,.filters select,.tasks select{font:inherit;font-size:15px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:6px 8px}
-.filters input{min-width:240px}.filters input::placeholder{color:var(--soft);opacity:1}
+.filters input{min-width:240px;margin:0}.filters input::placeholder{color:var(--soft);opacity:1}
 .filters :focus-visible,.tasks :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .tasks{width:100%;border-collapse:collapse;background:var(--paper);border:1px solid var(--edge)}
 .tasks th{text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.08em;padding:8px 10px;border-bottom:2px solid var(--edge)}
@@ -1498,11 +1681,12 @@ const view_styles =
 .tasks tr:hover td{background:var(--hover)}.tasks tr[aria-current=true] td{background:var(--sel)}
 .tasks .open{font:inherit;font-weight:600;color:var(--ink);background:none;border:0;padding:0;text-align:left;cursor:pointer}
 .tasks .open:hover{text-decoration:underline}
-.tasks .closed{white-space:nowrap;color:var(--soft)}
+.tasks .created,.tasks .closed{white-space:nowrap;color:var(--soft)}
 solace-task{display:block;margin-top:16px}
 .milestone{margin:0 0 20px}.milestone h3{margin:0 0 8px;font-size:16px;border-bottom:1px solid var(--line)}
-.feature{background:var(--paper);border:1px solid var(--edge);padding:8px 14px;margin:0 0 10px;max-width:760px}
+.feature{background:var(--paper);border:1px solid var(--edge);padding:8px 14px;margin:0 0 10px}
 .feature h4{margin:0 0 4px;font-size:15px}
+.feature-count{font-size:13px;color:var(--soft);margin:4px 0}
 .state{font-size:11px;text-transform:uppercase;letter-spacing:.08em;border:1px solid var(--line);padding:1px 6px;margin-left:6px;color:var(--soft);font-weight:400}
 .feature-tasks{margin:6px 0 0;padding-left:20px}
 .feature .open{font:inherit;color:var(--ink);background:none;border:0;padding:0;text-align:left;cursor:pointer}.feature .open:hover{text-decoration:underline}
@@ -1511,26 +1695,30 @@ solace-task{display:block;margin-top:16px}
 "
   <> solace_task.editor_styles
   <> plan.styles
-  <> ".vision{background:var(--paper);border:1px solid var(--edge);padding:12px 20px;max-width:760px}
+  <> ".vision{background:var(--paper);border:1px solid var(--edge);padding:12px 20px}
 .vision .md p,.vision .md li{color:var(--ink)}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}
 .md pre{background:var(--code);padding:8px;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace}.md code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px}
 .vision-actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 4px}
 .vision-count{margin:4px;font-size:13px}[role=tabpanel] .vision-count[role=alert]{color:var(--revision);font-weight:600}
 .vision-actions button,.toolbar button,.toolbar .button{font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;cursor:pointer}.vision-actions button{padding:6px 14px}
 .vision-actions button:hover,.toolbar button:hover{background:var(--hover)}.vision-actions button:disabled{color:var(--soft);cursor:default}
-.vision-actions button:focus-visible,.toolbar button:focus-visible,.composer textarea:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.composer textarea{display:block;font:inherit;color:var(--ink);background:var(--paper);min-height:320px;padding:10px;resize:vertical}
-.feature-form{background:var(--paper);border:1px solid var(--edge);padding:12px 14px;margin:0 0 16px;max-width:760px}.feature-form h3{margin:0 0 10px;font-size:16px}.feature-form .filters{margin:10px 0}
+.vision-actions button:focus-visible,.toolbar button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.composer solace-md-editor{--md-min-height:320px}
+.feature-form{background:var(--paper);border:1px solid var(--edge);padding:12px 14px;margin:0 0 16px}.feature-form h3{margin:0 0 10px;font-size:16px}.feature-form .filters{margin:10px 0}
 .feature .edit{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 8px;margin-left:6px;cursor:pointer}.feature .edit:hover{background:var(--hover)}.feature .edit:disabled{color:var(--soft);cursor:default}.feature .edit:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.feature .toggle{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 8px;margin-left:6px;cursor:pointer}.feature .toggle:hover{background:var(--hover)}.feature .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .new-task{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 2px}.new-task input,.new-task select{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px}.new-task input{min-width:220px}.new-task input::placeholder{color:var(--soft);opacity:1}.new-task :focus-visible{outline:3px solid var(--focus);outline-offset:2px}.new-task .edit{margin-left:0}.new-task [role=alert]{flex-basis:100%;margin:2px 0}
 .milestone h3 .edit{font:inherit;font-size:13px;font-weight:400;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 8px;margin-left:6px;cursor:pointer}.milestone h3 .edit:hover{background:var(--hover)}.milestone h3 .edit:disabled{color:var(--soft);cursor:default}
 .milestone .target{font-size:13px;font-weight:400;color:var(--soft);margin-left:6px}
 .feature h4 select{font:inherit;font-size:13px;font-weight:400;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 6px;margin-left:6px}
 .feature-tasks .depends{font-size:13px;color:var(--soft)}
 .feature-tasks li .edit{margin-left:6px}
-.depends-edit{border:1px solid var(--line);margin:4px 0 8px;padding:6px 10px;max-width:600px}.depends-edit ul{list-style:none;margin:4px 0;padding:0}.depends-edit li{margin:2px 0}.depends-edit li .edit{margin:0 6px 0 0}.depends-edit p{font-size:13px;margin:4px 0}
+.depends-edit{border:1px solid var(--line);margin:4px 0 8px;padding:6px 10px}.depends-edit ul{list-style:none;margin:4px 0;padding:0}.depends-edit li{margin:2px 0}.depends-edit li .edit{margin:0 6px 0 0}.depends-edit p{font-size:13px;margin:4px 0}
 .depends-edit input{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;min-width:260px;margin:4px 0}.depends-edit input::placeholder{color:var(--soft);opacity:1}
 .milestone h3 .edit:focus-visible,.feature h4 select:focus-visible,.depends-edit :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.pager{display:flex;align-items:center;gap:10px;margin:10px 0 2px}
+.pager button{font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:6px 14px;cursor:pointer}.pager button:hover{background:var(--hover)}.pager button:disabled{color:var(--soft);cursor:default}.pager button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.pager .count{font-size:13px;color:var(--soft)}
 "
 
 pub fn register() -> Result(Nil, lustre.Error) {
@@ -1571,6 +1759,8 @@ pub type Row {
     column: String,
     feature: Option(String),
     milestone: Option(String),
+    /// When the task was created, in seconds (D-130); None from an older server.
+    created: Option(Int),
     /// When the task first reached a final column, in seconds; None while open.
     closed: Option(Int),
     /// The ids of the tasks this one depends on (D-87).
@@ -1626,6 +1816,7 @@ pub fn new(tab: Tab) -> Model {
     features: [],
     milestones: [],
     filters: Filters("", "", "", "", ""),
+    page: 1,
     selected: None,
     error: "",
     source: None,
@@ -1637,17 +1828,14 @@ pub fn new(tab: Tab) -> Model {
     live_n: 0,
     vision: Document("", ""),
     draft: None,
-    preview: False,
     saving: False,
     vision_error: "",
     feature_draft: None,
-    feature_preview: False,
     feature_saving: False,
     feature_error: "",
     feature_request: "",
     feature_deleting: None,
     milestone_draft: None,
-    milestone_preview: False,
     milestone_saving: False,
     milestone_error: "",
     milestone_request: "",
@@ -1660,12 +1848,14 @@ pub fn new(tab: Tab) -> Model {
     task_saving: None,
     task_linking: None,
     task_errors: [],
+    new_task: None,
+    new_task_request: "",
+    new_task_error: "",
     runs: [],
     plan_open: "",
     plan_collapsed: False,
     plan_width: plan.default_width,
     plan_text: "",
-    plan_preview: False,
     plan_sending: False,
     plan_error: "",
     plan_entries: [],
@@ -1678,6 +1868,7 @@ pub fn new(tab: Tab) -> Model {
     plan_effort: "",
     root: no_root(),
     reveal: #("", 0),
+    focused_feature: None,
   )
 }
 
@@ -1728,12 +1919,7 @@ fn error(text: String) -> String {
 /// The body of an inline link's `PATCH /tasks/{id}`: the one field, null to
 /// clear it.
 pub fn link_body(field: String, value: String) -> json.Json {
-  json.object([
-    #(field, case value {
-      "" -> json.null()
-      id -> json.string(id)
-    }),
-  ])
+  links_body([#(field, value)])
 }
 
 /// Applies one `/events` message; a workspace's name their `project`.
@@ -1875,14 +2061,19 @@ fn label_of(model: Model, dir: String) -> String {
   project_of(model, dir) |> result.map(fn(p) { p.label }) |> result.unwrap(dir)
 }
 
-/// The project a live message is for: the one it names, else the root's.
+/// The project a live message is for: the homeless bucket when it marks a
+/// task with no project (D-129), else the one it names, else the root's.
 fn event_dir(model: Model, text: String) -> String {
-  case at(text, "project", decode.string) {
-    Ok(dir) -> dir
-    Error(_) ->
-      list.find(model.projects, fn(p) { p.base == "" })
-      |> result.map(fn(p) { p.dir })
-      |> result.unwrap("")
+  case homeless_event(text) {
+    True -> homeless_dir
+    False ->
+      case at(text, "project", decode.string) {
+        Ok(dir) -> dir
+        Error(_) ->
+          list.find(model.projects, fn(p) { p.base == "" })
+          |> result.map(fn(p) { p.dir })
+          |> result.unwrap("")
+      }
   }
 }
 
@@ -1891,11 +2082,13 @@ fn projects_event(text: String) -> Bool {
   at(text, "projects", decode.list(decode.string)) |> result.is_ok
 }
 
-/// Whether a live message can be applied now: its project is listed, or it
-/// names none (the project list, features and milestones).
+/// Whether a live message can be applied now: its project is listed, it
+/// marks a task with no project (D-129), or it names none (the project
+/// list, features and milestones).
 fn knows(model: Model, text: String) -> Bool {
   projects_event(text)
   || result.is_ok(records(model, text))
+  || homeless_event(text)
   || result.is_ok(project_of(model, event_dir(model, text)))
 }
 
@@ -1961,7 +2154,7 @@ fn follow_move(model: Model, dir: String, id: String) -> Model {
 }
 
 /// A task in `GET /tasks` or `/events`. A task saved before D-87 has no
-/// feature, milestone, dependsOn or closedTime.
+/// feature, milestone, dependsOn or closedTime; one before D-130 no createdTime.
 pub fn row_decoder() -> decode.Decoder(Row) {
   use id <- decode.field("id", decode.string)
   use title <- decode.optional_field("title", "", decode.string)
@@ -1976,6 +2169,11 @@ pub fn row_decoder() -> decode.Decoder(Row) {
     "milestone",
     None,
     decode.optional(decode.string),
+  )
+  use created <- decode.optional_field(
+    "createdTime",
+    None,
+    decode.optional(decode.int),
   )
   use closed <- decode.optional_field(
     "closedTime",
@@ -1994,6 +2192,7 @@ pub fn row_decoder() -> decode.Decoder(Row) {
     column,
     feature,
     milestone,
+    created,
     closed,
     depends,
   ))
@@ -2012,11 +2211,12 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Project))) {
 }
 
 /// The tasks the list shows, each with its project: those the filters keep,
-/// in the default order.
+/// in the default order. Tasks with no project (D-129) show too, in the
+/// homeless bucket.
 pub fn visible(model: Model) -> List(#(String, Row)) {
-  model.projects
-  |> list.flat_map(fn(p) {
-    list.map(rows_of(model, p.dir), fn(r) { #(p.dir, r) })
+  task_dirs(model)
+  |> list.flat_map(fn(dir) {
+    list.map(rows_of(model, dir), fn(r) { #(dir, r) })
   })
   |> list.filter(fn(pair) { keeps(model.filters, pair.0, pair.1) })
   |> sorted
@@ -2083,17 +2283,25 @@ fn columns(model: Model) -> List(solace_task.Column) {
 }
 
 fn column_label(model: Model, dir: String, column: String) -> String {
+  // A homeless row's (D-129) column label comes from the root's workflow.
+  let dir = case dir == homeless_dir {
+    True -> root_dir(model)
+    False -> dir
+  }
   list.key_find(model.workflows, dir)
   |> result.try(fn(w) { list.find(w.columns, fn(c) { c.id == column }) })
   |> result.map(fn(c) { c.label })
   |> result.unwrap(column)
 }
 
-/// The Tasks tab: the filters, a row per task, and the open task's details
-/// below them.
+/// The Tasks tab: the filters, one page of rows, the page controls with the
+/// count, and the open task's details below them.
 fn tasks_view(model: Model) -> List(Element(Msg)) {
   let rows = visible(model)
+  let total = list.length(rows)
+  let page = shown_page(model.page, total)
   [
+    new_task_view(model),
     filters_view(model),
     case model.error {
       "" -> element.none()
@@ -2113,10 +2321,35 @@ fn tasks_view(model: Model) -> List(Element(Msg)) {
           ]),
           html.tbody(
             [],
-            list.map(rows, fn(pair) { row_view(model, pair.0, pair.1) }),
+            list.map(page_rows(rows, page), fn(pair) {
+              row_view(model, pair.0, pair.1)
+            }),
           ),
         ])
     },
+    html.div([attribute.class("pager")], [
+      html.button(
+        [
+          attribute.disabled(page == 1),
+          event.on_click(Page(page - 1)),
+        ],
+        [html.text("← Prev")],
+      ),
+      html.span(
+        [
+          attribute.class("count"),
+          attribute.attribute("aria-live", "polite"),
+        ],
+        [html.text(page_text(page, total))],
+      ),
+      html.button(
+        [
+          attribute.disabled(page == pages(total)),
+          event.on_click(Page(page + 1)),
+        ],
+        [html.text("Next →")],
+      ),
+    ]),
     case model.selected {
       Some(#(dir, id)) -> task_view(model, dir, id)
       None -> element.none()
@@ -2126,8 +2359,10 @@ fn tasks_view(model: Model) -> List(Element(Msg)) {
 
 fn headings(model: Model) -> List(String) {
   case model.workspace {
-    True -> ["Title", "Column", "Project", "Feature", "Milestone", "Closed"]
-    False -> ["Title", "Column", "Feature", "Milestone", "Closed"]
+    True -> [
+      "Title", "Column", "Project", "Feature", "Milestone", "Created", "Closed",
+    ]
+    False -> ["Title", "Column", "Feature", "Milestone", "Created", "Closed"]
   }
 }
 
@@ -2155,7 +2390,8 @@ fn filters_view(model: Model) -> Element(Msg) {
         choice(
           "Project",
           f.project,
-          list.map(model.projects, fn(p) { #(p.dir, p.label) }),
+          list.map(model.projects, fn(p) { #(p.dir, p.label) })
+            |> list.append([#(homeless_dir, "(no project)")]),
           fn(v) { Filter(Filters(..f, project: v)) },
         )
       False -> element.none()
@@ -2211,10 +2447,22 @@ fn row_view(model: Model, dir: String, row: Row) -> Element(Msg) {
           True -> plan.marker()
           False -> element.none()
         },
+        // A single project's table has no Project column: the row says it here.
+        case !model.workspace && dir == homeless_dir {
+          True ->
+            html.span([attribute.class("homeless")], [html.text("No project")])
+          False -> element.none()
+        },
       ]),
       html.td([], [html.text(column_label(model, dir, row.column))]),
       case model.workspace {
-        True -> html.td([], [html.text(label_of(model, dir))])
+        True ->
+          html.td([], [
+            html.text(case dir == homeless_dir {
+              True -> "No project"
+              False -> label_of(model, dir)
+            }),
+          ])
         False -> element.none()
       },
       html.td([], [
@@ -2232,6 +2480,12 @@ fn row_view(model: Model, dir: String, row: Row) -> Element(Msg) {
           "Milestone of " <> row.title,
           fn(v) { Link(dir, row.id, "milestone", v) },
         ),
+      ]),
+      html.td([attribute.class("created")], [
+        html.text(case row.created {
+          Some(seconds) -> clock(seconds)
+          None -> ""
+        }),
       ]),
       html.td([attribute.class("closed")], [
         html.text(case row.closed {
@@ -2381,7 +2635,7 @@ fn vision_view(model: Model) -> List(Element(Msg)) {
           ])
       },
       html.div([attribute.class("vision-actions")], [
-        button("Edit", EditVision, False),
+        button(solace_task.ui_label("edit"), EditVision, False),
       ]),
     ]
     Some(#(text, base)) -> {
@@ -2394,9 +2648,7 @@ fn vision_view(model: Model) -> List(Element(Msg)) {
           model.prefix,
           "Vision",
           text,
-          model.preview,
           Draft,
-          VisionPreview,
           VisionFormat,
           VisionBlock,
         ),
@@ -2426,8 +2678,12 @@ fn vision_view(model: Model) -> List(Element(Msg)) {
           alert,
           [
             html.div([attribute.class("vision-actions")], [
-              button("Save", SaveVision, model.saving || over),
-              button("Cancel", CancelVision, model.saving),
+              button(
+                solace_task.ui_label("save"),
+                SaveVision,
+                model.saving || over,
+              ),
+              button(solace_task.ui_label("cancel"), CancelVision, model.saving),
               ..case base == model.vision.revision {
                 True -> []
                 False -> [button("Reload", ReloadVision, model.saving)]
@@ -2466,12 +2722,12 @@ fn milestone_pairs(model: Model) -> List(#(String, String)) {
 }
 
 /// The Features tab: the milestones' features, each with its tasks from
-/// every project.
+/// every project and the homeless bucket (D-129).
 fn features_view(model: Model) -> List(Element(Msg)) {
   let tasks =
-    list.flat_map(model.projects, fn(p) {
-      list.map(rows_of(model, p.dir), fn(r) {
-        #(p.dir, r.id, r.title, r.feature)
+    list.flat_map(task_dirs(model), fn(dir) {
+      list.map(rows_of(model, dir), fn(r) {
+        #(dir, r.id, r.title, r.feature, r.closed != None)
       })
     })
   features.view(
@@ -2482,7 +2738,6 @@ fn features_view(model: Model) -> List(Element(Msg)) {
     Open,
     features.Editor(
       draft: model.feature_draft,
-      preview: model.feature_preview,
       saving: model.feature_saving,
       error: model.feature_error,
       on_new: NewFeature,
@@ -2491,7 +2746,6 @@ fn features_view(model: Model) -> List(Element(Msg)) {
       on_text: FeatureText,
       on_state: FeatureState,
       on_milestone: FeatureMilestone,
-      on_preview: FeaturePreview,
       on_format: FeatureFormat,
       on_block: FeatureBlock,
       on_save: SaveFeature,
@@ -2509,6 +2763,8 @@ fn features_view(model: Model) -> List(Element(Msg)) {
       on_delete: DeleteFeature,
       on_confirm_delete: ConfirmDeleteFeature,
       on_cancel_delete: CancelDeleteFeature,
+      focused: model.focused_feature,
+      on_focus: FocusFeature,
     ),
     features.TaskForm(
       titles: model.task_titles,
@@ -2549,22 +2805,19 @@ fn drop(pairs: List(#(String, a)), key: String) -> List(#(String, a)) {
 /// The folder a new task goes to: the one picked, else the root's own project.
 fn task_dir(model: Model) -> String {
   case model.task_project {
-    "" ->
-      list.find(model.projects, fn(p) { p.base == "" })
-      |> result.map(fn(p) { p.dir })
-      |> result.unwrap(".")
+    "" -> root_dir(model)
     dir -> dir
   }
 }
 
 /// The Roadmap tab: the milestones with their features, and every project's
-/// tasks with their dependencies.
+/// tasks with their dependencies, homeless ones (D-129) included.
 fn roadmap_view(model: Model) -> List(Element(Msg)) {
   let tasks =
-    list.flat_map(model.projects, fn(p) {
-      list.map(rows_of(model, p.dir), fn(r) {
+    list.flat_map(task_dirs(model), fn(dir) {
+      list.map(rows_of(model, dir), fn(r) {
         roadmap.Task(
-          p.dir,
+          dir,
           r.id,
           r.title,
           r.feature,
@@ -2582,7 +2835,6 @@ fn roadmap_view(model: Model) -> List(Element(Msg)) {
     Open,
     roadmap.Editor(
       draft: model.milestone_draft,
-      preview: model.milestone_preview,
       saving: model.milestone_saving,
       error: model.milestone_error,
       on_new: NewMilestone,
@@ -2591,7 +2843,6 @@ fn roadmap_view(model: Model) -> List(Element(Msg)) {
       on_text: MilestoneText,
       on_target_date: MilestoneTargetDate,
       on_state: MilestoneState,
-      on_preview: MilestonePreview,
       on_format: MilestoneFormat,
       on_block: MilestoneBlock,
       on_save: SaveMilestone,
@@ -2725,7 +2976,6 @@ fn plan_view(model: Model) -> Element(Msg) {
       width: model.plan_width,
       max_width: plan.max_width(window_width()),
       text: model.plan_text,
-      preview: model.plan_preview,
       sending: model.plan_sending,
       error: model.plan_error,
       models: model.models,
@@ -2736,7 +2986,6 @@ fn plan_view(model: Model) -> Element(Msg) {
       on_drag: PlanDrag,
       on_key: PlanKey,
       on_text: PlanText,
-      on_preview: PlanPreview,
       on_format: PlanFormat,
       on_block: PlanBlock,
       on_model: PlanModel,
@@ -2830,16 +3079,20 @@ fn depends_of(model: Model, id: String) -> List(String) {
 
 /// A new message or proposal in the shown run (D-118) scrolls to it when the
 /// human was at the run's end; else "New message ↓" shows, with no jump.
+/// Transcript entries, drawn above the conversation, keep the human at the
+/// end when they were there, with no button.
 fn plan_track(
   old: Model,
   step: #(Model, Effect(Msg)),
 ) -> #(Model, Effect(Msg)) {
   let #(new, fx) = step
+  let grew = list.length(new.plan_entries) > list.length(old.plan_entries)
   case plan_shown(old), plan_shown(new) {
     Some(a), Some(b) if a.id == b.id && !new.plan_jump ->
       case plan.size(b) > plan.size(a), new.plan_at_bottom {
         True, True -> #(new, effect.batch([fx, plan_scroll()]))
         True, False -> #(Model(..new, plan_new: True), fx)
+        False, True if grew -> #(new, effect.batch([fx, plan_scroll()]))
         False, _ -> step
       }
     _, _ -> step
@@ -2853,15 +3106,6 @@ fn plan_scroll() -> Effect(Msg) {
 
 @external(javascript, "./api.mjs", "scroll_plan")
 fn scroll_plan(root: dynamic.Dynamic) -> Nil
-
-@external(javascript, "./api.mjs", "fit_plan_text")
-fn fit_plan_text(root: dynamic.Dynamic) -> Nil
-
-/// Sizes the panel's message box to its text, once it has rendered, where
-/// the browser can't (see `fit_plan_text` in api.mjs).
-fn plan_fit() -> Effect(Msg) {
-  effect.after_paint(fn(_, root) { fit_plan_text(root) })
-}
 
 /// A feature or milestone link (D-122): its tab opens, and its card scrolls
 /// into view once drawn; the stream may not have brought it yet.
@@ -2882,3 +3126,260 @@ fn show_record(
 
 @external(javascript, "./api.mjs", "reveal_card")
 fn reveal_card(root: dynamic.Dynamic, kind: String, id: String) -> Nil
+
+/// The bucket tasks with no project (D-129) live in. No project folder is
+/// named this, so it can't collide with one.
+const homeless_dir = "no-project"
+
+/// The root project's folder, as the board names it.
+fn root_dir(model: Model) -> String {
+  list.find(model.projects, fn(p) { p.base == "" })
+  |> result.map(fn(p) { p.dir })
+  |> result.unwrap(".")
+}
+
+/// Every bucket the task list reads: each project's, and the homeless one.
+fn task_dirs(model: Model) -> List(String) {
+  list.append(list.map(model.projects, fn(p) { p.dir }), [homeless_dir])
+}
+
+/// The bucket a named task's row lives in: the homeless one when its id is
+/// listed there (D-129), else the folder it was named with.
+fn bucket_of(model: Model, dir: String, id: String) -> String {
+  case list.any(rows_of(model, homeless_dir), fn(r) { r.id == id }) {
+    True -> homeless_dir
+    False -> dir
+  }
+}
+
+/// Whether a live message marks a task with no project (D-129).
+fn homeless_event(text: String) -> Bool {
+  case at(text, "noProject", decode.bool) {
+    Ok(True) -> True
+    _ -> False
+  }
+}
+
+/// The body of a link's `PATCH /tasks/{id}`: each field, null to clear it.
+pub fn links_body(fields: List(#(String, String))) -> json.Json {
+  json.object(
+    list.map(fields, fn(f) {
+      #(f.0, case f.1 {
+        "" -> json.null()
+        id -> json.string(id)
+      })
+    }),
+  )
+}
+
+/// The Tasks tab's new task: its title, description, the folder it goes to,
+/// and the feature and milestone it is linked to, "" for none.
+pub type NewTask {
+  NewTask(
+    title: String,
+    body: String,
+    project: String,
+    feature: String,
+    milestone: String,
+  )
+}
+
+/// The new task's description editor.
+const new_task_id = "new-task-text"
+
+/// The links a new task's PATCH sends: the feature and milestone picked.
+pub fn new_task_links(task: NewTask) -> List(#(String, String)) {
+  [#("feature", task.feature), #("milestone", task.milestone)]
+  |> list.filter(fn(f) { f.1 != "" })
+}
+
+/// Changes the open new task; nothing when its form is closed.
+fn edit_new_task(
+  model: Model,
+  change: fn(NewTask) -> NewTask,
+) -> #(Model, Effect(Msg)) {
+  case model.new_task {
+    Some(d) -> #(Model(..model, new_task: Some(change(d))), effect.none())
+    None -> #(model, effect.none())
+  }
+}
+
+/// The Tasks tab's new task is made: the form closes and the task opens
+/// below the list, as a row click does.
+fn new_task_done(model: Model, dir: String, id: String) -> Model {
+  Model(
+    ..model,
+    new_task: None,
+    new_task_request: "",
+    new_task_error: "",
+    task_saving: None,
+    task_linking: None,
+    selected: Some(#(dir, id)),
+    live: [],
+  )
+}
+
+/// The Tasks tab's New task button, or its form: a title, the description,
+/// the project in a workspace, the feature and milestone, Create and Cancel.
+fn new_task_view(model: Model) -> Element(Msg) {
+  case model.new_task {
+    None ->
+      html.div([attribute.class("vision-actions")], [
+        html.button([attribute.type_("button"), event.on_click(NewTaskOpen)], [
+          html.text(solace_task.ui_label("new_task")),
+        ]),
+      ])
+    Some(d) -> {
+      let select = fn(name, value, options: List(#(String, String)), msg) {
+        html.label([], [
+          html.text(name),
+          html.select(
+            [attribute.name(string.lowercase(name)), event.on_change(msg)],
+            list.map(options, fn(o) {
+              html.option(
+                [attribute.value(o.0), attribute.selected(o.0 == value)],
+                o.1,
+              )
+            }),
+          ),
+        ])
+      }
+      html.div([attribute.class("feature-form new-task-form")], [
+        html.h3([], [html.text(solace_task.ui_label("new_task"))]),
+        html.div([attribute.class("filters")], [
+          html.label([], [
+            html.text("Title"),
+            html.input([
+              attribute.type_("text"),
+              attribute.value(d.title),
+              event.on_input(NewTaskTitle),
+            ]),
+          ]),
+        ]),
+        solace_task.editor(
+          new_task_id,
+          "",
+          model.prefix,
+          "Description",
+          d.body,
+          NewTaskText,
+          NewTaskFormat,
+          NewTaskBlock,
+        ),
+        html.div([attribute.class("filters")], [
+          case model.workspace {
+            True ->
+              select(
+                "Project",
+                d.project,
+                list.map(model.projects, fn(p) { #(p.dir, p.label) }),
+                NewTaskProject,
+              )
+            False -> element.none()
+          },
+          select(
+            "Feature",
+            d.feature,
+            [#("", "(none)"), ..feature_pairs(model)],
+            NewTaskFeature,
+          ),
+          select(
+            "Milestone",
+            d.milestone,
+            [#("", "(none)"), ..milestone_pairs(model)],
+            NewTaskMilestone,
+          ),
+        ]),
+        case model.new_task_error {
+          "" -> element.none()
+          message -> html.p([attribute.role("alert")], [html.text(message)])
+        },
+        html.div([attribute.class("vision-actions")], [
+          html.button(
+            [
+              attribute.type_("button"),
+              attribute.disabled(
+                model.task_saving != None || string.trim(d.title) == "",
+              ),
+              event.on_click(CreateTask),
+            ],
+            [html.text(solace_task.ui_label("create_task"))],
+          ),
+          html.button(
+            [
+              attribute.type_("button"),
+              attribute.disabled(model.task_saving == Some("")),
+              event.on_click(NewTaskCancel),
+            ],
+            [html.text(solace_task.ui_label("cancel"))],
+          ),
+        ]),
+      ])
+    }
+  }
+}
+
+/// Tasks per page on the Tasks tab.
+pub const page_size = 25
+
+/// How many pages `total` tasks make, at least one.
+pub fn pages(total: Int) -> Int {
+  int.max(1, { total + page_size - 1 } / page_size)
+}
+
+/// The page to show, kept within the pages: live events can shrink the list
+/// under the page being shown, and the view never shows an empty page past
+/// the end.
+pub fn shown_page(page: Int, total: Int) -> Int {
+  page
+  |> int.max(1)
+  |> int.min(pages(total))
+}
+
+/// The rows the page `page` shows, of the filtered and sorted rows.
+pub fn page_rows(
+  rows: List(#(String, Row)),
+  page: Int,
+) -> List(#(String, Row)) {
+  let p = shown_page(page, list.length(rows))
+  rows
+  |> list.drop({ p - 1 } * page_size)
+  |> list.take(page_size)
+}
+
+/// The Tasks tab's count line: "page 2 of 4, 96 tasks".
+pub fn page_text(page: Int, total: Int) -> String {
+  let p = shown_page(page, total)
+  "page "
+  <> int.to_string(p)
+  <> " of "
+  <> int.to_string(pages(total))
+  <> ", "
+  <> int.to_string(total)
+  <> case total == 1 {
+    True -> " task"
+    False -> " tasks"
+  }
+}
+
+/// The page holding the task `dir`/`id` in the filtered rows, so a task link
+/// (D-98) shows its row beside its details; `fallback` when the filters hide it.
+fn page_of(
+  rows: List(#(String, Row)),
+  dir: String,
+  id: String,
+  fallback: Int,
+) -> Int {
+  // The row's place in the list, found once: `#(found, place)`.
+  let #(found, _) =
+    list.fold(rows, #(-1, 0), fn(acc, pair) {
+      case acc.0, pair.0 == dir && pair.1.id == id {
+        -1, True -> #(acc.1, 0)
+        _, _ -> #(acc.0, acc.1 + 1)
+      }
+    })
+  case found {
+    -1 -> fallback
+    i -> i / page_size + 1
+  }
+}

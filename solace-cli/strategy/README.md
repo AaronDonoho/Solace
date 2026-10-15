@@ -34,7 +34,7 @@ The root's features grouped by target milestone (D-87), with a form to create an
   on the Tasks tab, which is selected.
 - **Create and edit.** **New feature** opens a form above the groups, and a feature's **Edit** opens it in the
   feature's place: a title, the description in `solace_task.editor` (textarea `feature-text`), a state select
-  (`proposed`, `planned`, `active`, `complete`, `canceled`) and a milestone select with "(none)". **Save** sends
+  (`proposed`, `upcoming`, `active`, `complete`, `canceled`) and a milestone select with "(none)". **Save** sends
   `POST /features {title, body, state, milestone?, request}`, where `request` is an id chosen when the form opened,
   so a repeated save makes one feature; an edit sends `PATCH /features/{id}` with only the changed fields (a cleared
   milestone as null), and an edit that changed nothing just closes. One save at a time. The reply ends the edit; a
@@ -88,18 +88,33 @@ The root's milestones, each with its features and their tasks, drawn by `src/roa
 
 ## Tasks tab
 
-Every task of every project, one row each: title, column, project (in a workspace), feature, milestone and
-`closedTime`.
+Every task of every project, one row each: title, column, project (in a workspace), feature, milestone,
+`createdTime` (D-130) and `closedTime`, both as the reader's local date and time.
 
 - **Data.** `GET /projects`, each project's `GET {base}/workflow`, and the root's `/events`. A workspace root's own
   `GET /tasks` holds only its project, so the list comes from the merged stream: its replay sends each project's
-  `{tasks}` (with `project`), then the root's `{milestones}` and `{features}`; updates follow live (Spec 15).
+  `{tasks}` (with `project`), then the root's `{milestones}` and `{features}`, and the root task store's tasks
+  whose home is no project (with `noProject: true`, D-129); updates follow live (Spec 15).
+- **A task with no project (D-129).** The root task store can hold a task whose home is no project of the
+  workspace: it is in no board lane. The tab lists it with its project cell reading "No project", the project
+  filter offers "(no project)", and a task link opens it below the list with its details read from the root;
+  the human can cancel and archive it there. Its column labels come from the root's workflow.
 - **Sort and filter on the client.** Closed tasks newest first, then open ones by title. Filters for column,
   project, feature and milestone ("(none)" keeps tasks without one); the search needs every word in the title or
   the body. Notes and changes are not in `GET /tasks`, so they are not searched; a server search is left to the
   mass-edit/archive work.
 - **Inline links.** Each row's feature and milestone selects send `PATCH {base}/tasks/{id}` with that one field
   (null clears it), allowed in final columns and during runs (D-87, D-100).
+- **New task.** **New task** above the filters opens a form there: a title, the description in
+  `solace_task.editor` (textarea `new-task-text`, the feature form's tools), a project select in a workspace
+  (defaulting to the root's own project; none with a single project), and feature and milestone selects with
+  "(none)". **Create** (disabled while the title is blank) sends `POST {base}/tasks {title, body, request}`, then,
+  when a feature or milestone is picked, one `PATCH {base}/tasks/{id}` with both through the same `Links`/`Patched`
+  path as the inline links. `request` is chosen when the form opens and kept until a create succeeds, so a retry
+  makes one task; one create at a time, shared with the Features tab's form. A refused create keeps the draft
+  ("Couldn't create the task: …"); a refused link says "The task was created without its feature: …" (or
+  milestone, or feature and milestone), opens the task and leaves an empty form. On success the form closes and
+  the task opens below the list, as a row click does. **Cancel** closes the form, except while a create is sent.
 - **Task links (D-98).** The shell's `focus` property, `{dir, id, n}`, opens the task on this tab, from any tab,
   and asks `<solace-task>` to scroll it into view (its `reveal`). The shell sends here a linked task that is
   archived, so off the board.
@@ -138,7 +153,7 @@ collapses it to one line: the shown run's state and model, or whether a run is o
   (`POST .../notes {text}`), **End** (`.../end`) and **Stop** (`.../stop`). An ended run is read-only.
 - **Proposals** show with `solace_task.proposal_view` (components project): what is created or changed — an
   edit shows only the fields that change, as `old → new` with the body as a line diff, and says "No change"
-  when none do (D-115, D-116) — the feature or milestone Approve sets back to `planned`, and
+  when none do (D-115, D-116) — the feature or milestone Approve sets back to `upcoming`, and
   **Approve**/**Reject**, which send `POST .../questions/{qid} {option}`; answered, the answer the server
   recorded.
 - One request at a time; a refusal shows in the panel's alert.

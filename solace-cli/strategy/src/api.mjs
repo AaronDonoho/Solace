@@ -85,16 +85,6 @@ export function reveal_card(root, kind, id, tries = 20) {
   card.classList?.add('revealed');
   setTimeout(() => card.classList?.remove('revealed'), 2000);
 }
-// The planning panel's message box grows with its text up to its CSS
-// max-height, then scrolls. Where the browser has no `field-sizing`, its
-// height is set from the text here.
-export function fit_plan_text(root) {
-  if (globalThis.CSS?.supports?.('field-sizing', 'content')) return;
-  const box = root?.querySelector?.('#plan-text');
-  if (!box) return;
-  box.style.height = 'auto';
-  box.style.height = box.scrollHeight + 2 + 'px';
-}
 // The shadow root before the page has rendered: the editor's tools do nothing yet.
 export function no_root() { return null; }
 // A task's closedTime, in seconds, as the reader's local date and time.

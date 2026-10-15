@@ -46,11 +46,33 @@ so the board's dark theme applies. A page that hosts it outside the board define
 The last agent and effort chosen are kept in the browser under `solace-board-agent` and
 `solace-board-effort`.
 
+## Markdown editor
+
+`solace_task.editor` is the markdown editor of every page: the task's description and note box, and
+Strategy's vision, features, milestones and plan messages. It is a toolbar and `<solace-md-editor>`
+(`src/md_editor.mjs`), CodeMirror 6 in a shadow root of its own, which styles the markdown as it is
+written. There is no Write/Preview switch. Headings, **bold**, `code`, code blocks, quotes, list marks,
+links and the board's images are drawn as `markdown` in `task_api.mjs` draws them. Their marks (`#`,
+`**`, backticks, `>`, a link's `[`…`](url)`, an image's markdown) show on the lines the cursor is on and
+hide elsewhere, so the text saved is exactly what was typed.
+
+- The host sees a text box. It sets the `value` property and hears `md-input` (the text in `detail`), and
+  the tools read `selectionStart` / `selectionEnd`. A text set from outside (a tool, an image, a box
+  cleared after a send) replaces only the part that differs (`replacement` in `task_api.mjs`), so the
+  cursor and undo keep the rest.
+- Attributes: `label` (the accessible name), `placeholder`, `data-task` and `data-base` (images).
+- Ctrl/Cmd+Enter and Ctrl+F are left to the page. Tab moves focus on.
+- Colors come from the page's custom properties. `--md-min-height` (110px) and `--md-max-height`
+  (none) size the box; it grows with its text up to the second, then scrolls.
+- `solace_task.register` defines the element (`define_editor`), in a browser only. CodeMirror is
+  loaded by a dynamic import, so this project's tests never need it. The pages that bundle it, the
+  shell (`solace-cli/frontend`) and the board, install the `@codemirror/*` packages.
+
 ## Proposal display
 
 `solace_task.proposal_view` shows a strategy run's proposal (D-93, Spec 15 §6) in human terms, for the
 Strategy page's planning panel: "Create task *Index*", "Change feature *Search*" or "Replace the vision",
-then a line for each record Approve also sets back to `planned`, the question's options until it is
+then a line for each record Approve also sets back to `upcoming`, the question's options until it is
 answered and the answer after. An edit shows only the fields that change (D-115): a short one as
 `old → new`, a record id by its title, and the body as a line diff in its order — shared lines collapsed,
 removed lines struck, added ones marked, ignoring the space around lines and blank lines — with a toggle

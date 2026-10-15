@@ -10,6 +10,7 @@ import lustre/effect.{type Effect}
 import lustre/element.{type Element}
 import lustre/element/html
 import lustre/event
+import solace_task
 
 /// Registers the element on its own, for `index.html`.
 pub fn main() -> Nil {
@@ -138,13 +139,9 @@ pub fn theme_control(dark: Bool) -> Element(Msg) {
 pub fn view(model: Model) -> Element(Msg) {
   html.main([attribute.class("settings")], [
     html.style([], view_styles),
-    html.h1([], [html.text("Settings")]),
     html.section([attribute.attribute("aria-labelledby", "appearance")], [
       html.h2([attribute.id("appearance")], [html.text("Appearance")]),
       theme_control(model.dark),
-      html.p([], [
-        html.text("Applies to every page and is kept in this browser."),
-      ]),
     ]),
   ])
 }
@@ -152,10 +149,10 @@ pub fn view(model: Model) -> Element(Msg) {
 /// The light colour set; the dark one is the page's (`index.html`, and the
 /// shell's for `/settings`).
 const view_styles =
-  ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6}
+  solace_task.control_styles
+  <> ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6}
 .settings{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;min-height:calc(100dvh - 56px);box-sizing:border-box;padding:24px;background:var(--sheet);color:var(--ink)}
-.settings h1{margin:0 0 16px;font-size:24px}
-.settings section{background:var(--paper);border:1px solid var(--edge);padding:12px 20px;max-width:760px}
+.settings section{background:var(--paper);border:1px solid var(--edge);padding:12px 20px}
 .settings h2{margin:0 0 10px;font-size:19px}
 .settings p{color:var(--soft);margin:8px 0}
 .switch{display:flex;align-items:center;gap:10px;width:fit-content;cursor:pointer}

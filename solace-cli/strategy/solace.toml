@@ -9,4 +9,4 @@ unwatched = []
 # "docs/**/*.json" = ["python3", "-m", "json.tool", "{file}"]
 
 [commands]
-js_tests = { run = ["bun", "test", "test/api.test.mjs"] }
+js_tests = { run = ["bun", "test", "test/api.test.mjs"], allowed_in_reviews = true }

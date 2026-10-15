@@ -122,13 +122,14 @@ fn feature_view(
   feature: Feature,
   color: String,
   group: List(Feature),
-  tasks: List(#(String, String, String, Option(String))),
+  tasks: List(#(String, String, String, Option(String), Bool)),
   open: fn(String, String) -> msg,
   editor: Editor(msg),
   new_task: TaskForm(msg),
   planning: Bool,
 ) -> Element(msg) {
   let linked = list.filter(tasks, fn(t) { t.3 == Some(feature.id) })
+  let full = editor.focused == Some(feature.id)
   let busy = editor.draft != None || editor.deleting != None
   let small = fn(label, name, enabled: Bool, msg) {
     html.button(
@@ -174,17 +175,34 @@ fn feature_view(
         html.button(
           [
             attribute.type_("button"),
+            attribute.class("toggle"),
+            attribute.attribute("aria-expanded", case full {
+              True -> "true"
+              False -> "false"
+            }),
+            event.on_click(editor.on_focus(feature.id)),
+          ],
+          [
+            html.text(case full {
+              True -> "Less"
+              False -> "More"
+            }),
+          ],
+        ),
+        html.button(
+          [
+            attribute.type_("button"),
             attribute.class("edit"),
             attribute.disabled(busy),
             event.on_click(editor.on_edit(feature.id)),
           ],
-          [html.text("Edit")],
+          [html.text(solace_task.ui_label("edit"))],
         ),
         move("Up", "Move up", True),
         move("Down", "Move down", False),
         small(
-          "Delete",
-          "Delete " <> feature.title,
+          solace_task.ui_label("delete"),
+          solace_task.ui_label("delete") <> " " <> feature.title,
           True,
           editor.on_delete(feature.id),
         ),
@@ -204,25 +222,38 @@ fn feature_view(
                   attribute.type_("button"),
                   event.on_click(editor.on_confirm_delete),
                 ],
-                [html.text("Delete")],
+                [html.text(solace_task.ui_label("delete"))],
               ),
               html.button(
                 [
                   attribute.type_("button"),
                   event.on_click(editor.on_cancel_delete),
                 ],
-                [html.text("Cancel")],
+                [html.text(solace_task.ui_label("cancel"))],
               ),
             ]),
           ])
       },
-      case feature.body {
-        "" -> element.none()
-        body -> solace_task.md(base, body)
+      case full {
+        False ->
+          html.p([attribute.class("feature-count")], [
+            html.text(
+              int.to_string(list.count(linked, fn(t) { t.4 }))
+              <> " / "
+              <> int.to_string(list.length(linked))
+              <> " final",
+            ),
+          ])
+        True -> element.none()
       },
-      case linked {
-        [] -> html.p([], [html.text("No tasks.")])
-        _ ->
+      case full, feature.body {
+        False, _ | _, "" -> element.none()
+        True, body -> solace_task.md(base, body)
+      },
+      case full, linked {
+        False, _ -> element.none()
+        True, [] -> html.p([], [html.text("No tasks.")])
+        True, _ ->
           html.ul(
             [attribute.class("feature-tasks")],
             list.map(linked, fn(t) {
@@ -239,23 +270,27 @@ fn feature_view(
             }),
           )
       },
-      task_form(feature, busy, new_task),
+      case full {
+        True -> task_form(feature, busy, new_task)
+        False -> element.none()
+      },
     ],
   )
 }
 
 /// The Features tab: a group per milestone, then "No milestone". `tasks` are
-/// every project's tasks as (project, id, title, feature); a click on one
-/// sends `open(project, id)`. The form for a new feature shows above the
+/// every project's tasks as (project, id, title, feature, final); a click on
+/// one sends `open(project, id)`. The form for a new feature shows above the
 /// groups; an edited feature's form shows in its place. Each feature ends
 /// with a form for a new task linked to it. `planning` are the features with
 /// an open planning run, which show a marker. A started feature's edge has
-/// the color its tasks' cards show on the board.
+/// the color its tasks' cards show on the board. Only the focused feature
+/// shows its body, tasks and new-task form; the others show a task count.
 pub fn view(
   base: String,
   milestones: List(Milestone),
   features: List(Feature),
-  tasks: List(#(String, String, String, Option(String))),
+  tasks: List(#(String, String, String, Option(String), Bool)),
   open: fn(String, String) -> msg,
   editor: Editor(msg),
   new_task: TaskForm(msg),
@@ -280,7 +315,7 @@ pub fn view(
             attribute.disabled(editor.draft != None),
             event.on_click(editor.on_new),
           ],
-          [html.text("New feature")],
+          [html.text(solace_task.ui_label("new_feature"))],
         ),
       ]),
     ]
@@ -323,8 +358,9 @@ pub fn view(
   })
 }
 
-/// The states a feature can be in, the same for milestones (D-87).
-pub const states = ["proposed", "planned", "active", "complete", "canceled"]
+/// The states a feature can be in, the same for milestones (D-87; `upcoming`
+/// was `planned` before D-128).
+pub const states = ["proposed", "upcoming", "active", "complete", "canceled"]
 
 /// A feature being written: `id` is None for a new one.
 pub type Draft {
@@ -342,7 +378,6 @@ pub type Draft {
 pub type Editor(msg) {
   Editor(
     draft: Option(Draft),
-    preview: Bool,
     /// A save sent and not yet answered.
     saving: Bool,
     error: String,
@@ -353,7 +388,6 @@ pub type Editor(msg) {
     on_state: fn(String) -> msg,
     /// The milestone's id, "" for none.
     on_milestone: fn(String) -> msg,
-    on_preview: fn(Bool) -> msg,
     on_format: fn(String, String) -> msg,
     on_block: fn(String) -> msg,
     on_save: msg,
@@ -365,6 +399,10 @@ pub type Editor(msg) {
     on_delete: fn(String) -> msg,
     on_confirm_delete: msg,
     on_cancel_delete: msg,
+    /// The feature shown in full; the others show a compact card.
+    focused: Option(String),
+    /// Shows the feature with this id in full, or compacts it again.
+    on_focus: fn(String) -> msg,
   )
 }
 
@@ -479,8 +517,8 @@ fn form(
   html.div([attribute.class("feature-form")], [
     html.h3([], [
       html.text(case draft.id {
-        None -> "New feature"
-        Some(_) -> "Edit feature"
+        None -> solace_task.ui_label("new_feature")
+        Some(_) -> solace_task.ui_label("edit_feature")
       }),
     ]),
     html.div([attribute.class("filters")], [
@@ -499,9 +537,7 @@ fn form(
       base,
       "Description",
       draft.body,
-      editor.preview,
       editor.on_text,
-      editor.on_preview,
       editor.on_format,
       editor.on_block,
     ),
@@ -524,8 +560,8 @@ fn form(
       message -> html.p([attribute.role("alert")], [html.text(message)])
     },
     html.div([attribute.class("vision-actions")], [
-      button("Save", editor.on_save),
-      button("Cancel", editor.on_cancel),
+      button(solace_task.ui_label("save"), editor.on_save),
+      button(solace_task.ui_label("cancel"), editor.on_cancel),
     ]),
   ])
 }
@@ -580,7 +616,7 @@ fn task_form(
       html.input([
         attribute.type_("text"),
         attribute.attribute("aria-label", "New task for " <> feature.title),
-        attribute.placeholder("New task"),
+        attribute.placeholder(solace_task.ui_label("new_task")),
         attribute.value(title),
         event.on_input(new_task.on_title(feature.id, _)),
       ]),
@@ -589,7 +625,7 @@ fn task_form(
           html.select(
             [
               attribute.name("project"),
-              attribute.attribute("aria-label", "Project"),
+              attribute.attribute("aria-label", solace_task.ui_label("project")),
               event.on_change(new_task.on_project),
             ],
             list.map(new_task.projects, fn(p) {
@@ -612,7 +648,7 @@ fn task_form(
             busy || new_task.saving != None || string.trim(title) == "",
           ),
         ],
-        [html.text("Add task")],
+        [html.text(solace_task.ui_label("create_task"))],
       ),
       case list.key_find(new_task.errors, feature.id) {
         Ok(message) -> html.p([attribute.role("alert")], [html.text(message)])

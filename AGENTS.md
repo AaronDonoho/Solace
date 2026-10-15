@@ -11,10 +11,13 @@ A semantic programming system: programs are a store of identified, typed, verifi
 - Specs (`specs/`) change only through a decision.
 - Prefer tests as the spec: golden files (`input -> expected output/diagnostics`) for the parser, checker and code generation.
 - Build the smallest thing that passes the current gate (PROPOSAL.md §14.1). Defer anything a later phase owns.
-- Write American English ("color", "neighbor"). Change British spellings you come across to American when they are in your task's scope.
+- Write American English ("color", "neighbor"). Change British spellings you come across when they are in your task's scope.
 - Where applicable, tests should be kept in separate files from runtime code.
 - Practice domain-driven development.
 - If this or any file or any solace command appears out-of-date, unclear, or causes mistakes: say so.
+- Writings need to be understood by both humans and agents. Do not expect humans to comprehend implementation details.
+- Be straightforward, but kind; build a welcoming environment where everyone can do their best work.
+
 
 ## Layout
 - `solace-cli/`: the Rust CLI and server; `board/`, `migration/` and `frontend/` below it are Gleam projects of their own.
