@@ -1,8 +1,8 @@
 # Solace frontend
 
 The Lustre shell registers the board, contract view, migration, strategy and
-settings components, and uses modem for menu navigation and browser
-back/forward navigation.
+settings components, draws its own Knowledgebase page (the guide, D-140), and
+uses modem for menu navigation and browser back/forward navigation.
 
 | Page | Component |
 | --- | --- |
@@ -11,6 +11,7 @@ back/forward navigation.
 | /contracts | solace-contracts |
 | /strategy | solace-strategy |
 | /settings | solace-settings |
+| /knowledgebase | the shell's own page, `knowledgebase.gleam` (the guide); /guide lands here |
 | /p/<dir>/contracts | solace-contracts with base="/p/<dir>" |
 
 Unknown paths fall back to the board. /migration remains the JSON API.
@@ -45,7 +46,7 @@ The `focus` property is `{kind, dir, id, n}`; `n` counts the links followed, so
 following the same one again is news to the page. A bare link shows its
 record's title once the server gives it (kept 30 s), marked `data-bare`;
 copying any of these links gives its markdown back, a bare one still bare.
-The menu (Board, Migration, Contracts, Strategy, Settings) is on every page and
+The menu (Migration, Strategy, Board, Contracts, Knowledgebase, Settings) is on every page and
 highlights the current one; a workspace project's contract page highlights
 Contracts. The menu is 56px high, and the contract page fills the rest of the
 window (`--contracts-height`). The menu is sticky, always visible while a page
@@ -94,13 +95,13 @@ current menu link. Component registration and modem require a browser.
 ## Server integration
 
 The server task must serve this index.html at /, /migrate, /contracts, /strategy,
-/settings, /task/<id>, /feature/<id>, /milestone/<id> and /p/<dir>/contracts, and
+/settings, /knowledgebase, /task/<id>, /feature/<id>, /milestone/<id> and /p/<dir>/contracts, and
 priv/app.js at /app.js, all on port 3030.
 
 priv/app.js is generated, not source: `cargo build` builds it through this
 project's `build-release` command before embedding it. The server must keep
 serving the board's fonts at /fonts/sans-400.woff2, /fonts/sans-700.woff2 and
-/fonts/mono-400.woff2 and board/guide.html at /guide, and preserve JSON and SSE
+/fonts/mono-400.woff2, redirect /guide to /knowledgebase, and preserve JSON and SSE
 routes, including /migration.
 Links inside app shadow roots use full page navigation.
 

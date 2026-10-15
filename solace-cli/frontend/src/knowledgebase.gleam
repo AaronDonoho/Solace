@@ -1,33 +1,77 @@
-<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Solace guide</title>
-<style>
-:root{--text:#20252b;--muted:#56606b;--bg:#fafafa;--line:#ccd0d5;--code:#edf0f4;--link:#1f5fbf}
-@media (prefers-color-scheme:dark){:root{--text:#e4e7eb;--muted:#a3abb5;--bg:#16191d;--line:#3a4048;--code:#23282e;--link:#7fb0ff}}
-body{font:16px/1.55 system-ui,sans-serif;margin:0 auto;padding:24px 16px 64px;max-width:760px;color:var(--text);background:var(--bg)}
-h1{font-size:28px}h2{font-size:21px;margin-top:36px;border-top:1px solid var(--line);padding-top:20px}h3{font-size:17px}
-a{color:var(--link)}code,pre{font:14px ui-monospace,monospace;background:var(--code);border-radius:4px}code{padding:1px 4px}pre{padding:12px;overflow-x:auto}
-table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
-.muted{color:var(--muted)}
-</style></head><body>
-<p class="muted"><a href="/">← Back to the board</a></p>
-<h1>Using Solace</h1>
-<p>Solace lets AI coding agents build and change your project while you direct the work. You describe tasks on this board, choose which model works on each one, answer the agents' questions, and approve or reject what they did. The agents do all their work through Solace, which checks and records every change they make.</p>
+//// The Knowledgebase page (D-140): the shell's own page, holding the guide.
 
-<h2>The menu bar</h2>
-<p>A menu bar at the top of every page has three pages: <strong>Board</strong> (<code>/</code>), <strong>Migration</strong> (<code>/migrate</code>) and <strong>Contracts</strong> (<code>/contracts</code>, or <code>/p/&lt;folder&gt;/contracts</code> for one project in a workspace). This guide is a separate page.</p>
+import gleam/list
+import lustre/attribute
+import lustre/element.{type Element}
+import lustre/element/html
 
-<h2>How it works</h2>
-<p>Your project's code is kept in a store inside the project, in the <code>.solace/</code> folder, where each function, type and constant is a separate entry. The source files on disk are written from that store. Agents never edit files directly. They read and change code one entry at a time through Solace, and every change is type-checked before it is kept.</p>
+/// A section of the guide: its anchor id, its heading, and its HTML after the heading.
+pub type Section {
+  Section(id: String, title: String, body: String)
+}
+
+/// The Knowledgebase page (D-140): the guide, in the shell's light DOM so its table of contents' anchors
+/// work and the shell's theme applies. Hidden while another page shows.
+pub fn view(shown: Bool) -> Element(msg) {
+  let attributes = case shown {
+    True -> [attribute.class("knowledgebase")]
+    False -> [
+      attribute.class("knowledgebase"),
+      attribute.attribute("hidden", ""),
+    ]
+  }
+  html.article(attributes, [
+    html.h1([], [html.text("Using Solace")]),
+    element.unsafe_raw_html("", "div", [], intro),
+    html.nav(
+      [attribute.class("toc"), attribute.attribute("aria-label", "Contents")],
+      [
+        html.ul(
+          [],
+          list.map(sections(), fn(s) {
+            html.li([], [
+              html.a([attribute.href("#" <> s.id)], [html.text(s.title)]),
+            ])
+          }),
+        ),
+      ],
+    ),
+    ..list.map(sections(), fn(s) {
+      html.section([attribute.id(s.id)], [
+        html.h2([], [html.text(s.title)]),
+        element.unsafe_raw_html("", "div", [], s.body),
+      ])
+    })
+  ])
+}
+
+const intro =
+  "<p>Solace lets AI coding agents build and change your project while you direct the work. You describe tasks, choose which model works on each one, answer the agents' questions, and approve or reject what they did. The agents do all their work through Solace, which checks and records every change they make.</p>"
+
+/// The guide's sections, in order; their titles are the table of contents.
+pub fn sections() -> List(Section) {
+  [
+    Section(
+      "menu",
+      "The menu bar",
+      "<p>A menu bar at the top of every page has six pages: <strong>Migration</strong> (<code>/migrate</code>), <strong>Strategy</strong> (<code>/strategy</code>), <strong>Board</strong> (<code>/</code>), <strong>Contracts</strong> (<code>/contracts</code>, or <code>/p/&lt;folder&gt;/contracts</code> for one project in a workspace), <strong>Knowledgebase</strong> (<code>/knowledgebase</code>, this guide) and <strong>Settings</strong> (<code>/settings</code>).</p>",
+    ),
+    Section(
+      "how-it-works",
+      "How it works",
+      "<p>Your project's code is kept in a store inside the project, in the <code>.solace/</code> folder, where each function, type and constant is a separate entry. The source files on disk are written from that store. Agents never edit files directly. They read and change code one entry at a time through Solace, and every change is type-checked before it is kept.</p>
 <p>Agents have no shell and no general file access. They get one tool, Solace, plus web access for looking things up. That means:</p>
 <ul>
 <li>every change an agent makes goes through Solace's checks, and can be undone;</li>
 <li>an agent can't delete files, run arbitrary programs or change Solace's own settings;</li>
 <li>anything an agent needs that Solace doesn't offer, it has to ask you for.</li>
 </ul>
-<p>The drawbacks: an agent is limited to what Solace provides, so some tasks that are easy with a shell (a quick throwaway script, for example) need a command you declare for it. And you shouldn't edit the source files by hand either, because Solace rewrites them from its store.</p>
-
-<h2>Migrating an existing project</h2>
-<p>To start using Solace on a Gleam project you already have, run <code>solace serve</code> in its folder, open <strong>Migration</strong> in the menu bar (<code>/migrate</code>) and choose <strong>Migrate this project</strong>. The page stops polling for status when you leave it. Solace makes a copy of the whole folder next to it, called <code>solace-migration</code>, and sets up the copy to use Solace. Your folder isn't changed. You can try Solace in the copy for as long as you like, then switch to it or delete it.</p>
+<p>The drawbacks: an agent is limited to what Solace provides, so some tasks that are easy with a shell (a quick throwaway script, for example) need a command you declare for it. And you shouldn't edit the source files by hand either, because Solace rewrites them from its store.</p>",
+    ),
+    Section(
+      "migrating",
+      "Migrating an existing project",
+      "<p>To start using Solace on a Gleam project you already have, run <code>solace serve</code> in its folder, open <strong>Migration</strong> in the menu bar (<code>/migrate</code>) and choose <strong>Migrate this project</strong>. The page stops polling for status when you leave it. Solace makes a copy of the whole folder next to it, called <code>solace-migration</code>, and sets up the copy to use Solace. Your folder isn't changed. You can try Solace in the copy for as long as you like, then switch to it or delete it.</p>
 <p>When you start, choose which Gleam projects to set up. You can also give commands that check your app works, one per line, such as a script that starts the app and requests a page. Solace runs each one in your folder before migrating and in the copy afterwards, and compares the results. Without any, only builds and tests are compared.</p>
 <p>The copy has exactly the same code as your original, errors included. If a build or a test fails before migrating, it fails in the copy too. That doesn't stop you from switching: fixing it is ordinary work afterwards.</p>
 <h3>Keeping your original folder safe</h3>
@@ -54,18 +98,21 @@ table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid 
 <li><strong>Delete the copy</strong> deletes the copy and anything done in it. Your original folder stays as it is.</li>
 <li><strong>Switch back</strong>, after switching, puts your old folder back and moves the Solace version to <code>solace-migration</code>, with any work done in it since.</li>
 </ul>
-<p>The board reconnects by itself while Solace restarts in the new place.</p>
-
-<h2>Several projects on one board</h2>
-<p>One board can show several Gleam projects: those in one folder, the <em>root</em>. The root's own project, if the folder is a Gleam project, comes first, then any project in a folder below it. Choose <strong>Projects</strong> to add an already set up project back to the board, remove one, or create a new one: give a package name, and optionally a folder and whether it runs on Erlang or JavaScript, and Solace runs <code>gleam new</code> and sets the project up. Every project stays inside the root; a folder outside it, or reached through a link, is refused. The list is kept in the root's <code>solace.toml</code>.</p>
-<p>Each project keeps its own tasks, settings, <code>AGENTS.md</code> and agents, and agents in different projects can work at the same time. An agent changes only its own project, but can read the others, for example to see how a project it depends on works. Reading never waits for another project's agent. A lane names its project's folder, counts its tasks, and has its own <em>Contract view</em>; select the folder name to fold the lane away. When every project uses the same columns they share one header row; otherwise each lane names its own. Notices start with the project's folder. A notice's Show task button opens its task on the tab that has the news (Questions for a question, Notes when the run left a note, else Runs) and scrolls it into view.</p>
-
-<h2>Tasks</h2>
-<p>A task is a piece of work you write for an agent: a title and a description. The description can refer to existing behavior, ask for changes, suggest something new, or just ask a question.</p>
+<p>The board reconnects by itself while Solace restarts in the new place.</p>",
+    ),
+    Section(
+      "projects",
+      "Several projects on one board",
+      "<p>One board can show several Gleam projects: those in one folder, the <em>root</em>. The root's own project, if the folder is a Gleam project, comes first, then any project in a folder below it. Choose <strong>Projects</strong> to add an already set up project back to the board, remove one, or create a new one: give a package name, and optionally a folder and whether it runs on Erlang or JavaScript, and Solace runs <code>gleam new</code> and sets the project up. Every project stays inside the root; a folder outside it, or reached through a link, is refused. The list is kept in the root's <code>solace.toml</code>.</p>
+<p>Each project keeps its own tasks, settings, <code>AGENTS.md</code> and agents, and agents in different projects can work at the same time. An agent changes only its own project, but can read the others, for example to see how a project it depends on works. Reading never waits for another project's agent. A lane names its project's folder, counts its tasks, and has its own <em>Contract view</em>; select the folder name to fold the lane away. When every project uses the same columns they share one header row; otherwise each lane names its own. Notices start with the project's folder. A notice's Show task button opens its task on the tab that has the news (Questions for a question, Notes when the run left a note, else Runs) and scrolls it into view.</p>",
+    ),
+    Section(
+      "tasks",
+      "Tasks",
+      "<p>A task is a piece of work you write for an agent: a title and a description. The description can refer to existing behavior, ask for changes, suggest something new, or just ask a question.</p>
 <p>Tasks are created on the <strong>Strategy</strong> page with <strong>New task</strong>, and show on the board from then on. Select a task to see it: under its title are the model and effort to use, an editor, the actions you can take (with <em>Add note</em>), and tabs for its details, notes, questions, runs and changes, newest first. To change a task's title, description or order, use <em>Edit</em> on its Details tab. Descriptions, notes and instructions are markdown, styled as you write; images can be added once the task exists. A card shows ✓ once the task is approved. When an agent asks a question or a run ends, a notice appears in the corner of the board.</p>
 <p>The editor takes markdown for notes, answers and instructions. Its buttons add headings, bold, code and code blocks, bulleted and numbered lists, quotes and links. The editor shows the markdown styled as you write: headings, bold, code, quotes and links look as they will, and images show in place. The marks that make them (<code>#</code>, <code>**</code>, backticks, <code>&gt;</code>, a link's address) show only on the line you are editing. To add an image (PNG, JPEG, GIF or WebP, up to 5 MB), paste it, drop it on the editor or choose <em>Image</em>. Agents see the images in the notes they are given. Each note can be collapsed, and an agent's note names the run that wrote it.</p>
 <p>Each column says what an agent may do there. In <strong>Planning</strong>, <em>investigate</em> starts an agent that looks into the task and reports back: an answer to a question, or a plan for the change. It changes nothing. If the task was only a question, complete it once you have the answer. Otherwise assign it, and the agent that does the work gets the report with the task's other notes. An agent changes the project only once the task is <strong>Assigned</strong>. A review agent, in Needs review or Assigned, looks at what the task changed and gives feedback.</p>
-
 <h3>The default columns</h3>
 <table>
 <tr><th>Column</th><th>What it means</th><th>What you can do</th></tr>
@@ -83,96 +130,103 @@ table{border-collapse:collapse;width:100%;font-size:15px}th,td{border:1px solid 
 <p>A task can't be completed until you approve it. If you move an approved task anywhere else, for example by starting over, it loses the approval.</p>
 <p><strong>Cancel</strong> and <strong>Complete</strong> ask for confirmation. Cancel stops the task's agents and reverts its changes. Complete keeps the changes and closes the task, removing its undo records; the board cannot reopen or revert it afterwards. Dismissing either dialog leaves the task and your entered instructions unchanged.</p>
 <p>You can change the columns and what's allowed in each in the project's <code>solace.toml</code> (see Settings below).</p>
-
 <h3>Questions and attention</h3>
 <p>Solace keeps the author's conversation through investigation, implementation and review fixes when compatible. Each review starts fresh. Changing models or losing a conversation automatically gives the next agent a handoff with feedback, changes and verification results. You do not need to manage sessions. Finishing agents get time to exit normally; author conversations are cleaned up when the task is completed or canceled, and reviewer conversations after their review.</p>
 <p>When an agent needs a decision, it asks a question with a few options, and the task stays in Assigned, marked <strong>Needs attention</strong>. The agent waits, keeping everything it has learned so far. Pick an option or submit a written answer. Once every pending question is answered, the same agent automatically carries on. An investigating agent stays in Planning and continues the same way. If you paused the task, answers are saved and it stays paused until you choose <em>resume</em>. If you'd rather start fresh, <em>new agent</em> starts another one, which gets the task's notes and your answers.</p>
 <p>An agent can't change the project's settings (<code>solace.toml</code>) itself. When a task needs one, for example a new command to build the app, the agent proposes the change as a question titled <em>Change solace.toml</em>, showing the lines it would remove (<code>-</code>) and add (<code>+</code>). <em>Approve</em> writes it; <em>Reject</em>, or a written answer, leaves the file alone and tells the agent why. If the file was changed after the agent proposed it, approving does nothing and the agent is told to propose again.</p>
 <p>A task marked <strong>Needs attention</strong> is waiting on you. That happens when an agent asks a question, when an agent stops unexpectedly (it crashed, ran out of time, lost its connection, or its model became unavailable), or when Solace was restarted while an agent was working. The reason is shown on the task, together with the agent's last message when there is one. The run's activity shows everything that led up to it. The mark goes away when you next act on the task, except when an agent is waiting on your question or a working agent stopped: then it stays until that agent carries on, a new agent starts, or the task is stopped, canceled or completed. (<em>Blocked</em> is kept for tasks that will depend on other tasks.) Likewise, <strong>Agent finished</strong>, <strong>Report ready</strong> or <strong>Review ready</strong> marks a task whose agent has finished its work, investigation or review, until you next act on it. To continue, reassign it or start a new agent, and choose a different model if the first one isn't working.</p>
-
 <h3>Following an agent</h3>
 <p>Every run of an agent is listed under <em>Runs</em> on the task, newest first. <em>Follow live</em> shows what the agent is doing as it happens: its messages, its thinking, and each Solace command it runs. Open a command to see what it sent and what came back; a ✗ marks a command that failed. <em>Show activity</em> does the same for a run that has ended. It's a view only, so you can't interrupt or talk to the agent from it. Use a note, an answer or pause for that.</p>
-
 <h3>Undoing a task</h3>
 <p><em>Cancel</em> and <em>start over</em> undo everything the task changed, bringing the code and files back to how they were before it started. Solace refuses to undo a task when that would affect another open task: if a later task changed the same code, or depends on something this task added. The refusal names the other task, so you can undo that one first or leave things as they are.</p>
 <p>Solace doesn't keep a history beyond that. Use your own version control (such as git) for history.</p>
-
 <h3>Changes made outside Solace</h3>
 <p>Code is meant to change through tasks, but you can still edit files yourself, pull from git or switch branches. Solace never writes over a source file it didn't write last. It reads your edit in instead.</p>
 <p>If an agent is working, the edit becomes part of that agent's task and shows in its review. If no agent is working, the edit goes to a task called <em>Unexpected Changes</em>, marked with a yellow hazard sign, in <em>needs_review</em>. Its note lists what changed and whether the code still compiles. <em>Approve</em> and <em>complete</em> it to keep the changes, or <em>cancel</em> it to put back the code Solace had. No agent starts work until it is completed or canceled, so agents never build on code nobody has looked at. You can also <em>reassign</em> it to have an agent fix it.</p>
-<p>Code that came from Solace stays quiet: when you pull or switch to a branch whose code was approved in Solace, it is read in without a task. That works through <code>.solace/approved</code>, a list Solace keeps current; commit it with your code. Only Gleam files under <code>src/</code> and <code>test/</code> count. Other files you add, such as data or documents, never raise <em>Unexpected Changes</em>.</p>
-
-<h2>Models</h2>
-<p>You choose a model each time you assign a task or start a new agent. Solace runs the model through an agent program you already have installed and signed in to: the <strong>Codex CLI</strong> for OpenAI models, or <strong>Claude Code</strong> for Claude models. Solace doesn't store any credentials itself.</p>
-<p>A list of current major models is built in, and Solace asks each agent program which models it offers, so a model the agent added shows in the list with no rebuild and no config edit. Only the models that can start right now are offered. Under the list, a line such as <em>2 more models unavailable</em> opens the reasons for the others: the agent program isn't installed, it isn't signed in or its sign-in has expired, a key it needs isn't set, its usage limit was reached, or its agent no longer offers it. If no model can start, the board shows how to install and sign in to an agent instead of an empty list.</p>
-<p>Codex answers Solace's question <code>codex app-server</code>: its <code>model/list</code> gives the models, the efforts each one supports, and its default. Models Codex marks hidden are left out. Claude Code has no command that lists models without starting one, so Solace offers its aliases — <em>Opus</em>, <em>Sonnet</em>, <em>Haiku</em> and <em>Fable</em>, each naming the latest of its family — and when a run's log names the model the agent actually used, the run shows it and the model's label names it. With <code>ANTHROPIC_API_KEY</code> set, Solace also reads the provider's models endpoint for the exact ids, active ones only; it stores no key, and uses only the variable that is already set.</p>
-<p>Solace asks at startup, again about every 15 minutes, and again when a run says the model it asked for is no longer offered. The asking happens in the background: the board always shows the last list it has. A model that comes back onto its agent's offer is offered again. A model that leaves keeps working for the tasks already using it, with the reason <em>no longer offered by …</em>, and is not offered for a new run. A model on the list isn't proof your account may run it: usage limits are shown separately, below.</p>
-<p>When a run stops because the agent's plan reached its usage limit, Solace remembers it. Every model on that sign-in becomes unavailable, with a reason such as <em>Codex usage limit reached (resets 3:45 PM)</em>. They come back at that time when the agent said when its limit resets, or after a later run on that sign-in gets an answer. <em>Try again</em> beside the reason brings them back by hand. A model with its own endpoint and key isn't affected. Solace checks only what is on this computer, without asking a model: on macOS that includes Claude Code's keychain sign-in, which it finds without reading it. It checks again every few seconds.</p>
+<p>Code that came from Solace stays quiet: when you pull or switch to a branch whose code was approved in Solace, it is read in without a task. That works through <code>.solace/approved</code>, a list Solace keeps current; commit it with your code. Only Gleam files under <code>src/</code> and <code>test/</code> count. Other files you add, such as data or documents, never raise <em>Unexpected Changes</em>.</p>",
+    ),
+    Section(
+      "models",
+      "Models",
+      "<p>You choose a model each time you assign a task or start a new agent. Solace runs the model through an agent program you already have installed and signed in to: the <strong>Codex CLI</strong> for OpenAI models, or <strong>Claude Code</strong> for Claude models. Solace doesn't store any credentials itself.</p>
+<p>A list of current major models is built in. A model that can't be started right now is greyed out in the list, with the reason: the agent program isn't installed, it isn't signed in, or a key it needs isn't set.</p>
 <p>Add your own models, or change the built-in ones, in <code>~/.config/solace/config.toml</code>:</p>
 <pre>task_timeout = 3600            # seconds an agent may work; time spent waiting for you doesn't count
 
 [[models]]                     # a model through the normal Codex sign-in
-id = "codex-terra-high"
-label = "Codex · Terra (high effort)"
-agent = "codex"
-model = "gpt-5.6-terra"
-effort = "high"
+id = \"codex-terra-high\"
+label = \"Codex · Terra (high effort)\"
+agent = \"codex\"
+model = \"gpt-5.6-terra\"
+effort = \"high\"
 
 [[models]]                     # any OpenAI-compatible endpoint, through Codex
-id = "local-qwen"
-label = "Qwen3 Coder (local)"
-agent = "codex"
-model = "qwen3-coder"
-endpoint = { kind = "openai", base_url = "http://localhost:11434/v1", key_env = "LOCAL_LLM_KEY" }
+id = \"local-qwen\"
+label = \"Qwen3 Coder (local)\"
+agent = \"codex\"
+model = \"qwen3-coder\"
+endpoint = { kind = \"openai\", base_url = \"http://localhost:11434/v1\", key_env = \"LOCAL_LLM_KEY\" }
 
 [[models]]                     # any Claude-compatible endpoint, through Claude Code
-id = "proxy-sonnet"
-label = "Sonnet via our proxy"
-agent = "claude"
-model = "claude-sonnet-5-5"
-endpoint = { kind = "anthropic", base_url = "https://llm-proxy.example.com", key_env = "PROXY_KEY" }</pre>
+id = \"proxy-sonnet\"
+label = \"Sonnet via our proxy\"
+agent = \"claude\"
+model = \"claude-sonnet-5-5\"
+endpoint = { kind = \"anthropic\", base_url = \"https://llm-proxy.example.com\", key_env = \"PROXY_KEY\" }</pre>
 <ul>
 <li><code>effort</code> is the model's default. The board lets you pick another effort for each action: low, medium, high or xhigh for Codex, and also max for Claude Code. Changing it starts the agent's conversation afresh, with a handoff.</li>
-<li>A model Solace discovered offers the efforts its agent names for it; the built-in list and the aliases use the fixed ones above.</li>
 <li>An entry with the same <code>id</code> as a built-in model replaces it. Add <code>presets = false</code> at the top to hide the built-in list.</li>
 <li>An endpoint's key is never written in the file. <code>key_env</code> names an environment variable that holds it, and Solace reads that variable when it starts the agent. Leave <code>key_env</code> out for an endpoint that needs no key.</li>
 <li>Codex talks to OpenAI-compatible endpoints through the Responses API, so the endpoint has to support it.</li>
-</ul>
-
-<h2>Contract view</h2>
-<p>When a task changes the project, its Changes tab shows a review summary and a link to the contract view. The graph reports entry points, logic, derived effects, tests and project files. Effects are inferred from known calls and external declarations; they are not guarantees. Review compares the current project with its state before the task, and you can run the task's tests from the view API. Open <a href="/contracts">Contracts</a> to explore the drawing sheet. Search by name or summary, select a box to expand its connections and read its detail, and read its detail. The panel on the right has tabs: Review (for a task), Details (the box you opened) and Files, which lists the project’s files grouped as watched, protected and unwatched; click one to read it in place of the drawing. Close folds the panel to its tabs. The house button returns to the default view; disconnected entries fill rows. The header names the project and the task under review. A note says when no effects were found. On a phone, open Legend for kind colors and connector meanings. Drag the sheet to pan (dragging never selects), or use the zoom buttons. The selected box has a thick border. A box shows +N for connections not yet drawn, or − when expanded; arrows point from a function to what it calls, uses or tests (hover a connector to read it). Drag the panel’s left edge to resize it. Keys: arrows or WASD move between boxes, Shift with them pans, Ctrl+Up and Ctrl+Down zoom, Space expands a box, C collapses it, Shift+Space expands everything, Shift+C collapses everything (the two arrow buttons by the zoom buttons do the same) and Enter opens a box. A box with no connections has nothing to expand. A task’s review link marks additions, changes and removals and runs its tests when needed. Show source gives the source text; for a function the task changed, it shows what changed. Run forms and replay come later.</p>
-<p>Each file in the graph is labeled with how Solace treats it: watched, protected or unwatched, as described below.</p>
-<h2>What agents can touch</h2>
-<p>Solace puts every file in the project into one category, named for what Solace does with it:</p>
+</ul>",
+    ),
+    Section(
+      "contract-view",
+      "Contract view",
+      "<p>When a task changes the project, its Changes tab shows a review summary and a link to the contract view. The graph reports entry points, logic, derived effects, tests and project files. Effects are inferred from known calls and external declarations; they are not guarantees. Review compares the current project with its state before the task, and you can run the task's tests from the view API. Open <a href=\"/contracts\">Contracts</a> to explore the drawing sheet. Search by name or summary, select a box to expand its connections and read its detail. The panel on the right has tabs: Review (for a task), Details (the box you opened) and Files, which lists the project’s files grouped as watched, protected and unwatched; click one to read it in place of the drawing. Close folds the panel to its tabs. The house button returns to the default view; disconnected entries fill rows. The header names the project and the task under review. A note says when no effects were found. On a phone, open Legend for kind colors and connector meanings. Drag the sheet to pan (dragging never selects), or use the zoom buttons. The selected box has a thick border. A box shows +N for connections not yet drawn, or − when expanded; arrows point from a function to what it calls, uses or tests (hover a connector to read it). Drag the panel’s left edge to resize it. Keys: arrows or WASD move between boxes, Shift with them pans, Ctrl+Up and Ctrl+Down zoom, Space expands a box, C collapses it, Shift+Space expands everything, Shift+C collapses everything (the two arrow buttons by the zoom buttons do the same) and Enter opens a box. A box with no connections has nothing to expand. A task’s review link marks additions, changes and removals and runs its tests when needed. Show source gives the source text; for a function the task changed, it shows what changed. Run forms and replay come later.</p>
+<p>Each file in the graph is labeled with how Solace treats it: watched, protected or unwatched, as described below.</p>",
+    ),
+    Section(
+      "files",
+      "What agents can touch",
+      "<p>Solace puts every file in the project into one category, named for what Solace does with it:</p>
 <table>
 <tr><th>Category</th><th>Files</th><th>What agents can do</th></tr>
 <tr><td>Graph</td><td>Gleam files in <code>src/</code> and <code>test/</code>, held as symbols</td><td>Read and change code through Solace, one entry at a time</td></tr>
 <tr><td>Watched</td><td>Every other text file up to the size limit, including <code>gleam.toml</code></td><td>Read and write, checked by any validator you declare; undoing a task restores them</td></tr>
-<tr><td>Protected</td><td><code>solace.toml</code> and <code>AGENTS.md</code></td><td>Read; a change they want waits for your approval</td></tr>
+<tr><td>Protected</td><td><code>solace.toml</code>, <code>AGENTS.md</code> and the skills folder (<code>skills/</code> by default)</td><td>Read; a change to <code>solace.toml</code> or <code>AGENTS.md</code> waits for your approval; skills they only read</td></tr>
 <tr><td>Unwatched</td><td><code>.git/</code>, build output, anything <code>.gitignore</code> ignores, paths you list under <code>unwatched</code>, binary or oversized files</td><td>Read and write</td></tr>
 <tr><td>Internal</td><td><code>.solace/</code>, Solace's own files, and any other Solace project inside this one</td><td>Nothing</td></tr>
 </table>
-<p>File writes are limited to 256 KiB unless you change <code>watch_limit</code>, and require a current read or an exact replacement. Watched and unwatched file contents never appear in symbol searches.</p>
-
-<h2>Settings</h2>
-<p><code>solace.toml</code> in the project's root holds the project's settings. <code>solace create</code> creates a starter file if it is missing and preserves an existing one. Only you edit it; agents can read it, and an agent that needs a change has to ask you. Every part is optional.</p>
+<p>File writes are limited to 256 KiB unless you change <code>watch_limit</code>, and require a current read or an exact replacement. Watched and unwatched file contents never appear in symbol searches.</p>",
+    ),
+    Section(
+      "settings",
+      "Settings",
+      "<p><code>solace.toml</code> in the project's root holds the project's settings. <code>solace create</code> creates a starter file if it is missing and preserves an existing one. Only you edit it; agents can read it, and an agent that needs a change has to ask you. Every part is optional.</p>
 <pre>watch_limit = 262144                       # bytes
-unwatched   = ["priv/generated/"]
+unwatched   = [\"priv/generated/\"]
+skills      = \"skills\"      # the skills folder, listed in every agent's brief; this is the default
 
 [validators]                               # must pass before a file change is kept
-"priv/**/*.html" = ["tidy", "-q", "-e", "{file}"]
+\"priv/**/*.html\" = [\"tidy\", \"-q\", \"-e\", \"{file}\"]
 
 [commands]                                 # extra commands agents may run
-smoke = { run = ["gleam", "run", "-m", "smoke"], timeout = 60 }</pre>
+smoke = { run = [\"gleam\", \"run\", \"-m\", \"smoke\"], timeout = 60 }</pre>
 <p>Agents can always check, test, format and build the project. Under <code>[commands]</code> you add anything else they may run. Commands run without a shell, so agents can't chain or alter them, and they can pass extra arguments only to a command that sets <code>args = true</code>.</p>
-<p>A <code>[board]</code> section replaces the default columns and actions. It's described in the Solace repository's board specification.</p>
-
-<h2>Limits for now</h2>
-<ul>
+<p>Skills are your own instructions for agents, kept in the skills folder: <code>skills/</code>, or the folder named by the <code>skills</code> setting. Each skill is a subfolder with a <code>SKILL.md</code>, or a single <code>&lt;name&gt;.md</code> file in the folder, with its <code>name</code> and <code>description</code> as the first lines, between <code>---</code> markers; a skill with no description is listed by its first line. Every agent's brief lists your skills, one line each, and the agent reads the ones whose description matches its task. Agents can read skills and never change them. Solace never runs a skill's scripts: if a skill needs a tool, add it under <code>[commands]</code> and the skill can name it.</p>
+<p>A <code>[board]</code> section replaces the default columns and actions. It's described in the Solace repository's board specification.</p>",
+    ),
+    Section(
+      "limits",
+      "Limits for now",
+      "<ul>
 <li>Projects must be written in Gleam.</li>
 <li>One agent works on a project at a time. While one is working, assigning another task in that project is refused.</li>
 <li>A task belongs to one project. Its agent can read the other projects but can't change them, even one its project depends on.</li>
 <li>Tasks that are still open aren't kept apart: a later task sees the unapproved changes of earlier ones.</li>
 <li>The board runs on your machine only, for one person, with no sign-in.</li>
-</ul>
-</body></html>
+</ul>",
+    ),
+  ]
+}

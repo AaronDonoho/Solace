@@ -59,6 +59,33 @@ fn a_brief_carries_the_vision_up_to_the_cap() {
     assert!(vision_section(&root, "work").ends_with(":\nFor teams.\n"));
 }
 
+/// D-27: a run's brief lists the skills of the project it works in — name,
+/// description and the path to `read` — for every kind; a project with no
+/// skills has no Skills section, and the brief carries no skill contents.
+#[test]
+fn a_brief_lists_the_skills_of_its_project() {
+    let p = testing::project(&[
+        ("src/app.gleam", "pub fn main() { 1 }\n"),
+        ("skills/design/SKILL.md", "---\nname: design\ndescription: Layout and color.\n---\n# Design\n\nPick a palette.\n"),
+        ("skills/voice.md", "Speak plainly\n"),
+    ]);
+    let s = open(&p.root).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
+    for kind in ["work", "investigate", "discuss", "review"] {
+        let run = json!({"id":"r1","kind":kind});
+        let brief = continuation_brief(&t, &run, false, &p.root, &p.root, false).0;
+        assert!(brief.contains("- design: Layout and color. (`read skills/design/SKILL.md`)"), "{kind}: {brief}");
+        assert!(brief.contains("- voice: Speak plainly (`read skills/voice.md`)"), "{kind}: {brief}");
+        assert!(brief.contains("when the task matches a skill's description"), "{kind}: {brief}");
+        assert!(!brief.contains("Pick a palette"), "{kind}: the brief carries no skill contents");
+    }
+    let q = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let u = open(&q.root).unwrap();
+    let t2 = api(&u.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
+    let brief = continuation_brief(&t2, &json!({"id":"r1","kind":"work"}), false, &q.root, &q.root, false).0;
+    assert!(!brief.contains("Skills ("), "{brief}");
+}
+
 /// D-138: a task's feature section names the feature and carries the latest
 /// of its investigation report, assignment note and review feedback, cut at
 /// a line end within the cap; no feature, no section.
@@ -248,7 +275,7 @@ fn agent_guard_follows_the_run() {
 /// `strategy show` follows links; the brief carries the record, decisions and notes.
 #[test]
 fn strategy_runs_read_the_graph() {
-    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("skills/design/SKILL.md", "---\nname: design\ndescription: Layout and color.\n---\n")]);
     let s = open(&p.root).unwrap();
     let top = scope::top(&p.root);
     let runs = top.join(".solace/strategy/runs");
@@ -287,6 +314,8 @@ fn strategy_runs_read_the_graph() {
     assert!(brief.contains("- D-1 First thing") && !brief.contains("- Notes") && brief.contains("- human: Plan F"), "{brief}");
     // The root is a project itself, so the decisions can be read in full.
     assert!(brief.contains("`grep D-<n>`") && !brief.contains("folder of projects"), "{brief}");
+    // D-27: the root project's own skills are listed in the brief.
+    assert!(brief.contains("- design: Layout and color. (`read skills/design/SKILL.md`)"), "{brief}");
     // Only commands the run can use.
     for word in ["task ask", "submit", "`test`", "session start", "are refused"] {
         assert!(!brief.contains(word), "{word}: {brief}");
@@ -297,6 +326,21 @@ fn strategy_runs_read_the_graph() {
     let brief = strategy_brief(&top, &json!({"context":{"kind":"page"},"notes":[]}));
     assert!(brief.contains("- D-5 Thing 5") && brief.contains("- D-14 Thing 14") && !brief.contains("- D-4 Thing"), "{brief}");
     assert!(brief.contains("… 4 earlier decisions: `grep D-` lists them."), "{brief}");
+}
+
+/// D-27: a strategy brief for a folder of projects leaves the root's skills
+/// out, as it leaves the root's own files unread.
+#[test]
+fn a_strategy_brief_leaves_out_a_folder_of_projects_skills() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"a\"]\n"),
+        ("a/gleam.toml", "name = \"a\"\nversion = \"1.0.0\"\n"),
+        ("a/src/app.gleam", "pub fn main() { 1 }\n"),
+        ("skills/design/SKILL.md", "---\nname: design\ndescription: Layout and color.\n---\n"),
+    ]);
+    let brief = strategy_brief(&root, &json!({"context":{"kind":"page"},"notes":[]}));
+    assert!(brief.contains("folder of projects"), "{brief}");
+    assert!(!brief.contains("Skills ("), "{brief}");
 }
 
 /// A recorded file change stops being reviewable once the file is unwatched, and symbols always are.
@@ -1280,10 +1324,13 @@ fn unavailable_models_say_why() {
 const USAGE_LIMITS: &str = include_str!("board/usage-limits.json");
 /// 2026-10-14 12:00 UTC.
 const NOON: u64 = 1_791_979_200;
-/// Time zones for the tests, so no process is spawned: offsets on `NOON`.
-fn zones(z: Option<&str>) -> Option<i64> {
+/// Time zones for the tests, so no process is spawned: offsets at the time
+/// asked for. `Europe/London` steps from `+0100` to `+0000` a day after
+/// `NOON`, as a daylight-saving change does, so a reset named for after it is
+/// placed by the offset at the reset, not now's.
+fn zones(z: Option<&str>, at: i64) -> Option<i64> {
     match z {
-        Some("Europe/London") => Some(3600),
+        Some("Europe/London") => Some(if at < (NOON + 86400) as i64 { 3600 } else { 0 }),
         Some("America/Toronto") => Some(-4 * 3600),
         Some("UTC") | None => Some(0),
         _ => None,
@@ -1313,10 +1360,24 @@ fn agents_say_when_a_usage_limit_is_reached_and_when_it_resets() {
     assert_eq!(at("1am (Europe/London)", NOON), Some(1_792_022_400));
     assert_eq!(at("2:50pm (America/Toronto)", NOON), Some(1_792_003_800));
     assert_eq!(at("Oct 9, 2025 8:53 AM (UTC)", NOON), Some(1_759_999_980));
+    // A date with no year whose day has passed this year is next year's; one
+    // still to come this year stays this year.
+    assert_eq!(at("Oct 14 2pm", NOON + 86400), Some(1_823_522_400));
+    assert_eq!(at("Oct 16 9 am", NOON + 86400), Some(1_792_141_200));
+    // The offset at the reset, not now's: London's change a day after NOON
+    // moves a reset named for Oct 16 by an hour.
+    assert_eq!(at("Oct 16 1 am (Europe/London)", NOON), Some(1_792_112_400));
     // A reset that can't be read, or in an unknown zone, has no time.
     assert_eq!(at("soon", NOON), None);
     assert_eq!(at("2pm (Mars/Olympus)", NOON), None);
-    assert_eq!(agents::zone_offset(Some("UTC")), Some(0));
+    assert_eq!(agents::zone_offset(Some("UTC"), NOON as i64), Some(0));
+    // A zone this computer does not know has no offset: `date +%z` would
+    // answer `+0000` for it. A name that is a path into the zones is refused.
+    assert_eq!(agents::zone_offset(Some("Mars/Olympus"), NOON as i64), None);
+    assert_eq!(agents::zone_offset(Some("../etc"), NOON as i64), None);
+    // A zone folder (such as `America`) is not a zone file: `date` answers
+    // `+0000` for it, so it has no offset.
+    assert_eq!(agents::zone_offset(Some("America"), NOON as i64), None);
 }
 
 #[test]
@@ -1327,7 +1388,7 @@ fn a_usage_limit_marks_the_sign_in_until_it_resets_or_a_run_succeeds() {
     let codex = json!({"agent":"codex","model":"m"});
     let said = fixture["codex"][3]["said"].as_str().unwrap();
     fs::write(&log, json!({"type":"error","message":said}).to_string()).unwrap();
-    agents::observe(&path, &codex, &log, NOON, &zones).unwrap();
+    agents::observe(&path, &codex, &log, NOON, NOON, Some("stopped"), &zones).unwrap();
     let reason = "Codex usage limit reached (resets 3:45 PM)";
     assert_eq!(agents::limited(&path, "codex", NOON).as_deref(), Some(reason));
     assert_eq!(agents::limited(&path, "codex", 1_791_992_699).as_deref(), Some(reason));
@@ -1337,23 +1398,61 @@ fn a_usage_limit_marks_the_sign_in_until_it_resets_or_a_run_succeeds() {
     // A model on its own endpoint, or with its own program, isn't on the sign-in.
     let other = dir.join("other.json");
     for m in [json!({"agent":"codex","model":"m","endpoint":{"base_url":"http://x"}}), json!({"agent":"codex","run":["sh"]})] {
-        agents::observe(&other, &m, &log, NOON, &zones).unwrap();
+        agents::observe(&other, &m, &log, NOON, NOON, Some("finished"), &zones).unwrap();
     }
     assert!(!other.exists());
     // Claude Code's limit, in its stream-json result, with a reset it can't read: held until cleared.
     let claude = json!({"agent":"claude","model":"m"});
     fs::write(&log, json!({"type":"result","is_error":true,"result":"You've hit your limit · resets soon","usage":{}}).to_string()).unwrap();
-    agents::observe(&path, &claude, &log, NOON, &zones).unwrap();
+    agents::observe(&path, &claude, &log, NOON, NOON, Some("stopped"), &zones).unwrap();
     assert_eq!(agents::limited(&path, "claude", NOON + 365 * 86400).as_deref(), Some("Claude Code usage limit reached (resets soon)"));
     // The mark is on disk, not only in memory.
     agents::forget_marks();
     assert!(agents::limited(&path, "claude", NOON).is_some());
-    // A run that got no answer leaves it; a run whose agent answered clears it.
+    // A run that got no answer leaves it.
     fs::write(&log, "").unwrap();
-    agents::observe(&path, &claude, &log, NOON, &zones).unwrap();
+    agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("finished"), &zones).unwrap();
     assert!(agents::limited(&path, "claude", NOON).is_some());
+    // A run whose agent answered clears it: one that finished, started after
+    // the mark was set.
     fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}).to_string()).unwrap();
-    agents::observe(&path, &claude, &log, NOON, &zones).unwrap();
+    agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("finished"), &zones).unwrap();
+    assert_eq!(agents::limited(&path, "claude", NOON), None);
+    // A stopped run leaves the mark, even when its agent answered: it says
+    // nothing about the sign-in.
+    fs::write(&log, json!({"type":"result","is_error":true,"result":"You've hit your limit · resets soon","usage":{}}).to_string()).unwrap();
+    agents::observe(&path, &claude, &log, NOON, NOON, Some("stopped"), &zones).unwrap();
+    fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}).to_string()).unwrap();
+    agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("stopped"), &zones).unwrap();
+    assert!(agents::limited(&path, "claude", NOON).is_some());
+    // A finished run started before the mark leaves it too: its answers came
+    // before the limit was hit.
+    agents::observe(&path, &claude, &log, NOON, NOON, Some("finished"), &zones).unwrap();
+    assert!(agents::limited(&path, "claude", NOON).is_some());
+    agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("finished"), &zones).unwrap();
+    assert_eq!(agents::limited(&path, "claude", NOON), None);
+    // A run that succeeded clears the mark whatever its successful outcome:
+    // reviewed, discussed and planned count as `finished` does, the list
+    // `supervise` ends a run with. A mark set after the run started stays.
+    fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}).to_string()).unwrap();
+    for o in ["reviewed", "discussed", "planned"] {
+        agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some(o), &zones).unwrap();
+        assert_eq!(agents::limited(&path, "claude", NOON), None, "{o}");
+        agents::mark(&path, "claude", "Claude Code usage limit reached", Some(NOON + 3600)).unwrap();
+        agents::observe(&path, &claude, &log, NOON, NOON, Some(o), &zones).unwrap();
+        assert!(agents::limited(&path, "claude", NOON).is_some(), "{o}");
+    }
+    // Claude Code reports its limit as a message, not an error: a message that
+    // is exactly the limit's own text marks the sign-in, and is never counted
+    // as "the agent answered".
+    fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"You've hit your limit · resets 2pm (UTC)"}]}}).to_string()).unwrap();
+    agents::observe(&path, &claude, &log, NOON, NOON, Some("finished"), &zones).unwrap();
+    assert_eq!(agents::limited(&path, "claude", NOON).as_deref(), Some("Claude Code usage limit reached (resets 2pm (UTC))"));
+    agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("finished"), &zones).unwrap();
+    assert!(agents::limited(&path, "claude", NOON).is_some());
+    // A passing mention inside a longer message marks nothing, and is an answer.
+    fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"I noted: You've hit your limit · resets 2pm (UTC)\nThen I carried on."}]}}).to_string()).unwrap();
+    agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("finished"), &zones).unwrap();
     assert_eq!(agents::limited(&path, "claude", NOON), None);
     // Try again clears a mark.
     assert!(agents::clear(&path, "codex").unwrap());
@@ -1362,7 +1461,7 @@ fn a_usage_limit_marks_the_sign_in_until_it_resets_or_a_run_succeeds() {
     let none = dir.join("none.json");
     for e in fixture["not_limits"].as_array().unwrap() {
         fs::write(&log, json!({"type":"error","message":e}).to_string()).unwrap();
-        agents::observe(&none, &codex, &log, NOON, &zones).unwrap();
+        agents::observe(&none, &codex, &log, NOON, NOON, Some("finished"), &zones).unwrap();
     }
     assert!(!none.exists());
 }

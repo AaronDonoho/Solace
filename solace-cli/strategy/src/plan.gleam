@@ -500,7 +500,7 @@ fn agent_choice(p: Panel(msg)) -> Element(msg) {
     [], _ -> element.none()
     _, [] ->
       html.div([attribute.class("filters")], [
-        solace_task.no_agents_view(),
+        solace_task.no_agents_view(p.models),
         solace_task.unavailable_view(p.models, p.on_try_again),
       ])
     _, models ->

@@ -236,7 +236,7 @@ These answer at the root only.
 
 **Events.** The root's `/events` sends `{strategyRun}` in full after every change, with no `project` field, on the root task log. A new connection's replay sends `{strategyRuns: [...]}` (the list `GET /strategy/runs` returns) after `{vision}`.
 
-`solace serve` also serves the default board at `/` and a guide for humans at `/guide`.
+`solace serve` also serves the default board at `/` and a guide for humans as the shell's Knowledgebase page at `/knowledgebase`; `/guide` redirects there (D-140).
 
 ### One root, several projects (D-57)
 

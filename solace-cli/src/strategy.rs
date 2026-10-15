@@ -37,7 +37,14 @@ fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
     let prompt = strategy_brief(top, &run);
     let launched = spawn_agent(top, &dir, &log, &m, &prompt, &[], None, persists(&m), [STRATEGY, rid], timeout);
     let supervised = launched.and_then(|mut child| supervise(Watch::Strategy(top), rid, &mut child, &log, false, Duration::from_secs(timeout), GRACEFUL_EXIT));
-    agents::after_run(&m, &log);
+    let outcome = tasks::strategy_run(top, rid).and_then(|r| r["outcome"].as_str().map(String::from));
+    // A strategy agent that replied in plain text took its turn: its reply
+    // answers like a finished run, so it clears a mark the same way.
+    let outcome = match &supervised {
+        Err(Failure(_, REPLIED)) => Some("planned".to_string()),
+        _ => outcome,
+    };
+    agents::after_run(&m, &log, run["started"].as_u64().unwrap_or(0), outcome.as_deref());
     if dir.exists() {
         fs::remove_dir_all(&dir)?;
     }
@@ -67,6 +74,10 @@ pub(super) fn strategy_brief(top: &Path, run: &Value) -> String {
     let own = projects.iter().any(|p| p == ".");
     if !own {
         out += &format!("\nThe root is a folder of projects, not a project: add `--project <folder>` to every read. Its projects: {}.\n", projects.join(", "));
+    }
+    // The root's own skills (D-27); a folder of projects has no project the run can read them from.
+    if own {
+        out += &skills::section(top);
     }
     out += &format!("A proposed task's `scope` takes only these project folders: {}.\n", projects.join(", "));
     let decisions = fs::read_to_string(top.join("DECISIONS.md")).unwrap_or_default();

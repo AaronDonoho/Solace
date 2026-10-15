@@ -145,7 +145,7 @@ collapses it to one line: the shown run's state and model, or whether a run is o
   full after every change, with no `project`. A replayed run keeps the notes the page already has. The model list
   is `GET /models`. The pick offers only models that can start; under it, `solace_task.unavailable_view` gives the
   others' reasons, with Try again (`POST /models/try-again`) for a usage limit, and with none that can start,
-  `solace_task.no_agents_view` says what to set up.
+  `solace_task.no_agents_view` says what to set up, or that every model is held by a usage limit.
 - **Attention.** A live `{strategyRun}` where a run goes waiting (its agent replied) or asks a new proposal sends
   the host `attention` (D-107), which flags the Strategy tab while another page shows; a replay sends nothing.
 - **Layout.** Below the shell's menu the page fills the window: the tab content scrolls on its own, and the panel

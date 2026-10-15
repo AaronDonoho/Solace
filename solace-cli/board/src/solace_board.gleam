@@ -686,7 +686,6 @@ pub fn view(model: Model) -> Element(Msg) {
     ),
     h.header([a.class("top")], [
       h.h1([], [h.text("Solace tasks")]),
-      h.a([a.href("/guide")], [h.text("Guide")]),
       h.button(
         [a.aria_expanded(model.projects_open), e.on_click(ToggleProjects)],
         [h.text(solace_task.ui_label("projects"))],

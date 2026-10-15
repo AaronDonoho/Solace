@@ -25,8 +25,10 @@ turn that re-reads the conversation, so work in few calls:
     *** Add: pilot/checkout_test.fee_test
     +pub fn fee_test() { ... }
     *** End Patch
-   Imports are added automatically. Work out expected values from the task's
-   numbers and the code's own rules, never from running the code.
+   A new module is `*** Add: <module>`: its module comment, imports and code.
+   Every line of an Add, empty ones too, starts with `+`. Imports are added
+   automatically. Work out expected values from the task's numbers and the
+   code's own rules, never from running the code.
 3. Fix only what the reply reports, then `test` again; look at what it lists
    as reached by no test. Once `test` passes, the code is done (it type-checks
    first; no `check`).
@@ -60,7 +62,8 @@ lists them):
   work add | list | done        work records, kept across sessions
 Files by tier: src/ and test/ *.gleam are symbols (`submit`, never `write`);
 solace.toml, AGENTS.md, .gitignore: `write` with `reason`, the human approves;
-.solace/ and nested projects: their own commands; any other file, ignored
+the skills folder (Skills, below): `read` only; .solace/ and nested projects:
+their own commands; any other file, ignored
 or not: `read`, `write`, `move`, `remove` (not gleam.toml).
 
 Commands in full
@@ -121,7 +124,10 @@ Changing (the new code is in `text`)
                                 symbol or module `*** Update: <name>` with `@@`
                                 hunks (` ` context, `-` removed, `+` added),
                                 applied in order like `apply_patch`; `*** Add:
-                                <module>.<name>` with `+` lines adds a symbol.
+                                <module>.<name>` adds a symbol, `*** Add:
+                                <module>` a new module (module comment,
+                                imports, code); every line of an Add, empty
+                                ones too, starts with `+`.
                                 Checked together; a hunk that doesn't match
                                 changes nothing (E0108). A patch line is a
                                 whole line: for part of one, use --replace.
@@ -189,9 +195,12 @@ retries it, `submit --draft <id>` retries it as is, `view --draft <id>` reads it
 `drafts` lists them. A draft is stale once a symbol it replaces, or its module's
 imports, changed; its retry is refused (E0107): read the current source and
 submit again. A block equal to the stored symbol is reported unchanged. A patch
-that can't be applied (E0108, with the patch line at fault) is kept as written,
-so fix that line with `--replace` instead of resending it; a patch that applies
-but is rejected after is kept as the blocks it changed.
+that can't be applied (E0108) is kept as written. When the error names the
+patch line at fault, fix that line with `--replace` instead of resending it;
+when the fault is in the whole patch (an Add with no `+` line, no section, an
+unknown header, a file section sent to `submit`), send the corrected patch
+again, whole. A patch that applies but is rejected after is kept as the blocks
+it changed.
 
 Checking
   test                          run the tests that can see a change since they
@@ -222,10 +231,11 @@ change with `submit`, protected ones with `write` and the human's approval.
             `remove` and `move` work; searched by `grep`; a task's changes to
             them are recorded, and undone if the task is canceled
   protected solace.toml, AGENTS.md (the project's instructions for agents, shown
-            at session start) and every .gitignore: the human owns them. In a
-            work run, `write` one alone, with the exact new text and the why in
-            `reason`; it waits for the human's approval (no `task note` beside
-            it; don't ask in prose)
+            at session start), every .gitignore and the skills folder (Skills,
+            below): the human owns them. In a work run, `write` one alone, with
+            the exact new text and the why in `reason`; it waits for the
+            human's approval (no `task note` beside it; don't ask in prose).
+            Skills are refused outright: agents read them and change none.
   unwatched .git, build and dependency output, .gitignore'd files, paths in the
             `unwatched` list, node_modules, binary files and files over
             watch_limit: `read`, `write`, `remove` and `move` work; listed by
@@ -273,9 +283,9 @@ change with `submit`, protected ones with `write` and the human's approval.
                                 validator) writes none, and each is named.
                                 The patch is kept as a draft: fix its bad line
                                 with `write --draft <id> --replace` (`old`,
-                                `text`), not by resending it. A patch line is
-                                a whole line; for part of one, `write <path>`
-                                with `old`
+                                `text`); a fault in the whole patch says to
+                                resend it. A patch line is a whole line; for
+                                part of one, `write <path>` with `old`
   remove <path>...              files, whole or nothing: any refused path
                                 removes none and is named
   move <from> <to> [--to-project <folder>]
@@ -284,6 +294,22 @@ change with `submit`, protected ones with `write` and the human's approval.
                                 internal files stay put. --to-project: another
                                 project of this task. A repeated move changes
                                 nothing
+Skills (D-27): the `skills` key in solace.toml names the project's skills
+folder, `skills/` when the key is missing. Each skill is a subfolder with a
+`SKILL.md`, or a single `<name>.md` file at the folder's top; `name` and
+`description` are front matter between `---` lines, and a skill with no
+description is listed by its first line. Every run's brief (work, investigate,
+discuss, review, strategy) lists the skills of the project it works in, one
+line each — name, description, and the path to `read` — and never carries a
+skill's contents: `read` a skill when the task matches its description, and
+read any files it points to. The humans own the folder: agents read skills and
+change none of them. Solace never runs a skill's scripts: a skill that needs a
+tool names a `[commands]` entry the human adds to solace.toml, run with
+`run <name>` (as `layout_audit` is). A `README.md` at the folder's top is the
+folder's own note, not a skill. The key names a folder inside the project that
+holds no code: `src`, `test`, a folder inside them, `.solace`, a nested
+project (one with its own store) and a folder inside one are refused; `./x`
+names the same folder as `x`.
 Project: build | format | run <name> [args...] (commands declared in solace.toml)
   build plan                    every project's build recipe ([build] in its
                                 solace.toml, or the default from its files), in

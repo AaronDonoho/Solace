@@ -428,16 +428,40 @@ pub(super) fn end_run(r: &mut Value, outcome: &str) {
     }
 }
 
+/// A run's start time and outcome as the task holds them now: `after_run`
+/// clears a usage-limit mark only for a run that succeeded, started before it.
+fn run_state(root: &Path, tid: &str, rid: &str) -> (u64, Option<String>) {
+    task(root, tid)
+        .ok()
+        .and_then(|t| {
+            t["runs"]
+                .as_array()
+                .unwrap_or(&Vec::new())
+                .iter()
+                .find(|r| r["id"] == rid)
+                .map(|r| (r["started"].as_u64().unwrap_or(0), r["outcome"].as_str().map(String::from)))
+        })
+        .unwrap_or((now(), None))
+}
+
 /// The model a run's log start event names, when it names one: Codex in its
 /// `thread.started`, Claude Code in its `system`/`init` event.
 fn used_model(log: &Path) -> Option<String> {
-    fs::read_to_string(log).ok()?.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).find_map(|e| {
-        if e["type"] == "thread.started" || (e["type"] == "system" && e["subtype"] == "init") {
-            e["model"].as_str().map(String::from)
-        } else {
-            None
-        }
-    })
+    use std::io::BufRead;
+    // The start event is at the log's head: read line by line and stop after
+    // the first 50, so a long log is not read whole on every run's end.
+    let Ok(file) = fs::File::open(log) else { return None };
+    std::io::BufReader::new(file)
+        .lines()
+        .take(50)
+        .filter_map(|l| serde_json::from_str::<Value>(&l.ok()?).ok())
+        .find_map(|e| {
+            if e["type"] == "thread.started" || (e["type"] == "system" && e["subtype"] == "init") {
+                e["model"].as_str().map(String::from)
+            } else {
+                None
+            }
+        })
 }
 fn end_runs(t: &mut Value, outcome: &str) {
     for r in t["runs"].as_array_mut().unwrap() {
@@ -2311,7 +2335,14 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     }
     let mut child = spawn_agent(&at, &dir, &log, m, &prompt, &images, resume.as_deref(), persistent, [tid, rid], timeout)?;
     let supervised = supervise(Watch::Task(root, tid), rid, &mut child, &log, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT);
-    agents::after_run(m, &log);
+    let (started, outcome) = run_state(root, tid, rid);
+    // A discussion agent that replied in plain text took its turn: its reply
+    // answers like a finished run, so it clears a mark the same way.
+    let outcome = match &supervised {
+        Err(Failure(_, REPLIED)) => Some("discussed".to_string()),
+        _ => outcome,
+    };
+    agents::after_run(m, &log, started, outcome.as_deref());
     if !(author && persistent) && matches!(supervised, Err(Failure(_, REPLIED))) && dir.exists() {
         fs::remove_dir_all(&dir)?;
     }
@@ -2795,6 +2826,7 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
         }
     }
     out += &vision_section(&scope::top(root), kind);
+    out += &skills::section(here);
     if !images.is_empty() {
         out += "\nImages in the notes are attached to this message as [image 1], [image 2], ... in order.\n";
         if custom {
@@ -4130,14 +4162,20 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             // (D-122), is the shell's to resolve.
             let page = url.split('?').next().unwrap_or("");
             let record_link = ["/task/", "/feature/", "/milestone/"].iter().any(|p| page.strip_prefix(p).is_some_and(valid_id));
+            // The guide is the shell's Knowledgebase page (D-140): its old address sends the browser there.
+            if req.method().as_str() == "GET" && page == "/guide" {
+                let _ = req.respond(
+                    tiny_http::Response::empty(301).with_header(tiny_http::Header::from_bytes("Location", "/knowledgebase").unwrap()),
+                );
+                return;
+            }
             if req.method().as_str() == "GET"
                 && (record_link
-                    || matches!(page, "/" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/app.js" | "/guide" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2"))
+                    || matches!(page, "/" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/knowledgebase" | "/app.js" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2"))
             {
                 let (data, kind) = match page {
                     _ if record_link => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
-                    "/" | "/migrate" | "/contracts" | "/strategy" | "/settings" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
-                    "/guide" => (include_bytes!("../board/guide.html").as_slice(), "text/html"),
+                    "/" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/knowledgebase" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
                     "/fonts/sans-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-400-normal.woff2").as_slice(), "font/woff2"),
                     "/fonts/sans-700.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-700-normal.woff2").as_slice(), "font/woff2"),
                     "/fonts/mono-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-mono-latin-400-normal.woff2").as_slice(), "font/woff2"),

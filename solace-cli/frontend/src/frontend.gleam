@@ -1,4 +1,5 @@
 import contracts
+import gleam/bool
 import gleam/dynamic/decode
 import gleam/int
 import gleam/json
@@ -7,6 +8,7 @@ import gleam/option.{None}
 import gleam/result
 import gleam/string
 import gleam/uri.{type Uri}
+import knowledgebase
 import lustre
 import lustre/attribute
 import lustre/effect.{type Effect}
@@ -36,6 +38,8 @@ pub type Route {
   Contracts(base: String)
   Strategy
   Settings
+  /// The Knowledgebase page (D-140): the shell's own page, holding the guide. `/guide` lands here.
+  Knowledgebase
   /// A link's address, `/task/<id>` (D-98), `/feature/<id>` or `/milestone/<id>` (D-122): resolved to the
   /// board or Strategy, never shown itself. `kind` is "task", "feature" or "milestone".
   RecordLink(kind: String, id: String)
@@ -59,6 +63,7 @@ pub fn route(uri: Uri) -> Route {
     ["contracts"] -> Contracts("")
     ["strategy"] -> Strategy
     ["settings"] -> Settings
+    ["knowledgebase"] | ["guide"] -> Knowledgebase
     ["p", dir, "contracts"] -> Contracts("/p/" <> dir)
     ["task" as kind, id]
     | ["feature" as kind, id]
@@ -71,6 +76,9 @@ pub fn route(uri: Uri) -> Route {
 /// The page a link asked for gets the record in its `focus` property, `{kind, dir, id, n}`.
 /// Its `attention` event flags its menu tab.
 pub fn page(route: Route, shown: Bool, focus: Focus) -> Element(Msg) {
+  use <- bool.lazy_guard(route == Knowledgebase, fn() {
+    knowledgebase.view(shown)
+  })
   let attributes = case route {
     Contracts(base) if base != "" -> [attribute.attribute("base", base)]
     _ -> []
@@ -109,6 +117,12 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     Ok(uri) -> route(uri)
     Error(_) -> Board
   }
+  // The guide's old address shows the Knowledgebase under its own (D-140).
+  let renamed = case modem.initial_uri() {
+    Ok(uri) if uri.path == "/guide" ->
+      modem.replace("/knowledgebase", None, None)
+    _ -> effect.none()
+  }
   // A link's address shows the board until the record is found.
   let #(shown, found) = case initial {
     RecordLink(kind, id) -> #(Board, find(kind, id, True))
@@ -127,6 +141,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       // A bare link shows its record's title (D-122), in every page.
       effect.from(fn(_) { watch_titles() }),
       found,
+      renamed,
     ]),
   )
 }
@@ -215,6 +230,7 @@ pub fn view(model: Model) -> Element(Msg) {
       link("/strategy", "Strategy", Strategy),
       link("/", "Board", Board),
       link("/contracts", "Contracts", Contracts("")),
+      link("/knowledgebase", "Knowledgebase", Knowledgebase),
       link("/settings", "Settings", Settings),
     ]),
     ..list.map(model.opened, fn(r) { page(r, page_of(r) == shown, model.focus) })
@@ -500,6 +516,7 @@ pub fn page_of(route: Route) -> String {
     Contracts(_) -> "solace-contracts"
     Strategy -> "solace-strategy"
     Settings -> "solace-settings"
+    Knowledgebase -> "solace-knowledgebase"
     RecordLink(_, _) -> "solace-board"
   }
 }

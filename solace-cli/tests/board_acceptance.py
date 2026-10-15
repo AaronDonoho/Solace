@@ -873,8 +873,10 @@ class Board(unittest.TestCase):
         self.assertEqual((self.root/'priv/a').read_text(),'original');self.assertFalse((self.root/'priv/b').exists())
 
     def test_a11_embedded_client_and_internal_files(self):
-        for path,expected in [('/',b'Solace tasks'),('/migrate',b'Solace tasks'),('/strategy',b'Solace tasks'),('/strategy?tab=tasks',b'Solace tasks'),('/settings',b'Solace tasks'),('/app.js',b'/workflow'),('/guide',b'Using Solace')]:
+        for path,expected in [('/',b'Solace tasks'),('/migrate',b'Solace tasks'),('/strategy',b'Solace tasks'),('/strategy?tab=tasks',b'Solace tasks'),('/settings',b'Solace tasks'),('/knowledgebase',b'Solace tasks'),('/app.js',b'/workflow')]:
             c=http.client.HTTPConnection('127.0.0.1',self.port);c.request('GET',path);r=c.getresponse();self.assertEqual(r.status,200);self.assertIn(expected,r.read());c.close()
+        # The guide's old address still answers, sending the browser on to the Knowledgebase page (D-140).
+        c=http.client.HTTPConnection('127.0.0.1',self.port);c.request('GET','/guide');r=c.getresponse();self.assertEqual(r.status,301);self.assertEqual(r.getheader('Location'),'/knowledgebase');r.read();c.close()
         for command in ['files','read','write','remove']:
             p=subprocess.run([BIN,command,'.solace/board'],cwd=self.root,env=self.env,input='x',text=True,capture_output=True)
             self.assertIn('E6006',p.stdout)

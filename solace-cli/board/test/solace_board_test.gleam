@@ -1174,6 +1174,9 @@ pub fn shared_labels_on_the_board_test() {
   shows(model, button("new_task")) |> should.be_false
   shows(model, button("create_task")) |> should.be_false
   shows(model, "<section class=\"editor\">") |> should.be_false
+  // The guide is the shell's Knowledgebase page (D-140): no Guide link.
+  shows(model, "href=\"/guide\"") |> should.be_false
+  shows(model, ">Guide</a>") |> should.be_false
   shows(model, button("projects")) |> should.be_true
   shows(model, ">" <> solace_task.ui_label("contract_view") <> "</a>")
   |> should.be_true

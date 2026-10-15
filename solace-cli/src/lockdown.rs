@@ -30,7 +30,25 @@ pub fn settings(root: &Path) -> Result<toml::Value, Failure> {
     match fs::read_to_string(root.join("solace.toml")) {
         // A folder of projects' solace.toml only lists them (D-57); `workspace` checks it.
         Ok(s) if !root.join("gleam.toml").exists() && !root.join(".solace/store.db").exists() => s.parse().map_err(invalid_settings),
-        Ok(s) => parse_settings(&s),
+        Ok(s) => {
+            let v = parse_settings(&s)?;
+            // A skills folder that is a nested project (D-57), or a folder
+            // inside one, collides with its store's internal tier (D-27):
+            // every folder from the root down to it is checked, where the
+            // root is known.
+            let dir = skills_dir(&v);
+            let nested = root.join(&dir).strip_prefix(root).map(|rel| {
+                let mut at = root.to_path_buf();
+                rel.components().any(|c| {
+                    at = at.join(c.as_os_str());
+                    at.join(".solace/store.db").exists()
+                })
+            });
+            if nested.unwrap_or(true) {
+                return Err(invalid_settings("skills names a nested project; point it at a folder of house rules"));
+            }
+            Ok(v)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(toml::Value::Table(Default::default())),
         Err(e) => Err(e.into()),
     }
@@ -62,6 +80,24 @@ pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
     }
     if v.get("watch_limit").is_some_and(|x| x.as_integer().is_none_or(|n| n < 0)) {
         return Err(invalid("watch_limit"));
+    }
+    // `skills`: the skills folder (D-27), a folder inside the project, and
+    // none of its own code: `src` or `test` (or a folder inside them) would
+    // make watched source protected, and `.solace` is Solace's own. A nested
+    // project is refused by `settings`, which knows the root. `./x` names the
+    // same folder as `x`, so the parts decide, not the raw string.
+    if v.get("skills").is_some_and(|s| {
+        s.as_str().is_none_or(|d| {
+            let d = d.trim_end_matches('/');
+            let parts: Vec<&str> = d.split('/').filter(|c| !c.is_empty() && *c != ".").collect();
+            d.is_empty()
+                || parts.is_empty()
+                || Path::new(d).is_absolute()
+                || parts.iter().any(|c| *c == "..")
+                || matches!(parts.first().copied().unwrap_or(""), "src" | "test" | ".solace")
+        })
+    }) {
+        return Err(invalid("skills"));
     }
     for key in ["commands", "validators"] {
         if let Some(t) = v.get(key) {
@@ -182,6 +218,18 @@ pub fn tier(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -
     tier_and_bytes(root, v, &mut Ignores::new(root), name, proposed).0
 }
 
+/// The project's skills folder (D-27): the `skills` key of solace.toml, and
+/// `skills` when the key is missing. Humans own it: agents read its skills and
+/// change none of them.
+pub const DEFAULT_SKILLS: &str = "skills";
+pub fn skills_dir(v: &toml::Value) -> String {
+    v.get("skills").and_then(|s| s.as_str()).unwrap_or(DEFAULT_SKILLS).trim_end_matches('/').to_string()
+}
+/// Whether `name` is the skills folder or a file in it (D-27).
+pub fn in_skills(v: &toml::Value, name: &str) -> bool {
+    matches(&format!("{}/", skills_dir(v)), name)
+}
+
 /// `tier`, with the file's bytes when they were read to decide the tier, so a
 /// caller that wants a size reads the file once (D-119 point 4).
 fn tier_and_bytes(root: &Path, v: &toml::Value, ignores: &mut Ignores, name: &str, proposed: Option<&[u8]>) -> (String, Option<Vec<u8>>) {
@@ -190,6 +238,9 @@ fn tier_and_bytes(root: &Path, v: &toml::Value, ignores: &mut Ignores, name: &st
         return ("graph".into(), None);
     }
     if name == "solace.toml" || name == "AGENTS.md" {
+        return ("protected".into(), None);
+    }
+    if in_skills(v, name) {
         return ("protected".into(), None);
     }
     if internal(root, name) {
@@ -836,6 +887,9 @@ fn file_change(
         return error("E6001", name, format!("source is held as symbols; change it with a `submit` patch (`*** Update: {module}`)"));
     }
     if t == "protected" {
+        if in_skills(v, name) {
+            return error("E6002", name, "skills are the humans' house rules: `read` them; agents can't change them");
+        }
         return error("E6002", name, "protected files change only through a human-approved proposal: in a work run, `write` it alone, with the exact new text and `reason`");
     }
     if t != "watched" && !t.starts_with("unwatched") {
@@ -892,7 +946,7 @@ fn write_patch(root: &Path, v: &toml::Value, raw: &str) -> Out {
     }
     let changes: Vec<_> = changes.into_iter().filter(|(_, _, before, text)| text.as_deref().map(str::as_bytes) != before.as_deref()).collect();
     if changes.is_empty() {
-        return fail("E0108 the patch changes nothing.");
+        return fail(format!("E0108 the patch changes nothing. {}", drafts::RESEND));
     }
     let mut journals = vec![];
     let mut result = Ok(());
@@ -932,9 +986,9 @@ fn write_patch(root: &Path, v: &toml::Value, raw: &str) -> Out {
         })
         .collect())
 }
-/// A file patch whose refusal is kept as a draft (D-120), so a bad line is
-/// fixed with `write --draft <id> --replace` rather than by resending the
-/// patch. A retry is the whole patch again, whole or nothing (D-104).
+/// A file patch whose refusal is kept as a draft (D-120): a bad line is fixed
+/// with `write --draft <id> --replace`; a fault in the whole patch is resent
+/// (D-141). A retry is the whole patch again, whole or nothing (D-104).
 fn patch_with_draft(store: &Store, v: &toml::Value, id: Option<&str>, raw: &str, budget: usize) -> Out {
     match write_patch(&store.root, v, raw) {
         Ok(out) => {
@@ -945,10 +999,8 @@ fn patch_with_draft(store: &Store, v: &toml::Value, id: Option<&str>, raw: &str,
         }
         Err(Failure(message, code)) => {
             let id = drafts::keep_file_patch(store, id, raw)?;
-            Err(Failure(
-                format!("{message}\n\nDraft {id} retained. Read: `view --draft {id}`. Fix and retry: `write --draft {id} --replace` with `old` and `text`. List: `drafts`."),
-                code,
-            ))
+            let advice = drafts::retry_advice(&message, &id, "write", "");
+            Err(Failure(format!("{message}\n\n{advice}"), code))
         }
     }
 }
@@ -1542,6 +1594,9 @@ pub fn dispatch(
                     }
                     "write" => {
                         if t == "protected" {
+                            if in_skills(v, &name) {
+                                return error("E6002", &name, "skills are the humans' house rules: `read` them; agents can't change them");
+                            }
                             return error("E6002", &name, "protected files change only through a human-approved proposal: in a work run, `write` it with the exact new text");
                         }
                         not_here(root, &name)?;
@@ -1696,6 +1751,8 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
     Ok(format!("{launch}\n"))
 }
 
+/// The footer of a reply that shows a line cut by `around`.
+const GREP_CUT: &str = "Lines starting or ending with … are cut from longer lines; read the whole line with read <path> --lines <n>..<n>, and to change part of one use write <path> --replace with old/text.";
 /// How `grep` reads its query, for the hint after a miss that looks like a shell habit (D-109).
 pub const GREP_SYNTAX: &str = "grep takes literal text, already case-insensitive, searched as written; quotes around the whole query are dropped; no regex; the only options, at the end: `--in <path>` (one file or folder), `--context n` (1 to 5); `--project <folder>` picks the project";
 
@@ -1735,14 +1792,18 @@ fn grep(root: &Path, v: &toml::Value, query: &str, budget: usize) -> Out {
         return Ok(format!("No matches for \"{query}\" in {place}.\n{}", grep_hint(raw, query)));
     }
     let (mut out, mut shown) = (String::new(), 0);
-    for (k, block) in hits.iter().enumerate() {
-        // Room for the line that names the files left out, unless this is the last.
-        let room = if k + 1 == hits.len() { 0 } else { 140 };
+    let mut cut_shown = false;
+    for (k, (block, cut)) in hits.iter().enumerate() {
+        // Room for the footer, once a shown file has a cut line, and for the
+        // line that names the files left out, unless this is the last.
+        let foot = if cut_shown || *cut { GREP_CUT.len() + 1 } else { 0 };
+        let room = foot + if k + 1 == hits.len() { 0 } else { 140 };
         if shown == 40 || out.len() + block.len() + room > budget {
             break;
         }
         out += block;
         shown += 1;
+        cut_shown |= *cut;
     }
     if shown < hits.len() {
         // The files left out, named so the agent narrows (D-119 point 2): the
@@ -1762,6 +1823,11 @@ fn grep(root: &Path, v: &toml::Value, query: &str, budget: usize) -> Out {
         } else {
             format!("… {} more {more}, not shown; {narrow}.\n", left)
         };
+    }
+    // One footer for the reply, when a line it shows was cut at either end.
+    if cut_shown {
+        out += GREP_CUT;
+        out += "\n";
     }
     Ok(out)
 }
@@ -1823,8 +1889,9 @@ fn grep_in(root: &Path, v: &toml::Value, p: &str, rows: &mut Vec<(String, String
     Ok(Ok(name))
 }
 /// A file's matching lines (up to 10) with `context` lines around them, as
-/// the reply shows them; `None` when nothing matches `q`.
-fn grep_file(name: &str, text: &str, q: &str, context: usize) -> Option<String> {
+/// the reply shows them, and whether any shown line was cut; `None` when
+/// nothing matches `q`.
+fn grep_file(name: &str, text: &str, q: &str, context: usize) -> Option<(String, bool)> {
     // Matching is on the trimmed line; the reply shows the line as written, so
     // a match's indentation is kept (D-119 point 1).
     let raw: Vec<&str> = text.lines().collect();
@@ -1845,6 +1912,7 @@ fn grep_file(name: &str, text: &str, q: &str, context: usize) -> Option<String> 
         }
     }
     let mut out = if hits.len() > 10 { format!("{name} ({} matches, showing 10)\n", hits.len()) } else { format!("{name}\n") };
+    let mut cut = false;
     for (k, &(a, b)) in windows.iter().enumerate() {
         if k > 0 && context > 0 {
             out += "  …\n";
@@ -1852,14 +1920,15 @@ fn grep_file(name: &str, text: &str, q: &str, context: usize) -> Option<String> 
         for j in a..=b {
             // A line that matches but is past the 10 shown is context, not a
             // match line (D-119 point 2).
-            let (mark, line) = match found[j].filter(|_| shown.binary_search(&j).is_ok()) {
+            let (mark, (line, was_cut)) = match found[j].filter(|_| shown.binary_search(&j).is_ok()) {
                 Some(at) => (':', around(raw[j], at + raw[j].len() - raw[j].trim_start().len(), q.len())),
                 None => ('-', around(raw[j], 0, 0)),
             };
+            cut |= was_cut;
             out += &format!("  {:>4}{mark} {line}\n", j + 1);
         }
     }
-    Some(out)
+    Some((out, cut))
 }
 /// A query without the quotes around it, only when it is one quoted term:
 /// `"write" =>` keeps its quotes.
@@ -1896,14 +1965,16 @@ fn grep_hint(raw: &str, query: &str) -> String {
 const FILE_EXTENSIONS: &[&str] =
     &["rs", "gleam", "md", "txt", "toml", "json", "js", "mjs", "ts", "py", "html", "css", "erl", "sh", "yml", "yaml", "lock", "csv"];
 /// A long line cut to about 200 characters around a match at byte `at`
-/// (lowercasing can shift bytes, so cuts snap to character boundaries).
-fn around(line: &str, at: usize, len: usize) -> String {
+/// (lowercasing can shift bytes, so cuts snap to character boundaries). The
+/// flag says the line was cut at either end.
+fn around(line: &str, at: usize, len: usize) -> (String, bool) {
     if line.len() <= 200 {
-        return line.to_string();
+        return (line.to_string(), false);
     }
     let floor = |i: usize| (0..=i.min(line.len())).rev().find(|&i| line.is_char_boundary(i)).unwrap_or(0);
     let (start, end) = (floor(at.saturating_sub(80)), floor(at + len + 120));
-    format!("{}{}{}", if start > 0 { "…" } else { "" }, &line[start..end], if end < line.len() { "…" } else { "" })
+    let shown = format!("{}{}{}", if start > 0 { "…" } else { "" }, &line[start..end], if end < line.len() { "…" } else { "" });
+    (shown, start > 0 || end < line.len())
 }
 pub fn tree_files(root: &Path, settings: &toml::Value) -> Result<Vec<(String, String)>, Failure> {
     let mut rows = vec![];
@@ -2233,6 +2304,63 @@ mod tests {
         assert_eq!(got, "… the budget fits no file; 3 files match, run grep alone in the call.\n");
         let got = grep(&s.root, &v, "needle --in docs", 500).unwrap();
         assert!(got.ends_with("… 2 more files match, not shown; run grep alone in the call.\n"), "{got}");
+    }
+    /// A reply that shows a line cut at either end ends with one footer.
+    #[test]
+    fn grep_says_when_a_shown_line_is_cut() {
+        let (s, _) = fixture();
+        let v: toml::Value = "watch_limit = 100000\n".parse().unwrap();
+        let long = |before: usize, after: usize| format!("{}needle{}\n", "a".repeat(before), "b".repeat(after));
+        let run = |files: &[(&str, String)], query: &str| {
+            fs::create_dir_all(s.root.join("cuts")).unwrap();
+            for (n, text) in files {
+                fs::write(s.root.join("cuts").join(n), text).unwrap();
+            }
+            let got = grep(&s.root, &v, query, 100_000).unwrap();
+            fs::remove_dir_all(s.root.join("cuts")).unwrap();
+            got
+        };
+        let once = |got: &str| got.matches("are cut from longer lines").count() == 1 && got.ends_with(&format!("{GREP_CUT}\n"));
+        // Cut at the start only.
+        let got = run(&[("a.md", long(1000, 10))], "needle --in cuts");
+        assert!(once(&got), "{got}");
+        // Cut at the end only.
+        let got = run(&[("a.md", long(0, 1000))], "needle --in cuts");
+        assert!(once(&got), "{got}");
+        // A cut context line.
+        let got = run(&[("a.md", format!("needle\n{}\n", "x".repeat(1000)))], "needle --in cuts --context 1");
+        assert!(once(&got), "{got}");
+        // Many cut lines in several files: still one footer.
+        let two = long(1000, 1000).repeat(3);
+        let got = run(&[("a.md", two.clone()), ("b.md", two)], "needle --in cuts");
+        assert!(once(&got), "{got}");
+        // Whole lines only, one starting with `…`, and a `…` window separator.
+        let mut text = "…needle whole\n".to_string();
+        text += &"filler\n".repeat(8);
+        text += "needle again\n";
+        let got = run(&[("a.md", text)], "needle --in cuts --context 1");
+        assert!(got.contains("  …\n") && !got.contains("are cut from longer lines"), "{got}");
+    }
+    /// The footer's room is kept only for a file the reply shows: a cut file
+    /// the budget leaves out pushes out no whole-line file that fits.
+    #[test]
+    fn grep_a_cut_file_left_out_by_the_budget_pushes_out_nothing() {
+        let (s, _) = fixture();
+        let v: toml::Value = "watch_limit = 100000\n".parse().unwrap();
+        fs::create_dir_all(s.root.join("cuts")).unwrap();
+        // a.md: three whole lines; its block is 64 bytes.
+        fs::write(s.root.join("cuts/a.md"), "needle one\nneedle two\nneedle three\n").unwrap();
+        // b.md: one 1016-character line, shown cut to about 100 bytes.
+        fs::write(s.root.join("cuts/b.md"), format!("{}needle{}\n", "a".repeat(1000), "b".repeat(10))).unwrap();
+        // 250 fits a.md's block with the "more files" line (204), not the old
+        // footer room for b.md's cut (388); b.md with its own footer room
+        // (361) is left out, so the reply shows a.md and carries no footer.
+        let got = grep(&s.root, &v, "needle --in cuts", 250).unwrap();
+        fs::remove_dir_all(s.root.join("cuts")).unwrap();
+        assert!(got.contains("needle one\n") && got.contains("needle three\n"), "{got}");
+        assert!(got.contains("1 more file matches"), "{got}");
+        assert!(!got.contains("b.md") && !got.contains("are cut from longer lines"), "{got}");
+        assert!(got.len() <= 250, "{got}");
     }
     /// D-109: `write <path>` refuses patch text and a drastic shrink, and its
     /// reply gives the file's lines before and after.
@@ -2713,11 +2841,15 @@ running your program.
             ("*** Begin Patch\n*** Update File: notes\n-one\n+one\n*** End Patch\n", "E0108 the patch changes nothing"),
             ("*** Begin Patch\n*** Update File: notes\n*** Move to: other\n*** End Patch\n", "use `move <from> <to>`"),
             ("*** Begin Patch\n*** Delete File: notes\nx\n*** End Patch\n", "takes no lines"),
-            ("*** Begin Patch\n*** Add File: priv/x\nx\n*** End Patch\n", "in `*** Add File: priv/x` every line starts with `+`"),
+            ("*** Begin Patch\n*** Add File: priv/x\nx\n*** End Patch\n", "`*** Add File: priv/x` (line 2) has no `+` lines"),
             ("*** Begin Patch\n*** End Patch\n", "the patch has no `*** Add File: <path>`"),
         ] {
             let e = call(&s, &v, &["write"], patch, None).unwrap_err().0;
             assert!(e.contains(why), "{why}: {e}");
+            // D-141: a fault in the whole patch is resent, not fixed with `--replace`.
+            if why.contains("no `+` lines") || why.contains("has no `*** Add File") {
+                assert!(e.contains(drafts::RESEND) && !e.contains("--replace"), "{e}");
+            }
         }
         // With no path, `text` must be a file patch; with a list, `write` points to one.
         let e = call(&s, &v, &["write"], "plain text", None).unwrap_err();
@@ -2997,5 +3129,68 @@ running your program.
         out.clear();
         tree(&root, &v, &root, &mut out).unwrap();
         assert!(!out.contains("index.html"));
+    }
+    /// D-27: the skills folder is the humans' house rules: its files are
+    /// protected, a write into it is refused naming skills, a patch that adds
+    /// one is refused whole, a move out is refused, and `read` works.
+    #[test]
+    fn the_skills_folder_is_read_only_for_agents() {
+        let (p, v) = fixture();
+        fs::create_dir_all(p.root.join("skills/design")).unwrap();
+        fs::write(p.root.join("skills/design/SKILL.md"), "---\ndescription: Layout.\n---\n# Layout rules\n").unwrap();
+        fs::write(p.root.join("skills/voice.md"), "Speak plainly\n").unwrap();
+        assert_eq!(tier(&p.root, &v, "skills", None), "protected");
+        assert_eq!(tier(&p.root, &v, "skills/voice.md", None), "protected");
+        assert_eq!(tier(&p.root, &v, "skills/design/SKILL.md", None), "protected");
+        assert_eq!(tier(&p.root, &v, "voice.md", None), "watched");
+        let r = call(&p, &v, &["read", "skills/voice.md"], "", None).unwrap();
+        assert!(r.contains("Speak plainly"), "{r}");
+        // A direct write is refused, naming skills.
+        let w = call(&p, &v, &["write", "skills/voice.md"], "new\n", None).unwrap_err().0;
+        assert!(w.contains("E6002") && w.contains("skills are the humans' house rules"), "{w}");
+        // So is a patch that adds a file there; the whole patch writes none.
+        let patch = "*** Begin Patch\n*** Add File: skills/new/SKILL.md\n+x\n*** Update File: README.md\n+hi\n*** End Patch\n";
+        let w = call(&p, &v, &["write"], patch, None).unwrap_err().0;
+        assert!(w.contains("skills are the humans' house rules"), "{w}");
+        assert!(!p.root.join("README.md").exists() && !p.root.join("skills/new").exists());
+        // A move out of the folder is refused, and moves nothing.
+        let m = call(&p, &v, &["move", "skills/voice.md", "voice.md"], "", None).unwrap_err().0;
+        assert!(m.contains("E6002") && m.contains("can't be moved"), "{m}");
+        assert!(p.root.join("skills/voice.md").exists() && !p.root.join("voice.md").exists());
+    }
+    /// D-27: the `skills` key names the folder; anything that isn't a folder
+    /// inside the project is refused.
+    #[test]
+    fn the_skills_key_names_a_folder_inside_the_project() {
+        for key in ["house", "house/", "a/b", "skills"] {
+            let v = parse_settings(&format!("skills = \"{key}\"\n")).unwrap();
+            assert_eq!(skills_dir(&v), key.trim_end_matches('/'));
+        }
+        for bad in ["3", "true", "[\"a\"]", "\"/etc\"", "\"../x\"", "\"a/../b\"", "\"\"", "\".\"", "\"a/..\"", "\"src\"", "\"test\"", "\"src/x\"", "\"test/x\"", "\".solace\"", "\".solace/x\"", "\"./src\"", "\"./test/x\"", "\"./\"", "\"./a/../b\""] {
+            assert!(parse_settings(&format!("skills = {bad}\n")).is_err(), "{bad}");
+        }
+    }
+
+    /// D-27: a skills folder that is a nested project (D-57) collides with its
+    /// store's internal tier, so `settings` refuses it.
+    #[test]
+    fn a_skills_folder_that_is_a_nested_project_is_refused() {
+        let root = Scratch::new().with(&[
+            ("gleam.toml", "name = \"outer\"\nversion = \"1.0.0\"\n"),
+            ("solace.toml", "skills = \"inner\"\n"),
+            ("inner/gleam.toml", "name = \"inner\"\nversion = \"1.0.0\"\n"),
+            ("inner/src/app.gleam", "pub fn one() -> Int {\n  1\n}\n"),
+        ]);
+        import(&root.join("inner")).unwrap();
+        let e = settings(&root).unwrap_err().0;
+        assert!(e.contains("E6020") && e.contains("nested project"), "{e}");
+        // A folder inside a nested project is refused too: its store's
+        // internal tier covers the whole project, skills folder included.
+        fs::write(root.join("solace.toml"), "skills = \"inner/skills\"\n").unwrap();
+        let e = settings(&root).unwrap_err().0;
+        assert!(e.contains("E6020") && e.contains("nested project"), "{e}");
+        // The skills folder itself is fine, and so is the default.
+        fs::write(root.join("solace.toml"), "skills = \"house\"\n").unwrap();
+        assert!(settings(&root).is_ok());
     }
 }

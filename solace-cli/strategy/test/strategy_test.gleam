@@ -2287,10 +2287,25 @@ pub fn the_plan_offers_only_models_that_can_start_test() {
     "Sol: Codex usage limit reached<button type=\"button\">Try again</button>",
   )
   assert !string.contains(shown(model), "No model can start yet")
-  // None can start: what to set up instead of the pick.
+  // None can start, every one held by a usage limit: the limits line, not
+  // the install steps the agents are already past.
   let none = step(model, strategy.ModelsLoaded("[" <> sol <> "]"))
-  assert string.contains(shown(none), "No model can start yet")
+  assert string.contains(shown(none), "Every model is held by a usage limit")
+  assert !string.contains(shown(none), "No model can start yet")
+  assert !string.contains(shown(none), "claude.ai/install.sh")
   assert string.contains(shown(none), "<summary>1 model unavailable</summary>")
+  // A model that isn't installed: the install steps stand.
+  let setup =
+    step(
+      none,
+      strategy.ModelsLoaded(
+        "["
+        <> sol
+        <> ",{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"claude\",\"available\":false,\"reason\":\"claude is not installed\",\"limit\":false}]",
+      ),
+    )
+  assert string.contains(shown(setup), "No model can start yet")
+  assert string.contains(shown(setup), "claude.ai/install.sh")
   // Try again's reply is the list as it is now: the model is offered again.
   let again =
     none

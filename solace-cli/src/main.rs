@@ -19,6 +19,7 @@ mod outside;
 mod reach;
 mod recipe;
 mod scope;
+mod skills;
 mod tasks;
 mod view;
 mod workspace;
@@ -2417,7 +2418,11 @@ impl Store {
         let parsed = gleam::split(&formatted);
         let ix = self.index()?;
         let (Target::Imports(m) | Target::Module(m)) = target;
-        let module = self.resolve_module(&ix, m).ok_or_else(|| Failure(format!("E1003 unknown module: {m}"), 1))?.path.clone();
+        let module = self
+            .resolve_module(&ix, m)
+            .ok_or_else(|| Failure(format!("E1003 unknown module: {m}; create it with a patch `*** Add: {m}`: its module comment, imports and code, every line `+`."), 1))?
+            .path
+            .clone();
         let mut notes = vec![];
         let header = &ix.modules.iter().find(|m| m.path == module).unwrap().header;
         let out = self.transaction(&[], || {

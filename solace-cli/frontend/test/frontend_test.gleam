@@ -4,6 +4,7 @@ import gleam/list
 import gleam/string
 import gleam/uri
 import gleeunit
+import knowledgebase
 import lustre/element
 
 pub fn main() -> Nil {
@@ -20,6 +21,8 @@ pub fn routes_test() {
     #("/strategy", frontend.Strategy),
     #("/strategy?tab=tasks", frontend.Strategy),
     #("/settings", frontend.Settings),
+    #("/knowledgebase", frontend.Knowledgebase),
+    #("/guide", frontend.Knowledgebase),
     #("/view", Board),
     #("/migration", Board),
     #("/nope", Board),
@@ -85,8 +88,9 @@ pub fn menu_current_test() {
   assert string.contains(board, "<a href=\"/contracts\">Contracts</a>")
   assert string.contains(board, "<a href=\"/strategy\">Strategy</a>")
   assert string.contains(board, "<a href=\"/settings\">Settings</a>")
+  assert string.contains(board, "<a href=\"/knowledgebase\">Knowledgebase</a>")
   let order =
-    ["Migration", "Strategy", "Board", "Contracts", "Settings"]
+    ["Migration", "Strategy", "Board", "Contracts", "Knowledgebase", "Settings"]
     |> list.map(fn(label) {
       let assert [before, _] = string.split(board, label <> "</a>")
       string.length(before)
@@ -571,4 +575,45 @@ pub fn copy_markdown_of_feature_and_milestone_links_test() {
     <> id
     <> ", feature:"
     <> id
+}
+
+/// D-140: the Knowledgebase page is the guide, with a table of contents linking to each section, and no
+/// chrome of the old separate page.
+pub fn the_knowledgebase_shows_the_guide_test() {
+  let page =
+    element.to_string(
+      frontend.view(
+        frontend.Model(
+          frontend.Knowledgebase,
+          [frontend.Knowledgebase],
+          frontend.no_focus,
+          [],
+        ),
+      ),
+    )
+  assert string.contains(
+    page,
+    "<a aria-current=\"page\" class=\"current\" href=\"/knowledgebase\">Knowledgebase</a>",
+  )
+  assert string.contains(page, "<article class=\"knowledgebase\">")
+  assert list.length(knowledgebase.sections()) == 10
+  list.each(knowledgebase.sections(), fn(s) {
+    assert string.contains(
+      page,
+      "<a href=\"#" <> s.id <> "\">" <> s.title <> "</a>",
+    )
+    assert string.contains(
+      page,
+      "<section id=\"" <> s.id <> "\"><h2>" <> s.title <> "</h2>",
+    )
+  })
+  assert string.contains(page, "Using Solace")
+  assert !string.contains(page, "This guide is a separate page")
+  assert !string.contains(page, "Back to the board")
+  assert element.to_string(frontend.page(
+      frontend.Knowledgebase,
+      False,
+      frontend.no_focus,
+    ))
+    |> string.starts_with("<article class=\"knowledgebase\" hidden")
 }

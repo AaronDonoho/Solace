@@ -1849,7 +1849,7 @@ fn agent_choice(model: Model) -> Element(Msg) {
   case model.models, ready {
     [_, ..], [] ->
       h.div([a.class("agent")], [
-        no_agents_view(),
+        no_agents_view(model.models),
         unavailable_view(model.models, TryAgain),
       ])
     _, _ -> agent_pick(model, ready, chosen)
@@ -3016,33 +3016,48 @@ pub fn unavailable_count(n: Int, more: Bool) -> String {
 }
 
 /// What to set up when no model can start: an agent program, signed in
-/// (the README's "Get an AI agent").
-pub fn no_agents_view() -> Element(msg) {
-  h.div([a.class("no-agents"), a.role("status")], [
-    h.p([], [
-      h.text(
-        "No model can start yet. Install one of these agents, run it once and sign in, then reload this page:",
-      ),
-    ]),
-    h.ul([], [
-      h.li([], [
-        h.strong([], [h.text("Claude Code: ")]),
-        h.code([], [h.text("curl -fsSL https://claude.ai/install.sh | bash")]),
-        h.text(", then run "),
-        h.code([], [h.text("claude")]),
-        h.text("."),
-      ]),
-      h.li([], [
-        h.strong([], [h.text("Codex CLI: ")]),
-        h.code([], [h.text("brew install codex")]),
-        h.text(
-          " on macOS, or a release binary from github.com/openai/codex/releases, then run ",
-        ),
-        h.code([], [h.text("codex")]),
-        h.text("."),
-      ]),
-    ]),
-  ])
+/// (the README's "Get an AI agent"). When every model is held by a usage
+/// limit the install steps would mislead: the agents are installed, and
+/// `unavailable_view` shows each limit's reset and its Try again.
+pub fn no_agents_view(models: List(Agent)) -> Element(msg) {
+  case list.any(models, fn(m) { !m.limit }) {
+    False ->
+      h.div([a.class("no-agents"), a.role("status")], [
+        h.p([], [
+          h.text(
+            "Every model is held by a usage limit. It lifts at the reset shown below; Try again clears one.",
+          ),
+        ]),
+      ])
+    True ->
+      h.div([a.class("no-agents"), a.role("status")], [
+        h.p([], [
+          h.text(
+            "No model can start yet. Install one of these agents, run it once and sign in, then reload this page:",
+          ),
+        ]),
+        h.ul([], [
+          h.li([], [
+            h.strong([], [h.text("Claude Code: ")]),
+            h.code([], [
+              h.text("curl -fsSL https://claude.ai/install.sh | bash"),
+            ]),
+            h.text(", then run "),
+            h.code([], [h.text("claude")]),
+            h.text("."),
+          ]),
+          h.li([], [
+            h.strong([], [h.text("Codex CLI: ")]),
+            h.code([], [h.text("brew install codex")]),
+            h.text(
+              " on macOS, or a release binary from github.com/openai/codex/releases, then run ",
+            ),
+            h.code([], [h.text("codex")]),
+            h.text("."),
+          ]),
+        ]),
+      ])
+  }
 }
 
 /// The model pick's lines: the unavailable models and what to set up. Pages

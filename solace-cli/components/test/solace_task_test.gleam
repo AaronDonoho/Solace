@@ -1916,3 +1916,39 @@ pub fn a_run_names_the_model_it_used_test() {
   |> string.contains("work · claude-opus · high · claude-opus-5-5")
   |> should.be_true
 }
+
+/// Every model held by a usage limit: one line about the limits, not the
+/// install steps the agents are already past. A model that isn't installed
+/// keeps the install steps.
+pub fn all_models_held_by_usage_limits_says_so_test() {
+  let loaded = fn(models: String) {
+    let model = fresh("1")
+    let #(model, _) = task.update(model, task.ModelsLoaded(models))
+    let #(model, _) =
+      task.update(
+        model,
+        task.TaskLoaded(
+          model.generation,
+          "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
+        ),
+      )
+    html(model)
+  }
+  let rendered =
+    loaded(
+      "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached (resets 3:45 PM)\",\"limit\":true},{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"claude\",\"available\":false,\"reason\":\"Claude Code usage limit reached (resets 8pm)\",\"limit\":true}]",
+    )
+  rendered
+  |> string.contains("Every model is held by a usage limit")
+  |> should.be_true
+  rendered |> string.contains("No model can start yet") |> should.be_false
+  rendered |> string.contains("claude.ai/install.sh") |> should.be_false
+  rendered |> string.contains("<select") |> should.be_false
+  // A model that isn't installed: the install steps stand.
+  let rendered =
+    loaded(
+      "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached\",\"limit\":true},{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"claude\",\"available\":false,\"reason\":\"claude is not installed\",\"limit\":false}]",
+    )
+  rendered |> string.contains("No model can start yet") |> should.be_true
+  rendered |> string.contains("claude.ai/install.sh") |> should.be_true
+}

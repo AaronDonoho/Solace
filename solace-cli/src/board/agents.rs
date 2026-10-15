@@ -131,13 +131,22 @@ pub(super) fn merge_from(configured: &Value, all: &Value) -> Vec<Value> {
 
 /// How old a kind's answer may be before `/models` asks the program again.
 const STALE: u64 = 15 * 60;
+/// How long one Codex discovery may take in all, from spawning it to its last page.
+const CODEX_DEADLINE: Duration = Duration::from_secs(60);
 /// Kinds with a refresh going now, so one request starts one thread per kind.
 static REFRESHING: LazyLock<Mutex<HashSet<&'static str>>> = LazyLock::new(Default::default);
+/// One writer at a time for `agent-models.json`: each writer rewrites the
+/// whole file from a snapshot, so two at once would lose one kind's answer.
+static MODELS: LazyLock<Mutex<()>> = LazyLock::new(Default::default);
 
 /// Asks every kind for its models now: the server's startup refresh.
 pub(super) fn refresh_all() {
     for k in KINDS {
-        refresh(k);
+        // Register the kind first, as `refresh_stale` does: a `/models` poll
+        // during the startup refresh must not start a second refresh for it.
+        if REFRESHING.lock().unwrap().insert(k.name) {
+            refresh(k);
+        }
     }
 }
 
@@ -164,6 +173,7 @@ fn refresh(k: &'static Kind) {
 /// Records kind `k`'s answer `found`: models its offer dropped become `gone`
 /// (kept for the tasks using them), and models back on the offer are not.
 fn note_models(path: &Path, k: &'static Kind, found: Vec<Value>) -> Result<(), Failure> {
+    let _writer = MODELS.lock().unwrap();
     let mut all = saved_models(path);
     let mut gone = all["gone"].as_object().cloned().unwrap_or_default();
     for m in all[k.name]["models"].as_array().unwrap_or(&vec![]).iter() {
@@ -182,6 +192,7 @@ fn note_models(path: &Path, k: &'static Kind, found: Vec<Value>) -> Result<(), F
 
 /// Says model `model` resolved to `used`, so its label names the model a run used.
 pub(super) fn record_used(model: &str, used: &str) {
+    let _writer = MODELS.lock().unwrap();
     let path = models_path();
     let mut all = saved_models(&path);
     if all["used"][model].as_str() != Some(used) {
@@ -194,6 +205,7 @@ pub(super) fn record_used(model: &str, used: &str) {
 
 /// Marks kind `agent`'s answer stale, so the next `/models` asks the program.
 fn mark_stale(agent: &str) {
+    let _writer = MODELS.lock().unwrap();
     let path = models_path();
     let mut all = saved_models(&path);
     if all[agent].is_object() {
@@ -220,6 +232,9 @@ fn codex_models() -> Vec<Value> {
         return vec![];
     };
     let (tx, rx) = std::sync::mpsc::channel::<String>();
+    // One deadline for the whole discovery, not one per line: a program that
+    // answers slowly must not make the pages add up to hours of waiting.
+    let deadline = Instant::now() + CODEX_DEADLINE;
     std::thread::spawn(move || {
         use std::io::BufRead;
         for line in std::io::BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -232,7 +247,7 @@ fn codex_models() -> Vec<Value> {
         writeln!(stdin, "{}", json!({"jsonrpc":"2.0","id":id,"method":method,"params":params})).ok()?;
         stdin.flush().ok()?;
         for _ in 0..400 {
-            let line = rx.recv_timeout(Duration::from_secs(30)).ok()?;
+            let line = rx.recv_timeout(deadline.checked_duration_since(Instant::now())?).ok()?;
             if let Ok(v) = serde_json::from_str::<Value>(&line) {
                 if v["id"] == json!(id) {
                     return Some(v["result"].clone());
@@ -469,14 +484,16 @@ fn clock(c: &str) -> Option<i64> {
 /// time ("2pm", "3:45 PM"), maybe after a date ("Oct 15th, 2026", "Oct 15"),
 /// maybe followed by its time zone in parentheses ("(Europe/Paris)"); without
 /// a zone it is this computer's. A time with no date is its next coming.
-/// `offset` gives a zone's offset from UTC in seconds (`None`: the local zone).
-pub(super) fn reset_time(said: &str, now: u64, offset: &dyn Fn(Option<&str>) -> Option<i64>) -> Option<u64> {
+/// A date with no year whose day has passed this year is next year's.
+/// `offset(zone, at)` gives a zone's offset from UTC in seconds at `at`
+/// (`None`: the local zone); a reset is placed by the offset at the reset.
+pub(super) fn reset_time(said: &str, now: u64, offset: &dyn Fn(Option<&str>, i64) -> Option<i64>) -> Option<u64> {
     let said = said.trim();
     let (text, zone) = match said.strip_suffix(')').and_then(|s| s.rsplit_once('(')) {
         Some((t, z)) => (t.trim(), Some(z.trim())),
         None => (said, None),
     };
-    let off = offset(zone)?;
+    let off = offset(zone, now as i64)?;
     let words: Vec<String> = text.replace(',', " ").split_whitespace().map(str::to_ascii_lowercase).filter(|w| w != "at").collect();
     let (time, date) = match words.as_slice() {
         [date @ .., t, half] if half == "am" || half == "pm" => (format!("{t}{half}"), date),
@@ -487,33 +504,75 @@ pub(super) fn reset_time(said: &str, now: u64, offset: &dyn Fn(Option<&str>) -> 
     let today = (now as i64 + off).div_euclid(86400);
     let month = |w: &str| MONTHS.iter().position(|m| w.starts_with(&m.to_ascii_lowercase())).map(|i| i as u32 + 1);
     let day = |w: &str| w.trim_end_matches(|c: char| c.is_ascii_alphabetic()).parse::<u32>().ok().filter(|d| (1..=31).contains(d));
-    let at = |d: i64| d * 86400 + secs - off;
-    let t = match date {
-        [] if at(today) > now as i64 => at(today),
-        [] => at(today + 1),
-        [m, d] => at(days_from_civil(civil(today).0, month(m)?, day(d)?)),
-        [m, d, y] => at(days_from_civil(y.parse().ok()?, month(m)?, day(d)?)),
+    let at = |d: i64, off: i64| d * 86400 + secs - off;
+    let t0 = match date {
+        [] if at(today, off) > now as i64 => at(today, off),
+        [] => at(today + 1, off),
+        [m, d] => {
+            let (month, day) = (month(m)?, day(d)?);
+            let t = at(days_from_civil(civil(today).0, month, day), off);
+            // A date with no year whose day has passed this year is next year's.
+            if t <= now as i64 {
+                at(days_from_civil(civil(today).0 + 1, month, day), off)
+            } else {
+                t
+            }
+        }
+        [m, d, y] => at(days_from_civil(y.parse().ok()?, month(m)?, day(d)?), off),
         _ => return None,
+    };
+    // The offset at the reset, not now's: a daylight-saving change between
+    // now and the reset moves the time by an hour.
+    let t = match offset(zone, t0) {
+        Some(off2) if off2 != off => at((t0 + off).div_euclid(86400), off2),
+        _ => t0,
     };
     u64::try_from(t).ok()
 }
 
-/// A time zone's offset from UTC now, in seconds: `date +%z` with `TZ` set,
-/// or this computer's own zone without one. `UTC` and `GMT` need no process.
-pub(super) fn zone_offset(zone: Option<&str>) -> Option<i64> {
+/// Where this computer keeps its time-zone files; macOS keeps them under
+/// `/var/db/timezone/zoneinfo`.
+const ZONE_DIRS: [&str; 2] = ["/usr/share/zoneinfo", "/var/db/timezone/zoneinfo"];
+
+/// A time zone's offset from UTC at `at` (seconds since the epoch), in
+/// seconds: `date` with `TZ` set, or this computer's own zone without one.
+/// `UTC` and `GMT` need no process. A zone this computer does not know has no
+/// offset: `date +%z` answers `+0000` for one, as if it were UTC. A zone
+/// name must be a zone file: a folder such as `America` is not one.
+pub(super) fn zone_offset(zone: Option<&str>, at: i64) -> Option<i64> {
     if matches!(zone, Some("UTC" | "GMT")) {
         return Some(0);
     }
-    let mut cmd = Command::new("date");
-    cmd.arg("+%z");
     if let Some(z) = zone {
-        cmd.env("TZ", z);
+        // A zone name is a file under the zone folders, never a path into one.
+        if z.starts_with('.') || z.starts_with('/') || z.contains("..") {
+            return None;
+        }
+        if !ZONE_DIRS.iter().any(|d| Path::new(d).join(z).is_file()) {
+            return None;
+        }
     }
-    let out = String::from_utf8(cmd.output().ok()?.stdout).ok()?;
-    let out = out.trim();
-    let sign = if out.starts_with('-') { -1 } else { 1 };
-    let (h, m) = (out.get(1..3)?.parse::<i64>().ok()?, out.get(3..5)?.parse::<i64>().ok()?);
-    Some(sign * (h * 3600 + m * 60))
+    let at = at.max(0).to_string();
+    let at_time = |flag: String| {
+        let mut cmd = Command::new("date");
+        cmd.arg(flag).arg("+%z");
+        if let Some(z) = zone {
+            cmd.env("TZ", z);
+        }
+        let out = String::from_utf8(cmd.output().ok()?.stdout).ok()?;
+        let out = out.trim();
+        // A signed `HHMM` only: GNU `date` answers one, BSD `date -d` answers
+        // its format, and an answer that is neither is no offset.
+        let (sign, rest) = match (out.chars().next(), out.get(1..)) {
+            (Some('+'), Some(r)) => (1, r),
+            (Some('-'), Some(r)) => (-1, r),
+            _ => return None,
+        };
+        let (h, m) = (rest.get(..2)?.parse::<i64>().ok()?, rest.get(2..)?.parse::<i64>().ok()?);
+        (h < 24 && m < 60).then(|| sign * (h * 3600 + m * 60))
+    };
+    // GNU `date -d @<t>` first, then BSD `date -r <t>`: the offset at `at`, not now.
+    at_time(format!("-d@{at}")).or_else(|| at_time(format!("-r{at}")))
 }
 
 /// What a detection reads from this computer, so tests can give their own.
@@ -651,17 +710,34 @@ pub(super) fn limited(path: &Path, agent: &str, now: u64) -> Option<String> {
     (m.is_object() && m["until"].as_u64().is_none_or(|u| now < u)).then(|| m["reason"].as_str().unwrap_or("usage limit reached").to_string())
 }
 
-/// Learns from model `m`'s run log `log` whether its sign-in hit a usage
-/// limit. The agent's own error saying so marks the sign-in until the reset
-/// it names; a run whose agent answered clears a mark. A model on its own
-/// endpoint or program is never marked.
-pub(super) fn observe(path: &Path, m: &Value, log: &Path, now: u64, offset: &dyn Fn(Option<&str>) -> Option<i64>) -> Result<(), Failure> {
+/// Learns from model `m`'s run log `log`, started at `started` and ended with
+/// `outcome`, whether its sign-in hit a usage limit. The agent's own error
+/// saying so marks the sign-in until the reset it names; so does a message
+/// that is exactly such a saying, as Claude Code reports its limit with
+/// `is_error: false`. A run that ended with a successful outcome clears a
+/// mark, the same list `supervise` ends a run with: a stopped, timed-out or
+/// failed run leaves it, and so does a mark set after the run started. A
+/// model on its own endpoint or program is never marked.
+pub(super) fn observe(path: &Path, m: &Value, log: &Path, now: u64, started: u64, outcome: Option<&str>, offset: &dyn Fn(Option<&str>, i64) -> Option<i64>) -> Result<(), Failure> {
     let Some(k) = sign_in(m) else { return Ok(()) };
     let entries = transcript(log);
     if entries.iter().filter(|e| e["kind"] == "error").any(|e| (k.gone)(e["text"].as_str().unwrap_or(""))) {
         mark_stale(k.name);
     }
-    let hit = entries.iter().filter(|e| e["kind"] == "error").find_map(|e| (k.limit)(e["text"].as_str().unwrap_or("")));
+    // A limit said as the whole of an agent's message, not a passing mention
+    // inside one: Claude Code writes its limit as a message, not an error.
+    let in_text = |e: &Value| {
+        e["kind"] == "message"
+            && e["text"].as_str().is_some_and(|t| {
+                let t = t.trim();
+                !t.contains('\n') && (k.limit)(t).is_some()
+            })
+    };
+    let hit = entries
+        .iter()
+        .filter(|e| e["kind"] == "error")
+        .find_map(|e| (k.limit)(e["text"].as_str().unwrap_or("")))
+        .or_else(|| entries.iter().filter(|e| in_text(e)).find_map(|e| (k.limit)(e["text"].as_str().unwrap_or(""))));
     match hit {
         Some(said) => {
             let until = said.as_deref().and_then(|s| reset_time(s, now, offset));
@@ -671,14 +747,27 @@ pub(super) fn observe(path: &Path, m: &Value, log: &Path, now: u64, offset: &dyn
             };
             mark(path, k.name, &reason, until)
         }
-        None if entries.iter().any(|e| matches!(e["kind"].as_str(), Some("message" | "thinking" | "tool"))) => clear(path, k.name).map(drop),
+        // The agent answered: its sign-in works again. Only a run that ended
+        // with a successful outcome says that, and only a mark set before it
+        // started is this run's.
+        None if outcome.is_some_and(|o| matches!(o, "finished" | "reported" | "reviewed" | "discussed" | "planned"))
+            && entries.iter().any(|e| matches!(e["kind"].as_str(), Some("message" | "thinking" | "tool")) && !in_text(e)) =>
+        {
+            let m = &marks(path)[k.name];
+            if m.is_object() && m["time"].as_u64().is_none_or(|t| t <= started) {
+                clear(path, k.name).map(drop)
+            } else {
+                Ok(())
+            }
+        }
         None => Ok(()),
     }
 }
 
-/// After a run of model `m` ends: what its log says about its sign-in's limit.
-pub(super) fn after_run(m: &Value, log: &Path) {
-    if let Err(e) = observe(&limits_path(), m, log, now(), &zone_offset) {
+/// After a run of model `m`, started at `started` and ended with `outcome`:
+/// what its log says about its sign-in's limit.
+pub(super) fn after_run(m: &Value, log: &Path, started: u64, outcome: Option<&str>) {
+    if let Err(e) = observe(&limits_path(), m, log, now(), started, outcome, &zone_offset) {
         eprintln!("solace: could not record the agent's usage limit: {}", e.0);
     }
 }

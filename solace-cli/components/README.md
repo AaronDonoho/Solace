@@ -22,7 +22,8 @@ choice, the note editor and the task's actions. It is `solace_task.gleam`, with 
 - The model pick offers only models that can start. Under it, `unavailable_view` ("2 more models unavailable")
   opens the others' reasons; a usage limit (`limit` in the list) has Try again, `POST /models/try-again {agent}`,
   whose reply is the list as it is now. With none that can start, `no_agents_view` shows how to install and sign
-  in to an agent instead. Strategy's plan panel uses both; `model_styles` is their look.
+  in to an agent, unless every model is held by a usage limit: then it says so, and the reset and Try again
+  below each clear one. Strategy's plan panel uses both; `model_styles` is their look.
 - `hosted`: the host already follows `/events` and hands the task's messages down in the `live`
   property, so the element opens no stream of its own. Without it, the element follows `{base}/events`.
 - `reveal` property, `{tab, id, n}`: show `tab` for task `id` and scroll it into view (a notice's button).

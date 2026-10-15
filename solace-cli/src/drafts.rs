@@ -129,6 +129,24 @@ fn clip(line: &str) -> String {
     }
 }
 
+/// Ends an E0108 whose fault is in the whole patch, not in one line (D-141):
+/// its draft's footer then leaves out `--replace`. A whole-patch fault's
+/// message ends with this sentence; a one-line fault quotes its line, so its
+/// message ends with a backtick or `)`, never with this sentence.
+pub const RESEND: &str = "Send the corrected patch again, whole, as `text`.";
+
+/// The footer of a refusal kept as draft `id`, retried with `cmd` (`submit` or
+/// `write`): `--replace` fixes a fault in one line; a fault in the whole patch
+/// is resent. The kind is read at the message's end, where a quoted patch
+/// line can't reach it.
+pub fn retry_advice(message: &str, id: &str, cmd: &str, what: &str) -> String {
+    if message.ends_with(RESEND) {
+        format!("Draft {id} retained{what}. Read: `view --draft {id}`. List: `drafts`.")
+    } else {
+        format!("Draft {id} retained{what}. Read: `view --draft {id}`. Fix and retry: `{cmd} --draft {id} --replace` with `old` and `text`. List: `drafts`.")
+    }
+}
+
 /// A patch's hunk: its `@@` context line, its lines (` `, `-` or `+` first),
 /// and its line in the patch.
 pub type Hunk = (Option<String>, Vec<String>, usize);
@@ -147,7 +165,13 @@ pub enum Section {
 /// `submit` patch (D-47), whose targets are symbols or modules.
 pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, Vec<Hunk>)>, Failure> {
     let bad = |m: String| Failure(format!("E0108 {m}"), 1);
+    let whole = |e: Failure| Failure(format!("{} {RESEND}", e.0), e.1);
     let head = if files { " File" } else { "" };
+    let kinds = if files {
+        "`*** Add File: <path>`, `*** Update File: <path>` or `*** Delete File: <path>`"
+    } else {
+        "`*** Update: <name>` or `*** Add: <name>`"
+    };
     let path = |l: &str| l.split_once(':').map_or("", |p| p.1).trim().to_string();
     let mut sections: Vec<(Section, String, usize, Vec<Hunk>)> = vec![];
     let mut prev = "";
@@ -166,13 +190,15 @@ pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, V
             l if l.starts_with("*** Delete") => return Err(here("a patch can't delete; use `delete <name>`.".into())),
             l if l.starts_with("*** Move") && files => return Err(here("a patch can't move a file; use `move <from> <to>`.".into())),
             l if l.starts_with("*** Move") => return Err(here("a patch can't rename; submit the symbol under its new name.".into())),
+            l if l.starts_with("***") => return Err(whole(here(format!("`{}` is no section header; a section starts with {kinds}.", clip(l))))),
             l => {
-                let Some((kind, target, _, hunks)) = sections.last_mut() else {
-                    return Err(here(if files {
-                        "a file patch starts with `*** Begin Patch`, then `*** Add File: <path>`, `*** Update File: <path>` or `*** Delete File: <path>`.".into()
+                let Some((kind, target, at, hunks)) = sections.last_mut() else {
+                    let what = if files { "a file patch" } else { "a patch" };
+                    return Err(whole(here(if l.trim().is_empty() {
+                        format!("{what} must start with `*** Begin Patch`; remove the blank line before it.")
                     } else {
-                        "a patch starts with `*** Begin Patch`, then `*** Update: <name>` or `*** Add: <name>`.".into()
-                    }));
+                        format!("{what} starts with `*** Begin Patch`, then {kinds}.")
+                    })));
                 };
                 let update = *kind == Section::Update;
                 if *kind == Section::Delete {
@@ -185,7 +211,14 @@ pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, V
                     let numbers = at.starts_with('-') && at[1..].starts_with(|c: char| c.is_ascii_digit());
                     hunks.push(((!at.is_empty() && !numbers).then(|| at.to_string()), vec![], n));
                 } else if !update && !l.starts_with('+') {
-                    return Err(here(format!("in `*** Add{head}: {target}` every line starts with `+`; this one doesn't: `{}`", clip(l))));
+                    // an Add with no `+` line at all is a fault in the whole patch
+                    let mut rest = raw.lines().skip(n).take_while(|x| !x.starts_with("***"));
+                    if hunks[0].1.is_empty() && !rest.any(|x| x.starts_with('+')) {
+                        return Err(whole(bad(format!(
+                            "`*** Add{head}: {target}` (line {at}) has no `+` lines; every line of an Add, empty ones too, starts with `+`."
+                        ))));
+                    }
+                    return Err(here(format!("in `*** Add{head}: {target}` every line, empty ones too, starts with `+`; this one doesn't: `{}`", clip(l))));
                 } else if update && !l.is_empty() && !l.starts_with([' ', '-', '+']) {
                     return Err(here(format!(
                         "in `*** Update{head}: {target}` each line starts with ` `, `-` or `+` (or `@@`); this one doesn't: `{}`",
@@ -202,20 +235,20 @@ pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, V
         prev = line;
     }
     if sections.is_empty() {
-        return Err(bad(if files {
-            "the patch has no `*** Add File: <path>`, `*** Update File: <path>` or `*** Delete File: <path>` section.".into()
-        } else {
-            "the patch has no `*** Update: <name>` or `*** Add: <name>` section.".into()
-        }));
+        return Err(whole(bad(format!("the patch has no {kinds} section."))));
     }
     Ok(sections)
 }
 
 /// Applies a section's hunks to `lines` in order, as `apply_patch` does: each
 /// from where the last one ended, matched exactly, then ignoring trailing
-/// space, then trimmed. A hunk that only adds lines goes after its `@@` line;
-/// with none, it goes at the end if `at_end` (a file), else is refused (a
-/// symbol). `show` is the command that shows the target's current text.
+/// space. Leading space is part of the line: the first hunk line the target
+/// has only with other leading space is refused, naming that line (nearest
+/// the hunk) and how much space it has (D-142); hunk lines all present but
+/// not adjacent are refused as such, naming a blank line the target has none
+/// of. A hunk that only adds lines goes after its `@@` line; with
+/// none, it goes at the end if `at_end` (a file), else is refused (a symbol).
+/// `show` is the command that shows the target's current text.
 fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hunk>, at_end: bool) -> Result<(), Failure> {
     let bad = |m: String| Failure(format!("E0108 {m}"), 1);
     let mut cursor = 0;
@@ -234,17 +267,29 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
                 None => return Err(bad(format!("in {target} (hunk at line {hl}), a hunk that only adds lines needs `@@ <the line before them>`."))),
             }
         } else {
-            let same: [&dyn Fn(&str, &str) -> bool; 3] = [&|a, b| a == b, &|a, b| a.trim_end() == b.trim_end(), &|a, b| a.trim() == b.trim()];
+            // leading space is part of the line; only trailing space is forgiven (D-142)
+            let same: [&dyn Fn(&str, &str) -> bool; 2] = [&|a, b| a == b, &|a, b| a.trim_end() == b.trim_end()];
             let fits = |k: usize, eq: &dyn Fn(&str, &str) -> bool| k + old.len() <= lines.len() && old.iter().zip(&lines[k..]).all(|(o, l)| eq(o, l));
             same.iter().find_map(|eq| (from..lines.len()).chain(0..from).find(|&k| fits(k, *eq)))
         };
         let Some(k) = at_k else {
             let first = old.iter().find(|l| !l.trim().is_empty()).unwrap_or(&"");
+            // the first hunk line the target doesn't have exactly (trailing space aside): the line at fault
+            let at_fault = old.iter().filter(|l| !l.trim().is_empty()).find(|l| !lines.iter().any(|x| x.trim_end() == l.trim_end()));
             // a line that is only part of one longer line: patch lines are whole lines (D-120)
             let part = old.iter().map(|l| l.trim()).find(|l| !l.is_empty() && !lines.iter().any(|x| x.trim() == *l));
             let within: Vec<usize> = part.map_or(vec![], |p| (0..lines.len()).filter(|&k| lines[k].contains(p)).collect());
-            let hint = match (part, within.as_slice()) {
-                (Some(p), [k]) => {
+            // the line at fault, found with other leading space: name its line nearest the hunk, so the patch copies it whole (D-142)
+            let shifted = match (part, at_fault) {
+                (None, Some(l)) => {
+                    // where the hunk line belongs: search outward from there, both ways, so the nearest occurrence wins
+                    let want = from + old.iter().position(|o| o == l).unwrap_or(0);
+                    (0..lines.len()).filter(|&k| lines[k].trim() == l.trim()).min_by_key(|&k| k.abs_diff(want))
+                }
+                _ => None,
+            };
+            let hint = match (part, within.as_slice(), shifted) {
+                (Some(p), [k], _) => {
                     let (line, fix) = if at_end {
                         (format!("line {}", k + 1), format!("`write {target}`"))
                     } else {
@@ -256,13 +301,27 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
                         clip(lines[*k].trim())
                     )
                 }
+                (None, _, Some(k)) => format!(
+                    " `{}` is line {} with {}; a patch line is a whole line: copy all of it.",
+                    clip(lines[k].trim()),
+                    k + 1,
+                    count(lines[k].len() - lines[k].trim_start().len(), "leading space")
+                ),
                 _ => String::new(),
             };
-            return Err(bad(format!(
-                "in {target} (hunk at line {hl}), these lines weren't found: `{}`{}; copy them exactly from `{show}`.{hint}",
-                first.trim(),
-                if old.len() > 1 { format!(" (and {} more)", old.len() - 1) } else { String::new() }
-            )));
+            let more = if old.len() > 1 { format!(" (and {} more)", old.len() - 1) } else { String::new() };
+            // when the D-120 hint shows, the headline names the same line the hint names
+            let quote = match (part, within.as_slice()) {
+                (Some(p), [_]) => p,
+                _ => at_fault.map(|l| l.trim()).unwrap_or(first.trim()),
+            };
+            let msg = if part.is_none() && shifted.is_none() && !first.trim().is_empty() {
+                let blank = old.iter().any(|l| l.trim().is_empty()) && !lines.iter().any(|x| x.trim_end().is_empty());
+                format!("these lines aren't adjacent in the file: `{}`{more}; copy them in order from `{show}`.{}", first.trim(), if blank { " The hunk has a blank line; the target has none." } else { "" })
+            } else {
+                format!("these lines weren't found: `{}`{more}; copy them exactly from `{show}`.{hint}", quote)
+            };
+            return Err(bad(format!("in {target} (hunk at line {hl}), {msg}")));
         };
         cursor = k + new.len();
         lines.splice(k..k + old.len(), new);
@@ -315,7 +374,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 return e;
             }
             let path = header.split_once(':').map_or("", |p| p.1).trim();
-            bad(format!("`{path}` (line {at_line}) is no symbol or module; a file other than code changes with `write` with no path, this patch as `text`."))
+            bad(format!("`{path}` (line {at_line}) is no symbol or module; a file other than code changes with `write` with no path, this patch as `text`. {RESEND}"))
         };
         if kind == Section::Add {
             let text: String = hunks[0].1.iter().map(|l| format!("{}\n", &l[1..])).collect();
@@ -325,7 +384,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 _ => target.clone(),
             };
             if parsed.items.is_empty() {
-                return Err(not_code(bad(format!("`*** Add: {target}` (line {at_line}) defines no function, type or constant."))));
+                return Err(not_code(bad(format!("`*** Add: {target}` (line {at_line}) defines no function, type or constant. {RESEND}"))));
             }
             emit(&module, &parsed.header, &text, "");
             continue;
@@ -381,7 +440,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
         }
     }
     if blocks.is_empty() {
-        return Err(bad("the patch changes nothing.".into()));
+        return Err(bad(format!("the patch changes nothing. {RESEND}")));
     }
     Ok(blocks)
 }
@@ -465,12 +524,8 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
                 params![id, owner(), json!(args).to_string(), raw, base],
             )?;
             let what = if as_blocks { " (the patch applied; the draft holds the blocks it changed)" } else { "" };
-            Err(Failure(
-                format!(
-                    "{message}\n\nDraft {id} retained{what}. Read: `view --draft {id}`. Fix and retry: `submit --draft {id} --replace` with `old` and `text`. List: `drafts`."
-                ),
-                code,
-            ))
+            let advice = retry_advice(&message, &id, "submit", what);
+            Err(Failure(format!("{message}\n\n{advice}"), code))
         }
     }
 }
@@ -575,14 +630,14 @@ mod tests {
     /// Every way a patch is refused says why (E0108) and changes nothing.
     #[test]
     fn patch_refusals_name_the_problem() {
-        let s = board_project(&[("src/app.gleam", "import gleam/int\n\npub fn main() {\n  let x = 1\n  x\n}\n\npub fn other() {\n  2\n}\n")]);
+        let s = board_project(&[("src/app.gleam", "import gleam/int\n\npub fn main() {\n  let x = 1\n  x\n}\n\npub fn other() {\n  2\n}\n\npub fn one() {\n let x = 1\n x\n}\n\npub fn rep(x: Int) -> Int {\n  x\n  let a = 1\n  let b = 2\n  let c = 3\n  let d = 4\n  x\n}\n")]);
         let original = board::snapshot(&s).unwrap();
-        let cases: [(&str, &str); 15] = [
+        let cases: [(&str, &str); 23] = [
             ("*** Begin Patch\n*** Delete: app.main\n*** End Patch\n", "a patch can't delete"),
             ("*** Begin Patch\n*** Move: app.main\n*** End Patch\n", "a patch can't rename"),
             ("+pub fn x() { 1 }\n", "a patch starts with `*** Begin Patch`"),
             ("*** Begin Patch\n*** End Patch\n", "the patch has no"),
-            ("*** Begin Patch\n*** Add: app.x\nfn x() { 1 }\n*** End Patch\n", "every line starts with `+`"),
+            ("*** Begin Patch\n*** Add: app.x\nfn x() { 1 }\n*** End Patch\n", "has no `+` lines"),
             ("*** Begin Patch\n*** Add: app.x\n+// only a comment\n*** End Patch\n", "defines no function"),
             ("*** Begin Patch\n*** Update: app.main\nx\n*** End Patch\n", "each line starts with"),
             ("*** Begin Patch\n*** Update: app.main\n+  let y = 2\n*** End Patch\n", "needs `@@ <the line before them>`"),
@@ -590,6 +645,14 @@ mod tests {
             ("*** Begin Patch\n*** Update: app.main\n-  let z = 9\n+  let z = 8\n*** End Patch\n", "these lines weren't found: `let z = 9`"),
             ("*** Begin Patch\n*** Update: app.main\n-  let z = 9\n-  let w = 9\n*** End Patch\n", "(and 1 more)"),
             ("*** Begin Patch\n*** Update: app.main\n-x = 1\n+x = 2\n*** End Patch\n", "`x = 1` is only part of a longer line: `let x = 1`"),
+            ("*** Begin Patch\n*** Update: app.main\n-let x = 1\n+let x = 2\n*** End Patch\n", "`let x = 1` is line 2 with 2 leading spaces"),
+            ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-let x = 1\n+pub fn main() {\n+let x = 2\n*** End Patch\n", "`let x = 1` is line 2 with 2 leading spaces"),
+            ("*** Begin Patch\n*** Update: app.main\n-  let x = 1\n-}\n+  let x = 2\n*** End Patch\n", "these lines aren't adjacent in the file"),
+            ("*** Begin Patch\n*** Update: app.one\n-let x = 1\n+let x = 2\n*** End Patch\n", "`let x = 1` is line 2 with 1 leading space"),
+            ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-\n-  let x = 1\n+pub fn main() {\n+  let x = 2\n*** End Patch\n", "The hunk has a blank line; the target has none."),
+            ("*** Begin Patch\n*** Update: app.rep\n@@ let d\n-x\n-}\n+x\n+}\n*** End Patch\n", "`x` is line 7 with 2 leading spaces"),
+            ("*** Begin Patch\n*** Update: app.rep\n@@ let a\n-x\n-}\n+x\n+}\n*** End Patch\n", "`x` is line 2 with 2 leading spaces"),
+            ("*** Begin Patch\n*** Update: app.main\n-let x = 1\n-x = 1\n+let x = 2\n+x = 2\n*** End Patch\n", "these lines weren't found: `x = 1` (and 1 more)"),
             ("*** Begin Patch\n*** Update: app.main\n-  let x = 1\n+  let x = 1\n*** End Patch\n", "the patch changes nothing"),
             ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-  let x = 1\n-  x\n-}\n*** End Patch\n", "leaves nothing of app.main"),
             ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n+pub fn primary() {\n*** End Patch\n", "renames app.main"),
@@ -598,6 +661,20 @@ mod tests {
             let e = patch_blocks(&s, patch).unwrap_err().0;
             assert!(e.contains("E0108") && e.contains(why), "{why}: {e}");
         }
+        // the hint names the first hunk line with no exact match, not the hunk's first line (D-142)
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-let x = 1\n+pub fn main() {\n+let x = 2\n*** End Patch\n").unwrap_err().0;
+        assert!(e.contains("`let x = 1` is line 2 with 2 leading spaces") && !e.contains("`pub fn main() {` is line"), "{e}");
+        // the headline quotes the line at fault, not the hunk's first line
+        assert!(e.contains("these lines weren't found: `let x = 1` (and 1 more)"), "{e}");
+        // hunk lines all present but not adjacent: the refusal says so, with no indentation hint
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.main\n-  let x = 1\n-}\n+  let x = 2\n*** End Patch\n").unwrap_err().0;
+        assert!(e.contains("aren't adjacent in the file") && !e.contains("leading space"), "{e}");
+        // when the D-120 hint shows, the headline quotes the line the hint names, not the misindented line before it
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.main\n-let x = 1\n-x = 1\n+let x = 2\n+x = 2\n*** End Patch\n").unwrap_err().0;
+        assert!(e.contains("these lines weren't found: `x = 1`") && e.contains("`x = 1` is only part of a longer line"), "{e}");
+        // the search goes outward from where the hunk line belongs: an occurrence 2 lines before it beats one 3 lines after it
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.rep\n@@ let a\n-x\n-}\n+x\n+}\n*** End Patch\n").unwrap_err().0;
+        assert!(e.contains("`x` is line 2 with 2 leading spaces"), "{e}");
         // Each refusal says where in the patch it is; a prefix error quotes the line before.
         let bare = "*** Begin Patch\n*** Add: app.x\n+pub fn x() {\n+  1\n}\n*** End Patch\n";
         let e = patch_blocks(&s, bare).unwrap_err().0;
@@ -642,16 +719,58 @@ mod tests {
         assert!(submit(&s, &["submit", "--draft", &id], &mut || Ok(String::new()), None).unwrap_err().0.contains("E0107"));
     }
 
-    /// Hunks match through trailing whitespace and indentation, and a unified
-    /// diff's `@@ -3,4 +3,5 @@` gives no context line.
+    /// D-141: a fault in the whole patch, not in one line (an Add with no
+    /// `+` line, no section, a line before the first header, an unknown
+    /// header, a file section sent to `submit`) says to resend the patch, not
+    /// `--replace`; one line missing its `+` keeps `--replace`, even when its
+    /// text is the resend sentence.
+    /// A new module comes from `+` Add sections, each section's imports kept,
+    /// and E1003 points to that form.
     #[test]
-    fn patch_matching_tolerates_whitespace_and_unified_headers() {
+    fn whole_patch_faults_say_to_resend() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("src/util.gleam", "pub fn two() { 2 }\n")]);
+        for (patch, why) in [
+            ("*** Begin Patch\n*** Add: kb.one\npub fn one() { 1 }\n*** End Patch\n", "`*** Add: kb.one` (line 2) has no `+` lines; every line of an Add, empty ones too, starts with `+`"),
+            ("*** Begin Patch\n*** End Patch\n", "the patch has no `*** Update: <name>` or `*** Add: <name>` section"),
+            ("\n*** Begin Patch\n*** Add: app.x\n+pub fn x() { 1 }\n*** End Patch\n", "line 1 of the patch: a patch must start with `*** Begin Patch`; remove the blank line before it"),
+            ("*** Begin Patch\n*** Ad: app.x\n+pub fn x() { 1 }\n*** End Patch\n", "line 2 of the patch: `*** Ad: app.x` is no section header"),
+            ("*** Begin Patch\n*** Add: app.x\n+// only a comment\n*** End Patch\n", "defines no function"),
+            ("*** Begin Patch\n*** Update File: notes\n-one\n+1\n*** End Patch\n", "is no symbol or module"),
+        ] {
+            let e = submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
+            assert!(e.contains("E0108") && e.contains(why) && e.contains(RESEND) && e.contains("Draft") && !e.contains("--replace"), "{why}: {e}");
+        }
+        // One line without `+`, an empty one too, is a one-line fault: `--replace` fixes it.
+        let empty = "*** Begin Patch\n*** Add: app.x\n+pub fn x() {\n\n+  1\n+}\n*** End Patch\n";
+        let e = submit(&s, &["submit"], &mut || Ok(empty.into()), None).unwrap_err().0;
+        assert!(e.contains("line 4 of the patch: in `*** Add: app.x` every line, empty ones too, starts with `+`") && e.contains("--replace") && !e.contains(RESEND), "{e}");
+        // A quoted line that is the resend sentence is still a one-line fault.
+        let quoted = format!("*** Begin Patch\n*** Add: app.x\n+pub fn x() {{ 1 }}\n{RESEND}\n*** End Patch\n");
+        let e = submit(&s, &["submit"], &mut || Ok(quoted.clone()), None).unwrap_err().0;
+        assert!(e.contains("line 4 of the patch") && e.contains("--replace"), "{e}");
+        // A new module from two Add sections keeps its module comment and both sections' imports.
+        let module = "*** Begin Patch\n*** Add: kb.one\n+//// Knowledge.\n+import app\n+\n+pub fn one() -> Int { app.main() }\n*** Add: kb.two\n+import util\n+\n+pub fn two() -> Int { util.two() }\n*** End Patch\n";
+        let out = submit(&s, &["submit"], &mut || Ok(module.into()), None).unwrap();
+        assert!(out.contains("kb.one") && out.contains("kb.two"), "{out}");
+        let text = std::fs::read_to_string(s.root.join("src/kb.gleam")).unwrap();
+        assert!(text.starts_with("//// Knowledge.") && text.contains("import app\n") && text.contains("import util\n"), "{text}");
+        // An unknown module's imports point to the one way to create it.
+        let e = submit(&s, &["submit", "--imports", "nope"], &mut || Ok("import app".into()), None).unwrap_err().0;
+        assert!(e.starts_with("E1003 unknown module: nope; create it with a patch `*** Add: nope`"), "{e}");
+    }
+
+    /// Hunks match through trailing whitespace, not indentation (D-142), and a
+    /// unified diff's `@@ -3,4 +3,5 @@` gives no context line.
+    #[test]
+    fn patch_matching_ignores_trailing_space_and_unified_headers() {
         let s = board_project(&[("src/app.gleam", "pub fn main() {\n  let x = 1\n  x\n}\n")]);
         let trailing = "*** Begin Patch\n*** Update: app.main\n-  let x = 1   \n+  let x = 2\n*** End Patch\n";
         let blocks = patch_blocks(&s, trailing).unwrap();
         assert!(blocks.starts_with("// ── app.main ──\n") && blocks.contains("let x = 2") && !blocks.contains("let x = 1"), "{blocks}");
+        // leading space is part of the line: the line is named, with its own space (D-142)
         let indented = "*** Begin Patch\n*** Update: app.main\n-let x = 1\n+  let x = 3\n*** End Patch\n";
-        assert!(patch_blocks(&s, indented).unwrap().contains("let x = 3"));
+        let e = patch_blocks(&s, indented).unwrap_err().0;
+        assert!(e.contains("these lines weren't found: `let x = 1`") && e.contains("is line 2 with 2 leading spaces"), "{e}");
         let unified = "*** Begin Patch\n*** Update: app.main\n@@ -1,4 +1,4 @@\n-  let x = 1\n+  let x = 4\n*** End Patch\n";
         assert!(patch_blocks(&s, unified).unwrap().contains("let x = 4"));
         // `*** Add` of a name that is a symbol of a module goes into that module; any other name is a new module.

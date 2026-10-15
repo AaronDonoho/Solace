@@ -90,6 +90,8 @@ Unwatched files can be read and written through Solace (unwatched means not sear
 ## D-27 Agent memory and skills
 Memories are files in a directory named in `solace.toml`, read and written with the ordinary file commands. The brief lists them (name and first line), not their contents, and agents write one when a human asks. Skills work the same way from a human-owned directory. Any run may write memory, even a read-only one, and memory edits aren't task changes. Review and investigation reports are written by Solace to `.solace/board/`, not to memory. Later: extra MCP servers through a logged passthrough.
 
+Built: skills. The `skills` key in solace.toml names the skills folder, `skills/` by default. Each skill is a subfolder with a `SKILL.md`, or a single `<name>.md` file at the folder's top, with `name` and `description` in front matter; a skill with no description is listed by its first line. Every run's brief lists the project's skills (name, description, path to `read`) and carries no skill contents. The folder is protected like AGENTS.md: agents read skills and change none, and Solace never runs a skill's scripts — a skill that needs a tool names a `[commands]` entry the human adds. Memory is not built.
+
 ## D-28 Unlisted text files are watched
 A file no rule names is watched when it's text within the size limit, and unwatched when it's binary or too large. Humans see each file's category and what it allows.
 
@@ -800,3 +802,24 @@ Amends D-38 and D-71 (Aaron, approved on board task "ui: Layout audit command", 
 1. The root `layout_audit` command (`solace-cli/tests/layout_audit.py`) unsets `SOLACE_TASK`, `SOLACE_RUN`, `SOLACE_SESSION`, `SOLACE_CONFIG` and `SOLACE_BIN` as `rust-acceptance` does (D-71), takes an argument (one page), and is allowed in reviews. Like `rust-acceptance`, it runs with normal host permissions: it runs `cargo build` (unless `SOLACE_TEST_BIN` names a binary), starts a fixture `solace serve`, and drives a headless Chromium through Playwright. It writes only its temp fixture and the screenshots under `solace-cli/target/layout-audit/`.
 2. D-38's "the root's `solace.toml`, which only lists projects" is out of date: the root's `solace.toml` also holds `[commands]` (and its other settings). When a task's own project is the root (`.`), the root's `solace.toml` is the task's own file, and a work run proposes changes to it the D-38 way. A task in another project still never proposes to the root's file.
 Why: the human approved `layout_audit` with `allowed_in_reviews = true` so reviewers can compare measurements, and approved its line in the root's `solace.toml`; D-38's wording could make an agent refuse that proposal.
+
+## D-140 The guide is the shell's Knowledgebase page
+(Aaron, board task "knowledgebase: page with the Guide", 2026-10-15). The first piece of milestone:208dbeb9095a5a4b.
+1. The guide moved from `board/guide.html` into the frontend's `knowledgebase` module, shown by a **Knowledgebase** menu tab (after Contracts, before Settings) at `/knowledgebase`. It is drawn in the shell's light DOM, with the shell's fonts and light and dark theme, and its section headings form a table of contents at the top.
+2. `/guide` answers with a permanent redirect (301) to `/knowledgebase`, so old links still work; the shell also maps `/guide` to the page and replaces it in the history.
+3. The board's header loses its Guide link.
+4. A later Knowledgebase task may turn the page into its own app.
+Why: the guide had no menu, its own styles and no dark mode; inside the shell it reads as part of the app.
+
+## D-141 One strict Add form; whole-patch faults are resent
+Amends D-47, D-104 and D-120, and Spec 3 (Aaron, board task "submit: new modules without a syntax spiral", 2026-10-15).
+1. Every line of a patch's `*** Add:` and of `write`'s `*** Add File:`, empty ones too, starts with `+`, as before. A lenient Add (plain code when no line has `+`, blank lines read as empty) was considered and rejected: one way to write it, no undocumented behavior, and the `apply_patch` form agents already lean toward.
+2. The one documented way to create a module is a patch `*** Add: <module>` (or `*** Add: <module>.<name>` sections) with its module comment, imports and code; the brief says so in step 2. `E1003` for an unknown module (`submit --imports <module>`) points to it. `submit --new` and `submit <module>` still work and are not promoted.
+3. An `E0108` whose fault is in the whole patch, not in one line, says to send the corrected patch again whole, and its draft's footer leaves out `--replace`: an Add with no `+` line, no section, a line before the first header (blank or not), an unknown `***` header, an Add that defines nothing, a file section sent to `submit`, a patch that changes nothing. A one-line fault names its line and keeps the `--replace` advice; an Add line missing its `+` says every line, empty ones too, starts with `+`.
+Why: run 8b3697864d7244e0 spent 10 of its first 27 calls creating one module. The strict rule cost one call; the `--replace` advice that followed cost the rest. The human chose consistency and one way over leniency.
+
+## D-142 A patch line's leading space is part of it
+Amends D-120, and Spec 3 (Aaron, board task "submit: new modules without a syntax spiral", 2026-10-15).
+1. A hunk line matches the target's line exactly, or with trailing space ignored. The third level, trimming both sides, is dropped: it matched a line the patch only resembled, and the splice rewrote that line with the patch's own indentation, so a patch could re-indent a line it merely quoted.
+2. When a hunk doesn't match, `E0108` names the first hunk line with no exact match in the target; when the target has that line only with other leading space, it names the line and how many leading spaces it has, so the patch copies it whole. When every hunk line matches somewhere in the target, `E0108` says the lines aren't adjacent in the file.
+Why: a reworded brief paragraph was written one space right of its block, and probes built on the trimming level reported the file as aligned, which cost two review rounds. Leading indentation is the kind of change a patch should not make silently.
