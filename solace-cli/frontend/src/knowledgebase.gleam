@@ -54,7 +54,7 @@ pub fn sections() -> List(Section) {
     Section(
       "menu",
       "The menu bar",
-      "<p>A menu bar at the top of every page has six pages: <strong>Migration</strong> (<code>/migrate</code>), <strong>Strategy</strong> (<code>/strategy</code>), <strong>Board</strong> (<code>/</code>), <strong>Contracts</strong> (<code>/contracts</code>, or <code>/p/&lt;folder&gt;/contracts</code> for one project in a workspace), <strong>Knowledgebase</strong> (<code>/knowledgebase</code>, this guide) and <strong>Settings</strong> (<code>/settings</code>).</p>",
+      "<p>A menu bar at the top of every page has six pages: <strong>Workspace</strong> (<code>/workspace</code>), <strong>Strategy</strong> (<code>/strategy</code>), <strong>Board</strong> (<code>/</code>), <strong>Contracts</strong> (<code>/contracts</code>, or <code>/p/&lt;folder&gt;/contracts</code> for one project in a workspace), <strong>Knowledgebase</strong> (<code>/knowledgebase</code>, this guide) and <strong>Settings</strong> (<code>/settings</code>).</p>",
     ),
     Section(
       "how-it-works",
@@ -71,7 +71,7 @@ pub fn sections() -> List(Section) {
     Section(
       "migrating",
       "Migrating an existing project",
-      "<p>To start using Solace on a Gleam project you already have, run <code>solace serve</code> in its folder, open <strong>Migration</strong> in the menu bar (<code>/migrate</code>) and choose <strong>Migrate this project</strong>. The page stops polling for status when you leave it. Solace makes a copy of the whole folder next to it, called <code>solace-migration</code>, and sets up the copy to use Solace. Your folder isn't changed. You can try Solace in the copy for as long as you like, then switch to it or delete it.</p>
+      "<p>To start using Solace on a Gleam project you already have, run <code>solace serve</code> in its folder, open <strong>Workspace</strong> in the menu bar (<code>/workspace</code>) and choose <strong>Migrate this project</strong>. The page stops polling for status when you leave it. Solace makes a copy of the whole folder next to it, called <code>solace-migration</code>, and sets up the copy to use Solace. Your folder isn't changed. You can try Solace in the copy for as long as you like, then switch to it or delete it.</p>
 <p>When you start, choose which Gleam projects to set up. You can also give commands that check your app works, one per line, such as a script that starts the app and requests a page. Solace runs each one in your folder before migrating and in the copy afterwards, and compares the results. Without any, only builds and tests are compared.</p>
 <p>The copy has exactly the same code as your original, errors included. If a build or a test fails before migrating, it fails in the copy too. That doesn't stop you from switching: fixing it is ordinary work afterwards.</p>
 <h3>Keeping your original folder safe</h3>
@@ -103,7 +103,7 @@ pub fn sections() -> List(Section) {
     Section(
       "projects",
       "Several projects on one board",
-      "<p>One board can show several Gleam projects: those in one folder, the <em>root</em>. The root's own project, if the folder is a Gleam project, comes first, then any project in a folder below it. Choose <strong>Projects</strong> to add an already set up project back to the board, remove one, or create a new one: give a package name, and optionally a folder and whether it runs on Erlang or JavaScript, and Solace runs <code>gleam new</code> and sets the project up. Every project stays inside the root; a folder outside it, or reached through a link, is refused. The list is kept in the root's <code>solace.toml</code>.</p>
+      "<p>One board can show several Gleam projects: those in one folder, the <em>root</em>. The root's own project, if the folder is a Gleam project, comes first, then any project in a folder below it. The <strong>Projects</strong> section of the <strong>Workspace</strong> page (<code>/workspace</code>) adds an already set up project back to the board, removes one, or creates a new one: give a package name, and optionally a folder and whether it runs on Erlang or JavaScript, and Solace runs <code>gleam new</code> and sets the project up. Every project stays inside the root; a folder outside it, or reached through a link, is refused. The list is kept in the root's <code>solace.toml</code>.</p>
 <p>Each project keeps its own tasks, settings, <code>AGENTS.md</code> and agents, and agents in different projects can work at the same time. An agent changes only its own project, but can read the others, for example to see how a project it depends on works. Reading never waits for another project's agent. A lane names its project's folder, counts its tasks, and has its own <em>Contract view</em>; select the folder name to fold the lane away. When every project uses the same columns they share one header row; otherwise each lane names its own. Notices start with the project's folder. A notice's Show task button opens its task on the tab that has the news (Questions for a question, Notes when the run left a note, else Runs) and scrolls it into view.</p>",
     ),
     Section(

@@ -1,0 +1,104 @@
+diff --git a/solace.toml b/solace.toml
+new file mode 100644
+index 0000000..bac0ebb
+--- /dev/null
++++ b/solace.toml
+@@ -0,0 +1,13 @@
++# Solace project settings. Protected: agents may read this file.
++# Text files up to this many bytes are watched; file writes are limited to it.
++watch_limit = 262144
++# Files Solace doesn't watch or search (agents can still read and write them).
++unwatched = []
++
++[validators]
++# Optional checks, for example:
++# "docs/**/*.json" = ["python3", "-m", "json.tool", "{file}"]
++
++[commands]
++# Optional commands agents may run, for example:
++# app = { run = ["gleam", "run", "--"], args = true }
+diff --git a/src/pilot/date.gleam b/src/pilot/date.gleam
+index eb788e7..cb79e8b 100644
+--- a/src/pilot/date.gleam
++++ b/src/pilot/date.gleam
+@@ -112,7 +112,11 @@ pub fn add_business_days(date: Date, days: Int) -> Date {
+     True -> date
+     False -> {
+       let next = add_days(date, 1)
+-      add_business_days(next, days - 1)
++      case is_weekend(next) {
++        // A Saturday or Sunday is skipped: it uses up none of `days`.
++        True -> add_business_days(next, days)
++        False -> add_business_days(next, days - 1)
++      }
+     }
+   }
+ }
+diff --git a/test/pilot/date_test.gleam b/test/pilot/date_test.gleam
+index 7cb0319..1b69f3b 100644
+--- a/test/pilot/date_test.gleam
++++ b/test/pilot/date_test.gleam
+@@ -23,6 +23,23 @@ pub fn business_days_test() {
+   // Monday + 3 business days = Thursday
+   assert date.add_business_days(Date(2026, 3, 2), 3) == Date(2026, 3, 5)
+   assert date.add_business_days(Date(2026, 3, 2), 0) == Date(2026, 3, 2)
++
++  // A weekend in between is skipped, not counted: Thursday 2026-03-05
++  // plus 4 business days is Wednesday 2026-03-11, not Monday 2026-03-09.
++  assert date.add_business_days(Date(2026, 3, 5), 4) == Date(2026, 3, 11)
++
++  // Friday runs over into the following week.
++  assert date.add_business_days(Date(2026, 3, 6), 1) == Date(2026, 3, 9)
++  assert date.add_business_days(Date(2026, 3, 6), 3) == Date(2026, 3, 11)
++
++  // Starting on a weekend counts from the following Monday.
++  assert date.add_business_days(Date(2026, 3, 7), 1) == Date(2026, 3, 9)
++  assert date.add_business_days(Date(2026, 3, 8), 4) == Date(2026, 3, 12)
++  assert date.add_business_days(Date(2026, 3, 7), 0) == Date(2026, 3, 7)
++
++  // Whole weeks land back on the same weekday.
++  assert date.add_business_days(Date(2026, 3, 2), 5) == Date(2026, 3, 9)
++  assert date.add_business_days(Date(2026, 3, 2), 10) == Date(2026, 3, 16)
+ }
+ 
+ pub fn days_between_and_iso_test() {
+diff --git a/test/pilot/fulfillment_test.gleam b/test/pilot/fulfillment_test.gleam
+index 7566fce..7a799eb 100644
+--- a/test/pilot/fulfillment_test.gleam
++++ b/test/pilot/fulfillment_test.gleam
+@@ -49,7 +49,11 @@ pub fn shipped_email_has_estimate_test() {
+     list.find(store.sent_messages(db), fn(m) {
+       m.kind == notifications.OrderShipped
+     })
+-  assert string.contains(message.body, "should arrive by 2026-03-")
++  // Shipped Tuesday 2026-03-03 from Newark (NJ) to Albany (NY): standard
++  // national is 4 business days, skipping the weekend, so Wednesday
++  // 2026-03-04, Thursday 2026-03-05, Friday 2026-03-06 and Monday
++  // 2026-03-09.
++  assert string.contains(message.body, "should arrive by 2026-03-09")
+ }
+ 
+ pub fn consolidates_split_reservations_test() {
+diff --git a/test/pilot/tax_shipping_test.gleam b/test/pilot/tax_shipping_test.gleam
+index fd9bee7..08a906f 100644
+--- a/test/pilot/tax_shipping_test.gleam
++++ b/test/pilot/tax_shipping_test.gleam
+@@ -46,4 +46,18 @@ pub fn estimate_delivery_test() {
+   // Shipped Monday 2026-03-02, national standard: 4 business days
+   let q = shipping.quote(Standard, "NJ", Domestic("NY"), 850, 0)
+   assert shipping.estimate_delivery(Date(2026, 3, 2), q) == Date(2026, 3, 6)
++
++  // Shipped Thursday 2026-03-05: the weekend in between is skipped, so
++  // 4 business days lands on Wednesday 2026-03-11, not Monday 2026-03-09.
++  assert shipping.estimate_delivery(Date(2026, 3, 5), q) == Date(2026, 3, 11)
++
++  // Express to the same state: 1 business day, so Friday ships out Monday.
++  let express_local = shipping.quote(Express, "NJ", Domestic("NJ"), 850, 0)
++  assert shipping.estimate_delivery(Date(2026, 3, 6), express_local)
++    == Date(2026, 3, 9)
++
++  // Overseas standard: 10 business days from Thursday 2026-03-05.
++  let overseas = shipping.quote(Standard, "NJ", International("DE"), 850, 0)
++  assert shipping.estimate_delivery(Date(2026, 3, 5), overseas)
++    == Date(2026, 3, 19)
+ }

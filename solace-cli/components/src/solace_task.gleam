@@ -236,6 +236,9 @@ pub type Model {
     /// The `strategy` attribute: the Strategy page shows the task, so a task
     /// in Planning may go back to the backlog there (D-132).
     strategy: Bool,
+    /// The `bar` attribute: the host's bar shows the task's title, Copy ID,
+    /// column and status, so the details leave them out.
+    bar: Bool,
     task: Option(Task),
     /// Counts the tasks opened, so a reply for one shown before is dropped.
     generation: Int,
@@ -286,6 +289,7 @@ pub type Msg {
   WorkspaceChanged(Bool)
   HostedChanged(Bool)
   StrategyChanged(Bool)
+  BarChanged(Bool)
   /// One `/events` message, from the host or from this element's stream.
   Live(String)
   /// Numbered `/events` messages from the host, oldest first; the ones past
@@ -378,6 +382,9 @@ pub fn register() -> Result(Nil, lustre.Error) {
       component.on_attribute_change("strategy", fn(v) {
         Ok(StrategyChanged(v != "false"))
       }),
+      component.on_attribute_change("bar", fn(v) {
+        Ok(BarChanged(v != "false"))
+      }),
       component.on_property_change(
         "live",
         decode.list({
@@ -411,6 +418,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       workspace: False,
       hosted: False,
       strategy: False,
+      bar: False,
       task: None,
       generation: 0,
       workflow: Workflow([], dict.new()),
@@ -763,6 +771,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     DirChanged(dir) -> #(Model(..model, dir: dir), effect.none())
     WorkspaceChanged(on) -> #(Model(..model, workspace: on), effect.none())
     StrategyChanged(on) -> #(Model(..model, strategy: on), effect.none())
+    BarChanged(on) -> #(Model(..model, bar: on), effect.none())
     HostedChanged(True) -> #(Model(..close(model), hosted: True), effect.none())
     HostedChanged(False) -> {
       let model = Model(..model, hosted: False)
@@ -1172,20 +1181,14 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           #(
             Model(..model, copy: #(n, "")),
             effect.from(fn(send) {
-              copy_text(reference(t.id), fn(ok) { send(CopyDone(n, ok)) })
+              copy_reference(t.id, fn(ok) { send(CopyDone(n, ok)) })
             }),
           )
         }
       }
     CopyDone(n, ok) if n == model.copy.0 -> #(
-      Model(
-        ..model,
-        copy: #(n, case ok {
-          True -> "Copied"
-          False -> "Copy failed"
-        }),
-      ),
-      effect.from(fn(send) { after(copied_ms, fn() { send(CopyReset(n)) }) }),
+      Model(..model, copy: #(n, copy_said(ok))),
+      effect.from(fn(send) { after_copied(fn() { send(CopyReset(n)) }) }),
     )
     CopyReset(n) if n == model.copy.0 -> #(
       Model(..model, copy: #(n, "")),
@@ -1680,7 +1683,12 @@ pub fn change_groups(
 pub fn view(model: Model) -> Element(Msg) {
   h.div([], [
     h.style([], task_styles),
-    h.p([a.role("alert")], [h.text(model.error)]),
+    // An empty paragraph keeps its margins: under the board's bar it would
+    // leave a gap above the details.
+    case model.error {
+      "" -> h.text("")
+      error -> h.p([a.role("alert")], [h.text(error)])
+    },
     case model.task {
       None -> h.text("")
       Some(t) -> detail(model, t)
@@ -1711,105 +1719,95 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
     False -> tabs
   }
   h.section([a.class("detail")], [
-    h.div([a.class("heading")], [
-      h.h2([], [h.text(t.title)]),
-      h.button(
-        [
-          a.class("copy-id"),
-          a.title(
-            "Copies "
-            <> reference(t.id)
-            <> ": pasted into any text, it links to this task",
-          ),
-          e.on_click(CopyId),
-        ],
-        [
-          h.text(case model.copy.1 {
-            "" -> ui_label("copy_id")
-            said -> said
+    case model.bar {
+      True -> h.text("")
+      False ->
+        h.div([a.class("heading")], [
+          h.h2([], [h.text(t.title)]),
+          copy_button(t.id, model.copy.1, CopyId),
+        ])
+    },
+    case model.bar {
+      True -> h.text("")
+      False -> h.p([a.class("meta")], meta(model.workflow, t))
+    },
+    // What the human does, then the task's record: side by side on a wide
+    // element (`task_styles`), one above the other otherwise.
+    h.div([a.class("act")], [
+      case t.attention {
+        "" -> h.text("")
+        reason ->
+          h.div([a.class("attention"), a.role("status")], [
+            h.strong([], [h.text("Needs attention")]),
+            md(model.base, reason),
+          ])
+      },
+      agent_choice(model),
+      composer(model),
+      case model.acting {
+        "" -> h.text("")
+        name ->
+          h.p([a.class("muted"), a.role("status")], [
+            h.text(acting_text(t, action_label(model.workflow, name))),
+          ])
+      },
+      h.div(
+        [a.class("actions")],
+        list.append(
+          list.map(actions(model.workflow, t, model.strategy), fn(name) {
+            action_button(
+              name,
+              action_label(model.workflow, name),
+              model.acting != "",
+            )
           }),
-        ],
+          [button(ui_label("add_note"), AddNote)],
+        ),
       ),
     ]),
-    h.p([a.class("meta")], [
-      h.text(column_label(model.workflow, t.column)),
-      status_badge_in(model.workflow, t),
-      case t.no_project {
-        True -> h.text(" • no project")
-        False -> h.text("")
-      },
-    ]),
-    case t.attention {
-      "" -> h.text("")
-      reason ->
-        h.div([a.class("attention"), a.role("status")], [
-          h.strong([], [h.text("Needs attention")]),
-          md(model.base, reason),
-        ])
-    },
-    agent_choice(model),
-    composer(model),
-    case model.acting {
-      "" -> h.text("")
-      name ->
-        h.p([a.class("muted"), a.role("status")], [
-          h.text(acting_text(t, action_label(model.workflow, name))),
-        ])
-    },
-    h.div(
-      [a.class("actions")],
-      list.append(
-        list.map(actions(model.workflow, t, model.strategy), fn(name) {
-          action_button(
-            name,
-            action_label(model.workflow, name),
-            model.acting != "",
+    h.div([a.class("record")], [
+      h.div(
+        [a.class("tabs"), a.role("tablist")],
+        list.map(tabs, fn(tab) {
+          h.button(
+            [
+              a.role("tab"),
+              a.aria_selected(model.tab == tab.0),
+              e.on_click(Tab(tab.0)),
+            ],
+            [h.text(tab.1)],
           )
         }),
-        [button(ui_label("add_note"), AddNote)],
       ),
-    ),
-    h.div(
-      [a.class("tabs"), a.role("tablist")],
-      list.map(tabs, fn(tab) {
-        h.button(
-          [
-            a.role("tab"),
-            a.aria_selected(model.tab == tab.0),
-            e.on_click(Tab(tab.0)),
-          ],
-          [h.text(tab.1)],
-        )
+      h.div([a.class("panel"), a.role("tabpanel")], case model.tab {
+        "notes" -> notes_view(model.base, t)
+        "questions" -> questions_view(model.base, t)
+        "runs" -> list.map(list.reverse(t.runs), fn(r) { run_view(model, r) })
+        "changes" -> [
+          case t.changes {
+            [] -> h.text("")
+            _ ->
+              h.p([], [
+                h.text(model.review_summary <> " "),
+                h.a([a.href(model.base <> "/contracts?task=" <> t.id)], [
+                  h.text(ui_label("contract_view")),
+                ]),
+              ])
+          },
+          h.div(
+            [a.class("changes")],
+            list.map(change_groups(t.changes, list.length(t.scope) > 1), fn(g) {
+              h.section([], [
+                h.h4([], [h.text(g.0)]),
+                h.ul([], list.map(g.1, fn(n) { h.li([], [h.text(n)]) })),
+              ])
+            }),
+          ),
+        ]
+        "scope" -> [scope_view(model, t)]
+        _ -> details_view(model, t)
       }),
-    ),
-    h.div([a.class("panel"), a.role("tabpanel")], case model.tab {
-      "notes" -> notes_view(model.base, t)
-      "questions" -> questions_view(model.base, t)
-      "runs" -> list.map(list.reverse(t.runs), fn(r) { run_view(model, r) })
-      "changes" -> [
-        case t.changes {
-          [] -> h.text("")
-          _ ->
-            h.p([], [
-              h.text(model.review_summary <> " "),
-              h.a([a.href(model.base <> "/contracts?task=" <> t.id)], [
-                h.text(ui_label("contract_view")),
-              ]),
-            ])
-        },
-        h.div(
-          [a.class("changes")],
-          list.map(change_groups(t.changes, list.length(t.scope) > 1), fn(g) {
-            h.section([], [
-              h.h4([], [h.text(g.0)]),
-              h.ul([], list.map(g.1, fn(n) { h.li([], [h.text(n)]) })),
-            ])
-          }),
-        ),
-      ]
-      "scope" -> [scope_view(model, t)]
-      _ -> details_view(model, t)
-    }),
+    ]),
   ])
 }
 
@@ -1841,8 +1839,8 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
 
 /// The model and its effort. A pick shows what is chosen, so it names
 /// itself; while none is, a placeholder says what to pick. Only models that
-/// can start are offered; a line under the pick says why the others can't,
-/// and with none that can, what to set up.
+/// can start are offered; with none that can, a line says why each can't
+/// and what to set up.
 fn agent_choice(model: Model) -> Element(Msg) {
   let chosen = list.find(model.models, fn(m) { m.id == model.model })
   let ready = list.filter(model.models, fn(m) { m.available })
@@ -2179,13 +2177,14 @@ const task_styles =
   <> projects_pick_styles
   <> editor_styles
   <> model_styles
-  <> ":host{display:block}input,textarea,pre,code,.md,.detail > .heading > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}
-button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.detail{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}
+  <> ":host{display:block;container-type:inline-size}input,textarea,pre,code,.md,.detail > .heading > h2,.record > .panel > article > p,.record > .panel > p,.record > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}
+button,input,textarea,select{font:inherit;padding:var(--control-pad);margin:var(--space-1);border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.detail{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:0 8px}
 .meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}
 .tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}
 details.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}
 .title{display:block;box-sizing:border-box;width:calc(100% - 8px);margin:8px 4px}
-.heading{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px}.heading h2{margin:12px 0}.copy-id{flex:none;margin:0;padding:2px 10px;font-size:13px}
+.heading{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px}.heading h2{margin:12px 0}.copy-id{flex:none;margin:0;padding:0 10px;font-size:13px}
+@container (min-width:90rem){.detail{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:2rem;align-items:start}.detail > .heading,.detail > .meta{grid-column:1 / -1}.record > .tabs{margin-top:0}}
 *{scrollbar-color:var(--line) var(--paper)}::selection{background:var(--sel);color:var(--ink)}
 h1,h2,h3{line-height:1.2;letter-spacing:-.02em}a{color:var(--focus);text-underline-offset:3px}
 button,input,textarea,select{border:1px solid var(--edge);background:var(--paper);color:var(--ink);caret-color:var(--focus)}input::placeholder,textarea::placeholder{color:var(--soft);opacity:1}
@@ -2194,16 +2193,19 @@ textarea{font-family:inherit}
 .depends .unfinished{color:var(--warn-text);font-weight:600}
 .attention{font-weight:700}
 .status{border:1px solid var(--line);background:var(--paper);font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:1px 8px}.status.finished{background:var(--add);color:var(--ok-text);border-color:var(--ok-text)}.working::before{background:var(--entry)}
-.detail,.composer,.note,.run{background:var(--paper);border-color:var(--edge)}.detail{padding:20px 24px}
-.tabs{border-bottom:2px solid var(--edge)}.tabs button{border:0;border-right:1px solid var(--line);background:transparent;margin:0;padding:10px 16px}.tabs [aria-selected=true]{background:var(--paper);box-shadow:inset 0 -3px var(--ink);border-color:var(--line)}
+.detail,.composer,.note,.run{background:var(--paper);border-color:var(--edge)}.detail{padding:10px 12px}
+.tabs{border-bottom:2px solid var(--edge)}.tabs button{border:0;border-right:1px solid var(--line);background:transparent;margin:0;padding:5px 8px}.tabs [aria-selected=true]{background:var(--paper);box-shadow:inset 0 -3px var(--ink);border-color:var(--line)}
+.note,.run{padding:4px 6px}article{padding:4px}.panel{padding-top:4px}
 article{border-bottom-color:var(--line)}.transcript{border-left:1px solid var(--edge)}
 .md pre,.transcript pre,.diff,code{background:var(--code);color:var(--ink)}
 @media(prefers-reduced-motion:no-preference){button{transition:background-color .12s ease-out}}"
 
 /// The markdown editor's look (`editor`), shared with the pages that use it.
-/// Colors come from the page's custom properties.
+/// Colors come from the page's custom properties. The Image tool is a `label`
+/// around a file picker, so it takes the toolbar's box model: its border-box
+/// min-height is the toolbar's small height, as a button's is.
 pub const editor_styles =
-  ".composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}.composer solace-md-editor{display:block;border-top:1px solid var(--line)}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-block;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}
+  ".composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}.composer solace-md-editor{display:block;border-top:1px solid var(--line)}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-flex;align-items:center;box-sizing:border-box;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}
 .composer solace-md-editor{border-top:1px solid var(--edge)}.toolbar .button{border-color:var(--edge);background:var(--paper)}.toolbar .button:hover{background:var(--hover)}
 "
 
@@ -2871,7 +2873,7 @@ pub fn ui_label(key: String) -> String {
 
 /// What a column is called: its label from the workflow, or its id when the
 /// workflow doesn't list it.
-fn column_label(workflow: Workflow, id: String) -> String {
+pub fn column_label(workflow: Workflow, id: String) -> String {
   case list.find(workflow.columns, fn(c) { c.id == id }) {
     Ok(c) -> c.label
     Error(_) -> id
@@ -2880,9 +2882,12 @@ fn column_label(workflow: Workflow, id: String) -> String {
 
 /// Buttons, inputs, text areas, selects and their option lists, in the
 /// theme's tokens only, so the dark theme reaches the open list of a select
-/// too. Pages put it first, so their own rules for a control win.
+/// too, and the two control heights of `spacing_styles`. Pages put it first,
+/// so their own rules for a control win.
 pub const control_styles =
-  "button,input,textarea,select{border:1px solid var(--edge);background:var(--paper);color:var(--ink);caret-color:var(--focus)}option,optgroup{background:var(--paper);color:var(--ink)}option:disabled{color:var(--soft)}input::placeholder,textarea::placeholder{color:var(--soft);opacity:1}button:hover,select:hover{background:var(--hover)}button:disabled{color:var(--soft)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+  spacing_styles
+  <> "button,input,textarea,select{border:1px solid var(--edge);background:var(--paper);color:var(--ink);caret-color:var(--focus)}option,optgroup{background:var(--paper);color:var(--ink)}option:disabled{color:var(--soft)}input::placeholder,textarea::placeholder{color:var(--soft);opacity:1}button:hover,select:hover{background:var(--hover)}button:disabled{color:var(--soft)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
+button,select,input:not([type=checkbox]):not([type=radio]):not([type=file]){box-sizing:border-box;min-height:var(--control-h)}button.edit,button.toggle,button.act,button.copy-id,button.delete,.toolbar button,.toolbar .button,.unavailable button{min-height:var(--control-h-small)}
 "
 
 /// A select's placeholder option: shown only while nothing is picked, it
@@ -2964,7 +2969,6 @@ fn agent_pick(
         )
       _ -> h.text("")
     },
-    unavailable_view(model.models, TryAgain),
   ])
 }
 
@@ -3064,3 +3068,65 @@ pub fn no_agents_view(models: List(Agent)) -> Element(msg) {
 /// with a pick add it to their styles; colors come from the page.
 pub const model_styles =
   ".unavailable,.no-agents{flex-basis:100%;font-size:13px;color:var(--soft);margin:2px 0}.unavailable>summary{cursor:pointer}.unavailable ul,.no-agents ul{margin:4px 0;padding-left:20px}.unavailable li,.no-agents li{white-space:normal;margin:2px 0}.unavailable button{font-size:13px;padding:1px 8px;margin:0 0 0 8px}.no-agents{color:var(--ink)}\n"
+
+/// The spacing and control sizes every page shares: pages and the detail
+/// use these instead of their own numbers. Custom properties inherit,
+/// so a nested shadow root gets them from its host too. Two control heights:
+/// `--control-h` for buttons, inputs and selects, `--control-h-small` for
+/// the small ones beside text (Edit, Copy ID, the editor's toolbar).
+pub const spacing_styles =
+  ":host{--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:20px;--space-6:24px;--control-h:36px;--control-h-small:32px;--control-pad:6px 12px;--pad-card:12px 16px;--pad-section:20px 24px}\n"
+
+/// A task's column, status and whether it has no project: the line under
+/// its title, or beside it in the board's bar.
+pub fn meta(workflow: Workflow, t: Task) -> List(Element(msg)) {
+  [
+    h.text(column_label(workflow, t.column)),
+    status_badge_in(workflow, t),
+    case t.no_project {
+      True -> h.text(" • no project")
+      False -> h.text("")
+    },
+  ]
+}
+
+/// The Copy ID button: `said` is what it says for a moment after a copy,
+/// "" for Copy ID.
+pub fn copy_button(id: String, said: String, on_click: msg) -> Element(msg) {
+  h.button(
+    [
+      a.class("copy-id"),
+      a.title(
+        "Copies "
+        <> reference(id)
+        <> ": pasted into any text, it links to this task",
+      ),
+      e.on_click(on_click),
+    ],
+    [
+      h.text(case said {
+        "" -> ui_label("copy_id")
+        said -> said
+      }),
+    ],
+  )
+}
+
+/// Puts a task's reference on the clipboard (D-98); `done` hears whether it
+/// took it.
+pub fn copy_reference(id: String, done: fn(Bool) -> Nil) -> Nil {
+  copy_text(reference(id), done)
+}
+
+/// What Copy ID says for a moment after a copy.
+pub fn copy_said(ok: Bool) -> String {
+  case ok {
+    True -> "Copied"
+    False -> "Copy failed"
+  }
+}
+
+/// Calls `then` once Copy ID's moment of saying Copied has passed.
+pub fn after_copied(then: fn() -> Nil) -> Nil {
+  after(copied_ms, then)
+}

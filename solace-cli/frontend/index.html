@@ -13,7 +13,9 @@ try { document.documentElement.dataset.theme = localStorage.getItem('solace-them
 @font-face{font-family:"IBM Plex Sans";font-weight:700;src:url("/fonts/sans-700.woff2") format("woff2");font-display:swap}
 @font-face{font-family:"IBM Plex Mono";font-weight:400;src:url("/fonts/mono-400.woff2") format("woff2");font-display:swap}
 html{background:#f7f6f0;color-scheme:light;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--code:#eef1ec}
-body{font:16px system-ui,sans-serif;margin:0;color:var(--ink);background:var(--sheet)}
+/* The shared spacing and control sizes, as solace_task's spacing_styles sets them in the pages. */
+html{--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:20px;--space-6:24px;--control-h:36px;--control-h-small:32px;--control-pad:6px 12px;--pad-card:12px 16px;--pad-section:20px 24px}
+body{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;margin:0;color:var(--ink);background:var(--sheet)}
 .menu{display:flex;gap:8px;align-items:center;box-sizing:border-box;height:56px;padding:0 16px;border-bottom:1px solid var(--line);background:var(--paper);position:sticky;top:0;z-index:26}
 /* The contract page fills the window below the menu. */
 solace-contracts{--contracts-height:calc(100dvh - 56px)}
@@ -39,9 +41,9 @@ solace-contracts{--contracts-height:calc(100dvh - 56px)}
 /* Find in page (Ctrl+F): a bar below the menu, above the board's layers. */
 .find{position:fixed;top:64px;right:16px;z-index:30;display:flex;gap:6px;align-items:center;padding:6px 8px;background:var(--paper);color:var(--ink);border:2px solid var(--edge);box-shadow:0 4px 14px #00000033}
 .find[hidden]{display:none}
-.find input{font:inherit;width:16em;padding:4px 6px;border:1px solid var(--line);background:var(--sheet);color:inherit}
+.find input{font:inherit;width:16em;box-sizing:border-box;min-height:var(--control-h-small);padding:4px 6px;border:1px solid var(--line);background:var(--sheet);color:inherit}
 .find-count{min-width:6em;font-size:14px;color:var(--soft)}
-.find button{font:inherit;min-width:32px;min-height:32px;border:1px solid var(--line);background:var(--paper);color:inherit;cursor:pointer}
+.find button{font:inherit;min-width:var(--control-h-small);min-height:var(--control-h-small);border:1px solid var(--line);background:var(--paper);color:inherit;cursor:pointer}
 .find button:hover{background:var(--hover)}
 .find :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 /* Matches are boxes drawn over the text; clicks and drags pass through to the page. */

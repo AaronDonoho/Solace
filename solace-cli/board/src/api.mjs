@@ -48,30 +48,74 @@ export function prevent_drag(target) {
 }
 
 // The detail band's resize handle. The band sits at the page's bottom edge,
-// so the handle drags from the top, which CSS `resize` cannot do: the
-// browser keeps the pointer on the handle (`setPointerCapture`), so its
-// pointermove and pointerup keep arriving as the pointer travels over the
-// page. The heights are px; the largest keeps the board's column bar on
-// screen. Outside a browser (tests), the sizes fall back.
+// or its right edge on a wide window (`side`), so the handle drags from the
+// top or the left, which CSS `resize` cannot do: the browser keeps the
+// pointer on the handle (`setPointerCapture`), so its pointermove and
+// pointerup keep arriving as the pointer travels over the page. The sizes
+// are px; the largest keeps the board's column bar on screen, or a strip of
+// the board beside the band. Outside a browser (tests), the sizes fall back.
 const detailMin = 120, detailKeep = 160;
-export function detail_max() {
-  return Math.max(detailMin, (globalThis.innerHeight || 800) - detailKeep);
+export function detail_max(side = false) {
+  const room = side ? globalThis.innerWidth || 1280 : globalThis.innerHeight || 800;
+  return Math.max(detailMin, room - detailKeep);
 }
 export function detail_min() { return detailMin; }
-// The band's task height now: a key step starts from it while the height
-// is still the CSS default (45dvh). Outside a browser, 45% of 800px.
-export function detail_now(root) {
-  const task = root?.querySelector?.('.detail-band > solace-task');
-  const height = task ? task.getBoundingClientRect().height : 0;
-  return Math.round(height || 0.45 * (globalThis.innerHeight || 800));
+// The side band's smallest width, 32rem, in px at the page's font size.
+export function side_min() {
+  const size = parseFloat(globalThis.getComputedStyle?.(globalThis.document?.documentElement)?.fontSize);
+  return Math.round(32 * (size || 16));
 }
-export function begin_resize(root, pointerId, clientY) {
+// The width the lanes area keeps for its scroll bar (`scrollbar-gutter`):
+// 0 with overlay scroll bars, and it differs between platforms, so it is
+// measured once. Outside a browser, 16px.
+let gutter;
+export function scroll_gutter() {
+  const doc = globalThis.document;
+  if (gutter === undefined && doc?.body) {
+    const probe = doc.createElement('div');
+    probe.style.cssText = 'position:absolute;top:-999px;width:100px;height:100px;overflow:scroll';
+    doc.body.appendChild(probe);
+    gutter = probe.offsetWidth - probe.clientWidth;
+    probe.remove();
+  }
+  return gutter ?? 16;
+}
+// The size a drag or a key step starts from: the task's height, or on the
+// side the band's width, while it is still the CSS default (45dvh, or
+// min(42vw, 720px)). Outside a browser, from an 800px high, 1280px wide window.
+function detailSize(root, side) {
+  if (side) {
+    const band = root?.querySelector?.('.detail-band');
+    return band ? band.getBoundingClientRect().width : 0;
+  }
+  const task = root?.querySelector?.('.detail-band > solace-task');
+  return task ? task.getBoundingClientRect().height : 0;
+}
+export function detail_now(root, side = false) {
+  const fallback = side ? Math.max(side_min(), Math.min(0.42 * (globalThis.innerWidth || 1280), 720)) : 0.45 * (globalThis.innerHeight || 800);
+  return Math.round(detailSize(root, side) || fallback);
+}
+export function begin_resize(root, pointerId, at, side = false) {
   try { root?.querySelector?.('.detail-resize')?.setPointerCapture?.(pointerId); } catch {}
-  const task = root?.querySelector?.('.detail-band > solace-task');
-  const height = task ? task.getBoundingClientRect().height : 0;
-  return [Number(clientY) || 0, Number(height) || 0, detail_max()];
+  return [Number(at) || 0, Number(detailSize(root, side)) || 0, detail_max(side)];
 }
-export function resize_height(startY, startH, y, max) {
-  const height = Math.round(startH + (startY - y));
-  return Math.min(Math.max(height, detailMin), Math.max(max, detailMin));
+// The band's size for a pointer at `at` in a drag that began at `start` with
+// the band `startSize` along the drag; the board clamps it.
+export function resize_size(start, startSize, at) {
+  return Math.round(startSize + (start - at));
+}
+
+// The band moves to the right edge when the window is wider than 1.4 times
+// its height. `send` hears whether it is, now and on every change; a root
+// that asks again replaces its listener.
+const sideWatchers = new WeakMap();
+export function watch_side(root, send) {
+  const media = globalThis.matchMedia?.('(min-aspect-ratio: 7/5)');
+  if (!media || !root) return;
+  const old = sideWatchers.get(root);
+  if (old) old[0].removeEventListener('change', old[1]);
+  const listener = () => send(media.matches);
+  sideWatchers.set(root, [media, listener]);
+  media.addEventListener('change', listener);
+  send(media.matches);
 }

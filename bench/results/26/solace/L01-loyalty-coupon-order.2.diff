@@ -1,0 +1,115 @@
+diff --git a/solace.toml b/solace.toml
+new file mode 100644
+index 0000000..bac0ebb
+--- /dev/null
++++ b/solace.toml
+@@ -0,0 +1,13 @@
++# Solace project settings. Protected: agents may read this file.
++# Text files up to this many bytes are watched; file writes are limited to it.
++watch_limit = 262144
++# Files Solace doesn't watch or search (agents can still read and write them).
++unwatched = []
++
++[validators]
++# Optional checks, for example:
++# "docs/**/*.json" = ["python3", "-m", "json.tool", "{file}"]
++
++[commands]
++# Optional commands agents may run, for example:
++# app = { run = ["gleam", "run", "--"], args = true }
+diff --git a/src/pilot/pricing.gleam b/src/pilot/pricing.gleam
+index 852c985..ebe66c5 100644
+--- a/src/pilot/pricing.gleam
++++ b/src/pilot/pricing.gleam
+@@ -62,18 +62,14 @@ pub fn quote(
+     Some(c) -> c.stacks_with_loyalty
+     None -> True
+   }
+-  let coupon_discount = case coupon {
+-    Some(c) -> promotions.discount(c, lines, subtotal)
+-    None -> 0
+-  }
+   let loyalty = case loyalty_applies {
+-    True ->
+-      money.percent(
+-        subtotal - coupon_discount,
+-        customer.loyalty_discount_percent(tier),
+-      )
++    True -> money.percent(subtotal, customer.loyalty_discount_percent(tier))
+     False -> 0
+   }
++  let coupon_discount = case coupon {
++    Some(c) -> promotions.discount(c, lines, subtotal - loyalty)
++    None -> 0
++  }
+   let units = list.fold(lines, 0, fn(sum, l) { sum + l.quantity })
+   let after_coupon = subtotal - loyalty - coupon_discount
+   let volume = case units >= volume_min_units {
+diff --git a/test/pilot/checkout_test.gleam b/test/pilot/checkout_test.gleam
+index a9a0fa4..cc45fc0 100644
+--- a/test/pilot/checkout_test.gleam
++++ b/test/pilot/checkout_test.gleam
+@@ -174,3 +174,15 @@ pub fn origin_warehouse_test() {
+   assert checkout.origin_warehouse([], customer.Domestic("CA"))
+     == Error(checkout.NoWarehouse)
+ }
++
++pub fn gold_fixed_coupon_quote_test() {
++  // Grace (Gold), one Desk Lamp, TENOFF, standard shipping.
++  let #(db, o) =
++    support.draft(seed.demo_store(), seed.grace, [#("LAMP-OAK", 1)])
++  let clock = support.on_day(0)
++  let assert Ok(#(db, o)) = checkout.apply_coupon(db, clock, o.id, "TENOFF")
++  let assert Ok(q) = checkout.quote(db, o.id, Standard)
++  assert q.loyalty_discount_cents == 370
++  assert q.coupon_discount_cents == 1000
++  assert q.total_cents == 7067
++}
+diff --git a/test/pilot/pricing_test.gleam b/test/pilot/pricing_test.gleam
+index 66182f0..45ef39e 100644
+--- a/test/pilot/pricing_test.gleam
++++ b/test/pilot/pricing_test.gleam
+@@ -2,7 +2,7 @@ import gleam/option.{None, Some}
+ import pilot/customer.{Domestic, Gold, Standard}
+ import pilot/order.{Line}
+ import pilot/pricing
+-import pilot/promotions.{Coupon, FreeShipping, PercentOff}
++import pilot/promotions.{Coupon, FixedOff, FreeShipping, PercentOff}
+ import pilot/shipping
+ 
+ fn ship(cost) {
+@@ -77,3 +77,34 @@ pub fn free_shipping_coupon_test() {
+   assert q.shipping_cents == 0
+   assert q.tax_cents == 40
+ }
++
++pub fn fixed_coupon_after_loyalty_test() {
++  // Gold 5% off the full 7400 first, then TENOFF's fixed 1000 off the rest.
++  let q =
++    pricing.quote(
++      [Line("L", 1, 7400)],
++      Gold,
++      Some(coupon(FixedOff(1000), True)),
++      ship(600),
++      Domestic("CA"),
++    )
++  assert q.loyalty_discount_cents == 370
++  assert q.coupon_discount_cents == 1000
++  assert pricing.goods_cents(q) == 6030
++  assert q.total_cents == 6030 + 600 + 437
++}
++
++pub fn fixed_coupon_caps_at_discounted_goods_test() {
++  let q =
++    pricing.quote(
++      [Line("L", 1, 1000)],
++      Gold,
++      Some(coupon(FixedOff(1000), True)),
++      ship(0),
++      Domestic("OR"),
++    )
++  assert q.loyalty_discount_cents == 50
++  assert q.coupon_discount_cents == 950
++  assert pricing.goods_cents(q) == 0
++  assert q.total_cents == 0
++}

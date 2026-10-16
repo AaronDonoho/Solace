@@ -4,7 +4,7 @@ import gleam/dynamic/decode
 import gleam/int
 import gleam/json
 import gleam/list
-import gleam/option.{None}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import gleam/uri.{type Uri}
@@ -34,7 +34,8 @@ pub fn main() -> Nil {
 
 pub type Route {
   Board
-  Migrate
+  /// The Workspace page (D-146): the workspace and its migration. `/migrate` lands here.
+  Workspace
   Contracts(base: String)
   Strategy
   Settings
@@ -59,7 +60,7 @@ pub type Msg {
 pub fn route(uri: Uri) -> Route {
   case uri.path_segments(uri.path) {
     [] -> Board
-    ["migrate"] -> Migrate
+    ["workspace"] | ["migrate"] -> Workspace
     ["contracts"] -> Contracts("")
     ["strategy"] -> Strategy
     ["settings"] -> Settings
@@ -117,11 +118,13 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     Ok(uri) -> route(uri)
     Error(_) -> Board
   }
-  // The guide's old address shows the Knowledgebase under its own (D-140).
   let renamed = case modem.initial_uri() {
-    Ok(uri) if uri.path == "/guide" ->
-      modem.replace("/knowledgebase", None, None)
-    _ -> effect.none()
+    Ok(uri) ->
+      case renamed_path(uri.path) {
+        Some(path) -> modem.replace(path, None, None)
+        None -> effect.none()
+      }
+    Error(_) -> effect.none()
   }
   // A link's address shows the board until the record is found.
   let #(shown, found) = case initial {
@@ -226,7 +229,7 @@ pub fn view(model: Model) -> Element(Msg) {
   }
   element.fragment([
     html.nav([attribute.class("menu")], [
-      link("/migrate", "Migration", Migrate),
+      link("/workspace", "Workspace", Workspace),
       link("/strategy", "Strategy", Strategy),
       link("/", "Board", Board),
       link("/contracts", "Contracts", Contracts("")),
@@ -512,7 +515,7 @@ pub type Model {
 pub fn page_of(route: Route) -> String {
   case route {
     Board -> "solace-board"
-    Migrate -> "solace-migration"
+    Workspace -> "solace-migration"
     Contracts(_) -> "solace-contracts"
     Strategy -> "solace-strategy"
     Settings -> "solace-settings"
@@ -676,3 +679,12 @@ fn find_record(kind: String, id: String, receive: fn(String) -> Nil) -> Nil
 
 @external(javascript, "./task_link.mjs", "watch_titles")
 fn watch_titles() -> Nil
+
+/// A page's old address, replaced in the history by its own: the guide's (D-140) and the Migration page's (D-146).
+pub fn renamed_path(path: String) -> Option(String) {
+  case path {
+    "/guide" -> Some("/knowledgebase")
+    "/migrate" -> Some("/workspace")
+    _ -> None
+  }
+}

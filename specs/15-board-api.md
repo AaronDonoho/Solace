@@ -236,7 +236,7 @@ These answer at the root only.
 
 **Events.** The root's `/events` sends `{strategyRun}` in full after every change, with no `project` field, on the root task log. A new connection's replay sends `{strategyRuns: [...]}` (the list `GET /strategy/runs` returns) after `{vision}`.
 
-`solace serve` also serves the default board at `/` and a guide for humans as the shell's Knowledgebase page at `/knowledgebase`; `/guide` redirects there (D-140).
+`solace serve` also serves the default board at `/` and a guide for humans as the shell's Knowledgebase page at `/knowledgebase`; `/guide` redirects there (D-140). The Workspace page, where existing code is migrated, is at `/workspace`; its old address `/migrate` still serves the shell, which replaces it with `/workspace` (D-146).
 
 ### One root, several projects (D-57)
 
@@ -246,7 +246,7 @@ There is one root: `solace serve` and `solace create` use the root that holds th
 
 A request is refused with 403 (`E7016`) unless its `Host` is `127.0.0.1:{port}` or `localhost:{port}` and, when it sends `Origin`, that is `http://127.0.0.1:{port}` or `http://localhost:{port}` (D-80). A request without those headers is accepted. `SOLACE_BIN`, when set in the server's environment, is the CLI that agents call instead of the server's own executable.
 
-The root's own project answers at `/` as above; every other project's API is under `/p/{dir}`, `dir` percent-encoded (`/p/bench%2Fpilot/tasks`, `/p/bench%2Fpilot/view`). A note's image URL stays project-relative (`/tasks/{id}/files/{name}`); a client prefixes the project's `base`. The root adds:
+The root's own project answers at `/` as above; every other project's API is under `/p/{dir}`, `dir` percent-encoded (`/p/bench%2Fpilot/tasks`, `/p/bench%2Fpilot/view`). A note's image URL stays project-relative (`/tasks/{id}/files/{name}`); a client prefixes the project's `base`. The root's projects are listed, added, created and removed in the Projects section of the shell's Workspace page; the board reads `GET /projects` only for its lanes. The root adds:
 
 | Request | Effect |
 | --- | --- |

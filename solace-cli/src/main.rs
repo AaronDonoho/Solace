@@ -58,9 +58,31 @@ fn agent_reference() -> String {
     }
 }
 
-/// `help [command]` for agents: every option, without host commands, and
-/// task commands only in a board run; with a command, only the paragraphs
-/// that list it (D-46).
+/// The reference's file-tier rows are not commands: `help`'s name list skips
+/// them (D-144).
+const FILE_TIERS: [&str; 5] = ["graph", "watched", "protected", "unwatched", "internal"];
+
+/// The command names a row's term lists: the first word of each part split on
+/// a `|` (`view | inspect | refs | find`).
+fn row_names(l: &str) -> Vec<&str> {
+    let term = l.trim_start().split("  ").next().unwrap_or("");
+    term.split('|').filter_map(|p| p.split_whitespace().next()).collect()
+}
+
+/// The first call a session start ends with (D-145); a strategy run gets no
+/// workflow, so none.
+fn next_call(call: &str, strategy: bool) -> String {
+    if strategy {
+        String::new()
+    } else {
+        format!("\nNext: read what the change needs in one call, one command per line: {call}.\n")
+    }
+}
+
+/// `help [command]` for agents: every option, without host commands, and task
+/// commands only in a board run; with a command, only the paragraph holding
+/// its entry — a row indented by exactly two naming it (D-46 point 4, as
+/// amended by D-144); with no entry, the run's command names.
 fn agent_help(topic: Option<&str>) -> String {
     let (_, full) = REFERENCE.split_once("Commands in full\n").unwrap();
     let (full, _host) = full.split_once("\nHost commands").unwrap();
@@ -76,14 +98,20 @@ fn agent_help(topic: Option<&str>) -> String {
         general.to_string()
     };
     let Some(topic) = topic else { return format!("{full}\n") };
-    let paragraphs: Vec<&str> = full.split("\n\n").collect();
-    let word = |p: &str, f: &dyn Fn(&str) -> bool| {
-        p.lines().any(|l| f(l) && l.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == topic))
-    };
-    let hits: Vec<&str> =
-        paragraphs.iter().copied().filter(|p| word(p, &|l| l.starts_with("  ") && l.trim_start().starts_with(topic))).collect();
-    let hits = if hits.is_empty() { paragraphs.into_iter().filter(|p| word(p, &|_| true)).collect() } else { hits };
-    if hits.is_empty() { format!("No command `{topic}`. Every command:\n{full}\n") } else { hits.join("\n\n") + "\n" }
+    let entry = |l: &str| l.starts_with("  ") && !l[2..].starts_with(' ') && row_names(l).iter().any(|w| *w == topic);
+    let hits: Vec<&str> = full.split("\n\n").filter(|p| p.lines().any(entry)).collect();
+    if !hits.is_empty() {
+        return hits.join("\n\n") + "\n";
+    }
+    let mut list: Vec<&str> = vec![];
+    for l in full.lines().filter(|l| l.starts_with("  ") && !l[2..].starts_with(' ')) {
+        for w in row_names(l) {
+            if w != "..." && !FILE_TIERS.contains(&w) && !list.contains(&w) {
+                list.push(w);
+            }
+        }
+    }
+    format!("No command `{topic}`. Commands: {}\n", list.join(", "))
 }
 /// The largest reply, in bytes (about 8k tokens). Agents cut longer tool
 /// output (Codex at about 10k tokens), so `inspect` and `view` trim by
@@ -641,6 +669,33 @@ fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize)
     (out, !failed.is_empty())
 }
 
+/// The reference's example of a first call, for a session start with no
+/// ranked symbols (D-145).
+const EXAMPLE_CALL: &str = "for example `inspect checkout.pay payments.capture --context`";
+/// D-145: what a reply ends with from the second single read in a row.
+const READ_HINT: &str = "Hint: put independent reads in one call, one per line.\n";
+
+/// D-145: the hint a call's reply ends with, from the second call in a row
+/// that held one read and succeeded; `streak` counts those calls, and any
+/// other call starts it again.
+fn read_hint(streak: &mut usize, commands: &[&str], failed: bool) -> &'static str {
+    let read = match commands {
+        [command] if !failed => {
+            let mut words: Vec<&str> = command.split_whitespace().collect();
+            if words.first() == Some(&"solace") {
+                words.remove(0);
+            }
+            if let Some(i) = words.iter().position(|w| *w == "--project") {
+                words.drain(i..(i + 2).min(words.len()));
+            }
+            words.first().is_some_and(|w| READS.contains(w))
+        }
+        _ => false,
+    };
+    *streak = if read { *streak + 1 } else { 0 };
+    if *streak >= 2 { READ_HINT } else { "" }
+}
+
 /// A project folder as `--project` takes it.
 fn project_dir(dir: &str) -> &str {
     match dir.trim_end_matches('/') {
@@ -1034,8 +1089,10 @@ fn tool_schema() -> Value {
         "name": "solace",
         "description": "Read, change and test this project's code. Start with `session start --task`, \
             the task in `text`: it lists the symbols most likely relevant, the workflow and the commands. Several commands \
-            go in one call, one per line, and run in order: read everything you need in one call, and put \
-            `test` on the line after a `submit`.",
+            go in one call, one per line, and run in order: put every independent read in the same call \
+            (`inspect a.f b.g --context`, then `view c` on the next line), never one read per call, and put \
+            `test` on the line after a `submit`. Keep text between calls to a line or two: all of it is re-sent \
+            on every later call. Once the work is done, stop: no recap and no repeated checks.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1056,6 +1113,7 @@ fn mcp(budget: usize) {
     let tool = tool_schema();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
+    let mut single_reads = 0;
     for line in stdin.lines() {
         let Ok(line) = line else { break };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
@@ -1113,6 +1171,11 @@ fn mcp(budget: usize) {
                 if commands.is_empty() {
                     (out, is_error) = (format!("No command given.\n\n{}", agent_reference()), true);
                 }
+                let hint = read_hint(&mut single_reads, &commands, is_error);
+                if !hint.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out += hint;
                 json!({"content": [{"type": "text", "text": out}], "isError": is_error})
             }
             "ping" => json!({}),
@@ -1723,7 +1786,7 @@ impl Store {
             out += &format!("{} — {}\n  {}{more}\n", m.path, module_doc(m), names.join(", "));
         }
         out += &format!("\nTest modules (tests): {}\n", tests.join(", "));
-        out += &self.session_end(&ix)?;
+        out += &self.session_end(&ix, EXAMPLE_CALL)?;
         Ok(out)
     }
 
@@ -1734,14 +1797,16 @@ impl Store {
         out += deps;
         out += "This project has plain files and no Gleam code of its own: `files` lists them, `read` and `write` change them, \
                 and `run` runs the commands its solace.toml declares.\n";
-        out += &self.session_end(&self.index()?)?;
+        out += &self.session_end(&self.index()?, "for example `grep <text> --in <path>` and `read <path> --lines a..b`")?;
         Ok(out)
     }
 
     /// The end of every session start: status, open work and its context,
-    /// the other projects, and the command reference.
-    fn session_end(&self, ix: &Index) -> Out {
-        Ok(format!("{}{}{}\n{}", self.status()?, self.work_context(ix)?, self.other_projects(), agent_reference()))
+    /// the other projects, the command reference, and last `call`, a first
+    /// call to send, where the agent plans its reads (D-145).
+    fn session_end(&self, ix: &Index, call: &str) -> Out {
+        let next = next_call(call, board::strategy_context().is_some());
+        Ok(format!("{}{}{}\n{}{next}", self.status()?, self.work_context(ix)?, self.other_projects(), agent_reference()))
     }
 
     /// The symbols `text` names as `module.name`, in order, each once.
@@ -2038,7 +2103,9 @@ impl Store {
         out += &format!(
             "Symbols most likely relevant to the task, best first (signatures; `>` lines quote code that names the task's terms; `inspect` for code{marked}):\n{packet}{repro}\n{modules}"
         );
-        out += &self.session_end(&ix)?;
+        let top: Vec<String> = ranked.iter().filter(|&&(p, _)| p == 0).take(3).map(|&(_, i)| name(i)).collect();
+        let call = if top.is_empty() { EXAMPLE_CALL.to_string() } else { format!("`inspect {} --context`", top.join(" ")) };
+        out += &self.session_end(&ix, &call)?;
         Ok(out)
     }
 
@@ -3120,6 +3187,12 @@ impl Store {
             out = trace_report(&out);
         }
         if !ok {
+            if out.contains("Unknown module value") {
+                if !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out += "Hint: print a value with `echo value`.\n";
+            }
             out += &format!("\nThe probe ran as test/{PROBE}.gleam:\n{code}");
         }
         if ok { Ok(out) } else { fail(out) }
@@ -4147,6 +4220,138 @@ mod tests {
     use super::*;
     use testing::*;
 
+    /// Runs the reference layout check (D-143) on `text`: whether it passed, and its output.
+    fn reference_layout(text: &str) -> (bool, String) {
+        let dir = Scratch::new().with(&[("reference.txt", text)]);
+        let out = Command::new("python3")
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/reference_layout.py"))
+            .arg(dir.join("reference.txt"))
+            .output()
+            .unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+    /// A sample reference: "Commands in full" on line 3, a heading, then `lines` from line 5.
+    fn sample(lines: &[String]) -> String {
+        format!("Workflow\n\nCommands in full\nReading\n{}", lines.concat())
+    }
+    /// A command row whose description starts at column 19.
+    fn ref_row(term: &str, description: &str) -> String {
+        format!("  {term:<16}{description}\n")
+    }
+    /// A line after `spaces` leading spaces.
+    fn ref_line(spaces: usize, text: &str) -> String {
+        format!("{}{text}\n", " ".repeat(spaces))
+    }
+    #[test]
+    fn reference_layout_of_the_embedded_reference_is_clean() {
+        let (clean, out) = reference_layout(REFERENCE);
+        assert!(clean, "{out}");
+    }
+    /// D-144: a command in the summary table with no entry in the section is
+    /// named, so `help <command>` can answer one paragraph.
+    #[test]
+    fn reference_layout_needs_an_entry_for_every_summary_command() {
+        let text = |entry: &str| format!("Commands (help <command> lists them):\n  drafts                        kept drafts\n\nWorkflow\n\nCommands in full\nReading\n{entry}");
+        assert_eq!(
+            reference_layout(&text(&ref_row("read <path>", "a file"))),
+            (false, "line 2: no entry in \"Commands in full\" for `drafts`\n".into())
+        );
+        let entry = format!("{}{}", ref_row("read <path>", "a file"), ref_row("drafts", "kept drafts"));
+        assert_eq!(reference_layout(&text(&entry)), (true, String::new()));
+        // `help` never shows host commands, so an entry there answers nothing.
+        let host = format!("{}\nHost commands (humans only)\n{}", ref_row("read <path>", "a file"), ref_row("drafts", "kept drafts"));
+        assert_eq!(reference_layout(&text(&host)), (false, "line 2: no entry in \"Commands in full\" for `drafts`\n".into()));
+    }
+    #[test]
+    fn reference_layout_names_a_continuation_one_column_off() {
+        let text = |spaces| sample(&[ref_row("read <path>", "a file, or"), ref_line(spaces, "some of its lines")]);
+        assert_eq!(reference_layout(&text(18)), (true, String::new()));
+        assert_eq!(reference_layout(&text(19)), (false, "line 6: starts at column 20; the descriptions start at column 19\n".into()));
+        assert_eq!(reference_layout(&text(17)), (false, "line 6: starts at column 18; the descriptions start at column 19\n".into()));
+    }
+    #[test]
+    fn reference_layout_takes_an_example_block_after_a_colon_at_one_column() {
+        let text = |last| {
+            sample(&[
+                ref_row("write", "a patch, for"),
+                ref_line(18, "example:"),
+                ref_line(20, "*** Begin Patch"),
+                ref_line(last, "*** End Patch"),
+                ref_line(18, "and more"),
+            ])
+        };
+        assert_eq!(reference_layout(&text(20)), (true, String::new()));
+        assert_eq!(reference_layout(&text(21)), (false, "line 8: starts at column 22; the example starts at column 21\n".into()));
+        // One column deeper after a `:` is the slip again, not an example.
+        let text = sample(&[ref_row("write", "a patch, for"), ref_line(18, "example:"), ref_line(19, "files")]);
+        assert_eq!(reference_layout(&text), (false, "line 7: starts at column 20; the descriptions start at column 19\n".into()));
+    }
+    #[test]
+    fn reference_layout_refuses_deeper_lines_without_a_colon_before_them() {
+        // task:e86828d20aaab5a2's slip: two lines one space right of their paragraph.
+        let text = sample(&[
+            ref_row("strategy task", "a title is the work"),
+            ref_line(18, "in 3-7 words (`extract"),
+            ref_line(19, "files`); details"),
+            ref_line(19, "go in body"),
+        ]);
+        assert_eq!(
+            reference_layout(&text),
+            (
+                false,
+                "line 7: starts at column 20; the descriptions start at column 19\nline 8: starts at column 20; the descriptions start at column 19\n"
+                    .into()
+            )
+        );
+    }
+    #[test]
+    fn reference_layout_names_a_row_whose_description_is_one_column_off() {
+        let text = sample(&[
+            ref_row("read", "a file"),
+            format!("  {:<17}{}\n", "grep <text>", "search"),
+            ref_line(18, "watched files"),
+            ref_row("find <text>", "search code"),
+        ]);
+        // Its continuation is held to the description column, so it adds no fault of its own.
+        assert_eq!(reference_layout(&text), (false, "line 6: its description starts at column 20; the descriptions start at column 19\n".into()));
+    }
+    #[test]
+    fn reference_layout_lets_rows_next_to_each_other_share_their_own_column() {
+        let table = |third: &str| {
+            sample(&[
+                ref_row("read", "a file"),
+                ref_row("grep", "search"),
+                "Files: by tier\n".into(),
+                "  graph     the store\n".into(),
+                ref_line(12, "refused"),
+                format!("  {third} solace.toml\n"),
+                ref_line(12, "the human's"),
+                "  internal  .solace/\n".into(),
+                ref_row("files [dir]", "tree"),
+            ])
+        };
+        assert_eq!(reference_layout(&table("protected")), (true, String::new()));
+        // One space after a term that doesn't reach the table's column: the row has no description of its own.
+        assert_eq!(reference_layout(&table("protectedx")), (false, "line 11: starts at column 13; the descriptions start at column 19\n".into()));
+    }
+    #[test]
+    fn reference_layout_refuses_a_line_after_prose_and_a_reference_without_the_section() {
+        let text = sample(&[ref_row("read", "a file"), "Prose here\n".into(), ref_line(18, "stray")]);
+        assert_eq!(
+            reference_layout(&text),
+            (false, "line 7: starts at column 19; after a heading or prose, a line starts at column 1 or 3\n".into())
+        );
+        let text = sample(&[ref_row("read", "a file"), "\n".into(), ref_line(18, "stray")]);
+        assert_eq!(
+            reference_layout(&text),
+            (false, "line 7: starts at column 19; after a blank line, a line starts at column 1 or 3\n".into())
+        );
+        assert_eq!(reference_layout("Workflow only\n"), (false, "no \"Commands in full\" line\n".into()));
+        assert_eq!(
+            reference_layout("Commands in full\n  grep <text>\n"),
+            (false, "no command row has its description on the same line\n".into())
+        );
+    }
     #[test]
     fn broken_symbols_counted_once() {
         let d = |sym: &str| Diag { error: true, module: None, symbol: Some(sym.into()), text: format!("error: {sym}") };
@@ -4187,6 +4392,24 @@ mod tests {
         let (out, error) = batch(&["read b.md", "write a.md"], 10_000, &mut fake("none", &mut vec![]));
         assert!(!error && !out.contains("commands failed"), "{out}");
     }
+    /// D-145: from the second successful single read in a row, the reply hints to batch.
+    #[test]
+    fn a_second_single_read_in_a_row_gets_the_hint() {
+        let mut streak = 0;
+        assert_eq!(read_hint(&mut streak, &["read a.md"], false), "");
+        assert_eq!(read_hint(&mut streak, &["solace grep x"], false), READ_HINT);
+        assert_eq!(read_hint(&mut streak, &["view a.f --project lib"], false), READ_HINT);
+        // A batch, a failed read and a change each start the count again.
+        assert_eq!(read_hint(&mut streak, &["read a.md", "read b.md"], false), "");
+        assert_eq!(read_hint(&mut streak, &["read a.md"], false), "");
+        assert_eq!(read_hint(&mut streak, &["read a.md"], true), "");
+        assert_eq!(read_hint(&mut streak, &["read a.md"], false), "");
+        assert_eq!(read_hint(&mut streak, &["write a.md"], false), "");
+        assert_eq!(read_hint(&mut streak, &["--project lib inspect a.f"], false), "");
+        assert_eq!(read_hint(&mut streak, &["--project lib inspect a.f"], false), READ_HINT);
+        assert_eq!(read_hint(&mut streak, &[], false), "");
+        assert_eq!(streak, 0);
+    }
     /// A read command given an option it doesn't take is refused by name.
     #[test]
     fn an_option_a_command_doesnt_take_is_refused_by_name() {
@@ -4209,6 +4432,12 @@ mod tests {
         assert!(e.starts_with("view has no --lines; read takes --lines"), "{e}");
     }
     #[test]
+    fn the_tool_asks_for_batched_reads_short_text_and_a_clean_stop() {
+        let d = tool_schema()["description"].as_str().unwrap().to_string();
+        assert!(d.contains("put every independent read in the same call") && d.contains("never one read per call"), "{d}");
+        assert!(d.contains("Keep text between calls to a line or two") && d.contains("Once the work is done, stop"), "{d}");
+    }
+    #[test]
     fn agent_reference_leaves_out_host_and_task_commands() {
         // Tests run outside a board run; `help` keeps everything.
         let r = agent_reference();
@@ -4225,6 +4454,9 @@ mod tests {
         );
         assert!(!r.contains("probe --from <fn>") && REFERENCE.contains("probe --from <fn>") && REFERENCE.contains("--replace [--all]"));
         assert!(r.contains("Imports are added") && !r.contains("task ask"));
+        // Scope, the code's own conventions, comments that say why, and no secrets.
+        assert!(r.contains("stop exploring") && r.contains("Write code the way the code around it is written"));
+        assert!(r.contains("A comment says why code exists") && r.contains("Never put secrets or keys"));
         // D-119 point 5: plain-file projects batch too, every edit in one patch.
         assert!(r.contains("then `run <name>`") && r.contains("go in one patch") && r.contains("a patch of many edits"));
         // D-123: where a line runs, and that options belong to one command.
@@ -4234,7 +4466,32 @@ mod tests {
         assert!(h.contains("probe --from <fn>") && !h.contains("task diff") && !h.contains("agent-config"));
         let s = agent_help(Some("submit"));
         assert!(s.contains("--replace [--all]") && s.contains("draft") && !s.contains("probe --from"), "{s}");
-        assert!(agent_help(Some("work")).contains("work done") && agent_help(Some("nope")).starts_with("No command"));
+    }
+
+    /// D-144: `help <command>` answers the one paragraph holding the command's
+    /// entry; every command in the summary table has its own entry, so its
+    /// section is much shorter than the whole reference.
+    #[test]
+    fn help_answers_one_command_its_own_section() {
+        let full = agent_help(None);
+        let table = REFERENCE.split("Commands (").nth(1).unwrap();
+        let rows: Vec<&str> = table.lines().skip_while(|l| !l.starts_with("  ")).take_while(|l| l.starts_with("  ")).collect();
+        assert!(rows.len() >= 19, "{rows:?}");
+        for row in rows {
+            let cmd = row.split_whitespace().next().unwrap();
+            let h = agent_help(Some(cmd));
+            assert!(h.contains(&format!("  {cmd} ")), "{cmd}: {h}");
+            assert!(h.len() * 2 < full.len(), "{cmd}: {} of {} bytes", h.len(), full.len());
+        }
+        let w = agent_help(Some("work"));
+        assert!(w.contains("work done <id>") && !w.contains("inspect"), "{w}");
+        let r = agent_help(Some("run"));
+        assert!(r.contains("run <name>") && !r.contains("work add"), "{r}");
+        let n = agent_help(Some("nosuch"));
+        assert!(
+            n.starts_with("No command `nosuch`") && n.contains("inspect") && n.contains("work") && !n.contains("--context") && !n.contains("watched") && n.len() * 2 < full.len(),
+            "{n}"
+        );
     }
 
     /// D-123: an unknown name another project has says where it is, and the
@@ -4450,6 +4707,10 @@ mod tests {
         assert!(!probe_file.exists());
         let err = store.probe("echo calc.nope()", None, &[]).unwrap_err().0;
         assert!(err.contains("The probe ran as") && err.contains("import calc"), "{err}");
+        // D-145: an unknown module value says how to print a value; another failure doesn't.
+        assert!(err.contains("Unknown module value") && err.contains("Hint: print a value with `echo value`.\n\nThe probe ran as"), "{err}");
+        let err = store.probe("echo nope", None, &[]).unwrap_err().0;
+        assert!(err.contains("The probe ran as") && !err.contains("Hint:"), "{err}");
         assert!(!probe_file.exists());
         // A probe is test-side code: it may use test helpers.
         assert!(store.probe("echo helper.two()", None, &[]).unwrap().contains("2"));
@@ -4618,6 +4879,30 @@ mod tests {
         fs::write(root.join("AGENTS.md"), "a line of forty bytes, give or take ok.\n".repeat(250)).unwrap();
         let out = store.session(&[]).unwrap();
         assert!(out.contains("ok.\n… `read AGENTS.md --lines 201..` for the rest\n"), "{out}");
+    }
+    /// D-145: every session start ends with a first call to send.
+    #[test]
+    fn session_start_ends_with_a_first_call() {
+        let store = calc_project();
+        let next = "\nNext: read what the change needs in one call, one command per line: ";
+        let out = store.session(&[]).unwrap();
+        assert!(out.ends_with(&format!("{next}for example `inspect checkout.pay payments.capture --context`.\n")), "{out}");
+        // With --task, the call reads the top-ranked symbols.
+        let out = store.session_task("Make calc.add handle overflow").unwrap();
+        let last = out.rsplit_once(next).map(|(_, l)| l).unwrap_or_default();
+        assert!(last.starts_with("`inspect calc.add ") && last.ends_with(" --context`.\n") && last.lines().count() == 1, "{out}");
+        // A project of plain files reads with grep and read, with or without --task.
+        fs::remove_file(store.root.join("gleam.toml")).unwrap();
+        let plain = format!("{next}for example `grep <text> --in <path>` and `read <path> --lines a..b`.\n");
+        for out in [store.session(&[]).unwrap(), store.session_task("calc.add").unwrap()] {
+            assert!(out.contains("plain files") && out.ends_with(&plain), "{out}");
+        }
+    }
+    /// D-145: a strategy run gets no workflow, so no first call.
+    #[test]
+    fn a_strategy_run_gets_no_first_call() {
+        assert_eq!(next_call("`read a`", true), "");
+        assert_eq!(next_call("`read a`", false), "\nNext: read what the change needs in one call, one command per line: `read a`.\n");
     }
 
     /// A whole module replaces every symbol it holds, and may not drop one;

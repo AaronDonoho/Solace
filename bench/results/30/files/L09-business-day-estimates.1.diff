@@ -1,0 +1,43 @@
+diff --git a/src/pilot/date.gleam b/src/pilot/date.gleam
+index eb788e7..8c8e644 100644
+--- a/src/pilot/date.gleam
++++ b/src/pilot/date.gleam
+@@ -110,10 +110,21 @@ pub fn add_days(date: Date, days: Int) -> Date {
+ pub fn add_business_days(date: Date, days: Int) -> Date {
+   case days <= 0 {
+     True -> date
+-    False -> {
+-      let next = add_days(date, 1)
+-      add_business_days(next, days - 1)
+-    }
++    False -> step_business_days(skip_weekend(date), days)
++  }
++}
++
++fn skip_weekend(date: Date) -> Date {
++  case is_weekend(date) {
++    True -> skip_weekend(add_days(date, 1))
++    False -> date
++  }
++}
++
++fn step_business_days(date: Date, days: Int) -> Date {
++  case days <= 0 {
++    True -> date
++    False -> step_business_days(skip_weekend(add_days(date, 1)), days - 1)
+   }
+ }
+ 
+diff --git a/test/pilot/date_test.gleam b/test/pilot/date_test.gleam
+index 7cb0319..28a6e68 100644
+--- a/test/pilot/date_test.gleam
++++ b/test/pilot/date_test.gleam
+@@ -23,6 +23,8 @@ pub fn business_days_test() {
+   // Monday + 3 business days = Thursday
+   assert date.add_business_days(Date(2026, 3, 2), 3) == Date(2026, 3, 5)
+   assert date.add_business_days(Date(2026, 3, 2), 0) == Date(2026, 3, 2)
++  assert date.add_business_days(Date(2026, 3, 5), 4) == Date(2026, 3, 11)
++  assert date.add_business_days(Date(2026, 3, 7), 1) == Date(2026, 3, 10)
+ }
+ 
+ pub fn days_between_and_iso_test() {

@@ -1,0 +1,108 @@
+diff --git a/solace.toml b/solace.toml
+new file mode 100644
+index 0000000..bac0ebb
+--- /dev/null
++++ b/solace.toml
+@@ -0,0 +1,13 @@
++# Solace project settings. Protected: agents may read this file.
++# Text files up to this many bytes are watched; file writes are limited to it.
++watch_limit = 262144
++# Files Solace doesn't watch or search (agents can still read and write them).
++unwatched = []
++
++[validators]
++# Optional checks, for example:
++# "docs/**/*.json" = ["python3", "-m", "json.tool", "{file}"]
++
++[commands]
++# Optional commands agents may run, for example:
++# app = { run = ["gleam", "run", "--"], args = true }
+diff --git a/src/pilot/return_policy.gleam b/src/pilot/return_policy.gleam
+index cd15ae9..11ad510 100644
+--- a/src/pilot/return_policy.gleam
++++ b/src/pilot/return_policy.gleam
+@@ -144,13 +144,20 @@ pub fn completes_order(
+   items: List(Item),
+   already_returned: Dict(String, Int),
+ ) -> Bool {
+-  list.all(items, fn(item) {
+-    let before = dict.get(already_returned, item.sku) |> result.unwrap(0)
+-    let bought = case order.find_line(order, item.sku) {
+-      Ok(line) -> line.quantity
+-      Error(Nil) -> 0
+-    }
+-    before + item.quantity >= bought
++  let this_return =
++    list.fold(items, dict.new(), fn(acc, item) {
++      dict.upsert(acc, item.sku, fn(n) {
++        case n {
++          Some(n) -> n + item.quantity
++          None -> item.quantity
++        }
++      })
++    })
++  // Every line of the order must be covered, not just the ones in this return.
++  list.all(order.lines, fn(line) {
++    let before = dict.get(already_returned, line.sku) |> result.unwrap(0)
++    let now = dict.get(this_return, line.sku) |> result.unwrap(0)
++    before + now >= line.quantity
+   })
+ }
+ 
+diff --git a/test/pilot/return_policy_test.gleam b/test/pilot/return_policy_test.gleam
+index d524f34..10b339e 100644
+--- a/test/pilot/return_policy_test.gleam
++++ b/test/pilot/return_policy_test.gleam
+@@ -102,3 +102,25 @@ pub fn restocking_fee_test() {
+   assert return_policy.restocking_fee_percent(Electronics, Damaged) == 0
+   assert return_policy.restocking_fee_percent(Apparel, NoLongerNeeded) == 0
+ }
++
++pub fn order_not_complete_until_every_line_test() {
++  let o = delivered_on(0)
++  assert return_policy.completes_order(o, [Item("TEE", 2)], dict.new()) == False
++  assert return_policy.completes_order(o, [Item("MUG", 1)], dict.new()) == False
++  assert return_policy.completes_order(o, [Item("TEE", 1)], dict.new()) == False
++  assert return_policy.completes_order(
++    o,
++    [Item("MUG", 1)],
++    dict.from_list([#("TEE", 2)]),
++  )
++  assert return_policy.completes_order(
++    o,
++    [Item("TEE", 2)],
++    dict.from_list([#("MUG", 1)]),
++  )
++  assert return_policy.completes_order(
++    o,
++    [Item("TEE", 2), Item("MUG", 1)],
++    dict.new(),
++  )
++}
+diff --git a/test/pilot/returns_test.gleam b/test/pilot/returns_test.gleam
+index 5cf865d..f31868c 100644
+--- a/test/pilot/returns_test.gleam
++++ b/test/pilot/returns_test.gleam
+@@ -102,3 +102,22 @@ pub fn must_receive_before_refund_test() {
+     returns.refund(db, c, gateway(), r.id)
+   assert inventory.available(db.stock, "WH-EAST", "MUG-BLUE") == 29
+ }
++
++pub fn partial_return_keeps_shipping_test() {
++  let #(db, o, _) =
++    support.delivered(
++      seed.demo_store(),
++      seed.ada,
++      [#("TEE-M-BLK", 2), #("MUG-BLUE", 1)],
++      3,
++    )
++  let c = support.on_day(5)
++  let assert Ok(#(db, shirts)) =
++    returns.request(db, c, o.id, [Item("TEE-M-BLK", 2)], Damaged)
++  assert shirts.refund.shipping_cents == 0
++  assert shirts.refund.total_cents == 3761
++  let assert Ok(#(_, mug)) =
++    returns.request(db, c, o.id, [Item("MUG-BLUE", 1)], Damaged)
++  assert mug.refund.shipping_cents == 600
++  assert mug.refund.total_cents == 2062
++}

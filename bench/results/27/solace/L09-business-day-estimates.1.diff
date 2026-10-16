@@ -1,0 +1,136 @@
+diff --git a/solace.toml b/solace.toml
+new file mode 100644
+index 0000000..bac0ebb
+--- /dev/null
++++ b/solace.toml
+@@ -0,0 +1,13 @@
++# Solace project settings. Protected: agents may read this file.
++# Text files up to this many bytes are watched; file writes are limited to it.
++watch_limit = 262144
++# Files Solace doesn't watch or search (agents can still read and write them).
++unwatched = []
++
++[validators]
++# Optional checks, for example:
++# "docs/**/*.json" = ["python3", "-m", "json.tool", "{file}"]
++
++[commands]
++# Optional commands agents may run, for example:
++# app = { run = ["gleam", "run", "--"], args = true }
+diff --git a/src/pilot/date.gleam b/src/pilot/date.gleam
+index eb788e7..c5ddec1 100644
+--- a/src/pilot/date.gleam
++++ b/src/pilot/date.gleam
+@@ -111,7 +111,7 @@ pub fn add_business_days(date: Date, days: Int) -> Date {
+   case days <= 0 {
+     True -> date
+     False -> {
+-      let next = add_days(date, 1)
++      let next = next_business_day(add_days(date, 1))
+       add_business_days(next, days - 1)
+     }
+   }
+@@ -133,3 +133,12 @@ pub fn to_iso(date: Date) -> String {
+   <> "-"
+   <> string.pad_start(int.to_string(date.day), 2, "0")
+ }
++
++/// The first business day on or after `date`: Saturdays and Sundays are
++/// skipped, so a weekend date lands on the Monday that follows.
++fn next_business_day(date: Date) -> Date {
++  case is_weekend(date) {
++    True -> next_business_day(add_days(date, 1))
++    False -> date
++  }
++}
+diff --git a/test/pilot/date_test.gleam b/test/pilot/date_test.gleam
+index 7cb0319..6b62c85 100644
+--- a/test/pilot/date_test.gleam
++++ b/test/pilot/date_test.gleam
+@@ -23,6 +23,17 @@ pub fn business_days_test() {
+   // Monday + 3 business days = Thursday
+   assert date.add_business_days(Date(2026, 3, 2), 3) == Date(2026, 3, 5)
+   assert date.add_business_days(Date(2026, 3, 2), 0) == Date(2026, 3, 2)
++  // Thursday + 4 business days skips the weekend: Fri, Mon, Tue, Wed
++  assert date.add_business_days(Date(2026, 3, 5), 4) == Date(2026, 3, 11)
++  // The business day after a Friday is the Monday that follows
++  assert date.add_business_days(Date(2026, 3, 6), 1) == Date(2026, 3, 9)
++  // Starting on a weekend counts from the following Monday
++  assert date.add_business_days(Date(2026, 3, 7), 1) == Date(2026, 3, 9)
++  assert date.add_business_days(Date(2026, 3, 8), 2) == Date(2026, 3, 10)
++  // 5 business days from a Monday is the Monday of the next week
++  assert date.add_business_days(Date(2026, 3, 2), 5) == Date(2026, 3, 9)
++  // 10 business days from a Monday is the Monday two weeks later
++  assert date.add_business_days(Date(2026, 3, 2), 10) == Date(2026, 3, 16)
+ }
+ 
+ pub fn days_between_and_iso_test() {
+diff --git a/test/pilot/fulfillment_test.gleam b/test/pilot/fulfillment_test.gleam
+index 7566fce..cf271d4 100644
+--- a/test/pilot/fulfillment_test.gleam
++++ b/test/pilot/fulfillment_test.gleam
+@@ -49,7 +49,8 @@ pub fn shipped_email_has_estimate_test() {
+     list.find(store.sent_messages(db), fn(m) {
+       m.kind == notifications.OrderShipped
+     })
+-  assert string.contains(message.body, "should arrive by 2026-03-")
++  // Shipped Tuesday 2026-03-03, national standard: 4 business days
++  assert string.contains(message.body, "should arrive by 2026-03-09")
+ }
+ 
+ pub fn consolidates_split_reservations_test() {
+@@ -119,3 +120,16 @@ pub fn must_be_paid_to_pick_test() {
+   let assert Error(fulfillment.OrderRejected(_)) =
+     fulfillment.start_picking(db, support.on_day(1), o.id, Standard)
+ }
++
++pub fn shipped_email_skips_the_weekend_test() {
++  // Ada's order ships from Newark (NJ) to Albany (NY): national standard.
++  let #(db, o) = support.paid(seed.demo_store(), seed.ada, [#("MUG-BLUE", 1)])
++  // Day 3 after the seed epoch (Monday 2026-03-02) is Thursday 2026-03-05.
++  let #(db, _shipment) = support.shipped_on(db, o.id, 3)
++  let assert Ok(message) =
++    list.find(store.sent_messages(db), fn(m) {
++      m.kind == notifications.OrderShipped
++    })
++  // 4 business days from Thursday: Fri 6, Mon 9, Tue 10, Wed 11.
++  assert string.contains(message.body, "should arrive by 2026-03-11")
++}
+diff --git a/test/pilot/tax_shipping_test.gleam b/test/pilot/tax_shipping_test.gleam
+index fd9bee7..e18ad11 100644
+--- a/test/pilot/tax_shipping_test.gleam
++++ b/test/pilot/tax_shipping_test.gleam
+@@ -46,4 +46,15 @@ pub fn estimate_delivery_test() {
+   // Shipped Monday 2026-03-02, national standard: 4 business days
+   let q = shipping.quote(Standard, "NJ", Domestic("NY"), 850, 0)
+   assert shipping.estimate_delivery(Date(2026, 3, 2), q) == Date(2026, 3, 6)
++  // Shipped Thursday 2026-03-05, national standard: 4 business days, and the
++  // weekend is skipped: Fri 6, Mon 9, Tue 10, Wed 11.
++  assert shipping.estimate_delivery(Date(2026, 3, 5), q) == Date(2026, 3, 11)
++  // Express national from a Thursday: 2 business days lands on Monday
++  let express = shipping.quote(Express, "NJ", Domestic("NY"), 850, 0)
++  assert shipping.estimate_delivery(Date(2026, 3, 5), express)
++    == Date(2026, 3, 9)
++  // Overseas standard from a Thursday: 10 business days
++  let overseas = shipping.quote(Standard, "NJ", International("DE"), 850, 0)
++  assert shipping.estimate_delivery(Date(2026, 3, 5), overseas)
++    == Date(2026, 3, 19)
+ }
+diff --git a/test/support.gleam b/test/support.gleam
+index 340163e..85662b4 100644
+--- a/test/support.gleam
++++ b/test/support.gleam
+@@ -71,7 +71,12 @@ pub fn delivered(
+ 
+ /// Picks, packs and ships a paid order on day 1.
+ pub fn shipped(db: Store, order_id: Int) -> #(Store, Shipment) {
+-  let c = on_day(1)
++  shipped_on(db, order_id, 1)
++}
++
++/// Picks, packs and ships a paid order `days` days after the seed epoch.
++pub fn shipped_on(db: Store, order_id: Int, days: Int) -> #(Store, Shipment) {
++  let c = on_day(days)
+   let assert Ok(#(db, s)) =
+     fulfillment.start_picking(db, c, order_id, shipping.Standard)
+   let assert Ok(#(db, s)) = fulfillment.pack(db, c, s.id)

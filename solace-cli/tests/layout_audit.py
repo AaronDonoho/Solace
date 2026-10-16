@@ -2,9 +2,14 @@
 
 Agents can't see pages, so this loads each page of a fixture Solace instance in
 headless Chromium, in the light and the dark theme, and prints what a reviewer
-would look at: control heights, label-to-control baselines, padding, the tab
-bar's position, and how the sticky lane header lines up with its lanes, at the
-top and again with the lanes scrolled under it (a short viewport, extra PNG).
+would look at: control heights (a label styled as a button, the editor's Image
+tool, counts as one), label-to-control baselines, padding, the tab bar's
+position, and how the sticky lane header lines up with its lanes, at the top
+and again with the lanes scrolled under it (a short viewport, extra PNG), and
+the width of every task element. The board audit also opens a task in the
+board's band at several window sizes: on the side, at its smallest width,
+collapsed on the side, and at the bottom with two columns and with one, and
+measures the band, its bar and where the bar's items sit in it.
 
 Usage: layout_audit.py [page]
 Pages: board, strategy (all tabs), strategy-vision, strategy-features,
@@ -172,7 +177,10 @@ MEASURE = r"""
 
   const controls = {};
   for (const [el, hosts] of all) {
-    if (!['button', 'input', 'select'].includes(el.localName) || !shown(el)) continue;
+    // A label styled as a button (the editor's Image tool) is a control, like the buttons.
+    const label_button = el.localName === 'label' && el.classList.contains('button');
+    if (!['button', 'input', 'select'].includes(el.localName) && !label_button) continue;
+    if (!shown(el)) continue;
     if (el.localName === 'input' && ['hidden', 'checkbox', 'radio', 'file'].includes(el.type)) continue;
     const h = r1(el.getBoundingClientRect().height), sel = path(el, hosts);
     (controls[h] ??= {})[sel] = ((controls[h] ??= {})[sel] || 0) + 1;
@@ -227,7 +235,13 @@ MEASURE = r"""
       });
     }
   }
-  return { controls, labels, padding, tabs, lanes };
+  // A task element sized by its content would shrink to nothing: its
+  // styles give it `container-type:inline-size`.
+  const hosts = [];
+  for (const [el, on] of all) {
+    if (el.localName === 'solace-task') hosts.push({ sel: path(el, on), width: r1(el.getBoundingClientRect().width) });
+  }
+  return { controls, labels, padding, tabs, lanes, hosts };
 }
 """
 
@@ -257,6 +271,93 @@ SCROLL = r"""
 SCROLLED_VIEWPORT = {'width': 1440, 'height': 520}
 SCROLL_BY = 160
 
+# The board's detail band with a task open: its layout and size, its bar's
+# height, the task element's width and whether its details show in two
+# columns, and for each item in the bar the space above it (to the band's top
+# border) and below it (to the details' top edge).
+BAND = r"""
+() => {
+  const find = (root, sel) => { const hit = root.querySelector(sel); if (hit) return hit;
+    for (const el of root.querySelectorAll('*')) { const f = el.shadowRoot && find(el.shadowRoot, sel); if (f) return f; }
+    return null; };
+  const r1 = x => Math.round(x * 10) / 10;
+  const band = find(document, '.detail-band');
+  if (!band) return null;
+  const work = band.parentElement, b = band.getBoundingClientRect();
+  const host = band.querySelector('solace-task'), shadow = host?.shadowRoot;
+  const detail = shadow?.querySelector('.detail')?.getBoundingClientRect();
+  const bar = band.querySelector('.detail-bar');
+  const top = b.top + parseFloat(getComputedStyle(band).borderTopWidth);
+  const under = detail && detail.height > 0 ? detail.top : null;
+  const items = bar ? [...bar.children].filter(c => c.getBoundingClientRect().height > 0).map(c => {
+    const r = c.getBoundingClientRect();
+    return { name: `${c.className || c.localName} "${(c.textContent || '').trim().slice(0, 16)}"`,
+             above: r1(r.top - top), below: under === null ? null : r1(under - r.bottom), height: r1(r.height) };
+  }) : [];
+  const act = shadow?.querySelector('.act')?.getBoundingClientRect();
+  const record = shadow?.querySelector('.record')?.getBoundingClientRect();
+  const two = act && record && record.height > 0 && record.left >= act.right;
+  const side = work.classList.contains('side');
+  return { layout: (side ? 'side' : 'bottom') + (band.classList.contains('collapsed') ? ', collapsed' : ''),
+           band_w: r1(b.width), band_h: r1(b.height), bar_h: bar ? r1(bar.getBoundingClientRect().height) : 0,
+           rem: parseFloat(getComputedStyle(document.documentElement).fontSize),
+           host_w: host ? r1(host.getBoundingClientRect().width) : null,
+           columns: act && record && record.height > 0 ? (two ? 'two' : 'one') : 'hidden',
+           gap: two ? r1(record.left - act.right) : null,
+           lanes_margin: r1(parseFloat(getComputedStyle(work.querySelector('.lanes-area')).marginRight) || 0),
+           items };
+}
+"""
+# (name, window, stored band width, collapse after opening). A window wider
+# than 1.4 times its height puts the band on the side.
+BAND_CASES = [
+    ('side', {'width': 1440, 'height': 900}, None, False),
+    ('side at its smallest width', {'width': 1440, 'height': 900}, '100', False),
+    ('side, collapsed', {'width': 1440, 'height': 900}, None, True),
+    ('bottom, wide', {'width': 1600, 'height': 1200}, None, False),
+    ('bottom, narrow', {'width': 1200, 'height': 1000}, None, False),
+]
+
+def report_band(name, window, m, shot):
+    size = f'{window["width"]}×{window["height"]}'
+    print(f'\n== task band · {name} · {size} ==')
+    if not m:
+        print('  no detail band')
+        return
+    rem = m['rem']
+    print(f'  layout {m["layout"]}: band {m["band_w"]:.1f}×{m["band_h"]:.1f}px '
+          f'(side minimum 32rem = {32 * rem:.0f}px), board margin {m["lanes_margin"]:.1f}px')
+    gap = f', {m["gap"]:.1f}px apart (2rem = {2 * rem:.0f}px)' if m['gap'] is not None else ''
+    print(f'  task element {m["host_w"]}px wide (two columns from 90rem = {90 * rem:.0f}px): {m["columns"]} column(s){gap}')
+    print(f'  bar {m["bar_h"]:.1f}px high; items (space above to the band\'s top border, below to the details):')
+    for i in m['items']:
+        below = f'{i["below"]:.1f}' if i['below'] is not None else 'no details shown'
+        print(f'    {i["name"]:<36} height {i["height"]:.1f} above {i["above"]:.1f} below {below}')
+    print(f'screenshot {shot.name}')
+
+def audit_band(browser, fixture, task, out):
+    """Opens the task on the board in each of BAND_CASES and reports its band."""
+    from playwright.sync_api import Error as PlaywrightError
+    for i, (name, window, width, collapse) in enumerate(BAND_CASES):
+        context = browser.new_context(viewport=window, color_scheme='light')
+        stored = f"localStorage.setItem('solace-board-detail-width', '{width}')" if width else "localStorage.removeItem('solace-board-detail-width')"
+        context.add_init_script(f"try {{ localStorage.setItem('solace-theme', 'light'); localStorage.setItem('solace-board-detail', '0'); localStorage.removeItem('solace-board-detail-height'); {stored} }} catch {{}}")
+        page = context.new_page()
+        page.goto(fixture.url + '/', wait_until='load')
+        try:
+            page.wait_for_function(READY, arg='.lane', timeout=10000)
+            page.locator('button.card', has_text=task['title']).first.click(timeout=5000)
+            page.wait_for_function(READY, arg='.detail', timeout=10000)
+            if collapse: page.locator('button.detail-toggle').first.click(timeout=5000)
+        except PlaywrightError as e:
+            print(f'\nlayout_audit: task band · {name}: could not open the task: {str(e).splitlines()[0]}')
+        page.evaluate('document.fonts.ready.then(() => 0)')
+        page.wait_for_timeout(600)
+        shot = out/f'band-{i + 1}.png'
+        page.screenshot(path=str(shot))
+        report_band(name, window, page.evaluate(BAND), shot)
+        context.close()
+
 def address(page, task):
     if page == 'board': return '/', '.lane'
     if page.startswith('strategy-'): return '/strategy?tab=' + page.split('-', 1)[1], 'button'
@@ -284,6 +385,9 @@ def report(name, theme, m, shot):
     if not m['tabs']: print('  none')
     print('lane heads (head column vs lane column)')
     lane_heads(m['lanes'])
+    print('task elements (width)')
+    for t in m['hosts']: print(f'  {t["sel"]}: {t["width"]:.1f}px')
+    if not m['hosts']: print('  none')
     print(f'screenshot {shot.name}')
 
 def lane_heads(lanes, stuck=False):
@@ -346,6 +450,7 @@ def main(args):
                         page.screenshot(path=str(shot))
                         report_scrolled(by, page.evaluate(MEASURE), shot)
                     context.close()
+            if 'board' in pages: audit_band(browser, fixture, task, out)
         finally:
             fixture.close()
             browser.close()

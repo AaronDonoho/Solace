@@ -59,11 +59,6 @@ pub type Lane {
   )
 }
 
-/// A Gleam project found in the workspace folder.
-pub type Found {
-  Found(dir: String, name: String, imported: Bool, member: Bool)
-}
-
 pub type Model {
   Model(
     lanes: List(Lane),
@@ -72,7 +67,6 @@ pub type Model {
     workspace: Bool,
     /// Whether the project list has loaded once.
     listed: Bool,
-    found: List(Found),
     /// The task chosen on the board: the project it is stored in, and its id.
     /// Its details are `<solace-task>`, which loads them itself.
     selected_card: Option(#(String, String)),
@@ -85,17 +79,19 @@ pub type Model {
     detail_collapsed: Bool,
     /// The detail band's task height in pixels; 0 is the CSS default.
     detail_height: Int,
+    /// The detail band's width in pixels when it sits at the right edge; 0
+    /// is the CSS default.
+    detail_width: Int,
+    /// Whether the window is wider than 1.4 times its height, so an open
+    /// task's band sits at the right edge instead of the bottom.
+    side: Bool,
     /// A drag of the resize handle in progress: the pointer's start, the
-    /// band's height then, and the largest height that keeps the board's
+    /// band's size then, and the largest size that keeps the board's
     /// column bar on screen.
     resizing: Option(#(Float, Float, Int)),
-    projects_open: Bool,
-    project_name: String,
-    project_dir: String,
-    project_target: String,
-    /// The project being removed: its dir, whether the second step (deleting
-    /// its files) shows, and the name typed to confirm it.
-    removing: Option(#(String, Bool, String)),
+    /// Copy ID in the bar: how many copies were asked for, and what it says
+    /// for a moment after the last ("" for Copy ID).
+    copy: #(Int, String),
     source: Option(Source),
     /// The `base` attribute: this instance's API prefix, "" for the page's.
     prefix: String,
@@ -132,29 +128,25 @@ pub type Msg {
   Collapse(String)
   /// Collapse the detail band to its bar, or expand it back.
   ToggleDetail
-  /// The resize handle's pointerdown: the pointer's y and id.
-  ResizeStart(Float, Int)
-  /// A drag has begun: the pointer's y, the band's height then, and the
-  /// largest height that keeps the board's column bar on screen.
+  /// The resize handle's pointerdown: the pointer's x, y and id.
+  ResizeStart(Float, Float, Int)
+  /// A drag has begun: the pointer's x or y, the band's size then, and the
+  /// largest size that keeps the board's column bar on screen.
   ResizeBegin(Float, Float, Int)
-  /// The handle's pointermove: the pointer's y.
-  ResizeMove(Float)
-  /// The drag ends: the height is kept.
+  /// The handle's pointermove: the pointer's x and y.
+  ResizeMove(Float, Float)
+  /// The drag ends: the size is kept.
   ResizeEnd
   /// The handle's keydown: the key's name.
   ResizeKey(String)
-  ToggleProjects
-  AddProject(String)
-  RemoveProject(String)
-  RemoveOnly
-  RemoveFiles
-  RemoveTyped(String)
-  RemoveDelete
-  RemoveCancel
-  ProjectName(String)
-  ProjectDir(String)
-  ProjectTarget(String)
-  CreateProject
+  /// Whether the window is wider than 1.4 times its height.
+  Sided(Bool)
+  /// The bar's Copy ID: the open task's reference goes to the clipboard.
+  CopyId
+  /// Copy number `n` is done: whether the clipboard took it.
+  CopyDone(Int, Bool)
+  /// Copy number `n`'s moment has passed.
+  CopyReset(Int)
   Dismiss(solace_task.Notice)
   /// Close All: every toast goes.
   DismissAll
@@ -190,7 +182,6 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       ],
       workspace: False,
       listed: False,
-      found: [],
       selected_card: None,
       error: "",
       notices: [],
@@ -200,12 +191,10 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
         |> list.filter(fn(d) { d != "" }),
       detail_collapsed: load(detail_key) == "1",
       detail_height: load(detail_height_key) |> int.parse |> result.unwrap(0),
+      detail_width: load(detail_width_key) |> int.parse |> result.unwrap(0),
+      side: False,
       resizing: None,
-      projects_open: False,
-      project_name: "",
-      project_dir: "",
-      project_target: "erlang",
-      removing: None,
+      copy: #(0, ""),
       source: None,
       prefix: "",
       root: no_root(),
@@ -260,7 +249,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     }
     Attached(root) -> #(
       Model(..model, root: root),
-      effect.from(fn(_) { prevent_drag(root) }),
+      effect.from(fn(send) {
+        prevent_drag(root)
+        watch_side(root, fn(side) { send(Sided(side)) })
+      }),
     )
     Listening(source) -> #(Model(..model, source: Some(source)), effect.none())
     Disconnected -> #(Model(..stop(model), connected: False), effect.none())
@@ -278,11 +270,11 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       case json.parse(text, projects_decoder()) {
         // A project on its own that gains another needs the merged event
         // stream, which a fresh page opens.
-        Ok(#(True, _, _)) if model.listed && !model.workspace -> {
+        Ok(#(True, _)) if model.listed && !model.workspace -> {
           reload()
           #(model, effect.none())
         }
-        Ok(#(workspace, lanes, found)) -> {
+        Ok(#(workspace, lanes)) -> {
           let lanes =
             list.map(lanes, fn(l) {
               case lane_of(model, l.dir) {
@@ -297,12 +289,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                 lanes: lanes,
                 workspace: workspace,
                 listed: True,
-                found: found,
-                projects_open: model.projects_open
-                  || { workspace && lanes == [] },
-                project_name: "",
-                project_dir: "",
-                removing: None,
                 error: "",
               ),
             ),
@@ -355,7 +341,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       effect.none(),
     )
     Select(dir, id) -> #(
-      expanded(Model(..model, selected_card: Some(#(dir, id)), live: [])),
+      expanded(
+        Model(..model, selected_card: Some(#(dir, id)), live: [], copy: #(
+          model.copy.0 + 1,
+          "",
+        )),
+      ),
       effect.none(),
     )
     // The task's live update takes the card off the board.
@@ -412,16 +403,21 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     }
     // The handle's drag: the browser captures the pointer on the handle, so
     // its moves keep arriving as the pointer travels over the page, and
-    // answers the band's height now and the largest height that leaves the
-    // board its column bar.
-    ResizeStart(y, pointer_id) ->
+    // answers the band's size now and the largest size that leaves the
+    // board its column bar. On the side the drag is across, so it follows x.
+    ResizeStart(x, y, pointer_id) ->
       case model.selected_card, model.detail_collapsed {
         Some(_), False -> #(
           model,
           effect.from(fn(dispatch) {
-            let #(start_y, height, max) =
-              begin_resize(model.root, pointer_id, y)
-            dispatch(ResizeBegin(start_y, height, max))
+            let #(start, size, max) =
+              begin_resize(
+                model.root,
+                pointer_id,
+                along(model, x, y),
+                model.side,
+              )
+            dispatch(ResizeBegin(start, size, max))
           }),
         )
         _, _ -> #(model, effect.none())
@@ -430,15 +426,16 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(..model, resizing: Some(#(y, height, max))),
       effect.none(),
     )
-    // Dragging up (a smaller y) grows the band; the height is clamped so
-    // the board always keeps its column bar.
-    ResizeMove(y) ->
+    // Dragging up, or left on the side, grows the band; the size is clamped
+    // so the board always keeps its column bar.
+    ResizeMove(x, y) ->
       case model.resizing {
-        Some(#(start_y, start_h, max)) -> #(
-          Model(
-            ..model,
-            detail_height: clamp_height(
-              resize_height(start_y, start_h, y, max),
+        Some(#(start, start_size, max)) -> #(
+          sized(
+            model,
+            clamp_size(
+              resize_size(start, start_size, along(model, x, y)),
+              min_size(model),
               max,
             ),
           ),
@@ -450,115 +447,63 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       case model.resizing {
         Some(_) -> #(
           Model(..model, resizing: None),
-          effect.from(fn(_) {
-            store(detail_height_key, int.to_string(model.detail_height))
-          }),
+          effect.from(fn(_) { store_size(model) }),
         )
         None -> #(model, effect.none())
       }
-    // The handle's keys: the arrows step the height, Home returns the
-    // default.
-    ResizeKey(key) ->
-      case key {
-        "ArrowUp" | "ArrowDown" | "Home" -> {
-          // The default height is the CSS's: a step starts from what shows.
-          let now = case model.detail_height {
-            0 -> detail_now(model.root)
-            h -> h
+    // The handle's keys: the arrows step the size, Home returns the
+    // default. Up grows the band at the bottom, Left grows it on the side.
+    ResizeKey(key) -> {
+      let #(grow, shrink) = case model.side {
+        True -> #("ArrowLeft", "ArrowRight")
+        False -> #("ArrowUp", "ArrowDown")
+      }
+      case key == grow || key == shrink || key == "Home" {
+        True -> {
+          // The default size is the CSS's: a step starts from what shows.
+          let now = case size(model) {
+            0 -> detail_now(model.root, model.side)
+            s -> s
           }
-          let height = case key {
-            "ArrowUp" -> clamp_height(now + 24, detail_max())
-            "ArrowDown" -> clamp_height(now - 24, detail_max())
+          let max = detail_max(model.side)
+          let min = min_size(model)
+          let next = case key {
+            _ if key == grow -> clamp_size(now + 24, min, max)
+            _ if key == shrink -> clamp_size(now - 24, min, max)
             _ -> 0
           }
+          let model = sized(model, next)
+          #(model, effect.from(fn(_) { store_size(model) }))
+        }
+        False -> #(model, effect.none())
+      }
+    }
+    Sided(side) -> #(Model(..model, side: side), effect.none())
+    // Pasted into any text, the reference is a link to the task (D-98).
+    CopyId ->
+      case model.selected_card {
+        None -> #(model, effect.none())
+        Some(#(_, id)) -> {
+          let n = model.copy.0 + 1
           #(
-            Model(..model, detail_height: height),
-            effect.from(fn(_) {
-              store(detail_height_key, int.to_string(height))
+            Model(..model, copy: #(n, "")),
+            effect.from(fn(send) {
+              solace_task.copy_reference(id, fn(ok) { send(CopyDone(n, ok)) })
             }),
           )
         }
-        _ -> #(model, effect.none())
       }
-    ToggleProjects -> #(
-      Model(..model, projects_open: !model.projects_open),
+    CopyDone(n, ok) if n == model.copy.0 -> #(
+      Model(..model, copy: #(n, solace_task.copy_said(ok))),
+      effect.from(fn(send) {
+        solace_task.after_copied(fn() { send(CopyReset(n)) })
+      }),
+    )
+    CopyReset(n) if n == model.copy.0 -> #(
+      Model(..model, copy: #(n, "")),
       effect.none(),
     )
-    AddProject(dir) -> #(
-      model,
-      case
-        list.any(model.found, fn(f) { f.dir == dir && f.imported && !f.member })
-      {
-        True ->
-          projects_request(model, "/projects", "POST", [
-            #("dir", json.string(dir)),
-          ])
-        False -> effect.none()
-      },
-    )
-    // Removing asks first whether to keep the files; deleting them takes a
-    // second warning and the project's name (D-74).
-    RemoveProject(dir) -> #(
-      Model(..model, removing: Some(#(dir, False, ""))),
-      effect.none(),
-    )
-    RemoveOnly ->
-      case model.removing {
-        Some(#(dir, _, _)) -> #(
-          model,
-          projects_request(
-            model,
-            "/projects/" <> uri.percent_encode(dir),
-            "DELETE",
-            [],
-          ),
-        )
-        None -> #(model, effect.none())
-      }
-    RemoveFiles ->
-      case model.removing {
-        Some(#(dir, _, _)) -> #(
-          Model(..model, removing: Some(#(dir, True, ""))),
-          effect.none(),
-        )
-        None -> #(model, effect.none())
-      }
-    RemoveTyped(text) ->
-      case model.removing {
-        Some(#(dir, True, _)) -> #(
-          Model(..model, removing: Some(#(dir, True, text))),
-          effect.none(),
-        )
-        _ -> #(model, effect.none())
-      }
-    RemoveDelete ->
-      case model.removing {
-        Some(#(dir, True, typed)) if typed == dir -> #(
-          model,
-          projects_request(
-            model,
-            "/projects/" <> uri.percent_encode(dir),
-            "DELETE",
-            [#("delete", json.bool(True)), #("name", json.string(typed))],
-          ),
-        )
-        _ -> #(model, effect.none())
-      }
-    RemoveCancel -> #(Model(..model, removing: None), effect.none())
-    ProjectName(text) -> #(Model(..model, project_name: text), effect.none())
-    ProjectDir(text) -> #(Model(..model, project_dir: text), effect.none())
-    ProjectTarget(text) -> #(
-      Model(..model, project_target: text),
-      effect.none(),
-    )
-    CreateProject -> #(
-      model,
-      projects_request(model, "/projects/new", "POST", [
-        #("name", json.string(model.project_name)),
-        #("dir", json.string(model.project_dir)),
-        #("target", json.string(model.project_target)),
-      ]),
-    )
+    CopyDone(_, _) | CopyReset(_) -> #(model, effect.none())
     DismissAll -> #(Model(..model, notices: []), effect.none())
     Dismiss(notice) -> #(
       Model(..model, notices: list.filter(model.notices, fn(n) { n != notice })),
@@ -575,6 +520,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             True -> model.live
             False -> []
           },
+          copy: #(model.copy.0 + 1, ""),
           reveal: #(notice.tab, notice.id, model.reveal.2 + 1),
           notices: list.filter(model.notices, fn(n) { n != notice }),
         ),
@@ -592,6 +538,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             True -> model.live
             False -> []
           },
+          copy: #(model.copy.0 + 1, ""),
           reveal: #("details", id, model.reveal.2 + 1),
         ),
       ),
@@ -618,25 +565,7 @@ fn projects_event(text: String) -> Bool {
   |> result.is_ok
 }
 
-/// A `/projects` change; the reply is the new list, or an error.
-fn projects_request(
-  model: Model,
-  path: String,
-  method: String,
-  fields: List(#(String, json.Json)),
-) -> Effect(Msg) {
-  effect.from(fn(dispatch) {
-    request(
-      model.prefix,
-      path,
-      method,
-      json.to_string(json.object(fields)),
-      fn(text) { dispatch(ProjectsLoaded(text)) },
-    )
-  })
-}
-
-fn projects_decoder() -> decode.Decoder(#(Bool, List(Lane), List(Found))) {
+fn projects_decoder() -> decode.Decoder(#(Bool, List(Lane))) {
   let lane = {
     use dir <- decode.field("dir", decode.string)
     use label <- decode.optional_field("label", dir, decode.string)
@@ -655,21 +584,9 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Lane), List(Found))) {
       ),
     )
   }
-  let found = {
-    use dir <- decode.field("dir", decode.string)
-    use name <- decode.field("name", decode.string)
-    use imported <- decode.field("imported", decode.bool)
-    use member <- decode.field("member", decode.bool)
-    decode.success(Found(dir, name, imported, member))
-  }
   use workspace <- decode.field("workspace", decode.bool)
   use lanes <- decode.field("projects", decode.list(lane))
-  use found <- decode.optional_field("found", [], decode.list(found))
-  decode.success(#(workspace, lanes, found))
-}
-
-fn button(label: String, msg: Msg) -> Element(Msg) {
-  h.button([e.on_click(msg)], [h.text(label)])
+  decode.success(#(workspace, lanes))
 }
 
 pub fn view(model: Model) -> Element(Msg) {
@@ -679,20 +596,12 @@ pub fn view(model: Model) -> Element(Msg) {
       board_styles
         <> detail_band_styles
         <> selected_card_styles
-        <> modal_styles
         <> notice_styles
         <> archive_styles
         <> waiting_styles,
     ),
-    h.header([a.class("top")], [
-      h.h1([], [h.text("Solace tasks")]),
-      h.button(
-        [a.aria_expanded(model.projects_open), e.on_click(ToggleProjects)],
-        [h.text(solace_task.ui_label("projects"))],
-      ),
-    ]),
     // The error line shows only with an error: an empty paragraph in the
-    // page's flex column takes a line between the header and the lanes.
+    // page's flex column takes a line above the lanes.
     case model.error {
       "" -> h.text("")
       _ -> h.p([a.role("alert")], [h.text(model.error)])
@@ -735,29 +644,60 @@ pub fn view(model: Model) -> Element(Msg) {
         }),
       ),
     ),
-    case model.projects_open {
-      True -> projects_view(model)
-      False -> h.text("")
-    },
-    h.div([a.class("lanes-area")], [lanes_view(model)]),
     h.div(
       [
-        a.class(case model.detail_collapsed, model.resizing {
-          True, _ -> "detail-band collapsed"
-          False, Some(_) -> "detail-band resizing"
-          False, None -> "detail-band"
+        a.class(case on_side(model), model.detail_collapsed {
+          True, True -> "work side collapsed"
+          True, False -> "work side"
+          False, _ -> "work"
         }),
       ],
       [
-        detail_resize(model),
-        detail_bar(model),
-        case model.selected_card, model.detail_collapsed {
-          // The task element stays in the band when it is collapsed, hidden
-          // by its CSS, so its loaded task and live events survive.
-          None, True -> h.text("")
-          None, False -> h.text("Select a task to see its details.")
-          Some(#(dir, id)), _ -> task_view(model, dir, id)
-        },
+        // Beside the band the board narrows to its smallest columns, then
+        // the band covers it. (`a.none()` would add an empty class.)
+        h.div(
+          [
+            a.class("lanes-area"),
+            ..case spread(model) {
+              True -> [
+                a.style(
+                  "margin-right",
+                  "min("
+                    <> band_width(model)
+                    <> ", max(0px, 100% - "
+                    <> int.to_string(lanes_min(model))
+                    <> "px))",
+                ),
+              ]
+              False -> []
+            }
+          ],
+          [lanes_view(model)],
+        ),
+        h.div(
+          [
+            a.class(case model.detail_collapsed, model.resizing {
+              True, _ -> "detail-band collapsed"
+              False, Some(_) -> "detail-band resizing"
+              False, None -> "detail-band"
+            }),
+            ..case spread(model) {
+              True -> [a.style("width", band_width(model))]
+              False -> []
+            }
+          ],
+          [
+            detail_resize(model),
+            detail_bar(model),
+            case model.selected_card, model.detail_collapsed {
+              // The task element stays in the band when it is collapsed, hidden
+              // by its CSS, so its loaded task and live events survive.
+              None, True -> h.text("")
+              None, False -> h.text("Select a task to see its details.")
+              Some(#(dir, id)), _ -> task_view(model, dir, id)
+            },
+          ],
+        ),
       ],
     ),
   ])
@@ -792,9 +732,9 @@ fn lanes_view(model: Model) -> Element(Msg) {
       ])
     True, [] ->
       h.p([a.class("muted")], [
-        h.text(
-          "No projects on this board yet. Add or create one under Projects.",
-        ),
+        h.text("No projects on this board yet. Add or create one on the "),
+        h.a([a.href("/workspace")], [h.text("Workspace page")]),
+        h.text("."),
       ])
     _, lanes ->
       h.div([a.class("lanes")], [
@@ -996,92 +936,6 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
   )
 }
 
-/// The workspace's projects: remove one, add one found in the folder, or
-/// create a new Gleam project.
-fn projects_view(model: Model) -> Element(Msg) {
-  let others = list.filter(model.found, fn(f) { !f.member })
-  h.section([a.class("editor projects")], [
-    h.ul(
-      [],
-      list.map(model.lanes, fn(l) {
-        h.li([], [
-          h.strong([], [h.text(l.label)]),
-          h.text(" " <> l.name <> " "),
-          // The root's own project always stays on its board.
-          case l.dir {
-            "." -> h.small([], [h.text("(this folder)")])
-            dir -> button(solace_task.ui_label("remove"), RemoveProject(dir))
-          },
-        ])
-      }),
-    ),
-    removal_view(model),
-    case others {
-      [] -> h.text("")
-      _ ->
-        h.div([], [
-          h.h3([], [h.text("Found in this folder")]),
-          h.ul(
-            [],
-            list.map(others, fn(f) {
-              h.li([], [
-                h.strong([], [
-                  h.text(case f.dir {
-                    "." -> "This folder"
-                    dir -> dir
-                  }),
-                ]),
-                h.text(
-                  " "
-                  <> f.name
-                  <> case f.imported {
-                    True -> " (already set up) "
-                    False -> " (not set up) "
-                  },
-                ),
-                case f.imported {
-                  True -> button(solace_task.ui_label("add"), AddProject(f.dir))
-                  False ->
-                    h.small([], [
-                      h.text("Existing code is brought in on the "),
-                      h.a([a.href("/migrate")], [h.text("Migration page")]),
-                      h.text("."),
-                    ])
-                },
-              ])
-            }),
-          ),
-        ])
-    },
-    h.h3([], [h.text("New project")]),
-    h.div([a.class("new-project")], [
-      h.input([
-        a.placeholder("Package name, e.g. my_app"),
-        a.attribute("aria-label", "Package name"),
-        a.value(model.project_name),
-        e.on_input(ProjectName),
-      ]),
-      h.input([
-        a.placeholder(case model.project_name {
-          "" -> "Folder (default: the package name)"
-          name -> "Folder (default: " <> name <> ")"
-        }),
-        a.attribute("aria-label", "Folder"),
-        a.value(model.project_dir),
-        e.on_input(ProjectDir),
-      ]),
-      h.label([], [
-        h.text("Runs on"),
-        h.select([a.value(model.project_target), e.on_input(ProjectTarget)], [
-          h.option([a.value("erlang")], "Erlang (BEAM)"),
-          h.option([a.value("javascript")], "JavaScript"),
-        ]),
-      ]),
-      button(solace_task.ui_label("create_project"), CreateProject),
-    ]),
-  ])
-}
-
 /// The hazard mark on an Unexpected Changes card (D-58).
 fn hazard() -> Element(Msg) {
   let what = "Unexpected changes: code changed outside Solace"
@@ -1190,18 +1044,17 @@ pub fn register() -> Result(Nil, lustre.Error) {
 
 const board_styles =
   solace_task.control_styles
-  <> ":host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 24px 0;height:calc(100dvh - 56px);user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{font:16px system-ui,sans-serif;color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:0}button{cursor:pointer}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:2px 8px}\n.top{align-items:center;gap:16px}.top h1{margin:0}.top .primary{margin-left:auto}.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:4px 10px}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.projects{margin-top:16px}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:4px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}\n.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
+  <> ":host{display:block;--well:#eceee6;--hover:#e7eeea;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--edge:var(--ink);--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a;--focus:#174f78;box-sizing:border-box;padding:0 var(--space-6);height:calc(100dvh - 56px);user-select:none;-webkit-user-select:none}input,textarea,pre,code,.md,.view-code,.detail > h2,.detail > .panel > article > p,.detail > .panel > p,.detail > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}\nmain{color:var(--ink);background:var(--sheet)}button,input,textarea,select{font:inherit;padding:var(--control-pad);margin:var(--space-1);border:1px solid var(--edge);border-radius:0}button{cursor:pointer}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.board{display:flex;gap:12px;overflow-x:auto;margin:24px 0}.column{min-width:190px;flex:1;background:var(--well);padding:12px;border-radius:0}.column h2{font-size:17px}.card{display:block;width:100%;text-align:left}.detail,.editor{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:0 8px}\n.primary{background:var(--focus);color:var(--paper);border-color:var(--focus)}.primary:hover{background:var(--focus)}.column{min-height:240px}.card+.card{margin-top:6px}\n.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}\n.tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}\ndetails.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}\n.lanes{display:grid;gap:0;margin:24px 0;overflow-x:auto;padding-bottom:4px}.lanes .board{margin:0;overflow:visible}.lane .board{margin:8px 0}.lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;background:var(--paper)}.lane .column{min-height:110px}.lane-title{align-items:center;gap:12px}.lane-title small{display:inline}.lane-title button{padding:2px 10px;min-height:var(--control-h-small)}.lane-toggle{border:0;background:transparent;font-size:17px}.lane-head{margin:0;padding:0 9px}.lane-head .column{min-height:0;padding:0 12px;background:transparent}.lane-head h2{margin:6px 0}\n.stamp{color:var(--ok-text);font-weight:700;margin-right:6px}.hazard{display:inline-block;width:18px;height:18px;margin-right:6px;vertical-align:-3px}.hazard svg{width:100%;height:100%}.hazard path{fill:#f2c94c;stroke:#7a5200;stroke-width:1.5;stroke-linejoin:round}.hazard path.mark{fill:none;stroke:#3d2900;stroke-width:2.5;stroke-linecap:round}.notices{position:fixed;right:16px;bottom:16px;z-index:10;display:grid;gap:8px;max-width:min(380px,calc(100% - 32px))}.notices .notice{position:relative;background:var(--ink);color:var(--paper);padding:12px 52px 12px 14px;border-radius:0;box-shadow:0 4px 16px var(--shadow)}.notice strong{display:block;overflow-wrap:anywhere}.notice .close{position:absolute;top:6px;right:6px;margin:0;padding:6px;line-height:0;background:transparent;color:var(--paper);border:0}.notice .close:hover{background:color-mix(in srgb,var(--paper) 20%,transparent)}.notice .close svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round}
 :host{background:var(--sheet);color:var(--ink)}
 main{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;color:var(--ink);background:none}
 *{scrollbar-color:var(--line) var(--paper)}::selection{background:var(--sel);color:var(--ink)}
 h1,h2,h3{line-height:1.2;letter-spacing:-.02em}a{color:var(--focus);text-underline-offset:3px}
 button:disabled{color:var(--soft)}a:focus-visible,summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
 textarea{font-family:inherit}
-.top{margin:0 -24px 24px;padding:12px 22px;background:var(--paper);border-bottom:2px solid var(--edge)}.top h1{font-size:28px}
 .primary{background:var(--ink);color:var(--paper);border-color:var(--edge);font-weight:700}.primary:hover{background:var(--focus);border-color:var(--focus);color:var(--paper)}
 .column{background:var(--well);border:1px solid var(--line);padding:0 12px 12px}
 .column h2{font-size:13px;text-transform:uppercase;letter-spacing:.1em;margin:0 -12px 12px;padding:10px 12px;background:var(--paper);border-bottom:2px solid var(--edge)}
-.lanes{display:block;overflow:visible}.lane-head{position:sticky;top:0;z-index:5;background:var(--paper);border-bottom:2px solid var(--edge)}.lane-head .column{background:transparent;border:0}.lane-head h2{margin:0 -12px;border-bottom:0}.lane .lane-head{margin:0;padding:0}
+.lanes{display:block;overflow:visible}.lane-head{position:sticky;top:0;z-index:5;background:var(--paper);border-bottom:2px solid var(--edge)}.lane-head .column{background:transparent;border-color:transparent;border-top:0;border-bottom:0}.lane-head h2{margin:0 -12px;border-bottom:0}.lane .lane-head{margin:0;padding:0}
 .lane{border-color:var(--edge);background:var(--paper)}.lane-title{padding:6px 0}.lane-toggle{font-weight:700;background:transparent}.lane-toggle:hover{background:var(--hover)}
 .card{position:relative;background:var(--paper);border-color:var(--edge);padding:10px 12px 10px 22px;line-height:1.35;--tab:#999999}
 .card::before{content:\"\";position:absolute;inset:0 auto 0 0;width:8px;background:var(--tab)}
@@ -1209,16 +1062,16 @@ textarea{font-family:inherit}
 .attention{font-weight:700}.stamp{margin-right:6px}
 .debt{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;border:1px solid var(--test);color:var(--test);padding:0 6px;margin-right:6px}.card:has(.debt){--tab:var(--test)}
 .status{border:1px solid var(--line);background:var(--paper);font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:1px 8px}.status.finished{background:var(--add);color:var(--ok-text);border-color:var(--ok-text)}.working::before{background:var(--entry)}
-.detail,.editor,.note,.run,.projects{background:var(--paper);border-color:var(--edge)}.detail{padding:20px 24px}
+.detail,.editor,.note,.run{background:var(--paper);border-color:var(--edge)}.detail{padding:var(--pad-section)}
 .tabs{border-bottom:2px solid var(--edge)}.tabs button{border:0;border-right:1px solid var(--line);background:transparent;margin:0;padding:10px 16px}.tabs [aria-selected=true]{background:var(--paper);box-shadow:inset 0 -3px var(--ink);border-color:var(--line)}
 article{border-bottom-color:var(--line)}.transcript{border-left:1px solid var(--edge)}
 .md pre,.transcript pre,.diff,code{background:var(--code);color:var(--ink)}
 .notices .notice{background:var(--ink);color:var(--paper);box-shadow:4px 8px 24px var(--shadow)}.notice .close{color:var(--paper)}
 @media(prefers-reduced-motion:no-preference){button,.card{transition:background-color .12s ease-out}}
 .lane+.lane{margin-top:-1px}
-.top a,.lane-title a{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid var(--edge);background:var(--paper);color:var(--ink);text-decoration:none;font-weight:700}
-.top a:hover,.lane-title a:hover{background:var(--hover)}
-.top a::after,.lane-title a::after{content:\"\";width:14px;height:14px;background:currentColor;-webkit-mask:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 5l7 7-7 7'/%3E%3C/svg%3E\") center/contain no-repeat;mask:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 5l7 7-7 7'/%3E%3C/svg%3E\") center/contain no-repeat}"
+.lane-title a{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid var(--edge);background:var(--paper);color:var(--ink);text-decoration:none;font-weight:700}
+.lane-title a:hover{background:var(--hover)}
+.lane-title a::after{content:\"\";width:14px;height:14px;background:currentColor;-webkit-mask:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 5l7 7-7 7'/%3E%3C/svg%3E\") center/contain no-repeat;mask:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 12h15M13 5l7 7-7 7'/%3E%3C/svg%3E\") center/contain no-repeat}"
 
 /// Opens this instance's transport with its own `base`: the event stream and
 /// the project list. Runs on connection and when `base` changes; the fresh
@@ -1284,69 +1137,6 @@ fn head_view(columns: List(solace_task.Column)) -> Element(Msg) {
       h.div([a.class("column")], [h.h2([], [h.text(c.label)])])
     }),
   )
-}
-
-/// The dialog for removing a project: keep its files, or delete them after a
-/// second warning and typing its name.
-fn removal_view(model: Model) -> Element(Msg) {
-  case model.removing {
-    None -> h.text("")
-    Some(#(dir, False, _)) ->
-      modal([
-        h.p([], [
-          h.text(
-            "Remove "
-            <> dir
-            <> " from this board? Its tasks and Solace setup stay in its folder, and it can be added again. Should its folder and files be deleted too?",
-          ),
-        ]),
-        button(solace_task.ui_label("remove_only"), RemoveOnly),
-        button("Remove and delete files…", RemoveFiles),
-        button(solace_task.ui_label("cancel"), RemoveCancel),
-      ])
-    Some(#(dir, True, typed)) ->
-      modal([
-        h.p([], [
-          h.strong([], [
-            h.text(
-              "This permanently deletes "
-              <> dir
-              <> " and everything in it. It cannot be undone.",
-            ),
-          ]),
-        ]),
-        h.label([], [
-          h.text("Type " <> dir <> " to confirm"),
-          h.input([
-            a.attribute("aria-label", "Project name"),
-            a.attribute("autofocus", ""),
-            a.value(typed),
-            e.on_input(RemoveTyped),
-          ]),
-        ]),
-        h.button([a.disabled(typed != dir), e.on_click(RemoveDelete)], [
-          h.text(solace_task.ui_label("delete_permanently")),
-        ]),
-        button(solace_task.ui_label("cancel"), RemoveCancel),
-      ])
-  }
-}
-
-const modal_styles =
-  ".modal-backdrop{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:var(--shadow);padding:16px}.removal{background:var(--paper);color:var(--ink);border:2px solid var(--edge);box-shadow:0 8px 32px var(--shadow);padding:20px 24px;width:min(480px,100%);max-height:100%;overflow:auto}.removal p{margin:0 0 12px;overflow-wrap:anywhere}.removal input{margin:0}.removal button:disabled{opacity:.5;cursor:not-allowed}"
-
-/// A modal dialog: a backdrop over the page that blocks the board behind it.
-fn modal(body: List(Element(Msg))) -> Element(Msg) {
-  h.div([a.class("modal-backdrop")], [
-    h.div(
-      [
-        a.class("removal"),
-        a.attribute("role", "alertdialog"),
-        a.attribute("aria-modal", "true"),
-      ],
-      body,
-    ),
-  ])
 }
 
 /// The project a live message is for: the one it names, else the root's.
@@ -1434,15 +1224,17 @@ fn task_view(model: Model, dir: String, id: String) -> Element(Msg) {
       a.attribute("dir", dir),
       a.attribute("task", id),
       a.attribute("hosted", ""),
+      // The band's bar shows the title, Copy ID, column and status.
+      a.attribute("bar", ""),
       case model.workspace {
         True -> a.attribute("workspace", "")
         False -> a.none()
       },
       // A dragged height is the task element's own; 0 leaves the CSS
-      // default.
-      case model.detail_height {
-        0 -> a.none()
-        h -> a.style("height", int.to_string(h) <> "px")
+      // default. On the side the band's width is dragged instead.
+      case model.detail_height, on_side(model) {
+        0, _ | _, True -> a.none()
+        h, False -> a.style("height", int.to_string(h) <> "px")
       },
       a.property(
         "live",
@@ -1658,30 +1450,66 @@ const detail_key = "solace-board-detail"
 const detail_band_styles =
   "
 main{display:flex;flex-direction:column;height:100%}
+.work{flex:1;min-height:0;display:flex;flex-direction:column;position:relative}
 .lanes-area{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .lanes-area{scrollbar-gutter:stable}
 .lanes-area > .lanes{margin:0}
 .lanes-area .board{margin:0}
 .lane-head{box-shadow:0 -10px 0 var(--paper)}
-.detail-band{flex:none;display:flex;flex-direction:column;border-top:2px solid var(--edge);background:var(--paper)}
+.detail-band{flex:none;display:flex;flex-direction:column;position:relative;border-top:2px solid var(--edge);background:var(--paper)}
 .detail-band > solace-task{flex:none;height:min(45dvh,calc(100dvh - 190px));min-height:0;overflow-y:auto;visibility:visible;transition:height .18s ease-out,visibility .18s}
 .detail-band.collapsed > solace-task{height:0 !important;overflow:hidden;visibility:hidden}
 .detail-band.resizing > solace-task{transition:none}
-.detail-resize{height:12px;margin:0;cursor:ns-resize;touch-action:none;display:flex;align-items:center;justify-content:center;color:var(--line)}
+.detail-resize{position:absolute;top:-7px;left:0;right:0;z-index:1;height:12px;margin:0;cursor:ns-resize;touch-action:none;display:flex;align-items:center;justify-content:center;color:var(--line)}
 .detail-resize::before{content:\"\";width:40px;height:4px;border-top:2px solid currentColor;border-bottom:2px solid currentColor}
 .detail-resize:hover::before,.detail-resize:focus-visible::before{color:var(--ink)}
-.detail-bar{display:flex;gap:8px;align-items:center;padding:10px 0}
-.detail-toggle{border:0;background:transparent;font-weight:700;font-size:17px;margin:0;padding:4px 10px}
+.detail-bar{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;padding:2px 0}
+.detail-bar .copy-id{flex:none;margin:0;padding:0 10px;font-size:13px}
+.detail-bar .meta{margin:0}
+.detail-toggle{border:0;background:transparent;font-weight:700;font-size:17px;margin:0;padding:2px 10px;min-height:var(--control-h-small)}
 .detail-toggle:hover{background:var(--hover)}
+.work.side > .detail-band{position:absolute;top:0;right:0;bottom:0;z-index:6;box-sizing:border-box;min-width:32rem;border-top:0;border-left:2px solid var(--edge);padding-left:12px;box-shadow:-8px 0 16px var(--shadow)}
+.work.side > .detail-band > solace-task{flex:1 1 0;height:auto}
+.work.side.collapsed{flex-direction:row}
+.work.side.collapsed > .lanes-area{min-width:0}
+.work.side.collapsed > .detail-band{position:static;min-width:0;padding:0 4px;box-shadow:none}
+.work.side.collapsed > .detail-band > solace-task{display:none}
+.work.side .detail-resize{left:-7px;right:auto;top:0;bottom:0;width:12px;height:auto;cursor:ew-resize}
+.work.side .detail-resize::before{width:4px;height:40px;border:0;border-left:2px solid currentColor;border-right:2px solid currentColor}
 "
 
 /// The detail band's bar: the open task's title with the collapse control,
-/// the same glyph pattern as a lane's toggle. With no task open the bar is
-/// empty: there is nothing to collapse.
+/// the same glyph pattern as a lane's toggle, then Copy ID, its column and
+/// its status, on the title's line while there is room. The task element
+/// leaves these out (its `bar` attribute). Collapsed on the side, it is
+/// only an expand button. With no task open the bar is empty: there is
+/// nothing to collapse.
 fn detail_bar(model: Model) -> Element(Msg) {
-  case model.selected_card {
-    None -> h.header([a.class("detail-bar")], [])
-    Some(_) ->
+  let found = detail_task(model)
+  let title = fn(id) {
+    case found {
+      Ok(#(_, t)) -> t.title
+      Error(_) -> id
+    }
+  }
+  case model.selected_card, on_side(model) && model.detail_collapsed {
+    None, _ -> h.header([a.class("detail-bar")], [])
+    Some(#(_, id)), True -> {
+      let label = "Show the task details: " <> title(id)
+      h.header([a.class("detail-bar")], [
+        h.button(
+          [
+            a.class("detail-toggle"),
+            a.aria_expanded(False),
+            a.attribute("aria-label", label),
+            a.title(label),
+            e.on_click(ToggleDetail),
+          ],
+          [h.text("◂")],
+        ),
+      ])
+    }
+    Some(#(_, id)), False ->
       h.header([a.class("detail-bar")], [
         h.button(
           [
@@ -1690,30 +1518,21 @@ fn detail_bar(model: Model) -> Element(Msg) {
             e.on_click(ToggleDetail),
           ],
           [
-            h.text(case model.detail_collapsed {
+            // On the side the band collapses to the right.
+            h.text(case model.detail_collapsed || on_side(model) {
               True -> "▸ "
               False -> "▾ "
             }),
-            h.text(detail_title(model)),
+            h.text(title(id)),
           ],
         ),
+        solace_task.copy_button(id, model.copy.1, CopyId),
+        case found {
+          Ok(#(workflow, t)) ->
+            h.span([a.class("meta")], solace_task.meta(workflow, t))
+          Error(_) -> h.text("")
+        },
       ])
-  }
-}
-
-/// The open task's title, taken from the lane that stores it; its id when
-/// the task is not listed.
-fn detail_title(model: Model) -> String {
-  case model.selected_card {
-    None -> ""
-    Some(#(dir, id)) ->
-      case
-        list.find(model.lanes, fn(l: Lane) { l.dir == dir })
-        |> result.try(fn(l: Lane) { list.find(l.tasks, fn(t) { t.id == id }) })
-      {
-        Ok(t) -> t.title
-        Error(_) -> id
-      }
   }
 }
 
@@ -1728,44 +1547,30 @@ fn expanded(model: Model) -> Model {
   }
 }
 
-/// The band's height for a pointer at `y` in a drag that began at `start_y`
-/// with the band `start_h` high; the browser rounds the pixel.
-@external(javascript, "./api.mjs", "resize_height")
-fn resize_height(start_y: Float, start_h: Float, y: Float, max: Int) -> Int
-
 const detail_height_key = "solace-board-detail-height"
-
-/// The detail band keeps a readable height, and leaves the board room for
-/// its column bar: `max` comes from the browser.
-fn clamp_height(height: Int, max: Int) -> Int {
-  let min = detail_min()
-  case height {
-    _ if height < min -> min
-    _ if height > max -> max
-    _ -> height
-  }
-}
 
 /// Starts a drag of the detail band's handle: the browser keeps the pointer
 /// on the handle, so its pointermove and pointerup keep arriving as the
-/// pointer travels over the page, and answers the pointer's y, the band's
-/// height now, and the largest height that keeps the board's column bar on
-/// screen.
+/// pointer travels over the page, and answers the pointer's position, the
+/// band's size now (its width on the side), and the largest size that
+/// keeps the board's column bar on screen.
 @external(javascript, "./api.mjs", "begin_resize")
 fn begin_resize(
   root: dynamic.Dynamic,
   pointer_id: Int,
-  y: Float,
+  at: Float,
+  side: Bool,
 ) -> #(Float, Float, Int)
 
-/// The largest detail height that keeps the board's column bar on screen.
+/// The largest detail size that keeps the board's column bar on screen, or
+/// on the side a strip of the board.
 @external(javascript, "./api.mjs", "detail_max")
-fn detail_max() -> Int
+fn detail_max(side: Bool) -> Int
 
-/// The detail band's resize handle: a grip at its top edge, dragged with
-/// the pointer or stepped with the arrow keys, Home for the default height.
-/// It shows only when the band is open on a task: a collapsed band has no
-/// height to change.
+/// The detail band's resize handle: a grip at its top edge, or its left
+/// edge on the side, dragged with the pointer or stepped with the arrow
+/// keys, Home for the default size. It shows only when the band is open on
+/// a task: a collapsed band has no size to change.
 fn detail_resize(model: Model) -> Element(Msg) {
   case model.selected_card, model.detail_collapsed {
     Some(_), False ->
@@ -1773,21 +1578,26 @@ fn detail_resize(model: Model) -> Element(Msg) {
         [
           a.class("detail-resize"),
           a.role("separator"),
-          a.attribute("aria-orientation", "horizontal"),
+          a.attribute("aria-orientation", case model.side {
+            True -> "vertical"
+            False -> "horizontal"
+          }),
           a.attribute("aria-label", "Resize the task details"),
-          a.attribute("aria-valuenow", int.to_string(model.detail_height)),
+          a.attribute("aria-valuenow", int.to_string(size(model))),
           a.attribute("tabindex", "0"),
           a.title("Drag to resize, or press arrow keys"),
           e.prevent_default(
             e.on("pointerdown", {
+              use x <- decode.field("clientX", decode.float)
               use y <- decode.field("clientY", decode.float)
               use id <- decode.field("pointerId", decode.int)
-              decode.success(ResizeStart(y, id))
+              decode.success(ResizeStart(x, y, id))
             }),
           ),
           e.on("pointermove", {
+            use x <- decode.field("clientX", decode.float)
             use y <- decode.field("clientY", decode.float)
-            decode.success(ResizeMove(y))
+            decode.success(ResizeMove(x, y))
           }),
           e.on("pointerup", decode.success(ResizeEnd)),
           e.on("pointercancel", decode.success(ResizeEnd)),
@@ -1806,9 +1616,10 @@ fn detail_resize(model: Model) -> Element(Msg) {
 @external(javascript, "./api.mjs", "detail_min")
 fn detail_min() -> Int
 
-/// The band's task height now, for a key step from the CSS default.
+/// The band's size now, its width on the side, for a key step from the CSS
+/// default.
 @external(javascript, "./api.mjs", "detail_now")
-fn detail_now(root: dynamic.Dynamic) -> Int
+fn detail_now(root: dynamic.Dynamic, side: Bool) -> Int
 
 /// The column a task waits in while it is not active. The board leaves it
 /// out, with its tasks; the Strategy page shows them (D-133).
@@ -1827,3 +1638,149 @@ pub fn board_columns(
 fn no_project(text: String) -> Bool {
   json.parse(text, decode.at(["noProject"], decode.bool)) == Ok(True)
 }
+
+const detail_width_key = "solace-board-detail-width"
+
+/// The pointer's position along the band's resize axis: x on the side, y
+/// at the bottom.
+fn along(model: Model, x: Float, y: Float) -> Float {
+  case model.side {
+    True -> x
+    False -> y
+  }
+}
+
+/// The band's size along its resize axis: its width on the side, its
+/// task's height at the bottom; 0 is the CSS default.
+fn size(model: Model) -> Int {
+  case model.side {
+    True -> model.detail_width
+    False -> model.detail_height
+  }
+}
+
+/// The band at `size` along its resize axis.
+fn sized(model: Model, size: Int) -> Model {
+  case model.side {
+    True -> Model(..model, detail_width: size)
+    False -> Model(..model, detail_height: size)
+  }
+}
+
+/// Keeps the band's size along its resize axis for the next visit.
+fn store_size(model: Model) -> Nil {
+  case model.side {
+    True -> store(detail_width_key, int.to_string(model.detail_width))
+    False -> store(detail_height_key, int.to_string(model.detail_height))
+  }
+}
+
+/// Whether the open task's band sits at the right edge: the window is wide
+/// and a task shows. Collapsed, it is a strip holding its expand button; an
+/// empty band stays a line at the bottom.
+pub fn on_side(model: Model) -> Bool {
+  model.side && model.selected_card != None
+}
+
+/// The band's width on the side: the dragged width, or the CSS default,
+/// never under 32rem, so the board's margin beside it matches it.
+fn band_width(model: Model) -> String {
+  case model.detail_width {
+    0 -> "max(32rem, min(42vw, 720px))"
+    w -> int.to_string(int.max(w, side_min())) <> "px"
+  }
+}
+
+/// The narrowest the board gets beside the band, in pixels: its widest
+/// lane's columns at their smallest. Past that, the band covers the board.
+fn lanes_min(model: Model) -> Int {
+  let columns =
+    list.fold(model.lanes, 1, fn(most, l: Lane) {
+      int.max(most, list.length(board_columns(l.workflow)))
+    })
+  lanes_width(columns)
+}
+
+/// Tells `send` whether the window is wider than 1.4 times its height, now
+/// and on every change.
+@external(javascript, "./api.mjs", "watch_side")
+fn watch_side(root: dynamic.Dynamic, send: fn(Bool) -> Nil) -> Nil
+
+/// The open task and its lane's workflow, taken from the lane that stores
+/// it; an error when the task is not listed.
+fn detail_task(
+  model: Model,
+) -> Result(#(solace_task.Workflow, solace_task.Task), Nil) {
+  case model.selected_card {
+    None -> Error(Nil)
+    Some(#(dir, id)) -> {
+      use l <- result.try(list.find(model.lanes, fn(l: Lane) { l.dir == dir }))
+      use t <- result.map(list.find(l.tasks, fn(t) { t.id == id }))
+      #(l.workflow, t)
+    }
+  }
+}
+
+/// The detail band keeps a readable height, or on the side at least 32rem
+/// of width, and leaves the board room for its column bar: `max` comes
+/// from the browser.
+fn clamp_size(size: Int, min: Int, max: Int) -> Int {
+  int.clamp(size, min, int.max(min, max))
+}
+
+/// The band's smallest size along its resize axis.
+fn min_size(model: Model) -> Int {
+  case model.side {
+    True -> side_min()
+    False -> detail_min()
+  }
+}
+
+/// The side band's smallest width, 32rem, in pixels.
+@external(javascript, "./api.mjs", "side_min")
+fn side_min() -> Int
+
+/// The band's size for a pointer at `at` in a drag that began at `start`
+/// with the band `start_size` along the drag (its height, or its width on
+/// the side); the browser rounds the pixel.
+@external(javascript, "./api.mjs", "resize_size")
+fn resize_size(start: Float, start_size: Float, at: Float) -> Int
+
+/// Whether the band is open on the side, so it takes its width and the
+/// board narrows beside it.
+fn spread(model: Model) -> Bool {
+  on_side(model) && !model.detail_collapsed
+}
+
+/// The width of `columns` board columns at their smallest, with the
+/// lane's edges and the scroll bar's gutter, from the sizes in
+/// `board_styles` (`.column`, `.board`, `.lane`) and the browser's
+/// scroll bar (16px outside one).
+pub fn lanes_width(columns: Int) -> Int {
+  columns
+  * { column_min + 2 * column_pad + 2 * column_border }
+  + { columns - 1 }
+  * column_gap
+  + lane_edges
+  + scroll_gutter()
+}
+
+/// `.column`'s `min-width`, in pixels.
+const column_min = 190
+
+/// `.column`'s left and right padding, in pixels.
+const column_pad = 12
+
+/// `.board`'s gap between columns, in pixels.
+const column_gap = 12
+
+/// A lane's padding and border on both sides, in pixels.
+const lane_edges = 18
+
+/// The width `.lanes-area` keeps for its scroll bar, in pixels, measured
+/// in the browser: scroll bars differ between platforms.
+@external(javascript, "./api.mjs", "scroll_gutter")
+fn scroll_gutter() -> Int
+
+/// `.column`'s border width, in pixels.
+const column_border = 1

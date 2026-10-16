@@ -77,6 +77,8 @@ fn a_brief_lists_the_skills_of_its_project() {
         assert!(brief.contains("- design: Layout and color. (`read skills/design/SKILL.md`)"), "{kind}: {brief}");
         assert!(brief.contains("- voice: Speak plainly (`read skills/voice.md`)"), "{kind}: {brief}");
         assert!(brief.contains("when the task matches a skill's description"), "{kind}: {brief}");
+        assert!(brief.contains("After the call that ends the run returns, stop: no more calls"), "{kind}: {brief}");
+        assert!(!brief.contains("finishing tool"), "{kind}: a discussion's first note is not its end: {brief}");
         assert!(!brief.contains("Pick a palette"), "{kind}: the brief carries no skill contents");
     }
     let q = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
@@ -311,6 +313,7 @@ fn strategy_runs_read_the_graph() {
     let brief = strategy_brief(&top, &json!({"context":{"kind":"feature","id":fid},"notes":[{"author":"human","text":"Plan F"}]}));
     assert!(brief.contains(&format!("This run is about the feature {fid}")) && brief.contains("\"title\": \"F\""), "{brief}");
     assert!(brief.contains("A `title` names the work in a few words") && brief.contains("go in `body`"), "{brief}");
+    assert!(brief.contains("in short Markdown: lead with the answer"), "{brief}");
     assert!(brief.contains("- D-1 First thing") && !brief.contains("- Notes") && brief.contains("- human: Plan F"), "{brief}");
     // The root is a project itself, so the decisions can be read in full.
     assert!(brief.contains("`grep D-<n>`") && !brief.contains("folder of projects"), "{brief}");
@@ -1269,6 +1272,7 @@ fn briefs_hold_what_the_agent_needs_as_text() {
             "relevant sections with short headings",
             "blank lines around headings and lists",
             "explain what you need and why it matters",
+            "Keep messages short: lead with the answer or outcome",
         ] {
             assert!(prompt.contains(guidance), "{kind}: missing {guidance}");
         }

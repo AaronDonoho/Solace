@@ -873,7 +873,7 @@ class Board(unittest.TestCase):
         self.assertEqual((self.root/'priv/a').read_text(),'original');self.assertFalse((self.root/'priv/b').exists())
 
     def test_a11_embedded_client_and_internal_files(self):
-        for path,expected in [('/',b'Solace tasks'),('/migrate',b'Solace tasks'),('/strategy',b'Solace tasks'),('/strategy?tab=tasks',b'Solace tasks'),('/settings',b'Solace tasks'),('/knowledgebase',b'Solace tasks'),('/app.js',b'/workflow')]:
+        for path,expected in [('/',b'Solace tasks'),('/workspace',b'Solace tasks'),('/migrate',b'Solace tasks'),('/strategy',b'Solace tasks'),('/strategy?tab=tasks',b'Solace tasks'),('/settings',b'Solace tasks'),('/knowledgebase',b'Solace tasks'),('/app.js',b'/workflow')]:
             c=http.client.HTTPConnection('127.0.0.1',self.port);c.request('GET',path);r=c.getresponse();self.assertEqual(r.status,200);self.assertIn(expected,r.read());c.close()
         # The guide's old address still answers, sending the browser on to the Knowledgebase page (D-140).
         c=http.client.HTTPConnection('127.0.0.1',self.port);c.request('GET','/guide');r=c.getresponse();self.assertEqual(r.status,301);self.assertEqual(r.getheader('Location'),'/knowledgebase');r.read();c.close()
@@ -1365,6 +1365,23 @@ class Board(unittest.TestCase):
         models={m['id']:m for m in self.api('POST','/models/try-again',{'agent':'codex'})}
         self.assertTrue(models['signed-in']['available'],models['signed-in'])
         self.assertEqual(self.api('POST','/models/try-again',{'agent':'nobody'},'E7001')['code'],'E7001')
+
+    def test_a_plain_discussion_reply_clears_a_limit_mark(self):
+        # A mark whose reset has passed leaves the model available but stays until an answer.
+        with (self.root/'system.toml').open('a') as f:
+            f.write('\n[[models]]\nid="signed-in"\nlabel="Signed in"\nagent="codex"\nmodel="fixture"\n')
+        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        limits=self.root/'agent-limits.json'
+        limits.write_text(json.dumps({'codex':{'reason':'Codex usage limit reached','until':1,'time':1}}))
+        self.env['OPENAI_API_KEY']='test-key'
+        self.serve()
+        self.assertTrue({m['id']:m for m in self.api('GET','/models')}['signed-in']['available'])
+        t=self.create([{'say':'plain reply'}]);self.action(t,'plan')
+        t=self.action(t,'discuss',model='signed-in',text='What about X?')
+        self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(x['notes'])==2)
+        end=time.monotonic()+5
+        while 'codex' in json.loads(limits.read_text()) and time.monotonic()<end:time.sleep(.05)
+        self.assertNotIn('codex',json.loads(limits.read_text()))
 
 if __name__=='__main__':unittest.main()
 

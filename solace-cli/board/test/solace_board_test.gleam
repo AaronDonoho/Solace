@@ -173,7 +173,8 @@ pub fn workspace_lanes_test() {
   rendered
   |> string.contains("href=\"/p/bench%2Fpilot/contracts\"")
   |> should.be_true
-  rendered |> string.contains(">Projects</button>") |> should.be_true
+  // Projects are managed on the Workspace page, not here.
+  rendered |> string.contains(">Projects</button>") |> should.be_false
   // A run ending in a workspace names its project.
   let ended =
     string.replace(
@@ -232,7 +233,7 @@ pub fn workspace_lanes_test() {
   let #(model, _) = board.update(model, board.Select("bench/pilot", "1"))
   board.view(model)
   |> element.to_string
-  |> string.contains("<solace-task base=\"/p/bench%2Fpilot\"")
+  |> string.contains("<solace-task bar base=\"/p/bench%2Fpilot\"")
   |> should.be_true
 }
 
@@ -257,10 +258,7 @@ pub fn root_project_lane_test() {
   let assert [root, frontend] = model.lanes
   list.length(root.tasks) |> should.equal(1)
   frontend.tasks |> should.equal([])
-  let #(model, _) = board.update(model, board.ToggleProjects)
   let rendered = board.view(model) |> element.to_string
-  rendered |> string.contains("<strong>visualizer</strong>") |> should.be_true
-  rendered |> string.contains("(this folder)") |> should.be_true
   rendered |> string.contains("href=\"/contracts\"") |> should.be_true
   rendered
   |> string.contains("href=\"/p/frontend/contracts\"")
@@ -439,53 +437,10 @@ pub fn selected_card_test() {
   selected(model) |> should.equal(3)
   board.view(model)
   |> element.to_string
-  |> string.contains("<solace-task base=\"/p/b\" dir=\"b\" hosted task=\"1\"")
+  |> string.contains(
+    "<solace-task bar base=\"/p/b\" dir=\"b\" hosted task=\"1\"",
+  )
   |> should.be_true
-}
-
-pub fn removing_a_project_test() {
-  let #(model, _) = board.init(Nil)
-  let #(model, _) =
-    board.update(
-      model,
-      board.ProjectsLoaded(
-        "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"},{\"dir\":\"b\",\"label\":\"b\",\"name\":\"b\",\"base\":\"/p/b\"}],\"found\":[]}",
-      ),
-    )
-  let #(model, _) = board.update(model, board.ToggleProjects)
-  let shows = fn(model, text) {
-    board.view(model) |> element.to_string |> string.contains(text)
-  }
-  shows(model, "Remove and delete files") |> should.be_false
-  // Step one asks whether to keep the files.
-  let #(model, _) = board.update(model, board.RemoveProject("a"))
-  model.removing |> should.equal(Some(#("a", False, "")))
-  shows(model, "Remove only") |> should.be_true
-  shows(model, "Remove and delete files") |> should.be_true
-  shows(model, "Delete permanently") |> should.be_false
-  // Step two warns, and Delete stays disabled until the name matches.
-  let #(model, _) = board.update(model, board.RemoveFiles)
-  model.removing |> should.equal(Some(#("a", True, "")))
-  shows(model, "It cannot be undone") |> should.be_true
-  shows(model, " disabled>Delete permanently") |> should.be_true
-  let #(model, _) = board.update(model, board.RemoveTyped("b"))
-  shows(model, " disabled>Delete permanently") |> should.be_true
-  let #(model, _) = board.update(model, board.RemoveTyped("a"))
-  shows(model, "Delete permanently") |> should.be_true
-  shows(model, " disabled>Delete permanently") |> should.be_false
-  // Cancel closes the dialog and sends nothing.
-  let #(model, _) = board.update(model, board.RemoveCancel)
-  model.removing |> should.equal(None)
-  // A reloaded list closes it too.
-  let #(model, _) = board.update(model, board.RemoveProject("b"))
-  let #(model, _) =
-    board.update(
-      model,
-      board.ProjectsLoaded(
-        "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"}],\"found\":[]}",
-      ),
-    )
-  model.removing |> should.equal(None)
 }
 
 /// D-78: a new stream starts from each project's tasks; a snapshot that comes
@@ -527,45 +482,6 @@ pub fn snapshot_waits_for_its_lane_and_replaces_tasks_test() {
     )
   let assert [web] = model.lanes
   list.map(web.tasks, fn(t) { t.title }) |> should.equal(["Another"])
-}
-
-pub fn typed_fields_and_toggles_update_the_model_test() {
-  let #(model, _) = board.init(Nil)
-  let #(model, _) = board.update(model, board.ProjectName("web"))
-  let #(model, _) = board.update(model, board.ProjectDir("apps/web"))
-  let #(model, _) = board.update(model, board.ProjectTarget("javascript"))
-  #(model.project_name, model.project_dir, model.project_target)
-  |> should.equal(#("web", "apps/web", "javascript"))
-  let open = model.projects_open
-  let #(model, _) = board.update(model, board.ToggleProjects)
-  model.projects_open |> should.equal(!open)
-}
-
-pub fn removing_needs_the_second_step_and_the_exact_name_test() {
-  let #(model, _) = board.init(Nil)
-  // Nothing is being removed: every removal message is a no-op.
-  let #(same, _) = board.update(model, board.RemoveOnly)
-  same |> should.equal(model)
-  let #(same, _) = board.update(model, board.RemoveFiles)
-  same |> should.equal(model)
-  let #(same, _) = board.update(model, board.RemoveTyped("a"))
-  same |> should.equal(model)
-  let #(same, _) = board.update(model, board.RemoveDelete)
-  same |> should.equal(model)
-  // Typing before the second step is ignored, and Delete before it sends nothing.
-  let #(first, _) = board.update(model, board.RemoveProject("a"))
-  let #(same, _) = board.update(first, board.RemoveTyped("a"))
-  same |> should.equal(first)
-  let #(same, _) = board.update(first, board.RemoveDelete)
-  same |> should.equal(first)
-  // A wrong name keeps the dialog open.
-  let #(second, _) = board.update(first, board.RemoveFiles)
-  let #(wrong, _) = board.update(second, board.RemoveTyped("b"))
-  let #(same, _) = board.update(wrong, board.RemoveDelete)
-  same |> should.equal(wrong)
-  // Adding a directory that was not found does nothing.
-  let #(same, _) = board.update(model, board.AddProject("zzz"))
-  same |> should.equal(model)
 }
 
 /// A notice's button opens its task and asks `<solace-task>` to show the
@@ -611,7 +527,7 @@ pub fn detail_is_a_solace_task_element_test() {
   let rendered = board.view(model) |> element.to_string
   rendered
   |> string.contains(
-    "<solace-task base=\"/p/a\" dir=\"a\" hosted task=\"t1\" workspace>",
+    "<solace-task bar base=\"/p/a\" dir=\"a\" hosted task=\"t1\" workspace>",
   )
   |> should.be_true
   rendered |> string.contains("class=\"detail\"") |> should.be_false
@@ -620,7 +536,9 @@ pub fn detail_is_a_solace_task_element_test() {
   let #(model, _) = board.update(model, board.Select(".", "t2"))
   board.view(model)
   |> element.to_string
-  |> string.contains("<solace-task base=\"/x\" dir=\".\" hosted task=\"t2\"")
+  |> string.contains(
+    "<solace-task bar base=\"/x\" dir=\".\" hosted task=\"t2\"",
+  )
   |> should.be_true
 }
 
@@ -1177,27 +1095,15 @@ pub fn shared_labels_on_the_board_test() {
   // The guide is the shell's Knowledgebase page (D-140): no Guide link.
   shows(model, "href=\"/guide\"") |> should.be_false
   shows(model, ">Guide</a>") |> should.be_false
-  shows(model, button("projects")) |> should.be_true
+  // Projects are managed on the Workspace page: the board has no Projects
+  // button and no header bar above its lanes.
+  shows(model, button("projects")) |> should.be_false
+  shows(model, "class=\"top\"") |> should.be_false
+  shows(model, "Solace tasks") |> should.be_false
   shows(model, ">" <> solace_task.ui_label("contract_view") <> "</a>")
   |> should.be_true
-  // The Projects panel: no heading repeating its button, then Remove, Add
-  // and Create project.
-  let #(model, _) = board.update(model, board.ToggleProjects)
-  shows(model, "<h2>" <> solace_task.ui_label("projects") <> "</h2>")
-  |> should.be_false
-  shows(model, button("remove")) |> should.be_true
-  shows(model, button("add")) |> should.be_true
-  shows(model, button("create_project")) |> should.be_true
-  // The removal dialog keeps the shared Remove, Cancel and Delete.
-  let #(model, _) = board.update(model, board.RemoveProject("a"))
-  shows(model, button("remove_only")) |> should.be_true
-  shows(model, button("cancel")) |> should.be_true
-  let #(model, _) = board.update(model, board.RemoveFiles)
-  let #(model, _) = board.update(model, board.RemoveTyped("a"))
-  shows(model, button("delete_permanently"))
-  |> should.be_true
-  let #(model, _) = board.update(model, board.RemoveCancel)
-  let #(model, _) = board.update(model, board.ToggleProjects)
+  shows(model, button("remove")) |> should.be_false
+  shows(model, button("create_project")) |> should.be_false
   // A finished run's notice closes with Show task and Dismiss.
   let running =
     "{\"project\":\"a\",\"task\":{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"log\":\"/l\"}]}}"
@@ -1222,10 +1128,7 @@ pub fn dismissed_notices_go_test() {
 }
 
 /// Text areas and inputs fill their container: `width:100%` with
-/// `box-sizing:border-box`, no percentage cap; the new-project row's input
-/// keeps its flex growth, and the removal dialog's input drops its margins so
-/// `width:100%` fits the dialog (whose `overflow:auto` would show a scrollbar
-/// for the base rule's 4px side margins).
+/// `box-sizing:border-box`, no percentage cap.
 pub fn textareas_fill_their_container_test() {
   let #(model, _) = board.init(Nil)
   let assert [css, ..] =
@@ -1240,10 +1143,6 @@ pub fn textareas_fill_their_container_test() {
   |> should.be_true
   css |> string.contains("min(95%") |> should.be_false
   css |> string.contains("min(80%") |> should.be_false
-  css
-  |> string.contains(".new-project input{flex:1;min-width:220px}")
-  |> should.be_true
-  css |> string.contains(".removal input{margin:0}") |> should.be_true
 }
 
 /// The detail is a band pinned to the bottom of the board page: selecting a
@@ -1267,7 +1166,7 @@ pub fn detail_band_test() {
   let #(model, _) = board.update(model, board.Select("a", "1"))
   let html = board.view(model) |> element.to_string
   string.contains(html, "class=\"detail-band\"") |> should.be_true
-  string.contains(html, "<solace-task base=\"/p/a\"") |> should.be_true
+  string.contains(html, "<solace-task bar base=\"/p/a\"") |> should.be_true
   string.contains(html, "detail-bar\"") |> should.be_true
   string.contains(html, "aria-expanded=\"true\"") |> should.be_true
   // The bar names the task: its title is inside the toggle, not just on a card.
@@ -1276,7 +1175,7 @@ pub fn detail_band_test() {
     |> string.split("<header class=\"detail-bar\"")
     |> list.find(fn(s) { string.contains(s, "Detail task") })
   let assert Ok(bar) = bar |> string.split("</header>") |> list.first
-  bar |> string.contains("<solace-task base=\"/p/a\"") |> should.be_false
+  bar |> string.contains("<solace-task bar base=\"/p/a\"") |> should.be_false
   // Collapsing: the bar stays, the details hide, the control says collapsed.
   let #(model, _) = board.update(model, board.ToggleDetail)
   model.detail_collapsed |> should.be_true
@@ -1285,7 +1184,7 @@ pub fn detail_band_test() {
   string.contains(html, "aria-expanded=\"false\"") |> should.be_true
   // The task element stays in the band, hidden by the band's CSS, so its
   // loaded task and live events survive a collapse.
-  string.contains(html, "<solace-task base=\"/p/a\"") |> should.be_true
+  string.contains(html, "<solace-task bar base=\"/p/a\"") |> should.be_true
   string.contains(
     html,
     ".detail-band.collapsed > solace-task{height:0 !important;overflow:hidden;visibility:hidden}",
@@ -1295,7 +1194,13 @@ pub fn detail_band_test() {
   // the lanes room on short windows.
   string.contains(
     html,
-    ".detail-bar{display:flex;gap:8px;align-items:center;padding:10px 0}",
+    ".detail-bar{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:center;padding:2px 0}",
+  )
+  |> should.be_true
+  // The resize handle lies over the band's top edge, taking no height.
+  string.contains(
+    html,
+    ".detail-resize{position:absolute;top:-7px;left:0;right:0;z-index:1;height:12px;",
   )
   |> should.be_true
   string.contains(
@@ -1308,7 +1213,7 @@ pub fn detail_band_test() {
   model.detail_collapsed |> should.be_false
   let html = board.view(model) |> element.to_string
   string.contains(html, "class=\"detail-band collapsed\"") |> should.be_false
-  string.contains(html, "<solace-task base=\"/p/a\"") |> should.be_true
+  string.contains(html, "<solace-task bar base=\"/p/a\"") |> should.be_true
 }
 
 pub fn showing_a_task_expands_the_band_test() {
@@ -1392,20 +1297,20 @@ pub fn detail_height_drag_test() {
   // The default: no inline height; the CSS default applies.
   body(model) |> string.contains("height:") |> should.be_false
   let #(model, _) = board.update(model, board.ResizeBegin(500.0, 300.0, 600))
-  let #(model, _) = board.update(model, board.ResizeMove(400.0))
+  let #(model, _) = board.update(model, board.ResizeMove(0.0, 400.0))
   model.detail_height |> should.equal(400)
   body(model) |> string.contains("height:400px") |> should.be_true
   // A drag past the bounds clamps.
-  let #(model, _) = board.update(model, board.ResizeMove(0.0))
+  let #(model, _) = board.update(model, board.ResizeMove(0.0, 0.0))
   model.detail_height |> should.equal(600)
-  let #(model, _) = board.update(model, board.ResizeMove(1000.0))
+  let #(model, _) = board.update(model, board.ResizeMove(0.0, 1000.0))
   model.detail_height |> should.equal(120)
   // The drag ends: the height stays and the drag is over.
   let #(model, _) = board.update(model, board.ResizeEnd)
   model.resizing |> should.equal(None)
   model.detail_height |> should.equal(120)
   // A move with no drag in progress changes nothing.
-  let #(model, _) = board.update(model, board.ResizeMove(400.0))
+  let #(model, _) = board.update(model, board.ResizeMove(0.0, 400.0))
   model.detail_height |> should.equal(120)
 }
 
@@ -1536,4 +1441,202 @@ pub fn no_project_messages_leave_the_root_lane_test() {
   let #(model, _) = board.update(model, board.CaughtUp)
   titles(model) |> should.equal(["Root"])
   model.replay |> should.equal([])
+}
+
+/// The board's controls and detail take the shared spacing values, so their
+/// heights and padding match the other pages; the page font is set once.
+pub fn board_uses_the_shared_spacing_test() {
+  let html = board.view(deps_board()) |> element.to_string
+  string.contains(html, "--control-h:36px") |> should.be_true
+  string.contains(
+    html,
+    "button,input,textarea,select{font:inherit;padding:var(--control-pad);margin:var(--space-1);",
+  )
+  |> should.be_true
+  string.contains(html, ".detail{padding:var(--pad-section)}")
+  |> should.be_true
+  string.contains(
+    html,
+    ".lane-title button{padding:2px 10px;min-height:var(--control-h-small)}",
+  )
+  |> should.be_true
+  string.contains(html, "16px system-ui") |> should.be_false
+}
+
+/// The bar is the open task's only heading: its title, Copy ID, column and
+/// status sit there, and `<solace-task>` is told to leave them out. Copy ID
+/// says Copied for a moment; opening another task starts it afresh.
+pub fn the_bar_holds_the_heading_test() {
+  let model =
+    deps_board()
+    |> put_task("a", "1", "Detail task", "planning", "")
+    |> put_task("a", "2", "Other task", "planning", "")
+  let #(model, _) = board.update(model, board.Select("a", "1"))
+  let bar = fn(m: board.Model) {
+    let assert Ok(bar) =
+      board.view(m)
+      |> element.to_string
+      |> string.split("<header class=\"detail-bar\"")
+      |> list.last
+    bar |> string.split("</header>") |> list.first |> result.unwrap("")
+  }
+  let shown = bar(model)
+  shown |> string.contains("Detail task") |> should.be_true
+  shown |> string.contains(">Copy ID</button>") |> should.be_true
+  shown |> string.contains("Copies task:1") |> should.be_true
+  shown |> string.contains("<span class=\"meta\">Planning") |> should.be_true
+  board.view(model)
+  |> element.to_string
+  |> string.contains("<solace-task bar base=\"/p/a\"")
+  |> should.be_true
+  // Copy ID: Copied for a moment; an older copy's reply changes nothing.
+  let #(asked, _) = board.update(model, board.CopyId)
+  let n = asked.copy.0
+  let #(copied, _) = board.update(asked, board.CopyDone(n, True))
+  bar(copied) |> string.contains(">Copied</button>") |> should.be_true
+  let #(stale, _) = board.update(copied, board.CopyReset(n - 1))
+  bar(stale) |> string.contains(">Copied</button>") |> should.be_true
+  let #(later, _) = board.update(copied, board.CopyReset(n))
+  bar(later) |> string.contains(">Copy ID</button>") |> should.be_true
+  let #(failed, _) = board.update(asked, board.CopyDone(n, False))
+  bar(failed) |> string.contains(">Copy failed</button>") |> should.be_true
+  // Another task opens: a late reply for the first shows nothing.
+  let #(other, _) = board.update(asked, board.Select("a", "2"))
+  let #(other, _) = board.update(other, board.CopyDone(n, True))
+  bar(other) |> string.contains(">Copy ID</button>") |> should.be_true
+  bar(other) |> string.contains("Copies task:2") |> should.be_true
+  // A task not listed in its lane: its id names it, with no meta line.
+  let #(unlisted, _) = board.update(model, board.Select("a", "9"))
+  bar(unlisted) |> string.contains(">9</button>") |> should.be_false
+  bar(unlisted) |> string.contains("▾ 9") |> should.be_true
+  bar(unlisted) |> string.contains("class=\"meta\"") |> should.be_false
+  // No task open: no Copy ID to press.
+  let #(none, _) =
+    board.update(board.Model(..model, selected_card: None), board.CopyId)
+  none.copy |> should.equal(model.copy)
+}
+
+/// On a window wider than 1.4 times its height an open task's band sits at
+/// the right edge: its width is dragged across and stepped with Left and
+/// Right, never below 32rem, and the board keeps room for its smallest
+/// columns before the band covers it. Collapsed, it is a strip holding
+/// only its expand button.
+pub fn a_wide_window_puts_the_band_on_the_side_test() {
+  let model = deps_board() |> put_task("a", "1", "Detail task", "planning", "")
+  let #(model, _) = board.update(model, board.Select("a", "1"))
+  let #(model, _) = board.update(model, board.Sided(True))
+  board.on_side(model) |> should.be_true
+  let model = board.Model(..model, detail_height: 300)
+  let body = fn(m: board.Model) {
+    m
+    |> board.view
+    |> element.to_string
+    |> string.split("</style>")
+    |> list.last
+    |> result.unwrap("")
+  }
+  let html = body(model)
+  html |> string.contains("class=\"work side\"") |> should.be_true
+  html
+  |> string.contains("width:max(32rem, min(42vw, 720px))")
+  |> should.be_true
+  html |> string.contains("aria-orientation=\"vertical\"") |> should.be_true
+  // The task fills the band's height: the bottom band's height is not used.
+  html |> string.contains("height:300px") |> should.be_false
+  // A drag to the left widens the band; its height stays.
+  let #(model, _) = board.update(model, board.ResizeBegin(900.0, 500.0, 1100))
+  let #(model, _) = board.update(model, board.ResizeMove(800.0, 0.0))
+  model.detail_width |> should.equal(600)
+  model.detail_height |> should.equal(300)
+  let html = body(model)
+  html |> string.contains("width:600px") |> should.be_true
+  // Three columns (Backlog is off the board): 3 × 216 + 2 × 12 + 18 + 16.
+  html
+  |> string.contains("margin-right:min(600px, max(0px, 100% - 706px))")
+  |> should.be_true
+  let #(model, _) = board.update(model, board.ResizeEnd)
+  // Keys: Left grows, Right shrinks, Up does nothing on the side.
+  let #(model, _) = board.update(model, board.ResizeKey("ArrowLeft"))
+  model.detail_width |> should.equal(624)
+  let #(model, _) = board.update(model, board.ResizeKey("ArrowRight"))
+  model.detail_width |> should.equal(600)
+  let #(model, _) = board.update(model, board.ResizeKey("ArrowUp"))
+  model.detail_width |> should.equal(600)
+  model.detail_height |> should.equal(300)
+  let #(model, _) = board.update(model, board.ResizeKey("Home"))
+  model.detail_width |> should.equal(0)
+  // From the CSS default, a step starts from the width that shows
+  // (min(42% of the 1280px fallback window, 720px): 538), not from 0.
+  let #(wider, _) = board.update(model, board.ResizeKey("ArrowLeft"))
+  wider.detail_width |> should.equal(562)
+  // The width stops at 32rem (512px at the 16px fallback font size), by
+  // drag and by key.
+  let #(thin, _) = board.update(model, board.ResizeBegin(900.0, 500.0, 1100))
+  let #(thin, _) = board.update(thin, board.ResizeMove(2000.0, 0.0))
+  thin.detail_width |> should.equal(512)
+  let #(thin, _) = board.update(thin, board.ResizeEnd)
+  let #(thin, _) = board.update(thin, board.ResizeKey("ArrowRight"))
+  thin.detail_width |> should.equal(512)
+  string.contains(
+    board.view(thin) |> element.to_string,
+    "box-sizing:border-box;min-width:32rem;",
+  )
+  |> should.be_true
+  // A width kept from before, under 32rem, shows at 32rem, and the board's
+  // margin follows it.
+  let html = body(board.Model(..model, detail_width: 100))
+  html |> string.contains("width:512px") |> should.be_true
+  html |> string.contains("margin-right:min(512px, ") |> should.be_true
+  // Collapsed: a strip on the side with only an expand button, no text.
+  let #(collapsed, _) = board.update(model, board.ToggleDetail)
+  board.on_side(collapsed) |> should.be_true
+  let html = body(collapsed)
+  html |> string.contains("class=\"work side collapsed\"") |> should.be_true
+  html |> string.contains("margin-right:") |> should.be_false
+  html |> string.contains("width:min(42vw") |> should.be_false
+  let assert Ok(bar) =
+    html |> string.split("<header class=\"detail-bar\"") |> list.last
+  let assert Ok(bar) = bar |> string.split("</header>") |> list.first
+  bar
+  |> string.contains("aria-label=\"Show the task details: Detail task\"")
+  |> should.be_true
+  bar |> string.contains(">◂</button>") |> should.be_true
+  bar |> string.contains(">Detail task") |> should.be_false
+  bar |> string.contains("Copy ID") |> should.be_false
+  bar |> string.contains("class=\"meta\"") |> should.be_false
+  // Expanding puts the full bar back.
+  let #(open, _) = board.update(collapsed, board.ToggleDetail)
+  body(open) |> string.contains("▸ Detail task") |> should.be_true
+  // A narrower window: the band goes back to the bottom with its height.
+  let #(narrow, _) = board.update(model, board.Sided(False))
+  body(narrow) |> string.contains("work side") |> should.be_false
+  body(narrow) |> string.contains("height:300px") |> should.be_true
+  body(narrow)
+  |> string.contains("aria-orientation=\"horizontal\"")
+  |> should.be_true
+}
+
+/// The board's smallest width beside the side band comes from the CSS:
+/// columns of 190px with 12px padding and a 1px border each side, 12px
+/// gaps, the lane's 8px padding and 1px border each side, and a 16px
+/// scroll bar gutter.
+pub fn lanes_keep_their_smallest_columns_test() {
+  board.lanes_width(5) |> should.equal(1162)
+  board.lanes_width(1) |> should.equal(250)
+  let html = board.view(deps_board()) |> element.to_string
+  html |> string.contains(".column{min-width:190px;") |> should.be_true
+  html
+  |> string.contains(
+    ".column{background:var(--well);border:1px solid var(--line);padding:0 12px 12px}",
+  )
+  |> should.be_true
+  html |> string.contains(".board{display:flex;gap:12px;") |> should.be_true
+  html
+  |> string.contains(
+    ".lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;",
+  )
+  |> should.be_true
+  html
+  |> string.contains(".lanes-area{scrollbar-gutter:stable}")
+  |> should.be_true
 }

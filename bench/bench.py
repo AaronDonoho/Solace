@@ -2,10 +2,10 @@
 """Solace benchmark harness (PROPOSAL.md §15.1).
 
   bench.py validate [TASK...]   check each task: hidden tests fail before, pass with the reference solution
-  bench.py run [--arm files|solace] [--run-number N] [--agent codex|claude] [--model M] [--effort E]
-               [--budget USD] [--repeat N] [TASK...]
+  bench.py run [--arm files|solace] [--run-number N] [--agent codex|claude|opencode|trueforge|pi] [--model M] [--effort E]
+               [--budget USD] [--repeat N] [--base-url URL] [TASK...]
                                 run an agent on each task and grade it
-  bench.py report RUN_DIR       per-task pass rate and medians for a run
+  bench.py report RUN_DIR...    per-task pass rate and medians; several runs also compare harnesses
 
 A task is a directory in bench/tasks/ holding prompt.md, hidden_test.gleam,
 solution.patch, and optionally setup.patch, `project` (the project directory
@@ -24,6 +24,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import urllib.request
 from datetime import datetime
 from pathlib import Path
 
@@ -31,7 +32,8 @@ ROOT = Path(__file__).resolve().parent
 TASKS = ROOT / "tasks"
 RESULTS = ROOT / "results"
 HIDDEN = "test/bench_hidden_test.gleam"
-EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit",  # Claude Code
+              "edit", "write", "multiedit", "patch", "apply_patch"}  # opencode
 
 
 def is_edit(block):
@@ -47,8 +49,10 @@ ALLOWED_TOOLS = [  # and what runs without a permission prompt
     "Read", "Edit", "Write", "Glob", "Grep",
     "Bash(gleam:*)", "Bash(ls:*)", "Bash(cat:*)", "Bash(find:*)", "Bash(grep:*)",
 ]
-SOLACE_BIN = ROOT.parent / "solace-cli" / "target" / "release"
-DEFAULT_MODEL = {"codex": "gpt-5.6-terra", "claude": "claude-sonnet-5"}
+# $SOLACE_BIN: another build's folder, e.g. an older version to compare; the bench then builds nothing.
+SOLACE_BIN = Path(os.environ.get("SOLACE_BIN") or ROOT.parent / "solace-cli" / "target" / "release")
+DEFAULT_MODEL = {"codex": "gpt-5.6-terra", "claude": "claude-sonnet-5", "opencode": "swift-1.5-iq2_xs",
+                 "trueforge": "swift-1.5-iq2_xs", "pi": "swift-1.5-iq2_xs"}
 # Codex features that aren't part of the task environment, turned off in both arms.
 CODEX_OFF = ["multi_agent", "apps", "plugins", "goals", "image_generation", "view_image", "browser_use",
              "computer_use", "in_app_browser", "hooks", "memories", "tool_suggest"]
@@ -73,7 +77,10 @@ PREAMBLE = (
 
 
 def sh(cmd, cwd, **kw):
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, **kw)
+    # PWD too: opencode works in $PWD, not its real working directory, so an inherited
+    # PWD sent run 24's agent into the solace repository itself.
+    env = {**kw.pop("env", os.environ), "PWD": str(cwd)}
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, env=env, **kw)
 
 
 def prepare(task: Path, arm: str = "files") -> Path:
@@ -93,6 +100,24 @@ def prepare(task: Path, arm: str = "files") -> Path:
     sh(git + ["add", "-A"], work)
     sh(git + ["commit", "-qm", "base"], work)
     return work
+
+
+def repo_state():
+    """What an agent that escaped its task copy would change in this repository: git status
+    (results aside), the Solace store, and the names in .git (opencode once left .git/opencode)."""
+    repo = ROOT.parent
+    status = sh(["git", "status", "--porcelain", "--untracked-files=all", "--", ".", ":!bench/results"], repo).stdout
+    store = repo / ".solace" / "store.db"
+    return status, store.stat().st_mtime_ns if store.exists() else None, sorted(p.name for p in (repo / ".git").iterdir())
+
+
+def changed_paths(before, after):
+    lines = lambda st: set(st[0].splitlines())
+    out = sorted(lines(before) ^ lines(after))
+    if before[1] != after[1]:
+        out.append(".solace/store.db")
+    out += [f".git/{n}" for n in sorted(set(before[2]) ^ set(after[2]))]
+    return out
 
 
 def gleam_test(work: Path) -> bool:
@@ -133,7 +158,7 @@ def parse_stream(lines):
     message's input side (fresh + cached context), which the stream reports exactly.
     """
     seen, blocks = set(), set()
-    context = calls = 0
+    context = calls = commands = 0
     first_context = None
     first_edit = None  # (tokens, tool calls, turns) spent before the first edit
     result, init = {}, {}
@@ -159,6 +184,8 @@ def parse_stream(lines):
                     if is_edit(b) and first_edit is None:
                         first_edit = (spent_before, calls, len(seen))
                     calls += 1
+                    if b.get("name") == "mcp__solace__solace":
+                        commands += sum(1 for l in b.get("input", {}).get("command", "").splitlines() if l.strip())
         elif ev.get("type") == "result":
             result = ev
     usage = result.get("usage", {})
@@ -173,6 +200,8 @@ def parse_stream(lines):
         + usage.get("output_tokens", 0),
         "output_tokens": usage.get("output_tokens"),
         "tool_calls": calls,
+        # D-145 asks for several commands per call; None when no solace call ran
+        "commands_per_call": round(commands / calls, 2) if commands else None,
         "tokens_before_first_edit": first_edit[0] if first_edit else None,
         "tool_calls_before_first_edit": first_edit[1] if first_edit else None,
         # model turns up to and including the one that makes the first edit
@@ -333,6 +362,240 @@ def parse_codex(lines):
     }
 
 
+def parse_opencode(lines):
+    """Metrics from `opencode run --format json` events.
+
+    Each model call ends with a step-finish part carrying its usage; tool parts
+    carry the call's name and input. opencode's `input` excludes cached input.
+    """
+    calls = turns = context = 0
+    first_context = None
+    first_edit = None  # (tokens, tool calls, turns) spent before the first edit
+    tokens = uncached = output = 0
+    cost = 0.0
+    seen, stamps = set(), []
+    for line in lines:
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(ev.get("timestamp"), (int, float)):
+            stamps.append(ev["timestamp"])
+        part = ev.get("part") or {}
+        if part.get("type") == "tool" and part.get("callID") not in seen:
+            seen.add(part.get("callID"))
+            if first_edit is None and is_edit({"name": part.get("tool", ""), "input": (part.get("state") or {}).get("input") or {}}):
+                first_edit = (context, calls, turns + 1)
+            calls += 1
+        elif part.get("type") == "step-finish":
+            t = part.get("tokens") or {}
+            cache = t.get("cache") or {}
+            size = t.get("input", 0) + cache.get("read", 0) + cache.get("write", 0)
+            out = t.get("output", 0) + t.get("reasoning", 0)
+            turns += 1
+            context += size
+            first_context = size if first_context is None else first_context
+            tokens += size + out
+            uncached += t.get("input", 0) + cache.get("write", 0) + out
+            output += out
+            cost += part.get("cost") or 0
+    return {
+        "tokens": tokens,
+        "work_tokens": tokens - (first_context or 0) * turns,
+        "uncached_tokens": uncached,
+        "output_tokens": output,
+        "tool_calls": calls,
+        "tokens_before_first_edit": first_edit[0] if first_edit else None,
+        "tool_calls_before_first_edit": first_edit[1] if first_edit else None,
+        "turns_to_first_edit": first_edit[2] if first_edit else None,
+        "turns": turns,
+        "cost_usd": cost or None,
+        "duration_ms": int(max(stamps) - min(stamps)) if stamps else None,
+        "agent_error": turns == 0 or any('"type":"error"' in l.replace(" ", "") for l in lines),
+        "init": {},
+    }
+
+
+TF_WRITE = re.compile(r"open\([^)]*['\"][wa]|\.write_text\(")
+
+
+def tf_edit(name, args):
+    """A TrueForge tool call that changes code: solace submit/delete, or a write from the sandbox's `exec`."""
+    try:
+        parsed = json.loads(args)
+    except json.JSONDecodeError:
+        parsed = {}
+    found = []
+
+    def commands(x):  # `command` may sit inside `call_tool`'s arguments
+        if isinstance(x, dict):
+            found.extend(v for k, v in x.items() if k == "command" and isinstance(v, str))
+            for v in x.values():
+                commands(v)
+    commands(parsed)
+    if "solace" in name or name == "call_tool":
+        return any(is_edit({"name": "solace", "input": {"command": c}}) for c in found)
+    return bool(CODEX_EDIT.search(args) or TF_WRITE.search(args))
+
+
+def parse_trueforge(lines):
+    """Metrics from TrueForge session events (one JSON event per line, merged messages).
+
+    Each model call is one model.message with its usage; its input_tokens count
+    cached input too, as OpenAI's usage does. Tool calls are in its tool_calls.
+    """
+    calls = turns = context = 0
+    first_context = None
+    first_edit = None
+    tokens = uncached = output = 0
+    stamps, failed_turn = [], False
+    for line in lines:
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if ev.get("created_at"):
+            stamps.append(datetime.fromisoformat(ev["created_at"].replace("Z", "+00:00")))
+        if ev.get("type") == "turn.done":
+            failed_turn |= (ev.get("state") or {}).get("status") != "done"
+        if ev.get("type") != "model.message" or not ev.get("usage"):
+            continue
+        u = ev["usage"]
+        turns += 1
+        for c in ev.get("tool_calls") or []:
+            name = (c.get("tool_info") or {}).get("name") or c.get("function", {}).get("name", "")
+            if first_edit is None and tf_edit(name, c.get("function", {}).get("arguments") or ""):
+                first_edit = (context, calls, turns)
+            calls += 1
+        size = u.get("input_tokens", 0)
+        context += size
+        first_context = size if first_context is None else first_context
+        tokens += size + u.get("output_tokens", 0)
+        uncached += size - u.get("cache_read_tokens", 0) + u.get("output_tokens", 0)
+        output += u.get("output_tokens", 0)
+    return {
+        "tokens": tokens,
+        "work_tokens": tokens - (first_context or 0) * turns,
+        "uncached_tokens": uncached,
+        "output_tokens": output,
+        "tool_calls": calls,
+        "tokens_before_first_edit": first_edit[0] if first_edit else None,
+        "tool_calls_before_first_edit": first_edit[1] if first_edit else None,
+        "turns_to_first_edit": first_edit[2] if first_edit else None,
+        "turns": turns,
+        "cost_usd": None,  # a local model has no price
+        "duration_ms": int((max(stamps) - min(stamps)).total_seconds() * 1000) if stamps else None,
+        "agent_error": turns == 0 or failed_turn,
+        "init": {},
+    }
+
+
+def parse_pi(lines):
+    """Metrics from `pi --mode json` events.
+
+    Each model call is an assistant message_end carrying its usage and tool calls;
+    pi's `input` excludes cached input.
+    """
+    calls = turns = context = 0
+    first_context = None
+    first_edit = None
+    tokens = uncached = output = 0
+    stamps, error = [], False
+    for line in lines:
+        try:
+            ev = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        m = ev.get("message") or {}
+        if ev.get("type") != "message_end" or m.get("role") != "assistant":
+            continue
+        stamps.append(m.get("timestamp", 0))
+        error |= m.get("stopReason") in ("error", "aborted")
+        u = m.get("usage") or {}
+        turns += 1
+        for c in m.get("content") or []:
+            if c.get("type") != "toolCall":
+                continue
+            if first_edit is None and is_edit({"name": c.get("name", ""), "input": c.get("arguments") or {}}):
+                first_edit = (context, calls, turns)
+            calls += 1
+        size = u.get("input", 0) + u.get("cacheRead", 0) + u.get("cacheWrite", 0)
+        context += size
+        first_context = size if first_context is None else first_context
+        tokens += size + u.get("output", 0)
+        uncached += u.get("input", 0) + u.get("cacheWrite", 0) + u.get("output", 0)
+        output += u.get("output", 0)
+    return {
+        "tokens": tokens,
+        "work_tokens": tokens - (first_context or 0) * turns,
+        "uncached_tokens": uncached,
+        "output_tokens": output,
+        "tool_calls": calls,
+        "tokens_before_first_edit": first_edit[0] if first_edit else None,
+        "tool_calls_before_first_edit": first_edit[1] if first_edit else None,
+        "turns_to_first_edit": first_edit[2] if first_edit else None,
+        "turns": turns,
+        "cost_usd": None,  # a local model has no price
+        "duration_ms": int(max(stamps) - min(stamps)) if stamps else None,
+        "agent_error": turns == 0 or error,
+        "init": {},
+    }
+
+
+def pi_home(home: Path, model, base_url, work: Path, solace_bin):
+    """A pi agent directory for one solace-arm run: the model behind an OpenAI-compatible server and the solace MCP tool."""
+    n_ctx = served_context(base_url)
+    limit = {"contextWindow": n_ctx, "maxTokens": min(32000, n_ctx // 4)} if n_ctx else {}
+    (home / "models.json").write_text(json.dumps({"providers": {"local": {
+        "baseUrl": base_url, "api": "openai-completions", "apiKey": "none", "models": [{"id": model, **limit}]}}}))
+    # D-8: the protocol only, declared to the model like a built-in tool; it runs in the task's copy.
+    (home / "mcp.json").write_text(json.dumps({"mcpServers": {"solace": {
+        "command": str(solace_bin / "solace"), "args": ["mcp", "--budget", "40000"], "cwd": str(work), "exposure": "direct"}}}))
+    (home / "settings.json").write_text("{}")
+
+
+# Built-in opencode tools; the files arm keeps the ones Claude Code's files arm gets.
+OPENCODE_TOOLS = ["bash", "edit", "write", "read", "grep", "glob", "list", "patch", "apply_patch", "multiedit",
+                  "webfetch", "websearch", "codesearch", "task", "todowrite", "todoread", "skill", "question", "lsp"]
+OPENCODE_FILES = {"bash", "edit", "write", "read", "grep", "glob", "list", "patch", "apply_patch", "multiedit"}
+
+
+def served_context(base_url):
+    """The context window an OpenAI-compatible server reports (llama.cpp, Strata), so the harness compacts before it."""
+    try:
+        with urllib.request.urlopen(base_url.rstrip("/") + "/models", timeout=5) as r:
+            data = json.load(r).get("data") or [{}]
+        return (data[0].get("meta") or {}).get("n_ctx")
+    except (OSError, ValueError):
+        return None
+
+
+def opencode_config(arm, model, base_url, solace_bin):
+    """An opencode.json for one run: the model behind an OpenAI-compatible server, and the arm's tools."""
+    n_ctx = served_context(base_url)
+    limit = {"limit": {"context": n_ctx, "output": min(32000, n_ctx // 4)}} if n_ctx else {}
+    config = {
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {"local": {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": base_url},
+                               "models": {model: {"name": model, **limit}}}},
+        "model": f"local/{model}",
+        "autoupdate": False, "share": "disabled", "snapshot": False,
+        "instructions": [],
+    }
+    # Nothing outside the task's copy: run 24 first wrote into the solace repository itself.
+    external = {"external_directory": "deny"}
+    if arm == "files":
+        config["tools"] = {t: t in OPENCODE_FILES for t in OPENCODE_TOOLS}
+        # the same shell commands Claude Code's files arm may run
+        config["permission"] = {**external, "edit": "allow", "bash": {"*": "deny", **{f"{c} *": "allow" for c in ("gleam", "ls", "cat", "find", "grep")}}}
+    else:  # D-8: the protocol only, as one MCP tool
+        config["tools"] = {t: False for t in OPENCODE_TOOLS}
+        config["mcp"] = {"solace": {"type": "local", "command": [str(solace_bin / "solace"), "mcp", "--budget", "40000"],
+                                    "enabled": True}}
+        config["permission"] = {**external, "edit": "deny", "bash": "deny", "solace_*": "allow"}
+    return config
+
+
 def codex_cmd(arm, model, effort, base_url=None):
     cmd = ["codex", "exec", "--json", "--skip-git-repo-check", "-m", model,
            "-c", f'model_reasoning_effort="{effort}"', "-c", 'web_search="disabled"']
@@ -377,12 +640,26 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort=None, run_numbe
         cmd += ["--effort", effort]
     effort = effort or "medium" if agent == "codex" else effort
     if arm == "files":
-        preamble = PREAMBLE
         cmd += ["--tools", TOOLS, "--allowedTools", *ALLOWED_TOOLS]
-    else:  # D-8: the protocol only, as one MCP tool; no built-in tools at all
-        preamble = SOLACE_PREAMBLE
+    # solace arm, D-8: the protocol only, as one MCP tool; no built-in tools at all
     # Keep the user's own plugins, hooks and settings out of the measurement.
     cmd += ["--bare"] if os.environ.get("ANTHROPIC_API_KEY") else ["--setting-sources", "project"]
+    forge = None
+    if agent == "trueforge":  # one private server for the whole run; each task is its own session
+        import trueforge
+        url = base_url or "http://127.0.0.1:8080/v1"
+        forge = trueforge.Server(Path(tempfile.mkdtemp(prefix="trueforge-home-")), model, url, served_context(url))
+    try:
+        run_tasks(tasks, model, repeat, arm, agent, effort, base_url, followup, cmd, env, scenario_dir, first_reps, forge)
+    finally:
+        if forge:
+            forge.close()
+            shutil.rmtree(forge.home)
+    print(f"results: {run_dir}")
+
+
+def run_tasks(tasks, model, repeat, arm, agent, effort, base_url, followup, cmd, env, scenario_dir, first_reps, forge):
+    preamble = PREAMBLE if arm == "files" else SOLACE_PREAMBLE
     for task, offset in [(t, r) for r in range(repeat) for t in tasks]:
         rep = first_reps[task.name] + offset
         name = f"{task.name}.{rep}"
@@ -396,7 +673,7 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort=None, run_numbe
             if (task / "work.md").exists():
                 sh(["solace", "work", "add"], work, env=env, input=(task / "work.md").read_text())
         launch = None
-        if arm == "solace":
+        if arm == "solace" and agent not in ("opencode", "trueforge", "pi"):
             config_dir = Path(tempfile.mkdtemp(prefix="solace-agent-"))
             generated = sh(["solace", "agent-config", agent, str(config_dir)], work, env=env)
             if generated.returncode:
@@ -411,7 +688,44 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort=None, run_numbe
                 settings["permissions"]["deny"] += ["WebFetch", "WebSearch"]
                 settings_path.write_text(json.dumps(settings))
         prompt = preamble + (task / "prompt.md").read_text()
-        if agent == "codex":
+        before = repo_state()
+        if agent == "trueforge":
+            stream = "\n".join(forge.run_task(arm, work, prompt, [str(SOLACE_BIN / "solace"), "mcp", "--budget", "40000"], env))
+            metrics = parse_trueforge(stream.splitlines())
+        elif agent == "pi":
+            # A fresh agent directory keeps the user's pi settings, extensions, sessions and AGENTS.md out.
+            home = Path(tempfile.mkdtemp(prefix="pi-home-"))
+            pi_home(home, model, base_url or "http://127.0.0.1:8080/v1", work, SOLACE_BIN)
+            pi = ["pi", "-p", "--mode", "json", "--no-session", "--tools", "mcp__solace__*", "--no-skills",
+                  "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-approve", "--model", f"local/{model}"]
+            if effort:
+                pi += ["--thinking", effort]
+            try:  # empty stdin: pi waits for it to close
+                stream = sh(pi + ["--", prompt], work, input="", timeout=1800,
+                            env={**env, "PI_CODING_AGENT_DIR": str(home), "PI_OFFLINE": "1", "PI_TELEMETRY": "0"}).stdout
+            except subprocess.TimeoutExpired as e:
+                stream = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+            shutil.rmtree(home)
+            metrics = parse_pi(stream.splitlines())
+        elif agent == "opencode":
+            # A fresh config and data home keep the user's opencode config, plugins and sessions out.
+            home = Path(tempfile.mkdtemp(prefix="opencode-home-"))
+            (home / "config" / "opencode").mkdir(parents=True)
+            (home / "config" / "opencode" / "opencode.json").write_text(
+                json.dumps(opencode_config(arm, model, base_url or "http://127.0.0.1:8080/v1", SOLACE_BIN)))
+            oc_env = {**env, "XDG_CONFIG_HOME": str(home / "config"), "XDG_DATA_HOME": str(home / "data"),
+                      "XDG_STATE_HOME": str(home / "state"), "XDG_CACHE_HOME": str(home / "cache"),
+                      "OPENCODE_DISABLE_CLAUDE_CODE": "1", "OPENCODE_DISABLE_AUTOUPDATE": "1"}
+            oc = ["opencode", "run", "--format", "json", "--pure", "--dir", str(work), "-m", f"local/{model}"]
+            if effort:
+                oc += ["--variant", effort]
+            try:
+                stream = sh(oc + [prompt], work, timeout=1800, env=oc_env).stdout
+            except subprocess.TimeoutExpired as e:
+                stream = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
+            shutil.rmtree(home)
+            metrics = parse_opencode(stream.splitlines())
+        elif agent == "codex":
             # A fresh CODEX_HOME keeps the user's config, plugins, hooks and memories out.
             home = config_dir if launch else Path(tempfile.mkdtemp(prefix="codex-home-"))
             (home / "auth.json").symlink_to(Path.home() / ".codex" / "auth.json")
@@ -433,6 +747,14 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort=None, run_numbe
                 stream = e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or "")
             metrics = parse_stream(stream.splitlines())
         (scenario_dir / f"{name}.stream.jsonl").write_text(stream)
+        escaped = changed_paths(before, repo_state())
+        if escaped == [".solace/store.db"] and str(ROOT.parent) not in stream:
+            # The store alone changed and the agent never named this repository: a running
+            # `solace serve` (the board) writes it too.
+            print(f"  note: .solace/store.db changed during {name}; the agent's log never names this repository")
+        elif escaped:
+            sys.exit(f"stopped: during {name} the agent changed this repository, outside its task copy: "
+                     f"{', '.join(escaped)}. Undo those changes; the run's log is in {scenario_dir}.")
         row = {"task": task.name, "rep": rep, "agent": agent,
                "model": f"{model} ({effort})" if effort else model, "effort": effort,
                "arm": arm, **metrics, **grade(task, work)}
@@ -458,10 +780,9 @@ def run(tasks, model, budget, repeat, arm, agent="codex", effort=None, run_numbe
         print(f"{'PASS' if row['hidden_pass'] else 'fail'} {name}  tokens={row['tokens']} "
               f"turns_to_edit={row['turns_to_first_edit']} before_edit={row['tokens_before_first_edit']}")
         shutil.rmtree(work.parent)
-    print(f"results: {run_dir}")
 
 
-def report(run_dir: Path):
+def load_rows(run_dir: Path):
     rows = []
     summaries = [run_dir / "summary.jsonl"] if (run_dir / "summary.jsonl").exists() else sorted(run_dir.glob("*/summary.jsonl"))
     if not summaries:
@@ -472,23 +793,61 @@ def report(run_dir: Path):
             rows.append(r)
             # Older runs kept all task streams directly in the run directory.
             stream = summary.parent / f"{r['task']}.{r.get('rep', 1)}.stream.jsonl"
-            if (r.get("agent") == "codex" or "turns_to_first_edit" not in r) and stream.exists():
-                parse = parse_codex if r.get("agent") == "codex" else parse_stream
+            if (r.get("agent") in ("codex", "opencode", "trueforge", "pi") or "turns_to_first_edit" not in r
+                    or "commands_per_call" not in r) and stream.exists():
+                parse = {"codex": parse_codex, "opencode": parse_opencode, "trueforge": parse_trueforge, "pi": parse_pi}.get(r.get("agent"), parse_stream)
                 r.update({k: v for k, v in parse(stream.read_text().splitlines()).items() if k != "init"})
-    cols = ["tokens", "work_tokens", "turns_to_first_edit", "tokens_before_first_edit", "uncached_tokens", "duration_ms", "cost_usd"]
+    return rows
+
+
+def compare(rows):
+    """One line per harness setup (agent, model, arm): medians over every run, and tokens per pass."""
+    groups = {}
+    for r in rows:
+        groups.setdefault((r.get("agent") or "claude", r.get("model") or "?", r.get("arm") or "?"), []).append(r)
+    tasks = [{r["task"] for r in rs} for rs in groups.values()]
+    if len({frozenset(t) for t in tasks}) > 1:
+        shared = sorted(set.intersection(*tasks))
+        print("note: setups ran different tasks; " + (f"compare only the shared ones: {', '.join(shared)}"
+                                                      if shared else "no task is shared, so the medians don't compare"))
+    cols = ["tokens", "work_tokens", "uncached_tokens", "output_tokens", "turns", "tool_calls", "duration_ms"]
+    print(f"{'agent':<9} {'model':<24} {'arm':<7} {'pass':>6} " + " ".join(
+        f"{c:>10}" for c in ["tokens", "work", "uncached", "output", "turns", "calls", "ms", "tok/pass"]))
+    for (agent, model, arm), rs in sorted(groups.items()):
+        passed = sum(r["hidden_pass"] for r in rs)
+        meds = [statistics.median(v) if (v := [r[c] for r in rs if r.get(c) is not None]) else None for c in cols]
+        per_pass = sum(r.get("tokens") or 0 for r in rs) // passed if passed else None
+        print(f"{agent:<9} {model[:24]:<24} {arm:<7} {passed:>3}/{len(rs):<2} " + " ".join(
+            f"{'-' if v is None else int(v):>10}" for v in meds + [per_pass]))
+    print("medians per run; tok/pass: all tokens (failed runs included) over hidden-test passes. "
+          "Harnesses differ in fixed prompt size, so `work` (tokens minus the first call's context re-sent each call) "
+          "is the fairest efficiency measure; `tokens` is what the model actually read.")
+
+
+def report(*run_dirs: Path):
+    rows = [r for d in run_dirs for r in load_rows(d)]
+    if len({(r.get("agent"), r.get("model"), r.get("arm")) for r in rows}) > 1:
+        compare(rows)
+        print()
+    cols = ["tokens", "work_tokens", "turns_to_first_edit", "tokens_before_first_edit", "uncached_tokens", "duration_ms", "cost_usd",
+            "commands_per_call"]
 
     def med(rs, c):
         vals = [r[c] for r in rs if r.get(c) is not None]
         return statistics.median(vals) if vals else None
 
-    print(f"{'task':<28} {'pass':>5} " + " ".join(f"{c:>12}" for c in ["tokens", "work", "turns→edit", "tok<edit", "uncached", "ms", "cost"]))
+    print(f"{'task':<28} {'pass':>5} " + " ".join(f"{c:>12}" for c in ["tokens", "work", "turns→edit", "tok<edit", "uncached", "ms", "cost",
+                                                                        "cmd/call"]))
     for name in sorted({r["task"] for r in rows}) + ["ALL", "SUM"]:
         rs = rows if name in ("ALL", "SUM") else [r for r in rows if r["task"] == name]
         passed = sum(r["hidden_pass"] for r in rs)
-        cells = [sum(r.get(c) or 0 for r in rs) if name == "SUM" else med(rs, c) for c in cols]
+        # a sum of ratios means nothing, so SUM leaves cmd/call out
+        cells = [(None if c == "commands_per_call" else sum(r.get(c) or 0 for r in rs)) if name == "SUM" else med(rs, c)
+                 for c in cols]
         print(f"{name:<28} {passed:>2}/{len(rs):<2} " + " ".join(
-            f"{'-' if v is None else round(v, 3) if c == 'cost_usd' else int(v):>12}" for c, v in zip(cols, cells)))
-    cost = sum(r['cost_usd'] or 0 for r in rows)
+            f"{'-' if v is None else round(v, 3) if c == 'cost_usd' else round(v, 2) if c == 'commands_per_call' else int(v):>12}"
+            for c, v in zip(cols, cells)))
+    cost = sum(r.get('cost_usd') or 0 for r in rows)
     passed = sum(r["hidden_pass"] for r in rows)
     print(f"tokens per passed task: {sum(r['tokens'] for r in rows) // passed if passed else '-'} "
           "(all tokens, failed runs included, over hidden-test passes)")
@@ -516,25 +875,30 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("command", choices=["validate", "run", "report"])
     ap.add_argument("tasks", nargs="*", help="task directory names (default: all); for report, the run directory")
-    ap.add_argument("--agent", choices=["codex", "claude"], default="codex")
-    ap.add_argument("--model", help="default: gpt-5.6-terra (codex), claude-sonnet-5 (claude)")
+    ap.add_argument("--agent", choices=["codex", "claude", "opencode", "trueforge", "pi"], default="codex")
+    ap.add_argument("--model", help="default: gpt-5.6-terra (codex), claude-sonnet-5 (claude), swift-1.5-iq2_xs (opencode, trueforge, pi)")
     ap.add_argument("--effort", help="reasoning effort (codex default: medium; claude: its own default)")
     ap.add_argument("--followup", type=Path, help="claude only: a question asked in the same session after grading")
     ap.add_argument("--budget", type=float, default=2.0, help="max USD per task (claude only)")
     ap.add_argument("--repeat", type=int, default=1, help="runs per task")
     ap.add_argument("--run-number", type=int, help="override the next run number, e.g. to pair both arms")
-    ap.add_argument("--base-url", help="codex only: OpenAI-compatible server for a local model, e.g. http://127.0.0.1:1234/v1")
+    ap.add_argument("--base-url", help="codex, opencode, trueforge and pi: OpenAI-compatible server for a local model, e.g. http://127.0.0.1:1234/v1 "
+                    "(opencode, trueforge and pi default: http://127.0.0.1:8080/v1)")
     ap.add_argument("--arm", choices=["files", "solace"], default="files",
                     help="files: normal file tools; solace: the solace protocol only (D-8)")
     a = ap.parse_args()
     if a.command == "report":
-        return report(Path(a.tasks[0]))
+        return report(*map(Path, a.tasks))
     all_names = sorted(p.name for p in TASKS.iterdir() if p.is_dir())
     names = [n for n in all_names if not a.tasks or any(fnmatch.fnmatch(n, pat) for pat in a.tasks)]
     tasks = [TASKS / n for n in names]
     if a.command == "validate":
         sys.exit(0 if validate(tasks) else 1)
-    if a.arm == "solace":
+    if a.agent == "trueforge" and a.effort:
+        sys.exit("--effort is not passed to trueforge; leave it out")
+    if a.agent == "pi" and a.arm == "files":
+        sys.exit("pi runs only the solace arm: it has no way to limit its shell to the files arm's commands")
+    if a.arm == "solace" and not os.environ.get("SOLACE_BIN"):
         r = subprocess.run(["cargo", "build", "--release", "--quiet"], cwd=ROOT.parent / "solace-cli")
         if r.returncode:
             sys.exit("could not build solace-cli")

@@ -75,7 +75,7 @@ pub fn section_fills_the_page_test() {
   let assert [css, ..] = page |> string.split("</style>")
   assert string.contains(
     css,
-    ".settings section{background:var(--paper);border:1px solid var(--edge);padding:12px 20px}",
+    ".settings section{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card)}",
   )
   assert !string.contains(css, ".settings section{max-width")
 }

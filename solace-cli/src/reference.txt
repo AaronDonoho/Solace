@@ -10,7 +10,8 @@ Several commands go in one call, one per line, run in order. Each call is a
 turn that re-reads the conversation, so work in few calls:
 1. Read once: `inspect checkout.pay payments.capture --context` gives each
    symbol with the signatures it uses, its callers and a test. Don't ask again
-   for anything a reply showed. To reproduce a case:
+   for anything a reply showed, and read only what the change needs: once you
+   know what to change, stop exploring. To reproduce a case:
    `probe --from checkout_test.pay_test --trace checkout.pay`.
 2. Change and test in one call: `submit` then `test`, or for other files
    `write` (no path) then `run <name>`. All the edits, in one
@@ -29,6 +30,11 @@ turn that re-reads the conversation, so work in few calls:
    Every line of an Add, empty ones too, starts with `+`. Imports are added
    automatically. Work out expected values from the task's numbers and the
    code's own rules, never from running the code.
+   Write code the way the code around it is written: reuse the helpers, types
+   and patterns `inspect --context` shows. A comment says why code exists, only
+   where the code can't say it; never restate what the code does or address the
+   reviewer (that goes in your summary). Never put secrets or keys in code, logs
+   or notes.
 3. Fix only what the reply reports, then `test` again; look at what it lists
    as reached by no test. Once `test` passes, the code is done (it type-checks
    first; no `check`).
@@ -109,9 +115,10 @@ Reading
                                 every symbol, and open work records with context
   ... --project <folder>        this line only, in another project: its folder
                                 as session start lists it, from the Solace root,
-                                or `../x` from this project. Reads (view, inspect, refs, find,
-                                grep, files, read) reach any project there;
-                                other commands, the projects the task covers
+                                or `../x` from this project. Reads (view,
+                                inspect, refs, find, grep, files, read) reach
+                                any project there; other commands, the
+                                projects the task covers
 Replies have a size limit: a signature is printed once per reply, and a reply
 that would be larger says what it left out and the command that shows it.
 
@@ -185,14 +192,16 @@ Changing (the new code is in `text`)
                                   merge solace_task.Task board.Task --to-project components
                                 Private helpers only <drop> used are named as
                                 now unused, not deleted.
+  drafts                        the kept drafts: rejected submits and writes,
+                                each with its id; fix and retry with `--draft`
 Every submit is type-checked. Missing imports are added and imports in `text`
 are merged. If the submitted code has errors, nothing is saved. If it breaks
 other symbols (e.g. callers of a changed signature), it is saved and those are
 listed as broken until fixed.
 Rejected text is kept as a draft; the error gives its id. Fix it rather than
 resending it: `submit --draft <id> --replace` (`old` and `text`) patches and
-retries it, `submit --draft <id>` retries it as is, `view --draft <id>` reads it,
-`drafts` lists them. A draft is stale once a symbol it replaces, or its module's
+retries it, `submit --draft <id>` retries it as is, `view --draft <id>` reads it.
+A draft is stale once a symbol it replaces, or its module's
 imports, changed; its retry is refused (E0107): read the current source and
 submit again. A block equal to the stored symbol is reported unchanged. A patch
 that can't be applied (E0108) is kept as written. When the error names the
@@ -242,6 +251,7 @@ change with `submit`, protected ones with `write` and the human's approval.
             `files` (folders as one line with a count), not searched by `grep`
   internal  .solace/ and projects nested in this one: no reading, writing or
             searching; work in them through their own commands
+
   files [dir]...                tree with each file's tier and line count (bytes
                                 if binary or over watch_limit); no path: the
                                 project
@@ -294,6 +304,7 @@ change with `submit`, protected ones with `write` and the human's approval.
                                 internal files stay put. --to-project: another
                                 project of this task. A repeated move changes
                                 nothing
+
 Skills (D-27): the `skills` key in solace.toml names the project's skills
 folder, `skills/` when the key is missing. Each skill is a subfolder with a
 `SKILL.md`, or a single `<name>.md` file at the folder's top; `name` and
@@ -310,15 +321,25 @@ folder's own note, not a skill. The key names a folder inside the project that
 holds no code: `src`, `test`, a folder inside them, `.solace`, a nested
 project (one with its own store) and a folder inside one are refused; `./x`
 names the same folder as `x`.
-Project: build | format | run <name> [args...] (commands declared in solace.toml)
+Project (commands declared in solace.toml)
+  build                         gleam build for the project; new dependencies are
+                                fetched (a plain-file project has nothing to build)
   build plan                    every project's build recipe ([build] in its
                                 solace.toml, or the default from its files), in
                                 build order; reads only
-Work records, kept between sessions: work add (`text`) | work list | work done <id>
+  format                        gleam format for the project
+  run <name> [args...]          a command declared in solace.toml's [commands];
+                                extra arguments only when it allows them
+
+Work records, kept between sessions
+  work add                      a record of the work so far, the note in `text`
+  work list                     the open records, as `session start` lists them
+  work done <id>                close a record
 
 Task runs (the note, summary or question in `text`). Reviews and investigations
-are read-only: submit, delete, extract, merge, write, remove, move and format are refused, and so is
-run, except in a review for commands marked `allowed_in_reviews = true`.
+are read-only: submit, delete, extract, merge, write, remove, move and format
+are refused, and so is run, except in a review for commands marked
+`allowed_in_reviews = true`.
   task diff [name...]           what this task changed, against its state before;
                                 `impact` with no names is the same
   task note                     add a note; completes a review run
@@ -328,8 +349,9 @@ run, except in a review for commands marked `allowed_in_reviews = true`.
                                 discussion's answers are notes)
   task done                     finish: a work run's summary goes to human
                                 review; an investigation's report stays on the task
-  In notes, cite code by name (`board.rs::within`, `checkout.pay`), not by
-  `file:line`: line numbers move.
+
+In notes, cite code by name (`board.rs::within`, `checkout.pay`), not by
+`file:line`: line numbers move.
 
 Strategy runs (planning with the human on the Strategy page): read only; any
 command not listed here is refused.
@@ -366,8 +388,8 @@ command not listed here is refused.
                                 editing. state: proposed|upcoming|active|
                                 complete|canceled. Other fields are refused.
                                 A title is the work in 3-7 words (`extract: JS FFI
-                                 files`); details go in body. The human sees
-                                 body as Markdown, the rest as
+                                files`); details go in body. The human sees
+                                body as Markdown, the rest as
                                 text
   strategy vision               propose a new vision, its text in `text`; waits
                                 the same way
@@ -382,8 +404,9 @@ command not listed here is refused.
                                 takes one path
   ... --project <folder>        read in a project below the root; in a folder of
                                 projects, every read needs it
-  In notes and proposals, cite code by name (`board.rs::within`), not by
-  `file:line`: line numbers move.
+
+In notes and proposals, cite code by name (`board.rs::within`), not by
+`file:line`: line numbers move.
 
 Host commands (humans only, refused in a run)
   create <name> [--javascript] [--yes]

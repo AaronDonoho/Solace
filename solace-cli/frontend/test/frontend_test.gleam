@@ -1,6 +1,7 @@
-import frontend.{Board, Contracts, Migrate, RouteChanged}
+import frontend.{Board, Contracts, RouteChanged}
 import gleam/int
 import gleam/list
+import gleam/option.{None, Some}
 import gleam/string
 import gleam/uri
 import gleeunit
@@ -14,7 +15,9 @@ pub fn main() -> Nil {
 pub fn routes_test() {
   let cases = [
     #("/", Board),
-    #("/migrate", Migrate),
+    #("/workspace", frontend.Workspace),
+    #("/migrate", frontend.Workspace),
+    #("/projects", Board),
     #("/contracts", Contracts("")),
     #("/p/web/contracts", Contracts("/p/web")),
     #("/contracts?task=t1", Contracts("")),
@@ -26,7 +29,8 @@ pub fn routes_test() {
     #("/view", Board),
     #("/migration", Board),
     #("/nope", Board),
-    #("/migrate?filter=all#top", Migrate),
+    #("/workspace?filter=all#top", frontend.Workspace),
+    #("/migrate?filter=all#top", frontend.Workspace),
   ]
   list.each(cases, fn(entry) {
     let #(path, expected) = entry
@@ -38,7 +42,7 @@ pub fn routes_test() {
 pub fn page_elements_test() {
   let cases = [
     #(#(Board, True), "<solace-board></solace-board>"),
-    #(#(Migrate, True), "<solace-migration></solace-migration>"),
+    #(#(frontend.Workspace, True), "<solace-migration></solace-migration>"),
     #(#(Contracts(""), True), "<solace-contracts></solace-contracts>"),
     #(
       #(Contracts("/p/web"), True),
@@ -65,9 +69,16 @@ pub fn menu_current_test() {
     element.to_string(
       frontend.view(frontend.Model(Board, [Board], frontend.no_focus, [])),
     )
-  let migration =
+  let workspace =
     element.to_string(
-      frontend.view(frontend.Model(Migrate, [Migrate], frontend.no_focus, [])),
+      frontend.view(
+        frontend.Model(
+          frontend.Workspace,
+          [frontend.Workspace],
+          frontend.no_focus,
+          [],
+        ),
+      ),
     )
   let contract =
     element.to_string(
@@ -84,13 +95,14 @@ pub fn menu_current_test() {
     board,
     "<a aria-current=\"page\" class=\"current\" href=\"/\">Board</a>",
   )
-  assert string.contains(board, "<a href=\"/migrate\">Migration</a>")
+  assert string.contains(board, "<a href=\"/workspace\">Workspace</a>")
+  assert !string.contains(board, "Migration</a>")
   assert string.contains(board, "<a href=\"/contracts\">Contracts</a>")
   assert string.contains(board, "<a href=\"/strategy\">Strategy</a>")
   assert string.contains(board, "<a href=\"/settings\">Settings</a>")
   assert string.contains(board, "<a href=\"/knowledgebase\">Knowledgebase</a>")
   let order =
-    ["Migration", "Strategy", "Board", "Contracts", "Knowledgebase", "Settings"]
+    ["Workspace", "Strategy", "Board", "Contracts", "Knowledgebase", "Settings"]
     |> list.map(fn(label) {
       let assert [before, _] = string.split(board, label <> "</a>")
       string.length(before)
@@ -127,14 +139,14 @@ pub fn menu_current_test() {
     "<a aria-current=\"page\" class=\"current\" href=\"/settings\">Settings</a>",
   )
   assert string.contains(settings_page, "<a href=\"/\">Board</a>")
-  assert string.contains(migration, "<a href=\"/\">Board</a>")
+  assert string.contains(workspace, "<a href=\"/\">Board</a>")
   assert string.contains(
-    migration,
-    "<a aria-current=\"page\" class=\"current\" href=\"/migrate\">Migration</a>",
+    workspace,
+    "<a aria-current=\"page\" class=\"current\" href=\"/workspace\">Workspace</a>",
   )
-  assert string.contains(migration, "<a href=\"/contracts\">Contracts</a>")
+  assert string.contains(workspace, "<a href=\"/contracts\">Contracts</a>")
   assert string.contains(contract, "<a href=\"/\">Board</a>")
-  assert string.contains(contract, "<a href=\"/migrate\">Migration</a>")
+  assert string.contains(contract, "<a href=\"/workspace\">Workspace</a>")
   // A workspace project's contract page highlights Contracts too.
   assert string.contains(
     contract,
@@ -152,13 +164,18 @@ pub fn starts_on_the_board_outside_a_browser_test() {
 pub fn a_route_change_shows_the_new_page_test() {
   let #(model, _effect) =
     frontend.update(
-      frontend.Model(Migrate, [Migrate], frontend.no_focus, []),
+      frontend.Model(
+        frontend.Workspace,
+        [frontend.Workspace],
+        frontend.no_focus,
+        [],
+      ),
       RouteChanged(Contracts("/p/web")),
     )
   assert model
     == frontend.Model(
       Contracts("/p/web"),
-      [Migrate, Contracts("/p/web")],
+      [frontend.Workspace, Contracts("/p/web")],
       frontend.no_focus,
       [],
     )
@@ -351,10 +368,11 @@ pub fn a_page_left_stays_hidden_test() {
   let #(model, _) =
     frontend.update(
       frontend.Model(Board, [Board], frontend.no_focus, []),
-      RouteChanged(Migrate),
+      RouteChanged(frontend.Workspace),
     )
   let #(model, _) = frontend.update(model, RouteChanged(Board))
-  assert model == frontend.Model(Board, [Board, Migrate], frontend.no_focus, [])
+  assert model
+    == frontend.Model(Board, [Board, frontend.Workspace], frontend.no_focus, [])
   let html = element.to_string(frontend.view(model))
   assert string.contains(
     html,
@@ -365,7 +383,14 @@ pub fn a_page_left_stays_hidden_test() {
 pub fn a_page_not_opened_is_not_drawn_test() {
   let html =
     element.to_string(
-      frontend.view(frontend.Model(Migrate, [Migrate], frontend.no_focus, [])),
+      frontend.view(
+        frontend.Model(
+          frontend.Workspace,
+          [frontend.Workspace],
+          frontend.no_focus,
+          [],
+        ),
+      ),
     )
   assert !string.contains(html, "<solace-board")
   assert !string.contains(html, "<solace-contracts")
@@ -375,7 +400,8 @@ pub fn a_page_not_opened_is_not_drawn_test() {
 pub fn a_reopened_page_keeps_its_place_test() {
   assert frontend.open([Contracts(""), Board], Contracts("/p/web"))
     == [Contracts("/p/web"), Board]
-  assert frontend.open([Board], Migrate) == [Board, Migrate]
+  assert frontend.open([Board], frontend.Workspace)
+    == [Board, frontend.Workspace]
 }
 
 /// D-98: a task link's address is resolved, never shown; the server's reply says where the task opens.
@@ -496,7 +522,7 @@ pub fn a_hidden_page_flags_its_tab_until_shown_test() {
     html,
     "<a class=\"attention\" href=\"/strategy\">Strategy<span class=\"attention-note\"> (needs attention)</span></a>",
   )
-  assert string.contains(html, "<a href=\"/migrate\">Migration</a>")
+  assert string.contains(html, "<a href=\"/workspace\">Workspace</a>")
   let #(shown, _) = frontend.update(flagged, RouteChanged(frontend.Strategy))
   assert shown.attention == []
   let html = element.to_string(frontend.view(shown))
@@ -616,4 +642,13 @@ pub fn the_knowledgebase_shows_the_guide_test() {
       frontend.no_focus,
     ))
     |> string.starts_with("<article class=\"knowledgebase\" hidden")
+}
+
+/// `/migrate` (D-146) and `/guide` (D-140) are replaced in the history by their page's own address.
+pub fn old_addresses_are_renamed_test() {
+  assert frontend.renamed_path("/migrate") == Some("/workspace")
+  assert frontend.renamed_path("/guide") == Some("/knowledgebase")
+  assert frontend.renamed_path("/workspace") == None
+  assert frontend.renamed_path("/migration") == None
+  assert frontend.renamed_path("/") == None
 }

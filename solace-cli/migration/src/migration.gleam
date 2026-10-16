@@ -5,6 +5,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import gleam/uri
 import lustre
 import lustre/attribute as a
 import lustre/component
@@ -16,6 +17,7 @@ import migration/api.{
   type Migration, type MigrationItem, type MigrationReport, Migration, clock,
   migration_decoder,
 }
+import solace_task
 
 /// Standalone development mount, exercising the same custom element as the shell.
 pub fn main() {
@@ -38,6 +40,7 @@ pub type Model {
     migration_dismissed: Bool,
     migration_connected: Bool,
     migration_poll_id: Int,
+    projects: Projects,
   )
 }
 
@@ -53,12 +56,27 @@ pub type Msg {
   MigrationAction(String)
   MigrationChanged(Int, String)
   DismissMigration
+  ProjectsLoaded(String)
+  AddProject(String)
+  RemoveProject(String)
+  RemoveOnly
+  RemoveFiles
+  RemoveTyped(String)
+  RemoveDelete
+  RemoveCancel
+  ProjectName(String)
+  ProjectDir(String)
+  ProjectTarget(String)
+  CreateProject
 }
 
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   #(
-    Model(None, False, [], "", False, 0, "", False, True, 0),
-    effect.from(fn(send) { send(MigrationStarted(new_poll_id())) }),
+    Model(None, False, [], "", False, 0, "", False, True, 0, no_projects),
+    effect.batch([
+      effect.from(fn(send) { send(MigrationStarted(new_poll_id())) }),
+      get("/projects", ProjectsLoaded),
+    ]),
   )
 }
 
@@ -74,9 +92,13 @@ pub fn register() -> Result(Nil, lustre.Error) {
 
 pub fn view(model: Model) -> Element(Msg) {
   h.div([a.class("migration-page")], [
-    element.element("style", [], [h.text(styles)]),
-    h.h1([], [h.text("Migration")]),
-    migration_view(model),
+    element.element("style", [], [h.text(styles <> projects_styles)]),
+    h.h1([], [h.text("Workspace")]),
+    projects_view(model.projects),
+    h.section([a.class("bring-in")], [
+      h.h2([], [h.text("Bring in an existing project")]),
+      migration_view(model),
+    ]),
   ])
 }
 
@@ -111,8 +133,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               migration_generation: generation,
             ),
             case model.migration_poll_id {
-              0 -> effect.none()
-              _ -> get("/migration", MigrationLoaded(generation, _))
+              0 -> get("/projects", ProjectsLoaded)
+              _ ->
+                effect.batch([
+                  get("/migration", MigrationLoaded(generation, _)),
+                  get("/projects", ProjectsLoaded),
+                ])
             },
           )
         }
@@ -217,6 +243,21 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       effect.none(),
     )
     MigrationAction(action) -> migration_action(model, action)
+    ProjectsLoaded(_)
+    | AddProject(_)
+    | RemoveProject(_)
+    | RemoveOnly
+    | RemoveFiles
+    | RemoveTyped(_)
+    | RemoveDelete
+    | RemoveCancel
+    | ProjectName(_)
+    | ProjectDir(_)
+    | ProjectTarget(_)
+    | CreateProject -> {
+      let #(projects, fx) = update_projects(model.projects, msg)
+      #(Model(..model, projects: projects), fx)
+    }
     MigrationChanged(generation, text) ->
       case
         model.migration_connected && generation == model.migration_generation
@@ -774,3 +815,319 @@ fn new_poll_id() -> Int
 
 @external(javascript, "./api.mjs", "cancel_poll")
 fn cancel_poll(poll_id: Int) -> Nil
+
+/// The root's projects section: the listed projects, the Gleam projects
+/// found in its folder, the new-project form and a removal in progress.
+pub type Projects {
+  Projects(
+    /// Whether the list has loaded once; the section shows from then on.
+    listed: Bool,
+    projects: List(Project),
+    found: List(Found),
+    error: String,
+    name: String,
+    dir: String,
+    target: String,
+    /// The project being removed: its dir, whether the second step (deleting
+    /// its files) shows, and the name typed to confirm it.
+    removing: Option(#(String, Bool, String)),
+  )
+}
+
+/// A project on the root's board: its folder, label and package name.
+pub type Project {
+  Project(dir: String, label: String, name: String)
+}
+
+/// A Gleam project found in the root's folder.
+pub type Found {
+  Found(dir: String, name: String, imported: Bool, member: Bool)
+}
+
+pub const no_projects = Projects(False, [], [], "", "", "", "erlang", None)
+
+/// The Projects section's messages. Every change to the list answers with
+/// the new list, which the board's lanes follow through its event stream.
+fn update_projects(p: Projects, msg: Msg) -> #(Projects, Effect(Msg)) {
+  case msg {
+    ProjectsLoaded(text) ->
+      case json.parse(text, projects_decoder()) {
+        Ok(#(projects, found)) -> #(
+          Projects(
+            ..p,
+            listed: True,
+            projects: projects,
+            found: found,
+            error: "",
+            name: "",
+            dir: "",
+            removing: None,
+          ),
+          effect.none(),
+        )
+        Error(_) -> #(Projects(..p, error: error(text)), effect.none())
+      }
+    AddProject(dir) -> #(
+      p,
+      case
+        list.any(p.found, fn(f) { f.dir == dir && f.imported && !f.member })
+      {
+        True ->
+          projects_request("/projects", "POST", [#("dir", json.string(dir))])
+        False -> effect.none()
+      },
+    )
+    // Removing asks first whether to keep the files; deleting them takes a
+    // second warning and the project's name (D-74).
+    RemoveProject(dir) -> #(
+      Projects(..p, removing: Some(#(dir, False, ""))),
+      effect.none(),
+    )
+    RemoveOnly ->
+      case p.removing {
+        Some(#(dir, _, _)) -> #(
+          p,
+          projects_request(
+            "/projects/" <> uri.percent_encode(dir),
+            "DELETE",
+            [],
+          ),
+        )
+        None -> #(p, effect.none())
+      }
+    RemoveFiles ->
+      case p.removing {
+        Some(#(dir, _, _)) -> #(
+          Projects(..p, removing: Some(#(dir, True, ""))),
+          effect.none(),
+        )
+        None -> #(p, effect.none())
+      }
+    RemoveTyped(text) ->
+      case p.removing {
+        Some(#(dir, True, _)) -> #(
+          Projects(..p, removing: Some(#(dir, True, text))),
+          effect.none(),
+        )
+        _ -> #(p, effect.none())
+      }
+    RemoveDelete ->
+      case p.removing {
+        Some(#(dir, True, typed)) if typed == dir -> #(
+          p,
+          projects_request("/projects/" <> uri.percent_encode(dir), "DELETE", [
+            #("delete", json.bool(True)),
+            #("name", json.string(typed)),
+          ]),
+        )
+        _ -> #(p, effect.none())
+      }
+    RemoveCancel -> #(Projects(..p, removing: None), effect.none())
+    ProjectName(text) -> #(Projects(..p, name: text), effect.none())
+    ProjectDir(text) -> #(Projects(..p, dir: text), effect.none())
+    ProjectTarget(text) -> #(Projects(..p, target: text), effect.none())
+    CreateProject -> #(
+      p,
+      projects_request("/projects/new", "POST", [
+        #("name", json.string(p.name)),
+        #("dir", json.string(p.dir)),
+        #("target", json.string(p.target)),
+      ]),
+    )
+    _ -> #(p, effect.none())
+  }
+}
+
+/// A `/projects` change; the reply is the new list, or an error.
+fn projects_request(
+  path: String,
+  method: String,
+  fields: List(#(String, json.Json)),
+) -> Effect(Msg) {
+  effect.from(fn(send) {
+    request(path, method, json.to_string(json.object(fields)), fn(text) {
+      send(ProjectsLoaded(text))
+    })
+  })
+}
+
+fn projects_decoder() -> decode.Decoder(#(List(Project), List(Found))) {
+  let project = {
+    use dir <- decode.field("dir", decode.string)
+    use label <- decode.optional_field("label", dir, decode.string)
+    use name <- decode.field("name", decode.string)
+    decode.success(Project(dir, label, name))
+  }
+  let found = {
+    use dir <- decode.field("dir", decode.string)
+    use name <- decode.field("name", decode.string)
+    use imported <- decode.field("imported", decode.bool)
+    use member <- decode.field("member", decode.bool)
+    decode.success(Found(dir, name, imported, member))
+  }
+  use projects <- decode.field("projects", decode.list(project))
+  use found <- decode.optional_field("found", [], decode.list(found))
+  decode.success(#(projects, found))
+}
+
+/// The root's projects: remove one, add one found in the folder, or create
+/// a new Gleam project. Existing code without Solace is brought in by the
+/// section below.
+fn projects_view(p: Projects) -> Element(Msg) {
+  case p.listed {
+    False -> h.text("")
+    True -> {
+      let others = list.filter(p.found, fn(f) { !f.member })
+      h.section([a.class("projects")], [
+        h.h2([], [h.text(solace_task.ui_label("projects"))]),
+        case p.error {
+          "" -> h.text("")
+          message -> h.p([a.role("alert")], [h.text(message)])
+        },
+        h.ul(
+          [],
+          list.map(p.projects, fn(l) {
+            h.li([], [
+              h.strong([], [h.text(l.label)]),
+              h.text(" " <> l.name <> " "),
+              // The root's own project always stays on its board.
+              case l.dir {
+                "." -> h.small([], [h.text("(this folder)")])
+                dir ->
+                  button(solace_task.ui_label("remove"), RemoveProject(dir))
+              },
+            ])
+          }),
+        ),
+        removal_view(p),
+        case others {
+          [] -> h.text("")
+          _ ->
+            h.div([], [
+              h.h3([], [h.text("Found in this folder")]),
+              h.ul(
+                [],
+                list.map(others, fn(f) {
+                  h.li([], [
+                    h.strong([], [
+                      h.text(case f.dir {
+                        "." -> "This folder"
+                        dir -> dir
+                      }),
+                    ]),
+                    h.text(
+                      " "
+                      <> f.name
+                      <> case f.imported {
+                        True -> " (already set up) "
+                        False -> " (not set up) "
+                      },
+                    ),
+                    case f.imported {
+                      True ->
+                        button(solace_task.ui_label("add"), AddProject(f.dir))
+                      False ->
+                        h.small([], [
+                          h.text(
+                            "Existing code is brought in under Bring in an existing project, below.",
+                          ),
+                        ])
+                    },
+                  ])
+                }),
+              ),
+            ])
+        },
+        h.h3([], [h.text("New project")]),
+        h.div([a.class("new-project")], [
+          h.input([
+            a.placeholder("Package name, e.g. my_app"),
+            a.attribute("aria-label", "Package name"),
+            a.value(p.name),
+            e.on_input(ProjectName),
+          ]),
+          h.input([
+            a.placeholder(case p.name {
+              "" -> "Folder (default: the package name)"
+              name -> "Folder (default: " <> name <> ")"
+            }),
+            a.attribute("aria-label", "Folder"),
+            a.value(p.dir),
+            e.on_input(ProjectDir),
+          ]),
+          h.label([], [
+            h.text("Runs on"),
+            h.select([a.value(p.target), e.on_input(ProjectTarget)], [
+              h.option([a.value("erlang")], "Erlang (BEAM)"),
+              h.option([a.value("javascript")], "JavaScript"),
+            ]),
+          ]),
+          button(solace_task.ui_label("create_project"), CreateProject),
+        ]),
+      ])
+    }
+  }
+}
+
+/// The dialog for removing a project: keep its files, or delete them after a
+/// second warning and typing its name.
+fn removal_view(p: Projects) -> Element(Msg) {
+  case p.removing {
+    None -> h.text("")
+    Some(#(dir, False, _)) ->
+      modal([
+        h.p([], [
+          h.text(
+            "Remove "
+            <> dir
+            <> " from this board? Its tasks and Solace setup stay in its folder, and it can be added again. Should its folder and files be deleted too?",
+          ),
+        ]),
+        button(solace_task.ui_label("remove_only"), RemoveOnly),
+        button("Remove and delete files…", RemoveFiles),
+        button(solace_task.ui_label("cancel"), RemoveCancel),
+      ])
+    Some(#(dir, True, typed)) ->
+      modal([
+        h.p([], [
+          h.strong([], [
+            h.text(
+              "This permanently deletes "
+              <> dir
+              <> " and everything in it. It cannot be undone.",
+            ),
+          ]),
+        ]),
+        h.label([], [
+          h.text("Type " <> dir <> " to confirm"),
+          h.input([
+            a.attribute("aria-label", "Project name"),
+            a.attribute("autofocus", ""),
+            a.value(typed),
+            e.on_input(RemoveTyped),
+          ]),
+        ]),
+        h.button([a.disabled(typed != dir), e.on_click(RemoveDelete)], [
+          h.text(solace_task.ui_label("delete_permanently")),
+        ]),
+        button(solace_task.ui_label("cancel"), RemoveCancel),
+      ])
+  }
+}
+
+/// A modal dialog: a backdrop over the page that blocks the page behind it.
+fn modal(body: List(Element(Msg))) -> Element(Msg) {
+  h.div([a.class("modal-backdrop")], [
+    h.div(
+      [
+        a.class("removal"),
+        a.attribute("role", "alertdialog"),
+        a.attribute("aria-modal", "true"),
+      ],
+      body,
+    ),
+  ])
+}
+
+const projects_styles =
+  ".projects{margin-bottom:24px}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:2px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}.new-project select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:4px}.modal-backdrop{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:#17222626;padding:16px}.removal{background:var(--paper);color:var(--ink);border:2px solid var(--edge);box-shadow:0 8px 32px #17222626;padding:20px 24px;width:min(480px,100%);max-height:100%;overflow:auto}.removal p{margin:0 0 12px;overflow-wrap:anywhere}.removal input{margin:0}.removal button:disabled{opacity:.5;cursor:not-allowed}"

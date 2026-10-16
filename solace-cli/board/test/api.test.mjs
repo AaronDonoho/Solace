@@ -58,7 +58,7 @@ test('A11: Lustre board uses only the HTTP API, including live task and workflow
     await until(() => to_string(board.view(model)).includes('Initial') && events);
     // A card opens the task's details, which load it themselves.
     dispatch(new board.Select('', 't1'));
-    expect(to_string(board.view(model))).toContain('<solace-task base dir hosted task="t1">');
+    expect(to_string(board.view(model))).toContain('<solace-task bar base dir hosted task="t1">');
     // A live update of the open task goes to its details, and a run that ended raises a notice.
     task.runs = [{ id: 'r1', kind: 'work', state: 'running', model: 'fake', log: '/logs/r1' }];
     events.enqueue(new TextEncoder().encode('id: 1\ndata: ' + JSON.stringify({ task }) + '\n\n'));
@@ -212,58 +212,6 @@ test('a component removed and added again reopens one stream, which receives lat
     expect(b.model.caught_up).toBe(true);
     // One open stream.
     expect(browser.sources.filter(s => !s.closed)).toHaveLength(1);
-  } finally { browser.restore(); }
-});
-
-test('the project panel sends only the requests its buttons make', async () => {
-  const projects = { workspace: true, projects: [{ dir: 'a/b', name: 'ab', base: '' }],
-    found: [{ dir: 'c/d', name: 'cd', imported: true, member: false }, { dir: 'e/f', name: 'ef', imported: false, member: false }] };
-  const browser = fakeBrowser('', { '/projects': projects });
-  const sent = [];
-  globalThis.fetch = async (path, opts) => {
-    sent.push([opts?.method ?? 'GET', path, opts?.body ? JSON.parse(opts.body) : null]);
-    return Response.json(opts?.method === 'GET' && path === '/projects' ? projects : opts?.method === 'GET' && path.endsWith('/workflow') ? { columns: [] } : {});
-  };
-  try {
-    const b = mount(board);
-    b.dispatch(new board.Connected());
-    await settle();
-    expect(sent).toEqual([['GET', '/projects', null], ['GET', '/workflow', null]]);
-    // An imported project that isn't a member joins; anything else sends nothing.
-    b.dispatch(new board.AddProject('c/d'));
-    b.dispatch(new board.AddProject('e/f'));
-    b.dispatch(new board.AddProject('z/z'));
-    await settle();
-    expect(sent[2]).toEqual(['POST', '/projects', { dir: 'c/d' }]);
-    expect(sent.length).toBe(3);
-    // The new-project form posts what it holds.
-    b.dispatch(new board.ProjectName('new'));
-    b.dispatch(new board.ProjectDir('newdir'));
-    b.dispatch(new board.ProjectTarget('javascript'));
-    b.dispatch(new board.CreateProject());
-    await settle();
-    expect(sent[3]).toEqual(['POST', '/projects/new', { name: 'new', dir: 'newdir', target: 'javascript' }]);
-    // Remove asks first whether to keep the files; deleting them needs the project's name.
-    b.dispatch(new board.RemoveProject('a/b'));
-    b.dispatch(new board.RemoveOnly());
-    await settle();
-    expect(sent[4]).toEqual(['DELETE', '/projects/a%2Fb', {}]);
-    b.dispatch(new board.RemoveProject('a/b'));
-    b.dispatch(new board.RemoveFiles());
-    b.dispatch(new board.RemoveTyped('wrong'));
-    b.dispatch(new board.RemoveDelete());
-    await settle();
-    expect(sent.length).toBe(5);
-    b.dispatch(new board.RemoveTyped('a/b'));
-    b.dispatch(new board.RemoveDelete());
-    await settle();
-    expect(sent[5]).toEqual(['DELETE', '/projects/a%2Fb', { delete: true, name: 'a/b' }]);
-    // Cancel closes the dialog, so RemoveOnly then sends nothing.
-    b.dispatch(new board.RemoveProject('a/b'));
-    b.dispatch(new board.RemoveCancel());
-    b.dispatch(new board.RemoveOnly());
-    await settle();
-    expect(sent.length).toBe(6);
   } finally { browser.restore(); }
 });
 

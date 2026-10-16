@@ -121,15 +121,16 @@ pub fn attention_and_unavailable_models_test() {
   let rendered = html(model)
   rendered |> string.contains("Needs attention</strong>") |> should.be_true
   rendered |> string.contains("<p>task timeout</p>") |> should.be_true
-  // Only the model that can start is offered; the other is under the pick, with why.
+  // Only the model that can start is offered; the others aren't listed
+  // under the pick.
   rendered |> string.contains("value=\"gone\"") |> should.be_false
   rendered |> string.contains(">Ok</option>") |> should.be_true
   rendered
-  |> string.contains("<summary>1 more model unavailable</summary>")
-  |> should.be_true
+  |> string.contains("model unavailable")
+  |> should.be_false
   rendered
   |> string.contains("<li>Gone: codex is not installed</li>")
-  |> should.be_true
+  |> should.be_false
 }
 
 pub fn working_status_notes_and_transcript_test() {
@@ -1293,7 +1294,9 @@ pub fn styles_inherit_the_hosts_colors_test() {
   let assert [css, ..] = string.split(html(fresh("1")), "</style>")
   css |> string.contains("--paper:") |> should.be_false
   css |> string.contains("--ink:") |> should.be_false
-  css |> string.contains(":host{display:block}") |> should.be_true
+  css
+  |> string.contains(":host{display:block;container-type:inline-size}")
+  |> should.be_true
 }
 
 /// D-115: an edit proposal carries the record's current values as `before`;
@@ -1951,4 +1954,114 @@ pub fn all_models_held_by_usage_limits_says_so_test() {
     )
   rendered |> string.contains("No model can start yet") |> should.be_true
   rendered |> string.contains("claude.ai/install.sh") |> should.be_true
+}
+
+/// Every page's controls take one of two heights and the spacing values from
+/// `spacing_styles`, which the shared control styles carry.
+pub fn controls_share_two_heights_test() {
+  assert string.starts_with(task.control_styles, task.spacing_styles)
+  assert string.contains(task.spacing_styles, "--control-h:36px")
+  assert string.contains(task.spacing_styles, "--control-h-small:32px")
+  assert string.contains(task.control_styles, "min-height:var(--control-h)}")
+  assert string.contains(
+    task.control_styles,
+    "button.edit,button.toggle,button.act,button.copy-id,button.delete,.toolbar button,.toolbar .button,.unavailable button{min-height:var(--control-h-small)}",
+  )
+  // A switch keeps its own size.
+  assert string.contains(
+    task.control_styles,
+    "input:not([type=checkbox]):not([type=radio]):not([type=file])",
+  )
+}
+
+/// The editor's Image tool is a label, not a button: it takes the toolbar's
+/// box model, so the shared small height is its whole height, as the toolbar
+/// buttons' is, and its text centers in it the way theirs does.
+pub fn editor_toolbar_shares_the_small_height_test() {
+  assert string.contains(
+    task.editor_styles,
+    ".toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}",
+  )
+  assert string.contains(
+    task.editor_styles,
+    ".toolbar .button{position:relative;display:inline-flex;align-items:center;box-sizing:border-box;",
+  )
+  assert string.contains(
+    task.control_styles,
+    ".toolbar button,.toolbar .button,.unavailable button{min-height:var(--control-h-small)}",
+  )
+}
+
+/// With the `bar` attribute the host's bar shows the title, Copy ID, column
+/// and status, so the details leave them out; without it, as on the
+/// Strategy page, they show.
+pub fn a_barred_detail_leaves_its_heading_to_the_host_test() {
+  let model =
+    loaded(
+      "{\"id\":\"t1\",\"title\":\"Fix\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1}",
+    )
+  let shown = body(model)
+  shown |> string.contains(">Fix</h2>") |> should.be_true
+  shown |> string.contains("class=\"meta\"") |> should.be_true
+  let #(barred, _) = task.update(model, task.BarChanged(True))
+  let shown = body(barred)
+  shown |> string.contains(">Fix</h2>") |> should.be_false
+  shown |> string.contains(">Copy ID</button>") |> should.be_false
+  shown |> string.contains("class=\"meta\"") |> should.be_false
+  shown |> string.contains("role=\"tablist\"") |> should.be_true
+  let #(back, _) = task.update(barred, task.BarChanged(False))
+  body(back) |> string.contains(">Fix</h2>") |> should.be_true
+}
+
+/// The board's bar draws Copy ID and the task's meta line with the same
+/// pieces the details use.
+pub fn the_bar_shares_copy_id_test() {
+  task.copy_said(True) |> should.equal("Copied")
+  task.copy_said(False) |> should.equal("Copy failed")
+  let button = task.copy_button("t1", "", Nil) |> element.to_string
+  button |> string.contains(">Copy ID</button>") |> should.be_true
+  button |> string.contains("Copies task:t1") |> should.be_true
+  task.copy_button("t1", "Copied", Nil)
+  |> element.to_string
+  |> string.contains(">Copied</button>")
+  |> should.be_true
+}
+
+/// What the human does and the task's record (its tabs and their panel)
+/// are two blocks: on an element at least 90rem wide they sit side by
+/// side, 2rem apart with no border; narrower, one above the other.
+pub fn a_wide_detail_shows_two_columns_test() {
+  let model =
+    loaded(
+      "{\"id\":\"t1\",\"title\":\"Fix\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1}",
+    )
+  let shown = body(model)
+  let assert [_, after_act] = string.split(shown, "<div class=\"act\">")
+  let assert [act, record] = string.split(after_act, "<div class=\"record\">")
+  act |> string.contains("class=\"actions\"") |> should.be_true
+  act |> string.contains("role=\"tablist\"") |> should.be_false
+  record |> string.contains("role=\"tablist\"") |> should.be_true
+  record |> string.contains("role=\"tabpanel\"") |> should.be_true
+  let styles = html(model)
+  styles
+  |> string.contains(":host{display:block;container-type:inline-size}")
+  |> should.be_true
+  styles
+  |> string.contains(
+    "@container (min-width:90rem){.detail{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:2rem;align-items:start}",
+  )
+  |> should.be_true
+  // The task element's padding and its blocks' are half the page's.
+  styles |> string.contains(".detail{padding:10px 12px}") |> should.be_true
+  styles
+  |> string.contains(
+    ".note,.run{padding:4px 6px}article{padding:4px}.panel{padding-top:4px}",
+  )
+  |> should.be_true
+  // No error: no empty alert paragraph to leave a gap above the details.
+  styles |> string.contains("role=\"alert\"") |> should.be_false
+  let #(failed, _) = task.update(model, task.Failed("Broken"))
+  html(failed)
+  |> string.contains("<p role=\"alert\">Broken</p>")
+  |> should.be_true
 }

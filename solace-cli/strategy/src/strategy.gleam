@@ -1717,7 +1717,7 @@ const view_styles =
 .tabs button:hover{background:var(--hover)}
 .tabs button[aria-selected=true]{background:var(--paper);font-weight:700;box-shadow:inset 0 -3px var(--ink)}
 .tabs button:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
-[role=tabpanel]{padding:24px}
+[role=tabpanel]{padding:var(--space-6)}
 [role=tabpanel] p{color:var(--soft);margin:8px 0}
 [role=alert]{color:var(--revision)}
 .filters{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:flex-end;margin:0 0 16px}
@@ -1727,28 +1727,29 @@ const view_styles =
 .filters :focus-visible,.tasks :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .tasks{width:100%;border-collapse:collapse;background:var(--paper);border:1px solid var(--edge)}
 .tasks th{text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.08em;padding:8px 10px;border-bottom:2px solid var(--edge)}
-.tasks th .sort{font:inherit;font-weight:700;color:var(--ink);text-transform:inherit;letter-spacing:inherit;background:none;border:0;padding:0;text-align:left;cursor:pointer;white-space:nowrap}.tasks th .sort:hover{text-decoration:underline}
+.tasks th .sort{font:inherit;font-weight:700;color:var(--ink);text-transform:inherit;letter-spacing:inherit;background:none;border:0;padding:0;min-height:0;text-align:inherit;cursor:pointer;white-space:nowrap}.tasks th .sort:hover{text-decoration:underline}
 .tasks td{padding:6px 10px;border-top:1px solid var(--line);vertical-align:middle}
 .tasks tr:hover td{background:var(--hover)}.tasks tr[aria-current=true] td{background:var(--sel)}
-.tasks .open{font:inherit;font-weight:600;color:var(--ink);background:none;border:0;padding:0;text-align:left;cursor:pointer}
+.tasks .open{font:inherit;font-weight:600;color:var(--ink);background:none;border:0;padding:0;min-height:0;text-align:left;cursor:pointer}
 .tasks .open:hover{text-decoration:underline}
-.tasks .act{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 8px;margin-left:8px;cursor:pointer}.tasks .act:hover{background:var(--hover)}
-.tasks .created,.tasks .closed{white-space:nowrap;color:var(--soft)}
+.tasks .act{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:0 8px;margin-left:8px;cursor:pointer}.tasks .act:hover{background:var(--hover)}
+.tasks .created,.tasks .closed{white-space:nowrap;color:var(--soft);text-align:right;font-variant-numeric:tabular-nums}
+.tasks th:nth-last-child(-n+2){text-align:right}
 .tasks .homeless{font-size:13px;color:var(--soft);margin-left:6px;white-space:nowrap}
 solace-task{display:block;margin-top:16px}
-.milestone{margin:0 0 20px}.milestone h3{margin:0 0 8px;font-size:16px;border-bottom:1px solid var(--line)}
-.feature{background:var(--paper);border:1px solid var(--edge);padding:8px 14px;margin:0 0 10px}
+.milestone{margin:0 0 var(--space-5)}.milestone h3{margin:0 0 var(--space-2);font-size:16px;border-bottom:1px solid var(--line)}
+.feature{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-3)}
 .feature h4{margin:0 0 4px;font-size:15px}
 .feature-count{font-size:13px;color:var(--soft);margin:4px 0}
 .state{font-size:11px;text-transform:uppercase;letter-spacing:.08em;border:1px solid var(--line);padding:1px 6px;margin-left:6px;color:var(--soft);font-weight:400}
 .feature-tasks{margin:6px 0 0;padding-left:20px}
-.feature .open{font:inherit;color:var(--ink);background:none;border:0;padding:0;text-align:left;cursor:pointer}.feature .open:hover{text-decoration:underline}
+.feature .open{font:inherit;color:var(--ink);background:none;border:0;padding:0;min-height:0;text-align:left;cursor:pointer}.feature .open:hover{text-decoration:underline}
 .feature .open:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .feature.revealed,.milestone h3.revealed{outline:3px solid var(--focus);outline-offset:2px}
 "
   <> solace_task.editor_styles
   <> plan.styles
-  <> ".vision{background:var(--paper);border:1px solid var(--edge);padding:12px 20px}
+  <> ".vision{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card)}
 .vision .md p,.vision .md li{color:var(--ink)}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}
 .md pre{background:var(--code);padding:8px;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace}.md code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px}
 .vision-actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 4px}
@@ -1757,16 +1758,16 @@ solace-task{display:block;margin-top:16px}
 .vision-actions button:hover,.toolbar button:hover{background:var(--hover)}.vision-actions button:disabled{color:var(--soft);cursor:default}
 .vision-actions button:focus-visible,.toolbar button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .composer solace-md-editor{--md-min-height:320px}
-.feature-form{background:var(--paper);border:1px solid var(--edge);padding:12px 14px;margin:0 0 16px}.feature-form h3{margin:0 0 10px;font-size:16px}.feature-form .filters{margin:10px 0}
-.feature .edit,.feature .toggle{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 8px;margin-left:6px;cursor:pointer}.feature .edit:hover,.feature .toggle:hover{background:var(--hover)}.feature .edit:disabled{color:var(--soft);cursor:default}.feature .edit:focus-visible,.feature .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.new-task{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 2px}.new-task input,.new-task select{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px}.new-task input{min-width:220px}.new-task input::placeholder{color:var(--soft);opacity:1}.new-task :focus-visible{outline:3px solid var(--focus);outline-offset:2px}.new-task .edit{margin-left:0}.new-task [role=alert]{flex-basis:100%;margin:2px 0}
-.milestone h3 .edit{font:inherit;font-size:13px;font-weight:400;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 8px;margin-left:6px;cursor:pointer}.milestone h3 .edit:hover{background:var(--hover)}.milestone h3 .edit:disabled{color:var(--soft);cursor:default}
+.feature-form{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-4)}.feature-form h3{margin:0 0 10px;font-size:16px}.feature-form .filters{margin:10px 0}
+.feature .edit,.feature .toggle{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:0 8px;margin-left:6px;cursor:pointer}.feature .edit:hover,.feature .toggle:hover{background:var(--hover)}.feature .edit:disabled{color:var(--soft);cursor:default}.feature .edit:focus-visible,.feature .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.new-task{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 2px}.new-task input,.new-task select{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;min-height:var(--control-h-small)}.new-task input{min-width:220px}.new-task input::placeholder{color:var(--soft);opacity:1}.new-task :focus-visible{outline:3px solid var(--focus);outline-offset:2px}.new-task .edit{margin-left:0}.new-task [role=alert]{flex-basis:100%;margin:2px 0}
+.milestone h3 .edit{font:inherit;font-size:13px;font-weight:400;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:0 8px;margin-left:6px;cursor:pointer}.milestone h3 .edit:hover{background:var(--hover)}.milestone h3 .edit:disabled{color:var(--soft);cursor:default}
 .milestone .target{font-size:13px;font-weight:400;color:var(--soft);margin-left:6px}
-.feature h4 select{font:inherit;font-size:13px;font-weight:400;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 6px;margin-left:6px}
+.feature h4 select{font:inherit;font-size:13px;font-weight:400;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 6px;margin-left:6px;min-height:var(--control-h-small)}
 .feature-tasks .depends{font-size:13px;color:var(--soft)}
 .feature-tasks li .edit{margin-left:6px}
 .depends-edit{border:1px solid var(--line);margin:4px 0 8px;padding:6px 10px}.depends-edit ul{list-style:none;margin:4px 0;padding:0}.depends-edit li{margin:2px 0}.depends-edit li .edit{margin:0 6px 0 0}.depends-edit p{font-size:13px;margin:4px 0}
-.depends-edit input{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;min-width:260px;margin:4px 0}.depends-edit input::placeholder{color:var(--soft);opacity:1}
+.depends-edit input{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;min-height:var(--control-h-small);min-width:260px;margin:4px 0}.depends-edit input::placeholder{color:var(--soft);opacity:1}
 .milestone h3 .edit:focus-visible,.feature h4 select:focus-visible,.depends-edit :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .pager{display:flex;align-items:center;gap:10px;margin:10px 0 2px}
 .pager button{font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:6px 14px;cursor:pointer}.pager button:hover{background:var(--hover)}.pager button:disabled{color:var(--soft);cursor:default}.pager button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}

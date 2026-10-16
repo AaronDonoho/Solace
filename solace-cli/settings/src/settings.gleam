@@ -151,8 +151,8 @@ pub fn view(model: Model) -> Element(Msg) {
 const view_styles =
   solace_task.control_styles
   <> ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6}
-.settings{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;min-height:calc(100dvh - 56px);box-sizing:border-box;padding:24px;background:var(--sheet);color:var(--ink)}
-.settings section{background:var(--paper);border:1px solid var(--edge);padding:12px 20px}
+.settings{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;min-height:calc(100dvh - 56px);box-sizing:border-box;padding:var(--space-6);background:var(--sheet);color:var(--ink)}
+.settings section{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card)}
 .settings h2{margin:0 0 10px;font-size:19px}
 .settings p{color:var(--soft);margin:8px 0}
 .switch{display:flex;align-items:center;gap:10px;width:fit-content;cursor:pointer}

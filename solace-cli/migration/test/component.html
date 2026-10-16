@@ -20,7 +20,9 @@ try {
   check(host?.shadowRoot, 'standalone main mounts a shadow component');
   const root = host.shadowRoot;
   await wait(() => root.textContent.includes('Migrate this project'));
-  check(root.querySelector('h1')?.textContent === 'Migration', 'page heading');
+  check(root.querySelector('h1')?.textContent === 'Workspace', 'page heading');
+  check(root.querySelector('section.bring-in > h2')?.textContent === 'Bring in an existing project', 'migration section heading');
+  check(root.querySelector('section.bring-in')?.textContent.includes('Migrate this project'), 'migration is a section of the page');
   check(root.querySelector('style')?.textContent.includes('.migration'), 'owned CSS');
   check(customElements.get('solace-migration').observedAttributes.length === 0, 'no attributes');
   check(getComputedStyle(root.querySelector('button')).color !== 'rgb(255, 0, 255)', 'shell styles not adopted');

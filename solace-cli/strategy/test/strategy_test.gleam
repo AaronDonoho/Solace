@@ -1447,15 +1447,15 @@ pub fn textareas_fill_their_container_test() {
   assert !string.contains(css, ".depends-edit{max-width")
   assert string.contains(
     css,
-    ".feature{background:var(--paper);border:1px solid var(--edge);padding:8px 14px;margin:0 0 10px}",
+    ".feature{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-3)}",
   )
   assert string.contains(
     css,
-    ".vision{background:var(--paper);border:1px solid var(--edge);padding:12px 20px}",
+    ".vision{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card)}",
   )
   assert string.contains(
     css,
-    ".feature-form{background:var(--paper);border:1px solid var(--edge);padding:12px 14px;margin:0 0 16px}",
+    ".feature-form{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-4)}",
   )
   assert string.contains(
     css,
@@ -2338,4 +2338,32 @@ pub fn a_plan_run_names_the_model_it_used_test() {
   assert plan.state_text(run("")) == "Ended: planned · claude-opus"
   assert plan.state_text(run("claude-opus-5-5"))
     == "Ended: planned · claude-opus · claude-opus-5-5"
+}
+
+/// Cards take the shared card padding, small controls the small height, and
+/// the Tasks table's date columns align right with their headings.
+pub fn strategy_uses_the_shared_spacing_test() {
+  let page = element.to_string(strategy.view(planned()))
+  assert string.contains(page, "--control-h:36px")
+  assert string.contains(
+    page,
+    ".feature{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card)",
+  )
+  assert string.contains(
+    page,
+    ".vision{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card)}",
+  )
+  assert string.contains(page, ".plan-bar select{")
+  assert string.contains(
+    page,
+    "min-height:var(--control-h-small);max-width:100%}",
+  )
+  assert string.contains(
+    page,
+    ".tasks th:nth-last-child(-n+2){text-align:right}",
+  )
+  assert string.contains(
+    page,
+    "white-space:nowrap;color:var(--soft);text-align:right;font-variant-numeric:tabular-nums}",
+  )
 }

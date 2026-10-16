@@ -823,3 +823,32 @@ Amends D-120, and Spec 3 (Aaron, board task "submit: new modules without a synta
 1. A hunk line matches the target's line exactly, or with trailing space ignored. The third level, trimming both sides, is dropped: it matched a line the patch only resembled, and the splice rewrote that line with the patch's own indentation, so a patch could re-indent a line it merely quoted.
 2. When a hunk doesn't match, `E0108` names the first hunk line with no exact match in the target; when the target has that line only with other leading space, it names the line and how many leading spaces it has, so the patch copies it whole. When every hunk line matches somewhere in the target, `E0108` says the lines aren't adjacent in the file.
 Why: a reworded brief paragraph was written one space right of its block, and probes built on the trimming level reported the file as aligned, which cost two review rounds. Leading indentation is the kind of change a patch should not make silently.
+
+## D-143 The reference's layout is checked
+(Aaron, board task "reference: layout validator", 2026-10-15).
+1. `solace-cli/tests/reference_layout.py <file>` checks the columns of the reference's "Commands in full" section. It is the root's validator for `solace-cli/src/reference.txt`, so a `write` that misaligns a line is refused, naming the line and column. A `main.rs` unit test runs it on the embedded reference, so `rust-unit` catches a change made some other way.
+2. A command row's same-line description starts at the description column, the one most rows use. Rows next to each other may share another column (a table, like the file tiers); a row whose term fills that column with one space takes its neighbors'. A continuation line starts where its row's description starts. Lines two or more columns deeper than that are an example block only right after a line ending in `:`, and the whole block shares one column; one column deeper is always a slip. Headings, prose and blank lines are left alone.
+3. No width limit: the section's widest lines are quoted tool output, so its widest line would limit nothing (the human dropped it).
+Why: in task e86828d20aaab5a2 one leading space cost six runs. `read`, `grep` and `write`'s `old` don't show leading space, so only a check can catch it.
+
+## D-144 `help <command>` answers one section
+(Aaron, board task "help: one command's section only", 2026-10-15).
+1. Amends D-46 point 4: `help <command>` answers the paragraph holding the command's entry — a row indented by exactly two naming it — not every paragraph that mentions the word. A command with no entry answers `No command` and the run's command names, not the whole reference.
+2. The reference gives every summary-table command its own entry, and `build`, `format`, `run` and `work` their own paragraphs.
+3. Amends D-143: the layout check names a summary-table command with no entry in "Commands in full".
+Why: `help work` printed nearly the whole reference: a common word matched every paragraph.
+
+## D-145 Batching guidance where the agent plans
+(Aaron, board task "batching: guidance at session start and after single reads", 2026-10-15).
+1. Every session start reply (symbol index, `--task`, plain files) ends with a `Next:` line naming a first call to send: with `--task`, `inspect` of the agent's project's top three ranked symbols with `--context`; otherwise the reference's example `inspect`, or `grep` and `read` in a project of plain files. Strategy runs get no such line: they get no workflow.
+2. Over MCP, from the second call in a row that held one read and succeeded, the reply ends `Hint: put independent reads in one call, one per line.` Any other call (a batch, a failure, a change, `help`) starts the count again. A failed call never gets it, so D-109's last line is unchanged, and the hint is no failure.
+3. A failed probe whose compiler output says `Unknown module value` adds the line "Hint: print a value with `echo value`." after that output (the human's note).
+Why: the tool description's "never one read per call" didn't change behavior: agents still sent about one command per call, though run 27 sent 82 commands in 11 calls. A small model acts on the end of a reply and on the reply to its mistake.
+
+## D-146 The Migration page is the Workspace page, at `/workspace`
+Amends D-62 (Aaron, board task "workspace: rename Migration page", 2026-10-16). Part of the Workspace page feature.
+1. The **Migration** menu tab and page become **Workspace**, at `/workspace`. The menu follows a user's journey through a project: Workspace, Strategy, Board, Contracts, Knowledgebase, Settings.
+2. The page's heading is **Workspace**; migration is one section of it, "Bring in an existing project". The `solace-cli/migration` package and its `<solace-migration>` tag keep their names.
+3. `/migrate` still serves the shell, which shows the Workspace page and replaces `/migrate` with `/workspace` in the history. `/migration` stays the JSON API.
+4. The address is not `/projects`: that is the projects JSON API, and a page address can't share a path with an API.
+Why: the page is growing into the place to manage the workspace and its projects, of which bringing in existing code is one part.

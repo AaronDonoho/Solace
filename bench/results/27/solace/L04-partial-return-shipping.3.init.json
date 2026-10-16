@@ -1,0 +1,31 @@
+{
+  "model": "swift-1.5-iq3_xxs",
+  "tools": [
+    "mcp__solace__solace"
+  ],
+  "mcp_servers": [
+    {
+      "name": "solace",
+      "status": "connected",
+      "source": "dynamic"
+    }
+  ],
+  "plugins": [
+    {
+      "name": "cc-plugin-agents-md",
+      "path": "builtin",
+      "source": "cc-plugin-agents-md@builtin"
+    },
+    {
+      "name": "cc-plugin-telemetry",
+      "path": "builtin",
+      "source": "cc-plugin-telemetry@builtin"
+    },
+    {
+      "name": "cc-plugin-plugin-authoring",
+      "path": "builtin",
+      "source": "cc-plugin-plugin-authoring@builtin"
+    }
+  ],
+  "slash_commands": []
+}

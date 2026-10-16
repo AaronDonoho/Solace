@@ -2835,7 +2835,9 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
             }
         }
     }
-    out += "\nAfter the finishing tool returns, give a short final response and exit normally.\n";
+    // A discussion's `task note` returns the human's next message, so the run
+    // ends with the call that says so, not with the first note.
+    out += "\nAfter the call that ends the run returns, stop: no more calls, and a final response of one line at most; then exit normally.\n";
     (out, images)
 }
 
@@ -3044,7 +3046,7 @@ const TECH_DEBT_ASK: &str = "This task is part of a feature: put minor, non-bloc
 fn brief(t: &Value, kind: &str) -> String {
     let start = START;
     let ask = "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
-    let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); keep the options concise.";
+    let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. Keep messages short: lead with the answer or outcome, then only what the human needs to act on; don't restate the task or narrate your steps. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); keep the options concise.";
     let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `merge`, `write`, `remove`, `format` and `run` are refused.";
     // A task in a feature files its review's minor findings as the feature's tech debt (D-112).
     let debt = if t["feature"].is_string() { format!(" {TECH_DEBT_ASK}") } else { String::new() };
@@ -4171,11 +4173,11 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             }
             if req.method().as_str() == "GET"
                 && (record_link
-                    || matches!(page, "/" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/knowledgebase" | "/app.js" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2"))
+                    || matches!(page, "/" | "/workspace" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/knowledgebase" | "/app.js" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2"))
             {
                 let (data, kind) = match page {
                     _ if record_link => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
-                    "/" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/knowledgebase" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
+                    "/" | "/workspace" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/knowledgebase" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
                     "/fonts/sans-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-400-normal.woff2").as_slice(), "font/woff2"),
                     "/fonts/sans-700.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-700-normal.woff2").as_slice(), "font/woff2"),
                     "/fonts/mono-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-mono-latin-400-normal.woff2").as_slice(), "font/woff2"),

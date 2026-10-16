@@ -245,6 +245,8 @@ test('shared Lustre init result gives each element its own poll timer', async ()
   };
   globalThis.clearTimeout = id => timers.delete(id);
   globalThis.fetch = async path => {
+    // The projects list loads beside the migration; this test follows only the migration.
+    if (path === '/projects') return Response.json({ workspace: false, projects: [], found: [] });
     requests.push(path);
     return Response.json(state('running', { step: 'Copying files', original, copy }));
   };
@@ -292,7 +294,10 @@ test('disconnect cancels polling and ignores late replies; reconnect starts one 
     return id;
   };
   globalThis.clearTimeout = id => timers.delete(id);
-  globalThis.fetch = path => new Promise(resolve => requests.push({ path, resolve }));
+  // The projects list loads beside the migration; this test follows only the migration.
+  globalThis.fetch = path => path === '/projects'
+    ? Promise.resolve(Response.json({ workspace: false, projects: [], found: [] }))
+    : new Promise(resolve => requests.push({ path, resolve }));
   Object.defineProperty(globalThis, 'location', {
     configurable: true, value: { reload() { reloads++; } },
   });
@@ -332,6 +337,69 @@ test('disconnect cancels polling and ignores late replies; reconnect starts one 
     reply(3, running);
     await until(() => timers.size === 1);
     expect(reloads).toBe(0);
+  } finally {
+    for (const [key, descriptor] of Object.entries(saved)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key];
+    }
+  }
+});
+
+test('the projects section sends only the requests its buttons make', async () => {
+  const saved = Object.fromEntries(['fetch', 'setTimeout', 'clearTimeout'].map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]));
+  const projects = { workspace: true, projects: [{ dir: 'a/b', name: 'ab', base: '' }],
+    found: [{ dir: 'c/d', name: 'cd', imported: true, member: false }, { dir: 'e/f', name: 'ef', imported: false, member: false }] };
+  const sent = [];
+  globalThis.setTimeout = () => 0;
+  globalThis.clearTimeout = () => {};
+  globalThis.fetch = async (path, opts) => {
+    if (path === '/migration') return Response.json(state('available'));
+    sent.push([opts?.method ?? 'GET', path, opts?.body ? JSON.parse(opts.body) : null]);
+    return Response.json(opts?.method === 'GET' && path === '/projects' ? projects : {});
+  };
+  let model;
+  const noop = () => {};
+  const run = effect => perform(effect, dispatch, noop, noop, noop, noop, noop, noop);
+  const dispatch = msg => { let effect; [model, effect] = board.update(model, msg); run(effect); };
+  const settle = () => Bun.sleep(10);
+  try {
+    let effect; [model, effect] = board.init(); run(effect);
+    await settle();
+    expect(sent).toEqual([['GET', '/projects', null]]);
+    // An imported project that isn't a member joins; anything else sends nothing.
+    dispatch(new board.AddProject('c/d'));
+    dispatch(new board.AddProject('e/f'));
+    dispatch(new board.AddProject('z/z'));
+    await settle();
+    expect(sent[1]).toEqual(['POST', '/projects', { dir: 'c/d' }]);
+    expect(sent.length).toBe(2);
+    // The new-project form posts what it holds.
+    dispatch(new board.ProjectName('new'));
+    dispatch(new board.ProjectDir('newdir'));
+    dispatch(new board.ProjectTarget('javascript'));
+    dispatch(new board.CreateProject());
+    await settle();
+    expect(sent[2]).toEqual(['POST', '/projects/new', { name: 'new', dir: 'newdir', target: 'javascript' }]);
+    // Remove asks first whether to keep the files; deleting them needs the project's name.
+    dispatch(new board.RemoveProject('a/b'));
+    dispatch(new board.RemoveOnly());
+    await settle();
+    expect(sent[3]).toEqual(['DELETE', '/projects/a%2Fb', {}]);
+    dispatch(new board.RemoveProject('a/b'));
+    dispatch(new board.RemoveFiles());
+    dispatch(new board.RemoveTyped('wrong'));
+    dispatch(new board.RemoveDelete());
+    await settle();
+    expect(sent.length).toBe(4);
+    dispatch(new board.RemoveTyped('a/b'));
+    dispatch(new board.RemoveDelete());
+    await settle();
+    expect(sent[4]).toEqual(['DELETE', '/projects/a%2Fb', { delete: true, name: 'a/b' }]);
+    // Cancel closes the dialog, so RemoveOnly then sends nothing.
+    dispatch(new board.RemoveProject('a/b'));
+    dispatch(new board.RemoveCancel());
+    dispatch(new board.RemoveOnly());
+    await settle();
+    expect(sent.length).toBe(5);
   } finally {
     for (const [key, descriptor] of Object.entries(saved)) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key];

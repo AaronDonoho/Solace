@@ -22,7 +22,7 @@ The rest of this spec is Claude's proposal, drawing on Astra's review.
 
 ## 2. Starting a migration
 
-The user runs `solace serve` in the project folder, as today. A folder with Gleam projects but no Solace store is offered **Migrate this project** on the board (`solace migrate` does the same from a shell). The user picks which Gleam projects to migrate: one, several or all. Then Solace:
+The user runs `solace serve` in the project folder, as today. A folder with Gleam projects but no Solace store is offered **Migrate this project** on the Workspace page (`/workspace`, D-146; `solace migrate` does the same from a shell). The user picks which Gleam projects to migrate: one, several or all. Then Solace:
 
 1. Refuses if `../solace-migration/` already exists ("a migration is already in progress: adopt or abandon it first"), or isn't on the same filesystem as the original (the swap needs an atomic rename).
 2. Records an **inventory** of the original: every entry's path and permissions, each file's size, modified time and SHA-256, and each symlink's target, including `.git`, untracked and ignored files. Build output (`build/` beside a `gleam.toml`) is left out of the inventory, since building the original rewrites it; it is still copied.

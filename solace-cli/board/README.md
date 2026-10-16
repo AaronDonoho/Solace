@@ -3,7 +3,8 @@
 The Lustre client uses only the Spec 15 HTTP API. `solace serve` embeds the
 built HTML and JavaScript, so an installed binary needs no asset directory.
 
-The board holds the lanes, cards, new tasks, projects and notices. The open
+The board holds the lanes, cards, new tasks and notices; projects are managed
+in the Workspace page's Projects section (`../migration`). The open
 task's details are `<solace-task>` from `../components`: the board hands it the
 task's events, the updates of the tasks it depends on (for its Depends on line,
 from any project) and a notice's tab, and follows it when it moves project. A live
@@ -12,6 +13,21 @@ flags the Board tab while another page shows.
 
 A task link (D-98) reaches the board through the shell's `focus` property,
 `{dir, id, n}`: the task opens and its details scroll into view.
+
+The open task's details sit in a band at the bottom of the board. The band's
+bar is the task's only heading: its title, which collapses and expands the band,
+then **Copy ID**, its column and its status, on the title's line while there's
+room. The board sets `<solace-task>`'s `bar` attribute, so the details leave
+these out; the Strategy page sets no bar, so its details keep them. When the
+window is wider than 1.4 times its height, an open band moves to the right
+edge. The board narrows beside it down to its columns' smallest width, then
+the band covers it. Its handle drags its width there (Left and Right step
+it), never below 32rem. Collapsed there, the band is a narrow strip holding
+only an expand button; on a narrower window it stays a line at the bottom.
+At least 90rem wide, the details show in two columns 2rem apart: what the
+human does (actions, model, message) on the left, the tabs on the right.
+`layout_audit board` opens a task in the band at each of these sizes and
+measures it.
 
 A card is dimmed while a task in its `dependsOn` (D-87) is unfinished: not in
 a final column of its workflow now, so complete and cancelled both count as

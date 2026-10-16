@@ -1,0 +1,75 @@
+diff --git a/solace.toml b/solace.toml
+new file mode 100644
+index 0000000..bac0ebb
+--- /dev/null
++++ b/solace.toml
+@@ -0,0 +1,13 @@
++# Solace project settings. Protected: agents may read this file.
++# Text files up to this many bytes are watched; file writes are limited to it.
++watch_limit = 262144
++# Files Solace doesn't watch or search (agents can still read and write them).
++unwatched = []
++
++[validators]
++# Optional checks, for example:
++# "docs/**/*.json" = ["python3", "-m", "json.tool", "{file}"]
++
++[commands]
++# Optional commands agents may run, for example:
++# app = { run = ["gleam", "run", "--"], args = true }
+diff --git a/src/pilot/date.gleam b/src/pilot/date.gleam
+index eb788e7..4756bb0 100644
+--- a/src/pilot/date.gleam
++++ b/src/pilot/date.gleam
+@@ -108,13 +108,12 @@ pub fn add_days(date: Date, days: Int) -> Date {
+ /// The date `days` business days after `date`, skipping Saturdays and
+ /// Sundays. Starting on a weekend counts from the following Monday.
+ pub fn add_business_days(date: Date, days: Int) -> Date {
+-  case days <= 0 {
+-    True -> date
+-    False -> {
+-      let next = add_days(date, 1)
+-      add_business_days(next, days - 1)
+-    }
++  let start = case weekday(date) {
++    Saturday -> add_days(date, 2)
++    Sunday -> add_days(date, 1)
++    _ -> date
+   }
++  step_business_days(start, days)
+ }
+ 
+ pub fn days_between(from: Date, to: Date) -> Int {
+@@ -133,3 +132,17 @@ pub fn to_iso(date: Date) -> String {
+   <> "-"
+   <> string.pad_start(int.to_string(date.day), 2, "0")
+ }
++
++fn step_business_days(date: Date, days: Int) -> Date {
++  case days <= 0 {
++    True -> date
++    False -> {
++      let next = case weekday(date) {
++        Friday -> add_days(date, 3)
++        Saturday -> add_days(date, 2)
++        _ -> add_days(date, 1)
++      }
++      step_business_days(next, days - 1)
++    }
++  }
++}
+diff --git a/test/pilot/date_test.gleam b/test/pilot/date_test.gleam
+index 7cb0319..2000290 100644
+--- a/test/pilot/date_test.gleam
++++ b/test/pilot/date_test.gleam
+@@ -29,3 +29,10 @@ pub fn days_between_and_iso_test() {
+   assert date.days_between(Date(2026, 2, 27), Date(2026, 3, 2)) == 3
+   assert date.to_iso(Date(2026, 3, 2)) == "2026-03-02"
+ }
++
++pub fn business_days_skip_weekend_test() {
++  // Thursday 2026-03-05 + 4 business days is Wednesday 2026-03-11.
++  assert date.add_business_days(Date(2026, 3, 5), 4) == Date(2026, 3, 11)
++  // Saturday counts from the following Monday.
++  assert date.add_business_days(Date(2026, 3, 7), 1) == Date(2026, 3, 10)
++}
