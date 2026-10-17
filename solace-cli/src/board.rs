@@ -1672,25 +1672,57 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     Ok(None)
 }
 
-/// The models this Solace install knows; the same for every project. Every
-/// model is listed, with why it can't start; `limit`: the reason is a usage
+/// The models this Solace install knows; the same for every project. One entry
+/// per Claude family, with why it can't start; `limit`: the reason is a usage
 /// limit a human may clear ("Try again", `POST /models/try-again`).
 fn models() -> Result<Value, Failure> {
     // Serve the last list; ask a kind whose answer is stale, in the background.
     agents::refresh_stale();
+    let all = system()?["models"].as_array().cloned().unwrap_or_default();
     Ok(json!(
-        system()?["models"]
-            .as_array()
-            .unwrap_or(&vec![])
+        served(&all)
             .iter()
             .map(|m| {
                 let status = agents::availability(m);
                 let limit = status.as_ref().is_some_and(|s| s.1);
                 let reason = status.map(|s| s.0);
-                json!({"id":m["id"],"label":m["label"],"agent":m["agent"],"effort":m["effort"],"efforts":efforts(m),"available":reason.is_none(),"reason":reason,"limit":limit})
+                json!({"id":m["id"],"label":m["label"],"model":m["model"],"agent":m["agent"],"effort":m["effort"],"efforts":efforts(m),"available":reason.is_none(),"reason":reason,"limit":limit})
             })
             .collect::<Vec<_>>()
     ))
+}
+
+/// One entry per Claude family: the family's live exact model (preset, discovered or
+/// configured); its alias only when the family has no live exact one. Codex answers exact
+/// ids, so its entries, and a configured model whose id names no family, keep their places.
+/// The alias stays in the settings, so a task naming it still starts (`model`).
+fn served(models: &[Value]) -> Vec<Value> {
+    let mut best: HashMap<&str, usize> = HashMap::new();
+    for (i, m) in models.iter().enumerate() {
+        let Some(f) = agents::family(m) else { continue };
+        if best.get(f).is_none_or(|&j| rank(&models[j], f) < rank(m, f)) {
+            best.insert(f, i);
+        }
+    }
+    models
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| match agents::family(m) {
+            Some(f) => best[f] == *i,
+            None => true,
+        })
+        .map(|(_, m)| m.clone())
+        .collect()
+}
+
+/// How well an entry stands for its family: a live exact model, then an alias
+/// (live, or dropped with the family's exact model gone), then a dropped exact model.
+fn rank(m: &Value, f: &str) -> u8 {
+    match (m["gone"] != true, agents::is_alias(m, f)) {
+        (true, false) => 2,
+        (true, true) | (false, true) => 1,
+        _ => 0,
+    }
 }
 fn path_of(url: &str) -> Vec<&str> {
     url.split('?').next().unwrap_or("").trim_matches('/').split('/').collect()
@@ -2729,7 +2761,7 @@ fn review_context(s: &Store, t: &Value) -> Out {
     }
     match review_checkpoint(s, t) {
         Ok(checkpoint) => {
-            out += "Start with `task diff --since-review`. Assess the delta, prior unresolved findings and affected dependencies. Honor human requests for a fresh full review using `task diff`.\n";
+            out += "The task's changes are below: the delta since the last review. Assess the delta, prior unresolved findings and affected dependencies. Run `task diff` only when the human asks for a fresh full review, or for parts left out below.\n";
             let current = review_state(s, t)?;
             if checkpoint["changed_during_review"] != false {
                 out += "Project or instructions changed during the previous review, or stability is unknown. Its checkpoint represents review-start content only; recheck affected code and context before carrying forward any assessment.\n";
@@ -2744,7 +2776,10 @@ fn review_context(s: &Store, t: &Value) -> Out {
             }
             out += &task_diff(s, t["id"].as_str().unwrap(), &["--since-review"], 8000)?;
         }
-        Err(reason) => out += &format!("Start with `task diff` and assess the whole task: {reason}. No usable delta baseline.\n"),
+        Err(reason) => {
+            out += &format!("No usable delta baseline: {reason}. The task's changes are below (the whole task); assess all of them.\n");
+            out += &task_diff(s, t["id"].as_str().unwrap(), &[], 8000)?;
+        }
     }
     Ok(out)
 }
@@ -2776,6 +2811,12 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
     if resumed {
         out = out.replace(START, "Use the continuation context below.");
     }
+    // D-151: a fresh run's brief holds its session start reply, so its first
+    // call reads; the brief has its feature and dependencies already.
+    let reply = if resumed || !out.contains(START) { None } else { session_reply(t, here) };
+    if reply.is_some() {
+        out = out.replace(START, HELD_START);
+    }
     out += &waiting_on(&scope::top(root), tid);
     if !matches!(kind, "review" | "discuss") && t["runs"].as_array().is_some_and(|r| r.len() > 1) {
         if resumed {
@@ -2796,7 +2837,7 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
         if kind == "review" {
             match review_context(&s, t) {
                 Ok(context) => out += &context,
-                Err(e) => out += &format!("\nReview context unavailable: {}. Start with `task diff` and assess the whole task.\n", e.0),
+                Err(e) => out += &format!("\nReview context unavailable: {}. Run `task diff` to see the whole task and assess it.\n", e.0),
             }
         }
         // A discussion runs no checks, so it gets the decision titles instead of the verification record.
@@ -2835,10 +2876,33 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
             }
         }
     }
+    if let Some(reply) = reply {
+        out += &format!("\nSession start (the reply to `session start --task`):\n{reply}");
+    }
     // A discussion's `task note` returns the human's next message, so the run
     // ends with the call that says so, not with the first note.
     out += "\nAfter the call that ends the run returns, stop: no more calls, and a final response of one line at most; then exit normally.\n";
     (out, images)
+}
+
+/// The reply `session start --task` gives task `t`'s agent, with the task's
+/// title and description, in `here`, the project its run works in (D-151);
+/// none when that folder has no store, or when building it fails, which is
+/// logged so the brief's plain start line can be traced.
+fn session_reply(t: &Value, here: &Path) -> Option<String> {
+    if !here.join(".solace/store.db").exists() {
+        return None;
+    }
+    let text = |k: &str| t[k].as_str().unwrap_or("").trim().to_string();
+    let task = format!("{}\n{}", text("title"), text("body"));
+    let tid = t["id"].as_str()?;
+    match Store::at(here).and_then(|s| s.task_session(task.trim_end(), Some(tid), "")) {
+        Ok(reply) => Some(reply),
+        Err(e) => {
+            eprintln!("session start for the brief of task {tid}: {}", e.0);
+            None
+        }
+    }
 }
 
 /// The most of the vision a brief carries (D-91): all of it, since a save is
@@ -3037,31 +3101,87 @@ pub fn record_verification(s: &Store, tid: &str, command: &str, result: &Out) ->
     tasks::send(&scope::top(&s.root), json!({"kind":"verification","task":tid,"command":command,"result":result}))?;
     Ok(())
 }
+/// D-157: saves run `rid`'s reads on its run, through the inbox.
+pub(super) fn record_reads(top: &Path, tid: &str, rid: &str, reads: Value) -> Result<(), Failure> {
+    tasks::send(top, json!({"kind":"reads","task":tid,"run":rid,"reads":reads}))?;
+    Ok(())
+}
+/// D-157: run `rid`'s reads as its MCP process last saved them.
+pub(super) fn run_reads(top: &Path, tid: &str, rid: &str) -> Value {
+    run_record(top, tid, rid).map_or(Value::Null, |r| r["reads"].clone())
+}
+/// D-157: run `rid`'s steps so far, one line each (D-99), the latest that fit in `budget`.
+pub(super) fn run_outline(top: &Path, tid: &str, rid: &str, budget: usize) -> String {
+    let Some(r) = run_record(top, tid, rid) else {
+        return String::new();
+    };
+    outline(&transcript(Path::new(r["log"].as_str().unwrap_or(""))), budget)
+}
+fn run_record(top: &Path, tid: &str, rid: &str) -> Option<Value> {
+    let t = read_task(top, &task_path(top, tid).ok()?).ok()?;
+    let i = run_at(&t, rid).ok()?;
+    Some(t["runs"][i].clone())
+}
+/// The tool calls and messages of `steps`, one line each and numbered as in
+/// the run log: the latest that fit in `budget`, after how many were left out.
+fn outline(steps: &[Value], budget: usize) -> String {
+    let lines: Vec<String> =
+        steps.iter().enumerate().filter(|(_, e)| matches!(e["kind"].as_str(), Some("tool" | "message"))).map(|(i, e)| step_line(i, e) + "\n").collect();
+    let (mut kept, mut size) = (0, 0);
+    for l in lines.iter().rev() {
+        // room for the line naming what's left out
+        if size + l.len() + 40 > budget {
+            break;
+        }
+        size += l.len();
+        kept += 1;
+    }
+    let left = lines.len() - kept;
+    let head = if left > 0 { format!("Earlier steps left out: {left}\n") } else { String::new() };
+    head + &lines[left..].concat()
+}
+/// A line cut to 100 characters, with `…` when more was cut.
+fn cut_line(what: &str) -> String {
+    let cut: String = what.chars().take(100).collect();
+    let more = if cut.len() < what.len() { "…" } else { "" };
+    format!("{cut}{more}")
+}
+/// One line for a transcript entry: its number, kind, and text's first line cut to 100.
+fn step_line(i: usize, e: &Value) -> String {
+    let kind = e["kind"].as_str().unwrap_or("");
+    let what = match kind {
+        "tool" => format!("{} ({})", e["title"].as_str().unwrap_or("").lines().next().unwrap_or(""), e["status"].as_str().unwrap_or("")),
+        _ => e["text"].as_str().unwrap_or("").lines().next().unwrap_or("").to_string(),
+    };
+    format!("{} {kind}: {}", i + 1, cut_line(&what))
+}
 /// An agent's prompt: what its run is for, how to start, ask and finish, then
 /// what it needs from the task (Spec 15 §6), as plain text.
 /// A fresh run's first step; a resumed run continues instead.
 const START: &str = "Start with `session start --task`, with the task's title and description as `text`.";
+/// A fresh run's first step when its brief holds the session start reply (D-151).
+const HELD_START: &str = "The reply to `session start --task`, with the task's title and description, is at the end of this brief: start with the call its `Next:` line names. Send `session start --task` again only to see that reply again, for example after the conversation is compacted.";
 /// What a review of a task in a feature is asked to add (D-112).
 const TECH_DEBT_ASK: &str = "This task is part of a feature: put minor, non-blocking findings that later work in the feature should fix under a `### Tech debt` heading in the feedback, one finding per bullet with its location (`module.name` or a file). When the task is completed, Solace files each on the feature's Tech Debt task; findings that block this task belong in the findings, not there.";
 fn brief(t: &Value, kind: &str) -> String {
     let start = START;
-    let ask = "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
-    let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. Keep messages short: lead with the answer or outcome, then only what the human needs to act on; don't restate the task or narrate your steps. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); keep the options concise.";
+    let ask = "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. In the question's `text`, give each option a short example of the outcome the human would see (what a user sees, what a command prints, what a page shows, what a file or record ends up as), not how the code would change; the `options` stay short labels matching the bold names in the examples. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
+    let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. Keep messages short: lead with the answer or outcome, then only what the human needs to act on; don't restate the task or narrate your steps. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); in `text`, give each option a short example of its outcome in the human's terms, its name in bold, and keep the `options` labels short, matching the bold names.";
     let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `merge`, `write`, `remove`, `format` and `run` are refused.";
     // A task in a feature files its review's minor findings as the feature's tech debt (D-112).
     let debt = if t["feature"].is_string() { format!(" {TECH_DEBT_ASK}") } else { String::new() };
     let role = match kind {
         "review" => format!(
-            "Review the changes this task made (listed below) and give feedback. Follow the review context below: the first review assesses the whole task with `task diff`; follow-ups start with `task diff --since-review` when a completed checkpoint exists. Then read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. {read_only} In a review, `run <name>` is allowed for commands marked `allowed_in_reviews` in `solace.toml`; use those to verify (for example JavaScript tests). Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
+            "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. Read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. {read_only} In a review, `run <name>` is allowed for commands marked `allowed_in_reviews` in `solace.toml`; use those to verify (for example JavaScript tests). Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
         ),
         "discuss" => format!(
             "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
         ),
         "work" => format!(
-            "Make the change this task describes. {start} {ask} Before `task done`, run all tests of the projects this task covers: `test --all` in each one with Gleam code, and the test commands its `solace.toml` declares (`run <name>`). Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Finish with `task done`, a summary in `text`: what you changed and how you checked it."
+            "Make the change this task describes. {start} {ask} Before `task done`, run all tests of the projects this task covers: `test --all` in each one with Gleam code, and the test commands its `solace.toml` declares (`run <name>`). Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
         ),
         _ => format!(
-            "Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work."
+            "Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. A plan assigns every file change to whoever does the work, as an edit (`submit` or `write`) or a settings proposal (`write` with `reason`), never to the human, who never edits files or runs commands. A plan is the smallest complete change (the reference's step 2) and names every file it reaches. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work, and anything you didn't check."
         ),
     };
     let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
@@ -3322,7 +3442,11 @@ fn finish(root: &Path, tid: &str, rid: &str, failure: Option<&str>) -> Result<()
 /// A task run's task and run, from its agent's environment; none in a
 /// strategy run.
 pub fn context() -> Option<(String, String)> {
-    Some((env::var("SOLACE_TASK").ok().filter(|t| t != STRATEGY)?, env::var("SOLACE_RUN").ok()?))
+    task_ids(env::var("SOLACE_TASK").ok(), env::var("SOLACE_RUN").ok())
+}
+/// The task run's ids: both of them, and the task is not a strategy run's.
+pub(super) fn task_ids(task: Option<String>, run: Option<String>) -> Option<(String, String)> {
+    Some((task.filter(|t| t != STRATEGY)?, run?))
 }
 /// `SOLACE_TASK` in a strategy run's agent (D-93). No task has this id: task
 /// ids are hex digits.
@@ -3559,6 +3683,10 @@ pub(super) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
                 t["verification"] = json!({});
             }
             t["verification"][m["command"].as_str().unwrap_or("")] = m["result"].clone();
+        }
+        "reads" => {
+            let i = run_at(t, rid.unwrap_or(""))?;
+            t["runs"][i]["reads"] = m["reads"].clone();
         }
         "note" => {
             note(t, m["author"].as_str().unwrap_or("solace"), rid, text);

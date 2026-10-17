@@ -23,6 +23,7 @@ try {
   check(root.querySelector('h1')?.textContent === 'Workspace', 'page heading');
   check(root.querySelector('section.bring-in > h2')?.textContent === 'Bring in an existing project', 'migration section heading');
   check(root.querySelector('section.bring-in')?.textContent.includes('Migrate this project'), 'migration is a section of the page');
+  check(!root.querySelector('section.migration h2'), 'no h2 inside the migration section');
   check(root.querySelector('style')?.textContent.includes('.migration'), 'owned CSS');
   check(customElements.get('solace-migration').observedAttributes.length === 0, 'no attributes');
   check(getComputedStyle(root.querySelector('button')).color !== 'rgb(255, 0, 255)', 'shell styles not adopted');
@@ -32,6 +33,7 @@ try {
   document.documentElement.dataset.theme = 'light';
   root.querySelector('button').click();
   await wait(() => root.querySelector('textarea'));
+  check(root.querySelector('#migration-title')?.tagName === 'H3', 'dialog title is an h3');
   const inputs = [...root.querySelectorAll('input[type=checkbox]')];
   check(inputs.length === 2 && inputs.every(input => input.checked), 'projects selected');
   inputs[0].click();

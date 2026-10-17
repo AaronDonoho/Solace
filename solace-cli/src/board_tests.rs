@@ -88,6 +88,39 @@ fn a_brief_lists_the_skills_of_its_project() {
     assert!(!brief.contains("Skills ("), "{brief}");
 }
 
+/// D-151: a fresh work or investigate brief holds the session start reply in
+/// place of the line asking for it, before the stop line; a resumed brief, a
+/// review's and a discussion's don't, and a project of plain files gets its own reply.
+#[test]
+fn a_fresh_brief_holds_the_session_start_reply() {
+    let p = testing::project(&[("src/app.gleam", "/// Totals an order.\npub fn total() -> Int {\n  1\n}\n")]);
+    let s = open(&p.root).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title":"Fix the order total","body":"app.total is off by one"})).unwrap();
+    let brief = |kind: &str, resumed: bool| continuation_brief(&t, &json!({"id":"r1","kind":kind}), resumed, &p.root, &p.root, false).0;
+    let (reply, next) = ("\nSession start (the reply to `session start --task`):\n", "\nNext: read what the change needs in one call, one command per line: `inspect app.total");
+    for kind in ["work", "investigate"] {
+        let b = brief(kind, false);
+        assert!(b.contains(reply) && b.contains("Symbols most likely relevant to the task") && b.contains("-- app.total"), "{kind}: {b}");
+        assert!(!b.contains(START) && b.contains(HELD_START), "{kind}: {b}");
+        let (at, stop) = (b.find(next).expect(&b), b.find("After the call that ends the run returns, stop").unwrap());
+        assert!(b.find(reply).unwrap() < at && at < stop, "{kind}: the reply's first call comes just before the stop line: {b}");
+        assert!(!b.contains("Feature (the feature") && !b.contains("Depends on"), "{kind}: {b}");
+    }
+    for kind in ["review", "discuss"] {
+        let b = brief(kind, false);
+        assert!(!b.contains(reply) && !b.contains(HELD_START), "{kind}: {b}");
+    }
+    let resumed = brief("work", true);
+    assert!(resumed.contains("Use the continuation context below.") && !resumed.contains(reply) && !resumed.contains(HELD_START), "{resumed}");
+    fs::remove_file(p.root.join("gleam.toml")).unwrap();
+    let plain = brief("work", false);
+    assert!(plain.contains(reply) && plain.contains("This project has plain files") && plain.contains("`grep <text> --in <path>`"), "{plain}");
+    // A folder with no store keeps the line asking for the call.
+    let bare = testing::Scratch::new();
+    let b = continuation_brief(&t, &json!({"id":"r1","kind":"work"}), false, &p.root, &bare, false).0;
+    assert!(b.contains(START) && !b.contains(reply), "{b}");
+}
+
 /// D-138: a task's feature section names the feature and carries the latest
 /// of its investigation report, assignment note and review feedback, cut at
 /// a line end within the cap; no feature, no section.
@@ -313,7 +346,10 @@ fn strategy_runs_read_the_graph() {
     let brief = strategy_brief(&top, &json!({"context":{"kind":"feature","id":fid},"notes":[{"author":"human","text":"Plan F"}]}));
     assert!(brief.contains(&format!("This run is about the feature {fid}")) && brief.contains("\"title\": \"F\""), "{brief}");
     assert!(brief.contains("A `title` names the work in a few words") && brief.contains("go in `body`"), "{brief}");
+    assert!(brief.contains("Propose the smallest version that meets the need") && brief.contains("Say once if the need or vision"), "{brief}");
     assert!(brief.contains("in short Markdown: lead with the answer"), "{brief}");
+    // D-148: records are named as links the human can click.
+    assert!(brief.contains("name tasks, features and milestones as `task:<id>`, `feature:<id>` or `milestone:<id>`, written bare and never inside backticks"), "{brief}");
     assert!(brief.contains("- D-1 First thing") && !brief.contains("- Notes") && brief.contains("- human: Plan F"), "{brief}");
     // The root is a project itself, so the decisions can be read in full.
     assert!(brief.contains("`grep D-<n>`") && !brief.contains("folder of projects"), "{brief}");
@@ -395,6 +431,41 @@ fn review_delta_keeps_module_headers_budget_and_completed_baseline() {
     assert!(delta.contains("Left out to fit the reply") && delta.contains("task diff --since-review <name>"));
     let filtered = task_diff(&s, &tid, &["--since-review", "file:later.txt"], 1000).unwrap();
     assert!(filtered.contains("file:later.txt (added)") && !filtered.contains("module:app"));
+}
+
+/// A review's brief holds the task's changes: the whole task at first, then
+/// the delta since the last completed review; it never asks for `task diff`
+/// or a session start first.
+#[test]
+fn a_review_brief_holds_the_task_diff() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Review diff"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id":"work","kind":"work","state":"ended"}]);
+    tasks::put(&s, &t).unwrap();
+    fs::write(s.root.join("first.txt"), "first").unwrap();
+    record_listed(&s, &tid, &json!({"file:first.txt":null}), &json!({"file:first.txt":b"first".to_vec()}));
+    let brief = |t: &Value| continuation_brief(t, &json!({"id":"r1","kind":"review"}), false, &p.root, &p.root, false).0;
+    t = task(&s.root, &tid).unwrap();
+    let first = brief(&t);
+    assert!(first.contains("first.txt (added)") && first.contains("(the whole task)"), "{first}");
+    t["runs"].as_array_mut().unwrap().push(json!({"id":"review","kind":"review","state":"ended","outcome":"reviewed"}));
+    let mut checkpoint = review_state(&s, &t).unwrap();
+    checkpoint["run"] = json!("review");
+    checkpoint["changed_during_review"] = json!(false);
+    let path = review_path(&s.root, &tid, "review").unwrap();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    tasks::put(&s, &t).unwrap();
+    fs::write(s.root.join("later.txt"), "later").unwrap();
+    record_listed(&s, &tid, &json!({"file:later.txt":null}), &json!({"file:later.txt":b"later".to_vec()}));
+    let followup = brief(&task(&s.root, &tid).unwrap());
+    assert!(followup.contains("Since completed review review") && followup.contains("later.txt (added)"), "{followup}");
+    assert!(!followup.contains("first.txt (added)"), "{followup}");
+    for b in [&first, &followup] {
+        assert!(!b.contains("Start with") && !b.contains(START) && !b.contains(HELD_START), "{b}");
+    }
 }
 
 /// Canceling a task puts back what it changed: a module it created goes,
@@ -605,7 +676,7 @@ fn a_task_with_a_feature_is_refused_back_to_the_backlog() {
 }
 
 /// D-133: back to planning from Assigned is refused while a run is open, and
-/// from Needs review it keeps the task's changes and clears its approval.
+/// from Review it keeps the task's changes and clears its approval.
 #[test]
 fn back_to_planning_waits_for_the_run_and_keeps_changes() {
     let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
@@ -743,6 +814,32 @@ fn note_images_are_checked_numbered_and_encoded() {
     assert_eq!(found, ["0123456789abcdef.png"]);
 }
 
+/// A strategy run and a run outside a task have no task run: a task run has
+/// both ids, and a strategy run's task id is `strategy`.
+#[test]
+fn a_strategy_run_and_a_run_outside_a_task_have_no_task_run() {
+    assert_eq!(task_ids(None, None), None);
+    assert_eq!(task_ids(Some("strategy".into()), Some("r".into())), None);
+    assert_eq!(task_ids(Some("t".into()), None), None);
+    assert_eq!(task_ids(Some("t".into()), Some("r".into())), Some(("t".into(), "r".into())));
+}
+
+/// D-157: a reads message lands on its run; the outline keeps the latest steps that fit.
+#[test]
+fn a_reads_message_lands_on_its_run_and_the_outline_keeps_the_latest_steps() {
+    let w = workflow(&toml::Value::Table(Default::default())).unwrap();
+    let mut t = new_task("T", "", &w["columns"][0]["id"], 1.);
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+    let reads = json!({"symbols":[{"project":".","symbol":"a.f","revision":"sha256:1","recent":true}],"caught":false});
+    message(&w, &mut t, &json!({"kind":"reads","task":"t","run":"r1","reads":reads})).unwrap();
+    assert_eq!(t["runs"][0]["reads"], reads);
+    assert!(message(&w, &mut t, &json!({"kind":"reads","task":"t","run":"r2","reads":reads})).is_err());
+    let steps = [json!({"kind":"tool","title":"view a.f","status":"completed"}), json!({"kind":"usage"}), json!({"kind":"message","text":"Done.\nmore"})];
+    assert_eq!(outline(&steps, 1000), "1 tool: view a.f (completed)\n3 message: Done.\n");
+    assert_eq!(outline(&steps, 60), "Earlier steps left out: 1\n3 message: Done.\n");
+    assert_eq!(outline(&[], 1000), "");
+}
+
 /// A message for a run that has ended keeps its note and changes nothing else.
 #[test]
 fn a_late_agent_message_does_not_wake_an_ended_run() {
@@ -821,6 +918,10 @@ fn strategy_show_run_outlines_and_picks_steps() {
     assert!(!run(&["strategy", "show", "run", "t1", "r1", "1,2"], 10_000).unwrap().contains("Next:"));
     assert!(run(&["strategy", "show", "run", "t1", "r1", "1", "--from", "x"], 10_000).unwrap_err().0.starts_with("E7001"));
     assert!(run(&["strategy", "show", "note", "t1", "2", "--from", "3"], 10_000).unwrap().contains("characters 3.."));
+    // An id copied in its link form names the same record.
+    assert_eq!(run(&["strategy", "show", "task", "task:t1"], 10_000).unwrap(), run(&["strategy", "show", "task", "t1"], 10_000).unwrap());
+    assert_eq!(run(&["strategy", "show", "note", "task:t1", "2"], 10_000).unwrap(), run(&["strategy", "show", "note", "t1", "2"], 10_000).unwrap());
+    assert_eq!(run(&["strategy", "show", "run", "task:t1", "r1"], 10_000).unwrap(), run(&["strategy", "show", "run", "t1", "r1"], 10_000).unwrap());
     for bad in ["0", "3", "2..1", "x", "1,,2"] {
         assert!(strategy_run_show(&root, "t1", "r1", Some(bad)).unwrap_err().0.starts_with("E7001"), "{bad}");
     }
@@ -832,6 +933,17 @@ fn strategy_show_run_outlines_and_picks_steps() {
     assert!(strategy_run_show(&root, "t1", "nope", None).unwrap_err().0.starts_with("E7023"));
     assert!(strategy_run_show(&root, "nope", "r1", None).unwrap_err().0.starts_with("E7023"));
 }
+/// A proposal's links lose their `task:`/`feature:`/`milestone:` prefix; other fields keep theirs.
+#[test]
+fn a_proposal_takes_ids_in_their_link_form() {
+    assert_eq!(tasks::bare_id("task:t1"), "t1");
+    assert_eq!(tasks::bare_id("milestone:m1"), "m1");
+    assert_eq!(tasks::bare_id("t1"), "t1");
+    let fields = json!({"title":"see task:t9","feature":"feature:f1","milestone":"milestone:m1","dependsOn":["task:t1","t2"]});
+    assert_eq!(tasks::bare_links(fields), json!({"title":"see task:t9","feature":"f1","milestone":"m1","dependsOn":["t1","t2"]}));
+    assert_eq!(tasks::bare_links(json!({"feature":null})), json!({"feature":null}), "a cleared link stays cleared");
+}
+
 /// One unreadable task file doesn't hide the others.
 #[test]
 fn all_tasks_skips_an_unreadable_file() {
@@ -945,14 +1057,40 @@ fn discovered_models_merge_after_presets() {
         {"id":"mine","label":"Mine","agent":"claude","model":"opus","configured":true},
     ]);
     let all = json!({"codex":{"time":100,"models":[
-        {"id":"codex-gpt-6-astra","label":"Codex · GPT-6 Astra","agent":"codex","model":"gpt-6-astra","effort":"medium","efforts":["low","medium"]},
-        {"id":"codex-new-1","label":"Codex · New 1","agent":"codex","model":"new-1","effort":"high","efforts":["high"]},
+        {"id":"codex-gpt-6-astra","label":"GPT-6 Astra","agent":"codex","model":"gpt-6-astra","effort":"medium","efforts":["low","medium"]},
+        {"id":"codex-new-1","label":"New 1","agent":"codex","model":"new-1","effort":"high","efforts":["high"]},
     ]}});
     let m = agents::merge_from(&configured, &all);
-    assert_eq!(m.iter().find(|x| x["id"] == "codex-gpt-6-astra").unwrap()["label"], "Codex · GPT-6 Astra", "discovery replaces a preset");
+    assert_eq!(m.iter().find(|x| x["id"] == "codex-gpt-6-astra").unwrap()["label"], "GPT-6 Astra", "discovery replaces a preset");
     assert!(m.iter().any(|x| x["id"] == "codex-new-1"), "a model the agent reports is offered");
     assert_eq!(m.iter().find(|x| x["id"] == "mine").unwrap()["label"], "Mine", "the human's config wins for the same id");
     assert_eq!(agents::merge_from(&configured, &json!({})).len(), 2, "presets stand when discovery fails");
+}
+
+/// Every native model gets a default effort: its own, else `medium`, else the
+/// middle of its offer; custom runners and an empty offer get none.
+#[test]
+fn every_native_model_gets_a_default_effort() {
+    let configured = json!([
+        {"id":"claude-opus-5-5","label":"P","agent":"claude","model":"claude-opus-5-5"},
+        {"id":"mine","label":"Mine","agent":"claude","model":"opus","effort":"high","configured":true},
+        {"id":"odd","label":"Odd","agent":"claude","model":"x","efforts":["high","max"]},
+        {"id":"bare","label":"Bare","agent":"claude","model":"y","efforts":[]},
+        {"id":"runner","label":"R","agent":"claude","model":"z","run":["my-agent"]},
+        {"id":"local","label":"L","agent":"claude","model":"q","endpoint":{"kind":"anthropic","base_url":"http://h"}},
+        {"id":"bogus","label":"B","agent":"claude","model":"opus","effort":"bogus","configured":true},
+    ]);
+    let all = json!({"codex":{"time":1,"models":[{"id":"codex-a","label":"A","agent":"codex","model":"a","effort":"low","efforts":["low","medium"]}]}});
+    let m = agents::merge_from(&configured, &all);
+    let e = |id: &str| m.iter().find(|x| x["id"] == id).unwrap()["effort"].clone();
+    assert_eq!(e("claude-opus-5-5"), "medium", "a preset takes medium");
+    assert_eq!(e("mine"), "high", "the config's own effort wins");
+    assert_eq!(e("odd"), "max", "no medium: the middle of the offer");
+    assert_eq!(e("bare"), Value::Null, "nothing offered, no default");
+    assert_eq!(e("runner"), Value::Null, "a custom runner takes none");
+    assert_eq!(e("local"), "medium", "an endpoint model is native");
+    assert_eq!(e("codex-a"), "low", "the agent's reported default stands");
+    assert_eq!(e("bogus"), "medium", "a configured effort the model doesn't offer falls back");
 }
 
 /// A recorded `model/list` answer: hidden models are left out, and each model
@@ -969,7 +1107,7 @@ fn codex_answers_offer_their_models_and_efforts() {
     let models = agents::codex_page(&r);
     assert_eq!(models.len(), 2, "a hidden model is left out");
     assert_eq!(models[0]["id"], "codex-gpt-6-sol");
-    assert_eq!(models[0]["label"], "Codex · GPT-6 Sol");
+    assert_eq!(models[0]["label"], "GPT-6 Sol", "a label is the model's name alone");
     assert_eq!(models[0]["model"], "gpt-6-sol", "the slug is what the run passes to -m");
     assert_eq!(models[0]["efforts"], json!(["low", "medium", "high"]));
     assert_eq!(models[0]["effort"], "medium");
@@ -983,25 +1121,71 @@ fn claude_falls_back_to_its_aliases() {
     let ids: Vec<&str> = a.iter().map(|m| m["id"].as_str().unwrap()).collect();
     assert_eq!(ids, ["claude-opus", "claude-sonnet", "claude-haiku", "claude-fable"]);
     assert_eq!(a[0]["model"], "opus", "the alias is what the run passes to --model");
-    assert_eq!(a[0]["label"], "Claude Code · Opus (latest)");
+    assert_eq!(a[0]["label"], "Opus (latest)");
     assert_eq!(efforts(&a[0]), ["low", "medium", "high", "xhigh", "max"], "an alias takes the fixed Claude efforts");
 }
 
 /// With an API key, the provider's models endpoint lists exact ids: active
-/// ones, with the efforts its capability flags name.
+/// ones, with the efforts its capability flags name and the family its `line` names.
 #[test]
 fn the_models_endpoint_lists_active_ids() {
     let body = json!({"data":[
-        {"id":"claude-opus-5-5","display_name":"Opus 5.5","lifecycle":"active","capabilities":{"effort":{"low":true,"medium":true,"high":true,"xhigh":true,"max":true}}},
+        {"id":"claude-opus-5-5","display_name":"Opus 5.5","lifecycle":"active","line":"opus","capabilities":{"effort":{"low":true,"medium":true,"high":true,"xhigh":true,"max":true}}},
         {"id":"claude-old-1","display_name":"Old 1","lifecycle":"deprecated","capabilities":{"effort":{"low":true}}},
-        {"id":"claude-haiku-5","display_name":"Haiku 5","capabilities":{}}
+        {"id":"claude-haiku-5","display_name":"Haiku 5","line":"haiku","capabilities":{}}
     ]});
     let models = agents::api_page(&body);
     assert_eq!(models.len(), 2, "a retired model is left out");
     assert_eq!(models[0]["id"], "claude-opus-5-5");
-    assert_eq!(models[0]["label"], "Claude Code · Opus 5.5");
+    assert_eq!(models[0]["label"], "Opus 5.5");
     assert_eq!(models[0]["efforts"], json!(["low", "medium", "high", "xhigh", "max"]));
     assert_eq!(models[1]["efforts"], json!([]), "no effort flags: no efforts to choose");
+    assert_eq!(agents::family(&models[0]), Some("opus"), "the endpoint's line names the family");
+    assert_eq!(agents::family(&models[1]), Some("haiku"));
+}
+
+/// A family word inside a `claude-` id names the family, a configured one's too (D-150);
+/// Codex's ids and a configured model with no family word name none, so they keep their entries.
+#[test]
+fn a_model_names_its_family_by_id() {
+    assert_eq!(agents::family(&json!({"agent":"claude","id":"claude-opus-5-5","model":"claude-opus-5-5"})), Some("opus"));
+    assert_eq!(agents::family(&json!({"agent":"claude","id":"claude-haiku-4-5","model":"claude-haiku-4-5-20251001"})), Some("haiku"));
+    assert_eq!(agents::family(&json!({"agent":"claude","id":"claude-opus","model":"opus"})), Some("opus"), "an alias names its family");
+    assert_eq!(agents::family(&json!({"agent":"claude","id":"claude-opus-5-5","family":"fable"})), Some("fable"), "the endpoint's line outranks the id");
+    assert_eq!(agents::family(&json!({"agent":"codex","id":"codex-gpt-6-astra","model":"gpt-6-astra"})), None);
+    assert_eq!(agents::family(&json!({"agent":"claude","id":"my-opus-local","model":"opus","configured":true})), None, "a configured model keeps its entry");
+    assert_eq!(agents::family(&json!({"agent":"claude","id":"claude-opus-local","model":"opus","configured":true})), Some("opus"), "a configured id with a family word joins the family");
+}
+
+/// The pick lists one entry per Claude family: the family's live exact model,
+/// its alias only when the family has none; a dropped exact model gives way to
+/// the alias, so the family shows one reason. Codex's entries keep their places.
+#[test]
+fn the_pick_lists_one_entry_per_claude_family() {
+    let models = json!([
+        {"id":"codex-gpt-6-astra","label":"GPT-6 Astra","agent":"codex","model":"gpt-6-astra"},
+        {"id":"claude-opus-5-5","label":"Opus 5.5","agent":"claude","model":"claude-opus-5-5"},
+        {"id":"claude-opus","label":"Opus (latest)","agent":"claude","model":"opus"},
+        {"id":"claude-opus-local","label":"Local Opus","agent":"claude","model":"opus","configured":true},
+        {"id":"claude-fable","label":"Fable (latest)","agent":"claude","model":"fable"},
+        {"id":"claude-haiku-4-5","label":"Haiku 4.5","agent":"claude","model":"claude-haiku-4-5-20251001","gone":true},
+        {"id":"claude-haiku","label":"Haiku (latest)","agent":"claude","model":"haiku"},
+        {"id":"mine","label":"Mine","agent":"claude","model":"local","configured":true},
+    ]);
+    let picked = served(models.as_array().unwrap());
+    let ids: Vec<&str> = picked.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["codex-gpt-6-astra", "claude-opus-5-5", "claude-fable", "claude-haiku", "mine"]);
+    let dropped = json!([
+        {"id":"claude-opus-5-5","label":"Opus 5.5","agent":"claude","model":"claude-opus-5-5","gone":true},
+        {"id":"claude-opus","label":"Opus (latest)","agent":"claude","model":"opus"},
+    ]);
+    let picked = served(dropped.as_array().unwrap());
+    let ids: Vec<&str> = picked.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["claude-opus"], "the alias stands when the family's exact model is gone");
+    let exact_only = json!([{"id":"claude-opus-5-5","label":"Opus 5.5","agent":"claude","model":"claude-opus-5-5","gone":true}]);
+    let picked = served(exact_only.as_array().unwrap());
+    let ids: Vec<&str> = picked.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["claude-opus-5-5"], "a family with only a dropped model shows its reason");
 }
 
 /// A model a discovery dropped stays in the list, so tasks already using it
@@ -1015,6 +1199,11 @@ fn a_model_off_the_offer_stays_for_the_tasks_using_it() {
     let gone = m.iter().find(|x| x["id"] == "claude-opus").unwrap();
     assert_eq!(gone["gone"], true);
     assert_eq!(agents::availability(gone), Some(("no longer offered by Claude Code".to_string(), false)), "it is not offered for a new run");
+    assert_eq!(gone["label"], "Opus (latest)", "a label saved before D-150 drops the agent's name");
+    let saved = json!({"codex":{"time":1,"models":[{"id":"codex-x","label":"Codex · GPT-6 X","agent":"codex","model":"x"}]}});
+    assert_eq!(agents::merge_from(&json!([]), &saved)[0]["label"], "GPT-6 X");
+    let mine = json!([{"id":"mine","label":"Codex · mine","agent":"codex","model":"y","configured":true}]);
+    assert_eq!(agents::merge_from(&mine, &json!({}))[0]["label"], "Codex · mine", "the human's own label stays as written");
 }
 
 #[test]
@@ -1027,7 +1216,7 @@ fn a_model_error_names_the_offer_as_out_of_date() {
 }
 
 /// The model a run used comes from its log's start event, and an alias's
-/// label names it once known.
+/// label becomes that model's once known: its entry's label, else its id.
 #[test]
 fn a_run_shows_the_model_it_used() {
     let dir = testing::Scratch::new();
@@ -1036,10 +1225,18 @@ fn a_run_shows_the_model_it_used() {
     assert_eq!(used_model(&log).as_deref(), Some("claude-opus-5-5"));
     fs::write(&log, "not json\n{\"type\":\"thread.started\",\"thread_id\":\"t1\"}\n").unwrap();
     assert_eq!(used_model(&log), None, "a start event naming no model names none");
-    let configured = json!([{"id":"claude-opus","label":"Claude Code · Opus (latest)","agent":"claude","model":"opus"}]);
+    let configured = json!([{"id":"claude-opus","label":"Opus (latest)","agent":"claude","model":"opus"}]);
     let m = agents::merge_from(&configured, &json!({"used":{"claude-opus":"claude-opus-5-5"}}));
-    assert_eq!(m[0]["label"], "Claude Code · Opus (latest) · claude-opus-5-5");
+    assert_eq!(m[0]["label"], "claude-opus-5-5", "no entry runs it: its id");
     assert_eq!(m[0]["model"], "opus", "the alias is what runs");
+    let listed = json!([configured[0], {"id":"claude-opus-5-5","label":"Opus 5.5","agent":"claude","model":"claude-opus-5-5"}]);
+    let m = agents::merge_from(&listed, &json!({"used":{"claude-opus":"claude-opus-5-5"}}));
+    assert_eq!(m[0]["label"], "Opus 5.5", "the entry running it names it");
+    let own = agents::merge_from(
+        &json!([{"id":"local","label":"Local: Strata Swift","agent":"claude","model":"swift-iq3_xxs","configured":true}]),
+        &json!({"used":{"local":"swift-iq2_xs"}}),
+    );
+    assert_eq!(own[0]["label"], "Local: Strata Swift", "a model with its own name shows it, not what an older run used");
 }
 
 #[test]
@@ -1264,7 +1461,7 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     for noise in ["{", "r1", "rank"] {
         assert!(!b.contains(noise), "{noise} in:\n{b}");
     }
-    for kind in ["work", "investigate", "review"] {
+    for kind in ["work", "investigate", "review", "discuss"] {
         let prompt = brief(&t, kind);
         for guidance in [
             "Write human-facing task messages in Markdown",
@@ -1273,6 +1470,7 @@ fn briefs_hold_what_the_agent_needs_as_text() {
             "blank lines around headings and lists",
             "explain what you need and why it matters",
             "Keep messages short: lead with the answer or outcome",
+            "give each option a short example of its outcome",
         ] {
             assert!(prompt.contains(guidance), "{kind}: missing {guidance}");
         }
@@ -1282,8 +1480,19 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     // D-119 point 6: check what is already answered before asking.
     for kind in ["work", "investigate"] {
         assert!(brief(&t, kind).contains("check the Notes so far and Questions below, if any"), "{kind}");
+        // D-153: each option shows an example of its outcome.
+        assert!(brief(&t, kind).contains("give each option a short example of the outcome the human would see"), "{kind}");
     }
     assert!(brief(&t, "investigate").contains("Investigate this task"));
+    // D-147: a plan never hands a file change to the human.
+    assert!(brief(&t, "investigate").contains("never to the human, who never edits files or runs commands"));
+    // D-156: each role gets the smallest-complete-change guidance it acts on.
+    assert!(brief(&t, "investigate").contains("A plan is the smallest complete change") && brief(&t, "investigate").contains("anything you didn't check"));
+    assert!(brief(&t, "work").contains("what you skipped and risks the human must know"));
+    assert!(brief(&t, "review").contains("Flag code the task didn't need, places it missed"));
+    for kind in ["work", "discuss"] {
+        assert!(!brief(&t, kind).contains("smallest complete change") && !brief(&t, kind).contains("Flag code the task didn't need"), "{kind}");
+    }
     // Only a work run changes code, so only it is told to run every test before finishing.
     for kind in ["work", "investigate", "review", "discuss"] {
         assert_eq!(brief(&t, kind).contains("Before `task done`, run all tests of the projects this task covers"), kind == "work", "{kind}");

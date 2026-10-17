@@ -18,7 +18,7 @@ actions = ["reassign", "new_agent", "review", "to_planning", "cancel"]
 
 [[board.columns]]
 id = "needs_review"
-label = "Needs review"
+label = "Review"   # the id stays for saved tasks
 actions = ["approve", "complete", "review", "reassign", "start_over", "to_planning", "cancel"]
 next = "complete"
 requires = ["approved"]                # an agent's result is on the task: a human signs it off

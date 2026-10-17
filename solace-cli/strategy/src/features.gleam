@@ -143,15 +143,43 @@ fn feature_view(
       [html.text(label)],
     )
   }
-  let move = fn(label, name, up) {
-    let rank = move_rank(group, feature.id, up)
-    small(
-      label,
-      name <> " " <> feature.title,
-      rank != None,
-      editor.on_move(feature.id, option.unwrap(rank, feature.rank)),
+  let grip =
+    html.button(
+      [
+        attribute.type_("button"),
+        attribute.class("grip"),
+        attribute.attribute("aria-label", "Reorder " <> feature.title),
+        attribute.attribute("aria-roledescription", "reorder handle"),
+        attribute.tabindex(0),
+        attribute.disabled(busy),
+        // The card follows the pointer from here; the arrows reorder without
+        // one, so a card can be moved with no pointer.
+        event.prevent_default(
+          event.on("pointerdown", {
+            use y <- decode.field(
+              "clientY",
+              decode.one_of(decode.int, [decode.map(decode.float, float.round)]),
+            )
+            decode.success(editor.on_grab(feature.id, y))
+          }),
+        ),
+        event.advanced("keydown", {
+          use key <- decode.field("key", decode.string)
+          let rank = move_rank(group, feature.id, key == "ArrowUp")
+          let handler =
+            event.handler(
+              editor.on_move(feature.id, option.unwrap(rank, feature.rank)),
+              prevent_default: True,
+              stop_propagation: False,
+            )
+          case grip_key(key) {
+            Some(_) -> decode.success(handler)
+            None -> decode.failure(handler, "an arrow key")
+          }
+        }),
+      ],
+      [html.text("⠿")],
     )
-  }
   html.article(
     [
       attribute.class("feature"),
@@ -163,117 +191,132 @@ fn feature_view(
       },
     ],
     [
-      html.h4([], [
-        html.text(feature.title),
-        html.text(" "),
-        html.span([attribute.class("state")], [html.text(feature.state)]),
-        case planning {
-          True -> plan.marker()
+      grip,
+      html.div([attribute.class("feature-body")], [
+        html.h4([], [
+          html.text(feature.title),
+          html.text(" "),
+          html.span([attribute.class("state")], [html.text(feature.state)]),
+          case planning {
+            True -> plan.marker()
+            False -> element.none()
+          },
+          html.text(" "),
+          html.button(
+            [
+              attribute.type_("button"),
+              attribute.class("toggle"),
+              attribute.attribute("aria-expanded", case full {
+                True -> "true"
+                False -> "false"
+              }),
+              event.on_click(editor.on_focus(feature.id)),
+            ],
+            [
+              html.text(case full {
+                True -> "Less"
+                False -> "More"
+              }),
+            ],
+          ),
+          html.button(
+            [
+              attribute.type_("button"),
+              attribute.class("edit"),
+              attribute.disabled(busy),
+              event.on_click(editor.on_edit(feature.id)),
+            ],
+            [html.text(solace_task.ui_label("edit"))],
+          ),
+          // Only a feature not started yet can start (D-154).
+          case feature.state {
+            "proposed" | "upcoming" ->
+              small(
+                solace_task.ui_label("start"),
+                solace_task.ui_label("start") <> " " <> feature.title,
+                True,
+                editor.on_start(feature.id),
+              )
+            _ -> element.none()
+          },
+          small(
+            solace_task.ui_label("delete"),
+            solace_task.ui_label("delete") <> " " <> feature.title,
+            True,
+            editor.on_delete(feature.id),
+          ),
+        ]),
+        case editor.deleting == Some(feature.id) {
+          False -> element.none()
+          True ->
+            html.div(
+              [attribute.role("alertdialog"), attribute.class("confirm")],
+              [
+                html.p([], [
+                  html.text("Delete "),
+                  html.em([], [html.text(feature.title)]),
+                  html.text("? " <> delete_text(list.length(linked))),
+                ]),
+                html.div([attribute.class("vision-actions")], [
+                  html.button(
+                    [
+                      attribute.type_("button"),
+                      event.on_click(editor.on_confirm_delete),
+                    ],
+                    [html.text(solace_task.ui_label("delete"))],
+                  ),
+                  html.button(
+                    [
+                      attribute.type_("button"),
+                      event.on_click(editor.on_cancel_delete),
+                    ],
+                    [html.text(solace_task.ui_label("cancel"))],
+                  ),
+                ]),
+              ],
+            )
+        },
+        case full {
+          False ->
+            html.p([attribute.class("feature-count")], [
+              html.text(
+                int.to_string(list.count(linked, fn(t) { t.4 }))
+                <> " / "
+                <> int.to_string(list.length(linked))
+                <> " final",
+              ),
+            ])
+          True -> element.none()
+        },
+        case full, feature.body {
+          False, _ | _, "" -> element.none()
+          True, body -> solace_task.md(base, body)
+        },
+        case full, linked {
+          False, _ -> element.none()
+          True, [] -> html.p([], [html.text("No tasks.")])
+          True, _ ->
+            html.ul(
+              [attribute.class("feature-tasks")],
+              list.map(linked, fn(t) {
+                html.li([], [
+                  html.button(
+                    [
+                      attribute.type_("button"),
+                      attribute.class("open"),
+                      event.on_click(open(t.0, t.1)),
+                    ],
+                    [html.text(t.2)],
+                  ),
+                ])
+              }),
+            )
+        },
+        case full {
+          True -> task_form(feature, busy, new_task)
           False -> element.none()
         },
-        html.text(" "),
-        html.button(
-          [
-            attribute.type_("button"),
-            attribute.class("toggle"),
-            attribute.attribute("aria-expanded", case full {
-              True -> "true"
-              False -> "false"
-            }),
-            event.on_click(editor.on_focus(feature.id)),
-          ],
-          [
-            html.text(case full {
-              True -> "Less"
-              False -> "More"
-            }),
-          ],
-        ),
-        html.button(
-          [
-            attribute.type_("button"),
-            attribute.class("edit"),
-            attribute.disabled(busy),
-            event.on_click(editor.on_edit(feature.id)),
-          ],
-          [html.text(solace_task.ui_label("edit"))],
-        ),
-        move("Up", "Move up", True),
-        move("Down", "Move down", False),
-        small(
-          solace_task.ui_label("delete"),
-          solace_task.ui_label("delete") <> " " <> feature.title,
-          True,
-          editor.on_delete(feature.id),
-        ),
       ]),
-      case editor.deleting == Some(feature.id) {
-        False -> element.none()
-        True ->
-          html.div([attribute.role("alertdialog"), attribute.class("confirm")], [
-            html.p([], [
-              html.text("Delete "),
-              html.em([], [html.text(feature.title)]),
-              html.text("? " <> delete_text(list.length(linked))),
-            ]),
-            html.div([attribute.class("vision-actions")], [
-              html.button(
-                [
-                  attribute.type_("button"),
-                  event.on_click(editor.on_confirm_delete),
-                ],
-                [html.text(solace_task.ui_label("delete"))],
-              ),
-              html.button(
-                [
-                  attribute.type_("button"),
-                  event.on_click(editor.on_cancel_delete),
-                ],
-                [html.text(solace_task.ui_label("cancel"))],
-              ),
-            ]),
-          ])
-      },
-      case full {
-        False ->
-          html.p([attribute.class("feature-count")], [
-            html.text(
-              int.to_string(list.count(linked, fn(t) { t.4 }))
-              <> " / "
-              <> int.to_string(list.length(linked))
-              <> " final",
-            ),
-          ])
-        True -> element.none()
-      },
-      case full, feature.body {
-        False, _ | _, "" -> element.none()
-        True, body -> solace_task.md(base, body)
-      },
-      case full, linked {
-        False, _ -> element.none()
-        True, [] -> html.p([], [html.text("No tasks.")])
-        True, _ ->
-          html.ul(
-            [attribute.class("feature-tasks")],
-            list.map(linked, fn(t) {
-              html.li([], [
-                html.button(
-                  [
-                    attribute.type_("button"),
-                    attribute.class("open"),
-                    event.on_click(open(t.0, t.1)),
-                  ],
-                  [html.text(t.2)],
-                ),
-              ])
-            }),
-          )
-      },
-      case full {
-        True -> task_form(feature, busy, new_task)
-        False -> element.none()
-      },
     ],
   )
 }
@@ -394,6 +437,10 @@ pub type Editor(msg) {
     on_cancel: msg,
     /// The feature's id and its new rank.
     on_move: fn(String, Float) -> msg,
+    /// A card's grip pressed at this clientY: the drag begins.
+    on_grab: fn(String, Int) -> msg,
+    /// Starts the feature with this id: it becomes active.
+    on_start: fn(String) -> msg,
     /// The feature whose delete is being confirmed.
     deleting: Option(String),
     on_delete: fn(String) -> msg,
@@ -664,30 +711,60 @@ pub fn rank_move(
   id: String,
   up: Bool,
 ) -> Option(Float) {
-  let ranks = list.map(group, fn(r) { r.1 })
-  let at = fn(i) {
-    case i < 0, list.drop(ranks, i) {
-      False, [r, ..] -> Some(r)
-      _, _ -> None
-    }
-  }
   let index =
     list.index_map(group, fn(r, i) { #(r.0, i) })
     |> list.key_find(id)
-  case index, up {
-    Error(_), _ -> None
-    Ok(0), True -> None
-    Ok(i), True ->
-      case at(i - 2), at(i - 1) {
+  case index {
+    Ok(i) ->
+      drop(group, id, case up {
+        True -> i - 1
+        False -> i + 1
+      })
+    Error(_) -> None
+  }
+}
+
+/// The rank that puts the record `id` at index `to` among `group`, the
+/// ordered records as (id, rank): the midpoint of its new neighbors, or the
+/// neighbor's rank ∓ 1 at either end. None when it lands where it is, and
+/// for an index outside the group.
+fn drop(group: List(#(String, Float)), id: String, to: Int) -> Option(Float) {
+  let index =
+    list.index_map(group, fn(r, i) { #(r.0, i) })
+    |> list.key_find(id)
+  let others = list.filter(group, fn(r) { r.0 != id })
+  let last = list.length(others)
+  let at = fn(i: Int) -> Option(Float) {
+    case i < 0, list.drop(others, i) {
+      False, [r, ..] -> Some(r.1)
+      _, _ -> None
+    }
+  }
+  case index, to {
+    Ok(from), to if to != from && to >= 0 && to <= last ->
+      case at(to - 1), at(to) {
         Some(a), Some(b) -> Some({ a +. b } /. 2.0)
         None, Some(b) -> Some(b -. 1.0)
-        _, _ -> None
-      }
-    Ok(i), False ->
-      case at(i + 1), at(i + 2) {
-        Some(a), Some(b) -> Some({ a +. b } /. 2.0)
         Some(a), None -> Some(a +. 1.0)
         _, _ -> None
       }
+    _, _ -> None
+  }
+}
+
+/// The rank that puts the feature `id` at index `to` in `group`, its group's
+/// features in order: the rank `drop_rank` gives. None when it lands where it
+/// is, and for an index outside the group.
+pub fn drop_rank(group: List(Feature), id: String, to: Int) -> Option(Float) {
+  drop(list.map(group, fn(f) { #(f.id, f.rank) }), id, to)
+}
+
+/// The grip's reorder keys: the arrows, up for the first. Any other key,
+/// Tab among them, keeps its default.
+pub fn grip_key(key: String) -> Option(Bool) {
+  case key {
+    "ArrowUp" -> Some(True)
+    "ArrowDown" -> Some(False)
+    _ -> None
   }
 }

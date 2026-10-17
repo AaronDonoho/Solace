@@ -56,7 +56,7 @@ pub type Msg {
   MigrationAction(String)
   MigrationChanged(Int, String)
   DismissMigration
-  ProjectsLoaded(String)
+  ProjectsLoaded(String, keep: Bool)
   AddProject(String)
   RemoveProject(String)
   RemoveOnly
@@ -75,7 +75,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     Model(None, False, [], "", False, 0, "", False, True, 0, no_projects),
     effect.batch([
       effect.from(fn(send) { send(MigrationStarted(new_poll_id())) }),
-      get("/projects", ProjectsLoaded),
+      get("/projects", ProjectsLoaded(_, True)),
     ]),
   )
 }
@@ -92,13 +92,19 @@ pub fn register() -> Result(Nil, lustre.Error) {
 
 pub fn view(model: Model) -> Element(Msg) {
   h.div([a.class("migration-page")], [
-    element.element("style", [], [h.text(styles <> projects_styles)]),
+    element.element("style", [], [
+      h.text(styles <> solace_task.modal_styles <> projects_styles),
+    ]),
     h.h1([], [h.text("Workspace")]),
     projects_view(model.projects),
-    h.section([a.class("bring-in")], [
-      h.h2([], [h.text("Bring in an existing project")]),
-      migration_view(model),
-    ]),
+    case model.migration {
+      None -> h.text("")
+      Some(_) ->
+        h.section([a.class("bring-in")], [
+          h.h2([], [h.text("Bring in an existing project")]),
+          migration_view(model),
+        ])
+    },
   ])
 }
 
@@ -133,11 +139,11 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               migration_generation: generation,
             ),
             case model.migration_poll_id {
-              0 -> get("/projects", ProjectsLoaded)
+              0 -> get("/projects", ProjectsLoaded(_, True))
               _ ->
                 effect.batch([
                   get("/migration", MigrationLoaded(generation, _)),
-                  get("/projects", ProjectsLoaded),
+                  get("/projects", ProjectsLoaded(_, True)),
                 ])
             },
           )
@@ -243,7 +249,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       effect.none(),
     )
     MigrationAction(action) -> migration_action(model, action)
-    ProjectsLoaded(_)
+    ProjectsLoaded(..)
     | AddProject(_)
     | RemoveProject(_)
     | RemoveOnly
@@ -450,7 +456,7 @@ fn migration_view(model: Model) -> Element(Msg) {
                       a.attribute("aria-labelledby", "migration-title"),
                     ],
                     [
-                      h.h2([a.id("migration-title")], [
+                      h.h3([a.id("migration-title")], [
                         h.text("Migrate this project"),
                       ]),
                       h.p([], [
@@ -526,14 +532,14 @@ fn migration_view(model: Model) -> Element(Msg) {
                 a.attribute("aria-live", "polite"),
               ],
               [
-                h.h2([], [h.text("Migrating")]),
+                h.h3([], [h.text("Migrating")]),
                 h.p([], [h.text(m.step)]),
                 h.small([], [h.text("This page reloads when it's done.")]),
               ],
             )
           "confirm_paths" ->
             h.div([a.class("editor")], [
-              h.h2([], [h.text("Check these files before going on")]),
+              h.h3([], [h.text("Check these files before going on")]),
               h.p([], [
                 h.text(
                   "Each one could change your original folder if it runs from the copy, for example a script that uses the folder's full path. Nothing has run yet. Look at each one, then continue.",
@@ -552,7 +558,7 @@ fn migration_view(model: Model) -> Element(Msg) {
             ])
           "failed" ->
             h.div([a.class("editor")], [
-              h.h2([], [h.text("The migration stopped")]),
+              h.h3([], [h.text("The migration stopped")]),
               h.p([a.role("alert")], [h.text(m.problem)]),
               folders,
               case m.report {
@@ -563,7 +569,7 @@ fn migration_view(model: Model) -> Element(Msg) {
             ])
           "copying" ->
             h.div([a.class("editor")], [
-              h.h2([], [h.text("Copying your folder")]),
+              h.h3([], [h.text("Copying your folder")]),
               h.p([], [
                 h.text(
                   "A copy of your folder is being made, or an earlier attempt was interrupted.",
@@ -575,7 +581,7 @@ fn migration_view(model: Model) -> Element(Msg) {
           "in_progress" ->
             h.div([], [
               h.div([a.class("editor")], [
-                h.h2([], [
+                h.h3([], [
                   h.text("You're trying Solace on a copy of your project"),
                 ]),
                 h.p([], [
@@ -850,21 +856,37 @@ pub const no_projects = Projects(False, [], [], "", "", "", "erlang", None)
 /// the new list, which the board's lanes follow through its event stream.
 fn update_projects(p: Projects, msg: Msg) -> #(Projects, Effect(Msg)) {
   case msg {
-    ProjectsLoaded(text) ->
+    // A reload, such as after a reconnect, keeps what the human typed; a
+    // change's reply clears the form.
+    ProjectsLoaded(text, keep) ->
       case json.parse(text, projects_decoder()) {
-        Ok(#(projects, found)) -> #(
-          Projects(
-            ..p,
-            listed: True,
-            projects: projects,
-            found: found,
-            error: "",
-            name: "",
-            dir: "",
-            removing: None,
-          ),
-          effect.none(),
-        )
+        Ok(#(projects, found)) -> {
+          let p =
+            Projects(
+              ..p,
+              listed: True,
+              projects: projects,
+              found: found,
+              error: "",
+            )
+          #(
+            case keep {
+              // A reload keeps what the human typed; a removal whose
+              // project has left the list has nothing left to confirm.
+              True ->
+                case p.removing {
+                  None -> p
+                  Some(#(dir, _, _)) ->
+                    case list.any(projects, fn(x) { x.dir == dir }) {
+                      True -> p
+                      False -> Projects(..p, removing: None)
+                    }
+                }
+              False -> Projects(..p, name: "", dir: "", removing: None)
+            },
+            effect.none(),
+          )
+        }
         Error(_) -> #(Projects(..p, error: error(text)), effect.none())
       }
     AddProject(dir) -> #(
@@ -946,7 +968,7 @@ fn projects_request(
 ) -> Effect(Msg) {
   effect.from(fn(send) {
     request(path, method, json.to_string(json.object(fields)), fn(text) {
-      send(ProjectsLoaded(text))
+      send(ProjectsLoaded(text, False))
     })
   })
 }
@@ -1075,7 +1097,7 @@ fn removal_view(p: Projects) -> Element(Msg) {
   case p.removing {
     None -> h.text("")
     Some(#(dir, False, _)) ->
-      modal([
+      solace_task.modal([
         h.p([], [
           h.text(
             "Remove "
@@ -1088,7 +1110,7 @@ fn removal_view(p: Projects) -> Element(Msg) {
         button(solace_task.ui_label("cancel"), RemoveCancel),
       ])
     Some(#(dir, True, typed)) ->
-      modal([
+      solace_task.modal([
         h.p([], [
           h.strong([], [
             h.text(
@@ -1115,19 +1137,5 @@ fn removal_view(p: Projects) -> Element(Msg) {
   }
 }
 
-/// A modal dialog: a backdrop over the page that blocks the page behind it.
-fn modal(body: List(Element(Msg))) -> Element(Msg) {
-  h.div([a.class("modal-backdrop")], [
-    h.div(
-      [
-        a.class("removal"),
-        a.attribute("role", "alertdialog"),
-        a.attribute("aria-modal", "true"),
-      ],
-      body,
-    ),
-  ])
-}
-
 const projects_styles =
-  ".projects{margin-bottom:24px}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:2px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}.new-project select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:4px}.modal-backdrop{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:#17222626;padding:16px}.removal{background:var(--paper);color:var(--ink);border:2px solid var(--edge);box-shadow:0 8px 32px #17222626;padding:20px 24px;width:min(480px,100%);max-height:100%;overflow:auto}.removal p{margin:0 0 12px;overflow-wrap:anywhere}.removal input{margin:0}.removal button:disabled{opacity:.5;cursor:not-allowed}"
+  ":host{--shadow:#17222626}.projects{margin-bottom:24px}.projects h3{font-size:15px;margin:16px 0 4px}.projects ul{list-style:none;padding:0;margin:0}.projects li{display:flex;align-items:center;gap:6px;white-space:normal;margin:0}.projects li button{padding:2px 10px}.new-project{display:flex;flex-wrap:wrap;align-items:flex-end;gap:4px}.new-project input{flex:1;min-width:220px}.new-project label{display:flex;flex-direction:column}.new-project select{font:inherit;padding:8px;margin:4px;border:1px solid var(--edge);border-radius:4px}.modal p{margin:0 0 12px;overflow-wrap:anywhere}.modal input{margin:0}.modal button:disabled{opacity:.5;cursor:not-allowed}"

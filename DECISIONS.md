@@ -852,3 +852,79 @@ Amends D-62 (Aaron, board task "workspace: rename Migration page", 2026-10-16). 
 3. `/migrate` still serves the shell, which shows the Workspace page and replaces `/migrate` with `/workspace` in the history. `/migration` stays the JSON API.
 4. The address is not `/projects`: that is the projects JSON API, and a page address can't share a path with an API.
 Why: the page is growing into the place to manage the workspace and its projects, of which bringing in existing code is one part.
+
+## D-147 The human never edits files
+Amends D-38 (Aaron, board task "agents: never ask the human to edit files", 2026-10-16). Part of the Improved Agent Integration feature.
+1. The human never edits files or runs commands. A needed change is made by the agent with `submit` or `write`; a settings file (`solace.toml`, `AGENTS.md`, `.gitignore`) with `write` and `reason`, which the human approves (D-38); a change in a project outside the task's scope after `task ask` has the human add the project. A question never asks the human to change a file.
+2. D-38's "report the exact edit instead" in read-only runs means reporting it for whoever does the work: an investigation's plan assigns every file change to the worker, never to the human.
+3. `gleam.toml` is a watched file changed with `write` (validated, recorded with the task); it can't be moved or removed.
+Why: in task c0795803428e089d the reference's "(not gleam.toml)" read as "can't be written", and an investigation planned for the human to edit it.
+
+## D-148 Records are named as links in agent text
+(Aaron, board task "strategy: refer to records as links", 2026-10-16). Part of the Improved Agent Integration feature.
+1. The strategy brief and the reference tell agents to name tasks, features and milestones in notes and proposals as `task:<id>`, `feature:<id>` or `milestone:<id>`, written bare and never inside backticks: a bare reference renders as a link with the record's title (D-98, D-122), while a code span stays literal.
+2. An approved create answers `created task:<id>`, and the same for a feature and a milestone, so the agent copies the link form from its own reply. `strategy show`'s `links` stay plain ids: they are data.
+Why: strategy agents wrote bare ids and code spans, which a human can't follow; the link form already renders, so the agent only needs to write it.
+
+## D-149 Every native model has a default effort
+Amends Spec 15 §1 and §6 (Aaron, board task "agents: a default effort for every model", 2026-10-16). Part of the Improved Agent Integration feature.
+1. A model's default `effort` is the one its `[[models]]` entry or its agent names (Codex's `defaultReasoningEffort`), else `medium` when the model offers it, else the middle of the efforts it offers. Custom runners and models offering no effort have none. Endpoint models count as native.
+2. A run with no chosen effort passes and records that default, so a run's effort is never blank when the model offers efforts.
+Why: Claude's models endpoint names no default, so Claude runs left the effort to Claude Code and showed only "Default".
+
+## D-150 A model shows by one name; configured models join their family
+(Aaron, board task "Improved Agent Integration: Tech Debt", 2026-10-16). Part of the Improved Agent Integration feature.
+1. The model pick shows each model by its label alone, the model's own name ("Opus 5.5", "GPT-6 Sol"): no agent name and no model string beside it. Presets and discovered models are labeled that way; an alias reads "Opus (latest)" until a run names the model it used, then that model's label, or its id when no entry runs it.
+2. A configured `[[models]]` entry whose `claude-` id names a family (`claude-opus-local`) belongs to that family, so the pick's one entry per family may stand in front of it; one whose id names no family keeps its own entry.
+3. A remembered pick the list no longer shows that is a Claude alias (`claude-opus`) becomes its family's listed model rather than the first one.
+Why: the pick read "Claude Code · Opus 5.5 · claude-opus-5-5", three names for one model; the label is the one name every entry has (a custom runner has no model string).
+
+## D-151 A fresh run's brief holds the session start reply
+Amends D-145 point 1 and Spec 15 §6 (Aaron, board task "briefs: session start in the brief", 2026-10-16). Part of the Agent Tooling Efficiency feature.
+1. For a fresh work or investigate run, the board runs `session start --task` with the task's title and description in the project the run works in, and puts the reply at the end of the brief in place of the line asking the agent to run it. The agent starts with the call the reply's `Next:` line names. Resumed, review and discussion briefs are unchanged; a folder with no store keeps the line.
+2. `session start` keeps no state, so the agent's own process needs nothing from the board's call: the session functions take the run's task id rather than reading it from the environment. The brief's reply leaves out the feature and dependencies, which the brief has already.
+3. Every session start shows open work records whole, within 4,000 bytes, and says how many it left out; `work list` shows them all.
+4. The tool description says a board run's brief holds the reply and that `session start --task` gives it again, for example after the conversation is compacted. The board doesn't send it again after compaction, which happens inside the agent.
+Why: an agent's first turn was always the same call; the reply in the brief saves it. One task's open work records alone were over 10k characters.
+
+## D-152 A batched task done waits for a passing test
+Amends D-119 point 5 and Spec 3 §1 (Aaron, board task "batch: task done waits for a passing test", 2026-10-16). Part of the Agent Tooling Efficiency feature.
+1. In a board run, a passing `test` names the task's changed symbols in its project that no test reaches: `No test reaches <names>.`
+2. In a call, a `task done` after a `test` is skipped when that test fails or names such a change. The reply names it with the reason, `task done (the test failed)` or `task done (no test reaches <names>)`, among D-119's skipped commands, or as `Skipped: <commands>` when nothing failed, and asks the agent to fix what the test reports and send `task done` again with an updated summary. An untested change alone makes no error.
+3. A clean pass finishes the task in the same call.
+4. The summary is written before the result is known, so the reference says to send `task done` in a call of its own when the result may need a caveat.
+Why: `submit`, `test` and `task done` in one call saves a turn per work run, but `test` isn't a change, so a `task done` ran even after a failing test; a pass with untested changes is also not done.
+
+## D-153 Questions show example outcomes
+Amends D-66 (Aaron, board task "agents: questions show example outcomes", 2026-10-16). Part of the Improved Agent Integration feature.
+1. A question's `text` gives each option a short example of the outcome the human would see: what a user sees, what a command prints, what a page shows, what a file or record ends up as; not how the code would change. The option's name is bold in the example; the `options` stay short labels matching the bold names.
+2. The work and investigate briefs' asking guidance, the message guidance every brief shares (so discussion runs asking in notes too), and the reference's `task ask` entry say this.
+Why: D-66 explains why agents ask, but the human still had to picture what each option would do.
+
+## D-154 A feature starts from its card
+(Aaron, board task "Start feature button", 2026-10-16). Part of the General UI Polish feature.
+1. On the Strategy page's Features tab, a `proposed` or `upcoming` feature's card has a **Start** button. It sends one `PATCH /features/{id} {state: "active"}`; the server does the rest, as for any edit to `active`: it keeps the start time and color (D-114) and plans the feature's Backlog tasks (D-134).
+2. A feature in any other state (active, complete, canceled) has no Start button: it is left out, not disabled.
+Why: starting a feature took opening its form and picking the state; it is the step that sets the feature's work going, so it gets a button of its own.
+
+## D-155 A card shows its feature's name on a line of its own
+Amends D-114 point 3 (Aaron, board task "Feature on task card", 2026-10-17). Part of the General UI Polish feature.
+1. A board card shows its feature's name, with no "Feature" prefix, on its own line under the title. The line is visible text, so screen readers read it too.
+2. The card's tooltip keeps "Feature: <name>".
+Why: the feature was only in the tooltip and screen-reader text, so it wasn't evident on the card; on its own line the name needs no prefix.
+
+## D-156 Briefs ask for the smallest complete change, per role
+(Aaron, board task "briefs: inspirations from ponytail", 2026-10-17). Part of the Agent Tooling Efficiency feature.
+1. The reference's workflow asks for the smallest complete change: reuse the code's helpers, then the standard library and installed dependencies; add nothing the task doesn't need; complete includes its tests and every caller; never drop validation, data-loss handling or security; fix a reported bug once, at its cause. It also says `test` doesn't reach docs, config, JavaScript or golden files.
+2. Each role gets only what it acts on. A strategy run proposes the smallest version that meets the need, names what it left out, and says once if part of a request isn't justified. An investigate plan is the smallest complete change, names every file it reaches, offers a smaller option with `task ask` when it would change what the human gets, and reports what it didn't check. A work summary names, if any, what was skipped and the risks. A review flags code the task didn't need, places it missed, and removed validation, data-loss handling or security. Discussion briefs don't change.
+Why: the Ponytail skill makes agents more efficient without losing quality; these are its items Solace lacked, worded so they don't contradict step 3 ("fix only what the reply reports"), test coverage or the rule that specs change only through a decision.
+
+## D-157 A re-read of an unchanged symbol brings back the run's recent work
+Amends Spec 3 §1 (Aaron, board task "replies: catch re-reads after compaction", 2026-10-17). Part of the Agent Tooling Efficiency feature.
+1. In a task run, the MCP server keeps the run's reads: each symbol it printed in full (`view`, `inspect`), with its project and the revision served. It saves them on the run in the task store, through the inbox, so a resumed run goes on from them. The run log records steps but no revisions, so it can't serve.
+2. A call that prints a symbol again at the revision the run was served means the conversation was most likely compacted. Once per window, the reply adds the current views of the window's other symbols, within the reply budget (D-14), then the run's steps so far, one line each (D-99), the latest that fit.
+3. A window runs from one change command (`submit`, `delete`, `extract`, `merge`, `write`, `remove`, `move`) to the next. A change starts a new one that keeps only the symbols it made differ from what was served, so the catch adds little right after compaction.
+4. A re-read of a symbol changed since it was served adds nothing. Runs outside a task and strategy runs keep no reads.
+5. It is one turn late: the first call after compaction is planned from the summary alone, so only the re-reads after it are saved.
+6. `refs` shows references, not a symbol in full, so it records nothing. A change to symbols the run never read starts no window. A store that won't open is no change, and views the reply can't fit are named.
+Why: run 11 made four separate re-reads after compaction. The server can't see the agent compact, but a re-read of an unchanged symbol shows it.

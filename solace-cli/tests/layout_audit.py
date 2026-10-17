@@ -106,6 +106,16 @@ class Fixture:
             # A task linked to an active feature has left Backlog already.
             if self.api('GET', f'{base}/tasks/{t["id"]}')['column'] == 'backlog':
                 self.api('POST', f'{base}/tasks/{t["id"]}/actions', {'action': 'plan'})
+        # One finished task: its card carries the Archive button (D-95).
+        base, t = tasks[2]
+        self.api('PATCH', f'{base}/tasks/{t["id"]}', {'body': json.dumps([{'command': 'task done Spacing aligned.'}])})
+        self.api('POST', f'{base}/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        end = time.monotonic() + 30
+        while self.api('GET', f'{base}/tasks/{t["id"]}')['column'] != 'needs_review':
+            if time.monotonic() > end: fail('the fixture run did not finish', 1)
+            time.sleep(.1)
+        self.api('POST', f'{base}/tasks/{t["id"]}/actions', {'action': 'approve'})
+        self.api('POST', f'{base}/tasks/{t["id"]}/actions', {'action': 'complete'})
         # One task with a finished run, notes and a report, for the detail page.
         base, t = tasks[0]
         self.api('POST', f'{base}/tasks/{t["id"]}/notes', {'text': 'Buttons in the detail band look **taller** than the tabs.'})

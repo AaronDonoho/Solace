@@ -519,7 +519,7 @@ fn agent_choice(p: Panel(msg)) -> Element(msg) {
             list.map(models, fn(m) {
               html.option(
                 [attribute.value(m.id), attribute.selected(m.id == p.model)],
-                m.label,
+                solace_task.agent_option(m),
               )
             }),
           ),

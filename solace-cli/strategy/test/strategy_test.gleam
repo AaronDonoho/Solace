@@ -161,6 +161,21 @@ pub fn filters_keep_column_project_links_and_words_test() {
     "web",
     row,
   )
+  // A word that is the task's id, bare, as task:<id>, in any case, or
+  // beside a word in the title.
+  assert strategy.keeps(strategy.Filters(..all, query: "t1"), "web", row)
+  assert strategy.keeps(strategy.Filters(..all, query: "task:t1"), "web", row)
+  assert strategy.keeps(strategy.Filters(..all, query: "TASK:T1"), "web", row)
+  assert strategy.keeps(
+    strategy.Filters(..all, query: "checkout t1"),
+    "web",
+    row,
+  )
+  // Only the whole id: a part of it, another task's id, and `task:` alone
+  // name no task.
+  assert !strategy.keeps(strategy.Filters(..all, query: "1"), "web", row)
+  assert !strategy.keeps(strategy.Filters(..all, query: "task:t2"), "web", row)
+  assert !strategy.keeps(strategy.Filters(..all, query: "task:"), "web", row)
 }
 
 pub fn live_messages_merge_every_project_test() {
@@ -2274,7 +2289,9 @@ pub fn the_plan_offers_only_models_that_can_start_test() {
   let model =
     planned()
     |> step(strategy.ModelsLoaded(
-      "[{\"id\":\"m\",\"label\":\"M\",\"available\":true}," <> sol <> "]",
+      "[{\"id\":\"m\",\"label\":\"M\",\"model\":\"gpt-6-astra\",\"available\":true},"
+      <> sol
+      <> "]",
     ))
   assert string.contains(shown(model), ">M</option>")
   assert !string.contains(shown(model), "value=\"sol\"")
@@ -2366,4 +2383,102 @@ pub fn strategy_uses_the_shared_spacing_test() {
     page,
     "white-space:nowrap;color:var(--soft);text-align:right;font-variant-numeric:tabular-nums}",
   )
+}
+
+/// The Tasks tab's search keeps a task whose id a query word names, bare or
+/// as task:<id>, in any case; a word no id names keeps nothing.
+pub fn the_search_finds_a_task_by_its_id_test() {
+  let by = fn(query: String) {
+    let filters = strategy.Filters("", "", "", "", query)
+    step(many(30), strategy.Filter(filters)) |> ids
+  }
+  assert by("task:t27") == ["t27"]
+  assert by("t27") == ["t27"]
+  assert by("TASK:T27") == ["t27"]
+  assert by("task:t31") == []
+}
+
+// A model list fetched again keeps the plan's pick; its effort stays only
+// while the model still offers it, so a config edit that drops the effort
+// leaves the plan at the model's default.
+pub fn the_plan_keeps_only_an_effort_the_model_still_offers_test() {
+  let chosen =
+    planned()
+    |> step(strategy.ModelsLoaded(
+      "[{\"id\":\"m\",\"label\":\"M\",\"efforts\":[\"low\",\"high\"]}]",
+    ))
+    |> step(strategy.PlanModel("m"))
+    |> step(strategy.PlanEffort("high"))
+  assert chosen.plan_effort == "high"
+  let kept =
+    step(
+      chosen,
+      strategy.ModelsLoaded(
+        "[{\"id\":\"m\",\"label\":\"M\",\"efforts\":[\"low\",\"high\"]}]",
+      ),
+    )
+  assert kept.plan_model == "m"
+  assert kept.plan_effort == "high"
+  let dropped =
+    step(
+      chosen,
+      strategy.ModelsLoaded(
+        "[{\"id\":\"m\",\"label\":\"M\",\"efforts\":[\"low\"]}]",
+      ),
+    )
+  assert dropped.plan_model == "m"
+  assert dropped.plan_effort == ""
+}
+
+/// Start shows on a proposed or upcoming feature (D-154), and on one with no
+/// state, which reads as proposed; a feature started or closed has none.
+pub fn only_a_feature_not_started_shows_start_test() {
+  let html =
+    workspace()
+    |> step(strategy.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Idea\",\"state\":\"proposed\"},{\"id\":\"f2\",\"title\":\"Next\",\"state\":\"upcoming\"},{\"id\":\"f3\",\"title\":\"Blank\"},{\"id\":\"f4\",\"title\":\"Busy\",\"state\":\"active\"},{\"id\":\"f5\",\"title\":\"Done\",\"state\":\"complete\"},{\"id\":\"f6\",\"title\":\"Dropped\",\"state\":\"canceled\"}]}",
+    ))
+    |> step(strategy.Select(strategy.Features))
+    |> strategy.view
+    |> element.to_string
+  let start = fn(title) {
+    string.contains(html, "aria-label=\"Start " <> title <> "\"")
+  }
+  assert start("Idea")
+  assert start("Next")
+  assert start("Blank")
+  assert !start("Busy")
+  assert !start("Done")
+  assert !start("Dropped")
+}
+
+pub fn a_dropped_feature_moves_at_once_and_back_if_refused_test() {
+  let model =
+    workspace()
+    |> step(strategy.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\",\"rank\":1},{\"id\":\"f2\",\"title\":\"Export\",\"rank\":2}]}",
+    ))
+    |> step(strategy.Select(strategy.Features))
+  let html = element.to_string(strategy.view(model))
+  assert string.contains(html, "aria-label=\"Reorder Search\"")
+  assert string.contains(html, "class=\"grip\"")
+  assert !string.contains(html, "Move up")
+  let ranks = fn(m: strategy.Model) {
+    list.map(m.features, fn(f) { #(f.id, f.rank) })
+    |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
+  }
+  // A cancelled drag moves nothing.
+  assert ranks(step(model, strategy.DropFeature("f1", -1)))
+    == [#("f1", 1.0), #("f2", 2.0)]
+  let dropped = step(model, strategy.DropFeature("f1", 1))
+  assert ranks(dropped) == [#("f1", 3.0), #("f2", 2.0)]
+  let refused =
+    step(
+      dropped,
+      strategy.FeatureMoved(
+        "{\"error\":{\"code\":\"E7003\",\"message\":\"A run is open.\"}}",
+      ),
+    )
+  assert ranks(refused) == [#("f1", 1.0), #("f2", 2.0)]
+  assert refused.feature_error != ""
 }

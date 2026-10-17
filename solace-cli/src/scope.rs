@@ -64,9 +64,14 @@ pub fn home(project: &Path, tid: &str) -> Result<PathBuf, Failure> {
 /// The projects the board run's task may change, found from `project`, any
 /// project of its scope (D-123); none outside a task run.
 pub fn of_run(project: &Path) -> Option<Vec<String>> {
-    let (tid, _) = board::context()?;
-    let h = home(project, &tid).ok()?;
-    Some(of(&board::task(&h, &tid).ok()?, &dir(&top(&h), &h)))
+    of_task(project, &board::context()?.0)
+}
+
+/// The projects task `tid` may change, found from `project`, any project of
+/// its scope; none for a task not found there.
+pub fn of_task(project: &Path, tid: &str) -> Option<Vec<String>> {
+    let h = home(project, tid).ok()?;
+    Some(of(&board::task(&h, tid).ok()?, &dir(&top(&h), &h)))
 }
 
 #[cfg(test)]
@@ -112,6 +117,17 @@ mod tests {
             assert_eq!(of(&t, "h"), ["h"], "{t}");
         }
         assert_eq!(of(&json!({"scope": ["a", 1, "b"]}), "h"), ["a", "b"]);
+    }
+
+    /// D-151: a task's projects are found by its id from any of them, without a run.
+    #[test]
+    fn of_task_finds_the_projects_from_any_of_them() {
+        let root = two_projects();
+        for p in [root.to_path_buf(), root.join("sub")] {
+            assert_eq!(of_task(&p, "t1"), Some(vec![".".to_string(), "sub".to_string()]), "{}", p.display());
+        }
+        assert_eq!(of_task(&root, "t3"), Some(vec![".".to_string()]));
+        assert_eq!(of_task(&root, "nope"), None);
     }
 
     /// Each project is locked once, however often it is named.

@@ -30,19 +30,29 @@ human does (actions, model, message) on the left, the tabs on the right.
 measures it.
 
 A card is dimmed while a task in its `dependsOn` (D-87) is unfinished: not in
-a final column of its workflow now, so complete and cancelled both count as
+a final column of its workflow now, so complete and canceled both count as
 finished and a reopened task counts again. The card's tooltip and a short line
 on it say "Waiting on" and those tasks' titles. Dimming is only visual: the
 card opens as any other. The root's event stream already brings every
 project's tasks, so a dependency in another project needs no request of its
 own, and the card follows each change live.
 
+A card shows its title, cut to 200 characters with "…" when longer; the whole
+title is in the card's tooltip. The card shows no scope line: the task's
+Scope tab lists its projects. Its text fills the card; a finished task's
+Archive button sits in the upper right corner and the title's first line
+wraps around it.
+
+A card names its feature on a line of its own under the title (D-155); the
+tooltip spells it out as "Feature: …". The card's stripe takes the feature's
+color (D-114).
+
 The board leaves out the `backlog` column and its tasks (D-133): Backlog means
 *not active*, so Planning is the first column. Backlog tasks are on the
 Strategy page, which plans them. A task of a proposed, upcoming or canceled
 feature stays off the board in any column (D-128).
 
-Assigned, Needs review and Canceled offer **Back to planning**, the workflow's
+Assigned, Review and Canceled offer **Back to planning**, the workflow's
 `to_planning` action (D-133); a complete task's details offer nothing. The task
 keeps its changes and loses its approval, and the server refuses it while an
 agent is working. From Canceled the task returns with its notes, runs and

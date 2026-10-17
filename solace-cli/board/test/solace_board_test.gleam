@@ -73,7 +73,7 @@ pub fn notices_and_stamp_test() {
           "",
           "",
           solace_task.Workflow(
-            [solace_task.Column("needs_review", "Needs review", [], False)],
+            [solace_task.Column("needs_review", "Review", [], False)],
             dict.new(),
           ),
           [new],
@@ -310,8 +310,8 @@ pub fn single_project_header_test() {
   rendered |> string.contains("lane-toggle") |> should.be_false
 }
 
-/// D-61: a task covering a and b shows in both lanes, names its projects and
-/// each change's project, and leaves a lane it moved out of.
+/// D-61: a task covering a and b shows in both lanes, keeps each change's
+/// project, and leaves a lane it moved out of; its card shows no scope line.
 pub fn task_across_projects_test() {
   let #(model, _) = board.init(Nil)
   let lane = fn(d) {
@@ -348,9 +348,8 @@ pub fn task_across_projects_test() {
       board.Live("{\"project\":\"a\",\"task\":" <> task <> "}"),
     )
   let rendered = board.view(model) |> element.to_string
-  string.split(rendered, "Across<small class=\"muted\">a · b</small>")
-  |> list.length
-  |> should.equal(3)
+  string.split(rendered, "Across") |> list.length |> should.equal(3)
+  rendered |> string.contains("a · b") |> should.be_false
   string.split(rendered, "<small>1 task</small>")
   |> list.length
   |> should.equal(3)
@@ -723,6 +722,17 @@ pub fn archive_button_and_archived_cards_test() {
   rendered |> string.contains("aria-label=\"Archive Done\"") |> should.be_true
   rendered |> string.contains("aria-label=\"Archive Open\"") |> should.be_false
   rendered |> string.contains("2 tasks") |> should.be_true
+  // The card text fills the card; a floated spacer inside it makes room for
+  // the Archive button in the upper right corner.
+  rendered |> string.contains("padding-right:84px") |> should.be_false
+  rendered
+  |> string.contains(".card-wrap .archive{position:absolute;top:6px;right:6px")
+  |> should.be_true
+  rendered
+  |> string.contains(
+    ".card-wrap:has(.archive) .card::before{content:\"\";float:right",
+  )
+  |> should.be_true
   let #(model, _) = board.update(model, board.Select("", "2"))
   let #(model, _) =
     board.update(model, board.Live(task("2", "Done", "complete", "1700")))
@@ -964,7 +974,7 @@ pub fn tech_debt_card_is_marked_test() {
 /// A card's stripe is its feature's color, by the slot the server kept when
 /// the feature started (D-114); a task with no feature, or one not started,
 /// keeps the gray stripe, and the agent's status no longer colors it. The
-/// card names its feature in its tooltip and for screen readers.
+/// card names its feature on a line of its own, and its tooltip spells it out.
 pub fn a_card_takes_its_feature_color_test() {
   let model =
     deps_board()
@@ -986,11 +996,13 @@ pub fn a_card_takes_its_feature_color_test() {
   |> string.contains("title=\"Feature: Export\"")
   |> should.be_true
   card_of(model, "Two")
-  |> string.contains("<span class=\"sr-only\"> · Feature: Export</span>")
+  |> string.contains("<small class=\"card-feature\">Export</small>")
   |> should.be_true
+  string.contains(card_of(model, "Idle"), "card-feature") |> should.be_false
   string.contains(card_of(model, "Idle"), "--tab") |> should.be_false
   string.contains(card_of(model, "Loose"), "--tab") |> should.be_false
   string.contains(card_of(model, "Loose"), "Feature:") |> should.be_false
+  string.contains(card_of(model, "Loose"), "card-feature") |> should.be_false
   // A feature that starts takes the slot the server gives it; a removed one
   // moves no other feature's color.
   let model =
@@ -1029,7 +1041,7 @@ pub fn default_workflow_shows_its_column_labels_test() {
       model,
       board.WorkflowLoaded(
         "",
-        "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\",\"cancel\"]},{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\",\"complete\",\"to_backlog\",\"cancel\"]},{\"id\":\"assigned\",\"label\":\"Assigned\",\"actions\":[\"reassign\",\"new_agent\",\"review\",\"to_planning\",\"cancel\"]},{\"id\":\"needs_review\",\"label\":\"Needs review\",\"actions\":[\"approve\",\"complete\",\"review\",\"reassign\",\"start_over\",\"to_planning\",\"cancel\"]},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true,\"actions\":[\"to_planning\"]}]}",
+        "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\",\"cancel\"]},{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\",\"complete\",\"to_backlog\",\"cancel\"]},{\"id\":\"assigned\",\"label\":\"Assigned\",\"actions\":[\"reassign\",\"new_agent\",\"review\",\"to_planning\",\"cancel\"]},{\"id\":\"needs_review\",\"label\":\"Review\",\"actions\":[\"approve\",\"complete\",\"review\",\"reassign\",\"start_over\",\"to_planning\",\"cancel\"]},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true,\"actions\":[\"to_planning\"]}]}",
       ),
     )
   let #(model, _) = board.update(model, board.CaughtUp)
@@ -1054,11 +1066,14 @@ pub fn default_workflow_shows_its_column_labels_test() {
   )
   |> should.be_true
   rendered |> string.contains("<h2>Assigned</h2>") |> should.be_true
-  rendered |> string.contains("<h2>Needs review</h2>") |> should.be_true
+  rendered
+  |> string.contains(
+    "<section aria-label=\"Review\" class=\"column\"><h2>Review</h2>",
+  )
+  |> should.be_true
   rendered |> string.contains("<h2>Complete</h2>") |> should.be_true
   rendered |> string.contains("<h2>Canceled</h2>") |> should.be_true
   rendered |> string.contains("<h2>needs_review</h2>") |> should.be_false
-  rendered |> string.contains("aria-label=\"Needs review\"") |> should.be_true
   rendered |> string.contains(">Archive</button>") |> should.be_true
   rendered |> string.contains("aria-label=\"Archive Done\"") |> should.be_true
 }
@@ -1639,4 +1654,32 @@ pub fn lanes_keep_their_smallest_columns_test() {
   html
   |> string.contains(".lanes-area{scrollbar-gutter:stable}")
   |> should.be_true
+}
+
+/// A card shows its title cut to 200 characters with an ellipsis and the
+/// whole title in its tooltip; a 200-character title shows whole, no tooltip.
+pub fn card_title_is_cut_to_200_characters_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.WorkflowLoaded(
+        "",
+        "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\"}]}",
+      ),
+    )
+  let #(base, _) = board.update(model, board.CaughtUp)
+  let long = string.repeat("a", 210)
+  let cut = put_task(base, "", "1", long, "planning", "")
+  let rendered = board.view(cut) |> element.to_string
+  rendered
+  |> string.contains(string.repeat("a", 200) <> "…")
+  |> should.be_true
+  rendered
+  |> string.contains("title=\"Title: " <> long <> "\"")
+  |> should.be_true
+  let whole = put_task(base, "", "2", string.repeat("b", 200), "planning", "")
+  let rendered = board.view(whole) |> element.to_string
+  rendered |> string.contains(string.repeat("b", 200)) |> should.be_true
+  rendered |> string.contains("Title:") |> should.be_false
 }

@@ -17,6 +17,7 @@ mod migrate;
 mod orientation;
 mod outside;
 mod reach;
+mod reads;
 mod recipe;
 mod scope;
 mod skills;
@@ -41,20 +42,25 @@ const REFERENCE: &str = include_str!("reference.txt");
 
 /// The reference as agents get it at session start: the workflow and one line
 /// per command (`help` has every option, D-46), and task commands only in a
-/// board run.
-fn agent_reference() -> String {
+/// board run (`in_task`).
+fn agent_reference(in_task: bool) -> String {
     let (workflow, rest) = REFERENCE.split_once("\nCommands in full").unwrap();
     let (_, rest) = rest.split_once("\nTask runs").unwrap();
     let (task, rest) = rest.split_once("\nStrategy runs").unwrap();
     let (strategy, _host) = rest.split_once("\nHost commands").unwrap();
-    if board::context().is_some() {
+    if in_task {
         format!("{workflow}\nTask runs{task}")
     } else if board::strategy_context().is_some() {
         // The workflow is for changing code, which a strategy run never does.
         format!("Strategy runs{strategy}\nRun `help` for the read commands' options.\n")
     } else {
         // no task to ask or finish outside a board run (run 18)
-        format!("{}\n", workflow.replace("ask with `task ask`, or say so", "say so"))
+        format!(
+            "{}\n",
+            workflow
+                .replace("ask with `task ask`, or say so", "say so")
+                .replace("A project outside the task's reach: `task ask` to add it, then make\nthe change there. ", "")
+        )
     }
 }
 
@@ -622,6 +628,9 @@ const HOST: &[&str] = &["agent-config", "serve", "create", "migrate"];
 const GLEAM: &[&str] = &["submit", "drafts", "view", "inspect", "refs", "impact", "find", "delete", "extract", "merge", "check", "test", "probe"];
 /// D-119: changes whose failure stops the call, so nothing after them runs on unsaved work.
 const STOPS: &[&str] = &["submit", "delete", "extract", "merge", "write", "remove", "move"];
+/// D-152: what a reply ends with when it held back a `task done`.
+const HELD: &str = "`task done` waits for a test that passes and reaches every change: fix what the test reports, \
+then send `task done` again with an updated summary.\n";
 /// D-131: `build plan` only reads, so it is no change, process or verification.
 fn reads_only(a: &[&str]) -> bool {
     a.starts_with(&["build", "plan"])
@@ -629,16 +638,26 @@ fn reads_only(a: &[&str]) -> bool {
 
 /// Several commands, one per line, run in order; they share `budget`, since the
 /// agent cuts the reply as a whole. D-119: after a failed change the rest are
-/// skipped. The reply, and whether a command failed.
+/// skipped. D-152: after a test that failed or left a change no test reaches,
+/// a `task done` is skipped. The reply, and whether a command failed.
 fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize) -> Out) -> (String, bool) {
     let (mut out, mut failed, mut skipped, mut stopped) = (String::new(), vec![], vec![], false);
+    let (mut waiting, mut held) = (None::<String>, false);
     for &command in commands {
         let command = command.strip_prefix("solace").map_or(command, |c| c.trim_start());
         if stopped {
-            skipped.push(command);
+            skipped.push(command.to_string());
             continue;
         }
         let words: Vec<String> = command.split_whitespace().map(String::from).collect();
+        let verb = verb_words(&words);
+        if let Some(why) = &waiting
+            && verb.starts_with(&["task", "done"])
+        {
+            skipped.push(format!("{command} ({why})"));
+            held = true;
+            continue;
+        }
         if commands.len() > 1 {
             out += &format!("==== solace {command} ====\n");
         }
@@ -646,11 +665,22 @@ fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize)
             out += &agent_help(words.get(1).map(|w| w.as_str()));
             continue;
         }
-        match run(&words, budget.saturating_sub(out.len())) {
+        let test = verb.first() == Some(&"test");
+        if test {
+            UNTESTED.with(|u| u.borrow_mut().take());
+        }
+        let result = run(&words, budget.saturating_sub(out.len()));
+        if test && waiting.is_none() {
+            waiting = match &result {
+                Err(_) => Some("the test failed".into()),
+                Ok(_) => UNTESTED.with(|u| u.borrow_mut().take()).map(|names| format!("no test reaches {names}")),
+            };
+        }
+        match result {
             Ok(o) => out += &o,
             Err(Failure(msg, _)) => {
                 out += &msg;
-                failed.push(command);
+                failed.push(command.to_string());
                 stopped = words.first().is_some_and(|w| STOPS.contains(&w.as_str()));
             }
         }
@@ -665,13 +695,30 @@ fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize)
             out += &format!("; skipped: {}", skipped.join("; "));
         }
         out.push('\n');
+    } else if !skipped.is_empty() {
+        out += &format!("Skipped: {}\n", skipped.join("; "));
     }
+    if held {
+        out += HELD;
+    }
+    UNTESTED.with(|u| u.borrow_mut().take());
     (out, !failed.is_empty())
+}
+
+/// A command's words without `--project <folder>`, which may stand anywhere on the line.
+fn verb_words(words: &[String]) -> Vec<&str> {
+    let mut w: Vec<&str> = words.iter().map(String::as_str).collect();
+    if let Some(i) = w.iter().position(|x| *x == "--project") {
+        w.drain(i..(i + 2).min(w.len()));
+    }
+    w
 }
 
 /// The reference's example of a first call, for a session start with no
 /// ranked symbols (D-145).
 const EXAMPLE_CALL: &str = "for example `inspect checkout.pay payments.capture --context`";
+/// D-151: the most bytes of open work records a session start shows.
+const WORK_CAP: usize = 4000;
 /// D-145: what a reply ends with from the second single read in a row.
 const READ_HINT: &str = "Hint: put independent reads in one call, one per line.\n";
 
@@ -1034,6 +1081,9 @@ fn operands<'a>(args: &[&'a str]) -> Vec<&'a str> {
 thread_local! {
     /// The `reason` argument of the current tool call, for a settings write's question.
     static REASON: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    /// D-152: the task's changes the last passing `test` found no test reaching,
+    /// named for the reply, so the call's `task done` waits.
+    static UNTESTED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 /// A command that asks the human something: `task ask`, a strategy run's
@@ -1087,8 +1137,11 @@ fn tool_schema() -> Value {
     }
     json!({
         "name": "solace",
-        "description": "Read, change and test this project's code. Start with `session start --task`, \
-            the task in `text`: it lists the symbols most likely relevant, the workflow and the commands. Several commands \
+        "description": "Read, change and test this project's code. In a board run, the brief holds the reply to \
+            `session start --task`: start with the call its `Next:` line names, and send `session start --task` again \
+            only to see the reply again, for example after the conversation is compacted. Elsewhere, start with \
+            `session start --task`, the task in `text`: it lists the symbols most likely relevant, the workflow and \
+            the commands. Several commands \
             go in one call, one per line, and run in order: put every independent read in the same call \
             (`inspect a.f b.g --context`, then `view c` on the next line), never one read per call, and put \
             `test` on the line after a `submit`. Keep text between calls to a line or two: all of it is re-sent \
@@ -1114,6 +1167,7 @@ fn mcp(budget: usize) {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut single_reads = 0;
+    let mut run_reads = reads::Run::load();
     for line in stdin.lines() {
         let Ok(line) = line else { break };
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
@@ -1141,6 +1195,9 @@ fn mcp(budget: usize) {
                     args["command"].as_str().unwrap_or("").lines().map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
                 let (mut out, mut is_error) = (String::new(), false);
                 SHOWN.with(|s| *s.borrow_mut() = Some(HashSet::new()));
+                if run_reads.is_some() {
+                    reads::Run::start_call();
+                }
                 // Code sent as command lines rather than in `text` (run 11): one
                 // error for the call, and nothing runs.
                 if let Some(code) = commands.iter().find(|c| looks_like_code(c)) {
@@ -1169,7 +1226,11 @@ fn mcp(budget: usize) {
                         batch(&commands, budget, &mut |words, left| run_options(words, &mut input, args["old"].as_str(), left, &options));
                 }
                 if commands.is_empty() {
-                    (out, is_error) = (format!("No command given.\n\n{}", agent_reference()), true);
+                    (out, is_error) = (format!("No command given.\n\n{}", agent_reference(board::context().is_some())), true);
+                }
+                // D-157: a re-read of an unchanged symbol brings back what the run was working on.
+                if let Some(run) = &mut run_reads {
+                    out += &run.end_call(&commands, budget.saturating_sub(out.len()));
                 }
                 let hint = read_hint(&mut single_reads, &commands, is_error);
                 if !hint.is_empty() && !out.ends_with('\n') {
@@ -1762,8 +1823,9 @@ impl Store {
     /// work records expanded with the context of the symbols they name.
     fn session(&self, scopes: &[&str]) -> Out {
         const CAP: usize = 80;
+        let tid = board::context().map(|(t, _)| t);
         if !self.root.join("gleam.toml").exists() {
-            return self.plain_session("");
+            return self.plain_session("", tid.as_deref());
         }
         let ix = self.index()?;
         let in_scope =
@@ -1786,27 +1848,30 @@ impl Store {
             out += &format!("{} — {}\n  {}{more}\n", m.path, module_doc(m), names.join(", "));
         }
         out += &format!("\nTest modules (tests): {}\n", tests.join(", "));
-        out += &self.session_end(&ix, EXAMPLE_CALL)?;
+        out += &self.session_end(&ix, EXAMPLE_CALL, tid.as_deref())?;
         Ok(out)
     }
 
     /// Session start in a project of plain files (D-60): no symbols to list.
-    /// `deps` is the task's unfinished dependencies, for `--task` in a board run.
-    fn plain_session(&self, deps: &str) -> Out {
+    /// `deps` is the task's unfinished dependencies, for `--task` in a board
+    /// run of task `tid`.
+    fn plain_session(&self, deps: &str, tid: Option<&str>) -> Out {
         let mut out = self.project_instructions();
         out += deps;
         out += "This project has plain files and no Gleam code of its own: `files` lists them, `read` and `write` change them, \
                 and `run` runs the commands its solace.toml declares.\n";
-        out += &self.session_end(&self.index()?, "for example `grep <text> --in <path>` and `read <path> --lines a..b`")?;
+        out += &self.session_end(&self.index()?, "for example `grep <text> --in <path>` and `read <path> --lines a..b`", tid)?;
         Ok(out)
     }
 
     /// The end of every session start: status, open work and its context,
     /// the other projects, the command reference, and last `call`, a first
-    /// call to send, where the agent plans its reads (D-145).
-    fn session_end(&self, ix: &Index, call: &str) -> Out {
+    /// call to send, where the agent plans its reads (D-145). `tid` is the
+    /// board run's task; the open work records are capped (D-151).
+    fn session_end(&self, ix: &Index, call: &str, tid: Option<&str>) -> Out {
         let next = next_call(call, board::strategy_context().is_some());
-        Ok(format!("{}{}{}\n{}{next}", self.status()?, self.work_context(ix)?, self.other_projects(), agent_reference()))
+        let (status, work) = self.status_within(WORK_CAP)?;
+        Ok(format!("{status}{}{}\n{}{next}", self.work_context(ix, &work)?, self.other_projects(tid), agent_reference(tid.is_some())))
     }
 
     /// The symbols `text` names as `module.name`, in order, each once.
@@ -1827,8 +1892,8 @@ impl Store {
     /// Where the agent is, and the other projects under this project's Solace
     /// root, which reads reach with `--project` (D-57): in a task run, those
     /// its task may change apart from those it only reads, and the rules for
-    /// `--project` and paths (D-123).
-    fn other_projects(&self) -> String {
+    /// `--project` and paths (D-123); `tid` is the board run's task.
+    fn other_projects(&self, tid: Option<&str>) -> String {
         let Ok(Some(root)) = workspace::enclosing(&self.root) else { return String::new() };
         let Ok(members) = workspace::members(&root) else { return String::new() };
         let me = scope::dir(&root, &self.root);
@@ -1844,7 +1909,7 @@ impl Store {
             return String::new();
         }
         let labels = |ms: Vec<&String>| ms.into_iter().map(|m| label(m)).collect::<Vec<_>>().join(", ");
-        let task = scope::of_run(&self.root);
+        let task = tid.and_then(|t| scope::of_task(&self.root, t));
         let mut out = format!("\nYou are in {}.\n", label(&me));
         match &task {
             Some(scoped) => {
@@ -1867,7 +1932,7 @@ impl Store {
         );
         if task.is_some() {
             out += "If the task needs a change in a read-only project (or the root, `.`), ask the human with `task ask` \
-                    to add that project; never put the change somewhere else instead.\n";
+                    to add that project, then make the change yourself; never put the change somewhere else instead.\n";
         }
         out
     }
@@ -1896,11 +1961,11 @@ impl Store {
         )
     }
 
-    /// Open work records expanded with the context of the symbols they name.
-    fn work_context(&self, ix: &Index) -> Out {
+    /// The open work records `work` expanded with the context of the symbols they name.
+    fn work_context(&self, ix: &Index, work: &[String]) -> Out {
         let mut out = String::new();
-        for (_, text) in self.open_work()? {
-            let named = self.named(ix, &text);
+        for text in work {
+            let named = self.named(ix, text);
             if !named.is_empty() {
                 out += "\n== Context of the symbols the work record names ==\n";
                 let (full, mut shown) = (named.iter().copied().collect(), HashSet::new());
@@ -1918,22 +1983,32 @@ impl Store {
     /// within a fixed budget, plus the module list. In a board run it also
     /// names the task's feature (D-138) and unfinished dependencies (D-110).
     fn session_task(&self, task: &str) -> Out {
-        const BUDGET: usize = 6500; // bytes, about 1.6k tokens
-        let deps = board::context()
-            .map(|(tid, _)| {
+        let tid = board::context().map(|(tid, _)| tid);
+        let deps = tid
+            .as_deref()
+            .map(|tid| {
                 let top = scope::top(&self.root);
-                board::feature_of(&top, &tid) + &board::waiting_on(&top, &tid)
+                board::feature_of(&top, tid) + &board::waiting_on(&top, tid)
             })
             .unwrap_or_default();
+        self.task_session(task, tid.as_deref(), &deps)
+    }
+
+    /// `session start --task` for board run task `tid`, with `deps` before the
+    /// symbols; the board builds a fresh run's brief with it (D-151), outside
+    /// the run's environment.
+    fn task_session(&self, task: &str, tid: Option<&str>, deps: &str) -> Out {
+        const BUDGET: usize = 6500; // bytes, about 1.6k tokens
         if !self.root.join("gleam.toml").exists() {
-            return self.plain_session(&deps);
+            return self.plain_session(deps, tid);
         }
         let ix = self.index()?;
         // The task's other projects with Gleam code, by folder: the list of
         // symbols draws on them too (D-123).
         let top = scope::top(&self.root);
         let mine = scope::dir(&top, &self.root);
-        let others: Vec<(String, Store, Index)> = scope::of_run(&self.root)
+        let others: Vec<(String, Store, Index)> = tid
+            .and_then(|t| scope::of_task(&self.root, t))
             .unwrap_or_default()
             .into_iter()
             .filter(|d| *d != mine && scope::path(&top, d).join("gleam.toml").exists())
@@ -2098,14 +2173,14 @@ impl Store {
             }
         }
         let mut out = self.project_instructions();
-        out += &deps;
+        out += deps;
         let marked = if others.is_empty() { "" } else { "; one marked `(<folder>)` is in that project: add `--project <folder>`" };
         out += &format!(
             "Symbols most likely relevant to the task, best first (signatures; `>` lines quote code that names the task's terms; `inspect` for code{marked}):\n{packet}{repro}\n{modules}"
         );
         let top: Vec<String> = ranked.iter().filter(|&&(p, _)| p == 0).take(3).map(|&(_, i)| name(i)).collect();
         let call = if top.is_empty() { EXAMPLE_CALL.to_string() } else { format!("`inspect {} --context`", top.join(" ")) };
-        out += &self.session_end(&ix, &call)?;
+        out += &self.session_end(&ix, &call, tid)?;
         Ok(out)
     }
 
@@ -2117,20 +2192,39 @@ impl Store {
 
     /// Open work records and broken symbols.
     fn status(&self) -> Result<String, Failure> {
+        Ok(self.status_within(usize::MAX)?.0)
+    }
+
+    /// `status` with the open work records cut at a whole record within `cap`
+    /// bytes, saying how many were left out (D-14), and the texts of those shown.
+    fn status_within(&self, cap: usize) -> Result<(String, Vec<String>), Failure> {
         let mut out = String::new();
         let work = self.open_work()?;
         if !work.is_empty() {
             out += "\nOpen work records:\n";
         }
-        for (id, text) in work {
-            out += &format!("#{id}\n{}\n", text.trim_end());
+        let mut shown = vec![];
+        for (id, text) in &work {
+            let entry = format!("#{id}\n{}\n", text.trim_end());
+            if out.len() + entry.len() > cap {
+                break;
+            }
+            out += &entry;
+            shown.push(text.clone());
+        }
+        if shown.len() < work.len() {
+            out += &format!(
+                "{} of {} open work records left out to fit the reply's size limit; `work list` shows them all.\n",
+                work.len() - shown.len(),
+                work.len()
+            );
         }
         let broken: Vec<String> =
             self.db.prepare("SELECT symbol FROM broken ORDER BY symbol")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?;
         if !broken.is_empty() {
             out += &format!("\nBroken symbols: {}\n", broken.join(", "));
         }
-        Ok(out)
+        Ok((out, shown))
     }
 
     /// A module is shown as an outline unless `bodies` is set. Past `budget`,
@@ -2141,7 +2235,7 @@ impl Store {
         let (mut out, mut left) = (String::new(), vec![]);
         let fits = |out: &str, text: &str| out.is_empty() || out.len() + text.len() <= budget;
         for &name in names {
-            let text = if let Some(m) = self.resolve_module(&ix, name) {
+            let (text, served): (String, Vec<&Sym>) = if let Some(m) = self.resolve_module(&ix, name) {
                 let mut body = format!("// ── module {} ({}) ──\n", m.path, m.dir);
                 if !m.header.is_empty() {
                     body += &format!("{}\n\n", m.header);
@@ -2150,7 +2244,7 @@ impl Store {
                     body += &format!("{}\n\n", s.text);
                 }
                 if bodies && fits(&out, &body) {
-                    body
+                    (body, ix.syms.iter().filter(|s| s.module == m.path).collect())
                 } else {
                     let mut text =
                         format!("// ── module {} ({}), outline: `view <name>` for a body, `--bodies` for all ──\n", m.path, m.dir);
@@ -2169,12 +2263,12 @@ impl Store {
                             if broken.contains_key(&s.qname()) { "  // BROKEN" } else { "" }
                         );
                     }
-                    text
+                    (text, vec![])
                 }
             } else {
                 match self.resolve(&ix, name) {
-                    Ok(i) => format!("// ── {} ({}) ──\n{}\n\n", ix.syms[i].qname(), ix.syms[i].kind.as_str(), ix.syms[i].text),
-                    Err(e) => self.dependency(name).ok_or(e)?,
+                    Ok(i) => (format!("// ── {} ({}) ──\n{}\n\n", ix.syms[i].qname(), ix.syms[i].kind.as_str(), ix.syms[i].text), vec![&ix.syms[i]]),
+                    Err(e) => (self.dependency(name).ok_or(e)?, vec![]),
                 }
             };
             if left.is_empty() && fits(&out, &text) {
@@ -2184,6 +2278,7 @@ impl Store {
                     None => self.resolve(&ix, name).map(|i| vec![ix.syms[i].qname()]).unwrap_or_default(),
                 };
                 printed.into_iter().for_each(mark_shown);
+                served.into_iter().for_each(|s| reads::mark_served(&self.root, s));
             } else {
                 left.push(name);
             }
@@ -2255,6 +2350,9 @@ impl Store {
             }
             for &j in shown.iter().chain(full.iter().filter(|&&j| !left.contains(&ix.syms[j].qname()))) {
                 mark_shown(ix.syms[j].qname());
+            }
+            for &j in full.iter().filter(|&&j| !left.contains(&ix.syms[j].qname())) {
+                reads::mark_served(&self.root, &ix.syms[j]);
             }
             if !left.is_empty() {
                 out += &format!(
@@ -3015,6 +3113,7 @@ impl Store {
             .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
             .collect::<Result<_, _>>()?;
         let (mut run, mut hashes) = (vec![], HashMap::new());
+        let mut reached = HashSet::new();
         for &t in &tests {
             let reach = reach::closure(&ix, t);
             let hash = reach::hash(&ix, &reach, &revisions, &self.root);
@@ -3030,7 +3129,11 @@ impl Store {
                 run.push(t);
             }
             hashes.insert(t, hash);
+            reached.extend(reach);
         }
+        let untested = self.task_untested(&ix, &reached);
+        UNTESTED.with(|u| *u.borrow_mut() = untested.clone());
+        let untested = untested.map_or(String::new(), |names| format!("No test reaches {names}.\n"));
         // Suites outside `gleam test` that reach a change since tests last passed.
         let changed: Vec<usize> =
             self.since_pass()?.unwrap_or_default().iter().filter_map(|(id, _)| ix.syms.iter().position(|s| &s.id == id)).collect();
@@ -3054,7 +3157,7 @@ impl Store {
             if !errors.is_empty() {
                 return fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
             }
-            return Ok(head + &also);
+            return Ok(head + &also + &untested);
         }
         let files = self.materialize(&ix)?;
         let skipped: Vec<(usize, String)> = tests
@@ -3111,7 +3214,30 @@ impl Store {
             out.push('\n');
         }
         out += &also;
-        if ok { Ok(out) } else { fail(out) }
+        if ok { Ok(out + &untested) } else { fail(out) }
+    }
+
+    /// D-152: this task's changed symbols in this project, outside test modules,
+    /// that no test reaches (`reached`: what the tests reach), named for a reply;
+    /// `None` when there are none or outside a board run.
+    fn task_untested(&self, ix: &Index, reached: &HashSet<usize>) -> Option<String> {
+        let (tid, _) = board::context()?;
+        let t = scope::home(&self.root, &tid).and_then(|home| board::task(&home, &tid)).ok()?;
+        let here = scope::dir(&scope::top(&self.root), &self.root);
+        let names: Vec<String> = board::changes_of(self, &t)
+            .unwrap_or_default()
+            .iter()
+            .filter(|c| c["project"] == here)
+            .filter_map(|c| c["entity"].as_str()?.strip_prefix("symbol:").map(String::from))
+            .filter_map(|id| ix.syms.iter().position(|s| s.id == id))
+            .filter(|&i| !is_test(ix, i) && !reached.contains(&i))
+            .map(|i| reach::short(ix, i))
+            .collect();
+        if names.is_empty() {
+            return None;
+        }
+        let more = if names.len() > 3 { format!(" and {} more", names.len() - 3) } else { String::new() };
+        Some(format!("{}{more}", names[..names.len().min(3)].join(", ")))
     }
 
     /// Symbols changed since `test` last passed in full: (id, text then, `None`
@@ -4247,6 +4373,24 @@ mod tests {
         let (clean, out) = reference_layout(REFERENCE);
         assert!(clean, "{out}");
     }
+    /// The reference says gleam.toml is written, and that the human never edits files (D-147).
+    #[test]
+    fn the_reference_never_hands_a_file_change_to_the_human() {
+        assert!(!REFERENCE.contains("(not gleam.toml)"));
+        assert!(REFERENCE.contains("gleam.toml: `write` (validated, recorded with the task),\nnever `move` or `remove`"));
+        assert!(REFERENCE.contains("The human never edits files or runs commands"));
+        assert!(REFERENCE.contains("Never asks the human to change a file"));
+        // D-153: a question shows each option's outcome.
+        assert!(REFERENCE.contains("Each option's `text` gives a short example of its outcome"));
+        assert!(!agent_reference(false).contains("task ask"), "outside a board run");
+    }
+    /// D-148: the reference tells agents to write a record's reference bare, so it
+    /// renders as a link with the record's title.
+    #[test]
+    fn the_reference_names_records_as_links() {
+        let tail = "`task:<id>`, `feature:<id>` or `milestone:<id>`, written bare";
+        assert_eq!(REFERENCE.matches(tail).count(), 2, "the notes line and the strategy section");
+    }
     /// D-144: a command in the summary table with no entry in the section is
     /// named, so `help <command>` can answer one paragraph.
     #[test]
@@ -4392,6 +4536,48 @@ mod tests {
         let (out, error) = batch(&["read b.md", "write a.md"], 10_000, &mut fake("none", &mut vec![]));
         assert!(!error && !out.contains("commands failed"), "{out}");
     }
+    /// A batch runner whose `test` passes or fails, leaving `untested` named as
+    /// the task's changes no test reaches.
+    fn fake_test<'a>(pass: bool, untested: Option<&'static str>, ran: &'a mut Vec<String>) -> impl FnMut(&[String], usize) -> Out + 'a {
+        move |w: &[String], _| {
+            ran.push(w.join(" "));
+            if !w.iter().any(|x| x == "test") {
+                return Ok("fine".into());
+            }
+            UNTESTED.with(|u| *u.borrow_mut() = untested.map(String::from));
+            if pass { Ok("passed".into()) } else { Err(Failure("1 failure".into(), 1)) }
+        }
+    }
+    #[test]
+    fn a_batched_task_done_waits_for_a_passing_test() {
+        // D-152: a failed test holds back the task done after it.
+        let mut ran = vec![];
+        let (out, error) = batch(&["submit", "test", "task done fixed"], 10_000, &mut fake_test(false, None, &mut ran));
+        assert!(error);
+        assert_eq!(ran, ["submit", "test"]);
+        assert!(!out.contains("==== solace task done"), "{out}");
+        assert!(out.ends_with(&format!("1 of 3 commands failed: test; skipped: task done fixed (the test failed)\n{HELD}")), "{out}");
+        // A pass that leaves a change no test reaches holds it back too, and is no error.
+        let mut ran = vec![];
+        let (out, error) = batch(&["submit", "test", "task done fixed"], 10_000, &mut fake_test(true, Some("app.three"), &mut ran));
+        assert!(!error);
+        assert_eq!(ran, ["submit", "test"]);
+        assert!(out.ends_with(&format!("Skipped: task done fixed (no test reaches app.three)\n{HELD}")), "{out}");
+        // A clean pass finishes, a test in another project too.
+        let mut ran = vec![];
+        let (out, error) = batch(&["submit", "--project lib test", "task done fixed"], 10_000, &mut fake_test(true, None, &mut ran));
+        assert!(!error);
+        assert_eq!(ran, ["submit", "--project lib test", "task done fixed"]);
+        assert!(!out.contains("Skipped") && !out.contains(HELD), "{out}");
+        // A task done before the test, or in a call with no test, runs.
+        let mut ran = vec![];
+        batch(&["task done fixed", "test"], 10_000, &mut fake_test(false, None, &mut ran));
+        assert_eq!(ran, ["task done fixed", "test"]);
+        let mut ran = vec![];
+        let (out, _) = batch(&["submit", "task done fixed"], 10_000, &mut fake_test(false, Some("app.three"), &mut ran));
+        assert_eq!(ran, ["submit", "task done fixed"]);
+        assert!(!out.contains("Skipped"), "{out}");
+    }
     /// D-145: from the second successful single read in a row, the reply hints to batch.
     #[test]
     fn a_second_single_read_in_a_row_gets_the_hint() {
@@ -4440,7 +4626,8 @@ mod tests {
     #[test]
     fn agent_reference_leaves_out_host_and_task_commands() {
         // Tests run outside a board run; `help` keeps everything.
-        let r = agent_reference();
+        let r = agent_reference(false);
+        assert!(agent_reference(true).contains("task done") && !agent_reference(true).contains("Host commands"));
         assert!(r.contains("Several commands go in one call") && r.contains("work records"));
         assert!(!r.contains("task done") && !r.contains("Host commands"));
         assert!(REFERENCE.contains("task done") && REFERENCE.contains("agent-config"));
@@ -4448,7 +4635,7 @@ mod tests {
         // test examples (D-48: a test at the level reported, one per shifted
         // behavior); D-102: the file tiers. D-123: no byte cap; it is kept as
         // brief as understanding it allows, and `help` keeps every option.
-        assert!(r.contains("Files by tier") && r.contains("ignored\nor not"));
+        assert!(r.contains("Files by tier") && r.contains("ignored or not"));
         assert!(
             r.contains("Changing a signature or adding a field") && r.contains("one at the level the task reports") && r.contains("`help <command>`")
         );
@@ -4457,6 +4644,9 @@ mod tests {
         // Scope, the code's own conventions, comments that say why, and no secrets.
         assert!(r.contains("stop exploring") && r.contains("Write code the way the code around it is written"));
         assert!(r.contains("A comment says why code exists") && r.contains("Never put secrets or keys"));
+        // Ponytail's craft rules: the smallest complete change, and what `test` can't reach.
+        assert!(r.contains("Make the smallest complete change") && r.contains("Fix a reported bug once, at its cause"));
+        assert!(r.contains("`test` doesn't reach docs, config, JavaScript or golden files"));
         // D-119 point 5: plain-file projects batch too, every edit in one patch.
         assert!(r.contains("then `run <name>`") && r.contains("go in one patch") && r.contains("a patch of many edits"));
         // D-123: where a line runs, and that options belong to one command.
@@ -4513,7 +4703,7 @@ mod tests {
         assert!(e.contains("E1001 unknown name: plan.answer\nfound in b: add --project b"), "{e}");
         let e = hinted(a.view(&["plan.nope"], false, BUDGET), &a.root).unwrap_err().0;
         assert!(e.contains("E1001") && !e.contains("found in"), "{e}");
-        let s = a.other_projects();
+        let s = a.other_projects(None);
         for part in [
             "You are in a (alpha).\n",
             "Other projects under this Solace root (read only): b (beta).",
@@ -4897,6 +5087,49 @@ mod tests {
         for out in [store.session(&[]).unwrap(), store.session_task("calc.add").unwrap()] {
             assert!(out.contains("plain files") && out.ends_with(&plain), "{out}");
         }
+    }
+    /// D-151: session start shows whole open work records within a cap and
+    /// says how to read the rest; `work list` shows them all.
+    #[test]
+    fn session_start_caps_the_open_work_records() {
+        let store = calc_project();
+        store.work_add("Short record about calc.add").unwrap();
+        let long = "x".repeat(WORK_CAP);
+        store.work_add(&long).unwrap();
+        let out = store.session(&[]).unwrap();
+        assert!(out.contains("#1\nShort record about calc.add\n") && !out.contains(&long), "{out}");
+        assert!(out.contains("1 of 2 open work records left out to fit the reply's size limit; `work list` shows them all.\n"), "{out}");
+        assert!(out.contains("== Context of the symbols the work record names =="), "the shown record's symbols: {out}");
+        let all = store.work_list().unwrap();
+        assert!(all.contains(&long) && !all.contains("left out"), "{all}");
+    }
+    /// D-151: the board's call names the task, so a task scoped to this
+    /// project and another lists both, outside any run's environment.
+    #[test]
+    fn a_task_session_names_the_projects_of_its_task() {
+        let root = testing::Scratch::new().with(&[
+            ("solace.toml", "projects = [\"a\", \"b\"]\n"),
+            ("a/gleam.toml", "name = \"alpha\"\nversion = \"1.0.0\"\n"),
+            ("a/src/app.gleam", "pub fn one() -> Int {\n  1\n}\n"),
+            ("b/gleam.toml", "name = \"beta\"\nversion = \"1.0.0\"\n"),
+            ("b/src/plan.gleam", "pub fn answer() -> Int {\n  42\n}\n"),
+        ]);
+        for d in ["a", "b"] {
+            import(&root.join(d)).unwrap();
+        }
+        let a = Store::at(&root.join("a")).unwrap();
+        board::open(&a.root).unwrap();
+        let t = board::api(&a.root, "POST", "/tasks", json!({"title":"Answer"})).unwrap();
+        tasks::update(&a.root, t["id"].as_str().unwrap(), |t| {
+            t["scope"] = json!(["a", "b"]);
+            Ok(())
+        })
+        .unwrap();
+        let out = a.task_session("Change plan.answer", t["id"].as_str(), "").unwrap();
+        assert!(out.contains("This task can change: a (alpha), b (beta).") && out.contains("-- plan.answer (b)"), "{out}");
+        assert!(out.contains("task done"), "a board run's reference: {out}");
+        let out = a.task_session("Change plan.answer", None, "").unwrap();
+        assert!(out.contains("Other projects under this Solace root (read only): b (beta).") && !out.contains("task done"), "{out}");
     }
     /// D-145: a strategy run gets no workflow, so no first call.
     #[test]

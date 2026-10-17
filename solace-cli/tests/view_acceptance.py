@@ -68,7 +68,13 @@ pub fn main_test() {
         self.server.wait(timeout=3)
         self.server.stdout.close()
         self.server.stderr.close()
-        self.tmp.cleanup()
+        # An agent the server started may still be writing `.solace` for a moment.
+        for _ in range(30):
+            try:
+                self.tmp.cleanup()
+                break
+            except OSError:
+                time.sleep(.1)
 
     def cli(self, *args, input_text=None):
         p = subprocess.run([BIN, *args], cwd=self.root, env=self.env, input=input_text, capture_output=True, text=True)

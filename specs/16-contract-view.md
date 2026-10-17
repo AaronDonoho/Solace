@@ -73,7 +73,7 @@ Sound or windows a program produces directly appear on the human's machine, beca
 
 ## 4. Review
 
-A task in *needs review* (or any task with changes) shows a one-line summary on the board, such as "1 effects added, 0 signature changed, 0 test unfinished, 3 untested uses", linking to the view filtered to that task. The line sits in the task's detail panel. The filtered view shows:
+A task in *Review* (or any task with changes) shows a one-line summary on the board, such as "1 effects added, 0 signature changed, 0 test unfinished, 3 untested uses", linking to the view filtered to that task. The line sits in the task's detail panel. The filtered view shows:
 
 1. entry points and effects that were added, removed or changed. A new effect is flagged. Example: "`main` now writes files";
 2. logic whose signature changed;

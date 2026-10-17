@@ -855,6 +855,29 @@ fn proposed_task(top: &Path, rid: &str, fields: &Value) -> Result<Value, Failure
     board::set_links(top, &mut t, fields)?;
     Ok(t)
 }
+/// Id `id` without its link prefix: an agent copies `task:<id>` from a reply (D-148)
+/// where a plain id is asked for.
+pub(super) fn bare_id(id: &str) -> &str {
+    ["task:", "feature:", "milestone:"].iter().find_map(|p| id.strip_prefix(p)).unwrap_or(id)
+}
+
+/// A proposal's fields with each linked id bare: `feature`, `milestone` and `dependsOn`.
+pub(super) fn bare_links(mut fields: Value) -> Value {
+    for k in ["feature", "milestone"] {
+        if let Some(id) = fields[k].as_str() {
+            fields[k] = json!(bare_id(id));
+        }
+    }
+    if let Some(deps) = fields.get_mut("dependsOn").and_then(Value::as_array_mut) {
+        for d in deps.iter_mut() {
+            if let Some(id) = d.as_str() {
+                *d = json!(bare_id(id));
+            }
+        }
+    }
+    fields
+}
+
 /// A strategy run's proposal (D-93) as the question its agent waits on:
 /// checked as its request would be, writing nothing. `fields` is the JSON
 /// object of the request, or for the vision its new text. The question names
@@ -869,6 +892,8 @@ pub(super) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text
             _ => return board::err("E7001", "the proposal's fields go in `text`, as a JSON object"),
         }
     };
+    let fields = bare_links(fields);
+    let id = id.map(bare_id);
     // D-105: a field the request doesn't take is refused, so a misspelt one isn't lost.
     if kind != "vision" {
         let allowed: &[&str] = match (kind, id.is_some()) {
@@ -956,12 +981,12 @@ fn apply_proposal(top: &Path, rid: &str, p: &Value) -> Result<String, Failure> {
     let answer = match built {
         Built::Record(plural, v, new) => {
             put_record(top, plural, &v)?;
-            let created = format!(": created {} {}", singular(plural), v["id"].as_str().unwrap_or(""));
+            let created = format!(": created {}:{}", singular(plural), v["id"].as_str().unwrap_or(""));
             format!("Approved and applied{}", if new { created.as_str() } else { "" })
         }
         Built::Task(t, new) => {
             write(top, &t)?;
-            format!("Approved and applied{}", if new { format!(": created task {}", t["id"].as_str().unwrap_or("")) } else { String::new() })
+            format!("Approved and applied{}", if new { format!(": created task:{}", t["id"].as_str().unwrap_or("")) } else { String::new() })
         }
         Built::Vision(text) => {
             write_vision(top, &text)?;
@@ -1692,7 +1717,7 @@ mod tests {
         for kind in ["feature", "milestone", "task"] {
             let qid = propose(&root, &rid, kind, None, r#"{"title": "New one"}"#);
             let (said, note) = answer(&root, &rid, &qid, "Approve");
-            let prefix = format!("Approved and applied: created {kind} ");
+            let prefix = format!("Approved and applied: created {kind}:");
             assert!(said.starts_with(&prefix), "{said}");
             let id = &said[prefix.len()..];
             assert!(note.contains(&format!("Create {kind} \"New one\"")) && note.contains(&said), "{note}");
@@ -1848,7 +1873,7 @@ mod tests {
         let approved = propose(&root, &rid, "task", None, &fields);
         let said = answer(&root, &rid, &approved, "Approve").0;
         assert_eq!((state("features", &f), state("milestones", &m)), (json!("upcoming"), json!("upcoming")));
-        let t = board::task(&root, said.rsplit(' ').next().unwrap()).unwrap();
+        let t = board::task(&root, said.rsplit(':').next().unwrap()).unwrap();
         assert_eq!((&t["feature"], &t["milestone"]), (&f["id"], &m["id"]));
     }
 
@@ -2154,7 +2179,7 @@ mod tests {
         let rid = page_run(&root);
         let qid = propose(&root, &rid, "task", None, &json!({"title": "Proposed", "feature": f["id"]}).to_string());
         let said = answer(&root, &rid, &qid, "Approve").0;
-        let id = said.rsplit(' ').next().unwrap();
+        let id = said.rsplit(':').next().unwrap();
         assert_eq!(column(id), "planning");
         let n = notes(id);
         assert!(n[0].starts_with("Created by strategy run") && n[1].starts_with("Moved to Planning"), "{n:?}");

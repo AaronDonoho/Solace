@@ -80,6 +80,9 @@ pub type Model {
     feature_request: String,
     /// The feature whose delete is being confirmed.
     feature_deleting: Option(String),
+    /// A dropped feature shown at its new rank before the server answers:
+    /// its id and the rank a refusal puts back.
+    feature_moving: Option(#(String, Float)),
     /// The milestone being written on the Roadmap tab, None when no form is open.
     milestone_draft: Option(roadmap.Draft),
     /// A milestone save sent and not yet answered.
@@ -217,7 +220,14 @@ pub type Msg {
   FeatureSaved(String)
   /// Moves the feature with this id to this rank: one PATCH.
   MoveFeature(String, Float)
-  /// The reply to a move: the feature, or a refusal.
+  /// A press on a feature card's grip at this clientY: the drag begins.
+  GrabFeature(String, Int)
+  /// The drag ended: the feature's id and the index it lands at in its
+  /// group, -1 when cancelled.
+  DropFeature(String, Int)
+  /// Starts the feature with this id: one PATCH to `active` (D-154).
+  StartFeature(String)
+  /// The reply to a move or a start: the feature, or a refusal.
   FeatureMoved(String)
   /// The reply to a delete: the deleted feature, or a refusal.
   FeatureDeleted(String)
@@ -662,6 +672,56 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
       }),
     )
+    GrabFeature(id, y) -> #(
+      model,
+      effect.from(fn(send) {
+        drag_card(model.root, id, y, fn(index) { send(DropFeature(id, index)) })
+      }),
+    )
+    // The new order shows at once, with no jump back while the PATCH is
+    // answered.
+    DropFeature(id, index) -> {
+      let group =
+        features.groups(model.milestones, model.features)
+        |> list.find(fn(g) { list.any(g.features, fn(f) { f.id == id }) })
+        |> result.map(fn(g) { g.features })
+        |> result.unwrap([])
+      case
+        features.drop_rank(group, id, index),
+        list.find(model.features, fn(f) { f.id == id })
+      {
+        Some(rank), Ok(f) -> {
+          let #(model, fx) = update(model, MoveFeature(id, rank))
+          #(
+            Model(
+              ..model,
+              features: keep(
+                model.features,
+                features.Feature(..f, rank: rank),
+                fn(f) { f.id },
+              ),
+              feature_moving: Some(#(id, f.rank)),
+            ),
+            fx,
+          )
+        }
+        _, _ -> #(model, effect.none())
+      }
+    }
+    // The server keeps its start time and color and plans its Backlog tasks
+    // (D-114, D-134); the reply is a move's.
+    StartFeature(id) -> #(
+      Model(..model, feature_error: ""),
+      effect.from(fn(send) {
+        request(
+          model.prefix,
+          "/features/" <> id,
+          "PATCH",
+          json.to_string(json.object([#("state", json.string("active"))])),
+          fn(reply) { send(FeatureMoved(reply)) },
+        )
+      }),
+    )
     // A reply after the feature was removed doesn't bring it back.
     FeatureMoved(text) ->
       case json.parse(text, features.decoder()) {
@@ -673,10 +733,29 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               False -> model.features
             },
             feature_error: "",
+            feature_moving: None,
           ),
           effect.none(),
         )
-        Error(_) -> #(Model(..model, feature_error: error(text)), effect.none())
+        // A refused drop goes back to where it was.
+        Error(_) -> #(
+          Model(
+            ..model,
+            features: case model.feature_moving {
+              Some(#(id, rank)) ->
+                list.map(model.features, fn(f) {
+                  case f.id == id {
+                    True -> features.Feature(..f, rank: rank)
+                    False -> f
+                  }
+                })
+              None -> model.features
+            },
+            feature_error: error(text),
+            feature_moving: None,
+          ),
+          effect.none(),
+        )
       }
     // The `{removedFeature}` and `{task}` events update the page.
     FeatureDeleted(text) ->
@@ -1324,24 +1403,29 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     ModelsLoaded(text) ->
       case json.parse(text, decode.list(solace_task.agent_decoder())) {
         Ok(models) -> {
-          let id = case
-            list.find(models, fn(a) { a.available && a.id == model.plan_model })
-          {
+          let kept = solace_task.remembered(models, model.plan_model)
+          let id = case kept {
             Ok(a) -> a.id
             Error(_) ->
               list.find(models, fn(a) { a.available })
               |> result.map(fn(a) { a.id })
               |> result.unwrap("")
           }
+          // The effort stays only while the kept model still offers it.
+          let plan_effort = case kept {
+            Ok(a) ->
+              case list.contains(a.efforts, model.plan_effort) {
+                True -> model.plan_effort
+                False -> ""
+              }
+            Error(_) -> ""
+          }
           #(
             Model(
               ..model,
               models: models,
               plan_model: id,
-              plan_effort: case id == model.plan_model {
-                True -> model.plan_effort
-                False -> ""
-              },
+              plan_effort: plan_effort,
             ),
             effect.none(),
           )
@@ -1746,6 +1830,9 @@ solace-task{display:block;margin-top:16px}
 .feature .open{font:inherit;color:var(--ink);background:none;border:0;padding:0;min-height:0;text-align:left;cursor:pointer}.feature .open:hover{text-decoration:underline}
 .feature .open:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .feature.revealed,.milestone h3.revealed{outline:3px solid var(--focus);outline-offset:2px}
+.feature{display:flex;gap:var(--space-2);position:relative;transition:transform .15s ease}.feature-body{flex:1;min-width:0}
+.feature .grip{flex:none;align-self:stretch;width:20px;margin:0;padding:0;font:inherit;font-size:14px;color:var(--muted,inherit);background:none;border:0;border-radius:0;cursor:grab;touch-action:none}.feature .grip:hover{background:var(--line)}.feature .grip:disabled{cursor:default;opacity:.4}.feature .grip:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.feature.dragging{transition:none;z-index:2;box-shadow:0 6px 18px rgba(0,0,0,.18);cursor:grabbing}.feature.dragging .grip{cursor:grabbing}
 "
   <> solace_task.editor_styles
   <> plan.styles
@@ -1822,8 +1909,8 @@ pub type Row {
 }
 
 /// What the list keeps. "" in a field keeps every task; "-" for feature or
-/// milestone keeps the tasks without one. `query` is searched in the title
-/// and the body.
+/// milestone keeps the tasks without one. A word equal to a task's id,
+/// bare or as `task:<id>`, finds that task.
 pub type Filters {
   Filters(
     column: String,
@@ -1923,6 +2010,7 @@ pub fn new(tab: Tab) -> Model {
     root: no_root(),
     reveal: #("", 0),
     focused_feature: None,
+    feature_moving: None,
   )
 }
 
@@ -2307,15 +2395,18 @@ fn linked(wanted: String, link: Option(String)) -> Bool {
   }
 }
 
-/// Every word of the query is in the title or the body, ignoring case. Notes
-/// and changes are not in `GET /tasks`, so they are not searched.
+/// Every word of the query is in the title or the body, ignoring case, or is
+/// the task's id, bare or as `task:<id>`. Notes and changes are not in
+/// `GET /tasks`, so they are not searched.
 fn searched(query: String, row: Row) -> Bool {
   let text = string.lowercase(row.title <> "\n" <> row.body)
   query
   |> string.lowercase
   |> string.split(" ")
   |> list.filter(fn(word) { word != "" })
-  |> list.all(fn(word) { string.contains(text, word) })
+  |> list.all(fn(word) {
+    string.contains(text, word) || word == row.id || word == "task:" <> row.id
+  })
 }
 
 /// Every project's columns, each id once, in workflow order.
@@ -2441,7 +2532,7 @@ fn filters_view(model: Model) -> Element(Msg) {
       html.input([
         attribute.type_("search"),
         attribute.value(f.query),
-        attribute.placeholder("Title or description"),
+        attribute.placeholder("Title, description, or task:<id>"),
         event.on_input(fn(v) { Filter(Filters(..f, query: v)) }),
       ]),
     ]),
@@ -2820,6 +2911,8 @@ fn features_view(model: Model) -> List(Element(Msg)) {
       on_save: SaveFeature,
       on_cancel: CancelFeature,
       on_move: MoveFeature,
+      on_grab: GrabFeature,
+      on_start: StartFeature,
       // A feature removed while confirming no longer holds the list.
       deleting: case model.feature_deleting {
         Some(id) ->
@@ -3613,3 +3706,11 @@ fn compare_text(a: String, b: String) -> order.Order {
   string.compare(string.lowercase(a), string.lowercase(b))
   |> order.lazy_break_tie(fn() { string.compare(a, b) })
 }
+
+@external(javascript, "./api.mjs", "drag_card")
+fn drag_card(
+  root: dynamic.Dynamic,
+  id: String,
+  y: Int,
+  done: fn(Int) -> Nil,
+) -> Nil

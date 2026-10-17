@@ -150,3 +150,27 @@ pub fn the_delete_text_names_the_task_count_test() {
   assert features.delete_text(1)
     == "Its 1 task loses its link to it; the tasks stay."
 }
+
+pub fn a_drop_takes_the_midpoint_of_its_new_neighbors_test() {
+  let group = [
+    feature("a", "", 1.0),
+    feature("b", "", 2.0),
+    feature("c", "", 4.0),
+  ]
+  // To the first position: one below the first.
+  assert features.drop_rank(group, "c", 0) == Some(0.0)
+  // To a middle position, among the others: between a and c.
+  assert features.drop_rank(group, "a", 1) == Some(3.0)
+  // To the last position: one above the last.
+  assert features.drop_rank(group, "a", 2) == Some(5.0)
+  // Where it is, cancelled, or past the end: no move.
+  assert features.drop_rank(group, "b", 1) == None
+  assert features.drop_rank(group, "b", -1) == None
+  assert features.drop_rank(group, "b", 3) == None
+}
+
+pub fn the_grip_reorders_with_the_arrow_keys_only_test() {
+  assert features.grip_key("ArrowUp") == Some(True)
+  assert features.grip_key("ArrowDown") == Some(False)
+  assert features.grip_key("Tab") == None
+}

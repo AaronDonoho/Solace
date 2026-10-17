@@ -139,6 +139,11 @@ class Board(unittest.TestCase):
             first = t['runs'][-1]['id']
             self.assertTrue((self.root/'.solace'/(first+'.exited')).exists())
             self.assertIn('E7010', (self.root/'.solace'/(first+'.responses')).read_text())
+            # D-151: the fresh run's brief holds the session start reply.
+            fresh = (self.root/'.solace'/(first+'.prompt')).read_text()
+            self.assertIn('Session start (the reply to `session start --task`)', fresh)
+            self.assertIn('\nNext: read what the change needs in one call', fresh)
+            self.assertNotIn('Start with `session start', fresh)
             self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([{'command':'submit app.one','text':'pub fn one() { 10 }'}, {'command':'check'}, {'command':'task done work complete'}])})
             t = self.action(t, 'assign', model=model)
             work = t['runs'][-1]['id']
@@ -149,6 +154,7 @@ class Board(unittest.TestCase):
             prompt = (self.root/'.solace'/(work+'.prompt')).read_text()
             self.assertIn("Continue the author's conversation", prompt)
             self.assertNotIn('Start with `session start', prompt)
+            self.assertNotIn('Session start (the reply', prompt)
             self.assertIn('10', self.cli('view', 'app.one'))
 
             self.api('PATCH', '/tasks/'+t['id'], {'body':json.dumps([{'command':'submit app.one','text':'pub fn one() { 99 }'}, {'command':'task note please fix rounding'}])})
@@ -184,7 +190,9 @@ class Board(unittest.TestCase):
             self.assertEqual(launch['session'], followup)
             self.assertEqual(t['conversation']['session'], original['session'])
             prompt = (self.root/'.solace'/(followup+'.prompt')).read_text()
-            self.assertIn('Start with `task diff --since-review`', prompt)
+            self.assertIn("The task's changes are below: the delta since the last review", prompt)
+            self.assertIn('Since completed review', prompt)
+            self.assertNotIn('Start with', prompt)
             self.assertIn('please fix rounding', prompt)
             self.assertIn('fixed rounding', prompt)
             delta = json.loads((self.root/'.solace'/(followup+'.responses')).read_text().splitlines()[0])['result']['content'][0]['text']
@@ -226,7 +234,8 @@ class Board(unittest.TestCase):
         t = self.completed([{'command':'submit app.one','text':'pub fn one() { 10 }'}])
         steps = [{'command':'task diff --since-review'}, {'command':'task note **Assessment: Needs work** unique finding'}]
         t, prompt, replies = self.review(t, steps)
-        self.assertIn('assess the whole task: no completed review', prompt)
+        self.assertIn('No usable delta baseline: no completed review', prompt)
+        self.assertIn('## app.one (changed)', prompt)
         self.assertIn('falling back', replies[0])
         first = t['runs'][-1]['id']
         t, prompt, replies = self.review(t)
@@ -406,6 +415,17 @@ class Board(unittest.TestCase):
         t=self.wait(self.action(t,'assign',model='fake'),lambda x:x['column']=='needs_review')
         self.assertIn('[image 1: ',(self.root/'.solace'/(t['runs'][-1]['id']+'.prompt')).read_text())
 
+    def test_a_work_run_with_no_effort_takes_medium(self):
+        # D-149: no effort chosen, so the run records and passes the model's default.
+        t=self.create([{'command':'task done done'}])
+        self.action(t,'plan')
+        t=self.action(t,'assign',model='native-claude')
+        self.assertEqual((t['runs'][-1]['effort'],t['effort']),('medium','medium'))
+        rid=t['runs'][-1]['id']
+        self.wait(t,lambda x:(self.root/'.solace'/(rid+'.launch')).exists())
+        argv=json.loads((self.root/'.solace'/(rid+'.launch')).read_text())['argv']
+        self.assertEqual(argv[argv.index('--effort')+1],'medium')
+
     def test_model_and_effort_change_keep_session_and_start_over_gets_fresh(self):
         t = self.create([{'command':'task done done'}])
         self.action(t, 'plan'); self.action(t, 'assign', model='native')
@@ -543,6 +563,30 @@ class Board(unittest.TestCase):
         self.assertEqual(self.cli('view','app.one'),original)
         self.assertEqual((self.root/'priv/a').read_text(),'original')
 
+    def test_a_batched_task_done_waits_for_a_passing_test(self):
+        # D-152: one call submits, tests and finishes; the test builds and runs, so allow it time.
+        config=self.root/'system.toml';config.write_text(config.read_text().replace('task_timeout=2\n','task_timeout=20\n'))
+        patch=lambda expected:('*** Begin Patch\n*** Update: app.one\n@@\n-pub fn one() { 1 }\n+pub fn one() { 10 }\n'
+            '*** Add: fixture_test\n+//// Tests for app.\n+\n+pub fn main() { one_test() }\n+\n'
+            f'+pub fn one_test() {{\n+  let assert {expected} = app.one()\n+}}\n*** End Patch')
+        def ran(steps):
+            t=self.assign(steps);rid=t['runs'][-1]['id']
+            self.wait(t,lambda x:(self.root/'.solace'/(rid+'.exited')).exists())
+            reply=json.loads((self.root/'.solace'/(rid+'.responses')).read_text().splitlines()[0])['result']['content'][0]['text']
+            return self.get(t),reply
+        # A failing test holds back the task done.
+        t,reply=ran([{'command':'submit\ntest\ntask done done','text':patch(1)}])
+        self.assertIn('1 of 3 commands failed: test; skipped: task done done (the test failed)\n',reply)
+        self.assertNotEqual(t['column'],'needs_review');self.action(t,'cancel')
+        # A pass that leaves a changed symbol no test reaches holds it back too.
+        t,reply=ran([{'command':'submit app.two\ntest\ntask done done','text':'pub fn two() { 20 }'}])
+        self.assertIn('No test reaches app.two.\n',reply)
+        self.assertIn('Skipped: task done done (no test reaches app.two)\n',reply)
+        self.assertNotEqual(t['column'],'needs_review');self.action(t,'cancel')
+        # A clean pass finishes the task in the same call.
+        t=self.assign([{'command':'submit\ntest\ntask done done','text':patch(10)}])
+        self.wait(t,lambda x:x['column']=='needs_review')
+
     def test_a3_custom_workflow_and_invalid(self):
         original=(self.root/'solace.toml').read_text()
         default=Path(__file__).parents[1].joinpath('src/default-board.toml').read_text()
@@ -625,6 +669,12 @@ class Board(unittest.TestCase):
         self.wait(t,lambda x:len(x['questions'])==2)
         prompt=(self.root/'.solace'/(new+'.prompt')).read_text();self.assertIn("Answer: b",prompt);self.assertNotIn('"runs"',prompt)
         self.action(t,'reassign',text='b');self.wait(t,lambda x:x['column']=='needs_review')
+    def test_a17_gleam_toml_is_written_directly(self):  # D-147: no question, no human edit
+        manifest=self.root/'gleam.toml';original=manifest.read_text();new=original+'[dependencies]\n'
+        t=self.completed([{'command':'read gleam.toml'},{'command':'write gleam.toml','text':new}])
+        replies=(self.root/'.solace'/(t['runs'][-1]['id']+'.responses')).read_text()
+        self.assertEqual(t['questions'],[]);self.assertEqual(manifest.read_text(),new,replies)
+        manifest.write_text(original)
     def test_a17_agents_md_proposal(self):  # D-45: AGENTS.md is human-owned like solace.toml
         agents=self.root/'AGENTS.md'
         t=self.assign([{'command':'write AGENTS.md','text':'Prices are in cents.\n'},{'command':'task done done'}])
@@ -886,6 +936,8 @@ class Board(unittest.TestCase):
         self.assertTrue(models['fake']['available']);self.assertIsNone(models['fake']['reason'])
         self.assertFalse(models['missing']['available']);self.assertIn('not installed',models['missing']['reason'])
         self.assertIn('codex-gpt-6-astra',models)  # built-in presets are listed too
+        self.assertEqual(models['native']['model'],'fixture',"the list names each model's own model")
+        self.assertIsNone(models['fake'].get('model'),"a run argv names no model")
         t=self.create();self.action(t,'plan')
         e=self.action(t,'assign','E7011',model='missing');self.assertIn('not installed',e['message'])
         self.assertEqual(self.get(t)['column'],'planning')
@@ -909,14 +961,17 @@ class Board(unittest.TestCase):
             if 'codex-gpt-6-fake' in models:break
             time.sleep(.2)
         self.assertIn('codex-gpt-6-fake',models,json.dumps(sorted(models)))
-        self.assertEqual(models['codex-gpt-6-fake']['label'],'Codex · GPT-6 Fake')
+        self.assertEqual(models['codex-gpt-6-fake']['label'],'GPT-6 Fake')
         self.assertEqual(models['codex-gpt-6-fake']['efforts'],['low','medium','high'])
         self.assertTrue(models['codex-gpt-6-fake']['available'],json.dumps(models['codex-gpt-6-fake']))
         self.assertNotIn('codex-gpt-6-fake-hidden',models,'a hidden model is left out')
         self.assertNotIn('gpt-6-fake',(self.root/'system.toml').read_text(),'no config change asked for the model')
-        # Claude Code has no list command: its aliases are offered.
-        self.assertIn('claude-opus',models)
-        self.assertIn('Claude Code · Opus',models['claude-opus']['label'])
+        # Claude Code has no list command: the pick lists one entry per family —
+        # the family's live preset, and an alias only for a family with no preset.
+        self.assertIn('claude-opus-5-5',models)
+        self.assertNotIn('claude-opus',models,"the alias stands behind the family's live model")
+        self.assertIn('claude-fable',models)
+        self.assertEqual(models['claude-fable']['label'],'Fable (latest)')
 
     def test_a_run_shows_the_model_it_used(self):
         t=self.create([{'command':'task done done'}])
@@ -925,7 +980,8 @@ class Board(unittest.TestCase):
         t=self.wait(t,lambda x:x['column']=='needs_review')
         self.assertEqual(t['runs'][-1]['used'],'claude-opus-5-5')
         models={m['id']:m for m in self.api('GET','/models')}
-        self.assertEqual(models['native-claude']['label'],'Fixture · claude-opus-5-5')
+        self.assertEqual(models['native-claude']['label'],'Fixture',"a model with its own name keeps its label")
+        self.assertEqual(models['native-claude']['model'],'fixture',"the list names the model it runs")
 
     def test_a10_events_reconnect(self):
         stream=self.stream()
@@ -1062,7 +1118,7 @@ class Board(unittest.TestCase):
         self.assertIn('stop',self.action(working,'to_planning','E7001')['message'])
         self.action(working,'stop')
         self.assertEqual(self.action(working,'to_planning')['column'],'planning')
-        # From Needs review: the changes stay and the approval goes, as Reassign does.
+        # From Review: the changes stay and the approval goes, as Reassign does.
         t=self.completed([{'command':'read priv/a'},{'command':'write priv/a','text':'keep this'}])
         before=self.get(t)['changes'];self.assertTrue(before)
         self.action(t,'approve')
@@ -1297,7 +1353,7 @@ class Board(unittest.TestCase):
         out=self.replies(rid)
         self.assertTrue(out[0].startswith('E7017'),out[0])
         self.assertEqual(out[1],'The human answered the proposal: Reject\n')
-        self.assertIn(f'Approved and applied: created task {t["id"]}',out[2]);self.assertIn('Not applied: E7026',out[3])
+        self.assertIn(f'Approved and applied: created task:{t["id"]}',out[2]);self.assertIn('Not applied: E7026',out[3])
         # Every answer is on the run's notes, and so in its transcript once it ends.
         answers=[n['text'] for n in run['notes'] if n['author']=='solace']
         self.assertEqual(len(answers),3)
@@ -1380,6 +1436,21 @@ class Board(unittest.TestCase):
         t=self.action(t,'discuss',model='signed-in',text='What about X?')
         self.wait(t,lambda x:x['runs'][-1]['state']=='waiting' and len(x['notes'])==2)
         end=time.monotonic()+5
+        while 'codex' in json.loads(limits.read_text()) and time.monotonic()<end:time.sleep(.05)
+        self.assertNotIn('codex',json.loads(limits.read_text()))
+
+    def test_a_plain_strategy_reply_clears_a_limit_mark(self):
+        # A strategy agent that answers in plain text took its turn (`planned`), like a discussion.
+        with (self.root/'system.toml').open('a') as f:
+            f.write('\n[[models]]\nid="signed-in"\nlabel="Signed in"\nagent="codex"\nmodel="fixture"\n')
+        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        limits=self.root/'agent-limits.json'
+        limits.write_text(json.dumps({'codex':{'reason':'Codex usage limit reached','until':1,'time':1}}))
+        self.env['OPENAI_API_KEY']='test-key'
+        self.serve()
+        rid=self.api('POST','/strategy/runs',{'model':'signed-in','text':json.dumps([{'say':'plain reply'}]),'context':{'kind':'page'}})['id']
+        end=time.monotonic()+10
+        while self.api('GET',f'/strategy/runs/{rid}')['state']!='waiting' and time.monotonic()<end:time.sleep(.05)
         while 'codex' in json.loads(limits.read_text()) and time.monotonic()<end:time.sleep(.05)
         self.assertNotIn('codex',json.loads(limits.read_text()))
 

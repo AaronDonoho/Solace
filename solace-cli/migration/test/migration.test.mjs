@@ -26,6 +26,21 @@ test('migration states, report, confirmations and recovery use the root HTTP API
   const execute = effect => perform(effect, dispatch, noop, noop, noop, noop, noop, noop);
   const dispatch = msg => { let effect; [model, effect] = board.update(model, msg); execute(effect); };
   const html = () => to_string(board.view(model));
+  // One section's own span in the page's string, nested sections included.
+  const section = cls => {
+    const page = html();
+    const start = page.indexOf(`<section class="${cls}"`);
+    if (start < 0) throw new Error(`no section.${cls} on the page`);
+    let depth = 0, i = page.indexOf('>', start) + 1;
+    for (;;) {
+      const open = page.indexOf('<section', i);
+      const close = page.indexOf('</section>', i);
+      if (close < 0) throw new Error(`section.${cls} never closes`);
+      if (open >= 0 && open < close) { depth++; i = open + 8; continue; }
+      if (depth === 0) return page.slice(start, close + 10);
+      depth--; i = close + 10;
+    }
+  };
   const until = async predicate => {
     for (let i = 0; i < 100; i++) { if (predicate()) return; await Bun.sleep(5); }
     throw new Error('Migration did not reach expected state: ' + html());
@@ -58,7 +73,14 @@ test('migration states, report, confirmations and recovery use the root HTTP API
     await until(() => model.migration[0]?.state && timers.length);
     expect(requests.some(r => r.path === '/migration' && r.method === 'GET')).toBe(true);
     expect(html()).toContain('Migrate this project');
+    expect(html()).toContain('<section class="bring-in"><h2>Bring in an existing project</h2>');
+    expect(section('migration')).not.toMatch(/<h2/);
+    // A page without that section fails the check instead of passing it empty.
+    expect(() => section('absent')).toThrow('no section.absent on the page');
     dispatch(new board.ToggleMigration());
+    expect(html()).toContain('<h3 id="migration-title">Migrate this project</h3>');
+    // The span reaches the dialog nested inside the section, not just its opening tag.
+    expect(section('migration')).toContain('<h3 id="migration-title">Migrate this project</h3>');
     expect(html().match(/<input(?=[^>]*type="checkbox")(?=[^>]*checked)[^>]*>/g)).toHaveLength(2);
     expect(html()).toContain('Your folder isn&#39;t changed');
     expect(html()).toContain('compares the results');
@@ -86,7 +108,7 @@ test('migration states, report, confirmations and recovery use the root HTTP API
     expect(reloads).toBe(0);
     offline = true; await poll(); await poll();
     expect(reloads).toBe(0);
-    expect(html()).toContain('Migrating');
+    expect(html()).toContain('<h3>Migrating</h3>');
     offline = false;
     migration = state('running', { step: 'Building the baseline', original, copy });
     await poll();

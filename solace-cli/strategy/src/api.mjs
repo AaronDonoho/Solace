@@ -55,6 +55,58 @@ export function drag(x, width, move, done) {
   globalThis.addEventListener('pointerup', onUp);
   globalThis.addEventListener('pointercancel', onUp);
 }
+// Dragging a feature card by its grip within its milestone: the card follows
+// the pointer and the others slide aside to show where it would land. `done`
+// gets the index it lands at among the group's cards, -1 when cancelled. The
+// cards are measured once, so the target stays steady while they move.
+export function drag_card(root, id, y, done) {
+  if (!/^[\w-]+$/.test(id)) return;
+  const card = root?.querySelector?.(`[data-feature-id="${id}"]`);
+  const section = card?.closest?.('section.milestone');
+  if (!section) return done(-1);
+  const cards = [...section.querySelectorAll(':scope > [data-feature-id]')];
+  const from = cards.indexOf(card);
+  const rects = cards.map(c => c.getBoundingClientRect());
+  const own = rects[from];
+  const gap = from + 1 < rects.length ? rects[from + 1].top - own.bottom
+    : from > 0 ? own.top - rects[from - 1].bottom : 0;
+  const shift = own.bottom - own.top + gap;
+  const others = cards.map((c, i) => ({ c, i, mid: (rects[i].top + rects[i].bottom) / 2 })).filter(o => o.i !== from);
+  const body = globalThis.document?.body;
+  const select = body?.style.userSelect;
+  if (body) body.style.userSelect = 'none';
+  card.classList.add('dragging');
+  let to = from;
+  const onMove = e => {
+    const dy = e.clientY - y;
+    const centre = (own.top + own.bottom) / 2 + dy;
+    to = others.filter(o => o.mid < centre).length;
+    card.style.transform = `translateY(${dy}px)`;
+    others.forEach((o, j) => {
+      o.c.style.transform = o.i < from && j >= to ? `translateY(${shift}px)`
+        : o.i > from && j < to ? `translateY(${-shift}px)` : '';
+    });
+  };
+  const end = index => {
+    globalThis.removeEventListener('pointermove', onMove);
+    globalThis.removeEventListener('pointerup', onUp);
+    globalThis.removeEventListener('pointercancel', onCancel);
+    globalThis.removeEventListener('keydown', onKey);
+    if (body) body.style.userSelect = select;
+    card.classList.remove('dragging');
+    // The cards take their new places at once, without sliding back first.
+    cards.forEach(c => { c.style.transition = 'none'; c.style.transform = ''; });
+    globalThis.requestAnimationFrame?.(() => cards.forEach(c => { c.style.transition = ''; }));
+    done(index);
+  };
+  const onUp = () => end(to);
+  const onCancel = () => end(-1);
+  const onKey = e => { if (e.key === 'Escape') end(-1); };
+  globalThis.addEventListener('pointermove', onMove);
+  globalThis.addEventListener('pointerup', onUp);
+  globalThis.addEventListener('pointercancel', onCancel);
+  globalThis.addEventListener('keydown', onKey);
+}
 // The planning panel follows its newest message (D-118): the run's end, right
 // above the pinned message box, is kept at the bottom of the panel's scroll area.
 const reach = 48;

@@ -1,6 +1,10 @@
 Solace keeps this project's code as symbols, read and changed by symbol
 through this tool (no file access or shell). If it can't do what the task
 needs, don't work around it: ask with `task ask`, or say so in your summary.
+The human never edits files or runs commands: make every change yourself with
+`submit` or `write` (settings files: `write` with `reason`, which the human
+approves). A project outside the task's reach: `task ask` to add it, then make
+the change there. A question never asks the human to change a file.
 Names: `module.name`, e.g. `pilot/checkout.pay`, or any unambiguous suffix
 (`checkout.pay`). Tests are symbols in test modules (`x_test`).
 Each line runs in one project: yours (session start names it) or its
@@ -35,12 +39,18 @@ turn that re-reads the conversation, so work in few calls:
    where the code can't say it; never restate what the code does or address the
    reviewer (that goes in your summary). Never put secrets or keys in code, logs
    or notes.
+   Make the smallest complete change: prefer the standard library and
+   installed dependencies over new code; add nothing the task doesn't need.
+   Complete includes its tests and every caller. Never drop validation,
+   data-loss handling or security. Fix a reported bug once, at its cause.
 3. Fix only what the reply reports, then `test` again; look at what it lists
    as reached by no test. Once `test` passes, the code is done (it type-checks
    first; no `check`).
 Changing a signature or adding a field: `inspect <type or fn> --context` lists
 every construction or call site; patch the type or function and every site in
 one `submit` (`*** Update: <module>` holds several hunks), then `test`.
+`test` doesn't reach docs, config, JavaScript or golden files: `grep` the name
+there.
 Tests: one at the level the task reports (a checkout ticket gets a checkout
 test), and one per behavior the change shifts (a cap, a boundary). `inspect <a
 similar test> --context` shows its helpers; don't read whole test modules.
@@ -69,8 +79,9 @@ lists them):
 Files by tier: src/ and test/ *.gleam are symbols (`submit`, never `write`);
 solace.toml, AGENTS.md, .gitignore: `write` with `reason`, the human approves;
 the skills folder (Skills, below): `read` only; .solace/ and nested projects:
-their own commands; any other file, ignored
-or not: `read`, `write`, `move`, `remove` (not gleam.toml).
+their own commands; gleam.toml: `write` (validated, recorded with the task),
+never `move` or `remove`; any other file, ignored or not: `read`, `write`,
+`move`, `remove`.
 
 Commands in full
 Reading
@@ -110,9 +121,11 @@ Reading
                                 lines around each match, marked `12-`. Up to
                                 10 lines per file; the reply stops at a whole
                                 file and says how many it left out
-  session start [--task]        this overview again (--task: for the task in `text`)
+  session start [--task]        this overview again (--task: for the task in `text`;
+                                a board run's brief holds its first reply)
   session start [--scope <module>...]
                                 every symbol, and open work records with context
+                                (up to 4,000 bytes; `work list` shows them all)
   ... --project <folder>        this line only, in another project: its folder
                                 as session start lists it, from the Solace root,
                                 or `../x` from this project. Reads (view,
@@ -237,8 +250,9 @@ change with `submit`, protected ones with `write` and the human's approval.
             are refused (E6001); change it with `submit` and `delete`
   watched   every other text file within watch_limit, gleam.toml included (new
             dependencies are fetched by check, test and build): `read`, `write`,
-            `remove` and `move` work; searched by `grep`; a task's changes to
-            them are recorded, and undone if the task is canceled
+            `remove` and `move` work, except that gleam.toml is never moved or
+            removed; searched by `grep`; a task's changes to them are
+            recorded, and undone if the task is canceled
   protected solace.toml, AGENTS.md (the project's instructions for agents, shown
             at session start), every .gitignore and the skills folder (Skills,
             below): the human owns them. In a work run, `write` one alone, with
@@ -346,12 +360,21 @@ are refused, and so is run, except in a review for commands marked
   task ask                      a question, with 2–4 `options`; waits for the
                                 human's answer. Check the task's Questions and
                                 Notes first for what is already answered (a
-                                discussion's answers are notes)
+                                discussion's answers are notes).
+                                Each option's `text` gives a short example of its outcome.
+                                Never asks the human to change a file: make the
+                                change yourself, or ask to add a project
   task done                     finish: a work run's summary goes to human
-                                review; an investigation's report stays on the task
+                                review; an investigation's report stays on the task.
+                                After a `test` in the same call, it waits for that
+                                test to pass and reach every change; send it in a
+                                call of its own when the summary may need a caveat
 
 In notes, cite code by name (`board.rs::within`, `checkout.pay`), not by
-`file:line`: line numbers move.
+`file:line`: line numbers move. Name tasks, features and milestones as
+`task:<id>`, `feature:<id>` or `milestone:<id>`, written bare and never inside
+backticks: a bare reference renders as a link with the record's title, and a
+code span stays literal.
 
 Strategy runs (planning with the human on the Strategy page): read only; any
 command not listed here is refused.
@@ -406,7 +429,10 @@ command not listed here is refused.
                                 projects, every read needs it
 
 In notes and proposals, cite code by name (`board.rs::within`), not by
-`file:line`: line numbers move.
+`file:line`: line numbers move. Name tasks, features and milestones as
+`task:<id>`, `feature:<id>` or `milestone:<id>`, written bare and never inside
+backticks: a bare reference renders as a link with the record's title, and a
+code span stays literal.
 
 Host commands (humans only, refused in a run)
   create <name> [--javascript] [--yes]

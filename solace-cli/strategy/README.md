@@ -43,6 +43,9 @@ The root's features grouped by target milestone (D-87), with a form to create an
   the midpoint of its new neighbours' ranks, or the neighbour's rank ∓ 1 at either end (`features.move_rank`). The
   first feature's Up and the last one's Down are disabled. Features with equal ranks (a missing rank reads as 0)
   keep their order by id, so a move between them changes nothing visible.
+- **Start.** A `proposed` or `upcoming` feature's **Start** sends `PATCH /features/{id} {state: "active"}` (D-154);
+  the server keeps its start time and color (D-114) and plans its Backlog tasks (D-134). An active, complete or
+  canceled feature has no Start. A refused start shows in the alert above the groups, as a refused move does.
 - **Delete.** **Delete** asks inside the page: "Delete *title*? Its N tasks lose their link to it; the tasks stay."
   (N counts the linked tasks of every project). Confirming sends `DELETE /features/{id}`; the server clears the
   tasks' `feature`, and its `{task}` and `{removedFeature}` events update the page. A refused move or delete shows
@@ -143,7 +146,9 @@ collapses it to one line: the shown run's state and model, or whether a run is o
 
 - **Data.** The root's `/events` replays `{strategyRuns}` (no notes) after `{vision}` and sends `{strategyRun}` in
   full after every change, with no `project`. A replayed run keeps the notes the page already has. The model list
-  is `GET /models`. The pick offers only models that can start; under it, `solace_task.unavailable_view` gives the
+  is `GET /models`, one entry per Claude family (see the components README). The pick offers only models that
+  can start, each shown by its label (`solace_task.agent_option`, D-150), and a remembered alias the list no
+  longer shows becomes its family's entry (`solace_task.remembered`); under it, `solace_task.unavailable_view` gives the
   others' reasons, with Try again (`POST /models/try-again`) for a usage limit, and with none that can start,
   `solace_task.no_agents_view` says what to set up, or that every model is held by a usage limit.
 - **Attention.** A live `{strategyRun}` where a run goes waiting (its agent replied) or asks a new proposal sends

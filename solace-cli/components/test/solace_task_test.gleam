@@ -217,7 +217,7 @@ pub fn effort_choice_test() {
 
 pub fn models_loaded_keeps_choice_test() {
   let list_json =
-    "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\",\"high\"]},{\"id\":\"c\",\"label\":\"C\",\"available\":false}]"
+    "[{\"id\":\"a\",\"label\":\"A\",\"model\":\"a-model\"},{\"id\":\"b\",\"label\":\"B\",\"model\":\"b-model\",\"efforts\":[\"low\",\"high\"]},{\"id\":\"c\",\"label\":\"C\",\"model\":\"c-model\",\"available\":false}]"
   let base = fresh("1")
   let loaded = fn(model, text) {
     let #(m, _) = task.update(model, task.ModelsLoaded(text))
@@ -240,6 +240,42 @@ pub fn models_loaded_keeps_choice_test() {
   assert unavailable.effort == ""
   let unknown = loaded(task.Model(..base, model: "zzz", effort: ""), list_json)
   assert unknown.model == "a"
+  // A remembered alias the list no longer shows: its family's model, not the first one.
+  let families =
+    "[{\"id\":\"a\",\"label\":\"A\",\"model\":\"a-model\"},{\"id\":\"claude-sonnet-5-5\",\"label\":\"Sonnet 5.5\",\"agent\":\"claude\"},{\"id\":\"claude-opus-5-5\",\"label\":\"Opus 5.5\",\"agent\":\"claude\"}]"
+  let alias =
+    loaded(task.Model(..base, model: "claude-opus", effort: ""), families)
+  assert alias.model == "claude-opus-5-5"
+  let gone =
+    loaded(task.Model(..base, model: "claude-fable", effort: ""), families)
+  assert gone.model == "a"
+  // Fetched again with the task: a failed reply changes nothing, and an
+  // unavailable pick the list still has stays chosen.
+  let refreshed = fn(model, text) {
+    let #(m, _) = task.update(model, task.ModelsRefreshed(text))
+    m
+  }
+  let held = task.Model(..kept, error: "")
+  let failed = refreshed(held, "oops")
+  assert failed.error == ""
+  assert failed.models == held.models
+  let limited =
+    refreshed(
+      held,
+      "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"available\":false,\"efforts\":[\"low\",\"high\"]}]",
+    )
+  assert limited.model == "b"
+  assert limited.effort == "high"
+  // A refresh that drops the chosen effort leaves the pick at its default.
+  let narrowed =
+    refreshed(
+      held,
+      "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\"]}]",
+    )
+  assert narrowed.model == "b"
+  assert narrowed.effort == ""
+  let dropped_pick = refreshed(held, "[{\"id\":\"a\",\"label\":\"A\"}]")
+  assert dropped_pick.model == "a"
 }
 
 pub fn settings_question_shows_diff_and_approve_test() {
@@ -618,6 +654,11 @@ pub fn reveal_shows_the_tab_when_the_task_is_open_test() {
         model.generation,
         string.replace(text, "\"id\":\"1\"", "\"id\":\"2\""),
       ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.WorkflowLoaded(model.generation, "{\"columns\":[]}"),
     )
   #(model.tab, model.revealing) |> should.equal(#("questions", ""))
   // No notice yet: nothing changes.
@@ -1535,7 +1576,7 @@ pub fn a_vision_proposal_saved_before_before_shows_markdown_test() {
 /// The default workflow's action buttons show their labels, not the action
 /// names (D-108), and the fixed buttons read `ui_labels`. Back to backlog
 /// shows from Planning only with the `strategy` attribute (D-132). Back to
-/// planning shows from Needs review and Canceled, feature or not (D-133).
+/// planning shows from Review and Canceled, feature or not (D-133).
 pub fn default_workflow_buttons_show_their_labels_test() {
   let model = fresh("1")
   let #(model, _) =
@@ -1543,7 +1584,7 @@ pub fn default_workflow_buttons_show_their_labels_test() {
       model,
       task.WorkflowLoaded(
         model.generation,
-        "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\",\"cancel\"]},{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\",\"complete\",\"to_backlog\",\"cancel\"]},{\"id\":\"assigned\",\"label\":\"Assigned\",\"actions\":[\"reassign\",\"new_agent\",\"review\",\"to_planning\",\"cancel\"]},{\"id\":\"needs_review\",\"label\":\"Needs review\",\"actions\":[\"approve\",\"complete\",\"review\",\"reassign\",\"start_over\",\"to_planning\",\"cancel\"]},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true,\"actions\":[\"to_planning\"]}],\"actions\":{\"plan\":{\"to\":\"planning\",\"label\":\"Plan\"},\"to_backlog\":{\"to\":\"backlog\",\"label\":\"Back to backlog\"},\"to_planning\":{\"unstamp\":\"approved\",\"to\":\"planning\",\"label\":\"Back to planning\"},\"investigate\":{\"run\":\"investigate\",\"model\":true,\"label\":\"Investigate\"},\"review\":{\"run\":\"review\",\"label\":\"Review\"},\"assign\":{\"to\":\"assigned\",\"run\":\"work\",\"model\":true,\"label\":\"Assign\"},\"new_agent\":{\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"New agent\"},\"approve\":{\"stamp\":\"approved\",\"label\":\"Approve\"},\"complete\":{\"to\":\"complete\",\"label\":\"Complete\"},\"reassign\":{\"unstamp\":\"approved\",\"to\":\"assigned\",\"run\":\"work\",\"label\":\"Reassign\"},\"start_over\":{\"revert\":true,\"unstamp\":\"approved\",\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"Start over\"},\"cancel\":{\"revert\":true,\"to\":\"cancelled\",\"label\":\"Cancel\"}}}",
+        "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\",\"cancel\"]},{\"id\":\"planning\",\"label\":\"Planning\",\"actions\":[\"investigate\",\"assign\",\"complete\",\"to_backlog\",\"cancel\"]},{\"id\":\"assigned\",\"label\":\"Assigned\",\"actions\":[\"reassign\",\"new_agent\",\"review\",\"to_planning\",\"cancel\"]},{\"id\":\"needs_review\",\"label\":\"Review\",\"actions\":[\"approve\",\"complete\",\"review\",\"reassign\",\"start_over\",\"to_planning\",\"cancel\"]},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true,\"actions\":[\"to_planning\"]}],\"actions\":{\"plan\":{\"to\":\"planning\",\"label\":\"Plan\"},\"to_backlog\":{\"to\":\"backlog\",\"label\":\"Back to backlog\"},\"to_planning\":{\"unstamp\":\"approved\",\"to\":\"planning\",\"label\":\"Back to planning\"},\"investigate\":{\"run\":\"investigate\",\"model\":true,\"label\":\"Investigate\"},\"review\":{\"run\":\"review\",\"label\":\"Review\"},\"assign\":{\"to\":\"assigned\",\"run\":\"work\",\"model\":true,\"label\":\"Assign\"},\"new_agent\":{\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"New agent\"},\"approve\":{\"stamp\":\"approved\",\"label\":\"Approve\"},\"complete\":{\"to\":\"complete\",\"label\":\"Complete\"},\"reassign\":{\"unstamp\":\"approved\",\"to\":\"assigned\",\"run\":\"work\",\"label\":\"Reassign\"},\"start_over\":{\"revert\":true,\"unstamp\":\"approved\",\"to\":\"assigned\",\"run\":\"new_work\",\"label\":\"Start over\"},\"cancel\":{\"revert\":true,\"to\":\"cancelled\",\"label\":\"Cancel\"}}}",
       ),
     )
   let #(model, _) =
@@ -2064,4 +2105,427 @@ pub fn a_wide_detail_shows_two_columns_test() {
   html(failed)
   |> string.contains("<p role=\"alert\">Broken</p>")
   |> should.be_true
+}
+
+/// The pick shows each model by one name, its label: not the model string beside it.
+pub fn the_pick_names_the_model_it_runs_test() {
+  let model = fresh("1")
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded(
+        "[{\"id\":\"local\",\"label\":\"Local: Strata Swift\",\"model\":\"swift-iq3_xxs\"},{\"id\":\"claude-opus\",\"label\":\"Opus 5.5\",\"model\":\"opus\"},{\"id\":\"argv\",\"label\":\"Fake agent\"}]",
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.TaskLoaded(
+        model.generation,
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
+      ),
+    )
+  let rendered = html(model)
+  rendered
+  |> string.contains(">Local: Strata Swift</option>")
+  |> should.be_true
+  rendered
+  |> string.contains(">Opus 5.5</option>")
+  |> should.be_true
+  rendered |> string.contains(">Fake agent</option>") |> should.be_true
+}
+
+/// The shared modal's look names no color of its own, only the theme's
+/// tokens; its markup is checked where a page shows a dialog.
+pub fn modal_styles_use_only_tokens_test() {
+  task.modal_styles |> string.contains(".modal-backdrop") |> should.be_true
+  task.modal_styles |> string.contains("var(--shadow)") |> should.be_true
+  task.modal_styles |> string.contains("#") |> should.be_false
+  task.modal_styles |> string.contains("hsl") |> should.be_false
+}
+
+/// Opening another task keeps the one shown, inert, until the new task and
+/// its workflow have both arrived; then both swap in at once.
+pub fn switching_tasks_keeps_the_old_one_until_the_new_loads_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.WorkflowLoaded(model.generation, "{\"columns\":[{\"id\":\"x\"}]}"),
+    )
+  let #(model, _) = task.update(model, task.Text("typed"))
+  let #(model, _) =
+    task.update(task.Model(..model, connected: True), task.TaskChanged("2"))
+  let rendered = html(model)
+  string.contains(rendered, "One") |> should.be_true
+  string.contains(rendered, "inert") |> should.be_true
+  let #(model, _) =
+    task.update(
+      model,
+      task.TaskLoaded(
+        model.generation,
+        "{\"id\":\"2\",\"title\":\"Two\",\"body\":\"\",\"column\":\"y\",\"rank\":1}",
+      ),
+    )
+  option.map(model.task, fn(t) { t.id }) |> should.equal(Some("1"))
+  let #(model, _) =
+    task.update(
+      model,
+      task.WorkflowLoaded(model.generation, "{\"columns\":[{\"id\":\"y\"}]}"),
+    )
+  option.map(model.task, fn(t) { t.id }) |> should.equal(Some("2"))
+  model.staged |> should.equal(None)
+  model.text |> should.equal("")
+  let rendered = html(model)
+  string.contains(rendered, "Two") |> should.be_true
+  string.contains(rendered, "inert") |> should.be_false
+}
+
+/// A new task that fails to load leaves no stale task on screen.
+pub fn a_failed_load_while_switching_drops_the_old_task_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+    )
+  let #(model, _) =
+    task.update(task.Model(..model, connected: True), task.TaskChanged("2"))
+  let #(model, _) =
+    task.update(
+      model,
+      task.TaskLoaded(model.generation, "{\"error\":\"Not found\"}"),
+    )
+  model.task |> should.equal(None)
+  model.staged |> should.equal(None)
+  model.error |> should.not_equal("")
+}
+
+/// An action's reply for the task shown before another opened changes nothing.
+pub fn a_reply_for_the_task_shown_before_is_dropped_test() {
+  let one =
+    "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1}"
+  let model = loaded(one)
+  let #(model, _) = task.update(model, task.TaskChanged("2"))
+  let #(after, _) = task.update(model, task.Changed(one))
+  after |> should.equal(model)
+}
+
+/// A workflow that fails to load while switching leaves no stale task either.
+pub fn a_failed_workflow_while_switching_drops_the_old_task_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+    )
+  let #(model, _) =
+    task.update(task.Model(..model, connected: True), task.TaskChanged("2"))
+  let #(model, _) =
+    task.update(
+      model,
+      task.WorkflowLoaded(model.generation, "{\"error\":\"Down\"}"),
+    )
+  model.task |> should.equal(None)
+  model.staged |> should.equal(None)
+  model.error |> should.not_equal("")
+}
+
+/// While a task loads, its events and its project's workflow wait with it:
+/// an event before the reply doesn't show the task on its own.
+pub fn live_events_while_switching_wait_with_the_new_task_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+    )
+  let #(model, _) =
+    task.update(
+      task.Model(..model, connected: True, hosted: True),
+      task.TaskChanged("2"),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.Live(
+        "{\"task\":{\"id\":\"2\",\"title\":\"Newer\",\"body\":\"\",\"column\":\"y\",\"rank\":1}}",
+      ),
+    )
+  option.map(model.task, fn(t) { t.id }) |> should.equal(Some("1"))
+  let #(model, _) =
+    task.update(
+      model,
+      task.Live("{\"workflow\":{\"columns\":[{\"id\":\"z\"}]}}"),
+    )
+  option.map(model.task, fn(t) { t.id }) |> should.equal(Some("1"))
+  let #(model, _) =
+    task.update(
+      model,
+      task.TaskLoaded(
+        model.generation,
+        "{\"id\":\"2\",\"title\":\"Two\",\"body\":\"\",\"column\":\"y\",\"rank\":1}",
+      ),
+    )
+  option.map(model.task, fn(t) { t.title }) |> should.equal(Some("Two"))
+  list.map(model.workflow.columns, fn(c) { c.id }) |> should.equal(["z"])
+  model.staged |> should.equal(None)
+}
+
+/// Opened while disconnected, nothing is asked for: the old task goes at once.
+pub fn switching_while_disconnected_clears_at_once_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+    )
+  let #(model, _) = task.update(model, task.TaskChanged("2"))
+  model.task |> should.equal(None)
+  model.staged |> should.equal(None)
+}
+
+/// A task removed from its project while it loads is opened from its next
+/// project; one not yet loaded drops the task shown before.
+pub fn a_task_that_moves_while_switching_is_followed_test() {
+  let projects =
+    "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"},{\"dir\":\"b\",\"name\":\"b\",\"base\":\"/p/b\"}]}"
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1,\"scope\":[\"a\"]}",
+    )
+  let #(model, _) = task.update(model, task.ProjectsLoaded(projects))
+  let model =
+    task.Model(..model, dir: "a", base: "/p/a", connected: True, hosted: True)
+  let #(model, _) = task.update(model, task.TaskChanged("2"))
+  let #(waiting, _) =
+    task.update(model, task.Live("{\"project\":\"a\",\"removed\":\"2\"}"))
+  waiting.task |> should.equal(None)
+  waiting.staged |> should.equal(None)
+  let #(model, _) =
+    task.update(
+      model,
+      task.TaskLoaded(
+        model.generation,
+        "{\"id\":\"2\",\"title\":\"Two\",\"body\":\"\",\"column\":\"y\",\"rank\":1,\"scope\":[\"a\",\"b\"]}",
+      ),
+    )
+  let #(model, _) =
+    task.update(model, task.Live("{\"project\":\"a\",\"removed\":\"2\"}"))
+  #(model.dir, model.base) |> should.equal(#("b", "/p/b"))
+}
+
+/// An event for the task being loaded, after its reply, is what shows at
+/// the swap, with the reply's changes.
+pub fn an_event_after_the_staged_reply_shows_at_the_swap_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+    )
+  let #(model, _) =
+    task.update(
+      task.Model(..model, connected: True, hosted: True),
+      task.TaskChanged("2"),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.TaskLoaded(
+        model.generation,
+        "{\"id\":\"2\",\"title\":\"Two\",\"body\":\"\",\"column\":\"y\",\"rank\":1}",
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.Live(
+        "{\"task\":{\"id\":\"2\",\"title\":\"Newer\",\"body\":\"\",\"column\":\"y\",\"rank\":1}}",
+      ),
+    )
+  option.map(model.task, fn(t) { t.id }) |> should.equal(Some("1"))
+  let #(model, _) =
+    task.update(
+      model,
+      task.WorkflowLoaded(model.generation, "{\"columns\":[]}"),
+    )
+  option.map(model.task, fn(t) { t.title }) |> should.equal(Some("Newer"))
+}
+
+/// Removed while another task loads, the element drops the one shown before.
+pub fn disconnecting_while_switching_drops_the_old_task_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+    )
+  let #(model, _) =
+    task.update(
+      task.Model(..model, connected: True, watching: "r", text: "draft"),
+      task.TaskChanged("2"),
+    )
+  let #(model, _) = task.update(model, task.Disconnected)
+  model.task |> should.equal(None)
+  model.staged |> should.equal(None)
+  #(model.watching, model.text) |> should.equal(#("", ""))
+  // Added back, the new task shows with nothing of the old one's.
+  let #(model, _) = task.update(model, task.Connected)
+  let #(model, _) =
+    task.update(
+      model,
+      task.TaskLoaded(
+        model.generation,
+        "{\"id\":\"2\",\"title\":\"Two\",\"body\":\"\",\"column\":\"y\",\"rank\":1}",
+      ),
+    )
+  option.map(model.task, fn(t) { t.id }) |> should.equal(Some("2"))
+  #(model.watching, model.text) |> should.equal(#("", ""))
+}
+
+/// The Delete button floats right and comes first in the summary, so the
+/// author line wraps around it instead of pushing it off the corner.
+pub fn note_delete_button_hugs_the_corner_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[{\"author\":\"human\",\"run\":null,\"text\":\"hi\",\"time\":1}]}",
+    )
+  let #(model, _) = task.update(model, task.Tab("notes"))
+  let rendered = html(model)
+  // The note's summary alone: a task with runs renders transcript summaries too.
+  let assert [_, note] = string.split(rendered, "class=\"note\"")
+  let assert [_, after] = string.split(note, "<summary>")
+  let assert [summary, _] = string.split(after, "</summary>")
+  let assert [before_author, _] = string.split(summary, ">human</strong>")
+  before_author |> string.contains("class=\"delete\"") |> should.be_true
+  // The note button's own rule: the corner float, not the flex push it replaces.
+  let assert [_, delete] = string.split(rendered, ".note .delete{")
+  let assert [rule, ..] = string.split(delete, "}")
+  rule |> string.contains("float:right") |> should.be_true
+  rule |> string.contains("margin-left:auto") |> should.be_false
+  // The summary is as tall as the button, so it contains the float.
+  let assert [_, corner] = string.split(rendered, "details.note>summary{")
+  let assert [height, ..] = string.split(corner, "}")
+  height
+  |> string.contains("min-height:var(--control-h-small)")
+  |> should.be_true
+}
+
+/// The Details tab's first line links to the task's feature with its
+/// title; one that can't be found shows its id. No feature, no line.
+pub fn feature_line_test() {
+  let none = loaded(depends_task("1", "T", "backlog", ""))
+  assert !string.contains(html(none), "class=\"feature\"")
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"Body text\",\"column\":\"backlog\",\"rank\":1,\"feature\":\"f1\"}",
+    )
+  let g = model.generation
+  let #(model, _) = task.update(model, task.WorkflowLoaded(g, depends_flow))
+  assert model.feature == Some(#("f1", None))
+  let page = html(model)
+  assert string.contains(page, "href=\"/feature/f1\"")
+  assert string.contains(page, "data-feature=\"f1\"")
+  assert string.contains(page, ">f1</a>")
+  let #(missing, _) =
+    task.update(
+      model,
+      task.FeatureLoaded(
+        g,
+        "{\"code\":\"E7023\",\"message\":\"no such feature\"}",
+      ),
+    )
+  assert string.contains(html(missing), ">f1</a>")
+  let #(model, _) =
+    task.update(
+      model,
+      task.FeatureLoaded(g, "{\"id\":\"f1\",\"title\":\"Polish\"}"),
+    )
+  let page = html(model)
+  assert string.contains(page, ">Polish</a>")
+  // It comes before the description.
+  let assert [before, ..] = string.split(page, "Body text")
+  assert string.contains(before, "class=\"feature\"")
+  // A reply for a task shown before changes nothing.
+  let #(same, _) =
+    task.update(
+      model,
+      task.FeatureLoaded(g - 1, "{\"id\":\"f1\",\"title\":\"Old\"}"),
+    )
+  assert same == model
+}
+
+/// The dependencies line also lists the tasks that depend on this one, each
+/// a link with its column, an unfinished one marked. A failed reply, or none,
+/// leaves no **Needed by**.
+pub fn needed_by_line_test() {
+  let model = loaded(depends_task("1", "T", "backlog", "\"d1\""))
+  let g = model.generation
+  let #(model, _) = task.update(model, task.WorkflowLoaded(g, depends_flow))
+  assert model.dependents == Some([])
+  assert !string.contains(html(model), "Needed by")
+  let #(model, _) =
+    task.update(
+      model,
+      task.DependentsLoaded(
+        g,
+        "{\"tasks\":[{\"id\":\"n1\",\"title\":\"Later\",\"column\":\"backlog\"},{\"id\":\"n2\",\"title\":\"Done\",\"column\":\"complete\"}]}",
+      ),
+    )
+  let page = html(model)
+  assert string.contains(page, "Depends on")
+  assert string.contains(page, "Needed by")
+  assert string.contains(page, "href=\"/task/n1\"")
+  assert string.contains(page, "data-task=\"n2\"")
+  assert string.contains(page, ">Later</a> (Backlog, unfinished)")
+  assert string.contains(page, ">Done</a> (Complete)")
+  // One line holds both.
+  assert list.length(string.split(page, "class=\"depends\"")) == 2
+  let alone = loaded(depends_task("1", "T", "backlog", ""))
+  let #(alone, _) =
+    task.update(
+      alone,
+      task.DependentsLoaded(
+        alone.generation,
+        "{\"code\":\"E7023\",\"message\":\"no such task\"}",
+      ),
+    )
+  assert !string.contains(html(alone), "class=\"depends\"")
+}
+
+/// A dependent's update under another project changes its line; a task that
+/// starts depending on this one joins it, one that stops leaves it, and an
+/// unrelated task changes nothing.
+pub fn needed_by_line_updates_live_test() {
+  let model =
+    task.Model(
+      ..loaded(depends_task("1", "T", "backlog", "")),
+      dir: "a",
+      hosted: True,
+    )
+  let g = model.generation
+  let #(model, _) = task.update(model, task.WorkflowLoaded(g, depends_flow))
+  let #(model, _) =
+    task.update(
+      model,
+      task.DependentsLoaded(
+        g,
+        "{\"tasks\":[{\"id\":\"n1\",\"title\":\"Later\",\"column\":\"backlog\"}]}",
+      ),
+    )
+  let event = fn(id, title, column, depends) {
+    "{\"project\":\"b\",\"task\":"
+    <> depends_task(id, title, column, depends)
+    <> "}"
+  }
+  let #(model, _) =
+    task.update(
+      model,
+      task.Handed([
+        #(1, event("n1", "Renamed", "complete", "\"1\"")),
+        #(2, event("n2", "New", "backlog", "\"1\"")),
+        #(3, event("n9", "Other", "backlog", "")),
+      ]),
+    )
+  let page = html(model)
+  assert string.contains(page, ">Renamed</a> (Complete)")
+  assert string.contains(page, ">New</a> (Backlog, unfinished)")
+  assert !string.contains(page, "Other")
+  let #(model, _) =
+    task.update(model, task.Live(event("n1", "Renamed", "complete", "")))
+  let page = html(model)
+  assert !string.contains(page, "Renamed")
+  assert string.contains(page, ">New</a>")
 }

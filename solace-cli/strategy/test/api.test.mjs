@@ -34,6 +34,43 @@ test('a linked card is revealed once it is drawn', async () => {
 });
 
 // A workspace root: its own `/tasks` holds only its project, so the list comes from the merged stream.
+// A feature card dragged by its grip: the others slide aside, and the drop reports the index it passes.
+test('a dragged feature card reports where it lands, or -1 when cancelled', async () => {
+  const { drag_card } = await import('../src/api.mjs');
+  const make = top => ({
+    style: {}, classes: new Set(),
+    classList: { add(c) { this.owner.classes.add(c); }, remove(c) { this.owner.classes.delete(c); } },
+    getBoundingClientRect: () => ({ top, bottom: top + 50 }),
+  });
+  const cards = [make(0), make(60), make(120)];
+  cards.forEach(c => { c.classList.owner = c; });
+  const section = { querySelectorAll: () => cards };
+  cards.forEach(c => { c.closest = () => section; });
+  const root = { querySelector: () => cards[0] };
+  const listeners = {};
+  const [add, remove] = [globalThis.addEventListener, globalThis.removeEventListener];
+  globalThis.addEventListener = (k, f) => { listeners[k] = f; };
+  globalThis.removeEventListener = k => { delete listeners[k]; };
+  try {
+    const landed = [];
+    drag_card(root, 'f1', 25, i => landed.push(i));
+    expect(cards[0].classes.has('dragging')).toBe(true);
+    // Past the second card's middle (85): the second slides up into its place.
+    listeners.pointermove({ clientY: 95 });
+    expect([cards[0].style.transform, cards[1].style.transform, cards[2].style.transform]).toEqual(['translateY(70px)', 'translateY(-60px)', '']);
+    listeners.pointerup({});
+    expect(landed).toEqual([1]);
+    expect([cards[0].classes.has('dragging'), cards[1].style.transform, listeners.pointermove]).toEqual([false, '', undefined]);
+    drag_card(root, 'f1', 25, i => landed.push(i));
+    listeners.pointermove({ clientY: 200 });
+    listeners.keydown({ key: 'Escape' });
+    expect(landed).toEqual([1, -1]);
+  } finally {
+    globalThis.addEventListener = add;
+    globalThis.removeEventListener = remove;
+  }
+});
+
 test('Tasks tab merges every project, sorts and filters, opens a task and links it inline', async () => {
   const requests = [];
   const workflow = { columns: [{ id: 'backlog', label: 'Backlog', actions: [], final: false }, { id: 'done', label: 'Done', actions: [], final: true }] };
@@ -339,6 +376,12 @@ test('Features tab creates a feature and edits it with only the changed fields',
     dispatch(new strategy.MoveFeature('f3', rank));
     await until(() => order());
     expect(moves).toEqual([{ rank: 0 }]);
+    // Start (D-154): a proposed feature's one PATCH to active; the button is gone once it is active.
+    expect(html()).toContain('aria-label="Start Tags"');
+    expect(html()).not.toContain('aria-label="Start Search"');
+    dispatch(new strategy.StartFeature('f3'));
+    await until(() => !html().includes('aria-label="Start Tags"'));
+    expect(moves).toEqual([{ rank: 0 }, { state: 'active' }]);
     // Delete asks first, naming the tasks that lose their link; the events update the page.
     dispatch(new strategy.DeleteFeature('f1'));
     expect(html()).toContain('Delete <em>Search</em>? Its 1 task loses its link to it; the tasks stay.');

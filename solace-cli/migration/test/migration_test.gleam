@@ -130,11 +130,14 @@ pub fn projects_section_test() {
   let #(model, _) = migration.init(Nil)
   let html = element.to_string(migration.view(model))
   assert !string.contains(html, "class=\"projects\"")
+  // Nothing to bring in until the migration loads.
+  assert !string.contains(html, "Bring in an existing project")
   let #(model, _) =
     migration.update(
       model,
       migration.ProjectsLoaded(
         "{\"workspace\":true,\"projects\":[{\"dir\":\".\",\"label\":\"root\",\"name\":\"app\",\"base\":\"\"},{\"dir\":\"a\",\"label\":\"a\",\"name\":\"pa\",\"base\":\"/p/a\"}],\"found\":[{\"dir\":\"tools\",\"name\":\"tools\",\"imported\":true,\"member\":false},{\"dir\":\"old\",\"name\":\"old\",\"imported\":false,\"member\":false}]}",
+        True,
       ),
     )
   let html = element.to_string(migration.view(model))
@@ -171,7 +174,10 @@ pub fn projects_section_test() {
   let #(model, _) =
     migration.update(
       model,
-      migration.ProjectsLoaded("{\"code\":\"E7003\",\"message\":\"busy\"}"),
+      migration.ProjectsLoaded(
+        "{\"code\":\"E7003\",\"message\":\"busy\"}",
+        False,
+      ),
     )
   assert string.contains(
     element.to_string(migration.view(model)),
@@ -186,6 +192,7 @@ pub fn removing_a_project_test() {
       model,
       migration.ProjectsLoaded(
         "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"},{\"dir\":\"b\",\"label\":\"b\",\"name\":\"b\",\"base\":\"/p/b\"}],\"found\":[]}",
+        True,
       ),
     )
   let shows = fn(model, text) {
@@ -197,6 +204,11 @@ pub fn removing_a_project_test() {
   assert model.projects.removing == Some(#("a", False, ""))
   assert shows(model, solace_task.ui_label("remove_only"))
   assert shows(model, "Remove and delete files")
+  // The dialog is the shared modal from components.
+  assert shows(
+    model,
+    "<div class=\"modal-backdrop\"><div aria-modal=\"true\" class=\"modal\" role=\"alertdialog\">",
+  )
   assert !shows(model, solace_task.ui_label("delete_permanently"))
   // Step two warns, and Delete stays disabled until the name matches.
   let #(model, _) = migration.update(model, migration.RemoveFiles)
@@ -227,6 +239,7 @@ pub fn removing_a_project_test() {
       model,
       migration.ProjectsLoaded(
         "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"}],\"found\":[]}",
+        False,
       ),
     )
   assert model.projects.removing == None
@@ -268,4 +281,40 @@ pub fn removing_needs_the_second_step_and_the_exact_name_test() {
   // Adding a directory that was not found does nothing.
   let #(same, _) = migration.update(model, migration.AddProject("zzz"))
   assert same == model
+}
+
+/// A reload, such as after a reconnect, keeps what was typed; the reply to
+/// a change clears it.
+pub fn a_reload_keeps_typed_fields_test() {
+  let list = "{\"workspace\":true,\"projects\":[],\"found\":[]}"
+  let #(model, _) = migration.init(Nil)
+  let #(model, _) = migration.update(model, migration.ProjectName("web"))
+  let #(model, _) = migration.update(model, migration.ProjectDir("apps/web"))
+  let #(model, _) = migration.update(model, migration.MigrationConnected)
+  let #(model, _) =
+    migration.update(model, migration.ProjectsLoaded(list, True))
+  assert #(model.projects.name, model.projects.dir) == #("web", "apps/web")
+  let #(model, _) =
+    migration.update(model, migration.ProjectsLoaded(list, False))
+  assert #(model.projects.name, model.projects.dir) == #("", "")
+}
+
+/// A reload keeps an open removal while its project is listed, and closes
+/// it once the project has left the list — removed from another window,
+/// for example.
+pub fn a_reload_closes_a_removal_whose_project_is_gone_test() {
+  let two =
+    "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"},{\"dir\":\"b\",\"label\":\"b\",\"name\":\"b\",\"base\":\"/p/b\"}],\"found\":[]}"
+  let one =
+    "{\"workspace\":true,\"projects\":[{\"dir\":\"a\",\"label\":\"a\",\"name\":\"a\",\"base\":\"/p/a\"}],\"found\":[]}"
+  let #(model, _) = migration.init(Nil)
+  let #(model, _) = migration.update(model, migration.ProjectsLoaded(two, True))
+  let #(model, _) = migration.update(model, migration.RemoveProject("b"))
+  assert model.projects.removing == Some(#("b", False, ""))
+  // A reload that still lists the project keeps the dialog open.
+  let #(model, _) = migration.update(model, migration.ProjectsLoaded(two, True))
+  assert model.projects.removing == Some(#("b", False, ""))
+  // A reload where the project is gone closes it.
+  let #(model, _) = migration.update(model, migration.ProjectsLoaded(one, True))
+  assert model.projects.removing == None
 }

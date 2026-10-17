@@ -781,12 +781,16 @@ fn lanes_view(model: Model) -> Element(Msg) {
 
 /// A lane's columns, with every task that covers its project (D-61); a card
 /// opens its task from the project it is stored in. A card in a final column
-/// has an Archive button in its upper right corner (D-95).
+/// has an Archive button in its upper right corner (D-95); the card's text
+/// fills the card and its first line wraps around the button, which a floated
+/// spacer inside the card makes room for.
 /// A card waiting on an unfinished dependency is dimmed and says what it
 /// waits on; it still opens as any other.
 /// A card's stripe is its feature's color, gray with no feature or one not
-/// started yet; its tooltip and screen-reader text name the feature, so color
-/// is not its only sign (D-114).
+/// started yet; a line under the title names the feature and the tooltip
+/// spells it out, so color is not its only sign (D-114, D-155).
+/// A card shows its title cut to 200 characters, the whole title in its
+/// tooltip; it shows no scope line, which the task's Scope tab lists.
 fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
   let colors =
     solace_task.feature_colors(list.map(model.features, fn(f) { #(f.0, f.2) }))
@@ -819,16 +823,20 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
             Some(f) -> list.key_find(colors, f) |> result.unwrap("")
             None -> ""
           }
-          let feature = case t.feature {
-            Some(f) ->
-              case list.key_find(names, f) {
-                Ok(name) if name != "" -> "Feature: " <> name
-                _ -> ""
-              }
+          let feature_name = case t.feature {
+            Some(f) -> list.key_find(names, f) |> result.unwrap("")
             None -> ""
           }
+          let feature = case feature_name {
+            "" -> ""
+            name -> "Feature: " <> name
+          }
+          let short = card_title(t.title)
           let tip =
-            [waiting, feature]
+            case short == t.title {
+              True -> [waiting, feature]
+              False -> ["Title: " <> t.title, waiting, feature]
+            }
             |> list.filter(fn(s) { s != "" })
             |> string.join("\n")
           h.div([a.class("card-wrap")], [
@@ -891,20 +899,11 @@ fn columns_view(model: Model, lane: Lane, labels: Bool) -> Element(Msg) {
                   False -> h.text("")
                   True -> debt_mark()
                 },
-                h.text(t.title),
-                case feature {
+                h.text(short),
+                case feature_name {
                   "" -> h.text("")
-                  _ -> h.span([a.class("sr-only")], [h.text(" · " <> feature)])
-                },
-                case t.scope {
-                  [_, _, ..] ->
-                    h.small([a.class("muted")], [
-                      h.text(string.join(
-                        list.map(t.scope, label_of(model, _)),
-                        " · ",
-                      )),
-                    ])
-                  _ -> h.text("")
+                  _ ->
+                    h.small([a.class("card-feature")], [h.text(feature_name)])
                 },
                 case waiting {
                   "" -> h.text("")
@@ -1010,10 +1009,6 @@ fn cards(model: Model, lane: Lane) -> List(#(String, solace_task.Task)) {
   })
 }
 
-fn label_of(model: Model, dir: String) -> String {
-  lane_of(model, dir) |> result.map(fn(l) { l.label }) |> result.unwrap(dir)
-}
-
 pub type Source
 
 @external(javascript, "./api.mjs", "close_events")
@@ -1057,7 +1052,7 @@ textarea{font-family:inherit}
 .lanes{display:block;overflow:visible}.lane-head{position:sticky;top:0;z-index:5;background:var(--paper);border-bottom:2px solid var(--edge)}.lane-head .column{background:transparent;border-color:transparent;border-top:0;border-bottom:0}.lane-head h2{margin:0 -12px;border-bottom:0}.lane .lane-head{margin:0;padding:0}
 .lane{border-color:var(--edge);background:var(--paper)}.lane-title{padding:6px 0}.lane-toggle{font-weight:700;background:transparent}.lane-toggle:hover{background:var(--hover)}
 .card{position:relative;background:var(--paper);border-color:var(--edge);padding:10px 12px 10px 22px;line-height:1.35;--tab:#999999}
-.card::before{content:\"\";position:absolute;inset:0 auto 0 0;width:8px;background:var(--tab)}
+.card::after{content:\"\";position:absolute;inset:0 auto 0 0;width:8px;background:var(--tab)}
 .card:hover{background:var(--hover)}.card+.card{margin-top:8px}
 .attention{font-weight:700}.stamp{margin-right:6px}
 .debt{display:inline-block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;border:1px solid var(--test);color:var(--test);padding:0 6px;margin-right:6px}.card:has(.debt){--tab:var(--test)}
@@ -1270,7 +1265,7 @@ fn hand(model: Model, text: String) -> Model {
 }
 
 const archive_styles =
-  ".card-wrap{position:relative}.card-wrap+.card-wrap{margin-top:8px}.card-wrap:has(.archive) .card{padding-right:84px}.card-wrap .archive{position:absolute;top:6px;right:6px;margin:0;padding:2px 8px;font-size:12px}"
+  ".card-wrap{position:relative}.card-wrap+.card-wrap{margin-top:8px}.card-wrap:has(.archive) .card::before{content:\"\";float:right;width:64px;height:32px}.card-wrap .archive{position:absolute;top:6px;right:6px;margin:0;padding:2px 8px;font-size:12px}"
 
 fn push(model: Model, text: String) -> Model {
   let n = model.live_n + 1
@@ -1313,7 +1308,7 @@ fn waiting_on(model: Model, t: solace_task.Task) -> List(String) {
 }
 
 const waiting_styles =
-  ".card.waiting{opacity:.55}.card.waiting:hover,.card.waiting[aria-current=true],.card.waiting:focus-visible{opacity:.85}.card .waiting-on{font-size:13px}"
+  ".card.waiting{opacity:.55}.card.waiting:hover,.card.waiting[aria-current=true],.card.waiting:focus-visible{opacity:.85}.card .waiting-on,.card .card-feature{font-size:13px}"
 
 /// Whether a live update raised a notice: the host hears `attention`, which
 /// flags the Board tab while another page shows. `live` only adds notices.
@@ -1784,3 +1779,12 @@ fn scroll_gutter() -> Int
 
 /// `.column`'s border width, in pixels.
 const column_border = 1
+
+/// The title shown on a card: at most 200 characters, with an ellipsis when
+/// it is cut; the whole title is in the card's tooltip.
+fn card_title(title: String) -> String {
+  case string.length(title) > 200 {
+    True -> string.slice(title, 0, 200) <> "…"
+    False -> title
+  }
+}

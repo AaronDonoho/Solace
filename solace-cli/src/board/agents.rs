@@ -96,7 +96,8 @@ fn save_models(path: &Path, all: &Value) -> Result<(), Failure> {
 /// same id, and a configured model keeps its entry — the human's config wins.
 /// Models a discovery dropped stay, marked `gone`, so tasks already using them
 /// keep working; they are not offered for a new run. Once a run has named the
-/// model it used, an alias's label names it.
+/// model it used, an alias's label is that model's: the label of the entry
+/// running it, else its id.
 pub(super) fn merge(configured: &Value) -> Vec<Value> {
     merge_from(configured, &saved_models(&models_path()))
 }
@@ -105,6 +106,7 @@ pub(super) fn merge_from(configured: &Value, all: &Value) -> Vec<Value> {
     let mut out: Vec<Value> = configured.as_array().cloned().unwrap_or_default();
     for k in KINDS {
         for m in all[k.name]["models"].as_array().unwrap_or(&vec![]).iter() {
+            let m = &plain_label(m);
             match out.iter().position(|x| x["id"] == m["id"]) {
                 Some(i) if out[i]["configured"] == true => {}
                 Some(i) => out[i] = m.clone(),
@@ -114,19 +116,45 @@ pub(super) fn merge_from(configured: &Value, all: &Value) -> Vec<Value> {
     }
     for m in all["gone"].as_object().unwrap_or(&Default::default()).values() {
         if !out.iter().any(|x| x["id"] == m["id"]) {
-            let mut m = m.clone();
+            let mut m = plain_label(m);
             m["gone"] = json!(true);
             out.push(m);
         }
     }
+    let labels: Vec<(Value, Value)> = out.iter().map(|m| (m["model"].clone(), m["label"].clone())).collect();
     for m in &mut out {
+        m["effort"] = json!(default_effort(m));
         if let Some(used) = all["used"][m["id"].as_str().unwrap_or("")].as_str() {
-            if m["model"].as_str() != Some(used) {
-                m["label"] = json!(format!("{} · {}", m["label"].as_str().unwrap_or(""), used));
+            if names_family(m) {
+                m["label"] = labels.iter().find(|(model, _)| model == used).map_or(json!(used), |(_, l)| l.clone());
             }
         }
     }
     out
+}
+
+/// The effort a run takes when none is chosen: the one the agent or the human's
+/// config names, else `medium` when offered, else the middle of the offer.
+/// Custom runners offer none, so they take none.
+pub(super) fn default_effort(m: &Value) -> Option<String> {
+    let offered = super::efforts(m);
+    if let Some(e) = m["effort"].as_str().filter(|e| offered.iter().any(|x| x == e)) {
+        return Some(e.to_string());
+    }
+    if offered.iter().any(|x| x == "medium") {
+        return Some("medium".into());
+    }
+    offered.get(offered.len() / 2).cloned()
+}
+
+/// Saved model `m` with its label as D-150 has it: a discovery saved before then
+/// named the agent first ("Claude Code · Opus 5.5"), which the next one drops.
+fn plain_label(m: &Value) -> Value {
+    let mut m = m.clone();
+    if let Some(l) = m["label"].as_str().and_then(|l| ["Claude Code · ", "Codex · "].iter().find_map(|p| l.strip_prefix(p))) {
+        m["label"] = json!(l);
+    }
+    m
 }
 
 /// How old a kind's answer may be before `/models` asks the program again.
@@ -190,7 +218,8 @@ fn note_models(path: &Path, k: &'static Kind, found: Vec<Value>) -> Result<(), F
     save_models(path, &all)
 }
 
-/// Says model `model` resolved to `used`, so its label names the model a run used.
+/// Says model `model` resolved to `used`: an alias's label names the model a run used, and a
+/// model with its own `model` keeps showing it.
 pub(super) fn record_used(model: &str, used: &str) {
     let _writer = MODELS.lock().unwrap();
     let path = models_path();
@@ -295,7 +324,7 @@ pub(super) fn codex_page(r: &Value) -> Vec<Value> {
         .filter_map(|m| {
             let slug = m["model"].as_str()?;
             let efforts: Vec<String> = m["supportedReasoningEfforts"].as_array().unwrap_or(&vec![]).iter().filter_map(|e| e["effort"].as_str().map(String::from)).collect();
-            Some(json!({"id":format!("codex-{slug}"),"label":format!("Codex · {}", m["displayName"].as_str().unwrap_or(slug)),"agent":"codex","model":slug,"effort":m["defaultReasoningEffort"],"efforts":efforts}))
+            Some(json!({"id":format!("codex-{slug}"),"label":m["displayName"].as_str().unwrap_or(slug),"agent":"codex","model":slug,"effort":m["defaultReasoningEffort"],"efforts":efforts}))
         })
         .collect()
 }
@@ -316,12 +345,39 @@ fn claude_models() -> Vec<Value> {
     out
 }
 
+/// Claude's model families, with the label each alias shows: an exact id names one
+/// family; an alias names the latest of one.
+const FAMILIES: [(&str, &str); 4] = [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"), ("fable", "Fable")];
+
 /// The aliases Claude Code resolves to the latest of each family.
 pub(super) fn claude_aliases() -> Vec<Value> {
-    [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"), ("fable", "Fable")]
-        .iter()
-        .map(|(a, l)| json!({"id":format!("claude-{a}"),"label":format!("Claude Code · {l} (latest)"),"agent":"claude","model":a}))
-        .collect()
+    FAMILIES.iter().map(|(a, l)| json!({"id":format!("claude-{a}"),"label":format!("{l} (latest)"),"agent":"claude","model":a})).collect()
+}
+
+/// The family a model entry belongs to: Claude's families only — Codex answers exact ids.
+/// A discovered model names its family in `family` (the endpoint's `line`); a preset and an
+/// alias name it in their ids, and so does a configured model: `claude-opus-local` is an Opus
+/// and can stand behind the family's live model (D-150). A configured id with no family word
+/// is its own entry.
+pub(super) fn family(m: &Value) -> Option<&'static str> {
+    if m["agent"] != "claude" {
+        return None;
+    }
+    if let Some(f) = m["family"].as_str().and_then(|l| FAMILIES.iter().map(|(f, _)| *f).find(|f| *f == l)) {
+        return Some(f);
+    }
+    FAMILIES.iter().map(|(f, _)| *f).find(|f| m["id"].as_str().is_some_and(|id| id.starts_with("claude-") && id.split('-').any(|p| p == *f)))
+}
+
+/// The entry naming the latest of family `f`, rather than one exact model: decided by its id.
+pub(super) fn is_alias(m: &Value, f: &str) -> bool {
+    m["id"].as_str() == Some(&format!("claude-{f}"))
+}
+
+/// An entry whose `model` is a family word, whatever its id: the agent resolves it to the latest
+/// of that family, so a run's model is known only once its start event names one.
+pub(super) fn names_family(m: &Value) -> bool {
+    m["model"].as_str().is_some_and(|model| FAMILIES.iter().any(|(f, _)| *f == model))
 }
 
 /// The models the provider's models endpoint lists for the key: the active
@@ -343,7 +399,7 @@ fn api_models(key: &str) -> Vec<Value> {
 }
 
 /// The models one models-endpoint answer lists: active only, each with the
-/// efforts its capability flags name.
+/// efforts its capability flags name and the family its `line` names.
 pub(super) fn api_page(body: &Value) -> Vec<Value> {
     body["data"]
         .as_array()
@@ -353,7 +409,11 @@ pub(super) fn api_page(body: &Value) -> Vec<Value> {
         .filter_map(|m| {
             let id = m["id"].as_str()?;
             let efforts = ["low", "medium", "high", "xhigh", "max"].iter().filter(|e| m["capabilities"]["effort"][*e] == true).map(|e| e.to_string()).collect::<Vec<_>>();
-            Some(json!({"id":id,"label":format!("Claude Code · {}", m["display_name"].as_str().unwrap_or(id)),"agent":"claude","model":id,"efforts":efforts}))
+            let mut entry = json!({"id":id,"label":m["display_name"].as_str().unwrap_or(id),"agent":"claude","model":id,"efforts":efforts});
+            if let Some(line) = m["line"].as_str() {
+                entry["family"] = json!(line);
+            }
+            Some(entry)
         })
         .collect()
 }

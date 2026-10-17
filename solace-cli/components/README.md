@@ -19,8 +19,14 @@ choice, the note editor and the task's actions. It is `solace_task.gleam`, with 
   workspace's merged stream and anchors the Scope tab.
 - `task`: the task's id. `workspace`: show the Scope tab.
 - The model list comes from `GET /models` and the Scope tab's projects from `GET /projects`.
-- The model pick offers only models that can start. Under it, `unavailable_view` ("2 more models unavailable")
-  opens the others' reasons; a usage limit (`limit` in the list) has Try again, `POST /models/try-again {agent}`,
+- The model pick offers only models that can start, each option showing the model by one name, its label
+  (`agent_option`, D-150: "Opus 5.5", with no agent name or model string beside it; an alias's label becomes
+  the model a run used). `GET /models` lists one entry per Claude family (Opus, Sonnet, Haiku, Fable): the
+  family's live exact model, else its alias. A configured model whose id names a family (`claude-opus-local`)
+  belongs to it; one whose id names none keeps its own entry. A remembered pick the list no longer shows
+  (`remembered`), such as `claude-opus`, becomes its family's entry, and the list is fetched again with the task.
+  Under it, `unavailable_view` ("2 more models unavailable") opens the others' reasons; a usage limit
+  (`limit` in the list) has Try again, `POST /models/try-again {agent}`,
   whose reply is the list as it is now. With none that can start, `no_agents_view` shows how to install and sign
   in to an agent, unless every model is held by a usage limit: then it says so, and the reset and Try again
   below each clear one. Strategy's plan panel uses both; `model_styles` is their look.
@@ -29,7 +35,7 @@ choice, the note editor and the task's actions. It is `solace_task.gleam`, with 
 - `reveal` property, `{tab, id, n}`: show `tab` for task `id` and scroll it into view (a notice's button).
 
 **Actions.** The task's buttons are the workflow's actions for its column (Spec 15 §3). **Back to
-planning** (`to_planning`, D-133) brings a task from Assigned, Needs review or Canceled back to
+planning** (`to_planning`, D-133) brings a task from Assigned, Review or Canceled back to
 Planning: it keeps the task's changes and clears approval, as Reassign does, and the server refuses
 it while an agent is working. **Back to backlog** shows from Planning only on the Strategy page (the
 `strategy` attribute) and never for a task with a feature (D-132, D-133).
@@ -92,6 +98,13 @@ nothing to change, the vision included, says "No change". A create, and a propos
 was kept, show every field, the body (and the vision's text) as Markdown. `proposal_decoder` reads
 `{kind, id?, fields, base?, reopens?, before?}`; `proposal_styles` is its look, with colors from the
 page. `entry_view`, `entry_decoder`, `note_decoder` and `agent_decoder` are public for the same panel.
+
+## Modal dialog
+
+`solace_task.modal` draws a modal dialog: a backdrop over the page with an `alertdialog` box, for a
+choice that blocks the page behind it — the Workspace page's remove-project dialog. A page adds
+`modal_styles` to its `<style>` and puts its content in `body`; the look takes its colors from the
+page's custom properties, `--shadow` among them.
 
 ## Checks
 

@@ -203,6 +203,8 @@ pub type Agent {
     agent: String,
     /// Unavailable for a usage limit, which Try again clears.
     limit: Bool,
+    /// The model string the agent runs, "" for a model with a `run` argv.
+    model: String,
   )
 }
 
@@ -242,6 +244,10 @@ pub type Model {
     task: Option(Task),
     /// Counts the tasks opened, so a reply for one shown before is dropped.
     generation: Int,
+    /// While another task loads, the parts of it that have arrived: the task
+    /// shown before stays until both are in, then they swap at once, so
+    /// switching tasks doesn't blank the details. None when nothing loads.
+    staged: Option(#(Option(Task), Option(Workflow))),
     workflow: Workflow,
     projects: List(Project),
     models: List(Agent),
@@ -279,6 +285,12 @@ pub type Model {
     /// The Details tab's **Depends on** line, by task id: None while a
     /// dependency is asked for, or when it can't be found (its id shows).
     deps: List(#(String, Option(Dep))),
+    /// The Details tab's **Feature** line: the feature asked for and its
+    /// title, None while it loads or when it can't be found (its id shows).
+    feature: Option(#(String, Option(String))),
+    /// The **Needed by** part of the line: the tasks that depend on this one,
+    /// by id. None until they are asked for.
+    dependents: Option(List(#(String, Dep))),
   )
 }
 
@@ -307,6 +319,9 @@ pub type Msg {
   Refetched(Int, String)
   WorkflowLoaded(Int, String)
   ModelsLoaded(String)
+  /// The models fetched again with the task (see `refresh`): a failed reply
+  /// changes nothing, and a pick the list still has stays.
+  ModelsRefreshed(String)
   /// A usage limit's Try again: the agent kind whose limit to clear.
   TryAgain(String)
   ProjectsLoaded(String)
@@ -347,6 +362,10 @@ pub type Msg {
   DepFound(Int, String, String)
   /// Dependency `id` as its project has it.
   DepLoaded(Int, String, String)
+  /// The task's feature (`GET /features/find/{id}` at the root).
+  FeatureLoaded(Int, String)
+  /// The tasks that depend on this one (`GET /tasks/{id}/dependents`).
+  DependentsLoaded(Int, String)
 }
 
 /// While a watched run is going, its transcript is fetched again this often.
@@ -421,6 +440,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       bar: False,
       task: None,
       generation: 0,
+      staged: None,
       workflow: Workflow([], dict.new()),
       projects: [],
       models: [],
@@ -446,6 +466,8 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       connected: False,
       copy: #(0, ""),
       deps: [],
+      feature: None,
+      dependents: None,
     ),
     // Attributes arrive before the element is added; nothing is asked until then.
     effect.none(),
@@ -498,24 +520,27 @@ fn fetch(model: Model) -> Effect(Msg) {
 }
 
 /// Shows the task the attributes name now: what belonged to the one shown
-/// before goes.
+/// before goes, once the new one has loaded (see `settle`).
 fn open(model: Model) -> #(Model, Effect(Msg)) {
-  let model =
-    Model(
-      ..stop(model),
-      task: None,
-      generation: model.generation + 1,
-      workflow: Workflow([], dict.new()),
-      text: "",
-      watching: "",
-      entries: [],
-      review_summary: "",
-      editing: False,
-      acting: "",
-      error: "",
-      copy: #(model.copy.0 + 1, ""),
-      deps: [],
-    )
+  // Nothing is asked for without an id or a connection: the task shown
+  // before would wait, inert, for a reply that never comes.
+  let staging = model.task != None && model.connected && model.id != ""
+  let model = case staging {
+    True ->
+      Model(
+        ..stop(model),
+        generation: model.generation + 1,
+        staged: Some(#(None, None)),
+        copy: #(model.copy.0 + 1, model.copy.1),
+      )
+    False ->
+      Model(
+        ..cleared(stop(model)),
+        generation: model.generation + 1,
+        workflow: Workflow([], dict.new()),
+        copy: #(model.copy.0 + 1, ""),
+      )
+  }
   #(model, fetch(model))
 }
 
@@ -611,7 +636,12 @@ fn follow(model: Model, dir: String) -> #(Model, Effect(Msg)) {
 /// The task left this project: it is opened from the first other project it
 /// covers.
 fn moved_away(model: Model) -> #(Model, Effect(Msg)) {
-  let scope = case model.task {
+  // While another task loads, the shown one is not the task that moved.
+  let moving = case model.staged {
+    Some(#(t, _)) -> t
+    None -> model.task
+  }
+  let scope = case moving {
     Some(t) -> scope_of(model.dir, t)
     None -> []
   }
@@ -630,7 +660,13 @@ fn moved_away(model: Model) -> #(Model, Effect(Msg)) {
         ]),
       )
     }
-    Error(_) -> #(model, effect.none())
+    // A task still loading has no scope to follow: the one shown before
+    // goes rather than wait, inert, for a reply that may never show it.
+    Error(_) ->
+      case model.staged {
+        Some(#(None, _)) -> #(unstage(model), effect.none())
+        _ -> #(model, effect.none())
+      }
   }
 }
 
@@ -658,14 +694,18 @@ fn live(model: Model, text: String) -> #(Model, Effect(Msg)) {
     Ok(dir) -> dir == model.dir || homeless_event(text)
     Error(_) -> True
   }
-  // A dependency's update counts under any project: it may live in another.
+  // A dependency's or dependent's update counts under any project: it may
+  // live in another.
   let dep = case
     model.task,
     json.parse(text, decode.at(["task"], task_decoder()))
   {
     Some(t), Ok(d) if d.id != t.id ->
-      case list.contains(t.depends, d.id) {
-        True -> Ok(d)
+      case
+        list.contains(t.depends, d.id)
+        || needed_by(model, t, d) != model.dependents
+      {
+        True -> Ok(#(t, d))
         False -> Error(Nil)
       }
     _, _ -> Error(Nil)
@@ -673,25 +713,51 @@ fn live(model: Model, text: String) -> #(Model, Effect(Msg)) {
   // What a new stream of its own replays is old: the task was fetched whole.
   case model.hosted || model.caught_up, stale(model, text), ours, dep {
     False, _, _, _ -> #(model, effect.none())
-    True, _, _, Ok(d) -> #(
-      Model(
-        ..model,
-        deps: list.key_set(model.deps, d.id, Some(Dep(d.title, d.column))),
-      ),
-      effect.none(),
-    )
+    True, _, _, Ok(#(t, d)) -> {
+      let deps = case list.contains(t.depends, d.id) {
+        True -> list.key_set(model.deps, d.id, Some(Dep(d.title, d.column)))
+        False -> model.deps
+      }
+      #(
+        Model(..model, deps: deps, dependents: needed_by(model, t, d)),
+        effect.none(),
+      )
+    }
     True, False, False, _ -> #(model, effect.none())
     True, True, _, _ -> {
-      // After a resync the dependencies may have changed too.
+      // After a resync the dependencies, feature and dependents may have
+      // changed too.
       let model = case json.parse(text, decode.at(["resync"], decode.bool)) {
-        Ok(_) -> Model(..model, deps: [])
+        Ok(_) -> Model(..model, deps: [], feature: None, dependents: None)
         Error(_) -> model
       }
       let #(model, deps) = want_deps(model)
-      #(model, effect.batch([refresh(model), deps]))
+      // `refresh` asks for the task shown, not the one being loaded.
+      let again = case model.staged {
+        Some(_) -> reload(model)
+        None -> refresh(model)
+      }
+      #(model, effect.batch([again, deps]))
     }
     True, False, True, _ ->
       case json.parse(text, decode.at(["task"], task_decoder())) {
+        // The task being loaded: its newer state waits with it.
+        Ok(task) if task.id == model.id && model.staged != None ->
+          case model.staged {
+            Some(#(Some(t), w)) -> {
+              let task = Task(..task, changes: t.changes)
+              let #(model, fx) =
+                settle(Model(..model, staged: Some(#(Some(task), w))))
+              let news = case model.hosted {
+                False -> list.map(notices(t, task), notice)
+                True -> []
+              }
+              #(model, effect.batch([fx, ..news]))
+            }
+            // The reply on its way may be older than the event: ask again.
+            Some(#(None, _)) -> #(model, reload(model))
+            None -> #(model, effect.none())
+          }
         Ok(task) if task.id == model.id -> {
           // Events carry no `changes` (D-77): keep the list until it is fetched again.
           let old = model.task
@@ -711,7 +777,12 @@ fn live(model: Model, text: String) -> #(Model, Effect(Msg)) {
         Ok(_) -> #(model, effect.none())
         Error(_) ->
           case json.parse(text, decode.at(["workflow"], workflow_decoder())) {
-            Ok(w) -> #(Model(..model, workflow: w), effect.none())
+            Ok(w) ->
+              case model.staged {
+                Some(#(t, _)) ->
+                  settle(Model(..model, staged: Some(#(t, Some(w)))))
+                None -> #(Model(..model, workflow: w), effect.none())
+              }
             Error(_) ->
               case json.parse(text, decode.at(["removed"], decode.string)) {
                 Ok(id) if id == model.id -> moved_away(model)
@@ -763,7 +834,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }),
     )
     Listening(source) -> #(Model(..model, source: Some(source)), effect.none())
-    Disconnected -> #(Model(..stop(model), connected: False), effect.none())
+    // Replies may never come once removed: the task shown before goes, and
+    // `Connected` asks for the new one again.
+    Disconnected -> #(
+      Model(..unstage(stop(model)), connected: False),
+      effect.none(),
+    )
     TaskChanged(id) if id == model.id -> #(model, effect.none())
     TaskChanged(id) -> open(Model(..model, id: id))
     BaseChanged(base) if base == model.base -> #(model, effect.none())
@@ -808,35 +884,16 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
     TaskLoaded(generation, text) if generation == model.generation ->
       case json.parse(text, task_decoder()) {
-        Ok(task) -> {
-          let shown = model.revealing != "" && model.revealing == task.id
-          let model =
-            Model(
-              ..model,
-              task: Some(task),
-              title: task.title,
-              body: task.body,
-              rank: float.to_string(task.rank),
-              error: "",
-              revealing: case shown {
-                True -> ""
-                False -> model.revealing
-              },
-            )
-          let #(model, deps) = want_deps(model)
-          #(
-            model,
-            effect.batch([
-              review(model, task),
-              deps,
-              case shown {
-                True -> reveal()
-                False -> effect.none()
-              },
-            ]),
-          )
-        }
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
+        Ok(task) ->
+          case model.staged {
+            Some(#(_, w)) ->
+              settle(Model(..model, staged: Some(#(Some(task), w))))
+            None -> show(model, task)
+          }
+        Error(_) -> #(
+          Model(..unstage(model), error: error(text)),
+          effect.none(),
+        )
       }
     TaskLoaded(_, _) -> #(model, effect.none())
     // The whole task is taken; fields being edited are the model's, so they
@@ -853,8 +910,15 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
     WorkflowLoaded(generation, text) if generation == model.generation ->
       case json.parse(text, workflow_decoder()) {
-        Ok(w) -> #(Model(..model, workflow: w), effect.none())
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
+        Ok(w) ->
+          case model.staged {
+            Some(#(t, _)) -> settle(Model(..model, staged: Some(#(t, Some(w)))))
+            None -> #(Model(..model, workflow: w), effect.none())
+          }
+        Error(_) -> #(
+          Model(..unstage(model), error: error(text)),
+          effect.none(),
+        )
       }
     WorkflowLoaded(_, _) -> #(model, effect.none())
     TryAgain(agent) -> #(
@@ -874,8 +938,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Ok(models) -> {
           // The remembered agent stays if it is still available; its effort
           // stays if the agent still offers it.
-          let kept =
-            list.find(models, fn(a) { a.available && a.id == model.model })
+          let kept = remembered(models, model.model)
           let chosen = case kept {
             Ok(a) -> Ok(a)
             Error(_) -> list.find(models, fn(a) { a.available })
@@ -896,6 +959,23 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         }
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
+    // A pick held by a usage limit stays chosen, so a limit doesn't swap the model unasked;
+    // its effort stays only while the model still offers it.
+    ModelsRefreshed(text) ->
+      case json.parse(text, decode.list(agent_decoder())) {
+        Ok(models) ->
+          case list.find(models, fn(a) { a.id == model.model }) {
+            Ok(a) -> {
+              let effort = case list.contains(a.efforts, model.effort) {
+                True -> model.effort
+                False -> ""
+              }
+              #(Model(..model, models: models, effort: effort), effect.none())
+            }
+            Error(_) -> update(model, ModelsLoaded(text))
+          }
+        Error(_) -> #(model, effect.none())
+      }
     // The Scope tab's projects; without them it lists none.
     ProjectsLoaded(text) ->
       case json.parse(text, projects_decoder()) {
@@ -912,6 +992,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     Acted(text) -> update(Model(..model, acting: ""), Changed(text))
     Changed(text) ->
       case json.parse(text, task_decoder()) {
+        // A reply for the task shown before another opened.
+        Ok(task) if task.id != model.id -> #(model, effect.none())
         Ok(task) -> {
           // A reply carries no `changes` (D-77): keep the list until it is fetched again.
           let task = case model.task {
@@ -1217,6 +1299,42 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         _ -> #(model, effect.none())
       }
     DepFound(_, _, _) | DepLoaded(_, _, _) -> #(model, effect.none())
+    // A feature that can't be found keeps None: its id shows.
+    FeatureLoaded(generation, text) if generation == model.generation -> {
+      let decoder = {
+        use id <- decode.field("id", decode.string)
+        use title <- decode.field("title", decode.string)
+        decode.success(#(id, title))
+      }
+      case json.parse(text, decoder), model.feature {
+        Ok(#(id, title)), Some(#(asked, _)) if id == asked -> #(
+          Model(..model, feature: Some(#(id, Some(title)))),
+          effect.none(),
+        )
+        _, _ -> #(model, effect.none())
+      }
+    }
+    // A failed reply leaves the list empty, so no **Needed by** shows.
+    DependentsLoaded(generation, text) if generation == model.generation -> {
+      let decoder =
+        decode.at(
+          ["tasks"],
+          decode.list({
+            use id <- decode.field("id", decode.string)
+            use title <- decode.field("title", decode.string)
+            use column <- decode.field("column", decode.string)
+            decode.success(#(id, Dep(title, column)))
+          }),
+        )
+      case json.parse(text, decoder) {
+        Ok(dependents) -> #(
+          Model(..model, dependents: Some(dependents)),
+          effect.none(),
+        )
+        Error(_) -> #(model, effect.none())
+      }
+    }
+    FeatureLoaded(_, _) | DependentsLoaded(_, _) -> #(model, effect.none())
   }
 }
 
@@ -1494,6 +1612,11 @@ pub fn agent_decoder() -> decode.Decoder(Agent) {
     decode.one_of(decode.string, [decode.success("")]),
   )
   use limit <- decode.optional_field("limit", False, decode.bool)
+  use model <- decode.optional_field(
+    "model",
+    "",
+    decode.one_of(decode.string, [decode.success("")]),
+  )
   decode.success(Agent(
     id,
     label,
@@ -1503,6 +1626,7 @@ pub fn agent_decoder() -> decode.Decoder(Agent) {
     efforts,
     agent,
     limit,
+    model,
   ))
 }
 
@@ -1718,7 +1842,13 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
     True -> list.append(tabs, [#("scope", "Scope")])
     False -> tabs
   }
-  h.section([a.class("detail")], [
+  // The task shown before stays while another loads, but can't be used: its
+  // clicks would reach the new one.
+  let loading = case model.staged {
+    Some(_) -> [a.attribute("inert", ""), a.attribute("aria-busy", "true")]
+    None -> []
+  }
+  h.section([a.class("detail"), ..loading], [
     case model.bar {
       True -> h.text("")
       False ->
@@ -1824,6 +1954,8 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
       button(ui_label("cancel"), Edit(False)),
     ]
     False -> [
+      feature_view(model, t),
+      depends_view(model, t),
       md(model.base, t.body),
       h.div(
         [],
@@ -1831,7 +1963,6 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
           h.a([a.href(link.url)], [h.text(link.name)])
         }),
       ),
-      depends_view(model, t),
       button(ui_label("edit"), Edit(True)),
     ]
   }
@@ -2009,8 +2140,6 @@ fn notes_view(base: String, t: Task) -> List(Element(Msg)) {
     let #(n, i) = pair
     h.details([a.class("note"), a.open(True)], [
       h.summary([], [
-        h.strong([], [h.text(author(t, n))]),
-        h.small([], [h.text(clock(n.time))]),
         h.button(
           [
             a.class("delete"),
@@ -2019,6 +2148,8 @@ fn notes_view(base: String, t: Task) -> List(Element(Msg)) {
           ],
           [h.text(ui_label("delete"))],
         ),
+        h.strong([], [h.text(author(t, n))]),
+        h.small([], [h.text(clock(n.time))]),
       ]),
       md(base, n.text),
     ])
@@ -2178,10 +2309,10 @@ const task_styles =
   <> editor_styles
   <> model_styles
   <> ":host{display:block;container-type:inline-size}input,textarea,pre,code,.md,.detail > .heading > h2,.record > .panel > article > p,.record > .panel > p,.record > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}
-button,input,textarea,select{font:inherit;padding:var(--control-pad);margin:var(--space-1);border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.detail{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{margin-left:auto;font-size:13px;padding:0 8px}
+button,input,textarea,select{font:inherit;padding:var(--control-pad);margin:var(--space-1);border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.detail{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{float:right;margin:0 0 4px 8px;font-size:13px;padding:0 8px}
 .meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}
 .tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}
-details.note>summary{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap;cursor:pointer;list-style:none}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);width:1em}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}
+details.note>summary{display:block;min-height:var(--control-h-small);cursor:pointer;list-style:none}details.note>summary>small{display:inline}details.note>summary>*+*{margin-left:8px}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);margin-right:8px}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}
 .title{display:block;box-sizing:border-box;width:calc(100% - 8px);margin:8px 4px}
 .heading{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px}.heading h2{margin:12px 0}.copy-id{flex:none;margin:0;padding:0 10px;font-size:13px}
 @container (min-width:90rem){.detail{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:2rem;align-items:start}.detail > .heading,.detail > .meta{grid-column:1 / -1}.record > .tabs{margin-top:0}}
@@ -2191,6 +2322,7 @@ button,input,textarea,select{border:1px solid var(--edge);background:var(--paper
 button:hover{background:var(--hover)}button:disabled{color:var(--soft)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
 textarea{font-family:inherit}
 .depends .unfinished{color:var(--warn-text);font-weight:600}
+.feature{margin:4px 0}
 .attention{font-weight:700}
 .status{border:1px solid var(--line);background:var(--paper);font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:1px 8px}.status.finished{background:var(--add);color:var(--ok-text);border-color:var(--ok-text)}.working::before{background:var(--entry)}
 .detail,.composer,.note,.run{background:var(--paper);border-color:var(--edge)}.detail{padding:10px 12px}
@@ -2198,7 +2330,8 @@ textarea{font-family:inherit}
 .note,.run{padding:4px 6px}article{padding:4px}.panel{padding-top:4px}
 article{border-bottom-color:var(--line)}.transcript{border-left:1px solid var(--edge)}
 .md pre,.transcript pre,.diff,code{background:var(--code);color:var(--ink)}
-@media(prefers-reduced-motion:no-preference){button{transition:background-color .12s ease-out}}"
+@media(prefers-reduced-motion:no-preference){button{transition:background-color .12s ease-out}}
+.detail[aria-busy=true]{animation:stale 0s .3s forwards}@keyframes stale{to{opacity:.6}}"
 
 /// The markdown editor's look (`editor`), shared with the pages that use it.
 /// Colors come from the page's custom properties. The Image tool is a `label`
@@ -2516,10 +2649,15 @@ pub fn stale(model: Model, text: String) -> Bool {
 /// Fetches the task again: its GET is the whole task as the server has it
 /// now, the only one that carries its changes (D-77). Each event and reply
 /// ends with one, so a lost or late message can't leave the copy stale.
+/// The models come with it, so a `config.toml` edit reaches the pick without
+/// a page load.
 fn refresh(model: Model) -> Effect(Msg) {
   case model.task {
     Some(t) ->
-      get(model.base, "/tasks/" <> t.id, Refetched(model.generation, _))
+      effect.batch([
+        get(model.base, "/tasks/" <> t.id, Refetched(model.generation, _)),
+        get("", "/models", ModelsRefreshed),
+      ])
     None -> effect.none()
   }
 }
@@ -2553,7 +2691,8 @@ pub type Dep {
 }
 
 /// Asks for the dependencies of the shown task not asked for yet, from the
-/// root: a dependency may be stored in any project.
+/// root: a dependency may be stored in any project. Its feature and the
+/// tasks that depend on it are asked for once too.
 fn want_deps(model: Model) -> #(Model, Effect(Msg)) {
   let missing = case model.task {
     Some(t) ->
@@ -2563,18 +2702,47 @@ fn want_deps(model: Model) -> #(Model, Effect(Msg)) {
     None -> []
   }
   let generation = model.generation
+  let #(feature, ask_feature) = case model.task {
+    Some(t) ->
+      case t.feature, model.feature {
+        Some(id), Some(#(asked, _)) if asked == id -> #(
+          model.feature,
+          effect.none(),
+        )
+        Some(id), _ -> #(
+          Some(#(id, None)),
+          get("", "/features/find/" <> id, FeatureLoaded(generation, _)),
+        )
+        None, _ -> #(None, effect.none())
+      }
+    None -> #(model.feature, effect.none())
+  }
+  let #(dependents, ask_dependents) = case model.task, model.dependents {
+    Some(t), None -> #(
+      Some([]),
+      get("", "/tasks/" <> t.id <> "/dependents", DependentsLoaded(
+        generation,
+        _,
+      )),
+    )
+    _, _ -> #(model.dependents, effect.none())
+  }
   #(
     Model(
       ..model,
       deps: list.fold(missing, model.deps, fn(deps, id) {
         list.key_set(deps, id, None)
       }),
+      feature: feature,
+      dependents: dependents,
     ),
-    effect.batch(
-      list.map(missing, fn(id) {
+    effect.batch([
+      ask_feature,
+      ask_dependents,
+      ..list.map(missing, fn(id) {
         get("", "/tasks/find/" <> id, DepFound(generation, id, _))
-      }),
-    ),
+      })
+    ]),
   )
 }
 
@@ -2594,54 +2762,43 @@ pub fn finished(workflow: Workflow, column: String) -> Bool {
   list.any(workflow.columns, fn(c) { c.final && c.id == column })
 }
 
-/// The **Depends on** line: each dependency a link to the task (D-98) with
-/// its column, an unfinished one marked; one that can't be found shows its id.
+/// The dependencies line: **Depends on** the tasks this one depends on, then
+/// **Needed by** the tasks that depend on it, each shown by `dep_view`.
 fn depends_view(model: Model, t: Task) -> Element(Msg) {
-  case t.depends {
-    [] -> h.text("")
-    ids ->
-      h.p([a.class("depends")], [
-        h.strong([], [h.text("Depends on ")]),
+  let on =
+    list.map(t.depends, fn(id) {
+      #(id, list.key_find(model.deps, id) |> result.unwrap(None))
+    })
+  let needed =
+    model.dependents
+    |> option.unwrap([])
+    |> list.map(fn(e) { #(e.0, Some(e.1)) })
+  let part = fn(label, entries: List(#(String, Option(Dep)))) {
+    case entries {
+      [] -> []
+      _ -> [
+        h.strong([], [h.text(label)]),
         ..list.intersperse(
-          list.map(ids, fn(id) {
-            let link = fn(label) {
-              h.a([a.href("/task/" <> id), a.attribute("data-task", id)], [
-                h.text(label),
-              ])
-            }
-            case list.key_find(model.deps, id) {
-              Ok(Some(d)) -> {
-                let done = finished(model.workflow, d.column)
-                let column =
-                  list.find(model.workflow.columns, fn(c) { c.id == d.column })
-                  |> result.map(fn(c) { c.label })
-                  |> result.unwrap(d.column)
-                h.span(
-                  [
-                    a.class(case done {
-                      True -> "dep"
-                      False -> "dep unfinished"
-                    }),
-                  ],
-                  [
-                    link(d.title),
-                    h.text(
-                      " ("
-                      <> column
-                      <> case done {
-                        True -> ")"
-                        False -> ", unfinished)"
-                      },
-                    ),
-                  ],
-                )
-              }
-              _ -> h.span([a.class("dep")], [link(id)])
-            }
-          }),
+          list.map(entries, fn(e) { dep_view(model, e.0, e.1) }),
           h.text(", "),
         )
-      ])
+      ]
+    }
+  }
+  case on, needed {
+    [], [] -> h.text("")
+    _, _ ->
+      h.p(
+        [a.class("depends")],
+        list.flatten([
+          part("Depends on ", on),
+          case on, needed {
+            [_, ..], [_, ..] -> [h.text("; ")]
+            _, _ -> []
+          },
+          part("Needed by ", needed),
+        ]),
+      )
   }
 }
 
@@ -2939,7 +3096,10 @@ fn agent_pick(
       list.append(
         placeholder_option(ui_label("pick_model"), model.model),
         list.map(ready, fn(m) {
-          h.option([a.value(m.id), a.selected(m.id == model.model)], m.label)
+          h.option(
+            [a.value(m.id), a.selected(m.id == model.model)],
+            agent_option(m),
+          )
         }),
       ),
     ),
@@ -3129,4 +3289,192 @@ pub fn copy_said(ok: Bool) -> String {
 /// Calls `then` once Copy ID's moment of saying Copied has passed.
 pub fn after_copied(then: fn() -> Nil) -> Nil {
   after(copied_ms, then)
+}
+
+/// A model pick's option: the model's one name, its label (D-150). Every entry has a label, a
+/// `run` argv entry has no model string, and an alias's label follows the model a run used.
+pub fn agent_option(m: Agent) -> String {
+  m.label
+}
+
+/// A modal dialog: a backdrop over the page that blocks the page behind it.
+/// Pages add `modal_styles` to their `<style>` and put their content in `body`.
+pub fn modal(body: List(Element(msg))) -> Element(msg) {
+  h.div([a.class("modal-backdrop")], [
+    h.div(
+      [
+        a.class("modal"),
+        a.attribute("role", "alertdialog"),
+        a.attribute("aria-modal", "true"),
+      ],
+      body,
+    ),
+  ])
+}
+
+/// The modal dialog's look (`modal`), for the pages that show one. Colors
+/// come from the page's custom properties, `--shadow` among them.
+pub const modal_styles =
+  ".modal-backdrop{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:color-mix(in srgb,var(--ink) 15%,transparent);padding:16px}.modal{background:var(--paper);color:var(--ink);border:2px solid var(--edge);box-shadow:0 8px 32px var(--shadow);padding:20px 24px;width:min(480px,100%);max-height:100%;overflow:auto}\n"
+
+/// The available model a remembered pick names: the model itself, or for a Claude alias the
+/// pick no longer lists (`claude-opus`), its family's listed model, so the pick stays an Opus.
+pub fn remembered(models: List(Agent), id: String) -> Result(Agent, Nil) {
+  case list.find(models, fn(a) { a.available && a.id == id }), id {
+    Ok(a), _ -> Ok(a)
+    Error(_), "claude-" <> family ->
+      list.find(models, fn(a) {
+        a.available
+        && a.agent == "claude"
+        && list.contains(string.split(a.id, "-"), family)
+      })
+    Error(_), _ -> Error(Nil)
+  }
+}
+
+/// Drops what belonged to the task shown before.
+fn cleared(model: Model) -> Model {
+  Model(
+    ..model,
+    task: None,
+    staged: None,
+    text: "",
+    watching: "",
+    entries: [],
+    review_summary: "",
+    editing: False,
+    acting: "",
+    error: "",
+    copy: #(model.copy.0, ""),
+    deps: [],
+    feature: None,
+    dependents: None,
+  )
+}
+
+/// Swaps in the task being loaded once it and its workflow are both in.
+fn settle(model: Model) -> #(Model, Effect(Msg)) {
+  case model.staged {
+    Some(#(Some(task), Some(w))) ->
+      show(Model(..cleared(model), workflow: w), task)
+    _ -> #(model, effect.none())
+  }
+}
+
+/// A load that fails while another task is staged drops the one shown
+/// before: it would otherwise stay on screen as if it were the new one. All
+/// that was its goes with it, as `open` does, since a later reply may show
+/// the new task.
+fn unstage(model: Model) -> Model {
+  case model.staged {
+    Some(_) -> Model(..cleared(model), workflow: Workflow([], dict.new()))
+    None -> model
+  }
+}
+
+/// Shows `task`, fetched whole.
+fn show(model: Model, task: Task) -> #(Model, Effect(Msg)) {
+  let shown = model.revealing != "" && model.revealing == task.id
+  let model =
+    Model(
+      ..model,
+      task: Some(task),
+      title: task.title,
+      body: task.body,
+      rank: float.to_string(task.rank),
+      error: "",
+      revealing: case shown {
+        True -> ""
+        False -> model.revealing
+      },
+    )
+  let #(model, deps) = want_deps(model)
+  #(
+    model,
+    effect.batch([
+      review(model, task),
+      deps,
+      case shown {
+        True -> reveal()
+        False -> effect.none()
+      },
+    ]),
+  )
+}
+
+/// Asks again for the task being loaded; its reply fills the staged slot.
+fn reload(model: Model) -> Effect(Msg) {
+  get(model.base, "/tasks/" <> model.id, TaskLoaded(model.generation, _))
+}
+
+/// The **Needed by** list once task `d` is as an event has it: in it while
+/// `d` depends on task `t` and isn't archived, else out of it.
+fn needed_by(model: Model, t: Task, d: Task) -> Option(List(#(String, Dep))) {
+  case model.dependents {
+    Some(dependents) ->
+      case list.contains(d.depends, t.id) && !d.archived {
+        True -> Some(list.key_set(dependents, d.id, Dep(d.title, d.column)))
+        False -> Some(list.filter(dependents, fn(e) { e.0 != d.id }))
+      }
+    None -> None
+  }
+}
+
+/// The **Feature** line: a link to the task's feature with its title; one
+/// that can't be found shows its id. No feature, no line.
+fn feature_view(model: Model, t: Task) -> Element(Msg) {
+  case t.feature {
+    None -> h.text("")
+    Some(id) -> {
+      let title = case model.feature {
+        Some(#(asked, Some(title))) if asked == id -> title
+        _ -> id
+      }
+      h.p([a.class("feature")], [
+        h.strong([], [h.text("Feature ")]),
+        h.a([a.href("/feature/" <> id), a.attribute("data-feature", id)], [
+          h.text(title),
+        ]),
+      ])
+    }
+  }
+}
+
+/// One task of the dependencies line: a link to it (D-98) with its column,
+/// an unfinished one marked; one that can't be found shows its id.
+fn dep_view(model: Model, id: String, dep: Option(Dep)) -> Element(Msg) {
+  let link = fn(label) {
+    h.a([a.href("/task/" <> id), a.attribute("data-task", id)], [
+      h.text(label),
+    ])
+  }
+  case dep {
+    Some(d) -> {
+      let done = finished(model.workflow, d.column)
+      let column =
+        list.find(model.workflow.columns, fn(c) { c.id == d.column })
+        |> result.map(fn(c) { c.label })
+        |> result.unwrap(d.column)
+      h.span(
+        [
+          a.class(case done {
+            True -> "dep"
+            False -> "dep unfinished"
+          }),
+        ],
+        [
+          link(d.title),
+          h.text(
+            " ("
+            <> column
+            <> case done {
+              True -> ")"
+              False -> ", unfinished)"
+            },
+          ),
+        ],
+      )
+    }
+    None -> h.span([a.class("dep")], [link(id)])
+  }
 }
