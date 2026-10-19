@@ -1,6 +1,8 @@
 //! Build recipes (D-131): how each project builds, declared in its
 //! `solace.toml` `[build]` or taken from the files it has, and the order the
 //! workspace builds them in.
+//! A passing `run` of a recipe's last step records what it built (D-166), so
+//! `build plan` judges staleness by contents, not file times.
 
 use super::*;
 use std::path::{Component, PathBuf};
@@ -348,8 +350,125 @@ fn built_from(root: &Path) -> Vec<PathBuf> {
     [lexical(root)].into_iter().chain(paths.map(|p| lexical(&root.join(p)))).collect()
 }
 
-/// Why a recipe's outputs need its steps run (D-159): one is missing, or a source of the project
-/// or of a path dependency changed after the oldest was built. `None` when they are current or
+/// The recipe whose last step is `command`, when it names outputs (D-166): a passing `run` of
+/// that command records what it built.
+fn recording(top: &Path, project: &str, command: &str) -> Result<Option<Recipe>, Failure> {
+    let Some(r) = of(top, project)? else { return Ok(None) };
+    Ok((!r.outputs.is_empty() && r.steps.last().and_then(|s| s.command.as_deref()) == Some(command)).then_some(r))
+}
+
+/// Each source part of the project at `root`, and its hash now (D-166).
+fn source_hashes(top: &Path, root: &Path) -> Value {
+    Value::Object(source_parts(top, root).into_iter().map(|(name, part)| (name, json!(part_hash(&part)))).collect())
+}
+
+/// D-166: what a recording build's `sources` hold, hashed now. The caller takes it before the
+/// command runs, so a source the build itself changes isn't recorded as built. `None` when this
+/// run records nothing.
+pub fn built_sources(top: &Path, project: &str, command: &str) -> Result<Option<Value>, Failure> {
+    if recording(top, project, command)?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(source_hashes(top, &scope::path(top, project))))
+}
+
+/// D-166: a passing `run` of a recipe's last step `command` records what it built in the project's
+/// `.solace/built.json`: the hash of each output now, and of each source part as `sources` held it.
+/// A source touched without changing, or a file added later, is then judged by contents, not times.
+pub fn record_built(top: &Path, project: &str, command: &str, sources: Value) -> Result<(), Failure> {
+    let Some(r) = recording(top, project, command)? else { return Ok(()) };
+    let root = scope::path(top, project);
+    let mut outputs = serde_json::Map::new();
+    for o in &r.outputs {
+        // An output the command didn't make leaves the file-time rule in charge.
+        let Ok(bytes) = fs::read(root.join(o)) else { return Ok(()) };
+        outputs.insert(o.clone(), json!(sha256(bytes)));
+    }
+    fs::create_dir_all(root.join(".solace"))?;
+    fs::write(root.join(".solace/built.json"), json!({"command": command, "outputs": outputs, "sources": sources}).to_string())?;
+    Ok(())
+}
+
+/// The source parts of the project at `root` (D-159): its own and its path dependencies'
+/// `SOURCES`, each named from the root, as `b/src`.
+fn source_parts(top: &Path, root: &Path) -> Vec<(String, PathBuf)> {
+    let top = lexical(top);
+    built_from(root)
+        .into_iter()
+        .flat_map(|p| SOURCES.map(move |s| (p.clone(), s)))
+        .map(|(p, s)| {
+            let part = p.join(s);
+            (part.strip_prefix(&top).unwrap_or(&part).display().to_string(), part)
+        })
+        .collect()
+}
+
+/// The files below `path`, by relative name and contents; a symlink counts as the file it names
+/// and isn't followed into a folder, as in `newest`.
+fn fingerprints(path: &Path, rel: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+    match fs::read_dir(path) {
+        Ok(read) => {
+            for e in read.flatten() {
+                let name = rel.join(e.file_name());
+                if e.file_type().is_ok_and(|t| t.is_symlink()) {
+                    if let Ok(bytes) = fs::read(e.path()) {
+                        out.push((name.display().to_string(), bytes));
+                    }
+                } else {
+                    fingerprints(&e.path(), &name, out);
+                }
+            }
+        }
+        // A file, or a part that isn't there: nothing to walk.
+        Err(_) => {
+            if let Ok(bytes) = fs::read(path) {
+                out.push((rel.display().to_string(), bytes));
+            }
+        }
+    }
+}
+
+/// The hash of a source part (D-166): the names and contents of its files, sorted.
+fn part_hash(path: &Path) -> String {
+    let mut files = vec![];
+    fingerprints(path, Path::new(""), &mut files);
+    files.sort();
+    let mut blob = vec![];
+    for (name, bytes) in files {
+        blob.extend_from_slice(name.as_bytes());
+        blob.push(0);
+        blob.extend_from_slice(&bytes);
+        blob.push(0);
+    }
+    sha256(blob)
+}
+
+/// D-166: what the recorded build says changed since it ran. `None` when there is no record or an
+/// output isn't the recorded one (it was rebuilt some other way): the caller falls back to file
+/// times. `Some(None)` means the record applies and nothing changed.
+fn recorded_change(root: &Path, r: &Recipe, parts: &[(String, PathBuf)]) -> Option<Option<String>> {
+    let record: Value = serde_json::from_str(&fs::read_to_string(root.join(".solace/built.json")).ok()?).ok()?;
+    // The record is for the last step as it was: a recipe that now names another command
+    // says nothing about this build.
+    if record["command"].as_str() != r.steps.last().and_then(|s| s.command.as_deref()) {
+        return None;
+    }
+    for o in &r.outputs {
+        let bytes = fs::read(root.join(o)).ok()?;
+        if record["outputs"][o.as_str()].as_str() != Some(sha256(bytes).as_str()) {
+            return None;
+        }
+    }
+    let changed: Vec<String> = parts
+        .iter()
+        .filter(|(name, part)| record["sources"][name.as_str()].as_str() != Some(part_hash(part).as_str()))
+        .map(|(name, _)| name.clone())
+        .collect();
+    Some((!changed.is_empty()).then(|| format!("{} changed since {} was built", changed.join(", "), r.outputs.join(", "))))
+}
+
+/// Why a recipe's outputs need its steps run (D-159, D-166): one is missing, or a source of the
+/// project or of a path dependency changed since it was built. `None` when they are current or
 /// the recipe names no outputs.
 fn stale(top: &Path, r: &Recipe) -> Option<String> {
     let root = scope::path(top, &r.project);
@@ -361,12 +480,14 @@ fn stale(top: &Path, r: &Recipe) -> Option<String> {
         }
     }
     let built = built?;
-    let top = lexical(top);
-    let changed: Vec<String> = built_from(&root)
+    let parts = source_parts(top, &root);
+    if let Some(change) = recorded_change(&root, r, &parts) {
+        return change;
+    }
+    let changed: Vec<String> = parts
         .iter()
-        .flat_map(|p| SOURCES.map(|s| p.join(s)))
-        .filter(|part| newest(part).is_some_and(|t| t > built + FRESH))
-        .map(|part| part.strip_prefix(&top).unwrap_or(&part).display().to_string())
+        .filter(|(_, part)| newest(part).is_some_and(|t| t > built + FRESH))
+        .map(|(name, _)| name.clone())
         .collect();
     (!changed.is_empty()).then(|| format!("{} changed after {} was built", changed.join(", "), r.outputs.join(", ")))
 }

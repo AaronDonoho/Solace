@@ -309,7 +309,7 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
     }
     for &i in &tests {
         let s = &ix.syms[i];
-        nodes.push(json!({"id":s.id,"kind":"test","name":s.name,"module":s.module,"summary":"","signature":ix.lang.signature(&s.item()),"known":"derived","tests":0,"changed":changed.contains(&format!("symbol:{}",s.id)),"checks":checks(&s.text)}));
+        nodes.push(json!({"id":s.id,"kind":"test","name":s.name,"module":s.module,"summary":"","signature":ix.signature(s),"known":"derived","tests":0,"changed":changed.contains(&format!("symbol:{}",s.id)),"checks":checks(&s.text)}));
         for &j in &ix.uses[i] {
             if visible.contains(&j) {
                 edges.push(json!({"from":s.id,"to":ix.syms[j].id,"kind":"tests","known":"derived","direct":true}));
@@ -401,27 +401,31 @@ fn version(s: &Store, v: Version<'_>) -> Result<Index, Failure> {
             continue;
         }
         if key.starts_with("symbol:") {
+            // A snapshot from before the nested columns has only the first eight (D-158).
             syms.push(Sym {
                 id: row[0].as_str().unwrap().into(),
                 module: row[1].as_str().unwrap().into(),
                 name: row[2].as_str().unwrap().into(),
                 kind: Kind::parse(row[3].as_str().unwrap()),
+                kind_text: row[3].as_str().unwrap().into(),
                 text: row[4].as_str().unwrap().into(),
-                parent: None,
-                sep: None,
-                tail: String::new(),
+                parent: row.get(5).and_then(|x| x.as_str()).map(String::from),
+                sep: row.get(6).and_then(|x| x.as_str()).map(String::from),
+                tail: row.get(7).and_then(|x| x.as_str()).unwrap_or("").into(),
             });
         } else if key.starts_with("module:") {
             modules.push(ModuleRow {
                 path: row[0].as_str().unwrap().into(),
                 dir: row[1].as_str().unwrap().into(),
                 header: row[2].as_str().unwrap().into(),
-                file: None,
+                file: row.get(3).and_then(|x| x.as_str()).map(String::from),
+                // A snapshot row from before the column has only four fields (D-168).
+                owns_dir: row.get(4).and_then(|x| x.as_i64()).map(|v| v != 0),
             });
         }
     }
     syms.sort_by(|a, b| a.module.cmp(&b.module).then(a.name.cmp(&b.name)));
-    Ok(Index::build(s.lang(), syms, modules))
+    Ok(Index::build(s.lang(), syms, modules, language::is_rust(&s.root)))
 }
 /// What the task's changes reach (D-44): its tests (those it changed, and
 /// those that reach a symbol it changed or read a field the change reaches),
@@ -643,7 +647,7 @@ pub fn run_tests(root: PathBuf, tid: String) {
                 (base, r["tests"].as_array().cloned().unwrap_or_default())
             };
             let lang = language::of(&dir);
-            let output = lockdown::command(&dir, &[lang.tool().into(), "test".into()], 300, 100_000, false);
+            let output = lockdown::command(&dir, &[lang.tool().into(), "test".into()], 300, 100_000, false, false);
             let _ = fs::remove_dir_all(&dir);
             let (state, results) = match output {
                 Ok(log) => {

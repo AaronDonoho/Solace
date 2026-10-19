@@ -252,12 +252,30 @@ fn a_package_reaches_its_files_each_way_a_module_names_one() {
             ("src/b/mod.rs", "b"),
             ("src/b/d.rs", "b::d"),
             ("src/main_tests.rs", "tests"),
-            ("tests/acceptance.rs", "acceptance"),
-            ("tests/common/mod.rs", "acceptance::common"),
+            ("tests/acceptance.rs", "integration::acceptance"),
+            ("tests/common/mod.rs", "integration::common"),
         ]))
     );
     let missing = package_of(&[("Cargo.toml", CARGO), ("src/lib.rs", "mod gone;\n")]);
     assert_eq!(missing, Err("src/lib.rs: `mod gone;` has no file: neither src/gone.rs nor src/gone/mod.rs exists.".to_string()));
+}
+
+#[test]
+fn a_new_modules_file_and_name_follow_its_parent() {
+    assert_eq!(child_file("src/lib.rs", true, "cache"), "src/cache.rs");
+    assert_eq!(child_file("src/board/agents.rs", false, "cache"), "src/board/agents/cache.rs");
+    assert_eq!(child_file("src/board/agents/mod.rs", true, "cache"), "src/board/agents/cache.rs");
+    assert_eq!(child_file("src/a_tests.rs", true, "cache"), "src/cache.rs");
+    assert_eq!(child_file("tests/x.rs", true, "helper"), "tests/helper.rs");
+    assert!(owns_dir("crate", "src/lib.rs"));
+    assert!(owns_dir("b", "src/b/mod.rs"));
+    assert!(owns_dir("a::tests", "src/a_tests.rs"));
+    assert!(owns_dir("integration::x", "tests/x.rs"));
+    assert!(!owns_dir("a", "src/a.rs"));
+    assert!(!owns_dir("tests", "src/tests.rs"));
+    assert_eq!(child_module("crate", "src/lib.rs", true, "cache"), "cache");
+    assert_eq!(child_module("board", "src/board.rs", false, "agents"), "board::agents");
+    assert_eq!(child_module("integration::x", "tests/x.rs", true, "y"), "integration::y");
 }
 
 #[test]
@@ -310,8 +328,15 @@ fn more_than_one_crate_is_refused_naming_its_roots() {
 
 #[test]
 fn modules_solace_cant_hold_yet_fail_the_package_naming_their_files() {
-    let same_name = package_of(&[("Cargo.toml", CARGO), ("src/main.rs", "mod x;\n"), ("src/x.rs", ""), ("tests/x.rs", "")]);
-    assert_eq!(same_name, Err("Two modules are named `x` (src/x.rs, tests/x.rs); Solace holds one module of each name for now.".to_string()));
+    // A library module named `integration` still shares its prefix with an integration test file.
+    let same_name = package_of(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "mod integration;\n"),
+        ("src/integration.rs", "mod x;\n"),
+        ("src/integration/x.rs", ""),
+        ("tests/x.rs", ""),
+    ]);
+    assert_eq!(same_name, Err("Two modules are named `integration::x` (src/integration/x.rs, tests/x.rs); Solace holds one module of each name for now.".to_string()));
     let twice = package_of(&[("Cargo.toml", CARGO), ("src/main.rs", "mod x;\n#[path = \"x.rs\"]\nmod y;\n"), ("src/x.rs", "")]);
     assert_eq!(twice, Err("src/x.rs is two modules (`x`, `y`); Solace holds a file as one module for now.".to_string()));
     let cycle = package_of(&[("Cargo.toml", CARGO), ("src/main.rs", "#[path = \"main.rs\"]\nmod again;\n")]);
@@ -335,6 +360,30 @@ fn a_helper_shared_by_test_crates_is_held_once() {
         ("tests/b.rs", "mod common;\n"),
         ("tests/common/mod.rs", "pub fn setup() {}\n"),
     ]);
-    assert_eq!(got, Ok(pairs(&[("src/lib.rs", "crate"), ("tests/a.rs", "a"), ("tests/common/mod.rs", "a::common"), ("tests/b.rs", "b")])));
+    assert_eq!(got, Ok(pairs(&[("src/lib.rs", "crate"), ("tests/a.rs", "integration::a"), ("tests/common/mod.rs", "integration::common"), ("tests/b.rs", "integration::b")])));
+}
+
+#[test]
+fn a_library_module_and_a_test_helper_may_share_a_name() {
+    let got = package_of(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "mod common;\n"),
+        ("src/common.rs", ""),
+        ("tests/a.rs", "mod common;\n"),
+        ("tests/common/mod.rs", ""),
+    ]);
+    assert_eq!(got, Ok(pairs(&[("src/lib.rs", "crate"), ("src/common.rs", "common"), ("tests/a.rs", "integration::a"), ("tests/common/mod.rs", "integration::common")])));
+}
+
+/// A module-level import is found whether or not it is re-exported; a `mod x;`
+/// and an item's own imports are not (D-168).
+#[test]
+fn a_header_holds_its_imports() {
+    assert!(imports("use std::fmt;\n\n"));
+    assert!(imports("pub use std::fmt::Debug;\n"));
+    assert!(imports("pub(crate) use fmt;\n"));
+    assert!(!imports("//! doc\npub mod x;\n"));
+    assert!(!imports("pub fn one() {\n    use std::fmt;\n}\n"));
+    assert!(!imports(""));
 }
 

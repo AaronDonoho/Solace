@@ -72,6 +72,7 @@ pub fn notices_and_stamp_test() {
           "",
           "",
           "",
+          "",
           solace_task.Workflow(
             [solace_task.Column("needs_review", "Review", [], False)],
             dict.new(),
@@ -1669,4 +1670,27 @@ pub fn card_title_is_cut_to_200_characters_test() {
   let rendered = board.view(whole) |> element.to_string
   rendered |> string.contains(string.repeat("b", 200)) |> should.be_true
   rendered |> string.contains("Title:") |> should.be_false
+}
+
+/// A project that can't run its commands names why, beside its name (D-167).
+pub fn lane_needs_test() {
+  let #(model, _) = board.init(Nil)
+  let #(model, _) =
+    board.update(
+      model,
+      board.ProjectsLoaded(
+        "{\"workspace\":true,\"projects\":[{\"dir\":\".\",\"label\":\"app\",\"name\":\"app\",\"base\":\"\",\"needs\":\"Needs the Rust toolchain (`cargo`)\"},{\"dir\":\"lib\",\"label\":\"lib\",\"name\":\"lib\",\"base\":\"/p/lib\"}],\"found\":[]}",
+      ),
+    )
+  let assert [app, lib] = model.lanes
+  app.needs |> should.equal("Needs the Rust toolchain (`cargo`)")
+  lib.needs |> should.equal("")
+  let rendered = board.view(model) |> element.to_string
+  rendered
+  |> string.contains(
+    "<small class=\"lane-needs attention\"> Needs the Rust toolchain (`cargo`)</small>",
+  )
+  |> should.be_true
+  rendered |> string.contains("lane-needs attention\"> \n") |> should.be_false
+  string.split(rendered, "lane-needs") |> list.length |> should.equal(2)
 }

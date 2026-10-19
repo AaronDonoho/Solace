@@ -1,6 +1,6 @@
 # Solace
 
-Solace is an experimental system in which agents build and maintain a software project and humans direct them. It wraps a project: the project's code lives in a semantic store as individual symbols (functions, types, constants), and agents read and change it only through Solace, by symbol, with every change type-checked before it is saved. Humans hand work to agents through a local task board. Today Gleam is the only supported project language.
+Solace is an experimental system in which agents build and maintain a software project and humans direct them. It wraps a project: the project's code lives in a semantic store as individual symbols (functions, types, constants), and agents read and change it only through Solace, by symbol, with every change type-checked before it is saved. Humans hand work to agents through a local task board. Today Gleam is the complete project language; a Rust Cargo package is held as symbols too: its items are read, checked and saved by name (D-168).
 
 See [PROPOSAL.md](PROPOSAL.md) for the design, [DECISIONS.md](DECISIONS.md) for settled questions, and [WORK.md](WORK.md) for progress.
 
@@ -261,7 +261,7 @@ Solace puts every file in the project into one category, named for what Solace d
 
 | Category | Files | Agents |
 | --- | --- | --- |
-| Graph | Gleam files under `src/` and `test/`, held as symbols | read and change symbols through Solace, never as files |
+| Graph | Gleam files under `src/` and `test/`, and a Rust package's `.rs` files, held as symbols | read and change symbols through Solace, never as files |
 | Watched | every other text file within `watch_limit`, including `gleam.toml` | read and write through Solace, checked by any validator; a task's changes are undone with it |
 | Protected | `solace.toml`, `AGENTS.md` | read; in a board work run, propose a change that you approve or reject on the task |
 | Unwatched | `.git/`, build output, `.gitignore`d files, paths listed in `unwatched`, binary or oversized files | read and write through Solace |
@@ -285,7 +285,7 @@ Rejected submissions are retained as editable drafts. Agents use `drafts`, `view
 
 ## Current limitations
 
-- Gleam is the only project language.
+- Gleam is the complete project language. A Rust Cargo package is held as symbols too: `check`, `test`, `submit`, `delete` and the reads work on it (D-168–D-173).
 - One agent works on a project at a time: assigning a task is refused while another task's agent works in any project it covers. A task changes only the projects it lists, even when it needs a path dependency of its own. The work of open tasks isn't isolated either, so a later task sees the unapproved changes of earlier ones.
 - The board is local only, for one person, with no authentication.
 - The Contracts page at `/contracts` opens on an outline of what the project does: its main ways in and the requests they handle, then each area (source module) with every public function described in words, what it reads or changes, and whether tests check it. One button asks an agent to describe functions that have no description. The drawing sheet beside it shows areas, entry points, logic, effects, tests and files. A task link opens review with changes and test results. Running functions and replaying prior runs are later packages.

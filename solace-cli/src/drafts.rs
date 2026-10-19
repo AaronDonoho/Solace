@@ -10,8 +10,7 @@ fn owner() -> String {
 /// to a callee, leave it current.
 fn base(s: &Store, ix: &Index, args: &[String], text: &str) -> Out {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let mut names: Vec<String> =
-        text.lines().filter_map(|l| l.strip_prefix("// ── ")).map(|h| h.split([' ', '(']).next().unwrap_or("").to_string()).collect();
+    let mut names: Vec<String> = text.lines().filter_map(|l| l.strip_prefix("// ── ")).map(block_name).collect();
     let (mut parts, mut modules) = (vec![], vec![]);
     // a patch draft: what its sections update or add to; a module section covers the whole module
     if is_patch(text) {
@@ -348,6 +347,47 @@ pub fn file_text(path: &str, current: &str, kind: Section, hunks: Vec<Hunk>) -> 
     }
 }
 
+/// One `// ── <module>.<name> ──` block: a module's imports (its header), once,
+/// before the text of the first item they go with.
+fn push_block(blocks: &mut String, header: &mut String, module: &str, name: &str, text: &str) {
+    let head = if header.is_empty() { String::new() } else { format!("{}\n\n", std::mem::take(header)) };
+    blocks.push_str(&format!("// ── {module}.{name} ──\n{head}{text}\n"));
+}
+
+/// Pushes one block per item a whole-module patch changed or added (D-168); a
+/// container's own text can't go through a named submit, so it is refused.
+fn push_module_blocks(
+    blocks: &mut String,
+    ix: &Index,
+    module: &str,
+    items: &[crate::rust_submit::RustItem],
+    at_line: usize,
+    bad: &impl Fn(String) -> Failure,
+) -> Result<(), Failure> {
+    for item in items {
+        let changed = match item.stored {
+            Some(i) => ix.syms[i].text != item.text || ix.syms[i].kind_text != item.kind,
+            None => true,
+        };
+        if changed {
+            if crate::rust_submit::container_kind(item.kind) || !item.children.is_empty() {
+                let how = match item.stored {
+                    Some(_) => "change it with `submit <module>`".to_string(),
+                    None => store::block_note(item.kind),
+                };
+                return Err(bad(format!(
+                    "the patch changes the `{}` block {} (section at line {at_line}); {how}.",
+                    item.kind,
+                    item.name,
+                )));
+            }
+            push_block(blocks, &mut String::new(), module, &item.name, &item.text);
+        }
+        push_module_blocks(blocks, ix, module, &item.children, at_line, bad)?;
+    }
+    Ok(())
+}
+
 /// Blocks for a plain `submit` from a patch (D-47): `*** Update: <symbol or
 /// module>` sections of `@@` hunks (` ` context, `-` removed, `+` added) change
 /// stored symbols, applied in order as `apply_patch` does, each from where the
@@ -357,15 +397,8 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
     let bad = |m: String| Failure(format!("E0108 {m}"), 1);
     let sections = sections(raw, false)?;
     let ix = s.index()?;
+    let rust = language::is_rust(&s.root);
     let mut blocks = String::new();
-    // Each item of `text` as a block in `module`, but for the one equal to
-    // `stored`; extra items (code added after a symbol) become new symbols.
-    let mut emit = |module: &str, header: &str, text: &str, stored: &str| {
-        let mut header = if header.is_empty() { String::new() } else { format!("{header}\n\n") };
-        for item in s.lang().split(text).items.iter().filter(|i| i.text != stored) {
-            blocks += &format!("// ── {module}.{} ──\n{}{}\n", item.name, std::mem::take(&mut header), item.text);
-        }
-    };
     for (kind, target, at_line, hunks) in sections {
         // A `*** Update File:` header may name a symbol; one that names no code is a file, for `write`.
         let header = raw.lines().nth(at_line - 1).unwrap_or("");
@@ -378,15 +411,84 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
         };
         if kind == Section::Add {
             let text: String = hunks[0].1.iter().map(|l| format!("{}\n", &l[1..])).collect();
-            let parsed = s.lang().split(&text);
+            let (header, items): (String, Vec<(String, String)>) = if rust {
+                let f = language::rust::split(&text, &target)?;
+                // A block's own text is not an item: it comes in whole through
+                // `submit --new <module>` (D-168).
+                if let Some(p) = f.items.iter().find(|p| store::is_block(p)) {
+                    return Err(bad(format!("{}.", store::block_note(p.kind))));
+                }
+                (f.header, f.items.into_iter().map(|p| (p.name, p.text)).collect())
+            } else {
+                let m = s.lang().split(&text);
+                (m.header, m.items.into_iter().map(|i| (i.name, i.text)).collect())
+            };
             let module = match target.rsplit_once('.') {
-                Some((m, n)) if parsed.items.iter().any(|i| i.name == n) => m.to_string(),
+                Some((m, n)) if items.iter().any(|(name, _)| name.as_str() == n) => m.to_string(),
                 _ => target.clone(),
             };
-            if parsed.items.is_empty() {
+            if items.is_empty() {
                 return Err(not_code(bad(format!("`*** Add: {target}` (line {at_line}) defines no function, type or constant. {RESEND}"))));
             }
-            emit(&module, &parsed.header, &text, "");
+            let mut header = header;
+            for (name, item) in &items {
+                let text = s.rust_block_text(&ix, &module, name, item);
+                push_block(&mut blocks, &mut header, &module, name, &text);
+            }
+            continue;
+        }
+        // In a Rust store a section updates one item: its text goes as one block
+        // under the name the store has for it, and the Rust submit path parses
+        // it in its parent's wrapper (D-168).
+        if rust {
+            // A `*** Update:` that names a module applies its hunks to the
+            // module's whole file (D-168): every changed or added item goes as
+            // one block; the header has its own commands.
+            if !target.contains('.') && let Some(m) = s.resolve_module(&ix, &target) {
+                let module = m.path.clone();
+                let before = store::module_text(&ix, m);
+                let mut lines: Vec<String> = before.lines().map(String::from).collect();
+                apply_hunks(&target, &format!("view {target}"), &mut lines, hunks, false)?;
+                let after = lines.join("\n");
+                let file = language::rust::split(&after, &module).map_err(|e| bad(e.0))?;
+                if !file.refusals.is_empty() {
+                    let lines: Vec<String> = file.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
+                    return Err(bad(lines.join("\n")));
+                }
+                if file.header.trim_end() != s.header(&module)?.trim_end() {
+                    return Err(bad(format!(
+                        "the patch changes {module}'s imports (section at line {at_line}); imports are added automatically (`submit --imports {module}` replaces them)."
+                    )));
+                }
+                let items = crate::rust_submit::rust_module_items(&ix, &module, &file.items)?;
+                push_module_blocks(&mut blocks, &ix, &module, &items, at_line, &bad)?;
+                continue;
+            }
+            let Some(i) = crate::rust_submit::rust_symbol(&ix, &target)? else {
+                if let Some(c) = crate::rust_submit::rust_container(&ix, &target) {
+                    return Err(bad(format!("{}.", store::block_note(&ix.syms[c].kind_text))));
+                }
+                return Err(not_code(bad(format!("`*** Update: {target}` (line {at_line}) is no symbol. {RESEND}"))));
+            };
+            let mut lines: Vec<String> = ix.syms[i].text.lines().map(String::from).collect();
+            apply_hunks(&target, &format!("view {target}"), &mut lines, hunks, false)?;
+            let text = lines.join("\n");
+            if text == ix.syms[i].text {
+                continue;
+            }
+            let parent = ix.syms[i].parent.as_ref().and_then(|p| ix.syms.iter().find(|x| &x.id == p)).map(|p| (p.name.as_str(), p.text.as_str(), p.kind_text.as_str()));
+            let items = store::submit_items(&s.root, &ix.syms[i].module, parent, &text, false)?;
+            match items.as_slice() {
+                [] => return Err(bad(format!("the patch leaves nothing of {} (section at line {at_line}); use `delete <name>`.", ix.syms[i].qname()))),
+                [one] if one.name == ix.syms[i].name => {}
+                _ => {
+                    return Err(bad(format!(
+                        "the patch renames {} (section at line {at_line}); submit it whole under its new name.",
+                        ix.syms[i].qname()
+                    )))
+                }
+            }
+            push_block(&mut blocks, &mut String::new(), &ix.syms[i].module, &ix.syms[i].name, &items[0].text);
             continue;
         }
         // The target's text, a unit per symbol (and a module's header first).
@@ -431,7 +533,10 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 }
                 _ => {}
             }
-            emit(&module, &std::mem::take(&mut header), text, &ix.syms[*i].text);
+            let mut head = std::mem::take(&mut header);
+            for item in s.lang().split(text).items.iter().filter(|x| x.text != ix.syms[*i].text) {
+                push_block(&mut blocks, &mut head, &module, &item.name, &item.text);
+            }
         }
         if !header.is_empty() {
             return Err(bad(format!(
@@ -496,7 +601,7 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
     let result = match refs.as_slice() {
         // a patch that applies is submitted as the blocks it changes; if those are rejected, the draft keeps them
         ["submit"] if is_patch(&raw) => patch_blocks(s, &raw).and_then(|blocks| {
-            let result = s.submit_symbols(None, None, &blocks);
+            let result = s.submit_symbols_blocks(None, None, &blocks, true);
             if result.is_err() {
                 raw = blocks;
                 as_blocks = true;

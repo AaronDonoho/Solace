@@ -2703,6 +2703,10 @@ mod tests {
         tick(&root, &mut held, &queue);
         assert!(held.is_some() && serving(&root));
         drop(held);
+        let end = std::time::Instant::now() + Duration::from_secs(1);
+        while serving(&root) && std::time::Instant::now() < end {
+            std::thread::sleep(Duration::from_millis(1));
+        }
         assert!(!serving(&root));
     }
 

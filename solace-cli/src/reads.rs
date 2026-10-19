@@ -1,7 +1,6 @@
 //! A task run's reads (D-157): each symbol the MCP server printed in full, at
-//! the revision served. The server can't see the agent compact its
-//! conversation, but a re-read of a symbol unchanged since shows it, and the
-//! reply then brings back what the run was working on.
+//! the revision served, and the window since its last change. `session
+//! remember` reads them back after a compaction.
 
 use super::*;
 
@@ -9,10 +8,19 @@ thread_local! {
     /// The symbols this MCP call printed in full, in a task run; `None`
     /// elsewhere, so other runs keep no reads.
     static SERVED: RefCell<Option<Vec<Served>>> = const { RefCell::new(None) };
+    /// The reads the run held when this MCP call started; `session remember`
+    /// reads this copy, so it is fresh even before `serve` applies the inbox.
+    static WINDOW: RefCell<Option<Value>> = const { RefCell::new(None) };
 }
 
-/// The most bytes of a catch's run outline.
+/// The most bytes of a run outline in `session remember`.
 const OUTLINE_CAP: usize = 3000;
+
+/// The task run's reads as this MCP call started; `None` outside a task run or
+/// before its first call.
+pub(super) fn window_reads() -> Option<Value> {
+    WINDOW.with(|v| v.borrow().clone())
+}
 
 /// Records symbol `s` of the project at `root` as served in full.
 pub(super) fn mark_served(root: &Path, s: &Sym) {
@@ -35,6 +43,7 @@ pub(super) struct Run {
     tid: String,
     rid: String,
     reads: Reads,
+    dirty: bool,
 }
 
 impl Run {
@@ -50,84 +59,152 @@ impl Run {
         let (tid, rid) = context?;
         let top = scope::top(&Store::root().ok().or_else(|| env::current_dir().ok()).unwrap_or_default());
         let reads = Reads::from_json(&board::run_reads(&top, &tid, &rid));
-        Some(Run { top, tid, rid, reads })
+        Some(Run { top, tid, rid, reads, dirty: false })
     }
 
-    /// An MCP call starts: what it prints in full is recorded from here.
-    pub(super) fn start_call() {
+    /// An MCP call starts: what it prints in full is recorded from here, and
+    /// `session remember` sees the run's reads as they are now.
+    pub(super) fn start_call(&mut self) {
         SERVED.with(|v| *v.borrow_mut() = Some(vec![]));
+        WINDOW.with(|v| *v.borrow_mut() = Some(self.reads.to_json()));
+        self.dirty = false;
     }
 
-    /// The MCP call of `commands` ended: what its reply adds, within `budget`.
-    /// The reads are saved on the run.
-    pub(super) fn end_call(&mut self, commands: &[&str], budget: usize) -> String {
+    /// The MCP call of `commands` ended: the reads are saved on the run. A
+    /// change command starts a new window; the reply adds nothing on its own.
+    pub(super) fn end_call(&mut self, commands: &[&str]) {
         let served = take_served();
         let changed = commands.iter().any(|c| {
             let words: Vec<String> = c.strip_prefix("solace").unwrap_or(c).split_whitespace().map(String::from).collect();
-            verb_words(&words).first().is_some_and(|v| STOPS.contains(v))
+            is_change(&words)
         });
-        let (top, tid, rid) = (&self.top, &self.tid, &self.rid);
-        let out = if served.is_empty() && !changed {
-            String::new()
-        } else {
-            let out = catch_up(&mut self.reads, top, served, changed, budget, &|b| board::run_outline(top, tid, rid, b));
-            let _ = board::record_reads(top, tid, rid, self.reads.to_json());
-            out
-        };
+        if !served.is_empty() || changed {
+            if changed {
+                let stores = opened(&self.top, &self.reads);
+                self.reads.new_window(&|r| current_revision(&stores, r));
+            }
+            self.reads.record(&served);
+            self.window();
+            self.dirty = true;
+        }
         SERVED.with(|v| v.borrow_mut().take());
-        out
+        if self.dirty {
+            let (top, tid, rid) = (&self.top, &self.tid, &self.rid);
+            let _ = board::record_reads(top, tid, rid, self.reads.to_json());
+            self.dirty = false;
+        }
+    }
+
+    /// After one command: its served symbols and any change join the window
+    /// before the next command, so `session remember` in the same call sees them.
+    pub(super) fn end_command(&mut self, words: &[String]) {
+        let served = take_served();
+        // `mark_served` records only while `SERVED` is Some; arm it for the next command.
+        SERVED.with(|v| *v.borrow_mut() = Some(vec![]));
+        let changed = is_change(words);
+        if !served.is_empty() || changed {
+            if changed {
+                let stores = opened(&self.top, &self.reads);
+                self.reads.new_window(&|r| current_revision(&stores, r));
+            }
+            self.reads.record(&served);
+            self.window();
+            self.dirty = true;
+        }
+    }
+
+    /// Shows `session remember` the run's reads as they are now, including a
+    /// change the inbox has not applied yet.
+    fn window(&self) {
+        WINDOW.with(|v| *v.borrow_mut() = Some(self.reads.to_json()));
     }
 }
 
-/// What a task run's reply adds after a call that read or changed code. A
-/// re-read of a symbol unchanged since the run was served it means the
-/// conversation was most likely compacted: once a window, the reply adds the
-/// current views of the window's other symbols, then `outline` of the run,
-/// within `budget`. A call with a change starts a new window, which keeps only
-/// the symbols the change made differ from what was served.
-fn catch_up(reads: &mut Reads, top: &Path, served: Vec<Served>, changed: bool, budget: usize, outline: &dyn Fn(usize) -> String) -> String {
-    // A change command that failed or changed nothing the run read keeps the
-    // window; one that did starts a new window, and its call's reads are no catch.
-    let reset = changed && {
-        let stores = opened(top, reads);
-        reads.new_window(&|r| current_revision(&stores, r))
-    };
-    let again = if reset { None } else { reads.reread(&served).map(|r| r.symbol.clone()) };
-    reads.record(&served);
-    let Some(symbol) = again else {
-        return String::new();
-    };
-    reads.caught = true;
-    let mut out = format!("\n`{symbol}` hasn't changed since this run last read it, so the conversation was likely compacted.\n");
-    let story = outline(OUTLINE_CAP.min(budget.saturating_sub(out.len())));
+/// What `session remember` replies: the task's context, then the window's
+/// symbols other than those the call printed, as `view` prints them, then
+/// `outline` of the run, within `budget`. What did not fit is named; when the
+/// context itself does not fit, it is cut and the notice says so. It reads
+/// only: it records nothing and has no once-per-window rule.
+pub(super) fn remember_reply(context: &str, reads: &Value, top: &Path, outline: &dyn Fn(usize) -> String, budget: usize) -> String {
+    let reads = Reads::from_json(reads);
+    const VIEWS_HEAD: &str = "What this run read or changed since its last change, as it is now:\n";
+    const STORY_HEAD: &str = "This run so far, one step per line:\n";
+    const NOT_SHOWN: &str = "Not shown, to fit the size limit: ";
+    const NOTES: &str = "the task's notes";
+    // The headings and the notice naming what didn't fit are added last; hold
+    // room for them and every name they could carry, so the reply keeps to its
+    // budget even when many views are left out.
+    let groups = reads.others(&[]);
+    let names = groups.iter().flat_map(|(_, names)| names.iter()).map(|n| n.len() + 1).sum::<usize>();
+    let fixed = VIEWS_HEAD.len() + STORY_HEAD.len() + NOT_SHOWN.len() + names + 2;
+    // A context over its room is cut, and the notice says the task's notes.
+    let cut = context.len() > budget.saturating_sub(fixed);
+    let room = fixed + if cut { NOTES.len() + 1 } else { 0 };
+    let mut left_out: Vec<String> = if cut { vec![NOTES.to_string()] } else { vec![] };
+    let mut out = cut_text(context, budget.saturating_sub(room)).to_string();
+    let story = outline(OUTLINE_CAP.min(budget.saturating_sub(out.len() + room)));
     let mut views = String::new();
-    let mut left_out: Vec<String> = vec![];
-    for (project, names) in reads.others(&served) {
-        // room for the two headings
-        let left = budget.saturating_sub(out.len() + story.len() + views.len() + 100);
-        if left == 0 {
-            left_out.extend(names);
-            continue;
+    // The ask is read-only: the views it prints are not new reads for the run.
+    without_serving(|| {
+        for (project, names) in groups {
+            let left = budget.saturating_sub(out.len() + story.len() + views.len() + room);
+            if left == 0 {
+                left_out.extend(names);
+                continue;
+            }
+            let Ok(s) = Store::at(&top.join(&project)) else { left_out.extend(names); continue };
+            let Ok(ix) = s.index() else { left_out.extend(names); continue };
+            let names: Vec<&str> = names.iter().map(String::as_str).filter(|n| s.resolve(&ix, n).is_ok()).collect();
+            match s.view(&names, false, left) {
+                Ok(v) if v.len() <= left => views += &v,
+                _ => left_out.extend(names.iter().map(|n| n.to_string())),
+            }
         }
-        let Ok(s) = Store::at(&top.join(&project)) else { left_out.extend(names); continue };
-        let Ok(ix) = s.index() else { left_out.extend(names); continue };
-        let names: Vec<&str> = names.iter().map(String::as_str).filter(|n| s.resolve(&ix, n).is_ok()).collect();
-        match s.view(&names, false, left) {
-            Ok(v) if v.len() <= left => views += &v,
-            _ => left_out.extend(names.iter().map(|n| n.to_string())),
-        }
-    }
-    reads.record(&take_served());
+    });
     if !left_out.is_empty() {
-        views += &format!("Not shown, to fit the size limit: {}\n", left_out.join(" "));
+        views += &format!("{NOT_SHOWN}{}\n", left_out.join(" "));
     }
     if !views.is_empty() {
-        out += &format!("What this run read or changed since its last change, as it is now:\n{views}");
+        out += &format!("{VIEWS_HEAD}{views}");
     }
     if !story.is_empty() {
-        out += &format!("This run so far, one step per line:\n{story}");
+        out += &format!("{STORY_HEAD}{story}");
     }
     out
+}
+
+/// `s` cut to `room` bytes at a line end where one is near, so a reply that
+/// must cut the task's context ends on a whole line.
+fn cut_text(s: &str, room: usize) -> &str {
+    if s.len() <= room {
+        return s;
+    }
+    let mut end = room;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    match s[..end].rfind('\n') {
+        Some(i) if i > 0 => &s[..i],
+        _ => &s[..end],
+    }
+}
+
+/// Whether a command's words name a change command (D-157).
+fn is_change(words: &[String]) -> bool {
+    verb_words(words).first().is_some_and(|v| STOPS.contains(v))
+}
+
+/// Runs `f` without recording what it prints as served: `session remember`
+/// must not change the run's reads.
+fn without_serving<T>(f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Vec<Served>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SERVED.with(|v| *v.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(SERVED.with(|v| v.borrow_mut().take()));
+    f()
 }
 
 /// Each project the window's symbols live in, opened once for a change
@@ -171,12 +248,11 @@ impl Served {
     }
 }
 
-/// A task run's reads, each symbol once, latest last, and whether the window
-/// since the last change command has had its catch.
+/// A task run's reads, each symbol once, latest last; `recent` marks the
+/// window since the last change command.
 #[derive(Default)]
 struct Reads {
     symbols: Vec<Served>,
-    caught: bool,
 }
 
 impl Reads {
@@ -193,7 +269,7 @@ impl Reads {
                 })
                 .collect()
         });
-        Reads { symbols, caught: v["caught"] == true }
+        Reads { symbols }
     }
 
     fn to_json(&self) -> Value {
@@ -202,16 +278,7 @@ impl Reads {
             .iter()
             .map(|r| json!({"project":r.project,"symbol":r.symbol,"revision":r.revision,"recent":r.recent,"latest":r.latest}))
             .collect();
-        json!({"symbols":symbols,"caught":self.caught})
-    }
-
-    /// The first of `served` the run was served before at the same revision,
-    /// unless the window has had its catch.
-    fn reread<'a>(&self, served: &'a [Served]) -> Option<&'a Served> {
-        if self.caught {
-            return None;
-        }
-        served.iter().find(|s| self.symbols.iter().any(|r| r.same(s) && r.revision == s.revision))
+        json!({"symbols":symbols})
     }
 
     /// When a recent symbol's revision `now` differs from the one the run last
@@ -229,7 +296,6 @@ impl Reads {
                 r.latest = c;
             }
         }
-        self.caught = false;
         true
     }
 
@@ -254,9 +320,11 @@ impl Reads {
     }
 
     /// The window's symbols other than `served`, by project, in the order read.
+    /// A symbol with an empty latest revision is one the run saw deleted: it is
+    /// gone from its project, so it is not a view to name as left out.
     fn others(&self, served: &[Served]) -> Vec<(String, Vec<String>)> {
         let mut out: Vec<(String, Vec<String>)> = vec![];
-        for r in self.symbols.iter().filter(|r| r.recent && !served.iter().any(|s| s.same(r))) {
+        for r in self.symbols.iter().filter(|r| r.recent && !r.latest.is_empty() && !served.iter().any(|s| s.same(r))) {
             match out.iter_mut().find(|(p, _)| *p == r.project) {
                 Some((_, names)) => names.push(r.symbol.clone()),
                 None => out.push((r.project.clone(), vec![r.symbol.clone()])),

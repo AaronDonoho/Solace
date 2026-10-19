@@ -1,0 +1,880 @@
+//! `submit` in a Rust store (D-168): items saved by name, checked with cargo.
+
+use super::*;
+use crate::testing::*;
+
+fn text_of(root: &Path, rel: &str) -> String {
+    fs::read_to_string(root.join(rel)).unwrap()
+}
+
+/// The text of the one kept draft.
+fn kept(store: &Store) -> String {
+    store.db.query_row("SELECT text FROM drafts", [], |r| r.get(0)).unwrap()
+}
+
+/// Editing a function and a method leaves every other byte of the file alone.
+#[test]
+fn an_edit_keeps_the_rest_of_the_file() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n\npub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.submit_symbols(Some("crate.one"), None, "pub fn one() -> i32 {\n    3\n}\n").unwrap();
+    assert!(out.contains("Saved crate.one"), "{out}");
+    let edited = lib.replace("    1\n", "    3\n");
+    assert_eq!(text_of(&root, "src/lib.rs"), edited);
+    let out = store.submit_symbols(Some("crate.Store::open"), None, "pub fn open(&self) -> i32 {\n    4\n}\n").unwrap();
+    assert!(out.contains("Saved crate.Store::open"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), edited.replace("        2\n", "        4\n"));
+}
+
+/// `--new` adds a top-level item and a method, with the file's blank lines.
+#[test]
+fn new_adds_items_with_the_right_spacing() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) {}\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.submit_symbols(None, Some("crate"), "pub fn extra() -> i32 {\n    5\n}\n").unwrap();
+    assert!(out.contains("Saved crate.extra"), "{out}");
+    let added = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) {}\n}\n\npub fn extra() -> i32 {\n    5\n}\n";
+    assert_eq!(text_of(&root, "src/lib.rs"), added);
+    let out = store.submit_symbols(None, Some("crate.Store"), "pub fn close(&self) {}\n").unwrap();
+    assert!(out.contains("Saved crate.Store::close"), "{out}");
+    assert_eq!(
+        text_of(&root, "src/lib.rs"),
+        "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) {}\n\n    pub fn close(&self) {}\n}\n\npub fn extra() -> i32 {\n    5\n}\n"
+    );
+}
+
+/// A refusal from the Rust splitter replies "Not saved" and keeps the draft.
+#[test]
+fn a_split_refusal_keeps_the_draft() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "include!(\"table.rs\");\n";
+    let err = drafts::submit(&store, &["submit", "crate.one"], &mut || Ok(text.into()), None).unwrap_err().0;
+    assert!(err.contains("Not saved") && err.contains("include!"), "{err}");
+    assert_eq!(kept(&store), text);
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}
+
+/// A stored item the whole module leaves out, a `mod` line in the text, and a
+/// named block each say where the work goes.
+#[test]
+fn whole_modules_and_named_blocks_say_where_the_work_goes() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Store;\n\nimpl Store {}\n\npub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "pub fn one() -> i32 {\n    1\n}\n";
+    let err = drafts::submit(&store, &["submit", "crate"], &mut || Ok(text.into()), None).unwrap_err().0;
+    assert!(err.contains("E0102 the module text leaves out: Store"), "{err}");
+    assert_eq!(kept(&store), text);
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+    let err = store.submit_symbols(None, Some("crate"), "mod extra;\n").unwrap_err().0;
+    assert!(err.contains("`mod extra;` names another module") && err.contains("submit --new <module>"), "{err}");
+    let err = store.submit_symbols(None, Some("crate"), "mod tests {\n    mod inner;\n}\n").unwrap_err().0;
+    assert!(err.contains("names another module") && err.contains("submit --new <module>"), "{err}");
+    let err = store.submit_symbols(Some("crate.Store"), None, "impl Store {\n    pub fn open(&self) {}\n}\n").unwrap_err().0;
+    assert!(err.contains("submit --new <module>") && !err.contains("task:"), "{err}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+    assert_eq!(store.index().unwrap().modules.len(), 1, "nothing new was stored");
+}
+
+/// A type error replies "Not saved" with the round note, and keeps the draft.
+#[test]
+fn a_type_error_keeps_the_draft() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "pub fn one() -> i32 {\n    \"two\"\n}\n";
+    let err = drafts::submit(&store, &["submit", "crate.one"], &mut || Ok(text.into()), None).unwrap_err().0;
+    assert!(err.contains("Not saved: the submitted text has errors."), "{err}");
+    assert!(err.contains("Rust checks borrows only once types check"), "{err}");
+    assert_eq!(kept(&store), text);
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}
+
+/// `--imports` takes a header of `use` lines, and refuses more than that.
+#[test]
+fn imports_replace_the_header_only() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "use std::fmt;\n\npub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.submit(Target::Imports("crate"), "use std::fmt;\nuse std::io;\n").unwrap();
+    assert!(out.contains("Saved crate imports"), "{out}");
+    let header = "use std::fmt;\nuse std::io;\n\npub fn one() -> i32 {\n    1\n}\n";
+    assert_eq!(text_of(&root, "src/lib.rs"), header);
+    let err = store.submit(Target::Imports("crate"), "use std::fmt;\n\npub fn extra() -> i32 {\n    1\n}\n").unwrap_err().0;
+    assert!(err.contains("--imports text may only contain imports"), "{err}");
+    let err = store.submit(Target::Imports("crate"), "use std::fmt;\nmod extra;\n").unwrap_err().0;
+    assert!(err.contains("`--imports` can't add or remove a module") && err.contains("submit --new <module>"), "{err}");
+    assert_eq!(text_of(&root, "src/lib.rs"), header);
+}
+
+/// A block named `<T as Tr>::f` settles on the trait impl's method.
+#[test]
+fn a_block_named_with_a_trait_impl_submits() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Thing;\n\nimpl std::fmt::Display for Thing {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"thing\")\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let block = "// ── crate.<Thing as std::fmt::Display>::fmt ──\nfn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n    write!(f, \"other\")\n}\n";
+    let out = store.submit_symbols(None, None, block).unwrap();
+    assert!(out.contains("Saved crate.<Thing as std::fmt::Display>::fmt"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("\"thing\"", "\"other\""));
+}
+
+/// A patch updates a method and adds one, leaving the rest of the file alone.
+#[test]
+fn a_patch_updates_and_adds_a_method() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let update = "*** Begin Patch\n*** Update: crate.Store::open\n@@\n-    pub fn open(&self) -> i32 {\n-        2\n-    }\n+    pub fn open(&self) -> i32 {\n+        3\n+    }\n*** End Patch\n";
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(update.into()), None).unwrap();
+    assert!(out.contains("Saved crate.Store::open"), "{out}");
+    let edited = lib.replace("        2\n", "        3\n");
+    assert_eq!(text_of(&root, "src/lib.rs"), edited);
+    let add = "*** Begin Patch\n*** Add: crate.Store\n+pub fn close(&self) {}\n*** End Patch\n";
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(add.into()), None).unwrap();
+    assert!(out.contains("Saved crate.Store::close"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), edited.replace("    }\n}\n", "    }\n\n    pub fn close(&self) {}\n}\n"));
+}
+
+/// Undoing a Rust submit restores the file byte for byte.
+#[test]
+fn undo_restores_the_file() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let before = board::snapshot(&store).unwrap();
+    store.submit_symbols(Some("crate.Store::open"), None, "pub fn open(&self) -> i32 {\n    7\n}\n").unwrap();
+    assert_ne!(text_of(&root, "src/lib.rs"), lib);
+    let states: Vec<(String, Value)> = before.as_object().unwrap().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    board::restore(&store, &states).unwrap();
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}
+
+/// Editing a method of an `impl` inside an inline `mod` keeps every other byte.
+#[test]
+fn an_edit_inside_an_inline_mod_keeps_the_file() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "mod tests {\n    pub struct Store;\n\n    impl Store {\n        pub fn open(&self) -> i32 {\n            2\n        }\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.submit_symbols(Some("crate.tests::Store::open"), None, "pub fn open(&self) -> i32 {\n    3\n}\n").unwrap();
+    assert!(out.contains("Saved crate.tests::Store::open"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("            2\n", "            3\n"));
+}
+
+/// An `extern "C"` block's item is saved under the parent's prefix, not the
+/// block's name (D-162).
+#[test]
+fn an_extern_item_is_saved_under_the_parents_prefix() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "mod tests {\n    extern \"C\" {\n        pub fn getpid() -> i32;\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.submit_symbols(Some("crate.tests::getpid"), None, "pub fn getpid() -> u32;\n").unwrap();
+    assert!(out.contains("Saved crate.tests::getpid"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("-> i32", "-> u32"));
+}
+
+/// A method's multi-line string literal keeps its lines, even nested.
+#[test]
+fn a_nested_method_keeps_a_multi_line_string_literal() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "mod tests {\n    pub struct Store;\n\n    impl Store {\n        pub fn open(&self) -> &str {\n            \"one\ntwo\"\n        }\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "pub fn open(&self) -> &str {\n    \"one\nthree\"\n}\n";
+    let out = store.submit_symbols(Some("crate.tests::Store::open"), None, text).unwrap();
+    assert!(out.contains("Saved crate.tests::Store::open"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("two", "three"));
+}
+
+/// A block whose text carries imports is refused, naming `--imports`.
+#[test]
+fn a_block_with_imports_names_the_imports_command() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "use std::fmt;\n\npub fn one() -> i32 {\n    2\n}\n";
+    let err = drafts::submit(&store, &["submit", "crate.one"], &mut || Ok(text.into()), None).unwrap_err().0;
+    assert!(err.contains("submit --imports"), "{err}");
+    assert_eq!(kept(&store), text);
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}
+
+/// Removing a `use` an item needs is refused, and the file is unchanged.
+#[test]
+fn imports_that_break_an_item_are_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "use std::collections::HashMap;\n\npub fn one() -> HashMap<u8, u8> {\n    HashMap::new()\n}\n";
+    let (root, store) = rust_project(lib);
+    let err = store.submit(Target::Imports("crate"), "").unwrap_err().0;
+    assert!(err.contains("Not saved: the submitted text has errors."), "{err}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}
+
+/// An `*** Update:` that names only a container is refused, as `submit` is.
+#[test]
+fn a_patch_naming_only_a_container_is_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Other;\n\nimpl std::fmt::Display for Other {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"other\")\n    }\n}\n";
+    let (_root, store) = rust_project(lib);
+    let patch = "*** Begin Patch\n*** Update: crate.<Other as std::fmt::Display>\n@@\n-    fn fmt(&self) {\n+    fn fmt(&self) {\n*** End Patch\n";
+    let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
+    assert!(err.contains("submit --new <module>") && err.contains("item by item"), "{err}");
+    assert!(!err.contains("task:"), "{err}");
+    let add = "*** Begin Patch\n*** Add: crate\n+impl Other {\n+    fn o(&self) {}\n+}\n*** End Patch\n";
+    let err = drafts::submit(&store, &["submit"], &mut || Ok(add.into()), None).unwrap_err().0;
+    assert!(err.contains("submit --new <module>"), "{err}");
+}
+
+/// A `pub use` re-export in a block's header is refused, as a plain `use` is.
+#[test]
+fn a_block_with_a_pub_use_is_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "pub use std::fmt;\n\npub fn one() -> i32 {\n    2\n}\n";
+    let err = drafts::submit(&store, &["submit", "crate.one"], &mut || Ok(text.into()), None).unwrap_err().0;
+    assert!(err.contains("submit --imports"), "{err}");
+    assert_eq!(kept(&store), text);
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}
+
+/// A patch on a nested method, whose stored text is already indented, rewraps
+/// exactly: every other byte of the file stays (D-168).
+#[test]
+fn a_patch_updates_a_nested_method() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "mod tests {\n    pub struct Store;\n\n    impl Store {\n        pub fn open(&self) -> i32 {\n            2\n        }\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let patch = "*** Begin Patch\n*** Update: crate.tests::Store::open\n@@\n-        pub fn open(&self) -> i32 {\n-            2\n-        }\n+        pub fn open(&self) -> i32 {\n+            3\n+        }\n*** End Patch\n";
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("Saved crate.tests::Store::open"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("            2\n", "            3\n"));
+}
+
+/// A nested method's multi-line C-string literal keeps its lines too.
+#[test]
+fn a_nested_method_keeps_a_multi_line_c_string() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "mod tests {\n    pub struct Store;\n\n    impl Store {\n        pub fn lines(&self) -> &'static core::ffi::CStr {\n            c\"one\ntwo\"\n        }\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "pub fn lines(&self) -> &'static core::ffi::CStr {\n    c\"one\nthree\"\n}\n";
+    let out = store.submit_symbols(Some("crate.tests::Store::lines"), None, text).unwrap();
+    assert!(out.contains("Saved crate.tests::Store::lines"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("two", "three"));
+}
+
+/// `--new` saves a whole `impl` block with its items (D-168).
+#[test]
+fn new_saves_a_whole_impl_block() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("pub struct X;\n");
+    let block = "impl std::fmt::Display for X {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"x\")\n    }\n}\n";
+    let out = store.submit_symbols(None, Some("crate"), block).unwrap();
+    assert!(out.contains("Saved crate.<X as std::fmt::Display>"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), format!("pub struct X;\n\n{block}"));
+}
+
+/// A type with no `impl` takes its first method as a new block, and the next
+/// one goes item by item (D-168).
+#[test]
+fn new_saves_a_types_first_method() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("pub struct Store;\n");
+    let block = "impl Store {\n    pub fn open(&self) -> i32 {\n        1\n    }\n}\n";
+    let out = store.submit_symbols(None, Some("crate"), block).unwrap();
+    assert!(out.contains("Saved crate.Store"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), format!("pub struct Store;\n\n{block}"));
+    let out = store.submit_symbols(None, Some("crate.Store"), "pub fn close(&self) {}\n").unwrap();
+    assert!(out.contains("Saved crate.Store::close"), "{out}");
+    assert_eq!(
+        text_of(&root, "src/lib.rs"),
+        "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        1\n    }\n\n    pub fn close(&self) {}\n}\n"
+    );
+}
+
+/// An item added to an empty `impl X {}` joins it where its `}` was (D-168).
+#[test]
+fn adding_to_an_empty_impl_fills_it() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("pub struct Store;\n\nimpl Store {}\n");
+    let out = store.submit_symbols(None, Some("crate.Store"), "pub fn open(&self) {}\n").unwrap();
+    assert!(out.contains("crate.Store::open"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) {}\n}\n");
+    let out = store.submit_symbols(None, Some("crate.Store"), "pub fn close(&self) {}\n").unwrap();
+    assert!(out.contains("crate.Store::close"), "{out}");
+    assert_eq!(
+        text_of(&root, "src/lib.rs"),
+        "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) {}\n\n    pub fn close(&self) {}\n}\n"
+    );
+}
+
+/// A whole inline `mod` block and a whole `extern` block save with their items.
+#[test]
+fn new_saves_an_inline_mod_and_an_extern_block() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let inline = "mod tests {\n    pub fn t() -> i32 {\n        2\n    }\n}\n";
+    let out = store.submit_symbols(None, Some("crate"), inline).unwrap();
+    assert!(out.contains("Saved crate.tests"), "{out}");
+    let extern_block = "extern \"C\" {\n    pub fn getpid() -> i32;\n}\n";
+    let out = store.submit_symbols(None, Some("crate"), extern_block).unwrap();
+    assert!(out.contains("Saved crate.extern \"C\""), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), format!("pub fn one() -> i32 {{\n    1\n}}\n\n{inline}\n{extern_block}"));
+}
+
+/// The first item of an empty `extern "C" {}` lands inside it (D-168).
+#[test]
+fn an_extern_block_takes_its_first_item() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("extern \"C\" {}\n");
+    let out = store.submit_symbols(None, Some("crate.extern \"C\""), "pub fn getpid() -> i32;\n").unwrap();
+    assert!(out.contains("crate.getpid"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "extern \"C\" {\n    pub fn getpid() -> i32;\n}\n");
+}
+
+/// A whole block nests in an existing inline `mod`; naming the mod refuses it
+/// (D-168).
+#[test]
+fn a_whole_block_nests_in_an_inline_mod() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "mod tests {\n    pub struct Store;\n\n    pub fn t() -> i32 {\n        2\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let block = "impl Store {\n    pub fn open(&self) {}\n}\n";
+    let err = store.submit_symbols(Some("crate.tests"), None, block).unwrap_err().0;
+    assert!(err.contains("submit --new <module>") && !err.contains("task:"), "{err}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib, "a named mod's block saved nothing");
+    let out = store.submit_symbols(None, Some("crate.tests"), block).unwrap();
+    assert!(out.contains("crate.tests::Store::open"), "{out}");
+    assert_eq!(
+        text_of(&root, "src/lib.rs"),
+        "mod tests {\n    pub struct Store;\n\n    pub fn t() -> i32 {\n        2\n    }\n\n    impl Store {\n        pub fn open(&self) {}\n    }\n}\n"
+    );
+}
+
+/// Every row a new block or a filled container adds is recorded as created
+/// (D-168).
+#[test]
+fn a_new_blocks_rows_are_recorded_as_created() {
+    if !cargo::installed() {
+        return;
+    }
+    let created = |store: &Store, detail: &str| -> i64 {
+        store.db.query_row("SELECT COUNT(*) FROM history WHERE action = 'create' AND detail = ?1", [detail], |r| r.get(0)).unwrap()
+    };
+    let (_root, store) = rust_project("pub struct Store;\n");
+    store.submit_symbols(None, Some("crate"), "impl Store {\n    pub fn open(&self) {}\n}\n").unwrap();
+    assert_eq!((created(&store, "Store"), created(&store, "Store::open")), (1, 1));
+    let (_root, store) = rust_project("pub struct Store;\n\nimpl Store {}\n");
+    store.submit_symbols(None, Some("crate.Store"), "pub fn open(&self) {}\n").unwrap();
+    assert_eq!((created(&store, "Store"), created(&store, "Store::open")), (0, 1), "the container is edited, its item created");
+}
+
+/// A module the store doesn't have is created by `--new`: its file beside the
+/// crate root, the `mod` line its parent's header takes, and a clean check
+/// (D-168).
+#[test]
+fn new_creates_a_module_with_its_file_and_mod_line() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Store;\n\npub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.submit_symbols(None, Some("brand"), "pub fn side() -> i32 {\n    2\n}\n").unwrap();
+    assert!(out.contains("Saved brand.side"), "{out}");
+    assert!(out.contains("created module brand (src/brand.rs; added mod brand; to crate)"), "{out}");
+    assert_eq!(text_of(&root, "src/brand.rs"), "pub fn side() -> i32 {\n    2\n}\n");
+    assert_eq!(text_of(&root, "src/lib.rs"), format!("mod brand;\n\n{lib}"));
+    assert_eq!(store.index().unwrap().modules.len(), 2);
+}
+
+/// A new module's text carries its own header, docs and `use` lines included,
+/// and its `mod` line goes after the parent's last one (D-168).
+#[test]
+fn new_takes_the_header_of_a_new_module() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    store.submit_symbols(None, Some("brand"), "pub fn side() -> i32 {\n    2\n}\n").unwrap();
+    let text = "//! Words.\n\nuse std::collections::HashMap;\n\npub fn show() -> usize {\n    HashMap::<u8, u8>::new().len()\n}\n";
+    let out = store.submit_symbols(None, Some("words"), text).unwrap();
+    assert!(out.contains("created module words (src/words.rs; added mod words; to crate)"), "{out}");
+    assert!(text_of(&root, "src/words.rs").starts_with("//! Words.\n\nuse std::collections::HashMap;\n\npub fn show()"), "{out}");
+    assert!(text_of(&root, "src/lib.rs").starts_with("mod brand;\nmod words;\n\n"), "{out}");
+    assert_eq!(store.index().unwrap().modules.len(), 3);
+}
+
+/// A new module still refuses a `mod x;` in its text, and refused text leaves
+/// no file behind (D-168).
+#[test]
+fn a_refused_new_module_leaves_no_file() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let err = store.submit_symbols(None, Some("other"), "mod y;\n").unwrap_err().0;
+    assert!(err.contains("names another module") && err.contains("submit --new <module>"), "{err}");
+    let err = store.submit_symbols(None, Some("other"), "include!(\"table.rs\");\n").unwrap_err().0;
+    assert!(err.contains("Not saved") && err.contains("include!"), "{err}");
+    assert!(!root.join("src/other.rs").exists(), "a refused module writes no file");
+    assert_eq!(store.index().unwrap().modules.len(), 1);
+}
+
+/// A new nested module lands beside its parent's file, not in a folder named
+/// after itself (D-168).
+#[test]
+fn new_creates_a_nested_module_beside_its_parents_file() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod board;\n"),
+        ("src/board.rs", "pub mod agents;\n"),
+        ("src/board/agents.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.submit_symbols(None, Some("board::agents::cache"), "pub fn two() -> i32 {\n    2\n}\n").unwrap();
+    assert!(out.contains("Saved board::agents::cache.two"), "{out}");
+    assert!(out.contains("created module board::agents::cache (src/board/agents/cache.rs; added mod cache; to board::agents)"), "{out}");
+    assert_eq!(text_of(&root, "src/board/agents/cache.rs"), "pub fn two() -> i32 {\n    2\n}\n");
+    assert_eq!(text_of(&root, "src/board/agents.rs"), "mod cache;\n\npub fn one() -> i32 {\n    1\n}\n");
+}
+
+/// A patch's `*** Add: <module>` creates the module too, its `mod` line going
+/// after the header's last one (D-168).
+#[test]
+fn a_patch_add_creates_a_module_after_the_headers_last_mod_line() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "mod a;\n\nuse std::fmt;\n\npub fn one() -> std::fmt::Result {\n    Ok(())\n}\n"),
+        ("src/a.rs", ""),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let patch = "*** Begin Patch\n*** Add: brand\n+pub fn side() -> i32 {\n+    2\n+}\n*** End Patch\n";
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("created module brand (src/brand.rs; added mod brand; to crate)"), "{out}");
+    assert_eq!(text_of(&root, "src/brand.rs"), "pub fn side() -> i32 {\n    2\n}\n");
+    assert_eq!(text_of(&root, "src/lib.rs"), "mod a;\nmod brand;\n\nuse std::fmt;\n\npub fn one() -> std::fmt::Result {\n    Ok(())\n}\n");
+}
+
+/// `integration::x` creates a test crate root, `tests/x.rs`, which no `mod`
+/// line names (D-168, D-169).
+#[test]
+fn new_creates_a_test_crate_root() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.submit_symbols(None, Some("integration::x"), "pub fn t() -> i32 {\n    2\n}\n").unwrap();
+    assert!(out.contains("created module integration::x (tests/x.rs)"), "{out}");
+    assert_eq!(text_of(&root, "tests/x.rs"), "pub fn t() -> i32 {\n    2\n}\n");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib, "a test root takes no `mod` line");
+    assert_eq!(store.index().unwrap().modules.len(), 2);
+}
+
+/// A new module's file already there outside the store is refused, as Gleam's
+/// is (D-168).
+#[test]
+fn a_new_modules_existing_file_is_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    fs::write(root.join("src/brand.rs"), "pub fn mine() -> i32 {\n    9\n}\n").unwrap();
+    let err = store.submit_symbols(None, Some("brand"), "pub fn side() -> i32 {\n    2\n}\n").unwrap_err().0;
+    assert!(err.contains("already exists outside the store"), "{err}");
+    assert_eq!(text_of(&root, "src/brand.rs"), "pub fn mine() -> i32 {\n    9\n}\n");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+    assert_eq!(store.index().unwrap().modules.len(), 1);
+}
+
+/// A module name Rust reserves is refused and leaves no file and no `mod` line
+/// (D-168): `mod type;` doesn't parse, so the crate would stop building.
+#[test]
+fn a_reserved_module_name_is_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    for name in ["type", "fn", "async", "self", "_"] {
+        let err = store.submit_symbols(None, Some(name), "pub fn side() -> i32 {\n    2\n}\n").unwrap_err().0;
+        assert!(err.contains("E1003") && err.contains(name), "{name}: {err}");
+    }
+    assert!(!root.join("src/type.rs").exists() && !root.join("src/_.rs").exists(), "a refused module writes no file");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib, "the parent's header is untouched");
+    assert_eq!(store.index().unwrap().modules.len(), 1);
+}
+/// A `use` in a block submitted into an inline `mod` is refused, as a top-level
+/// one is: it would land as the container's child, and imports go through
+/// `submit --imports` (D-168).
+#[test]
+fn a_nested_block_with_imports_names_the_imports_command() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "mod tests {\n    pub fn one() -> i32 {\n        1\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "use std::fmt;\n\npub fn two() -> i32 {\n    2\n}\n";
+    let err = store.submit_symbols(None, Some("crate.tests"), text).unwrap_err().0;
+    assert!(err.contains("submit --imports"), "{err}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}
+/// A symbol three levels deep — inside a `mod` inside a `mod` — is named and
+/// saved as its parents name it (D-168).
+#[test]
+fn an_edit_inside_a_three_level_nesting_keeps_the_file() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "mod a {\n    mod b {\n        pub fn f() -> i32 {\n            1\n        }\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.submit_symbols(Some("crate.a::b::f"), None, "pub fn f() -> i32 {\n    2\n}\n").unwrap();
+    assert!(out.contains("Saved crate.a::b::f"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("            1\n", "            2\n"));
+}
+
+/// An error the new `mod` line causes in its parent's header is this submit's:
+/// the module is not saved (D-168).
+#[test]
+fn a_parent_header_error_refuses_the_new_module() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "use std::fmt::Debug as brand;\n\npub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let err = store.submit_symbols(None, Some("brand"), "pub fn side() -> i32 {\n    2\n}\n").unwrap_err().0;
+    assert!(err.contains("Not saved: the submitted text has errors."), "{err}");
+    assert!(!root.join("src/brand.rs").exists(), "a refused module writes no file");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+    assert_eq!(store.index().unwrap().modules.len(), 1);
+}
+
+/// The new `mod` line goes after the header's last `mod` declaration, `pub` and
+/// `#[path]` lines included (D-168).
+#[test]
+fn a_new_mod_line_goes_after_pub_and_path_declarations() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod a;\n#[path = \"b.rs\"]\nmod b;\n\nuse std::fmt;\n\npub fn one() -> std::fmt::Result {\n    Ok(())\n}\n"),
+        ("src/a.rs", ""),
+        ("src/b.rs", ""),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.submit_symbols(None, Some("brand"), "pub fn side() -> i32 {\n    2\n}\n").unwrap();
+    assert!(out.contains("created module brand (src/brand.rs; added mod brand; to crate)"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "pub mod a;\n#[path = \"b.rs\"]\nmod b;\nmod brand;\n\nuse std::fmt;\n\npub fn one() -> std::fmt::Result {\n    Ok(())\n}\n");
+}
+
+/// A name landing on a module the store already has under a test crate's
+/// prefix is refused: `integration::x::y` when `integration::y` exists (D-169).
+#[test]
+fn a_nested_test_module_already_stored_is_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    store.submit_symbols(None, Some("integration::x"), "pub fn t() -> i32 {\n    2\n}\n").unwrap();
+    store.submit_symbols(None, Some("integration::y"), "pub fn u() -> i32 {\n    3\n}\n").unwrap();
+    let err = store.submit_symbols(None, Some("integration::x::y"), "pub fn v() -> i32 {\n    4\n}\n").unwrap_err().0;
+    assert!(err.contains("E1003") && err.contains("integration::x::y"), "{err}");
+    assert_eq!(text_of(&root, "tests/x.rs"), "pub fn t() -> i32 {\n    2\n}\n");
+    assert_eq!(text_of(&root, "tests/y.rs"), "pub fn u() -> i32 {\n    3\n}\n");
+    assert_eq!(store.index().unwrap().modules.len(), 3);
+}
+
+/// A `#[path]` module places its children beside its file, where the importer
+/// read them: a new `foo::x` goes to `src/x.rs`, not `src/foo/x.rs` (D-168).
+#[test]
+fn a_path_module_places_its_child_beside_it() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "#[path = \"foo.rs\"]\nmod foo;\n"),
+        ("src/foo.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.submit_symbols(None, Some("foo::x"), "pub fn two() -> i32 {\n    2\n}\n").unwrap();
+    assert!(out.contains("created module foo::x (src/x.rs; added mod x; to foo)"), "{out}");
+    assert_eq!(text_of(&root, "src/x.rs"), "pub fn two() -> i32 {\n    2\n}\n");
+    assert_eq!(text_of(&root, "src/foo.rs"), "mod x;\n\npub fn one() -> i32 {\n    1\n}\n");
+}
+
+/// A module resubmitted as `view` shows it changes no byte and no id (D-168).
+#[test]
+fn a_whole_module_submitted_unchanged_keeps_every_byte_and_id() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let ids = |s: &Store| s.index().unwrap().syms.iter().map(|x| x.id.clone()).collect::<Vec<_>>();
+    let before = ids(&store);
+    let ix = store.index().unwrap();
+    let text = super::module_text(&ix, &ix.modules[0]);
+    let out = store.submit(crate::Target::Module("crate"), &text).unwrap();
+    assert!(out.contains("Unchanged: crate"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+    assert_eq!(ids(&store), before);
+}
+
+/// A whole module changes one method and adds one item, and nothing else: the
+/// other ids stay (D-168).
+#[test]
+fn a_whole_module_changes_one_method_and_adds_one() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let id = |s: &Store, name: &str| s.index().unwrap().syms.iter().find(|x| x.name == name).map(|x| x.id.clone()).unwrap();
+    let open = id(&store, "Store::open");
+    let ix = store.index().unwrap();
+    let text = super::module_text(&ix, &ix.modules[0]);
+    let edited = text.replace("        2\n", "        7\n") + "\npub fn two() -> i32 {\n    3\n}\n";
+    let out = store.submit(crate::Target::Module("crate"), &edited).unwrap();
+    assert!(out.contains("Saved crate."), "{out}");
+    assert!(out.contains("changed Store::open") && out.contains("added two"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("        2\n", "        7\n") + "\npub fn two() -> i32 {\n    3\n}\n");
+    assert_eq!(id(&store, "Store::open"), open, "the edited method keeps its id");
+}
+
+/// Two `impl Store` blocks keep their own ids: items pair in order (D-168).
+#[test]
+fn a_whole_module_keeps_the_ids_of_two_impl_blocks() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        1\n    }\n}\n\nimpl Store {\n    pub fn close(&self) -> i32 {\n        2\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let ids = |s: &Store| s.index().unwrap().syms.iter().map(|x| x.id.clone()).collect::<Vec<_>>();
+    let before = ids(&store);
+    let ix = store.index().unwrap();
+    let text = super::module_text(&ix, &ix.modules[0]);
+    let out = store.submit(crate::Target::Module("crate"), &text).unwrap();
+    assert!(out.contains("Unchanged: crate"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+    assert_eq!(ids(&store), before);
+}
+
+/// A type error in a whole module replies "Not saved" and keeps the draft (D-168).
+#[test]
+fn a_whole_module_type_error_keeps_the_draft() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "pub fn one() -> i32 {\n    \"two\"\n}\n";
+    let err = drafts::submit(&store, &["submit", "crate"], &mut || Ok(text.into()), None).unwrap_err().0;
+    assert!(err.contains("Not saved: the submitted text has errors."), "{err}");
+    assert_eq!(kept(&store), text);
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}
+
+/// A whole module can't change the header's `mod` list (D-168).
+#[test]
+fn a_whole_module_refuses_a_changed_mod_list() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "pub fn one() -> i32 {\n    1\n}\n\nmod extra;\n";
+    let err = drafts::submit(&store, &["submit", "crate"], &mut || Ok(text.into()), None).unwrap_err().0;
+    assert!(err.contains("Not saved") && err.contains("submit --new <module>"), "{err}");
+    assert_eq!(kept(&store), text);
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}
+
+/// A splitter refusal in a whole module keeps the draft (D-168).
+#[test]
+fn a_whole_module_splitter_refusal_keeps_the_draft() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "pub fn one() -> i32 {\n    1\n}\n\ninclude!(\"table.rs\");\n";
+    let err = drafts::submit(&store, &["submit", "crate"], &mut || Ok(text.into()), None).unwrap_err().0;
+    assert!(err.contains("Not saved") && err.contains("include!"), "{err}");
+    assert_eq!(kept(&store), text);
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}
+
+/// A patch's `*** Update: <module>` edits one item of the module, leaving the
+/// rest of the file alone (D-168).
+#[test]
+fn a_patch_updating_a_whole_module_edits_one_item() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let patch = "*** Begin Patch\n*** Update: crate\n@@\n-        2\n+        3\n*** End Patch\n";
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("Saved crate.Store::open"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("        2\n", "        3\n"));
+}
+
+/// A module the store doesn't have is created by `submit <module>`, through the
+/// `--new` path (D-168, D-171).
+#[test]
+fn a_whole_module_the_store_doesnt_have_is_created() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.submit(crate::Target::Module("brand"), "pub fn side() -> i32 {\n    2\n}\n").unwrap();
+    assert!(out.contains("Saved brand.side"), "{out}");
+    assert_eq!(text_of(&root, "src/brand.rs"), "pub fn side() -> i32 {\n    2\n}\n");
+    assert!(text_of(&root, "src/lib.rs").starts_with("mod brand;\n\n"), "{}", text_of(&root, "src/lib.rs"));
+}
+
+/// A container whose own opening changed is formatted whole; its items keep
+/// their ids and bytes (D-168).
+#[test]
+fn a_whole_module_formats_a_changed_container_opening() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "mod tests {\n    pub fn t() -> i32 {\n        1\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let id = |s: &Store, name: &str| s.index().unwrap().syms.iter().find(|x| x.name == name).map(|x| x.id.clone()).unwrap();
+    let t = id(&store, "tests::t");
+    let text = "#[allow(dead_code)]\nmod tests {\n    pub fn t() -> i32 {\n        1\n    }\n}\n";
+    let out = store.submit(crate::Target::Module("crate"), text).unwrap();
+    assert!(out.contains("Saved crate."), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), text);
+    assert_eq!(id(&store, "tests::t"), t);
+}
+
+/// A whole module adds an `impl` block with its items in one submit (D-168).
+#[test]
+fn a_whole_module_adds_a_new_container_with_its_items() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Store;\n";
+    let (root, store) = rust_project(lib);
+    let text = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        1\n    }\n}\n";
+    let out = store.submit(crate::Target::Module("crate"), text).unwrap();
+    assert!(out.contains("Saved crate."), "{out}");
+    assert!(out.contains("added Store, Store::open"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), text);
+}
+
+/// A patch on a module with imports edits one item and leaves the header alone
+/// (D-168).
+#[test]
+fn a_patch_updating_a_module_with_imports_edits_one_item() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "use std::fmt;\n\npub fn one() -> fmt::Result {\n    Ok(())\n}\n";
+    let (root, store) = rust_project(lib);
+    let patch = "*** Begin Patch\n*** Update: crate\n@@\n-    Ok(())\n+    let _ = 1;\n+    Ok(())\n*** End Patch\n";
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("Saved crate.one"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "use std::fmt;\n\npub fn one() -> fmt::Result {\n    let _ = 1;\n    Ok(())\n}\n");
+}
+
+/// A patch that changes a module's imports is refused, naming `--imports`
+/// (D-168).
+#[test]
+fn a_patch_changing_a_modules_imports_is_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "use std::fmt;\n\npub fn one() -> fmt::Result {\n    Ok(())\n}\n";
+    let (root, store) = rust_project(lib);
+    let patch = "*** Begin Patch\n*** Update: crate\n@@\n-use std::fmt;\n+use std::io;\n*** End Patch\n";
+    let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
+    assert!(err.contains("changes crate's imports") && err.contains("submit --imports"), "{err}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}
+
+/// A whole module whose text defines a name twice is refused without saving
+/// (D-168): the splitter catches it.
+#[test]
+fn a_whole_module_with_a_duplicate_item_is_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let text = "pub fn one() -> i32 {\n    1\n}\n\npub fn one() -> i32 {\n    2\n}\n";
+    let err = drafts::submit(&store, &["submit", "crate"], &mut || Ok(text.into()), None).unwrap_err().0;
+    assert!(err.contains("Not saved") && err.contains("defined twice"), "{err}");
+    assert_eq!(kept(&store), text);
+    assert_eq!(text_of(&root, "src/lib.rs"), lib);
+}

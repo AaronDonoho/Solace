@@ -16,7 +16,7 @@ fn a_split_rust_file_is_stored_nested_and_written_back_exactly() {
     for (m, text) in sources {
         store_rust_file(&db, m, "src", &format!("src/{m}.rs"), &language::rust::split(text, m).unwrap()).unwrap();
     }
-    let store = Store { db: Rc::new(db), root: root.to_path_buf(), lang: None };
+    let store = Store { db: Rc::new(db), root: root.to_path_buf(), lang: None, nested: true, owns_dir: true };
     let ix = store.index().unwrap();
     for (m, text) in sources {
         let row = ix.modules.iter().find(|r| r.path == m).unwrap();
@@ -50,8 +50,10 @@ INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES ('fn:1',
     // Peeking changes no table, so the older columns are read as Gleam's.
     let ix = Store::peek(&root).unwrap().index().unwrap();
     assert!(ix.syms[0].parent.is_none() && ix.modules[0].file.is_none());
+    assert!(ix.modules[0].owns_dir.is_none());
     let ix = Store::at(&root).unwrap().index().unwrap();
     assert!(ix.syms[0].parent.is_none() && ix.syms[0].sep.is_none() && ix.syms[0].tail.is_empty() && ix.modules[0].file.is_none());
+    assert!(ix.modules[0].owns_dir.is_none());
     assert_eq!(projection(&ix, &ix.modules[0]).0, "pub fn main() { 1 }\n");
 }
 
@@ -91,5 +93,8 @@ fn a_copy_of_this_crate_is_imported_and_written_back_exactly() {
     let module = |p: &str| ix.modules.iter().find(|m| m.path == p).unwrap();
     assert!(module("crate").header.contains("\nmod board;\n"));
     assert_eq!(module("board::tests").rel(), "src/board_tests.rs");
-    assert_eq!(module("acceptance").rel(), "tests/acceptance.rs");
+    assert_eq!(module("integration::acceptance").rel(), "tests/acceptance.rs");
+    assert_eq!(module("crate").owns_dir, Some(true), "a crate root's modules are beside it");
+    assert_eq!(module("board").owns_dir, Some(false), "a plain file's modules are in a folder");
+    assert_eq!(module("board::tests").owns_dir, Some(true), "a `#[path]` file's modules are beside it");
 }

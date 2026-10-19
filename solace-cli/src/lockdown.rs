@@ -214,6 +214,103 @@ pub fn is_gitignore(name: &str) -> bool {
 fn dependencies(name: &str) -> bool {
     name.split('/').any(|c| c == "node_modules")
 }
+/// Whether `name` is a Cargo or rustup setting the human approves (D-158
+/// point 4, D-174): each one can run a program or pick a toolchain. Cargo and
+/// rustup read both the older name and the newer one. A crate below the root
+/// (a workspace member or a path dependency) has the same settings: cargo runs
+/// its `build.rs` and builds with its `Cargo.toml` (D-175).
+pub(crate) fn rust_setting(name: &str) -> bool {
+    if matches!(name, "build.rs" | ".cargo/config.toml" | ".cargo/config" | "rust-toolchain.toml" | "rust-toolchain") {
+        return true;
+    }
+    let unwatched = ["target/", ".git/", ".solace/"].iter().any(|p| name.starts_with(p));
+    !unwatched && (name.ends_with("/build.rs") || name.ends_with("/Cargo.toml"))
+}
+/// Whether a run's `write` of `name` is a settings proposal (D-38, D-45,
+/// D-158 point 4): the human-owned files, and a Rust project's Cargo and
+/// rustup settings, its workspace crates' included (D-175).
+pub fn settings_file(root: &Path, name: &str) -> bool {
+    name == "solace.toml" || name == "AGENTS.md" || is_gitignore(name) || (crate::language::is_rust(root) && rust_setting(name))
+}
+/// Why a Cargo.toml change that touches a protected key is refused (D-158 point 4).
+fn cargo_setting_note() -> &'static str {
+    "dependency, feature, workspace and build changes to Cargo.toml change only through a human-approved proposal: `write` it alone, with the exact new text and `reason`"
+}
+/// The dependency, feature and build keys of a Cargo.toml the human approves
+/// (D-158 point 4, D-177): the dependency tables, `[features]`, each
+/// `[target.*]` table's dependencies, `[patch]`, `[replace]`, `package.build`,
+/// `package.links` and `lib.proc-macro`, and a workspace's `members`,
+/// `default-members`, `exclude` and `dependencies` (D-175). Text that doesn't
+/// parse counts as changed.
+pub fn cargo_settings_changed(before: &[u8], after: &str) -> bool {
+    let parse = |text: &str| text.parse::<toml::Value>().ok();
+    let (Some(before), Some(after)) = (std::str::from_utf8(before).ok().and_then(parse), parse(after)) else { return true };
+    cargo_settings(&before) != cargo_settings(&after)
+}
+/// The part of a parsed Cargo.toml that is a setting the human approves, so
+/// the rest of the file compares equal (D-158 point 4).
+fn cargo_settings(v: &toml::Value) -> toml::Value {
+    let deps = ["dependencies", "dev-dependencies", "build-dependencies"];
+    let mut out = toml::map::Map::new();
+    for key in ["dependencies", "dev-dependencies", "build-dependencies", "features", "patch", "replace"] {
+        if let Some(x) = v.get(key) {
+            out.insert(key.to_string(), x.clone());
+        }
+    }
+    if let Some(targets) = v.get("target").and_then(|t| t.as_table()) {
+        let mut kept = toml::map::Map::new();
+        for (name, table) in targets {
+            let mut found = toml::map::Map::new();
+            for key in deps {
+                if let Some(x) = table.get(key) {
+                    found.insert(key.to_string(), x.clone());
+                }
+            }
+            if !found.is_empty() {
+                kept.insert(name.clone(), toml::Value::Table(found));
+            }
+        }
+        if !kept.is_empty() {
+            out.insert("target".to_string(), toml::Value::Table(kept));
+        }
+    }
+    let mut package = toml::map::Map::new();
+    for key in ["build", "links"] {
+        if let Some(x) = v.get("package").and_then(|p| p.get(key)) {
+            package.insert(key.to_string(), x.clone());
+        }
+    }
+    if !package.is_empty() {
+        out.insert("package".to_string(), toml::Value::Table(package));
+    }
+    if let Some(x) = v.get("lib").and_then(|l| l.get("proc-macro")) {
+        let mut lib = toml::map::Map::new();
+        lib.insert("proc-macro".to_string(), x.clone());
+        out.insert("lib".to_string(), toml::Value::Table(lib));
+    }
+    if let Some(workspace) = v.get("workspace").and_then(|w| w.as_table()) {
+        let mut kept = toml::map::Map::new();
+        for key in ["members", "default-members", "exclude", "dependencies"] {
+            if let Some(x) = workspace.get(key) {
+                kept.insert(key.to_string(), x.clone());
+            }
+        }
+        if !kept.is_empty() {
+            out.insert("workspace".to_string(), toml::Value::Table(kept));
+        }
+    }
+    toml::Value::Table(out)
+}
+/// The module a graph file belongs to (D-158): Gleam's path under `src/` or
+/// `test/`, or the Rust store's module row for that file.
+pub(crate) fn module_of_file(s: &Store, name: &str) -> Option<String> {
+    if name.ends_with(".gleam")
+        && let Some(rest) = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/"))
+    {
+        return Some(rest.trim_end_matches(".gleam").to_string());
+    }
+    s.db.query_row("SELECT path FROM modules WHERE file = ?1", [name], |r| r.get::<_, String>(0)).ok()
+}
 pub fn tier(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -> String {
     tier_and_bytes(root, v, &mut Ignores::new(root), name, proposed).0
 }
@@ -237,7 +334,16 @@ fn tier_and_bytes(root: &Path, v: &toml::Value, ignores: &mut Ignores, name: &st
     if crate::language::detect(root).is_some() && (name.starts_with("src/") || name.starts_with("test/")) && name.ends_with(".gleam") {
         return ("graph".into(), None);
     }
+    // A Rust project's `.rs` files are symbols too (D-158 point 1).
+    if crate::language::is_rust(root) && (name.starts_with("src/") || name.starts_with("tests/")) && name.ends_with(".rs") {
+        return ("graph".into(), None);
+    }
     if name == "solace.toml" || name == "AGENTS.md" {
+        return ("protected".into(), None);
+    }
+    // Cargo's and rustup's settings run programs at check time (D-158 point 4, D-174);
+    // a nested project's own files stay internal (D-57).
+    if crate::language::is_rust(root) && rust_setting(name) && !internal(root, name) {
         return ("protected".into(), None);
     }
     if in_skills(v, name) {
@@ -252,7 +358,14 @@ fn tier_and_bytes(root: &Path, v: &toml::Value, ignores: &mut Ignores, name: &st
     if dependencies(name) {
         return ("unwatched".into(), None);
     }
-    if name == ".git" || name.starts_with(".git/") || name == "build" || name.starts_with("build/") || name == "manifest.toml" {
+    if name == ".git"
+        || name.starts_with(".git/")
+        || name == "build"
+        || name.starts_with("build/")
+        || name == "manifest.toml"
+        || name == "target"
+        || name.starts_with("target/")
+    {
         return ("unwatched".into(), None);
     }
     if ignores.ignored(name) || patterns(v, "unwatched", name) {
@@ -370,6 +483,13 @@ pub fn watched_paths(root: &Path, v: &toml::Value) -> Result<Vec<String>, Failur
     let mut rows = vec![];
     tree_rows(root, v, root, &mut rows)?;
     Ok(rows.into_iter().filter(|(_, t, _)| t == "watched").map(|(n, _, _)| n).collect())
+}
+/// Every graph file path, relative to `root`: `view <file>` reads a Rust
+/// project's `.rs` files by file as well as by symbol (D-121, D-158).
+pub fn graph_paths(root: &Path, v: &toml::Value) -> Result<Vec<String>, Failure> {
+    let mut rows = vec![];
+    tree_rows(root, v, root, &mut rows)?;
+    Ok(rows.into_iter().filter(|(_, t, _)| t == "graph").map(|(n, _, _)| n).collect())
 }
 #[cfg(test)]
 fn read(root: &Path, name: &str, args: &[&str], budget: usize) -> Out {
@@ -641,13 +761,19 @@ pub fn wait_or_kill(child: &mut std::process::Child, timeout: Duration) -> std::
 
 /// Runs `argv` in `root`: the exit code and elapsed time, then the output
 /// within `budget`, `condense`d for a `run` or `build` reply (D-111).
-pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize, condensed: bool) -> Out {
+pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize, condensed: bool, sandbox: bool) -> Out {
     use std::os::unix::process::CommandExt;
     fs::create_dir_all(root.join(".solace"))?;
     let log = root.join(".solace").join(format!("command-{}.log", unique_id()));
     let out = fs::File::create(&log)?;
-    // During a migration the original is read-only to commands in the copy (Spec 17).
-    let mut child = migrate::sandboxed(argv, root, migrate::protected(root).as_deref())
+    // `sandbox` is a Rust check, test or build on Linux (D-158 point 4); a
+    // migration's original is read-only to commands in the copy (Spec 17).
+    let mut cmd = if sandbox {
+        migrate::cargo_sandboxed(argv, root)
+    } else {
+        migrate::sandboxed(argv, root, migrate::protected(root).as_deref())
+    };
+    let mut child = cmd
         .process_group(0)
         .stdout(out.try_clone()?)
         .stderr(out)
@@ -664,6 +790,29 @@ pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize, conden
         Ok(prefix) => Ok(prefix.clone() + &trim_output(&output, budget.saturating_sub(prefix.len()))),
         Err(Failure(message, code)) => Err(Failure(message + &trim_output(&output, budget), code)),
     }
+}
+
+/// Starts `argv` in `root` in the background, without waiting: the same
+/// sandbox and process group as `command`, its output dropped, and a thread
+/// reaping it (`cargo::warm`, D-158 point 3).
+pub fn background(root: &Path, argv: &[String], sandbox: bool) -> Out {
+    use std::os::unix::process::CommandExt;
+    fs::create_dir_all(root.join(".solace"))?;
+    let mut cmd = if sandbox {
+        migrate::cargo_sandboxed(argv, root)
+    } else {
+        migrate::sandboxed(argv, root, migrate::protected(root).as_deref())
+    };
+    let mut child = cmd
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(String::new())
 }
 /// Whether a `command` reply is from a command that exited with 0.
 pub fn passed(out: &str) -> bool {
@@ -715,6 +864,9 @@ fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, all
     let p = path(root, name)?;
     let before = fs::read(&p).ok();
     let text = edited(before.as_deref().unwrap_or_default(), new, replace, all, old)?;
+    if crate::language::is_rust(root) && name == "Cargo.toml" && cargo_settings_changed(before.as_deref().unwrap_or_default(), &text) {
+        return error("E6002", name, cargo_setting_note());
+    }
     if text.len() > limit(v) {
         return error("E6004", name, "proposed text exceeds watch_limit");
     }
@@ -831,7 +983,7 @@ fn validate(root: &Path, v: &toml::Value, name: &str, p: &Path, text: &str) -> R
             if matches(pattern, name) {
                 let argv: Vec<String> =
                     argv.as_array().unwrap().iter().map(|x| x.as_str().unwrap().replace("{file}", &p.to_string_lossy())).collect();
-                let out = command(root, &argv, 120, BUDGET, false).map_err(|e| Failure(format!("E6003 validator failed\n  {}", e.0), 1))?;
+                let out = command(root, &argv, 120, BUDGET, false, false).map_err(|e| Failure(format!("E6003 validator failed\n  {}", e.0), 1))?;
                 if !passed(&out) {
                     return error("E6003", name, out);
                 }
@@ -889,19 +1041,23 @@ pub fn change_file(root: &Path, name: &str, text: &str) -> Result<impl FnOnce(bo
 /// One section of a `write` patch, checked and applied in memory: the file's
 /// path, its bytes now, and its new text (`None` to delete it).
 fn file_change(
-    root: &Path,
+    store: &Store,
     v: &toml::Value,
     name: &str,
     kind: drafts::Section,
     hunks: Vec<drafts::Hunk>,
 ) -> Result<(PathBuf, Option<Vec<u8>>, Option<String>), Failure> {
     use drafts::Section;
+    let root = &store.root;
     let p = reachable(root, name)?;
     not_here(root, name)?;
     let t = tier(root, v, name, None);
     if t == "graph" {
-        let module = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/")).unwrap().trim_end_matches(".gleam");
-        return error("E6001", name, format!("source is held as symbols; change it with a `submit` patch (`*** Update: {module}`)"));
+        let fix = match module_of_file(store, name) {
+            Some(module) => format!("change it with a `submit` patch (`*** Update: {module}`)"),
+            None => "change it with `submit`".to_string(),
+        };
+        return error("E6001", name, format!("source is held as symbols; {fix}"));
     }
     if t == "protected" {
         if in_skills(v, name) {
@@ -928,6 +1084,9 @@ fn file_change(
     };
     let text = drafts::file_text(name, current, kind, hunks)?;
     if let Some(text) = &text {
+        if crate::language::is_rust(root) && name == "Cargo.toml" && cargo_settings_changed(before.as_deref().unwrap_or_default(), text) {
+            return error("E6002", name, cargo_setting_note());
+        }
         if text.len() > limit(v) {
             return error("E6004", name, "proposed text exceeds watch_limit");
         }
@@ -944,7 +1103,8 @@ fn file_change(
 /// then every file is written before any is validated, so a validator sees
 /// the project as it will be, and if one fails, every file goes back. An
 /// update needs no earlier `read`: its hunks matching is the check.
-fn write_patch(root: &Path, v: &toml::Value, raw: &str) -> Out {
+fn write_patch(store: &Store, v: &toml::Value, raw: &str) -> Out {
+    let root = &store.root;
     let mut changes: Vec<(String, PathBuf, Option<Vec<u8>>, Option<String>)> = vec![];
     let mut refused = vec![];
     for (kind, target, _, hunks) in drafts::sections(raw, true)? {
@@ -953,7 +1113,7 @@ fn write_patch(root: &Path, v: &toml::Value, raw: &str) -> Out {
             refused.push(format!("E0108 the patch names {name} twice; give each file one section"));
             continue;
         }
-        match file_change(root, v, &name, kind, hunks) {
+        match file_change(store, v, &name, kind, hunks) {
             Ok((p, before, text)) => changes.push((name, p, before, text)),
             Err(e) => refused.push(e.0),
         }
@@ -1007,7 +1167,7 @@ fn write_patch(root: &Path, v: &toml::Value, raw: &str) -> Out {
 /// with `write --draft <id> --replace`; a fault in the whole patch is resent
 /// (D-141). A retry is the whole patch again, whole or nothing (D-104).
 fn patch_with_draft(store: &Store, v: &toml::Value, id: Option<&str>, raw: &str, budget: usize) -> Out {
-    match write_patch(&store.root, v, raw) {
+    match write_patch(store, v, raw) {
         Ok(out) => {
             if let Some(id) = id {
                 drafts::discard(store, id)?;
@@ -1239,7 +1399,7 @@ fn movable(root: &Path, v: &toml::Value, name: &str) -> Result<(), Failure> {
         return error("E6002", name, "gleam.toml can't be moved");
     }
     match tier(root, v, name, Some(b"")).as_str() {
-        "graph" => error("E6001", name, "Gleam source is held as symbols, and its file is a projection of the store: it can't be moved"),
+        "graph" => error("E6001", name, "source is held as symbols, and its file is a projection of the store: it can't be moved"),
         "internal" => error("E6006", name, "Solace's own files and other projects' files can't be moved"),
         t if t == "watched" || t.starts_with("unwatched") => Ok(()),
         t => error("E6002", name, format!("{t} files can't be moved")),
@@ -1577,11 +1737,10 @@ pub fn dispatch(
                 let p = reachable(root, &name)?;
                 let (t, bytes) = tier_and_bytes(root, v, &mut Ignores::new(root), &name, None);
                 if a[0] != "files" && t == "graph" {
-                    let module = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/")).unwrap().trim_end_matches(".gleam");
-                    let fix = if p.exists() {
-                        format!("inspect {module}, view {module}, or submit {module}")
-                    } else {
-                        format!("create the module by adding a symbol to it: submit --new {module}")
+                    let fix = match module_of_file(store, &name) {
+                        Some(module) if p.exists() => format!("inspect {module}, view {module}, or submit {module}"),
+                        Some(module) => format!("create the module by adding a symbol to it: submit --new {module}"),
+                        None => "change it with `submit`".to_string(),
                     };
                     let e = error("E6001", &name, format!("source is held as symbols; fix: {fix}"));
                     if a[0] == "remove" {
@@ -1685,6 +1844,13 @@ pub fn dispatch(
                 let mut argv: Vec<String> = c["run"].as_array().unwrap().iter().map(|x| x.as_str().unwrap().into()).collect();
                 argv.extend(a[2..].iter().map(|s| s.to_string()));
                 (argv, c.get("timeout").and_then(|x| x.as_integer()).unwrap_or(120) as u64)
+            } else if a[0] == "build" && language::is_rust(root) {
+                if !cargo::installed() {
+                    return error("E6013", "build", cargo::MISSING);
+                }
+                let mut argv = vec!["cargo".to_string()];
+                argv.extend(cargo::build_args(root));
+                (argv, 120)
             } else if !root.join("gleam.toml").exists() {
                 return plain(a[0]);
             } else {
@@ -1705,8 +1871,34 @@ pub fn dispatch(
                 )?;
             }
             store.materialize(&store.index()?)?;
-            let out = command(root, &argv, timeout, budget, a[0] != "format")?;
-            if passed(&out) { Ok(out) } else { fail(out) }
+            // D-166: the sources are hashed before the command runs, so a source the build itself
+            // changes isn't recorded as built. A recipe that can't be read doesn't refuse the run:
+            // recording is a note, never a gate, like a record write that fails.
+            let (record, unread) = if a[0] == "run" {
+                let top = scope::top(root);
+                let dir = scope::dir(&top, root);
+                match recipe::built_sources(&top, &dir, a[1]) {
+                    Ok(sources) => (sources.map(|sources| (top, dir, sources)), None),
+                    Err(e) => (None, Some(e.0)),
+                }
+            } else {
+                (None, None)
+            };
+            let mut out = command(root, &argv, timeout, budget, a[0] != "format", a[0] == "build" && language::is_rust(root))?;
+            if !passed(&out) {
+                return fail(out);
+            }
+            if let Some(why) = unread {
+                out.push_str(&format!("\nnote: could not record what it built ({}); `build plan` uses file times\n", why.trim()));
+            }
+            // D-166: a passing declared command that is a recipe's last step records what it built.
+            if let Some((top, dir, sources)) = record {
+                if let Err(e) = recipe::record_built(&top, &dir, a[1], sources) {
+                    // The build passed: a record that can't be written leaves the plan on file times.
+                    out.push_str(&format!("\nnote: could not record what it built ({}); `build plan` uses file times\n", e.0.trim()));
+                }
+            }
+            Ok(out)
         })());
     }
     None
@@ -2012,6 +2204,16 @@ mod tests {
     }
     fn call(s: &Store, v: &toml::Value, args: &[&str], text: &str, old: Option<&str>) -> Out {
         dispatch(s, v, args, &mut || Ok(text.into()), old, 1000).unwrap()
+    }
+    /// A background command returns at once, and one that can't start is
+    /// reported (D-158 point 3).
+    #[test]
+    fn a_background_command_does_not_wait() {
+        let dir = Scratch::new();
+        let start = std::time::Instant::now();
+        background(&dir, &["sh".to_string(), "-c".to_string(), "sleep 3".to_string()], false).unwrap();
+        assert!(start.elapsed().as_secs_f64() < 1.0, "waited {:?}", start.elapsed());
+        assert!(background(&dir, &["no-such-command-anywhere".to_string()], false).is_err());
     }
     /// A folder's `.gitignore` is matched from that folder: `/gen` in
     /// `src/.gitignore` ignores `src/gen`, not a `gen` at the root.
@@ -2718,6 +2920,48 @@ running your program.
         assert_eq!(rest, "test b ... FAILED\n");
         assert!(!passed(&err.0) && passed("exit code: 0 (0.0s)\n"));
     }
+
+    /// D-166: a passing `run` of a recipe's last step records what it built; a failing one
+    /// records nothing.
+    #[test]
+    fn a_passing_run_records_what_the_recipe_built() {
+        let recipe = |run: &str| {
+            format!(
+                "[commands]\nbuild-release = {{ run = [\"sh\", \"-c\", \"{run}\"] }}\n[build]\noutputs = [\"priv/app.js\"]\nsteps = [{{ name = \"release\", command = \"build-release\" }}]\n"
+            )
+        };
+        let dir = Scratch::new().with(&[("gleam.toml", "name = \"fixture\"\nversion = \"1.0.0\"\n"), ("src/main.gleam", "pub fn main() { 1 }\n")]);
+        let p = dir.import();
+        let record = p.root.join(".solace/built.json");
+        let failing = recipe("echo no >&2; exit 1");
+        fs::write(p.root.join("solace.toml"), &failing).unwrap();
+        let v: toml::Value = failing.parse().unwrap();
+        assert!(call(&p, &v, &["run", "build-release"], "", None).unwrap_err().0.starts_with("exit code: 1"));
+        assert!(!record.exists(), "a failing run records nothing");
+        let passing = recipe("mkdir -p priv && echo built > priv/app.js");
+        fs::write(p.root.join("solace.toml"), &passing).unwrap();
+        let v: toml::Value = passing.parse().unwrap();
+        call(&p, &v, &["run", "build-release"], "", None).unwrap();
+        let text = fs::read_to_string(&record).unwrap();
+        assert!(text.contains("priv/app.js") && text.contains("src"), "{text}");
+    }
+
+    /// D-166: a passing `run` stays passed when the record can't be written; `build plan` then
+    /// falls back to file times.
+    #[test]
+    fn a_run_that_cannot_record_what_it_built_still_passes() {
+        let recipe = "[commands]\nbuild-release = { run = [\"sh\", \"-c\", \"mkdir -p priv && echo built > priv/app.js\"] }\n[build]\noutputs = [\"priv/app.js\"]\nsteps = [{ name = \"release\", command = \"build-release\" }]\n";
+        let dir = Scratch::new().with(&[("gleam.toml", "name = \"fixture\"\nversion = \"1.0.0\"\n"), ("src/main.gleam", "pub fn main() { 1 }\n")]);
+        let p = dir.import();
+        fs::write(p.root.join("solace.toml"), recipe).unwrap();
+        // A folder where the record goes makes the write fail, not the build.
+        fs::create_dir_all(p.root.join(".solace/built.json")).unwrap();
+        let v: toml::Value = recipe.parse().unwrap();
+        let out = call(&p, &v, &["run", "build-release"], "", None).unwrap();
+        assert!(out.starts_with("exit code: 0 (") && out.contains("could not record"), "{out}");
+        assert!(p.root.join("priv/app.js").is_file());
+    }
+
     #[test]
     fn a4_new_watched_file_and_size() {
         let (s, v) = fixture();
@@ -3138,6 +3382,16 @@ running your program.
         assert!(e.0.contains("E6010") && e.0.contains("smoke"));
         assert!(call(&s, &v, &["run", "smoke"], "", None).unwrap_err().0.contains("E6012"));
     }
+    /// A `run` whose recipe can't be read still runs: the record is skipped with
+    /// a note, not a refusal (D-166).
+    #[test]
+    fn a_run_with_an_unreadable_recipe_still_runs() {
+        let (s, _) = fixture();
+        fs::write(s.root.join("solace.toml"), "unwatched=1\n").unwrap();
+        let v: toml::Value = "[commands]\nsmoke={run=[\"true\"]}".parse().unwrap();
+        let out = call(&s, &v, &["run", "smoke"], "", None).unwrap();
+        assert!(out.contains("could not record what it built") && out.contains("E6020"), "{out}");
+    }
     #[test]
     fn a10_agent_config_golden() {
         let (s, _) = fixture();
@@ -3232,5 +3486,93 @@ running your program.
         // The skills folder itself is fine, and so is the default.
         fs::write(root.join("solace.toml"), "skills = \"house\"\n").unwrap();
         assert!(settings(&root).is_ok());
+    }
+
+    /// D-158 point 1, D-174: a Rust project's `.rs` files are symbols, its
+    /// Cargo and rustup settings are protected, and `target/` is unwatched.
+    #[test]
+    fn a_rust_projects_files_have_their_tiers() {
+        let (root, _store) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+        let v = settings(&root).unwrap();
+        assert_eq!(tier(&root, &v, "src/lib.rs", None), "graph");
+        assert_eq!(tier(&root, &v, "src/board/agents.rs", None), "graph");
+        assert_eq!(tier(&root, &v, "tests/acceptance.rs", None), "graph");
+        assert_eq!(tier(&root, &v, "build.rs", None), "protected");
+        assert_eq!(tier(&root, &v, ".cargo/config.toml", None), "protected");
+        assert_eq!(tier(&root, &v, ".cargo/config", None), "protected");
+        assert_eq!(tier(&root, &v, "rust-toolchain.toml", None), "protected");
+        assert_eq!(tier(&root, &v, "rust-toolchain", None), "protected");
+        assert_eq!(tier(&root, &v, "member/build.rs", None), "protected");
+        assert_eq!(tier(&root, &v, "member/Cargo.toml", None), "protected");
+        assert_eq!(tier(&root, &v, "target/debug/app", None), "unwatched");
+        assert_eq!(tier(&root, &v, "target/debug/build/x/build.rs", None), "unwatched");
+        assert_eq!(tier(&root, &v, "Cargo.toml", None), "watched");
+    }
+
+    /// D-158 point 4, D-175: only a Cargo.toml's dependency, workspace and build keys are
+    /// settings; a description edit is an ordinary watched write.
+    #[test]
+    fn cargo_toml_settings_are_the_dependency_and_build_keys() {
+        let base = "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+        assert!(!cargo_settings_changed(base.as_bytes(), &base.replace("0.1.0", "0.2.0")));
+        assert!(!cargo_settings_changed(base.as_bytes(), &format!("{base}description = \"a fixture\"\n")));
+        for extra in [
+            "[dependencies]\nserde = \"1\"\n",
+            "[dev-dependencies]\nserde = \"1\"\n",
+            "[build-dependencies]\ncc = \"1\"\n",
+            "[target.'cfg(unix)'.dependencies]\nlibc = \"1\"\n",
+            "[target.'cfg(windows)'.dev-dependencies]\nwinapi = \"1\"\n",
+            "[patch.crates-io]\nserde = { path = \"serde\" }\n",
+            "[replace]\n\"serde\" = { path = \"serde\" }\n",
+            "[lib]\nproc-macro = true\n",
+            "[workspace]\nmembers = [\"member\"]\n",
+            "[workspace]\ndefault-members = [\".\", \"member\"]\n",
+            "[workspace]\nexclude = [\"member\"]\n",
+            "[workspace.dependencies]\nserde = \"1\"\n",
+        ] {
+            assert!(cargo_settings_changed(base.as_bytes(), &format!("{base}\n{extra}")), "{extra}");
+        }
+        assert!(!cargo_settings_changed(base.as_bytes(), &format!("{base}\n[workspace]\nresolver = \"2\"\n")));
+        let build = base.replace("edition = \"2021\"", "edition = \"2021\"\nbuild = \"build.rs\"");
+        assert!(cargo_settings_changed(base.as_bytes(), &build));
+        let links = base.replace("edition = \"2021\"", "edition = \"2021\"\nlinks = \"x\"");
+        assert!(cargo_settings_changed(base.as_bytes(), &links));
+        assert!(cargo_settings_changed(base.as_bytes(), "[package\n"), "text that doesn't parse counts as changed");
+    }
+
+    /// D-175: a crate below the root's manifest and build script are settings
+    /// in a Rust project, and nowhere else (D-158 point 4).
+    #[test]
+    fn a_nested_crates_manifest_and_build_script_are_settings() {
+        let rust = Scratch::new().with(&[("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\n")]);
+        for name in ["build.rs", "member/build.rs", "member/Cargo.toml", "build/x/build.rs", "node_modules/x/Cargo.toml"] {
+            assert!(settings_file(&rust, name), "{name}");
+        }
+        assert!(!settings_file(&rust, "target/debug/build/x/build.rs"), "target/ stays unwatched");
+        assert!(!settings_file(&rust, "Cargo.toml"), "the root's manifest is watched unless a protected key changes");
+        let gleam = Scratch::new().with(&[("gleam.toml", "name = \"app\"\nversion = \"1.0.0\"\n")]);
+        assert!(!settings_file(&gleam, "build.rs") && !settings_file(&gleam, "member/Cargo.toml"));
+    }
+
+    /// D-158 point 4: a file patch that changes Cargo.toml's dependency keys
+    /// is refused, like `write <path>`, and nothing is written.
+    #[test]
+    fn a_cargo_toml_patch_that_changes_a_dependency_is_refused() {
+        let (root, store) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+        let v = settings(&root).unwrap();
+        let patch = "*** Begin Patch\n*** Update File: Cargo.toml\n@@\n edition = \"2021\"\n+[dependencies]\n+serde = \"1\"\n*** End Patch\n";
+        let e = call(&store, &v, &["write"], patch, None).unwrap_err().0;
+        assert!(e.contains("E6002") && e.contains("human-approved proposal"), "{e}");
+        assert!(!fs::read_to_string(root.join("Cargo.toml")).unwrap().contains("serde"));
+    }
+
+    /// D-177: a `[features]` edit is a setting, so a feature can't turn on an
+    /// optional dependency without approval.
+    #[test]
+    fn a_features_edit_is_a_setting() {
+        let base = "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n";
+        let before = format!("{base}\n[features]\ndefault = []\n");
+        assert!(cargo_settings_changed(before.as_bytes(), &format!("{base}\n[features]\ndefault = [\"extra\"]\n")));
+        assert!(!cargo_settings_changed(before.as_bytes(), &before.replace("0.1.0", "0.2.0")));
     }
 }

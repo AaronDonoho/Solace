@@ -563,14 +563,27 @@ class Board(unittest.TestCase):
         self.assertEqual(self.cli('view','app.one'),original)
         self.assertEqual((self.root/'priv/a').read_text(),'original')
 
-    def test_a_reread_in_the_loop_catches_up(self):
-        # D-157: the MCP loop records the run's reads and adds the catch to the reply.
-        t=self.assign([{'command':'view app.one'},{'command':'view app.one'},{'exit':0}])
+    def test_session_remember_gives_back_the_run_context(self):
+        # D-157 point 7: after a compaction the agent asks for its task and window.
+        t=self.assign([{'command':'view app.one'},{'command':'session remember'},{'command':'session remember'},{'exit':0}])
         rid=t['runs'][-1]['id']
         self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
         replies=[json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(rid+'.responses')).read_text().splitlines()]
-        self.assertNotIn("hasn't changed",replies[0])
-        self.assertIn("`app.one` hasn't changed",replies[1])
+        self.assertIn('What this run read or changed since its last change, as it is now:',replies[1])
+        self.assertIn('pub fn one() { 1 }',replies[1])
+        self.assertEqual(replies[1],replies[2])
+
+    def test_session_remember_after_a_change_in_the_same_call(self):
+        # D-157 point 7: each command updates the window, so an ask in the
+        # same call sees the change it just made.
+        t=self.assign([{'command':'view app.one'},
+            {'command':'submit app.one\nsession remember','text':'pub fn one() { 10 }'},
+            {'command':'session remember'},{'exit':0}])
+        rid=t['runs'][-1]['id']
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        replies=[json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(rid+'.responses')).read_text().splitlines()]
+        self.assertIn('pub fn one() { 10 }',replies[1])
+        self.assertIn('pub fn one() { 10 }',replies[2])
 
     def test_a_batched_task_done_waits_for_a_passing_test(self):
         # D-152: one call submits, tests and finishes; the test builds and runs, so allow it time.
@@ -870,6 +883,20 @@ class Board(unittest.TestCase):
         self.cli('view','app.one')  # recovery runs at the start of this command
         self.assertEqual((self.root/'src/app.gleam').read_text(),'pub fn one() { 1 }\n\npub fn two() { 2 }\n\npub fn removed() { 3 }\n')
         self.assertEqual(self.rows(t['id']),[])
+    def test_a_panicking_command_keeps_the_mcp_server_serving(self):  # task:da797576d0cfaaac
+        # A panic at the command point is that line's error, not the end of the
+        # tool: the line after it still runs, and nothing of the panicked change
+        # is kept.
+        self.restart({'SOLACE_FAIL_AFTER':'panic:command'})
+        t=self.assign([{'command':'submit app.one','text':'pub fn one() { 10 }'},{'command':'view app.one'}])
+        t=self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        first,second=[json.loads(l)['result'] for l in (self.root/'.solace'/(t['runs'][-1]['id']+'.responses')).read_text().splitlines()]
+        self.assertTrue(first['isError'])
+        self.assertIn('Solace hit an internal error running `submit app.one`',first['content'][0]['text'])
+        self.assertFalse(second['isError'])
+        self.assertIn('{ 1 }',second['content'][0]['text'])
+        self.assertEqual(self.rows(t['id']),[])
+        self.assertEqual((self.root/'src/app.gleam').read_text(),'pub fn one() { 1 }\n\npub fn two() { 2 }\n\npub fn removed() { 3 }\n')
     def test_a_crash_after_a_file_write_keeps_its_undo(self):
         self.restart({'SOLACE_FAIL_AFTER':'command'})
         t=self.assign([{'command':'read priv/a'},{'command':'write priv/a','text':'changed'}])

@@ -693,7 +693,9 @@ fn efforts(m: &Value) -> Vec<String> {
 // Snapshot live rows only. Before-state rows never enter the semantic index.
 pub fn snapshot(s: &Store) -> Result<Value, Failure> {
     let mut out = json!({});
-    let mut st = s.db.prepare("SELECT id,module,name,kind,text,ord,revision,live FROM symbols WHERE live=1")?;
+    let mut st = s.db.prepare(
+        "SELECT id,module,name,kind,text,ord,revision,live,parent,sep,tail FROM symbols WHERE live=1",
+    )?;
     for row in st.query_map([], |r| {
         Ok(json!([
             r.get::<_, String>(0)?,
@@ -703,15 +705,29 @@ pub fn snapshot(s: &Store) -> Result<Value, Failure> {
             r.get::<_, String>(4)?,
             r.get::<_, i64>(5)?,
             r.get::<_, String>(6)?,
-            r.get::<_, i64>(7)?
+            r.get::<_, i64>(7)?,
+            r.get::<_, Option<String>>(8)?,
+            r.get::<_, Option<String>>(9)?,
+            r.get::<_, String>(10)?
         ]))
     })? {
         let row = row?;
         let key = format!("symbol:{}", row[0].as_str().unwrap());
         out[key] = row;
     }
-    let mut st = s.db.prepare("SELECT path,dir,header FROM modules")?;
-    for row in st.query_map([], |r| Ok(json!([r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?])))? {
+    // A Rust module's `owns_dir` is part of its before-state: it says where the module's own
+    // children go, so undo restores the recorded value instead of guessing (D-168).
+    let owns = if s.owns_dir { "owns_dir" } else { "NULL" };
+    let mut st = s.db.prepare(&format!("SELECT path,dir,header,file,{owns} FROM modules"))?;
+    for row in st.query_map([], |r| {
+        Ok(json!([
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, Option<String>>(3)?,
+            r.get::<_, Option<i64>>(4)?
+        ]))
+    })? {
         let row = row?;
         let key = format!("module:{}", row[0].as_str().unwrap());
         out[key] = row;
@@ -907,7 +923,12 @@ pub fn touch(s: &Store, tid: &str, rid: &str, before: &Value, after: &Value, fol
             (Some(name), Some(f)) if data.is_null() => absent(name, f),
             // A module the command added: its file's folders count too (D-136).
             (None, Some(f)) if data.is_null() && key.starts_with("module:") && after[key].is_array() => {
-                absent(&outside::file_of(after[key][1].as_str().unwrap_or(""), after[key][0].as_str().unwrap_or("")), f)
+                let row = &after[key];
+                let file = row[3]
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| outside::file_of(row[1].as_str().unwrap_or(""), row[0].as_str().unwrap_or("")));
+                absent(&file, f)
             }
             _ => data.clone(),
         };
@@ -1011,6 +1032,7 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
     let projects = scope_stores(s, &t)?;
     let changes = changes_of(s, &t)?;
     let (mut out, mut left) = (String::new(), vec![]);
+    let mut unsafe_lines: Vec<String> = vec![];
     for (dir, st) in &projects {
         let current = snapshot(st)?;
         let mut rows = st.db.prepare("SELECT entity,data FROM board_before WHERE task=?")?;
@@ -1050,6 +1072,11 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
             }
             // A task across projects names each change's project (D-61).
             let shown = if projects.len() > 1 { format!("{dir}: {name}") } else { name.to_string() };
+            if crate::language::is_rust(&st.root)
+                && let Some(line) = new_unsafe(&shown, old, &new)
+            {
+                unsafe_lines.push(line);
+            }
             let part = match (text(key, old), text(key, &new)) {
                 (a, b) if a == b && baseline.is_some() => format!("## {shown} (metadata or binary content changed)\n"),
                 (a, b) if a == b => format!("## {shown} (back to its state before the task)\n"),
@@ -1066,6 +1093,15 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
                 out.push('\n');
             }
         }
+    }
+    if !unsafe_lines.is_empty() {
+        // D-158 point 2: a review list, not a refusal.
+        out += "New `unsafe`:\n";
+        for line in &unsafe_lines {
+            out += line;
+            out.push('\n');
+        }
+        out.push('\n');
     }
     if out.is_empty() {
         return Ok(heading
@@ -1085,6 +1121,90 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
         );
     }
     Ok(heading + &out)
+}
+/// A changed symbol that added `unsafe`, for the review (D-158 point 2):
+/// `name`, marked when the new text has no `// SAFETY:` comment. This lists it
+/// for the human; nothing is refused.
+fn new_unsafe(name: &str, old: &Value, new: &Value) -> Option<String> {
+    let (had, _) = rust_unsafe(old[4].as_str().unwrap_or(""));
+    let (now, safety) = rust_unsafe(new[4].as_str().unwrap_or(""));
+    (now > had).then(|| if safety { format!("- {name}") } else { format!("- {name} (no `// SAFETY:` comment)") })
+}
+/// The `unsafe` keywords in Rust text, outside comments, string and char
+/// literals, and whether a comment holds `SAFETY:` (D-158 point 2). A name
+/// that contains `unsafe` doesn't count.
+fn rust_unsafe(text: &str) -> (usize, bool) {
+    fn skip_string(b: &[u8], mut i: usize) -> usize {
+        while i < b.len() && b[i] != b'"' {
+            i += if b[i] == b'\\' { 2 } else { 1 };
+        }
+        i + 1
+    }
+    /// A raw string's body start and its `#` count, when one begins at `i`.
+    fn raw_start(b: &[u8], i: usize) -> Option<(usize, usize)> {
+        let mut j = i;
+        if b.get(j) == Some(&b'b') {
+            j += 1;
+        }
+        if b.get(j) != Some(&b'r') {
+            return None;
+        }
+        j += 1;
+        let hashes = (j..b.len()).take_while(|&k| b[k] == b'#').count();
+        j += hashes;
+        (b.get(j) == Some(&b'"')).then_some((j + 1, hashes))
+    }
+    fn skip_raw(b: &[u8], from: usize, hashes: usize) -> usize {
+        let close: Vec<u8> = std::iter::once(b'"').chain(std::iter::repeat_n(b'#', hashes)).collect();
+        let mut i = from;
+        while i + close.len() <= b.len() {
+            if &b[i..i + close.len()] == close.as_slice() {
+                return i + close.len();
+            }
+            i += 1;
+        }
+        b.len()
+    }
+    let b = text.as_bytes();
+    let (mut i, mut count, mut safety) = (0, 0, false);
+    while i < b.len() {
+        if let Some((from, hashes)) = raw_start(b, i) {
+            i = skip_raw(b, from, hashes);
+        } else if b[i] == b'/' && b.get(i + 1) == Some(&b'/') {
+            let end = text[i..].find('\n').map_or(b.len(), |k| i + k);
+            safety |= text[i..end].contains("SAFETY:");
+            i = end;
+        } else if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
+            let end = text[i + 2..].find("*/").map_or(b.len(), |k| i + 2 + k + 2);
+            safety |= text[i..end].contains("SAFETY:");
+            i = end;
+        } else if b[i] == b'"' {
+            i = skip_string(b, i + 1);
+        } else if b[i] == b'\'' {
+            if b.get(i + 1) == Some(&b'\\') {
+                i += 2;
+                while i < b.len() && b[i] != b'\'' {
+                    i += 1;
+                }
+                i += 1;
+            } else if b.get(i + 2) == Some(&b'\'') {
+                i += 3;
+            } else {
+                i += 1;
+            }
+        } else if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            if &text[start..i] == "unsafe" {
+                count += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    (count, safety)
 }
 /// The other project of `projects` where the symbol entity `key` is live: an
 /// extract into another project moved it there (D-103). One that gained it in
@@ -1236,8 +1356,9 @@ pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failu
             if v.is_null() {
                 s.db.execute("DELETE FROM symbols WHERE id=?", [id])?;
             } else {
+                // A snapshot from before the nested columns has only the first eight (D-158).
                 s.db.execute(
-                    "INSERT OR REPLACE INTO symbols(id,module,name,kind,text,ord,revision,live) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
+                    "INSERT OR REPLACE INTO symbols(id,module,name,kind,text,ord,revision,live,parent,sep,tail) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
                     params![
                         v[0].as_str(),
                         v[1].as_str(),
@@ -1246,7 +1367,10 @@ pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failu
                         v[4].as_str(),
                         v[5].as_i64(),
                         v[6].as_str(),
-                        v[7].as_i64()
+                        v[7].as_i64(),
+                        v.get(8).and_then(|x| x.as_str()),
+                        v.get(9).and_then(|x| x.as_str()),
+                        v.get(10).and_then(|x| x.as_str()).unwrap_or("")
                     ],
                 )?;
             }
@@ -1254,15 +1378,24 @@ pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failu
             if !v.is_array() {
                 // Where its file's folders stop going, when recorded (D-136).
                 if let Some(k) = v["kept"].as_str() {
-                    let dir: Option<String> = s.db.query_row("SELECT dir FROM modules WHERE path=?", [name], |r| r.get(0)).ok();
-                    if let Some(dir) = dir {
-                        kept.insert(outside::file_of(&dir, name), k.to_string());
+                    // A Rust module's row holds its file; a Gleam one its dir (D-168).
+                    let row: Option<(String, Option<String>)> =
+                        s.db.query_row("SELECT dir, file FROM modules WHERE path=?", [name], |r| Ok((r.get(0)?, r.get(1)?))).ok();
+                    if let Some((dir, file)) = row {
+                        kept.insert(file.unwrap_or_else(|| outside::file_of(&dir, name)), k.to_string());
                     }
                 }
                 // Its file goes in the `materialize` below, which keeps one edited outside Solace (D-58).
                 s.db.execute("DELETE FROM modules WHERE path=?", [name])?;
             } else {
-                s.db.execute("INSERT OR REPLACE INTO modules(path,dir,header) VALUES (?1,?2,?3)", params![v[0].as_str(), v[1].as_str(), v[2].as_str()])?;
+                // ON CONFLICT keeps a Rust module's `file` and `owns_dir`; a snapshot from
+                // before them reads as None.
+                let (path, dir, header) = (v[0].as_str(), v[1].as_str(), v[2].as_str());
+                let (file, owns) = (v.get(3).and_then(|x| x.as_str()), v.get(4).and_then(|x| x.as_i64()));
+                s.db.execute(
+                    "INSERT INTO modules(path,dir,header,file,owns_dir) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(path) DO UPDATE SET dir=excluded.dir, header=excluded.header, file=excluded.file, owns_dir=excluded.owns_dir",
+                    params![path, dir, header, file, owns],
+                )?;
             }
         } else if let Some(name) = key.strip_prefix("file:") {
             let p = lockdown::path(&s.root, name)?;
@@ -1282,6 +1415,12 @@ pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failu
     let ix = s.index()?;
     s.materialize_to(&ix, &s.root, &kept)?;
     Ok(())
+}
+/// Whether the check after an undo runs in the project: a project with a
+/// language, or a Rust project whose toolchain is there (D-158). Without the
+/// toolchain the undo is unchecked, not refused.
+fn checkable(root: &Path, cargo: bool) -> bool {
+    crate::language::detect(root).is_some() || (crate::language::is_rust(root) && cargo)
 }
 /// Undoes a task's changes in every project of its scope (D-61): each is
 /// restored and checked, and a failure puts back the projects already restored.
@@ -1348,7 +1487,7 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
         for (dir, st, _) in &plans {
             // A project of plain files (D-60) has no code to type-check; the restored files say
             // which it is now.
-            if crate::language::detect(&st.root).is_some()
+            if checkable(&st.root, crate::language::cargo::installed())
                 && let Err(e) = st.check()
             {
                 failed = Some((dir.as_str(), *st, e));
@@ -3177,6 +3316,24 @@ pub(super) fn run_outline(top: &Path, tid: &str, rid: &str, budget: usize) -> St
     };
     outline(&transcript(Path::new(r["log"].as_str().unwrap_or(""))), budget)
 }
+
+/// `session remember`: the task's context and the run's own record, for an
+/// agent that noticed its conversation was compacted. It reads only and is
+/// repeatable; a discussion's brief already holds its context, so it is
+/// refused, and so is a run that isn't there (D-157 point 7).
+pub(super) fn remember(top: &Path, tid: &str, rid: &str, budget: usize) -> Out {
+    let Some(run) = run_record(top, tid, rid) else { return err("E7003", format!("unknown run {rid}")) };
+    if run["kind"] == "discuss" {
+        return err("E7010", "a discussion's brief holds its context; reply with `task note`");
+    }
+    let t = read_task(top, &task_path(top, tid)?)?;
+    let mut context = task_sections(&t);
+    context += &feature_section(top, &t);
+    context += &waiting_on(top, tid);
+    let reads = reads::window_reads().unwrap_or_else(|| run_reads(top, tid, rid));
+    Ok(reads::remember_reply(&context, &reads, top, &|b| run_outline(top, tid, rid, b), budget))
+}
+
 fn run_record(top: &Path, tid: &str, rid: &str) -> Option<Value> {
     let t = read_task(top, &task_path(top, tid).ok()?).ok()?;
     let i = run_at(&t, rid).ok()?;
@@ -3198,6 +3355,9 @@ fn outline(steps: &[Value], budget: usize) -> String {
     }
     let left = lines.len() - kept;
     let head = if left > 0 { format!("Earlier steps left out: {left}\n") } else { String::new() };
+    if head.len() > budget {
+        return String::new();
+    }
     head + &lines[left..].concat()
 }
 /// A line cut to 100 characters, with `…` when more was cut.
@@ -3223,32 +3383,11 @@ const START: &str = "Start with `session start --task`, with the task's title an
 const HELD_START: &str = "The reply to `session start --task`, with the task's title and description, is at the end of this brief: start with the call its `Next:` line names. Send `session start --task` again only to see that reply again, for example after the conversation is compacted.";
 /// What a review of a task in a feature is asked to add (D-112).
 const TECH_DEBT_ASK: &str = "This task is part of a feature: put minor, non-blocking findings that later work in the feature should fix under a `### Tech debt` heading in the feedback, one finding per bullet with its location (`module.name` or a file). When the task is completed, Solace files each on the feature's Tech Debt task; findings that block this task belong in the findings, not there.";
-fn brief(t: &Value, kind: &str) -> String {
-    let start = START;
-    let ask = "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. In the question's `text`, give each option a short example of the outcome the human would see (what a user sees, what a command prints, what a page shows, what a file or record ends up as), not how the code would change; the `options` stay short labels matching the bold names in the examples. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
-    let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. Keep messages short: lead with the answer or outcome, then only what the human needs to act on; don't restate the task or narrate your steps. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); in `text`, give each option a short example of its outcome in the human's terms, its name in bold, and keep the `options` labels short, matching the bold names.";
-    let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `merge`, `write`, `remove` and `format` are refused, and `run <name>` works only for commands marked `allowed_in_reviews` in `solace.toml`: use those to verify (for example test suites).";
-    // A task in a feature files its review's minor findings as the feature's tech debt (D-112).
-    let debt = if t["feature"].is_string() { format!(" {TECH_DEBT_ASK}") } else { String::new() };
-    let role = match kind {
-        "review" => format!(
-            "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. Read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. {read_only} Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
-        ),
-        "discuss" => format!(
-            "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
-        ),
-        "work" => format!(
-            "Make the change this task describes. {start} {ask} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, run all tests of the projects this task covers: `test --all` in each one with Gleam code, and the test commands its `solace.toml` declares (`run <name>`). Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
-        ),
-        _ => format!(
-            "Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. A plan assigns every file change to whoever does the work, as an edit (`submit` or `write`) or a settings proposal (`write` with `reason`), never to the human, who never edits files or runs commands. A plan is the smallest complete change (the reference's step 2) and names every file it reaches. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work, and anything you didn't check."
-        ),
-    };
+/// The task's context as a brief gives it: title, body, links, notes and
+/// questions. Its feature and dependencies are added where a brief adds them.
+fn task_sections(t: &Value) -> String {
     let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
-    let mut out = format!(
-        "You are working on a task from this project's task board. You work only through the Solace tool: there is no shell and no file access.\n{role}\n{responses}\n\nTask: {}\n",
-        text(&t["title"])
-    );
+    let mut out = format!("Task: {}\n", text(&t["title"]));
     if !text(&t["body"]).is_empty() {
         out += &format!("\n{}\n", text(&t["body"]));
     }
@@ -3283,6 +3422,41 @@ fn brief(t: &Value, kind: &str) -> String {
             })
             .collect(),
     );
+    out
+}
+
+fn brief(t: &Value, kind: &str) -> String {
+    let start = START;
+    let ask = "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. In the question's `text`, give each option a short example of the outcome the human would see (what a user sees, what a command prints, what a page shows, what a file or record ends up as), not how the code would change; the `options` stay short labels matching the bold names in the examples. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
+    let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. Keep messages short: lead with the answer or outcome, then only what the human needs to act on; don't restate the task or narrate your steps. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); in `text`, give each option a short example of its outcome in the human's terms, its name in bold, and keep the `options` labels short, matching the bold names.";
+    let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `merge`, `write`, `remove` and `format` are refused, and `run <name>` works only for commands marked `allowed_in_reviews` in `solace.toml`: use those to verify (for example test suites).";
+    // A task in a feature files its review's minor findings as the feature's tech debt (D-112).
+    let debt = if t["feature"].is_string() { format!(" {TECH_DEBT_ASK}") } else { String::new() };
+    let role = match kind {
+        "review" => format!(
+            "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. Read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. {read_only} Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
+        ),
+        "discuss" => format!(
+            "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
+        ),
+        "work" => format!(
+            "Make the change this task describes. {start} {ask} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, run all tests of the projects this task covers: `test --all` in each one with Gleam code, and the test commands its `solace.toml` declares (`run <name>`). Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
+        ),
+        _ => format!(
+            "Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. A plan assigns every file change to whoever does the work, as an edit (`submit` or `write`) or a settings proposal (`write` with `reason`), never to the human, who never edits files or runs commands. A plan is the smallest complete change (the reference's step 2) and names every file it reaches. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work, and anything you didn't check."
+        ),
+    };
+    let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
+    let mut out = format!(
+        "You are working on a task from this project's task board. You work only through the Solace tool: there is no shell and no file access.\n{role}\n{responses}\n\n{}",
+        task_sections(t)
+    );
+    let mut section = |title: &str, lines: Vec<String>| {
+        if !lines.is_empty() {
+            out += &format!("\n{title}:\n{}\n", lines.join("\n"));
+        }
+    };
+    let list = |k: &str| t[k].as_array().cloned().unwrap_or_default();
     // A task across projects (D-61): where the agent works, and how it reaches the others.
     let home = text(&t["home"]);
     let projects: Vec<String> = list("scope").iter().map(text).collect();
@@ -3887,7 +4061,28 @@ fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
         q["answer"] = json!(format!("Not applied: {file} changed since the proposal; read it and propose again"));
         return Ok(());
     }
-    fs::write(p, proposed)?;
+    // A Cargo.toml dependency change needs a fetch outside the sandbox, and a
+    // machine without cargo can't fill the cache (D-158 point 4).
+    let cargo = file.ends_with("Cargo.toml") && lockdown::cargo_settings_changed(current.as_bytes(), proposed);
+    if cargo && !crate::language::cargo::installed() {
+        q["answer"] = json!(format!("Not applied: E6013 {}", crate::language::cargo::MISSING));
+        return Ok(());
+    }
+    let existed = p.exists();
+    fs::create_dir_all(p.parent().unwrap_or(root))?;
+    fs::write(&p, proposed)?;
+    // A failed fetch undoes the approval, so the project stays as it was.
+    if cargo {
+        let dir = match q["settings"]["project"].as_str() {
+            Some(d) => scope::path(&scope::top(root), d),
+            None => root.to_path_buf(),
+        };
+        if let Err(e) = crate::language::cargo::fetch(&dir) {
+            let _ = if existed { fs::write(&p, &current) } else { fs::remove_file(&p) };
+            q["answer"] = json!(format!("Not applied: {}", e.0.trim_end()));
+            return Ok(());
+        }
+    }
     q["answer"] = json!("Approved and written");
     Ok(())
 }
@@ -3988,7 +4183,18 @@ impl Board {
                 } else {
                     (format!("/p/{}", percent_encode(&dir)), dir.clone())
                 };
-                json!({"dir":dir,"label":label,"name":workspace::name(&root),"target":workspace::target(&root),"base":base})
+                let needs = if !crate::language::is_rust(&root) {
+                    String::new()
+                } else if !crate::language::cargo::installed() {
+                    crate::language::cargo::MISSING.to_string()
+                } else {
+                    fs::read_to_string(root.join(".solace/fetch-failed"))
+                        .ok()
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .unwrap_or_default()
+                };
+                json!({"dir":dir,"label":label,"name":workspace::name(&root),"target":workspace::target(&root),"base":base,"needs":needs})
             })
             .collect();
         Ok(json!({"workspace":self.explicit(),"projects":projects,"found":workspace::found(&self.top)?}))

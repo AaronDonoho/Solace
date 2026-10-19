@@ -12,6 +12,7 @@ import unittest
 
 BIN = os.environ['SOLACE_TEST_BIN']
 FAKE = str(Path(__file__).with_name('fake_agent.py'))
+BWRAP = shutil.which('bwrap') is not None and subprocess.run(['bwrap', '--dev-bind', '/', '/', 'true'], capture_output=True).returncode == 0
 
 def project(path, name='pilot', body='pub fn one() { 1 }\n', target='javascript'):
     (path/'src').mkdir(parents=True, exist_ok=True)
@@ -99,6 +100,303 @@ class Root(unittest.TestCase):
             if predicate(v): return v
             time.sleep(.05)
         self.fail('timed out: ' + json.dumps(v))
+
+    def test_a_rust_project_without_cargo_is_marked_and_refused(self):  # D-167
+        # A Cargo package at the root, with its `solace.toml` already there,
+        # comes in at serve; its lane says what it needs, and its commands are refused.
+        (self.root/'src').mkdir()
+        (self.root/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n')
+        (self.root/'src/lib.rs').write_text('pub fn one() -> i32 { 1 }\n')
+        (self.root/'solace.toml').write_text('projects = []\n')
+        # No Rust toolchain on PATH: the lane and the refusals say so.
+        self.env = {**self.env, 'PATH': str(self.root/'no-tools')}
+        self.start()
+        v = self.api('GET', '/projects')
+        self.assertEqual([(p['dir'], p['needs']) for p in v['projects']], [('.', 'Needs the Rust toolchain (`cargo`)')])
+        out = self.cli('check', ok=False)
+        self.assertIn('Needs the Rust toolchain (`cargo`)', out)
+        out = self.cli('delete', 'crate.one', ok=False)
+        self.assertIn('Needs the Rust toolchain (`cargo`)', out)
+        # A read reaches the store by name, without the toolchain (D-158).
+        out = self.cli('inspect', 'crate.one')
+        self.assertIn('pub fn one()', out)
+        self.assertNotIn('Needs the Rust toolchain', out)
+        self.assertIn('pub fn one()', self.cli('view', 'src/lib.rs'))
+        self.cli('work', 'list')
+
+    def test_a_rust_check_names_its_symbol_and_submit_saves_one(self):  # D-167, D-168
+        # A Rust project's own tools: `check` runs cargo and names the symbol
+        # its error is in; `submit` saves the corrected item and checks it.
+        (self.root/'src').mkdir()
+        (self.root/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n')
+        (self.root/'src/lib.rs').write_text('pub fn one() -> i32 {\n    "two"\n}\n')
+        (self.root/'solace.toml').write_text('projects = []\n')
+        self.start()
+        out = self.cli('check', ok=False)
+        self.assertIn('at crate.one, line 2', out)
+        self.assertIn('Rust checks borrows only once types check', out)
+        out = self.cli('submit', 'crate.one', input='pub fn one() -> i32 {\n    1\n}\n')
+        self.assertIn('Saved crate.one', out)
+        self.assertEqual((self.root/'src/lib.rs').read_text(), 'pub fn one() -> i32 {\n    1\n}\n')
+
+    def test_a_rust_delete_removes_an_item_and_refuses_a_used_one(self):  # D-173
+        # `delete` works on a Rust store through the CLI: an unused item goes,
+        # and one cargo still finds a use for is refused with E5001.
+        (self.root/'src').mkdir()
+        (self.root/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n')
+        usage = 'pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    one()\n}\n'
+        (self.root/'src/lib.rs').write_text(usage)
+        (self.root/'solace.toml').write_text('projects = []\n')
+        self.start()
+        out = self.cli('delete', 'crate.one', ok=False)
+        self.assertIn('E5001 crate.one is still used by:\n  crate.two', out)
+        self.assertEqual((self.root/'src/lib.rs').read_text(), usage)
+        out = self.cli('delete', 'crate.two')
+        self.assertIn('Deleted crate.two.', out)
+        self.assertEqual((self.root/'src/lib.rs').read_text(), 'pub fn one() -> i32 {\n    1\n}\n')
+
+    def test_a_rust_test_reports_libtest_failures(self):  # D-167
+        # `test` runs cargo test on the whole project and names the failures.
+        (self.root/'src').mkdir()
+        (self.root/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n')
+        (self.root/'src/lib.rs').write_text(
+            'pub fn one() -> i32 { 1 }\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn ok() { assert_eq!(one(), 1); }\n\n    #[test]\n    fn bad() { assert_eq!(one(), 2); }\n}\n')
+        (self.root/'solace.toml').write_text('projects = []\n')
+        self.start()
+        out = self.cli('test', '--all', ok=False)
+        self.assertIn('Ran all 2 tests.', out)
+        self.assertIn('tests::bad', out)
+
+    def test_a_rust_test_that_does_not_compile_names_its_symbol(self):  # D-167
+        (self.root/'src').mkdir()
+        (self.root/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n')
+        (self.root/'src/lib.rs').write_text('pub fn one() -> i32 { 1 }\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn bad() { let _: i32 = "x"; }\n}\n')
+        (self.root/'solace.toml').write_text('projects = []\n')
+        self.start()
+        out = self.cli('test', '--all', ok=False)
+        self.assertIn('Tests did not compile', out)
+        self.assertIn('at crate.tests::bad, line 2', out)
+
+    def test_rust_settings_files_wait_for_approval(self):  # Spec 14 A11 (D-158 point 4, D-174)
+        # build.rs, .cargo/config, rust-toolchain and Cargo.toml's dependency
+        # keys are proposals; a plain Cargo.toml edit is written with no question.
+        (self.root/'src').mkdir()
+        (self.root/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n')
+        (self.root/'src/lib.rs').write_text('pub fn one() -> i32 { 1 }\n')
+        (self.root/'solace.toml').write_text('projects = []\n')
+        self.start()
+        base = (self.root/'Cargo.toml').read_text()
+        described = base + 'description = "an app"\n'
+        depended = base + '\n[dependencies]\nserde = "1"\n'
+        steps = [{'command': 'read Cargo.toml'},
+                 {'command': 'write build.rs', 'text': 'fn main() {}\n'},
+                 {'command': 'write Cargo.toml', 'text': depended},
+                 {'command': 'write Cargo.toml', 'text': described},
+                 {'command': 'write Cargo.toml --replace', 'old': 'description = "an app"', 'text': 'description = "a tool"'},
+                 {'command': 'task done done'}]
+        t = self.api('POST', '/tasks', {'title': 'Rust settings', 'body': json.dumps(steps)})
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'plan'})
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        t = self.wait('', t, lambda x: x['runs'][-1]['state'] == 'waiting')
+        q = t['questions'][0]
+        self.assertEqual(q['text'], f'Change {self.root.name}/build.rs')
+        self.assertEqual(q['settings']['proposed'], 'fn main() {}\n')
+        self.assertFalse((self.root/'build.rs').exists())
+        self.api('POST', f'/tasks/{t["id"]}/questions/{q["id"]}', {'option': 'Reject'})
+        t = self.wait('', t, lambda x: len(x['questions']) == 2 and x['runs'][-1]['state'] == 'waiting')
+        q = t['questions'][1]
+        self.assertEqual(q['text'], f'Change {self.root.name}/Cargo.toml')
+        self.assertEqual(q['settings']['base'], base)
+        self.assertEqual(q['settings']['proposed'], depended)
+        self.assertNotIn('serde', (self.root/'Cargo.toml').read_text())
+        self.api('POST', f'/tasks/{t["id"]}/questions/{q["id"]}', {'option': 'Reject'})
+        t = self.wait('', t, lambda x: x['column'] == 'needs_review')
+        self.assertEqual(len(t['questions']), 2)
+        # A partial write is replayed as the whole text once, never duplicated.
+        self.assertEqual((self.root/'Cargo.toml').read_text(), base + 'description = "a tool"\n')
+
+    def cargo_dependency(self):
+        """A scratch git crate, so fetching it needs no network."""
+        repo = Path(self.tmp.name)/'dependency'
+        (repo/'src').mkdir(parents=True)
+        (repo/'Cargo.toml').write_text('[package]\nname = "dependency"\nversion = "0.1.0"\nedition = "2021"\n')
+        (repo/'src/lib.rs').write_text('pub fn two() -> i32 { 2 }\n')
+        for args in (['git', 'init', '-q', str(repo)],
+                     ['git', '-C', str(repo), 'add', '.'],
+                     ['git', '-C', str(repo), '-c', 'user.name=Solace', '-c', 'user.email=solace@example.invalid', 'commit', '-qm', 'initial']):
+            subprocess.run(args, check=True, capture_output=True)
+        return repo
+
+    def scratch_cargo_home(self):
+        home = Path(self.tmp.name)/'cargo-home'
+        self.env = {**self.env, 'CARGO_HOME': str(home)}
+        return home
+
+    def rust_package(self, dependencies='', body='pub fn one() -> i32 { 1 }\n'):
+        (self.root/'src').mkdir()
+        (self.root/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n' + dependencies)
+        (self.root/'src/lib.rs').write_text(body)
+        (self.root/'solace.toml').write_text('projects = []\n')
+
+    def test_a_rust_import_fetches_its_dependencies(self):  # Spec 14 A11 (D-176)
+        # The scratch cache starts empty; the import fills it, so check's
+        # --offline can find the dependency.
+        repo = self.cargo_dependency()
+        home = self.scratch_cargo_home()
+        self.rust_package(f'\n[dependencies]\ndependency = {{ git = "{repo.as_uri()}" }}\n', 'pub fn one() -> i32 { dependency::two() }\n')
+        self.start()
+        self.assertTrue((home/'git').exists())
+        self.assertTrue((self.root/'.solace/store.db').exists())
+        self.cli('check')
+
+    def test_opening_a_cloned_rust_project_fetches_again(self):  # D-176
+        repo = self.cargo_dependency()
+        home = self.scratch_cargo_home()
+        self.rust_package(f'\n[dependencies]\ndependency = {{ git = "{repo.as_uri()}" }}\n', 'pub fn one() -> i32 { dependency::two() }\n')
+        self.start()
+        self.assertTrue((home/'git').exists())
+        # A clone brings the store but not this computer's cargo cache.
+        server = self.servers.pop()
+        server.terminate()
+        server.wait(timeout=3)
+        server.stdout.close()
+        server.stderr.close()
+        shutil.rmtree(home)
+        self.start()
+        end = time.monotonic() + 20
+        while not (home/'git').exists() and time.monotonic() < end:
+            time.sleep(.05)
+        self.assertTrue((home/'git').exists())
+        self.cli('check')
+
+    def test_a_failed_rust_import_creates_no_store(self):
+        self.scratch_cargo_home()
+        missing = Path(self.tmp.name)/'missing'
+        self.rust_package(f'\n[dependencies]\ndependency = {{ git = "{missing.as_uri()}" }}\n')
+        manifest = (self.root/'Cargo.toml').read_text()
+        settings = (self.root/'solace.toml').read_text()
+        p = subprocess.run([BIN, 'serve', '--port', '0'], cwd=self.root, env=self.env, text=True, capture_output=True, timeout=60)
+        out = p.stdout + p.stderr
+        self.assertNotEqual(p.returncode, 0, out)
+        self.assertIn('cargo fetch failed', out)
+        self.assertIn('missing', out)
+        self.assertFalse((self.root/'.solace/store.db').exists())
+        self.assertFalse((self.root/'.solace').exists())
+        self.assertEqual((self.root/'Cargo.toml').read_text(), manifest)
+        self.assertEqual((self.root/'solace.toml').read_text(), settings)
+        self.assertFalse((self.root/'Cargo.lock').exists())
+
+    def test_a_failed_reopen_fetch_is_shown_on_the_lane(self):  # D-176
+        repo = self.cargo_dependency()
+        home = self.scratch_cargo_home()
+        self.rust_package(f'\n[dependencies]\ndependency = {{ git = "{repo.as_uri()}" }}\n', 'pub fn one() -> i32 { dependency::two() }\n')
+        self.start()
+        server = self.servers.pop()
+        server.terminate()
+        server.wait(timeout=3)
+        server.stdout.close()
+        server.stderr.close()
+        # A clone on a machine whose cache and dependency are both gone.
+        shutil.rmtree(home)
+        shutil.rmtree(repo)
+        self.start()
+        # The reopen fetch runs in the background, so wait for its lane mark.
+        end = time.monotonic() + 20
+        while True:
+            v = self.api('GET', '/projects')
+            root = next(p for p in v['projects'] if p['dir'] == '.')
+            if 'cargo fetch failed' in root['needs'] or time.monotonic() >= end:
+                break
+            time.sleep(.05)
+        self.assertIn('cargo fetch failed', root['needs'])
+
+    def test_an_approved_rust_dependency_is_fetched(self):  # D-176
+        repo = self.cargo_dependency()
+        home = self.scratch_cargo_home()
+        self.rust_package(body='pub fn one() -> i32 { dependency::two() }\n')
+        self.start()
+        base = (self.root/'Cargo.toml').read_text()
+        proposed = base + f'\n[dependencies]\ndependency = {{ git = "{repo.as_uri()}" }}\n'
+        steps = [{'command': 'read Cargo.toml'}, {'command': 'write Cargo.toml', 'text': proposed},
+                 {'command': 'task done done'}]
+        t = self.api('POST', '/tasks', {'title': 'Fetch a dependency', 'body': json.dumps(steps)})
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'plan'})
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        t = self.wait('', t, lambda x: x['runs'][-1]['state'] == 'waiting')
+        q = t['questions'][0]
+        self.api('POST', f'/tasks/{t["id"]}/questions/{q["id"]}', {'option': 'Approve'})
+        self.wait('', t, lambda x: x['column'] == 'needs_review')
+        self.assertEqual((self.root/'Cargo.toml').read_text(), proposed)
+        self.assertTrue((home/'git').exists())
+        self.cli('check')
+
+    def test_a_failed_rust_fetch_undoes_the_approval(self):  # D-176
+        self.scratch_cargo_home()
+        self.rust_package()
+        self.start()
+        base = (self.root/'Cargo.toml').read_text()
+        lock = self.root/'Cargo.lock'
+        before = lock.read_bytes() if lock.exists() else None
+        missing = Path(self.tmp.name)/'missing'
+        proposed = base + f'\n[dependencies]\ndependency = {{ git = "{missing.as_uri()}" }}\n'
+        steps = [{'command': 'read Cargo.toml'}, {'command': 'write Cargo.toml', 'text': proposed},
+                 {'command': 'task done done'}]
+        t = self.api('POST', '/tasks', {'title': 'Fetch a missing dependency', 'body': json.dumps(steps)})
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'plan'})
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        t = self.wait('', t, lambda x: x['runs'][-1]['state'] == 'waiting')
+        q = t['questions'][0]
+        self.api('POST', f'/tasks/{t["id"]}/questions/{q["id"]}', {'option': 'Approve'})
+        t = self.wait('', t, lambda x: x['column'] == 'needs_review')
+        self.assertTrue(t['questions'][0]['answer'].startswith('Not applied: cargo fetch failed:'), t['questions'][0])
+        self.assertEqual((self.root/'Cargo.toml').read_text(), base)
+        self.assertEqual(lock.read_bytes() if lock.exists() else None, before)
+
+    def test_a_rust_approval_without_cargo_is_refused(self):  # D-167, D-176
+        tools = self.root/'no-cargo'
+        tools.mkdir()
+        os.symlink(shutil.which('python3'), tools/'python3')
+        self.env = {**self.env, 'PATH': str(tools)}
+        self.rust_package()
+        self.start()
+        self.assertTrue((self.root/'.solace/store.db').exists())
+        v = self.api('GET', '/projects')
+        self.assertEqual([(p['dir'], p['needs']) for p in v['projects']], [('.', 'Needs the Rust toolchain (`cargo`)')])
+        base = (self.root/'Cargo.toml').read_text()
+        proposed = base + '\n[dependencies]\ndependency = "1"\n'
+        steps = [{'command': 'read Cargo.toml'}, {'command': 'write Cargo.toml', 'text': proposed},
+                 {'command': 'task done done'}]
+        t = self.api('POST', '/tasks', {'title': 'Fetch without cargo', 'body': json.dumps(steps)})
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'plan'})
+        self.api('POST', f'/tasks/{t["id"]}/actions', {'action': 'assign', 'model': 'fake'})
+        t = self.wait('', t, lambda x: x['runs'][-1]['state'] == 'waiting')
+        q = t['questions'][0]
+        self.api('POST', f'/tasks/{t["id"]}/questions/{q["id"]}', {'option': 'Approve'})
+        t = self.wait('', t, lambda x: x['column'] == 'needs_review')
+        self.assertEqual(t['questions'][0]['answer'], 'Not applied: E6013 Needs the Rust toolchain (`cargo`)')
+        self.assertEqual((self.root/'Cargo.toml').read_text(), base)
+
+    def test_a_rust_build_script_runs_sandboxed(self):  # Spec 14 A11
+        # Only target/ is writable and there is no network, so this build
+        # script fails the check; the file beside the project never appears.
+        if not BWRAP:
+            self.skipTest('needs bubblewrap')
+        (self.root/'src').mkdir()
+        (self.root/'Cargo.toml').write_text('[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n')
+        (self.root/'src/lib.rs').write_text('pub fn one() -> i32 { 1 }\n')
+        (self.root/'solace.toml').write_text('projects = []\n')
+        (self.root/'build.rs').write_text(
+            'fn main() {\n'
+            '    let escape = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("escaped.txt");\n'
+            '    if std::fs::write(&escape, "out").is_ok() {\n'
+            '        panic!("wrote outside target/");\n'
+            '    }\n'
+            '    std::net::TcpStream::connect("1.1.1.1:80").expect("no network");\n'
+            '}\n')
+        self.start()
+        out = self.cli('check', ok=False)
+        self.assertFalse((self.root/'escaped.txt').exists())
+        self.assertIn('no network', out)
 
     def test_folder_of_projects(self):
         # Two projects with the same package name: lanes are keyed by folder.

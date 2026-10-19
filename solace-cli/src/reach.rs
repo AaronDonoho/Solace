@@ -4,14 +4,53 @@
 use super::*;
 use std::collections::VecDeque;
 
-/// Test functions: public `_test` functions in test modules.
+/// Test functions: public `_test` functions in test modules (Gleam), or
+/// `#[test]` functions (Rust, D-170).
 pub fn test_symbols(ix: &Index) -> Vec<usize> {
     (0..ix.syms.len())
         .filter(|&i| {
             let s = &ix.syms[i];
-            is_test(ix, i) && s.kind == Kind::Fn && s.name.ends_with("_test") && s.text.contains(&format!("pub fn {}(", s.name))
+            is_test(ix, i) && s.kind == Kind::Fn && is_test_fn(ix, i)
         })
         .collect()
+}
+
+/// Whether `i` is a test function: a Gleam `pub …_test`, or a Rust `#[test]`.
+pub fn is_test_fn(ix: &Index, i: usize) -> bool {
+    let s = &ix.syms[i];
+    if ix.rust {
+        language::rust_refs::has_test_attr(&s.text)
+    } else {
+        s.name.ends_with("_test") && s.text.contains(&format!("pub fn {}(", s.name))
+    }
+}
+
+/// A test's libtest name (D-170): its module path and name, `crate` dropped,
+/// and the `integration::<file>` prefix of a `tests/*.rs` crate dropped.
+pub fn libtest_name(ix: &Index, i: usize) -> String {
+    let s = &ix.syms[i];
+    let prefix = libtest_prefix(ix, &s.module);
+    if prefix.is_empty() { s.name.clone() } else { format!("{prefix}::{}", s.name) }
+}
+
+fn libtest_prefix(ix: &Index, module: &str) -> String {
+    if module == "crate" {
+        return String::new();
+    }
+    if let Some(rest) = module.strip_prefix("integration::") {
+        // A file that is its own `tests/*.rs` binary is that binary's crate
+        // root; a helper module (`tests/common/mod.rs`) keeps its own name.
+        let root = ix
+            .modules
+            .iter()
+            .find(|m| m.path == module)
+            .and_then(|m| m.file.as_deref())
+            .and_then(|f| f.strip_prefix("tests/"))
+            .and_then(|f| f.strip_suffix(".rs"))
+            .is_some_and(|stem| stem == rest && !stem.contains('/'));
+        return if root { String::new() } else { rest.to_string() };
+    }
+    module.to_string()
 }
 
 /// Everything a symbol can run or read: its closure over `uses`.
@@ -48,6 +87,28 @@ pub fn covered(ix: &Index, t: usize) -> HashSet<usize> {
 /// Symbols whose effect static reach can't see the end of: other processes,
 /// the network, and foreign code. A test that reaches one always runs.
 pub fn outside(ix: &Index) -> HashSet<usize> {
+    if ix.rust {
+        let by_id: HashMap<&str, usize> = ix.syms.iter().enumerate().map(|(i, s)| (s.id.as_str(), i)).collect();
+        let in_extern = |j: usize| {
+            let mut p = ix.syms[j].parent.clone();
+            while let Some(id) = p {
+                let Some(&k) = by_id.get(id.as_str()) else { break };
+                if ix.syms[k].kind_text == "extern" {
+                    return true;
+                }
+                p = ix.syms[k].parent.clone();
+            }
+            false
+        };
+        return (0..ix.syms.len())
+            .filter(|&j| {
+                let s = &ix.syms[j];
+                s.kind_text == "extern"
+                    || in_extern(j)
+                    || ["std::process", "std::net", "Command::new"].iter().any(|m| s.text.contains(m))
+            })
+            .collect();
+    }
     (0..ix.syms.len())
         .filter(|&j| {
             ix.syms[j].text.lines().any(|l| l.starts_with("@external"))
@@ -69,7 +130,10 @@ pub fn hash(ix: &Index, reach: &HashSet<usize>, revisions: &[String], root: &Pat
     for m in ix.modules.iter().filter(|m| modules.contains(m.path.as_str())) {
         h.update(&m.header);
     }
-    for f in ["gleam.toml", "manifest.toml"] {
+    // A Rust project's tests also depend on its manifest, lockfile and build
+    // script; a Gleam project's on its manifest and lockfile (D-170).
+    let manifests: &[&str] = if ix.rust { &["Cargo.toml", "Cargo.lock", "build.rs"] } else { &["gleam.toml", "manifest.toml"] };
+    for f in manifests {
         h.update(fs::read(root.join(f)).unwrap_or_default());
     }
     hex(&h.finalize())
@@ -185,7 +249,7 @@ pub fn field_refs(ix: &Index, ty: usize, field: &str) -> String {
                 "-- {}{}\n{}\n",
                 ix.syms[r].qname(),
                 if certain { "" } else { " (possible: another type has this field)" },
-                ix.lang.signature(&ix.syms[r].item())
+                ix.signature(&ix.syms[r])
             );
         }
     }
@@ -200,6 +264,9 @@ pub fn field_refs(ix: &Index, ty: usize, field: &str) -> String {
 /// shared helper doesn't pull in all its callers). The analysis stops where
 /// the data stops; only displays are cut.
 pub fn flow(ix: &Index, origins: &[(usize, Vec<usize>)]) -> Impact {
+    if ix.rust {
+        return flow_calls(ix, origins);
+    }
     let n = ix.syms.len();
     let rec = records(ix);
     let callers = &ix.used_by;
@@ -283,6 +350,27 @@ pub fn flow(ix: &Index, origins: &[(usize, Vec<usize>)]) -> Impact {
                     queue.push_back((r, at, vec![format!(".{f}")], steps + 1, format!("reads {}.{f}", ix.syms[ty].name), certain && sure));
                 }
             }
+        }
+    }
+    impact
+}
+
+/// Rust's flow (D-170): the changed symbols and every caller of them,
+/// transitively. A Rust `let` is not the data marker Gleam's is, so no fields
+/// are tracked and certainty is not weighed; callers are followed whatever
+/// changed, which overestimates.
+fn flow_calls(ix: &Index, origins: &[(usize, Vec<usize>)]) -> Impact {
+    let mut impact = Impact::default();
+    let mut found: HashSet<usize> = HashSet::new();
+    let mut queue: VecDeque<(usize, usize, String, bool)> =
+        origins.iter().map(|(i, _)| (*i, 0, "changed".to_string(), true)).collect();
+    while let Some((i, steps, via, certain)) = queue.pop_front() {
+        if is_test(ix, i) || !found.insert(i) {
+            continue;
+        }
+        impact.uses.push(Use { sym: i, steps, via, certain });
+        for &c in &ix.used_by[i] {
+            queue.push_back((c, steps + 1, format!("calls {}", short(ix, i)), certain));
         }
     }
     impact

@@ -21,6 +21,11 @@ pub struct File {
     pub mods: Vec<(String, Option<String>)>,
     pub items: Vec<Piece>,
     pub refusals: Vec<Refusal>,
+    /// Whether this file's `mod x;` children sit beside it rather than in a
+    /// folder named after it: a crate root, `mod.rs`, a `tests/*.rs` crate root
+    /// or a `#[path]` file. The store keeps what `walk` found, so a `submit`
+    /// places a `#[path]` module's child where the importer read it (D-168).
+    pub owns_dir: bool,
 }
 
 /// An item, from its leading comments to the next item's.
@@ -99,7 +104,7 @@ fn split_parsed(source: &str, module: &str) -> Result<File, Failure> {
     let mods = nodes.iter().filter(|n| n.kind == "mod" && n.children.is_none()).map(|n| (n.name.clone(), n.file.clone())).collect();
     let (first, mut items) = cut(body, &nodes, 0, body.len(), true);
     shift(&mut items, prefix);
-    Ok(File { header: source[..prefix + first].to_string(), mods, items, refusals: cx.refusals })
+    Ok(File { header: source[..prefix + first].to_string(), mods, items, refusals: cx.refusals, owns_dir: false })
 }
 
 /// The bytes of a leading BOM and `#!` line (not an inner `#![attribute]`).
@@ -495,7 +500,10 @@ pub fn package(root: &Path) -> Result<Vec<(String, String, File)>, Failure> {
     let mut out = vec![];
     walk(root, main, "crate".into(), true, &mut out)?;
     for name in entries(root, "tests")?.into_iter().filter(|n| n.ends_with(".rs") && root.join("tests").join(n).is_file()) {
-        let module = name.trim_end_matches(".rs").to_string();
+        // A test crate's modules take the `integration::` prefix (D-169), so a helper shared by
+        // two test crates (`tests/common/mod.rs`) holds one name and never clashes with a library
+        // module of the same name, nor with the crate's own unit-test module `tests`.
+        let module = format!("integration::{}", name.trim_end_matches(".rs"));
         walk(root, format!("tests/{name}"), module, true, &mut out)?;
     }
     let mut modules = HashMap::new();
@@ -591,15 +599,15 @@ fn entries(root: &Path, dir: &str) -> Result<Vec<String>, Failure> {
 /// it rather than in a folder named after it.
 fn walk(root: &Path, rel: String, module: String, owns_dir: bool, out: &mut Vec<(String, String, File)>) -> Result<(), Failure> {
     if let Some((_, first, _)) = out.iter().find(|(p, ..)| *p == rel) {
-        let crate_of = |m: &str| m.split("::").next().unwrap_or("").to_string();
-        // Test crates share a helper (`tests/common/mod.rs`); it is held once, as the first test's module.
-        if rel.starts_with("tests/") && crate_of(first) != crate_of(&module) {
+        // Test crates share a helper (`tests/common/mod.rs`); it is held once, under the
+        // name `integration::common` every test crate's `mod common;` gives it.
+        if rel.starts_with("tests/") && first == &module {
             return Ok(());
         }
         return Err(Failure(format!("{rel} is two modules (`{first}`, `{module}`); Solace holds a file as one module for now."), 1));
     }
     let text = fs::read_to_string(root.join(&rel)).map_err(|e| Failure(format!("{rel}: {e}"), 1))?;
-    let file = split(&text, &module).map_err(|e| Failure(format!("{rel}: {}", e.0), 1))?;
+    let mut file = split(&text, &module).map_err(|e| Failure(format!("{rel}: {}", e.0), 1))?;
     if !file.refusals.is_empty() {
         let lines: Vec<String> = file.refusals.iter().map(|r| format!("{rel}: line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
         return Err(Failure(lines.join("\n"), 1));
@@ -609,16 +617,20 @@ fn walk(root: &Path, rel: String, module: String, owns_dir: bool, out: &mut Vec<
     }
     let path = Path::new(&rel);
     let dir = path.parent().unwrap().to_string_lossy().replace('\\', "/");
-    let base = if owns_dir { dir.clone() } else { format!("{dir}/{}", path.file_stem().unwrap().to_string_lossy()) };
+    let base = child_dir(&rel, owns_dir);
     let mods = file.mods.clone();
+    file.owns_dir = owns_dir;
     out.push((rel.clone(), module.clone(), file));
+    // A test crate's own `mod x;` is `integration::x` (D-169), so every test crate that names
+    // `tests/common/mod.rs` holds the same module name, and it never clashes with the
+    // library module `common`. A library crate's own `mod x;` takes the bare name `x`.
     for (name, named) in mods {
-        let child = if module == "crate" { name.clone() } else { format!("{module}::{name}") };
+        let child = child_module(&module, &rel, owns_dir, &name);
         if let Some(p) = named {
             walk(root, format!("{dir}/{p}"), child, true, out)?;
             continue;
         }
-        let (flat, nested) = (format!("{base}/{name}.rs"), format!("{base}/{name}/mod.rs"));
+        let (flat, nested) = (child_file(&rel, owns_dir, &name), format!("{base}{name}/mod.rs"));
         if root.join(&flat).is_file() {
             walk(root, flat, child, false, out)?;
         } else if root.join(&nested).is_file() {
@@ -639,6 +651,90 @@ fn inline_file_mod(text: &str, pieces: &[Piece]) -> Option<String> {
             inline_file_mod(text, std::slice::from_ref(c))
         }
     })
+}
+
+/// The byte ranges of the string literals in `source`, their contents and quotes
+/// included: a nested item's reindent leaves a multi-line literal as written
+/// (D-168). Tokenizing finds them, so numbers and `'a'`/`b'a'` don't count.
+pub fn string_literals(source: &str) -> Vec<Range<usize>> {
+    let Ok(tokens) = source.parse::<proc_macro2::TokenStream>() else { return vec![] };
+    let mut out = vec![];
+    let mut groups = vec![tokens];
+    while let Some(stream) = groups.pop() {
+        for tree in stream {
+            match tree {
+                proc_macro2::TokenTree::Literal(l) if is_string(&l) => out.push(l.span().byte_range()),
+                proc_macro2::TokenTree::Group(g) => groups.push(g.stream()),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Whether a literal token is a string (`"x"`, `r"x"`, `r#"x"#`, `b"x"`, `c"x"`),
+/// not a number or a character.
+fn is_string(l: &proc_macro2::Literal) -> bool {
+    let text = l.to_string();
+    let rest = text.strip_prefix('b').or_else(|| text.strip_prefix('c')).unwrap_or(&text);
+    rest.starts_with('"') || rest.starts_with("r\"") || rest.starts_with("r#")
+}
+
+/// Whether `source` holds a module-level `use`: parsed, so `pub use` and
+/// `pub(crate) use` count, and an inline `mod`'s imports — which a nested save
+/// would drop as a child row — are found (D-168).
+pub fn imports(source: &str) -> bool {
+    syn::parse_file(source).map(|f| f.items.iter().any(item_use)).unwrap_or(false)
+}
+
+/// Whether an item is a `use`, an inline `mod`'s items included (D-168).
+fn item_use(item: &Item) -> bool {
+    match item {
+        Item::Use(_) => true,
+        Item::Mod(m) => m.content.as_ref().is_some_and(|(_, items)| items.iter().any(item_use)),
+        _ => false,
+    }
+}
+
+/// The folder a new module of `parent_file` goes in, from the project root
+/// (D-168): beside `parent_file` when its parent owns its folder, and in a
+/// folder named after the parent file otherwise.
+fn child_dir(parent_file: &str, owns_dir: bool) -> String {
+    let (dir, file) = parent_file.rsplit_once('/').map_or(("", parent_file), |(d, f)| (d, f));
+    let folder = if owns_dir { String::new() } else { format!("{}/", file.strip_suffix(".rs").unwrap_or(file)) };
+    if dir.is_empty() { folder } else { format!("{dir}/{folder}") }
+}
+
+/// The file a new module `name` takes, from the project root (D-168): a crate
+/// root, `tests/x.rs`, `mod.rs` and a `#[path]` file place children beside
+/// themselves; any other file places them in a folder named after it. So
+/// `src/board/agents.rs` gives `src/board/agents/cache.rs`, and a child of
+/// `tests/x.rs` gives `tests/y.rs`.
+pub fn child_file(parent_file: &str, owns_dir: bool, name: &str) -> String {
+    format!("{}{name}.rs", child_dir(parent_file, owns_dir))
+}
+
+/// Whether a module's file places its `mod x;` children beside itself (D-168):
+/// a crate root, a `tests/*.rs` crate root, `mod.rs`, or a `#[path]` file,
+/// whose name is not the module's own last segment.
+pub fn owns_dir(path: &str, file: &str) -> bool {
+    let (dir, name) = file.rsplit_once('/').map_or(("", file), |(d, f)| (d, f));
+    let stem = name.strip_suffix(".rs").unwrap_or(name);
+    matches!(stem, "mod" | "lib" | "main") || dir == "tests" || Some(stem) != path.rsplit("::").next()
+}
+
+/// The module a child `name` of module `path` (file `file`) takes (D-168): a
+/// test crate's children share its `integration::` prefix (D-169), and the
+/// crate root's take the bare name. `owns_dir` is the caller's, which only
+/// `walk` knows when a `#[path]` file named the module.
+pub fn child_module(path: &str, file: &str, owns_dir: bool, name: &str) -> String {
+    if owns_dir && file.rsplit_once('/').is_some_and(|(dir, _)| dir == "tests") {
+        format!("integration::{name}")
+    } else if path == "crate" {
+        name.to_string()
+    } else {
+        format!("{path}::{name}")
+    }
 }
 
 #[cfg(test)]

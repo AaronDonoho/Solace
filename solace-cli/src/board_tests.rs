@@ -444,6 +444,34 @@ fn review_delta_keeps_module_headers_budget_and_completed_baseline() {
     assert!(filtered.contains("file:later.txt (added)") && !filtered.contains("module:app"));
 }
 
+/// D-158 point 2: a review lists a changed symbol that added `unsafe`, and
+/// marks one with no `// SAFETY:` comment; a symbol that gains none is left out.
+#[test]
+fn a_review_lists_new_unsafe() {
+    let (root, s) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\npub fn three() -> i32 {\n    3\n}\n");
+    let mut t = api(&root, "POST", "/tasks", json!({"title": "Unsafe"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id":"work","kind":"work","state":"ended"}]);
+    tasks::put(&s, &t).unwrap();
+    let before = snapshot(&s).unwrap();
+    let row = |name: &str| -> String { s.db.query_row("SELECT id FROM symbols WHERE name=?1", [name], |r| r.get(0)).unwrap() };
+    s.db.execute("UPDATE symbols SET text=?1 WHERE id=?2", params!["pub fn one() -> i32 {\n    unsafe { 1 }\n}\n", row("one")]).unwrap();
+    s.db.execute(
+        "UPDATE symbols SET text=?1 WHERE id=?2",
+        params!["pub fn two() -> i32 {\n    // SAFETY: nothing is dereferenced.\n    unsafe { 2 }\n}\n", row("two")],
+    )
+    .unwrap();
+    s.db.execute("UPDATE symbols SET text=?1 WHERE id=?2", params!["pub fn three() -> &'static str {\n    \"unsafe\"\n}\n", row("three")]).unwrap();
+    let after = snapshot(&s).unwrap();
+    record_listed(&s, &tid, &before, &after);
+    let diff = task_diff(&s, &tid, &[], 4000).unwrap();
+    assert!(diff.contains("New `unsafe`:\n"), "{diff}");
+    assert!(diff.contains("- crate.one (no `// SAFETY:` comment)"), "{diff}");
+    assert!(diff.contains("- crate.two\n"), "{diff}");
+    assert!(!diff.contains("crate.two (no `// SAFETY:`"), "{diff}");
+    assert!(!diff.contains("- crate.three"), "{diff}");
+}
+
 /// A review's brief holds the task's changes: the whole task at first, then
 /// the delta since the last completed review; it never asks for `task diff`
 /// or a session start first.
@@ -522,6 +550,55 @@ fn cancel_keeps_an_edited_file_of_a_module_the_task_created() {
     tasks::put(&s, &t).unwrap();
     api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"cancel"})).unwrap();
     assert_eq!(fs::read_to_string(&file).unwrap(), "pub fn side() {\n  22\n}\n");
+}
+
+/// D-158/D-166: undo carries a module's `file` and a nested symbol's parent, separator and tail,
+/// so a Rust module keeps its own file and its nesting.
+#[test]
+fn undo_keeps_a_rust_modules_file_and_nested_items() {
+    fn at<'a>(ix: &'a Index, name: &str) -> &'a Sym {
+        ix.syms.iter().find(|s| s.name == name).unwrap()
+    }
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let split = language::rust::split("impl Outer {\n    fn inner() {}\n}\n", "x").unwrap();
+    store_rust_file(&s.db, "x", "src", "src/other.rs", &split).unwrap();
+    let before = s.index().unwrap();
+    let snap = snapshot(&s).unwrap();
+    let ids: Vec<String> = before.syms.iter().filter(|s| s.module == "x").map(|s| s.id.clone()).collect();
+    // The undo puts back the rows the task removed.
+    s.db.execute("DELETE FROM modules WHERE path = 'x'", []).unwrap();
+    s.db.execute("DELETE FROM symbols WHERE module = 'x'", []).unwrap();
+    let mut states = vec![("module:x".to_string(), snap["module:x"].clone())];
+    states.extend(ids.iter().map(|id| (format!("symbol:{id}"), snap.get(format!("symbol:{id}")).unwrap().clone())));
+    restore(&s, &states).unwrap();
+    let ix = s.index().unwrap();
+    let m = ix.modules.iter().find(|m| m.path == "x").unwrap();
+    assert_eq!(m.file.as_deref(), Some("src/other.rs"));
+    assert_eq!(m.rel(), "src/other.rs");
+    assert_eq!(at(&ix, "Outer::inner").parent.as_deref(), Some(at(&ix, "Outer").id.as_str()));
+    assert_eq!((at(&ix, "Outer").sep.clone(), at(&ix, "Outer").tail.clone()), (at(&before, "Outer").sep.clone(), at(&before, "Outer").tail.clone()));
+    assert_eq!(
+        (at(&ix, "Outer::inner").sep.clone(), at(&ix, "Outer::inner").tail.clone()),
+        (at(&before, "Outer::inner").sep.clone(), at(&before, "Outer::inner").tail.clone())
+    );
+}
+
+/// A snapshot carries a Rust module's `owns_dir`, so undo restores the recorded
+/// value instead of falling back to the guess (D-168).
+#[test]
+fn a_snapshot_keeps_a_modules_owns_dir() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut split = language::rust::split("pub fn one() {}\n", "x").unwrap();
+    split.owns_dir = true;
+    store_rust_file(&s.db, "x", "src", "src/other.rs", &split).unwrap();
+    let snap = snapshot(&s).unwrap();
+    assert_eq!(snap["module:x"][4], json!(1), "the snapshot keeps the row's owns_dir");
+    s.db.execute("DELETE FROM modules WHERE path = 'x'", []).unwrap();
+    restore(&s, &[("module:x".to_string(), snap["module:x"].clone())]).unwrap();
+    let ix = s.index().unwrap();
+    assert_eq!(ix.modules.iter().find(|m| m.path == "x").unwrap().owns_dir, Some(true));
 }
 
 /// D-77 point 4: a `changes` message left in an old inbox adds nothing. The
@@ -841,14 +918,50 @@ fn a_reads_message_lands_on_its_run_and_the_outline_keeps_the_latest_steps() {
     let w = workflow(&toml::Value::Table(Default::default())).unwrap();
     let mut t = new_task("T", "", &w["columns"][0]["id"], 1.);
     t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
-    let reads = json!({"symbols":[{"project":".","symbol":"a.f","revision":"sha256:1","recent":true}],"caught":false});
+    let reads = json!({"symbols":[{"project":".","symbol":"a.f","revision":"sha256:1","recent":true}]});
     message(&w, &mut t, &json!({"kind":"reads","task":"t","run":"r1","reads":reads})).unwrap();
     assert_eq!(t["runs"][0]["reads"], reads);
     assert!(message(&w, &mut t, &json!({"kind":"reads","task":"t","run":"r2","reads":reads})).is_err());
     let steps = [json!({"kind":"tool","title":"view a.f","status":"completed"}), json!({"kind":"usage"}), json!({"kind":"message","text":"Done.\nmore"})];
     assert_eq!(outline(&steps, 1000), "1 tool: view a.f (completed)\n3 message: Done.\n");
     assert_eq!(outline(&steps, 60), "Earlier steps left out: 1\n3 message: Done.\n");
+    assert_eq!(outline(&steps, 10), "");
     assert_eq!(outline(&[], 1000), "");
+}
+
+/// `session remember` is for a task run: a discussion's brief holds its
+/// context, so it is refused, and a run that isn't there is too.
+#[test]
+fn session_remember_is_refused_in_a_discussion_and_for_an_unknown_run() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
+    t["runs"] = json!([{"id":"r1","kind":"discuss","state":"running"}]);
+    tasks::put(&s, &t).unwrap();
+    let tid = t["id"].as_str().unwrap();
+    let e = remember(&p.root, tid, "r1", 1000).unwrap_err();
+    assert!(e.0.starts_with("E7010"), "{}", e.0);
+    let e = remember(&p.root, tid, "r9", 1000).unwrap_err();
+    assert!(e.0.starts_with("E7003"), "{}", e.0);
+}
+
+/// A resumed brief drops notes the conversation already saw; `session
+/// remember` still gives them, so a compacted run can read its task again.
+#[test]
+fn session_remember_keeps_notes_a_resumed_brief_filters_out() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
+    t["notes"] = json!([{"author":"agent","text":"The investigator's plan."}]);
+    t["conversation"] = json!({"notes_seen":[note_fingerprint(&t["notes"][0])]});
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+    tasks::put(&s, &t).unwrap();
+    let tid = t["id"].as_str().unwrap();
+    let run = json!({"id":"r1","kind":"work","state":"running"});
+    let brief = continuation_brief(&t, &run, true, &p.root, &p.root, false).0;
+    assert!(!brief.contains("The investigator's plan."), "{brief}");
+    let out = remember(&p.root, tid, "r1", 10_000).unwrap();
+    assert!(out.contains("The investigator's plan."), "{out}");
 }
 
 /// A message for a run that has ended keeps its note and changes nothing else.
@@ -1964,6 +2077,70 @@ fn reverting_checks_a_project_the_restore_makes_gleam_again() {
     assert!(e.contains("E7008") && e.contains("errors"), "{e}");
 }
 
+/// An undo checks a restored project when its tool is there: Gleam always,
+/// Rust only with cargo, and a project of plain files never (D-158).
+#[test]
+fn an_undo_checks_a_restored_project_only_when_its_tool_is_there() {
+    let gleam = testing::Scratch::new().with(&[("gleam.toml", "name=\"a\"\n")]);
+    let rust = testing::Scratch::new().with(&[("Cargo.toml", "[package]\nname=\"a\"\nversion=\"0.1.0\"\n")]);
+    let plain = testing::Scratch::new().with(&[("notes.md", "x\n")]);
+    assert!(checkable(&gleam, false));
+    assert!(checkable(&rust, true));
+    assert!(!checkable(&rust, false), "no cargo: the undo is unchecked, not refused");
+    assert!(!checkable(&plain, true));
+}
+
+/// D-167: an undo in a Rust project is checked too. The restored code has a
+/// type error, so the cancel fails and the project is put back.
+#[test]
+fn reverting_checks_a_rust_projects_restored_code() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let p = testing::Scratch::new().with(&[
+        ("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        ("src/lib.rs", "pub fn one() -> i32 { 1 }\n"),
+    ]);
+    crate::import(&p).unwrap();
+    let s = open(&p).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title": "Rust"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let id: String = s.db.query_row("SELECT id FROM symbols WHERE name='one'", [], |r| r.get(0)).unwrap();
+    let mut before = snapshot(&s).unwrap();
+    before[format!("symbol:{id}")][4] = json!("pub fn one() -> i32 { \"two\" }");
+    let after = snapshot(&s).unwrap();
+    record(&s, &tid, "r1", &before, &after, None).unwrap();
+    let e = api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap_err().0;
+    assert!(e.contains("E7008") && e.contains("errors"), "{e}");
+}
+
+/// Cancelling a task that made a Rust module removes its file and the `mod x;`
+/// line its parent's header took (D-136, D-168).
+#[test]
+fn reverting_a_rust_module_removes_its_file_and_mod_line() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let p = testing::Scratch::new().with(&[
+        ("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        ("src/lib.rs", "pub fn one() -> i32 { 1 }\n"),
+    ]);
+    crate::import(&p).unwrap();
+    let s = open(&p).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title": "Rust module"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let found = existing_folders(&s.root);
+    let before = snapshot(&s).unwrap();
+    s.submit_symbols(None, Some("x"), "pub fn two() -> i32 { 2 }\n").unwrap();
+    let after = snapshot(&s).unwrap();
+    record(&s, &tid, "r1", &before, &after, Some(&found)).unwrap();
+    assert!(s.root.join("src/x.rs").is_file());
+    assert!(fs::read_to_string(s.root.join("src/lib.rs")).unwrap().contains("mod x;"));
+    api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap();
+    assert!(!s.root.join("src/x.rs").exists(), "the file went with the module");
+    assert_eq!(fs::read_to_string(s.root.join("src/lib.rs")).unwrap(), "pub fn one() -> i32 { 1 }\n");
+}
+
 /// D-136: a folder the task made still goes; the one above it, there before, stays.
 #[test]
 fn reverting_removes_a_folder_the_task_made() {
@@ -2209,4 +2386,24 @@ fn a_change_on_a_homeless_task_saves_no_mark() {
     let saved = fs::read_to_string(&path).unwrap();
     assert!(!saved.contains("noProject"), "{saved}");
     assert!(saved.contains("Moved from `web` to `.`"), "{saved}");
+}
+
+/// D-176: a successful approved fetch clears the reopen failure the lane shows.
+#[test]
+fn an_approved_fetch_clears_the_reopen_failure() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", testing::CARGO),
+        ("src/lib.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    fs::create_dir_all(root.join(".solace")).unwrap();
+    fs::write(root.join(".solace/fetch-failed"), "cargo fetch failed: stale").unwrap();
+    let base = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let proposed = format!("{base}\n[features]\nextra = []\n");
+    let mut q = json!({"settings":{"file":"Cargo.toml","base":base,"proposed":proposed}});
+    apply_settings(&root, &mut q).unwrap();
+    assert_eq!(q["answer"], "Approved and written", "{q}");
+    assert!(!root.join(".solace/fetch-failed").exists(), "the stale failure is cleared");
 }

@@ -326,6 +326,74 @@ pub fn protected(root: &Path) -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// The arguments that run `argv` in `root` under bubblewrap: no network, only
+/// `root/target` writable, Cargo's and rustup's caches and the toolchain
+/// read-only (D-158 point 4). `home` is the home folder, emptied first so a
+/// build script can't read what else is in it; with `None` it is left as it
+/// is. `cargo_home` and `rustup_home` are where Cargo and rustup keep their
+/// caches, which a machine may put elsewhere (`CARGO_HOME`, `RUSTUP_HOME`).
+pub fn cargo_sandbox_args(argv: &[String], root: &Path, home: Option<&Path>, cargo_home: &Path, rustup_home: &Path) -> Vec<String> {
+    let mut a: Vec<String> = ["--die-with-parent", "--unshare-net", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    if let Some(home) = home {
+        let home = home.to_string_lossy().to_string();
+        a.extend(["--tmpfs".to_string(), home]);
+        for sub in ["registry", "git", "bin"] {
+            let p = cargo_home.join(sub).to_string_lossy().to_string();
+            a.extend(["--ro-bind-try".to_string(), p.clone(), p]);
+        }
+        let p = rustup_home.to_string_lossy().to_string();
+        a.extend(["--ro-bind-try".to_string(), p.clone(), p]);
+    }
+    let target = root.join("target").to_string_lossy().to_string();
+    let dir = root.to_string_lossy().to_string();
+    // `/tmp` and the home folder were emptied above, so a project below one
+    // of them is put back before its `target/` becomes the writable folder.
+    a.extend(["--ro-bind".to_string(), dir.clone(), dir.clone(), "--bind".to_string(), target.clone(), target, "--chdir".to_string(), dir]);
+    // A project's lockfile lives outside `target/`: bound writable, because
+    // cargo writes it. `cargo_sandboxed` creates a missing one first, so this
+    // only builds the arguments.
+    let lock = root.join("Cargo.lock").to_string_lossy().to_string();
+    a.extend(["--bind".to_string(), lock.clone(), lock]);
+    a.push("--".to_string());
+    a.extend(argv.iter().cloned());
+    a
+}
+
+/// `argv` run in `root` under bubblewrap on Linux, with no network and only
+/// `target/` writable, because a Rust command runs `build.rs` and
+/// dependencies' build scripts (D-158 point 4). Without bubblewrap, or a home
+/// folder, a plain command: approval is the guardrail elsewhere.
+pub fn cargo_sandboxed(argv: &[String], root: &Path) -> Command {
+    let home = env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute()).filter(|_| bwrap());
+    let mut c = match home {
+        Some(home) => {
+            let _ = fs::create_dir_all(root.join("target"));
+            // A fresh package has no lockfile; a writable bind needs the file
+            // to exist, and cargo writes it as it would without the sandbox.
+            let lock = root.join("Cargo.lock");
+            if !lock.exists() {
+                let _ = fs::write(&lock, "");
+            }
+            let elsewhere = |key: &str| env::var_os(key).map(PathBuf::from).filter(|p| p.is_absolute());
+            let cargo_home = elsewhere("CARGO_HOME").unwrap_or_else(|| home.join(".cargo"));
+            let rustup_home = elsewhere("RUSTUP_HOME").unwrap_or_else(|| home.join(".rustup"));
+            let mut c = Command::new("bwrap");
+            c.args(cargo_sandbox_args(argv, root, Some(&home), &cargo_home, &rustup_home));
+            c
+        }
+        None => {
+            let mut c = Command::new(&argv[0]);
+            c.args(&argv[1..]);
+            c
+        }
+    };
+    c.current_dir(root);
+    c
+}
+
 /// Runs `argv` in `dir`: whether it exited with 0, and the end of its output.
 fn run(dir: &Path, argv: &[&str], secs: u64, protect: Option<&Path>) -> (bool, String) {
     use std::os::unix::process::CommandExt;

@@ -162,15 +162,21 @@ pub fn file_of(dir: &str, module: &str) -> String {
     format!("{dir}/{module}.gleam")
 }
 
-/// Every Gleam file under `src/` and `test/`, except a probe left behind.
-fn graph_files(root: &Path) -> Result<Vec<String>, Failure> {
-    let mut out = vec![];
-    // A project of plain files holds no symbols (D-60).
-    if let Some(lang) = language::detect(root) {
-        out = lang.source_files(root)?;
+/// Every file the store holds: a Gleam project's `src/` and `test/` files
+/// except a probe left behind, or a Rust project's module files (D-158). A
+/// project of plain files holds no symbols (D-60).
+fn graph_files(s: &Store) -> Result<Vec<String>, Failure> {
+    if let Some(lang) = language::detect(&s.root) {
+        let mut out = lang.source_files(&s.root)?;
         out.retain(|rel| *rel != file_of("test", PROBE));
+        return Ok(out);
     }
-    Ok(out)
+    if !language::is_rust(&s.root) {
+        return Ok(vec![]);
+    }
+    let mut stmt = s.db.prepare("SELECT file FROM modules WHERE file IS NOT NULL ORDER BY file")?;
+    let files: Vec<String> = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<Result<_, _>>()?;
+    Ok(files.into_iter().filter(|rel| s.root.join(rel).is_file()).collect())
 }
 
 // --- approved hashes ------------------------------------------------------------
@@ -242,6 +248,11 @@ pub fn approve(s: &Store, tid: &str) -> Result<(), Failure> {
 
 /// Reads one changed file into the store, or says why it can't.
 fn read_in(s: &Store, rel: &str, text: Option<&str>) -> Result<Result<(), String>, Failure> {
+    // Reading a changed Rust file back into the store is the Rust store
+    // task's; until then the change is reported, not lost (D-158).
+    if language::is_rust(&s.root) {
+        return Ok(Err(format!("{rel}: changes to Rust files outside Solace aren't read in yet")));
+    }
     let (dir, file) = rel.split_once('/').unwrap();
     let module = file.strip_suffix(".gleam").unwrap();
     if !s.lang().valid_module_path(module) {
@@ -262,7 +273,11 @@ fn read_in(s: &Store, rel: &str, text: Option<&str>) -> Result<Result<(), String
     if let Some(twice) = language::repeated(&parsed.items).first() {
         return Ok(Err(format!("{rel} defines `{twice}` twice; Solace left it as it is and reads it again once fixed")));
     }
-    s.db.execute("INSERT OR REPLACE INTO modules(path, dir, header) VALUES (?1, ?2, ?3)", params![module, dir, parsed.header])?;
+    // ON CONFLICT keeps a Rust module's `file` (D-158).
+    s.db.execute(
+        "INSERT INTO modules(path, dir, header) VALUES (?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET dir=excluded.dir, header=excluded.header",
+        params![module, dir, parsed.header],
+    )?;
     for (ord, item) in parsed.items.iter().enumerate() {
         match existing.iter().find(|e| e.1 == item.name) {
             Some((id, _, old, old_ord, kind)) => {
@@ -316,7 +331,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
     if !s.root.join(".solace/approved").exists() {
         approve_all(s)?;
     }
-    let disk = graph_files(&s.root)?;
+    let disk = graph_files(s)?;
     let mut changed: Vec<(String, Option<Vec<u8>>)> = vec![];
     for rel in &disk {
         let path = s.root.join(rel);
@@ -619,6 +634,17 @@ mod tests {
         assert_eq!(modules(&s), 0);
     }
 
+    /// D-158: reading a module in keeps the file a Rust module is written to.
+    #[test]
+    fn read_in_keeps_a_modules_file() {
+        let s = app();
+        s.db.execute("UPDATE modules SET file = 'src/app.rs' WHERE path = 'app'", []).unwrap();
+        let edited = APP.replace("  1", "  11");
+        read_in(&s, "src/app.gleam", Some(&edited)).unwrap().unwrap();
+        let file: Option<String> = s.db.query_row("SELECT file FROM modules WHERE path = 'app'", [], |r| r.get(0)).unwrap();
+        assert_eq!(file.as_deref(), Some("src/app.rs"));
+    }
+
     /// Moving a symbol without editing it changes its order only; the text stays.
     #[test]
     fn a_reordered_symbol_keeps_its_text_and_takes_its_new_place() {
@@ -653,7 +679,8 @@ mod tests {
     #[test]
     fn plain_files_have_no_graph_and_odd_entries_no_approval() {
         let plain = Scratch::new().with(&[("notes/readme.txt", "hi")]);
-        assert!(graph_files(&plain).unwrap().is_empty());
+        crate::import(&plain).unwrap();
+        assert!(graph_files(&crate::Store::at(&plain).unwrap()).unwrap().is_empty());
         assert_eq!(approval("task:1", &json!(["a"])), None);
         assert_eq!(approval("symbol:1", &json!([0, "app", 5, 0, "text"])), None);
         assert_eq!(approval("module:1", &json!(["app.gleam", 0, null])), None);

@@ -1,10 +1,14 @@
 //! A project's programming language, behind one interface: how its source
 //! splits into symbols, what a symbol names, and how its tools format, check
 //! and test the code. The store, ids, history, drafts, undo and patches don't
-//! depend on it. Gleam (`language/gleam.rs`) is the only language so far.
+//! depend on it. Gleam is the language of a `gleam.toml` project
+//! (`language/gleam.rs`); a Cargo package is read by `language/rust.rs` and
+//! run by `language/cargo.rs` (D-158).
 
+pub mod cargo;
 pub mod gleam;
 pub mod rust;
+pub mod rust_refs;
 
 use crate::{Diag, Failure, FileMap};
 use gleam::Gleam;
@@ -156,6 +160,13 @@ pub trait Language: Sync {
 }
 
 const LANGUAGES: &[&dyn Language] = &[&Gleam];
+
+/// Whether the project at `root` is a Cargo package: `Cargo.toml` and no
+/// `gleam.toml` (D-158), the rule `import` uses. Its code is held as symbols,
+/// but its tools are `cargo`'s, not a `Language`'s.
+pub fn is_rust(root: &Path) -> bool {
+    root.join("Cargo.toml").exists() && !root.join("gleam.toml").exists()
+}
 
 /// The language of the project at `root`, from its files; `None` for a
 /// project of plain files (D-60).

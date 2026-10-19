@@ -7,7 +7,8 @@ The source of the `solace` executable. Installing and using it are described in 
 - `src/reach.rs`: test reach and impact analysis (D-44).
 - `src/reference.txt`: the agent reference; the part before "Commands in full" is what `session start` shows.
 - `tests/reference_layout.py`: checks the column layout of the reference's "Commands in full" section; the root's validator for `src/reference.txt` (D-143).
-- `src/gleam.rs`: splitting Gleam source into symbols.
+- `src/language/gleam.rs`, `src/language/rust.rs`, `src/language/cargo.rs`: splitting Gleam and Rust source into symbols, and running cargo's check and test.
+- `src/store.rs`: the store's projection: a Rust file's items, kept nested and written back exactly, and what a Rust module's body, outline and session names are (D-158).
 - `src/lockdown.rs`: file tiers, `solace.toml`, file and run commands, `agent-config` (Spec 14).
 - `src/board.rs`, `src/default-board.toml`: the task board server and the default workflow (Spec 15).
 - `src/outside.rs`: changes made outside Solace (D-58): what Solace last wrote (`.solace/written`), reading changed files in, Unexpected Changes, and the approved list (`.solace/approved`). `materialize` in `main.rs` asks it before writing a file.

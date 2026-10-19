@@ -56,7 +56,13 @@ pub fn enclosing(start: &Path) -> Result<Option<PathBuf>, Failure> {
 pub fn find(start: &Path) -> Result<PathBuf, Failure> {
     if let Some(root) = enclosing(start)? {
         members(&root)?;
+        let had_store = root.join(".solace/store.db").exists();
         establish(&root)?;
+        if had_store {
+            // The fetch can wait on the network; `serve` listens meanwhile (D-176).
+            let root = root.clone();
+            std::thread::spawn(move || reopen(&root));
+        }
         return Ok(root);
     }
     // A Gleam project Solace doesn't manage yet is served as it is, read only, so the board can offer to migrate it.
@@ -167,6 +173,22 @@ fn establish(root: &Path) -> Result<(), Failure> {
         import(root)?;
     }
     Ok(())
+}
+
+/// Fills a Rust root's missing dependency cache when a project with a store is
+/// opened again (D-176). A failure goes on the project's lane, as the missing
+/// toolchain does, instead of refusing to serve a store that already exists. It
+/// runs in the background, so `serve` starts listening without waiting for it.
+fn reopen(root: &Path) {
+    if !crate::language::is_rust(root) {
+        return;
+    }
+    let marker = root.join(".solace/fetch-failed");
+    if !crate::language::cargo::installed() {
+        let _ = fs::remove_file(marker);
+        return;
+    }
+    let _ = crate::language::cargo::reopen(root);
 }
 
 fn save(root: &Path, dirs: &[String]) -> Result<(), Failure> {

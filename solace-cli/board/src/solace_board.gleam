@@ -54,6 +54,8 @@ pub type Lane {
     base: String,
     /// The project's compilation target, "" when the server didn't say.
     target: String,
+    /// Why the project can't run its commands, "" when it can (D-167).
+    needs: String,
     workflow: solace_task.Workflow,
     tasks: List(solace_task.Task),
   )
@@ -178,7 +180,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   #(
     Model(
       lanes: [
-        Lane("", "", "", "", "", solace_task.Workflow([], dict.new()), []),
+        Lane("", "", "", "", "", "", solace_task.Workflow([], dict.new()), []),
       ],
       workspace: False,
       listed: False,
@@ -572,6 +574,7 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Lane))) {
     use name <- decode.field("name", decode.string)
     use base <- decode.field("base", decode.string)
     use target <- decode.optional_field("target", "", decode.string)
+    use needs <- decode.optional_field("needs", "", decode.string)
     decode.success(
       Lane(
         dir,
@@ -579,6 +582,7 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Lane))) {
         name,
         base,
         target,
+        needs,
         solace_task.Workflow([], dict.new()),
         [],
       ),
@@ -961,6 +965,11 @@ fn lane_name(lane: Lane) -> List(Element(Msg)) {
     case lane.target {
       "" -> h.text("")
       target -> h.small([a.class("lane-target muted")], [h.text(" " <> target)])
+    },
+    case lane.needs {
+      "" -> h.text("")
+      needs ->
+        h.small([a.class("lane-needs attention")], [h.text(" " <> needs)])
     },
   ]
 }

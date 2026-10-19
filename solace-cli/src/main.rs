@@ -12,7 +12,9 @@ mod board;
 mod drafts;
 mod extract;
 mod language;
+mod rust_submit;
 mod lockdown;
+mod mcp;
 mod migrate;
 mod orientation;
 mod outside;
@@ -21,14 +23,17 @@ mod reads;
 mod recipe;
 mod scope;
 mod skills;
+mod store;
 mod tasks;
 mod view;
 mod workspace;
 
-use language::{Import, Item, Kind, Language, Ref, gleam};
+use language::{Import, Item, Kind, Language, Ref, cargo, gleam};
+use store::{projection, store_rust_file};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -37,88 +42,8 @@ use std::{env, fs};
 use std::time::Duration;
 use std::{cell::RefCell, rc::Rc};
 
-
-const REFERENCE: &str = include_str!("reference.txt");
-
-/// The reference as agents get it at session start: the workflow and one line
-/// per command (`help` has every option, D-46), and task commands only in a
-/// board run (`in_task`).
-fn agent_reference(in_task: bool) -> String {
-    let (workflow, rest) = REFERENCE.split_once("\nCommands in full").unwrap();
-    let (_, rest) = rest.split_once("\nTask runs").unwrap();
-    let (task, rest) = rest.split_once("\nStrategy runs").unwrap();
-    let (strategy, _host) = rest.split_once("\nHost commands").unwrap();
-    if in_task {
-        format!("{workflow}\nTask runs{task}")
-    } else if board::strategy_context().is_some() {
-        // The workflow is for changing code, which a strategy run never does.
-        format!("Strategy runs{strategy}\nRun `help` for the read commands' options.\n")
-    } else {
-        // no task to ask or finish outside a board run (run 18)
-        format!(
-            "{}\n",
-            workflow
-                .replace("ask with `task ask`, or say so", "say so")
-                .replace("A project outside the task's reach: `task ask` to add it, then make\nthe change there. ", "")
-        )
-    }
-}
-
-/// The reference's file-tier rows are not commands: `help`'s name list skips
-/// them (D-144).
-const FILE_TIERS: [&str; 5] = ["graph", "watched", "protected", "unwatched", "internal"];
-
-/// The command names a row's term lists: the first word of each part split on
-/// a `|` (`view | inspect | refs | find`).
-fn row_names(l: &str) -> Vec<&str> {
-    let term = l.trim_start().split("  ").next().unwrap_or("");
-    term.split('|').filter_map(|p| p.split_whitespace().next()).collect()
-}
-
-/// The first call a session start ends with (D-145); a strategy run gets no
-/// workflow, so none.
-fn next_call(call: &str, strategy: bool) -> String {
-    if strategy {
-        String::new()
-    } else {
-        format!("\nNext: read what the change needs in one call, one command per line: {call}.\n")
-    }
-}
-
-/// `help [command]` for agents: every option, without host commands, and task
-/// commands only in a board run; with a command, only the paragraph holding
-/// its entry — a row indented by exactly two naming it (D-46 point 4, as
-/// amended by D-144); with no entry, the run's command names.
-fn agent_help(topic: Option<&str>) -> String {
-    let (_, full) = REFERENCE.split_once("Commands in full\n").unwrap();
-    let (full, _host) = full.split_once("\nHost commands").unwrap();
-    let (general, runs) = full.split_once("\nTask runs").unwrap();
-    let (task, strategy) = runs.split_once("\nStrategy runs").unwrap();
-    let full = if board::context().is_some() {
-        format!("{general}\nTask runs{task}")
-    } else if board::strategy_context().is_some() {
-        // Only what a strategy run may do: the reads, and its own commands.
-        let reading = general.split("\n\n").next().unwrap_or("");
-        format!("{reading}\n\nStrategy runs{strategy}")
-    } else {
-        general.to_string()
-    };
-    let Some(topic) = topic else { return format!("{full}\n") };
-    let entry = |l: &str| l.starts_with("  ") && !l[2..].starts_with(' ') && row_names(l).iter().any(|w| *w == topic);
-    let hits: Vec<&str> = full.split("\n\n").filter(|p| p.lines().any(entry)).collect();
-    if !hits.is_empty() {
-        return hits.join("\n\n") + "\n";
-    }
-    let mut list: Vec<&str> = vec![];
-    for l in full.lines().filter(|l| l.starts_with("  ") && !l[2..].starts_with(' ')) {
-        for w in row_names(l) {
-            if w != "..." && !FILE_TIERS.contains(&w) && !list.contains(&w) {
-                list.push(w);
-            }
-        }
-    }
-    format!("No command `{topic}`. Commands: {}\n", list.join(", "))
-}
+mod reference;
+pub(crate) use reference::*;
 /// The largest reply, in bytes (about 8k tokens). Agents cut longer tool
 /// output (Codex at about 10k tokens), so `inspect` and `view` trim by
 /// priority to fit rather than being cut mid-document (D-14). `solace mcp
@@ -193,7 +118,7 @@ fn main() {
                 }
                 _ => return usage("mcp [--budget N]"),
             };
-            mcp(budget);
+            mcp::mcp(budget);
             return Ok(String::new());
         }
         run_options(&args, &mut stdin, old.as_deref(), BUDGET, &options)
@@ -241,6 +166,13 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     }
     if a.first() == Some(&"task") && board::context().is_none() {
         return lockdown::error("E7010", "task", "task commands work only in a run started from the task board; this session has no task");
+    }
+    if a.as_slice() == ["session", "remember"] {
+        let Some((tid, rid)) = board::context() else {
+            return lockdown::error("E7010", "session remember", "session remember works only in a run started from the task board");
+        };
+        let top = scope::top(&Store::root()?);
+        return board::remember(&top, &tid, &rid, budget);
     }
     let rest;
     let (args, cross) = match a.iter().position(|x| *x == "--project") {
@@ -340,15 +272,21 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     }
     board::flow(&store.root)?;
     let noticed = outside::absorb(&store, outside::Mode::Notice)?;
+    // A run's settings write is a proposal the human approves (D-38); a Rust
+    // project's Cargo.toml is one only when it touches a protected key (D-158
+    // point 4). Its text is read here, once, and replayed to the command.
+    let mut settings_write: Option<String> = None;
     if let Some((tid, rid)) = &context {
-        // A run's settings write is a proposal the human approves (D-38).
         if a.first() == Some(&"write")
-            && let Some(file) = a.get(1).map(|p| file_name(Path::new(p))).filter(|p| p == "solace.toml" || p == "AGENTS.md" || lockdown::is_gitignore(p))
+            && let Some(file) = a.get(1).map(|p| file_name(Path::new(p))).filter(|p| lockdown::settings_file(&store.root, p) || *p == "Cargo.toml")
         {
             let current = fs::read(store.root.join(&file)).unwrap_or_default();
             let proposed = lockdown::edited(&current, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old)?;
-            let reason = REASON.with(|r| r.borrow().clone());
-            return board::propose_settings(&home, &store.root, tid, rid, &file, &current, &proposed, reason.as_deref(), guard);
+            if lockdown::settings_file(&store.root, &file) || lockdown::cargo_settings_changed(&current, &proposed) {
+                let reason = REASON.with(|r| r.borrow().clone());
+                return board::propose_settings(&home, &store.root, tid, rid, &file, &current, &proposed, reason.as_deref(), guard);
+            }
+            settings_write = Some(proposed);
         }
     }
     // A file patch (`write` with no path, D-104) names its files in `text`: it
@@ -370,8 +308,8 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         },
         _ => vec![],
     };
-    let mut replay = || -> Out { Ok(patch.clone().or_else(|| fix.clone()).unwrap_or_default()) };
-    let input: &mut dyn FnMut() -> Out = if patch.is_some() || fix.is_some() { &mut replay } else { input };
+    let mut replay = || -> Out { Ok(patch.clone().or_else(|| fix.clone()).or_else(|| settings_write.clone()).unwrap_or_default()) };
+    let input: &mut dyn FnMut() -> Out = if patch.is_some() || fix.is_some() || settings_write.is_some() { &mut replay } else { input };
     let before = if a.first().is_some_and(|c| CHANGES.contains(c)) && !reads_only(&a) && context.is_some() {
         let mut v = board::snapshot(&store)?;
         v.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
@@ -457,7 +395,10 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
             d.db.execute_batch("BEGIN IMMEDIATE")?;
         }
     }
-    let result = run_inner(args, input, old, budget);
+    // A settings write's text already applied `old`; replay it whole (D-158 point 4).
+    let whole = settings_write.is_some();
+    let replay: Vec<String> = args.iter().filter(|x| !whole || (*x != "--replace" && *x != "--all")).cloned().collect();
+    let result = run_inner(&replay, input, if whole { None } else { old }, budget);
     if before.is_some() {
         crash_after("command");
     }
@@ -599,16 +540,24 @@ impl Drop for OuterTransaction {
     }
 }
 
-/// A test-only hook: exits after the named point, so recovery is tested
-/// (`SOLACE_FAIL_AFTER=command` | `complete` | `destination` | `others` | `commit`;
+/// A test-only hook: `SOLACE_FAIL_AFTER=<point>` exits after the named point,
+/// and `panic:<point>` panics there instead, so a caught panic is tested too
+/// (`command` | `complete` | `destination` | `others` | `commit`;
 /// `complete` is after an extract's record gains its result, before any commit;
 /// `destination` after its destination commits, before the source does;
 /// `source` after the source commits, before the dependents do;
 /// `others` after a merge's dependents commit, before the source does).
 /// Only in a board run, so a plain CLI call is never interrupted.
 fn crash_after(point: &str) {
-    if board::context().is_some() && env::var("SOLACE_FAIL_AFTER").is_ok_and(|v| v == point) {
+    if board::context().is_none() {
+        return;
+    }
+    let Ok(asked) = env::var("SOLACE_FAIL_AFTER") else { return };
+    if asked == point {
         std::process::exit(1);
+    }
+    if asked.strip_prefix("panic:") == Some(point) {
+        panic!("SOLACE_FAIL_AFTER=panic:{point}");
     }
 }
 
@@ -631,6 +580,9 @@ const STOPS: &[&str] = &["submit", "delete", "extract", "merge", "write", "remov
 /// D-152: what a reply ends with when it held back a `task done`.
 const HELD: &str = "`task done` waits for a test that passes and reaches every change: fix what the test reports, \
 then send `task done` again with an updated summary.\n";
+/// task:da797576d0cfaaac: a line left with no command once `--project <dir>` is
+/// taken off is refused as that line's error; the rest of the call runs.
+const PROJECT_ONLY: &str = "`--project` goes on the same line as its command, e.g. `view x.y --project <dir>`\n";
 /// D-131: `build plan` only reads, so it is no change, process or verification.
 fn reads_only(a: &[&str]) -> bool {
     a.starts_with(&["build", "plan"])
@@ -665,11 +617,28 @@ fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize)
             out += &agent_help(words.get(1).map(|w| w.as_str()));
             continue;
         }
+        // `--project` names where its command runs, not a command of its own.
+        if verb.is_empty() && words.iter().any(|w| w == "--project") {
+            out += PROJECT_ONLY;
+            failed.push(command.to_string());
+            continue;
+        }
         let test = verb.first() == Some(&"test");
         if test {
             UNTESTED.with(|u| u.borrow_mut().take());
         }
-        let result = run(&words, budget.saturating_sub(out.len()));
+        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&words, budget.saturating_sub(out.len())))) {
+            Ok(result) => result,
+            Err(p) => {
+                // A panic is this line's error, not the tool's: the lines after
+                // it are skipped, and the next call starts clean.
+                reset_after_panic();
+                out += &panic_reply(&*p, Some(command));
+                failed.push(command.to_string());
+                stopped = true;
+                continue;
+            }
+        };
         if test && waiting.is_none() {
             waiting = match &result {
                 Err(_) => Some("the test failed".into()),
@@ -712,6 +681,36 @@ fn verb_words(words: &[String]) -> Vec<&str> {
         w.drain(i..(i + 2).min(w.len()));
     }
     w
+}
+
+/// What a panic replies to the agent, whatever its payload carries: the message
+/// (`&str` or `String`), and the line it happened in, if it was inside one.
+fn panic_reply(p: &(dyn Any + Send), line: Option<&str>) -> String {
+    let message = if let Some(s) = p.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = p.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic".to_string()
+    };
+    let at = line.map_or(String::new(), |l| format!(" running `{l}`"));
+    format!("Solace hit an internal error{at}: {message}; nothing after it ran\n")
+}
+
+/// Drops what a caught panic left with this thread — the untested changes a
+/// `test` named, and any outer transaction it held open — so the next call
+/// starts clean. A transaction's own drop guard rolls back as the panic
+/// unwinds; this covers a panic in a place without one.
+fn reset_after_panic() {
+    UNTESTED.with(|u| u.borrow_mut().take());
+    let _ = COMMAND_DB.try_with(|c| {
+        let Ok(mut dbs) = c.try_borrow_mut() else { return };
+        for (_, db) in std::mem::take(&mut *dbs) {
+            if !db.is_autocommit() {
+                let _ = db.execute_batch("ROLLBACK");
+            }
+        }
+    });
 }
 
 /// The reference's example of a first call, for a session start with no
@@ -994,7 +993,20 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
     }
     // drafts include kept file patches (D-120), so a plain-files project lists and reads them
     if GLEAM.contains(&a[0]) && !matches!(a.as_slice(), ["drafts"] | ["view", "--draft", _]) && store.lang.is_none() {
-        return lockdown::plain(a[0]);
+        if !language::is_rust(&store.root) {
+            return lockdown::plain(a[0]);
+        }
+        // A Rust project's tools are cargo's (D-158, D-168, D-173): `check` and
+        // `test` run, `submit` saves items by name and `delete` removes them,
+        // each checked with cargo; `drafts` is language-neutral.
+        match a[0] {
+            "check" | "test" | "submit" | "delete" if cargo::installed() => {}
+            "check" | "test" | "submit" | "delete" => return lockdown::error("E6013", a[0], cargo::MISSING),
+            // Reads reach a Rust store's symbols by name, as they do Gleam's
+            // (D-158); `refs` and `impact` answer from its reference graph (D-170).
+            "view" | "inspect" | "find" | "refs" | "impact" => {}
+            _ => return lockdown::plain(a[0]),
+        }
     }
     match a.as_slice() {
         ["session", "start", "--task"] => store.session_task(&input()?),
@@ -1079,10 +1091,10 @@ fn is_question(line: &str) -> bool {
     let w: Vec<&str> = line.strip_prefix("solace").unwrap_or(line).split_whitespace().collect();
     match w.as_slice() {
         ["task", "ask", ..] | ["strategy", "task" | "feature" | "milestone" | "vision", ..] => true,
-        ["write", rest @ ..] if board::context().is_some() => rest.iter().any(|p| {
-            let name = file_name(Path::new(p));
-            name == "solace.toml" || name == "AGENTS.md" || lockdown::is_gitignore(&name)
-        }),
+        ["write", rest @ ..] if board::context().is_some() => {
+            let root = Store::root().ok();
+            rest.iter().any(|p| root.as_deref().is_some_and(|r| lockdown::settings_file(r, &file_name(Path::new(p)))))
+        }
         _ => false,
     }
 }
@@ -1099,146 +1111,6 @@ fn stdin() -> Result<String, Failure> {
     Ok(text)
 }
 
-/// The one MCP tool `solace mcp` serves. A strategy run's agent only reads
-/// and plans (D-93), so it is told only those commands.
-fn tool_schema() -> Value {
-    if board::strategy_context().is_some() {
-        return json!({
-            "name": "solace",
-            "description": "Read this project's code and plan with the human; this run changes no code. Read with \
-                `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` (`--project <folder>` for a project below \
-                the root); read the plan with `strategy list [--archived]` and `strategy show <task|feature|milestone> <id>...` (one id, or several in one reply) \
-                (a task's notes in full: `strategy show note <task> <notes>`; a task's run log: `strategy show run <task> <run> [<steps>|all]`); propose \
-                a change with `strategy task|feature|milestone [<id>]` or `strategy vision`, alone in its call; reply with \
-                `strategy note`. Several reads go in one call, one per line, and run in order.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "One or more commands, one per line, e.g. `strategy show feature <id>` or `view app.main --project <folder>`"},
-                    "text": {"type": "string", "description": "The reply for `strategy note`; a proposal's fields as a JSON object (`help strategy` lists them per kind); the new vision for `strategy vision`"}
-                },
-                "required": ["command"]
-            }
-        });
-    }
-    json!({
-        "name": "solace",
-        "description": "Read, change and test this project's code. In a board run, the brief holds the reply to \
-            `session start --task`: start with the call its `Next:` line names, and send `session start --task` again \
-            only to see the reply again, for example after the conversation is compacted (the brief says when not \
-            to). Elsewhere, start with `session start`: it lists the symbols most likely relevant, the workflow and \
-            the commands. Several commands \
-            go in one call, one per line, and run in order: put every independent read in the same call \
-            (`inspect a.f b.g --context`, then `view c` on the next line), never one read per call, and never send \
-            a change alone: put its check on the line after it (`test` after `submit`, `run <name>` after `write`). \
-            Keep text between calls to a line or two: all of it is re-sent \
-            on every later call. Once the work is done, stop: no recap and no repeated checks.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "command": {"type": "string", "description": "One or more commands, one per line, e.g. `inspect checkout.pay tax.quote --context`, or `submit` then `test`"},
-                "text": {"type": "string", "description": "For submit: a patch (`*** Begin Patch` / `*** Update: <symbol or module>` / `@@` hunks) or new code; for `write` with no path: a patch of files (`*** Update File: <path>`, `*** Add File: <path>`, `*** Delete File: <path>`); the task for `session start --task`; the record, note, summary or question for `work add` and `task note|done|ask`"},
-                "options": {"type": "array", "items": {"type": "string"}, "description": "2–4 options, for `task ask`"},
-                "reason": {"type": "string", "description": "For a settings `write` (solace.toml, AGENTS.md): why the change, shown with the question the human approves"},
-                "old": {"type": "string", "description": "For `--replace`: the exact text that `text` replaces"}
-            },
-            "required": ["command"]
-        }
-    })
-}
-
-/// `solace mcp`: the same commands as one MCP tool over stdio, so an agent
-/// can pass code without shell quoting and needs no shell at all.
-fn mcp(budget: usize) {
-    let tool = tool_schema();
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
-    let mut single_reads = 0;
-    let mut run_reads = reads::Run::load();
-    for line in stdin.lines() {
-        let Ok(line) = line else { break };
-        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        let Some(id) = msg.get("id").cloned() else {
-            continue;
-        }; // notifications need no reply
-        let result = match msg["method"].as_str().unwrap_or("") {
-            "initialize" => json!({
-                "protocolVersion": msg["params"]["protocolVersion"].as_str().unwrap_or("2025-06-18"),
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "solace", "version": env!("CARGO_PKG_VERSION")}
-            }),
-            "tools/list" => json!({"tools": [tool]}),
-            "tools/call" => {
-                let args = &msg["params"]["arguments"];
-                let text = args["text"].as_str().map(String::from);
-                let mut input = || match &text {
-                    Some(t) => Ok(t.clone()),
-                    _ => usage("This command needs the new code in the `text` argument."),
-                };
-                // Several commands, one per line, run in order in one call.
-                let commands: Vec<&str> =
-                    args["command"].as_str().unwrap_or("").lines().map(|c| c.trim()).filter(|c| !c.is_empty()).collect();
-                let (mut out, mut is_error) = (String::new(), false);
-                SHOWN.with(|s| *s.borrow_mut() = Some(HashSet::new()));
-                if run_reads.is_some() {
-                    reads::Run::start_call();
-                }
-                // Code sent as command lines rather than in `text` (run 11): one
-                // error for the call, and nothing runs.
-                if let Some(code) = commands.iter().find(|c| looks_like_code(c)) {
-                    out = format!(
-                        "Not a command: {code}\nThis looks like code. Code (for probe, submit) goes in `text`, \
-                        not in `command`; nothing in this call ran.\n"
-                    );
-                    is_error = true;
-                }
-                // A question is complete in itself: no note or other action beside it.
-                if !is_error
-                    && commands.len() > 1
-                    && let Some(q) = commands.iter().find(|c| is_question(c))
-                {
-                    out = format!(
-                        "E7017 `{q}` must be the only command in its call: put the explanation in the question \
-                        (`text`, or `reason` for a settings write), not in a note beside it; nothing in this call ran.\n"
-                    );
-                    is_error = true;
-                }
-                REASON.with(|r| *r.borrow_mut() = args["reason"].as_str().map(String::from).filter(|r| !r.trim().is_empty()));
-                if !is_error {
-                    let options: Vec<String> =
-                        args["options"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default();
-                    (out, is_error) =
-                        batch(&commands, budget, &mut |words, left| run_options(words, &mut input, args["old"].as_str(), left, &options));
-                }
-                if commands.is_empty() {
-                    (out, is_error) = (format!("No command given.\n\n{}", agent_reference(board::context().is_some())), true);
-                }
-                // D-157: a re-read of an unchanged symbol brings back what the run was working on.
-                if let Some(run) = &mut run_reads {
-                    out += &run.end_call(&commands, budget.saturating_sub(out.len()));
-                }
-                let hint = read_hint(&mut single_reads, &commands, is_error);
-                if !hint.is_empty() && !out.ends_with('\n') {
-                    out.push('\n');
-                }
-                out += hint;
-                json!({"content": [{"type": "text", "text": out}], "isError": is_error})
-            }
-            "ping" => json!({}),
-            _ => {
-                let reply = json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "method not found"}});
-                let _ = writeln!(stdout, "{reply}");
-                let _ = stdout.flush();
-                continue;
-            }
-        };
-        let _ = writeln!(stdout, "{}", json!({"jsonrpc": "2.0", "id": id, "result": result}));
-        let _ = stdout.flush();
-    }
-}
-
 // --- the store --------------------------------------------------------------
 
 #[derive(Clone)]
@@ -1247,6 +1119,8 @@ struct Sym {
     module: String,
     name: String,
     kind: Kind,
+    /// The kind as the source writes it; `Kind` keeps only Gleam's three (D-158).
+    kind_text: String,
     text: String,
     /// The enclosing `impl`, `trait`, `extern` or inline `mod`, by id (Rust).
     parent: Option<String>,
@@ -1271,6 +1145,9 @@ struct ModuleRow {
     header: String,
     /// Its file from the project root, written exactly (Rust); `None` for Gleam.
     file: Option<String>,
+    /// Whether its `mod x;` children sit beside its file (Rust); `None` for
+    /// Gleam or a store written before the column (D-168).
+    owns_dir: Option<bool>,
 }
 
 impl ModuleRow {
@@ -1288,6 +1165,12 @@ struct Store {
     /// The project's language, chosen once from its files; `None` for a
     /// project of plain files (D-60).
     lang: Option<&'static dyn Language>,
+    /// Whether the store has the nested Rust item columns (`symbols.parent`, `modules.file`);
+    /// `false` only for an older store opened by `peek` (D-158).
+    nested: bool,
+    /// Whether the store has `modules.owns_dir`; `false` only for an older store
+    /// opened by `peek` (D-168).
+    owns_dir: bool,
 }
 
 thread_local! {
@@ -1299,6 +1182,8 @@ thread_local! {
 /// All live symbols and modules, with the reference graph resolved.
 struct Index {
     lang: &'static dyn Language,
+    /// Rust's: signatures come from the file's text, and its graph is not built yet.
+    rust: bool,
     syms: Vec<Sym>,
     modules: Vec<ModuleRow>,
     uses: Vec<Vec<usize>>,
@@ -1306,10 +1191,18 @@ struct Index {
     used_by: Vec<Vec<usize>>,
     /// Every resolved reference: (symbol, line in the user's text).
     at: Vec<Vec<(usize, usize)>>,
+    /// Whether each symbol is test code (D-170).
+    test: Vec<bool>,
 }
 
 impl Index {
-    fn build(lang: &'static dyn Language, syms: Vec<Sym>, modules: Vec<ModuleRow>) -> Index {
+    fn build(lang: &'static dyn Language, syms: Vec<Sym>, modules: Vec<ModuleRow>, rust: bool) -> Index {
+        // A Rust store's graph comes from the names its text mentions, resolved
+        // against the module's `use` lines and the crate's item names (D-170).
+        if rust {
+            let g = language::rust_refs::graph(&syms, &modules);
+            return Index { lang, rust, syms, modules, uses: g.uses, used_by: g.used_by, at: g.at, test: g.test };
+        }
         // (module, name) -> symbol, for names and for type constructors
         let mut names: HashMap<(&str, &str), usize> = HashMap::new();
         for (i, s) in syms.iter().enumerate() {
@@ -1374,7 +1267,14 @@ impl Index {
                 used_by[u].push(j);
             }
         }
-        Index { lang, syms, modules, uses, used_by, at }
+        let test: Vec<bool> = syms.iter().map(|s| modules.iter().any(|m| m.path == s.module && store::is_test(m))).collect();
+        Index { lang, rust, syms, modules, uses, used_by, at, test }
+    }
+
+    /// The item's signature as `view` and `inspect` show it: Rust's from its own
+    /// text (D-162), Gleam's from its `Language`.
+    fn signature(&self, s: &Sym) -> String {
+        if self.rust { orientation::rust_signature(&s.text, &s.kind_text) } else { self.lang.signature(&s.item()) }
     }
 }
 
@@ -1385,7 +1285,7 @@ enum Target<'a> {
 }
 
 const SCHEMA: &str = "
-CREATE TABLE modules(path TEXT PRIMARY KEY, dir TEXT NOT NULL, header TEXT NOT NULL, file TEXT);
+CREATE TABLE modules(path TEXT PRIMARY KEY, dir TEXT NOT NULL, header TEXT NOT NULL, file TEXT, owns_dir INTEGER);
 CREATE TABLE symbols(id TEXT PRIMARY KEY, module TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
   text TEXT NOT NULL, ord INTEGER NOT NULL, revision TEXT NOT NULL, live INTEGER NOT NULL DEFAULT 1,
   parent TEXT, sep TEXT, tail TEXT NOT NULL DEFAULT '');
@@ -1448,6 +1348,13 @@ fn without_comment_lines(text: &str) -> String {
     text.lines().filter(|l| !l.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n")
 }
 
+/// The name in a `// ── <name> (<kind>) ──` header (D-168): up to the closing
+/// dashes, without the kind. A name may hold spaces (`<T as Tr>::f`).
+fn block_name(header: &str) -> String {
+    let name = header.split(" ──").next().unwrap_or("").trim();
+    name.strip_suffix(')').and_then(|n| n.rsplit_once(" (")).map_or(name, |(name, _)| name).to_string()
+}
+
 /// Phase 1a revision: a hash of the code without its comments or doc text.
 fn revision(text: &str) -> String {
     format!("sha256:{}", &sha256(without_comment_lines(text).as_bytes())[..16])
@@ -1472,7 +1379,15 @@ unwatched = []
 /// code under `src/` and `test/`. Without `gleam.toml` the store stays empty:
 /// a project of plain files (D-60).
 fn import(root: &Path) -> Out {
+    import_with(root, cargo::installed())
+}
+
+/// Imports `root`, fetching a Rust project's dependencies with `cargo` when
+/// `has_cargo` (D-158 point 4); without it, the import goes ahead and says so.
+fn import_with(root: &Path, has_cargo: bool) -> Out {
     let mut out = String::new();
+    // Fetch before any write, so a failed fetch leaves the project as it was.
+    let dependencies = dependencies(root, has_cargo)?;
     match fs::OpenOptions::new().write(true).create_new(true).open(root.join("solace.toml")) {
         Ok(mut file) => {
             file.write_all(STARTER_SETTINGS.as_bytes())?;
@@ -1491,6 +1406,7 @@ fn import(root: &Path) -> Out {
     let dir = root.join(".solace");
     if dir.join("store.db").exists() {
         out += "This project already has a store (.solace/store.db); existing symbols were preserved.\n";
+        out += &dependencies;
         return Ok(out);
     }
     // A Cargo package is read whole first, so a refused one leaves no store behind.
@@ -1522,6 +1438,7 @@ fn import(root: &Path) -> Out {
             modules += 1;
         }
     }
+    let rust_imported = rust.is_some();
     for (rel, module, file) in rust.into_iter().flatten() {
         written.record(&rel, file.join().as_bytes());
         store_rust_file(&db, &module, rel.split_once('/').unwrap().0, &rel, &file)?;
@@ -1529,10 +1446,28 @@ fn import(root: &Path) -> Out {
         symbols = db.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
     }
     written.save()?;
-    let store = Store { db: Rc::new(db), root: root.to_path_buf(), lang: language::detect(root) };
+    // The first check is warm, without making the import wait (D-158 point 3).
+    if rust_imported && has_cargo {
+        cargo::warm(root);
+    }
+    let store = Store { db: Rc::new(db), root: root.to_path_buf(), lang: language::detect(root), nested: true, owns_dir: true };
     outside::approve_all(&store)?;
     out += &format!("Imported {modules} modules, {symbols} symbols into .solace/store.db\n");
+    out += &dependencies;
     Ok(out)
+}
+
+/// Fetches a Rust project's dependencies, or says why it couldn't (D-158 point 4).
+fn dependencies(root: &Path, has_cargo: bool) -> Out {
+    if !language::is_rust(root) {
+        return Ok(String::new());
+    }
+    if has_cargo {
+        cargo::fetch(root)?;
+        Ok(String::new())
+    } else {
+        Ok(format!("Dependencies not fetched: {}\n", cargo::MISSING))
+    }
 }
 
 /// Stores a new symbol at `ord`, or after its module's last; returns its id.
@@ -1549,73 +1484,12 @@ fn insert_symbol(db: &Connection, module: &str, item: &Item, ord: Option<i64>) -
     Ok(id)
 }
 
-/// Stores a Rust file split by `syn` as module `module` of `file`, its items
-/// nested in their containers, to be written back exactly (D-158 point 5).
-fn store_rust_file(db: &Connection, module: &str, dir: &str, file: &str, split: &language::rust::File) -> Result<(), Failure> {
-    db.execute("INSERT INTO modules(path, dir, header, file) VALUES (?1, ?2, ?3, ?4)", params![module, dir, split.header, file])?;
-    store_pieces(db, module, None, &split.items)
-}
-
-fn store_pieces(db: &Connection, module: &str, parent: Option<&str>, pieces: &[language::rust::Piece]) -> Result<(), Failure> {
-    for (ord, p) in pieces.iter().enumerate() {
-        let container = !p.children.is_empty();
-        let last = if container { &p.tail } else { &p.text };
-        let body = last.trim_end();
-        let sep = &last[body.len()..];
-        let (text, tail) = if container { (p.text.as_str(), body) } else { (body, "") };
-        let id = new_id(language::rust::id_kind(p.kind));
-        db.execute(
-            "INSERT INTO symbols(id, module, name, kind, text, ord, revision, parent, sep, tail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![id, module, p.name, p.kind, text, ord as i64, revision(text), parent, sep, tail],
-        )?;
-        store_pieces(db, module, Some(&id), &p.children)?;
-    }
-    Ok(())
-}
-
-/// A module's file as Solace writes it, with the line range of each symbol.
-fn projection(ix: &Index, m: &ModuleRow) -> (String, Vec<(usize, usize, String)>) {
-    let mut content = String::new();
-    let mut ranges = vec![];
-    if m.file.is_some() {
-        content.push_str(&m.header);
-        project_exact(ix, m, None, &mut content, &mut ranges);
-        return (content, ranges);
-    }
-    let mut line = 1;
-    if !m.header.is_empty() {
-        content.push_str(&m.header);
-        content.push_str("\n\n");
-        line += m.header.lines().count() + 1;
-    }
-    for s in ix.syms.iter().filter(|s| s.module == m.path) {
-        let n = s.text.lines().count();
-        ranges.push((line, line + n - 1, s.qname()));
-        content.push_str(&s.text);
-        content.push_str("\n\n");
-        line += n + 1;
-    }
-    (content.trim_end().to_string() + "\n", ranges)
-}
-
-/// `m`'s items under `parent` as stored, each with its children, tail and separator.
-fn project_exact(ix: &Index, m: &ModuleRow, parent: Option<&str>, content: &mut String, ranges: &mut Vec<(usize, usize, String)>) {
-    for s in ix.syms.iter().filter(|s| s.module == m.path && s.parent.as_deref() == parent) {
-        let start = content.matches('\n').count() + 1;
-        content.push_str(&s.text);
-        project_exact(ix, m, Some(&s.id), content, ranges);
-        content.push_str(&s.tail);
-        ranges.push((start, content.matches('\n').count() + 1, s.qname()));
-        content.push_str(s.sep.as_deref().unwrap_or(""));
-    }
-}
-
 impl Store {
     /// The store of the project at `root`, with every table this version uses.
     fn at(root: &Path) -> Result<Store, Failure> {
         let shared = COMMAND_DB.with_borrow(|c| c.iter().find(|(r, _)| lockdown::same_project(r, root)).map(|(_, db)| db.clone()));
         if let Some(db) = shared {
-            return Ok(Store { db, root: root.into(), lang: language::detect(root) });
+            return Ok(Store { db, root: root.into(), lang: language::detect(root), nested: true, owns_dir: true });
         }
         let db = Connection::open(root.join(".solace/store.db"))?;
         // WAL and a busy timeout: readers see the last committed state while a
@@ -1624,7 +1498,7 @@ impl Store {
         db.execute_batch("PRAGMA journal_mode=WAL;")?;
         db.execute_batch(LATER_TABLES)?;
         Self::add_columns(&db)?;
-        Ok(Store { db: Rc::new(db), root: root.into(), lang: language::detect(root) })
+        Ok(Store { db: Rc::new(db), root: root.into(), lang: language::detect(root), nested: true, owns_dir: true })
     }
 
     /// The language that reads this store's code.
@@ -1642,6 +1516,7 @@ impl Store {
             ("symbols", "sep", "TEXT"),
             ("symbols", "tail", "TEXT NOT NULL DEFAULT ''"),
             ("modules", "file", "TEXT"),
+            ("modules", "owns_dir", "INTEGER"),
         ] {
             // A store of the root's board alone has no `symbols` or `modules`.
             let exists: bool = db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0))?;
@@ -1666,7 +1541,11 @@ impl Store {
         }
         let db = Connection::open(file)?;
         db.busy_timeout(Duration::from_secs(10))?;
-        Ok(Store { db: Rc::new(db), root: root.into(), lang: language::detect(root) })
+        // An older store may lack the nested-item columns; the checks happen here, once
+        // (D-158), so `index` reads its rows without touching `pragma_table_info`.
+        let nested = has_column(&db, "symbols", "parent")? && has_column(&db, "modules", "file")?;
+        let owns_dir = has_column(&db, "modules", "owns_dir")?;
+        Ok(Store { db: Rc::new(db), root: root.into(), lang: language::detect(root), nested, owns_dir })
     }
 
     /// The project the working folder is in: the nearest folder up with a store.
@@ -1685,16 +1564,18 @@ impl Store {
     }
 
     fn index(&self) -> Result<Index, Failure> {
-        // A store only peeked at may be older than its nested-item columns.
-        let nested = if has_column(&self.db, "symbols", "parent")? { "parent, sep, tail" } else { "NULL, NULL, ''" };
+        // A store only peeked at may be older than its nested-item columns (checked once in `peek`).
+        let nested = if self.nested { "parent, sep, tail" } else { "NULL, NULL, ''" };
         let mut stmt = self.db.prepare(&format!("SELECT id, module, name, kind, text, {nested} FROM symbols WHERE live = 1 ORDER BY module, ord"))?;
         let syms: Vec<Sym> = stmt
             .query_map([], |r| {
+                let kind: String = r.get(3)?;
                 Ok(Sym {
                     id: r.get(0)?,
                     module: r.get(1)?,
                     name: r.get(2)?,
-                    kind: Kind::parse(&r.get::<_, String>(3)?),
+                    kind: Kind::parse(&kind),
+                    kind_text: kind,
                     text: r.get(4)?,
                     parent: r.get(5)?,
                     sep: r.get(6)?,
@@ -1702,13 +1583,16 @@ impl Store {
                 })
             })?
             .collect::<Result<_, _>>()?;
-        let file = if has_column(&self.db, "modules", "file")? { "file" } else { "NULL" };
-        let mut stmt = self.db.prepare(&format!("SELECT path, dir, header, {file} FROM modules ORDER BY dir, path"))?;
+        let file = if self.nested { "file" } else { "NULL" };
+        let owns = if self.owns_dir { "owns_dir" } else { "NULL" };
+        let mut stmt = self.db.prepare(&format!("SELECT path, dir, header, {file}, {owns} FROM modules ORDER BY dir, path"))?;
         let modules: Vec<ModuleRow> = stmt
-            .query_map([], |r| Ok(ModuleRow { path: r.get(0)?, dir: r.get(1)?, header: r.get(2)?, file: r.get(3)? }))?
+            .query_map([], |r| {
+                Ok(ModuleRow { path: r.get(0)?, dir: r.get(1)?, header: r.get(2)?, file: r.get(3)?, owns_dir: r.get(4)? })
+            })?
             .collect::<Result<_, _>>()?;
 
-        Ok(Index::build(self.lang(), syms, modules))
+        Ok(Index::build(self.lang(), syms, modules, language::is_rust(&self.root)))
     }
 
     // --- writing files --------------------------------------------------------
@@ -1767,7 +1651,15 @@ impl Store {
         let mut argv = vec![self.lang().tool().to_string()];
         argv.extend(args.iter().map(|s| s.to_string()));
         // whole, so every failure is parsed; the reply is trimmed later
-        let text = lockdown::command(&self.root, &argv, 120, usize::MAX, false)?;
+        let text = lockdown::command(&self.root, &argv, 120, usize::MAX, false, false)?;
+        Ok((lockdown::passed(&text), strip_ansi(text.split_once('\n').map_or("", |(_, s)| s))))
+    }
+
+    /// Runs `cargo` in the project (D-158): the exit code and its output.
+    fn cargo(&self, args: &[&str], timeout: u64) -> Result<(bool, String), Failure> {
+        let mut argv = vec!["cargo".to_string()];
+        argv.extend(args.iter().map(|s| s.to_string()));
+        let text = lockdown::command(&self.root, &argv, timeout, usize::MAX, false, true)?;
         Ok((lockdown::passed(&text), strip_ansi(text.split_once('\n').map_or("", |(_, s)| s))))
     }
 
@@ -1775,8 +1667,22 @@ impl Store {
     /// their errors, so the next reply can report only what changed (D-46).
     fn check_all(&self, ix: &Index) -> Result<Vec<Diag>, Failure> {
         let files = self.materialize(ix)?;
-        let (_, output) = self.tool(&["check"])?;
-        let diags = self.lang().diagnostics(&output, &files);
+        let diags = if language::is_rust(&self.root) {
+            let args = cargo::check_args(&self.root);
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            let (passed, output) = self.cargo(&argv, 120)?;
+            let mut diags = cargo::diagnostics(&output, &files);
+            // A build script that fails this way (no network, a refused
+            // write) is cargo's exit with no located diagnostic, so the
+            // check must add it or it would report a pass (D-158 point 4).
+            if !passed && !diags.iter().any(|d| d.error) {
+                diags.push(Diag { error: true, module: None, symbol: None, text: cargo::failure_text(&output) });
+            }
+            diags
+        } else {
+            let (_, output) = self.tool(&["check"])?;
+            self.lang().diagnostics(&output, &files)
+        };
         self.db.execute("DELETE FROM broken", [])?;
         for d in diags.iter().filter(|d| d.error) {
             if let Some(sym) = &d.symbol {
@@ -1801,27 +1707,21 @@ impl Store {
     // --- reading ---------------------------------------------------------------
 
     fn resolve(&self, ix: &Index, input: &str) -> Result<usize, Failure> {
-        let (module, name) = match input.rsplit_once('.') {
-            Some((m, n)) => (Some(m.replace('.', "/")), n),
-            None => (None, input),
-        };
-        let found: Vec<usize> = (0..ix.syms.len())
-            .filter(|&i| {
-                let s = &ix.syms[i];
-                s.name == name && module.as_ref().is_none_or(|m| s.module == *m || s.module.ends_with(&format!("/{m}")))
-            })
-            .collect();
+        let mut found: Vec<usize> = (0..ix.syms.len()).filter(|&i| store::names(&ix.syms[i], input)).collect();
+        // In a Rust store a type and its `impl` share a name; the item wins (D-158).
+        if ix.rust {
+            let named: Vec<usize> = found.iter().copied().filter(|&i| ix.syms[i].kind_text != "impl").collect();
+            if !named.is_empty() {
+                found = named;
+            }
+        }
         match found.as_slice() {
             [i] => Ok(*i),
             [] => {
-                let lower = name.to_lowercase();
-                let similar: Vec<String> =
-                    ix.syms.iter().filter(|s| s.name.to_lowercase().contains(&lower)).take(10).map(|s| s.qname()).collect();
-                let hint = if similar.is_empty() { String::new() } else { format!("\nSimilar names: {}", similar.join(", ")) };
-                fail(format!("E1001 unknown name: {input}{hint}"))
+                fail(format!("E1001 unknown name: {input}{}", store::similar_hint(ix, input)))
             }
             many => {
-                let list: Vec<String> = many.iter().map(|&i| format!("  {} ({})", ix.syms[i].qname(), ix.syms[i].kind.as_str())).collect();
+                let list: Vec<String> = many.iter().map(|&i| format!("  {} ({})", ix.syms[i].qname(), ix.syms[i].kind_text)).collect();
                 fail(format!("E1002 ambiguous name: {input} could be\n{}", list.join("\n")))
             }
         }
@@ -1868,10 +1768,18 @@ impl Store {
     }
 
     fn resolve_module<'a>(&self, ix: &'a Index, input: &str) -> Option<&'a ModuleRow> {
-        let input = input.replace('.', "/");
-        let exact = ix.modules.iter().find(|m| m.path == input);
-        let suffix: Vec<&ModuleRow> = ix.modules.iter().filter(|m| m.path.ends_with(&format!("/{input}"))).collect();
-        exact.or(if suffix.len() == 1 { Some(suffix[0]) } else { None })
+        // A module path may be written with `.`, `::` or `/`; the store keeps `::`
+        // for Rust (`a::agents`) and `/` for Gleam (D-158).
+        let forms = [input.replace('.', "/"), input.replace('.', "::"), input.to_string()];
+        if let Some(m) = ix.modules.iter().find(|m| forms.contains(&m.path)) {
+            return Some(m);
+        }
+        let suffix: Vec<&ModuleRow> = ix
+            .modules
+            .iter()
+            .filter(|m| forms.iter().any(|f| m.path.ends_with(&format!("/{f}")) || m.path.ends_with(&format!("::{f}"))))
+            .collect();
+        if suffix.len() == 1 { Some(suffix[0]) } else { None }
     }
 
     /// The symbol index (one line per source symbol), test modules, and open
@@ -1879,7 +1787,8 @@ impl Store {
     fn session(&self, scopes: &[&str]) -> Out {
         const CAP: usize = 80;
         let tid = board::context().map(|(t, _)| t);
-        if self.lang.is_none() {
+        let rust = language::is_rust(&self.root);
+        if self.lang.is_none() && !rust {
             return self.plain_session("", tid.as_deref());
         }
         let ix = self.index()?;
@@ -1893,16 +1802,19 @@ impl Store {
         let mut tests = vec![];
         for m in ix.modules.iter().filter(|m| in_scope(m)) {
             let syms: Vec<&Sym> = ix.syms.iter().filter(|s| s.module == m.path).collect();
-            if m.dir == "test" {
+            if store::is_test(m) {
                 tests.push(format!("{} ({})", m.path, syms.len()));
                 continue;
             }
             // Names only: this is re-sent on every turn, so it must stay small (D-12).
-            let names: Vec<&str> = syms.iter().take(CAP).map(|s| s.name.as_str()).collect();
-            let more = if syms.len() > CAP { format!(", …{} more", syms.len() - CAP) } else { String::new() };
-            out += &format!("{} — {}\n  {}{more}\n", m.path, module_doc(m), names.join(", "));
+            let names = store::module_names(&ix, &m.path);
+            let more = if names.len() > CAP { format!(", …{} more", names.len() - CAP) } else { String::new() };
+            out += &format!("{} — {}\n  {}{more}\n", m.path, store::module_doc(m), names[..names.len().min(CAP)].join(", "));
         }
         out += &format!("\nTest modules (tests): {}\n", tests.join(", "));
+        if rust {
+            out += &format!("\n{}", store::RUST_BRIEF);
+        }
         out += &self.session_end(&ix, EXAMPLE_CALL, tid.as_deref())?;
         Ok(out)
     }
@@ -2054,7 +1966,8 @@ impl Store {
     /// the run's environment.
     fn task_session(&self, task: &str, tid: Option<&str>, deps: &str) -> Out {
         const BUDGET: usize = 6500; // bytes, about 1.6k tokens
-        if self.lang.is_none() {
+        let rust = language::is_rust(&self.root);
+        if self.lang.is_none() && !rust {
             return self.plain_session(deps, tid);
         }
         let ix = self.index()?;
@@ -2066,7 +1979,10 @@ impl Store {
             .and_then(|t| scope::of_task(&self.root, t))
             .unwrap_or_default()
             .into_iter()
-            .filter(|d| *d != mine && language::detect(&scope::path(&top, d)).is_some())
+            .filter(|d| {
+                let path = scope::path(&top, d);
+                *d != mine && (language::detect(&path).is_some() || language::is_rust(&path))
+            })
             .filter_map(|d| {
                 let s = Store::peek(&scope::path(&top, &d)).ok()?;
                 let ix = s.index().ok()?;
@@ -2078,13 +1994,16 @@ impl Store {
         let mut modules = String::from("Modules (`view <module>` for an outline):\n");
         let mut tests = vec![];
         for m in &ix.modules {
-            if m.dir == "test" {
+            if store::is_test(m) {
                 tests.push(m.path.as_str());
             } else {
-                modules += &format!("  {} — {}\n", m.path, module_doc(m));
+                modules += &format!("  {} — {}\n", m.path, store::module_doc(m));
             }
         }
         modules += &format!("Test modules: {}\n", tests.join(", "));
+        if rust {
+            modules += &format!("\n{}", store::RUST_BRIEF);
+        }
 
         // Direct matches: rare task words weigh more; a word in the name
         // counts 3, in the doc line 2, anywhere else in the code 1. Words are
@@ -2211,7 +2130,7 @@ impl Store {
             let (folder, _, pix) = projects[p];
             let s = &pix.syms[i];
             let at = folder.map(|d| format!(" ({d})")).unwrap_or_default();
-            let entry = format!("-- {}{at}\n{}\n", s.qname(), pix.lang.signature(&s.item()));
+            let entry = format!("-- {}{at}\n{}\n", s.qname(), pix.signature(s));
             let mut quoted = String::new();
             for e in evidence(&s.text, &evidence_terms) {
                 let line = format!("  > {e}\n");
@@ -2291,38 +2210,15 @@ impl Store {
         let fits = |out: &str, text: &str| out.is_empty() || out.len() + text.len() <= budget;
         for &name in names {
             let (text, served): (String, Vec<&Sym>) = if let Some(m) = self.resolve_module(&ix, name) {
-                let mut body = format!("// ── module {} ({}) ──\n", m.path, m.dir);
-                if !m.header.is_empty() {
-                    body += &format!("{}\n\n", m.header);
-                }
-                for s in ix.syms.iter().filter(|s| s.module == m.path) {
-                    body += &format!("{}\n\n", s.text);
-                }
+                let body = store::module_text(&ix, m);
                 if bodies && fits(&out, &body) {
                     (body, ix.syms.iter().filter(|s| s.module == m.path).collect())
                 } else {
-                    let mut text =
-                        format!("// ── module {} ({}), outline: `view <name>` for a body, `--bodies` for all ──\n", m.path, m.dir);
-                    if bodies {
-                        text += &format!("// bodies left out to fit the size limit; `view {} --bodies` alone shows them\n", m.path);
-                    }
-                    let doc: Vec<&str> = m.header.lines().filter(|l| l.starts_with("////")).collect();
-                    if !doc.is_empty() {
-                        text += &format!("{}\n\n", doc.join("\n"));
-                    }
-                    let broken = self.broken()?;
-                    for s in ix.syms.iter().filter(|s| s.module == m.path) {
-                        text += &format!(
-                            "{}{}\n\n",
-                            ix.lang.signature(&s.item()),
-                            if broken.contains_key(&s.qname()) { "  // BROKEN" } else { "" }
-                        );
-                    }
-                    (text, vec![])
+                    (store::module_outline(&ix, m, &self.broken()?, bodies), vec![])
                 }
             } else {
                 match self.resolve(&ix, name) {
-                    Ok(i) => (format!("// ── {} ({}) ──\n{}\n\n", ix.syms[i].qname(), ix.syms[i].kind.as_str(), ix.syms[i].text), vec![&ix.syms[i]]),
+                    Ok(i) => (format!("// ── {} ({}) ──\n{}\n\n", ix.syms[i].qname(), ix.syms[i].kind_text, ix.syms[i].text), vec![&ix.syms[i]]),
                     Err(e) => (self.dependency(name).ok_or(e)?, vec![]),
                 }
             };
@@ -2426,7 +2322,7 @@ impl Store {
     /// printed so far.
     fn bundle(&self, ix: &Index, i: usize, context: bool, level: u8, full: &HashSet<usize>, shown: &mut HashSet<usize>) -> Out {
         let s = &ix.syms[i];
-        let mut out = format!("// ── {} ({}) ──\n{}\n", s.qname(), s.kind.as_str(), s.text);
+        let mut out = format!("// ── {} ({}) ──\n{}\n", s.qname(), s.kind_text, s.text);
         if !context {
             return Ok(out);
         }
@@ -2437,7 +2333,7 @@ impl Store {
             } else if !shown.insert(u) {
                 format!("-- {q} (above)\n")
             } else {
-                format!("-- {q}\n{}\n", ix.lang.signature(&ix.syms[u].item()))
+                format!("-- {q}\n{}\n", ix.signature(&ix.syms[u]))
             }
         };
         let used_by = ix.used_by[i].clone();
@@ -2484,7 +2380,7 @@ impl Store {
             if let Some(t) = example {
                 out += &format!("-- {} (example)\n{}\n", ix.syms[t].qname(), ix.syms[t].text);
                 // the test helpers it uses, so a new test can call them without guessing
-                for &h in ix.uses[t].iter().filter(|&&h| is_test(ix, h) && !ix.syms[h].name.ends_with("_test")) {
+                for &h in ix.uses[t].iter().filter(|&&h| is_test(ix, h) && !reach::is_test_fn(ix, h)) {
                     out += &entry(h);
                 }
             }
@@ -2536,7 +2432,7 @@ impl Store {
             out += &if shown_earlier(&q) {
                 format!("-- {q} (above)\n")
             } else {
-                format!("-- {q}\n{}\n", ix.lang.signature(&ix.syms[u].item()))
+                format!("-- {q}\n{}\n", ix.signature(&ix.syms[u]))
             };
             out += &call_lines(&ix, u, i);
             mark_shown(q);
@@ -2615,7 +2511,7 @@ impl Store {
             if name_hit || !lines.is_empty() {
                 let more = if lines.len() > 4 { format!("\n  … {} more lines", lines.len() - 4) } else { String::new() };
                 let shown: Vec<String> = lines.into_iter().take(4).collect();
-                hits.push((name_hit, format!("{} ({})\n{}{}", s.qname(), s.kind.as_str(), shown.join("\n"), more)));
+                hits.push((name_hit, format!("{} ({})\n{}{}", s.qname(), s.kind_text, shown.join("\n"), more)));
             }
         }
         if hits.is_empty() {
@@ -2633,6 +2529,9 @@ impl Store {
     // --- changing ----------------------------------------------------------------
 
     fn submit(&self, target: Target, raw: &str) -> Out {
+        if language::is_rust(&self.root) {
+            return self.submit_rust(target, raw);
+        }
         let raw: String = raw.lines().filter(|l| !l.starts_with("// ── ")).collect::<Vec<_>>().join("\n");
         let formatted = self.lang().format(&raw)?;
         let parsed = self.lang().split(&formatted);
@@ -2769,6 +2668,15 @@ impl Store {
     /// as `view` and `inspect` print them; a name that doesn't exist yet adds
     /// a symbol to the module its prefix names.
     fn submit_symbols(&self, name: Option<&str>, new_in: Option<&str>, raw: &str) -> Out {
+        self.submit_symbols_blocks(name, new_in, raw, false)
+    }
+
+    /// `formatted`: the blocks are already rustfmt's text, as a patch's are
+    /// (`drafts::patch_blocks`), so a Rust submit formats nothing twice (D-168).
+    fn submit_symbols_blocks(&self, name: Option<&str>, new_in: Option<&str>, raw: &str, formatted: bool) -> Out {
+        if language::is_rust(&self.root) {
+            return self.submit_symbols_rust(name, new_in, raw, formatted);
+        }
         let ix = self.index()?;
         let is_header = |l: &str| l.starts_with("// ── ");
         let blocks: Vec<(Option<String>, String)> =
@@ -2779,8 +2687,7 @@ impl Store {
                         if h.starts_with("module ") {
                             return fail("E0101 a whole module goes through `submit <module>`.");
                         }
-                        let n = h.split([' ', '(']).next().unwrap_or("").to_string();
-                        blocks.push((Some(n), String::new()));
+                        blocks.push((Some(block_name(h)), String::new()));
                     } else if let Some((_, text)) = blocks.last_mut() {
                         text.push_str(line);
                         text.push('\n');
@@ -3071,9 +2978,14 @@ impl Store {
     /// `delete <name>...`: deletes each named symbol in order (D-102). Nothing
     /// is deleted when any named symbol is still used by a symbol outside the
     /// list, so the check runs over the whole list first: uses only shrink as
-    /// symbols go, never grow.
+    /// symbols go, never grow. A Rust store is cargo's to check (D-173).
     fn delete_all(&self, names: &[&str], budget: usize) -> Out {
         let ix = self.index()?;
+        // The name-based graph overestimates, so it would refuse a safe delete
+        // (D-173): a Rust store's uses are cargo's to find.
+        if ix.rust {
+            return self.delete_rust(names, budget);
+        }
         let listed = names.iter().map(|name| self.resolve(&ix, name)).collect::<Result<Vec<_>, _>>()?;
         let used: Vec<String> = listed
             .iter()
@@ -3146,16 +3058,19 @@ impl Store {
         if errors.is_empty() {
             Ok(format!("No errors ({warnings} warnings).\n{details}"))
         } else {
-            fail(format!("{} errors, {warnings} warnings:\n\n{}\n{details}", errors.len(), errors.join("\n\n")))
+            let more = if language::is_rust(&self.root) { format!("\n{}", cargo::ROUND_NOTE) } else { String::new() };
+            fail(format!("{} errors, {warnings} warnings:\n\n{}\n{details}{more}", errors.len(), errors.join("\n\n")))
         }
     }
 
     /// `test [--all | <name>...]`: the tests that can see a change since they
     /// last passed, that failed or were never run, or that reach other
     /// processes, the network or foreign code; with names, those that reach
-    /// them; `--all`, every test (D-44). Tests left out are made private in the
-    /// projected files for the run, so gleeunit skips them on either target.
+    /// them; `--all`, every test (D-44). A Rust project runs the chosen tests
+    /// with `cargo test` by libtest name (D-170); Gleam's tests left out are
+    /// made private in the projected files for the run, so gleeunit skips them.
     fn test(&self, args: &[&str]) -> Out {
+        let rust = language::is_rust(&self.root);
         let ix = self.index()?;
         let named: Vec<usize> = operands(args).iter().map(|n| self.resolve(&ix, n)).collect::<Result<_, _>>()?;
         let all = args.contains(&"--all");
@@ -3215,39 +3130,61 @@ impl Store {
             return Ok(head + &also + &untested);
         }
         let files = self.materialize(&ix)?;
-        let skipped: Vec<(usize, String)> = tests
-            .iter()
-            .filter(|t| !run.contains(t))
-            .map(|&t| (t, ix.syms[t].text.replacen(&format!("pub fn {}(", ix.syms[t].name), &format!("fn {}(", ix.syms[t].name), 1)))
-            .collect();
-        let rewritten = self.rewritten(&ix, &skipped)?;
-        let result = (|| {
-            for (path, content) in &rewritten {
-                self.rewrite(path, content)?;
+        let result = if rust {
+            // Rust runs the chosen tests by libtest name, and the whole suite
+            // when every test is due (D-170).
+            let names: Vec<String> = run.iter().map(|&t| reach::libtest_name(&ix, t)).collect();
+            let filters = if run.len() == tests.len() { vec![] } else { names };
+            let args = cargo::test_args(&self.root, &filters);
+            let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+            self.cargo(&argv, 600)
+        } else {
+            let skipped: Vec<(usize, String)> = tests
+                .iter()
+                .filter(|t| !run.contains(t))
+                .map(|&t| (t, ix.syms[t].text.replacen(&format!("pub fn {}(", ix.syms[t].name), &format!("fn {}(", ix.syms[t].name), 1)))
+                .collect();
+            let rewritten = self.rewritten(&ix, &skipped)?;
+            let result = (|| {
+                for (path, content) in &rewritten {
+                    self.rewrite(path, content)?;
+                }
+                self.tool(&["test"])
+            })();
+            if !rewritten.is_empty() {
+                self.materialize(&ix)?;
             }
-            self.tool(&["test"])
-        })();
-        if !rewritten.is_empty() {
-            self.materialize(&ix)?;
-        }
+            result
+        };
         let (ok, output) = result?;
-        let diags = self.lang().diagnostics(&output, &files);
+        let diags = if rust { cargo::diagnostics(&output, &files) } else { self.lang().diagnostics(&output, &files) };
         let errors: Vec<&str> = diags.iter().filter(|d| d.error).map(|d| d.text.as_str()).collect();
         if !errors.is_empty() {
             return fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
         }
+        let failed = if rust { cargo::failures(&output) } else { self.lang().failures(&output) };
         // Record results only from a run that finished; passes only when every
         // failure it counted was attributed to a test.
-        let failed = self.lang().failures(&output);
-        let summary = output.lines().find(|l| l.contains(" passed, ")).map(|l| {
-            let number = |word: &str| l.split(word).next().and_then(|p| p.split_whitespace().last()).and_then(|n| n.parse::<usize>().ok());
-            if l.contains("no failures") { Some(0) } else { number(" failure") }
-        });
-        if let Some(count) = summary {
-            let complete = ok || count == Some(failed.len());
+        let summary = output.lines().find(|l| l.contains(" passed, "));
+        let complete = if rust {
+            let (passed, count) = cargo::totals(&output);
+            if !ok && passed + count == 0 {
+                // cargo stopped before the tests ran: its own words say why.
+                return fail(format!("Tests did not run.\n\n{}", output.trim()));
+            }
+            ok || count == failed.len()
+        } else {
+            summary.is_some_and(|l| {
+                let number = |word: &str| l.split(word).next().and_then(|p| p.split_whitespace().last()).and_then(|n| n.parse::<usize>().ok());
+                let count = if l.contains("no failures") { Some(0) } else { number(" failure") };
+                ok || count == Some(failed.len())
+            })
+        };
+        if rust || summary.is_some() {
             for &t in &run {
                 let q = ix.syms[t].qname();
-                let result = match failed.get(&q) {
+                let key = if rust { reach::libtest_name(&ix, t) } else { q.clone() };
+                let result = match failed.get(&key) {
                     Some(_) => "fail",
                     None if complete => "pass",
                     None => continue,
@@ -3260,13 +3197,19 @@ impl Store {
             }
         }
         let mut out = head;
-        for line in self.lang().quiet(&output).lines() {
-            let line = line.trim_start_matches('.');
-            if line.trim().is_empty() || line.trim().starts_with("Checking ") {
-                continue;
+        if rust {
+            for (name, (_, text)) in &failed {
+                out += &format!("\n{name}:\n{text}\n");
             }
-            out += &self.lang().relocate(line, &files);
-            out.push('\n');
+        } else {
+            for line in self.lang().quiet(&output).lines() {
+                let line = line.trim_start_matches('.');
+                if line.trim().is_empty() || line.trim().starts_with("Checking ") {
+                    continue;
+                }
+                out += &self.lang().relocate(line, &files);
+                out.push('\n');
+            }
         }
         out += &also;
         if ok { Ok(out + &untested) } else { fail(out) }
@@ -3583,12 +3526,8 @@ fn evidence(text: &str, terms: &[String]) -> Vec<String> {
     out
 }
 
-fn module_doc(m: &ModuleRow) -> &str {
-    m.header.lines().find(|l| l.starts_with("////")).map_or("", |l| l.trim_start_matches('/').trim())
-}
-
 fn is_test(ix: &Index, i: usize) -> bool {
-    ix.modules.iter().any(|m| m.path == ix.syms[i].module && m.dir == "test")
+    ix.test[i]
 }
 
 /// A type's users for `inspect --context` and `refs`: the sites that
@@ -3988,9 +3927,15 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-/// Where a file position falls: (module, symbol and its first line).
+/// Where a file position falls: (module, symbol and its first line). Cargo in
+/// a workspace reports a path relative to the workspace root, so more than one
+/// file can end with it; an exact match is the shallowest, and the shallowest
+/// is the project's own file.
 fn locate<'a>(files: &'a [FileMap], path: &str, line: usize) -> Option<(&'a str, Option<(&'a str, usize)>)> {
-    let f = files.iter().find(|f| f.file.to_string_lossy() == path || f.file.ends_with(path))?;
+    let f = files
+        .iter()
+        .filter(|f| f.file.to_string_lossy() == path || f.file.ends_with(path))
+        .min_by_key(|f| f.file.components().count())?;
     let sym = f.ranges.iter().find(|r| r.0 <= line && line <= r.1).map(|r| (r.2.as_str(), r.0));
     Some((&f.module, sym))
 }
@@ -4179,13 +4124,14 @@ fn test_index(sources: &[(&str, &str, &str)]) -> Index {
     let (mut syms, mut modules) = (vec![], vec![]);
     for (dir, path, text) in sources {
         let m = gleam::split(text);
-        modules.push(ModuleRow { path: (*path).into(), dir: (*dir).into(), header: m.header, file: None });
+        modules.push(ModuleRow { path: (*path).into(), dir: (*dir).into(), header: m.header, file: None, owns_dir: None });
         for item in m.items {
             syms.push(Sym {
                 id: format!("fn:{path}.{}", item.name),
                 module: (*path).into(),
                 name: item.name,
                 kind: item.kind,
+                kind_text: item.kind.as_str().to_string(),
                 text: item.text,
                 parent: None,
                 sep: None,
@@ -4193,1076 +4139,14 @@ fn test_index(sources: &[(&str, &str, &str)]) -> Index {
             });
         }
     }
-    Index::build(&gleam::Gleam, syms, modules)
+    Index::build(&gleam::Gleam, syms, modules, false)
 }
-
-#[cfg(test)]
-#[path = "store_tests.rs"]
-mod store_tests;
 
 /// Fixtures for every module's tests.
 #[cfg(test)]
-mod testing {
-    use super::*;
-
-    /// A folder for one test, deleted when the test ends, passed or failed.
-    pub(crate) struct Scratch(pub PathBuf);
-    impl Scratch {
-        pub(crate) fn new() -> Scratch {
-            let dir = env::temp_dir().join(format!("solace-test-{}", unique_id()));
-            fs::create_dir_all(&dir).unwrap();
-            Scratch(dir)
-        }
-        /// Writes `files` (path, text) into the folder.
-        pub(crate) fn with(self, files: &[(&str, &str)]) -> Scratch {
-            for (path, text) in files {
-                let p = self.0.join(path);
-                fs::create_dir_all(p.parent().unwrap()).unwrap();
-                fs::write(p, text).unwrap();
-            }
-            self
-        }
-        /// Gleam's packages and compiled dependencies, so `gleam test` runs
-        /// without downloading anything: the bench pilot's.
-        pub(crate) fn with_packages(self) -> Scratch {
-            let pilot = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/pilot-large");
-            for f in ["manifest.toml", "test/pilot_test.gleam"] {
-                fs::create_dir_all(self.0.join(f).parent().unwrap()).unwrap();
-                fs::copy(pilot.join(f), self.0.join(f)).unwrap();
-            }
-            let name = fs::read_to_string(self.0.join("gleam.toml")).map(|_| workspace::name(&self.0)).unwrap_or_else(|_| "app".into());
-            fs::write(self.0.join("gleam.toml"), fs::read_to_string(pilot.join("gleam.toml")).unwrap().replace("pilot_large", &name))
-                .unwrap();
-            migrate::copy_tree(&pilot.join("build"), &self.0.join("build"), &|_| false).unwrap();
-            self
-        }
-        /// The folder's Gleam project, read into a new store.
-        pub(crate) fn import(self) -> Project {
-            if !self.0.join("gleam.toml").exists() {
-                fs::write(self.0.join("gleam.toml"), "name = \"app\"\nversion = \"1.0.0\"\n").unwrap();
-            }
-            import(&self.0).unwrap();
-            Project { store: Store::at(&self.0).unwrap(), _dir: self }
-        }
-    }
-    impl std::ops::Deref for Scratch {
-        type Target = Path;
-        fn deref(&self) -> &Path {
-            &self.0
-        }
-    }
-    impl Drop for Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// A store and its folder, deleted together.
-    pub(crate) struct Project {
-        pub(crate) store: Store,
-        _dir: Scratch,
-    }
-    impl std::ops::Deref for Project {
-        type Target = Store;
-        fn deref(&self) -> &Store {
-            &self.store
-        }
-    }
-
-    /// A Gleam project of `files` (path, text), named `app`, in a store.
-    pub(crate) fn project(files: &[(&str, &str)]) -> Project {
-        Scratch::new().with(files).import()
-    }
-
-    /// Leaves message `m` in the root's task inbox under `id`, as a sender would.
-    pub(crate) fn inbox_file(root: &Path, id: &str, mut m: Value) {
-        let dir = board::store_dir(root).join("inbox");
-        fs::create_dir_all(&dir).unwrap();
-        m["id"] = json!(id);
-        // written aside and renamed, as senders do, so a running server never reads half of it
-        let part = dir.join(format!("{id}.json.tmp"));
-        fs::write(&part, m.to_string()).unwrap();
-        fs::rename(&part, dir.join(format!("{id}.json"))).unwrap();
-    }
-}
+#[path = "testing.rs"]
+mod testing;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use testing::*;
-
-    /// Runs the reference layout check (D-143) on `text`: whether it passed, and its output.
-    fn reference_layout(text: &str) -> (bool, String) {
-        let dir = Scratch::new().with(&[("reference.txt", text)]);
-        let out = Command::new("python3")
-            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/reference_layout.py"))
-            .arg(dir.join("reference.txt"))
-            .output()
-            .unwrap();
-        (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned())
-    }
-    /// A sample reference: "Commands in full" on line 3, a heading, then `lines` from line 5.
-    fn sample(lines: &[String]) -> String {
-        format!("Workflow\n\nCommands in full\nReading\n{}", lines.concat())
-    }
-    /// A command row whose description starts at column 19.
-    fn ref_row(term: &str, description: &str) -> String {
-        format!("  {term:<16}{description}\n")
-    }
-    /// A line after `spaces` leading spaces.
-    fn ref_line(spaces: usize, text: &str) -> String {
-        format!("{}{text}\n", " ".repeat(spaces))
-    }
-    #[test]
-    fn reference_layout_of_the_embedded_reference_is_clean() {
-        let (clean, out) = reference_layout(REFERENCE);
-        assert!(clean, "{out}");
-    }
-    /// The reference says gleam.toml is written, and that the human never edits files (D-147).
-    #[test]
-    fn the_reference_never_hands_a_file_change_to_the_human() {
-        assert!(!REFERENCE.contains("(not gleam.toml)"));
-        assert!(REFERENCE.contains("gleam.toml: `write` (validated, recorded with the task),\nnever `move` or `remove`"));
-        assert!(REFERENCE.contains("The human never edits files or runs commands"));
-        assert!(REFERENCE.contains("Never asks the human to change a file"));
-        // D-153: a question shows each option's outcome.
-        assert!(REFERENCE.contains("Each option's `text` gives a short example of its outcome"));
-        assert!(!agent_reference(false).contains("task ask"), "outside a board run");
-    }
-    /// D-148: the reference tells agents to write a record's reference bare, so it
-    /// renders as a link with the record's title.
-    #[test]
-    fn the_reference_names_records_as_links() {
-        let tail = "`task:<id>`, `feature:<id>` or `milestone:<id>`, written bare";
-        assert_eq!(REFERENCE.matches(tail).count(), 2, "the notes line and the strategy section");
-    }
-    /// D-144: a command in the summary table with no entry in the section is
-    /// named, so `help <command>` can answer one paragraph.
-    #[test]
-    fn reference_layout_needs_an_entry_for_every_summary_command() {
-        let text = |entry: &str| format!("Commands (help <command> lists them):\n  drafts                        kept drafts\n\nWorkflow\n\nCommands in full\nReading\n{entry}");
-        assert_eq!(
-            reference_layout(&text(&ref_row("read <path>", "a file"))),
-            (false, "line 2: no entry in \"Commands in full\" for `drafts`\n".into())
-        );
-        let entry = format!("{}{}", ref_row("read <path>", "a file"), ref_row("drafts", "kept drafts"));
-        assert_eq!(reference_layout(&text(&entry)), (true, String::new()));
-        // `help` never shows host commands, so an entry there answers nothing.
-        let host = format!("{}\nHost commands (humans only)\n{}", ref_row("read <path>", "a file"), ref_row("drafts", "kept drafts"));
-        assert_eq!(reference_layout(&text(&host)), (false, "line 2: no entry in \"Commands in full\" for `drafts`\n".into()));
-    }
-    #[test]
-    fn reference_layout_names_a_continuation_one_column_off() {
-        let text = |spaces| sample(&[ref_row("read <path>", "a file, or"), ref_line(spaces, "some of its lines")]);
-        assert_eq!(reference_layout(&text(18)), (true, String::new()));
-        assert_eq!(reference_layout(&text(19)), (false, "line 6: starts at column 20; the descriptions start at column 19\n".into()));
-        assert_eq!(reference_layout(&text(17)), (false, "line 6: starts at column 18; the descriptions start at column 19\n".into()));
-    }
-    #[test]
-    fn reference_layout_takes_an_example_block_after_a_colon_at_one_column() {
-        let text = |last| {
-            sample(&[
-                ref_row("write", "a patch, for"),
-                ref_line(18, "example:"),
-                ref_line(20, "*** Begin Patch"),
-                ref_line(last, "*** End Patch"),
-                ref_line(18, "and more"),
-            ])
-        };
-        assert_eq!(reference_layout(&text(20)), (true, String::new()));
-        assert_eq!(reference_layout(&text(21)), (false, "line 8: starts at column 22; the example starts at column 21\n".into()));
-        // One column deeper after a `:` is the slip again, not an example.
-        let text = sample(&[ref_row("write", "a patch, for"), ref_line(18, "example:"), ref_line(19, "files")]);
-        assert_eq!(reference_layout(&text), (false, "line 7: starts at column 20; the descriptions start at column 19\n".into()));
-    }
-    #[test]
-    fn reference_layout_refuses_deeper_lines_without_a_colon_before_them() {
-        // task:e86828d20aaab5a2's slip: two lines one space right of their paragraph.
-        let text = sample(&[
-            ref_row("strategy task", "a title is the work"),
-            ref_line(18, "in 3-7 words (`extract"),
-            ref_line(19, "files`); details"),
-            ref_line(19, "go in body"),
-        ]);
-        assert_eq!(
-            reference_layout(&text),
-            (
-                false,
-                "line 7: starts at column 20; the descriptions start at column 19\nline 8: starts at column 20; the descriptions start at column 19\n"
-                    .into()
-            )
-        );
-    }
-    #[test]
-    fn reference_layout_names_a_row_whose_description_is_one_column_off() {
-        let text = sample(&[
-            ref_row("read", "a file"),
-            format!("  {:<17}{}\n", "grep <text>", "search"),
-            ref_line(18, "watched files"),
-            ref_row("find <text>", "search code"),
-        ]);
-        // Its continuation is held to the description column, so it adds no fault of its own.
-        assert_eq!(reference_layout(&text), (false, "line 6: its description starts at column 20; the descriptions start at column 19\n".into()));
-    }
-    #[test]
-    fn reference_layout_lets_rows_next_to_each_other_share_their_own_column() {
-        let table = |third: &str| {
-            sample(&[
-                ref_row("read", "a file"),
-                ref_row("grep", "search"),
-                "Files: by tier\n".into(),
-                "  graph     the store\n".into(),
-                ref_line(12, "refused"),
-                format!("  {third} solace.toml\n"),
-                ref_line(12, "the human's"),
-                "  internal  .solace/\n".into(),
-                ref_row("files [dir]", "tree"),
-            ])
-        };
-        assert_eq!(reference_layout(&table("protected")), (true, String::new()));
-        // One space after a term that doesn't reach the table's column: the row has no description of its own.
-        assert_eq!(reference_layout(&table("protectedx")), (false, "line 11: starts at column 13; the descriptions start at column 19\n".into()));
-    }
-    #[test]
-    fn reference_layout_refuses_a_line_after_prose_and_a_reference_without_the_section() {
-        let text = sample(&[ref_row("read", "a file"), "Prose here\n".into(), ref_line(18, "stray")]);
-        assert_eq!(
-            reference_layout(&text),
-            (false, "line 7: starts at column 19; after a heading or prose, a line starts at column 1 or 3\n".into())
-        );
-        let text = sample(&[ref_row("read", "a file"), "\n".into(), ref_line(18, "stray")]);
-        assert_eq!(
-            reference_layout(&text),
-            (false, "line 7: starts at column 19; after a blank line, a line starts at column 1 or 3\n".into())
-        );
-        assert_eq!(reference_layout("Workflow only\n"), (false, "no \"Commands in full\" line\n".into()));
-        assert_eq!(
-            reference_layout("Commands in full\n  grep <text>\n"),
-            (false, "no command row has its description on the same line\n".into())
-        );
-    }
-    #[test]
-    fn broken_symbols_counted_once() {
-        let d = |sym: &str| Diag { error: true, module: None, symbol: Some(sym.into()), text: format!("error: {sym}") };
-        let out = broken_report(&HashMap::new(), &[d("a.f"), d("a.g"), d("a.f")]);
-        assert!(out.contains("Broken symbols (2): a.f, a.g"), "{out}");
-    }
-    /// A batch runner that records each command and fails the one named `fail`.
-    fn fake<'a>(fail: &'static str, ran: &'a mut Vec<String>) -> impl FnMut(&[String], usize) -> Out + 'a {
-        move |w: &[String], _| {
-            ran.push(w.join(" "));
-            if w[0] == fail { Err(Failure(format!("E6002 {fail} failed"), 1)) } else { Ok("fine".into()) }
-        }
-    }
-    #[test]
-    fn a_failed_change_stops_the_call() {
-        // D-119: a failed write skips the read and the run after it.
-        let mut ran = vec![];
-        let (out, error) = batch(&["write a.md", "read b.md", "run rust-unit"], 10_000, &mut fake("write", &mut ran));
-        assert!(error);
-        assert_eq!(ran, ["write a.md"]);
-        assert!(!out.contains("==== solace read") && !out.contains("==== solace run"), "{out}");
-        assert!(out.ends_with("E6002 write failed\n1 of 3 commands failed: write a.md; skipped: read b.md; run rust-unit\n"), "{out}");
-        // A failed read does not stop the call; with nothing skipped, the line is D-109's.
-        let mut ran = vec![];
-        let (out, error) = batch(&["read b.md", "write a.md"], 10_000, &mut fake("read", &mut ran));
-        assert!(error);
-        assert_eq!(ran, ["read b.md", "write a.md"]);
-        assert!(out.ends_with("1 of 2 commands failed: read b.md\n"), "{out}");
-        // A failed change as the last command skips nothing; a failed run stops nothing.
-        let mut ran = vec![];
-        let (out, _) = batch(&["read b.md", "solace write a.md"], 10_000, &mut fake("write", &mut ran));
-        assert!(out.ends_with("1 of 2 commands failed: write a.md\n"), "{out}");
-        let mut ran = vec![];
-        let (out, _) = batch(&["run rust-unit", "read b.md"], 10_000, &mut fake("run", &mut ran));
-        assert_eq!(ran, ["run rust-unit", "read b.md"]);
-        assert!(out.ends_with("1 of 2 commands failed: run rust-unit\n"), "{out}");
-        // Nothing failed: no last line, and no error.
-        let (out, error) = batch(&["read b.md", "write a.md"], 10_000, &mut fake("none", &mut vec![]));
-        assert!(!error && !out.contains("commands failed"), "{out}");
-    }
-    /// A batch runner whose `test` passes or fails, leaving `untested` named as
-    /// the task's changes no test reaches.
-    fn fake_test<'a>(pass: bool, untested: Option<&'static str>, ran: &'a mut Vec<String>) -> impl FnMut(&[String], usize) -> Out + 'a {
-        move |w: &[String], _| {
-            ran.push(w.join(" "));
-            if !w.iter().any(|x| x == "test") {
-                return Ok("fine".into());
-            }
-            UNTESTED.with(|u| *u.borrow_mut() = untested.map(String::from));
-            if pass { Ok("passed".into()) } else { Err(Failure("1 failure".into(), 1)) }
-        }
-    }
-    #[test]
-    fn a_batched_task_done_waits_for_a_passing_test() {
-        // D-152: a failed test holds back the task done after it.
-        let mut ran = vec![];
-        let (out, error) = batch(&["submit", "test", "task done fixed"], 10_000, &mut fake_test(false, None, &mut ran));
-        assert!(error);
-        assert_eq!(ran, ["submit", "test"]);
-        assert!(!out.contains("==== solace task done"), "{out}");
-        assert!(out.ends_with(&format!("1 of 3 commands failed: test; skipped: task done fixed (the test failed)\n{HELD}")), "{out}");
-        // A pass that leaves a change no test reaches holds it back too, and is no error.
-        let mut ran = vec![];
-        let (out, error) = batch(&["submit", "test", "task done fixed"], 10_000, &mut fake_test(true, Some("app.three"), &mut ran));
-        assert!(!error);
-        assert_eq!(ran, ["submit", "test"]);
-        assert!(out.ends_with(&format!("Skipped: task done fixed (no test reaches app.three)\n{HELD}")), "{out}");
-        // A clean pass finishes, a test in another project too.
-        let mut ran = vec![];
-        let (out, error) = batch(&["submit", "--project lib test", "task done fixed"], 10_000, &mut fake_test(true, None, &mut ran));
-        assert!(!error);
-        assert_eq!(ran, ["submit", "--project lib test", "task done fixed"]);
-        assert!(!out.contains("Skipped") && !out.contains(HELD), "{out}");
-        // A task done before the test, or in a call with no test, runs.
-        let mut ran = vec![];
-        batch(&["task done fixed", "test"], 10_000, &mut fake_test(false, None, &mut ran));
-        assert_eq!(ran, ["task done fixed", "test"]);
-        let mut ran = vec![];
-        let (out, _) = batch(&["submit", "task done fixed"], 10_000, &mut fake_test(false, Some("app.three"), &mut ran));
-        assert_eq!(ran, ["submit", "task done fixed"]);
-        assert!(!out.contains("Skipped"), "{out}");
-    }
-    /// D-145: from the second successful single read in a row, the reply hints to batch.
-    #[test]
-    fn a_second_single_read_in_a_row_gets_the_hint() {
-        let mut streak = 0;
-        assert_eq!(read_hint(&mut streak, &["read a.md"], false), "");
-        assert_eq!(read_hint(&mut streak, &["solace grep x"], false), READ_HINT);
-        assert_eq!(read_hint(&mut streak, &["view a.f --project lib"], false), READ_HINT);
-        // A batch, a failed read and a change each start the count again.
-        assert_eq!(read_hint(&mut streak, &["read a.md", "read b.md"], false), "");
-        assert_eq!(read_hint(&mut streak, &["read a.md"], false), "");
-        assert_eq!(read_hint(&mut streak, &["read a.md"], true), "");
-        assert_eq!(read_hint(&mut streak, &["read a.md"], false), "");
-        assert_eq!(read_hint(&mut streak, &["write a.md"], false), "");
-        assert_eq!(read_hint(&mut streak, &["--project lib inspect a.f"], false), "");
-        assert_eq!(read_hint(&mut streak, &["--project lib inspect a.f"], false), READ_HINT);
-        assert_eq!(read_hint(&mut streak, &[], false), "");
-        assert_eq!(streak, 0);
-    }
-    /// A read command given an option it doesn't take is refused by name.
-    #[test]
-    fn an_option_a_command_doesnt_take_is_refused_by_name() {
-        let e = unknown_option(&["view", "strategy.update", "--lines", "50..80"]).unwrap().unwrap_err().0;
-        assert!(e.starts_with("view has no --lines; read takes --lines. view takes: --bodies"), "{e}");
-        assert!(unknown_option(&["read", "a.md", "--lines", "1..2"]).is_none());
-        assert!(unknown_option(&["inspect", "a.b", "--context"]).is_none());
-        assert!(unknown_option(&["view", "a", "--bodies"]).is_none());
-        assert!(unknown_option(&["view", "--draft", "x"]).is_none(), "view --draft is in the reference");
-        assert!(unknown_option(&["grep", "--x"]).is_none());
-    }
-    /// The unknown-option refusal comes before other refusals, at both entry
-    /// points: `run_inner`, and `--project` through `read_project`.
-    #[test]
-    fn an_unknown_option_is_refused_before_other_refusals() {
-        let args = vec!["view".to_string(), "app.main".to_string(), "--lines".to_string(), "1..2".to_string()];
-        let e = run_inner(&args, &mut || Ok(String::new()), None, 10_000).unwrap_err().0;
-        assert!(e.starts_with("view has no --lines; read takes --lines"), "{e}");
-        let e = read_project("no-such-project", &args, 10_000).unwrap_err().0;
-        assert!(e.starts_with("view has no --lines; read takes --lines"), "{e}");
-    }
-    #[test]
-    fn the_tool_asks_for_batched_reads_short_text_and_a_clean_stop() {
-        let d = tool_schema()["description"].as_str().unwrap().to_string();
-        assert!(d.contains("put every independent read in the same call") && d.contains("never one read per call"), "{d}");
-        assert!(d.contains("Keep text between calls to a line or two") && d.contains("Once the work is done, stop"), "{d}");
-    }
-    #[test]
-    fn agent_reference_leaves_out_host_and_task_commands() {
-        // Tests run outside a board run; `help` keeps everything.
-        let r = agent_reference(false);
-        assert!(agent_reference(true).contains("task done") && !agent_reference(true).contains("Host commands"));
-        assert!(r.contains("Several commands go in one call") && r.contains("work records"));
-        assert!(!r.contains("task done") && !r.contains("Host commands"));
-        assert!(REFERENCE.contains("task done") && REFERENCE.contains("agent-config"));
-        // D-46: session start gets the workflow, with the signature-change and
-        // test examples (D-48: a test at the level reported, one per shifted
-        // behavior); D-102: the file tiers. D-123: no byte cap; it is kept as
-        // brief as understanding it allows, and `help` keeps every option.
-        assert!(r.contains("Files by tier") && r.contains("ignored or not"));
-        assert!(
-            r.contains("Changing a signature or adding a field") && r.contains("one at the level the task reports") && r.contains("`help <command>`")
-        );
-        assert!(!r.contains("probe --from <fn>") && REFERENCE.contains("probe --from <fn>") && REFERENCE.contains("--replace [--all]"));
-        assert!(r.contains("Imports are added") && !r.contains("task ask"));
-        // Scope, the code's own conventions, comments that say why, and no secrets.
-        assert!(r.contains("stop exploring") && r.contains("Write code the way the code around it is written"));
-        assert!(r.contains("A comment says why code exists") && r.contains("Never put secrets or keys"));
-        // Ponytail's craft rules: the smallest complete change, and what `test` can't reach.
-        assert!(r.contains("Make the smallest complete change") && r.contains("Fix a reported bug once, at its cause"));
-        assert!(r.contains("`test` doesn't reach docs, config, JavaScript or golden files"));
-        // D-119 point 5: plain-file projects batch too, every edit in one patch.
-        assert!(r.contains("then `run <name>`") && r.contains("go in one patch") && r.contains("a patch of many edits"));
-        // D-123: where a line runs, and that options belong to one command.
-        assert!(r.contains("Each line runs in one project") && r.contains("`--lines` is `read`'s") && r.contains("`help <command>`\nlists them"));
-        // `help` for agents: every option, but no host or task commands here.
-        let h = agent_help(None);
-        assert!(h.contains("probe --from <fn>") && !h.contains("task diff") && !h.contains("agent-config"));
-        let s = agent_help(Some("submit"));
-        assert!(s.contains("--replace [--all]") && s.contains("draft") && !s.contains("probe --from"), "{s}");
-    }
-
-    /// D-144: `help <command>` answers the one paragraph holding the command's
-    /// entry; every command in the summary table has its own entry, so its
-    /// section is much shorter than the whole reference.
-    #[test]
-    fn help_answers_one_command_its_own_section() {
-        let full = agent_help(None);
-        let table = REFERENCE.split("Commands (").nth(1).unwrap();
-        let rows: Vec<&str> = table.lines().skip_while(|l| !l.starts_with("  ")).take_while(|l| l.starts_with("  ")).collect();
-        assert!(rows.len() >= 19, "{rows:?}");
-        for row in rows {
-            let cmd = row.split_whitespace().next().unwrap();
-            let h = agent_help(Some(cmd));
-            assert!(h.contains(&format!("  {cmd} ")), "{cmd}: {h}");
-            assert!(h.len() * 2 < full.len(), "{cmd}: {} of {} bytes", h.len(), full.len());
-        }
-        let w = agent_help(Some("work"));
-        assert!(w.contains("work done <id>") && !w.contains("inspect"), "{w}");
-        let r = agent_help(Some("run"));
-        assert!(r.contains("run <name>") && !r.contains("work add"), "{r}");
-        let n = agent_help(Some("nosuch"));
-        assert!(
-            n.starts_with("No command `nosuch`") && n.contains("inspect") && n.contains("work") && !n.contains("--context") && !n.contains("watched") && n.len() * 2 < full.len(),
-            "{n}"
-        );
-    }
-
-    /// D-123: an unknown name another project has says where it is, and the
-    /// session start says where the agent is and how `--project` and paths work.
-    #[test]
-    fn a_name_in_another_project_says_where_it_is() {
-        let root = testing::Scratch::new().with(&[
-            ("solace.toml", "projects = [\"a\", \"b\"]\n"),
-            ("a/gleam.toml", "name = \"alpha\"\nversion = \"1.0.0\"\n"),
-            ("a/src/app.gleam", "pub fn one() -> Int {\n  1\n}\n"),
-            ("b/gleam.toml", "name = \"beta\"\nversion = \"1.0.0\"\n"),
-            ("b/src/plan.gleam", "pub fn answer() -> Int {\n  42\n}\n"),
-        ]);
-        for d in ["a", "b"] {
-            import(&root.join(d)).unwrap();
-        }
-        let a = Store::at(&root.join("a")).unwrap();
-        let e = hinted(a.view(&["plan.answer"], false, BUDGET), &a.root).unwrap_err().0;
-        assert!(e.contains("E1001 unknown name: plan.answer\nfound in b: add --project b"), "{e}");
-        let e = hinted(a.view(&["plan.nope"], false, BUDGET), &a.root).unwrap_err().0;
-        assert!(e.contains("E1001") && !e.contains("found in"), "{e}");
-        let s = a.other_projects(None);
-        for part in [
-            "You are in a (alpha).\n",
-            "Other projects under this Solace root (read only): b (beta).",
-            "(`--project b`), for that line only",
-            "grep",
-            "relative to the project the line runs in",
-        ] {
-            assert!(s.contains(part), "{part} missing from:\n{s}");
-        }
-    }
-
-    #[test]
-    fn probe_args_parse() {
-        assert_eq!(probe_args(&["--from", "t", "--trace", "a.b", "c"]).unwrap(), (Some("t"), vec!["a.b", "c"]));
-        assert_eq!(probe_args(&[]).unwrap(), (None, vec![]));
-        assert!(probe_args(&["--trace"]).is_err() && probe_args(&["--from"]).is_err() && probe_args(&["x"]).is_err());
-    }
-
-    #[test]
-    fn dependencies_show_their_public_api() {
-        let store = project(&[
-            ("src/app.gleam", "pub fn main() { 1 }\n"),
-            (
-                "build/packages/dep/src/dep/api.gleam",
-                "//// Talks to things.\n////\n//// A long guide.\n\nimport gleam/list\n\n\
-             /// Makes a widget.\n/// Second doc line.\npub fn make(size: Int) -> Widget {\n  secret(size)\n}\n\n\
-             // SECTION ---\n\nfn secret(n: Int) -> Widget {\n  Widget(n)\n}\n\n\
-             /// A widget.\npub opaque type Widget {\n  Widget(size: Int)\n}\n",
-            ),
-        ]);
-        // A module: its first doc paragraph and public declarations, no bodies.
-        let out = store.view(&["dep/api"], false, usize::MAX).ok().unwrap();
-        assert!(
-            out.starts_with("// ── module dep/api (dep, a dependency; read only)") && out.contains("//// Talks to things.\n\n"),
-            "{out}"
-        );
-        assert!(
-            out.contains("/// Makes a widget.\npub fn make(size: Int) -> Widget\n") && out.contains("pub opaque type Widget\n"),
-            "{out}"
-        );
-        for hidden in ["secret", "A long guide", "SECTION", "Widget(size", "Second doc line"] {
-            assert!(!out.contains(hidden), "{hidden}: {out}");
-        }
-        // A symbol: all of its doc; `inspect` falls back to the same view; store names still win.
-        let one = store.inspect(&["dep/api.make", "app.main"], true, usize::MAX).ok().unwrap();
-        assert!(one.contains("/// Second doc line.\npub fn make(size: Int) -> Widget") && !one.contains("secret(size)"), "{one}");
-        assert!(one.contains("app.main"), "{one}");
-        assert!(store.view(&["dep/api.secret"], false, usize::MAX).unwrap_err().0.contains("E1001"));
-    }
-
-    /// D-14: a multi-name inspect prints each signature once, and trims, then
-    /// defers names, to stay within the budget.
-    #[test]
-    fn inspect_dedups_and_fits_budget() {
-        // A real project of some size: the bench pilot's code.
-        let dir = Scratch::new();
-        let pilot = Path::new(env!("CARGO_MANIFEST_DIR")).join("../bench/pilot-large");
-        for top in ["src", "test"] {
-            migrate::copy_tree(&pilot.join(top), &dir.join(top), &|_| false).unwrap();
-        }
-        fs::copy(pilot.join("gleam.toml"), dir.join("gleam.toml")).unwrap();
-        let store = dir.import();
-        let names = ["store.put_shipment", "shipments.dispatch", "shipments.deliver", "fulfillment.ship"];
-        let ok = |r: Out| r.ok().unwrap();
-
-        let out = ok(store.inspect(&names, true, usize::MAX));
-        assert_eq!(out.matches("-- pilot/shipments.Shipment\n").count(), 1);
-        assert!(out.contains("-- pilot/shipments.Shipment (above)"));
-        assert!(!out.contains("Trimmed") && !out.contains("Not shown"));
-
-        let small = ok(store.inspect(&names, true, 3_000));
-        assert!(small.contains("Trimmed to fit the size limit"));
-        assert!(small.contains("Not shown, to fit the size limit: `solace inspect "));
-        assert!(small.len() < out.len());
-        for n in names {
-            assert!(
-                small.contains(&format!("// ── pilot/{n} ")) || small.lines().last().unwrap().contains(&format!("pilot/{n}")),
-                "{n} lost"
-            );
-        }
-
-        // an unknown name is reported after the others, not instead of them
-        let mixed = ok(store.inspect(&["shipments.deliver", "shipping.standard_cost_cents"], false, usize::MAX));
-        assert!(mixed.contains("// ── pilot/shipments.deliver ") && mixed.contains("E1001 unknown name: shipping.standard_cost_cents"));
-        assert!(store.inspect(&["shipping.nope"], false, usize::MAX).is_err());
-        // D-46: a type's users split into the sites that list every field and
-        // the rest by name; a function's callers show the call line.
-        let ty = ok(store.inspect(&["customer.Customer"], true, usize::MAX));
-        assert!(ty.contains("== Constructed by (") && ty.contains("-- pilot/seed.customers, line 3: Customer("), "{ty}");
-        assert!(ty.contains("-- pilot/accounts.register, line 11: customer.Customer(\n"), "{ty}");
-        assert!(ty.contains("== Other users (") && !ty.contains("== Used by"), "{ty}");
-        // commands in one MCP call share what was printed: `refs` says (above)
-        SHOWN.with(|s| *s.borrow_mut() = Some(HashSet::new()));
-        let f = ok(store.inspect(&["pricing.quote"], true, usize::MAX));
-        assert!(f.contains("-- pilot/checkout.quote\n") && f.contains("  > line "), "{f}");
-        let r = ok(store.refs("pricing.quote"));
-        assert!(r.contains("-- pilot/checkout.quote (above)\n  > line "), "{r}");
-        SHOWN.with(|s| *s.borrow_mut() = None);
-        assert!(ok(store.refs("pricing.quote")).contains("-- pilot/checkout.quote\n"));
-        // D-102: `refs <name>...` gives each symbol's users, in the order named
-        let many = ok(store.refs_all(&["pricing.quote", "checkout.quote"], usize::MAX));
-        assert!(many.starts_with("pilot/pricing.quote is used by") && many.contains("\npilot/checkout.quote is used by"), "{many}");
-    }
-
-    #[test]
-    fn code_is_told_from_commands() {
-        assert!(looks_like_code("let assert Ok(q) = checkout.quote(db, o.id, Standard)") && looks_like_code("echo q"));
-        assert!(!looks_like_code("probe --from checkout_test.quote_test --trace pricing.quote"));
-    }
-
-    #[test]
-    fn import_creates_settings_without_overwriting() {
-        for existing in [None, Some("# custom\nresources = [\"docs/**\"]\n")] {
-            let root =
-                Scratch::new().with(&[("gleam.toml", "name = \"app\"\nversion = \"1.0.0\"\n"), ("src/app.gleam", "pub fn main() { 1 }\n")]);
-            if let Some(text) = existing {
-                fs::write(root.join("solace.toml"), text).unwrap();
-            }
-            let out = import(&root).unwrap();
-            let text = fs::read_to_string(root.join("solace.toml")).unwrap();
-            if let Some(existing) = existing {
-                assert_eq!(text, existing);
-                assert!(!out.contains("Created solace.toml"));
-            } else {
-                assert!(out.contains("Created solace.toml"));
-                assert_eq!(lockdown::settings(&root).unwrap()["watch_limit"].as_integer(), Some(262144));
-                assert!(lockdown::settings(&root).unwrap()["commands"].as_table().unwrap().is_empty());
-            }
-            let store = fs::read(root.join(".solace/store.db")).unwrap();
-            assert!(import(&root).unwrap().contains("existing symbols were preserved"));
-            assert_eq!(fs::read_to_string(root.join("solace.toml")).unwrap(), text);
-            fs::remove_file(root.join("solace.toml")).unwrap();
-            fs::write(root.join("src/app.gleam"), "pub fn changed_on_disk() { 2 }\n").unwrap();
-            assert!(import(&root).unwrap().contains("Created solace.toml"));
-            assert!(lockdown::settings(&root).is_ok());
-            assert_eq!(fs::read(root.join(".solace/store.db")).unwrap(), store);
-        }
-    }
-
-    #[test]
-    fn submit_new_creates_a_module() {
-        let store = project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-        // Code with errors creates nothing.
-        assert!(store.submit_symbols(None, Some("calc"), "pub fn add(a: Int) -> Int { a <> 1 }").is_err());
-        assert!(store.resolve_module(&store.index().unwrap(), "calc").is_none());
-        let out = store.submit_symbols(None, Some("calc"), "pub fn add(a: Int, b: Int) -> Int { a + b }").unwrap();
-        assert!(out.contains("created module calc (src/calc.gleam)"), "{out}");
-        assert!(store.resolve_module(&store.index().unwrap(), "calc").is_some());
-        let out = store.submit_symbols(None, Some("calc_test"), "pub fn add_test() { assert calc.add(1, 2) == 3 }").unwrap();
-        assert!(out.contains("(test/calc_test.gleam)"), "{out}");
-        assert!(store.submit_symbols(None, Some("Bad"), "pub fn x() { 1 }").unwrap_err().0.starts_with("E1003"));
-        // A whole new module in one submit: module comment, imports and several symbols.
-        let module = "//// Geometry helpers.\nimport calc\n\npub const unit = 1\n\npub type Shape {\n  Square(Int)\n}\n\npub fn area(s: Shape) -> Int {\n  let Square(n) = s\n  calc.add(n * n, unit)\n}\n";
-        let out = store.submit_symbols(None, Some("geo"), module).unwrap();
-        assert!(out.contains("created module geo") && out.contains("geo.unit, geo.Shape, geo.area"), "{out}");
-        let file = fs::read_to_string(store.root.join("src/geo.gleam")).unwrap();
-        assert!(file.starts_with("//// Geometry helpers.\n") && file.contains("import calc\n"), "{file}");
-        assert!(store.submit_symbols(None, Some("geo2"), "pub fn a() { 1 }\npub fn a() { 2 }").unwrap_err().0.starts_with("E0103"));
-        // Blocks may name a module that doesn't exist yet; a named block still holds one symbol.
-        let out = store
-            .submit_symbols(None, None, "// ── shapes.side ──\npub fn side() { 2 }\n// ── shapes.twice ──\npub fn twice() { side() * 2 }\n")
-            .unwrap();
-        assert!(out.contains("created module shapes"), "{out}");
-        assert!(
-            store
-                .submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int) -> Int { a + b }\npub fn sub() { 1 }")
-                .unwrap_err()
-                .0
-                .starts_with("E0101")
-        );
-    }
-
-    /// `calc.add` and `scale`, a test helper, and a test with a local.
-    fn probe_project() -> Project {
-        project(&[
-            (
-                "src/calc.gleam",
-                "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn scale(x: Int, by factor: Int) -> Int {\n  factor * x\n}\n",
-            ),
-            ("test/helper.gleam", "pub fn two() {\n  2\n}\n"),
-            ("test/calc_test.gleam", "import calc\n\npub fn sum_test() {\n  let x = calc.add(1, 2)\n  assert x == 3\n}\n"),
-        ])
-    }
-
-    #[test]
-    fn probe_runs_and_leaves_nothing() {
-        let store = probe_project();
-        let probe_file = store.root.join("test/solace_probe.gleam");
-        let out = store.probe("echo calc.add(2, 3)", None, &[]).unwrap();
-        assert!(out.contains("5"), "{out}");
-        assert!(!probe_file.exists());
-        let err = store.probe("echo calc.nope()", None, &[]).unwrap_err().0;
-        assert!(err.contains("The probe ran as") && err.contains("import calc"), "{err}");
-        // D-145: an unknown module value says how to print a value; another failure doesn't.
-        assert!(err.contains("Unknown module value") && err.contains("Hint: print a value with `echo value`.\n\nThe probe ran as"), "{err}");
-        let err = store.probe("echo nope", None, &[]).unwrap_err().0;
-        assert!(err.contains("The probe ran as") && !err.contains("Hint:"), "{err}");
-        assert!(!probe_file.exists());
-        // A probe is test-side code: it may use test helpers.
-        assert!(store.probe("echo helper.two()", None, &[]).unwrap().contains("2"));
-        // `--from` starts from a function's body; a single expression is printed (D-43).
-        let out = store.probe("echo x + 10", Some("calc_test.sum_test"), &[]).unwrap();
-        assert!(out.contains("13"), "{out}");
-        assert!(store.probe("", Some("calc.add"), &[]).unwrap_err().0.starts_with("E1005"));
-        let out = store.probe("calc.add(20, 3)", None, &[]).unwrap();
-        assert!(out.contains("23") && !out.contains("warning"), "{out}");
-    }
-
-    #[test]
-    fn probe_trace_shows_calls_and_puts_the_module_back() {
-        let store = probe_project();
-        let before = fs::read_to_string(store.root.join("src/calc.gleam")).unwrap();
-        let out = store.probe("calc.add(2, 3)", None, &["calc.add"]).unwrap();
-        assert!(out.contains("→ calc.add(2, 3)") && out.contains("← calc.add = 5"), "{out}");
-        assert_eq!(fs::read_to_string(store.root.join("src/calc.gleam")).unwrap(), before);
-        let out = store.probe("calc.scale(3, by: 2)", None, &["calc.scale"]).unwrap();
-        assert!(out.contains("← calc.scale = 6"), "{out}");
-        assert!(store.probe("1", None, &["calc_test"]).is_err());
-    }
-
-    #[test]
-    fn test_helpers_are_imported_only_by_test_code() {
-        let store = probe_project();
-        let out = store.submit_symbols(None, Some("calc_test"), "pub fn two_test() { assert helper.two() == 2 }").unwrap();
-        assert!(out.contains("import helper"), "{out}");
-        assert!(store.submit_symbols(None, Some("calc"), "pub fn four() { helper.two() * 2 }").is_err());
-    }
-
-    /// D-43: an assert whose expected side reads the value it checks gets a note.
-    #[test]
-    fn weak_asserts_get_a_note() {
-        let store = probe_project();
-        let out = store
-            .submit_symbols(
-                None,
-                Some("calc_test"),
-                "pub fn weak_test() {\n  let q = #(1, 2)\n  assert q.0 == q.1 - 1\n  assert q.1 == 2\n}",
-            )
-            .unwrap();
-        assert!(out.contains("`assert q.0 == q.1 - 1` reads `q` on both sides") && !out.contains("assert q.1 == 2`"), "{out}");
-    }
-
-    /// A small project: `calc.add` and three callers.
-    fn calc_project() -> Project {
-        let callers =
-            "pub fn one() -> Int {\n  add(0, 1)\n}\n\npub fn two() -> Int {\n  add(1, 1)\n}\n\npub fn three() -> Int {\n  add(1, 2)\n}\n";
-        project(&[("src/calc.gleam", &format!("pub fn add(a: Int, b: Int) -> Int {{\n  a + b\n}}\n\n{callers}"))])
-    }
-
-    /// D-46: a submit reports what changed in the broken set; an error seen
-    /// before is one line, and errors with one message are printed in full once.
-    #[test]
-    fn signature_change_reports_changes_once() {
-        let store = calc_project();
-        let out = store.submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int, c: Int) -> Int { a + b + c }").unwrap();
-        assert!(out.contains("Broken symbols (3)") && out.contains("same error: 2 more"), "{out}");
-        assert_eq!(out.matches("Expected 3 arguments, got 2").count(), 1, "{out}");
-        assert!(out.contains("  at calc.three, line 2: add(1, 2)"), "{out}");
-        let out = store.submit_symbols(Some("calc.one"), None, "pub fn one() -> Int { add(0, 1, 0) }").unwrap();
-        assert!(out.contains("Fixed: calc.one.") && out.contains("Still broken, with the errors shown before"), "{out}");
-        assert!(out.contains("  calc.two, line 2: Incorrect arity: Expected 3 arguments, got 2\n"), "{out}");
-        assert!(!out.contains("│"), "{out}");
-        // `check` stays complete.
-        let full = store.check().unwrap_err().0;
-        assert_eq!(full.matches("Expected 3 arguments, got 2").count(), 2, "{full}");
-        let out = store
-            .submit_symbols(
-                None,
-                None,
-                "// ── calc.two ──\npub fn two() -> Int { add(1, 1, 0) }\n// ── calc.three ──\npub fn three() -> Int { add(1, 2, 0) }\n",
-            )
-            .unwrap();
-        assert!(out.contains("Fixed: calc.three, calc.two.\nThe project type-checks."), "{out}");
-    }
-
-    /// D-46: text equal to what is stored is reported unchanged, and when
-    /// nothing changed the type check is skipped.
-    #[test]
-    fn unchanged_submit_skips_check() {
-        let store = calc_project();
-        let blocks = "// ── calc.one ──\npub fn one() -> Int { add(0, 2) }\n// ── calc.two ──\npub fn two() -> Int { add(1, 1) }\n";
-        let out = store.submit_symbols(Some("calc.one"), None, blocks).unwrap();
-        assert!(
-            out.contains("plain `submit` does the same") && out.contains("Saved calc.one.\nUnchanged (the same as stored): calc.two."),
-            "{out}"
-        );
-        // A source change on disk would show if the project were checked again.
-        fs::write(store.root.join("src/calc.gleam"), "not gleam").unwrap();
-        let out = store.submit_symbols(Some("calc.two"), None, blocks).unwrap();
-        assert!(out.contains("Unchanged: calc.one, calc.two.") && out.contains("nothing was saved or checked"), "{out}");
-        assert_eq!(fs::read_to_string(store.root.join("src/calc.gleam")).unwrap(), "not gleam");
-    }
-
-    /// D-44: `test` runs the tests whose reach changed since they passed, those
-    /// that failed, and those reaching foreign code; the rest are skipped.
-    #[test]
-    fn test_runs_what_reaches_a_change() {
-        let store = Scratch::new()
-            .with(&[
-                (
-                    "src/calc.gleam",
-                    "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn double(a: Int) -> Int {\n  add(a, a)\n}\n\npub fn sub(a: Int, b: Int) -> Int {\n  a - b\n}\n\n@external(erlang, \"erlang\", \"abs\")\npub fn abs(x: Int) -> Int\n",
-                ),
-                (
-                    "test/calc_test.gleam",
-                    "import calc\n\npub fn add_test() {\n  assert calc.add(1, 2) == 3\n}\n\npub fn double_test() {\n  assert calc.double(2) == 4\n}\n\npub fn sub_test() {\n  assert calc.sub(3, 1) == 3\n}\n\npub fn abs_test() {\n  assert calc.abs(-2) == 2\n}\n",
-                ),
-            ])
-            .with_packages()
-            .import();
-        let first = |out: Out| out.unwrap_or_else(|e| e.0).lines().next().unwrap_or("").to_string();
-        // First run: everything; sub_test fails.
-        let err = store.test(&[]).unwrap_err().0;
-        assert!(err.starts_with("Ran all 4 tests.") && err.contains("sub_test"), "{err}");
-        // The failing test runs again, as does the one reaching foreign code.
-        store.submit_symbols(Some("calc_test.sub_test"), None, "pub fn sub_test() {\n  assert calc.sub(3, 1) == 2\n}").unwrap();
-        assert_eq!(
-            first(store.test(&[])),
-            "Ran 2 of 4 tests; the other 2 reach nothing changed since they passed (`test --all` runs every test)."
-        );
-        // A change reaches only the tests that can see it, and the files match the store afterwards.
-        store.submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int) -> Int {\n  b + a\n}").unwrap();
-        let out = store.test(&[]).unwrap();
-        assert!(out.starts_with("Ran 3 of 4 tests;") && out.contains("3 passed"), "{out}");
-        let file = fs::read_to_string(store.root.join("test/calc_test.gleam")).unwrap();
-        assert_eq!(file.matches("pub fn ").count(), 4, "{file}");
-        assert_eq!(first(store.test(&["--all"])), "Ran all 4 tests.");
-        assert_eq!(first(store.test(&["calc.double"])), "Ran 1 of 4 tests: those that reach calc.double.");
-        assert!(store.test(&["calc.nope"]).unwrap_err().0.starts_with("E1001"));
-        // With nothing changed, only the test reaching foreign code runs.
-        assert!(first(store.test(&[])).starts_with("Ran 1 of 4 tests;"));
-    }
-
-    /// D-44: the packet quotes code that names the task's terms, and names a
-    /// test that reaches the top symbols to reproduce the case with.
-    #[test]
-    fn packet_quotes_evidence_and_reproduction() {
-        let store = project(&[
-            (
-                "src/shop.gleam",
-                "pub type Customer {\n  Customer(name: String, tier: Int)\n}\n\npub const customers = [Customer(\"Grace\", 2), Customer(\"Ada\", 1)]\n\n/// The price after the tier discount.\npub fn price(c: Customer, cents: Int) -> Int {\n  cents - c.tier * 100\n}\n",
-            ),
-            (
-                "test/shop_test.gleam",
-                "import shop\n\npub fn price_test() {\n  let assert [grace, ..] = shop.customers\n  assert shop.price(grace, 1000) == 800\n}\n",
-            ),
-        ]);
-        let root = &store.root;
-        let out = store.session_task("Grace (tier 2) was charged the wrong price.").unwrap();
-        assert!(
-            out.contains(
-                "-- shop.customers\npub const customers = [Customer(\"Grace\", 2), Customer(\"Ada\", 1)]\n  > Customer(\"Grace\", 2)\n"
-            ),
-            "{out}"
-        );
-        assert!(out.contains("To reproduce the task's case: `probe --from shop_test.price_test --trace shop.price`"), "{out}");
-        assert!(!out.contains("Project instructions"));
-        // The project's AGENTS.md comes first in both orientations, cut at a whole line (D-45).
-        fs::write(root.join("AGENTS.md"), "Prices are in cents.\n").unwrap();
-        for out in [store.session_task("Grace").unwrap(), store.session(&[]).unwrap()] {
-            assert!(out.starts_with("Project instructions (AGENTS.md") && out.contains("):\nPrices are in cents.\n\n"), "{out}");
-        }
-        fs::write(root.join("AGENTS.md"), "a line of forty bytes, give or take ok.\n".repeat(250)).unwrap();
-        let out = store.session(&[]).unwrap();
-        assert!(out.contains("ok.\n… `read AGENTS.md --lines 201..` for the rest\n"), "{out}");
-    }
-    /// D-145: every session start ends with a first call to send.
-    #[test]
-    fn session_start_ends_with_a_first_call() {
-        let store = calc_project();
-        let next = "\nNext: read what the change needs in one call, one command per line: ";
-        let out = store.session(&[]).unwrap();
-        assert!(out.ends_with(&format!("{next}for example `inspect checkout.pay payments.capture --context`.\n")), "{out}");
-        // With --task, the call reads the top-ranked symbols.
-        let out = store.session_task("Make calc.add handle overflow").unwrap();
-        let last = out.rsplit_once(next).map(|(_, l)| l).unwrap_or_default();
-        assert!(last.starts_with("`inspect calc.add ") && last.ends_with(" --context`.\n") && last.lines().count() == 1, "{out}");
-        // A project of plain files reads with grep and read, with or without --task.
-        fs::remove_file(store.root.join("gleam.toml")).unwrap();
-        // the language is chosen when a command opens the store
-        let store = Store::at(&store.root).unwrap();
-        let plain = format!("{next}for example `grep <text> --in <path>` and `read <path> --lines a..b`.\n");
-        for out in [store.session(&[]).unwrap(), store.session_task("calc.add").unwrap()] {
-            assert!(out.contains("plain files") && out.ends_with(&plain), "{out}");
-        }
-    }
-    /// D-151: session start shows whole open work records within a cap and
-    /// says how to read the rest; `work list` shows them all.
-    #[test]
-    fn session_start_caps_the_open_work_records() {
-        let store = calc_project();
-        store.work_add("Short record about calc.add").unwrap();
-        let long = "x".repeat(WORK_CAP);
-        store.work_add(&long).unwrap();
-        let out = store.session(&[]).unwrap();
-        assert!(out.contains("#1\nShort record about calc.add\n") && !out.contains(&long), "{out}");
-        assert!(out.contains("1 of 2 open work records left out to fit the reply's size limit; `work list` shows them all.\n"), "{out}");
-        assert!(out.contains("== Context of the symbols the work record names =="), "the shown record's symbols: {out}");
-        let all = store.work_list().unwrap();
-        assert!(all.contains(&long) && !all.contains("left out"), "{all}");
-    }
-    /// D-151: the board's call names the task, so a task scoped to this
-    /// project and another lists both, outside any run's environment.
-    #[test]
-    fn a_task_session_names_the_projects_of_its_task() {
-        let root = testing::Scratch::new().with(&[
-            ("solace.toml", "projects = [\"a\", \"b\"]\n"),
-            ("a/gleam.toml", "name = \"alpha\"\nversion = \"1.0.0\"\n"),
-            ("a/src/app.gleam", "pub fn one() -> Int {\n  1\n}\n"),
-            ("b/gleam.toml", "name = \"beta\"\nversion = \"1.0.0\"\n"),
-            ("b/src/plan.gleam", "pub fn answer() -> Int {\n  42\n}\n"),
-        ]);
-        for d in ["a", "b"] {
-            import(&root.join(d)).unwrap();
-        }
-        let a = Store::at(&root.join("a")).unwrap();
-        board::open(&a.root).unwrap();
-        let t = board::api(&a.root, "POST", "/tasks", json!({"title":"Answer"})).unwrap();
-        tasks::update(&a.root, t["id"].as_str().unwrap(), |t| {
-            t["scope"] = json!(["a", "b"]);
-            Ok(())
-        })
-        .unwrap();
-        let out = a.task_session("Change plan.answer", t["id"].as_str(), "").unwrap();
-        assert!(out.contains("This task can change: a (alpha), b (beta).") && out.contains("-- plan.answer (b)"), "{out}");
-        assert!(out.contains("task done"), "a board run's reference: {out}");
-        let out = a.task_session("Change plan.answer", None, "").unwrap();
-        assert!(out.contains("Other projects under this Solace root (read only): b (beta).") && !out.contains("task done"), "{out}");
-    }
-    /// D-145: a strategy run gets no workflow, so no first call.
-    #[test]
-    fn a_strategy_run_gets_no_first_call() {
-        assert_eq!(next_call("`read a`", true), "");
-        assert_eq!(next_call("`read a`", false), "\nNext: read what the change needs in one call, one command per line: `read a`.\n");
-    }
-
-    /// A whole module replaces every symbol it holds, and may not drop one;
-    /// `--imports` replaces only the header.
-    #[test]
-    fn whole_module_and_imports_submit() {
-        let store = calc_project();
-        let file = store.root.join("src/calc.gleam");
-        let module = fs::read_to_string(&file).unwrap().replace("a + b", "b + a");
-        let out = store.submit(Target::Module("calc"), &module).unwrap();
-        assert_eq!(out, "Note: calc: changed add; added none\nSaved calc.\nThe project type-checks.\n");
-        assert!(fs::read_to_string(&file).unwrap().contains("b + a"));
-        let without_three = module.split("pub fn three").next().unwrap();
-        assert!(store.submit(Target::Module("calc"), without_three).unwrap_err().0.contains("E0102 the module text leaves out: three"));
-        assert!(store.submit(Target::Module("calc"), &format!("{module}\npub fn one() {{ 1 }}")).unwrap_err().0.starts_with("E0103"));
-        // A rejected module leaves the stored code, and its file, as they were.
-        let before = fs::read_to_string(&file).unwrap();
-        let err = store.submit(Target::Module("calc"), &module.replace("b + a", "b +. a")).unwrap_err().0;
-        assert!(err.starts_with("Not saved: the submitted text has errors."), "{err}");
-        assert_eq!(fs::read_to_string(&file).unwrap(), before);
-        store.submit_symbols(None, Some("other"), "pub fn x() { 1 }").unwrap();
-        let out = store.submit(Target::Imports("calc"), "//// Arithmetic.\nimport other").unwrap();
-        assert!(out.starts_with("Saved calc imports."), "{out}");
-        let text = fs::read_to_string(&file).unwrap();
-        assert!(text.starts_with("//// Arithmetic.\n\nimport other\n"), "{text}");
-        assert!(store.submit(Target::Imports("calc"), "pub fn x() { 1 }").unwrap_err().0.starts_with("E0101"));
-        assert!(store.submit(Target::Imports("nope"), "").unwrap_err().0.starts_with("E1003"));
-    }
-
-    /// D-44: `impact` follows a symbol's data to what uses it.
-    #[test]
-    fn impact_names_what_a_symbol_reaches() {
-        let store = calc_project();
-        let out = store.impact(&["calc.add"], BUDGET).unwrap();
-        assert!(out.starts_with("calc.add reaches 3 uses, nearest first:"), "{out}");
-        assert!(out.contains("calc.one") && out.contains("calc.two") && out.contains("calc.three"), "{out}");
-        assert!(store.impact(&[], BUDGET).unwrap().starts_with("Tests haven't passed in full yet"));
-        assert!(store.impact(&["calc.nope"], BUDGET).unwrap_err().0.starts_with("E1001"));
-    }
-
-    /// D-12: work records last between sessions; a session start shows the
-    /// open ones with the symbols they name.
-    #[test]
-    fn work_records_open_and_close() {
-        let store = calc_project();
-        assert_eq!(store.work_add("Make calc.add handle overflow").unwrap(), "Work record #1 added.\n");
-        let list = store.work_list().unwrap();
-        assert!(list.contains("Open work records:\n#1\nMake calc.add handle overflow\n"), "{list}");
-        let session = store.session(&[]).unwrap();
-        assert!(session.contains("== Context of the symbols the work record names ==") && session.contains("pub fn add("), "{session}");
-        assert_eq!(store.work_done("#1").unwrap(), "Work record #1 closed.\n");
-        assert!(!store.work_list().unwrap().contains("#1"));
-        assert_eq!(store.work_done("9").unwrap_err().0, "No work record #9.");
-        assert_eq!(store.work_done("x").unwrap_err().1, 2);
-    }
-
-    #[test]
-    fn delete_refuses_a_used_symbol_and_names_are_unambiguous() {
-        let store = calc_project();
-        let err = store.delete("calc.add").unwrap_err().0;
-        assert!(err.starts_with("E5001 calc.add is still used by:") && err.contains("calc.three"), "{err}");
-        assert!(store.delete("calc.one").unwrap().starts_with("Deleted calc.one."));
-        assert!(store.resolve(&store.index().unwrap(), "calc.one").is_err());
-        store.submit_symbols(None, Some("other"), "pub fn two() -> Int { 2 }").unwrap();
-        let err = store.resolve(&store.index().unwrap(), "two").unwrap_err().0;
-        assert!(err.starts_with("E1002 ambiguous name: two") && err.contains("calc.two") && err.contains("other.two"), "{err}");
-        // D-102: `delete <name>...` deletes each named symbol in order; a name
-        // used outside the list stops the whole list, so nothing is deleted.
-        let store = calc_project();
-        let err = store.delete_all(&["calc.add", "calc.one"], usize::MAX).unwrap_err().0;
-        assert!(err.starts_with("E5001 calc.add is still used by:") && err.contains("calc.three") && !err.contains("calc.one"), "{err}");
-        assert!(store.resolve(&store.index().unwrap(), "calc.one").is_ok());
-        let out = store.delete_all(&["calc.one", "calc.two"], usize::MAX).unwrap();
-        assert!(out.starts_with("Deleted calc.one.\nDeleted calc.two."), "{out}");
-        // A helper goes with its last caller in one list.
-        let out = store.delete_all(&["calc.add", "calc.three"], usize::MAX).unwrap();
-        assert!(out.starts_with("Deleted calc.add.\nDeleted calc.three"), "{out}");
-    }
-
-    fn module_paths(s: &Store) -> Vec<String> {
-        s.index().unwrap().modules.into_iter().map(|m| m.path).collect()
-    }
-
-    /// Deleting a module's last symbol retires the module, and its file and
-    /// emptied folder go with it; a module another one imports stays.
-    #[test]
-    fn deleting_the_last_symbol_retires_the_module_and_its_file() {
-        let store = calc_project();
-        store.submit_symbols(None, Some("other/deep"), "pub fn four() -> Int { 4 }").unwrap();
-        assert!(store.root.join("src/other/deep.gleam").exists());
-        let out = store.delete("other/deep.four").unwrap();
-        assert!(out.starts_with("Deleted other/deep.four; module other/deep retired."), "{out}");
-        assert!(!module_paths(&store).contains(&"other/deep".to_string()));
-        assert!(!store.root.join("src/other").exists());
-        let written = fs::read_to_string(store.root.join(".solace/written")).unwrap();
-        assert!(!written.contains("src/other/deep.gleam"), "{written}");
-        store.submit_symbols(None, Some("lib"), "pub fn five() -> Int { 5 }").unwrap();
-        store.set_header("calc", "import lib\n").unwrap();
-        assert!(store.delete("lib.five").unwrap().starts_with("Deleted lib.five.\n"));
-        assert!(module_paths(&store).contains(&"lib".to_string()) && store.root.join("src/lib.gleam").exists());
-    }
-
-    /// Prune keeps a file edited since Solace wrote it, for `absorb` to read
-    /// back in and report; a rolled-back change leaves no file behind.
-    #[test]
-    fn prune_keeps_an_edited_file_and_a_rollback_leaves_none() {
-        let store = calc_project();
-        store.submit_symbols(None, Some("other"), "pub fn four() -> Int { 4 }").unwrap();
-        let file = store.root.join("src/other.gleam");
-        fs::write(&file, "pub fn four() -> Int {\n  44\n}\n").unwrap();
-        let ix = store.index().unwrap();
-        store.retire(&ix.syms[store.resolve(&ix, "other.four").unwrap()].id, "").unwrap();
-        store.db.execute("DELETE FROM modules WHERE path = 'other'", []).unwrap();
-        store.materialize(&store.index().unwrap()).unwrap();
-        assert!(file.exists());
-        let note = outside::absorb(&store, outside::Mode::Notice).unwrap();
-        assert!(note.contains("other.four"), "{note}");
-        assert!(module_paths(&store).contains(&"other".to_string()));
-        let out = store.transaction(&[], || {
-            store.submit_symbols(None, Some("temp"), "pub fn t() -> Int { 1 }")?;
-            fail("stop")
-        });
-        assert!(out.is_err() && !store.root.join("src/temp.gleam").exists());
-    }
-
-    /// `gleam build` keeps a deleted module's `.beam` and artefacts; prune
-    /// removes them with its file.
-    #[test]
-    fn prune_drops_the_build_output_of_a_retired_module() {
-        let store = calc_project();
-        store.submit_symbols(None, Some("other"), "pub fn four() -> Int { 4 }").unwrap();
-        assert!(store.tool(&["build"]).unwrap().0);
-        let left = |s: &Store| {
-            let mut out = vec![];
-            let mut todo = vec![s.root.join("build/dev")];
-            while let Some(d) = todo.pop() {
-                for e in fs::read_dir(&d).into_iter().flatten().flatten() {
-                    let p = e.path();
-                    if p.is_dir() {
-                        todo.push(p);
-                    } else if p.file_name().unwrap().to_string_lossy().starts_with("other.") {
-                        out.push(p.strip_prefix(&s.root).unwrap().to_string_lossy().to_string());
-                    }
-                }
-            }
-            out
-        };
-        assert!(!left(&store).is_empty());
-        store.delete("other.four").unwrap();
-        assert!(store.tool(&["build"]).unwrap().0);
-        assert!(left(&store).is_empty(), "{:?}", left(&store));
-    }
-
-    /// An unqualified type or constructor the module doesn't import is imported
-    /// for it: from the standard library, or the one project module that has it.
-    #[test]
-    fn missing_type_imports_are_added() {
-        let store = Scratch::new()
-            .with(&[
-                ("src/shape.gleam", "pub type Shape {\n  Square(Int)\n}\n"),
-                ("src/app.gleam", "import shape\n\npub fn main() {\n  1\n}\n"),
-            ])
-            .with_packages()
-            .import();
-        let out = store.submit_symbols(None, Some("app"), "pub fn unit() -> Shape { Square(1) }").unwrap();
-        assert!(
-            out.contains("Note: imported `type Shape` from shape in app") && out.contains("Note: imported `Square` from shape in app"),
-            "{out}"
-        );
-        let file = fs::read_to_string(store.root.join("src/app.gleam")).unwrap();
-        assert!(file.starts_with("import shape.{type Shape, Square}\n"), "{file}");
-        let out = store.submit_symbols(None, Some("app"), "pub fn none() -> Option(Int) { None }").unwrap();
-        assert!(out.contains("from gleam/option in app") && out.contains("type-checks"), "{out}");
-    }
-
-    #[test]
-    fn task_words() {
-        assert_eq!(
-            words("Add the TENOFF coupon to refundsByMonth in order_totals, 10 tests"),
-            ["tenoff", "coupon", "refund", "month", "order", "total"]
-        );
-    }
-}
+#[path = "main_tests.rs"]
+mod tests;

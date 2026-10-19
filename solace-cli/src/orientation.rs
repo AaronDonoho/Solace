@@ -36,16 +36,36 @@ pub fn view(root: &Path, v: &toml::Value, a: &[&str], budget: usize) -> Option<O
         i += 1;
     }
     let source = |op: &str| op.ends_with(".rs") || op.ends_with(".py");
-    if !ops.iter().any(|&op| op.contains("::") || source(op)) {
+    // An operand is a file only when its path part, before `::`, is a `.rs` or
+    // `.py` file; any other name in a Rust project is the store's (D-158).
+    let rust = crate::language::is_rust(root);
+    let file = |op: &str| match rust {
+        false => op.contains("::") || source(op),
+        true => {
+            let path = op.split_once("::").map_or(op, |(p, _)| p);
+            path.ends_with(".rs") || path.ends_with(".py")
+        }
+    };
+    if !ops.iter().any(|&op| file(op)) {
         return None;
     }
-    let watched = match lockdown::watched_paths(root, v) {
+    let mut watched = match lockdown::watched_paths(root, v) {
         Ok(w) => w,
         Err(e) => return Some(Err(e)),
     };
+    // A Rust project's `.rs` files are graph, and `view <file>` reads them
+    // like any other file (D-121, D-158).
+    if rust && let Ok(graph) = lockdown::graph_paths(root, v) {
+        watched.extend(graph);
+    }
     let gleam = crate::language::detect(root).is_some();
-    let files: Vec<bool> =
-        ops.iter().map(|&op| op.contains("::") || source(op) && (!gleam || !matching(&watched, op).is_empty())).collect();
+    let files: Vec<bool> = ops
+        .iter()
+        .map(|&op| match rust {
+            true => file(op),
+            false => op.contains("::") || source(op) && (!gleam || !matching(&watched, op).is_empty()),
+        })
+        .collect();
     if !files.contains(&true) {
         return None;
     }
@@ -213,6 +233,28 @@ fn signature(lines: &[&str], kind: &str) -> String {
         sig.truncate(p);
     }
     cut(sig.trim_end_matches([' ', '{', ';', ',']), 140)
+}
+
+/// The signature of a Rust item as the store keeps its text: its leading
+/// comments and attributes are dropped, then `signature` reads the head (D-158).
+pub fn rust_signature(text: &str, kind: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut at = 0;
+    while at < lines.len() {
+        let t = lines[at].trim_start();
+        if t.starts_with("//") {
+            at += 1;
+        } else if t.starts_with("#[") || t.starts_with("#!") {
+            // A wrapped attribute runs to the line that closes it.
+            while at < lines.len() && !lines[at].contains(']') {
+                at += 1;
+            }
+            at += 1;
+        } else {
+            break;
+        }
+    }
+    signature(&lines[at.min(lines.len())..], kind)
 }
 
 fn rust(text: &str) -> Result<Vec<Item>, Failure> {

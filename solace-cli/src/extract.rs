@@ -682,9 +682,11 @@ fn merged(dep: &Index, source: &Index) -> Index {
         dep.modules
             .iter()
             .chain(&source.modules)
-            .map(|m| ModuleRow { path: m.path.clone(), dir: m.dir.clone(), header: m.header.clone(), file: m.file.clone() })
+            .map(|m| {
+                ModuleRow { path: m.path.clone(), dir: m.dir.clone(), header: m.header.clone(), file: m.file.clone(), owns_dir: m.owns_dir }
+            })
             .collect();
-    Index::build(source.lang, syms, modules)
+    Index::build(source.lang, syms, modules, false)
 }
 
 /// `body` in a transaction of each store, the first outermost; the last one
