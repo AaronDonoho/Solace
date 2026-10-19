@@ -1386,6 +1386,17 @@ fn import(root: &Path) -> Out {
 /// `has_cargo` (D-158 point 4); without it, the import goes ahead and says so.
 fn import_with(root: &Path, has_cargo: bool) -> Out {
     let mut out = String::new();
+    let dir = root.join(".solace");
+    let stored = dir.join("store.db").exists();
+    // A new Cargo package is read whole first, so a refused one leaves no settings or store behind.
+    let rust = if stored {
+        None
+    } else {
+        match language::detect(root) {
+            None if root.join("Cargo.toml").exists() => Some(language::rust::package(root)?),
+            _ => None,
+        }
+    };
     // Fetch before any write, so a failed fetch leaves the project as it was.
     let dependencies = dependencies(root, has_cargo)?;
     match fs::OpenOptions::new().write(true).create_new(true).open(root.join("solace.toml")) {
@@ -1403,17 +1414,11 @@ fn import_with(root: &Path, has_cargo: bool) -> Out {
         }
         Err(e) => return Err(e.into()),
     }
-    let dir = root.join(".solace");
-    if dir.join("store.db").exists() {
+    if stored {
         out += "This project already has a store (.solace/store.db); existing symbols were preserved.\n";
         out += &dependencies;
         return Ok(out);
     }
-    // A Cargo package is read whole first, so a refused one leaves no store behind.
-    let rust = match language::detect(root) {
-        None if root.join("Cargo.toml").exists() => Some(language::rust::package(root)?),
-        _ => None,
-    };
     fs::create_dir_all(&dir)?;
     let db = Connection::open(dir.join("store.db"))?;
     db.busy_timeout(Duration::from_secs(10))?;

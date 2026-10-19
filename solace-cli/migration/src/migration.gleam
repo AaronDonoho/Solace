@@ -845,9 +845,15 @@ pub type Project {
   Project(dir: String, label: String, name: String)
 }
 
-/// A Gleam project found in the root's folder.
+/// A project found in the root's folder: Gleam (migrated) or Rust (added in place).
 pub type Found {
-  Found(dir: String, name: String, imported: Bool, member: Bool)
+  Found(
+    dir: String,
+    name: String,
+    imported: Bool,
+    member: Bool,
+    language: String,
+  )
 }
 
 pub const no_projects = Projects(False, [], [], "", "", "", "erlang", None)
@@ -892,7 +898,9 @@ fn update_projects(p: Projects, msg: Msg) -> #(Projects, Effect(Msg)) {
     AddProject(dir) -> #(
       p,
       case
-        list.any(p.found, fn(f) { f.dir == dir && f.imported && !f.member })
+        list.any(p.found, fn(f) {
+          f.dir == dir && !f.member && { f.imported || f.language == "rust" }
+        })
       {
         True ->
           projects_request("/projects", "POST", [#("dir", json.string(dir))])
@@ -985,16 +993,17 @@ fn projects_decoder() -> decode.Decoder(#(List(Project), List(Found))) {
     use name <- decode.field("name", decode.string)
     use imported <- decode.field("imported", decode.bool)
     use member <- decode.field("member", decode.bool)
-    decode.success(Found(dir, name, imported, member))
+    use language <- decode.optional_field("language", "gleam", decode.string)
+    decode.success(Found(dir, name, imported, member, language))
   }
   use projects <- decode.field("projects", decode.list(project))
   use found <- decode.optional_field("found", [], decode.list(found))
   decode.success(#(projects, found))
 }
 
-/// The root's projects: remove one, add one found in the folder, or create
-/// a new Gleam project. Existing code without Solace is brought in by the
-/// section below.
+/// The root's projects: remove one, add a Gleam or Rust project found in the
+/// folder, or create a new Gleam project. Existing Gleam code is brought in
+/// by the section below; a Rust package is added in place.
 fn projects_view(p: Projects) -> Element(Msg) {
   case p.listed {
     False -> h.text("")
@@ -1049,11 +1058,19 @@ fn projects_view(p: Projects) -> Element(Msg) {
                       True ->
                         button(solace_task.ui_label("add"), AddProject(f.dir))
                       False ->
-                        h.small([], [
-                          h.text(
-                            "Existing code is brought in under Bring in an existing project, below.",
-                          ),
-                        ])
+                        case f.language {
+                          "rust" ->
+                            button(
+                              solace_task.ui_label("add"),
+                              AddProject(f.dir),
+                            )
+                          _ ->
+                            h.small([], [
+                              h.text(
+                                "Existing code is brought in under Bring in an existing project, below.",
+                              ),
+                            ])
+                        }
                     },
                   ])
                 }),

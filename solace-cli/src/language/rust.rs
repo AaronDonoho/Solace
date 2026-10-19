@@ -6,7 +6,7 @@
 use crate::Failure;
 use crate::language::Kind;
 use proc_macro2::Span;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::Range;
 use std::path::Path;
@@ -498,13 +498,18 @@ pub fn package(root: &Path) -> Result<Vec<(String, String, File)>, Failure> {
         _ => return Err(Failure(format!("This package has {} crates ({}); Solace holds a package of one crate.", crates.len(), crates.join(", ")), 1)),
     };
     let mut out = vec![];
-    walk(root, main, "crate".into(), true, &mut out)?;
+    let mut refused = vec![];
+    let mut seen = HashSet::new();
+    walk(root, main, "crate".into(), true, &mut seen, &mut out, &mut refused)?;
     for name in entries(root, "tests")?.into_iter().filter(|n| n.ends_with(".rs") && root.join("tests").join(n).is_file()) {
         // A test crate's modules take the `integration::` prefix (D-169), so a helper shared by
         // two test crates (`tests/common/mod.rs`) holds one name and never clashes with a library
         // module of the same name, nor with the crate's own unit-test module `tests`.
         let module = format!("integration::{}", name.trim_end_matches(".rs"));
-        walk(root, format!("tests/{name}"), module, true, &mut out)?;
+        walk(root, format!("tests/{name}"), module, true, &mut seen, &mut out, &mut refused)?;
+    }
+    if !refused.is_empty() {
+        return Err(Failure(refused.join("\n"), 1));
     }
     let mut modules = HashMap::new();
     for (path, module, _) in &out {
@@ -597,7 +602,15 @@ fn entries(root: &Path, dir: &str) -> Result<Vec<String>, Failure> {
 /// Splits file `rel` as `module`, then the files its `mod x;` declarations name.
 /// `owns_dir`: a crate root, `mod.rs` or `#[path]` file, whose modules are beside
 /// it rather than in a folder named after it.
-fn walk(root: &Path, rel: String, module: String, owns_dir: bool, out: &mut Vec<(String, String, File)>) -> Result<(), Failure> {
+fn walk(
+    root: &Path,
+    rel: String,
+    module: String,
+    owns_dir: bool,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<(String, String, File)>,
+    refused: &mut Vec<String>,
+) -> Result<(), Failure> {
     if let Some((_, first, _)) = out.iter().find(|(p, ..)| *p == rel) {
         // Test crates share a helper (`tests/common/mod.rs`); it is held once, under the
         // name `integration::common` every test crate's `mod common;` gives it.
@@ -606,35 +619,42 @@ fn walk(root: &Path, rel: String, module: String, owns_dir: bool, out: &mut Vec<
         }
         return Err(Failure(format!("{rel} is two modules (`{first}`, `{module}`); Solace holds a file as one module for now."), 1));
     }
+    // A refused file never reaches `out`; `seen` still keeps a shared test helper from being read again.
+    if !seen.insert(rel.clone()) {
+        return Ok(());
+    }
     let text = fs::read_to_string(root.join(&rel)).map_err(|e| Failure(format!("{rel}: {e}"), 1))?;
     let mut file = split(&text, &module).map_err(|e| Failure(format!("{rel}: {}", e.0), 1))?;
-    if !file.refusals.is_empty() {
-        let lines: Vec<String> = file.refusals.iter().map(|r| format!("{rel}: line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
-        return Err(Failure(lines.join("\n"), 1));
-    }
-    if let Some(name) = inline_file_mod(&text, &file.items) {
-        return Err(Failure(format!("{rel}: `{name}` is a `mod x;` inside an inline `mod {{ … }}`; Solace doesn't hold one there yet."), 1));
+    let ok = file.refusals.is_empty();
+    if ok {
+        if let Some(name) = inline_file_mod(&text, &file.items) {
+            return Err(Failure(format!("{rel}: `{name}` is a `mod x;` inside an inline `mod {{ … }}`; Solace doesn't hold one there yet."), 1));
+        }
+    } else {
+        refused.extend(file.refusals.iter().map(|r| format!("{rel}: line {} (`{}`): {}", r.line, r.quote, r.message)));
     }
     let path = Path::new(&rel);
     let dir = path.parent().unwrap().to_string_lossy().replace('\\', "/");
     let base = child_dir(&rel, owns_dir);
     let mods = file.mods.clone();
-    file.owns_dir = owns_dir;
-    out.push((rel.clone(), module.clone(), file));
+    if ok {
+        file.owns_dir = owns_dir;
+        out.push((rel.clone(), module.clone(), file));
+    }
     // A test crate's own `mod x;` is `integration::x` (D-169), so every test crate that names
     // `tests/common/mod.rs` holds the same module name, and it never clashes with the
     // library module `common`. A library crate's own `mod x;` takes the bare name `x`.
     for (name, named) in mods {
         let child = child_module(&module, &rel, owns_dir, &name);
         if let Some(p) = named {
-            walk(root, format!("{dir}/{p}"), child, true, out)?;
+            walk(root, format!("{dir}/{p}"), child, true, seen, out, refused)?;
             continue;
         }
         let (flat, nested) = (child_file(&rel, owns_dir, &name), format!("{base}{name}/mod.rs"));
         if root.join(&flat).is_file() {
-            walk(root, flat, child, false, out)?;
+            walk(root, flat, child, false, seen, out, refused)?;
         } else if root.join(&nested).is_file() {
-            walk(root, nested, child, true, out)?;
+            walk(root, nested, child, true, seen, out, refused)?;
         } else {
             return Err(Failure(format!("{rel}: `mod {name};` has no file: neither {flat} nor {nested} exists."), 1));
         }

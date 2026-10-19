@@ -347,6 +347,23 @@ fn modules_solace_cant_hold_yet_fail_the_package_naming_their_files() {
     assert_eq!(inline, Err("src/main.rs: `a::b` is a `mod x;` inside an inline `mod { … }`; Solace doesn't hold one there yet.".to_string()));
     let refused = package_of(&[("Cargo.toml", CARGO), ("src/main.rs", "fn main() {}\n\nlazy_static! {\n    static ref X: u8 = 1;\n}\n")]).unwrap_err();
     assert!(refused.starts_with("src/main.rs: line 3 (`lazy_static! {`): Not saved: `lazy_static! { … }`"), "{refused}");
+    let every = package_of(&[
+        ("Cargo.toml", CARGO),
+        ("src/main.rs", "mod one;\nmod two;\n"),
+        ("src/one.rs", "lazy_static! {\n    static ref A: u8 = 1;\n}\n"),
+        ("src/two.rs", "lazy_static! {\n    static ref B: u8 = 1;\n}\n"),
+    ])
+    .unwrap_err();
+    assert!(every.contains("src/one.rs: line 1") && every.contains("src/two.rs: line 1"), "{every}");
+    let shared = package_of(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", ""),
+        ("tests/a.rs", "mod common;\n"),
+        ("tests/b.rs", "mod common;\n"),
+        ("tests/common/mod.rs", "lazy_static! {\n    static ref X: u8 = 1;\n}\n"),
+    ])
+    .unwrap_err();
+    assert_eq!(shared.matches("tests/common/mod.rs: line 1").count(), 1, "{shared}");
     let syntax = package_of(&[("Cargo.toml", CARGO), ("src/main.rs", "fn b( {}\n")]).unwrap_err();
     assert!(syntax.starts_with("src/main.rs: line 1: "), "{syntax}");
 }

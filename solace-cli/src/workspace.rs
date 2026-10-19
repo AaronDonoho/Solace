@@ -4,7 +4,7 @@
 //! is a project of plain files (D-60).
 //!
 //! A root is explicit when its `solace.toml` lists `projects`, or when it has a
-//! `solace.toml` and no `gleam.toml` (a folder of projects). A project with no
+//! `solace.toml` and no project code (a folder of projects). A project with no
 //! root above it is its own root, with itself as its only project.
 
 use super::*;
@@ -23,9 +23,19 @@ fn listing(dir: &Path) -> Option<toml::Value> {
     v.get("projects").cloned()
 }
 
+/// Whether `dir` holds code of its own: Gleam or a Cargo package (D-158).
+fn has_code(dir: &Path) -> bool {
+    crate::language::detect(dir).is_some()
+        || (crate::language::is_rust(dir)
+            && fs::read_to_string(dir.join("Cargo.toml"))
+                .ok()
+                .and_then(|t| t.parse::<toml::Value>().ok())
+                .is_some_and(|v| v.get("package").is_some()))
+}
+
 /// Whether `dir` is an explicit root.
 pub fn is_root(dir: &Path) -> bool {
-    dir.join("solace.toml").exists() && (crate::language::detect(dir).is_none() || listing(dir).is_some())
+    dir.join("solace.toml").exists() && (!has_code(dir) || listing(dir).is_some())
 }
 
 /// The Solace root that holds `start`: the one explicit root among its
@@ -89,7 +99,7 @@ fn listed(root: &Path) -> Result<Vec<String>, Failure> {
         Err(e) => return Err(e.into()),
     };
     let v: toml::Value = text.parse().or_else(invalid)?;
-    if crate::language::detect(root).is_none()
+    if !has_code(root)
         && !has_store(root)
         && let Some(k) = v.as_table().unwrap().keys().find(|k| *k != "projects")
     {
@@ -202,16 +212,23 @@ fn save(root: &Path, dirs: &[String]) -> Result<(), Failure> {
         Err(e) => return Err(e.into()),
     };
     let new = with_projects(&text, dirs);
-    if crate::language::detect(root).is_some() || has_store(root) {
+    if has_code(root) || has_store(root) {
         lockdown::parse_settings(&new)?;
     }
     fs::write(&file, &new)?;
     Ok(())
 }
 
-/// The package name in a project's `gleam.toml`.
+/// The package name in a project's `gleam.toml`, or a Cargo package's name.
 pub fn name(dir: &Path) -> String {
-    field(dir, "name").unwrap_or_default()
+    field(dir, "name")
+        .or_else(|| {
+            fs::read_to_string(dir.join("Cargo.toml"))
+                .ok()
+                .and_then(|t| t.parse::<toml::Value>().ok())
+                .and_then(|v| v.get("package").and_then(|p| p.get("name")).and_then(|n| n.as_str()).map(String::from))
+        })
+        .unwrap_or_default()
 }
 
 /// The compile target in a project's `gleam.toml` (Gleam's default is
@@ -231,47 +248,68 @@ fn field(dir: &Path, key: &str) -> Option<String> {
         .and_then(|v| v.get(key).and_then(|n| n.as_str()).map(String::from))
 }
 
-/// Gleam projects in the root (itself as `.`) and below, skipping build
-/// output, dependencies, ignored files and symlinks: `{dir, name, imported, member}`.
+/// Gleam projects and Cargo packages in the root (itself as `.`) and below,
+/// skipping build output, dependencies, ignored files and symlinks:
+/// `{dir, name, imported, member, language}`. A Cargo package that is already a
+/// project is not offered again, but one with a store that was removed still is.
 pub fn found(root: &Path) -> Result<Vec<Value>, Failure> {
     let members = members(root)?;
     let mut out = vec![];
     // ponytail: depth 5 keeps a stray serve in a home folder quick; raise it if real repos nest deeper.
     let walk = ignore::WalkBuilder::new(root)
         .max_depth(Some(5))
-        .filter_entry(|e| !matches!(e.file_name().to_str(), Some("build" | "node_modules" | ".solace")))
+        .filter_entry(|e| !matches!(e.file_name().to_str(), Some("build" | "node_modules" | ".solace" | "target")))
         .build();
     for e in walk.flatten() {
-        if e.file_name() != "gleam.toml" || !e.file_type().is_some_and(|t| t.is_file()) {
+        if !e.file_type().is_some_and(|t| t.is_file()) {
             continue;
         }
+        let language = match e.file_name().to_str() {
+            Some("gleam.toml") => "gleam",
+            Some("Cargo.toml") => "rust",
+            _ => continue,
+        };
         let dir = e.path().parent().unwrap();
+        if language == "rust" {
+            let package = fs::read_to_string(e.path()).ok().and_then(|t| t.parse::<toml::Value>().ok());
+            if !package.is_some_and(|v| v.get("package").is_some()) {
+                continue;
+            }
+        }
         let rel = dir.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
         let rel = if rel.is_empty() { ".".to_string() } else { rel };
-        out.push(json!({"dir":rel,"name":name(dir),"imported":has_store(dir),"member":members.contains(&rel)}));
+        let member = members.contains(&rel);
+        if language == "rust" && has_store(dir) && member {
+            continue;
+        }
+        out.push(json!({"dir":rel,"name":name(dir),"imported":has_store(dir),"member":member,"language":language}));
     }
     out.sort_by(|a, b| a["dir"].as_str().cmp(&b["dir"].as_str()));
     Ok(out)
 }
 
-/// Whether `inner` lies in `outer`'s Gleam source, where a nested project
-/// would be read as modules.
-fn in_source(outer: &str, inner: &str) -> bool {
+/// Whether `inner` lies in `outer`'s source, where a nested project would be
+/// read as modules. A Rust package's integration tests are in `tests/`; a
+/// Gleam project's are in `test/`.
+fn in_source(root: &Path, outer: &str, inner: &str) -> bool {
     let prefix = if outer == "." { String::new() } else { format!("{outer}/") };
-    ["src", "test"].iter().any(|s| inner.starts_with(&format!("{prefix}{s}/")))
+    let dirs = if crate::language::is_rust(&root.join(outer)) { ["src", "tests"] } else { ["src", "test"] };
+    dirs.iter().any(|s| inner.starts_with(&format!("{prefix}{s}/")))
 }
 
-/// Lists the project at `dir` again, keeping its store. Existing code without
-/// a store comes in by migration (D-59), never in place.
+/// Lists the project at `dir` again, keeping its store. Existing Gleam code
+/// without a store comes in by migration (D-59); a Cargo package is set up in
+/// place (D-178).
 pub fn add(root: &Path, dir: &str) -> Out {
-    if !has_store(&scope::path(root, dir)) {
+    let path = scope::path(root, dir);
+    if !has_store(&path) && !crate::language::is_rust(&path) {
         return fail(format!("{dir} isn't set up. Existing code comes into Solace by migrating it (Migrate this project), not in place."));
     }
     setup(root, dir)
 }
 
 /// Sets up the project at `dir` (keeping an existing store) and lists it:
-/// for a new project, and for a migration's copy.
+/// for a new project, a Cargo package added in place, and a migration's copy.
 pub fn setup(root: &Path, dir: &str) -> Out {
     if dir == "." {
         return Ok(format!("{}: {}", root.display(), import(root)?));
@@ -284,8 +322,8 @@ pub fn setup(root: &Path, dir: &str) -> Out {
         return fail(format!("{dir} is already a project of this root."));
     }
     let path = root.join(dir);
-    if !path.join("gleam.toml").exists() {
-        return fail(format!("{dir} has no gleam.toml."));
+    if !path.join("gleam.toml").exists() && !crate::language::is_rust(&path) {
+        return fail(format!("{dir} has no gleam.toml or Cargo.toml."));
     }
     if is_root(&path) {
         return fail(format!("{dir} lists projects of its own; one root holds all its projects."));
@@ -294,8 +332,8 @@ pub fn setup(root: &Path, dir: &str) -> Out {
     if root.join("gleam.toml").exists() && has_store(root) {
         all.push(".".into());
     }
-    if let Some(d) = all.iter().find(|d| in_source(d, dir) || in_source(dir, d)) {
-        return fail(format!("{dir} and {d} would overlap: a project can't sit inside another's src/ or test/."));
+    if let Some(d) = all.iter().find(|d| in_source(root, d, dir) || in_source(root, dir, d)) {
+        return fail(format!("{dir} and {d} would overlap: a project can't sit inside another's src/, test/ or tests/."));
     }
     let out = import(&path)?;
     dirs.push(dir.to_string());
@@ -416,6 +454,12 @@ mod tests {
         fs::write(root.join(d).join("gleam.toml"), format!("name = \"{}\"\n", d.replace(['/', ' ', '.'], "_"))).unwrap();
     }
 
+    fn rust_project(root: &Path, d: &str, name: &str) {
+        fs::create_dir_all(root.join(d).join("src")).unwrap();
+        fs::write(root.join(d).join("Cargo.toml"), format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n")).unwrap();
+        fs::write(root.join(d).join("src/main.rs"), "fn main() {}\n").unwrap();
+    }
+
     #[test]
     fn members_are_folders_below_the_root() {
         let root = Scratch::new();
@@ -459,6 +503,54 @@ mod tests {
         assert_eq!(dirs, ["a", "a/inner", "b"]);
         assert_eq!(f[2]["member"], true);
         assert_eq!(f[1]["name"], "a_inner");
+    }
+
+    #[test]
+    fn found_offers_cargo_packages_except_those_already_listed() {
+        let root = Scratch::new();
+        rust_project(&root, "pkg", "pkg");
+        rust_project(&root, "pkg/target/debug/ghost", "ghost");
+        fs::create_dir_all(root.join("workspace")).unwrap();
+        fs::write(root.join("workspace/Cargo.toml"), "[workspace]\nmembers = [\"a\"]\n").unwrap();
+        rust_project(&root, "stored", "stored");
+        fs::create_dir_all(root.join("stored/.solace")).unwrap();
+        fs::write(root.join("stored/.solace/store.db"), "").unwrap();
+        rust_project(&root, "listed", "listed");
+        fs::create_dir_all(root.join("listed/.solace")).unwrap();
+        fs::write(root.join("listed/.solace/store.db"), "").unwrap();
+        fs::write(root.join("solace.toml"), "projects = [\"listed\"]\n").unwrap();
+        let f = found(&root).unwrap();
+        let dirs: Vec<&str> = f.iter().map(|v| v["dir"].as_str().unwrap()).collect();
+        assert_eq!(dirs, ["pkg", "stored"]);
+        assert_eq!(f[0]["dir"], "pkg");
+        assert_eq!(f[0]["name"], "pkg");
+        assert_eq!(f[0]["imported"], false);
+        assert_eq!(f[0]["language"], "rust");
+        assert_eq!(f[1]["imported"], true);
+        assert_eq!(f[1]["member"], false);
+    }
+
+    #[test]
+    fn a_cargo_package_with_settings_is_not_a_root() {
+        let root = Scratch::new();
+        rust_project(&root, ".", "app");
+        fs::write(root.join("solace.toml"), "# settings\n").unwrap();
+        assert!(!is_root(&root));
+        fs::write(root.join("solace.toml"), "projects = []\n").unwrap();
+        assert!(is_root(&root));
+        // A workspace-only manifest is not project code.
+        fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"a\"]\n").unwrap();
+        fs::write(root.join("solace.toml"), "# settings\n").unwrap();
+        assert!(is_root(&root));
+    }
+
+    #[test]
+    fn a_rust_package_reads_src_and_tests_as_its_source() {
+        let root = Scratch::new();
+        rust_project(&root, "app", "app");
+        assert!(in_source(&root, "app", "app/src/x.rs"));
+        assert!(in_source(&root, "app", "app/tests/x.rs"));
+        assert!(!in_source(&root, "app", "app/test/x.rs"));
     }
 
     /// D-74: deleting a project's folder is refused unless the name is typed, the

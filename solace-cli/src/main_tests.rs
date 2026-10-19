@@ -555,6 +555,27 @@ use super::testing::*;
     }
 
     #[test]
+    fn a_refused_rust_package_creates_no_settings_or_store() {
+        let root = Scratch::new().with(&[
+            ("Cargo.toml", CARGO),
+            ("src/main.rs", "fn main() {}\n\nlazy_static! {\n    static ref X: u8 = 1;\n}\n"),
+        ]);
+        let err = import_with(&root, false).unwrap_err();
+        assert!(err.0.contains("src/main.rs: line 3") && err.0.contains("Not saved"), "{}", err.0);
+        assert!(!root.join("solace.toml").exists());
+        assert!(!root.join(".solace").exists());
+    }
+
+    #[test]
+    fn reimporting_a_stored_rust_package_keeps_it_even_if_a_file_is_now_refused() {
+        let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/main.rs", "fn main() {}\n")]);
+        import_with(&root, false).unwrap();
+        fs::write(root.join("src/main.rs"), "fn main() {}\n\nlazy_static! {\n    static ref X: u8 = 1;\n}\n").unwrap();
+        let out = import_with(&root, false).unwrap();
+        assert!(out.contains("existing symbols were preserved"), "{out}");
+    }
+
+    #[test]
     fn submit_new_creates_a_module() {
         let store = project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
         // Code with errors creates nothing.

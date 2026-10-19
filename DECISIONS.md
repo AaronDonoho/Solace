@@ -1067,3 +1067,10 @@ Why: `--offline` leaves an agent no command that can fill a missing cache, so th
 Amends D-158 point 4 and Spec 14 §1 (Aaron, board task "Rust symbol store and lockdown: Tech Debt", 2026-10-19). Part of the Rust symbol store and lockdown feature.
 1. A Cargo.toml's `[features]` table is a setting the human approves, like its dependency tables (D-158 point 4): a feature can turn on an optional dependency whose build script runs.
 Why: the review of task:7db8dd126a22c863 showed that a feature edit could turn on an optional dependency that was already approved, along with its build script.
+
+## D-178 A one-crate Cargo package below a root is added in place
+Amends D-57 point 3 and D-59 (Aaron, board task "Workspace: add a Rust package in place", 2026-10-19). Part of the Rust symbol store and lockdown feature.
+1. A one-crate Cargo package below a managed root is added in place, not migrated: `found` lists it with `language: "rust"`, and the Workspace page's Add runs `setup`. The import writes only `.solace/` and a new `solace.toml`; every other file is left byte for byte as it was.
+2. `language::rust::package` reads and refuses the whole package before anything is written, naming each line outside the subset, so a refusal leaves the folder and the project list unchanged. Without `cargo`, the add goes ahead and says the dependencies weren't fetched (D-176).
+3. Gleam still comes in by migration. Rust migration (copy, check, swap) and multi-crate workspaces stay deferred (D-158 point 6).
+Why: a Cargo package already has the files Solace would project, so copying and swapping it would change nothing while risking the original.

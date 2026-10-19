@@ -1025,7 +1025,11 @@ pub fn candidates(top: &Path) -> Result<Vec<Value>, Failure> {
     if workspace::enclosing(top)?.is_some() || load(top).is_some() {
         return Ok(vec![]);
     }
-    Ok(workspace::found(top)?.into_iter().filter(|f| f["imported"] != true).map(|f| json!({"dir":f["dir"],"name":f["name"]})).collect())
+    Ok(workspace::found(top)?
+        .into_iter()
+        .filter(|f| f["language"] == "gleam" && f["imported"] != true)
+        .map(|f| json!({"dir":f["dir"],"name":f["name"]}))
+        .collect())
 }
 
 /// Starts a migration of `top`: inventory, then the copy, with links into
