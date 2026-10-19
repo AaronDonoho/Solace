@@ -97,7 +97,7 @@ Every task of every project, one row each: title, column, project (in a workspac
 
 Backlog tasks are listed here too: the board leaves Backlog out (D-133), so this page is where a
 Backlog task is planned (**Plan**, D-132) and where a planned one goes back on hold (**Back to
-backlog**). A task's details offer **Back to planning** from Assigned, Needs review and Canceled (D-133).
+backlog**). A task's details offer **Back to planning** from Assigned, Review and Canceled (D-133).
 
 - **Data.** `GET /projects`, each project's `GET {base}/workflow`, and the root's `/events`. A workspace root's own
   `GET /tasks` holds only its project, so the list comes from the merged stream: its replay sends each project's

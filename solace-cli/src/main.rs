@@ -11,7 +11,7 @@
 mod board;
 mod drafts;
 mod extract;
-mod gleam;
+mod language;
 mod lockdown;
 mod migrate;
 mod orientation;
@@ -25,7 +25,7 @@ mod tasks;
 mod view;
 mod workspace;
 
-use gleam::{Item, Kind, Ref};
+use language::{Import, Item, Kind, Language, Ref, gleam};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -915,7 +915,7 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
     if let Some(out) = lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
         return out;
     }
-    if !store.root.join("gleam.toml").exists() {
+    if store.lang.is_none() {
         return lockdown::plain(command);
     }
     let out = match a.as_slice() {
@@ -993,7 +993,7 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
         return out;
     }
     // drafts include kept file patches (D-120), so a plain-files project lists and reads them
-    if GLEAM.contains(&a[0]) && !matches!(a.as_slice(), ["drafts"] | ["view", "--draft", _]) && !store.root.join("gleam.toml").exists() {
+    if GLEAM.contains(&a[0]) && !matches!(a.as_slice(), ["drafts"] | ["view", "--draft", _]) && store.lang.is_none() {
         return lockdown::plain(a[0]);
     }
     match a.as_slice() {
@@ -1029,20 +1029,6 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
             a.join(" ")
         )),
     }
-}
-
-/// Command output without build progress and compiler warnings (a warning
-/// runs until the next error or until the program starts).
-fn quiet(output: &str) -> String {
-    let (mut out, mut warning) = (String::new(), false);
-    for l in output.lines() {
-        let t = l.trim();
-        warning = (warning || l.starts_with("warning")) && !l.starts_with("error") && !t.starts_with("Running ");
-        if !warning && !["Compiling ", "Compiled ", "Running ", "Downloading ", "Downloaded "].iter().any(|p| t.starts_with(p)) {
-            out += &format!("{l}\n");
-        }
-    }
-    out
 }
 
 /// The module name a probe runs as.
@@ -1139,12 +1125,13 @@ fn tool_schema() -> Value {
         "name": "solace",
         "description": "Read, change and test this project's code. In a board run, the brief holds the reply to \
             `session start --task`: start with the call its `Next:` line names, and send `session start --task` again \
-            only to see the reply again, for example after the conversation is compacted. Elsewhere, start with \
-            `session start --task`, the task in `text`: it lists the symbols most likely relevant, the workflow and \
+            only to see the reply again, for example after the conversation is compacted (the brief says when not \
+            to). Elsewhere, start with `session start`: it lists the symbols most likely relevant, the workflow and \
             the commands. Several commands \
             go in one call, one per line, and run in order: put every independent read in the same call \
-            (`inspect a.f b.g --context`, then `view c` on the next line), never one read per call, and put \
-            `test` on the line after a `submit`. Keep text between calls to a line or two: all of it is re-sent \
+            (`inspect a.f b.g --context`, then `view c` on the next line), never one read per call, and never send \
+            a change alone: put its check on the line after it (`test` after `submit`, `run <name>` after `write`). \
+            Keep text between calls to a line or two: all of it is re-sent \
             on every later call. Once the work is done, stop: no recap and no repeated checks.",
         "inputSchema": {
             "type": "object",
@@ -1261,6 +1248,12 @@ struct Sym {
     name: String,
     kind: Kind,
     text: String,
+    /// The enclosing `impl`, `trait`, `extern` or inline `mod`, by id (Rust).
+    parent: Option<String>,
+    /// What follows the item in its file; `None`: Gleam's blank line.
+    sep: Option<String>,
+    /// A container's text after its last child.
+    tail: String,
 }
 
 impl Sym {
@@ -1276,6 +1269,15 @@ struct ModuleRow {
     path: String,
     dir: String,
     header: String,
+    /// Its file from the project root, written exactly (Rust); `None` for Gleam.
+    file: Option<String>,
+}
+
+impl ModuleRow {
+    /// Its file from the project root.
+    fn rel(&self) -> String {
+        self.file.clone().unwrap_or_else(|| outside::file_of(&self.dir, &self.path))
+    }
 }
 
 struct Store {
@@ -1283,6 +1285,9 @@ struct Store {
     /// run inside its outer transaction (D-77 point 7).
     db: Rc<Connection>,
     root: PathBuf,
+    /// The project's language, chosen once from its files; `None` for a
+    /// project of plain files (D-60).
+    lang: Option<&'static dyn Language>,
 }
 
 thread_local! {
@@ -1293,6 +1298,7 @@ thread_local! {
 
 /// All live symbols and modules, with the reference graph resolved.
 struct Index {
+    lang: &'static dyn Language,
     syms: Vec<Sym>,
     modules: Vec<ModuleRow>,
     uses: Vec<Vec<usize>>,
@@ -1303,7 +1309,7 @@ struct Index {
 }
 
 impl Index {
-    fn build(syms: Vec<Sym>, modules: Vec<ModuleRow>) -> Index {
+    fn build(lang: &'static dyn Language, syms: Vec<Sym>, modules: Vec<ModuleRow>) -> Index {
         // (module, name) -> symbol, for names and for type constructors
         let mut names: HashMap<(&str, &str), usize> = HashMap::new();
         for (i, s) in syms.iter().enumerate() {
@@ -1312,7 +1318,7 @@ impl Index {
         let mut ctors: Vec<(String, String, usize)> = vec![];
         for (i, s) in syms.iter().enumerate() {
             if s.kind == Kind::Type {
-                for c in gleam::constructors(&s.text) {
+                for c in lang.constructors(&s.text) {
                     ctors.push((s.module.clone(), c, i));
                 }
             }
@@ -1320,14 +1326,14 @@ impl Index {
         for (m, c, i) in &ctors {
             names.entry((m, c)).or_insert(*i);
         }
-        let imports: HashMap<&str, Vec<gleam::Import>> = modules.iter().map(|m| (m.path.as_str(), gleam::imports(&m.header))).collect();
+        let imports: HashMap<&str, Vec<Import>> = modules.iter().map(|m| (m.path.as_str(), lang.imports(&m.header))).collect();
         let at: Vec<Vec<(usize, usize)>> = syms
             .iter()
             .enumerate()
             .map(|(i, s)| {
                 let imps = &imports[s.module.as_str()];
                 let mut found = vec![];
-                for (r, line) in gleam::references_at(&s.text) {
+                for (r, line) in lang.references_at(&s.text) {
                     let target = match &r {
                         Ref::Qualified(alias, member) => {
                             imps.iter().find(|imp| &imp.alias == alias).and_then(|imp| names.get(&(imp.module.as_str(), member.as_str())))
@@ -1368,7 +1374,7 @@ impl Index {
                 used_by[u].push(j);
             }
         }
-        Index { syms, modules, uses, used_by, at }
+        Index { lang, syms, modules, uses, used_by, at }
     }
 }
 
@@ -1379,9 +1385,10 @@ enum Target<'a> {
 }
 
 const SCHEMA: &str = "
-CREATE TABLE modules(path TEXT PRIMARY KEY, dir TEXT NOT NULL, header TEXT NOT NULL);
+CREATE TABLE modules(path TEXT PRIMARY KEY, dir TEXT NOT NULL, header TEXT NOT NULL, file TEXT);
 CREATE TABLE symbols(id TEXT PRIMARY KEY, module TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
-  text TEXT NOT NULL, ord INTEGER NOT NULL, revision TEXT NOT NULL, live INTEGER NOT NULL DEFAULT 1);
+  text TEXT NOT NULL, ord INTEGER NOT NULL, revision TEXT NOT NULL, live INTEGER NOT NULL DEFAULT 1,
+  parent TEXT, sep TEXT, tail TEXT NOT NULL DEFAULT '');
 CREATE TABLE history(seq INTEGER PRIMARY KEY, at INTEGER NOT NULL, symbol TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL);
 CREATE TABLE broken(symbol TEXT PRIMARY KEY, diagnostic TEXT NOT NULL);
 CREATE TABLE work(id INTEGER PRIMARY KEY, text TEXT NOT NULL, open INTEGER NOT NULL DEFAULT 1);
@@ -1399,6 +1406,11 @@ CREATE TABLE IF NOT EXISTS board_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, d
 CREATE TABLE IF NOT EXISTS board_before(task TEXT, entity TEXT, data TEXT NOT NULL, PRIMARY KEY(task,entity));
 CREATE TABLE IF NOT EXISTS board_touches(seq INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, entity TEXT, run TEXT, name TEXT);
 ";
+
+/// Whether `table` has the column `col`.
+fn has_column(db: &Connection, table: &str, col: &str) -> Result<bool, Failure> {
+    Ok(db.query_row(&format!("SELECT COUNT(*) FROM pragma_table_info('{table}') WHERE name=?1"), params![col], |r| r.get(0))?)
+}
 
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())
@@ -1481,6 +1493,11 @@ fn import(root: &Path) -> Out {
         out += "This project already has a store (.solace/store.db); existing symbols were preserved.\n";
         return Ok(out);
     }
+    // A Cargo package is read whole first, so a refused one leaves no store behind.
+    let rust = match language::detect(root) {
+        None if root.join("Cargo.toml").exists() => Some(language::rust::package(root)?),
+        _ => None,
+    };
     fs::create_dir_all(&dir)?;
     let db = Connection::open(dir.join("store.db"))?;
     db.busy_timeout(Duration::from_secs(10))?;
@@ -1489,17 +1506,15 @@ fn import(root: &Path) -> Out {
     let (mut modules, mut symbols) = (0, 0);
     let mut written = outside::Written::load(root);
     written.known = true;
-    for top in ["src", "test"].into_iter().filter(|_| root.join("gleam.toml").exists()) {
-        let mut files = vec![];
-        collect_gleam_files(&root.join(top), &mut files)?;
-        files.sort();
-        for file in files {
-            let path = file.strip_prefix(root.join(top)).unwrap().with_extension("");
-            let path = path.to_string_lossy().replace('\\', "/");
+    if let Some(lang) = language::detect(root) {
+        for rel in lang.source_files(root)? {
+            let (top, file) = rel.split_once('/').unwrap();
+            let path = Path::new(file).with_extension("").to_string_lossy().replace('\\', "/");
+            let file = root.join(&rel);
             let text = fs::read_to_string(&file).map_err(|e| Failure(format!("{}: {e}", file.display()), 1))?;
             written.record(&outside::file_of(top, &path), text.as_bytes());
-            let parsed = gleam::split(&text);
-            db.execute("INSERT INTO modules VALUES (?1, ?2, ?3)", params![path, top, parsed.header])?;
+            let parsed = lang.split(&text);
+            db.execute("INSERT INTO modules(path, dir, header) VALUES (?1, ?2, ?3)", params![path, top, parsed.header])?;
             for (ord, item) in parsed.items.iter().enumerate() {
                 insert_symbol(&db, &path, item, Some(ord as i64))?;
                 symbols += 1;
@@ -1507,15 +1522,21 @@ fn import(root: &Path) -> Out {
             modules += 1;
         }
     }
+    for (rel, module, file) in rust.into_iter().flatten() {
+        written.record(&rel, file.join().as_bytes());
+        store_rust_file(&db, &module, rel.split_once('/').unwrap().0, &rel, &file)?;
+        modules += 1;
+        symbols = db.query_row("SELECT COUNT(*) FROM symbols", [], |r| r.get(0))?;
+    }
     written.save()?;
-    let store = Store { db: Rc::new(db), root: root.to_path_buf() };
+    let store = Store { db: Rc::new(db), root: root.to_path_buf(), lang: language::detect(root) };
     outside::approve_all(&store)?;
     out += &format!("Imported {modules} modules, {symbols} symbols into .solace/store.db\n");
     Ok(out)
 }
 
 /// Stores a new symbol at `ord`, or after its module's last; returns its id.
-fn insert_symbol(db: &Connection, module: &str, item: &gleam::Item, ord: Option<i64>) -> Result<String, Failure> {
+fn insert_symbol(db: &Connection, module: &str, item: &Item, ord: Option<i64>) -> Result<String, Failure> {
     let ord = match ord {
         Some(o) => o,
         None => db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [module], |r| r.get(0))?,
@@ -1528,37 +1549,26 @@ fn insert_symbol(db: &Connection, module: &str, item: &gleam::Item, ord: Option<
     Ok(id)
 }
 
-/// A Gleam module path: lowercase names of letters, digits and `_`, joined by `/`.
-fn valid_module_path(m: &str) -> bool {
-    m.split('/').all(|p| {
-        p.starts_with(|c: char| c.is_ascii_lowercase()) && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
-    })
+/// Stores a Rust file split by `syn` as module `module` of `file`, its items
+/// nested in their containers, to be written back exactly (D-158 point 5).
+fn store_rust_file(db: &Connection, module: &str, dir: &str, file: &str, split: &language::rust::File) -> Result<(), Failure> {
+    db.execute("INSERT INTO modules(path, dir, header, file) VALUES (?1, ?2, ?3, ?4)", params![module, dir, split.header, file])?;
+    store_pieces(db, module, None, &split.items)
 }
 
-/// The Gleam files in a project's `src/` and `test/`, as sorted paths from `dir`.
-fn source_files(dir: &Path) -> Result<Vec<String>, Failure> {
-    let mut files = vec![];
-    for top in ["src", "test"] {
-        collect_gleam_files(&dir.join(top), &mut files)?;
-    }
-    let mut out: Vec<String> = files.iter().map(|f| f.strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/")).collect();
-    out.sort();
-    Ok(out)
-}
-
-fn collect_gleam_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    if !dir.exists() {
-        return Ok(());
-    }
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        // A symlinked folder isn't followed: deleting or writing through it could reach outside the project.
-        if entry.file_type()?.is_dir() {
-            collect_gleam_files(&path, out)?;
-        } else if path.extension().is_some_and(|e| e == "gleam") {
-            out.push(path);
-        }
+fn store_pieces(db: &Connection, module: &str, parent: Option<&str>, pieces: &[language::rust::Piece]) -> Result<(), Failure> {
+    for (ord, p) in pieces.iter().enumerate() {
+        let container = !p.children.is_empty();
+        let last = if container { &p.tail } else { &p.text };
+        let body = last.trim_end();
+        let sep = &last[body.len()..];
+        let (text, tail) = if container { (p.text.as_str(), body) } else { (body, "") };
+        let id = new_id(language::rust::id_kind(p.kind));
+        db.execute(
+            "INSERT INTO symbols(id, module, name, kind, text, ord, revision, parent, sep, tail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![id, module, p.name, p.kind, text, ord as i64, revision(text), parent, sep, tail],
+        )?;
+        store_pieces(db, module, Some(&id), &p.children)?;
     }
     Ok(())
 }
@@ -1566,8 +1576,13 @@ fn collect_gleam_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()
 /// A module's file as Solace writes it, with the line range of each symbol.
 fn projection(ix: &Index, m: &ModuleRow) -> (String, Vec<(usize, usize, String)>) {
     let mut content = String::new();
-    let mut line = 1;
     let mut ranges = vec![];
+    if m.file.is_some() {
+        content.push_str(&m.header);
+        project_exact(ix, m, None, &mut content, &mut ranges);
+        return (content, ranges);
+    }
+    let mut line = 1;
     if !m.header.is_empty() {
         content.push_str(&m.header);
         content.push_str("\n\n");
@@ -1583,12 +1598,24 @@ fn projection(ix: &Index, m: &ModuleRow) -> (String, Vec<(usize, usize, String)>
     (content.trim_end().to_string() + "\n", ranges)
 }
 
+/// `m`'s items under `parent` as stored, each with its children, tail and separator.
+fn project_exact(ix: &Index, m: &ModuleRow, parent: Option<&str>, content: &mut String, ranges: &mut Vec<(usize, usize, String)>) {
+    for s in ix.syms.iter().filter(|s| s.module == m.path && s.parent.as_deref() == parent) {
+        let start = content.matches('\n').count() + 1;
+        content.push_str(&s.text);
+        project_exact(ix, m, Some(&s.id), content, ranges);
+        content.push_str(&s.tail);
+        ranges.push((start, content.matches('\n').count() + 1, s.qname()));
+        content.push_str(s.sep.as_deref().unwrap_or(""));
+    }
+}
+
 impl Store {
     /// The store of the project at `root`, with every table this version uses.
     fn at(root: &Path) -> Result<Store, Failure> {
         let shared = COMMAND_DB.with_borrow(|c| c.iter().find(|(r, _)| lockdown::same_project(r, root)).map(|(_, db)| db.clone()));
         if let Some(db) = shared {
-            return Ok(Store { db, root: root.into() });
+            return Ok(Store { db, root: root.into(), lang: language::detect(root) });
         }
         let db = Connection::open(root.join(".solace/store.db"))?;
         // WAL and a busy timeout: readers see the last committed state while a
@@ -1597,15 +1624,29 @@ impl Store {
         db.execute_batch("PRAGMA journal_mode=WAL;")?;
         db.execute_batch(LATER_TABLES)?;
         Self::add_columns(&db)?;
-        Ok(Store { db: Rc::new(db), root: root.into() })
+        Ok(Store { db: Rc::new(db), root: root.into(), lang: language::detect(root) })
     }
 
-    /// `board_touches` gains `run` and `name` (D-77 point 4); older stores get them.
+    /// The language that reads this store's code.
+    fn lang(&self) -> &'static dyn Language {
+        language::reading(self.lang)
+    }
+
+    /// Columns added after their tables: `board_touches`' `run` and `name`
+    /// (D-77 point 4), nested Rust items (D-158). Older stores get them.
     fn add_columns(db: &Connection) -> Result<(), Failure> {
-        for col in ["run", "name"] {
-            let has: bool = db.query_row("SELECT COUNT(*) FROM pragma_table_info('board_touches') WHERE name=?1", params![col], |r| r.get(0))?;
-            if !has {
-                db.execute(&format!("ALTER TABLE board_touches ADD COLUMN {col} TEXT"), [])?;
+        for (table, col, decl) in [
+            ("board_touches", "run", "TEXT"),
+            ("board_touches", "name", "TEXT"),
+            ("symbols", "parent", "TEXT"),
+            ("symbols", "sep", "TEXT"),
+            ("symbols", "tail", "TEXT NOT NULL DEFAULT ''"),
+            ("modules", "file", "TEXT"),
+        ] {
+            // A store of the root's board alone has no `symbols` or `modules`.
+            let exists: bool = db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0))?;
+            if exists && !has_column(db, table, col)? {
+                db.execute(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl}"), [])?;
             }
         }
         Ok(())
@@ -1625,7 +1666,7 @@ impl Store {
         }
         let db = Connection::open(file)?;
         db.busy_timeout(Duration::from_secs(10))?;
-        Ok(Store { db: Rc::new(db), root: root.into() })
+        Ok(Store { db: Rc::new(db), root: root.into(), lang: language::detect(root) })
     }
 
     /// The project the working folder is in: the nearest folder up with a store.
@@ -1644,17 +1685,30 @@ impl Store {
     }
 
     fn index(&self) -> Result<Index, Failure> {
-        let mut stmt = self.db.prepare("SELECT id, module, name, kind, text FROM symbols WHERE live = 1 ORDER BY module, ord")?;
+        // A store only peeked at may be older than its nested-item columns.
+        let nested = if has_column(&self.db, "symbols", "parent")? { "parent, sep, tail" } else { "NULL, NULL, ''" };
+        let mut stmt = self.db.prepare(&format!("SELECT id, module, name, kind, text, {nested} FROM symbols WHERE live = 1 ORDER BY module, ord"))?;
         let syms: Vec<Sym> = stmt
             .query_map([], |r| {
-                Ok(Sym { id: r.get(0)?, module: r.get(1)?, name: r.get(2)?, kind: Kind::parse(&r.get::<_, String>(3)?), text: r.get(4)? })
+                Ok(Sym {
+                    id: r.get(0)?,
+                    module: r.get(1)?,
+                    name: r.get(2)?,
+                    kind: Kind::parse(&r.get::<_, String>(3)?),
+                    text: r.get(4)?,
+                    parent: r.get(5)?,
+                    sep: r.get(6)?,
+                    tail: r.get(7)?,
+                })
             })?
             .collect::<Result<_, _>>()?;
-        let mut stmt = self.db.prepare("SELECT path, dir, header FROM modules ORDER BY dir, path")?;
-        let modules: Vec<ModuleRow> =
-            stmt.query_map([], |r| Ok(ModuleRow { path: r.get(0)?, dir: r.get(1)?, header: r.get(2)? }))?.collect::<Result<_, _>>()?;
+        let file = if has_column(&self.db, "modules", "file")? { "file" } else { "NULL" };
+        let mut stmt = self.db.prepare(&format!("SELECT path, dir, header, {file} FROM modules ORDER BY dir, path"))?;
+        let modules: Vec<ModuleRow> = stmt
+            .query_map([], |r| Ok(ModuleRow { path: r.get(0)?, dir: r.get(1)?, header: r.get(2)?, file: r.get(3)? }))?
+            .collect::<Result<_, _>>()?;
 
-        Ok(Index::build(syms, modules))
+        Ok(Index::build(self.lang(), syms, modules))
     }
 
     // --- writing files --------------------------------------------------------
@@ -1673,7 +1727,7 @@ impl Store {
         let mut maps = vec![];
         for m in &ix.modules {
             let (content, ranges) = projection(ix, m);
-            let rel = outside::file_of(&m.dir, &m.path);
+            let rel = m.rel();
             let path = target.join(&rel);
             if fs::read_to_string(&path).ok().as_deref() != Some(content.as_str()) {
                 if written.as_ref().is_some_and(|w| !w.unchanged(&rel)) {
@@ -1690,7 +1744,7 @@ impl Store {
         }
         if let Some(w) = written.as_mut() {
             // A file whose module is gone goes with it, unless edited since.
-            w.prune(&ix.modules.iter().map(|m| outside::file_of(&m.dir, &m.path)).collect(), stops)?;
+            w.prune(&ix.modules.iter().map(|m| m.rel()).collect(), stops)?;
             w.save()?;
         }
         Ok(maps)
@@ -1708,20 +1762,21 @@ impl Store {
         Ok(())
     }
 
-    fn gleam(&self, args: &[&str]) -> Result<(bool, String), Failure> {
-        let mut argv = vec!["gleam".to_string()];
+    /// Runs the language's tool (`gleam check`, `gleam test`) in the project.
+    fn tool(&self, args: &[&str]) -> Result<(bool, String), Failure> {
+        let mut argv = vec![self.lang().tool().to_string()];
         argv.extend(args.iter().map(|s| s.to_string()));
         // whole, so every failure is parsed; the reply is trimmed later
         let text = lockdown::command(&self.root, &argv, 120, usize::MAX, false)?;
-        Ok((text.starts_with("exit code: 0\n"), strip_ansi(text.split_once('\n').map_or("", |(_, s)| s))))
+        Ok((lockdown::passed(&text), strip_ansi(text.split_once('\n').map_or("", |(_, s)| s))))
     }
 
     /// Type-checks the project and records which symbols are broken, with
     /// their errors, so the next reply can report only what changed (D-46).
     fn check_all(&self, ix: &Index) -> Result<Vec<Diag>, Failure> {
         let files = self.materialize(ix)?;
-        let (_, output) = self.gleam(&["check"])?;
-        let diags = diagnostics(&output, &files);
+        let (_, output) = self.tool(&["check"])?;
+        let diags = self.lang().diagnostics(&output, &files);
         self.db.execute("DELETE FROM broken", [])?;
         for d in diags.iter().filter(|d| d.error) {
             if let Some(sym) = &d.symbol {
@@ -1785,14 +1840,14 @@ impl Store {
                 Some((format!("{} ({}, a dependency; read only)", module, p.file_name().to_string_lossy()), text))
             })
         };
-        let declaration = |item: &gleam::Item| {
-            let sig = gleam::signature(&gleam::Item { text: without_comment_lines(&item.text), ..item.clone() }).trim_end().to_string();
+        let declaration = |item: &Item| {
+            let sig = self.lang().signature(&Item { text: without_comment_lines(&item.text), ..item.clone() }).trim_end().to_string();
             // An opaque type's constructors aren't part of its API.
             if sig.contains("pub opaque type ") { sig.split(" {").next().unwrap_or(&sig).to_string() } else { sig }
         };
-        let public = |item: &gleam::Item| item.text.lines().any(|l| l.starts_with("pub "));
+        let public = |item: &Item| item.text.lines().any(|l| l.starts_with("pub "));
         if let Some((title, text)) = source(input) {
-            let m = gleam::split(&text);
+            let m = self.lang().split(&text);
             let mut out = format!("// ── module {title}, public API: `view {input}.<name>` for one with its docs ──\n");
             // The module doc's first paragraph; the rest is guides and links.
             let doc: Vec<&str> = m.header.lines().filter(|l| l.starts_with("////")).take_while(|l| l.trim() != "////").collect();
@@ -1807,7 +1862,7 @@ impl Store {
         }
         let (module, name) = input.rsplit_once('.')?;
         let (title, text) = source(module)?;
-        let item = gleam::split(&text).items.into_iter().find(|i| i.name == name && public(i))?;
+        let item = self.lang().split(&text).items.into_iter().find(|i| i.name == name && public(i))?;
         let doc: String = item.text.lines().filter(|l| l.starts_with("///")).map(|l| format!("{l}\n")).collect();
         Some(format!("// ── {name} in {title} ({}) ──\n{doc}{}\n\n", item.kind.as_str(), declaration(&item)))
     }
@@ -1824,7 +1879,7 @@ impl Store {
     fn session(&self, scopes: &[&str]) -> Out {
         const CAP: usize = 80;
         let tid = board::context().map(|(t, _)| t);
-        if !self.root.join("gleam.toml").exists() {
+        if self.lang.is_none() {
             return self.plain_session("", tid.as_deref());
         }
         let ix = self.index()?;
@@ -1999,7 +2054,7 @@ impl Store {
     /// the run's environment.
     fn task_session(&self, task: &str, tid: Option<&str>, deps: &str) -> Out {
         const BUDGET: usize = 6500; // bytes, about 1.6k tokens
-        if !self.root.join("gleam.toml").exists() {
+        if self.lang.is_none() {
             return self.plain_session(deps, tid);
         }
         let ix = self.index()?;
@@ -2011,7 +2066,7 @@ impl Store {
             .and_then(|t| scope::of_task(&self.root, t))
             .unwrap_or_default()
             .into_iter()
-            .filter(|d| *d != mine && scope::path(&top, d).join("gleam.toml").exists())
+            .filter(|d| *d != mine && language::detect(&scope::path(&top, d)).is_some())
             .filter_map(|d| {
                 let s = Store::peek(&scope::path(&top, &d)).ok()?;
                 let ix = s.index().ok()?;
@@ -2132,7 +2187,7 @@ impl Store {
         let repro = code
             .first()
             .and_then(|_| {
-                reach::tests(&ix).into_iter().map(|t| (t, reach::closure(&ix, t))).filter(|(_, r)| r.contains(&code[0])).max_by(|a, b| {
+                reach::test_symbols(&ix).into_iter().map(|t| (t, reach::closure(&ix, t))).filter(|(_, r)| r.contains(&code[0])).max_by(|a, b| {
                     let reached = |r: &HashSet<usize>| code.iter().filter(|c| r.contains(c)).count();
                     reached(&a.1)
                         .cmp(&reached(&b.1))
@@ -2156,7 +2211,7 @@ impl Store {
             let (folder, _, pix) = projects[p];
             let s = &pix.syms[i];
             let at = folder.map(|d| format!(" ({d})")).unwrap_or_default();
-            let entry = format!("-- {}{at}\n{}\n", s.qname(), gleam::signature(&s.item()));
+            let entry = format!("-- {}{at}\n{}\n", s.qname(), pix.lang.signature(&s.item()));
             let mut quoted = String::new();
             for e in evidence(&s.text, &evidence_terms) {
                 let line = format!("  > {e}\n");
@@ -2259,7 +2314,7 @@ impl Store {
                     for s in ix.syms.iter().filter(|s| s.module == m.path) {
                         text += &format!(
                             "{}{}\n\n",
-                            gleam::signature(&s.item()),
+                            ix.lang.signature(&s.item()),
                             if broken.contains_key(&s.qname()) { "  // BROKEN" } else { "" }
                         );
                     }
@@ -2382,7 +2437,7 @@ impl Store {
             } else if !shown.insert(u) {
                 format!("-- {q} (above)\n")
             } else {
-                format!("-- {q}\n{}\n", gleam::signature(&ix.syms[u].item()))
+                format!("-- {q}\n{}\n", ix.lang.signature(&ix.syms[u].item()))
             }
         };
         let used_by = ix.used_by[i].clone();
@@ -2481,7 +2536,7 @@ impl Store {
             out += &if shown_earlier(&q) {
                 format!("-- {q} (above)\n")
             } else {
-                format!("-- {q}\n{}\n", gleam::signature(&ix.syms[u].item()))
+                format!("-- {q}\n{}\n", ix.lang.signature(&ix.syms[u].item()))
             };
             out += &call_lines(&ix, u, i);
             mark_shown(q);
@@ -2579,8 +2634,8 @@ impl Store {
 
     fn submit(&self, target: Target, raw: &str) -> Out {
         let raw: String = raw.lines().filter(|l| !l.starts_with("// ── ")).collect::<Vec<_>>().join("\n");
-        let formatted = format_gleam(&raw)?;
-        let parsed = gleam::split(&formatted);
+        let formatted = self.lang().format(&raw)?;
+        let parsed = self.lang().split(&formatted);
         let ix = self.index()?;
         let (Target::Imports(m) | Target::Module(m)) = target;
         let module = self
@@ -2750,7 +2805,7 @@ impl Store {
         // imports of their first block: (path, dir, header).
         let mut created: Vec<(String, &str, String)> = vec![];
         for (block_name, text) in &blocks {
-            let parsed = gleam::split(&format_gleam(text)?);
+            let parsed = self.lang().split(&self.lang().format(text)?);
             // `--new` adds every symbol in the text; a named block holds one.
             if parsed.items.is_empty() || (new_in.is_none() && parsed.items.len() > 1) {
                 return fail(format!(
@@ -2776,14 +2831,14 @@ impl Store {
             let (module, existing) = match (new_in, block_name) {
                 (Some(m), _) => match module_of(m) {
                     Ok(path) => (path, None),
-                    Err(_) if valid_module_path(m) => (create(m), None),
+                    Err(_) if self.lang().valid_module_path(m) => (create(m), None),
                     Err(e) => return Err(e),
                 },
                 (None, Some(n)) => match self.resolve(&ix, n) {
                     Ok(i) => (ix.syms[i].module.clone(), Some(i)),
                     Err(e) => match n.rsplit_once('.') {
                         Some((m, _)) if self.resolve_module(&ix, m).is_some() => (module_of(m)?, None),
-                        Some((m, _)) if valid_module_path(m) => (create(m), None),
+                        Some((m, _)) if self.lang().valid_module_path(m) => (create(m), None),
                         _ => return Err(e),
                     },
                 },
@@ -2813,7 +2868,7 @@ impl Store {
         }
         let out = self.transaction(&created_files, || {
             for (path, dir, header) in &created {
-                self.db.execute("INSERT INTO modules VALUES (?1, ?2, ?3)", params![path, dir, header])?;
+                self.db.execute("INSERT INTO modules(path, dir, header) VALUES (?1, ?2, ?3)", params![path, dir, header])?;
                 notes.push(format!("created module {path} ({dir}/{path}.gleam)"));
             }
             let (mut saved, mut unchanged): (Vec<String>, Vec<String>) = (vec![], vec![]);
@@ -2941,7 +2996,7 @@ impl Store {
                     let Some(a) = after.syms.iter().position(|s| s.id == before.id) else {
                         continue;
                     };
-                    if gleam::head(&before.item()) == gleam::head(item) {
+                    if self.lang().head(&before.item()) == self.lang().head(item) {
                         continue;
                     }
                     for &j in &after.used_by[a] {
@@ -3057,7 +3112,7 @@ impl Store {
             // The module goes with its last symbol, unless another module imports it.
             let module = &ix.syms[i].module;
             let last = !ix.syms.iter().enumerate().any(|(j, s)| j != i && s.module == *module);
-            let imported = ix.modules.iter().any(|m| gleam::imports(&m.header).iter().any(|imp| imp.module == *module));
+            let imported = ix.modules.iter().any(|m| ix.lang.imports(&m.header).iter().any(|imp| imp.module == *module));
             let retired = if last && !imported {
                 self.db.execute("DELETE FROM modules WHERE path = ?1", [module])?;
                 format!("; module {module} retired")
@@ -3104,7 +3159,7 @@ impl Store {
         let ix = self.index()?;
         let named: Vec<usize> = operands(args).iter().map(|n| self.resolve(&ix, n)).collect::<Result<_, _>>()?;
         let all = args.contains(&"--all");
-        let tests = reach::tests(&ix);
+        let tests = reach::test_symbols(&ix);
         let revisions: Vec<String> = ix.syms.iter().map(|s| revision(&s.text)).collect();
         let outside = reach::outside(&ix);
         let mut rows: HashMap<String, (String, String)> = self
@@ -3170,20 +3225,20 @@ impl Store {
             for (path, content) in &rewritten {
                 self.rewrite(path, content)?;
             }
-            self.gleam(&["test"])
+            self.tool(&["test"])
         })();
         if !rewritten.is_empty() {
             self.materialize(&ix)?;
         }
         let (ok, output) = result?;
-        let diags = diagnostics(&output, &files);
+        let diags = self.lang().diagnostics(&output, &files);
         let errors: Vec<&str> = diags.iter().filter(|d| d.error).map(|d| d.text.as_str()).collect();
         if !errors.is_empty() {
             return fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
         }
         // Record results only from a run that finished; passes only when every
         // failure it counted was attributed to a test.
-        let failed = failures(&output);
+        let failed = self.lang().failures(&output);
         let summary = output.lines().find(|l| l.contains(" passed, ")).map(|l| {
             let number = |word: &str| l.split(word).next().and_then(|p| p.split_whitespace().last()).and_then(|n| n.parse::<usize>().ok());
             if l.contains("no failures") { Some(0) } else { number(" failure") }
@@ -3205,12 +3260,12 @@ impl Store {
             }
         }
         let mut out = head;
-        for line in quiet(&output).lines() {
+        for line in self.lang().quiet(&output).lines() {
             let line = line.trim_start_matches('.');
             if line.trim().is_empty() || line.trim().starts_with("Checking ") {
                 continue;
             }
-            out += &relocate(line, &files);
+            out += &self.lang().relocate(line, &files);
             out.push('\n');
         }
         out += &also;
@@ -3299,7 +3354,7 @@ impl Store {
             }
             fs::create_dir_all(file.parent().unwrap())?;
             fs::write(&file, &code)?;
-            self.gleam(&["run", "-m", PROBE])
+            self.tool(&["run", "-m", PROBE])
         })();
         // Remove the probe and put traced modules back in every case.
         let _ = fs::remove_file(&file);
@@ -3308,7 +3363,7 @@ impl Store {
         }
         let (ok, output) = result?;
         // Compiler warnings (mostly the probe's unused imports) are noise here.
-        let mut out = quiet(&output);
+        let mut out = self.lang().quiet(&output);
         if !trace.is_empty() {
             out = trace_report(&out);
         }
@@ -3332,7 +3387,7 @@ impl Store {
         let Some(open) = open else {
             return fail(format!("E1005 {} isn't a function; --from takes a test or another function without arguments.", s.qname()));
         };
-        if !params(&gleam::head(&s.item()), &s.name).is_empty() {
+        if !params(&ix.lang.head(&s.item()), &s.name).is_empty() {
             return fail(format!("E1005 {} takes arguments; --from takes a test or another function without arguments.", s.qname()));
         }
         let body = &s.text[open + 1..s.text.rfind('}').unwrap_or(s.text.len())];
@@ -3390,29 +3445,6 @@ impl Store {
             _ => Ok(format!("Work record #{id} closed.\n")),
         }
     }
-}
-
-/// Failed tests in `gleam test` output by `module.name` (Erlang prints
-/// modules as `pilot@x_test`): whether wrong or unfinished, and the failure
-/// block (`assert …`, `test:`, `code:`, `left:`, `right:`, `info:`).
-fn failures(output: &str) -> BTreeMap<String, (String, String)> {
-    let clean = strip_ansi(output);
-    let mut out = BTreeMap::new();
-    let mut block: Vec<&str> = vec![];
-    for line in clean.lines().map(str::trim).chain([""]) {
-        let start = ["todo ", "assert ", "let assert ", "panic "].iter().any(|p| line.starts_with(p));
-        if (start || line.is_empty()) && !block.is_empty() {
-            if let Some(name) = block.iter().find_map(|l| l.strip_prefix("test: ")) {
-                let kind = if block[0].starts_with("todo ") { "unfinished" } else { "wrong" };
-                out.insert(name.replace('@', "/"), (kind.into(), block.join("\n")));
-            }
-            block.clear();
-        }
-        if start || (!block.is_empty() && !line.is_empty()) {
-            block.push(line);
-        }
-    }
-    out
 }
 
 /// Search terms: identifiers split at `_` and case changes, lowercased, a
@@ -3612,7 +3644,7 @@ fn ref_lines(ix: &Index, j: usize, i: usize) -> Vec<(usize, String)> {
 /// record updates and patterns with `..` instead, which don't.
 // ponytail: a generic type's annotation such as `Box(Int)` also matches; check the position if that misleads.
 fn sites(ix: &Index, j: usize, ty: usize, updates: bool) -> Vec<(usize, String)> {
-    let ctors = gleam::constructors(&ix.syms[ty].text);
+    let ctors = ix.lang.constructors(&ix.syms[ty].text);
     let text = &ix.syms[j].text;
     let starts: Vec<usize> = std::iter::once(0).chain(text.match_indices('\n').map(|(k, _)| k + 1)).collect();
     ref_lines(ix, j, ty)
@@ -3622,7 +3654,7 @@ fn sites(ix: &Index, j: usize, ty: usize, updates: bool) -> Vec<(usize, String)>
             ctors.iter().any(|c| {
                 line.match_indices(&format!("{c}(")).any(|(k, _)| {
                     let whole = !line[..k].ends_with(|ch: char| ch.is_alphanumeric() || ch == '_');
-                    whole && updates == gleam::split_args(&text[at + k + c.len() + 1..]).iter().any(|(_, a)| a.trim().starts_with(".."))
+                    whole && updates == language::split_args(&text[at + k + c.len() + 1..]).iter().any(|(_, a)| a.trim().starts_with(".."))
                 })
             })
         })
@@ -3648,31 +3680,17 @@ fn mark_shown(q: String) {
     })
 }
 
-/// Formats Gleam source, which doubles as the syntax check.
-fn format_gleam(source: &str) -> Result<String, Failure> {
-    let mut child =
-        Command::new("gleam").args(["format", "--stdin"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
-    child.stdin.take().unwrap().write_all(source.as_bytes())?;
-    let out = child.wait_with_output()?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
-    } else {
-        let msg = strip_ansi(&String::from_utf8_lossy(&out.stderr)).replace("<stdin>", "submitted text");
-        fail(format!("Not saved: E0100 syntax error.\n\n{}", msg.trim()))
-    }
-}
-
 /// Where a function's body opens: the first `{` outside parentheses after
 /// its `fn name(`.
 fn fn_body_start(s: &Sym) -> Option<usize> {
     let at = s.text.find(&format!("fn {}(", s.name))?;
-    Some(at + gleam::body_start(&s.text[at..])?)
+    Some(at + language::body_start(&s.text[at..])?)
 }
 
 /// A function's parameters from its signature: (label if any, name).
 fn params(signature: &str, name: &str) -> Vec<(Option<String>, String)> {
     let Some(at) = signature.find(&format!("fn {name}(")) else { return vec![] };
-    gleam::split_args(&signature[at + name.len() + 4..])
+    language::split_args(&signature[at + name.len() + 4..])
         .iter()
         .map(|(_, p)| p.split(':').next().unwrap_or("").split_whitespace().collect::<Vec<_>>())
         .filter(|words| !words.is_empty())
@@ -3861,7 +3879,7 @@ fn merge_import(header: &str, module: &str, items: &[String]) -> String {
     let Some((_, existing, (start, end))) = import_statements(header).into_iter().find(|(m, _, _)| m == module) else {
         let line = if items.is_empty() { format!("import {module}") } else { format!("import {module}.{{{}}}", items.join(", ")) };
         let added = add_import(header, &line);
-        return format_gleam(&added).map_or(added, |f| f.trim().to_string());
+        return gleam::format(&added).map_or(added, |f| f.trim().to_string());
     };
     if items.iter().all(|i| existing.contains(i)) {
         return header.to_string();
@@ -3875,7 +3893,7 @@ fn merge_import(header: &str, module: &str, items: &[String]) -> String {
     out.push(line);
     out.extend(lines[end + 1..].iter().map(|s| s.to_string()));
     let joined = out.join("\n");
-    format_gleam(&joined).map_or(joined, |f| f.trim().to_string())
+    gleam::format(&joined).map_or(joined, |f| f.trim().to_string())
 }
 
 /// From a compiler error about an unknown type or constructor, the import
@@ -3975,86 +3993,6 @@ fn locate<'a>(files: &'a [FileMap], path: &str, line: usize) -> Option<(&'a str,
     let f = files.iter().find(|f| f.file.to_string_lossy() == path || f.file.ends_with(path))?;
     let sym = f.ranges.iter().find(|r| r.0 <= line && line <= r.1).map(|r| (r.2.as_str(), r.0));
     Some((&f.module, sym))
-}
-
-/// Rewrites `path/to/file.gleam:LINE` references in a line to symbol positions.
-fn relocate(line: &str, files: &[FileMap]) -> String {
-    let Some(end) = line.find(".gleam:") else {
-        return line.to_string();
-    };
-    let start = line[..end].rfind(|c: char| c.is_whitespace()).map_or(0, |i| i + 1);
-    let path = &line[start..end + 6];
-    let rest = &line[end + 7..];
-    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-    let (Ok(n), Some((module, sym))) = (digits.parse::<usize>(), locate(files, path, digits.parse().unwrap_or(0))) else {
-        return line.to_string();
-    };
-    let tail = &rest[digits.len()..];
-    let tail = tail.strip_prefix(':').map_or(tail, |t| t.trim_start_matches(|c: char| c.is_ascii_digit()));
-    let place = match sym {
-        Some((q, first)) => format!("{q}, line {}", n - first + 1),
-        None => format!("{module} imports"),
-    };
-    format!("{}{place}{tail}", &line[..start])
-}
-
-/// Splits compiler output into diagnostics located by symbol.
-fn diagnostics(output: &str, files: &[FileMap]) -> Vec<Diag> {
-    let mut blocks: Vec<Vec<&str>> = vec![];
-    for line in output.lines() {
-        let t = line.trim_start();
-        if line.starts_with("error") || line.starts_with("warning") {
-            blocks.push(vec![line]);
-        } else if ["Compiling ", "Compiled ", "Checking ", "Running "].iter().any(|p| t.starts_with(p)) {
-            continue;
-        } else if let Some(b) = blocks.last_mut() {
-            b.push(line);
-        }
-    }
-    blocks
-        .into_iter()
-        .map(|b| {
-            let error = b[0].starts_with("error");
-            let mut module = None;
-            let mut symbol = None;
-            let mut offset = 0;
-            let mut text = vec![];
-            for line in &b {
-                if let Some(loc) = line.trim_start().strip_prefix("┌─ ") {
-                    let mut parts = loc.rsplitn(3, ':');
-                    let (_col, row, path) = (parts.next(), parts.next(), parts.next());
-                    if let (Some(path), Some(Ok(row))) = (path, row.map(|r| r.parse::<usize>()))
-                        && let Some((m, sym)) = locate(files, path, row)
-                    {
-                        module = Some(m.to_string());
-                        match sym {
-                            Some((q, first)) => {
-                                symbol = Some(q.to_string());
-                                offset = first - 1;
-                                text.push(format!("  at {q}, line {}", row - offset));
-                            }
-                            None => text.push(format!("  at {m} imports")),
-                        }
-                        continue;
-                    }
-                }
-                // renumber the code excerpt to lines within the symbol
-                let t = line.trim_start();
-                let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if offset > 0
-                    && !digits.is_empty()
-                    && t[digits.len()..].starts_with(" │")
-                    && let Ok(n) = digits.parse::<usize>()
-                    && n > offset
-                {
-                    text.push(format!("{:>4}{}", n - offset, &t[digits.len()..]));
-                    continue;
-                }
-                text.push(line.to_string());
-            }
-            Diag { error, module, symbol, text: text.join("\n").trim_end().to_string() }
-        })
-        .collect()
 }
 
 fn warning_summary<'a>(diags: impl Iterator<Item = &'a Diag>) -> String {
@@ -4241,7 +4179,7 @@ fn test_index(sources: &[(&str, &str, &str)]) -> Index {
     let (mut syms, mut modules) = (vec![], vec![]);
     for (dir, path, text) in sources {
         let m = gleam::split(text);
-        modules.push(ModuleRow { path: (*path).into(), dir: (*dir).into(), header: m.header });
+        modules.push(ModuleRow { path: (*path).into(), dir: (*dir).into(), header: m.header, file: None });
         for item in m.items {
             syms.push(Sym {
                 id: format!("fn:{path}.{}", item.name),
@@ -4249,11 +4187,18 @@ fn test_index(sources: &[(&str, &str, &str)]) -> Index {
                 name: item.name,
                 kind: item.kind,
                 text: item.text,
+                parent: None,
+                sep: None,
+                tail: String::new(),
             });
         }
     }
-    Index::build(syms, modules)
+    Index::build(&gleam::Gleam, syms, modules)
 }
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod store_tests;
 
 /// Fixtures for every module's tests.
 #[cfg(test)]
@@ -5083,6 +5028,8 @@ mod tests {
         assert!(last.starts_with("`inspect calc.add ") && last.ends_with(" --context`.\n") && last.lines().count() == 1, "{out}");
         // A project of plain files reads with grep and read, with or without --task.
         fs::remove_file(store.root.join("gleam.toml")).unwrap();
+        // the language is chosen when a command opens the store
+        let store = Store::at(&store.root).unwrap();
         let plain = format!("{next}for example `grep <text> --in <path>` and `read <path> --lines a..b`.\n");
         for out in [store.session(&[]).unwrap(), store.session_task("calc.add").unwrap()] {
             assert!(out.contains("plain files") && out.ends_with(&plain), "{out}");
@@ -5267,7 +5214,7 @@ mod tests {
     fn prune_drops_the_build_output_of_a_retired_module() {
         let store = calc_project();
         store.submit_symbols(None, Some("other"), "pub fn four() -> Int { 4 }").unwrap();
-        assert!(store.gleam(&["build"]).unwrap().0);
+        assert!(store.tool(&["build"]).unwrap().0);
         let left = |s: &Store| {
             let mut out = vec![];
             let mut todo = vec![s.root.join("build/dev")];
@@ -5285,7 +5232,7 @@ mod tests {
         };
         assert!(!left(&store).is_empty());
         store.delete("other.four").unwrap();
-        assert!(store.gleam(&["build"]).unwrap().0);
+        assert!(store.tool(&["build"]).unwrap().0);
         assert!(left(&store).is_empty(), "{:?}", left(&store));
     }
 

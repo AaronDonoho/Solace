@@ -11,5 +11,9 @@ unwatched = []
 [commands]
 install = { run = ["bun", "install"] }
 bundle = { run = ["bun", "build", "src/main.mjs", "--outfile", "priv/app.js", "--minify", "--target", "browser"] }
-# The frontend's release output, priv/app.js: compiled Gleam, then bundled. solace-cli/build.rs runs this.
+# The frontend's release output, priv/app.js: compiled Gleam, then bundled. Its [build] step `release` runs this.
 build-release = { run = ["sh", "-c", "bun install --frozen-lockfile && gleam build && bun build src/main.mjs --outfile priv/app.js --minify --target browser"] }
+
+[build]
+outputs = ["priv/app.js"]
+steps = [{ name = "release", command = "build-release", timeout = 600 }]

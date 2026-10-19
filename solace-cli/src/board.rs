@@ -40,15 +40,16 @@ fn task_dir(root: &Path, id: &str) -> Result<PathBuf, Failure> {
     let _ = task_path(root, id)?;
     Ok(root.join(".solace/board").join(id))
 }
-/// A task whose home is the project `root`. A task whose home is no project
-/// (D-129) is opened from the root, which stores it, and says `noProject`.
+/// A task whose home is the project `root`. A task whose home is no project is
+/// re-homed on load (D-160); one with no project at all is opened from the
+/// root, which stores it, and says `noProject` (D-129).
 pub(super) fn task(root: &Path, id: &str) -> Result<Value, Failure> {
     let path = task_path(root, id)?;
     let top = scope::top(root);
     if !path.exists() {
         return err("E7001", "unknown task");
     }
-    let mut t = read_task(&top, &path)?;
+    let mut t = rehome_task(&top, read_task(&top, &path)?)?;
     let dir = scope::dir(&top, root);
     if t["home"] != dir {
         if dir != "." || !homeless(&top, t["home"].as_str().unwrap_or("")) {
@@ -63,6 +64,31 @@ pub(super) fn task(root: &Path, id: &str) -> Result<Value, Failure> {
 /// A project list that can't be read counts every home as a project.
 pub(super) fn homeless(top: &Path, home: &str) -> bool {
     workspace::members(top).is_ok_and(|ms| !ms.iter().any(|m| m == home))
+}
+/// The home and scope a task whose home is no project takes (D-160): the first
+/// project of its scope, keeping only the projects of it, else the root with
+/// scope `["."]` when the root is a project. None when the root is no project:
+/// the task keeps no project. None while a run of the task is live: the agent
+/// works from the task's folder, and the load must not move it out from under
+/// the run (as `set_scope` says for a home change).
+pub(super) fn rehome_to(members: &[String], t: &Value) -> Option<(String, Vec<String>)> {
+    let home = t["home"].as_str().unwrap_or(".");
+    if members.iter().any(|m| m == home) || active(t) {
+        return None;
+    }
+    let kept: Vec<String> = scope::of(t, home).into_iter().filter(|d| members.iter().any(|m| m == d.as_str())).collect();
+    match kept.first() {
+        Some(d) => Some((d.clone(), kept)),
+        None if members.iter().any(|m| m == ".") => Some((".".to_string(), vec![".".to_string()])),
+        None => None,
+    }
+}
+/// A task whose home is no project is re-homed and saved (D-160); any other comes back as it is.
+fn rehome_task(top: &Path, t: Value) -> Result<Value, Failure> {
+    match workspace::members(top) {
+        Ok(ms) if rehome_to(&ms, &t).is_some() => tasks::rehome(top, &t),
+        _ => Ok(t),
+    }
 }
 /// The project to open task `t` from: its home, or the root when its home is
 /// no project (D-129).
@@ -89,14 +115,27 @@ pub(super) fn all_tasks(top: &Path) -> Result<Vec<Value>, Failure> {
     }
     // Each home's workflow is read at most once per listing.
     let mut flows = HashMap::new();
-    let members = workspace::members(top).unwrap_or_default();
+    // A list that can't be read counts every home as a project, as `homeless` does.
+    let members = workspace::members(top);
     for entry in fs::read_dir(dir)? {
         let p = entry?.path();
         if p.extension().is_some_and(|x| x == "json") {
             // One unreadable file (empty after a crash) must not hide the rest.
             match read_task_with(top, &p, &mut flows) {
-                Ok(mut t) => {
-                    if !members.iter().any(|m| m == t["home"].as_str().unwrap_or("")) {
+                Ok(t) => {
+                    // A re-home that fails (a folder that can't move) is logged and
+                    // leaves the task as it was, marked: one task must not hide the listing.
+                    let mut t = match &members {
+                        Ok(ms) if rehome_to(ms, &t).is_some() => match tasks::rehome(top, &t) {
+                            Ok(moved) => moved,
+                            Err(e) => {
+                                eprintln!("re-homing task {}: {}", t["id"].as_str().unwrap_or(""), e.0);
+                                t
+                            }
+                        },
+                        _ => t,
+                    };
+                    if members.as_ref().is_ok_and(|ms| !ms.iter().any(|m| m == t["home"].as_str().unwrap_or(""))) {
                         t["noProject"] = json!(true);
                     }
                     out.push(t);
@@ -162,6 +201,8 @@ fn read_task_with(top: &Path, path: &Path, flows: &mut HashMap<PathBuf, Value>) 
         let first_run = t["runs"][0]["started"].as_u64();
         t["createdTime"] = json!(first_note.into_iter().chain(first_run).min().unwrap_or_else(modified));
     }
+    // The mark comes from the home on each load (D-160): one saved by an older build is dropped.
+    t.as_object_mut().unwrap().remove("noProject");
     Ok(t)
 }
 /// Moves a project's tasks from before D-77 into the root's store, once, with
@@ -539,7 +580,11 @@ fn parse_system(text: &str) -> Result<Value, Failure> {
                     (e["kind"].as_str(), m["agent"].as_str()),
                     (Some("openai"), Some("codex")) | (Some("anthropic"), Some("claude"))
                 );
-                if !kind_matches || !e["base_url"].is_string() || e.get("key_env").is_some_and(|k| !k.is_string()) {
+                if !kind_matches
+                    || !e["base_url"].is_string()
+                    || e.get("key_env").is_some_and(|k| !k.is_string())
+                    || e.get("stored_key").is_some_and(|k| !k.is_boolean())
+                {
                     return Err(invalid());
                 }
             }
@@ -549,14 +594,17 @@ fn parse_system(text: &str) -> Result<Value, Failure> {
 }
 
 /// Codex settings for a model's OpenAI-compatible endpoint, if it has one. The
-/// key stays in the variable the endpoint names; Codex reads it at launch.
+/// key stays in the variable the endpoint names, or with a `stored` key in
+/// `setup::KEY_VAR`, set on the agent's process; Codex reads it at launch.
 /// Current Codex speaks only the Responses API, so the endpoint must serve it.
-fn endpoint_args(m: &Value) -> Vec<String> {
+fn endpoint_args(m: &Value, stored: bool) -> Vec<String> {
     let Some(e) = m.get("endpoint") else {
         return vec![];
     };
     let mut provider = json!({"name": m["label"], "base_url": e["base_url"], "wire_api": "responses"});
-    if let Some(k) = e["key_env"].as_str() {
+    if stored {
+        provider["env_key"] = json!(setup::KEY_VAR);
+    } else if let Some(k) = e["key_env"].as_str() {
         provider["env_key"] = json!(k);
     }
     let fields: Vec<String> = provider.as_object().unwrap().iter().map(|(k, v)| format!("{k} = {v}")).collect();
@@ -600,6 +648,7 @@ fn on_path(program: &str) -> bool {
 // Whether a model can start: its agent kind's checks and usage-limit marks.
 // An endpoint that is down shows up as a failed run.
 mod agents;
+mod setup;
 pub use agents::unavailable;
 fn model(config: &Value, name: &str) -> Result<Value, Failure> {
     config["models"]
@@ -1213,7 +1262,7 @@ pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failu
                 // Its file goes in the `materialize` below, which keeps one edited outside Solace (D-58).
                 s.db.execute("DELETE FROM modules WHERE path=?", [name])?;
             } else {
-                s.db.execute("INSERT OR REPLACE INTO modules VALUES (?1,?2,?3)", params![v[0].as_str(), v[1].as_str(), v[2].as_str()])?;
+                s.db.execute("INSERT OR REPLACE INTO modules(path,dir,header) VALUES (?1,?2,?3)", params![v[0].as_str(), v[1].as_str(), v[2].as_str()])?;
             }
         } else if let Some(name) = key.strip_prefix("file:") {
             let p = lockdown::path(&s.root, name)?;
@@ -1297,8 +1346,9 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
     }
     if failed.is_none() {
         for (dir, st, _) in &plans {
-            // A project of plain files (D-60) has no code to type-check.
-            if st.root.join("gleam.toml").exists()
+            // A project of plain files (D-60) has no code to type-check; the restored files say
+            // which it is now.
+            if crate::language::detect(&st.root).is_some()
                 && let Err(e) = st.check()
             {
                 failed = Some((dir.as_str(), *st, e));
@@ -1679,6 +1729,7 @@ fn models() -> Result<Value, Failure> {
     // Serve the last list; ask a kind whose answer is stale, in the background.
     agents::refresh_stale();
     let all = system()?["models"].as_array().cloned().unwrap_or_default();
+    let keys = setup::read_keys(&setup::keys_path());
     Ok(json!(
         served(&all)
             .iter()
@@ -1686,7 +1737,10 @@ fn models() -> Result<Value, Failure> {
                 let status = agents::availability(m);
                 let limit = status.as_ref().is_some_and(|s| s.1);
                 let reason = status.map(|s| s.0);
-                json!({"id":m["id"],"label":m["label"],"model":m["model"],"agent":m["agent"],"effort":m["effort"],"efforts":efforts(m),"available":reason.is_none(),"reason":reason,"limit":limit})
+                // Whether a key is stored, never the key.
+                let has_key = m["id"].as_str().is_some_and(|id| keys[id].is_string());
+                json!({"id":m["id"],"label":m["label"],"model":m["model"],"agent":m["agent"],"effort":m["effort"],"efforts":efforts(m),"available":reason.is_none(),"reason":reason,"limit":limit,
+                    "configured":m["configured"] == true,"base_url":m["endpoint"]["base_url"],"has_key":has_key})
             })
             .collect::<Vec<_>>()
     ))
@@ -1885,13 +1939,14 @@ fn set_scope(s: &Store, w: &Value, mut t: Value, body: &Value) -> Result<(Value,
     if active(&t) {
         return err("E7013", format!("this task's agent works from {home}; take {home} out of its projects once the run has ended"));
     }
-    move_task(s, &mut t, &scope::path(&top, &new[0]))?;
+    move_task(&s.root, &mut t, &scope::path(&top, &new[0]))?;
     Ok((t, After::Removed(home)))
 }
 /// Moves a task's folder to another project of its scope when its home leaves it.
-fn move_task(s: &Store, t: &mut Value, to: &Path) -> Result<(), Failure> {
+/// `from` is the project whose board holds the task's folder now.
+pub(super) fn move_task(from: &Path, t: &mut Value, to: &Path) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap().to_string();
-    let (from, into) = (s.root.join(".solace/board").join(&tid), to.join(".solace/board").join(&tid));
+    let (from, into) = (from.join(".solace/board").join(&tid), to.join(".solace/board").join(&tid));
     open(to)?;
     // A conversation is tied to the folder it ran in; the next run starts a new one, with a handoff.
     t["conversation"] = Value::Null;
@@ -2433,7 +2488,7 @@ fn start_project(home: &Path, t: &Value) -> String {
     let mut best = (0, mine);
     for d in candidates {
         let path = scope::path(&top, &d);
-        if !path.join("gleam.toml").exists() {
+        if crate::language::detect(&path).is_none() {
             continue;
         }
         let Ok(s) = Store::peek(&path) else { continue };
@@ -2481,6 +2536,7 @@ fn spawn_agent(
         None => env::current_exe()?,
     };
     let agent = agent_of(m);
+    let stored_key = m["id"].as_str().and_then(|id| setup::stored(&setup::keys_path(), id)).filter(|_| m.get("endpoint").is_some());
     let launch: Value = serde_json::from_str(&lockdown::agent_config(agent, dir, &binary, timeout)?).unwrap();
     let mut argv: Vec<String> = if let Some(a) = custom {
         a.iter().filter_map(|x| x.as_str().map(String::from)).collect()
@@ -2534,7 +2590,7 @@ fn spawn_agent(
             for image in images.iter().rev() {
                 argv.splice(at..at, ["--image".into(), image.to_string_lossy().into_owned()]);
             }
-            argv.extend(endpoint_args(m));
+            argv.extend(endpoint_args(m, stored_key.is_some()));
             argv.push("-".into());
         }
     }
@@ -2564,14 +2620,18 @@ fn spawn_agent(
     for (k, v) in launch["env"].as_object().unwrap() {
         cmd.env(k, v.as_str().unwrap());
     }
+    if agent == "codex"
+        && let Some(key) = &stored_key
+    {
+        cmd.env(setup::KEY_VAR, key);
+    }
     if agent == "claude" && custom.is_none() {
         if persistent {
             cmd.env("CLAUDE_CONFIG_DIR", dir);
         }
         if let Some(e) = m.get("endpoint") {
             cmd.env("ANTHROPIC_BASE_URL", e["base_url"].as_str().unwrap_or(""));
-            // The key is read from the named variable at launch and never stored.
-            if let Some(key) = e["key_env"].as_str().and_then(|k| env::var(k).ok()) {
+            if let Some(key) = setup::endpoint_key(m) {
                 cmd.env("ANTHROPIC_AUTH_TOKEN", key);
             }
             if env::var_os("CLAUDE_CODE_MAX_CONTEXT_TOKENS").is_none()
@@ -3167,18 +3227,18 @@ fn brief(t: &Value, kind: &str) -> String {
     let start = START;
     let ask = "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. In the question's `text`, give each option a short example of the outcome the human would see (what a user sees, what a command prints, what a page shows, what a file or record ends up as), not how the code would change; the `options` stay short labels matching the bold names in the examples. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
     let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. Keep messages short: lead with the answer or outcome, then only what the human needs to act on; don't restate the task or narrate your steps. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); in `text`, give each option a short example of its outcome in the human's terms, its name in bold, and keep the `options` labels short, matching the bold names.";
-    let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `merge`, `write`, `remove`, `format` and `run` are refused.";
+    let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `merge`, `write`, `remove` and `format` are refused, and `run <name>` works only for commands marked `allowed_in_reviews` in `solace.toml`: use those to verify (for example test suites).";
     // A task in a feature files its review's minor findings as the feature's tech debt (D-112).
     let debt = if t["feature"].is_string() { format!(" {TECH_DEBT_ASK}") } else { String::new() };
     let role = match kind {
         "review" => format!(
-            "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. Read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. {read_only} In a review, `run <name>` is allowed for commands marked `allowed_in_reviews` in `solace.toml`; use those to verify (for example JavaScript tests). Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
+            "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. Read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. {read_only} Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
         ),
         "discuss" => format!(
             "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
         ),
         "work" => format!(
-            "Make the change this task describes. {start} {ask} Before `task done`, run all tests of the projects this task covers: `test --all` in each one with Gleam code, and the test commands its `solace.toml` declares (`run <name>`). Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
+            "Make the change this task describes. {start} {ask} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, run all tests of the projects this task covers: `test --all` in each one with Gleam code, and the test commands its `solace.toml` declares (`run <name>`). Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
         ),
         _ => format!(
             "Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. A plan assigns every file change to whoever does the work, as an edit (`submit` or `write`) or a settings proposal (`write` with `reason`), never to the human, who never edits files or runs commands. A plan is the smallest complete change (the reference's step 2) and names every file it reaches. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work, and anything you didn't check."
@@ -3491,13 +3551,14 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: &[&Path]
         if HOST.contains(&a[0]) {
             return err("E7010", "host command is unavailable in a run");
         }
-        if r["kind"] == "review" && a[0] == "run" && a.len() > 1 {
+        // Every read-only run may run the commands a human marked (D-67, D-161).
+        if r["kind"] != "work" && a[0] == "run" && a.len() > 1 {
             let marked = lockdown::settings(also.first().copied().unwrap_or(root))
                 .ok()
                 .and_then(|v| v.get("commands")?.get(a[1])?.get("allowed_in_reviews")?.as_bool())
                 .unwrap_or(false);
             if !marked {
-                return err("E7010", "in a review, run only works for commands marked allowed_in_reviews in solace.toml");
+                return err("E7010", "this run is read-only: run only works for commands marked allowed_in_reviews in solace.toml");
             }
         } else if r["kind"] != "work" && CHANGES.contains(&a[0]) && a[0] != "build" {
             return err("E7010", "this run is read-only");
@@ -4007,6 +4068,11 @@ impl Board {
             ("GET", "/projects") => return self.listing(),
             ("GET", "/models") => return models(),
             ("POST", "/models/try-again") => return agents::try_again(body).and_then(|_| models()),
+            ("POST", "/models") => return setup::save(&config_path(), &setup::keys_path(), body).and_then(|_| models()),
+            ("DELETE", p) if p.starts_with("/models/") => {
+                let id = view::percent_decode(&p["/models/".len()..]);
+                return setup::remove(&config_path(), &setup::keys_path(), &id).and_then(|_| models());
+            }
             (_, p) if p == "/migration" || p.starts_with("/migration/") => return self.migration(method, p, body),
             _ => {}
         }
@@ -4469,7 +4535,7 @@ impl Events {
             return Ok(None);
         }
         let db = tasks::events(&self.board.top).map_err(|e| std::io::Error::other(e.0))?;
-        let members = workspace::members(&self.board.top).unwrap_or_default();
+        let members = workspace::members(&self.board.top);
         loop {
             let row = db
                 .query_row("SELECT seq,project,data FROM events WHERE seq>? ORDER BY seq LIMIT 1", [self.tasks], |r| {
@@ -4482,7 +4548,7 @@ impl Events {
             // A row with no project is a root record's (D-87); a row whose
             // project is no member is a task with no project (D-129), shown
             // on the root's streams and marked.
-            let homeless = !project.is_empty() && !members.iter().any(|m| m == &project);
+            let homeless = !project.is_empty() && members.as_ref().is_ok_and(|ms| !ms.iter().any(|m| m == &project));
             let shown = if project.is_empty() { self.at_root() } else { self.streams.iter().any(|s| s.0 == project) || (self.at_root() && homeless) };
             if !shown {
                 continue;

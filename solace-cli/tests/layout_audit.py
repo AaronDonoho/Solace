@@ -10,6 +10,9 @@ the width of every task element. The board audit also opens a task in the
 board's band at several window sizes: on the side, at its smallest width,
 collapsed on the side, and at the bottom with two columns and with one, and
 measures the band, its bar and where the bar's items sit in it.
+The band's measurements are checked against the tokens the pages share: a bar
+item over the 36px control height, a side band under its 32rem minimum, and a
+two-column task not 2rem apart fail the audit.
 
 Usage: layout_audit.py [page]
 Pages: board, strategy (all tabs), strategy-vision, strategy-features,
@@ -328,6 +331,19 @@ BAND_CASES = [
     ('bottom, narrow', {'width': 1200, 'height': 1000}, None, False),
 ]
 
+def check_band(name, m):
+    """Fails when the band's measurements drift from the tokens the pages share:
+    a bar item taller than the 36px control height, a side band under its 32rem
+    minimum, and a two-column task not 2rem apart."""
+    rem = m['rem']
+    for i in m['items']:
+        if i['height'] > 36.5:
+            fail(f'task band · {name}: bar item {i["name"]} is {i["height"]:.1f}px tall, over the 36px control height')
+    if m['layout'].startswith('side') and 'collapsed' not in m['layout'] and m['band_w'] < 32 * rem - 1:
+        fail(f'task band · {name}: the side band is {m["band_w"]:.1f}px wide, under its 32rem = {32 * rem:.0f}px minimum')
+    if m['gap'] is not None and abs(m['gap'] - 2 * rem) > 1:
+        fail(f'task band · {name}: the task columns are {m["gap"]:.1f}px apart, not the 2rem = {2 * rem:.0f}px gap')
+
 def report_band(name, window, m, shot):
     size = f'{window["width"]}×{window["height"]}'
     print(f'\n== task band · {name} · {size} ==')
@@ -343,6 +359,7 @@ def report_band(name, window, m, shot):
     for i in m['items']:
         below = f'{i["below"]:.1f}' if i['below'] is not None else 'no details shown'
         print(f'    {i["name"]:<36} height {i["height"]:.1f} above {i["above"]:.1f} below {below}')
+    check_band(name, m)
     print(f'screenshot {shot.name}')
 
 def audit_band(browser, fixture, task, out):

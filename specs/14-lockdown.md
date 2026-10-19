@@ -2,7 +2,7 @@
 
 **Status:** accepted 2026-09-29 · **Implements:** D-16 (points 8–10), PROPOSAL.md §6.8 · **Needed by:** the D-16 work. Not in the PROPOSAL.md §14.4 table; numbered after it.
 
-Solace is installed once and wraps a user's project. An agent does all of its work in that project through the Solace MCP tool. It has no shell and no file tools, only its own web access. Solace decides what each of the project's files is and what the agent may do with it. "Gleam:" marks what applies to a Gleam project, which is today's only target language.
+Solace is installed once and wraps a user's project. An agent does all of its work in that project through the Solace MCP tool. It has no shell and no file tools, only its own web access. Solace decides what each of the project's files is and what the agent may do with it. "Gleam:" marks what applies to a Gleam project and "Rust:" what applies to a Rust project, a Cargo package of one crate (D-158).
 
 Terms: a **validator** is a program declared for a set of files that decides whether a file's content is acceptable, such as an HTML linter or a JSON Schema checker. The **proposed text** is what a `write` would put in the file, before Solace has accepted it.
 
@@ -12,15 +12,16 @@ Every file under the project root is in exactly one category, named for what Sol
 
 | # | Rule | Category |
 | --- | --- | --- |
-| 1 | Source the store holds as symbols (Gleam: `src/**/*.gleam`, `test/**/*.gleam`; none in a project of plain files, D-60) | graph |
-| 2 | `solace.toml` (§2) and `AGENTS.md` (D-45) | protected |
+| 1 | Source the store holds as symbols (Gleam: `src/**/*.gleam`, `test/**/*.gleam`; Rust: `src/**/*.rs`, `tests/**/*.rs`; none in a project of plain files, D-60) | graph |
+| 2 | `solace.toml` (§2) and `AGENTS.md` (D-45); Rust: `build.rs`, `.cargo/config.toml`, `rust-toolchain.toml` (D-158) | protected |
 | 3 | `.solace/`: the store, the task board's data (Spec 15), and Solace's working files; and every file of another Solace project nested in this one (a folder below the root with its own `.solace/store.db`, D-57) | internal: no agent access at all (`E6006`) |
-| 4 | `.git/`, the target's build and dependency output (Gleam: `build/`, `manifest.toml`), anything `.gitignore` ignores | unwatched |
+| 4 | `.git/`, the target's build and dependency output (Gleam: `build/`, `manifest.toml`; Rust: `target/`), anything `.gitignore` ignores | unwatched |
 | 5 | A path registered in `unwatched` (§2) | unwatched |
 | 6 | A file over `watch_limit` or binary (not UTF-8, or containing a NUL byte) | unwatched, marked `over limit` or `binary` |
 | 7 | Everything else, including the target's manifest (Gleam: `gleam.toml`) (D-28) | watched |
 
 - Watched and unwatched files are readable and writable through file commands and never enter the symbol index (D-26). Solace keeps no permanent file history (source control does). It keeps the content hash last read or written in each session (§3), and, for direct task edits, the file as it was before the task first changed it (Spec 15 §5).
+- Rust: `Cargo.toml` is watched, but a `write` that changes its dependency tables, `[target.*]` dependencies, `[patch]`, `[replace]`, `package.build`, `package.links` or `lib.proc-macro` is a proposal the human approves, as for `solace.toml` (D-158).
 
 ## 2. Project settings
 
@@ -54,7 +55,7 @@ steps   = [
 
 `checks` (optional, D-44) marks a command as a test suite outside `gleam test` and lists the entry points it drives, by symbol name, or `"*"` for all. For `gleam run -m <module>`, that module's `main` is added, so `checks = []` is enough. A suite's reach is everything its entry points can run. `test`, `impact` and a submit's note name a suite that reaches a change ("Also reached: e2e (`run e2e`)"); Solace never runs a suite unasked. `checks` that isn't an array of strings is invalid (`E6020`).
 
-`[build]` (optional, D-131) is how the project builds: `steps` run in order, each a `name` with `run` (an argument vector) or `command` (an entry of `[commands]`, reused), and an optional `timeout` (else the command's, else 120 s). `after` names the projects built before it; `outputs` lists its artifacts. A fault is `E6020` naming the field. A project without `[build]` gets a default from `package.json`, `gleam.toml` and `Cargo.toml`, or none. `build plan` lists every project's recipe in build order.
+`[build]` (optional, D-131) is how the project builds: `steps` run in order, each a `name` with `run` (an argument vector) or `command` (an entry of `[commands]`, reused), and an optional `timeout` (else the command's, else 120 s). `after` names the projects built before it; `outputs` lists its artifacts. A fault is `E6020` naming the field. A project without `[build]` gets a default from `package.json`, `gleam.toml` and `Cargo.toml`, or none. `build plan` lists every project's recipe in build order, and marks outputs out of date, with the steps to run, when one is missing or a source changed after it was built (D-159).
 
 Solace rereads the file whenever a command starts, so a change takes effect with no restart.
 
@@ -85,12 +86,13 @@ Solace rereads the file whenever a command starts, so a change takes effect with
 
 ## 4. Commands the agent can run
 
-- **Built-in:** `check`, `test` and `format` (as today), plus `build`, which runs the target's build (Gleam: `gleam build`).
+- **Built-in:** `check`, `test` and `format` (as today), plus `build`, which runs the target's build (Gleam: `gleam build`). Rust: `cargo test` runs at `test` and the existing gates, never per submit; the per-submit check is Spec 2 §2's (D-158).
+- **Rust on Linux:** the submit check, `test` and `build` run under bubblewrap without network and with only `target/` writable, because each runs `build.rs` and dependencies' build scripts (D-158). They pass `--offline`; Cargo's registry and git caches (`~/.cargo/registry`, `~/.cargo/git`) and the toolchain are mounted read-only, so dependencies must already be fetched. Fetching (`cargo fetch`) runs outside the sandbox, after import and after an approved Cargo.toml change, the only times dependencies change.
 - **Declared:** `run <name> [args…]` runs a command from `[commands]`. Unknown names are refused (`E6010`), listing the declared ones.
 - Commands run **without a shell**: the `run` array is the argument vector. The agent may append arguments only if the command declares `args = true` (otherwise `E6011`).
 - **Dependencies stay in the project.** Commands fetch and build dependencies into the project's own directories (Gleam: `build/packages/`). They never install anything into the machine's global toolchain. A shared download cache (Gleam's Hex cache) is allowed, because it doesn't change how any other project builds.
 - They run in the project root, on the projection of the current store, with a timeout (default 120 s). A timed-out command is killed, and the reply says so (`E6012`).
-- The reply gives the exit code, then the output, condensed (D-111): failures with their messages and tracebacks, errors, panics and summary lines (`test result:`, `N tests, M failed`) stay, in order; build progress, passing-test lines and the text of warnings are left out, and warnings stay as a count. Output over the reply budget keeps the first 20 lines and as much of the end as fits, and says how many lines were left out.
+- The reply gives the exit code and the elapsed time (`exit code: 0 (4.2s)`, D-163), then the output, condensed (D-111): failures with their messages and tracebacks, errors, panics and summary lines (`test result:`, `N tests, M failed`) stay, in order; build progress, passing-test lines and the text of warnings are left out, and warnings stay as a count. Output over the reply budget keeps the first 20 lines and as much of the end as fits, and says how many lines were left out.
 
 ## 5. Agent configuration
 
@@ -112,7 +114,7 @@ The range `E60xx` is files, settings and commands, in Spec 3 §6's format. `E600
 
 - Humans editing graph files on disk. Solace doesn't detect it or keep such edits: it rewrites graph files from the store whenever it needs to (D-16).
 - Secrets and environment variables for commands (commands inherit Solace's environment).
-- Network limits on commands; more than one project per server.
+- Network limits on commands, other than Rust checks on Linux (§4); more than one project per server.
 
 ## Tests (acceptance)
 
@@ -126,3 +128,4 @@ The range `E60xx` is files, settings and commands, in Spec 3 §6's format. `E600
 - A8. `write solace.toml` outside a work run is refused. A human's edit to `solace.toml` applies to the next command.
 - A9. `run smoke extra` without `args = true` returns `E6011`, and `run nope` returns `E6010`, listing the declared commands. A declared command that sleeps past its timeout is killed and returns `E6012`.
 - A10. The `agent-config` output for both agents matches golden files, and has no shell or file tool enabled.
+- A11. Rust: `write build.rs` and a `write Cargo.toml` adding a dependency are proposals; a `Cargo.toml` edit to `[package] description` is written. On Linux, a `build.rs` that opens a network connection fails the check.

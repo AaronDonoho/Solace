@@ -10,16 +10,18 @@ Names: `module.name`, e.g. `pilot/checkout.pay`, or any unambiguous suffix
 Each line runs in one project: yours (session start names it) or its
 `--project <folder>`. Paths are relative to that project.
 
-Several commands go in one call, one per line, run in order. Each call is a
-turn that re-reads the conversation, so work in few calls:
+Several commands go in one call, one per line, run in order. A change that
+fails stops the call, so the lines after it don't run: `submit` then `test`
+tests only what was saved, and a failed read or `test` stops nothing. Each
+call is a turn that re-reads the conversation, so work in few calls:
 1. Read once: `inspect checkout.pay payments.capture --context` gives each
    symbol with the signatures it uses, its callers and a test. Don't ask again
    for anything a reply showed, and read only what the change needs: once you
    know what to change, stop exploring. To reproduce a case:
    `probe --from checkout_test.pay_test --trace checkout.pay`.
-2. Change and test in one call: `submit` then `test`, or for other files
-   `write` (no path) then `run <name>`. All the edits, in one
-   file or several, go in one patch, one header per symbol, module or file
+2. Change and test in one call, never a change alone: `submit` then `test`,
+   or for other files `write` (no path) then `run <name>`. All the edits, in
+   one file or several, go in one patch, one header per symbol, module or file
    (`*** Update: <module.name>`, `*** Add: <name>`, `*** Update File: <path>`),
    an `@@` hunk per edit; send only what changes:
     *** Begin Patch
@@ -340,7 +342,8 @@ Project (commands declared in solace.toml)
                                 fetched (a plain-file project has nothing to build)
   build plan                    every project's build recipe ([build] in its
                                 solace.toml, or the default from its files), in
-                                build order; reads only
+                                build order, naming outputs that are out of
+                                date and the steps to run; reads only
   format                        gleam format for the project
   run <name> [args...]          a command declared in solace.toml's [commands];
                                 extra arguments only when it allows them
@@ -350,9 +353,9 @@ Work records, kept between sessions
   work list                     the open records, as `session start` lists them
   work done <id>                close a record
 
-Task runs (the note, summary or question in `text`). Reviews and investigations
-are read-only: submit, delete, extract, merge, write, remove, move and format
-are refused, and so is run, except in a review for commands marked
+Task runs (the note, summary or question in `text`). Reviews, investigations
+and discussions are read-only: submit, delete, extract, merge, write, remove,
+move and format are refused, and so is run, except for commands marked
 `allowed_in_reviews = true`.
   task diff [name...]           what this task changed, against its state before;
                                 `impact` with no names is the same

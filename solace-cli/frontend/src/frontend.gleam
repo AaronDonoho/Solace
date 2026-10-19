@@ -18,6 +18,7 @@ import migration
 import modem
 import settings
 import solace_board
+import solace_task
 import strategy
 
 pub fn main() -> Nil {
@@ -55,6 +56,9 @@ pub type Msg {
   Found(String, String, String, Bool)
   /// A page's `attention` event: something there needs the human. The page's element.
   Attention(String)
+  /// The reply to `GET /workflow`: the root project's columns, which the
+  /// Knowledgebase's column table follows (D-140).
+  WorkflowLoaded(String)
 }
 
 pub fn route(uri: Uri) -> Route {
@@ -76,9 +80,15 @@ pub fn route(uri: Uri) -> Route {
 /// A route's page element, hidden unless it is the one shown.
 /// The page a link asked for gets the record in its `focus` property, `{kind, dir, id, n}`.
 /// Its `attention` event flags its menu tab.
-pub fn page(route: Route, shown: Bool, focus: Focus) -> Element(Msg) {
+/// The Knowledgebase page takes the server's columns for its column table.
+pub fn page(
+  route: Route,
+  shown: Bool,
+  focus: Focus,
+  columns: List(solace_task.Column),
+) -> Element(Msg) {
   use <- bool.lazy_guard(route == Knowledgebase, fn() {
-    knowledgebase.view(shown)
+    knowledgebase.view(shown, columns)
   })
   let attributes = case route {
     Contracts(base) if base != "" -> [attribute.attribute("base", base)]
@@ -135,7 +145,13 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   // what needs the human and can flag their tab.
   let opened = [shown] |> open(Board) |> open(Strategy)
   #(
-    Model(route: shown, opened: opened, focus: no_focus, attention: []),
+    Model(
+      route: shown,
+      opened: opened,
+      focus: no_focus,
+      attention: [],
+      columns: [],
+    ),
     effect.batch([
       modem.init(fn(uri) { RouteChanged(route(uri)) }),
       effect.from(fn(send) {
@@ -143,6 +159,10 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       }),
       // A bare link shows its record's title (D-122), in every page.
       effect.from(fn(_) { watch_titles() }),
+      // The guide's column table follows the server's workflow (D-140).
+      effect.from(fn(send) {
+        load_workflow(fn(text) { send(WorkflowLoaded(text)) })
+      }),
       found,
       renamed,
     ]),
@@ -191,6 +211,16 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           )
         }
       }
+    // A reply that is not a workflow (a server that is down, a project with no
+    // board section) leaves the guide's table as it is: no rows.
+    WorkflowLoaded(text) ->
+      case json.parse(text, solace_task.workflow_decoder()) {
+        Ok(workflow) -> #(
+          Model(..model, columns: workflow.columns),
+          effect.none(),
+        )
+        Error(_) -> #(model, effect.none())
+      }
   }
 }
 
@@ -236,7 +266,9 @@ pub fn view(model: Model) -> Element(Msg) {
       link("/knowledgebase", "Knowledgebase", Knowledgebase),
       link("/settings", "Settings", Settings),
     ]),
-    ..list.map(model.opened, fn(r) { page(r, page_of(r) == shown, model.focus) })
+    ..list.map(model.opened, fn(r) {
+      page(r, page_of(r) == shown, model.focus, model.columns)
+    })
   ])
 }
 
@@ -502,12 +534,15 @@ fn first_number(attributes: List(#(String, String))) -> Int {
 /// stays in the document once opened, hidden while another shows, so its work is there when you come back.
 /// `focus` is the last link followed. `attention` holds the pages, by element, whose menu tab flashes:
 /// a page hidden at the time asked for it, and it hasn't been shown since.
+/// `columns` are the root project's board columns, as `GET /workflow` answers
+/// them; [] until it answers, and a project with no workflow keeps [].
 pub type Model {
   Model(
     route: Route,
     opened: List(Route),
     focus: Focus,
     attention: List(String),
+    columns: List(solace_task.Column),
   )
 }
 
@@ -688,3 +723,6 @@ pub fn renamed_path(path: String) -> Option(String) {
     _ -> None
   }
 }
+
+@external(javascript, "./workflow.mjs", "load_workflow")
+fn load_workflow(receive: fn(String) -> Nil) -> Nil

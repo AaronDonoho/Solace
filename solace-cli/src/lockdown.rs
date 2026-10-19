@@ -29,7 +29,7 @@ pub fn invalid_settings(why: impl std::fmt::Display) -> Failure {
 pub fn settings(root: &Path) -> Result<toml::Value, Failure> {
     match fs::read_to_string(root.join("solace.toml")) {
         // A folder of projects' solace.toml only lists them (D-57); `workspace` checks it.
-        Ok(s) if !root.join("gleam.toml").exists() && !root.join(".solace/store.db").exists() => s.parse().map_err(invalid_settings),
+        Ok(s) if crate::language::detect(root).is_none() && !root.join(".solace/store.db").exists() => s.parse().map_err(invalid_settings),
         Ok(s) => {
             let v = parse_settings(&s)?;
             // A skills folder that is a nested project (D-57), or a folder
@@ -234,7 +234,7 @@ pub fn in_skills(v: &toml::Value, name: &str) -> bool {
 /// caller that wants a size reads the file once (D-119 point 4).
 fn tier_and_bytes(root: &Path, v: &toml::Value, ignores: &mut Ignores, name: &str, proposed: Option<&[u8]>) -> (String, Option<Vec<u8>>) {
     // A project of plain files holds no symbols (D-60).
-    if root.join("gleam.toml").exists() && (name.starts_with("src/") || name.starts_with("test/")) && name.ends_with(".gleam") {
+    if crate::language::detect(root).is_some() && (name.starts_with("src/") || name.starts_with("test/")) && name.ends_with(".gleam") {
         return ("graph".into(), None);
     }
     if name == "solace.toml" || name == "AGENTS.md" {
@@ -525,6 +525,13 @@ pub fn trim_output(text: &str, budget: usize) -> String {
     let result = format!("{head}... {} lines omitted ...\n{}\n", lines.len() - kept - tail.len(), tail.join("\n"));
     result[..result.floor_char_boundary(budget.min(result.len()))].into()
 }
+/// Whether `l` is a build script's warning, `warning: solace@0.1.0: …`: cargo prefixes it with
+/// the package and its version, which no compiler warning has.
+fn build_script_warning(l: &str) -> bool {
+    let spec = l.strip_prefix("warning: ").unwrap_or_default().split(": ").next().unwrap_or_default();
+    spec.split_once('@').is_some_and(|(_, version)| version.starts_with(|c: char| c.is_ascii_digit()))
+}
+
 /// A `run` or `build` reply's output (D-111): failures, errors, panics and
 /// summaries, in order. Build progress, passing tests and the text of
 /// warnings are left out; warnings stay as cargo's count line, or a count.
@@ -553,6 +560,11 @@ pub fn condense(output: &str) -> String {
             // cargo's `warning: `x` (bin "x") generated 3 warnings`
             if l.contains(" generated ") && l.contains(" warning") {
                 counted = true;
+                warning = None;
+                out += &format!("{l}\n");
+            } else if build_script_warning(l) {
+                // A build script's warning is the script's own message, one line naming the step
+                // to run, not a compiler note: it stays whole (D-159).
                 warning = None;
                 out += &format!("{l}\n");
             } else {
@@ -627,8 +639,8 @@ pub fn wait_or_kill(child: &mut std::process::Child, timeout: Duration) -> std::
     }
 }
 
-/// Runs `argv` in `root`: the exit code, then the output within `budget`,
-/// `condense`d for a `run` or `build` reply (D-111).
+/// Runs `argv` in `root`: the exit code and elapsed time, then the output
+/// within `budget`, `condense`d for a `run` or `build` reply (D-111).
 pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize, condensed: bool) -> Out {
     use std::os::unix::process::CommandExt;
     fs::create_dir_all(root.join(".solace"))?;
@@ -640,8 +652,9 @@ pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize, conden
         .stdout(out.try_clone()?)
         .stderr(out)
         .spawn()?;
+    let start = Instant::now();
     let result = match wait_or_kill(&mut child, Duration::from_secs(timeout))? {
-        Some(status) => Ok(format!("exit code: {}\n", status.code().unwrap_or(-1))),
+        Some(status) => Ok(format!("exit code: {} ({:.1}s)\n", status.code().unwrap_or(-1), start.elapsed().as_secs_f64())),
         None => error("E6012", &argv[0], format!("timed out after {timeout}s")),
     };
     let output = fs::read_to_string(&log)?;
@@ -651,6 +664,10 @@ pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize, conden
         Ok(prefix) => Ok(prefix.clone() + &trim_output(&output, budget.saturating_sub(prefix.len()))),
         Err(Failure(message, code)) => Err(Failure(message + &trim_output(&output, budget), code)),
     }
+}
+/// Whether a `command` reply is from a command that exited with 0.
+pub fn passed(out: &str) -> bool {
+    out.starts_with("exit code: 0 (")
 }
 /// The file's new text: `new` whole, or with `old` replaced by `new` by the
 /// rules of `submit --replace` (`all` replaces every occurrence).
@@ -815,7 +832,7 @@ fn validate(root: &Path, v: &toml::Value, name: &str, p: &Path, text: &str) -> R
                 let argv: Vec<String> =
                     argv.as_array().unwrap().iter().map(|x| x.as_str().unwrap().replace("{file}", &p.to_string_lossy())).collect();
                 let out = command(root, &argv, 120, BUDGET, false).map_err(|e| Failure(format!("E6003 validator failed\n  {}", e.0), 1))?;
-                if !out.starts_with("exit code: 0\n") {
+                if !passed(&out) {
                     return error("E6003", name, out);
                 }
             }
@@ -1689,7 +1706,7 @@ pub fn dispatch(
             }
             store.materialize(&store.index()?)?;
             let out = command(root, &argv, timeout, budget, a[0] != "format")?;
-            if out.starts_with("exit code: 0\n") { Ok(out) } else { fail(out) }
+            if passed(&out) { Ok(out) } else { fail(out) }
         })());
     }
     None
@@ -2644,6 +2661,26 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; fini
         assert_eq!(condense(none), "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s\n");
         assert_eq!(condense("hello\n"), "hello\n");
     }
+    /// A build script's warning stays whole: it names the step to run (D-159).
+    #[test]
+    fn condense_keeps_a_build_script_warning() {
+        let output = "   Compiling solace v0.1.0 (/x/solace-cli)
+warning: solace@0.1.0: solace-cli/frontend/priv/app.js is older than its sources: run the [build] step `release` in solace-cli/frontend (`build plan` lists it)
+warning: unused import
+ --> src/main.rs:1:5
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.00s
+     Running unittests src/main.rs (target/debug/deps/solace-1)
+
+running 1 test
+test a ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+";
+        assert_eq!(
+            condense(output),
+            "warning: solace@0.1.0: solace-cli/frontend/priv/app.js is older than its sources: run the [build] step `release` in solace-cli/frontend (`build plan` lists it)\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n1 warning not shown\n"
+        );
+    }
     /// Gleam's warnings, blank lines and all, become a count.
     #[test]
     fn condense_gleam_warning() {
@@ -2669,14 +2706,17 @@ running your program.
         let output = "Running step 3\nChecking config\nwarning: low disk\nstill here\nrunning late\nConnecting ... ok\n";
         assert_eq!(condense(output), "Running step 3\nChecking config\nstill here\nrunning late\nConnecting ... ok\n1 warning not shown\n");
     }
-    /// `run` replies with the exit code and the condensed output.
+    /// `run` replies with the exit code, the elapsed time and the condensed output.
     #[test]
     fn run_reply_is_condensed() {
         let (s, _) = fixture();
         let v: toml::Value =
             "[commands]\nsuite = { run = [\"sh\", \"-c\", \"printf 'running 2 tests\\\\ntest a ... ok\\\\ntest b ... FAILED\\\\n'; exit 1\"] }\n".parse().unwrap();
         let err = call(&s, &v, &["run", "suite"], "", None).unwrap_err();
-        assert_eq!(err.0, "exit code: 1\ntest b ... FAILED\n");
+        let (prefix, rest) = err.0.split_once('\n').unwrap();
+        assert!(prefix.starts_with("exit code: 1 (") && prefix.ends_with("s)"), "{prefix}");
+        assert_eq!(rest, "test b ... FAILED\n");
+        assert!(!passed(&err.0) && passed("exit code: 0 (0.0s)\n"));
     }
     #[test]
     fn a4_new_watched_file_and_size() {

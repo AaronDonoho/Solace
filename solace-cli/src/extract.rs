@@ -679,8 +679,12 @@ struct Dependent {
 fn merged(dep: &Index, source: &Index) -> Index {
     let syms = dep.syms.iter().chain(&source.syms).cloned().collect();
     let modules =
-        dep.modules.iter().chain(&source.modules).map(|m| ModuleRow { path: m.path.clone(), dir: m.dir.clone(), header: m.header.clone() }).collect();
-    Index::build(syms, modules)
+        dep.modules
+            .iter()
+            .chain(&source.modules)
+            .map(|m| ModuleRow { path: m.path.clone(), dir: m.dir.clone(), header: m.header.clone(), file: m.file.clone() })
+            .collect();
+    Index::build(source.lang, syms, modules)
 }
 
 /// `body` in a transaction of each store, the first outermost; the last one
@@ -700,7 +704,7 @@ fn name_map(ix: &Index) -> HashMap<(String, String), usize> {
     }
     for (i, s) in ix.syms.iter().enumerate() {
         if s.kind == Kind::Type {
-            for c in gleam::constructors(&s.text) {
+            for c in ix.lang.constructors(&s.text) {
                 names.entry((s.module.clone(), c)).or_insert(i);
             }
         }
@@ -719,7 +723,7 @@ fn raw_items(header: &str, module: &str, orig: &str, local: &str) -> Vec<String>
     if found.is_empty() { vec![orig.to_string()] } else { found }
 }
 
-fn resolve_ref(r: &Ref, oh: &str, imps: &[gleam::Import], header: &str, names: &HashMap<(String, String), usize>) -> Option<Resolved> {
+fn resolve_ref(r: &Ref, oh: &str, imps: &[Import], header: &str, names: &HashMap<(String, String), usize>) -> Option<Resolved> {
     match r {
         Ref::Qualified(alias, member) => {
             let imp = imps.iter().find(|i| &i.alias == alias)?;
@@ -810,11 +814,11 @@ fn cyclic(edges: &BTreeMap<String, BTreeSet<String>>) -> bool {
 /// `Task(` style uses of an opaque type's constructors by `j`: constructing or
 /// matching, not the type in an annotation.
 fn constructs(ix: &Index, j: usize, ty: usize) -> bool {
-    let ctors = gleam::constructors(&ix.syms[ty].text);
+    let ctors = ix.lang.constructors(&ix.syms[ty].text);
     let s = &ix.syms[j];
     let body = fn_body_start(s).filter(|_| s.kind == Kind::Fn);
-    let code = gleam::strip_comments(&s.text);
-    gleam::references_spans(&s.text).into_iter().any(|(r, a, _)| {
+    let code = ix.lang.strip_comments(&s.text);
+    ix.lang.references_spans(&s.text).into_iter().any(|(r, a, _)| {
         let name = match &r {
             Ref::Bare(n) | Ref::Qualified(_, n) => n,
         };
@@ -856,8 +860,8 @@ struct Plan<'a> {
 }
 
 impl Plan<'_> {
-    fn old_imports(&self, m: &str) -> Vec<gleam::Import> {
-        self.headers.get(m).map_or(vec![], |h| gleam::imports(h))
+    fn old_imports(&self, m: &str) -> Vec<Import> {
+        self.headers.get(m).map_or(vec![], |h| self.ix.lang.imports(h))
     }
 
     /// (alias, module) of the imports `m` has after the move.
@@ -894,7 +898,7 @@ impl Plan<'_> {
                 // a merge's retired symbol is gone from its module
                 self.redirect.is_none_or(|(r, _)| r != i)
                     && self.newmod[i] == m
-                    && (s.name == name || (s.kind == Kind::Type && gleam::constructors(&s.text).iter().any(|c| c == name)))
+                    && (s.name == name || (s.kind == Kind::Type && self.ix.lang.constructors(&s.text).iter().any(|c| c == name)))
             })
     }
 
@@ -932,7 +936,7 @@ impl Plan<'_> {
             };
             let mut bound: Option<HashSet<String>> = None;
             let mut edits: Vec<(usize, usize, String)> = vec![];
-            for (r, a, b) in gleam::references_spans(&text) {
+            for (r, a, b) in ix.lang.references_spans(&text) {
                 let Some(mut res) = resolve_ref(&r, &oh, &imps, header, &self.names) else { continue };
                 // a merge's redirect: the survivor, under its own name when that differs
                 let (mut hit, mut renamed) = (false, false);
@@ -943,7 +947,7 @@ impl Plan<'_> {
                     // a constructor named like the retired type keeps its name (the
                     // survivor's constructors match): one in a value or pattern, not a type
                     let ctor_alike = ix.syms[gone].kind == Kind::Type
-                        && gleam::constructors(&ix.syms[gone].text).contains(&ix.syms[gone].name)
+                        && ix.lang.constructors(&ix.syms[gone].text).contains(&ix.syms[gone].name)
                         && !type_position(&text, a, b, head);
                     if res.member == ix.syms[gone].name && ix.syms[keep].name != ix.syms[gone].name && !ctor_alike {
                         res.member = ix.syms[keep].name.clone();
@@ -977,7 +981,7 @@ impl Plan<'_> {
                     continue;
                 }
                 let member = res.member.clone();
-                let bound = bound.get_or_insert_with(|| gleam::bound_names(&text));
+                let bound = bound.get_or_insert_with(|| ix.lang.bound_names(&text));
                 let slice = text[a..b].to_string();
                 if nh == mx {
                     if (matches!(res.via, Via::Qual(_)) || renamed) && bound.contains(&member) {
@@ -1065,7 +1069,7 @@ fn write_headers(plan: &Plan, modules: &[(String, String, &Store)]) -> Result<Ve
         for need in plan.needs.get(m).into_iter().flatten() {
             match &need.alias {
                 Some(a) => {
-                    if !gleam::imports(&h).iter().any(|i| i.module == need.module && &i.alias == a) {
+                    if !ix.lang.imports(&h).iter().any(|i| i.module == need.module && &i.alias == a) {
                         h = add_import(&h, &format!("import {} as {a}", need.module));
                     }
                 }
@@ -1074,7 +1078,7 @@ fn write_headers(plan: &Plan, modules: &[(String, String, &Store)]) -> Result<Ve
         }
         let edited = edit_imports(&h, &keep_item, &keep_import);
         if edited != *header {
-            let formatted = format_gleam(&edited).map_or(edited.clone(), |f| f.trim().to_string());
+            let formatted = ix.lang.format(&edited).map_or(edited.clone(), |f| f.trim().to_string());
             st.set_header(m, &formatted)?;
             finals.push((m.clone(), formatted));
         } else {
@@ -1185,7 +1189,7 @@ impl Store {
             }
         }
         if let Some(d) = &dest {
-            if !d.has(&to) && !valid_module_path(&to) {
+            if !d.has(&to) && !d.store.lang().valid_module_path(&to) {
                 return fail(format!("{to} is not a module name; use --to <module>, e.g. --to solace_task"));
             }
         } else if !exists(&to) {
@@ -1194,7 +1198,7 @@ impl Store {
             {
                 return fail(format!("use --to {module} --to-project {d}"));
             }
-            if !valid_module_path(&to) {
+            if !self.lang().valid_module_path(&to) {
                 return fail(format!("{to} is not a module name; use --to <module>, e.g. --to solace_task"));
             }
         }
@@ -1279,7 +1283,7 @@ impl Store {
         bring_helpers(&ix, &mut moved, &mut helpers);
         let mut moved_tests: Vec<usize> = vec![];
         if !target_is_test {
-            for t in reach::tests(&ix) {
+            for t in reach::test_symbols(&ix) {
                 let c = reach::covered(&ix, t);
                 if !moved[t] && !c.is_empty() && c.iter().all(|&u| moved[u]) {
                     moved_tests.push(t);
@@ -1472,8 +1476,8 @@ impl Store {
             let Ok(dix) = other.index() else { continue };
             for s in &dix.syms {
                 let header = dix.modules.iter().find(|m| m.path == s.module).map_or("", |m| m.header.as_str());
-                let imps = gleam::imports(header);
-                for r in gleam::references(&s.text) {
+                let imps = dix.lang.imports(header);
+                for r in dix.lang.references(&s.text) {
                     let hit = match &r {
                         Ref::Qualified(alias, member) => imps
                             .iter()
@@ -1519,7 +1523,7 @@ impl Store {
             for s in d.ix.syms.iter().filter(|s| s.module == to || s.module == test_to) {
                 foreign.insert((s.module.clone(), s.name.clone()));
                 if s.kind == Kind::Type {
-                    foreign.extend(gleam::constructors(&s.text).into_iter().map(|c| (s.module.clone(), c)));
+                    foreign.extend(d.ix.lang.constructors(&s.text).into_iter().map(|c| (s.module.clone(), c)));
                 }
             }
         }
@@ -1639,7 +1643,7 @@ impl Store {
         let old_modules: BTreeSet<String> = (0..n).filter(|&i| moved[i]).map(|i| ix.syms[i].module.clone()).collect();
         let body = || {
             for (path, dir) in &created {
-                tgt.db.execute("INSERT INTO modules VALUES (?1, ?2, ?3)", params![path, dir, ""])?;
+                tgt.db.execute("INSERT INTO modules(path, dir, header) VALUES (?1, ?2, ?3)", params![path, dir, ""])?;
             }
             for i in 0..n {
                 let s = &ix.syms[i];
@@ -1697,7 +1701,7 @@ impl Store {
             let mut retired = vec![];
             for m in &old_modules {
                 let empty = !(0..n).any(|i| newmod[i] == *m);
-                let imported = finals.iter().any(|(o, h)| o != m && gleam::imports(h).iter().any(|i| i.module == *m));
+                let imported = finals.iter().any(|(o, h)| o != m && ix.lang.imports(h).iter().any(|i| i.module == *m));
                 if empty && !imported {
                     self.db.execute("DELETE FROM modules WHERE path = ?1", [m])?;
                     retired.push(m.clone());
@@ -1876,7 +1880,7 @@ impl Store {
         for i in (0..n).filter(|&i| moved[i]) {
             moved_names.insert(ix.syms[i].name.clone());
             if ix.syms[i].kind == Kind::Type {
-                moved_names.extend(gleam::constructors(&ix.syms[i].text));
+                moved_names.extend(ix.lang.constructors(&ix.syms[i].text));
             }
         }
         let olds: Vec<Vec<String>> = old_modules

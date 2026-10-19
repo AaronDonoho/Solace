@@ -24,8 +24,23 @@ rust-acceptance = { run = ["env", "-u", "SOLACE_TASK", "-u", "SOLACE_RUN", "-u",
 # Layout measurements and screenshots of a fixture instance, light and dark (D-71 isolation).
 # An argument limits it to one page: board, strategy[-vision|-features|-roadmap|-tasks], settings, task.
 layout_audit = { run = ["env", "-u", "SOLACE_TASK", "-u", "SOLACE_RUN", "-u", "SOLACE_SESSION", "-u", "SOLACE_CONFIG", "-u", "SOLACE_BIN", "python3", "solace-cli/tests/layout_audit.py"], args = true, allowed_in_reviews = true }
+# The shared spacing tokens and the board's column labels, against the one place that sets them.
+spacing_parity = { run = ["python3", "solace-cli/tests/spacing_parity.py"], allowed_in_reviews = true }
+# Remakes the pages' bundle, solace-cli/frontend/priv/app.js, after a change to any page project; the frontend's [build] step does the same.
+bundle = { run = ["sh", "-c", "cd solace-cli/frontend && bun install --frozen-lockfile && gleam build && bun build src/main.mjs --outfile priv/app.js --minify --target browser"], allowed_in_reviews = true, timeout = 600 }
 cargo-timings = { run = ["cargo", "build", "--release", "--timings", "--manifest-path", "solace-cli/Cargo.toml"], allowed_in_reviews = true }
 # Cold build measurement in an isolated target dir (leaves the normal cache alone): clean, then build.
 cargo-cold-clean = { run = ["cargo", "clean", "--manifest-path", "solace-cli/Cargo.toml", "--target-dir", "solace-cli/target/cold"] }
 cargo-cold-timings = { run = ["cargo", "build", "--release", "--locked", "--timings", "--manifest-path", "solace-cli/Cargo.toml", "--target-dir", "solace-cli/target/cold"] }
 cargo-cold-timings-debug = { run = ["cargo", "build", "--locked", "--timings", "--manifest-path", "solace-cli/Cargo.toml", "--target-dir", "solace-cli/target/cold"] }
+# Check-time measurement for the Rust symbol store plan: JSON diagnostics; arguments are passed to `cargo check`, e.g. `--target-dir solace-cli/target/cold` after `cargo-cold-clean`.
+cargo-check-json = { run = ["cargo", "check", "--all-targets", "--message-format=json", "--manifest-path", "solace-cli/Cargo.toml"], args = true }
+# rustfmt state of the crate.
+cargo-fmt-check = { run = ["cargo", "fmt", "--check", "--manifest-path", "solace-cli/Cargo.toml"] }
+# Test-time measurement; `--no-run` separates compile time from run time (D-71 isolation).
+cargo-test = { run = ["env", "-u", "SOLACE_TASK", "-u", "SOLACE_RUN", "-u", "SOLACE_SESSION", "-u", "SOLACE_CONFIG", "-u", "SOLACE_BIN", "cargo", "test", "--manifest-path", "solace-cli/Cargo.toml"], args = true }
+
+# Solace's own crate, built after the frontend bundle it embeds (solace-cli/build.rs).
+[build]
+after = ["solace-cli/frontend"]
+steps = [{ name = "cargo", run = ["cargo", "build", "--release", "--locked", "--manifest-path", "solace-cli/Cargo.toml"], timeout = 900 }]

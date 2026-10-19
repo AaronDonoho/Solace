@@ -812,7 +812,7 @@ fn deps_board() -> board.Model {
       ),
     )
   let columns =
-    "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"},{\"id\":\"planning\",\"label\":\"Planning\"},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Cancelled\",\"final\":true}]}"
+    "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"},{\"id\":\"planning\",\"label\":\"Planning\"},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true}]}"
   let #(model, _) = board.update(model, board.WorkflowLoaded("a", columns))
   let #(model, _) = board.update(model, board.WorkflowLoaded("b", columns))
   board.update(model, board.CaughtUp).0
@@ -1142,24 +1142,6 @@ pub fn dismissed_notices_go_test() {
   model.notices |> should.equal([two])
 }
 
-/// Text areas and inputs fill their container: `width:100%` with
-/// `box-sizing:border-box`, no percentage cap.
-pub fn textareas_fill_their_container_test() {
-  let #(model, _) = board.init(Nil)
-  let assert [css, ..] =
-    board.view(model) |> element.to_string |> string.split("</style>")
-  css
-  |> string.contains(
-    "textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}",
-  )
-  |> should.be_true
-  css
-  |> string.contains("input{width:100%;box-sizing:border-box}")
-  |> should.be_true
-  css |> string.contains("min(95%") |> should.be_false
-  css |> string.contains("min(80%") |> should.be_false
-}
-
 /// The detail is a band pinned to the bottom of the board page: selecting a
 /// card puts `<solace-task>` in the band, whose bar names the task and
 /// collapses it to one line; expanding shows the details again.
@@ -1458,17 +1440,22 @@ pub fn no_project_messages_leave_the_root_lane_test() {
   model.replay |> should.equal([])
 }
 
-/// The board's controls and detail take the shared spacing values, so their
+/// The board's controls and lanes take the shared spacing values, so their
 /// heights and padding match the other pages; the page font is set once.
 pub fn board_uses_the_shared_spacing_test() {
   let html = board.view(deps_board()) |> element.to_string
   string.contains(html, "--control-h:36px") |> should.be_true
   string.contains(
     html,
-    "button,input,textarea,select{font:inherit;padding:var(--control-pad);margin:var(--space-1);",
+    "button{font:inherit;padding:var(--control-pad);margin:var(--space-1);",
   )
   |> should.be_true
-  string.contains(html, ".detail{padding:var(--pad-section)}")
+  string.contains(
+    html,
+    ".lane{border:1px solid var(--line);border-radius:0;padding:var(--space-1) var(--space-2);background:var(--paper)}",
+  )
+  |> should.be_true
+  string.contains(html, ".lane-head{margin:0;padding:0 var(--space-2)}")
   |> should.be_true
   string.contains(
     html,
@@ -1648,7 +1635,7 @@ pub fn lanes_keep_their_smallest_columns_test() {
   html |> string.contains(".board{display:flex;gap:12px;") |> should.be_true
   html
   |> string.contains(
-    ".lane{border:1px solid var(--line);border-radius:0;padding:4px 8px;",
+    ".lane{border:1px solid var(--line);border-radius:0;padding:var(--space-1) var(--space-2);",
   )
   |> should.be_true
   html

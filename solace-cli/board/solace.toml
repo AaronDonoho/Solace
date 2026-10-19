@@ -12,5 +12,5 @@ unwatched = []
 install = { run = ["bun", "install"] }
 js_tests = { run = ["bun", "test", "test/api.test.mjs"], allowed_in_reviews = true }
 bundle = { run = ["bun", "build", "src/main.mjs", "--outfile", "priv/app.js", "--minify", "--target", "browser"] }
-# The board's release output, priv/app.js: compiled Gleam, then bundled. solace-cli/build.rs runs this.
+# The board's standalone page bundle, priv/app.js: compiled Gleam, then bundled. The crate embeds the frontend's bundle, which compiles this Gleam; run this after Gleam changes to refresh the page.
 build-release = { run = ["sh", "-c", "bun install --frozen-lockfile && gleam build && bun build src/main.mjs --outfile priv/app.js --minify --target browser"] }

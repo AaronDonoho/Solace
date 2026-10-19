@@ -1,9 +1,12 @@
 //// The Knowledgebase page (D-140): the shell's own page, holding the guide.
 
 import gleam/list
+import gleam/result
+import gleam/string
 import lustre/attribute
 import lustre/element.{type Element}
 import lustre/element/html
+import solace_task.{type Column}
 
 /// A section of the guide: its anchor id, its heading, and its HTML after the heading.
 pub type Section {
@@ -12,7 +15,9 @@ pub type Section {
 
 /// The Knowledgebase page (D-140): the guide, in the shell's light DOM so its table of contents' anchors
 /// work and the shell's theme applies. Hidden while another page shows.
-pub fn view(shown: Bool) -> Element(msg) {
+/// `columns` are the project's board columns, as the server's workflow answers
+/// them (D-140): the guide's column table follows them.
+pub fn view(shown: Bool, columns: List(Column)) -> Element(msg) {
   let attributes = case shown {
     True -> [attribute.class("knowledgebase")]
     False -> [
@@ -39,7 +44,7 @@ pub fn view(shown: Bool) -> Element(msg) {
     ..list.map(sections(), fn(s) {
       html.section([attribute.id(s.id)], [
         html.h2([], [html.text(s.title)]),
-        element.unsafe_raw_html("", "div", [], s.body),
+        element.unsafe_raw_html("", "div", [], body_html(s.body, columns)),
       ])
     })
   ])
@@ -113,15 +118,8 @@ pub fn sections() -> List(Section) {
 <p>Tasks are created on the <strong>Strategy</strong> page with <strong>New task</strong>, and show on the board from then on. Select a task to see it: under its title are the model and effort to use, an editor, the actions you can take (with <em>Add note</em>), and tabs for its details, notes, questions, runs and changes, newest first. To change a task's title, description or order, use <em>Edit</em> on its Details tab. Descriptions, notes and instructions are markdown, styled as you write; images can be added once the task exists. A card shows ✓ once the task is approved. When an agent asks a question or a run ends, a notice appears in the corner of the board.</p>
 <p>The editor takes markdown for notes, answers and instructions. Its buttons add headings, bold, code and code blocks, bulleted and numbered lists, quotes and links. The editor shows the markdown styled as you write: headings, bold, code, quotes and links look as they will, and images show in place. The marks that make them (<code>#</code>, <code>**</code>, backticks, <code>&gt;</code>, a link's address) show only on the line you are editing. To add an image (PNG, JPEG, GIF or WebP, up to 5 MB), paste it, drop it on the editor or choose <em>Image</em>. Agents see the images in the notes they are given. Each note can be collapsed, and an agent's note names the run that wrote it.</p>
 <p>Each column says what an agent may do there. In <strong>Planning</strong>, <em>investigate</em> starts an agent that looks into the task and reports back: an answer to a question, or a plan for the change. It changes nothing. If the task was only a question, complete it once you have the answer. Otherwise assign it, and the agent that does the work gets the report with the task's other notes. An agent changes the project only once the task is <strong>Assigned</strong>. A review agent, in Review or Assigned, looks at what the task changed and gives feedback.</p>
-<h3>The default columns</h3>
-<table>
-<tr><th>Column</th><th>What it means</th><th>What you can do</th></tr>
-<tr><td>Planning</td><td>You're shaping the task</td><td>Ask an agent to investigate it, assign it to a model, complete it (when it only needed an answer), or cancel it</td></tr>
-<tr><td>Assigned</td><td>An agent is working, or needs your answer or stopped (the card is marked <em>Needs attention</em>)</td><td>Answer it, reassign it, start a new agent, ask for a review, send it back to planning (once no agent is on it), or cancel it</td></tr>
-<tr><td>Review</td><td>The agent says it's finished</td><td>Approve it, then complete it; ask for an agent review; reassign it for fixes; start over; send it back to planning; or cancel it</td></tr>
-<tr><td>Complete</td><td>Finished</td><td>Nothing</td></tr>
-<tr><td>Canceled</td><td>Dropped</td><td>Send it back to planning</td></tr>
-</table>
+<h3>The columns</h3>
+<!--columns-->
 <p>A task can also be in the <strong>Backlog</strong>: written, but not active yet. The board doesn't show Backlog tasks; they are on the <strong>Strategy</strong> page, where <em>Plan</em> brings one to Planning and <em>Back to backlog</em> puts a planned one on hold. When a feature becomes active, its Backlog tasks move to Planning by themselves.</p>
 <p><em>Back to planning</em> keeps the task's changes and clears any approval, as reassign does. Stop the task's agent first: it is refused while one is working.</p>
 <p>A task with an agent on it says so on its card: <em>Agent investigating</em>, <em>Agent working</em>, <em>Agent reviewing</em>, <em>Waiting for your answer</em> or <em>Agent paused</em>.</p>
@@ -229,4 +227,82 @@ smoke = { run = [\"gleam\", \"run\", \"-m\", \"smoke\"], timeout = 60 }</pre>
 </ul>",
     ),
   ]
+}
+
+/// Where a section's body has the project's column table drawn in.
+const columns_marker = "<!--columns-->"
+
+/// What the guide says about a column, by its id: what it means, and what you
+/// can do there. The guide's own words, so they carry markup.
+const column_notes = [
+  #(
+    "planning",
+    #(
+      "You're shaping the task",
+      "Ask an agent to investigate it, assign it to a model, complete it (when it only needed an answer), or cancel it",
+    ),
+  ),
+  #(
+    "assigned",
+    #(
+      "An agent is working, or needs your answer or stopped (the card is marked <em>Needs attention</em>)",
+      "Answer it, reassign it, start a new agent, ask for a review, send it back to planning (once no agent is on it), or cancel it",
+    ),
+  ),
+  #(
+    "needs_review",
+    #(
+      "The agent says it's finished",
+      "Approve it, then complete it; ask for an agent review; reassign it for fixes; start over; send it back to planning; or cancel it",
+    ),
+  ),
+  #("complete", #("Finished", "Nothing")),
+  #("cancelled", #("Dropped", "Send it back to planning")),
+  #(
+    "backlog",
+    #(
+      "Written, but not active yet",
+      "On the <strong>Strategy</strong> page: <em>Plan</em> brings it to Planning, and <em>Back to backlog</em> puts a planned one on hold",
+    ),
+  ),
+]
+
+/// A column the guide has no words for: the project's own settings decide.
+const column_generic = #(
+  "Set by the project's own workflow",
+  "What the project's settings allow there",
+)
+
+/// The column table, drawn from the workflow the server answers (D-140): one
+/// row per column, in the server's order, with the guide's words for the
+/// columns it knows. A label comes from the project's settings, so it is
+/// escaped; the guide's words are markup already.
+fn column_table(columns: List(Column)) -> String {
+  let row = fn(column: Column) -> String {
+    let #(meaning, actions) =
+      list.key_find(column_notes, column.id) |> result.unwrap(column_generic)
+    "<tr><td>"
+    <> escape(column.label)
+    <> "</td><td>"
+    <> meaning
+    <> "</td><td>"
+    <> actions
+    <> "</td></tr>"
+  }
+  "<table>\n<tr><th>Column</th><th>What it means</th><th>What you can do</th></tr>\n"
+  <> string.join(list.map(columns, row), "\n")
+  <> "\n</table>"
+}
+
+/// Text that comes from the project's settings, made safe to put in the page.
+fn escape(text: String) -> String {
+  text
+  |> string.replace("&", "&amp;")
+  |> string.replace("<", "&lt;")
+  |> string.replace(">", "&gt;")
+}
+
+/// A section's body, with the column table in its marked place.
+fn body_html(body: String, columns: List(Column)) -> String {
+  string.replace(body, columns_marker, column_table(columns))
 }

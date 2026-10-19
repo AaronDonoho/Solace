@@ -10,6 +10,7 @@ Every revision has exactly one canonical text form. Agents read and write that t
 - **Names in text.** A reference renders as the shortest name that is unambiguous from the symbol's own namespace: a bare name within the namespace, otherwise the fully qualified name. Input may use any unambiguous suffix (Spec 1 §4); the formatter canonicalizes it.
   - One consequence: adding a symbol elsewhere can make a bare name ambiguous and change how an unedited symbol renders. That changes the projection, never the revision (references are stored as identities).
 - **Prose is not in the text.** Descriptions and rationale are metadata, shown alongside the text by `inspect` (Spec 3). A doc comment in submitted text is split out into the description.
+- **Rust (D-158).** Files are written from the stored text exactly. rustfmt, with the project's `rustfmt.toml`, formats a submitted item only, so items never submitted keep their text. A submit is checked with `cargo check --all-targets --message-format=json`; errors are located by their primary span, and one reported once per target is shown once.
 
 ## 2. Single-symbol editing
 
@@ -20,6 +21,8 @@ Every revision has exactly one canonical text form. Agents read and write that t
 3. runs the fast check (Spec 3 §6) on the symbol itself;
 4. if the symbol has errors, changes nothing and returns the diagnostics;
 5. otherwise records the new revision, rechecks the symbol's dependents, and lists any it broke as **broken dependents** of the open change (Spec 3 §4).
+
+Rust (D-158): step 1 parses with `syn` and refuses code outside the subset; step 3 is `cargo check --all-targets --message-format=json` on the written files, its errors mapped to symbols by primary span.
 
 There is no find-and-replace, no line numbers across symbols, and no partial-text edit. Line numbers exist only within a symbol's text.
 
@@ -78,3 +81,6 @@ Constructors take their identity header as a trailing comment on the variant lin
 - P4. A view submission that omits a symbol fails with `E0102` and changes nothing.
 - P5. A view submission with one bad block records none of its blocks.
 - P6. An exported file edited by hand, with one symbol changed and one added without a header, imports as one new revision plus one new symbol.
+- P7. Rust: a submit that `cargo check` rejects changes nothing and names the symbol its error's primary span falls in.
+- P8. Rust: an error reported once per target (lib and test) is shown once.
+- P9. Rust: submitting one item of a file that isn't rustfmt-clean formats that item and leaves the file's other items byte for byte.

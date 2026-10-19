@@ -966,7 +966,7 @@ pub fn a_final_column_shows_no_live_agent_test() {
       [
         task.Column("assigned", "Assigned", ["complete"], False),
         task.Column("complete", "Complete", [], True),
-        task.Column("cancelled", "canceled", ["to_backlog"], True),
+        task.Column("cancelled", "Canceled", ["to_backlog"], True),
       ],
       dict.new(),
     )
@@ -1132,7 +1132,7 @@ pub fn depends_on_decodes_test() {
 
 /// A workflow with an open column and two final ones, as the default's.
 const depends_flow =
-  "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\"]},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Cancelled\",\"final\":true}]}"
+  "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\",\"actions\":[\"plan\"]},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true}]}"
 
 /// Task `id` titled `title` in `column`, depending on `depends`.
 fn depends_task(
@@ -1194,7 +1194,7 @@ pub fn depends_on_line_test() {
   assert string.contains(page, "href=\"/task/d1\"")
   assert string.contains(page, "data-task=\"d1\"")
   assert string.contains(page, ">First</a> (Backlog, unfinished)")
-  assert string.contains(page, ">Second</a> (Cancelled)")
+  assert string.contains(page, ">Second</a> (Canceled)")
   assert string.contains(page, ">Third</a> (Complete)")
   assert string.contains(page, ">d4</a>")
   assert list.length(string.split(page, ", unfinished)")) == 2
@@ -1645,7 +1645,7 @@ pub fn shared_labels_on_the_task_test() {
       dir: "a",
       workspace: True,
       workflow: task.Workflow(
-        [task.Column("planning", "Needs review", [], False)],
+        [task.Column("planning", "Review", [], False)],
         dict.new(),
       ),
     )
@@ -1663,7 +1663,7 @@ pub fn shared_labels_on_the_task_test() {
     )
   // The task's column shows the workflow's label, not its id.
   body(base)
-  |> string.contains("Needs review")
+  |> string.contains("Review")
   |> should.be_true
   body(base)
   |> string.contains("needs_review")
@@ -2100,7 +2100,7 @@ pub fn a_wide_detail_shows_two_columns_test() {
   )
   |> should.be_true
   // No error: no empty alert paragraph to leave a gap above the details.
-  styles |> string.contains("role=\"alert\"") |> should.be_false
+  body(model) |> string.contains("role=\"alert\"") |> should.be_false
   let #(failed, _) = task.update(model, task.Failed("Broken"))
   html(failed)
   |> string.contains("<p role=\"alert\">Broken</p>")
@@ -2385,20 +2385,18 @@ pub fn note_delete_button_hugs_the_corner_test() {
   let #(model, _) = task.update(model, task.Tab("notes"))
   let rendered = html(model)
   // The note's summary alone: a task with runs renders transcript summaries too.
-  let assert [_, note] = string.split(rendered, "class=\"note\"")
-  let assert [_, after] = string.split(note, "<summary>")
-  let assert [summary, _] = string.split(after, "</summary>")
+  let summary = between(rendered, "<summary>", "</summary>")
   let assert [before_author, _] = string.split(summary, ">human</strong>")
   before_author |> string.contains("class=\"delete\"") |> should.be_true
   // The note button's own rule: the corner float, not the flex push it replaces.
-  let assert [_, delete] = string.split(rendered, ".note .delete{")
-  let assert [rule, ..] = string.split(delete, "}")
-  rule |> string.contains("float:right") |> should.be_true
-  rule |> string.contains("margin-left:auto") |> should.be_false
+  between(rendered, ".note .delete{", "}")
+  |> string.contains("float:right")
+  |> should.be_true
+  between(rendered, ".note .delete{", "}")
+  |> string.contains("margin-left:auto")
+  |> should.be_false
   // The summary is as tall as the button, so it contains the float.
-  let assert [_, corner] = string.split(rendered, "details.note>summary{")
-  let assert [height, ..] = string.split(corner, "}")
-  height
+  between(rendered, "details.note>summary{", "}")
   |> string.contains("min-height:var(--control-h-small)")
   |> should.be_true
 }
@@ -2528,4 +2526,66 @@ pub fn needed_by_line_updates_live_test() {
   let page = html(model)
   assert !string.contains(page, "Renamed")
   assert string.contains(page, ">New</a>")
+}
+
+/// The text between the one match of `start` and the next `stop`. A fixture
+/// with more than one match fails the length assert with a message, where a
+/// match pattern would crash.
+fn between(text: String, start: String, stop: String) -> String {
+  let parts = string.split(text, start)
+  assert list.length(parts) == 2
+  let assert [_, after] = parts
+  let assert [inside, ..] = string.split(after, stop)
+  inside
+}
+
+/// An archived dependent leaves the **Needed by** line, as its event says.
+pub fn needed_by_drops_an_archived_dependent_test() {
+  let model =
+    task.Model(..loaded(depends_task("1", "T", "backlog", "")), hosted: True)
+  let g = model.generation
+  let #(model, _) = task.update(model, task.WorkflowLoaded(g, depends_flow))
+  let #(model, _) =
+    task.update(
+      model,
+      task.DependentsLoaded(
+        g,
+        "{\"tasks\":[{\"id\":\"n1\",\"title\":\"Later\",\"column\":\"backlog\"}]}",
+      ),
+    )
+  html(model) |> string.contains(">Later</a>") |> should.be_true
+  let archived =
+    "{\"project\":\"b\",\"task\":{\"id\":\"n1\",\"title\":\"Later\",\"body\":\"\","
+    <> "\"column\":\"complete\",\"rank\":1,\"archivedTime\":1,\"dependsOn\":[\"1\"]}}"
+  let #(model, _) = task.update(model, task.Live(archived))
+  html(model) |> string.contains("Later") |> should.be_false
+}
+
+/// The reply is a snapshot taken when the task opened: a dependent a live
+/// event added between the request and the reply stays on the line.
+pub fn dependents_reply_keeps_a_live_dependent_test() {
+  let model =
+    task.Model(..loaded(depends_task("1", "T", "backlog", "")), hosted: True)
+  let g = model.generation
+  let #(model, _) = task.update(model, task.WorkflowLoaded(g, depends_flow))
+  let #(model, _) =
+    task.update(
+      model,
+      task.Live(
+        "{\"project\":\"b\",\"task\":"
+        <> depends_task("n2", "Added", "backlog", "\"1\"")
+        <> "}",
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.DependentsLoaded(
+        g,
+        "{\"tasks\":[{\"id\":\"n1\",\"title\":\"Later\",\"column\":\"backlog\"}]}",
+      ),
+    )
+  let page = html(model)
+  page |> string.contains(">Later</a>") |> should.be_true
+  page |> string.contains(">Added</a>") |> should.be_true
 }

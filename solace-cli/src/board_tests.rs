@@ -273,7 +273,12 @@ fn agent_guard_follows_the_run() {
     let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
     let s = open(&p.root).unwrap();
     let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Look"})).unwrap();
-    t["runs"] = json!([{"id":"r1","kind":"review","state":"running"},{"id":"r2","kind":"work","state":"ended"}]);
+    t["runs"] = json!([
+        {"id":"r1","kind":"review","state":"running"},
+        {"id":"r2","kind":"work","state":"ended"},
+        {"id":"r3","kind":"investigate","state":"running"},
+        {"id":"r4","kind":"discuss","state":"running"}
+    ]);
     tasks::put(&s, &t).unwrap();
     let tid = t["id"].as_str().unwrap();
     let guard = |rid: &str, a: &[&str]| agent_guard(&s.root, tid, rid, a, &[]).map(drop).map_err(|e| e.0);
@@ -285,6 +290,12 @@ fn agent_guard_follows_the_run() {
     .unwrap();
     assert!(guard("r1", &["run", "safe"]).is_ok());
     assert!(guard("r1", &["run", "e2e"]).unwrap_err().contains("allowed_in_reviews"));
+    // Investigations and discussions run marked commands as reviews do (D-161).
+    for rid in ["r3", "r4"] {
+        assert!(guard(rid, &["run", "safe"]).is_ok(), "{rid}");
+        assert!(guard(rid, &["run", "e2e"]).unwrap_err().contains("allowed_in_reviews"), "{rid}");
+        assert!(guard(rid, &["write", "x"]).unwrap_err().contains("this run is read-only"), "{rid}");
+    }
     for a in [["submit", "app.main"], ["write", "x"]] {
         assert!(guard("r1", &a).unwrap_err().contains("this run is read-only"), "{a:?}");
     }
@@ -1246,13 +1257,62 @@ fn endpoints_are_checked_and_passed_to_codex() {
     assert!(parse_system(wrong).unwrap_err().0.starts_with("E6020"));
     let m =
         json!({"label":"Local","endpoint":{"kind":"openai","base_url":"http://localhost:11434/v1","key_env":"SOLACE_TEST_UNSET_KEY"}});
-    let args = endpoint_args(&m);
+    let args = endpoint_args(&m, false);
     assert_eq!(args[1], "model_provider=\"solace_endpoint\"");
     let provider: toml::Value = format!("p = {}", args[3].split_once('=').unwrap().1).parse().unwrap();
     assert_eq!(provider["p"]["base_url"].as_str(), Some("http://localhost:11434/v1"));
     assert_eq!(provider["p"]["env_key"].as_str(), Some("SOLACE_TEST_UNSET_KEY"));
     assert_eq!(provider["p"]["wire_api"].as_str(), Some("responses"));
-    assert!(endpoint_args(&json!({"label":"No endpoint"})).is_empty());
+    assert!(endpoint_args(&json!({"label":"No endpoint"}), false).is_empty());
+    // A stored key reaches Codex through Solace's own variable.
+    let stored = endpoint_args(&m, true);
+    let provider: toml::Value = format!("p = {}", stored[3].split_once('=').unwrap().1).parse().unwrap();
+    assert_eq!(provider["p"]["env_key"].as_str(), Some(setup::KEY_VAR));
+    let bad = "[[models]]\nid = \"x\"\nlabel = \"X\"\nagent = \"codex\"\nmodel = \"m\"\nendpoint = { kind = \"openai\", base_url = \"http://h\", stored_key = \"yes\" }\n";
+    assert!(parse_system(bad).unwrap_err().0.starts_with("E6020"));
+}
+
+#[test]
+fn models_and_keys_are_set_up_from_settings() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = testing::Scratch::new();
+    let (config, keys) = (dir.join("config.toml"), dir.join("keys.json"));
+    fs::write(&config, "task_timeout = 60\n").unwrap();
+    let body = json!({"label":"Command Code","agent":"codex","model":"deepseek/deepseek-v4.1-flash","base_url":"https://api.commandcode.ai/provider/v1","key":"sk-1"});
+    assert_eq!(setup::save(&config, &keys, &body).unwrap(), "command-code");
+    let v = parse_system(&fs::read_to_string(&config).unwrap()).unwrap();
+    assert_eq!(v["task_timeout"], 60, "other settings stay");
+    let m = v["models"].as_array().unwrap().iter().find(|m| m["id"] == "command-code").unwrap().clone();
+    assert_eq!(m["endpoint"]["kind"], "openai");
+    assert_eq!(m["endpoint"]["stored_key"], true);
+    assert!(!fs::read_to_string(&config).unwrap().contains("sk-1"), "the key never goes in the settings");
+    assert_eq!(setup::stored(&keys, "command-code").as_deref(), Some("sk-1"));
+    assert_eq!(fs::metadata(&keys).unwrap().permissions().mode() & 0o777, 0o600);
+    // Editing with a blank key keeps the stored one.
+    let edit = json!({"id":"command-code","label":"CC","agent":"codex","model":"m2","base_url":"https://h/v1","key":" "});
+    setup::save(&config, &keys, &edit).unwrap();
+    let v = parse_system(&fs::read_to_string(&config).unwrap()).unwrap();
+    let m = v["models"].as_array().unwrap().iter().find(|m| m["id"] == "command-code").unwrap().clone();
+    assert_eq!((m["label"].as_str(), m["model"].as_str()), (Some("CC"), Some("m2")));
+    assert_eq!(setup::stored(&keys, "command-code").as_deref(), Some("sk-1"));
+    // Removing takes the entry and its key.
+    setup::remove(&config, &keys, "command-code").unwrap();
+    assert_eq!(setup::stored(&keys, "command-code"), None);
+    // A model with its own variable keeps it and needs no stored key.
+    fs::write(&config, "[[models]]\nid = \"v\"\nlabel = \"V\"\nagent = \"claude\"\nmodel = \"m\"\nendpoint = { kind = \"anthropic\", base_url = \"http://h\", key_env = \"V_KEY\" }\n").unwrap();
+    setup::save(&config, &keys, &json!({"id":"v","label":"V","agent":"claude","model":"m","base_url":"http://h2"})).unwrap();
+    let v = parse_system(&fs::read_to_string(&config).unwrap()).unwrap();
+    let m = v["models"].as_array().unwrap().iter().find(|m| m["id"] == "v").unwrap().clone();
+    assert_eq!((m["endpoint"]["key_env"].as_str(), m["endpoint"].get("stored_key")), (Some("V_KEY"), None));
+    // Refused: a missing field, an unknown agent, a label with no letters.
+    assert!(setup::save(&config, &keys, &json!({"label":"X","agent":"codex","model":"m"})).unwrap_err().0.contains("base_url required"));
+    assert!(setup::save(&config, &keys, &json!({"label":"X","agent":"gpt","model":"m","base_url":"h"})).is_err());
+    assert!(setup::save(&config, &keys, &json!({"label":"!!","agent":"codex","model":"m","base_url":"h"})).is_err());
+    // An unknown id is refused.
+    setup::remove(&config, &keys, "v").unwrap();
+    assert!(setup::remove(&config, &keys, "v").is_err());
+    fs::write(&config, "").unwrap();
+    assert!(setup::remove(&config, &keys, "v").is_err());
 }
 
 /// A line diff keeps two lines around each change and marks the lines it
@@ -1410,7 +1470,9 @@ fn transcripts_read_codex_and_claude_logs() {
 /// with advice; with none, or only finished ones (canceled counts), it says nothing.
 #[test]
 fn briefs_name_unfinished_dependencies() {
-    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    // `lib` is listed as a project so a dependency homed there keeps its home:
+    // a home that is no project is re-homed on load (D-160).
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", "projects = [\"lib\"]\n"), ("lib/.solace/keep", "")]);
     let top = scope::top(&p.root);
     let home = scope::dir(&top, &p.root);
     let dir = store_dir(&top);
@@ -1510,7 +1572,7 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     assert!(
         r.contains("Task changes:\n- calc.add")
             && r.contains("`task note`, the feedback in `text`")
-            && r.contains("`run` are refused")
+            && r.contains("`format` are refused, and `run <name>` works only for commands marked `allowed_in_reviews`")
             && !r.contains("task done")
     );
     assert!(!b.contains("Projects:"), "one project needs no Projects section");
@@ -1684,9 +1746,9 @@ fn sign_ins_are_detected_without_a_model_call() {
     let home = testing::Scratch::new();
     let none = |_: &str| false;
     let now = NOON * 1000;
-    let check = |m: &Value, var: &dyn Fn(&str) -> bool| agents::local(m, &agents::Here { home: &home, var, installed: &|_| true, now });
+    let check = |m: &Value, var: &dyn Fn(&str) -> bool| agents::local(m, &agents::Here { home: &home, var, stored: &|_| false, installed: &|_| true, now });
     let (codex, claude) = (json!({"agent":"codex","model":"m"}), json!({"agent":"claude","model":"m"}));
-    let missing = agents::Here { home: &home, var: &none, installed: &|_| false, now };
+    let missing = agents::Here { home: &home, var: &none, stored: &none, installed: &|_| false, now };
     assert_eq!(agents::local(&codex, &missing).unwrap(), "codex is not installed (not on PATH)");
     assert_eq!(check(&codex, &none).unwrap(), "codex is not signed in");
     // The keychain is asked on macOS only; elsewhere no file and no key is no sign-in.
@@ -1698,8 +1760,15 @@ fn sign_ins_are_detected_without_a_model_call() {
     assert!(check(&claude, &|v| v == "ANTHROPIC_API_KEY").is_none());
     // An endpoint needs only its own key.
     let endpoint = json!({"agent":"codex","model":"m","endpoint":{"base_url":"http://x","key_env":"LOCAL_KEY"}});
-    assert_eq!(check(&endpoint, &none).unwrap(), "the endpoint's key variable LOCAL_KEY is not set");
+    assert_eq!(check(&endpoint, &none).unwrap(), "No key yet; add one in Settings or set the variable LOCAL_KEY");
     assert!(check(&endpoint, &|v| v == "LOCAL_KEY").is_none());
+    // A key stored from Settings is enough; an endpoint naming no key needs none.
+    let settings = json!({"id":"cc","agent":"codex","model":"m","endpoint":{"base_url":"http://x","stored_key":true}});
+    assert_eq!(check(&settings, &none).unwrap(), "No key yet; add one in Settings");
+    let stored = agents::Here { home: &home, var: &none, stored: &|id| id == "cc", installed: &|_| true, now };
+    assert!(agents::local(&settings, &stored).is_none());
+    assert!(agents::local(&endpoint.clone(), &agents::Here { stored: &|_| true, ..stored }).is_some(), "a key for another id is not this one's");
+    assert!(check(&json!({"agent":"codex","model":"m","endpoint":{"base_url":"http://x"}}), &none).is_none());
     // Codex's file: a token it can renew is a sign-in; neither key nor token has expired.
     fs::create_dir_all(home.join(".codex")).unwrap();
     fs::write(home.join(".codex/auth.json"), json!({"OPENAI_API_KEY":null,"tokens":{"refresh_token":"r"}}).to_string()).unwrap();
@@ -1875,6 +1944,26 @@ fn reverting_keeps_an_empty_folder_that_was_there_before() {
     assert!(s.root.join("src/ui").is_dir());
 }
 
+/// The check after an undo follows the restored files: a project the task left as plain files
+/// (its `gleam.toml` deleted) is Gleam again once restored, so its restored code is checked.
+#[test]
+fn reverting_checks_a_project_the_restore_makes_gleam_again() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title": "Manifest"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let id: String = s.db.query_row("SELECT id FROM symbols WHERE name='main'", [], |r| r.get(0)).unwrap();
+    let mut before = snapshot(&s).unwrap();
+    before[format!("symbol:{id}")][4] = json!("pub fn main() -> Int { \"one\" }");
+    before["file:gleam.toml"] = json!(fs::read(s.root.join("gleam.toml")).unwrap());
+    fs::remove_file(s.root.join("gleam.toml")).unwrap();
+    let mut after = snapshot(&s).unwrap();
+    after["file:gleam.toml"] = Value::Null;
+    record(&s, &tid, "r1", &before, &after, None).unwrap();
+    let e = api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap_err().0;
+    assert!(e.contains("E7008") && e.contains("errors"), "{e}");
+}
+
 /// D-136: a folder the task made still goes; the one above it, there before, stays.
 #[test]
 fn reverting_removes_a_folder_the_task_made() {
@@ -1904,7 +1993,7 @@ fn cancel_an_added_module(s: &Store) {
     let tid = t["id"].as_str().unwrap().to_string();
     let found = existing_folders(&s.root);
     let before = snapshot(s).unwrap();
-    s.db.execute("INSERT INTO modules SELECT 'ui/deep/new',dir,header FROM modules WHERE path='app'", []).unwrap();
+    s.db.execute("INSERT INTO modules(path,dir,header) SELECT 'ui/deep/new',dir,header FROM modules WHERE path='app'", []).unwrap();
     s.db.execute("INSERT INTO symbols(id,module,name,kind,text,ord,revision,live) SELECT 'new1','ui/deep/new',name,kind,text,ord,revision,live FROM symbols WHERE module='app'", []).unwrap();
     s.materialize(&s.index().unwrap()).unwrap();
     assert!(s.root.join("src/ui/deep/new.gleam").exists());
@@ -2006,4 +2095,118 @@ fn a_working_tasks_scope_widens_but_does_not_narrow() {
     tasks::put(&web, &t).unwrap();
     let moved = api(&web.root, "POST", &url, json!({"scope": ["components"]})).unwrap();
     assert_eq!((&moved["home"], &moved["createdTime"]), (&json!("components"), &created));
+}
+
+/// A root that is a project listing `sub`, with task t1 at home in `web`, no
+/// project: its folder is in the root's board, where its runs wrote.
+fn homeless_root() -> testing::Scratch {
+    testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"sub\"]\n"),
+        (".solace/store.db", ""),
+        (".solace/tasks/t1.json", r#"{"id":"t1","column":"backlog","home":"web","scope":["sub","web"],"runs":[],"notes":[]}"#),
+        (".solace/board/t1/log", ""),
+        ("sub/.solace/keep", ""),
+    ])
+}
+
+/// D-160: a task whose home is no project is re-homed on load to the first
+/// project of its scope, keeping only the projects of it, with a note naming the
+/// move and the dropped folder, and its folder moves as a scope change moves it.
+#[test]
+fn a_homeless_task_is_rehomed_to_the_first_project_of_its_scope() {
+    let root = homeless_root();
+    let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
+    assert_eq!((t["home"].as_str(), t["scope"].clone(), t["noProject"].is_null()), (Some("sub"), json!(["sub"]), true), "{t}");
+    let saved = fs::read_to_string(store_dir(&root).join("t1.json")).unwrap();
+    assert!(saved.contains(r#""home": "sub""#) && saved.contains("Moved from `web` to `sub`") && saved.contains("Dropped `web` from its projects"), "{saved}");
+    assert!(root.join("sub/.solace/board/t1").is_dir(), "its folder moved to the new home");
+    assert!(!root.join(".solace/board/t1").exists(), "and left the root");
+    assert_eq!(task(&root.join("sub"), "t1").unwrap()["home"], "sub", "it opens from its new home");
+}
+
+/// D-160: a task with a run still live is not re-homed: the agent works from the
+/// task's folder, so the load leaves it marked until the run ends.
+#[test]
+fn a_homeless_task_with_a_live_run_is_not_rehomed() {
+    let root = homeless_root();
+    fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"assigned","home":"web","scope":["sub","web"],"runs":[{"id":"r1","kind":"work","state":"running"}],"notes":[]}"#).unwrap();
+    let mut t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
+    assert_eq!((t["home"].as_str(), t["noProject"].as_bool()), (Some("web"), Some(true)), "{t}");
+    assert!(root.join(".solace/board/t1").is_dir(), "its folder stays where the run works");
+    t["runs"][0]["state"] = json!("ended");
+    fs::write(store_dir(&root).join("t1.json"), t.to_string()).unwrap();
+    let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
+    assert_eq!(t["home"].as_str(), Some("sub"), "and it re-homes once the run ends");
+}
+
+/// D-160: a task with no project in its scope goes to the root, and its scope
+/// becomes the root alone.
+#[test]
+fn a_task_with_no_project_in_its_scope_goes_to_the_root() {
+    let root = homeless_root();
+    fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"backlog","home":"web","scope":["web"],"runs":[],"notes":[]}"#).unwrap();
+    let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
+    assert_eq!((t["home"].as_str(), t["scope"].clone()), (Some("."), json!(["."])), "{t}");
+    let saved = fs::read_to_string(store_dir(&root).join("t1.json")).unwrap();
+    assert!(saved.contains("Moved from `web` to `.`"), "{saved}");
+}
+
+/// D-160: a task keeps no project only when the root is no project.
+#[test]
+fn a_task_stays_without_a_project_when_the_root_is_none() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"sub\"]\n"),
+        (".solace/tasks/t1.json", r#"{"id":"t1","column":"backlog","home":"web","scope":["web"],"runs":[],"notes":[]}"#),
+    ]);
+    let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
+    assert_eq!((t["home"].as_str(), t["noProject"].as_bool()), (Some("web"), Some(true)), "{t}");
+    assert!(task(&root, "t1").unwrap()["noProject"] == true, "it opens from the root");
+}
+
+/// D-160: the mark comes from the home on each load, so a `noProject` saved by
+/// an older build is dropped: a task at the root lists and opens unmarked.
+#[test]
+fn a_saved_no_project_mark_is_dropped_on_load() {
+    let root = homeless_root();
+    fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"backlog","home":".","scope":["."],"noProject":true,"runs":[],"notes":[]}"#).unwrap();
+    let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
+    assert!(t["noProject"].is_null(), "listed unmarked: {t}");
+    assert!(task(&root, "t1").unwrap()["noProject"].is_null(), "opens unmarked");
+}
+
+/// A project list that can't be read counts every home as a project: no task is
+/// marked and none is re-homed while the list is unreadable.
+#[test]
+fn an_unreadable_project_list_marks_no_task() {
+    let root = homeless_root();
+    fs::write(root.join("solace.toml"), "projects = 5\n").unwrap();
+    // A task that needs no workflow reads whole, so the listing reaches it.
+    fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"backlog","home":"web","scope":["sub","web"],"closedTime":null,"runs":[],"notes":[]}"#).unwrap();
+    let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
+    assert!(t["noProject"].is_null(), "{t}");
+    assert_eq!(t["home"], "web", "and stays where it is");
+}
+
+/// The cause of task:59d0b7ae77d161d9: a change on a task with no project saved
+/// the mark into its file, where it stayed. The load re-homes the task and the
+/// change saves no mark (D-160).
+#[test]
+fn a_change_on_a_homeless_task_saves_no_mark() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", "projects = [\"sub\"]\n")]);
+    let root = p.root.clone();
+    fs::create_dir_all(root.join("sub/.solace")).unwrap();
+    let mut t = new_task("Orphan", "", &json!("backlog"), 1.);
+    t["home"] = json!("web");
+    t["scope"] = json!(["web"]);
+    tasks::put(&p.store, &t).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let path = store_dir(&root).join(format!("{tid}.json"));
+    let mut v: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    v["noProject"] = json!(true);
+    fs::write(&path, v.to_string()).unwrap();
+    let t = api(&root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "plan"})).unwrap();
+    assert_eq!(t["home"], ".", "the load re-homes it to the root");
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("noProject"), "{saved}");
+    assert!(saved.contains("Moved from `web` to `.`"), "{saved}");
 }

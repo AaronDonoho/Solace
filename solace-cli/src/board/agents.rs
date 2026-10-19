@@ -640,6 +640,8 @@ pub(super) struct Here<'a> {
     pub home: &'a Path,
     /// Whether an environment variable is set.
     pub var: &'a dyn Fn(&str) -> bool,
+    /// Whether a key is stored for a model id (Settings).
+    pub stored: &'a dyn Fn(&str) -> bool,
     /// Whether a program is installed.
     pub installed: &'a dyn Fn(&str) -> bool,
     /// Milliseconds since the epoch.
@@ -659,8 +661,16 @@ pub(super) fn local(m: &Value, here: &Here) -> Option<String> {
         return Some(format!("{agent} is not installed (not on PATH)"));
     }
     if let Some(e) = m.get("endpoint") {
-        let key = e["key_env"].as_str()?;
-        return (!(here.var)(key)).then(|| format!("the endpoint's key variable {key} is not set"));
+        if m["id"].as_str().is_some_and(|id| (here.stored)(id)) {
+            return None;
+        }
+        return match e["key_env"].as_str() {
+            Some(key) if (here.var)(key) => None,
+            Some(key) => Some(format!("No key yet; add one in Settings or set the variable {key}")),
+            // An endpoint that names no key, such as a local server, needs none.
+            None if e["stored_key"] != true => None,
+            None => Some("No key yet; add one in Settings".into()),
+        };
     }
     let k = kind(agent)?;
     if k.keys.iter().any(|v| (here.var)(v)) {
@@ -718,6 +728,11 @@ pub(super) fn cached_for(key: &str, fresh: Duration, work: impl FnOnce() -> Valu
 /// Drops the cached limit marks, after one changes.
 pub(super) fn forget_marks() {
     CACHE.lock().unwrap().retain(|k, _| !k.starts_with("marks:"));
+}
+
+/// Drops the cached availability, after a model or its key changes.
+pub(super) fn forget_local() {
+    CACHE.lock().unwrap().retain(|k, _| !k.starts_with("local:"));
 }
 
 fn now_ms() -> u64 {
@@ -840,7 +855,8 @@ pub(super) fn availability(m: &Value) -> Option<(String, bool)> {
     }
     let reason = cached(&format!("local:{m}"), || {
         let home = PathBuf::from(env::var_os("HOME").unwrap_or_default());
-        let here = Here { home: &home, var: &|v| env::var(v).is_ok(), installed: &on_path, now: now_ms() };
+        let keys = setup::read_keys(&setup::keys_path());
+        let here = Here { home: &home, var: &|v| env::var(v).is_ok(), stored: &|id| keys[id].is_string(), installed: &on_path, now: now_ms() };
         json!(local(m, &here))
     });
     if let Some(r) = reason.as_str() {

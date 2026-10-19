@@ -32,9 +32,9 @@ fn category(module: &str, name: &str) -> Option<&'static str> {
 }
 pub(super) fn direct_effects(ix: &Index, i: usize) -> BTreeMap<String, Vec<String>> {
     let s = &ix.syms[i];
-    let imports = ix.modules.iter().find(|m| m.path == s.module).map(|m| gleam::imports(&m.header)).unwrap_or_default();
+    let imports = ix.modules.iter().find(|m| m.path == s.module).map(|m| ix.lang.imports(&m.header)).unwrap_or_default();
     let mut effects: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for r in gleam::references(&s.text) {
+    for r in ix.lang.references(&s.text) {
         let resolved = match r {
             Ref::Qualified(alias, name) => imports.iter().find(|imp| imp.alias == alias).map(|imp| (imp.module.clone(), name)),
             Ref::Bare(name) => imports.iter().find_map(|imp| {
@@ -155,7 +155,7 @@ fn base(t: &str) -> &str {
 /// A type in words, for people who don't read code (D-55).
 fn words(t: &str) -> String {
     let t = t.trim();
-    let args = |inner: &str| gleam::split_args(inner).into_iter().map(|(_, a)| words(&a)).collect::<Vec<_>>();
+    let args = |inner: &str| language::split_args(inner).into_iter().map(|(_, a)| words(&a)).collect::<Vec<_>>();
     let and = |parts: Vec<String>| match parts.split_last() {
         Some((last, [])) => last.clone(),
         Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
@@ -185,14 +185,14 @@ fn words(t: &str) -> String {
 /// A signature's parameters as (name, type) and its return type.
 fn parts(sig: &str, name: &str) -> (Vec<(String, String)>, String) {
     let Some((_, rest)) = sig.split_once(&format!("fn {name}(")) else { return (vec![], String::new()) };
-    let params = gleam::split_args(rest)
+    let params = language::split_args(rest)
         .into_iter()
         .map(|(_, p)| match split_top(&p, ":") {
             Some((names, t)) => (names.split_whitespace().last().unwrap_or("").to_string(), t.trim().to_string()),
             None => (String::new(), p.trim().to_string()),
         })
         .collect::<Vec<_>>();
-    let close = gleam::split_args(rest).last().map_or(0, |(at, p)| at + p.len());
+    let close = language::split_args(rest).last().map_or(0, |(at, p)| at + p.len());
     let out = rest[close..].trim_start_matches(|c: char| c == ')' || c.is_whitespace());
     (params, out.strip_prefix("->").unwrap_or("").trim().to_string())
 }
@@ -213,7 +213,7 @@ fn state_types(ix: &Index, fns: &[usize]) -> BTreeSet<String> {
     let mut modules: BTreeMap<String, BTreeSet<&str>> = BTreeMap::new();
     for &i in fns {
         let s = &ix.syms[i];
-        let (params, out) = parts(&gleam::head(&s.item()), &s.name);
+        let (params, out) = parts(&ix.lang.head(&s.item()), &s.name);
         for (_, t) in params {
             let b = base(&t);
             if project.contains(b) && out.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == b) {
@@ -229,7 +229,7 @@ fn state_types(ix: &Index, fns: &[usize]) -> BTreeSet<String> {
 fn requests(ix: &Index, i: usize, params: &[(String, String)]) -> Vec<Value> {
     for (_, t) in params {
         let Some(&ty) = ix.uses[i].iter().find(|&&j| ix.syms[j].kind == Kind::Type && ix.syms[j].name == base(t)) else { continue };
-        let cons = gleam::record_fields(&ix.syms[ty].text);
+        let cons = ix.lang.record_fields(&ix.syms[ty].text);
         if cons.iter().filter(|(_, fields)| !fields.is_empty()).count() >= 3 {
             return cons
                 .into_iter()
@@ -244,7 +244,7 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
     let mut edges = vec![];
     let src = |i: usize| ix.modules.iter().any(|m| m.path == ix.syms[i].module && m.dir == "src");
     let function = |i: usize| ix.syms[i].kind == Kind::Fn;
-    let tests = reach::tests(ix);
+    let tests = reach::test_symbols(ix);
     let mut visible = HashSet::new();
     let mut stack: Vec<_> = (0..ix.syms.len()).filter(|&i| src(i) && function(i) && ix.syms[i].text.contains("pub fn ")).collect();
     while let Some(i) = stack.pop() {
@@ -261,7 +261,7 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
     for &i in &ordered {
         let s = &ix.syms[i];
         let entry = s.name == "main" || (s.text.contains("pub fn ") && !ix.used_by[i].iter().any(|&j| src(j)));
-        let sig = gleam::head(&s.item());
+        let sig = ix.lang.head(&s.item());
         let summary = s.text.lines().filter_map(|l| l.strip_prefix("///")).map(str::trim).collect::<Vec<_>>().join(" ");
         let count = tests.iter().filter(|&&t| ix.uses[t].contains(&i)).count();
         let (params, out) = parts(&sig, &s.name);
@@ -309,7 +309,7 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
     }
     for &i in &tests {
         let s = &ix.syms[i];
-        nodes.push(json!({"id":s.id,"kind":"test","name":s.name,"module":s.module,"summary":"","signature":gleam::signature(&s.item()),"known":"derived","tests":0,"changed":changed.contains(&format!("symbol:{}",s.id)),"checks":checks(&s.text)}));
+        nodes.push(json!({"id":s.id,"kind":"test","name":s.name,"module":s.module,"summary":"","signature":ix.lang.signature(&s.item()),"known":"derived","tests":0,"changed":changed.contains(&format!("symbol:{}",s.id)),"checks":checks(&s.text)}));
         for &j in &ix.uses[i] {
             if visible.contains(&j) {
                 edges.push(json!({"from":s.id,"to":ix.syms[j].id,"kind":"tests","known":"derived","direct":true}));
@@ -407,17 +407,21 @@ fn version(s: &Store, v: Version<'_>) -> Result<Index, Failure> {
                 name: row[2].as_str().unwrap().into(),
                 kind: Kind::parse(row[3].as_str().unwrap()),
                 text: row[4].as_str().unwrap().into(),
+                parent: None,
+                sep: None,
+                tail: String::new(),
             });
         } else if key.starts_with("module:") {
             modules.push(ModuleRow {
                 path: row[0].as_str().unwrap().into(),
                 dir: row[1].as_str().unwrap().into(),
                 header: row[2].as_str().unwrap().into(),
+                file: None,
             });
         }
     }
     syms.sort_by(|a, b| a.module.cmp(&b.module).then(a.name.cmp(&b.name)));
-    Ok(Index::build(syms, modules))
+    Ok(Index::build(s.lang(), syms, modules))
 }
 /// What the task's changes reach (D-44): its tests (those it changed, and
 /// those that reach a symbol it changed or read a field the change reaches),
@@ -433,7 +437,7 @@ fn task_reach(s: &Store, old: &Index, now: &Index, task: &Value) -> Result<Value
     let impact = reach::flow(now, &reach::origins(now, &before));
     let changed: Vec<usize> = (0..now.syms.len()).filter(|&i| ids.contains(&now.syms[i].id)).collect();
     let readers = reach::readers(now, &impact.fields);
-    let tests: Vec<&str> = reach::tests(now)
+    let tests: Vec<&str> = reach::test_symbols(now)
         .into_iter()
         .filter(|&t| {
             changed.contains(&t) || readers.contains(&t) || !reach::closure(now, t).is_disjoint(&changed.iter().copied().collect())
@@ -638,11 +642,12 @@ pub fn run_tests(root: PathBuf, tid: String) {
                 })?;
                 (base, r["tests"].as_array().cloned().unwrap_or_default())
             };
-            let output = lockdown::command(&dir, &["gleam".into(), "test".into()], 300, 100_000, false);
+            let lang = language::of(&dir);
+            let output = lockdown::command(&dir, &[lang.tool().into(), "test".into()], 300, 100_000, false);
             let _ = fs::remove_dir_all(&dir);
             let (state, results) = match output {
                 Ok(log) => {
-                    let failed = failures(&log);
+                    let failed = lang.failures(&log);
                     let compile = log.contains("error:") && failed.is_empty();
                     let results = tests
                         .iter()
@@ -851,7 +856,7 @@ pub fn main_test() {
         let mut owned = vec![];
         for dir in ["src", "test"] {
             let mut paths = vec![];
-            collect_gleam_files(&root.join(dir), &mut paths).unwrap();
+            gleam::collect_gleam_files(&root.join(dir), &mut paths).unwrap();
             for path in paths {
                 let module = path.strip_prefix(root.join(dir)).unwrap().with_extension("").to_string_lossy().to_string();
                 owned.push((dir.to_string(), module, fs::read_to_string(path).unwrap()));
@@ -1014,7 +1019,7 @@ pub fn main_test() {
     /// and a passing test.
     #[test]
     fn gleam_test_output_states() {
-        let failed = failures(include_str!("../tests/golden/gleam-test-failures.txt"));
+        let failed = gleam::failures(include_str!("../tests/golden/gleam-test-failures.txt"));
         assert_eq!(failed["app_test.wrong_test"].0, "wrong");
         assert!(failed["app_test.wrong_test"].1.contains("left: 2\nright: 3"), "{failed:?}");
         assert_eq!(failed["app_test.todo_test"].0, "unfinished");
@@ -1113,7 +1118,7 @@ pub fn main_test() {
     #[test]
     fn test_failure_blocks() {
         let f =
-            failures("todo test/app_test.gleam:3\n test: app_test.todo_test\nassert test/app_test.gleam:6\n test: app_test.wrong_test\n");
+            gleam::failures("todo test/app_test.gleam:3\n test: app_test.todo_test\nassert test/app_test.gleam:6\n test: app_test.wrong_test\n");
         assert_eq!(f["app_test.todo_test"].0, "unfinished");
         assert_eq!(f["app_test.wrong_test"].0, "wrong");
         assert!(!f.contains_key("app_test.ok_test"));

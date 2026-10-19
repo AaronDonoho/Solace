@@ -25,7 +25,7 @@ fn listing(dir: &Path) -> Option<toml::Value> {
 
 /// Whether `dir` is an explicit root.
 pub fn is_root(dir: &Path) -> bool {
-    dir.join("solace.toml").exists() && (!dir.join("gleam.toml").exists() || listing(dir).is_some())
+    dir.join("solace.toml").exists() && (crate::language::detect(dir).is_none() || listing(dir).is_some())
 }
 
 /// The Solace root that holds `start`: the one explicit root among its
@@ -83,7 +83,7 @@ fn listed(root: &Path) -> Result<Vec<String>, Failure> {
         Err(e) => return Err(e.into()),
     };
     let v: toml::Value = text.parse().or_else(invalid)?;
-    if !root.join("gleam.toml").exists()
+    if crate::language::detect(root).is_none()
         && !has_store(root)
         && let Some(k) = v.as_table().unwrap().keys().find(|k| *k != "projects")
     {
@@ -163,7 +163,7 @@ fn with_projects(text: &str, dirs: &[String]) -> String {
 /// project of plain files, with its own lane. A root that is an unmanaged
 /// Gleam project is left alone; it comes in by migration.
 fn establish(root: &Path) -> Result<(), Failure> {
-    if !root.join("gleam.toml").exists() && !has_store(root) {
+    if crate::language::detect(root).is_none() && !has_store(root) {
         import(root)?;
     }
     Ok(())
@@ -180,7 +180,7 @@ fn save(root: &Path, dirs: &[String]) -> Result<(), Failure> {
         Err(e) => return Err(e.into()),
     };
     let new = with_projects(&text, dirs);
-    if root.join("gleam.toml").exists() || has_store(root) {
+    if crate::language::detect(root).is_some() || has_store(root) {
         lockdown::parse_settings(&new)?;
     }
     fs::write(&file, &new)?;

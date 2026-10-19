@@ -365,7 +365,7 @@ fn builds(root: &Path, projects: &[String], protect: Option<&Path>) -> Value {
         clear_compiled(root, std::slice::from_ref(d));
         let (build, bout) = run(&dir, &["gleam", "build"], 600, protect);
         let (test, tout) = if build { run(&dir, &["gleam", "test"], 600, protect) } else { (false, String::new()) };
-        let failing: Vec<String> = failures(&tout).into_keys().collect();
+        let failing: Vec<String> = language::of(&dir).failures(&tout).into_keys().collect();
         ps.insert(d.clone(), json!({"build":build,"test":test,"failing":failing,"output":bout + &tout}));
     }
     Value::Object(ps)
@@ -558,14 +558,14 @@ fn string_lines(text: &str) -> Vec<usize> {
 /// The pieces of the module file `rel` whose text differs from the store's:
 /// Solace stores each definition verbatim, so if none differs, the file can
 /// only differ between definitions, which is layout.
-fn changed_pieces(db: &Connection, rel: &str, text: &str) -> Result<Vec<String>, Failure> {
+fn changed_pieces(lang: &dyn Language, db: &Connection, rel: &str, text: &str) -> Result<Vec<String>, Failure> {
     let (dir, path) = rel.split_once('/').unwrap_or(("", rel));
     let path = path.trim_end_matches(".gleam");
     let header: Option<String> =
         db.query_row("SELECT header FROM modules WHERE path = ?1 AND dir = ?2", params![path, dir], |r| r.get(0)).optional()?;
     let mut stmt = db.prepare("SELECT name, text FROM symbols WHERE module = ?1 AND live = 1 ORDER BY ord")?;
     let stored: Vec<(String, String)> = stmt.query_map([path], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<_, _>>()?;
-    let split = gleam::split(text);
+    let split = lang.split(text);
     let mut out = vec![];
     if header.as_deref() != Some(split.header.as_str()) {
         out.push("the top of the file (imports and comments)".to_string());
@@ -580,7 +580,7 @@ fn changed_pieces(db: &Connection, rel: &str, text: &str) -> Result<Vec<String>,
     // and the blank line put between definitions would change the string.
     let lines: Vec<&str> = text.lines().collect();
     let within = string_lines(text);
-    if within.iter().any(|&i| lines.get(i).is_some_and(|l| gleam::declaration(l).is_some() || gleam::is_leading(l))) {
+    if within.iter().any(|&i| lines.get(i).is_some_and(|l| lang.declaration(l).is_some() || lang.is_leading(l))) {
         out.push("a text value spanning several lines, holding a line Solace would take for a new definition".into());
     }
     if !within.is_empty() && text.contains('\r') {
@@ -602,8 +602,9 @@ fn reconstruction(original: &Path, copy: &Path, projects: &[String]) -> Result<V
         let (o, c) = (scope::path(original, d), scope::path(copy, d));
         let db = Connection::open(c.join(".solace/store.db"))?;
         db.busy_timeout(Duration::from_secs(10))?;
-        let mut files = source_files(&o).unwrap_or_default();
-        files.extend(source_files(&c).unwrap_or_default());
+        let lang = language::of(&c);
+        let mut files = lang.source_files(&o).unwrap_or_default();
+        files.extend(lang.source_files(&c).unwrap_or_default());
         files.sort();
         files.dedup();
         for rel in files {
@@ -612,8 +613,8 @@ fn reconstruction(original: &Path, copy: &Path, projects: &[String]) -> Result<V
                 (Ok(a), Ok(b)) if a == b => same.push(label),
                 (Ok(a), Ok(b)) => {
                     let (a, b) = (String::from_utf8_lossy(&a), String::from_utf8_lossy(&b));
-                    let mut changed = changed_pieces(&db, &rel, &a)?;
-                    changed.extend(changed_pieces(&db, &rel, &b)?.into_iter().map(|p| format!("{p} (in the written file)")));
+                    let mut changed = changed_pieces(lang, &db, &rel, &a)?;
+                    changed.extend(changed_pieces(lang, &db, &rel, &b)?.into_iter().map(|p| format!("{p} (in the written file)")));
                     let why = explain(&a, &b).join(", ");
                     let (status, text) = if changed.is_empty() {
                         ("verified", format!("{label} differs only in spacing: {why}"))
@@ -650,13 +651,14 @@ fn unreadable(copy: &Path, projects: &[String]) -> Vec<Value> {
     let mut items = vec![];
     for d in projects {
         let root = scope::path(copy, d);
-        for rel in source_files(&root).unwrap_or_default() {
+        let lang = language::of(&root);
+        for rel in lang.source_files(&root).unwrap_or_default() {
             let label = if d == "." { rel.clone() } else { format!("{d}/{rel}") };
             match fs::read(root.join(&rel)).map(String::from_utf8) {
                 Err(e) => items.push(item("failed", format!("{label} couldn't be read ({e})"), "")),
                 Ok(Err(_)) => items.push(item("failed", format!("{label} isn't UTF-8 text, so Solace can't read it"), "")),
                 Ok(Ok(text)) => {
-                    for name in gleam::repeated(&gleam::split(&text).items) {
+                    for name in language::repeated(&lang.split(&text).items) {
                         items.push(item("failed", format!("{label} defines {name} twice"), ""));
                     }
                 }
@@ -1050,7 +1052,7 @@ fn proceed(copy: &Path, state: &mut Value, step: &dyn Fn(&str)) -> Result<(), Fa
         step("Writing your code back out from Solace's store");
         for d in &projects {
             let root = scope::path(copy, d);
-            for rel in source_files(&root).unwrap_or_default() {
+            for rel in language::of(&root).source_files(&root).unwrap_or_default() {
                 let f = root.join(rel);
                 if !inside(copy, f.parent().unwrap()) {
                     return fail(format!("{} isn't inside the copy, so Solace won't delete it.", f.display()));
@@ -1593,7 +1595,7 @@ mod tests {
         db.execute_batch(SCHEMA).unwrap();
         let src = "pub fn a() {\n  \"\npub fn b() {}\n\"\n}\n";
         let m = gleam::split(src);
-        db.execute("INSERT INTO modules VALUES ('app', 'src', ?1)", [&m.header]).unwrap();
+        db.execute("INSERT INTO modules(path, dir, header) VALUES ('app', 'src', ?1)", [&m.header]).unwrap();
         for (i, it) in m.items.iter().enumerate() {
             db.execute(
                 "INSERT INTO symbols(id, module, name, kind, text, ord, revision) VALUES (?1, 'app', ?2, 'fn', ?3, ?4, '')",
@@ -1602,10 +1604,10 @@ mod tests {
             .unwrap();
         }
         assert_eq!(
-            changed_pieces(&db, "src/app.gleam", src).unwrap(),
+            changed_pieces(&gleam::Gleam, &db, "src/app.gleam", src).unwrap(),
             vec!["a text value spanning several lines, holding a line Solace would take for a new definition"]
         );
-        assert!(!changed_pieces(&db, "src/app.gleam", "pub fn a() {\n  \"\n").unwrap().is_empty());
+        assert!(!changed_pieces(&gleam::Gleam, &db, "src/app.gleam", "pub fn a() {\n  \"\n").unwrap().is_empty());
     }
 
     #[test]

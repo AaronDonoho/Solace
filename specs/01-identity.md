@@ -51,6 +51,7 @@ Verification evidence attaches to `(identity, revision)`. When a revision change
 - A **qualified name** is `namespace.path.name`, for example `pilot.pricing.quote`. Constructors are `namespace.Type.Variant`.
 - Qualified names are unique among **live** symbols. A retired symbol's name is free to reuse, and the new symbol gets a new identity.
 - **Resolution:** the input may be any suffix of a qualified name (`quote`, `pricing.quote`). Exactly one live match resolves; zero or several fail with error `E1001 unknown name` or `E1002 ambiguous name`, listing up to 10 candidates with their kinds and signatures.
+- **Rust (D-158):** names follow Rust's paths: items by module path (`board::agents::cached`), methods as `Type::name`, trait impls as `<Type as Trait>` and their functions as `<Type as Trait>::f`. Inline `mod` blocks are modules.
 
 ## 5. Operations and their identity rules
 
@@ -83,6 +84,8 @@ Generic instantiations and derived implementations get **no identities of their 
 
 The store is SQLite. Imported Gleam modules are split into symbols per §1. Symbols and their references come from parsing with `glance` (the Gleam parser published as a Gleam package), resolved against each module's imports. Type information, where needed, comes from `gleam export package-interface`. Revisions hash the `gleam format` output of each symbol, with references replaced by identities. Gleam imports are regenerated from references and are not part of any symbol.
 
+**Rust (D-158).** A Cargo package of one crate is a Rust project: its `.rs` files in `src/` and `tests/` are split into items with `syn`, named as in §4. Code outside D-158 point 2's subset (a name defined twice in a module, an item-making macro other than `thread_local!`, `include!`, a `#[path]` outside the parent's folder) is refused at `submit`, with the rewrite; proc-macro crates and workspaces are refused at import. An `unsafe` without a `// SAFETY:` comment is saved; the review lists new `unsafe`. References come from names until type-accurate refs (deferred, as are extract and merge).
+
 ## Tests (acceptance)
 
 R1 to R5 above, plus:
@@ -92,3 +95,5 @@ R1 to R5 above, plus:
 - I3. Merge redirects every reference; afterwards the retired identity has zero live references.
 - I4. Identities are never reused over 10,000 create/delete cycles.
 - I5. An ambiguous suffix fails and lists every candidate.
+- I6. Rust: `impl Store { fn open }` and `impl From<io::Error> for Failure` give `Store::open` and `<Failure as From<io::Error>>::from`.
+- I7. Rust: two `#[cfg]` variants of one `fn` in a module are refused with the rewrite, and a draft is kept.

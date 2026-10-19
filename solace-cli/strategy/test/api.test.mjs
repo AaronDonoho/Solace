@@ -276,7 +276,7 @@ test('Vision tab shows the document, edits it and saves over its revision', asyn
 
 // D-87: a create names its `request`; an edit sends only what changed; a refusal keeps the form.
 test('Features tab creates a feature and edits it with only the changed fields', async () => {
-  let feature = { id: 'f1', title: 'Search', body: '', milestone: null, rank: 1, state: 'proposed' }, post, patch;
+  let feature = { id: 'f1', title: 'Search', body: '', milestone: null, rank: 1, state: 'proposed' }, post, patch, refuse = false;
   let tags = { id: 'f3', title: 'Tags', body: '', milestone: null, rank: 3, state: 'proposed' };
   const moves = [], deleted = [];
   const linked = { id: 't1', title: 'Index', body: '', rank: 1, column: 'backlog', paused_from: null, stamps: {}, links: [], runs: [], questions: [], feature: 'f1', milestone: null, closedTime: null };
@@ -286,8 +286,11 @@ test('Features tab creates a feature and edits it with only the changed fields',
       frame({ features: [feature, tags] }) + frame({ project: '.', workflow: { columns: [] } }) +
       frame({ project: '.', tasks: [linked] }) + 'event: ready\ndata: {}\n\n'), { headers: { 'Content-Type': 'text/event-stream' } });
     if (path === '/features/f3' && req.method === 'PATCH') {
-      moves.push(await req.json());
-      tags = { ...tags, ...moves.at(-1) };
+      const body = await req.json();
+      // A start refused while a run is open (D-100) answers with its error.
+      if (refuse && body.state === 'active') return Response.json({ code: 'E7003', message: 'E7003 a run is open on this feature' }, { status: 400 });
+      moves.push(body);
+      tags = { ...tags, ...body };
       return Response.json(tags);
     }
     if (path === '/features/f1' && req.method === 'DELETE') { deleted.push(path); return Response.json(feature); }
@@ -379,6 +382,15 @@ test('Features tab creates a feature and edits it with only the changed fields',
     // Start (D-154): a proposed feature's one PATCH to active; the button is gone once it is active.
     expect(html()).toContain('aria-label="Start Tags"');
     expect(html()).not.toContain('aria-label="Start Search"');
+    // A refused start says why and changes nothing: its state stays, and so
+    // does the order the move above answered.
+    refuse = true;
+    dispatch(new strategy.StartFeature('f3'));
+    await until(() => html().includes('E7003'));
+    expect(moves).toEqual([{ rank: 0 }]);
+    expect(html()).toContain('aria-label="Start Tags"');
+    expect(html()).toContain('class="state">proposed<');
+    refuse = false;
     dispatch(new strategy.StartFeature('f3'));
     await until(() => !html().includes('aria-label="Start Tags"'));
     expect(moves).toEqual([{ rank: 0 }, { state: 'active' }]);

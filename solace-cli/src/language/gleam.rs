@@ -3,46 +3,94 @@
 //! Formatted Gleam puts every top-level item at column 0, which is what makes
 //! a line-based splitter reliable. `gleam format` itself is the syntax check.
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Kind {
-    Fn,
-    Type,
-    Const,
-}
+use crate::language::{Import, Item, Kind, Language, Module, Ref, body_start, split_args};
+use crate::{Diag, Failure, FileMap, fail, locate, strip_ansi};
+use std::collections::BTreeMap;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
-impl Kind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Kind::Fn => "fn",
-            Kind::Type => "type",
-            Kind::Const => "const",
-        }
+/// Gleam behind the language interface.
+pub struct Gleam;
+
+impl Language for Gleam {
+    fn manifest(&self) -> &'static str {
+        "gleam.toml"
     }
-    pub fn parse(s: &str) -> Kind {
-        match s {
-            "type" => Kind::Type,
-            "const" => Kind::Const,
-            _ => Kind::Fn,
-        }
+    fn tool(&self) -> &'static str {
+        "gleam"
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct Item {
-    pub kind: Kind,
-    pub name: String,
-    /// Includes the doc comment and any comments directly above it.
-    pub text: String,
-}
-
-pub struct Module {
-    /// Module doc comment and imports: everything before the first item.
-    pub header: String,
-    pub items: Vec<Item>,
+    fn split(&self, source: &str) -> Module {
+        split(source)
+    }
+    fn declaration(&self, line: &str) -> Option<(Kind, String)> {
+        declaration(line)
+    }
+    fn is_leading(&self, line: &str) -> bool {
+        is_leading(line)
+    }
+    fn imports(&self, header: &str) -> Vec<Import> {
+        imports(header)
+    }
+    fn references(&self, code: &str) -> Vec<Ref> {
+        references(code)
+    }
+    fn references_at(&self, code: &str) -> Vec<(Ref, usize)> {
+        references_at(code)
+    }
+    fn references_spans(&self, code: &str) -> Vec<(Ref, usize, usize)> {
+        references_spans(code)
+    }
+    fn bound_names(&self, code: &str) -> std::collections::HashSet<String> {
+        bound_names(code)
+    }
+    fn constructors(&self, type_text: &str) -> Vec<String> {
+        constructors(type_text)
+    }
+    fn record_fields(&self, type_text: &str) -> Vec<(String, Vec<Option<String>>)> {
+        record_fields(type_text)
+    }
+    fn field_reads(&self, code: &str) -> Vec<(String, usize)> {
+        field_reads(code)
+    }
+    fn pattern_names(&self, pattern: &str) -> Vec<String> {
+        pattern_names(pattern)
+    }
+    fn strip_comments(&self, source: &str) -> String {
+        strip_comments(source)
+    }
+    fn signature(&self, item: &Item) -> String {
+        signature(item)
+    }
+    fn head(&self, item: &Item) -> String {
+        head(item)
+    }
+    fn source_files(&self, dir: &Path) -> Result<Vec<String>, Failure> {
+        source_files(dir)
+    }
+    fn valid_module_path(&self, m: &str) -> bool {
+        valid_module_path(m)
+    }
+    fn format(&self, source: &str) -> Result<String, Failure> {
+        format(source)
+    }
+    fn diagnostics(&self, output: &str, files: &[FileMap]) -> Vec<Diag> {
+        diagnostics(output, files)
+    }
+    fn relocate(&self, line: &str, files: &[FileMap]) -> String {
+        relocate(line, files)
+    }
+    fn failures(&self, output: &str) -> BTreeMap<String, (String, String)> {
+        failures(output)
+    }
+    fn quiet(&self, output: &str) -> String {
+        quiet(output)
+    }
 }
 
 /// Kind and name when `line` starts a top-level item.
-pub(super) fn declaration(line: &str) -> Option<(Kind, String)> {
+pub fn declaration(line: &str) -> Option<(Kind, String)> {
     let mut rest = line.strip_prefix("pub ").unwrap_or(line);
     rest = rest.strip_prefix("opaque ").unwrap_or(rest);
     let (kind, rest) = if let Some(r) = rest.strip_prefix("fn ") {
@@ -58,14 +106,8 @@ pub(super) fn declaration(line: &str) -> Option<(Kind, String)> {
 }
 
 /// Comment or attribute lines that belong to the item below them.
-pub(super) fn is_leading(line: &str) -> bool {
+pub fn is_leading(line: &str) -> bool {
     (line.starts_with("//") && !line.starts_with("////")) || line.starts_with('@')
-}
-
-/// Names defined again after their first definition, once per repeat.
-pub fn repeated(items: &[Item]) -> Vec<&str> {
-    let mut seen = std::collections::HashSet::new();
-    items.iter().filter(|i| !seen.insert(&i.name)).map(|i| i.name.as_str()).collect()
 }
 
 pub fn split(source: &str) -> Module {
@@ -102,31 +144,6 @@ pub fn constructors(type_text: &str) -> Vec<String> {
         .collect()
 }
 
-/// The parts of a bracketed list, split at its top-level commas: `s` starts
-/// just after the opening bracket and ends at the matching close. Each part
-/// comes with its byte offset in `s`; blank parts (trailing commas) are left out.
-pub fn split_args(s: &str) -> Vec<(usize, String)> {
-    let (mut depth, mut parts, mut start) = (0i32, vec![], 0);
-    let mut end = s.len();
-    for (i, c) in s.char_indices() {
-        match c {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' if depth == 0 => {
-                end = i;
-                break;
-            }
-            ')' | ']' | '}' => depth -= 1,
-            ',' if depth == 0 => {
-                parts.push((start, s[start..i].to_string()));
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push((start, s[start..end].to_string()));
-    parts.into_iter().filter(|(_, p)| !p.trim().is_empty()).collect()
-}
-
 /// Each constructor of a type with its fields' labels, in position order.
 pub fn record_fields(type_text: &str) -> Vec<(String, Vec<Option<String>>)> {
     let code = strip_comments(type_text);
@@ -154,21 +171,6 @@ pub fn signature(item: &Item) -> String {
     doc + &head(item)
 }
 
-/// Where a function's body opens in `decl` (text from its `fn`): the first `{`
-/// outside parentheses and brackets.
-pub fn body_start(decl: &str) -> Option<usize> {
-    let mut depth = 0i32;
-    for (i, c) in decl.char_indices() {
-        match c {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth -= 1,
-            '{' if depth == 0 => return Some(i),
-            _ => {}
-        }
-    }
-    None
-}
-
 /// The declaration part of an item: a function up to its body, a type or
 /// constant in full.
 pub fn head(item: &Item) -> String {
@@ -178,13 +180,6 @@ pub fn head(item: &Item) -> String {
         Kind::Fn => decl[..body_start(&decl).unwrap_or(decl.len())].trim_end().to_string(),
         _ => decl,
     }
-}
-
-pub struct Import {
-    pub module: String,
-    pub alias: String,
-    /// (name in the imported module, local name)
-    pub unqualified: Vec<(String, String)>,
 }
 
 pub fn imports(header: &str) -> Vec<Import> {
@@ -268,12 +263,6 @@ pub fn strip_comments(source: &str) -> String {
         }
     }
     out
-}
-
-pub enum Ref {
-    /// `alias.name`
-    Qualified(String, String),
-    Bare(String),
 }
 
 /// Every top-level name a piece of code mentions, as written. Names bound
@@ -578,200 +567,172 @@ pub fn pattern_names(s: &str) -> Vec<String> {
 
 const KEYWORDS: &[&str] = &["assert", "let", "use", "case", "if", "fn", "pub", "todo", "panic", "as", "echo"];
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// A Gleam module path: lowercase names of letters, digits and `_`, joined by `/`.
+pub fn valid_module_path(m: &str) -> bool {
+    m.split('/').all(|p| {
+        p.starts_with(|c: char| c.is_ascii_lowercase()) && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    })
+}
 
-    const SRC: &str = "//// Checkout.\n\nimport gleam/list\nimport gleam/order as ordering\nimport pilot/order.{type Order, Line as L}\n\n// section\n\n/// Pays.\npub fn pay(a: Int) -> Result(\n  Int,\n  Nil,\n) {\n  list.map([], fn(x) { L(x) })\n  // helper(\"no\")\n  helper(\"a.b\")\n}\n\n@deprecated(\"x\")\nfn helper(s: String) {\n  s\n}\n\npub type Status {\n  Draft\n  /// doc\n  Cancelled(reason: String)\n}\n\nconst limit = 3\n";
-
-    #[test]
-    fn splits_items_with_leading_comments() {
-        let m = split(SRC);
-        assert!(m.header.starts_with("//// Checkout.") && m.header.contains("import pilot/order"));
-        let names: Vec<_> = m.items.iter().map(|i| (i.kind.as_str(), i.name.as_str())).collect();
-        assert_eq!(names, [("fn", "pay"), ("fn", "helper"), ("type", "Status"), ("const", "limit")]);
-        assert!(m.items[0].text.starts_with("/// Pays."));
-        assert!(m.items[1].text.starts_with("@deprecated"));
-        assert!(m.header.ends_with("// section"));
+/// The Gleam files in a project's `src/` and `test/`, as sorted paths from `dir`.
+pub fn source_files(dir: &Path) -> Result<Vec<String>, Failure> {
+    let mut files = vec![];
+    for top in ["src", "test"] {
+        collect_gleam_files(&dir.join(top), &mut files)?;
     }
+    let mut out: Vec<String> = files.iter().map(|f| f.strip_prefix(dir).unwrap().to_string_lossy().replace('\\', "/")).collect();
+    out.sort();
+    Ok(out)
+}
 
-    #[test]
-    fn signatures_and_constructors() {
-        let m = split(SRC);
-        assert_eq!(signature(&m.items[0]), "/// Pays.\npub fn pay(a: Int) -> Result(\n  Int,\n  Nil,\n)");
-        // The whole doc, and not a constructor's doc for the type's.
-        let item = Item { text: "/// Pays.\n// note\n/// Never twice.\npub fn pay() {\n  1\n}".into(), ..m.items[0].clone() };
-        assert_eq!(signature(&item), "/// Pays.\n/// Never twice.\npub fn pay()");
-        assert!(!signature(&m.items[2]).starts_with("/// doc"));
-        assert_eq!(constructors(&m.items[2].text), ["Draft", "Cancelled"]);
+pub fn collect_gleam_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    if !dir.exists() {
+        return Ok(());
     }
-
-    #[test]
-    fn parses_imports() {
-        let m = split(SRC);
-        let i = imports(&m.header);
-        let got: Vec<_> = i.iter().map(|i| (i.module.as_str(), i.alias.as_str(), i.unqualified.len())).collect();
-        assert_eq!(got, [("gleam/list", "list", 0), ("gleam/order", "ordering", 0), ("pilot/order", "order", 2)]);
-        assert_eq!(i[2].unqualified[1], ("Line".to_string(), "L".to_string()));
-    }
-
-    /// The `alias.name` references in `code`.
-    fn qualified(code: &str) -> Vec<String> {
-        references(code).iter().filter_map(|r| if let Ref::Qualified(a, b) = r { Some(format!("{a}.{b}")) } else { None }).collect()
-    }
-    /// The bare-name references in `code`.
-    fn bare_names(code: &str) -> Vec<String> {
-        references(code).iter().filter_map(|r| if let Ref::Bare(b) = r { Some(b.clone()) } else { None }).collect()
-    }
-
-    #[test]
-    fn finds_references_outside_strings_and_comments() {
-        let m = split(SRC);
-        let bare = bare_names(&m.items[0].text);
-        assert_eq!(qualified(&m.items[0].text), ["list.map"]);
-        assert!(bare.iter().any(|b| b == "helper") && bare.iter().any(|b| b == "L") && !bare.iter().any(|b| b == "b"));
-    }
-
-    /// Spans are byte offsets into the original text, also after a string
-    /// literal, a trailing comment and multibyte text.
-    #[test]
-    fn reference_spans_are_byte_offsets_of_the_source() {
-        let code = "pub fn f(t: Task) {\n  let s = \"é Task\" // Task\n  board.go(Task(1), s)\n}";
-        let spans: Vec<(String, &str)> = references_spans(code)
-            .into_iter()
-            .map(|(r, a, b)| (match r { Ref::Bare(n) => n, Ref::Qualified(a, m) => format!("{a}.{m}") }, &code[a..b]))
-            .filter(|(n, _)| n == "Task" || n == "board.go")
-            .collect();
-        assert_eq!(spans, [("Task".into(), "Task"), ("board.go".into(), "board.go"), ("Task".into(), "Task")]);
-        assert!(bound_names("pub fn f(task: Int) {\n  let x = 1\n  x\n}").is_superset(&["task".to_string(), "x".to_string()].into()));
-    }
-
-    #[test]
-    fn record_fields_and_field_reads() {
-        let ty = "pub type Quote {\n  Quote(\n    /// the lines\n    lines: List(Line),\n    total_cents: Int,\n  )\n  Empty\n  Pair(Int, label: String)\n}";
-        let none: Vec<Option<String>> = vec![];
-        assert_eq!(
-            record_fields(ty),
-            [
-                ("Quote".to_string(), vec![Some("lines".to_string()), Some("total_cents".to_string())]),
-                ("Empty".to_string(), none),
-                ("Pair".to_string(), vec![None, Some("label".to_string())]),
-            ]
-        );
-        let code = "pub fn f(q: Quote) {\n  let t = q.total_cents\n  let Quote(lines: ls, ..) = q\n  let r = Quote(..q, total_cents: tax.rate)\n  case g(q).lines {\n    Pair(_, label:) -> label\n  }\n  r.inner.depth\n}";
-        let got: Vec<(String, usize)> = field_reads(code);
-        let got: Vec<(&str, usize)> = got.iter().map(|(f, l)| (f.as_str(), *l)).collect();
-        assert_eq!(got, [("total_cents", 1), ("lines", 4), ("inner", 7), ("depth", 7), ("lines", 2), ("label", 5)]);
-    }
-
-    #[test]
-    fn locals_shadow_top_level_names() {
-        let code = "pub fn f(quote: Quote, shipping: S) -> Int {\n  let tax = tax.quote(1)\n  let assert Ok(#(db, o)) = g(o)\n  list.map([], fn(order) { order.id })\n  case x {\n    Ok(line) if line > 0 -> line + tax.total + db\n    order.Paid -> order.x\n  }\n  shipping.cost + quote.total + h(label: 1)\n}";
-        let q = qualified(code);
-        let bare = bare_names(code);
-        assert_eq!(q, ["tax.quote", "list.map", "order.Paid", "order.x"]);
-        assert!(bare.contains(&"g".to_string()) && bare.contains(&"o".to_string()) && bare.contains(&"h".to_string()));
-        assert!(!bare.contains(&"quote".to_string()) && !bare.contains(&"line".to_string()) && !bare.contains(&"label".to_string()));
-        // a `use` or `let` pattern binds its names; it doesn't refer to symbols of that name
-        let bare = bare_names("pub fn f() {\n  use request <- try(g())\n  let tax = 1\n  request + tax\n}");
-        assert!(
-            bare.contains(&"g".to_string()) && !bare.contains(&"request".to_string()) && !bare.contains(&"tax".to_string()),
-            "{bare:?}"
-        );
-        // a binding starts after its whole right-hand side, however many lines it takes
-        let code = "pub fn f() {\n  use customer <- result.try(\n    customer.Customer(id: 1)\n    |> customer.validate,\n  )\n  customer.email\n}";
-        assert_eq!(qualified(code), ["result.try", "customer.Customer", "customer.validate"]);
-    }
-
-    /// `declaration` takes `opaque`, and wants a name: `type` and `fn` alone,
-    /// `const1`, and a word that is no declaration give nothing.
-    #[test]
-    fn declarations_take_opaque_and_refuse_an_empty_name() {
-        assert_eq!(declaration("pub opaque type T"), Some((Kind::Type, "T".to_string())));
-        assert_eq!(declaration("opaque fn x() { 1 }"), Some((Kind::Fn, "x".to_string())));
-        assert_eq!(declaration("const x = 1"), Some((Kind::Const, "x".to_string())));
-        for bad in ["type ", "fn ", "const ", "pub", "pub fn", "const1 = 1", "mytype", ""] {
-            assert_eq!(declaration(bad), None, "{bad}");
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        // A symlinked folder isn't followed: deleting or writing through it could reach outside the project.
+        if entry.file_type()?.is_dir() {
+            collect_gleam_files(&path, out)?;
+        } else if path.extension().is_some_and(|e| e == "gleam") {
+            out.push(path);
         }
     }
+    Ok(())
+}
 
-    /// A body's `{` is the first one outside brackets; a declaration with no
-    /// body keeps its whole head.
-    #[test]
-    fn body_start_skips_braces_inside_brackets() {
-        assert_eq!(body_start("fn f(a: Int) { 1 }"), Some(13));
-        assert_eq!(body_start("fn f(a: #(Int, Int)) { 1 }"), Some(21));
-        assert_eq!(body_start("fn f(a: Int) -> Int"), None);
-        let item = Item { kind: Kind::Fn, name: "f".into(), text: "pub fn f() -> Int".into() };
-        assert_eq!(head(&item), "pub fn f() -> Int", "no body brace: the head is the whole declaration");
-    }
-
-    /// Nested brackets keep one part; a trailing comma and a missing close
-    /// give the parts there are, and a lone close gives none.
-    #[test]
-    fn split_args_nests_and_keeps_only_the_parts_there_are() {
-        assert_eq!(split_args("a(b, c), [d, e])"), [(0, "a(b, c)".to_string()), (8, " [d, e]".to_string())]);
-        assert_eq!(split_args("a, b,)"), [(0, "a".to_string()), (2, " b".to_string())]);
-        assert_eq!(split_args("a, b"), [(0, "a".to_string()), (2, " b".to_string())]);
-        assert_eq!(split_args(")"), []);
-    }
-
-    /// A field label starts with a lowercase letter; `Label:` is a value, not a label.
-    #[test]
-    fn record_fields_wants_a_lowercase_label() {
-        let ty = "pub type Shape {\n  Shape(Int, Label: String)\n}";
-        assert_eq!(record_fields(ty), [("Shape".to_string(), vec![None, None])]);
-    }
-
-    /// Only an `import` at a line start counts: one in a doc comment, and one
-    /// after other text on its line, are left out. A `.{` with no close takes
-    /// the rest of the header as its list.
-    #[test]
-    fn imports_only_at_a_line_start() {
-        let i = imports("//// uses import gleam/int\nimport gleam/string\nx import gleam/float\n");
-        assert_eq!(i.len(), 1);
-        assert_eq!(i[0].module, "gleam/string");
-        let i = imports("import gleam/option.{Some as S\nas o\n");
-        assert_eq!((i[0].module.as_str(), i[0].alias.as_str()), ("gleam/option", "option"));
-        assert_eq!(i[0].unqualified[0], ("Some".to_string(), "S\nas o".to_string()));
-    }
-
-    /// String literals and comments are blanked out; the quotes and the line
-    /// breaks are kept, so the lines still match the source's. An escaped
-    /// quote is skipped, so the string ends at the quote that closes it.
-    #[test]
-    fn strip_comments_blanks_strings_and_comments() {
-        assert_eq!(strip_comments("let s = \"a // b\""), "let s = \"      \"");
-        assert_eq!(strip_comments("let s = \"\\\"\" // c\nx"), "let s = \"  \"     \nx");
-        assert_eq!(strip_comments("let s = \"a\nb\" // c\nx"), "let s = \" \n \"     \nx");
-        assert_eq!(strip_comments("// whole\nx"), "        \nx");
-        // offsets still match the source's, also after multibyte text
-        let s = "let s = \"é\" // ü\nx";
-        assert_eq!(strip_comments(s).len(), s.len());
-    }
-
-    /// `..base` in a record update names a value, not a field; `module::` is
-    /// two names, not a label.
-    #[test]
-    fn a_record_update_base_is_a_value_and_a_double_colon_is_no_label() {
-        let code = "pub fn f(q: Quote) {\n  let r = Quote(..base, x: 1)\n  r\n}";
-        let reads = field_reads(code);
-        assert!(!reads.iter().any(|(f, _)| f == "base"), "{reads:?}");
-        assert!(bare_names(code).contains(&"base".to_string()), "{:?}", bare_names(code));
-        assert_eq!(bare_names("a::b"), ["a", "b"]);
-    }
-
-    /// A binding lasts to the line indented no more than its `let`: the `x`
-    /// after the function is a name, the one inside is not. Keywords in a
-    /// pattern are not names, and `mod.Ctor` binds only `x`.
-    #[test]
-    fn a_binding_ends_at_its_indent_and_keywords_are_no_names() {
-        let code = "pub fn f() {\n  let x = 1\n  x\n}\nx";
-        let bare = bare_names(code);
-        assert_eq!(bare.iter().filter(|b| *b == "x").count(), 1, "{bare:?}");
-        assert_eq!(pattern_names("Ok(a) if b -> c"), ["a", "b", "c"]);
-        assert_eq!(pattern_names("Ok(a) as b"), ["a", "b"]);
-        assert_eq!(pattern_names("mod.Ctor(x)"), ["x"]);
-        assert_eq!(pattern_names("_"), ["_"]);
+/// Formats Gleam source, which doubles as the syntax check.
+pub fn format(source: &str) -> Result<String, Failure> {
+    let mut child =
+        Command::new("gleam").args(["format", "--stdin"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    child.stdin.take().unwrap().write_all(source.as_bytes())?;
+    let out = child.wait_with_output()?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    } else {
+        let msg = strip_ansi(&String::from_utf8_lossy(&out.stderr)).replace("<stdin>", "submitted text");
+        fail(format!("Not saved: E0100 syntax error.\n\n{}", msg.trim()))
     }
 }
+
+/// Command output without build progress and compiler warnings (a warning
+/// runs until the next error or until the program starts).
+fn quiet(output: &str) -> String {
+    let (mut out, mut warning) = (String::new(), false);
+    for l in output.lines() {
+        let t = l.trim();
+        warning = (warning || l.starts_with("warning")) && !l.starts_with("error") && !t.starts_with("Running ");
+        if !warning && !["Compiling ", "Compiled ", "Running ", "Downloading ", "Downloaded "].iter().any(|p| t.starts_with(p)) {
+            out += &format!("{l}\n");
+        }
+    }
+    out
+}
+
+/// Failed tests in `gleam test` output by `module.name` (Erlang prints
+/// modules as `pilot@x_test`): whether wrong or unfinished, and the failure
+/// block (`assert …`, `test:`, `code:`, `left:`, `right:`, `info:`).
+pub fn failures(output: &str) -> BTreeMap<String, (String, String)> {
+    let clean = strip_ansi(output);
+    let mut out = BTreeMap::new();
+    let mut block: Vec<&str> = vec![];
+    for line in clean.lines().map(str::trim).chain([""]) {
+        let start = ["todo ", "assert ", "let assert ", "panic "].iter().any(|p| line.starts_with(p));
+        if (start || line.is_empty()) && !block.is_empty() {
+            if let Some(name) = block.iter().find_map(|l| l.strip_prefix("test: ")) {
+                let kind = if block[0].starts_with("todo ") { "unfinished" } else { "wrong" };
+                out.insert(name.replace('@', "/"), (kind.into(), block.join("\n")));
+            }
+            block.clear();
+        }
+        if start || (!block.is_empty() && !line.is_empty()) {
+            block.push(line);
+        }
+    }
+    out
+}
+
+/// Rewrites `path/to/file.gleam:LINE` references in a line to symbol positions.
+fn relocate(line: &str, files: &[FileMap]) -> String {
+    let Some(end) = line.find(".gleam:") else {
+        return line.to_string();
+    };
+    let start = line[..end].rfind(|c: char| c.is_whitespace()).map_or(0, |i| i + 1);
+    let path = &line[start..end + 6];
+    let rest = &line[end + 7..];
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let (Ok(n), Some((module, sym))) = (digits.parse::<usize>(), locate(files, path, digits.parse().unwrap_or(0))) else {
+        return line.to_string();
+    };
+    let tail = &rest[digits.len()..];
+    let tail = tail.strip_prefix(':').map_or(tail, |t| t.trim_start_matches(|c: char| c.is_ascii_digit()));
+    let place = match sym {
+        Some((q, first)) => format!("{q}, line {}", n - first + 1),
+        None => format!("{module} imports"),
+    };
+    format!("{}{place}{tail}", &line[..start])
+}
+
+/// Splits compiler output into diagnostics located by symbol.
+fn diagnostics(output: &str, files: &[FileMap]) -> Vec<Diag> {
+    let mut blocks: Vec<Vec<&str>> = vec![];
+    for line in output.lines() {
+        let t = line.trim_start();
+        if line.starts_with("error") || line.starts_with("warning") {
+            blocks.push(vec![line]);
+        } else if ["Compiling ", "Compiled ", "Checking ", "Running "].iter().any(|p| t.starts_with(p)) {
+            continue;
+        } else if let Some(b) = blocks.last_mut() {
+            b.push(line);
+        }
+    }
+    blocks
+        .into_iter()
+        .map(|b| {
+            let error = b[0].starts_with("error");
+            let mut module = None;
+            let mut symbol = None;
+            let mut offset = 0;
+            let mut text = vec![];
+            for line in &b {
+                if let Some(loc) = line.trim_start().strip_prefix("┌─ ") {
+                    let mut parts = loc.rsplitn(3, ':');
+                    let (_col, row, path) = (parts.next(), parts.next(), parts.next());
+                    if let (Some(path), Some(Ok(row))) = (path, row.map(|r| r.parse::<usize>()))
+                        && let Some((m, sym)) = locate(files, path, row)
+                    {
+                        module = Some(m.to_string());
+                        match sym {
+                            Some((q, first)) => {
+                                symbol = Some(q.to_string());
+                                offset = first - 1;
+                                text.push(format!("  at {q}, line {}", row - offset));
+                            }
+                            None => text.push(format!("  at {m} imports")),
+                        }
+                        continue;
+                    }
+                }
+                // renumber the code excerpt to lines within the symbol
+                let t = line.trim_start();
+                let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if offset > 0
+                    && !digits.is_empty()
+                    && t[digits.len()..].starts_with(" │")
+                    && let Ok(n) = digits.parse::<usize>()
+                    && n > offset
+                {
+                    text.push(format!("{:>4}{}", n - offset, &t[digits.len()..]));
+                    continue;
+                }
+                text.push(line.to_string());
+            }
+            Diag { error, module, symbol, text: text.join("\n").trim_end().to_string() }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "gleam_tests.rs"]
+mod tests;

@@ -89,3 +89,91 @@ fn a_catch_names_the_views_that_do_not_fit() {
     assert!(out.contains("Not shown, to fit the size limit: calc.three"), "{out}");
     SERVED.with(|v| *v.borrow_mut() = None);
 }
+
+/// Deleting a symbol the run read is a change: it starts a new window, so the
+/// next re-read of an unchanged symbol catches.
+#[test]
+fn a_delete_of_a_read_symbol_starts_a_window() {
+    let store = testing::project(&[(
+        "src/calc.gleam",
+        "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn three() -> Int {\n  add(1, 2)\n}\n",
+    )]);
+    let top = scope::top(&store.root);
+    let outline = |_: usize| String::new();
+    let mut reads = Reads::default();
+    Run::start_call();
+    store.view(&["calc.add", "calc.three"], false, 10_000).unwrap();
+    assert_eq!(catch_up(&mut reads, &top, take_served(), false, 10_000, &outline), "");
+    Run::start_call();
+    store.view(&["calc.add"], false, 10_000).unwrap();
+    assert!(catch_up(&mut reads, &top, take_served(), false, 10_000, &outline).contains("hasn't changed"), "the window's catch is used");
+    // A delete of a symbol the run read starts a new window, so the catch is
+    // available again.
+    Run::start_call();
+    store.delete_all(&["calc.three"], usize::MAX).unwrap();
+    assert_eq!(catch_up(&mut reads, &top, take_served(), true, 10_000, &outline), "", "the change's call is no catch");
+    Run::start_call();
+    store.view(&["calc.add"], false, 10_000).unwrap();
+    let out = catch_up(&mut reads, &top, take_served(), false, 10_000, &outline);
+    assert!(out.contains("`calc.add` hasn't changed"), "the delete started a window: {out}");
+    SERVED.with(|v| *v.borrow_mut() = None);
+}
+
+/// A deleted symbol differs from every revision the run was served; a store
+/// that won't open is no change.
+#[test]
+fn a_deleted_symbol_differs_and_an_unopened_store_does_not() {
+    let store = testing::project(&[("src/calc.gleam", "pub fn one() -> Int {\n  1\n}\n")]);
+    let top = scope::top(&store.root);
+    let mut reads = Reads::default();
+    Run::start_call();
+    store.view(&["calc.one"], false, 10_000).unwrap();
+    reads.record(&take_served());
+    let stores = opened(&top, &reads);
+    let r = reads.symbols[0].clone();
+    assert!(current_revision(&stores, &r).is_some_and(|c| !c.is_empty()), "present: its revision");
+    store.delete_all(&["calc.one"], usize::MAX).unwrap();
+    let stores = opened(&top, &reads);
+    assert_eq!(current_revision(&stores, &r), Some(String::new()), "deleted: differs from what was served");
+    let gone = Served { project: "no/such/project".into(), ..r.clone() };
+    assert_eq!(current_revision(&stores, &gone), None, "a store that won't open is no change");
+    SERVED.with(|v| *v.borrow_mut() = None);
+}
+
+/// Over the cap the oldest entry the window no longer needs goes first, so a
+/// long window keeps the symbols it read.
+#[test]
+fn the_cap_drops_the_oldest_entry_the_window_no_longer_needs() {
+    let read = |n: usize, recent: bool| Served { project: ".".into(), symbol: format!("a.f{n}"), revision: "1".into(), recent, latest: "1".into() };
+    let mut reads = Reads::default();
+    reads.record(&(0..=60).map(|i| read(i, i > 0)).collect::<Vec<_>>());
+    assert_eq!(reads.symbols.len(), 60);
+    assert!(!reads.symbols.iter().any(|r| r.symbol == "a.f0"), "the oldest entry that isn't recent goes first");
+    assert!(reads.symbols.iter().any(|r| r.symbol == "a.f1"), "the oldest recent entry survives");
+    let mut all = Reads::default();
+    all.record(&(0..=60).map(|i| read(i, true)).collect::<Vec<_>>());
+    assert_eq!(all.symbols.len(), 60);
+    assert!(!all.symbols.iter().any(|r| r.symbol == "a.f0"), "when all are recent, the oldest goes");
+}
+
+/// A catch with no room for any view names the left-out symbols without
+/// opening their stores.
+#[test]
+fn a_catch_with_no_room_names_the_left_out_symbols() {
+    let store = testing::project(&[(
+        "src/calc.gleam",
+        "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn three() -> Int {\n  add(1, 2)\n}\n",
+    )]);
+    let top = scope::top(&store.root);
+    let outline = |_: usize| "x".repeat(4_000);
+    let mut reads = Reads::default();
+    Run::start_call();
+    store.view(&["calc.add", "calc.three"], false, 10_000).unwrap();
+    assert_eq!(catch_up(&mut reads, &top, take_served(), false, 10_000, &outline), "");
+    Run::start_call();
+    store.view(&["calc.add"], false, 10_000).unwrap();
+    let out = catch_up(&mut reads, &top, take_served(), false, 190, &outline);
+    assert!(out.contains("hasn't changed"), "{out}");
+    assert!(out.contains("Not shown, to fit the size limit: calc.three"), "{out}");
+    SERVED.with(|v| *v.borrow_mut() = None);
+}

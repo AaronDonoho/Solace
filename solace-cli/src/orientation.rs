@@ -1,7 +1,6 @@
 //! `view <file>` and `view <file>::<name>` for Rust and Python files (D-121).
-//! A line scanner, not a parser: it skips strings and comments, counts
-//! brackets, and reads an item's head from the line it starts, which fits the
-//! rustfmt-formatted Rust and the Python here without a new dependency.
+//! Rust items come from the `syn` splitter (`language::rust`); Python's from
+//! a line scanner that follows indentation.
 
 use super::*;
 
@@ -44,7 +43,7 @@ pub fn view(root: &Path, v: &toml::Value, a: &[&str], budget: usize) -> Option<O
         Ok(w) => w,
         Err(e) => return Some(Err(e)),
     };
-    let gleam = root.join("gleam.toml").exists();
+    let gleam = crate::language::detect(root).is_some();
     let files: Vec<bool> =
         ops.iter().map(|&op| op.contains("::") || source(op) && (!gleam || !matching(&watched, op).is_empty())).collect();
     if !files.contains(&true) {
@@ -86,7 +85,13 @@ fn view_files(root: &Path, watched: &[String], ops: &[&str], files: &[bool], fla
         };
         let text = fs::read_to_string(root.join(&file))?;
         let (items, sep) = if file.ends_with(".rs") {
-            (rust(&text), "::")
+            match rust(&text) {
+                Ok(items) => (items, "::"),
+                Err(e) => {
+                    out += &format!("{file}: {}; `read {file}` reads it.\n", e.0);
+                    continue;
+                }
+            }
         } else if file.ends_with(".py") {
             (python(&text), ".")
         } else {
@@ -192,170 +197,6 @@ fn cut(s: &str, n: usize) -> String {
     if s.chars().count() > n { s.chars().take(n - 1).collect::<String>() + "…" } else { s.to_string() }
 }
 
-/// How a line starts, for the Rust scanner: in code (not inside a string or
-/// block comment) or not, at what bracket depth, and the brackets and `;` in
-/// code on it, each with the depth it opens at or closes back to.
-struct Line {
-    code: bool,
-    depth: usize,
-    marks: Vec<(char, usize)>,
-}
-
-fn lex(lines: &[&str]) -> Vec<Line> {
-    #[derive(Clone, Copy, PartialEq)]
-    enum In {
-        Code,
-        Str,
-        Raw(usize),
-        Block(usize),
-    }
-    let ident = |c: Option<&char>| c.is_some_and(|c| c.is_alphanumeric() || *c == '_');
-    let mut state = In::Code;
-    let mut depth = 0;
-    let mut out = vec![];
-    for line in lines {
-        let mut l = Line { code: state == In::Code, depth, marks: vec![] };
-        let c: Vec<char> = line.chars().collect();
-        let before = |i: usize, k: usize| i.checked_sub(k).and_then(|p| c.get(p));
-        let mut i = 0;
-        while i < c.len() {
-            match state {
-                In::Str if c[i] == '\\' => i += 1,
-                In::Str if c[i] == '"' => state = In::Code,
-                In::Raw(n) if c[i] == '"' && c[i + 1..].iter().take_while(|&&h| h == '#').count() >= n => {
-                    state = In::Code;
-                    i += n;
-                }
-                In::Block(n) if c[i] == '*' && c.get(i + 1) == Some(&'/') => {
-                    state = if n == 1 { In::Code } else { In::Block(n - 1) };
-                    i += 1;
-                }
-                In::Block(n) if c[i] == '/' && c.get(i + 1) == Some(&'*') => {
-                    state = In::Block(n + 1);
-                    i += 1;
-                }
-                In::Code => match c[i] {
-                    '/' if c.get(i + 1) == Some(&'/') => break,
-                    '/' if c.get(i + 1) == Some(&'*') => {
-                        state = In::Block(1);
-                        i += 1;
-                    }
-                    '"' => state = In::Str,
-                    // `r"…"`, `r#"…"#`, `br"…"`, but not the end of a name such as `for`.
-                    'r' if !ident(before(i, 1)) || matches!(before(i, 1), Some(&('b' | 'c'))) && !ident(before(i, 2)) => {
-                        let n = c[i + 1..].iter().take_while(|&&h| h == '#').count();
-                        if c.get(i + 1 + n) == Some(&'"') {
-                            state = In::Raw(n);
-                            i += 1 + n;
-                        }
-                    }
-                    // A char literal (`'{'`, `'\''`), not a lifetime (`'a`).
-                    '\'' if c.get(i + 1) == Some(&'\\') => i += 3 + c.iter().skip(i + 3).position(|&q| q == '\'').unwrap_or(0),
-                    '\'' if c.get(i + 2) == Some(&'\'') => i += 2,
-                    '{' | '(' | '[' => {
-                        l.marks.push((c[i], depth));
-                        depth += 1;
-                    }
-                    '}' | ')' | ']' => {
-                        depth = depth.saturating_sub(1);
-                        l.marks.push((c[i], depth));
-                    }
-                    ';' => l.marks.push((';', depth)),
-                    _ => {}
-                },
-                _ => {}
-            }
-            i += 1;
-        }
-        out.push(l);
-    }
-    out
-}
-
-const KINDS: [&str; 11] = ["fn", "struct", "enum", "union", "trait", "type", "const", "static", "mod", "impl", "macro_rules!"];
-
-/// An item's kind and name from the line its head starts, after visibility
-/// and qualifiers: `pub(crate) async fn x`, `impl<T> Display for Y<T>` (`Y`).
-fn head(line: &str) -> Option<(&'static str, String)> {
-    let mut s = line.trim_start();
-    if let Some(r) = s.strip_prefix("pub(") {
-        s = r.split_once(')')?.1;
-    } else if let Some(r) = s.strip_prefix("pub ") {
-        s = r;
-    }
-    loop {
-        s = s.trim_start();
-        let next = ["async ", "unsafe ", "default "]
-            .iter()
-            .find_map(|q| s.strip_prefix(q))
-            .or_else(|| s.strip_prefix("const ").filter(|r| ["fn ", "unsafe ", "async ", "extern "].iter().any(|k| r.starts_with(k))))
-            .or_else(|| {
-                let r = s.strip_prefix("extern ")?.trim_start();
-                Some(r.strip_prefix('"').and_then(|q| q.split_once('"')).map_or(r, |(_, rest)| rest))
-            });
-        match next {
-            Some(r) => s = r,
-            None => break,
-        }
-    }
-    let (kind, rest) = KINDS.iter().find_map(|&k| {
-        let r = s.strip_prefix(k)?;
-        (r.starts_with(' ') || k == "impl" && r.starts_with('<')).then_some((k, r.trim_start()))
-    })?;
-    let name: String = if kind == "impl" {
-        let r = if rest.starts_with('<') { &rest[angle_end(rest)..] } else { rest };
-        let r = r.split(" where").next()?.split('{').next()?;
-        let r = r.rsplit_once(" for ").map_or(r, |(_, t)| t).trim().trim_start_matches(['&', '!']);
-        let r = r.strip_prefix("dyn ").unwrap_or(r);
-        r.split('<').next()?.rsplit("::").next()?.trim().to_string()
-    } else {
-        let r = rest.strip_prefix("mut ").unwrap_or(rest);
-        r.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect()
-    };
-    (!name.is_empty()).then_some((kind, name))
-}
-
-/// The byte after the `>` that closes the generics a text starts with.
-fn angle_end(s: &str) -> usize {
-    let mut depth = 0;
-    let mut prev = ' ';
-    for (i, c) in s.char_indices() {
-        match c {
-            '<' => depth += 1,
-            '>' if prev != '-' => {
-                depth -= 1;
-                if depth == 0 {
-                    return i + 1;
-                }
-            }
-            _ => {}
-        }
-        prev = c;
-    }
-    s.len()
-}
-
-/// Where the item whose head is on line `head` (0-based) ends: where its
-/// brackets close, or at its `;` (`mod x;`, a `const`, a tuple struct).
-fn item_end(lex: &[Line], head: usize, depth: usize, kind: &str) -> usize {
-    let semi_only = matches!(kind, "const" | "static" | "type");
-    let mut opened = false;
-    for (n, l) in lex.iter().enumerate().skip(head) {
-        for &(c, d) in &l.marks {
-            if d != depth {
-                continue;
-            }
-            match c {
-                ';' if semi_only || !opened => return n,
-                '{' if !semi_only => opened = true,
-                '}' if opened => return n,
-                _ => {}
-            }
-        }
-    }
-    lex.len() - 1
-}
-
 /// The head's text up to its body: wrapped parameters joined on one line.
 fn signature(lines: &[&str], kind: &str) -> String {
     let short = matches!(kind, "const" | "static" | "type");
@@ -374,59 +215,29 @@ fn signature(lines: &[&str], kind: &str) -> String {
     cut(sig.trim_end_matches([' ', '{', ';', ',']), 140)
 }
 
-fn rust(text: &str) -> Vec<Item> {
-    let lines: Vec<&str> = text.lines().collect();
-    let lex = lex(&lines);
+fn rust(text: &str) -> Result<Vec<Item>, Failure> {
+    let file = crate::language::rust::split(text, "crate")?;
     let mut items = vec![];
-    rust_block(&lines, &lex, 0..lines.len(), 0, "", &mut items);
-    items
+    rust_items(text, &file.items, 0, &mut items);
+    Ok(items)
 }
 
-/// The items whose heads start lines of `range` at `depth`, and the items of
-/// the `impl`, `trait` and `mod` blocks among them.
-fn rust_block(lines: &[&str], lex: &[Line], range: std::ops::Range<usize>, depth: usize, prefix: &str, items: &mut Vec<Item>) {
-    let from = range.start;
-    let mut i = from;
-    while i < range.end {
-        let Some((kind, name)) = (lex[i].code && lex[i].depth == depth).then(|| head(lines[i])).flatten() else {
-            i += 1;
-            continue;
-        };
-        let end = item_end(lex, i, depth, kind).min(range.end - 1);
-        // Docs, attributes and comments right above the head go with it.
-        let mut start = i;
-        while start > from && lex[start - 1].code && lex[start - 1].depth == depth && {
-            let t = lines[start - 1].trim_start();
-            t.starts_with("#[") || t.starts_with("//") && !t.starts_with("//!")
-        } {
-            start -= 1;
-        }
-        // A plain `//` comment is not the item's: the item starts at its doc, and a
-        // plain comment between the doc and the head is left out (D-119 point 4).
-        let plain = |l: &str| {
-            let t = l.trim_start();
-            t.starts_with("//") && !t.starts_with("///") && !t.starts_with("//!")
-        };
-        while start < i && plain(lines[start]) {
-            start += 1;
-        }
-        let mut above_end = i;
-        while above_end > start && plain(lines[above_end - 1]) {
-            above_end -= 1;
-        }
-        let above = &lines[start..above_end];
+/// The outline's items of `pieces` and of their children, imports left out.
+/// An item starts at its first doc or attribute: a plain `//` comment above it
+/// is not shown with it (D-119 point 4).
+fn rust_items(text: &str, pieces: &[crate::language::rust::Piece], level: usize, items: &mut Vec<Item>) {
+    let line = |b: usize| text[..b].matches('\n').count() + 1;
+    for p in pieces.iter().filter(|p| p.kind != "use") {
+        let lines: Vec<&str> = text[p.head..p.item.end].lines().collect();
+        let above: Vec<&str> = text[p.item.start..p.head].lines().collect();
         let doc = above.iter().find_map(|l| l.trim_start().strip_prefix("///")).unwrap_or("").trim().to_string();
-        let mut sig = signature(&lines[i..=end], kind);
+        let mut sig = signature(&lines, p.kind);
         // `#[path = "x.rs"] mod x;`: the module is in that file.
-        if let Some((file, _)) = above.iter().find_map(|l| l.trim_start().strip_prefix("#[path = \"")?.split_once('"')) {
+        if let Some(file) = &p.file {
             sig += &format!(" → {file}");
         }
-        let full = if prefix.is_empty() { name } else { format!("{prefix}::{name}") };
-        items.push(Item { kind, name: full.clone(), sig, doc, start: start + 1, end: end + 1, level: depth });
-        if matches!(kind, "impl" | "trait" | "mod") && end > i + 1 {
-            rust_block(lines, lex, i + 1..end, depth + 1, &full, items);
-        }
-        i = end + 1;
+        items.push(Item { kind: p.kind, name: p.name.clone(), sig, doc, start: line(p.item.start), end: line(p.item.end), level });
+        rust_items(text, &p.children, level + 1, items);
     }
 }
 
@@ -537,207 +348,5 @@ fn python(text: &str) -> Vec<Item> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use testing::*;
-
-    const SAMPLE: &str = r####"//! A module.
-use std::fs;
-
-/// The store.
-#[derive(Debug)]
-pub struct Store {
-    pub root: PathBuf,
-}
-
-impl Store {
-    /// Opens it.
-    pub fn open() -> Self {
-        let brace = '{';
-        let s = "}";
-        Store { root: PathBuf::new() }
-    }
-
-    pub(crate) fn view(&self, names: &[&str]) -> Out {
-        Ok(String::new())
-    }
-}
-
-impl fmt::Display for Failure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { write!(f, "{}", self.0) }
-}
-
-pub fn view() {}
-
-const GLEAM: &[&str] = &[
-    "submit",
-];
-
-pub fn outer() {
-    fn nested() {}
-    let src = r#"pub fn main() {
-}
-fn fake() {
-}"#;
-}
-
-#[cfg(test)]
-// The tests are here.
-#[path = "sample_tests.rs"]
-mod more;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn opens() {
-        assert!(Store::open().root.as_os_str().is_empty());
-    }
-}
-"####;
-
-    const PY: &str = "import os\n\n\nclass View(unittest.TestCase):\n    \"\"\"Views.\"\"\"\n\n    def setUp(self):\n        self.x = '''\ndef fake():\n'''\n        x = \"'''\"\n\n    @skip\n    def test_one(self):\n        def inner():\n            pass\n        inner()\n\n\ndef helper(a,\n           b):\n    \"\"\"Helps.\"\"\"\n    return a\n";
-
-    #[test]
-    fn rust_items_take_their_docs_and_skip_strings_and_nested_fns() {
-        let items = rust(SAMPLE);
-        let got: Vec<(&str, usize, usize, usize)> = items.iter().map(|i| (i.name.as_str(), i.start, i.end, i.level)).collect();
-        assert_eq!(
-            got,
-            [
-                ("Store", 4, 8, 0),
-                ("Store", 10, 21, 0),
-                ("Store::open", 11, 16, 1),
-                ("Store::view", 18, 20, 1),
-                ("Failure", 23, 25, 0),
-                ("Failure::fmt", 24, 24, 1),
-                ("view", 27, 27, 0),
-                ("GLEAM", 29, 31, 0),
-                ("outer", 33, 39, 0),
-                ("more", 41, 44, 0),
-                ("tests", 46, 53, 0),
-                ("tests::opens", 49, 52, 1),
-            ]
-        );
-        let sig = |n: &str, k: &str| items.iter().find(|i| i.name == n && i.kind == k).unwrap().sig.clone();
-        assert_eq!(sig("Store", "struct"), "pub struct Store");
-        assert_eq!(sig("Failure", "impl"), "impl fmt::Display for Failure");
-        assert_eq!(sig("Store::view", "fn"), "pub(crate) fn view(&self, names: &[&str]) -> Out");
-        assert_eq!(sig("GLEAM", "const"), "const GLEAM: &[&str]");
-        assert_eq!(sig("more", "mod"), "mod more → sample_tests.rs");
-        assert_eq!(items[0].doc, "The store.");
-    }
-
-    #[test]
-    fn names_match_in_full_or_by_suffix() {
-        // A plain `//` comment above an item's doc is not part of the item (D-119 point 4).
-        let store = |t: &str| {
-            let i = rust(t).into_iter().find(|i| i.kind == "struct").unwrap();
-            (i.start, i.end, i.doc)
-        };
-        assert_eq!(store("// A note.\n/// The store.\npub struct Store {\n}\n"), (2, 4, "The store.".to_string()));
-        assert_eq!(store("/// The store.\n// a note\npub struct Store {\n}\n"), (1, 4, "The store.".to_string()));
-        let items = rust(SAMPLE);
-        let one = |n: &str| find(&items, n, "::").iter().map(|i| (i.name.clone(), i.kind)).collect::<Vec<_>>();
-        assert_eq!(one("Store"), [("Store".to_string(), "struct")], "the type, not its impl");
-        assert_eq!(one("view"), [("view".to_string(), "fn")], "a full name wins over a suffix");
-        assert_eq!(one("Store::view"), [("Store::view".to_string(), "fn")]);
-        assert_eq!(one("opens"), [("tests::opens".to_string(), "fn")]);
-        assert!(one("nested").is_empty() && one("fake").is_empty() && one("main").is_empty());
-        let two = rust("impl A {\n    fn new() {}\n}\nimpl B {\n    fn new() {}\n}\n");
-        assert_eq!(find(&two, "new", "::").len(), 2);
-    }
-
-    #[test]
-    fn python_items_follow_indentation() {
-        let items = python(PY);
-        let got: Vec<(&str, usize, usize, usize)> = items.iter().map(|i| (i.name.as_str(), i.start, i.end, i.level)).collect();
-        assert_eq!(got, [("View", 4, 17, 0), ("View.setUp", 7, 11, 1), ("View.test_one", 13, 17, 1), ("helper", 20, 23, 0)]);
-        assert_eq!((items[0].doc.as_str(), items[3].doc.as_str(), items[3].sig.as_str()), ("Views.", "Helps.", "def helper(a, b)"));
-    }
-
-    #[test]
-    fn a_quote_in_a_comment_opens_no_string() {
-        // A quote in a comment opens no string, so the line below it is code.
-        let items = python("x = 1 # '''\ndef a():\n    pass\n");
-        let got: Vec<(&str, usize, usize, usize)> = items.iter().map(|i| (i.name.as_str(), i.start, i.end, i.level)).collect();
-        assert_eq!(got, [("a", 2, 3, 0)]);
-    }
-
-    #[test]
-    fn an_escaped_quote_closes_no_string() {
-        // `\"` in a one-line string is not its end, so the `'''` after it
-        // opens no string and the line below is code.
-        let items = python("x = \"a\\\"b'''\"\ndef a():\n    pass\n");
-        let got: Vec<(&str, usize, usize, usize)> = items.iter().map(|i| (i.name.as_str(), i.start, i.end, i.level)).collect();
-        assert_eq!(got, [("a", 2, 3, 0)]);
-    }
-
-    #[test]
-    fn view_gives_an_outline_or_an_item_and_names_a_miss() {
-        let dir = Scratch::new().with(&[("src/lib.rs", SAMPLE), ("src/other/lib.rs", "fn a() {}\n"), ("tests/check.py", PY)]);
-        let v = toml::Value::Table(Default::default());
-        let run = |a: &[&str], budget: usize| view(&dir, &v, a, budget).expect("a file form");
-        let outline = run(&["view", "src/lib.rs"], 32_000).unwrap();
-        assert!(outline.starts_with("src/lib.rs: 53 lines, 12 items\n"), "{outline}");
-        assert!(outline.contains("  4..8 pub struct Store — The store.\n"), "{outline}");
-        assert!(outline.contains("    11..16 pub fn open() -> Self — Opens it.\n"), "{outline}");
-        assert!(outline.contains("  41..44 mod more → sample_tests.rs\n"), "{outline}");
-        let item = run(&["view", "src/lib.rs::Store::open"], 32_000).unwrap();
-        assert_eq!(
-            item,
-            "src/lib.rs:11..16\n11:     /// Opens it.\n12:     pub fn open() -> Self {\n13:         let brace = '{';\n14:         let s = \"}\";\n15:         Store { root: PathBuf::new() }\n16:     }\n"
-        );
-        let e = run(&["view", "lib.rs"], 32_000).unwrap();
-        assert!(e.contains("E1002") && e.contains("src/other/lib.rs"), "{e}");
-        let e = run(&["view", "src/lib.rs::nested"], 32_000).unwrap();
-        assert!(e.contains("E1001") && e.contains("grep nested --in src/lib.rs --context 3"), "{e}");
-        // A refusal of one operand is its own part of the reply: the other is answered.
-        let mixed = run(&["view", "src/lib.rs::nested", "src/other/lib.rs"], 32_000).unwrap();
-        assert!(
-            mixed.contains("E1001") && mixed.contains("grep nested --in src/lib.rs --context 3") && mixed.contains("src/other/lib.rs: 1 lines, 1 items\n"),
-            "{mixed}"
-        );
-        assert!(run(&["view", "check.py::test_one"], 32_000).unwrap().starts_with("tests/check.py:13..17\n13:     @skip\n"));
-        // Over the budget: names only, then a cut at a whole line.
-        let short = run(&["view", "src/lib.rs"], outline.len() - 1).unwrap();
-        assert!(short.contains("  4..8 struct Store\n") && short.contains("    11..16 fn Store::open\n"), "{short}");
-        assert!(short.contains("Signatures left out to fit the reply") && !short.contains("The store."), "{short}");
-        let cut = run(&["view", "src/lib.rs"], 280).unwrap();
-        assert!(cut.contains("more items left out to fit the reply") && cut.len() < 400, "{cut}");
-        // Symbols are the store's, and the two don't mix.
-        assert!(view(&dir, &v, &["view", "app.main"], 32_000).is_none());
-        assert!(run(&["view", "src/lib.rs", "app.main"], 32_000).unwrap_err().0.contains("not both"));
-        let gleam = Scratch::new().with(&[("gleam.toml", "name = \"app\"\n")]);
-        assert!(view(&gleam, &v, &["view", "app.rs"], 32_000).is_none(), "a Gleam symbol `app.rs`");
-    }
-
-    #[test]
-    fn the_scanner_reads_this_crate() {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        for entry in fs::read_dir(&src).unwrap() {
-            let p = entry.unwrap().path();
-            if p.extension().is_none_or(|e| e != "rs") {
-                continue;
-            }
-            let text = fs::read_to_string(&p).unwrap();
-            let lines = text.lines().count();
-            let mut last = 0;
-            for it in rust(&text).iter().filter(|i| i.level == 0) {
-                assert!(last < it.start && it.start <= it.end && it.end <= lines, "{}: {it:?}", p.display());
-                last = it.end;
-            }
-        }
-        let read = |f: &str| rust(&fs::read_to_string(src.join(f)).unwrap());
-        let board = read("board.rs");
-        assert!(board.iter().any(|i| i.name == "tests" && i.sig.ends_with("→ board_tests.rs")));
-        assert!(board.iter().any(|i| i.name == "brief" && i.kind == "fn"));
-        let view = read("view.rs");
-        assert!(!view.iter().any(|i| i.sig.contains("fn write(path: String")), "Gleam in a raw string is not an item");
-        assert!(view.iter().any(|i| i.name == "tests::c1_graph_has_entries_effects_and_tests"));
-        let lockdown = read("lockdown.rs");
-        assert!(lockdown.iter().any(|i| i.name == "dispatch"));
-        // The top-level `drop_records`, not the one nested in `carry_file`.
-        assert_eq!(lockdown.iter().filter(|i| i.name.ends_with("drop_records")).count(), 1);
-    }
-}
+#[path = "orientation_tests.rs"]
+mod tests;

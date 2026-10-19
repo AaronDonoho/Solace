@@ -227,8 +227,10 @@ pub type Msg {
   DropFeature(String, Int)
   /// Starts the feature with this id: one PATCH to `active` (D-154).
   StartFeature(String)
-  /// The reply to a move or a start: the feature, or a refusal.
+  /// The reply to a move: the feature, or a refusal.
   FeatureMoved(String)
+  /// The reply to a start: the feature, or a refusal.
+  FeatureStarted(String)
   /// The reply to a delete: the deleted feature, or a refusal.
   FeatureDeleted(String)
   /// Asks to confirm deleting the feature with this id.
@@ -660,8 +662,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
       }
     // An attribute set before the element is added only takes effect then.
-    MoveFeature(id, rank) -> #(
-      Model(..model, feature_error: ""),
+    // One move or save at a time: a second before the first is answered
+    // would take the one `feature_moving` slot a refusal restores from.
+    MoveFeature(id, rank) if !model.feature_saving -> #(
+      Model(..model, feature_error: "", feature_saving: True),
       effect.from(fn(send) {
         request(
           model.prefix,
@@ -672,15 +676,16 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
       }),
     )
-    GrabFeature(id, y) -> #(
+    GrabFeature(id, y) if !model.feature_saving -> #(
       model,
       effect.from(fn(send) {
         drag_card(model.root, id, y, fn(index) { send(DropFeature(id, index)) })
       }),
     )
     // The new order shows at once, with no jump back while the PATCH is
-    // answered.
-    DropFeature(id, index) -> {
+    // answered; a save waits for the same answer, so a drag and a save of one
+    // feature don't send two PATCHes at once.
+    DropFeature(id, index) if !model.feature_saving -> {
       let group =
         features.groups(model.milestones, model.features)
         |> list.find(fn(g) { list.any(g.features, fn(f) { f.id == id }) })
@@ -701,6 +706,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                 fn(f) { f.id },
               ),
               feature_moving: Some(#(id, f.rank)),
+              feature_saving: True,
             ),
             fx,
           )
@@ -708,8 +714,13 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         _, _ -> #(model, effect.none())
       }
     }
+    MoveFeature(_, _) | GrabFeature(_, _) | DropFeature(_, _) -> #(
+      model,
+      effect.none(),
+    )
     // The server keeps its start time and color and plans its Backlog tasks
-    // (D-114, D-134); the reply is a move's.
+    // (D-114, D-134). Its reply answers the start alone: a start changes the
+    // state, not the order, so it never moves a feature a drag is answering.
     StartFeature(id) -> #(
       Model(..model, feature_error: ""),
       effect.from(fn(send) {
@@ -718,7 +729,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           "/features/" <> id,
           "PATCH",
           json.to_string(json.object([#("state", json.string("active"))])),
-          fn(reply) { send(FeatureMoved(reply)) },
+          fn(reply) { send(FeatureStarted(reply)) },
         )
       }),
     )
@@ -734,6 +745,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             },
             feature_error: "",
             feature_moving: None,
+            feature_saving: False,
           ),
           effect.none(),
         )
@@ -753,9 +765,27 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             },
             feature_error: error(text),
             feature_moving: None,
+            feature_saving: False,
           ),
           effect.none(),
         )
+      }
+    // A start's reply: the feature as the server has it. A refused start
+    // says why and changes nothing, so the order a drag set stays as it is.
+    FeatureStarted(text) ->
+      case json.parse(text, features.decoder()) {
+        Ok(f) -> #(
+          Model(
+            ..model,
+            features: case list.any(model.features, fn(x) { x.id == f.id }) {
+              True -> keep(model.features, f, fn(f) { f.id })
+              False -> model.features
+            },
+            feature_error: "",
+          ),
+          effect.none(),
+        )
+        Error(_) -> #(Model(..model, feature_error: error(text)), effect.none())
       }
     // The `{removedFeature}` and `{task}` events update the page.
     FeatureDeleted(text) ->
@@ -1797,7 +1827,7 @@ const view_styles =
 .strategy>.tabs{grid-column:1/-1}.strategy>[role=tabpanel]{grid-column:1;grid-row:2;min-width:0;min-height:0;overflow:auto}
 @media (max-width:900px){.strategy{display:block;height:auto;overflow:visible}.strategy>[role=tabpanel]{overflow:visible}}
 .tabs{display:flex;background:var(--sheet);border-bottom:2px solid var(--edge)}
-.tabs button{font:inherit;color:inherit;border:0;border-right:1px solid var(--line);background:transparent;padding:10px 16px;cursor:pointer}
+.tabs button{font:inherit;color:inherit;border:0;border-right:1px solid var(--line);background:transparent;padding:var(--tab-pad);cursor:pointer}
 .tabs button:hover{background:var(--hover)}
 .tabs button[aria-selected=true]{background:var(--paper);font-weight:700;box-shadow:inset 0 -3px var(--ink)}
 .tabs button:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
@@ -1816,14 +1846,16 @@ const view_styles =
 .tasks tr:hover td{background:var(--hover)}.tasks tr[aria-current=true] td{background:var(--sel)}
 .tasks .open{font:inherit;font-weight:600;color:var(--ink);background:none;border:0;padding:0;min-height:0;text-align:left;cursor:pointer}
 .tasks .open:hover{text-decoration:underline}
-.tasks .act{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:0 8px;margin-left:8px;cursor:pointer}.tasks .act:hover{background:var(--hover)}
+.tasks .act{"
+  <> solace_task.small_control
+  <> ";padding:0 8px;margin-left:8px}.tasks .act:hover{background:var(--hover)}
 .tasks .created,.tasks .closed{white-space:nowrap;color:var(--soft);text-align:right;font-variant-numeric:tabular-nums}
 .tasks th:nth-last-child(-n+2){text-align:right}
 .tasks .homeless{font-size:13px;color:var(--soft);margin-left:6px;white-space:nowrap}
 solace-task{display:block;margin-top:16px}
-.milestone{margin:0 0 var(--space-5)}.milestone h3{margin:0 0 var(--space-2);font-size:16px;border-bottom:1px solid var(--line)}
+.milestone{margin:0 0 var(--space-5)}.milestone h3{margin:0 0 var(--space-2);font-size:var(--h3);border-bottom:1px solid var(--line)}
 .feature{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-3)}
-.feature h4{margin:0 0 4px;font-size:15px}
+.feature h4{margin:0 0 4px;font-size:var(--h4)}
 .feature-count{font-size:13px;color:var(--soft);margin:4px 0}
 .state{font-size:11px;text-transform:uppercase;letter-spacing:.08em;border:1px solid var(--line);padding:1px 6px;margin-left:6px;color:var(--soft);font-weight:400}
 .feature-tasks{margin:6px 0 0;padding-left:20px}
@@ -1845,12 +1877,18 @@ solace-task{display:block;margin-top:16px}
 .vision-actions button:hover,.toolbar button:hover{background:var(--hover)}.vision-actions button:disabled{color:var(--soft);cursor:default}
 .vision-actions button:focus-visible,.toolbar button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .composer solace-md-editor{--md-min-height:320px}
-.feature-form{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-4)}.feature-form h3{margin:0 0 10px;font-size:16px}.feature-form .filters{margin:10px 0}
-.feature .edit,.feature .toggle{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:0 8px;margin-left:6px;cursor:pointer}.feature .edit:hover,.feature .toggle:hover{background:var(--hover)}.feature .edit:disabled{color:var(--soft);cursor:default}.feature .edit:focus-visible,.feature .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.feature-form{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-4)}.feature-form h3{margin:0 0 10px;font-size:var(--h3)}.feature-form .filters{margin:10px 0}
+.feature .edit,.feature .toggle{"
+  <> solace_task.small_control
+  <> ";padding:0 8px;margin-left:6px}.feature .edit:hover,.feature .toggle:hover{background:var(--hover)}.feature .edit:disabled{color:var(--soft);cursor:default}.feature .edit:focus-visible,.feature .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .new-task{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 2px}.new-task input,.new-task select{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;min-height:var(--control-h-small)}.new-task input{min-width:220px}.new-task input::placeholder{color:var(--soft);opacity:1}.new-task :focus-visible{outline:3px solid var(--focus);outline-offset:2px}.new-task .edit{margin-left:0}.new-task [role=alert]{flex-basis:100%;margin:2px 0}
-.milestone h3 .edit{font:inherit;font-size:13px;font-weight:400;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:0 8px;margin-left:6px;cursor:pointer}.milestone h3 .edit:hover{background:var(--hover)}.milestone h3 .edit:disabled{color:var(--soft);cursor:default}
+.milestone h3 .edit{"
+  <> solace_task.small_control
+  <> ";font-weight:400;padding:0 8px;margin-left:6px}.milestone h3 .edit:hover{background:var(--hover)}.milestone h3 .edit:disabled{color:var(--soft);cursor:default}
 .milestone .target{font-size:13px;font-weight:400;color:var(--soft);margin-left:6px}
-.feature h4 select{font:inherit;font-size:13px;font-weight:400;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:1px 6px;margin-left:6px;min-height:var(--control-h-small)}
+.feature h4 select{"
+  <> solace_task.small_control
+  <> ";font-weight:400;padding:1px 6px;margin-left:6px}
 .feature-tasks .depends{font-size:13px;color:var(--soft)}
 .feature-tasks li .edit{margin-left:6px}
 .depends-edit{border:1px solid var(--line);margin:4px 0 8px;padding:6px 10px}.depends-edit ul{list-style:none;margin:4px 0;padding:0}.depends-edit li{margin:2px 0}.depends-edit li .edit{margin:0 6px 0 0}.depends-edit p{font-size:13px;margin:4px 0}
@@ -1909,8 +1947,9 @@ pub type Row {
 }
 
 /// What the list keeps. "" in a field keeps every task; "-" for feature or
-/// milestone keeps the tasks without one. A word equal to a task's id,
-/// bare or as `task:<id>`, finds that task.
+/// milestone keeps the tasks without one. Every word of the query is in the
+/// task's title or body, ignoring case; a word equal to a task's id, bare or
+/// as `task:<id>`, finds that task.
 pub type Filters {
   Filters(
     column: String,

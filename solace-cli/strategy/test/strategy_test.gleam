@@ -1348,13 +1348,13 @@ pub fn the_column_filter_shows_the_workflow_labels_test() {
     workspace()
     |> step(strategy.WorkflowLoaded(
       ".",
-      "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"},{\"id\":\"planning\",\"label\":\"Planning\"},{\"id\":\"assigned\",\"label\":\"Assigned\"},{\"id\":\"needs_review\",\"label\":\"Needs review\"},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true}]}",
+      "{\"columns\":[{\"id\":\"backlog\",\"label\":\"Backlog\"},{\"id\":\"planning\",\"label\":\"Planning\"},{\"id\":\"assigned\",\"label\":\"Assigned\"},{\"id\":\"needs_review\",\"label\":\"Review\"},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true},{\"id\":\"cancelled\",\"label\":\"Canceled\",\"final\":true}]}",
     ))
   let page = element.to_string(strategy.view(model))
   assert string.contains(page, ">Backlog</option>")
   assert string.contains(page, ">Planning</option>")
   assert string.contains(page, ">Assigned</option>")
-  assert string.contains(page, ">Needs review</option>")
+  assert string.contains(page, ">Review</option>")
   assert string.contains(page, ">Complete</option>")
   assert string.contains(page, ">Canceled</option>")
   assert !string.contains(page, ">needs_review</option>")
@@ -2371,9 +2371,11 @@ pub fn strategy_uses_the_shared_spacing_test() {
     ".vision{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card)}",
   )
   assert string.contains(page, ".plan-bar select{")
+  // The plan panel's selects take the shared small-control declarations, and
+  // add the padding and width that are theirs.
   assert string.contains(
     page,
-    "min-height:var(--control-h-small);max-width:100%}",
+    solace_task.small_control <> ";padding:2px 6px;max-width:100%}",
   )
   assert string.contains(
     page,
@@ -2481,4 +2483,89 @@ pub fn a_dropped_feature_moves_at_once_and_back_if_refused_test() {
     )
   assert ranks(refused) == [#("f1", 1.0), #("f2", 2.0)]
   assert refused.feature_error != ""
+}
+
+/// A Start sends one PATCH to `active`, and its reply answers the start
+/// alone: the accepted feature shows as the server has it, and a refusal
+/// says why and leaves the order a drag is answering exactly as it was.
+pub fn a_start_answers_only_itself_test() {
+  let model =
+    workspace()
+    |> step(strategy.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\",\"rank\":1,\"state\":\"proposed\"},{\"id\":\"f2\",\"title\":\"Export\",\"rank\":2,\"state\":\"proposed\"}]}",
+    ))
+    |> step(strategy.Select(strategy.Features))
+  let html = element.to_string(strategy.view(model))
+  assert string.contains(
+    html,
+    "aria-label=\"" <> solace_task.ui_label("start") <> " Search\"",
+  )
+  let ranks = fn(m: strategy.Model) {
+    list.map(m.features, fn(f) { #(f.id, f.rank) })
+    |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
+  }
+  // A drag is answered by a move, which keeps a save from racing it.
+  let dropped = step(model, strategy.DropFeature("f1", 1))
+  assert dropped.feature_saving
+  assert ranks(dropped) == [#("f1", 3.0), #("f2", 2.0)]
+  let started = step(dropped, strategy.StartFeature("f1"))
+  // The card shows the state once the server answers, not before.
+  assert started.features == dropped.features
+  let answered =
+    step(
+      started,
+      strategy.FeatureStarted(
+        "{\"id\":\"f1\",\"title\":\"Search\",\"rank\":3,\"state\":\"active\",\"slot\":1}",
+      ),
+    )
+  let assert [f, ..] = answered.features
+  assert f.state == "active"
+  assert answered.feature_error == ""
+  // A start keeps the rank the drag set, and answers no other reply.
+  assert ranks(answered) == [#("f1", 3.0), #("f2", 2.0)]
+  // A refused start changes nothing: the order the drag set stays, and the
+  // drag's own PATCH is still the one being answered.
+  let refused =
+    step(
+      step(model, strategy.DropFeature("f1", 1)),
+      strategy.FeatureStarted(
+        "{\"error\":{\"code\":\"E7003\",\"message\":\"A run is open.\"}}",
+      ),
+    )
+  assert ranks(refused) == [#("f1", 3.0), #("f2", 2.0)]
+  assert refused.feature_error != ""
+  assert refused.feature_saving
+}
+
+/// A move in flight holds the others: a second drop or arrow before the
+/// first reply is ignored, so a refused first move restores its own rank.
+pub fn a_second_move_waits_for_the_first_test() {
+  let model =
+    workspace()
+    |> step(strategy.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\",\"rank\":1,\"state\":\"proposed\"},{\"id\":\"f2\",\"title\":\"Export\",\"rank\":2,\"state\":\"proposed\"}]}",
+    ))
+    |> step(strategy.Select(strategy.Features))
+  let ranks = fn(m: strategy.Model) {
+    list.map(m.features, fn(f) { #(f.id, f.rank) })
+    |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
+  }
+  let dropped = step(model, strategy.DropFeature("f1", 1))
+  let again =
+    dropped
+    |> step(strategy.DropFeature("f2", 0))
+    |> step(strategy.MoveFeature("f2", 0.5))
+  assert again == dropped
+  let refused =
+    step(
+      again,
+      strategy.FeatureMoved(
+        "{\"error\":{\"code\":\"E7003\",\"message\":\"A run is open.\"}}",
+      ),
+    )
+  assert ranks(refused) == [#("f1", 1.0), #("f2", 2.0)]
+  assert !refused.feature_saving
+  // The keyboard's move holds the others too.
+  let moved = step(model, strategy.MoveFeature("f1", 3.0))
+  assert moved.feature_saving
 }

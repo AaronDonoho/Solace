@@ -142,6 +142,21 @@ fn a_step_reuses_a_declared_command() {
     assert!(plan_text(&top).unwrap().contains("- release (command build-release): sh -c make [timeout 900 s]"));
 }
 
+/// D-159: Solace's own root bundles the frontend, then builds the crate that embeds it. The
+/// board's bundle serves its standalone page, so the board keeps the plan's default, not a release step.
+#[test]
+fn the_self_build_bundles_before_the_crate() {
+    let top = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let frontend = of(top, "solace-cli/frontend").unwrap().unwrap();
+    let root = of(top, ".").unwrap().unwrap();
+    assert!(frontend.declared && frontend.outputs == ["priv/app.js"], "{frontend:?}");
+    assert_eq!(frontend.steps.iter().map(|s| (s.name.as_str(), s.command.as_deref(), s.timeout)).collect::<Vec<_>>(), [("release", Some("build-release"), 600)]);
+    assert!(frontend.after.is_empty());
+    assert_eq!(root.after, ["solace-cli/frontend"]);
+    assert_eq!(root.steps[0].run[..2], ["cargo", "build"]);
+    assert!(!of(top, "solace-cli/board").unwrap().unwrap().declared, "the board's bundle is not in the plan");
+}
+
 /// `build plan` answers through the command dispatch and runs nothing; `build` takes no other argument.
 #[test]
 fn build_plan_is_a_command() {
@@ -153,4 +168,46 @@ fn build_plan_is_a_command() {
     assert!(!p.root.join("build").exists());
     let e = lockdown::dispatch(&p, &v, &["build", "now"], &mut input, None, BUDGET).unwrap().unwrap_err().0;
     assert!(e.contains("`build plan`"), "{e}");
+}
+
+/// Sets `path`'s modification time.
+fn touch(path: &Path, t: std::time::SystemTime) {
+    fs::File::options().write(true).open(path).unwrap().set_modified(t).unwrap();
+}
+
+/// D-159: `build plan` marks a declared output out of date when it is missing, or when a source
+/// of its project or of a path dependency changed more than 5 s after it was built.
+#[test]
+fn the_plan_marks_outputs_older_than_their_sources() {
+    let top = Scratch::new().with(&[
+        ("solace.toml", "projects = [\"a\", \"b\"]\n"),
+        ("a/solace.toml", "[build]\noutputs = [\"priv/app.js\"]\nsteps = [{ name = \"release\", run = [\"x\"] }]\n"),
+        ("a/gleam.toml", "name = \"a\"\n[dependencies]\nb = { path = \"../b\" }\n"),
+        ("a/src/a.gleam", ""),
+        ("a/priv/app.js", ""),
+        ("b/src/b.gleam", ""),
+    ]);
+    let now = std::time::SystemTime::now();
+    let built = now + std::time::Duration::from_secs(60);
+    touch(&top.join("a/priv/app.js"), built);
+    let marked = || plan_text(&top).unwrap().lines().find(|l| l.contains("out of date")).map(String::from);
+    assert_eq!(marked(), None);
+    assert_eq!(plan_json(&top).unwrap()[0]["stale"], Value::Null);
+    touch(&top.join("b/src/b.gleam"), built + std::time::Duration::from_secs(4));
+    assert_eq!(marked(), None, "within 5 s is the same build");
+    touch(&top.join("b/src/b.gleam"), built + std::time::Duration::from_secs(60));
+    assert_eq!(marked().as_deref(), Some("   out of date: b/src changed after priv/app.js was built: run step `release`"));
+    assert_eq!(plan_json(&top).unwrap()[0]["stale"], "b/src changed after priv/app.js was built");
+    touch(&top.join("a/src/a.gleam"), built + std::time::Duration::from_secs(60));
+    assert!(marked().unwrap().contains("a/src, b/src changed"));
+    fs::remove_file(top.join("a/priv/app.js")).unwrap();
+    assert_eq!(marked().as_deref(), Some("   out of date: priv/app.js is missing: run step `release`"));
+}
+
+/// A symlinked folder inside a source folder that points back up the tree ends the walk.
+#[test]
+fn newest_does_not_follow_a_symlinked_folder() {
+    let top = Scratch::new().with(&[("src/a.gleam", "")]);
+    std::os::unix::fs::symlink(top.join("src"), top.join("src/up")).unwrap();
+    assert!(newest(&top.join("src")).is_some());
 }

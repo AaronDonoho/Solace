@@ -54,6 +54,14 @@ shows its id. The line follows a dependency's `{task}` updates under any project
 added to `dependsOn`. A host hands those updates down (the board and Strategy do). Without `hosted`, the
 element's own `{base}/events` brings only its project's dependencies live; others refresh on a resync.
 
+**Needed by.** The same line names the tasks that depend on this one, asked once from the root's
+`GET /tasks/{id}/dependents`, answered `{tasks:[{id,title,column}]}`. The reply is a snapshot taken when
+the task opened: a dependent a live event added between the request and the reply stays until an event
+says otherwise, and an archived dependent leaves.
+
+**Feature.** When the task names a `feature`, the Details tab shows it above this line, asked once from
+the root's `GET /features/find/{id}`; one that can't be found shows its id.
+
 Events to the host: `task-moved` (`{id, dir, base}`: the task now lives in another of its projects)
 and `notice` (`{heading, text, id, tab}`, from its own stream only; a host raises its own).
 

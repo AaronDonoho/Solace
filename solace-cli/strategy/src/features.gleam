@@ -151,7 +151,7 @@ fn feature_view(
         attribute.attribute("aria-label", "Reorder " <> feature.title),
         attribute.attribute("aria-roledescription", "reorder handle"),
         attribute.tabindex(0),
-        attribute.disabled(busy),
+        attribute.disabled(busy || editor.saving),
         // The card follows the pointer from here; the arrows reorder without
         // one, so a card can be moved with no pointer.
         event.prevent_default(
@@ -165,16 +165,22 @@ fn feature_view(
         ),
         event.advanced("keydown", {
           use key <- decode.field("key", decode.string)
-          let rank = move_rank(group, feature.id, key == "ArrowUp")
-          let handler =
+          let handler = fn(rank) {
             event.handler(
-              editor.on_move(feature.id, option.unwrap(rank, feature.rank)),
+              editor.on_move(feature.id, rank),
               prevent_default: True,
               stop_propagation: False,
             )
+          }
           case grip_key(key) {
-            Some(_) -> decode.success(handler)
-            None -> decode.failure(handler, "an arrow key")
+            None -> decode.failure(handler(feature.rank), "an arrow key")
+            Some(up) ->
+              case move_rank(group, feature.id, up) {
+                // An arrow at the end of the group: the card stays where it
+                // is, and no PATCH goes out for the rank it already has.
+                None -> decode.failure(handler(feature.rank), "a move that way")
+                Some(rank) -> decode.success(handler(rank))
+              }
           }
         }),
       ],
@@ -561,7 +567,15 @@ fn form(
       }
     None -> listed
   }
-  html.div([attribute.class("feature-form")], [
+  let attrs = case draft.id {
+    None -> [attribute.class("feature-form")]
+    // The form names the feature it edits, so a test finds it by that.
+    Some(id) -> [
+      attribute.class("feature-form"),
+      attribute.attribute("data-feature-id", id),
+    ]
+  }
+  html.div(attrs, [
     html.h3([], [
       html.text(case draft.id {
         None -> solace_task.ui_label("new_feature")

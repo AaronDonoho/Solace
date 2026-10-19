@@ -78,11 +78,13 @@ pub fn of_task(project: &Path, tid: &str) -> Option<Vec<String>> {
 mod tests {
     use super::*;
 
-    /// A root listing project `sub`: t1 at home in the root and scoped to both,
+    /// A root listing project `sub`, with a store of its own so the root is a
+    /// project (D-160): t1 at home in the root and scoped to both,
     /// t2 at home in `sub`, t3 in the root only.
     fn two_projects() -> testing::Scratch {
         let root = testing::Scratch::new().with(&[
             ("solace.toml", "projects = [\"sub\"]\n"),
+            (".solace/store.db", ""),
             (".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#),
             (".solace/board/t3.json", r#"{"id":"t3","column":"backlog"}"#),
             ("sub/.solace/board/t2.json", r#"{"id":"t2","column":"backlog"}"#),

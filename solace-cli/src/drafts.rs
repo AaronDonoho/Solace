@@ -362,7 +362,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
     // `stored`; extra items (code added after a symbol) become new symbols.
     let mut emit = |module: &str, header: &str, text: &str, stored: &str| {
         let mut header = if header.is_empty() { String::new() } else { format!("{header}\n\n") };
-        for item in gleam::split(text).items.iter().filter(|i| i.text != stored) {
+        for item in s.lang().split(text).items.iter().filter(|i| i.text != stored) {
             blocks += &format!("// ── {module}.{} ──\n{}{}\n", item.name, std::mem::take(&mut header), item.text);
         }
     };
@@ -378,7 +378,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
         };
         if kind == Section::Add {
             let text: String = hunks[0].1.iter().map(|l| format!("{}\n", &l[1..])).collect();
-            let parsed = gleam::split(&text);
+            let parsed = s.lang().split(&text);
             let module = match target.rsplit_once('.') {
                 Some((m, n)) if parsed.items.iter().any(|i| i.name == n) => m.to_string(),
                 _ => target.clone(),
@@ -424,7 +424,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
             if *text == ix.syms[*i].text {
                 continue;
             }
-            match gleam::split(text).items.first() {
+            match s.lang().split(text).items.first() {
                 None => return Err(bad(format!("the patch leaves nothing of {} (section at line {at_line}); use `delete <name>`.", ix.syms[*i].qname()))),
                 Some(item) if item.name != ix.syms[*i].name => {
                     return Err(bad(format!("the patch renames {} (section at line {at_line}); submit it whole under its new name.", ix.syms[*i].qname())));

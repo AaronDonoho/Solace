@@ -563,6 +563,15 @@ class Board(unittest.TestCase):
         self.assertEqual(self.cli('view','app.one'),original)
         self.assertEqual((self.root/'priv/a').read_text(),'original')
 
+    def test_a_reread_in_the_loop_catches_up(self):
+        # D-157: the MCP loop records the run's reads and adds the catch to the reply.
+        t=self.assign([{'command':'view app.one'},{'command':'view app.one'},{'exit':0}])
+        rid=t['runs'][-1]['id']
+        self.wait(t,lambda x:x['runs'][-1]['state']=='ended')
+        replies=[json.loads(l)['result']['content'][0]['text'] for l in (self.root/'.solace'/(rid+'.responses')).read_text().splitlines()]
+        self.assertNotIn("hasn't changed",replies[0])
+        self.assertIn("`app.one` hasn't changed",replies[1])
+
     def test_a_batched_task_done_waits_for_a_passing_test(self):
         # D-152: one call submits, tests and finishes; the test builds and runs, so allow it time.
         config=self.root/'system.toml';config.write_text(config.read_text().replace('task_timeout=2\n','task_timeout=20\n'))
@@ -1012,6 +1021,47 @@ class Board(unittest.TestCase):
             if 'tasks' in e:break
         self.assertEqual([x['title'] for x in e['tasks'] if x['id']==t['id']],['Edited on disk'])
         self.assertNotIn('notes',e['tasks'][0])
+
+    def test_a_task_whose_home_is_no_project_is_rehomed_on_load(self):  # D-160
+        # The load re-homes a task whose home is no project: to the first project of
+        # its scope, keeping only the projects of it, and to the root when none is
+        # one. The move is noted, and the scope edits save like any other task's.
+        (self.root/'sub/.solace').mkdir(parents=True)
+        (self.root/'sub/.solace/keep').write_text('')
+        (self.root/'solace.toml').write_text('unwatched=["priv/gen/"]\nprojects=["sub"]\n')
+        a=self.create();pa=self.root/'.solace/tasks'/(a['id']+'.json')
+        v=json.loads(pa.read_text());v['home']='gone';v['scope']=['gone'];pa.write_text(json.dumps(v))
+        listed=next(x for x in self.api('GET','/tasks') if x['id']==a['id'])
+        self.assertEqual((listed['home'],listed['scope']),('.',['.']),'re-homed to the root')
+        self.assertNotIn('noProject',listed,'and unmarked')
+        self.assertTrue(any('Moved from `gone` to `.`' in n['text'] for n in self.get(a)['notes']),'the move is noted')
+        self.assertEqual(self.api('POST','/tasks/'+a['id']+'/scope',{'scope':['sub']})['home'],'sub','its scope saves')
+        # A scope with a project re-homes there, keeping only the projects of the scope.
+        b=self.create();pb=self.root/'.solace/tasks'/(b['id']+'.json')
+        v=json.loads(pb.read_text());v['home']='gone';v['scope']=['gone','sub'];pb.write_text(json.dumps(v))
+        stream=self.stream()
+        while True:
+            _,e=self.next_event(stream)
+            if 'tasks' in e and any(x['id']==b['id'] for x in e['tasks']):
+                x=next(x for x in e['tasks'] if x['id']==b['id'])
+                self.assertEqual((x['home'],x['scope']),('sub',['sub']),'re-homed to the first project of its scope, keeping only the projects')
+                break
+        saved=json.loads(pb.read_text())
+        self.assertEqual(saved['scope'],['sub'],'the saved scope keeps only the projects')
+        self.assertTrue(any('Moved from `gone` to `sub`' in n['text'] and 'Dropped `gone`' in n['text'] for n in saved['notes']),'the note names the folder it dropped')
+
+    def test_a_saved_noProject_mark_streams_unmarked(self):  # D-160
+        # The mark comes from the home on each load: a saved one streams nothing.
+        t=self.create();path=self.root/'.solace/tasks'/(t['id']+'.json')
+        v=json.loads(path.read_text());v['noProject']=True;path.write_text(json.dumps(v))
+        stream=self.stream()
+        while True:
+            _,e=self.next_event(stream)
+            if 'tasks' in e and 'noProject' not in e:
+                self.assertNotIn('noProject',next(x for x in e['tasks'] if x['id']==t['id']),'the task streams unmarked')
+            if e.get('noProject') is True:
+                self.assertEqual(e['tasks'],[],'and the no-project bucket stays empty')
+                break
 
     def test_delete_note(self):
         t=self.create()

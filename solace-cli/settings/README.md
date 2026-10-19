@@ -28,6 +28,15 @@ calls `settings.set_theme`, which sets the attribute, stores the value and
 publishes it. `settings.register()` makes the page follow a theme chosen in
 another window.
 
+## Models
+
+The Models section lists the models set up in `~/.config/solace/config.toml`
+(`configured` in `GET /models`), each with why it can't start, and a form to add
+or edit an endpoint model with its API key (`POST /models`; `DELETE
+/models/<id>` removes one). The key is kept in `keys.json` beside the settings,
+readable only by its owner; the page never gets it back, only `has_key`, so the
+key field starts empty and a blank key keeps the saved one (D-164).
+
 ## Standalone page
 
 `index.html` shows the page on its own, from `build/dev/javascript`, after

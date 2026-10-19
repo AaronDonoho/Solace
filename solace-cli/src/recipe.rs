@@ -3,9 +3,19 @@
 //! workspace builds them in.
 
 use super::*;
+use std::path::{Component, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// A step's time limit, in seconds, when neither it nor its command sets one (as for `run`).
 const TIMEOUT: i64 = 120;
+
+/// What a project's outputs are built from (D-159): its sources, and the manifests whose
+/// contents reach the build.
+const SOURCES: [&str; 4] = ["src", "gleam.toml", "package.json", "bun.lock"];
+
+/// A source newer than an output by less than this counts as the same build: `git checkout`
+/// writes files milliseconds apart, while an edit that needs a rebuild comes seconds later.
+const FRESH: Duration = Duration::from_secs(5);
 
 /// One step of a recipe: what it runs, and the command it reuses, if any.
 #[derive(Debug, Clone, PartialEq)]
@@ -268,6 +278,10 @@ pub fn plan_text(top: &Path) -> Out {
         }
         if !r.outputs.is_empty() {
             out += &format!("   outputs: {}\n", r.outputs.join(", "));
+            if let Some(why) = stale(top, r) {
+                let steps: Vec<String> = r.steps.iter().map(|s| format!("`{}`", s.name)).collect();
+                out += &format!("   out of date: {why}: run {} {}\n", if steps.len() == 1 { "step" } else { "steps" }, steps.join(", "));
+            }
         }
         for s in &r.steps {
             let via = s.command.as_ref().map(|c| format!(" (command {c})")).unwrap_or_default();
@@ -293,9 +307,68 @@ pub fn plan_json(top: &Path) -> Result<Value, Failure> {
                 j
             })
             .collect();
-        json!({"project": r.project, "source": if r.declared { "declared" } else { "default" }, "after": r.after, "outputs": r.outputs, "steps": steps})
+        let source = if r.declared { "declared" } else { "default" };
+        json!({"project": r.project, "source": source, "after": r.after, "outputs": r.outputs, "stale": stale(top, r), "steps": steps})
     };
     Ok(json!(recipes.iter().map(shown).collect::<Vec<_>>()))
+}
+
+/// `path` with `.` and `..` worked out by name, as a file manager does.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The newest modification time at `path`, a file or a folder tree.
+fn newest(path: &Path) -> Option<SystemTime> {
+    let own = fs::metadata(path).and_then(|m| m.modified()).ok();
+    // A symlink counts by its target's time and isn't followed: one inside `src` pointing up the
+    // tree would recurse until the stack overflows.
+    let entry = |e: fs::DirEntry| {
+        if e.file_type().is_ok_and(|t| t.is_symlink()) { fs::metadata(e.path()).and_then(|m| m.modified()).ok() } else { newest(&e.path()) }
+    };
+    fs::read_dir(path).into_iter().flatten().flatten().filter_map(entry).chain(own).max()
+}
+
+/// The projects whose files the project at `root` builds from: itself, and each path
+/// dependency its `gleam.toml` lists.
+fn built_from(root: &Path) -> Vec<PathBuf> {
+    let manifest = fs::read_to_string(root.join("gleam.toml")).ok().and_then(|t| t.parse::<toml::Value>().ok());
+    let deps = manifest.as_ref().and_then(|m| m.get("dependencies")).and_then(|d| d.as_table());
+    let paths = deps.into_iter().flat_map(|d| d.values()).filter_map(|d| d.get("path")?.as_str());
+    [lexical(root)].into_iter().chain(paths.map(|p| lexical(&root.join(p)))).collect()
+}
+
+/// Why a recipe's outputs need its steps run (D-159): one is missing, or a source of the project
+/// or of a path dependency changed after the oldest was built. `None` when they are current or
+/// the recipe names no outputs.
+fn stale(top: &Path, r: &Recipe) -> Option<String> {
+    let root = scope::path(top, &r.project);
+    let mut built: Option<SystemTime> = None;
+    for o in &r.outputs {
+        match fs::metadata(root.join(o)).and_then(|m| m.modified()) {
+            Ok(t) => built = Some(built.map_or(t, |b| b.min(t))),
+            Err(_) => return Some(format!("{o} is missing")),
+        }
+    }
+    let built = built?;
+    let top = lexical(top);
+    let changed: Vec<String> = built_from(&root)
+        .iter()
+        .flat_map(|p| SOURCES.map(|s| p.join(s)))
+        .filter(|part| newest(part).is_some_and(|t| t > built + FRESH))
+        .map(|part| part.strip_prefix(&top).unwrap_or(&part).display().to_string())
+        .collect();
+    (!changed.is_empty()).then(|| format!("{} changed after {} was built", changed.join(", "), r.outputs.join(", ")))
 }
 
 #[cfg(test)]

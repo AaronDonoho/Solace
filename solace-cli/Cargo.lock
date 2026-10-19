@@ -453,9 +453,11 @@ version = "0.1.0"
 dependencies = [
  "globset",
  "ignore",
+ "proc-macro2",
  "rusqlite",
  "serde_json",
  "sha2",
+ "syn",
  "tiny_http",
  "toml",
 ]

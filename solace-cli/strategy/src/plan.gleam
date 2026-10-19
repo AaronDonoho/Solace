@@ -569,13 +569,17 @@ fn agent_choice(p: Panel(msg)) -> Element(msg) {
 pub const styles =
   ".plan{grid-column:2;grid-row:2;position:relative;display:flex;flex-direction:column;min-height:0;box-sizing:border-box;width:clamp(280px,var(--plan-width,380px),60vw);background:var(--paper);border-left:2px solid var(--edge);padding:12px 16px 0}.plan.collapsed{width:auto;min-width:160px;padding-bottom:12px}
 .plan>header,.plan-bar,.plan-compose{flex:none}.plan-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0 -16px;padding:0 16px 12px}
-.plan-bar{border-bottom:1px solid var(--edge);padding:0 0 8px;margin-bottom:4px}.plan-bar .plan-context{margin:6px 0 4px}.plan-bar select{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;min-height:var(--control-h-small);max-width:100%}
+.plan-bar{border-bottom:1px solid var(--edge);padding:0 0 8px;margin-bottom:4px}.plan-bar .plan-context{margin:6px 0 4px}.plan-bar select{"
+  <> solace_task.small_control
+  <> ";padding:2px 6px;max-width:100%}
 .plan-compose{border-top:1px solid var(--edge);padding:8px 0 12px}.plan-compose .filters{margin:0 0 8px}.plan-compose .vision-actions{margin:8px 0 0}
 .plan .composer{margin:0}.plan .composer solace-md-editor{--md-min-height:5lh;--md-max-height:40dvh}
 .plan-resize{position:absolute;left:-7px;top:0;bottom:0;width:12px;cursor:col-resize;touch-action:none;z-index:1}.plan-resize:hover{background:var(--line);opacity:.6}.plan .plan-resize:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
 .plan header{display:flex;align-items:center;gap:8px}.plan h2{margin:0;font-size:17px;flex:1}.plan h3{font-size:14px;margin:16px 0 4px}
 .plan p{margin:6px 0}.plan .plan-summary,.plan .plan-context{color:var(--soft);font-size:13px}.plan-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.plan .edit,.plan .vision-actions button{font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:0 10px;min-height:var(--control-h-small);cursor:pointer}.plan .edit:hover,.plan .vision-actions button:hover{background:var(--hover)}.plan button:disabled{color:var(--soft);cursor:default}
+.plan .edit,.plan .vision-actions button{"
+  <> solace_task.small_control
+  <> ";padding:0 10px}.plan .edit:hover,.plan .vision-actions button:hover{background:var(--hover)}.plan button:disabled{color:var(--soft);cursor:default}
 .plan label{display:block;font-size:13px;color:var(--soft);margin:8px 0 2px}.plan .filters label{margin:0}.plan .filters select{max-width:100%}
 .plan :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .plan-note{border-top:1px solid var(--line);padding:6px 0}.plan-note.human strong{color:var(--focus)}.plan-note .md p{color:var(--ink)}

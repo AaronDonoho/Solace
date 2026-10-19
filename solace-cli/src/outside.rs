@@ -166,8 +166,8 @@ pub fn file_of(dir: &str, module: &str) -> String {
 fn graph_files(root: &Path) -> Result<Vec<String>, Failure> {
     let mut out = vec![];
     // A project of plain files holds no symbols (D-60).
-    if root.join("gleam.toml").exists() {
-        out = source_files(root)?;
+    if let Some(lang) = language::detect(root) {
+        out = lang.source_files(root)?;
         out.retain(|rel| *rel != file_of("test", PROBE));
     }
     Ok(out)
@@ -244,7 +244,7 @@ pub fn approve(s: &Store, tid: &str) -> Result<(), Failure> {
 fn read_in(s: &Store, rel: &str, text: Option<&str>) -> Result<Result<(), String>, Failure> {
     let (dir, file) = rel.split_once('/').unwrap();
     let module = file.strip_suffix(".gleam").unwrap();
-    if !valid_module_path(module) {
+    if !s.lang().valid_module_path(module) {
         return Ok(Err(format!("{rel}: `{module}` isn't a Gleam module name")));
     }
     let existing: Vec<(String, String, String, i64, String)> =
@@ -258,11 +258,11 @@ fn read_in(s: &Store, rel: &str, text: Option<&str>) -> Result<Result<(), String
         s.db.execute("DELETE FROM modules WHERE path = ?1", [module])?;
         return Ok(Ok(()));
     };
-    let parsed = gleam::split(text);
-    if let Some(twice) = gleam::repeated(&parsed.items).first() {
+    let parsed = s.lang().split(text);
+    if let Some(twice) = language::repeated(&parsed.items).first() {
         return Ok(Err(format!("{rel} defines `{twice}` twice; Solace left it as it is and reads it again once fixed")));
     }
-    s.db.execute("INSERT OR REPLACE INTO modules VALUES (?1, ?2, ?3)", params![module, dir, parsed.header])?;
+    s.db.execute("INSERT OR REPLACE INTO modules(path, dir, header) VALUES (?1, ?2, ?3)", params![module, dir, parsed.header])?;
     for (ord, item) in parsed.items.iter().enumerate() {
         match existing.iter().find(|e| e.1 == item.name) {
             Some((id, _, old, old_ord, kind)) => {
@@ -308,7 +308,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         let ix = s.index()?;
         for m in &ix.modules {
             let (content, _) = projection(&ix, m);
-            w.files.insert(file_of(&m.dir, &m.path), (digest(content.as_bytes()), 0, 0));
+            w.files.insert(m.rel(), (digest(content.as_bytes()), 0, 0));
         }
         w.known = true;
         w.dirty = true;

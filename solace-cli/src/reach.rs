@@ -5,7 +5,7 @@ use super::*;
 use std::collections::VecDeque;
 
 /// Test functions: public `_test` functions in test modules.
-pub fn tests(ix: &Index) -> Vec<usize> {
+pub fn test_symbols(ix: &Index) -> Vec<usize> {
     (0..ix.syms.len())
         .filter(|&i| {
             let s = &ix.syms[i];
@@ -129,7 +129,7 @@ struct Records {
 fn records(ix: &Index) -> Records {
     let mut r = Records { ctors: vec![], declared: HashMap::new() };
     for (t, s) in ix.syms.iter().enumerate().filter(|(_, s)| s.kind == Kind::Type) {
-        for (c, labels) in gleam::record_fields(&s.text) {
+        for (c, labels) in ix.lang.record_fields(&s.text) {
             for l in labels.iter().flatten() {
                 let d = r.declared.entry(l.clone()).or_default();
                 if !d.contains(&t) {
@@ -158,7 +158,7 @@ pub fn readers(ix: &Index, fields: &[(usize, String)]) -> HashSet<usize> {
     let rec = records(ix);
     (0..ix.syms.len())
         .filter(|&r| {
-            gleam::field_reads(&ix.syms[r].text)
+            ix.lang.field_reads(&ix.syms[r].text)
                 .iter()
                 .any(|(f, _)| fields.iter().any(|(t, g)| g == f && read_types(ix, &rec, r, f).0.contains(t)))
         })
@@ -175,7 +175,7 @@ pub fn field_refs(ix: &Index, ty: usize, field: &str) -> String {
     let mut out = String::new();
     let mut n = 0;
     for r in 0..ix.syms.len() {
-        if !gleam::field_reads(&ix.syms[r].text).iter().any(|(f, _)| f == field) {
+        if !ix.lang.field_reads(&ix.syms[r].text).iter().any(|(f, _)| f == field) {
             continue;
         }
         let (types, certain) = read_types(ix, &rec, r, field);
@@ -185,7 +185,7 @@ pub fn field_refs(ix: &Index, ty: usize, field: &str) -> String {
                 "-- {}{}\n{}\n",
                 ix.syms[r].qname(),
                 if certain { "" } else { " (possible: another type has this field)" },
-                gleam::signature(&ix.syms[r].item())
+                ix.lang.signature(&ix.syms[r].item())
             );
         }
     }
@@ -204,7 +204,7 @@ pub fn flow(ix: &Index, origins: &[(usize, Vec<usize>)]) -> Impact {
     let rec = records(ix);
     let callers = &ix.used_by;
     let reads: Vec<Vec<(String, usize)>> =
-        (0..n).map(|j| if is_test(ix, j) { vec![] } else { gleam::field_reads(&ix.syms[j].text) }).collect();
+        (0..n).map(|j| if is_test(ix, j) { vec![] } else { ix.lang.field_reads(&ix.syms[j].text) }).collect();
     let mut impact = Impact::default();
     // per symbol: tainted lines, and marks (`name` for a call, `.field` for a read)
     let mut seeds: HashMap<usize, (HashSet<usize>, HashSet<String>)> = HashMap::new();
@@ -277,7 +277,7 @@ pub fn flow(ix: &Index, origins: &[(usize, Vec<usize>)]) -> Impact {
                 let (types, sure) = read_types(ix, &rec, r, &f);
                 if types.contains(&ty) {
                     // `.field` reads are marked; pattern reads seed their lines
-                    let code = gleam::strip_comments(&ix.syms[r].text);
+                    let code = ix.lang.strip_comments(&ix.syms[r].text);
                     let lines: Vec<&str> = code.split('\n').collect();
                     let at = at.into_iter().filter(|&l| !lines.get(l).is_some_and(|t| marked_in(t, &mark))).collect();
                     queue.push_back((r, at, vec![format!(".{f}")], steps + 1, format!("reads {}.{f}", ix.syms[ty].name), certain && sure));
@@ -297,7 +297,7 @@ fn written(ix: &Index, user: usize, i: usize) -> Vec<String> {
     }
     let header = ix.modules.iter().find(|m| m.path == u.module).map_or("", |m| m.header.as_str());
     let mut out = vec![];
-    for imp in gleam::imports(header).into_iter().filter(|imp| imp.module == s.module) {
+    for imp in ix.lang.imports(header).into_iter().filter(|imp| imp.module == s.module) {
         out.push(format!("{}.{}", imp.alias, s.name));
         out.extend(imp.unqualified.into_iter().filter(|(o, _)| *o == s.name).map(|(_, local)| local));
     }
@@ -348,7 +348,7 @@ fn taint(ix: &Index, rec: &Records, i: usize, seeds: &HashSet<usize>, marks: &Ha
         t.any = !seeds.is_empty() || !marks.is_empty();
         return t;
     }
-    let code = gleam::strip_comments(&s.text);
+    let code = ix.lang.strip_comments(&s.text);
     let lines: Vec<&str> = code.split('\n').collect();
     let open = fn_body_start(s).filter(|_| s.kind == Kind::Fn).map(|o| s.text[..o].matches('\n').count());
     let close = lines.iter().rposition(|l| l.starts_with('}'));
@@ -369,7 +369,7 @@ fn taint(ix: &Index, rec: &Records, i: usize, seeds: &HashSet<usize>, marks: &Ha
             // `let db = store.put(db, x)` updates a value: its changed parts are
             // tracked as fields, so the name keeps its state
             let updated = roots(value);
-            for w in gleam::pattern_names(pattern).into_iter().filter(|w| !updated.contains(w)) {
+            for w in ix.lang.pattern_names(pattern).into_iter().filter(|w| !updated.contains(w)) {
                 if hit {
                     names.insert(w)
                 } else {
@@ -401,7 +401,7 @@ fn taint(ix: &Index, rec: &Records, i: usize, seeds: &HashSet<usize>, marks: &Ha
             for (ty, _, labels) in rec.ctors.iter().filter(|(ty, n, _)| *n == word && ix.uses[i].contains(ty)) {
                 // `..base` adds no field: the fields a value carries are tracked one by one
                 let mut position = 0;
-                for (off, arg) in gleam::split_args(&text[open + 1..]) {
+                for (off, arg) in language::split_args(&text[open + 1..]) {
                     let sp = span(open + 1 + off, &arg);
                     let arg = arg.trim();
                     if arg.starts_with("..") {
@@ -432,7 +432,7 @@ fn taint(ix: &Index, rec: &Records, i: usize, seeds: &HashSet<usize>, marks: &Ha
             if !(start..end).contains(&line) || g == i || ix.syms[g].kind != Kind::Fn || is_test(ix, g) {
                 continue;
             }
-            let ps = params_of(&ix.syms[g]);
+            let ps = params_of(ix, &ix.syms[g]);
             let name = format!("{}(", ix.syms[g].name);
             let call = text.match_indices(&name).map(|(p, _)| p).find(|&p| !text[..p].ends_with(|c: char| c.is_alphanumeric() || c == '_'));
             let piped = call.is_some_and(|p| {
@@ -450,7 +450,7 @@ fn taint(ix: &Index, rec: &Records, i: usize, seeds: &HashSet<usize>, marks: &Ha
                             out.push(ps[0].1.clone());
                         }
                     }
-                    for (off, arg) in gleam::split_args(&text[p + name.len()..]) {
+                    for (off, arg) in language::split_args(&text[p + name.len()..]) {
                         let sp = span(p + name.len() + off, &arg);
                         match split_label(arg.trim()) {
                             (Some(l), v) => {
@@ -483,8 +483,8 @@ fn taint(ix: &Index, rec: &Records, i: usize, seeds: &HashSet<usize>, marks: &Ha
 }
 
 /// A function's parameters: (label, name).
-fn params_of(s: &Sym) -> Vec<(Option<String>, String)> {
-    params(&gleam::head(&s.item()), &s.name)
+fn params_of(ix: &Index, s: &Sym) -> Vec<(Option<String>, String)> {
+    params(&ix.lang.head(&s.item()), &s.name)
 }
 
 /// `label: value` (or the shorthand `label:`) into its parts.
@@ -612,7 +612,7 @@ pub fn reached(suites: &[Suite], syms: &[usize]) -> Vec<String> {
 /// Each source symbol's tests, by D-36.3 coverage.
 fn own_tests(ix: &Index) -> HashMap<usize, Vec<usize>> {
     let mut out: HashMap<usize, Vec<usize>> = HashMap::new();
-    for t in tests(ix) {
+    for t in test_symbols(ix) {
         for u in covered(ix, t) {
             out.entry(u).or_default().push(t);
         }
@@ -870,7 +870,7 @@ mod tests {
         assert!(covered(&ix, id("run_test")).contains(&id("abs")));
         let out = outside(&ix);
         assert!(out.contains(&id("run")) && out.contains(&id("abs")) && !out.contains(&id("main")));
-        assert_eq!(tests(&ix), [main_test, id("run_test")]);
+        assert_eq!(test_symbols(&ix), [main_test, id("run_test")]);
     }
 
     /// A new symbol seeds every line; a comment-only change is no change at

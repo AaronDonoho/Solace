@@ -105,6 +105,10 @@ fn catch_up(reads: &mut Reads, top: &Path, served: Vec<Served>, changed: bool, b
     for (project, names) in reads.others(&served) {
         // room for the two headings
         let left = budget.saturating_sub(out.len() + story.len() + views.len() + 100);
+        if left == 0 {
+            left_out.extend(names);
+            continue;
+        }
         let Ok(s) = Store::at(&top.join(&project)) else { left_out.extend(names); continue };
         let Ok(ix) = s.index() else { left_out.extend(names); continue };
         let names: Vec<&str> = names.iter().map(String::as_str).filter(|n| s.resolve(&ix, n).is_ok()).collect();
@@ -141,10 +145,11 @@ fn opened(top: &Path, reads: &Reads) -> Vec<(String, Store, Index)> {
     out
 }
 
-/// The revision of `r`'s symbol in its project now; `None` once it's gone, and
+/// The revision of `r`'s symbol in its project now; an empty string once it's
+/// gone, which differs from every revision the run was served, and `None`
 /// when its store won't open — a store that won't open is no change.
 fn current_revision(stores: &[(String, Store, Index)], r: &Served) -> Option<String> {
-    stores.iter().find(|(p, _, _)| *p == r.project).and_then(|(_, s, ix)| s.resolve(ix, &r.symbol).ok().map(|i| revision(&ix.syms[i].text)))
+    stores.iter().find(|(p, _, _)| *p == r.project).map(|(_, s, ix)| s.resolve(ix, &r.symbol).map(|i| revision(&ix.syms[i].text)).unwrap_or_default())
 }
 
 /// A symbol a task run was served, at the revision served; `recent` while it
@@ -233,8 +238,18 @@ impl Reads {
             self.symbols.retain(|r| !r.same(s));
             self.symbols.push(s.clone());
         }
-        // The history is saved on the run after every call, so it stays bounded.
+        // The history is saved on the run after every call, so it stays
+        // bounded: the oldest entry the window no longer needs goes first, so
+        // a long window keeps the symbols it read.
         const CAP: usize = 60;
+        let mut over = self.symbols.len().saturating_sub(CAP);
+        self.symbols.retain(|r| {
+            if over == 0 || r.recent {
+                return true;
+            }
+            over -= 1;
+            false
+        });
         self.symbols.drain(..self.symbols.len().saturating_sub(CAP));
     }
 

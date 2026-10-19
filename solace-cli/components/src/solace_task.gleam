@@ -1327,10 +1327,19 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           }),
         )
       case json.parse(text, decoder) {
-        Ok(dependents) -> #(
-          Model(..model, dependents: Some(dependents)),
-          effect.none(),
-        )
+        // The reply is a snapshot taken when the task opened: a dependent a
+        // live event added between the request and the reply stays until an
+        // event says otherwise.
+        Ok(dependents) -> {
+          let live =
+            model.dependents
+            |> option.unwrap([])
+            |> list.filter(fn(e) { !list.any(dependents, fn(d) { d.0 == e.0 }) })
+          #(
+            Model(..model, dependents: Some(list.append(dependents, live))),
+            effect.none(),
+          )
+        }
         Error(_) -> #(model, effect.none())
       }
     }
@@ -2322,7 +2331,7 @@ button,input,textarea,select{border:1px solid var(--edge);background:var(--paper
 button:hover{background:var(--hover)}button:disabled{color:var(--soft)}button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,a:focus-visible,summary:focus-visible{outline:3px solid var(--focus);outline-offset:3px}
 textarea{font-family:inherit}
 .depends .unfinished{color:var(--warn-text);font-weight:600}
-.feature{margin:4px 0}
+.feature,.depends{margin:var(--space-1) 0}
 .attention{font-weight:700}
 .status{border:1px solid var(--line);background:var(--paper);font-size:11px;text-transform:uppercase;letter-spacing:.08em;padding:1px 8px}.status.finished{background:var(--add);color:var(--ok-text);border-color:var(--ok-text)}.working::before{background:var(--entry)}
 .detail,.composer,.note,.run{background:var(--paper);border-color:var(--edge)}.detail{padding:10px 12px}
@@ -3233,9 +3242,12 @@ pub const model_styles =
 /// use these instead of their own numbers. Custom properties inherit,
 /// so a nested shadow root gets them from its host too. Two control heights:
 /// `--control-h` for buttons, inputs and selects, `--control-h-small` for
-/// the small ones beside text (Edit, Copy ID, the editor's toolbar).
+/// the small ones beside text (Edit, Copy ID, the editor's toolbar). The
+/// heading sizes `--h2`, `--h3`, `--h4` and the tab buttons' padding
+/// `--tab-pad` are the sizes the pages settled on, so a page names them
+/// instead of repeating the numbers.
 pub const spacing_styles =
-  ":host{--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:20px;--space-6:24px;--control-h:36px;--control-h-small:32px;--control-pad:6px 12px;--pad-card:12px 16px;--pad-section:20px 24px}\n"
+  ":host{--space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:20px;--space-6:24px;--control-h:36px;--control-h-small:32px;--control-pad:6px 12px;--pad-card:12px 16px;--pad-section:20px 24px;--h2:19px;--h3:16px;--h4:15px;--tab-pad:10px 16px}\n"
 
 /// A task's column, status and whether it has no project: the line under
 /// its title, or beside it in the board's bar.
@@ -3478,3 +3490,10 @@ fn dep_view(model: Model, id: String, dep: Option(Dep)) -> Element(Msg) {
     None -> h.span([a.class("dep")], [link(id)])
   }
 }
+
+/// The declarations every small control shares: the page's font at the small
+/// control's 13px, on paper with the shared edge, its height and a pointing
+/// cursor. Where the controls differ is their padding and margins, so each
+/// rule adds those itself.
+pub const small_control =
+  "font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;min-height:var(--control-h-small);cursor:pointer"

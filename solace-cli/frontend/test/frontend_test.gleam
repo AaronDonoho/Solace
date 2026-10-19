@@ -7,6 +7,7 @@ import gleam/uri
 import gleeunit
 import knowledgebase
 import lustre/element
+import solace_task
 
 pub fn main() -> Nil {
   gleeunit.main()
@@ -59,7 +60,7 @@ pub fn page_elements_test() {
   ]
   list.each(cases, fn(entry) {
     let #(#(route, shown), expected) = entry
-    assert element.to_string(frontend.page(route, shown, frontend.no_focus))
+    assert element.to_string(frontend.page(route, shown, frontend.no_focus, []))
       == expected
   })
 }
@@ -67,7 +68,7 @@ pub fn page_elements_test() {
 pub fn menu_current_test() {
   let board =
     element.to_string(
-      frontend.view(frontend.Model(Board, [Board], frontend.no_focus, [])),
+      frontend.view(frontend.Model(Board, [Board], frontend.no_focus, [], [])),
     )
   let workspace =
     element.to_string(
@@ -76,6 +77,7 @@ pub fn menu_current_test() {
           frontend.Workspace,
           [frontend.Workspace],
           frontend.no_focus,
+          [],
           [],
         ),
       ),
@@ -87,6 +89,7 @@ pub fn menu_current_test() {
           Contracts("/p/web"),
           [Contracts("/p/web")],
           frontend.no_focus,
+          [],
           [],
         ),
       ),
@@ -116,6 +119,7 @@ pub fn menu_current_test() {
           [frontend.Strategy],
           frontend.no_focus,
           [],
+          [],
         ),
       ),
     )
@@ -130,6 +134,7 @@ pub fn menu_current_test() {
           frontend.Settings,
           [frontend.Settings],
           frontend.no_focus,
+          [],
           [],
         ),
       ),
@@ -158,7 +163,13 @@ pub fn starts_on_the_board_outside_a_browser_test() {
   let #(model, _effect) = frontend.init(Nil)
   // The board and Strategy are open from the start, hidden, to hear of what needs attention.
   assert model
-    == frontend.Model(Board, [Board, frontend.Strategy], frontend.no_focus, [])
+    == frontend.Model(
+      Board,
+      [Board, frontend.Strategy],
+      frontend.no_focus,
+      [],
+      [],
+    )
 }
 
 pub fn a_route_change_shows_the_new_page_test() {
@@ -169,6 +180,7 @@ pub fn a_route_change_shows_the_new_page_test() {
         [frontend.Workspace],
         frontend.no_focus,
         [],
+        [],
       ),
       RouteChanged(Contracts("/p/web")),
     )
@@ -177,6 +189,7 @@ pub fn a_route_change_shows_the_new_page_test() {
       Contracts("/p/web"),
       [frontend.Workspace, Contracts("/p/web")],
       frontend.no_focus,
+      [],
       [],
     )
 }
@@ -367,12 +380,18 @@ pub fn copy_markdown_quote_and_numbers_test() {
 pub fn a_page_left_stays_hidden_test() {
   let #(model, _) =
     frontend.update(
-      frontend.Model(Board, [Board], frontend.no_focus, []),
+      frontend.Model(Board, [Board], frontend.no_focus, [], []),
       RouteChanged(frontend.Workspace),
     )
   let #(model, _) = frontend.update(model, RouteChanged(Board))
   assert model
-    == frontend.Model(Board, [Board, frontend.Workspace], frontend.no_focus, [])
+    == frontend.Model(
+      Board,
+      [Board, frontend.Workspace],
+      frontend.no_focus,
+      [],
+      [],
+    )
   let html = element.to_string(frontend.view(model))
   assert string.contains(
     html,
@@ -388,6 +407,7 @@ pub fn a_page_not_opened_is_not_drawn_test() {
           frontend.Workspace,
           [frontend.Workspace],
           frontend.no_focus,
+          [],
           [],
         ),
       ),
@@ -457,6 +477,7 @@ pub fn a_found_task_is_focused_on_its_page_test() {
       [frontend.Strategy],
       frontend.no_focus,
       [],
+      [],
     )
   let #(clicked, _) = frontend.update(model, frontend.Follow("task", "t1"))
   assert clicked == model
@@ -508,7 +529,7 @@ pub fn copy_markdown_of_task_links_test() {
 /// A hidden page's `attention` flashes its tab until it is shown; the page shown never flags its own.
 pub fn a_hidden_page_flags_its_tab_until_shown_test() {
   let model =
-    frontend.Model(Board, [Board, frontend.Strategy], frontend.no_focus, [])
+    frontend.Model(Board, [Board, frontend.Strategy], frontend.no_focus, [], [])
   let #(same, _) = frontend.update(model, frontend.Attention("solace-board"))
   assert same == model
   let #(flagged, _) =
@@ -553,7 +574,7 @@ pub fn a_feature_or_milestone_link_opens_on_strategy_test() {
   assert frontend.failed_text("milestone")
     == "Couldn't look up the milestone. Try again."
   let model =
-    frontend.Model(frontend.Board, [frontend.Board], frontend.no_focus, [])
+    frontend.Model(frontend.Board, [frontend.Board], frontend.no_focus, [], [])
   let #(model, _) =
     frontend.update(model, frontend.Found("feature", "f1", found, False))
   assert model.focus
@@ -614,6 +635,7 @@ pub fn the_knowledgebase_shows_the_guide_test() {
           [frontend.Knowledgebase],
           frontend.no_focus,
           [],
+          [],
         ),
       ),
     )
@@ -636,11 +658,9 @@ pub fn the_knowledgebase_shows_the_guide_test() {
   assert string.contains(page, "Using Solace")
   assert !string.contains(page, "This guide is a separate page")
   assert !string.contains(page, "Back to the board")
-  assert element.to_string(frontend.page(
-      frontend.Knowledgebase,
-      False,
-      frontend.no_focus,
-    ))
+  assert element.to_string(
+      frontend.page(frontend.Knowledgebase, False, frontend.no_focus, []),
+    )
     |> string.starts_with("<article class=\"knowledgebase\" hidden")
 }
 
@@ -651,4 +671,50 @@ pub fn old_addresses_are_renamed_test() {
   assert frontend.renamed_path("/workspace") == None
   assert frontend.renamed_path("/migration") == None
   assert frontend.renamed_path("/") == None
+}
+
+/// D-140: the guide's column table follows the workflow the server answers:
+/// its rows are the server's columns, in its order, with the guide's words for
+/// the ones it knows and a general pair for a project's own.
+pub fn the_guide_follows_the_workflow_test() {
+  let columns = [
+    solace_task.Column("backlog", "Backlog", [], False),
+    solace_task.Column("planning", "Planning", [], False),
+    solace_task.Column("needs_review", "Review", [], False),
+    solace_task.Column("ship_it", "Ship It", [], True),
+  ]
+  let page =
+    element.to_string(frontend.page(
+      frontend.Knowledgebase,
+      True,
+      frontend.no_focus,
+      columns,
+    ))
+  assert string.contains(
+    page,
+    "<tr><th>Column</th><th>What it means</th><th>What you can do</th></tr>",
+  )
+  assert string.contains(page, "<td>Backlog</td>")
+  assert string.contains(page, "<td>Review</td>")
+  assert string.contains(page, "<td>Ship It</td>")
+  assert string.contains(page, "The agent says it's finished")
+  assert string.contains(page, "Set by the project's own workflow")
+  assert !string.contains(page, "<!--columns-->")
+  assert !string.contains(page, "<td>Canceled</td>")
+  // The shell asks once, at startup. An answer that is not a workflow (a
+  // server that is down) leaves the guide with no rows.
+  let #(model, _effect) = frontend.init(Nil)
+  assert model.columns == []
+  let #(down, _) =
+    frontend.update(model, frontend.WorkflowLoaded("{\"message\":\"down\"}"))
+  assert down.columns == []
+  let #(loaded, _) =
+    frontend.update(
+      model,
+      frontend.WorkflowLoaded(
+        "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\"}]}",
+      ),
+    )
+  assert loaded.columns
+    == [solace_task.Column("planning", "Planning", [], False)]
 }

@@ -115,6 +115,8 @@ fn write(top: &Path, t: &Value) -> Result<(), Failure> {
     }
     // An active feature's tasks are never in Backlog (D-134).
     let mut t = t.clone();
+    // The mark comes from the home on each load (D-160): it never goes in the file.
+    t.as_object_mut().unwrap().remove("noProject");
     plan(top, &mut t);
     let path = board::store_dir(top).join(format!("{id}.json"));
     let was: Option<Value> = fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok());
@@ -149,6 +151,32 @@ fn write(top: &Path, t: &Value) -> Result<(), Failure> {
         }
     }
     Ok(())
+}
+/// Re-homes a task whose home is no project (D-160), as one operation of the task
+/// server: it reads the task again, so two loads move it once, moves its folder,
+/// notes the move and writes it. The task as it is saved.
+pub(super) fn rehome(top: &Path, t: &Value) -> Result<Value, Failure> {
+    let (top, tid) = (top.to_path_buf(), t["id"].as_str().unwrap_or("").to_string());
+    op(&top.clone(), move || {
+        let mut t = board::read_task(&top, &board::store_dir(&top).join(format!("{tid}.json")))?;
+        let Some((home, dirs)) = board::rehome_to(&workspace::members(&top)?, &t) else { return Ok(t) };
+        let old = t["home"].as_str().unwrap_or(".").to_string();
+        // A homeless task's runs wrote in the root, where its folder is.
+        let from = scope::path(&top, &old);
+        let src = if from.join(".solace/board").join(&tid).is_dir() { from } else { top.clone() };
+        board::move_task(&src, &mut t, &scope::path(&top, &home))?;
+        // A re-home keeps only the projects of the scope (D-160): the note names what it drops.
+        let dropped: Vec<String> = scope::of(&t, &old).into_iter().filter(|d| !dirs.iter().any(|x| x == d)).collect();
+        t["scope"] = json!(dirs);
+        let dropped = if dropped.is_empty() {
+            String::new()
+        } else {
+            format!(" Dropped {} from its projects.", dropped.iter().map(|d| format!("`{d}`")).collect::<Vec<_>>().join(", "))
+        };
+        board::note(&mut t, "solace", None, &format!("Moved from `{old}` to `{home}`: its home was no project.{dropped}"));
+        write(&top, &t)?;
+        Ok(t)
+    })
 }
 /// Moves task `t` from Backlog to Planning when its feature is `active`
 /// (D-134), as `board::plan_for_feature` says. Whether it moved.
@@ -2734,12 +2762,15 @@ mod tests {
         assert!(rows.iter().any(|(p, d)| p == "." && d.contains(r#""removed":"t1"#)), "{rows:?}");
     }
 
-    /// D-129: a task stored with a home that is no project is listed marked
-    /// `noProject`, opens from the root, is found with `project` false, can be
-    /// planned, canceled and archived, and settles without a store at its home.
+    /// D-129 and D-160: while the root is no project a task with no project in its
+    /// scope keeps none: it is listed marked `noProject`, opens from the root, is
+    /// found with `project` false, and settles without a store at its home. A change
+    /// makes the root a project, which re-homes the task to the root with a note,
+    /// and its scope saves from there.
     #[test]
     fn a_task_with_no_project_shows_at_the_root() {
-        let root = workspace();
+        // A root that lists `sub` and has no store of its own: the root is no project.
+        let root = testing::Scratch::new().with(&[("solace.toml", "projects = [\"sub\"]\n"), ("sub/.solace/keep", "")]);
         let mut t = board::new_task("Orphan", "", &json!("backlog"), 1.);
         t["home"] = json!("web");
         t["scope"] = json!(["web"]);
@@ -2751,16 +2782,20 @@ mod tests {
         assert_eq!(board::task(&root, &tid).unwrap()["noProject"], json!(true), "opens from the root");
         let found = find_task(&root, &tid).unwrap();
         assert_eq!((&found["dir"], &found["project"]), (&json!("web"), &json!(false)));
-        let t = api(&root, "POST", &["tasks", &tid, "actions"], json!({"action": "plan"})).unwrap();
-        assert_eq!(t["column"], "planning");
-        let e = api(&root, "POST", &["tasks", &tid, "actions"], json!({"action": "assign"})).unwrap_err();
-        assert!(e.0.contains("needs a project"), "{}", e.0);
-        let t = api(&root, "POST", &["tasks", &tid, "actions"], json!({"action": "cancel"})).unwrap();
-        assert_eq!(t["column"], "cancelled");
-        let t = api(&root, "POST", &["tasks", &tid, "archive"], json!({})).unwrap();
-        assert!(!t["archivedTime"].is_null(), "archived");
         board::settle_final(&root, &tid).unwrap();
-        assert!(!root.join("web").join(".solace").exists(), "no store at its home");
+        assert!(!root.join("web").join(".solace").exists(), "settling settles no store at its home");
+        // The plan opens the root's store, so the root is a project and the task falls back to it.
+        let t = api(&root, "POST", &["tasks", &tid, "actions"], json!({"action": "plan"})).unwrap();
+        assert_eq!((t["column"].as_str(), t["home"].as_str()), (Some("planning"), Some(".")), "planned at the root");
+        assert_eq!(t["scope"], json!(["."]), "scoped to the root");
+        assert!(t["notes"].as_array().unwrap().iter().any(|n| n["text"].as_str().is_some_and(|x| x.contains("Moved from `web` to `.`"))), "the move is noted: {:?}", t["notes"]);
+        assert_eq!(api(&root, "POST", &["tasks", &tid, "scope"], json!({"scope": ["sub"]})).unwrap()["home"], "sub", "its scope saves");
+        let sub = root.join("sub");
+        let t = api(&sub, "POST", &["tasks", &tid, "actions"], json!({"action": "cancel"})).unwrap();
+        assert_eq!(t["column"], "cancelled");
+        let t = api(&sub, "POST", &["tasks", &tid, "archive"], json!({})).unwrap();
+        assert!(!t["archivedTime"].is_null(), "archived");
+        assert!(!root.join("web").join(".solace").exists(), "no store at its old home");
     }
 
     /// A workflow whose `finished` event targets a final column, so `task done` settles.

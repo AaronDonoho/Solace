@@ -391,7 +391,7 @@ impl Store {
         // others that use the retired symbol are refused (as extract refuses them)
         let mut outside_users: Vec<String> = vec![];
         let mut deps: Vec<Dependent> = vec![];
-        let gone_names: Vec<String> = std::iter::once(gone.name.clone()).chain(if gone.kind == Kind::Type { gleam::constructors(&gone.text) } else { vec![] }).collect();
+        let gone_names: Vec<String> = std::iter::once(gone.name.clone()).chain(if gone.kind == Kind::Type { self.lang().constructors(&gone.text) } else { vec![] }).collect();
         for d in members.iter().filter(|d| **d != mine && dest.as_ref().is_none_or(|t| t.dir != **d)) {
             let dir = scope::path(&top, d);
             let Some(me) = self.root.canonicalize().ok() else { break };
@@ -408,8 +408,8 @@ impl Store {
             let Ok(dix) = other.index() else { continue };
             for u in &dix.syms {
                 let header = dix.modules.iter().find(|m| m.path == u.module).map_or("", |m| m.header.as_str());
-                let imps = gleam::imports(header);
-                let hit = gleam::references(&u.text).into_iter().any(|rf| match &rf {
+                let imps = dix.lang.imports(header);
+                let hit = dix.lang.references(&u.text).into_iter().any(|rf| match &rf {
                     Ref::Qualified(alias, member) => imps.iter().any(|i| &i.alias == alias && i.module == gone.module && gone_names.contains(member)),
                     Ref::Bare(b) => imps.iter().any(|i| i.module == gone.module && i.unqualified.iter().any(|(o, l)| l == b && gone_names.contains(o))),
                 });
@@ -508,7 +508,7 @@ impl Store {
             // the retired symbol's module goes with it when emptied, unless another module imports it
             let m = &gone.module;
             let empty = !(0..n).any(|i| i != r && ix.syms[i].module == *m);
-            let imported = finals.iter().any(|(o, h)| o != m && gleam::imports(h).iter().any(|i| i.module == *m));
+            let imported = finals.iter().any(|(o, h)| o != m && ix.lang.imports(h).iter().any(|i| i.module == *m));
             let retired = empty && !imported;
             if retired {
                 self.db.execute("DELETE FROM modules WHERE path = ?1", [m])?;
