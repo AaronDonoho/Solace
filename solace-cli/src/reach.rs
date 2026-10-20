@@ -54,7 +54,7 @@ fn libtest_prefix(ix: &Index, module: &str) -> String {
 }
 
 /// Everything a symbol can run or read: its closure over `uses`.
-// ponytail: a DFS per test; switch to SCC condensation if suites reach tens of thousands of tests.
+// a DFS per test; switch to SCC condensation if suites reach tens of thousands of tests.
 pub fn closure(ix: &Index, i: usize) -> HashSet<usize> {
     let (mut seen, mut stack) = (HashSet::new(), vec![i]);
     while let Some(j) = stack.pop() {
@@ -293,7 +293,7 @@ pub fn flow(ix: &Index, origins: &[(usize, Vec<usize>)]) -> Impact {
         }
         let first = &impact.uses[found[&i]];
         let (steps, certain) = (first.steps, first.certain);
-        // ponytail: a possible use (a field name several types share) is listed but not
+        // a possible use (a field name several types share) is listed but not
         // followed, so ambiguous names can't flood the result; follow it if that misses flows.
         if !certain {
             continue;
@@ -414,7 +414,7 @@ pub fn short(ix: &Index, i: usize) -> String {
 /// Effects through which data leaves the program.
 fn leaves(ix: &Index, i: usize) -> String {
     const OUT: &[&str] = &["prints", "writes files", "network", "database", "processes", "external code"];
-    // ponytail: effects are per function, not per tainted statement.
+    // effects are per function, not per tainted statement.
     view::direct_effects(ix, i).into_keys().filter(|c| OUT.contains(&c.as_str())).collect::<Vec<_>>().join(", ")
 }
 
@@ -664,7 +664,7 @@ pub fn suites(s: &Store, ix: &Index) -> Result<Vec<Suite>, Failure> {
             out.push((name.clone(), None));
             continue;
         }
-        // ponytail: entry points that don't resolve are skipped silently.
+        // entry points that don't resolve are skipped silently.
         let reach = entries.iter().filter_map(|e| s.resolve(ix, e).ok()).flat_map(|i| closure(ix, i)).collect();
         out.push((name.clone(), Some(reach)));
     }

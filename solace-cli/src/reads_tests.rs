@@ -110,7 +110,7 @@ fn remember_keeps_the_size_limit_when_it_names_left_out_views() {
 }
 
 /// A remember reply with no room names the task's notes and the left-out
-/// views without opening their stores.
+/// views that still resolve.
 #[test]
 fn remember_with_no_room_names_the_task_notes_and_left_out_views() {
     let store = testing::project(&[(
@@ -198,12 +198,14 @@ fn a_change_before_remember_in_the_same_call_starts_its_window() {
     run.end_command(&["view".into(), "calc.add".into(), "calc.three".into()]);
     store.submit_symbols(Some("calc.add"), None, "pub fn add(a: Int, b: Int) -> Int { b + a }").unwrap();
     run.end_command(&["submit".into(), "calc.add".into()]);
+    run.end_call();
+    assert!(SERVED.with(|v| v.borrow().is_none()));
+    assert!(WINDOW.with(|v| v.borrow().is_none()));
+    tasks::drain(&top);
     let out = board::remember(&top, tid, "r1", 10_000).unwrap();
     assert!(out.contains("b + a"), "the window shows the change: {out}");
     assert!(!out.contains("a + b"), "the window does not show the old body: {out}");
     assert!(!out.contains("pub fn three"), "the unchanged symbol is outside the window: {out}");
-    SERVED.with(|v| v.borrow_mut().take());
-    WINDOW.with(|v| v.borrow_mut().take());
 }
 
 /// `session remember` prints the window's views, but printing them is not a
@@ -219,4 +221,94 @@ fn remember_does_not_record_the_views_it_prints() {
     assert!(out.contains("pub fn add"), "{out}");
     assert!(take_served().is_empty(), "the ask recorded a view as a read");
     SERVED.with(|v| v.borrow_mut().take());
+}
+
+/// A long window reserves no room for names or a notice when every view fits.
+#[test]
+fn remember_does_not_keep_room_for_names_when_all_views_fit() {
+    let store = testing::project(&[(
+        "src/calc.gleam",
+        "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn three() -> Int {\n  add(1, 2)\n}\n",
+    )]);
+    let top = scope::top(&store.root);
+    let mut reads = Reads::default();
+    read_names(&store, &["calc.add", "calc.three"], &mut reads);
+    let views = store.view(&["calc.add", "calc.three"], false, 10_000).unwrap();
+    let budget = "Task: T\n".len()
+        + "What this run read or changed since its last change, as it is now:\n".len()
+        + "This run so far, one step per line:\n".len()
+        + views.len();
+    let out = remember_reply("Task: T\n", &reads.to_json(), &top, &|_| String::new(), budget);
+    assert!(out.contains("pub fn add") && out.contains("pub fn three"), "{out}");
+    assert!(!out.contains("Not shown"), "{out}");
+    assert!(out.len() <= budget, "the reply keeps its size limit: {} bytes", out.len());
+}
+
+/// The left-out paths name only symbols their store still resolves.
+#[test]
+fn remember_does_not_name_a_symbol_gone_from_its_store() {
+    let store = testing::project(&[(
+        "src/calc.gleam",
+        "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn three() -> Int {\n  add(1, 2)\n}\n",
+    )]);
+    let top = scope::top(&store.root);
+    let mut reads = Reads::default();
+    read_names(&store, &["calc.add", "calc.three"], &mut reads);
+    store.delete_all(&["calc.three"], usize::MAX).unwrap();
+    let out = remember_reply("", &reads.to_json(), &top, &|b| "s".repeat(b), 300);
+    assert!(out.contains("calc.add"), "{out}");
+    assert!(!out.contains("calc.three"), "a deleted symbol is not a left-out view: {out}");
+    assert!(out.len() <= 300, "the reply keeps its size limit: {} bytes", out.len());
+}
+
+/// A store that will not open names no views.
+#[test]
+fn remember_names_no_views_of_a_store_that_will_not_open() {
+    let store = testing::project(&[("src/calc.gleam", "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n")]);
+    let top = scope::top(&store.root);
+    let mut reads = Reads::default();
+    reads.record(&[Served {
+        project: "no/such/project".into(),
+        symbol: "calc.add".into(),
+        revision: "1".into(),
+        recent: true,
+        latest: "1".into(),
+    }]);
+    let out = remember_reply("", &reads.to_json(), &top, &|_| String::new(), 10_000);
+    assert_eq!(out, "", "an unopened store is no view");
+}
+
+/// Even a budget too small for the notice stays within the budget.
+#[test]
+fn remember_keeps_a_very_small_budget() {
+    let store = testing::project(&[(
+        "src/calc.gleam",
+        "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn three() -> Int {\n  add(1, 2)\n}\n",
+    )]);
+    let top = scope::top(&store.root);
+    let mut reads = Reads::default();
+    read_names(&store, &["calc.add", "calc.three"], &mut reads);
+    let out = remember_reply("Task: T\n", &reads.to_json(), &top, &|_| String::new(), 10);
+    assert!(out.len() <= 10, "the reply keeps its size limit: {} bytes", out.len());
+}
+
+/// `end_call` records a read no command closed, then saves it.
+#[test]
+fn end_call_records_a_read_no_command_closed() {
+    let store = testing::project(&[("src/calc.gleam", "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n")]);
+    let top = scope::top(&store.root);
+    let s = board::open(&store.root).unwrap();
+    let mut t = board::api(&s.root, "POST", "/tasks", json!({"title":"Fix calc"})).unwrap();
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+    tasks::put(&s, &t).unwrap();
+    let tid = t["id"].as_str().unwrap();
+    let mut run = Run { top: top.clone(), tid: tid.into(), rid: "r1".into(), reads: Reads::default(), dirty: false };
+    run.start_call();
+    store.view(&["calc.add"], false, 10_000).unwrap();
+    run.end_call();
+    assert!(SERVED.with(|v| v.borrow().is_none()));
+    assert!(WINDOW.with(|v| v.borrow().is_none()));
+    tasks::drain(&top);
+    let out = board::remember(&top, tid, "r1", 10_000).unwrap();
+    assert!(out.contains("pub fn add"), "{out}");
 }

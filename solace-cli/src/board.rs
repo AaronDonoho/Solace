@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 pub fn lock(root: &Path) -> Result<fs::File, Failure> {
     fs::create_dir_all(root.join(".solace"))?;
-    // ponytail: one project lock; use per-change store isolation if parallel work is introduced.
+    // one project lock; use per-change store isolation if parallel work is introduced.
     lock_file(&root.join(".solace/lock"))
 }
 /// The project lock when it is free right now; the board's poll skips a busy project.
@@ -620,7 +620,7 @@ fn endpoint_args(m: &Value, stored: bool) -> Vec<String> {
 /// `meta.n_ctx` (llama.cpp, Strata). Claude Code doesn't know a local model's
 /// window, so without it, it compacts too late and the server refuses the prompt.
 fn endpoint_context(base_url: &str, model: &str) -> Option<u64> {
-    // ponytail: plain http only; an https endpoint goes undetected.
+    // plain http only; an https endpoint goes undetected.
     let rest = base_url.strip_prefix("http://")?;
     let (host, prefix) = rest.split_once('/').unwrap_or((rest, ""));
     let path = [prefix.trim_matches('/'), "v1/models"].iter().filter(|p| !p.is_empty()).fold(String::new(), |a, p| a + "/" + p);
@@ -1261,7 +1261,7 @@ pub fn diff_ops<'a>(a: &'a str, b: &'a str) -> Vec<(char, &'a str)> {
     let pre = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
     let suf = a[pre..].iter().rev().zip(b[pre..].iter().rev()).take_while(|(x, y)| x == y).count();
     let (x, y) = (&a[pre..a.len() - suf], &b[pre..b.len() - suf]);
-    // ponytail: O(n·m) LCS table over the changed middle; use Myers if whole-file rewrites get large.
+    // O(n·m) LCS table over the changed middle; use Myers if whole-file rewrites get large.
     let mut l = vec![vec![0u32; y.len() + 1]; x.len() + 1];
     for i in (0..x.len()).rev() {
         for j in (0..y.len()).rev() {
@@ -1505,7 +1505,8 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
                 .iter()
                 .filter(|x| x["id"] != tid.as_str())
                 .map(|x| {
-                    let names: Vec<String> = changes_of(st, x).unwrap_or_default().iter().map(|c| c["name"].as_str().unwrap_or("").to_string()).collect();
+                    let names: Vec<String> =
+                        changes_of(st, x).unwrap_or_default().iter().map(|c| c["name"].as_str().unwrap_or("").to_string()).collect();
                     format!("task {}: {}", x["id"], names.join(", "))
                 })
                 .collect::<Vec<_>>()
@@ -1523,6 +1524,7 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
         st.db.execute("DELETE FROM board_touches WHERE task=?", [&tid])?;
         drafts::clear(st, &tid)?;
         drop_before(st, &tid)?;
+        outside::checkpoint(st)?;
     }
     clear_reviews(s, &tid)?;
     end_runs(t, "reverted");
@@ -1536,6 +1538,8 @@ fn settle(s: &Store, t: &Value) -> Result<(), Failure> {
         lockdown::recover(&st.root, &st, &[])?;
         outside::approve(&st, tid)?;
         drop_before(&st, tid)?;
+        outside::checkpoint(&st)
+            .map_err(|e| Failure(format!("E7028 the task is settled; only flushing store.db is pending\n  {}", e.0), e.1))?;
     }
     Ok(())
 }
@@ -3005,6 +3009,13 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
     packet["changes"] = json!(open(root).map(|s| changes_of(&s, &packet).unwrap_or_default()).unwrap_or_default());
     // The brief says where the agent works.
     packet["home"] = json!(scope::dir(&scope::top(root), here));
+    // D-182: a work brief names the marked test commands of every project it covers.
+    if kind == "work" {
+        match marked_tests(&scope::top(root), &packet) {
+            Ok(tests) => packet["test_commands"] = json!(tests),
+            Err(e) => packet["test_commands_error"] = json!(e.0),
+        }
+    }
     let mut out = brief(&packet, kind);
     out += &feature_section(&scope::top(root), t);
     if resumed {
@@ -3042,7 +3053,8 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
         // A discussion runs no checks, so it gets the decision titles instead of the verification record.
         if kind == "discuss" {
             let decisions = fs::read_to_string(scope::top(root).join("DECISIONS.md")).unwrap_or_default();
-            let titles: Vec<String> = decisions.lines().filter_map(|l| l.strip_prefix("## ")).filter(|l| l.starts_with("D-")).map(|l| format!("- {l}")).collect();
+            let titles: Vec<String> =
+                decisions.lines().filter_map(|l| l.strip_prefix("## ")).filter(|l| l.starts_with("D-")).map(|l| format!("- {l}")).collect();
             if !titles.is_empty() {
                 out += &format!("\nDecisions (DECISIONS.md; `grep D-<n>` then `read` for a record):\n{}\n", titles.join("\n"));
             }
@@ -3080,7 +3092,8 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
     }
     // A discussion's `task note` returns the human's next message, so the run
     // ends with the call that says so, not with the first note.
-    out += "\nAfter the call that ends the run returns, stop: no more calls, and a final response of one line at most; then exit normally.\n";
+    out +=
+        "\nAfter the call that ends the run returns, stop: no more calls, and a final response of one line at most; then exit normally.\n";
     (out, images)
 }
 
@@ -3430,25 +3443,50 @@ fn brief(t: &Value, kind: &str) -> String {
     let ask = "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. In the question's `text`, give each option a short example of the outcome the human would see (what a user sees, what a command prints, what a page shows, what a file or record ends up as), not how the code would change; the `options` stay short labels matching the bold names in the examples. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
     let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. Keep messages short: lead with the answer or outcome, then only what the human needs to act on; don't restate the task or narrate your steps. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); in `text`, give each option a short example of its outcome in the human's terms, its name in bold, and keep the `options` labels short, matching the bold names.";
     let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `merge`, `write`, `remove` and `format` are refused, and `run <name>` works only for commands marked `allowed_in_reviews` in `solace.toml`: use those to verify (for example test suites).";
+    let common = "Code held as symbols is read and cited by name (`lockdown.dispatch`, `checkout.pay`), not by source path: source files are projections written by Solace.";
+    let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
+    let list = |k: &str| t[k].as_array().cloned().unwrap_or_default();
+    let home = text(&t["home"]);
+    let projects: Vec<String> = list("scope").iter().map(text).collect();
+    // D-182: the commands each project marks as tests, so a work brief names
+    // them once instead of making the agent guess among every declared command.
+    let marked = t["test_commands"].as_array().cloned().unwrap_or_default();
+    let tests = if marked.is_empty() {
+        String::new()
+    } else {
+        let suites = marked
+            .iter()
+            .map(|p| {
+                let names: Vec<&str> = p["commands"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+                let names = names.join(", ");
+                if projects.len() > 1 { format!("{}: {names}", text(&p["project"])) } else { names }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(", and `run <name>` for: {suites}")
+    };
+    let tests = match t["test_commands_error"].as_str() {
+        Some(e) => format!("; the marked test commands could not be read: {e}"),
+        None => tests,
+    };
     // A task in a feature files its review's minor findings as the feature's tech debt (D-112).
     let debt = if t["feature"].is_string() { format!(" {TECH_DEBT_ASK}") } else { String::new() };
     let role = match kind {
         "review" => format!(
-            "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. Read what you need in small batches, one concern at a time. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. {read_only} Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
+            "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed. A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names. Keep the concern-by-concern focus. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. {read_only} Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
         ),
         "discuss" => format!(
             "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
         ),
         "work" => format!(
-            "Make the change this task describes. {start} {ask} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, run all tests of the projects this task covers: `test --all` in each one with Gleam code, and the test commands its `solace.toml` declares (`run <name>`). Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
+            "Make the change this task describes. {start} {ask} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
         ),
         _ => format!(
-            "Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. A plan assigns every file change to whoever does the work, as an edit (`submit` or `write`) or a settings proposal (`write` with `reason`), never to the human, who never edits files or runs commands. A plan is the smallest complete change (the reference's step 2) and names every file it reaches. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work, and anything you didn't check."
+            "Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. A plan assigns every file change to whoever does the work, as an edit (`submit` or `write`) or a settings proposal (`write` with `reason`), never to the human, who never edits files or runs commands. A plan is the smallest complete change (the reference's step 2) and names every module or symbol it changes and every non-source file it reaches. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work, and anything you didn't check."
         ),
     };
-    let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
     let mut out = format!(
-        "You are working on a task from this project's task board. You work only through the Solace tool: there is no shell and no file access.\n{role}\n{responses}\n\n{}",
+        "You are working on a task from this project's task board. You work only through the Solace tool: there is no shell and no file access.\n{role}\n{common}\n{responses}\n\n{}",
         task_sections(t)
     );
     let mut section = |title: &str, lines: Vec<String>| {
@@ -3456,10 +3494,7 @@ fn brief(t: &Value, kind: &str) -> String {
             out += &format!("\n{title}:\n{}\n", lines.join("\n"));
         }
     };
-    let list = |k: &str| t[k].as_array().cloned().unwrap_or_default();
     // A task across projects (D-61): where the agent works, and how it reaches the others.
-    let home = text(&t["home"]);
-    let projects: Vec<String> = list("scope").iter().map(text).collect();
     if projects.len() > 1 {
         section(
             "Projects",
@@ -3528,7 +3563,7 @@ fn tool_input(args: &Value) -> (String, String) {
 }
 /// Reads an agent's log (Codex `exec --json` or Claude Code `stream-json`) into
 /// entries a board can show: message, thinking, tool, usage, error or output.
-// ponytail: rereads the whole log per request; keep an offset if logs get large.
+// rereads the whole log per request; keep an offset if logs get large.
 pub fn transcript(log: &Path) -> Vec<Value> {
     let mut out: Vec<Value> = vec![];
     let mut tools: HashMap<String, usize> = HashMap::new();
@@ -3676,6 +3711,10 @@ fn finish(root: &Path, tid: &str, rid: &str, failure: Option<&str>) -> Result<()
 /// A task run's task and run, from its agent's environment; none in a
 /// strategy run.
 pub fn context() -> Option<(String, String)> {
+    #[cfg(test)]
+    if let Some(ids) = TEST_CONTEXT.with(|c| c.borrow().clone()) {
+        return Some(ids);
+    }
     task_ids(env::var("SOLACE_TASK").ok(), env::var("SOLACE_RUN").ok())
 }
 /// The task run's ids: both of them, and the task is not a strategy run's.
@@ -4867,3 +4906,38 @@ impl Read for Events {
 // The unit tests are in their own file, so this one stays within watch_limit.
 #[path = "board_tests.rs"]
 mod tests;
+
+/// The `[commands]` each project of the task marks with `test = true`, in
+/// project order and sorted by name (D-182). A project with none is left out;
+/// a settings file that cannot be read is an error, not an empty project.
+fn marked_tests(top: &Path, t: &Value) -> Result<Vec<Value>, Failure> {
+    let home = t["home"].as_str().unwrap_or("");
+    let mut found = vec![];
+    for dir in scope::of(t, home) {
+        let settings = lockdown::settings(&scope::path(top, &dir))?;
+        let Some(commands) = settings.get("commands").and_then(|c| c.as_table()) else { continue };
+        let mut names: Vec<&str> =
+            commands.iter().filter(|(_, c)| c.get("test").and_then(|x| x.as_bool()) == Some(true)).map(|(name, _)| name.as_str()).collect();
+        names.sort();
+        if !names.is_empty() {
+            found.push(json!({"project": dir, "commands": names}));
+        }
+    }
+    Ok(found)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's task and run, in place of the agent's environment.
+    static TEST_CONTEXT: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `context` reading `tid` and `rid`, for a test that drives a
+/// task command without an agent's environment.
+#[cfg(test)]
+pub(super) fn with_context<T>(tid: &str, rid: &str, f: impl FnOnce() -> T) -> T {
+    let old = TEST_CONTEXT.with(|c| c.replace(Some((tid.to_string(), rid.to_string()))));
+    let out = f();
+    TEST_CONTEXT.with(|c| *c.borrow_mut() = old);
+    out
+}

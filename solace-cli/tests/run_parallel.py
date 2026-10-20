@@ -2,7 +2,7 @@
 
 Usage: run_parallel.py module [module...]
 Each test builds its own temp root and binds port 0, so tests share nothing.
-SOLACE_ACCEPTANCE_JOBS sets the worker count (default: CPU count, at most 8).
+SOLACE_ACCEPTANCE_JOBS sets the worker count (default: CPU count).
 """
 import os
 import subprocess
@@ -34,7 +34,7 @@ def main(modules):
     tests = []
     for module in modules:
         tests += ids(unittest.defaultTestLoader.loadTestsFromName(module))
-    jobs = int(os.environ.get('SOLACE_ACCEPTANCE_JOBS') or min(os.cpu_count() or 2, 8))
+    jobs = int(os.environ.get('SOLACE_ACCEPTANCE_JOBS') or (os.cpu_count() or 2))
     start = time.monotonic()
     failed = []
     with ThreadPoolExecutor(max_workers=max(jobs, 1)) as pool:

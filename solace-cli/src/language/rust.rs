@@ -704,7 +704,7 @@ fn is_string(l: &proc_macro2::Literal) -> bool {
 /// `pub(crate) use` count, and an inline `mod`'s imports — which a nested save
 /// would drop as a child row — are found (D-168).
 pub fn imports(source: &str) -> bool {
-    syn::parse_file(source).map(|f| f.items.iter().any(item_use)).unwrap_or(false)
+    !import_texts(source).is_empty()
 }
 
 /// Whether an item is a `use`, an inline `mod`'s items included (D-168).
@@ -760,4 +760,28 @@ pub fn child_module(path: &str, file: &str, owns_dir: bool, name: &str) -> Strin
 #[cfg(test)]
 #[path = "rust_tests.rs"]
 mod tests;
+
+/// The source text of every module-level `use`, an inline `mod`'s included.
+pub fn import_texts(source: &str) -> Vec<String> {
+    fn collect(items: &[Item], source: &str, out: &mut Vec<String>) {
+        for item in items {
+            if !item_use(item) {
+                continue;
+            }
+            match item {
+                Item::Use(_) => out.push(source[item.span().byte_range()].trim().to_string()),
+                Item::Mod(m) => {
+                    if let Some((_, items)) = &m.content {
+                        collect(items, source, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let Ok(file) = syn::parse_file(source) else { return vec![] };
+    let mut out = vec![];
+    collect(&file.items, source, &mut out);
+    out
+}
 

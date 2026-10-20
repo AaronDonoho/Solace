@@ -2589,3 +2589,17 @@ pub fn dependents_reply_keeps_a_live_dependent_test() {
   page |> string.contains(">Later</a>") |> should.be_true
   page |> string.contains(">Added</a>") |> should.be_true
 }
+
+/// The shared declarations of a small control: the page's font at 13px, on
+/// paper with the shared edge, its height and a pointing cursor.
+pub fn small_control_has_its_shared_declarations_test() {
+  let css = task.small_control
+  assert string.contains(css, "font:inherit")
+  assert string.contains(css, "font-size:13px")
+  assert string.contains(css, "color:var(--ink)")
+  assert string.contains(css, "background:var(--paper)")
+  assert string.contains(css, "border:1px solid var(--edge)")
+  assert string.contains(css, "border-radius:0")
+  assert string.contains(css, "min-height:var(--control-h-small)")
+  assert string.contains(css, "cursor:pointer")
+}

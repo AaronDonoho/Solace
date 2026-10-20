@@ -12,19 +12,21 @@ read = ["../bench/pilot-large"]
 # D-143: a write that misaligns the reference's columns is refused, naming the line.
 "src/reference.txt" = ["python3", "tests/reference_layout.py", "{file}"]
 
+# D-182: `test = true` marks a suite the work brief names to run after `test --all`.
 [commands]
 rust-board-tests = { run = ["cargo", "test", "board::"], allowed_in_reviews = true }
 rust-lockdown-tests = { run = ["cargo", "test", "lockdown::"], allowed_in_reviews = true }
 # Every module's unit tests; an argument filters by test name (`tasks::`, `scope::`).
-rust-unit = { run = ["env", "-u", "SOLACE_TASK", "-u", "SOLACE_RUN", "-u", "SOLACE_SESSION", "-u", "SOLACE_CONFIG", "-u", "SOLACE_BIN", "cargo", "test", "--bins"], args = true, allowed_in_reviews = true }
+rust-unit = { run = ["cargo", "test", "--bins"], args = true, allowed_in_reviews = true }
 # D-71: fixture instances run independently of the invoking agent's task context.
+# The server drops that context for every declared command.
 # The integration test is ignored so `test` skips the Python suites in its no-network sandbox; this runs them outside it.
-rust-acceptance = { run = ["env", "-u", "SOLACE_TASK", "-u", "SOLACE_RUN", "-u", "SOLACE_SESSION", "-u", "SOLACE_CONFIG", "-u", "SOLACE_BIN", "cargo", "test", "--test", "acceptance", "--", "--include-ignored"], allowed_in_reviews = true }
+rust-acceptance = { run = ["cargo", "test", "--test", "acceptance", "--", "--include-ignored"], allowed_in_reviews = true, test = true }
 # Layout measurements and screenshots of a fixture instance, light and dark (D-71 isolation).
 # An argument limits it to one page: board, strategy[-vision|-features|-roadmap|-tasks], settings, task.
-layout_audit = { run = ["env", "-u", "SOLACE_TASK", "-u", "SOLACE_RUN", "-u", "SOLACE_SESSION", "-u", "SOLACE_CONFIG", "-u", "SOLACE_BIN", "python3", "tests/layout_audit.py"], args = true, allowed_in_reviews = true }
+layout_audit = { run = ["python3", "tests/layout_audit.py"], args = true, allowed_in_reviews = true }
 # The shared spacing tokens and the board's column labels, against the one place that sets them.
-spacing_parity = { run = ["python3", "tests/spacing_parity.py"], allowed_in_reviews = true }
+spacing_parity = { run = ["python3", "tests/spacing_parity.py"], allowed_in_reviews = true, test = true }
 cargo-timings = { run = ["cargo", "build", "--release", "--timings"], allowed_in_reviews = true }
 # Cold build measurement in an isolated target dir (leaves the normal cache alone): clean, then build.
 cargo-cold-clean = { run = ["cargo", "clean", "--target-dir", "target/cold"] }
@@ -35,7 +37,7 @@ cargo-check-json = { run = ["cargo", "check", "--all-targets", "--message-format
 # rustfmt state of the crate.
 cargo-fmt-check = { run = ["cargo", "fmt", "--check"] }
 # Test-time measurement; `--no-run` separates compile time from run time (D-71 isolation).
-cargo-test = { run = ["env", "-u", "SOLACE_TASK", "-u", "SOLACE_RUN", "-u", "SOLACE_SESSION", "-u", "SOLACE_CONFIG", "-u", "SOLACE_BIN", "cargo", "test"], args = true }
+cargo-test = { run = ["cargo", "test"], args = true }
 
 # Solace's own crate, built after the frontend bundle it embeds (build.rs).
 [build]

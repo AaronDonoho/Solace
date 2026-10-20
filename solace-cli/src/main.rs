@@ -193,9 +193,14 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     // changes one project. A `merge`'s is the survivor's, which it only reads (D-117).
     let dest = match a.iter().position(|x| *x == "--to-project") {
         Some(i) if matches!(a.first(), Some(&"move" | &"extract" | &"merge")) => {
-            let dir = a.get(i + 1).copied().ok_or_else(|| Failure("--to-project needs a project folder; session start lists them".into(), 2))?;
+            let dir =
+                a.get(i + 1).copied().ok_or_else(|| Failure("--to-project needs a project folder; session start lists them".into(), 2))?;
             let Some(p) = scoped(dir, args)? else {
-                return lockdown::error("E6007", dir, format!("`{} --to-project` works only in a board run whose task covers both projects", a[0]));
+                return lockdown::error(
+                    "E6007",
+                    dir,
+                    format!("`{} --to-project` works only in a board run whose task covers both projects", a[0]),
+                );
             };
             let here = match &cross {
                 Some(c) => c.clone(),
@@ -278,7 +283,8 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     let mut settings_write: Option<String> = None;
     if let Some((tid, rid)) = &context {
         if a.first() == Some(&"write")
-            && let Some(file) = a.get(1).map(|p| file_name(Path::new(p))).filter(|p| lockdown::settings_file(&store.root, p) || *p == "Cargo.toml")
+            && let Some(file) =
+                a.get(1).map(|p| file_name(Path::new(p))).filter(|p| lockdown::settings_file(&store.root, p) || *p == "Cargo.toml")
         {
             let current = fs::read(store.root.join(&file)).unwrap_or_default();
             let proposed = lockdown::edited(&current, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old)?;
@@ -342,11 +348,12 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         v.as_object_mut().unwrap().extend(dependency_files(&d.root));
         Ok(v)
     };
-    let deps_before: Vec<(&Store, Value)> = if dest_before.as_ref().is_some_and(|(_, to, _)| to.is_none()) || (a[0] == "merge" && before.is_some()) {
-        deps.iter().map(|d| Ok((d, with_toml(d)?))).collect::<Result<_, Failure>>()?
-    } else {
-        vec![]
-    };
+    let deps_before: Vec<(&Store, Value)> =
+        if dest_before.as_ref().is_some_and(|(_, to, _)| to.is_none()) || (a[0] == "merge" && before.is_some()) {
+            deps.iter().map(|d| Ok((d, with_toml(d)?))).collect::<Result<_, Failure>>()?
+        } else {
+            vec![]
+        };
     // The folders each project had, so undo removes only those the task made (D-136).
     let folders = before.as_ref().map(|_| board::existing_folders(&store.root));
     let d_folders = dest_before.as_ref().map(|(d, ..)| board::existing_folders(&d.root));
@@ -355,7 +362,9 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     // transaction around the command and `record`. A process runs outside it, so
     // a long `run` holds the store's write lock only for the rows; the ahead
     // record in `.solace/pending/` covers a crash while the process runs.
-    let processes = a.first().is_some_and(|c| PROCESSES.contains(c)) && !reads_only(&a);
+    // Rust `format` saves through the store, so it belongs inside the outer
+    // transaction; only a process that changes files behind the store stays out.
+    let processes = is_process(&a, &store.root);
     COMMAND_DB.set(vec![(store.root.clone(), store.db.clone())]);
     let _outer = OuterTransaction(store.db.clone());
     let dest_tx = dest_before.as_ref().filter(|(_, to, _)| to.is_none()).map(|(d, ..)| *d);
@@ -573,8 +582,9 @@ const PROCESSES: &[&str] = &["format", "build", "run"];
 const VERIFIES: &[&str] = &["check", "test", "build"];
 /// Only for the human, never in a board run.
 const HOST: &[&str] = &["agent-config", "serve", "create", "migrate"];
-/// Need Gleam code: refused in a project of plain files.
-const GLEAM: &[&str] = &["submit", "drafts", "view", "inspect", "refs", "impact", "find", "delete", "extract", "merge", "check", "test", "probe"];
+/// Need symbol-held source (Gleam or Rust): refused in a project of plain files.
+const GLEAM: &[&str] =
+    &["submit", "drafts", "view", "inspect", "refs", "impact", "find", "delete", "extract", "merge", "check", "test", "probe"];
 /// D-119: changes whose failure stops the call, so nothing after them runs on unsaved work.
 const STOPS: &[&str] = &["submit", "delete", "extract", "merge", "write", "remove", "move"];
 /// D-152: what a reply ends with when it held back a `task done`.
@@ -852,7 +862,7 @@ fn scoped(dir: &str, args: &[String]) -> Result<Option<PathBuf>, Failure> {
 }
 
 /// Runs a command in another folder, and comes back after.
-// ponytail: the working folder is process-wide; fine while a process serves one call at a time (CLI, MCP).
+// the working folder is process-wide; fine while a process serves one call at a time (CLI, MCP).
 struct Within(PathBuf);
 impl Within {
     fn enter(dir: &Path) -> Result<Within, Failure> {
@@ -900,7 +910,10 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
         return lockdown::error(
             "E6007",
             dir,
-            format!("not a project under this Solace root: `--project` takes a folder from the Solace root; its projects: {}", members.join(", ")),
+            format!(
+                "not a project under this Solace root: `--project` takes a folder from the Solace root; its projects: {}",
+                members.join(", ")
+            ),
         );
     }
     let target = scope::path(&root, dir);
@@ -914,8 +927,11 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
     if let Some(out) = lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
         return out;
     }
-    if store.lang.is_none() {
-        return lockdown::plain(command);
+    // A Rust project has no `Language`; its store's symbols are read as any
+    // other's (D-158), so only a project of plain files is refused.
+    if store.lang.is_none() && !language::is_rust(&store.root) {
+        let task = board::context().map(|(tid, _)| tid);
+        return lockdown::plain(&store, task.as_deref(), command);
     }
     let out = match a.as_slice() {
         ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
@@ -988,13 +1004,14 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
     // run_options has put back any interrupted file write (lockdown::recover).
     let store = Store::open()?;
     let settings = lockdown::settings(&store.root)?;
+    let task = board::context().map(|(tid, _)| tid);
     if let Some(out) = lockdown::dispatch(&store, &settings, &a, input, old, budget) {
         return out;
     }
     // drafts include kept file patches (D-120), so a plain-files project lists and reads them
     if GLEAM.contains(&a[0]) && !matches!(a.as_slice(), ["drafts"] | ["view", "--draft", _]) && store.lang.is_none() {
         if !language::is_rust(&store.root) {
-            return lockdown::plain(a[0]);
+            return lockdown::plain(&store, task.as_deref(), a[0]);
         }
         // A Rust project's tools are cargo's (D-158, D-168, D-173): `check` and
         // `test` run, `submit` saves items by name and `delete` removes them,
@@ -1005,7 +1022,7 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
             // Reads reach a Rust store's symbols by name, as they do Gleam's
             // (D-158); `refs` and `impact` answer from its reference graph (D-170).
             "view" | "inspect" | "find" | "refs" | "impact" => {}
-            _ => return lockdown::plain(a[0]),
+            _ => return lockdown::plain(&store, task.as_deref(), a[0]),
         }
     }
     match a.as_slice() {
@@ -1099,7 +1116,7 @@ fn is_question(line: &str) -> bool {
     }
 }
 
-/// A `command` line that is Gleam code, not a Solace command.
+/// A `command` line that is Gleam or Rust code, not a Solace command.
 fn looks_like_code(line: &str) -> bool {
     let first = line.split_whitespace().next().unwrap_or("");
     matches!(first, "let" | "echo" | "assert" | "use" | "case" | "pub" | "fn" | "import" | "}" | "//") || first.contains('(')
@@ -1555,6 +1572,10 @@ impl Store {
 
     /// The project the working folder is in: the nearest folder up with a store.
     fn root() -> Result<PathBuf, Failure> {
+        #[cfg(test)]
+        if let Some(root) = TEST_ROOT.with(|r| r.borrow().clone()) {
+            return Ok(root);
+        }
         let mut dir = env::current_dir()?;
         loop {
             if dir.join(".solace/store.db").exists() {
@@ -1830,7 +1851,7 @@ impl Store {
     fn plain_session(&self, deps: &str, tid: Option<&str>) -> Out {
         let mut out = self.project_instructions();
         out += deps;
-        out += "This project has plain files and no Gleam code of its own: `files` lists them, `read` and `write` change them, \
+        out += "This project has plain files and no code held as symbols of its own: `files` lists them, `read` and `write` change them, \
                 and `run` runs the commands its solace.toml declares.\n";
         out += &self.session_end(&self.index()?, "for example `grep <text> --in <path>` and `read <path> --lines a..b`", tid)?;
         Ok(out)
@@ -1972,12 +1993,8 @@ impl Store {
     fn task_session(&self, task: &str, tid: Option<&str>, deps: &str) -> Out {
         const BUDGET: usize = 6500; // bytes, about 1.6k tokens
         let rust = language::is_rust(&self.root);
-        if self.lang.is_none() && !rust {
-            return self.plain_session(deps, tid);
-        }
-        let ix = self.index()?;
-        // The task's other projects with Gleam code, by folder: the list of
-        // symbols draws on them too (D-123).
+        // The task's other projects with code, by folder: the list of symbols
+        // draws on them too (D-123).
         let top = scope::top(&self.root);
         let mine = scope::dir(&top, &self.root);
         let others: Vec<(String, Store, Index)> = tid
@@ -1994,19 +2011,32 @@ impl Store {
                 Some((d, s, ix))
             })
             .collect();
+        if self.lang.is_none() && !rust && others.is_empty() {
+            return self.plain_session(deps, tid);
+        }
+        let ix = self.index()?;
         let projects: Vec<(Option<&str>, &Store, &Index)> =
             std::iter::once((None, self, &ix)).chain(others.iter().map(|(d, s, x)| (Some(d.as_str()), s, x))).collect();
         let mut modules = String::from("Modules (`view <module>` for an outline):\n");
-        let mut tests = vec![];
-        for m in &ix.modules {
-            if store::is_test(m) {
-                tests.push(m.path.as_str());
-            } else {
-                modules += &format!("  {} — {}\n", m.path, store::module_doc(m));
+        let grouped = !others.is_empty();
+        for (p, (folder, _, pix)) in projects.iter().enumerate() {
+            if grouped && pix.modules.is_empty() {
+                continue;
             }
+            if grouped {
+                modules += &format!("{}:\n", if p == 0 { mine.as_str() } else { folder.unwrap_or(mine.as_str()) });
+            }
+            let mut tests = vec![];
+            for m in &pix.modules {
+                if store::is_test(m) {
+                    tests.push(m.path.as_str());
+                } else {
+                    modules += &format!("  {} — {}\n", m.path, store::module_doc(m));
+                }
+            }
+            modules += &format!("Test modules: {}\n", tests.join(", "));
         }
-        modules += &format!("Test modules: {}\n", tests.join(", "));
-        if rust {
+        if rust || others.iter().any(|(_, s, _)| language::is_rust(&s.root)) {
             modules += &format!("\n{}", store::RUST_BRIEF);
         }
 
@@ -2104,26 +2134,29 @@ impl Store {
             .filter(|&i| !is_test(&ix, i) && ix.syms[i].kind == Kind::Fn && !ix.syms[i].text.contains("@external"))
             .take(2)
             .collect();
-        let name = |i: usize| {
-            let short = reach::short(&ix, i);
-            if self.resolve(&ix, &short).ok() == Some(i) { short } else { ix.syms[i].qname() }
+        let name = |p: usize, i: usize| {
+            let (_, store, pix) = projects[p];
+            let short = reach::short(pix, i);
+            if store.resolve(pix, &short).ok() == Some(i) { short } else { pix.syms[i].qname() }
         };
         let repro = code
             .first()
             .and_then(|_| {
-                reach::test_symbols(&ix).into_iter().map(|t| (t, reach::closure(&ix, t))).filter(|(_, r)| r.contains(&code[0])).max_by(|a, b| {
-                    let reached = |r: &HashSet<usize>| code.iter().filter(|c| r.contains(c)).count();
-                    reached(&a.1)
-                        .cmp(&reached(&b.1))
-                        .then(score[a.0].total_cmp(&score[b.0]))
-                        .then(ix.syms[b.0].text.len().cmp(&ix.syms[a.0].text.len()))
-                })
+                reach::test_symbols(&ix).into_iter().map(|t| (t, reach::closure(&ix, t))).filter(|(_, r)| r.contains(&code[0])).max_by(
+                    |a, b| {
+                        let reached = |r: &HashSet<usize>| code.iter().filter(|c| r.contains(c)).count();
+                        reached(&a.1)
+                            .cmp(&reached(&b.1))
+                            .then(score[a.0].total_cmp(&score[b.0]))
+                            .then(ix.syms[b.0].text.len().cmp(&ix.syms[a.0].text.len()))
+                    },
+                )
             })
             .map(|(t, r)| {
-                let traced: Vec<String> = code.iter().filter(|c| r.contains(c)).map(|&c| name(c)).collect();
+                let traced: Vec<String> = code.iter().filter(|c| r.contains(c)).map(|&c| name(0, c)).collect();
                 format!(
                     "To reproduce the task's case: `probe --from {} --trace {}`, with statements for the case in `text`.\n",
-                    name(t),
+                    name(0, t),
                     traced.join(" ")
                 )
             })
@@ -2157,8 +2190,16 @@ impl Store {
         out += &format!(
             "Symbols most likely relevant to the task, best first (signatures; `>` lines quote code that names the task's terms; `inspect` for code{marked}):\n{packet}{repro}\n{modules}"
         );
-        let top: Vec<String> = ranked.iter().filter(|&&(p, _)| p == 0).take(3).map(|&(_, i)| name(i)).collect();
-        let call = if top.is_empty() { EXAMPLE_CALL.to_string() } else { format!("`inspect {} --context`", top.join(" ")) };
+        let start: Vec<usize> = ranked.iter().filter(|&&(p, _)| p == 0).map(|&(_, i)| i).take(3).collect();
+        let call = if !start.is_empty() {
+            let names: Vec<String> = start.iter().map(|&i| name(0, i)).collect();
+            format!("`inspect {} --context`", names.join(" "))
+        } else if let Some(&(p, _)) = ranked.first() {
+            let names: Vec<String> = ranked.iter().filter(|&&(q, _)| q == p).map(|&(_, i)| name(p, i)).take(3).collect();
+            format!("`inspect {} --project {} --context`", names.join(" "), projects[p].0.unwrap_or(mine.as_str()))
+        } else {
+            EXAMPLE_CALL.to_string()
+        };
         out += &self.session_end(&ix, &call, tid)?;
         Ok(out)
     }
@@ -3227,13 +3268,23 @@ impl Store {
         let (tid, _) = board::context()?;
         let t = scope::home(&self.root, &tid).and_then(|home| board::task(&home, &tid)).ok()?;
         let here = scope::dir(&scope::top(&self.root), &self.root);
+        let mut covered = reached.clone();
+        let by_id: HashMap<&str, usize> = ix.syms.iter().enumerate().map(|(i, s)| (s.id.as_str(), i)).collect();
+        for &i in reached {
+            let mut parent = ix.syms[i].parent.as_deref();
+            while let Some(p) = parent {
+                let Some(&k) = by_id.get(p) else { break };
+                covered.insert(k);
+                parent = ix.syms[k].parent.as_deref();
+            }
+        }
         let names: Vec<String> = board::changes_of(self, &t)
             .unwrap_or_default()
             .iter()
             .filter(|c| c["project"] == here)
             .filter_map(|c| c["entity"].as_str()?.strip_prefix("symbol:").map(String::from))
             .filter_map(|id| ix.syms.iter().position(|s| s.id == id))
-            .filter(|&i| !is_test(ix, i) && !reached.contains(&i))
+            .filter(|&i| !is_test(ix, i) && !covered.contains(&i))
             .map(|i| reach::short(ix, i))
             .collect();
         if names.is_empty() {
@@ -3352,7 +3403,10 @@ impl Store {
             let i = self.resolve(ix, name)?;
             let s = &ix.syms[i];
             if s.kind != Kind::Fn || s.text.contains("@external") {
-                return fail(format!("E1006 {} can't be traced: only functions written in Gleam can.", s.qname()));
+                return fail(format!(
+                    "E1006 {} can't be traced: `probe` is Gleam only and traces only functions written in Gleam.",
+                    s.qname()
+                ));
             }
             edits.push((i, trace_wrap(s)));
         }
@@ -3586,7 +3640,7 @@ fn ref_lines(ix: &Index, j: usize, i: usize) -> Vec<(usize, String)> {
 /// Where `j` constructs or matches type `ty` listing every field (no `..`):
 /// the places that break when a field is added (D-46). With `updates`, the
 /// record updates and patterns with `..` instead, which don't.
-// ponytail: a generic type's annotation such as `Box(Int)` also matches; check the position if that misleads.
+// a generic type's annotation such as `Box(Int)` also matches; check the position if that misleads.
 fn sites(ix: &Index, j: usize, ty: usize, updates: bool) -> Vec<(usize, String)> {
     let ctors = ix.lang.constructors(&ix.syms[ty].text);
     let text = &ix.syms[j].text;
@@ -4025,13 +4079,28 @@ fn count(n: usize, noun: &str) -> String {
     format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 
-/// A project file's name as Solace lists it: `/`-separated, without `.` parts.
+/// A project file's name as Solace lists it: `/`-separated, with `.` removed
+/// and parent parts resolved for relative paths. A rooted path stays as
+/// written, so an error echoes what the agent sent.
 fn file_name(path: &Path) -> String {
-    path.components()
-        .filter(|c| !matches!(c, std::path::Component::CurDir))
-        .map(|c| c.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
+    if path.components().any(|part| matches!(part, std::path::Component::RootDir | std::path::Component::Prefix(_))) {
+        return path.to_string_lossy().into_owned();
+    }
+    let mut parts: Vec<String> = vec![];
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if parts.last().is_some_and(|part| part != "..") {
+                    parts.pop();
+                } else {
+                    parts.push("..".to_string());
+                }
+            }
+            part => parts.push(part.as_os_str().to_string_lossy().into_owned()),
+        }
+    }
+    parts.join("/")
 }
 
 /// Symbols as they were before a change: (id, text then; `None` if new).
@@ -4155,3 +4224,26 @@ mod testing;
 #[cfg(test)]
 #[path = "main_tests.rs"]
 mod tests;
+
+/// Whether the command is a process that changes files behind the store, so it
+/// runs outside the command's outer transaction. Rust's `format` saves through
+/// the store instead (D-180).
+fn is_process(a: &[&str], root: &Path) -> bool {
+    a.first().is_some_and(|c| PROCESSES.contains(c)) && !reads_only(a) && !(a[0] == "format" && language::is_rust(root))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's project root, in place of the working folder's.
+    static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `Store::root` reading `root`, so a test drives a command
+/// without changing the process's working folder.
+#[cfg(test)]
+pub(crate) fn with_root<T>(root: &Path, f: impl FnOnce() -> T) -> T {
+    let old = TEST_ROOT.with(|r| r.replace(Some(root.to_path_buf())));
+    let out = f();
+    TEST_ROOT.with(|r| *r.borrow_mut() = old);
+    out
+}

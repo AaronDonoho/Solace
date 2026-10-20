@@ -70,24 +70,16 @@ impl Run {
         self.dirty = false;
     }
 
-    /// The MCP call of `commands` ended: the reads are saved on the run. A
-    /// change command starts a new window; the reply adds nothing on its own.
-    pub(super) fn end_call(&mut self, commands: &[&str]) {
+    /// The MCP call ended: a read no command closed joins the window, and the
+    /// reads are saved once. Commands update their own window as they finish.
+    pub(super) fn end_call(&mut self) {
         let served = take_served();
-        let changed = commands.iter().any(|c| {
-            let words: Vec<String> = c.strip_prefix("solace").unwrap_or(c).split_whitespace().map(String::from).collect();
-            is_change(&words)
-        });
-        if !served.is_empty() || changed {
-            if changed {
-                let stores = opened(&self.top, &self.reads);
-                self.reads.new_window(&|r| current_revision(&stores, r));
-            }
+        if !served.is_empty() {
             self.reads.record(&served);
-            self.window();
             self.dirty = true;
         }
         SERVED.with(|v| v.borrow_mut().take());
+        WINDOW.with(|v| v.borrow_mut().take());
         if self.dirty {
             let (top, tid, rid) = (&self.top, &self.tid, &self.rid);
             let _ = board::record_reads(top, tid, rid, self.reads.to_json());
@@ -131,46 +123,71 @@ pub(super) fn remember_reply(context: &str, reads: &Value, top: &Path, outline: 
     const STORY_HEAD: &str = "This run so far, one step per line:\n";
     const NOT_SHOWN: &str = "Not shown, to fit the size limit: ";
     const NOTES: &str = "the task's notes";
-    // The headings and the notice naming what didn't fit are added last; hold
-    // room for them and every name they could carry, so the reply keeps to its
-    // budget even when many views are left out.
-    let groups = reads.others(&[]);
-    let names = groups.iter().flat_map(|(_, names)| names.iter()).map(|n| n.len() + 1).sum::<usize>();
-    let fixed = VIEWS_HEAD.len() + STORY_HEAD.len() + NOT_SHOWN.len() + names + 2;
-    // A context over its room is cut, and the notice says the task's notes.
-    let cut = context.len() > budget.saturating_sub(fixed);
-    let room = fixed + if cut { NOTES.len() + 1 } else { 0 };
-    let mut left_out: Vec<String> = if cut { vec![NOTES.to_string()] } else { vec![] };
-    let mut out = cut_text(context, budget.saturating_sub(room)).to_string();
-    let story = outline(OUTLINE_CAP.min(budget.saturating_sub(out.len() + room)));
-    let mut views = String::new();
-    // The ask is read-only: the views it prints are not new reads for the run.
-    without_serving(|| {
-        for (project, names) in groups {
+    // Open each project once, and keep only names it still has: a symbol deleted
+    // since it was read is no view to name as left out.
+    let groups: Vec<(String, Store, Index, Vec<String>)> = reads
+        .others(&[])
+        .into_iter()
+        .filter_map(|(project, names)| {
+            let s = Store::at(&top.join(&project)).ok()?;
+            let ix = s.index().ok()?;
+            let names: Vec<String> = names.into_iter().filter(|n| s.resolve(&ix, n).is_ok()).collect();
+            (!names.is_empty()).then_some((project, s, ix, names))
+        })
+        .collect();
+    let names = groups.iter().flat_map(|(_, _, _, names)| names.iter()).map(|n| n.len() + 1).sum::<usize>();
+    // The headings are added last. The first pass reserves neither symbol names
+    // nor a notice; when something is left out, a second pass makes that room.
+    let render = |notice: bool, reserved: usize| -> (String, bool, bool) {
+        let fixed = VIEWS_HEAD.len() + STORY_HEAD.len() + if notice { NOT_SHOWN.len() + reserved + 2 } else { 0 };
+        // A context over its room is cut, and the notice says the task's notes.
+        let cut = context.len() > budget.saturating_sub(fixed);
+        let room = fixed + if cut { NOTES.len() + 1 } else { 0 };
+        let mut left_out: Vec<String> = if cut { vec![NOTES.to_string()] } else { vec![] };
+        let mut out = cut_text(context, budget.saturating_sub(room)).to_string();
+        let story = outline(OUTLINE_CAP.min(budget.saturating_sub(out.len() + room)));
+        let mut views = String::new();
+        let mut view_left_out = false;
+        for (_, s, _, names) in &groups {
             let left = budget.saturating_sub(out.len() + story.len() + views.len() + room);
             if left == 0 {
-                left_out.extend(names);
+                left_out.extend(names.iter().cloned());
+                view_left_out = true;
                 continue;
             }
-            let Ok(s) = Store::at(&top.join(&project)) else { left_out.extend(names); continue };
-            let Ok(ix) = s.index() else { left_out.extend(names); continue };
-            let names: Vec<&str> = names.iter().map(String::as_str).filter(|n| s.resolve(&ix, n).is_ok()).collect();
+            let names: Vec<&str> = names.iter().map(String::as_str).collect();
             match s.view(&names, false, left) {
                 Ok(v) if v.len() <= left => views += &v,
-                _ => left_out.extend(names.iter().map(|n| n.to_string())),
+                _ => {
+                    left_out.extend(names.iter().map(|n| n.to_string()));
+                    view_left_out = true;
+                }
             }
         }
+        if !left_out.is_empty() {
+            views += &format!("{NOT_SHOWN}{}\n", left_out.join(" "));
+        }
+        if !views.is_empty() {
+            out += &format!("{VIEWS_HEAD}{views}");
+        }
+        if !story.is_empty() {
+            out += &format!("{STORY_HEAD}{story}");
+        }
+        (out, view_left_out, !left_out.is_empty())
+    };
+    // The ask is read-only: the views it prints are not new reads for the run.
+    let (out, _, _) = without_serving(|| {
+        let (out, view_left, any_left) = render(false, 0);
+        if !any_left {
+            (out, false, false)
+        } else if view_left {
+            render(true, names)
+        } else {
+            render(true, 0)
+        }
     });
-    if !left_out.is_empty() {
-        views += &format!("{NOT_SHOWN}{}\n", left_out.join(" "));
-    }
-    if !views.is_empty() {
-        out += &format!("{VIEWS_HEAD}{views}");
-    }
-    if !story.is_empty() {
-        out += &format!("{STORY_HEAD}{story}");
-    }
-    out
+    // A budget too small even for the notice still gets a reply within it.
+    cut_text(&out, budget).to_string()
 }
 
 /// `s` cut to `room` bytes at a line end where one is near, so a reply that

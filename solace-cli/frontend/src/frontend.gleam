@@ -80,7 +80,7 @@ pub fn route(uri: Uri) -> Route {
 /// A route's page element, hidden unless it is the one shown.
 /// The page a link asked for gets the record in its `focus` property, `{kind, dir, id, n}`.
 /// Its `attention` event flags its menu tab.
-/// The Knowledgebase page takes the server's columns for its column table.
+/// The Knowledgebase page takes these columns for its column table.
 pub fn page(
   route: Route,
   shown: Bool,
@@ -212,14 +212,22 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         }
       }
     // A reply that is not a workflow (a server that is down, a project with no
-    // board section) leaves the guide's table as it is: no rows.
+    // board section) keeps a loaded workflow, or gives the guide its known
+    // columns.
     WorkflowLoaded(text) ->
       case json.parse(text, solace_task.workflow_decoder()) {
         Ok(workflow) -> #(
           Model(..model, columns: workflow.columns),
           effect.none(),
         )
-        Error(_) -> #(model, effect.none())
+        Error(_) ->
+          case model.columns {
+            [] -> #(
+              Model(..model, columns: knowledgebase.known_columns()),
+              effect.none(),
+            )
+            _ -> #(model, effect.none())
+          }
       }
   }
 }
@@ -535,7 +543,8 @@ fn first_number(attributes: List(#(String, String))) -> Int {
 /// `focus` is the last link followed. `attention` holds the pages, by element, whose menu tab flashes:
 /// a page hidden at the time asked for it, and it hasn't been shown since.
 /// `columns` are the root project's board columns, as `GET /workflow` answers
-/// them; [] until it answers, and a project with no workflow keeps [].
+/// them; [] until it answers, and the guide's known columns when it answers
+/// with no workflow.
 pub type Model {
   Model(
     route: Route,

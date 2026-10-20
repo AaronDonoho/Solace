@@ -263,8 +263,12 @@ impl Store {
                 let dir = scope::path(&top, &d);
                 if lockdown::same_project(&dir, &self.root) {
                     None
+                } else if crate::language::is_rust(&dir) {
+                    return fail(format!(
+                        "E6013 {d} is a Rust project (Cargo.toml): `merge` is Gleam only; Rust merge is deferred (D-158 point 6)"
+                    ));
                 } else if !dir.join("gleam.toml").exists() {
-                    return fail(format!("E6013 {d} has no Gleam code to merge into"));
+                    return fail(format!("E6013 {d} has no code held as symbols to merge into"));
                 } else {
                     let store = Store::at(&dir)?;
                     let ix = store.index()?;
@@ -290,11 +294,20 @@ impl Store {
                     let scope_of: Option<Vec<String>> = scope::of_run(&self.root);
                     let found: Vec<&String> = members
                         .iter()
-                        .filter(|d| **d != mine && scope_of.as_ref().is_none_or(|ps| ps.contains(d)) && scope::path(&top, d).join("gleam.toml").exists())
-                        .filter(|d| board::open(&scope::path(&top, d)).ok().and_then(|st| st.resolve(&st.index().ok()?, &p.survivor).ok()).is_some())
+                        .filter(|d| {
+                            **d != mine
+                                && scope_of.as_ref().is_none_or(|ps| ps.contains(d))
+                                && scope::path(&top, d).join("gleam.toml").exists()
+                        })
+                        .filter(|d| {
+                            board::open(&scope::path(&top, d)).ok().and_then(|st| st.resolve(&st.index().ok()?, &p.survivor).ok()).is_some()
+                        })
                         .collect();
                     return match found.as_slice() {
-                        [d] => fail(format!("E1001 {} is not in this project; it is in {d}: use merge {} {} --to-project {d}", p.survivor, p.survivor, p.retired)),
+                        [d] => fail(format!(
+                            "E1001 {} is not in this project; it is in {d}: use merge {} {} --to-project {d}",
+                            p.survivor, p.survivor, p.retired
+                        )),
                         _ => Err(e),
                     };
                 }
@@ -328,14 +341,23 @@ impl Store {
             }
         }
         if jx.uses[s].contains(&r) {
-            return fail(format!("E5002 {} uses {}, which would then be itself: change {} first", keep.qname(), gone.qname(), keep.qname()));
+            return fail(format!(
+                "E5002 {} uses {}, which would then be itself: change {} first",
+                keep.qname(),
+                gone.qname(),
+                keep.qname()
+            ));
         }
 
         // this project's uses of the retired symbol, the retired symbol aside
         let users: Vec<usize> = ix.used_by[r].iter().copied().filter(|&j| j != r).collect();
         let user_names: Vec<String> = users.iter().map(|&j| ix.syms[j].qname()).collect();
         if !is_pub_text(&keep.text) && users.iter().any(|&j| ix.syms[j].module != keep.module) {
-            return fail(format!("E5009 {} is private and {} would use it: make it pub first, then merge", keep.qname(), user_names.join(", ")));
+            return fail(format!(
+                "E5009 {} is private and {} would use it: make it pub first, then merge",
+                keep.qname(),
+                user_names.join(", ")
+            ));
         }
 
         // a module cycle, or with --to-project a package cycle or a missing dependency
@@ -354,7 +376,8 @@ impl Store {
                     e
                 };
                 if cyclic(&edges(true)) && !cyclic(&edges(false)) {
-                    let apart: Vec<String> = users.iter().filter(|&&j| ix.syms[j].module != keep.module).map(|&j| ix.syms[j].qname()).collect();
+                    let apart: Vec<String> =
+                        users.iter().filter(|&&j| ix.syms[j].module != keep.module).map(|&j| ix.syms[j].qname()).collect();
                     return fail(format!(
                         "E5002 redirecting {} to {} closes an import loop: {}; change those uses first",
                         gone.qname(),
@@ -391,7 +414,9 @@ impl Store {
         // others that use the retired symbol are refused (as extract refuses them)
         let mut outside_users: Vec<String> = vec![];
         let mut deps: Vec<Dependent> = vec![];
-        let gone_names: Vec<String> = std::iter::once(gone.name.clone()).chain(if gone.kind == Kind::Type { self.lang().constructors(&gone.text) } else { vec![] }).collect();
+        let gone_names: Vec<String> = std::iter::once(gone.name.clone())
+            .chain(if gone.kind == Kind::Type { self.lang().constructors(&gone.text) } else { vec![] })
+            .collect();
         for d in members.iter().filter(|d| **d != mine && dest.as_ref().is_none_or(|t| t.dir != **d)) {
             let dir = scope::path(&top, d);
             let Some(me) = self.root.canonicalize().ok() else { break };
@@ -410,8 +435,12 @@ impl Store {
                 let header = dix.modules.iter().find(|m| m.path == u.module).map_or("", |m| m.header.as_str());
                 let imps = dix.lang.imports(header);
                 let hit = dix.lang.references(&u.text).into_iter().any(|rf| match &rf {
-                    Ref::Qualified(alias, member) => imps.iter().any(|i| &i.alias == alias && i.module == gone.module && gone_names.contains(member)),
-                    Ref::Bare(b) => imps.iter().any(|i| i.module == gone.module && i.unqualified.iter().any(|(o, l)| l == b && gone_names.contains(o))),
+                    Ref::Qualified(alias, member) => {
+                        imps.iter().any(|i| &i.alias == alias && i.module == gone.module && gone_names.contains(member))
+                    }
+                    Ref::Bare(b) => {
+                        imps.iter().any(|i| i.module == gone.module && i.unqualified.iter().any(|(o, l)| l == b && gone_names.contains(o)))
+                    }
                 });
                 if hit {
                     outside_users.push(format!("{d}: {} uses {}", u.qname(), gone.qname()));
@@ -434,7 +463,11 @@ impl Store {
             }
             if !is_pub_text(&keep.text) {
                 let names: Vec<String> = users_there.iter().map(|&j| format!("{}: {}", dp.dir, djx.syms[j].qname())).collect();
-                return fail(format!("E5009 {} is private and {} would use it: make it pub first, then merge", keep.qname(), names.join(", ")));
+                return fail(format!(
+                    "E5009 {} is private and {} would use it: make it pub first, then merge",
+                    keep.qname(),
+                    names.join(", ")
+                ));
             }
             let Some(d) = &dest else { continue };
             if depends_on(&d.store.root, &dp.store.root) {
@@ -487,7 +520,10 @@ impl Store {
             for i in (0..n).filter(|&i| i != r) {
                 let x = &ix.syms[i];
                 if plan.newtext[i] != x.text {
-                    self.db.execute("UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1", params![x.id, plan.newtext[i], revision(&plan.newtext[i])])?;
+                    self.db.execute(
+                        "UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1",
+                        params![x.id, plan.newtext[i], revision(&plan.newtext[i])],
+                    )?;
                     self.history(&x.id, "edit", &x.name)?;
                 }
             }
@@ -498,11 +534,15 @@ impl Store {
             for (dp, p) in deps.iter().zip(&dplans) {
                 for (i, x) in dp.ix.syms.iter().enumerate() {
                     if p.newtext[i] != x.text {
-                        dp.store.db.execute("UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1", params![x.id, p.newtext[i], revision(&p.newtext[i])])?;
+                        dp.store.db.execute(
+                            "UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1",
+                            params![x.id, p.newtext[i], revision(&p.newtext[i])],
+                        )?;
                         dp.store.history(&x.id, "edit", &x.name)?;
                     }
                 }
-                let modules: Vec<(String, String, &Store)> = dp.ix.modules.iter().map(|m| (m.path.clone(), m.header.clone(), &dp.store)).collect();
+                let modules: Vec<(String, String, &Store)> =
+                    dp.ix.modules.iter().map(|m| (m.path.clone(), m.header.clone(), &dp.store)).collect();
                 write_headers(p, &modules)?;
             }
             // the retired symbol's module goes with it when emptied, unless another module imports it
@@ -515,14 +555,24 @@ impl Store {
             }
             let mut bad: Vec<String> = vec![];
             let diags = self.check_all(&self.index()?)?;
-            bad.extend(diags.iter().filter(|g| g.error && g.symbol.as_ref().is_none_or(|x| !before.contains_key(x))).map(|g| g.text.clone()));
+            bad.extend(
+                diags.iter().filter(|g| g.error && g.symbol.as_ref().is_none_or(|x| !before.contains_key(x))).map(|g| g.text.clone()),
+            );
             for (dp, broken) in deps.iter().zip(&deps_broken) {
                 let diags = dp.store.check_all(&dp.store.index()?)?;
-                bad.extend(diags.iter().filter(|g| g.error && g.symbol.as_ref().is_none_or(|x| !broken.contains_key(x))).map(|g| format!("{}: {}", dp.dir, g.text)));
+                bad.extend(
+                    diags
+                        .iter()
+                        .filter(|g| g.error && g.symbol.as_ref().is_none_or(|x| !broken.contains_key(x)))
+                        .map(|g| format!("{}: {}", dp.dir, g.text)),
+                );
             }
             if !bad.is_empty() {
                 let more = if bad.len() > 5 { format!("\n\n… {} more", bad.len() - 5) } else { String::new() };
-                return fail(format!("Not merged: the result does not type-check, so nothing changed.\n\n{}{more}", bad[..bad.len().min(5)].join("\n\n")));
+                return fail(format!(
+                    "Not merged: the result does not type-check, so nothing changed.\n\n{}{more}",
+                    bad[..bad.len().min(5)].join("\n\n")
+                ));
             }
             Ok(if retired { format!("Retired module {m}\n") } else { String::new() })
         };

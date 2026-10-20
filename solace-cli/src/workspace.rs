@@ -24,7 +24,7 @@ fn listing(dir: &Path) -> Option<toml::Value> {
 }
 
 /// Whether `dir` holds code of its own: Gleam or a Cargo package (D-158).
-fn has_code(dir: &Path) -> bool {
+pub(crate) fn has_code(dir: &Path) -> bool {
     crate::language::detect(dir).is_some()
         || (crate::language::is_rust(dir)
             && fs::read_to_string(dir.join("Cargo.toml"))
@@ -255,7 +255,7 @@ fn field(dir: &Path, key: &str) -> Option<String> {
 pub fn found(root: &Path) -> Result<Vec<Value>, Failure> {
     let members = members(root)?;
     let mut out = vec![];
-    // ponytail: depth 5 keeps a stray serve in a home folder quick; raise it if real repos nest deeper.
+    // depth 5 keeps a stray serve in a home folder quick; raise it if real repos nest deeper.
     let walk = ignore::WalkBuilder::new(root)
         .max_depth(Some(5))
         .filter_entry(|e| !matches!(e.file_name().to_str(), Some("build" | "node_modules" | ".solace" | "target")))

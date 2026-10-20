@@ -914,10 +914,10 @@ Amends D-114 point 3 (Aaron, board task "Feature on task card", 2026-10-17). Par
 Why: the feature was only in the tooltip and screen-reader text, so it wasn't evident on the card; on its own line the name needs no prefix.
 
 ## D-156 Briefs ask for the smallest complete change, per role
-(Aaron, board task "briefs: inspirations from ponytail", 2026-10-17). Part of the Agent Tooling Efficiency feature.
-1. The reference's workflow asks for the smallest complete change: reuse the code's helpers, then the standard library and installed dependencies; add nothing the task doesn't need; complete includes its tests and every caller; never drop validation, data-loss handling or security; fix a reported bug once, at its cause. It also says `test` doesn't reach docs, config, JavaScript or golden files.
-2. Each role gets only what it acts on. A strategy run proposes the smallest version that meets the need, names what it left out, and says once if part of a request isn't justified. An investigate plan is the smallest complete change, names every file it reaches, offers a smaller option with `task ask` when it would change what the human gets, and reports what it didn't check. A work summary names, if any, what was skipped and the risks. A review flags code the task didn't need, places it missed, and removed validation, data-loss handling or security. Discussion briefs don't change.
-Why: the Ponytail skill makes agents more efficient without losing quality; these are its items Solace lacked, worded so they don't contradict step 3 ("fix only what the reply reports"), test coverage or the rule that specs change only through a decision.
+(Aaron, board task on efficient, role-specific briefs, 2026-10-17). Part of the Agent Tooling Efficiency feature.
+1. The embedded agent reference's numbered workflow asks for the smallest complete change: reuse the code's helpers, then the standard library and installed dependencies; add nothing the task doesn't need; complete includes its tests and every caller; never drop validation, data-loss handling or security; fix a reported bug once, at its cause. It also says `test` doesn't reach docs, config, JavaScript or golden files.
+2. Each role gets only what it acts on. A strategy run proposes the smallest version that meets the need, names what it left out, and says once if part of a request isn't justified. An investigate plan is the smallest complete change, names every module or symbol it changes and every non-source file it reaches, offers a smaller option with `task ask` when it would change what the human gets, and reports what it didn't check. A work summary names, if any, what was skipped and the risks. A review flags code the task didn't need, places it missed, and removed validation, data-loss handling or security. Discussion briefs don't change.
+Why: asking for the smallest complete change and giving each role only what it acts on makes agents more efficient without losing quality; these practices filled gaps in Solace, worded so they don't contradict step 3 ("fix only what the reply reports"), test coverage or the rule that specs change only through a decision.
 
 ## D-157 A re-read of an unchanged symbol brings back the run's recent work
 Amends Spec 3 §1 (Aaron, board task "replies: catch re-reads after compaction", 2026-10-17). Part of the Agent Tooling Efficiency feature.
@@ -1080,3 +1080,24 @@ Amends D-58 point 6 (Aaron, board task "Adopt solace-cli into the store", 2026-1
 1. Each project's `.solace/.gitignore` shares the symbol database (`store.db`), the approved list (`approved`) and itself. Everything else in `.solace/` stays ignored: locks, command logs, per-session caches, undo records, migration scratch, and `board/` run data, conversations and images.
 2. The per-project files stay for now; an old file that hid the store is upgraded in place, while a file a human has edited is left alone. Replacing them with one file at the root is a later task.
 Why: the symbols belong to the project, while run logs and conversations can hold private data and the other files change constantly.
+
+## D-180 A Rust module can be formatted whole
+Amends D-158 point 5 (Aaron, board task "format: one Rust module", 2026-10-20). Part of the Rust symbol store and lockdown feature.
+1. In a Rust project, `format <module>` runs rustfmt on that module's written file with the project's `rustfmt.toml` and edition, then reads the formatted file back into the store. Every item in the module is rustfmt's afterwards; ids stay by name and the change is checked like a submit. A file the store doesn't hold is out of scope.
+2. `format` with no module is refused, because the crate isn't rustfmt-clean and one call would bury the task's real change; the refusal says to name a module. `submit` still formats only the items whose text changed (D-172 point 1).
+Why: reshaping a module should take one call, not hand-written indentation for every item.
+
+## D-181 Source files are read by symbol, not by path
+Amends D-121 points 1–3 and D-162 (Aaron, board task "sources: block direct source reads", 2026-10-20). Part of the Rust symbol store and lockdown feature.
+1. In a symbol-held project, source files are projections written by Solace. `view <file>` and `view <file>::<name>` are refused for graph source (E6001), as `read` already was; Python and a plain-file project's `.rs` keep the file forms. `files` may list graph paths as `[graph]` without contents, and `grep` doesn't search them.
+2. `read`, `write`, `move`, `remove` and `view` give one graph-path hint for both languages: when the store holds the module, it names `view <module>` and `inspect <module>.<symbol>`; when the path isn't in the store, it names `submit --new <module>`. A refusal covers an exact graph path, or a new `.rs` or `.gleam` path under a graph root; a bare `app.rs` stays a symbol name.
+3. A new Rust path names a module only when it is certain: `src/lib.rs` and a lone `src/main.rs` are `crate`; `src/a.rs` and `src/a/mod.rs` are `a`; `src/a/b.rs` and `src/a/b/mod.rs` are `a::b`; `tests/x.rs` is `integration::x` (D-169). Everything else under a graph root, including a second crate's `src/main.rs`, `src/bin/**`, and nested test paths, gets the can't-tell hint. `examples/`, `benches/`, and root `build.rs` aren't graph paths, so they get no graph hint.
+4. Code is cited in the form the tools print, `module.item` (`lockdown.dispatch`, `checkout.pay`) or a method's `crate.Store::view`; `inspect` also accepts `::` in place of the last `.`.
+Why: an investigation cited file paths because `view <file>` still read Rust graph source and the brief and reference taught it; source files are projections, so reading and citing them by name is the one way to reach the symbols the store holds.
+
+## D-182 A command can say it is a test
+Part of the Agent Tooling Efficiency feature (Aaron, board task "briefs: name the test commands to run", 2026-10-20).
+1. A `[commands]` entry may set `test = true`; the key is optional, defaults to false, and a non-boolean is invalid (`E6020`).
+2. A work brief names each scope project's marked commands once, after its last change: `test --all` still runs the toolchain's tests, then `run <name>` for the marked suites. A suite names its project when the task spans more than one, even if only one project marks it; a project with none adds nothing.
+3. `test --all` remains the whole toolchain suite; the marker only keeps the brief from making the agent guess which declared commands are tests.
+Why: overlapping declared suites made an agent run the same tests several times, before and after a one-line fix.

@@ -18,10 +18,12 @@ struct Item {
     level: usize,
 }
 
-/// `view <file>` (an outline) and `view <file>::<name>` (one item's source),
-/// or None when the operands are symbols for the store: in a project with
-/// Gleam code, a `.rs` name that matches no watched file is one (`app.rs`).
-pub fn view(root: &Path, v: &toml::Value, a: &[&str], budget: usize) -> Option<Out> {
+/// `view <file>` (an outline) and `view <file>::<name>` (one item's source) for
+/// Python and plain-file Rust, or None when the operands are symbols for the
+/// store: in a project with Gleam code, a `.rs` name that matches no watched
+/// file is one (`app.rs`). A graph path is refused (D-181).
+pub fn view(store: &Store, v: &toml::Value, a: &[&str], budget: usize) -> Option<Out> {
+    let root = &store.root;
     if a.first() != Some(&"view") {
         return None;
     }
@@ -39,6 +41,44 @@ pub fn view(root: &Path, v: &toml::Value, a: &[&str], budget: usize) -> Option<O
     // An operand is a file only when its path part, before `::`, is a `.rs` or
     // `.py` file; any other name in a Rust project is the store's (D-158).
     let rust = crate::language::is_rust(root);
+    fn path_of(op: &str) -> &str {
+        op.split_once("::").map_or(op, |(p, _)| p)
+    }
+    fn graph_path(name: &str) -> Option<String> {
+        let path = std::path::Path::new(name);
+        if path.is_absolute() {
+            return None;
+        }
+        let path = crate::file_name(path);
+        (!path.split('/').any(|part| part == "..")).then_some(path)
+    }
+    // Only an operand that could name a source file needs the tree: a symbol
+    // view stays cheap.
+    let graph = if ops.iter().any(|op| {
+        let path = path_of(op);
+        path.ends_with(".rs") || path.ends_with(".gleam")
+    }) {
+        match lockdown::graph_paths(root, v) {
+            Ok(paths) => paths,
+            Err(e) => return Some(Err(e)),
+        }
+    } else {
+        vec![]
+    };
+    // A graph path is refused before the file forms: an exact graph path, or a
+    // new path under a graph root. A bare `app.rs` stays a symbol name (D-181).
+    for &op in &ops {
+        let raw = path_of(op);
+        if !(raw.ends_with(".rs") || raw.ends_with(".gleam")) {
+            continue;
+        }
+        let Some(path) = graph_path(raw) else {
+            return Some(lockdown::error("E6001", raw, "this path goes outside the project"));
+        };
+        if graph.iter().any(|p| p == &path) || lockdown::tier(root, v, &path, None) == "graph" {
+            return Some(lockdown::graph_error(store, &path));
+        }
+    }
     let file = |op: &str| match rust {
         false => op.contains("::") || source(op),
         true => {
@@ -49,15 +89,10 @@ pub fn view(root: &Path, v: &toml::Value, a: &[&str], budget: usize) -> Option<O
     if !ops.iter().any(|&op| file(op)) {
         return None;
     }
-    let mut watched = match lockdown::watched_paths(root, v) {
+    let watched = match lockdown::watched_paths(root, v) {
         Ok(w) => w,
         Err(e) => return Some(Err(e)),
     };
-    // A Rust project's `.rs` files are graph, and `view <file>` reads them
-    // like any other file (D-121, D-158).
-    if rust && let Ok(graph) = lockdown::graph_paths(root, v) {
-        watched.extend(graph);
-    }
     let gleam = crate::language::detect(root).is_some();
     let files: Vec<bool> = ops
         .iter()

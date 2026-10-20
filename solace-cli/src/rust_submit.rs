@@ -276,10 +276,11 @@ pub(crate) fn rust_symbol(ix: &Index, input: &str) -> Result<Option<usize>, Fail
 mod tests;
 
 /// The container `input` names (D-168): a live `impl`, `trait` or `mod`, the
-/// first `impl` when several share the name.
-pub(crate) fn rust_container(ix: &Index, input: &str) -> Option<usize> {
+/// first `impl` when several share the name. Several other containers with the
+/// name are ambiguous, as they are in `rust_symbol`.
+pub(crate) fn rust_container(ix: &Index, input: &str) -> Result<Option<usize>, Failure> {
     let found: Vec<usize> = rust_named(ix, input).into_iter().filter(|&i| container_kind(&ix.syms[i].kind_text)).collect();
-    found.iter().copied().find(|&i| ix.syms[i].kind_text == "impl").or_else(|| found.first().copied())
+    rust_one(&found, ix, input)
 }
 
 /// An item of a whole-module `submit`, paired with the row the store has for it
@@ -368,7 +369,7 @@ impl Store {
     pub(crate) fn submit_rust(&self, target: Target, raw: &str) -> Out {
         match target {
             Target::Imports(m) => self.submit_imports_rust(m, raw),
-            Target::Module(m) => self.submit_module_rust(m, raw),
+            Target::Module(m) => self.submit_module_rust(m, raw, false),
         }
     }
 
@@ -376,16 +377,18 @@ impl Store {
     /// file, item by item. Every stored item must be in it, matched by name
     /// within its parent so its id stays; an item the text adds is saved as
     /// `--new` saves it; only the items whose text changed are formatted, so
-    /// unchanged items keep their bytes (D-158 point 5); `ord`, `sep` and a
-    /// container's `tail` follow the text. The header's `mod x;` list can't
-    /// change, and a module the store doesn't have is created by `--new`.
-    fn submit_module_rust(&self, m: &str, raw: &str) -> Out {
+    /// unchanged items keep their bytes (D-158 point 5), unless `format
+    /// <module>` has already formatted the whole module (D-180); `ord`, `sep`
+    /// and a container's `tail` follow the text. The header's `mod x;` list
+    /// can't change, and a module the store doesn't have is created by `--new`.
+    fn submit_module_rust(&self, m: &str, raw: &str, formatted: bool) -> Out {
         let ix = self.index()?;
         let Some(row) = self.resolve_module(&ix, m) else {
             return self.submit_symbols_rust(None, Some(m), raw, false);
         };
         let module = row.path.clone();
-        let file = language::rust::split(raw, &module).map_err(|Failure(text, code)| Failure(format!("Not saved: {text}"), code))?;
+        let file = language::rust::split(raw, &module)
+            .map_err(|e| store::rust_syntax_error(e, &module, None, &module, 0, raw.lines().count().max(1)))?;
         if !file.refusals.is_empty() {
             let lines: Vec<String> = file.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
             return fail(format!("Not saved: the Rust text is outside the subset Solace holds.\n{}", lines.join("\n")));
@@ -395,7 +398,9 @@ impl Store {
             return fail(format!("Not saved: the module's `mod` list can't change; {}.", store::MODULE_NOTE));
         }
         let mut items = rust_module_items(&ix, &module, &file.items)?;
-        self.rust_format_module(&ix, &module, None, &mut items, false)?;
+        if !formatted {
+            self.rust_format_module(&ix, &module, None, &mut items, false)?;
+        }
         let end = &old[old.trim_end().len()..];
         let header = if file.header.trim().is_empty() {
             String::new()
@@ -403,6 +408,7 @@ impl Store {
             format!("{}{}", file.header.trim_end(), if end.is_empty() { "\n\n" } else { end })
         };
         let before = store::module_text(&ix, row);
+        let max_width = cargo::max_width(&self.root);
         let out = self.transaction(&[], || {
             self.set_header(&module, &header)?;
             let (mut changed, mut added): (Vec<String>, Vec<String>) = (vec![], vec![]);
@@ -410,7 +416,11 @@ impl Store {
             let after_ix = self.index()?;
             let after = after_ix.modules.iter().find(|r| r.path == module).map(|r| store::module_text(&after_ix, r));
             if after.as_deref() == Some(before.as_str()) {
-                return Ok(format!("Unchanged: {module}. The text equals the stored symbols, so nothing was saved or checked.\n"));
+                let mut out = format!("Unchanged: {module}. The text equals the stored symbols, so nothing was saved or checked.\n");
+                if formatted {
+                    out += &note_lines(&long_line_notes(&ix, &module, &items, max_width, true));
+                }
+                return Ok(out);
             }
             let before_broken = self.broken()?;
             let diags = self.check_all(&after_ix)?;
@@ -428,6 +438,7 @@ impl Store {
             out += &format!("Note: {module}: changed {}; added {}\n", list(&changed), list(&added));
             out += &warning_summary(diags.iter().filter(|d| !d.error && own(d)));
             out += &broken_report(&before_broken, &diags);
+            out += &note_lines(&long_line_notes(&ix, &module, &items, max_width, formatted));
             Ok(out)
         })?;
         Ok(out)
@@ -438,13 +449,22 @@ impl Store {
     /// the file isn't reformatted; a changed item is rustfmt's, inside its
     /// parent's opening when it is nested. `done`: this item's text came from
     /// formatting its parent whole.
-    fn rust_format_module(&self, ix: &Index, module: &str, parent: Option<(&str, &str, &str)>, items: &mut [RustItem], done: bool) -> Result<(), Failure> {
+    fn rust_format_module(
+        &self,
+        ix: &Index,
+        module: &str,
+        parent: Option<(&str, &str, &str)>,
+        items: &mut [RustItem],
+        done: bool,
+    ) -> Result<(), Failure> {
         for item in items {
             let same = item.stored.is_some_and(|i| ix.syms[i].text == item.text);
             let mut whole = done;
             if !done && !same {
                 let text = if item.children.is_empty() { item.text.clone() } else { item.joined() };
-                let one = store::format_one(&self.root, module, parent, &text)?;
+                let one = store::format_one(&self.root, module, parent, &text).map_err(|e| {
+                    store::rust_syntax_error(e, &format!("{module}.{}", item.name), parent, module, 0, text.lines().count().max(1))
+                })?;
                 if item.stored.is_none() && !item.children.is_empty() && item.children.len() == one.children.len() {
                     // A new container arrived formatted whole, its items too;
                     // they take no second rustfmt run.
@@ -530,6 +550,7 @@ impl Store {
                 Some(m) => self.rust_new_target(&ix, m)?,
                 None => self.rust_target(&ix, block_name.as_deref().unwrap_or_default())?,
             };
+            let block = block_name.clone().unwrap_or_else(|| target.module.clone());
             if created.iter().any(|c| c.module == target.module) {
                 target.create = None;
             }
@@ -540,8 +561,9 @@ impl Store {
                     items
                 }
                 None => {
-                    let container = target.parent.map(|i| (ix.syms[i].name.as_str(), ix.syms[i].text.as_str(), ix.syms[i].kind_text.as_str()));
-                    store::submit_items(&self.root, &target.module, container, text, formatted)?
+                    let container =
+                        target.parent.map(|i| (ix.syms[i].name.as_str(), ix.syms[i].text.as_str(), ix.syms[i].kind_text.as_str()));
+                    store::submit_items(&self.root, &target.module, &block, container, text, formatted)?
                 }
             };
             if items.is_empty() || (new_in.is_none() && items.len() > 1) {
@@ -585,7 +607,9 @@ impl Store {
                     }
                     let twice = plan.iter().any(|(m, .., items)| {
                         m == &target.module
-                            && items.iter().any(|p| nested(p).iter().any(|c| c.name == item.name && rust_namespace(c.kind) == rust_namespace(item.kind)))
+                            && items.iter().any(|p| {
+                                nested(p).iter().any(|c| c.name == item.name && rust_namespace(c.kind) == rust_namespace(item.kind))
+                            })
                     });
                     if twice {
                         return fail(format!("E0103 the text defines {}.{} twice.", target.module, item.name));
@@ -599,6 +623,7 @@ impl Store {
         if files.iter().any(|p| p.exists()) {
             return fail("E0101 the new module's file already exists outside the store; import or resolve it before creating this module");
         }
+        let max_width = cargo::max_width(&self.root);
         let out = self.transaction(&files, || {
             for c in &created {
                 let owns = language::rust::owns_dir(&c.module, &c.file);
@@ -655,11 +680,23 @@ impl Store {
             if !changed {
                 let broken = self.broken()?;
                 let still: Vec<&str> = unchanged.iter().map(String::as_str).filter(|u| broken.contains_key(*u)).collect();
-                let still = if still.is_empty() { String::new() } else { format!("Still broken: {} (`check` shows why).\n", still.join(", ")) };
-                return Ok(format!(
+                let still =
+                    if still.is_empty() { String::new() } else { format!("Still broken: {} (`check` shows why).\n", still.join(", ")) };
+                let mut out = format!(
                     "Unchanged: {}. The text equals the stored symbols, so nothing was saved or checked.\n{still}",
                     unchanged.join(", ")
-                ));
+                );
+                let mut long = vec![];
+                for (module, .., items) in &plan {
+                    for item in items.iter().flat_map(nested) {
+                        let name = format!("{module}.{}", item.name);
+                        if let Some(note) = long_line_note(&name, &item.text, max_width) {
+                            long.push(note);
+                        }
+                    }
+                }
+                out += &note_lines(&long);
+                return Ok(out);
             }
             let mut modules: HashSet<&str> = plan.iter().map(|p| p.0.as_str()).collect();
             // A new module's `mod` line lands in its parent's header, so an error
@@ -683,22 +720,55 @@ impl Store {
             }
             out += &warning_summary(diags.iter().filter(|d| !d.error && own(d)));
             out += &broken_report(&before_broken, &diags);
+            let mut long = vec![];
+            for (module, .., items) in &plan {
+                for item in items.iter().flat_map(nested) {
+                    let name = format!("{module}.{}", item.name);
+                    if let Some(note) = long_line_note(&name, &item.text, max_width) {
+                        long.push(note);
+                    }
+                }
+            }
+            out += &note_lines(&long);
             Ok(out)
         })?;
         Ok(note_lines(&notes) + &out)
     }
 
-    /// The container to add an item to, named anywhere in `n` (D-168): the
-    /// longest `::`/`.` cut that names one.
-    fn rust_container_in(&self, ix: &Index, n: &str) -> Option<usize> {
+    /// The container to add an item to, named in `n` (D-168): the whole name,
+    /// or a cut whose prefix is a module and whose next segment names a
+    /// container in it; a cut that is no module names a container itself. The
+    /// first `impl` when several share the name; several other containers with
+    /// it are ambiguous.
+    pub(crate) fn rust_container_in(&self, ix: &Index, n: &str) -> Result<Option<usize>, Failure> {
+        if let Some(i) = rust_container(ix, n)? {
+            return Ok(Some(i));
+        }
         let mut cuts: Vec<usize> = n.match_indices("::").map(|(i, _)| i).chain(n.match_indices('.').map(|(i, _)| i)).collect();
         cuts.sort_unstable();
-        for at in std::iter::once(n.len()).chain(cuts.iter().rev().copied()) {
-            if let Some(i) = rust_container(ix, &n[..at]) {
-                return Some(i);
+        for (j, &at) in cuts.iter().enumerate().rev() {
+            let prefix = &n[..at];
+            let Some(module) = self.resolve_module(ix, prefix) else {
+                if let Some(i) = rust_container(ix, prefix)? {
+                    return Ok(Some(i));
+                }
+                continue;
+            };
+            let start = at + if n[at..].starts_with("::") { 2 } else { 1 };
+            let end = cuts.get(j + 1).copied().unwrap_or(n.len());
+            let found: Vec<usize> = (0..ix.syms.len())
+                .filter(|&i| {
+                    let s = &ix.syms[i];
+                    // `mod x;` names a module, not a container with items to add.
+                    let file_mod = s.kind_text == "mod" && s.text.trim_end().ends_with(';');
+                    !file_mod && s.module == module.path && s.name.as_str() == &n[start..end] && container_kind(&s.kind_text)
+                })
+                .collect();
+            if let Some(i) = rust_one(&found, ix, &n[..end])? {
+                return Ok(Some(i));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Where a named block lands (D-168): the symbol it replaces (containers are
@@ -712,7 +782,7 @@ impl Store {
         if let Some(m) = self.resolve_module(ix, n) {
             return Ok(RustTarget { module: m.path.clone(), existing: None, parent: None, create: None });
         }
-        if let Some(i) = self.rust_container_in(ix, n) {
+        if let Some(i) = self.rust_container_in(ix, n)? {
             return Ok(RustTarget { module: ix.syms[i].module.clone(), existing: None, parent: Some(i), create: None });
         }
         if let Some(m) = n.rsplit_once('.').and_then(|(m, _)| self.resolve_module(ix, m)) {
@@ -732,7 +802,7 @@ impl Store {
         if let Some(module) = self.resolve_module(ix, m) {
             return Ok(RustTarget { module: module.path.clone(), existing: None, parent: None, create: None });
         }
-        if let Some(i) = self.rust_container_in(ix, m) {
+        if let Some(i) = self.rust_container_in(ix, m)? {
             return Ok(RustTarget { module: ix.syms[i].module.clone(), existing: None, parent: Some(i), create: None });
         }
         match self.rust_created(ix, m) {
@@ -880,7 +950,8 @@ impl Store {
     pub(crate) fn rust_block_text(&self, ix: &Index, module: &str, name: &str, item: &str) -> String {
         let Ok(target) = self.rust_target(ix, &format!("{module}.{name}")) else { return item.to_string() };
         let container = target.parent.map(|i| (ix.syms[i].name.as_str(), ix.syms[i].text.as_str(), ix.syms[i].kind_text.as_str()));
-        match store::submit_items(&self.root, &target.module, container, item, false) {
+        let block = format!("{module}.{name}");
+        match store::submit_items(&self.root, &target.module, &block, container, item, false) {
             Ok(items) => match items.as_slice() {
                 [one] if store::is_container(one) => one.children.first().map_or(item.to_string(), |c| c.text.clone()),
                 [one] => one.text.clone(),
@@ -902,7 +973,7 @@ impl Store {
                 Ok(i) => i,
                 // A Rust type and its `impl` share a name and the item wins
                 // (D-158), so a container the name also fits is found through it.
-                Err(e) if e.1 == 1 => rust_container(&ix, name).ok_or(e)?,
+                Err(e) if e.1 == 1 => rust_container(&ix, name)?.ok_or(e)?,
                 Err(e) => return Err(e),
             };
             targets.push(i);
@@ -1029,5 +1100,152 @@ impl Store {
             todo.push(parent);
         }
         Ok(())
+    }
+
+    /// `format <module>` in a Rust store (D-180): rustfmt the module's written
+    /// file whole, then save every item through the whole-module submit path,
+    /// so ids stay by name and the result is checked with cargo. A file the
+    /// store doesn't hold is not a module it can format.
+    pub(crate) fn format_module_rust(&self, m: &str) -> Out {
+        let ix = self.index()?;
+        let Some(row) = self.resolve_module(&ix, m) else {
+            return fail(format!("E1003 unknown module: {m}; `format` takes a module the store holds"));
+        };
+        if let Some(message) = format_missing(cargo::installed(), cargo::rustfmt_installed()) {
+            return crate::lockdown::error("E6013", "format", message);
+        }
+        let module = row.path.clone();
+        let files = self.materialize(&ix)?;
+        let Some(map) = files.iter().find(|f| f.module == module) else {
+            return fail(format!("E1003 unknown module: {m}"));
+        };
+        let text = cargo::format_module(&self.root, &map.file).map_err(|e| {
+            let line =
+                e.0.strip_prefix("Not saved: E0100 syntax error at line ")
+                    .and_then(|rest| rest.split_once(':'))
+                    .and_then(|(line, _)| line.trim().parse::<usize>().ok());
+            let label = line
+                .and_then(|line| map.ranges.iter().find(|(first, last, _)| *first <= line && line <= *last).map(|(.., name)| name.clone()))
+                .unwrap_or_else(|| module.clone());
+            let lines = map.ranges.iter().map(|(_, last, _)| *last).max().unwrap_or(1);
+            store::rust_syntax_error(e, &label, None, &module, 0, lines)
+        })?;
+        self.submit_module_rust(m, &text, true)
+    }
+}
+
+/// A note for the lines of `text` that rustfmt left longer than `max_width`.
+fn long_line_note(name: &str, text: &str, max_width: usize) -> Option<String> {
+    long_line_note_at(name, text, max_width, 1)
+}
+
+/// The long-line notes for a whole module's items: `all` when rustfmt formatted
+/// the file whole, otherwise only items whose text changed or are new.
+fn long_line_notes(ix: &Index, module: &str, items: &[RustItem], max_width: usize, all: bool) -> Vec<String> {
+    fn walk(ix: &Index, module: &str, items: &[RustItem], max_width: usize, all: bool, out: &mut Vec<String>) {
+        for item in items {
+            let name = format!("{module}.{}", item.name);
+            let changed = item.stored.is_none_or(|i| ix.syms[i].text != item.text || ix.syms[i].tail != item.tail);
+            if (all || changed)
+                && let Some(note) = long_line_note(&name, &item.text, max_width)
+            {
+                out.push(note);
+            }
+            walk(ix, module, &item.children, max_width, all, out);
+            if (all || changed)
+                && let Some(note) = long_line_note_at(&name, &item.tail, max_width, tail_line(item))
+            {
+                out.push(note);
+            }
+        }
+    }
+    let mut out = vec![];
+    walk(ix, module, items, max_width, all, &mut out);
+    out
+}
+
+/// Why `format` can't run: the toolchain, then rustfmt.
+fn format_missing(has_cargo: bool, has_rustfmt: bool) -> Option<&'static str> {
+    if !has_cargo {
+        Some(cargo::MISSING)
+    } else if !has_rustfmt {
+        Some(cargo::RUSTFMT_MISSING)
+    } else {
+        None
+    }
+}
+
+/// How wide `line` prints: a tab reaches the next 4-column stop, a wide
+/// character takes two columns, and a combining mark none.
+fn display_width(line: &str) -> usize {
+    let mut width = 0;
+    for c in line.chars() {
+        width += match c {
+            '\t' => 4 - width % 4,
+            '\u{0300}'..='\u{036f}'
+            | '\u{1ab0}'..='\u{1aff}'
+            | '\u{1dc0}'..='\u{1dff}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{20d0}'..='\u{20ff}'
+            | '\u{fe00}'..='\u{fe0f}'
+            | '\u{fe20}'..='\u{fe2f}'
+            | '\u{e0100}'..='\u{e01ef}' => 0,
+            '\u{1100}'..='\u{115f}'
+            | '\u{2e80}'..='\u{a4cf}'
+            | '\u{a960}'..='\u{a97f}'
+            | '\u{ac00}'..='\u{d7a3}'
+            | '\u{f900}'..='\u{faff}'
+            | '\u{fe10}'..='\u{fe19}'
+            | '\u{fe30}'..='\u{fe6f}'
+            | '\u{ff00}'..='\u{ff60}'
+            | '\u{ffe0}'..='\u{ffe6}'
+            | '\u{1f300}'..='\u{1f64f}'
+            | '\u{1f900}'..='\u{1f9ff}'
+            | '\u{1fa70}'..='\u{1faff}'
+            | '\u{20000}'..='\u{3fffd}' => 2,
+            _ => 1,
+        };
+    }
+    width
+}
+
+/// `long_line_note` for text that starts at `first_line` in its item.
+fn long_line_note_at(name: &str, text: &str, max_width: usize, first_line: usize) -> Option<String> {
+    let lines: Vec<String> =
+        text.lines().enumerate().filter(|(_, line)| display_width(line) > max_width).map(|(i, _)| (first_line + i).to_string()).collect();
+    if lines.is_empty() {
+        return None;
+    }
+    let (what, verb, them) = if lines.len() == 1 { ("line", "is", "it") } else { ("lines", "are", "them") };
+    Some(format!(
+        "{name}: {what} {} {verb} longer than rustfmt's max_width ({max_width}); rustfmt left {them} as written, so check the indentation or split the long literal",
+        lines.join(", ")
+    ))
+}
+
+/// The line of an item's tail where it starts in that item's text.
+fn tail_line(item: &RustItem) -> usize {
+    let mut prefix = item.text.clone();
+    for child in &item.children {
+        prefix += &child.joined();
+        prefix += &child.sep;
+    }
+    prefix.lines().count() + usize::from(prefix.ends_with('\n'))
+}
+
+/// The one container among `found` (D-168): the first `impl` when several
+/// share the name; several other containers with the name are ambiguous, as
+/// they are in `rust_symbol`.
+pub(crate) fn rust_one(found: &[usize], ix: &Index, input: &str) -> Result<Option<usize>, Failure> {
+    if let Some(i) = found.iter().copied().find(|&i| ix.syms[i].kind_text == "impl") {
+        return Ok(Some(i));
+    }
+    match found {
+        [] => Ok(None),
+        [i] => Ok(Some(*i)),
+        many => {
+            let list: Vec<String> = many.iter().map(|&i| format!("  {} ({})", ix.syms[i].qname(), ix.syms[i].kind_text)).collect();
+            fail(format!("E1002 ambiguous name: {input} could be\n{}", list.join("\n")))
+        }
     }
 }

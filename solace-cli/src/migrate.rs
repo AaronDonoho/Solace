@@ -333,7 +333,13 @@ pub fn protected(root: &Path) -> Option<PathBuf> {
 /// in it; with `None` it is left as it is. `cargo_home` and `rustup_home` are
 /// where Cargo and rustup keep their caches, which a machine may put elsewhere
 /// (`CARGO_HOME`, `RUSTUP_HOME`).
-pub fn cargo_sandbox_args(argv: &[String], root: &Path, home: Option<&Path>, cargo_home: &Path, rustup_home: &Path) -> Vec<String> {
+pub fn cargo_sandbox_args(
+    argv: &[String],
+    root: &Path,
+    home: Option<&Path>,
+    cargo_home: &Path,
+    rustup_home: &Path,
+) -> Result<Vec<String>, Failure> {
     let mut a: Vec<String> =
         ["--die-with-parent", "--unshare-net", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
             .iter()
@@ -351,7 +357,7 @@ pub fn cargo_sandbox_args(argv: &[String], root: &Path, home: Option<&Path>, car
     }
     // A project's tests may read fixtures beside it. Only the folders it names
     // come back after the home folder was emptied, never the whole root.
-    for p in sandbox_reads(root) {
+    for p in sandbox_reads(root)? {
         let p = p.to_string_lossy().to_string();
         a.extend(["--ro-bind-try".to_string(), p.clone(), p]);
     }
@@ -367,14 +373,14 @@ pub fn cargo_sandbox_args(argv: &[String], root: &Path, home: Option<&Path>, car
     a.extend(["--bind".to_string(), lock.clone(), lock]);
     a.push("--".to_string());
     a.extend(argv.iter().cloned());
-    a
+    Ok(a)
 }
 
 /// `argv` run in `root` under bubblewrap on Linux, with no network and only
 /// `target/` writable, because a Rust command runs `build.rs` and
 /// dependencies' build scripts (D-158 point 4). Without bubblewrap, or a home
 /// folder, a plain command: approval is the guardrail elsewhere.
-pub fn cargo_sandboxed(argv: &[String], root: &Path) -> Command {
+pub fn cargo_sandboxed(argv: &[String], root: &Path) -> Result<Command, Failure> {
     let home = env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute()).filter(|_| bwrap());
     let mut c = match home {
         Some(home) => {
@@ -389,7 +395,7 @@ pub fn cargo_sandboxed(argv: &[String], root: &Path) -> Command {
             let cargo_home = elsewhere("CARGO_HOME").unwrap_or_else(|| home.join(".cargo"));
             let rustup_home = elsewhere("RUSTUP_HOME").unwrap_or_else(|| home.join(".rustup"));
             let mut c = Command::new("bwrap");
-            c.args(cargo_sandbox_args(argv, root, Some(&home), &cargo_home, &rustup_home));
+            c.args(cargo_sandbox_args(argv, root, Some(&home), &cargo_home, &rustup_home)?);
             c
         }
         None => {
@@ -399,10 +405,8 @@ pub fn cargo_sandboxed(argv: &[String], root: &Path) -> Command {
         }
     };
     c.current_dir(root);
-    for key in TASK_ENV {
-        c.env_remove(key);
-    }
-    c
+    drop_task_context(&mut c);
+    Ok(c)
 }
 
 /// Runs `argv` in `dir`: whether it exited with 0, and the end of its output.
@@ -1736,7 +1740,7 @@ fn a_sandboxed_command_drops_the_agents_task_context() {
     let dir =
         crate::testing::Scratch::new().with(&[("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")]);
     let argv: Vec<String> = ["cargo", "check"].iter().map(|s| s.to_string()).collect();
-    let command = cargo_sandboxed(&argv, &dir);
+    let command = cargo_sandboxed(&argv, &dir).unwrap();
     let mut removed = 0;
     for (name, value) in command.get_envs() {
         if value.is_none() {
@@ -1754,7 +1758,7 @@ fn a_sandboxed_command_drops_the_agents_task_context() {
 /// so a member's build script cannot read the whole Solace root (D-158 point 4).
 #[cfg(test)]
 #[test]
-fn a_sandbox_in_a_solace_root_mounts_the_root_read_only() {
+fn a_sandbox_in_a_solace_root_mounts_only_the_declared_reads() {
     let top = crate::testing::Scratch::new().with(&[
         ("solace.toml", "projects = [\"app\"]\n"),
         ("app/solace.toml", "[sandbox]\nread = [\"../fixtures\", \"/opt/shared\"]\n"),
@@ -1762,7 +1766,8 @@ fn a_sandbox_in_a_solace_root_mounts_the_root_read_only() {
     ]);
     let root = top.join("app");
     let argv: Vec<String> = ["cargo", "check"].iter().map(|s| s.to_string()).collect();
-    let args = cargo_sandbox_args(&argv, &root, Some(Path::new("/home/x")), Path::new("/home/x/.cargo"), Path::new("/home/x/.rustup"));
+    let args =
+        cargo_sandbox_args(&argv, &root, Some(Path::new("/home/x")), Path::new("/home/x/.cargo"), Path::new("/home/x/.rustup")).unwrap();
     let line = args.join(" ");
     let top = top.display().to_string();
     assert!(line.contains(&format!("--ro-bind-try {top}/fixtures {top}/fixtures")), "{line}");
@@ -1774,15 +1779,50 @@ fn a_sandbox_in_a_solace_root_mounts_the_root_read_only() {
 
 /// The folders a project's `[sandbox] read` names, resolved against its root,
 /// so a sandboxed command can read fixtures beside the project (D-158 point 4).
-fn sandbox_reads(root: &Path) -> Vec<PathBuf> {
-    let Ok(v) = crate::lockdown::settings(root) else { return vec![] };
-    v.get("sandbox")
+fn sandbox_reads(root: &Path) -> Result<Vec<PathBuf>, Failure> {
+    let v = crate::lockdown::settings(root)?;
+    Ok(v.get("sandbox")
         .and_then(|s| s.get("read"))
         .and_then(|r| r.as_array())
         .map(|paths| paths.iter().filter_map(|p| p.as_str()).map(|p| lexical(&root.join(p))).collect())
-        .unwrap_or_default()
+        .unwrap_or_default())
 }
 
-/// The environment a task run sets; a sandboxed command must not inherit it
-/// (D-71).
-const TASK_ENV: [&str; 5] = ["SOLACE_TASK", "SOLACE_RUN", "SOLACE_SESSION", "SOLACE_CONFIG", "SOLACE_BIN"];
+/// The environment a task run sets; a command must not inherit it (D-71).
+pub(crate) const TASK_ENV: [&str; 5] = ["SOLACE_TASK", "SOLACE_RUN", "SOLACE_SESSION", "SOLACE_CONFIG", "SOLACE_BIN"];
+
+#[cfg(test)]
+#[test]
+fn a_sandbox_with_unreadable_settings_is_refused() {
+    let (root, _store) = crate::testing::rust_project("pub fn one() -> i32 { 1 }\n");
+    fs::write(root.join("solace.toml"), "[sandbox]\nread = 3\n").unwrap();
+    let argv: Vec<String> = ["cargo", "check"].iter().map(|s| s.to_string()).collect();
+    let e = cargo_sandbox_args(&argv, &root, None, Path::new("/home/x/.cargo"), Path::new("/home/x/.rustup")).unwrap_err();
+    assert!(e.0.starts_with("E6020"), "{}", e.0);
+}
+
+/// Removes the task context a command must not inherit (D-71): a declared
+/// command or a sandboxed Rust command runs as the project's own tool.
+pub(crate) fn drop_task_context(c: &mut Command) {
+    for key in TASK_ENV {
+        c.env_remove(key);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn a_declared_command_drops_the_agents_task_context() {
+    let mut command = Command::new("true");
+    drop_task_context(&mut command);
+    let mut removed = 0;
+    for (name, value) in command.get_envs() {
+        if value.is_none() {
+            for key in TASK_ENV {
+                if name == std::ffi::OsStr::new(key) {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(removed, TASK_ENV.len());
+}

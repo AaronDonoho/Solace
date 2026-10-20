@@ -83,8 +83,13 @@ pub fn submit_module(root: &Path, module: &str, text: &str, formatted: bool) -> 
     {
         return fail(format!("Not saved: `mod {name};` names another module; {MODULE_NOTE}."));
     }
-    let source = if formatted { text.to_string() } else { cargo::format_item(root, text, None)? };
-    let file = language::rust::split(&source, module)?;
+    let lines = text.lines().count().max(1);
+    let source = if formatted {
+        text.to_string()
+    } else {
+        cargo::format_item(root, text, None).map_err(|e| rust_syntax_error(e, module, None, module, 0, lines))?
+    };
+    let file = language::rust::split(&source, module).map_err(|e| rust_syntax_error(e, module, None, module, 0, lines))?;
     if !file.refusals.is_empty() {
         let lines: Vec<String> = file.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
         return fail(format!("Not saved: the Rust text is outside the subset Solace holds.\n{}", lines.join("\n")));
@@ -97,8 +102,16 @@ pub fn submit_module(root: &Path, module: &str, text: &str, formatted: bool) -> 
 /// items, or the children of `parent` (its name and its stored opening text)
 /// when the item sits inside a container. Names are the store's: a nested
 /// item's own name behind its parent's. `formatted`: `text` is already rustfmt's
-/// text (a patch's block), so it is not formatted again.
-pub fn submit_items(root: &Path, module: &str, parent: Option<(&str, &str, &str)>, text: &str, formatted: bool) -> Result<Vec<Submitted>, Failure> {
+/// text (a patch's block), so it is not formatted again. `label` names the
+/// block in a syntax error (`<module>.<name>`).
+pub fn submit_items(
+    root: &Path,
+    module: &str,
+    label: &str,
+    parent: Option<(&str, &str, &str)>,
+    text: &str,
+    formatted: bool,
+) -> Result<Vec<Submitted>, Failure> {
     // A block is saved whole at the top level; a named target holds no room for
     // one, and `mod x;` names a file a `submit` doesn't create (D-168). A
     // nested item's text doesn't parse on its own, so a refusal to parse is not
@@ -120,23 +133,28 @@ pub fn submit_items(root: &Path, module: &str, parent: Option<(&str, &str, &str)
     // is the wrapper its first item is formatted inside (D-168).
     let empty = parent.and_then(|(_, opening, _)| empty_container(opening, module));
     let opening = empty.clone().or_else(|| parent.map(|(_, opening, _)| opening.to_string()));
+    let offset = opening.as_ref().map_or(0, |opening| opening.lines().count());
+    let lines = text.lines().count().max(1);
     let source = if formatted {
         match &opening {
             Some(opening) => format!("{opening}\n{text}\n}}\n"),
             None => text.to_string(),
         }
     } else {
-        cargo::format_item(root, text, opening.as_deref())?
+        cargo::format_item(root, text, opening.as_deref()).map_err(|e| rust_syntax_error(e, label, parent, module, 0, lines))?
     };
-    let file = language::rust::split(&source, module)?;
+    let file = language::rust::split(&source, module).map_err(|e| rust_syntax_error(e, label, parent, module, offset, lines))?;
     if !file.refusals.is_empty() {
         let lines: Vec<String> = file.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
         return fail(format!("Not saved: the Rust text is outside the subset Solace holds.\n{}", lines.join("\n")));
     }
     // A block's `use` items are the module's imports, which `submit --imports`
     // writes; an item block's own are dropped, so saving one loses them.
-    if language::rust::imports(&source) {
-        return fail("Not saved: imports go through `submit --imports <module>`.");
+    if language::rust::imports(text) {
+        let imports: Vec<String> =
+            language::rust::import_texts(text).into_iter().map(|import| import.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+        let imports: Vec<String> = imports.iter().map(|import| format!("`{import}`")).collect();
+        return fail(format!("Not saved: block {label} carries {}; imports go through `submit --imports {module}`.", imports.join(", ")));
     }
     let Some((name, opening, _)) = parent else {
         return Ok(file.items.iter().map(submitted).collect());
@@ -470,3 +488,38 @@ mod read_tests;
 #[cfg(test)]
 #[path = "store_delete_tests.rs"]
 mod delete_tests;
+
+/// A Rust syntax failure `e` located in the block `label`: its line in the
+/// submitted text (the wrapper's `offset` lines are removed) and the container
+/// the item was to be added to, so a wrong placement is visible. A line from
+/// rustfmt's output is approximate once rustfmt has reflowed the text.
+pub(crate) fn rust_syntax_error(
+    e: Failure,
+    label: &str,
+    parent: Option<(&str, &str, &str)>,
+    module: &str,
+    offset: usize,
+    lines: usize,
+) -> Failure {
+    let (line, what) = if let Some(rest) = e.0.strip_prefix("Not saved: E0100 syntax error at line ") {
+        let (line, what) = rest.split_once(':').unwrap_or((rest, ""));
+        (line.trim().parse::<usize>().ok(), what.trim().to_string())
+    } else if let Some(rest) = e.0.strip_prefix("line ") {
+        let (line, what) = rest.split_once(':').unwrap_or((rest, ""));
+        let line = line.trim().parse::<usize>().ok().map(|line| line.saturating_sub(offset).max(1));
+        (line, what.trim().to_string())
+    } else if e.0.starts_with("Not saved:") {
+        return e;
+    } else {
+        return Failure(format!("Not saved: {}", e.0), e.1);
+    };
+    let mut at = format!("Not saved: E0100 syntax error in `{label}`");
+    if let Some(line) = line {
+        at += &format!(" at line {}", line.min(lines.max(1)));
+    }
+    if let Some((name, _, kind)) = parent {
+        at += &format!(", added inside `{module}.{name}` ({kind})");
+    }
+    let what = if what.is_empty() { "the text doesn't parse".to_string() } else { what };
+    Failure(format!("{at}: {what}"), e.1)
+}

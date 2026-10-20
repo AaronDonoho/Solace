@@ -101,3 +101,12 @@ fn a_copy_of_this_crate_is_imported_and_written_back_exactly() {
     assert_eq!(module("board").owns_dir, Some(false), "a plain file's modules are in a folder");
     assert_eq!(module("board::tests").owns_dir, Some(true), "a `#[path]` file's modules are beside it");
 }
+
+#[test]
+fn a_plain_error_keeps_not_saved() {
+    let e = rust_syntax_error(Failure("rustfmt failed".into(), 3), "crate.one", None, "crate", 0, 5);
+    assert_eq!(e.0, "Not saved: rustfmt failed");
+    assert_eq!(e.1, 3);
+    let e = rust_syntax_error(Failure("Not saved: elsewhere".into(), 1), "crate.one", None, "crate", 0, 5);
+    assert_eq!(e.0, "Not saved: elsewhere");
+}

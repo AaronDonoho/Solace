@@ -569,7 +569,8 @@ fn form(
   }
   let attrs = case draft.id {
     None -> [attribute.class("feature-form")]
-    // The form names the feature it edits, so a test finds it by that.
+    // The form stands where the feature's card would: `api.mjs` finds the card
+    // by this id to reveal or drag it.
     Some(id) -> [
       attribute.class("feature-form"),
       attribute.attribute("data-feature-id", id),

@@ -1,7 +1,6 @@
 //// The Knowledgebase page (D-140): the shell's own page, holding the guide.
 
 import gleam/list
-import gleam/result
 import gleam/string
 import lustre/attribute
 import lustre/element.{type Element}
@@ -16,7 +15,8 @@ pub type Section {
 /// The Knowledgebase page (D-140): the guide, in the shell's light DOM so its table of contents' anchors
 /// work and the shell's theme applies. Hidden while another page shows.
 /// `columns` are the project's board columns, as the server's workflow answers
-/// them (D-140): the guide's column table follows them.
+/// them, or the guide's known columns when it answers none (D-140): the
+/// guide's column table follows them.
 pub fn view(shown: Bool, columns: List(Column)) -> Element(msg) {
   let attributes = case shown {
     True -> [attribute.class("knowledgebase")]
@@ -232,11 +232,20 @@ smoke = { run = [\"gleam\", \"run\", \"-m\", \"smoke\"], timeout = 60 }</pre>
 /// Where a section's body has the project's column table drawn in.
 const columns_marker = "<!--columns-->"
 
-/// What the guide says about a column, by its id: what it means, and what you
-/// can do there. The guide's own words, so they carry markup.
+/// What the guide says about a column, by its id: its label, what it means and
+/// what you can do there. The guide's own words, so they carry markup.
 const column_notes = [
   #(
+    "backlog",
+    "Backlog",
+    #(
+      "Written, but not active yet",
+      "On the <strong>Strategy</strong> page: <em>Plan</em> brings it to Planning, and <em>Back to backlog</em> puts a planned one on hold",
+    ),
+  ),
+  #(
     "planning",
+    "Planning",
     #(
       "You're shaping the task",
       "Ask an agent to investigate it, assign it to a model, complete it (when it only needed an answer), or cancel it",
@@ -244,6 +253,7 @@ const column_notes = [
   ),
   #(
     "assigned",
+    "Assigned",
     #(
       "An agent is working, or needs your answer or stopped (the card is marked <em>Needs attention</em>)",
       "Answer it, reassign it, start a new agent, ask for a review, send it back to planning (once no agent is on it), or cancel it",
@@ -251,20 +261,14 @@ const column_notes = [
   ),
   #(
     "needs_review",
+    "Review",
     #(
       "The agent says it's finished",
       "Approve it, then complete it; ask for an agent review; reassign it for fixes; start over; send it back to planning; or cancel it",
     ),
   ),
-  #("complete", #("Finished", "Nothing")),
-  #("cancelled", #("Dropped", "Send it back to planning")),
-  #(
-    "backlog",
-    #(
-      "Written, but not active yet",
-      "On the <strong>Strategy</strong> page: <em>Plan</em> brings it to Planning, and <em>Back to backlog</em> puts a planned one on hold",
-    ),
-  ),
+  #("complete", "Complete", #("Finished", "Nothing")),
+  #("cancelled", "Canceled", #("Dropped", "Send it back to planning")),
 ]
 
 /// A column the guide has no words for: the project's own settings decide.
@@ -273,14 +277,18 @@ const column_generic = #(
   "What the project's settings allow there",
 )
 
-/// The column table, drawn from the workflow the server answers (D-140): one
-/// row per column, in the server's order, with the guide's words for the
-/// columns it knows. A label comes from the project's settings, so it is
-/// escaped; the guide's words are markup already.
+/// The column table, drawn from the columns the shell passes (D-140): one row
+/// per column, in their order, with the guide's words for the columns it
+/// knows. A label may come from the project's settings, so it is escaped; the
+/// guide's words are markup already.
 fn column_table(columns: List(Column)) -> String {
   let row = fn(column: Column) -> String {
-    let #(meaning, actions) =
-      list.key_find(column_notes, column.id) |> result.unwrap(column_generic)
+    let #(meaning, actions) = case
+      list.find(column_notes, fn(note) { note.0 == column.id })
+    {
+      Ok(#(_, _, notes)) -> notes
+      Error(_) -> column_generic
+    }
     "<tr><td>"
     <> escape(column.label)
     <> "</td><td>"
@@ -305,4 +313,13 @@ fn escape(text: String) -> String {
 /// A section's body, with the column table in its marked place.
 fn body_html(body: String, columns: List(Column)) -> String {
   string.replace(body, columns_marker, column_table(columns))
+}
+
+/// The columns the guide knows, for when the server answers no workflow: the
+/// default board's, in its order.
+pub fn known_columns() -> List(Column) {
+  list.map(column_notes, fn(note) {
+    let #(id, label, _) = note
+    solace_task.Column(id, label, [], False)
+  })
 }

@@ -390,12 +390,20 @@ class Migrate(unittest.TestCase):
         while time.monotonic() < end:
             try:
                 v = self.get()
-                self.assertIsNone(v.get('error'), v.get('error'))
-                if predicate(v): return v
+                error = v.get('error')
+                if error and 'E7003' in str(error) and 'app is busy' in str(error):
+                    pass
+                else:
+                    self.assertIsNone(error, error)
+                    if predicate(v): return v
             except (ConnectionError, http.client.HTTPException):
                 pass  # the server is restarting
             time.sleep(.2)
         self.fail(f'timed out; last {v}')
+    def test_until_retries_when_the_app_is_busy(self):
+        replies = [{'error': 'E7003 app is busy'}, {'state': 'ready'}]
+        self.get = lambda: replies.pop(0)
+        self.assertEqual(self.until(lambda v: v['state'] == 'ready', timeout=1), {'state': 'ready'})
 
 if __name__ == '__main__':
     unittest.main()

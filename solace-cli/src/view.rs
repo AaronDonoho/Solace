@@ -1,7 +1,7 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-// ponytail: effects inside dependencies are seen only through this table; extend by settings later.
+// effects inside dependencies are seen only through this table; extend by settings later.
 const EFFECTS: &[(&str, &str, &str)] = &[
     ("gleam/io", "*", "prints"),
     ("simplifile", "read*", "reads files"),
@@ -630,7 +630,7 @@ pub fn run_tests(root: PathBuf, tid: String) {
         let result = (|| -> Result<(), Failure> {
             let dir = env::temp_dir().join(format!("solace-view-{}", unique_id()));
             // The task may be stored in another project of its scope (D-61).
-            // ponytail: one review_tests per task; tests run from another project replace them.
+            // one review_tests per task; tests run from another project replace them.
             let home = scope::home(&root, &tid)?;
             let (base, tests) = {
                 let _guard = scope::lock_all(&[root.clone(), home.clone()])?;

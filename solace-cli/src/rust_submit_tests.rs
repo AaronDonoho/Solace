@@ -35,3 +35,18 @@ fn a_path_that_climbs_matches_the_file_it_names() {
     let outside = ModuleRow { file: Some("../common/mod.rs".into()), ..row };
     assert!(!declares_module(&parent, "common", &outside));
 }
+
+#[test]
+fn a_format_says_which_tool_is_missing() {
+    assert_eq!(super::format_missing(false, false), Some(crate::language::cargo::MISSING));
+    assert_eq!(super::format_missing(true, false), Some(crate::language::cargo::RUSTFMT_MISSING));
+    assert_eq!(super::format_missing(true, true), None);
+}
+
+#[test]
+fn a_long_line_counts_columns_not_characters() {
+    assert!(super::long_line_note("crate.x", &"\t".repeat(26), 100).is_some());
+    assert!(super::long_line_note("crate.x", &"界".repeat(51), 100).is_some());
+    assert!(super::long_line_note("crate.x", &"\u{1fa70}".repeat(51), 100).is_some());
+    assert!(super::long_line_note("crate.x", &"e\u{301}".repeat(60), 100).is_none());
+}

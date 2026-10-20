@@ -27,14 +27,6 @@ TOKENS = CLI/'components/src/solace_task.gleam'
 HTML = CLI/'frontend/index.html'
 SKIP = {'target', 'node_modules', '.solace', 'build', 'dist'}
 
-# The spellings a label drifts into, by the column id they drift from. The
-# lowercase ones are a fixture's slip: prose uses the verbs, not the labels.
-DRIFT = {
-    'cancelled': ['Cancelled', 'canceled'],
-    'needs_review': ['Needs Review', 'Needs review', 'In Review', 'In review'],
-}
-# A column named as a name, in prose as well as in a fixture.
-NAMES = ['Cancelled', 'Needs Review', 'In Review']
 SHARED = ('--space-', '--control-', '--pad-', '--tab-')
 HEADINGS = ('--h2', '--h3', '--h4')
 
@@ -54,6 +46,32 @@ def labels():
     for block in BOARD.read_text(encoding='utf-8').split('[[board.columns]]')[1:]:
         found = re.search(r'id\s*=\s*"([^"]+)"', block), re.search(r'label\s*=\s*"([^"]+)"', block)
         if all(found): out[found[0].group(1)] = found[1].group(1)
+    return out
+
+def final_columns():
+    """The ids of the board's final columns, as default-board.toml sets them."""
+    out = set()
+    for block in BOARD.read_text(encoding='utf-8').split('[[board.columns]]')[1:]:
+        found = re.search(r'id\s*=\s*"([^"]+)"', block)
+        if found and re.search(r'^\s*final\s*=\s*true\b', block, re.M):
+            out.add(found.group(1))
+    return out
+
+def drift(board, finals):
+    """The names a column's id suggests, when the board labels it otherwise.
+
+    Derived from the board's own columns, so a new column's drift is caught
+    without editing a list here. The id as words is a fixture's or prose's
+    slip; `In <label>` covers the common "In Review" form for a column that
+    isn't final.
+    """
+    out = {}
+    for cid, label in board.items():
+        named = cid.replace('_', ' ').title()
+        if named != label:
+            out[cid] = [named]
+            if cid not in finals:
+                out[cid].append('In ' + label)
     return out
 
 def shared(name):
@@ -77,17 +95,22 @@ def token_faults():
 
 def label_faults(paths, board):
     """One line per label that drifts from the board's spelling of its column."""
+    drift_names = drift(board, final_columns())
+    names = [name for variants in drift_names.values() for name in variants]
     out = []
     for path in paths:
         for n, line in enumerate(path.read_text(encoding='utf-8').split('\n'), 1):
-            for word in NAMES:
+            for word in names:
                 if re.search(rf'(?<!\w){re.escape(word)}(?!\w)', line):
-                    who = next(i for i in DRIFT if word in DRIFT[i])
+                    who = next(cid for cid, variants in drift_names.items() if word in variants)
                     out.append(f'{rel(path)}:{n}: a column is named "{word}"; the board shows "{board[who]}"')
             for pattern in FIXTURES:
                 for cid, label in pattern.findall(line):
                     want = board.get(cid)
-                    if want and label != want and (label.lower() == want.lower() or label in DRIFT.get(cid, [])):
+                    if want and label != want and (
+                        label.lower() == want.lower()
+                        or label.lower() in {v.lower() for v in drift_names.get(cid, [])}
+                    ):
                         out.append(f'{rel(path)}:{n}: column "{cid}" is labeled "{label}"; the board shows "{want}"')
     return out
 

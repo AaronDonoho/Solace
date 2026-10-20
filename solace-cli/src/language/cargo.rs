@@ -24,6 +24,11 @@ pub fn installed() -> bool {
 }
 
 fn search_path(program: &str) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(found) = PATH_OVERRIDE.with(|p| p.borrow().as_ref().map(|dirs| dirs.iter().map(|d| d.join(program)).find(|p| p.is_file())))
+    {
+        return found;
+    }
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path).map(|d| d.join(program)).find(|p| p.is_file())
 }
@@ -334,16 +339,23 @@ pub fn failures(output: &str) -> BTreeMap<String, (String, String)> {
 /// and the caller takes the child out again (D-168). The Rust `submit` task
 /// calls this.
 pub fn format_item(root: &Path, text: &str, opening: Option<&str>) -> Result<String, Failure> {
-    let dir = root.join(".solace");
-    fs::create_dir_all(&dir)?;
-    let file = dir.join(format!("format-{}.rs", crate::unique_id()));
     let source = match opening {
         Some(opening) => format!("{opening}\n{text}\n}}\n"),
         None => text.to_string(),
     };
+    let edition = edition(root);
+    let config = config_path(root);
+    let config_key = config.as_ref().and_then(|path| fs::read(path).ok());
+    let key = (source.clone(), edition.clone(), config_key);
+    if let Some(formatted) = FORMATTED.lock().unwrap().get(&key) {
+        return Ok(formatted.clone());
+    }
+    let dir = root.join(".solace");
+    fs::create_dir_all(&dir)?;
+    let file = dir.join(format!("format-{}.rs", crate::unique_id()));
     fs::write(&file, &source)?;
-    let mut argv: Vec<String> = vec!["rustfmt".into(), "--edition".into(), edition(root)];
-    if let Some(config) = config_path(root) {
+    let mut argv: Vec<String> = vec!["rustfmt".into(), "--edition".into(), edition];
+    if let Some(config) = config {
         argv.push("--config-path".into());
         argv.push(config);
     }
@@ -354,9 +366,27 @@ pub fn format_item(root: &Path, text: &str, opening: Option<&str>) -> Result<Str
     let output = output?;
     if !output.status.success() {
         let message = strip_ansi(&String::from_utf8_lossy(&output.stderr));
-        return fail(format!("Not saved: E0100 syntax error.\n\n{}", message.trim()));
+        let lines = text.lines().count().max(1);
+        let line = rustfmt_line(&message, opening.map_or(0, |opening| opening.lines().count())).unwrap_or(1).min(lines);
+        let path = file.to_string_lossy();
+        let summary = message
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("error"))
+            .or_else(|| {
+                message.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with("-->") && !line.contains("format-"))
+            })
+            .unwrap_or("the text doesn't parse")
+            .replace(&*path, "the submitted text");
+        return fail(format!("Not saved: E0100 syntax error at line {line}: {summary}"));
     }
-    Ok(format!("{}\n", formatted.trim_end()))
+    let formatted = format!("{}\n", formatted.trim_end());
+    let mut cache = FORMATTED.lock().unwrap();
+    if cache.len() >= 1024 {
+        cache.clear();
+    }
+    cache.insert(key, formatted.clone());
+    Ok(formatted)
 }
 
 /// The package's edition from its Cargo.toml, following
@@ -394,3 +424,87 @@ fn config_path(root: &Path) -> Option<String> {
 #[cfg(test)]
 #[path = "cargo_tests.rs"]
 mod tests;
+
+/// The line `rustfmt` names in its stderr, relative to `text`: `offset` is the
+/// wrapper's lines before it. The temp file's path stays out of the reply.
+fn rustfmt_line(stderr: &str, offset: usize) -> Option<usize> {
+    let at = stderr.lines().find_map(|line| line.trim().strip_prefix("--> "))?;
+    let (head, _column) = at.rsplit_once(':')?;
+    let (_, line) = head.rsplit_once(':')?;
+    line.trim().parse::<usize>().ok().map(|line| line.saturating_sub(offset).max(1))
+}
+
+static FORMATTED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<(String, String, Option<Vec<u8>>), String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Formats a whole module's written file with the project's `rustfmt.toml` and
+/// edition (D-180), leaving child modules alone. The file is put back on a
+/// failed run, so a syntax error changes nothing.
+pub fn format_module(root: &Path, file: &Path) -> Result<String, Failure> {
+    let before = fs::read_to_string(file)?;
+    let mut argv: Vec<String> = vec!["rustfmt".into(), "--edition".into(), edition(root)];
+    if let Some(config) = config_path(root) {
+        argv.push("--config-path".into());
+        argv.push(config);
+    }
+    argv.push("--config".into());
+    argv.push("skip_children=true,reorder_modules=false".into());
+    argv.push(file.to_string_lossy().to_string());
+    let output = Command::new(&argv[0]).args(&argv[1..]).output();
+    let output = output?;
+    if !output.status.success() {
+        let restored = fs::write(file, &before);
+        let message = strip_ansi(&String::from_utf8_lossy(&output.stderr));
+        let lines = before.lines().count().max(1);
+        let line = rustfmt_line(&message, 0).unwrap_or(1).min(lines);
+        let path = file.to_string_lossy();
+        let summary = message
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("error"))
+            .or_else(|| message.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with("-->")))
+            .unwrap_or("the text doesn't parse")
+            .replace(&*path, "the module");
+        let mut out = format!("Not saved: E0100 syntax error at line {line}: {summary}");
+        if let Err(e) = restored {
+            out += &format!("\nThe module file could not be put back after rustfmt: {e}");
+        }
+        return fail(out);
+    }
+    Ok(fs::read_to_string(file)?)
+}
+
+/// A Rust project's `format` needs this on `PATH`; without it the command is
+/// refused.
+pub const RUSTFMT_MISSING: &str = "Needs the Rust toolchain (`rustfmt`)";
+
+/// Whether `rustfmt` is on `PATH`, looked up on every call like `cargo`.
+pub fn rustfmt_installed() -> bool {
+    search_path("rustfmt").is_some()
+}
+
+/// The project's rustfmt `max_width`, from the same settings file `format_item`
+/// and `format_module` pass to rustfmt; rustfmt's default 100 without the setting.
+pub(crate) fn max_width(root: &Path) -> usize {
+    config_path(root)
+        .and_then(|path| fs::read_to_string(path).ok())
+        .and_then(|text| text.parse::<toml::Value>().ok())
+        .and_then(|settings| settings.get("max_width").and_then(|width| width.as_integer()))
+        .map_or(100, |width| width.max(1) as usize)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test thread's `PATH`, in place of the process's.
+    static PATH_OVERRIDE: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `PATH` read as `dirs`, so a test can act as a machine with or
+/// without a tool.
+#[cfg(test)]
+pub(crate) fn with_path<T>(dirs: &[PathBuf], f: impl FnOnce() -> T) -> T {
+    let old = PATH_OVERRIDE.with(|p| p.replace(Some(dirs.to_vec())));
+    let out = f();
+    PATH_OVERRIDE.with(|p| *p.borrow_mut() = old);
+    out
+}

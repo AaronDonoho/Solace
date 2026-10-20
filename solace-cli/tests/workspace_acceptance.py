@@ -112,6 +112,16 @@ class Root(unittest.TestCase):
             time.sleep(.05)
         self.fail('timed out: ' + json.dumps(v))
 
+    def test_a_rust_projects_symbols_are_read_with_project(self):
+        # D-158: `--project` reads a Rust project's store by name, as it does
+        # the current project's; only a project of plain files is refused.
+        cargo_package(self.root/'rust', body='pub fn one() -> i32 { 1 }\nfn main() {}\n')
+        self.start()
+        self.api('POST', '/projects', {'dir': 'rust'})
+        self.assertIn('pub fn one()', self.cli('inspect', 'crate.one', '--project', 'rust'))
+        self.assertIn('crate.one', self.cli('refs', 'crate.one', '--project', 'rust'))
+        self.assertIn('crate.one', self.cli('find', 'one', '--project', 'rust'))
+
     def test_a_rust_project_without_cargo_is_marked_and_refused(self):  # D-167
         # A Cargo package at the root, with its `solace.toml` already there,
         # comes in at serve; its lane says what it needs, and its commands are refused.
@@ -132,7 +142,9 @@ class Root(unittest.TestCase):
         out = self.cli('inspect', 'crate.one')
         self.assertIn('pub fn one()', out)
         self.assertNotIn('Needs the Rust toolchain', out)
-        self.assertIn('pub fn one()', self.cli('view', 'src/lib.rs'))
+        out = self.cli('view', 'src/lib.rs', ok=False)
+        self.assertIn('E6001', out)
+        self.assertIn('view crate', out)
         self.cli('work', 'list')
 
     def test_a_rust_check_names_its_symbol_and_submit_saves_one(self):  # D-167, D-168

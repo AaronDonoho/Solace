@@ -399,6 +399,9 @@ fn a_header_holds_its_imports() {
     assert!(imports("use std::fmt;\n\n"));
     assert!(imports("pub use std::fmt::Debug;\n"));
     assert!(imports("pub(crate) use fmt;\n"));
+    assert_eq!(import_texts("use std::fmt;\n\n"), vec!["use std::fmt;".to_string()]);
+    assert_eq!(import_texts("pub use std::fmt::Debug;\n"), vec!["pub use std::fmt::Debug;".to_string()]);
+    assert_eq!(import_texts("mod inner {\n    use std::fmt;\n}\n"), vec!["use std::fmt;".to_string()]);
     assert!(!imports("//! doc\npub mod x;\n"));
     assert!(!imports("pub fn one() {\n    use std::fmt;\n}\n"));
     assert!(!imports(""));

@@ -97,9 +97,19 @@ fn test_args_filter_by_libtest_name() {
 /// them writes nothing, and a moved Cargo or rustup home is mounted where it is.
 #[test]
 fn cargo_sandbox_arguments_keep_only_target_writable() {
-    let dir = Scratch::new().with(&[("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"), ("src/lib.rs", "pub fn one() -> i32 { 1 }\n")]);
+    let dir = Scratch::new().with(&[
+        ("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        ("src/lib.rs", "pub fn one() -> i32 { 1 }\n"),
+    ]);
     let argv: Vec<String> = ["cargo", "check"].iter().map(|s| s.to_string()).collect();
-    let args = crate::migrate::cargo_sandbox_args(&argv, &dir, Some(Path::new("/home/x")), Path::new("/home/x/.cargo"), Path::new("/home/x/.rustup"));
+    let args = crate::migrate::cargo_sandbox_args(
+        &argv,
+        &dir,
+        Some(Path::new("/home/x")),
+        Path::new("/home/x/.cargo"),
+        Path::new("/home/x/.rustup"),
+    )
+    .unwrap();
     let line = args.join(" ");
     assert!(line.contains("--die-with-parent --unshare-net --ro-bind / /"), "{line}");
     assert!(line.contains("--tmpfs /home/x"), "{line}");
@@ -112,13 +122,9 @@ fn cargo_sandbox_arguments_keep_only_target_writable() {
     assert!(line.contains(&format!("--bind {root}/Cargo.lock {root}/Cargo.lock")), "{line}");
     assert_eq!(&args[args.len() - 2..], ["cargo", "check"]);
     assert!(!dir.join("Cargo.lock").exists(), "building the arguments writes nothing");
-    let moved = crate::migrate::cargo_sandbox_args(
-        &argv,
-        &dir,
-        Some(Path::new("/home/x")),
-        Path::new("/opt/cargo"),
-        Path::new("/opt/rustup"),
-    );
+    let moved =
+        crate::migrate::cargo_sandbox_args(&argv, &dir, Some(Path::new("/home/x")), Path::new("/opt/cargo"), Path::new("/opt/rustup"))
+            .unwrap();
     let line = moved.join(" ");
     assert!(line.contains("--ro-bind-try /opt/cargo/registry /opt/cargo/registry"), "{line}");
     assert!(line.contains("--ro-bind-try /opt/rustup /opt/rustup"), "{line}");
@@ -227,6 +233,7 @@ fn a_failed_fetch_keeps_the_lockfile() {
         return;
     }
     let dir = Scratch::new().with(&[
+        (".cargo/config.toml", "# A failed fetch is the point; cargo's retries only slow the test.\n[net]\nretry = 0\n"),
         (
             "Cargo.toml",
             "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ndep = { git = \"file:///nonexistent/solace-missing\" }\n",
@@ -268,6 +275,7 @@ fn a_failed_member_fetch_keeps_the_workspace_lockfile() {
         return;
     }
     let root = Scratch::new().with(&[
+        (".cargo/config.toml", "# A failed fetch is the point; cargo's retries only slow the test.\n[net]\nretry = 0\n"),
         ("Cargo.toml", "[workspace]\nmembers = [\"member\"]\nresolver = \"2\"\n"),
         ("member/Cargo.toml", "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
         ("member/src/lib.rs", "pub fn one() -> i32 { 1 }\n"),
@@ -329,6 +337,7 @@ fn a_fetch_waits_for_the_fetch_lock() {
         return;
     }
     let root = Scratch::new().with(&[
+        (".cargo/config.toml", "# A failed fetch is the point; cargo's retries only slow the test.\n[net]\nretry = 0\n"),
         (
             "Cargo.toml",
             "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ndep = { git = \"file:///nonexistent/solace-missing\" }\n",
@@ -347,5 +356,57 @@ fn a_fetch_waits_for_the_fetch_lock() {
     drop(held);
     assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(60)).ok(), Some(true), "the fetch failed once the lock was free");
     worker.join().unwrap();
+}
+
+/// A second format of the same item and settings reuses the first result.
+#[test]
+fn a_formatted_item_is_reused() {
+    if search_path("rustfmt").is_none() {
+        return;
+    }
+    let dir = Scratch::new().with(&[("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")]);
+    let text = "fn cached( ) -> i32 { 3 }\n";
+    let one = format_item(&dir, text, None).unwrap();
+    assert_eq!(format_item(&dir, text, None).unwrap(), one);
+    let key = (text.to_string(), edition(&dir), None);
+    assert!(FORMATTED.lock().unwrap().contains_key(&key));
+    FORMATTED.lock().unwrap().insert(key, "sentinel\n".to_string());
+    assert_eq!(format_item(&dir, text, None).unwrap(), "sentinel\n");
+}
+
+/// A whole module is formatted on its written file with the project's settings,
+/// and its child modules keep their bytes (D-180).
+#[test]
+fn a_whole_module_is_formatted_without_its_children() {
+    if search_path("rustfmt").is_none() {
+        return;
+    }
+    let dir = Scratch::new().with(&[
+        ("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        ("rustfmt.toml", "hard_tabs = true\n"),
+        ("src/lib.rs", "mod b;\nmod a;\n\npub fn one( ) -> i32 { 1 }\n"),
+        ("src/a.rs", "pub fn a( ) -> i32 { 2 }\n"),
+        ("src/b.rs", "pub fn b( ) -> i32 { 3 }\n"),
+    ]);
+    let lib = dir.join("src/lib.rs");
+    let child = dir.join("src/a.rs");
+    let out = format_module(&dir, &lib).unwrap();
+    assert_eq!(out, "mod b;\nmod a;\n\npub fn one() -> i32 {\n\t1\n}\n");
+    assert_eq!(fs::read_to_string(&lib).unwrap(), out);
+    assert_eq!(fs::read_to_string(&child).unwrap(), "pub fn a( ) -> i32 { 2 }\n");
+}
+
+/// `max_width` reads the nearest rustfmt settings and keeps rustfmt's default
+/// 100 without one.
+#[test]
+fn max_width_comes_from_the_projects_rustfmt_settings_or_defaults_to_100() {
+    let none = Scratch::new().with(&[("Cargo.toml", "")]);
+    assert_eq!(max_width(&none), 100);
+    let other = Scratch::new().with(&[("Cargo.toml", ""), ("rustfmt.toml", "edition = \"2021\"\n")]);
+    assert_eq!(max_width(&other), 100);
+    let set = Scratch::new().with(&[("Cargo.toml", ""), ("rustfmt.toml", "max_width = 30\n")]);
+    assert_eq!(max_width(&set), 30);
+    let parent = Scratch::new().with(&[("rustfmt.toml", "max_width = 40\n"), ("sub/Cargo.toml", "")]);
+    assert_eq!(max_width(&parent.join("sub")), 40);
 }
 

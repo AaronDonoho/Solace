@@ -143,8 +143,10 @@ fn an_escaped_quote_closes_no_string() {
 #[test]
 fn view_gives_an_outline_or_an_item_and_names_a_miss() {
     let dir = Scratch::new().with(&[("src/lib.rs", SAMPLE), ("src/other/lib.rs", "fn a() {}\n"), ("tests/check.py", PY)]);
+    fs::create_dir_all(dir.join(".solace")).unwrap();
+    let store = Store::at(&dir).unwrap();
     let v = toml::Value::Table(Default::default());
-    let run = |a: &[&str], budget: usize| view(&dir, &v, a, budget).expect("a file form");
+    let run = |a: &[&str], budget: usize| view(&store, &v, a, budget).expect("a file form");
     let outline = run(&["view", "src/lib.rs"], 32_000).unwrap();
     assert!(outline.starts_with("src/lib.rs: 53 lines, 12 items\n"), "{outline}");
     assert!(outline.contains("  4..8 pub struct Store — The store.\n"), "{outline}");
@@ -160,12 +162,16 @@ fn view_gives_an_outline_or_an_item_and_names_a_miss() {
     let e = run(&["view", "src/lib.rs::nested"], 32_000).unwrap();
     assert!(e.contains("E1001") && e.contains("grep nested --in src/lib.rs --context 3"), "{e}");
     let broken = Scratch::new().with(&[("src/bad.rs", "fn a() {}\nfn b( {}\n")]);
-    let e = view(&broken, &v, &["view", "src/bad.rs"], 32_000).unwrap().unwrap();
+    fs::create_dir_all(broken.join(".solace")).unwrap();
+    let broken_store = Store::at(&broken).unwrap();
+    let e = view(&broken_store, &v, &["view", "src/bad.rs"], 32_000).unwrap().unwrap();
     assert!(e.starts_with("src/bad.rs: line 2: ") && e.ends_with("`read src/bad.rs` reads it.\n"), "{e}");
     // A refusal of one operand is its own part of the reply: the other is answered.
     let mixed = run(&["view", "src/lib.rs::nested", "src/other/lib.rs"], 32_000).unwrap();
     assert!(
-        mixed.contains("E1001") && mixed.contains("grep nested --in src/lib.rs --context 3") && mixed.contains("src/other/lib.rs: 1 lines, 1 items\n"),
+        mixed.contains("E1001")
+            && mixed.contains("grep nested --in src/lib.rs --context 3")
+            && mixed.contains("src/other/lib.rs: 1 lines, 1 items\n"),
         "{mixed}"
     );
     assert!(run(&["view", "check.py::test_one"], 32_000).unwrap().starts_with("tests/check.py:13..17\n13:     @skip\n"));
@@ -176,10 +182,13 @@ fn view_gives_an_outline_or_an_item_and_names_a_miss() {
     let cut = run(&["view", "src/lib.rs"], 280).unwrap();
     assert!(cut.contains("more items left out to fit the reply") && cut.len() < 400, "{cut}");
     // Symbols are the store's, and the two don't mix.
-    assert!(view(&dir, &v, &["view", "app.main"], 32_000).is_none());
+    assert!(view(&store, &v, &["view", "app.main"], 32_000).is_none());
     assert!(run(&["view", "src/lib.rs", "app.main"], 32_000).unwrap_err().0.contains("not both"));
     let gleam = Scratch::new().with(&[("gleam.toml", "name = \"app\"\n")]);
-    assert!(view(&gleam, &v, &["view", "app.rs"], 32_000).is_none(), "a Gleam symbol `app.rs`");
+    fs::create_dir_all(gleam.join(".solace")).unwrap();
+    let gleam_store = Store::at(&gleam).unwrap();
+    assert!(view(&gleam_store, &v, &["view", "app.rs"], 32_000).is_none(), "a Gleam symbol `app.rs`");
+    assert!(view(&gleam_store, &v, &["view", "app.gleam"], 32_000).is_none(), "a bare `.gleam` symbol");
 }
 
 #[test]

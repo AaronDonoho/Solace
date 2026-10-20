@@ -25,6 +25,8 @@ pub struct Written {
     root: PathBuf,
     files: BTreeMap<String, (String, u64, u128)>,
     bad: BTreeMap<String, String>,
+    /// Digest of the ignore file that last hid the store, so the note is said once per change.
+    hidden: Option<String>,
     /// False for a store from before D-58 that has no record yet.
     pub known: bool,
     dirty: bool,
@@ -33,8 +35,12 @@ pub struct Written {
 impl Written {
     pub fn load(root: &Path) -> Written {
         let text = fs::read_to_string(root.join(".solace/written"));
-        let (mut files, mut bad) = (BTreeMap::new(), BTreeMap::new());
+        let (mut files, mut bad, mut hidden) = (BTreeMap::new(), BTreeMap::new(), None);
         for line in text.as_deref().unwrap_or("").lines() {
+            if let Some(h) = line.strip_prefix("? ") {
+                hidden = Some(h.to_string());
+                continue;
+            }
             if let Some((h, path)) = line.strip_prefix("! ").and_then(|l| l.split_once(' ')) {
                 bad.insert(path.to_string(), h.to_string());
                 continue;
@@ -44,12 +50,13 @@ impl Written {
                 files.insert(path.to_string(), (h.to_string(), size.parse().unwrap_or(0), time.parse().unwrap_or(0)));
             }
         }
-        Written { root: root.into(), files, bad, known: text.is_ok(), dirty: false }
+        Written { root: root.into(), files, bad, hidden, known: text.is_ok(), dirty: false }
     }
 
     pub fn save(&mut self) -> Result<(), Failure> {
         if self.dirty {
-            let mut text: String = self.files.iter().map(|(p, (h, size, time))| format!("{h} {size} {time} {p}\n")).collect();
+            let mut text: String = self.hidden.iter().map(|h| format!("? {h}\n")).collect();
+            text.extend(self.files.iter().map(|(p, (h, size, time))| format!("{h} {size} {time} {p}\n")));
             text.extend(self.bad.iter().map(|(p, h)| format!("! {h} {p}\n")));
             write_atomic(&self.root.join(".solace/written"), text)?;
             self.dirty = false;
@@ -213,14 +220,17 @@ fn approval(key: &str, row: &Value) -> Option<(String, String)> {
 
 /// The whole store as approved: at `create`, and for a store that has no list yet.
 pub fn approve_all(s: &Store) -> Result<(), Failure> {
+    // A commit copies `store.db` alone: checkpoint the WAL into it first (D-179).
+    checkpoint(s)?;
     let snap = board::snapshot(s)?;
     let map = snap.as_object().unwrap().iter().filter_map(|(k, v)| approval(k, v)).collect();
     save_approved(&s.root, &map)
 }
 
 /// A completed task's changes become approved: each entity's name before the
-/// task leaves the list, and its current state joins it.
-// ponytail: takes each entity as it is now, even if a later open task also changed it.
+/// task leaves the list, and its current state joins it. The caller flushes the
+/// store after its last write (D-179).
+// takes each entity as it is now, even if a later open task also changed it.
 pub fn approve(s: &Store, tid: &str) -> Result<(), Failure> {
     let mut st = s.db.prepare("SELECT entity,data FROM board_before WHERE task=?")?;
     let before: Vec<(String, Value)> = st
@@ -318,6 +328,7 @@ pub enum Mode {
 pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
     share_store(&s.root)?;
     let mut w = Written::load(&s.root);
+    let hidden = hidden_note(&mut w, &s.root);
     if !w.known {
         // A store from before D-58: what it holds is what Solace last wrote.
         let ix = s.index()?;
@@ -354,7 +365,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
     }
     if changed.is_empty() {
         w.save()?;
-        return Ok(String::new());
+        return Ok(hidden);
     }
     let before = board::snapshot(s)?;
     let mut unreadable = vec![];
@@ -385,7 +396,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
     let after = board::snapshot(s)?;
     let unreadable_note = unreadable.iter().map(|u| format!("Not read in: {u}.\n")).collect::<String>();
     if matches!(mode, Mode::Command) {
-        return Ok(unreadable_note);
+        return Ok(format!("{hidden}{unreadable_note}"));
     }
     // What changed, and of that, what wasn't approved elsewhere.
     // Tasks from other projects whose scope includes this one count too (D-61).
@@ -416,7 +427,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         }
     }
     if unexpected.is_empty() && unreadable.is_empty() {
-        return Ok(String::new());
+        return Ok(hidden);
     }
     let pick = |v: &Value| json!(unexpected.iter().map(|k| (k.clone(), v[k].clone())).collect::<serde_json::Map<_, _>>());
     let (bf, af) = (pick(&before), pick(&after));
@@ -449,7 +460,7 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
             }
         );
         tasks::deliver(&top, json!({"kind":"note","task":tid,"run":rid,"author":"solace","text":text}))?;
-        return Ok(format!("Note: {text}"));
+        return Ok(format!("{hidden}Note: {text}"));
     }
     let tid = match open
         .iter()
@@ -485,7 +496,9 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         json!({"kind":"note","task":tid,"author":"solace","text":format!("{changed_note}{unreadable_note}\nCheck: {compiled}"),
             "flag":"code changed outside Solace"}),
     )?;
-    Ok(format!("Note: code changed outside Solace with no agent working; review it on the {TITLE} task. {changed_note}{unreadable_note}"))
+    Ok(format!(
+        "{hidden}Note: code changed outside Solace with no agent working; review it on the {TITLE} task. {changed_note}{unreadable_note}"
+    ))
 }
 
 #[cfg(test)]
@@ -757,3 +770,113 @@ const STORE_IGNORE: &str = concat!(
 /// The files earlier versions wrote: one hid the store; the interim one hid nothing.
 const OLD_STORE_IGNORES: [&str; 3] =
     ["# Only the approved list is shared (D-58).\n*\n!.gitignore\n!approved\n", "# Solace's store is committed with the project.\n", "*\n"];
+
+/// Whether the text of the store's `.gitignore` still hides `store.db`: an older
+/// variant `share_store` doesn't know, or a human's edit. Such a file is left
+/// alone (D-179), but the caller says so, since a commit would leave the store out.
+fn ignores_store(text: &str) -> bool {
+    let mut ignored = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (negated, pattern) = match line.strip_prefix('!') {
+            Some(p) => (true, p),
+            None => (false, line),
+        };
+        let p = pattern.trim_start_matches('/');
+        let hides = matches!(p, "*" | "**" | "**/*" | "store.db" | "*.db" | "store.*")
+            || p.ends_with("/store.db")
+            || p.ends_with("/store.*")
+            || p.ends_with("/*.db");
+        if hides {
+            ignored = !negated;
+        }
+    }
+    ignored
+}
+
+/// Approving marks the changes; checkpointing puts them in the file a commit copies.
+#[cfg(test)]
+#[test]
+fn approving_puts_the_whole_store_in_store_db() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn one() -> Int {\n  1\n}\n")]);
+    let s = board::open(&p.root).unwrap();
+    s.db.query_row("PRAGMA wal_autocheckpoint=0", [], |_| Ok(())).unwrap();
+    s.db.execute("INSERT INTO board_before VALUES ('t','symbol:x','null')", []).unwrap();
+    let wal = s.root.join(".solace/store.db-wal");
+    assert!(fs::metadata(&wal).unwrap().len() > 0, "the change is not in the WAL");
+    approve(&s, "t").unwrap();
+    checkpoint(&s).unwrap();
+    // A commit copies `store.db` alone, so the change must be in that file.
+    let copy = s.root.join(".solace/copied.db");
+    fs::copy(s.root.join(".solace/store.db"), &copy).unwrap();
+    let c = rusqlite::Connection::open(&copy).unwrap();
+    let rows: i64 = c.query_row("SELECT COUNT(*) FROM board_before", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[cfg(test)]
+#[test]
+fn an_ignore_file_that_still_hides_the_store_is_flagged() {
+    let s = crate::testing::project(&[("src/app.gleam", "pub fn one() -> Int {\n  1\n}\n")]);
+    crate::board::open(&s.root).unwrap();
+    fs::write(s.root.join(".solace/.gitignore"), "# mine\n*\n!/custom\n").unwrap();
+    let note = absorb(&s, Mode::Notice).unwrap();
+    assert!(note.contains("still ignores store.db"), "{note}");
+    let again = absorb(&s, Mode::Notice).unwrap();
+    assert!(!again.contains("still ignores store.db"), "{again}");
+    fs::write(s.root.join(".solace/.gitignore"), "# mine again\n*\n!/custom\n").unwrap();
+    let changed = absorb(&s, Mode::Notice).unwrap();
+    assert!(changed.contains("still ignores store.db"), "{changed}");
+    fs::write(s.root.join(".solace/.gitignore"), "# mine\n!store.db\n").unwrap();
+    let fixed = absorb(&s, Mode::Notice).unwrap();
+    assert!(!fixed.contains("still ignores store.db"), "{fixed}");
+    fs::write(s.root.join(".solace/.gitignore"), "# mine\n*\n!/custom\n").unwrap();
+    let regressed = absorb(&s, Mode::Notice).unwrap();
+    assert!(regressed.contains("still ignores store.db"), "{regressed}");
+}
+
+/// The note that the ignore file still hides the store, said once for each
+/// version of that file. Clearing the state when it stops hiding means a later
+/// regression is reported again.
+fn hidden_note(w: &mut Written, root: &Path) -> String {
+    let text = fs::read_to_string(root.join(".solace/.gitignore")).ok();
+    let hiding = text.as_deref().is_some_and(ignores_store);
+    let stamp = text.as_deref().map(|t| digest(t.as_bytes()));
+    if !hiding {
+        if w.hidden.take().is_some() {
+            w.dirty = true;
+        }
+        return String::new();
+    }
+    if w.hidden == stamp {
+        return String::new();
+    }
+    w.hidden = stamp;
+    w.dirty = true;
+    "Note: .solace/.gitignore still ignores store.db; remove that pattern so the symbol store is committed.\n".to_string()
+}
+
+/// Flushes the write-ahead log into `store.db`, the file a commit copies (D-179).
+pub(crate) fn checkpoint(s: &Store) -> Result<(), Failure> {
+    let (busy, _, _): (i64, i64, i64) = s.db.query_row("PRAGMA wal_checkpoint(FULL)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    checkpointed(busy)
+}
+
+/// Whether a checkpoint finished, or stopped partway because the database was busy.
+fn checkpointed(busy: i64) -> Result<(), Failure> {
+    if busy == 0 {
+        return Ok(());
+    }
+    crate::lockdown::error("E7028", "store", "the write-ahead log is busy; store.db does not hold every change")
+}
+
+#[cfg(test)]
+#[test]
+fn a_busy_checkpoint_is_reported() {
+    assert!(checkpointed(0).is_ok());
+    let e = checkpointed(1).unwrap_err();
+    assert!(e.0.starts_with("E7028"), "{}", e.0);
+}

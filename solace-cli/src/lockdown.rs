@@ -6,8 +6,15 @@ pub fn error<T>(code: &str, at: &str, message: impl std::fmt::Display) -> Result
     fail(format!("{code} command refused\n  at {at}\n  {message}\n"))
 }
 
-/// A Gleam command in a project of plain files (D-60).
-pub fn plain<T>(command: &str) -> Result<T, Failure> {
+/// A symbol command in a project of plain files (D-60).
+pub fn plain<T>(store: &Store, tid: Option<&str>, command: &str) -> Result<T, Failure> {
+    if command == "format" && language::is_rust(&store.root) {
+        return error(
+            "E6013",
+            command,
+            "`format` needs a module in a Rust project: name one, e.g. `format crate`. The whole crate isn't rustfmt-clean, so formatting it in one call would bury a task's real change (D-158 point 5).",
+        );
+    }
     let use_ = if board::strategy_context().is_some() { "files, grep and read" } else { "files, grep, read, write and run" };
     // D-121: Rust and Python files are read by item.
     let files = if matches!(command, "view" | "inspect" | "refs") {
@@ -15,7 +22,25 @@ pub fn plain<T>(command: &str) -> Result<T, Failure> {
     } else {
         ""
     };
-    error("E6013", command, format!("this project has no Gleam code (no gleam.toml); use {use_}{files}"))
+    let what = if language::is_rust(&store.root) {
+        match command {
+            "extract" | "merge" | "probe" => format!("`{command}` is Gleam only: Rust `{command}` is deferred (D-158 point 6)"),
+            _ => format!("this Rust project has no code that `{command}` handles"),
+        }
+    } else {
+        "this project has no code held as symbols".to_string()
+    };
+    let mut out = format!("{what}; use {use_}{files}.");
+    if let Some(projects) = tid.and_then(|tid| scope::of_task(&store.root, tid)) {
+        let top = scope::top(&store.root);
+        let here = scope::dir(&top, &store.root);
+        let names: Vec<String> = projects.iter().map(|p| if p.as_str() == "." { ". (the root)".to_string() } else { p.clone() }).collect();
+        out += &format!(" This task can change: {}.", names.join(", "));
+        if let Some(other) = projects.iter().find(|p| p.as_str() != here.as_str() && workspace::has_code(&scope::path(&top, p))) {
+            out += &format!(" Run it in {other} with `--project {other}`.");
+        }
+    }
+    error("E6013", command, out)
 }
 
 /// The default `watch_limit`: text files up to this many bytes are watched.
@@ -113,6 +138,7 @@ pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
                 if c.get("timeout").is_some_and(|x| x.as_integer().is_none_or(|n| n <= 0))
                     || c.get("args").is_some_and(|x| x.as_bool().is_none())
                     || c.get("allowed_in_reviews").is_some_and(|x| x.as_bool().is_none())
+                    || c.get("test").is_some_and(|x| x.as_bool().is_none())
                     || c.get("checks").is_some_and(|x| x.as_array().is_none_or(|a| a.iter().any(|e| e.as_str().is_none())))
                 {
                     return Err(invalid(name));
@@ -315,15 +341,23 @@ fn cargo_settings(v: &toml::Value) -> toml::Value {
     }
     toml::Value::Table(out)
 }
-/// The module a graph file belongs to (D-158): Gleam's path under `src/` or
-/// `test/`, or the Rust store's module row for that file.
+/// The module a graph file belongs to (D-158, D-181): Gleam's path under `src/`
+/// or `test/`, the Rust store's module row for that file, or the module a new
+/// Rust path certainly names.
 pub(crate) fn module_of_file(s: &Store, name: &str) -> Option<String> {
     if name.ends_with(".gleam")
         && let Some(rest) = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/"))
     {
-        return Some(rest.trim_end_matches(".gleam").to_string());
+        let module = rest.trim_end_matches(".gleam");
+        if name.starts_with("test/") {
+            return Some(test_module_name(module));
+        }
+        return Some(module.to_string());
     }
-    s.db.query_row("SELECT path FROM modules WHERE file = ?1", [name], |r| r.get::<_, String>(0)).ok()
+    if let Ok(module) = s.db.query_row("SELECT path FROM modules WHERE file = ?1", [name], |r| r.get::<_, String>(0)) {
+        return Some(module);
+    }
+    rust_module_of_path(&s.root, name)
 }
 pub fn tier(root: &Path, v: &toml::Value, name: &str, proposed: Option<&[u8]>) -> String {
     tier_and_bytes(root, v, &mut Ignores::new(root), name, proposed).0
@@ -498,8 +532,8 @@ pub fn watched_paths(root: &Path, v: &toml::Value) -> Result<Vec<String>, Failur
     tree_rows(root, v, root, &mut rows)?;
     Ok(rows.into_iter().filter(|(_, t, _)| t == "watched").map(|(n, _, _)| n).collect())
 }
-/// Every graph file path, relative to `root`: `view <file>` reads a Rust
-/// project's `.rs` files by file as well as by symbol (D-121, D-158).
+/// Every graph file path, relative to `root`: `files` lists them, and a view
+/// refuses them by path because a source file is a projection (D-181).
 pub fn graph_paths(root: &Path, v: &toml::Value) -> Result<Vec<String>, Failure> {
     let mut rows = vec![];
     tree_rows(root, v, root, &mut rows)?;
@@ -777,21 +811,10 @@ pub fn wait_or_kill(child: &mut std::process::Child, timeout: Duration) -> std::
 /// within `budget`, `condense`d for a `run` or `build` reply (D-111).
 pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize, condensed: bool, sandbox: bool) -> Out {
     use std::os::unix::process::CommandExt;
-    fs::create_dir_all(root.join(".solace"))?;
+    let mut cmd = prepared(root, argv, sandbox)?;
     let log = root.join(".solace").join(format!("command-{}.log", unique_id()));
     let out = fs::File::create(&log)?;
-    // `sandbox` is a Rust check, test or build on Linux (D-158 point 4); a
-    // migration's original is read-only to commands in the copy (Spec 17).
-    let mut cmd = if sandbox {
-        migrate::cargo_sandboxed(argv, root)
-    } else {
-        migrate::sandboxed(argv, root, migrate::protected(root).as_deref())
-    };
-    let mut child = cmd
-        .process_group(0)
-        .stdout(out.try_clone()?)
-        .stderr(out)
-        .spawn()?;
+    let mut child = cmd.process_group(0).stdout(out.try_clone()?).stderr(out).spawn()?;
     let start = Instant::now();
     let result = match wait_or_kill(&mut child, Duration::from_secs(timeout))? {
         Some(status) => Ok(format!("exit code: {} ({:.1}s)\n", status.code().unwrap_or(-1), start.elapsed().as_secs_f64())),
@@ -811,18 +834,8 @@ pub fn command(root: &Path, argv: &[String], timeout: u64, budget: usize, conden
 /// reaping it (`cargo::warm`, D-158 point 3).
 pub fn background(root: &Path, argv: &[String], sandbox: bool) -> Out {
     use std::os::unix::process::CommandExt;
-    fs::create_dir_all(root.join(".solace"))?;
-    let mut cmd = if sandbox {
-        migrate::cargo_sandboxed(argv, root)
-    } else {
-        migrate::sandboxed(argv, root, migrate::protected(root).as_deref())
-    };
-    let mut child = cmd
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+    let mut cmd = prepared(root, argv, sandbox)?;
+    let mut child = cmd.process_group(0).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()?;
     std::thread::spawn(move || {
         let _ = child.wait();
     });
@@ -1067,17 +1080,17 @@ fn file_change(
     not_here(root, name)?;
     let t = tier(root, v, name, None);
     if t == "graph" {
-        let fix = match module_of_file(store, name) {
-            Some(module) => format!("change it with a `submit` patch (`*** Update: {module}`)"),
-            None => "change it with `submit`".to_string(),
-        };
-        return error("E6001", name, format!("source is held as symbols; {fix}"));
+        return graph_error(store, name);
     }
     if t == "protected" {
         if in_skills(v, name) {
             return error("E6002", name, "skills are the humans' house rules: `read` them; agents can't change them");
         }
-        return error("E6002", name, "protected files change only through a human-approved proposal: in a work run, `write` it alone, with the exact new text and `reason`");
+        return error(
+            "E6002",
+            name,
+            "protected files change only through a human-approved proposal: in a work run, `write` it alone, with the exact new text and `reason`",
+        );
     }
     if t != "watched" && !t.starts_with("unwatched") {
         return error("E6002", name, format!("caught by tier rule: {t}"));
@@ -1093,7 +1106,9 @@ fn file_change(
         _ => {}
     }
     let current = match (kind, &before) {
-        (Section::Update, Some(b)) => std::str::from_utf8(b).map_err(|_| Failure(format!("E6002 {name}: a patch changes only UTF-8 text"), 1))?,
+        (Section::Update, Some(b)) => {
+            std::str::from_utf8(b).map_err(|_| Failure(format!("E6002 {name}: a patch changes only UTF-8 text"), 1))?
+        }
         _ => "",
     };
     let text = drafts::file_text(name, current, kind, hunks)?;
@@ -1290,6 +1305,9 @@ fn count_files(p: &Path) -> Result<usize, Failure> {
 /// Where `name` is in `root`, if an agent may reach it: not Solace's own files,
 /// not out of the project or into a project nested in it, and no symlink.
 fn reachable(root: &Path, name: &str) -> Result<PathBuf, Failure> {
+    if Path::new(name).is_absolute() {
+        return error("E6002", name, "expected a path inside the project");
+    }
     if Path::new(name).components().any(|c| c.as_os_str() == ".solace") {
         return error("E6006", name, "Solace internal files have no agent access");
     }
@@ -1305,7 +1323,11 @@ fn reachable(root: &Path, name: &str) -> Result<PathBuf, Failure> {
             Some((dir, _, rest)) => format!("; it is {rest} in {dir}: add --project {dir}"),
             None => String::new(),
         };
-        return error("E6006", name, format!("outside this project: another project's files are reached with `--project <folder>`{form}{ask}"));
+        return error(
+            "E6006",
+            name,
+            format!("outside this project: another project's files are reached with `--project <folder>`{form}{ask}"),
+        );
     }
     path(root, name)
 }
@@ -1413,7 +1435,17 @@ fn movable(root: &Path, v: &toml::Value, name: &str) -> Result<(), Failure> {
         return error("E6002", name, "gleam.toml can't be moved");
     }
     match tier(root, v, name, Some(b"")).as_str() {
-        "graph" => error("E6001", name, "source is held as symbols, and its file is a projection of the store: it can't be moved"),
+        "graph" => match crate::Store::peek(root) {
+            Ok(s) => graph_error(&s, name),
+            Err(_) => match module_of_path(root, name) {
+                Some(module) => error("E6001", name, format!("this source file isn't in the store yet: {}", new_module_hint(&module))),
+                None => error(
+                    "E6001",
+                    name,
+                    "this source file isn't in the store yet, and Solace can't tell which module it would be: submit --new <module> with the module's name",
+                ),
+            },
+        },
         "internal" => error("E6006", name, "Solace's own files and other projects' files can't be moved"),
         t if t == "watched" || t.starts_with("unwatched") => Ok(()),
         t => error("E6002", name, format!("{t} files can't be moved")),
@@ -1632,8 +1664,9 @@ pub fn dispatch(
     budget: usize,
 ) -> Option<Out> {
     let root = &store.root;
-    // D-121: `view <file>` and `view <file>::<name>` read Rust and Python files.
-    if let Some(out) = orientation::view(root, v, a, budget) {
+    // D-181: file-form `view` remains for Python and plain-file Rust; graph
+    // source is refused by `orientation::view`.
+    if let Some(out) = orientation::view(store, v, a, budget) {
         return Some(out);
     }
     if a[0] == "grep" {
@@ -1722,7 +1755,9 @@ pub fn dispatch(
         }
         return Some((|| {
             if paths.len() > 1 && a[0] == "write" {
-                return usage("write <path> changes one file; for several, `write` with no path takes a file patch (`*** Update File: <path>` sections)");
+                return usage(
+                    "write <path> changes one file; for several, `write` with no path takes a file patch (`*** Update File: <path>` sections)",
+                );
             }
             if paths.len() > 1 && !flags.is_empty() {
                 return usage("a --lines or --tail range takes one path: read <path> --lines 3,7,10..12");
@@ -1751,12 +1786,7 @@ pub fn dispatch(
                 let p = reachable(root, &name)?;
                 let (t, bytes) = tier_and_bytes(root, v, &mut Ignores::new(root), &name, None);
                 if a[0] != "files" && t == "graph" {
-                    let fix = match module_of_file(store, &name) {
-                        Some(module) if p.exists() => format!("inspect {module}, view {module}, or submit {module}"),
-                        Some(module) => format!("create the module by adding a symbol to it: submit --new {module}"),
-                        None => "change it with `submit`".to_string(),
-                    };
-                    let e = error("E6001", &name, format!("source is held as symbols; fix: {fix}"));
+                    let e = graph_error(store, &name);
                     if a[0] == "remove" {
                         refused.extend(e.err());
                         continue;
@@ -1775,7 +1805,8 @@ pub fn dispatch(
                         if many {
                             out += &format!("==== {name} ====\n");
                         }
-                        let (text, cut) = read_part(root, &name, &flags, if many { budget.saturating_sub(out.len() + 200) } else { budget })?;
+                        let (text, cut) =
+                            read_part(root, &name, &flags, if many { budget.saturating_sub(out.len() + 200) } else { budget })?;
                         out += &text;
                         if cut && k + 1 < paths.len() {
                             out += &format!("Next: read {}\n", paths[k + 1..].join(" "));
@@ -1787,7 +1818,11 @@ pub fn dispatch(
                             if in_skills(v, &name) {
                                 return error("E6002", &name, "skills are the humans' house rules: `read` them; agents can't change them");
                             }
-                            return error("E6002", &name, "protected files change only through a human-approved proposal: in a work run, `write` it with the exact new text");
+                            return error(
+                                "E6002",
+                                &name,
+                                "protected files change only through a human-approved proposal: in a work run, `write` it with the exact new text",
+                            );
                         }
                         not_here(root, &name)?;
                         return write(root, v, &name, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old);
@@ -1795,7 +1830,12 @@ pub fn dispatch(
                     "remove" => {
                         if name == "gleam.toml" || (t != "watched" && !t.starts_with("unwatched")) {
                             refused.extend(
-                                error::<()>("E6002", &name, format!("only watched and unwatched files can be removed, and never gleam.toml; {t}")).err(),
+                                error::<()>(
+                                    "E6002",
+                                    &name,
+                                    format!("only watched and unwatched files can be removed, and never gleam.toml; {t}"),
+                                )
+                                .err(),
                             );
                         } else if !p.is_file() {
                             refused.extend(error::<()>("E6002", &name, not_found(root, &name, "no such file")).err());
@@ -1837,6 +1877,16 @@ pub fn dispatch(
     if a[0] == "build" && a.len() > 1 {
         return Some(usage("build takes no arguments; `build plan` lists every project's build recipe, in order"));
     }
+    if a[0] == "format" && language::is_rust(root) {
+        return Some(match a {
+            ["format"] => {
+                let task = board::context().map(|(tid, _)| tid);
+                plain(store, task.as_deref(), "format")
+            }
+            ["format", module] => store.format_module_rust(module),
+            _ => usage("format <module>: name one module, e.g. `format crate`"),
+        });
+    }
     if matches!(a[0], "build" | "format" | "run") {
         return Some((|| {
             let (argv, timeout) = if a[0] == "run" {
@@ -1866,7 +1916,8 @@ pub fn dispatch(
                 argv.extend(cargo::build_args(root));
                 (argv, 120)
             } else if !root.join("gleam.toml").exists() {
-                return plain(a[0]);
+                let task = board::context().map(|(tid, _)| tid);
+                return plain(store, task.as_deref(), a[0]);
             } else {
                 (vec!["gleam".into(), a[0].into()], 120)
             };
@@ -2006,13 +2057,15 @@ fn grep(root: &Path, v: &toml::Value, query: &str, budget: usize) -> Out {
         },
         None => "watched files".into(),
     };
+    let graph = rows.iter().any(|(_, t, _)| t == "graph");
     let mut hits = vec![];
     for (name, _, _) in rows.into_iter().filter(|(_, t, _)| t == "watched" || t == "protected") {
         let Ok(text) = fs::read_to_string(root.join(&name)) else { continue };
         hits.extend(grep_file(&name, &text, &q, context));
     }
     if hits.is_empty() {
-        return Ok(format!("No matches for \"{query}\" in {place}.\n{}", grep_hint(raw, query)));
+        let source = if graph { "Source is held as symbols (use `find`).\n" } else { "" };
+        return Ok(format!("No matches for \"{query}\" in {place}.\n{}{source}", grep_hint(raw, query)));
     }
     let (mut out, mut shown) = (String::new(), 0);
     let mut cut_shown = false;
@@ -2082,7 +2135,12 @@ fn grep_options(raw: &str) -> Result<(&str, Option<&str>, usize), Failure> {
 /// Narrows `rows` to the path of `--in`, checked as `read` checks a path, and
 /// gives its name. A path that exists but isn't searched is named instead (the
 /// inner `Err`); one that doesn't exist is refused.
-fn grep_in(root: &Path, v: &toml::Value, p: &str, rows: &mut Vec<(String, String, Option<String>)>) -> Result<Result<String, String>, Failure> {
+fn grep_in(
+    root: &Path,
+    v: &toml::Value,
+    p: &str,
+    rows: &mut Vec<(String, String, Option<String>)>,
+) -> Result<Result<String, String>, Failure> {
     let name = file_name(Path::new(p));
     if name.is_empty() {
         return Ok(Ok("watched files".into()));
@@ -2091,6 +2149,10 @@ fn grep_in(root: &Path, v: &toml::Value, p: &str, rows: &mut Vec<(String, String
         return Ok(Err(format!("{name} is Solace's own files; not searched\n")));
     }
     let target = reachable(root, &name)?;
+    let t = tier(root, v, &name, None);
+    if t == "graph" {
+        return Ok(Err(format!("{name} is source held as symbols (use `find`); not searched\n")));
+    }
     if !target.exists() {
         return error("E6002", &name, not_found(root, &name, "no such file or folder"));
     }
@@ -2102,10 +2164,8 @@ fn grep_in(root: &Path, v: &toml::Value, p: &str, rows: &mut Vec<(String, String
             return Ok(Err(format!("{name}/ holds no watched or protected files; not searched\n")));
         }
     } else {
-        let t = tier(root, v, &name, None);
         if !held(&t) {
-            let why = if t == "graph" { "source held as symbols (use `find`)".to_string() } else { t };
-            return Ok(Err(format!("{name} is {why}; not searched\n")));
+            return Ok(Err(format!("{name} is {t}; not searched\n")));
         }
         rows.retain(|(n, _, _)| *n == name);
     }
@@ -2349,8 +2409,11 @@ mod tests {
         assert!(got.contains("needle é") && got.contains("solace.toml\n     1: # needle in settings"), "{got}");
         assert!(!got.contains("generated") && !got.contains("main.gleam"), "{got}");
         assert!(got.lines().nth(3).unwrap().len() < 260, "{got}");
-        // A plain miss gets no hint.
-        assert_eq!(call(&s, &v, &["grep", "absent"], "", None).unwrap(), "No matches for \"absent\" in watched files.\n");
+        // A miss in a project with source says the source is `find`'s.
+        assert_eq!(
+            call(&s, &v, &["grep", "absent"], "", None).unwrap(),
+            "No matches for \"absent\" in watched files.\nSource is held as symbols (use `find`).\n"
+        );
         assert!(call(&s, &v, &["grep", "\"The", "Needle\""], "", None).unwrap().starts_with("docs/a.md"));
     }
     /// D-109: grep searches code text as written, quotes included unless they
@@ -2360,7 +2423,8 @@ mod tests {
         let (s, _) = fixture();
         let v = "watch_limit = 2000\n".parse().unwrap();
         fs::create_dir_all(s.root.join("docs")).unwrap();
-        fs::write(s.root.join("docs/code.rs"), "\"write\" => go(),\nlet x = \"write\" | y;\nfn f() -> Result<(), E>\n| a \\| b |\n").unwrap();
+        fs::write(s.root.join("docs/code.rs"), "\"write\" => go(),\nlet x = \"write\" | y;\nfn f() -> Result<(), E>\n| a \\| b |\n")
+            .unwrap();
         for (q, line) in [
             (&["grep", "\"write\"", "=>"][..], 1),
             (&["grep", "\"write\"", "|"], 2),
@@ -2373,27 +2437,35 @@ mod tests {
         // One quoted term is searched without its quotes.
         let got = call(&s, &v, &["grep", "\"write\""], "", None).unwrap();
         assert!(got.contains("     1: ") && got.contains("     2: "), "{got}");
-        for (q, filter) in [
-            (&["grep", "-i", "needle"][..], false),
-            (&["grep", "\"x\"", "src/a.rs"], true),
-            (&["grep", "foo", "--path", "src"], true),
-        ] {
+        for (q, filter) in
+            [(&["grep", "-i", "needle"][..], false), (&["grep", "\"x\"", "src/a.rs"], true), (&["grep", "foo", "--path", "src"], true)]
+        {
             let got = call(&s, &v, q, "", None).unwrap();
-            assert!(got.starts_with("No matches") && got.contains("Searched for: ") && got.contains("literal text, already case-insensitive"), "{q:?}: {got}");
+            assert!(
+                got.starts_with("No matches") && got.contains("Searched for: ") && got.contains("literal text, already case-insensitive"),
+                "{q:?}: {got}"
+            );
             assert_eq!(got.contains("end the query with `--in <path>`"), filter, "{q:?}: {got}");
             assert!(!got.contains("no path filter"), "{q:?}: {got}");
         }
         assert!(call(&s, &v, &["grep", "-i", "needle"], "", None).unwrap().contains("Searched for: -i needle."));
         // Code at the end of a query is not taken for a path: a plain miss.
         for q in [&["grep", "let", "n", "=", "a.len"][..], &["grep", "x", "=", "a", "/"], &["grep", "self.name"]] {
-            assert_eq!(call(&s, &v, q, "", None).unwrap(), format!("No matches for \"{}\" in watched files.\n", q[1..].join(" ")), "{q:?}");
+            assert_eq!(
+                call(&s, &v, q, "", None).unwrap(),
+                format!("No matches for \"{}\" in watched files.\nSource is held as symbols (use `find`).\n", q[1..].join(" ")),
+                "{q:?}"
+            );
         }
         // A folder or a file is: the hint says to use `--in <path>`.
         for q in [&["grep", "foo", "src/app"][..], &["grep", "foo", "notes.md"]] {
             assert!(call(&s, &v, q, "", None).unwrap().contains("end the query with `--in <path>`"), "{q:?}");
         }
         // `--in` with no path after it is text, not an option.
-        assert_eq!(call(&s, &v, &["grep", "foo", "--in"], "", None).unwrap(), "No matches for \"foo --in\" in watched files.\n");
+        assert_eq!(
+            call(&s, &v, &["grep", "foo", "--in"], "", None).unwrap(),
+            "No matches for \"foo --in\" in watched files.\nSource is held as symbols (use `find`).\n"
+        );
     }
     /// D-119: `--context` merges touching windows, shows gaps, marks context
     /// lines `-`, cuts long ones, and takes only 1 to 5.
@@ -2410,19 +2482,33 @@ mod tests {
         fs::write(s.root.join("docs/a.txt"), text.join("\n") + "\n").unwrap();
         let got = call(&s, &v, &["grep", "hit", "--context", "1"], "", None).unwrap();
         // 3 and 5 are two lines apart: windows 2..4 and 4..6 touch and merge; 15 is apart.
-        assert_eq!(got, "docs/a.txt\n     2- line 2\n     3: hit three\n     4- line 4\n     5: hit five\n     6- line 6\n  …\n    14- line 14\n    15: hit fifteen\n    16- line 16\n");
+        assert_eq!(
+            got,
+            "docs/a.txt\n     2- line 2\n     3: hit three\n     4- line 4\n     5: hit five\n     6- line 6\n  …\n    14- line 14\n    15: hit fifteen\n    16- line 16\n"
+        );
         // Without context, no gap marker and no context lines.
-        assert_eq!(call(&s, &v, &["grep", "hit"], "", None).unwrap(), "docs/a.txt\n     3: hit three\n     5: hit five\n    15: hit fifteen\n");
+        assert_eq!(
+            call(&s, &v, &["grep", "hit"], "", None).unwrap(),
+            "docs/a.txt\n     3: hit three\n     5: hit five\n    15: hit fifteen\n"
+        );
         // A long context line is cut around its start; the reply stays short.
         let got = call(&s, &v, &["grep", "hit", "five", "--context", "5"], "", None).unwrap();
         assert!(got.contains("    10- x x") && got.lines().all(|l| l.len() < 260), "{got}");
         // A match past the 10 shown, inside a window, is context, not a match line.
         fs::write(s.root.join("docs/b.txt"), (1..=12).map(|n| format!("hit {n}")).collect::<Vec<_>>().join("\n") + "\n").unwrap();
         let got = call(&s, &v, &["grep", "hit", "--in", "docs/b.txt", "--context", "1"], "", None).unwrap();
-        assert!(got.starts_with("docs/b.txt (12 matches, showing 10)\n") && got.contains("    10: hit 10\n") && got.contains("    11- hit 11\n"), "{got}");
+        assert!(
+            got.starts_with("docs/b.txt (12 matches, showing 10)\n")
+                && got.contains("    10: hit 10\n")
+                && got.contains("    11- hit 11\n"),
+            "{got}"
+        );
         // A context line keeps its indentation, as the line is written.
         fs::write(s.root.join("docs/c.txt"), "    ind hit\n        deep\n").unwrap();
-        assert_eq!(call(&s, &v, &["grep", "hit", "--in", "docs/c.txt", "--context", "1"], "", None).unwrap(), "docs/c.txt\n     1:     ind hit\n     2-         deep\n");
+        assert_eq!(
+            call(&s, &v, &["grep", "hit", "--in", "docs/c.txt", "--context", "1"], "", None).unwrap(),
+            "docs/c.txt\n     1:     ind hit\n     2-         deep\n"
+        );
         for bad in ["0", "6", "x", "-1"] {
             let e = call(&s, &v, &["grep", "hit", "--context", bad], "", None).unwrap_err();
             assert!(e.0.contains("--context takes a number from 1 to 5") && e.1 == 2, "{bad}: {e:?}");
@@ -2434,7 +2520,9 @@ mod tests {
         assert!(a.starts_with("docs/a.txt\n     2- line 2"), "{a}");
         assert_eq!(
             call(&s, &v, &["grep", "--context", "3", "hit"], "", None).unwrap(),
-            "No matches for \"--context 3 hit\" in watched files.\nSearched for: --context 3 hit. ".to_string() + GREP_SYNTAX + "\n"
+            "No matches for \"--context 3 hit\" in watched files.\nSearched for: --context 3 hit. ".to_string()
+                + GREP_SYNTAX
+                + "\nSource is held as symbols (use `find`).\n"
         );
     }
     /// D-119: `--in` takes a file or a folder, checked as `read` checks a path;
@@ -2643,7 +2731,7 @@ mod tests {
         let (s, v) = fixture();
         for cmd in ["read", "write", "remove"] {
             let e = call(&s, &v, &[cmd, "src/main.gleam"], "x", None).unwrap_err();
-            assert!(e.0.contains("E6001") && e.0.contains("submit main"));
+            assert!(e.0.contains("E6001") && e.0.contains("view main") && e.0.contains("inspect main."));
         }
         for cmd in ["files", "read", "write", "remove"] {
             assert!(call(&s, &v, &[cmd, ".solace/board/x"], "x", None).unwrap_err().0.contains("E6006"));
@@ -3059,6 +3147,8 @@ running your program.
             let e = call(&s, &v, &["move", from, to], "", None).unwrap_err().0;
             assert!(e.contains(code), "{from} -> {to}: {e}");
         }
+        let e = call(&s, &v, &["move", "src/main.gleam", "priv/main.gleam"], "", None).unwrap_err().0;
+        assert!(e.contains("view main") && e.contains("inspect main."), "{e}");
         assert_eq!(fs::read_to_string(s.root.join("priv/a")).unwrap(), "a");
         assert!(s.root.join("src/main.gleam").exists() && s.root.join("box/keep").exists());
         for gone in ["lib", "crate", "elsewhere", "AGENTS2", "outer"] {
@@ -3133,6 +3223,9 @@ running your program.
             let section = if why == "E6004" { format!("{section}{}\n", "x".repeat(101)) } else { section.to_string() };
             let e = call(&s, &v, &["write"], &format!("*** Begin Patch\n{update}{section}*** End Patch\n"), None).unwrap_err().0;
             assert!(e.starts_with("nothing written:\n") && e.contains(why), "{why}: {e}");
+            if why == "E6001" {
+                assert!(e.contains("view main") && e.contains("inspect main."), "{e}");
+            }
             assert_eq!(fs::read_to_string(s.root.join("notes")).unwrap(), "one\n2\nthree\nfour\n", "{why}");
         }
         for (patch, why) in [
@@ -3390,6 +3483,8 @@ running your program.
         let (s, _) = fixture();
         assert!(parse_settings("[commands]\ne2e={run=[\"x\"],checks=\"*\"}").unwrap_err().0.contains("E6020"));
         assert!(parse_settings("[commands]\ne2e={run=[\"x\"],checks=[\"*\"]}").is_ok());
+        assert!(parse_settings("[commands]\ne2e={run=[\"x\"],test=\"yes\"}").unwrap_err().0.contains("E6020"));
+        assert!(parse_settings("[commands]\ne2e={run=[\"x\"],test=true}").is_ok());
         let v: toml::Value = "[commands]\nsmoke={run=[\"sleep\",\"5\"],timeout=1}".parse().unwrap();
         assert!(call(&s, &v, &["run", "smoke", "extra"], "", None).unwrap_err().0.contains("E6011"));
         let e = call(&s, &v, &["run", "nope"], "", None).unwrap_err();
@@ -3506,7 +3601,7 @@ running your program.
     /// Cargo and rustup settings are protected, and `target/` is unwatched.
     #[test]
     fn a_rust_projects_files_have_their_tiers() {
-        let (root, _store) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+        let (root, store) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
         let v = settings(&root).unwrap();
         assert_eq!(tier(&root, &v, "src/lib.rs", None), "graph");
         assert_eq!(tier(&root, &v, "src/board/agents.rs", None), "graph");
@@ -3521,6 +3616,8 @@ running your program.
         assert_eq!(tier(&root, &v, "target/debug/app", None), "unwatched");
         assert_eq!(tier(&root, &v, "target/debug/build/x/build.rs", None), "unwatched");
         assert_eq!(tier(&root, &v, "Cargo.toml", None), "watched");
+        let got = call(&store, &v, &["files"], "", None).unwrap();
+        assert!(got.contains("src/lib.rs [graph]"), "{got}");
     }
 
     /// D-158 point 4, D-175: only a Cargo.toml's dependency, workspace and build keys are
@@ -3589,6 +3686,199 @@ running your program.
         assert!(cargo_settings_changed(before.as_bytes(), &format!("{base}\n[features]\ndefault = [\"extra\"]\n")));
         assert!(!cargo_settings_changed(before.as_bytes(), &before.replace("0.1.0", "0.2.0")));
     }
+
+    /// A Rust project's miss, and an absent symbol-held `.rs` path, point at `find`.
+    #[test]
+    fn grep_points_at_find_for_rust_source() {
+        let (root, s) = rust_project("pub fn helper() -> i32 {\n    1\n}\n");
+        let v = settings(&root).unwrap();
+        let got = call(&s, &v, &["grep", "absent"], "", None).unwrap();
+        assert!(got.starts_with("No matches") && got.contains("use `find`"), "{got}");
+        fs::remove_file(root.join("src/lib.rs")).unwrap();
+        let got = call(&s, &v, &["grep", "absent", "--in", "src/lib.rs"], "", None).unwrap();
+        assert!(got.contains("src/lib.rs is source held as symbols") && got.contains("use `find`"), "{got}");
+        assert!(!got.contains("no such file"), "{got}");
+    }
+
+    #[test]
+    fn a_background_command_drops_the_agents_task_context() {
+        let dir = Scratch::new().with(&[("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")]);
+        let argv: Vec<String> = ["cargo", "check"].iter().map(|s| s.to_string()).collect();
+        for sandbox in [false, true] {
+            let command = prepared(&dir, &argv, sandbox).unwrap();
+            let mut removed = 0;
+            for (name, value) in command.get_envs() {
+                if value.is_none() {
+                    for key in migrate::TASK_ENV {
+                        if name == std::ffi::OsStr::new(key) {
+                            removed += 1;
+                        }
+                    }
+                }
+            }
+            assert_eq!(removed, migrate::TASK_ENV.len(), "sandbox {sandbox}");
+        }
+    }
+
+    #[test]
+    fn view_refuses_rust_graph_source() {
+        let (root, s) = rust_project("pub fn helper() -> i32 {\n    1\n}\n");
+        let v = settings(&root).unwrap();
+        for args in [&["view", "src/lib.rs"][..], &["view", "src/lib.rs::helper"][..], &["view", "./src/lib.rs"][..]] {
+            let e = call(&s, &v, args, "", None).unwrap_err().0;
+            assert!(e.contains("E6001") && e.contains("view crate") && e.contains("inspect crate."), "{e}");
+        }
+        let e = call(&s, &v, &["view", "foo/../src/lib.rs"], "", None).unwrap_err().0;
+        assert!(e.contains("E6001") && e.contains("view crate"), "{e}");
+        let e = call(&s, &v, &["view", "../src/lib.rs"], "", None).unwrap_err().0;
+        assert!(e.contains("E6001") && e.contains("outside the project"), "{e}");
+        for cmd in ["view", "read"] {
+            let e = call(&s, &v, &[cmd, "src/new.rs"], "", None).unwrap_err().0;
+            assert!(e.contains("E6001") && e.contains("submit --new new"), "{cmd}: {e}");
+        }
+        for cmd in ["write", "remove"] {
+            let e = call(&s, &v, &[cmd, "src/lib.rs"], "x", None).unwrap_err().0;
+            assert!(e.contains("E6001") && e.contains("view crate"), "{cmd}: {e}");
+        }
+        let e = call(&s, &v, &["move", "src/lib.rs", "src/other.rs"], "", None).unwrap_err().0;
+        assert!(e.contains("E6001") && e.contains("view crate"), "{e}");
+        let e = call(&s, &v, &["view", "src/bin/x.rs"], "", None).unwrap_err().0;
+        assert!(e.contains("can't tell which module"), "{e}");
+    }
+
+    #[test]
+    fn graph_paths_share_one_hint() {
+        let (s, v) = fixture();
+        let viewed = call(&s, &v, &["view", "src/main.gleam"], "", None).unwrap_err().0;
+        let read = call(&s, &v, &["read", "src/main.gleam"], "", None).unwrap_err().0;
+        assert_eq!(viewed, read);
+        assert!(viewed.contains("E6001") && viewed.contains("view main") && viewed.contains("inspect main."), "{viewed}");
+        for cmd in ["view", "read"] {
+            let e = call(&s, &v, &[cmd, "src/new.gleam"], "", None).unwrap_err().0;
+            assert!(e.contains("E6001") && e.contains("submit --new new"), "{cmd}: {e}");
+            let e = call(&s, &v, &[cmd, "test/new.gleam"], "", None).unwrap_err().0;
+            assert!(e.contains("E6001") && e.contains("submit --new new_test"), "{cmd}: {e}");
+        }
+    }
+
+    #[test]
+    fn paths_name_a_rust_module_only_when_certain() {
+        let (_root, s) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+        for (path, module) in [
+            ("src/lib.rs", Some("crate")),
+            ("src/main.rs", None),
+            ("src/a.rs", Some("a")),
+            ("src/a/mod.rs", Some("a")),
+            ("src/a/b.rs", Some("a::b")),
+            ("src/a/b/mod.rs", Some("a::b")),
+            ("tests/x.rs", Some("integration::x")),
+            ("tests/x/mod.rs", None),
+            ("src/bin/x.rs", None),
+            ("examples/x.rs", None),
+            ("benches/x.rs", None),
+            ("build.rs", None),
+        ] {
+            assert_eq!(module_of_file(&s, path).as_deref(), module, "{path}");
+        }
+        let no_lib = Scratch::new();
+        assert_eq!(rust_module_of_path(&no_lib, "src/main.rs").as_deref(), Some("crate"));
+    }
+
+    #[test]
+    fn view_reads_python_beside_rust_graph() {
+        let (root, s) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+        fs::write(root.join("tool.py"), "def main():\n    pass\n").unwrap();
+        let v = settings(&root).unwrap();
+        let out = call(&s, &v, &["view", "tool.py"], "", None).unwrap();
+        assert!(out.contains("def main"), "{out}");
+        let out = call(&s, &v, &["view", "tool.py::main"], "", None).unwrap();
+        assert!(out.starts_with("tool.py:1..2"), "{out}");
+        let e = call(&s, &v, &["view", "src/lib.rs"], "", None).unwrap_err().0;
+        assert!(e.contains("E6001"), "{e}");
+    }
+
+    /// Moving a graph path with no store names a certain module, and keeps the
+    /// can't-tell hint for a path whose module depends on a declaration (D-181).
+    #[test]
+    fn move_names_a_certain_module_without_a_store() {
+        let root = Scratch::new().with(&[
+            ("Cargo.toml", CARGO),
+            ("src/lib.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+            ("src/bin/x.rs", "fn main() {}\n"),
+        ]);
+        let v = toml::Value::Table(Default::default());
+        let e = movable(&root, &v, "src/lib.rs").unwrap_err().0;
+        assert!(e.contains("E6001") && e.contains("submit --new crate"), "{e}");
+        let e = movable(&root, &v, "src/bin/x.rs").unwrap_err().0;
+        assert!(e.contains("can't tell which module"), "{e}");
+    }
+
+    /// A `test/foo.gleam` path resolves to the held `foo_test` module.
+    #[test]
+    fn a_held_test_module_is_named_for_its_path() {
+        let s = project(&[("test/foo_test.gleam", "pub fn foo_test() { 1 }\n")]);
+        let v = toml::Value::Table(Default::default());
+        let e = call(&s, &v, &["view", "test/foo.gleam"], "", None).unwrap_err().0;
+        assert!(e.contains("E6001") && e.contains("view foo_test") && !e.contains("submit --new"), "{e}");
+    }
+
+    /// `read`, `write`, and `move` resolve an internal parent part before the graph
+    /// check, so they give the same hint as `view` (D-181).
+    #[test]
+    fn parent_paths_share_the_graph_hint() {
+        let (root, s) = rust_project("pub fn helper() -> i32 {\n    1\n}\n");
+        let v = settings(&root).unwrap();
+        for args in
+            [&["read", "foo/../src/lib.rs"][..], &["write", "foo/../src/lib.rs"][..], &["move", "foo/../src/lib.rs", "src/other.rs"][..]]
+        {
+            let e = call(&s, &v, args, "x", None).unwrap_err().0;
+            assert!(e.contains("E6001") && e.contains("view crate"), "{args:?}: {e}");
+        }
+    }
+
+    /// When both `foo` and `foo_test` are held, `test/foo.gleam` names `foo_test`.
+    #[test]
+    fn a_both_held_test_module_prefers_the_test_name() {
+        let s = project(&[("src/foo.gleam", "pub fn foo() { 1 }\n"), ("test/foo_test.gleam", "pub fn foo_test() { 1 }\n")]);
+        let v = toml::Value::Table(Default::default());
+        let e = call(&s, &v, &["view", "test/foo.gleam"], "", None).unwrap_err().0;
+        assert!(e.contains("E6001") && e.contains("view foo_test"), "{e}");
+    }
+
+    /// `remove` shares the parent-path hint, and every command rejects `/../...`.
+    #[test]
+    fn parent_and_absolute_paths_are_checked_for_every_command() {
+        let (root, s) = rust_project("pub fn helper() -> i32 {\n    1\n}\n");
+        let v = settings(&root).unwrap();
+        let e = call(&s, &v, &["remove", "foo/../src/lib.rs"], "", None).unwrap_err().0;
+        assert!(e.contains("E6001") && e.contains("view crate"), "{e}");
+        for args in [
+            &["read", "/../src/lib.rs"][..],
+            &["write", "/../src/lib.rs"][..],
+            &["remove", "/../src/lib.rs"][..],
+            &["move", "/../src/lib.rs", "src/other.rs"][..],
+        ] {
+            let e = call(&s, &v, args, "x", None).unwrap_err().0;
+            assert!(
+                e.contains("E6002") && e.contains("expected a path inside the project") && e.contains(args[1]) && !e.contains("//"),
+                "{args:?}: {e}"
+            );
+        }
+        let e = call(&s, &v, &["write"], "*** Add File: /../docs/x\n+x\n", None).unwrap_err().0;
+        assert!(
+            e.contains("E6002") && e.contains("expected a path inside the project") && e.contains("/../docs/x") && !e.contains("//"),
+            "{e}"
+        );
+    }
+
+    /// A `test/` path names the `_test` module even when only the source module is held.
+    #[test]
+    fn a_test_path_without_the_test_module_names_the_test_module() {
+        let s = project(&[("src/foo.gleam", "pub fn foo() { 1 }\n")]);
+        let v = toml::Value::Table(Default::default());
+        let e = call(&s, &v, &["view", "test/foo.gleam"], "", None).unwrap_err().0;
+        assert!(e.contains("E6001") && e.contains("submit --new foo_test") && !e.contains("view foo"), "{e}");
+    }
 }
 
 /// `[sandbox] read` is a list of non-empty paths, and no other sandbox key is
@@ -3600,4 +3890,85 @@ fn sandbox_read_is_a_list_of_paths() {
     for bad in ["[sandbox]\nread = \"../fixtures\"\n", "[sandbox]\nread = [\"\"]\n", "[sandbox]\nwrite = []\n"] {
         assert!(parse_settings(bad).is_err(), "{bad}");
     }
+}
+
+/// The command `command` and `background` start: the project's tool, with the
+/// agent's task context removed (D-71).
+fn prepared(root: &Path, argv: &[String], sandbox: bool) -> Result<std::process::Command, Failure> {
+    fs::create_dir_all(root.join(".solace"))?;
+    // `sandbox` is a Rust check, test or build on Linux (D-158 point 4); a
+    // migration's original is read-only to commands in the copy (Spec 17).
+    let mut cmd =
+        if sandbox { migrate::cargo_sandboxed(argv, root)? } else { migrate::sandboxed(argv, root, migrate::protected(root).as_deref()) };
+    if !sandbox {
+        migrate::drop_task_context(&mut cmd);
+    }
+    Ok(cmd)
+}
+
+/// The module a new Rust file certainly names (D-181): only paths whose module
+/// does not depend on a `mod` declaration.
+fn rust_module_of_path(root: &Path, name: &str) -> Option<String> {
+    if let Some(rest) = name.strip_prefix("tests/") {
+        let stem = rest.strip_suffix(".rs")?;
+        return (stem != "mod" && !stem.is_empty() && !stem.contains('/')).then(|| format!("integration::{stem}"));
+    }
+    let stem = name.strip_prefix("src/")?.strip_suffix(".rs")?;
+    if stem == "lib" {
+        return Some("crate".to_string());
+    }
+    if stem == "main" {
+        return (!root.join("src/lib.rs").exists()).then(|| "crate".to_string());
+    }
+    if stem.starts_with("bin/") {
+        return None;
+    }
+    let stem = stem.strip_suffix("/mod").unwrap_or(stem);
+    (!matches!(stem, "lib" | "main" | "mod") && !stem.is_empty()).then(|| stem.replace('/', "::"))
+}
+
+/// Whether the store holds `module` (D-181).
+fn module_held(s: &Store, module: &str) -> bool {
+    s.db.query_row("SELECT 1 FROM modules WHERE path = ?1", [module], |_| Ok(())).is_ok()
+}
+
+/// The shared hint for a graph path (D-181): read by name when the module is
+/// held, and a new module only when its name is certain.
+pub(crate) fn graph_hint(s: &Store, name: &str) -> String {
+    match module_of_file(s, name) {
+        Some(module) if module_held(s, &module) => {
+            format!("source is held as symbols; view {module} for its outline, or inspect {module}.<symbol> for one item")
+        }
+        Some(module) => format!("this source file isn't in the store yet: {}", new_module_hint(&module)),
+        None => "this source file isn't in the store yet, and Solace can't tell which module it would be: submit --new <module> with the module's name".to_string(),
+    }
+}
+
+/// A graph path refused with its shared hint (D-181).
+pub(crate) fn graph_error<T>(s: &Store, name: &str) -> Result<T, Failure> {
+    error("E6001", name, graph_hint(s, name))
+}
+
+/// The module a path names without consulting the store: Gleam's path under
+/// `src/` or `test/`, or a new Rust path whose module is certain (D-181).
+fn module_of_path(root: &Path, name: &str) -> Option<String> {
+    if name.ends_with(".gleam")
+        && let Some(rest) = name.strip_prefix("src/").or_else(|| name.strip_prefix("test/"))
+    {
+        let module = rest.trim_end_matches(".gleam");
+        return Some(if name.starts_with("test/") { test_module_name(module) } else { module.to_string() });
+    }
+    rust_module_of_path(root, name)
+}
+
+/// The submit hint for a new graph path. The caller has already applied Gleam's
+/// test suffix when the path is under `test/`.
+fn new_module_hint(module: &str) -> String {
+    format!("submit --new {module}")
+}
+
+/// A Gleam test module's name: the `test/` stem with `_test`, unless it
+/// already ends in `_test`.
+fn test_module_name(module: &str) -> String {
+    if module.ends_with("_test") { module.to_string() } else { format!("{module}_test") }
 }

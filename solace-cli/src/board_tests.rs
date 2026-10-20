@@ -321,7 +321,10 @@ fn agent_guard_follows_the_run() {
 /// `strategy show` follows links; the brief carries the record, decisions and notes.
 #[test]
 fn strategy_runs_read_the_graph() {
-    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("skills/design/SKILL.md", "---\nname: design\ndescription: Layout and color.\n---\n")]);
+    let p = testing::project(&[
+        ("src/app.gleam", "pub fn main() { 1 }\n"),
+        ("skills/design/SKILL.md", "---\nname: design\ndescription: Layout and color.\n---\n"),
+    ]);
     let s = open(&p.root).unwrap();
     let top = scope::top(&p.root);
     let runs = top.join(".solace/strategy/runs");
@@ -347,21 +350,33 @@ fn strategy_runs_read_the_graph() {
     assert!(strategy_show(&top, "feature", "nope").unwrap_err().0.starts_with("E7023"));
     assert!(strategy_show(&top, "vision", "x").unwrap_err().0.starts_with("E7001"));
     let listed = strategy_list(&top, false).unwrap();
-    assert!(listed.contains(&format!("{tid} {} f:{fid} m:{mid} T", t["column"].as_str().unwrap()))
-        && listed.contains(&format!("Features:\n{fid} proposed m:{mid} F"))
-        && listed.contains(&format!("Milestones:\n{mid} proposed #1 M"))
-        && listed.contains("Vision:"), "{listed}");
-    fs::write(store_dir(&top).join("t9.json"), json!({"id":"t9","title":"Gone","column":"complete","closedTime":8,"archivedTime":9}).to_string()).unwrap();
+    assert!(
+        listed.contains(&format!("{tid} {} f:{fid} m:{mid} T", t["column"].as_str().unwrap()))
+            && listed.contains(&format!("Features:\n{fid} proposed m:{mid} F"))
+            && listed.contains(&format!("Milestones:\n{mid} proposed #1 M"))
+            && listed.contains("Vision:"),
+        "{listed}"
+    );
+    fs::write(
+        store_dir(&top).join("t9.json"),
+        json!({"id":"t9","title":"Gone","column":"complete","closedTime":8,"archivedTime":9}).to_string(),
+    )
+    .unwrap();
     assert!(!strategy_list(&top, false).unwrap().contains("t9") && strategy_list(&top, true).unwrap().contains("t9 complete f:- m:- Gone"));
     fs::write(top.join("DECISIONS.md"), "# Decisions\n## D-1 First thing\nWhy: x\n## Notes\n").unwrap();
     let brief = strategy_brief(&top, &json!({"context":{"kind":"feature","id":fid},"notes":[{"author":"human","text":"Plan F"}]}));
     assert!(brief.contains(&format!("This run is about the feature {fid}")) && brief.contains("\"title\": \"F\""), "{brief}");
     assert!(brief.contains("A `title` names the work in a few words") && brief.contains("go in `body`"), "{brief}");
-    assert!(brief.contains("Propose the smallest version that meets the need") && brief.contains("Say once if the need or vision"), "{brief}");
+    assert!(
+        brief.contains("Propose the smallest version that meets the need") && brief.contains("Say once if the need or vision"),
+        "{brief}"
+    );
     assert!(brief.contains("in short Markdown: lead with the answer"), "{brief}");
     // D-148: records are named as links the human can click.
     assert!(brief.contains("name tasks, features and milestones as `task:<id>`, `feature:<id>` or `milestone:<id>`, written bare and never inside backticks"), "{brief}");
     assert!(brief.contains("- D-1 First thing") && !brief.contains("- Notes") && brief.contains("- human: Plan F"), "{brief}");
+    // D-181: cite code by its printed symbol name.
+    assert!(brief.contains("lockdown.dispatch") && !brief.contains("board.rs::within"), "{brief}");
     // The root is a project itself, so the decisions can be read in full.
     assert!(brief.contains("`grep D-<n>`") && !brief.contains("folder of projects"), "{brief}");
     // D-27: the root project's own skills are listed in the brief.
@@ -1621,7 +1636,8 @@ fn briefs_name_unfinished_dependencies() {
 fn briefs_hold_what_the_agent_needs_as_text() {
     let t = json!({"id":"t1","title":"Add coolcalc","body":"A CLI calculator.","rank":3,"stamps":{},
         "links":[{"name":"spec","url":"http://x"}],"notes":[{"author":"human","text":"Keep it small","time":1,"run":null}],
-        "questions":[{"id":"q","text":"Syntax?","options":["a","b"],"answer":"b"}],"runs":[{"id":"r1"}],"changes":[{"entity":"symbol:x","name":"calc.add","run":"r1"}]});
+        "questions":[{"id":"q","text":"Syntax?","options":["a","b"],"answer":"b"}],"runs":[{"id":"r1"}],"changes":[{"entity":"symbol:x","name":"calc.add","run":"r1"}],
+        "test_commands":[{"project":"a","commands":["rust-acceptance","spacing_parity"]}]});
     let b = brief(&t, "work");
     for part in [
         "Make the change",
@@ -1636,6 +1652,8 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     for noise in ["{", "r1", "rank"] {
         assert!(!b.contains(noise), "{noise} in:\n{b}");
     }
+    // Symbol-held source is named without tying it to Gleam.
+    assert!(b.contains("symbol-held source") && !b.contains("with Gleam code"), "{b}");
     for kind in ["work", "investigate", "review", "discuss"] {
         let prompt = brief(&t, kind);
         for guidance in [
@@ -1652,6 +1670,21 @@ fn briefs_hold_what_the_agent_needs_as_text() {
         assert_eq!(prompt.contains("**Assessment: Looks good**"), kind == "review");
         assert_eq!(prompt.contains("**Assessment: Needs work**"), kind == "review");
     }
+    // D-181: source files are projections; only a module, symbol or other file is named.
+    for kind in ["work", "investigate", "review", "discuss"] {
+        assert!(
+            brief(&t, kind).contains(
+                "Code held as symbols is read and cited by name (`lockdown.dispatch`, `checkout.pay`), not by source path: source files are projections written by Solace."
+            ),
+            "{kind}: missing the projection rule"
+        );
+    }
+    let plan = brief(&t, "investigate");
+    assert!(
+        plan.contains("names every module or symbol it changes and every non-source file it reaches")
+            && !plan.contains("names every file it reaches"),
+        "{plan}"
+    );
     // D-119 point 6: check what is already answered before asking.
     for kind in ["work", "investigate"] {
         assert!(brief(&t, kind).contains("check the Notes so far and Questions below, if any"), "{kind}");
@@ -1662,16 +1695,29 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     // D-147: a plan never hands a file change to the human.
     assert!(brief(&t, "investigate").contains("never to the human, who never edits files or runs commands"));
     // D-156: each role gets the smallest-complete-change guidance it acts on.
-    assert!(brief(&t, "investigate").contains("A plan is the smallest complete change") && brief(&t, "investigate").contains("anything you didn't check"));
+    assert!(
+        brief(&t, "investigate").contains("A plan is the smallest complete change")
+            && brief(&t, "investigate").contains("anything you didn't check")
+    );
     assert!(brief(&t, "work").contains("what you skipped and risks the human must know"));
     assert!(brief(&t, "review").contains("Flag code the task didn't need, places it missed"));
     for kind in ["work", "discuss"] {
-        assert!(!brief(&t, kind).contains("smallest complete change") && !brief(&t, kind).contains("Flag code the task didn't need"), "{kind}");
+        assert!(
+            !brief(&t, kind).contains("smallest complete change") && !brief(&t, kind).contains("Flag code the task didn't need"),
+            "{kind}"
+        );
     }
-    // Only a work run changes code, so only it is told to run every test before finishing.
+    // D-182: only a work run is told to run every test, once, after its last change.
     for kind in ["work", "investigate", "review", "discuss"] {
-        assert_eq!(brief(&t, kind).contains("Before `task done`, run all tests of the projects this task covers"), kind == "work", "{kind}");
+        let prompt = brief(&t, kind);
+        assert_eq!(
+            prompt.contains("Before `task done`, after your last change, run `test --all` in each project with symbol-held source"),
+            kind == "work",
+            "{kind}"
+        );
+        assert_eq!(prompt.contains("and `run <name>` for: rust-acceptance, spacing_parity."), kind == "work", "{kind}");
     }
+    assert!(!b.contains("the test commands its `solace.toml` declares"), "{b}");
     // A discussion keeps every note whole: no command reads a cut note's full text.
     let mut talk = t.clone();
     talk["notes"] = json!([
@@ -1682,6 +1728,14 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     let d = brief(&talk, "discuss");
     assert!(d.contains("Long A.") && d.contains("Keep.\n\n### All\n\nOf it.") && d.contains("Long B."), "{d}");
     let r = brief(&t, "review");
+    assert!(
+        r.contains(
+            "For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed"
+        ) && r
+            .contains("A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names")
+            && !r.contains("small batches"),
+        "{r}"
+    );
     assert!(
         r.contains("Task changes:\n- calc.add")
             && r.contains("`task note`, the feedback in `text`")
@@ -1694,9 +1748,14 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     wide["scope"] = json!(["a", "web"]);
     wide["home"] = json!("a");
     wide["changes"][0]["project"] = json!("web");
+    wide["test_commands"] = json!([
+        {"project":"a","commands":["rust-acceptance"]},
+        {"project":"web","commands":["spacing_parity"]}
+    ]);
     let w = brief(&wide, "work");
     assert!(w.contains("covers the projects a, web. You work in a; for another of them, add `--project <folder>`"), "{w}");
     assert!(w.contains("Task changes:\n- web: calc.add"), "{w}");
+    assert!(w.contains("and `run <name>` for: a: rust-acceptance; web: spacing_parity."), "{w}");
 }
 
 #[test]
@@ -2406,4 +2465,120 @@ fn an_approved_fetch_clears_the_reopen_failure() {
     apply_settings(&root, &mut q).unwrap();
     assert_eq!(q["answer"], "Approved and written", "{q}");
     assert!(!root.join(".solace/fetch-failed").exists(), "the stale failure is cleared");
+}
+
+/// D-179: settling checkpoints the undo-row delete too, so a commit's copy of
+/// `store.db` sees the finished task.
+#[test]
+fn settling_puts_the_whole_store_in_store_db() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title": "Settle"})).unwrap();
+    let tid = t["id"].as_str().unwrap();
+    s.db.query_row("PRAGMA wal_autocheckpoint=0", [], |_| Ok(())).unwrap();
+    s.db.execute("INSERT INTO board_before VALUES (?1,'symbol:x','null')", [tid]).unwrap();
+    let wal = s.root.join(".solace/store.db-wal");
+    assert!(std::fs::metadata(&wal).unwrap().len() > 0, "the change is not in the WAL");
+    settle(&s, &t).unwrap();
+    let copy = s.root.join(".solace/copied.db");
+    std::fs::copy(s.root.join(".solace/store.db"), &copy).unwrap();
+    let c = rusqlite::Connection::open(&copy).unwrap();
+    let rows: i64 = c.query_row("SELECT COUNT(*) FROM board_before WHERE task=?1", [tid], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0, "the deleted undo row is still only in the WAL");
+}
+
+/// A whole-module format is one task change, named by the item it reshaped
+/// (D-180).
+#[test]
+fn a_whole_module_format_is_recorded_on_the_task() {
+    if !crate::language::cargo::installed() || !crate::language::cargo::rustfmt_installed() {
+        return;
+    }
+    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n    2\n}\n}\n";
+    let (root, s) = testing::rust_project(lib);
+    let mut t = api(&root, "POST", "/tasks", json!({"title": "Format"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id":"format","kind":"work","state":"running"}]);
+    tasks::put(&s, &t).unwrap();
+    let out = crate::with_root(&root, || {
+        with_context(&tid, "format", || {
+            crate::run_options(&["format".to_string(), "crate".to_string()], &mut || Ok(String::new()), None, 1000, &[])
+        })
+    })
+    .unwrap();
+    assert!(out.contains("Saved crate."), "{out}");
+    let changes = changes_of(&s, &task(&s.root, &tid).unwrap()).unwrap();
+    assert!(changes.iter().any(|c| c["name"] == "crate.Store::open" && c["run"] == "format"), "{changes:?}");
+    // The format was recorded with its undo: cancelling puts the bytes back.
+    let mut t = task(&s.root, &tid).unwrap();
+    end_runs(&mut t, "finished");
+    tasks::put(&s, &t).unwrap();
+    api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap();
+    assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+}
+
+/// D-182: a work brief names the commands each project marks `test = true`,
+/// sorted; a project with none adds no `run` clause.
+#[test]
+fn briefs_name_the_test_commands_each_project_marks() {
+    let p = testing::project(&[
+        ("src/app.gleam", "pub fn main() { 1 }\n"),
+        (
+            "solace.toml",
+            "[commands]\nunit = { run = [\"gleam\", \"test\"] }\nspacing_parity = { run = [\"true\"], test = true }\nrust-acceptance = { run = [\"true\"], test = true }\nreview = { run = [\"true\"], allowed_in_reviews = true }\n",
+        ),
+    ]);
+    let s = open(&p.root).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
+    let run = json!({"id":"r1","kind":"work"});
+    let brief = continuation_brief(&t, &run, false, &p.root, &p.root, false).0;
+    assert!(brief.contains("and `run <name>` for: rust-acceptance, spacing_parity."), "{brief}");
+    assert!(!brief.contains("for: unit") && !brief.contains("for: rust-acceptance, spacing_parity, review"), "{brief}");
+    // A project with no marked command gets only `test --all`.
+    let q = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let u = open(&q.root).unwrap();
+    let t = api(&u.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
+    let brief = continuation_brief(&t, &run, false, &q.root, &q.root, false).0;
+    assert!(brief.contains("run `test --all` in each project with symbol-held source."), "{brief}");
+    assert!(!brief.contains("`run <name>` for:"), "{brief}");
+    // Two projects in scope, one marked: name the project so `run` lands there.
+    let w = testing::project(&[
+        ("src/app.gleam", "pub fn main() { 1 }\n"),
+        ("solace.toml", "projects = [\"web\"]\n"),
+        ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+        ("web/src/app.gleam", "pub fn main() { 1 }\n"),
+        ("web/solace.toml", "[commands]\nspacing_parity = { run = [\"true\"], test = true }\n"),
+    ]);
+    let s = open(&w.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
+    t["scope"] = json!([".", "web"]);
+    t["home"] = json!(".");
+    let brief = continuation_brief(&t, &run, false, &w.root, &w.root, false).0;
+    assert!(brief.contains("and `run <name>` for: web: spacing_parity."), "{brief}");
+    // A malformed settings file is surfaced, not treated as no marked commands.
+    let bad = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&bad.root).unwrap();
+    let t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
+    fs::write(bad.root.join("solace.toml"), "[commands]\nspacing_parity = { run = [\"true\"], test = \"yes\" }\n").unwrap();
+    let brief = continuation_brief(&t, &run, false, &bad.root, &bad.root, false).0;
+    assert!(brief.contains("the marked test commands could not be read") && brief.contains("E6020"), "{brief}");
+}
+
+/// A changed container is covered when a test reaches one of its items.
+#[test]
+fn a_container_reached_through_its_items_is_tested() {
+    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n";
+    let (root, s) = testing::rust_project(lib);
+    let mut t = api(&root, "POST", "/tasks", json!({"title": "Coverage"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+    tasks::put(&s, &t).unwrap();
+    let before = snapshot(&s).unwrap();
+    let container: String = s.index().unwrap().syms.into_iter().find(|x| x.name == "Store" && x.kind_text == "impl").map(|x| x.id).unwrap();
+    s.db.execute("UPDATE symbols SET text = ?1 WHERE id = ?2", params!["impl Store {\n    // changed\n", container]).unwrap();
+    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
+    let ix = s.index().unwrap();
+    let reached: std::collections::HashSet<usize> =
+        ix.syms.iter().enumerate().filter(|(_, x)| x.name == "Store::open").map(|(i, _)| i).collect();
+    assert_eq!(with_context(&tid, "r1", || s.task_untested(&ix, &reached)), None);
 }

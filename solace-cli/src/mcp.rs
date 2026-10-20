@@ -112,7 +112,7 @@ fn tool_call(msg: &Value, budget: usize, single_reads: &mut usize, run_reads: &m
     }
     // D-157: each command updated the window; the run's reads are saved once.
     if let Some(run) = run_reads {
-        run.end_call(&commands);
+        run.end_call();
     }
     let hint = read_hint(single_reads, &commands, is_error);
     if !hint.is_empty() && !out.ends_with('\n') {
@@ -185,5 +185,14 @@ mod tests {
         // A call that doesn't panic is its own reply.
         let ok = guarded(|| json!({"content": [{"type": "text", "text": "fine"}], "isError": false}));
         assert_eq!((ok["isError"].clone(), ok["content"][0]["text"].clone()), (json!(false), json!("fine")));
+    }
+
+    #[test]
+    fn no_command_is_an_error_reply() {
+        let msg = json!({"params": {"arguments": {"command": ""}}});
+        let (mut reads, mut run) = (0, None);
+        let out = tool_call(&msg, 10_000, &mut reads, &mut run);
+        assert_eq!(out["isError"], json!(true));
+        assert!(out["content"][0]["text"].as_str().unwrap().starts_with("No command given."));
     }
 }

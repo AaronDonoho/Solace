@@ -702,19 +702,32 @@ pub fn the_guide_follows_the_workflow_test() {
   assert !string.contains(page, "<!--columns-->")
   assert !string.contains(page, "<td>Canceled</td>")
   // The shell asks once, at startup. An answer that is not a workflow (a
-  // server that is down) leaves the guide with no rows.
+  // server that is down) gives the guide its known columns.
   let #(model, _effect) = frontend.init(Nil)
   assert model.columns == []
   let #(down, _) =
     frontend.update(model, frontend.WorkflowLoaded("{\"message\":\"down\"}"))
-  assert down.columns == []
+  assert down.columns == knowledgebase.known_columns()
+  let fallback =
+    element.to_string(frontend.page(
+      frontend.Knowledgebase,
+      True,
+      frontend.no_focus,
+      down.columns,
+    ))
+  assert string.contains(fallback, "<td>Backlog</td>")
+  assert string.contains(fallback, "<td>Review</td>")
+  assert string.contains(fallback, "<td>Canceled</td>")
   let #(loaded, _) =
     frontend.update(
-      model,
+      down,
       frontend.WorkflowLoaded(
         "{\"columns\":[{\"id\":\"planning\",\"label\":\"Planning\"}]}",
       ),
     )
   assert loaded.columns
     == [solace_task.Column("planning", "Planning", [], False)]
+  let #(still, _) =
+    frontend.update(loaded, frontend.WorkflowLoaded("{\"message\":\"down\"}"))
+  assert still.columns == loaded.columns
 }

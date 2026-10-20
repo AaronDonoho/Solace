@@ -188,8 +188,18 @@ pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, V
             l if l.starts_with("*** Delete") && files => sections.push((Section::Delete, target(l), n, vec![])),
             l if l.starts_with("*** Delete") => return Err(here("a patch can't delete; use `delete <name>`.".into())),
             l if l.starts_with("*** Move") && files => return Err(here("a patch can't move a file; use `move <from> <to>`.".into())),
-            l if l.starts_with("*** Move") => return Err(here("a patch can't rename; submit the symbol under its new name.".into())),
-            l if l.starts_with("***") => return Err(whole(here(format!("`{}` is no section header; a section starts with {kinds}.", clip(l))))),
+            l if l.starts_with("*** Move") => {
+                let stored = if l.contains(" to:") { sections.last().map(|(_, target, ..)| target.clone()) } else { Some(target(l)) };
+                let advice = match stored {
+                    Some(name) => format!("`submit {name}` with the stored name replaces it and may rename it, keeping its id."),
+                    None => "submit the stored name with the new text; it replaces the stored symbol and may rename it, keeping its id."
+                        .to_string(),
+                };
+                return Err(here(format!("a patch can't rename; {advice}")));
+            }
+            l if l.starts_with("***") => {
+                return Err(whole(here(format!("`{}` is no section header; a section starts with {kinds}.", clip(l)))));
+            }
             l => {
                 let Some((kind, target, at, hunks)) = sections.last_mut() else {
                     let what = if files { "a file patch" } else { "a patch" };
@@ -217,7 +227,10 @@ pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, V
                             "`*** Add{head}: {target}` (line {at}) has no `+` lines; every line of an Add, empty ones too, starts with `+`."
                         ))));
                     }
-                    return Err(here(format!("in `*** Add{head}: {target}` every line, empty ones too, starts with `+`; this one doesn't: `{}`", clip(l))));
+                    return Err(here(format!(
+                        "in `*** Add{head}: {target}` every line, empty ones too, starts with `+`; this one doesn't: `{}`",
+                        clip(l)
+                    )));
                 } else if update && !l.is_empty() && !l.starts_with([' ', '-', '+']) {
                     return Err(here(format!(
                         "in `*** Update{head}: {target}` each line starts with ` `, `-` or `+` (or `@@`); this one doesn't: `{}`",
@@ -407,12 +420,24 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 return e;
             }
             let path = header.split_once(':').map_or("", |p| p.1).trim();
-            bad(format!("`{path}` (line {at_line}) is no symbol or module; a file other than code changes with `write` with no path, this patch as `text`. {RESEND}"))
+            bad(format!(
+                "`{path}` (line {at_line}) is no symbol or module; a file other than code changes with `write` with no path, this patch as `text`. {RESEND}"
+            ))
         };
         if kind == Section::Add {
             let text: String = hunks[0].1.iter().map(|l| format!("{}\n", &l[1..])).collect();
             let (header, items): (String, Vec<(String, String)>) = if rust {
-                let f = language::rust::split(&text, &target)?;
+                let container = s.rust_container_in(&ix, &target)?.map(|i| &ix.syms[i]);
+                let f = language::rust::split(&text, &target).map_err(|e| {
+                    store::rust_syntax_error(
+                        e,
+                        &target,
+                        container.map(|c| (c.name.as_str(), c.text.as_str(), c.kind_text.as_str())),
+                        container.map_or("", |c| c.module.as_str()),
+                        0,
+                        text.lines().count().max(1),
+                    )
+                })?;
                 // A block's own text is not an item: it comes in whole through
                 // `submit --new <module>` (D-168).
                 if let Some(p) = f.items.iter().find(|p| store::is_block(p)) {
@@ -444,7 +469,9 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
             // A `*** Update:` that names a module applies its hunks to the
             // module's whole file (D-168): every changed or added item goes as
             // one block; the header has its own commands.
-            if !target.contains('.') && let Some(m) = s.resolve_module(&ix, &target) {
+            if !target.contains('.')
+                && let Some(m) = s.resolve_module(&ix, &target)
+            {
                 let module = m.path.clone();
                 let before = store::module_text(&ix, m);
                 let mut lines: Vec<String> = before.lines().map(String::from).collect();
@@ -452,7 +479,8 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 let after = lines.join("\n");
                 let file = language::rust::split(&after, &module).map_err(|e| bad(e.0))?;
                 if !file.refusals.is_empty() {
-                    let lines: Vec<String> = file.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
+                    let lines: Vec<String> =
+                        file.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
                     return Err(bad(lines.join("\n")));
                 }
                 if file.header.trim_end() != s.header(&module)?.trim_end() {
@@ -465,7 +493,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 continue;
             }
             let Some(i) = crate::rust_submit::rust_symbol(&ix, &target)? else {
-                if let Some(c) = crate::rust_submit::rust_container(&ix, &target) {
+                if let Some(c) = crate::rust_submit::rust_container(&ix, &target)? {
                     return Err(bad(format!("{}.", store::block_note(&ix.syms[c].kind_text))));
                 }
                 return Err(not_code(bad(format!("`*** Update: {target}` (line {at_line}) is no symbol. {RESEND}"))));
@@ -476,16 +504,26 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
             if text == ix.syms[i].text {
                 continue;
             }
-            let parent = ix.syms[i].parent.as_ref().and_then(|p| ix.syms.iter().find(|x| &x.id == p)).map(|p| (p.name.as_str(), p.text.as_str(), p.kind_text.as_str()));
-            let items = store::submit_items(&s.root, &ix.syms[i].module, parent, &text, false)?;
+            let parent = ix.syms[i]
+                .parent
+                .as_ref()
+                .and_then(|p| ix.syms.iter().find(|x| &x.id == p))
+                .map(|p| (p.name.as_str(), p.text.as_str(), p.kind_text.as_str()));
+            let qname = ix.syms[i].qname();
+            let items = store::submit_items(&s.root, &ix.syms[i].module, &qname, parent, &text, false)?;
             match items.as_slice() {
-                [] => return Err(bad(format!("the patch leaves nothing of {} (section at line {at_line}); use `delete <name>`.", ix.syms[i].qname()))),
+                [] => {
+                    return Err(bad(format!(
+                        "the patch leaves nothing of {} (section at line {at_line}); use `delete <name>`.",
+                        ix.syms[i].qname()
+                    )));
+                }
                 [one] if one.name == ix.syms[i].name => {}
                 _ => {
+                    let qname = ix.syms[i].qname();
                     return Err(bad(format!(
-                        "the patch renames {} (section at line {at_line}); submit it whole under its new name.",
-                        ix.syms[i].qname()
-                    )))
+                        "the patch renames {qname} (section at line {at_line}); submit {qname} with the new text: `submit {qname}` replaces the stored symbol and may rename it, keeping its id."
+                    )));
                 }
             }
             push_block(&mut blocks, &mut String::new(), &ix.syms[i].module, &ix.syms[i].name, &items[0].text);
@@ -527,9 +565,17 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 continue;
             }
             match s.lang().split(text).items.first() {
-                None => return Err(bad(format!("the patch leaves nothing of {} (section at line {at_line}); use `delete <name>`.", ix.syms[*i].qname()))),
+                None => {
+                    return Err(bad(format!(
+                        "the patch leaves nothing of {} (section at line {at_line}); use `delete <name>`.",
+                        ix.syms[*i].qname()
+                    )));
+                }
                 Some(item) if item.name != ix.syms[*i].name => {
-                    return Err(bad(format!("the patch renames {} (section at line {at_line}); submit it whole under its new name.", ix.syms[*i].qname())));
+                    let qname = ix.syms[*i].qname();
+                    return Err(bad(format!(
+                        "the patch renames {qname} (section at line {at_line}); submit {qname} with the new text: `submit {qname}` replaces the stored symbol and may rename it, keeping its id."
+                    )));
                 }
                 _ => {}
             }
@@ -735,7 +781,10 @@ mod tests {
     /// Every way a patch is refused says why (E0108) and changes nothing.
     #[test]
     fn patch_refusals_name_the_problem() {
-        let s = board_project(&[("src/app.gleam", "import gleam/int\n\npub fn main() {\n  let x = 1\n  x\n}\n\npub fn other() {\n  2\n}\n\npub fn one() {\n let x = 1\n x\n}\n\npub fn rep(x: Int) -> Int {\n  x\n  let a = 1\n  let b = 2\n  let c = 3\n  let d = 4\n  x\n}\n")]);
+        let s = board_project(&[(
+            "src/app.gleam",
+            "import gleam/int\n\npub fn main() {\n  let x = 1\n  x\n}\n\npub fn other() {\n  2\n}\n\npub fn one() {\n let x = 1\n x\n}\n\npub fn rep(x: Int) -> Int {\n  x\n  let a = 1\n  let b = 2\n  let c = 3\n  let d = 4\n  x\n}\n",
+        )]);
         let original = board::snapshot(&s).unwrap();
         let cases: [(&str, &str); 23] = [
             ("*** Begin Patch\n*** Delete: app.main\n*** End Patch\n", "a patch can't delete"),
@@ -747,19 +796,43 @@ mod tests {
             ("*** Begin Patch\n*** Update: app.main\nx\n*** End Patch\n", "each line starts with"),
             ("*** Begin Patch\n*** Update: app.main\n+  let y = 2\n*** End Patch\n", "needs `@@ <the line before them>`"),
             ("*** Begin Patch\n*** Update: app.main\n@@ nosuchline\n+  let y = 2\n*** End Patch\n", "no line starts with `@@ nosuchline`"),
-            ("*** Begin Patch\n*** Update: app.main\n-  let z = 9\n+  let z = 8\n*** End Patch\n", "these lines weren't found: `let z = 9`"),
+            (
+                "*** Begin Patch\n*** Update: app.main\n-  let z = 9\n+  let z = 8\n*** End Patch\n",
+                "these lines weren't found: `let z = 9`",
+            ),
             ("*** Begin Patch\n*** Update: app.main\n-  let z = 9\n-  let w = 9\n*** End Patch\n", "(and 1 more)"),
-            ("*** Begin Patch\n*** Update: app.main\n-x = 1\n+x = 2\n*** End Patch\n", "`x = 1` is only part of a longer line: `let x = 1`"),
-            ("*** Begin Patch\n*** Update: app.main\n-let x = 1\n+let x = 2\n*** End Patch\n", "`let x = 1` is line 2 with 2 leading spaces"),
-            ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-let x = 1\n+pub fn main() {\n+let x = 2\n*** End Patch\n", "`let x = 1` is line 2 with 2 leading spaces"),
-            ("*** Begin Patch\n*** Update: app.main\n-  let x = 1\n-}\n+  let x = 2\n*** End Patch\n", "these lines aren't adjacent in the file"),
+            (
+                "*** Begin Patch\n*** Update: app.main\n-x = 1\n+x = 2\n*** End Patch\n",
+                "`x = 1` is only part of a longer line: `let x = 1`",
+            ),
+            (
+                "*** Begin Patch\n*** Update: app.main\n-let x = 1\n+let x = 2\n*** End Patch\n",
+                "`let x = 1` is line 2 with 2 leading spaces",
+            ),
+            (
+                "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-let x = 1\n+pub fn main() {\n+let x = 2\n*** End Patch\n",
+                "`let x = 1` is line 2 with 2 leading spaces",
+            ),
+            (
+                "*** Begin Patch\n*** Update: app.main\n-  let x = 1\n-}\n+  let x = 2\n*** End Patch\n",
+                "these lines aren't adjacent in the file",
+            ),
             ("*** Begin Patch\n*** Update: app.one\n-let x = 1\n+let x = 2\n*** End Patch\n", "`let x = 1` is line 2 with 1 leading space"),
-            ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-\n-  let x = 1\n+pub fn main() {\n+  let x = 2\n*** End Patch\n", "The hunk has a blank line; the target has none."),
+            (
+                "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-\n-  let x = 1\n+pub fn main() {\n+  let x = 2\n*** End Patch\n",
+                "The hunk has a blank line; the target has none.",
+            ),
             ("*** Begin Patch\n*** Update: app.rep\n@@ let d\n-x\n-}\n+x\n+}\n*** End Patch\n", "`x` is line 7 with 2 leading spaces"),
             ("*** Begin Patch\n*** Update: app.rep\n@@ let a\n-x\n-}\n+x\n+}\n*** End Patch\n", "`x` is line 2 with 2 leading spaces"),
-            ("*** Begin Patch\n*** Update: app.main\n-let x = 1\n-x = 1\n+let x = 2\n+x = 2\n*** End Patch\n", "these lines weren't found: `x = 1` (and 1 more)"),
+            (
+                "*** Begin Patch\n*** Update: app.main\n-let x = 1\n-x = 1\n+let x = 2\n+x = 2\n*** End Patch\n",
+                "these lines weren't found: `x = 1` (and 1 more)",
+            ),
             ("*** Begin Patch\n*** Update: app.main\n-  let x = 1\n+  let x = 1\n*** End Patch\n", "the patch changes nothing"),
-            ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-  let x = 1\n-  x\n-}\n*** End Patch\n", "leaves nothing of app.main"),
+            (
+                "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-  let x = 1\n-  x\n-}\n*** End Patch\n",
+                "leaves nothing of app.main",
+            ),
             ("*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n+pub fn primary() {\n*** End Patch\n", "renames app.main"),
         ];
         for (patch, why) in cases {
@@ -767,7 +840,12 @@ mod tests {
             assert!(e.contains("E0108") && e.contains(why), "{why}: {e}");
         }
         // the hint names the first hunk line with no exact match, not the hunk's first line (D-142)
-        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-let x = 1\n+pub fn main() {\n+let x = 2\n*** End Patch\n").unwrap_err().0;
+        let e = patch_blocks(
+            &s,
+            "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-let x = 1\n+pub fn main() {\n+let x = 2\n*** End Patch\n",
+        )
+        .unwrap_err()
+        .0;
         assert!(e.contains("`let x = 1` is line 2 with 2 leading spaces") && !e.contains("`pub fn main() {` is line"), "{e}");
         // the headline quotes the line at fault, not the hunk's first line
         assert!(e.contains("these lines weren't found: `let x = 1` (and 1 more)"), "{e}");
@@ -775,7 +853,9 @@ mod tests {
         let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.main\n-  let x = 1\n-}\n+  let x = 2\n*** End Patch\n").unwrap_err().0;
         assert!(e.contains("aren't adjacent in the file") && !e.contains("leading space"), "{e}");
         // when the D-120 hint shows, the headline quotes the line the hint names, not the misindented line before it
-        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.main\n-let x = 1\n-x = 1\n+let x = 2\n+x = 2\n*** End Patch\n").unwrap_err().0;
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.main\n-let x = 1\n-x = 1\n+let x = 2\n+x = 2\n*** End Patch\n")
+            .unwrap_err()
+            .0;
         assert!(e.contains("these lines weren't found: `x = 1`") && e.contains("`x = 1` is only part of a longer line"), "{e}");
         // the search goes outward from where the hunk line belongs: an occurrence 2 lines before it beats one 3 lines after it
         let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.rep\n@@ let a\n-x\n-}\n+x\n+}\n*** End Patch\n").unwrap_err().0;
@@ -787,7 +867,16 @@ mod tests {
         let hunk = "*** Begin Patch\n*** Update: app.main\n@@ nosuchline\n+  let y = 2\n*** End Patch\n";
         assert!(patch_blocks(&s, hunk).unwrap_err().0.contains("in app.main (hunk at line 3)"));
         let rename = "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n+pub fn primary() {\n*** End Patch\n";
-        assert!(patch_blocks(&s, rename).unwrap_err().0.contains("renames app.main (section at line 2)"));
+        let e = patch_blocks(&s, rename).unwrap_err().0;
+        assert!(e.contains("renames app.main (section at line 2)") && e.contains("submit app.main") && e.contains("keeping its id"), "{e}");
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Move: app.main\n*** End Patch\n").unwrap_err().0;
+        assert!(e.contains("submit app.main") && e.contains("keeping its id"), "{e}");
+        let moved = "*** Begin Patch\n*** Update: app.main\n@@\n-  let x = 1\n+  let x = 2\n*** Move to: app.primary\n*** End Patch\n";
+        let e = patch_blocks(&s, moved).unwrap_err().0;
+        assert!(e.contains("submit app.main") && !e.contains("submit app.primary"), "{e}");
+        let after = "*** Begin Patch\n*** Update: app.other\n@@\n-  2\n+  3\n*** Move: app.main\n*** End Patch\n";
+        let e = patch_blocks(&s, after).unwrap_err().0;
+        assert!(e.contains("submit app.main") && !e.contains("submit app.other"), "{e}");
         // Units are joined by a NUL line; only a hunk naming that line can remove it.
         let spans = "*** Begin Patch\n*** Update: app\n-}\n-\u{0}\n-pub fn other() {\n+  y\n*** End Patch\n";
         assert!(patch_blocks(&s, spans).unwrap_err().0.contains("a hunk spans two symbols"), "spans");

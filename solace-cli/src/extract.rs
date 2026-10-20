@@ -1168,8 +1168,12 @@ impl Store {
                 let dir = scope::path(&top, &d);
                 if lockdown::same_project(&dir, &self.root) {
                     None
+                } else if crate::language::is_rust(&dir) {
+                    return fail(format!(
+                        "E6013 {d} is a Rust project (Cargo.toml): `extract` is Gleam only; Rust extract is deferred (D-158 point 6)"
+                    ));
                 } else if !dir.join("gleam.toml").exists() {
-                    return fail(format!("E6013 {d} has no Gleam code to extract into"));
+                    return fail(format!("E6013 {d} has no code held as symbols to extract into"));
                 } else {
                     let store = Store::at(&dir)?;
                     let ix = store.index()?;
@@ -1232,7 +1236,11 @@ impl Store {
                         .collect();
                     if found.iter().any(|&i| ix.syms[i].module == to) && found.iter().any(|&i| ix.syms[i].module != to) {
                         let list: Vec<String> = found.iter().map(|&i| ix.syms[i].qname()).collect();
-                        return fail(format!("E1004 {name} resolves in both the source and {to}: {}; name the module, e.g. {}", list.join(", "), list[0]));
+                        return fail(format!(
+                            "E1004 {name} resolves in both the source and {to}: {}; name the module, e.g. {}",
+                            list.join(", "),
+                            list[0]
+                        ));
                     }
                     return Err(e);
                 }
@@ -1322,17 +1330,24 @@ impl Store {
                 if has(m) {
                     // the destination's module is not new, but a module of that name the source keeps clashes with it
                     if (0..n).any(|i| !moved[i] && ix.syms[i].module == *m) {
-                        return fail(format!("E1004 module {m} is in this project too and stays; Gleam module names are unique across packages that depend on each other: pick another module name"));
+                        return fail(format!(
+                            "E1004 module {m} is in this project too and stays; Gleam module names are unique across packages that depend on each other: pick another module name"
+                        ));
                     }
                     continue;
                 }
                 if exists(m) {
-                    return fail(format!("E1004 module {m} is in this project too; Gleam module names are unique across packages that depend on each other: pick another module name"));
+                    return fail(format!(
+                        "E1004 module {m} is in this project too; Gleam module names are unique across packages that depend on each other: pick another module name"
+                    ));
                 }
                 for other in linked.iter().filter(|o| **o != mine && **o != d.dir) {
                     let dir = scope::path(&top, other);
                     if ["src", "test"].iter().any(|t| dir.join(t).join(format!("{m}.gleam")).exists()) {
-                        return fail(format!("E1004 module {m} is in {other}, a package connected to {mine} or {}; Gleam module names are unique across them: pick another module name", d.dir));
+                        return fail(format!(
+                            "E1004 module {m} is in {other}, a package connected to {mine} or {}; Gleam module names are unique across them: pick another module name",
+                            d.dir
+                        ));
                     }
                 }
             }
@@ -1360,7 +1375,8 @@ impl Store {
                 ));
             }
             if let Some(d) = &dest
-                && let Some(t) = d.ix.syms.iter().find(|t| t.module == newmod[i] && t.name == s.name && (t.kind == Kind::Type) == (s.kind == Kind::Type))
+                && let Some(t) =
+                    d.ix.syms.iter().find(|t| t.module == newmod[i] && t.name == s.name && (t.kind == Kind::Type) == (s.kind == Kind::Type))
             {
                 return fail(format!(
                     "E1004 {} already exists in {} ({}); {} cannot move there; to fold {} into it, use merge {} {} --to-project {}",
@@ -1656,7 +1672,8 @@ impl Store {
                     let (kind, rev): (String, String) =
                         self.db.query_row("SELECT kind, revision FROM symbols WHERE id = ?1", [&s.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
                     let rev = if plan.newtext[i] != s.text { revision(&plan.newtext[i]) } else { rev };
-                    let ord: i64 = tgt.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [&newmod[i]], |r| r.get(0))?;
+                    let ord: i64 =
+                        tgt.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [&newmod[i]], |r| r.get(0))?;
                     tgt.db.execute(
                         "INSERT OR REPLACE INTO symbols(id,module,name,kind,text,ord,revision,live) VALUES (?1,?2,?3,?4,?5,?6,?7,1)",
                         params![s.id, newmod[i], s.name, kind, plan.newtext[i], ord, rev],
@@ -1667,7 +1684,8 @@ impl Store {
                     continue;
                 }
                 if moved[i] {
-                    let ord: i64 = self.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [&newmod[i]], |r| r.get(0))?;
+                    let ord: i64 =
+                        self.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [&newmod[i]], |r| r.get(0))?;
                     self.db.execute("UPDATE symbols SET module = ?2, ord = ?3 WHERE id = ?1", params![s.id, newmod[i], ord])?;
                     self.history(&s.id, "move", &s.module)?;
                 }
@@ -1685,18 +1703,24 @@ impl Store {
             let mut headers: Vec<(String, String, &Store)> = ix.modules.iter().map(|m| (m.path.clone(), m.header.clone(), self)).collect();
             headers.extend(created.iter().map(|(m, _)| (m.clone(), String::new(), tgt)));
             if let Some(d) = &dest {
-                headers.extend(d.ix.modules.iter().filter(|m| m.path == to || m.path == test_to).map(|m| (m.path.clone(), m.header.clone(), tgt)));
+                headers.extend(
+                    d.ix.modules.iter().filter(|m| m.path == to || m.path == test_to).map(|m| (m.path.clone(), m.header.clone(), tgt)),
+                );
             }
             let finals = write_headers(&plan, &headers)?;
             // the dependents: their rewritten symbols and imports
             for (dp, p) in deps.iter().zip(&dplans) {
                 for (i, s) in dp.ix.syms.iter().enumerate() {
                     if p.newtext[i] != s.text {
-                        dp.store.db.execute("UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1", params![s.id, p.newtext[i], revision(&p.newtext[i])])?;
+                        dp.store.db.execute(
+                            "UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1",
+                            params![s.id, p.newtext[i], revision(&p.newtext[i])],
+                        )?;
                         dp.store.history(&s.id, "edit", &s.name)?;
                     }
                 }
-                let modules: Vec<(String, String, &Store)> = dp.ix.modules.iter().map(|m| (m.path.clone(), m.header.clone(), &dp.store)).collect();
+                let modules: Vec<(String, String, &Store)> =
+                    dp.ix.modules.iter().map(|m| (m.path.clone(), m.header.clone(), &dp.store)).collect();
                 write_headers(p, &modules)?;
             }
             // a source module the move emptied goes, unless another module imports it
@@ -1748,23 +1772,35 @@ impl Store {
                 if let Some(d) = &dest {
                     let diags = tgt.check_all(&tgt.index()?)?;
                     bad.extend(
-                        diags.iter().filter(|g| g.error && g.symbol.as_ref().is_none_or(|s| !dest_broken.contains_key(s))).map(|g| format!("{}: {}", d.dir, g.text)),
+                        diags
+                            .iter()
+                            .filter(|g| g.error && g.symbol.as_ref().is_none_or(|s| !dest_broken.contains_key(s)))
+                            .map(|g| format!("{}: {}", d.dir, g.text)),
                     );
                 }
                 let ix2 = self.index()?;
                 let diags = self.check_all(&ix2)?;
-                bad.extend(diags.iter().filter(|g| g.error && g.symbol.as_ref().is_none_or(|s| !before.contains_key(s))).map(|g| g.text.clone()));
+                bad.extend(
+                    diags.iter().filter(|g| g.error && g.symbol.as_ref().is_none_or(|s| !before.contains_key(s))).map(|g| g.text.clone()),
+                );
                 // the dependents last: they read both from disk
                 for (dp, broken) in deps.iter().zip(&deps_broken) {
                     let diags = dp.store.check_all(&dp.store.index()?)?;
                     bad.extend(
-                        diags.iter().filter(|g| g.error && g.symbol.as_ref().is_none_or(|s| !broken.contains_key(s))).map(|g| format!("{}: {}", dp.dir, g.text)),
+                        diags
+                            .iter()
+                            .filter(|g| g.error && g.symbol.as_ref().is_none_or(|s| !broken.contains_key(s)))
+                            .map(|g| format!("{}: {}", dp.dir, g.text)),
                     );
                 }
                 if !bad.is_empty() {
                     return fail(format!("Not moved: the result does not type-check, so nothing changed.\n\n{}", bad.join("\n\n")));
                 }
-                let gone: Vec<String> = suites_before.iter().filter(|(_, e)| self.resolve(&ix2, e).is_err()).map(|(s, e)| format!("suite {s} entry {e}")).collect();
+                let gone: Vec<String> = suites_before
+                    .iter()
+                    .filter(|(_, e)| self.resolve(&ix2, e).is_err())
+                    .map(|(s, e)| format!("suite {s} entry {e}"))
+                    .collect();
                 Ok(format!("{}\u{1}{}", gone.join("\u{2}"), retired.join("\u{2}")))
             })();
             // every end runs, so a failing one never leaves the rest undecided
@@ -1799,17 +1835,34 @@ impl Store {
             out += &format!("Already in {to}: {}\n", already.join(", "));
         }
         if !now_pub.is_empty() {
-            out += &format!("Now pub: {} (new revision)\n", now_pub.iter().map(|&i| ix.syms[i].name.as_str()).collect::<Vec<_>>().join(", "));
+            out +=
+                &format!("Now pub: {} (new revision)\n", now_pub.iter().map(|&i| ix.syms[i].name.as_str()).collect::<Vec<_>>().join(", "));
         }
         if plan.edits > 0 {
-            out += &format!("Rewrote {} reference{} in {} module{}\n", plan.edits, if plan.edits == 1 { "" } else { "s" }, plan.edited.len(), if plan.edited.len() == 1 { "" } else { "s" });
+            out += &format!(
+                "Rewrote {} reference{} in {} module{}\n",
+                plan.edits,
+                if plan.edits == 1 { "" } else { "s" },
+                plan.edited.len(),
+                if plan.edited.len() == 1 { "" } else { "s" }
+            );
         }
         for (dp, p) in deps.iter().zip(&dplans).filter(|(_, p)| p.edits > 0) {
             let plural = |k: usize| if k == 1 { "" } else { "s" };
-            out += &format!("Rewrote {} reference{} in {} module{} in {}\n", p.edits, plural(p.edits), p.edited.len(), plural(p.edited.len()), dp.dir);
+            out += &format!(
+                "Rewrote {} reference{} in {} module{} in {}\n",
+                p.edits,
+                plural(p.edits),
+                p.edited.len(),
+                plural(p.edited.len()),
+                dp.dir
+            );
         }
         if !moved_tests.is_empty() {
-            out += &format!("Tests moved: {}\n", moved_tests.iter().map(|&t| format!("{} -> {}", q(t), newmod[t])).collect::<Vec<_>>().join(", "));
+            out += &format!(
+                "Tests moved: {}\n",
+                moved_tests.iter().map(|&t| format!("{} -> {}", q(t), newmod[t])).collect::<Vec<_>>().join(", ")
+            );
         }
         for c in &carries {
             let imports = if c.text.is_some() { " (its imports rewritten)" } else { "" };
@@ -1858,7 +1911,8 @@ impl Store {
                 }
                 // and each covered dependent's suites that reach the code rewritten there
                 for (dp, p) in deps.iter().zip(&dplans) {
-                    let rewritten: HashSet<&str> = dp.ix.syms.iter().enumerate().filter(|(i, s)| p.newtext[*i] != s.text).map(|(_, s)| s.id.as_str()).collect();
+                    let rewritten: HashSet<&str> =
+                        dp.ix.syms.iter().enumerate().filter(|(i, s)| p.newtext[*i] != s.text).map(|(_, s)| s.id.as_str()).collect();
                     if rewritten.is_empty() {
                         continue;
                     }
@@ -1904,7 +1958,10 @@ impl Store {
         }
         if !js_hits.is_empty() {
             let (s, it) = if js_hits.len() == 1 { ("", "it") } else { ("s", "them") };
-            out += &format!("Not rewritten: JavaScript import{s} of moved code from its old module ({}): change {it} with `write`\n", js_hits.join(", "));
+            out += &format!(
+                "Not rewritten: JavaScript import{s} of moved code from its old module ({}): change {it} with `write`\n",
+                js_hits.join(", ")
+            );
         }
         // places outside the code that name a moved symbol, in qualified form only
         let mut needles: Vec<String> = (0..n).filter(|&i| moved[i]).map(|i| format!("{}.{}", ix.syms[i].module, ix.syms[i].name)).collect();
@@ -1932,7 +1989,14 @@ impl Store {
         if !hits.is_empty() {
             let shown: Vec<&str> = hits.iter().take(5).map(String::as_str).collect();
             let more = if hits.len() > 5 { ", …" } else { "" };
-            out += &format!("Not rewritten: {} place{} in {} file{} ({}{more})\n", hits.len(), if hits.len() == 1 { "" } else { "s" }, files.len(), if files.len() == 1 { "" } else { "s" }, shown.join(", "));
+            out += &format!(
+                "Not rewritten: {} place{} in {} file{} ({}{more})\n",
+                hits.len(),
+                if hits.len() == 1 { "" } else { "s" },
+                files.len(),
+                if files.len() == 1 { "" } else { "s" },
+                shown.join(", ")
+            );
         }
         Ok(lockdown::trim_output(&out, budget))
     }

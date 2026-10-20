@@ -97,13 +97,13 @@ fn names_resolve_by_suffix_and_a_type_wins() {
     assert_eq!(ix.syms[i].kind_text, "struct", "`Store` names the type, not its impl");
 }
 
-/// A `.rs` file operand still reaches `orientation`.
+/// A graph `.rs` operand is refused: a source file is read by symbol (D-181).
 #[test]
 fn a_rust_file_operand_reaches_orientation() {
-    let (root, _store) = sample();
-    let out = orientation::view(&root, &toml::Value::Table(Default::default()), &["view", "src/lib.rs::open"], usize::MAX);
-    let Some(Ok(text)) = out else { panic!("a `.rs` operand is a file view") };
-    assert!(text.contains("pub fn open"), "{text}");
+    let (_root, store) = sample();
+    let out = orientation::view(&store, &toml::Value::Table(Default::default()), &["view", "src/lib.rs::open"], usize::MAX);
+    let Some(Err(f)) = out else { panic!("a graph path is refused, not viewed") };
+    assert!(f.0.contains("E6001") && f.0.contains("view crate") && f.0.contains("inspect crate."), "{}", f.0);
 }
 
 /// A Rust session lists its modules and names, and carries D-158 point 2's lines.

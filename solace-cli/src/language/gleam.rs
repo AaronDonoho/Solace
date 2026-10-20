@@ -300,7 +300,7 @@ pub fn bound_names(code: &str) -> std::collections::HashSet<String> {
 /// The record fields a piece of code reads, each with its line: `x.field` on
 /// a local `x`, a field of a field or of a call's result (`f(x).field`), and
 /// labels in constructor patterns (`Quote(total_cents: t, ..) ->`).
-// ponytail: positional pattern fields (`let Square(n) = s`) aren't counted as reads.
+// positional pattern fields (`let Square(n) = s`) aren't counted as reads.
 pub fn field_reads(code: &str) -> Vec<(String, usize)> {
     scan(code).1
 }
@@ -604,8 +604,15 @@ pub fn collect_gleam_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Resul
 
 /// Formats Gleam source, which doubles as the syntax check.
 pub fn format(source: &str) -> Result<String, Failure> {
-    let mut child =
-        Command::new("gleam").args(["format", "--stdin"]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    // Formatting stdin needs no project folder; a fixed child folder keeps a
+    // process-wide `Within` from moving the formatter's working directory.
+    let mut child = Command::new("gleam")
+        .args(["format", "--stdin"])
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
     child.stdin.take().unwrap().write_all(source.as_bytes())?;
     let out = child.wait_with_output()?;
     if out.status.success() {

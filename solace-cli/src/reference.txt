@@ -78,9 +78,10 @@ lists them):
   write [path]                  one replacement, or no path: a patch of many edits
   move <from> <to>              move a file
   work add | list | done        work records, kept across sessions
-Files by tier: src/ and test/ *.gleam, and a Rust project's src/ and tests/
-*.rs, are symbols (`submit`, never `write`); solace.toml, AGENTS.md,
-.gitignore, and a Rust project's build.rs, .cargo/config[.toml],
+Files by tier: a Gleam project's src/ and test/ *.gleam, and a Rust project's
+src/ and tests/ *.rs, are symbol-held source (`submit`, never `write`);
+solace.toml, AGENTS.md, .gitignore, and a Rust project's build.rs,
+.cargo/config[.toml],
 rust-toolchain[.toml], Cargo.toml's dependency and [workspace] keys, and
 every crate below its root (Cargo.toml, build.rs): `write` with `reason`, the
 human approves; the skills folder (Skills, below): `read` only; .solace/ and
@@ -92,16 +93,19 @@ Commands in full
 Reading
   inspect <name>... --context   symbols, the signatures of what they use, their
                                 callers, and the tests that use them (the
-                                smallest in full)
+                                smallest in full); `lockdown::dispatch` is
+                                accepted for `lockdown.dispatch`
   view <name>...                symbols' source
   view <module>...              outlines: signatures and doc lines
   view <module> --bodies        whole module; only for one you will rewrite
-  view <file>                   a .rs or .py file's outline: each item (fn,
-                                struct, `Type::method`, test) with its line
-                                range, signature and first doc line
+  view <file>                   a .py or plain-file .rs file's outline: each
+                                item (fn, struct, `Type::method`, test) with
+                                its line range, signature and first doc line;
+                                graph source is read by symbol, never by path
   view <file>::<name>           one item's source with its docs, numbered for
-                                `read --lines` and `write` (`board.rs::within`,
-                                `board.rs::Store::view`: a path or name suffix)
+                                `read --lines` and `write`; stored code is read
+                                and cited by name (`lockdown.dispatch`,
+                                `checkout.pay`)
   view --draft <id>             a kept draft's text, from `drafts`
   view | inspect <dependency>   a dependency's module (`lustre/component`): its
                                 public signatures; `<module>.<name>`: one with
@@ -194,6 +198,7 @@ Changing (the new code is in `text`)
                                 public symbols are rewritten with --to-project
                                 when the task covers them; others are refused
                                 (E5003).
+                                Gleam only: Rust extract is deferred (D-158 point 6).
   merge <keep> <drop> [--to-project <folder>]
                                 fold a duplicate into its copy: <keep> keeps its
                                 identity, <drop> is retired (history:
@@ -210,6 +215,7 @@ Changing (the new code is in `text`)
                                   merge solace_task.Task board.Task --to-project components
                                 Private helpers only <drop> used are named as
                                 now unused, not deleted.
+                                Gleam only: Rust merge is deferred (D-158 point 6).
   drafts                        the kept drafts: rejected submits and writes,
                                 each with its id; fix and retry with `--draft`
 Every submit is type-checked. Missing imports are added and imports in `text`
@@ -246,62 +252,80 @@ Checking
                                 statements that can use its variables
   probe --trace <fn>...         also show each call to these functions, with
                                 its arguments and result (combines with --from)
+                                Gleam only: Rust probe is deferred (D-158 point 6)
 
-Rust projects (D-167, D-168): `check` runs `cargo check`, `test` runs
-`cargo test` and `build` runs `cargo build`; they work on a Cargo package, and
-their errors and failures are located by symbol and libtest name. `view`,
-`inspect` and `find` read Rust by
-name as they read Gleam: `view <module>` outlines it, `view <module>.<Type>::<fn>`
-shows one item, and `inspect <name>` gives its signature and kind. `submit` saves
-Rust items by name as it saves Gleam's: a block or a patch per item,
-`--new <module>` for top-level items and for a whole `impl`, `trait`, inline
-`mod` or `extern` block with its items, `--new <module>.<Type>` for a method (an
-empty `impl X {}` takes its first one) and `--imports <module>` for a module's
-header, each checked with cargo. A block can't be submitted as one item: a new
-block goes through `--new <module>`, so `submit <name>` and `*** Update: <container>`
-reply that an existing one changes item by item. `submit --new a::b::c` creates
-the module when the store doesn't have it (`*** Add: a::b::c` in a patch does
-too): its file follows its parent's (`src/a/b/c.rs` beside `a::b`), and its
-parent's header takes `mod c;`; `integration::x` creates the test crate root
-`tests/x.rs`. A name `syn` wouldn't read as a module's — a keyword or reserved
-word such as `type`, or `_` — is refused. A whole-module `submit <module>`
-replaces the module as Gleam's does: every stored item must be in the text,
-matched by name within its parent, so its id stays, and only the items whose text
-changed are reformatted (`*** Update: <module>` in a patch does the same).
-`delete` works as it does in Gleam, checked with cargo: an item goes with the
-items it holds, a module this empties loses its file and its `mod` declaration,
-and a name cargo still finds a use for is refused with E5001, naming the user.
-`refs`, `impact` and `inspect --context`
-answer Rust names from a name-based graph, as they do Gleam's: they overestimate
-(a method name links to every type that has it), and tests run by libtest name;
-`session` lists Rust modules and names and carries the Rust brief lines. On
-Linux, `check`, `test` and `build` run under a sandbox with no network and only
-the project's `target/` writable, because each runs `build.rs` and
-dependencies' build scripts; they run offline, so new dependencies are fetched
-after an import and after an approved Cargo.toml change, outside the sandbox.
-A failed fetch is reported at that import or approval, with cargo's message,
-and changes nothing. Reopening a Rust root with a store fetches only a missing
-cache; a failed reopen fetch is shown on the project's lane and does not stop
-the server. A Rust project listed below a root isn't fetched on reopen.
-Elsewhere approval is the guardrail. Without the Rust toolchain (`cargo` on
-PATH), `check`, `test`, `build`, `submit` and `delete` are refused with "Needs
-the Rust toolchain (`cargo`)"; reads still work, and the project's lane on the
-board says the same. An import without `cargo` goes ahead and says its
-dependencies were not fetched.
+Rust projects
+
+Names
+  `<module>.<item>`             a free function: `testing.rust_project`
+  `<module>.<Type>::<method>`   a method: `crate.Store::resolve_module`, named
+                                by the module holding the `impl`, not the type's
+  `<module>.tests::<name>`      an item in an inline `mod tests`:
+                                `drafts.tests::rejected_text_survives_and_retries_atomically`
+  `crate`                       the crate root; `crate.Store::resolve_module`
+                                is a method there
+  view <module>                 lists the real names; E1001's "Similar names"
+                                line gives the one to use
+
+Adding
+  submit --new <module>         a function, or a whole `impl`, `trait`, inline
+                                `mod` or `extern` block with its items
+  submit --new <module>.<Type>  a method: `submit --new crate.Store`
+  submit --new <module>.tests   a test in an inline `mod tests`; its name comes
+                                from the submitted text
+  submit --imports <module>     a module's header: imports and module comment
+  submit <module>               a whole module: keep every stored item; ids
+                                stay by name, and only changed items are reformatted
+  submit <container>            an existing block changes item by item; submit
+                                its items instead
+  submit --new <parent>::<new>  a new module: `submit --new store::notes`;
+                                `integration::x` makes `tests/x.rs`
+  *** Add: a::b::c              in a patch, creates the module
+
+Formatting
+  format <module>               rustfmt the whole module, with the project's
+                                rustfmt.toml and edition; its ids stay by name
+  submit                        formats only the items its text changes
+
+Searching
+  find <text>                   finds Rust source, e.g. `find resolve_module`
+  grep <text>                   does not search Rust source; it searches other
+                                files and settings, e.g. `grep rust-unit`
+
+Details: `check`, `test` and `build` run cargo and locate errors and failures
+by symbol and libtest name. `delete` removes an item with the items it holds;
+a module this empties loses its file and `mod` line; `delete` refuses a name
+cargo still uses (E5001).
+A new module's name must be an identifier `syn` reads; a keyword or `_` is
+refused. `refs`, `impact` and `inspect --context` overestimate a method name.
+On Linux, cargo runs in a sandbox with no network and only `target/` writable,
+so dependencies are fetched after an import or an approved Cargo.toml change;
+without `cargo`, those commands are refused.
+`submit` and `format` name an item and the lines rustfmt leaves longer than
+`max_width`: rustfmt left them as written, so check their indentation or split
+the long literal.
+
+Not available for Rust: `probe`, `extract`, `merge`.
+  test <name>                   instead of `probe`: add a `#[test]` and run it
+  submit + delete               instead of `extract` or `merge`: add the item
+                                where it belongs, then delete the old one
 
 Files: every file is in one tier, by the first rule that matches, and the tier
 is what says what you may do with the file. `files` prints each file's tier. A
 file you can't change with `write` isn't a file you can't change: graph files
 change with `submit`, protected ones with `write` and the human's approval.
-  graph     src/ and test/ *.gleam, and a Rust project's src/ and tests/ *.rs:
-            the code in the store. `read`, `write` and `move` are refused
-            (E6001); change it with `submit` and `delete`
-  watched   every other text file within watch_limit, gleam.toml included (new
-            dependencies are fetched by check, test and build), and Cargo.toml
-            for a Rust project (its dependency, feature, workspace and build keys are
-            protected, above): `read`, `write`, `remove` and `move` work, except that
-            gleam.toml is never moved or removed; searched by `grep`; a task's
-            changes to them are recorded, and undone if the task is canceled
+  graph     a Gleam project's src/ and test/ *.gleam, and a Rust project's
+            src/ and tests/ *.rs: the symbol-held source, read by symbol.
+            `read`, `write`, `move`, `remove` and `view <file>` are refused
+            (E6001); change it with `submit` and `delete`. `files` lists its
+            paths as `[graph]`, without contents
+  watched   every other text file within watch_limit, gleam.toml (Gleam's
+            manifest) included (new dependencies are fetched by check, test and
+            build), and Cargo.toml for a Rust project (its dependency, feature,
+            workspace and build keys are protected, above): `read`, `write`,
+            `remove` and `move` work, except that gleam.toml is never moved or
+            removed; searched by `grep`; a task's changes to them are recorded,
+            and undone if the task is canceled
   protected solace.toml, AGENTS.md (the project's instructions for agents, shown
             at session start), every .gitignore, the skills folder (Skills,
             below), and a Rust project's build.rs, .cargo/config[.toml],
@@ -400,7 +424,8 @@ Project (commands declared in solace.toml)
                                 solace.toml, or the default from its files), in
                                 build order, naming outputs that are out of
                                 date and the steps to run; reads only
-  format                        gleam format for the project
+  format                        Gleam: gleam format for the project; Rust:
+                                name a module to rustfmt that module whole
   run <name> [args...]          a command declared in solace.toml's [commands];
                                 extra arguments only when it allows them
 
@@ -432,7 +457,7 @@ move and format are refused, and so is run, except for commands marked
                                 test to pass and reach every change; send it in a
                                 call of its own when the summary may need a caveat
 
-In notes, cite code by name (`board.rs::within`, `checkout.pay`), not by
+In notes, cite code by name (`lockdown.dispatch`, `checkout.pay`), not by
 `file:line`: line numbers move. Name tasks, features and milestones as
 `task:<id>`, `feature:<id>` or `milestone:<id>`, written bare and never inside
 backticks: a bare reference renders as a link with the record's title, and a
@@ -490,7 +515,7 @@ command not listed here is refused.
   ... --project <folder>        read in a project below the root; in a folder of
                                 projects, every read needs it
 
-In notes and proposals, cite code by name (`board.rs::within`), not by
+In notes and proposals, cite code by name (`lockdown.dispatch`), not by
 `file:line`: line numbers move. Name tasks, features and milestones as
 `task:<id>`, `feature:<id>` or `milestone:<id>`, written bare and never inside
 backticks: a bare reference renders as a link with the record's title, and a
