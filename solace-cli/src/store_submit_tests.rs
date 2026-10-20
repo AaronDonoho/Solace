@@ -18,7 +18,8 @@ fn an_edit_keeps_the_rest_of_the_file() {
     if !cargo::installed() {
         return;
     }
-    let lib = "pub fn one() -> i32 {\n    1\n}\n\npub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n";
+    let lib =
+        "pub fn one() -> i32 {\n    1\n}\n\npub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n";
     let (root, store) = rust_project(lib);
     let out = store.submit_symbols(Some("crate.one"), None, "pub fn one() -> i32 {\n    3\n}\n").unwrap();
     assert!(out.contains("Saved crate.one"), "{out}");
@@ -45,7 +46,18 @@ fn new_adds_items_with_the_right_spacing() {
     assert!(out.contains("Saved crate.Store::close"), "{out}");
     assert_eq!(
         text_of(&root, "src/lib.rs"),
-        "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) {}\n\n    pub fn close(&self) {}\n}\n\npub fn extra() -> i32 {\n    5\n}\n"
+        r#"pub struct Store;
+
+impl Store {
+    pub fn open(&self) {}
+
+    pub fn close(&self) {}
+}
+
+pub fn extra() -> i32 {
+    5
+}
+"#
     );
 }
 
@@ -129,9 +141,20 @@ fn a_block_named_with_a_trait_impl_submits() {
     if !cargo::installed() {
         return;
     }
-    let lib = "pub struct Thing;\n\nimpl std::fmt::Display for Thing {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"thing\")\n    }\n}\n";
+    let lib = r#"pub struct Thing;
+
+impl std::fmt::Display for Thing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "thing")
+    }
+}
+"#;
     let (root, store) = rust_project(lib);
-    let block = "// ── crate.<Thing as std::fmt::Display>::fmt ──\nfn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n    write!(f, \"other\")\n}\n";
+    let block = r#"// ── crate.<Thing as std::fmt::Display>::fmt ──
+fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "other")
+}
+"#;
     let out = store.submit_symbols(None, None, block).unwrap();
     assert!(out.contains("Saved crate.<Thing as std::fmt::Display>::fmt"), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("\"thing\"", "\"other\""));
@@ -145,7 +168,17 @@ fn a_patch_updates_and_adds_a_method() {
     }
     let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n";
     let (root, store) = rust_project(lib);
-    let update = "*** Begin Patch\n*** Update: crate.Store::open\n@@\n-    pub fn open(&self) -> i32 {\n-        2\n-    }\n+    pub fn open(&self) -> i32 {\n+        3\n+    }\n*** End Patch\n";
+    let update = r#"*** Begin Patch
+*** Update: crate.Store::open
+@@
+-    pub fn open(&self) -> i32 {
+-        2
+-    }
++    pub fn open(&self) -> i32 {
++        3
++    }
+*** End Patch
+"#;
     let out = drafts::submit(&store, &["submit"], &mut || Ok(update.into()), None).unwrap();
     assert!(out.contains("Saved crate.Store::open"), "{out}");
     let edited = lib.replace("        2\n", "        3\n");
@@ -178,7 +211,8 @@ fn an_edit_inside_an_inline_mod_keeps_the_file() {
     if !cargo::installed() {
         return;
     }
-    let lib = "mod tests {\n    pub struct Store;\n\n    impl Store {\n        pub fn open(&self) -> i32 {\n            2\n        }\n    }\n}\n";
+    let lib =
+        "mod tests {\n    pub struct Store;\n\n    impl Store {\n        pub fn open(&self) -> i32 {\n            2\n        }\n    }\n}\n";
     let (root, store) = rust_project(lib);
     let out = store.submit_symbols(Some("crate.tests::Store::open"), None, "pub fn open(&self) -> i32 {\n    3\n}\n").unwrap();
     assert!(out.contains("Saved crate.tests::Store::open"), "{out}");
@@ -205,7 +239,17 @@ fn a_nested_method_keeps_a_multi_line_string_literal() {
     if !cargo::installed() {
         return;
     }
-    let lib = "mod tests {\n    pub struct Store;\n\n    impl Store {\n        pub fn open(&self) -> &str {\n            \"one\ntwo\"\n        }\n    }\n}\n";
+    let lib = r#"mod tests {
+    pub struct Store;
+
+    impl Store {
+        pub fn open(&self) -> &str {
+            "one
+two"
+        }
+    }
+}
+"#;
     let (root, store) = rust_project(lib);
     let text = "pub fn open(&self) -> &str {\n    \"one\nthree\"\n}\n";
     let out = store.submit_symbols(Some("crate.tests::Store::open"), None, text).unwrap();
@@ -247,9 +291,17 @@ fn a_patch_naming_only_a_container_is_refused() {
     if !cargo::installed() {
         return;
     }
-    let lib = "pub struct Other;\n\nimpl std::fmt::Display for Other {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"other\")\n    }\n}\n";
+    let lib = r#"pub struct Other;
+
+impl std::fmt::Display for Other {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "other")
+    }
+}
+"#;
     let (_root, store) = rust_project(lib);
-    let patch = "*** Begin Patch\n*** Update: crate.<Other as std::fmt::Display>\n@@\n-    fn fmt(&self) {\n+    fn fmt(&self) {\n*** End Patch\n";
+    let patch =
+        "*** Begin Patch\n*** Update: crate.<Other as std::fmt::Display>\n@@\n-    fn fmt(&self) {\n+    fn fmt(&self) {\n*** End Patch\n";
     let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
     assert!(err.contains("submit --new <module>") && err.contains("item by item"), "{err}");
     assert!(!err.contains("task:"), "{err}");
@@ -280,9 +332,20 @@ fn a_patch_updates_a_nested_method() {
     if !cargo::installed() {
         return;
     }
-    let lib = "mod tests {\n    pub struct Store;\n\n    impl Store {\n        pub fn open(&self) -> i32 {\n            2\n        }\n    }\n}\n";
+    let lib =
+        "mod tests {\n    pub struct Store;\n\n    impl Store {\n        pub fn open(&self) -> i32 {\n            2\n        }\n    }\n}\n";
     let (root, store) = rust_project(lib);
-    let patch = "*** Begin Patch\n*** Update: crate.tests::Store::open\n@@\n-        pub fn open(&self) -> i32 {\n-            2\n-        }\n+        pub fn open(&self) -> i32 {\n+            3\n+        }\n*** End Patch\n";
+    let patch = r#"*** Begin Patch
+*** Update: crate.tests::Store::open
+@@
+-        pub fn open(&self) -> i32 {
+-            2
+-        }
++        pub fn open(&self) -> i32 {
++            3
++        }
+*** End Patch
+"#;
     let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
     assert!(out.contains("Saved crate.tests::Store::open"), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("            2\n", "            3\n"));
@@ -294,7 +357,17 @@ fn a_nested_method_keeps_a_multi_line_c_string() {
     if !cargo::installed() {
         return;
     }
-    let lib = "mod tests {\n    pub struct Store;\n\n    impl Store {\n        pub fn lines(&self) -> &'static core::ffi::CStr {\n            c\"one\ntwo\"\n        }\n    }\n}\n";
+    let lib = r#"mod tests {
+    pub struct Store;
+
+    impl Store {
+        pub fn lines(&self) -> &'static core::ffi::CStr {
+            c"one
+two"
+        }
+    }
+}
+"#;
     let (root, store) = rust_project(lib);
     let text = "pub fn lines(&self) -> &'static core::ffi::CStr {\n    c\"one\nthree\"\n}\n";
     let out = store.submit_symbols(Some("crate.tests::Store::lines"), None, text).unwrap();
@@ -309,7 +382,12 @@ fn new_saves_a_whole_impl_block() {
         return;
     }
     let (root, store) = rust_project("pub struct X;\n");
-    let block = "impl std::fmt::Display for X {\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        write!(f, \"x\")\n    }\n}\n";
+    let block = r#"impl std::fmt::Display for X {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "x")
+    }
+}
+"#;
     let out = store.submit_symbols(None, Some("crate"), block).unwrap();
     assert!(out.contains("Saved crate.<X as std::fmt::Display>"), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), format!("pub struct X;\n\n{block}"));
@@ -398,7 +476,18 @@ fn a_whole_block_nests_in_an_inline_mod() {
     assert!(out.contains("crate.tests::Store::open"), "{out}");
     assert_eq!(
         text_of(&root, "src/lib.rs"),
-        "mod tests {\n    pub struct Store;\n\n    pub fn t() -> i32 {\n        2\n    }\n\n    impl Store {\n        pub fn open(&self) {}\n    }\n}\n"
+        r#"mod tests {
+    pub struct Store;
+
+    pub fn t() -> i32 {
+        2
+    }
+
+    impl Store {
+        pub fn open(&self) {}
+    }
+}
+"#
     );
 }
 
@@ -627,7 +716,10 @@ fn a_new_mod_line_goes_after_pub_and_path_declarations() {
     let store = Store::at(&root).unwrap();
     let out = store.submit_symbols(None, Some("brand"), "pub fn side() -> i32 {\n    2\n}\n").unwrap();
     assert!(out.contains("created module brand (src/brand.rs; added mod brand; to crate)"), "{out}");
-    assert_eq!(text_of(&root, "src/lib.rs"), "pub mod a;\n#[path = \"b.rs\"]\nmod b;\nmod brand;\n\nuse std::fmt;\n\npub fn one() -> std::fmt::Result {\n    Ok(())\n}\n");
+    assert_eq!(
+        text_of(&root, "src/lib.rs"),
+        "pub mod a;\n#[path = \"b.rs\"]\nmod b;\nmod brand;\n\nuse std::fmt;\n\npub fn one() -> std::fmt::Result {\n    Ok(())\n}\n"
+    );
 }
 
 /// A name landing on a module the store already has under a test crate's
@@ -674,7 +766,8 @@ fn a_whole_module_submitted_unchanged_keeps_every_byte_and_id() {
     if !cargo::installed() {
         return;
     }
-    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+    let lib =
+        "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n\npub fn one() -> i32 {\n    1\n}\n";
     let (root, store) = rust_project(lib);
     let ids = |s: &Store| s.index().unwrap().syms.iter().map(|x| x.id.clone()).collect::<Vec<_>>();
     let before = ids(&store);
@@ -713,7 +806,20 @@ fn a_whole_module_keeps_the_ids_of_two_impl_blocks() {
     if !cargo::installed() {
         return;
     }
-    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        1\n    }\n}\n\nimpl Store {\n    pub fn close(&self) -> i32 {\n        2\n    }\n}\n";
+    let lib = r#"pub struct Store;
+
+impl Store {
+    pub fn open(&self) -> i32 {
+        1
+    }
+}
+
+impl Store {
+    pub fn close(&self) -> i32 {
+        2
+    }
+}
+"#;
     let (root, store) = rust_project(lib);
     let ids = |s: &Store| s.index().unwrap().syms.iter().map(|x| x.id.clone()).collect::<Vec<_>>();
     let before = ids(&store);
@@ -1229,4 +1335,26 @@ fn a_whole_module_submit_names_an_overlong_changed_tail() {
     let out = store.submit(crate::Target::Module("crate"), &text).unwrap();
     assert!(out.contains("Saved crate."), "{out}");
     assert!(out.contains("crate.Store: line 5"), "{out}");
+}
+
+/// A whole-module format saves a module whose child `mod` follows its items
+/// (D-180), keeping every id.
+#[test]
+fn a_whole_module_format_keeps_a_trailing_mod_list() {
+    if !cargo::installed() || !crate::language::cargo::rustfmt_installed() {
+        return;
+    }
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", testing::CARGO),
+        ("src/lib.rs", "pub fn one( ) -> i32 { 1 }\n\nmod tests;\n"),
+        ("src/tests.rs", "pub fn helper() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let ids = |s: &Store| s.index().unwrap().syms.iter().map(|x| x.id.clone()).collect::<Vec<_>>();
+    let before = ids(&store);
+    let out = store.format_module_rust("crate").unwrap();
+    assert!(out.contains("Saved crate."), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "pub fn one() -> i32 {\n    1\n}\n\nmod tests;\n");
+    assert_eq!(ids(&store), before);
 }

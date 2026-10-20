@@ -1,8 +1,8 @@
 //! Resolving Rust references against a module's `use` lines and the crate's
 //! item names (D-170).
 
-use crate::testing::{Scratch, CARGO};
-use crate::{import, Index, Store};
+use crate::testing::{CARGO, Scratch};
+use crate::{Index, Store, import};
 
 /// A one-crate package with `lib` as `src/lib.rs`, read into a store.
 fn index(lib: &str, extra: &[(&str, &str)]) -> (Scratch, Index) {
@@ -32,7 +32,11 @@ fn tested(ix: &Index, q: &str) -> bool {
 #[test]
 fn a_call_inside_a_macro_is_a_reference() {
     let (_root, ix) = index(
-        "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn adds() {\n        assert_eq!(add(1, 2), 3);\n    }\n}\n",
+        concat!(
+            "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n",
+            "    fn adds() {\n        assert_eq!(add(1, 2), 3);\n    }\n}\n",
+        ),
         &[],
     );
     let s = index_of(&ix, "crate.tests::adds");
@@ -45,7 +49,11 @@ fn a_call_inside_a_macro_is_a_reference() {
 #[test]
 fn use_aliases_and_groups_resolve_to_their_items() {
     let (_root, ix) = index(
-        "use crate::{one as uno, two};\n\npub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\npub fn both() -> i32 {\n    uno() + two()\n}\n",
+        concat!(
+            "use crate::{one as uno, two};\n\n",
+            "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\n",
+            "pub fn both() -> i32 {\n    uno() + two()\n}\n",
+        ),
         &[],
     );
     assert!(uses(&ix, "crate.both", "crate.one"));
@@ -57,7 +65,11 @@ fn use_aliases_and_groups_resolve_to_their_items() {
 #[test]
 fn a_glob_import_reaches_the_parents_items() {
     let (_root, ix) = index(
-        "pub fn one() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn t() {\n        assert_eq!(one(), 1);\n    }\n}\n",
+        concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    #[test]\n    fn t() {\n        assert_eq!(one(), 1);\n    }\n}\n",
+        ),
         &[],
     );
     assert!(uses(&ix, "crate.tests::t", "crate.one"));
@@ -69,7 +81,10 @@ fn a_glob_import_reaches_the_parents_items() {
 #[test]
 fn self_reaches_the_impls_other_items() {
     let (_root, ix) = index(
-        "pub struct Store;\n\nimpl Store {\n    pub fn a(&self) -> i32 {\n        self.b()\n    }\n\n    pub fn b(&self) -> i32 {\n        1\n    }\n}\n",
+        concat!(
+            "pub struct Store;\n\nimpl Store {\n    pub fn a(&self) -> i32 {\n        self.b()\n    }\n\n",
+            "    pub fn b(&self) -> i32 {\n        1\n    }\n}\n",
+        ),
         &[],
     );
     assert!(uses(&ix, "crate.Store::a", "crate.Store::b"));
@@ -79,7 +94,11 @@ fn self_reaches_the_impls_other_items() {
 #[test]
 fn a_method_name_links_to_every_type_that_has_it() {
     let (_root, ix) = index(
-        "pub struct A;\npub struct B;\n\nimpl A {\n    pub fn show(&self) -> i32 {\n        1\n    }\n}\n\nimpl B {\n    pub fn show(&self) -> i32 {\n        2\n    }\n}\n\npub fn go(a: &A, b: &B) -> i32 {\n    a.show() + b.show()\n}\n",
+        concat!(
+            "pub struct A;\npub struct B;\n\nimpl A {\n    pub fn show(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "impl B {\n    pub fn show(&self) -> i32 {\n        2\n    }\n}\n\n",
+            "pub fn go(a: &A, b: &B) -> i32 {\n    a.show() + b.show()\n}\n",
+        ),
         &[],
     );
     assert!(uses(&ix, "crate.go", "crate.A::show"));
@@ -91,7 +110,12 @@ fn a_method_name_links_to_every_type_that_has_it() {
 #[test]
 fn a_type_mention_reaches_its_trait_impls() {
     let (_root, ix) = index(
-        "use std::fmt;\n\npub struct Store;\n\nimpl fmt::Display for Store {\n    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n        write!(f, \"s\")\n    }\n}\n\npub fn label(s: &Store) -> String {\n    format!(\"{s}\")\n}\n",
+        concat!(
+            "use std::fmt;\n\npub struct Store;\n\n",
+            "impl fmt::Display for Store {\n    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n",
+            "        write!(f, \"s\")\n    }\n}\n\n",
+            "pub fn label(s: &Store) -> String {\n    format!(\"{s}\")\n}\n",
+        ),
         &[],
     );
     let names: Vec<String> = ix.uses[index_of(&ix, "crate.label")].iter().map(|&u| ix.syms[u].name.clone()).collect();
@@ -102,7 +126,12 @@ fn a_type_mention_reaches_its_trait_impls() {
 #[test]
 fn a_helper_under_cfg_test_is_test_code() {
     let (_root, ix) = index(
-        "pub fn one() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    fn helper() -> i32 {\n        one()\n    }\n\n    #[test]\n    fn t() {\n        assert_eq!(helper(), 1);\n    }\n}\n",
+        concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    fn helper() -> i32 {\n        one()\n    }\n\n",
+            "    #[test]\n    fn t() {\n        assert_eq!(helper(), 1);\n    }\n}\n",
+        ),
         &[],
     );
     assert!(tested(&ix, "crate.tests::helper"));
@@ -115,7 +144,10 @@ fn a_helper_under_cfg_test_is_test_code() {
 #[test]
 fn a_cfg_test_method_does_not_make_the_impl_test_code() {
     let (_root, ix) = index(
-        "pub struct Store;\n\nimpl Store {\n    pub fn a(&self) -> i32 {\n        1\n    }\n\n    #[cfg(test)]\n    fn helper(&self) -> i32 {\n        2\n    }\n}\n",
+        concat!(
+            "pub struct Store;\n\nimpl Store {\n    pub fn a(&self) -> i32 {\n        1\n    }\n\n",
+            "    #[cfg(test)]\n    fn helper(&self) -> i32 {\n        2\n    }\n}\n",
+        ),
         &[],
     );
     assert!(!tested(&ix, "crate.Store::a"));
@@ -146,7 +178,12 @@ fn x() {}
 #[test]
 fn a_multiline_attribute_before_test_keeps_it_a_test() {
     let (_root, ix) = index(
-        "pub fn add() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[should_panic(\n        expected = \"nope\"\n    )]\n    #[test]\n    fn boom() {\n        assert_eq!(add(), 2);\n    }\n}\n",
+        concat!(
+            "pub fn add() -> i32 {\n    1\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    #[should_panic(\n        expected = \"nope\"\n    )]\n    #[test]\n",
+            "    fn boom() {\n        assert_eq!(add(), 2);\n    }\n}\n",
+        ),
         &[],
     );
     assert!(crate::reach::is_test_fn(&ix, index_of(&ix, "crate.tests::boom")));
@@ -156,7 +193,11 @@ fn a_multiline_attribute_before_test_keeps_it_a_test() {
 #[test]
 fn an_all_test_cfg_is_test_code() {
     let (_root, ix) = index(
-        "pub fn one() -> i32 {\n    1\n}\n\n#[cfg(all(test, unix))]\nmod tests {\n    use super::*;\n\n    fn helper() -> i32 {\n        one()\n    }\n}\n",
+        concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "#[cfg(all(test, unix))]\nmod tests {\n    use super::*;\n\n",
+            "    fn helper() -> i32 {\n        one()\n    }\n}\n",
+        ),
         &[],
     );
     assert!(tested(&ix, "crate.tests::helper"));
@@ -167,7 +208,11 @@ fn an_all_test_cfg_is_test_code() {
 #[test]
 fn a_path_test_attribute_is_a_test() {
     let (_root, ix) = index(
-        "pub fn one() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[tokio::test]\n    async fn one_works() {\n        assert_eq!(one(), 1);\n    }\n}\n",
+        concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    #[tokio::test]\n    async fn one_works() {\n        assert_eq!(one(), 1);\n    }\n}\n",
+        ),
         &[],
     );
     let t = index_of(&ix, "crate.tests::one_works");
@@ -194,7 +239,12 @@ fn a_header_line_with_attributes_is_read() {
 #[test]
 fn a_nested_or_named_test_cfg_is_not_test_only() {
     let (_root, ix) = index(
-        "pub fn one() -> i32 {\n    1\n}\n\n#[cfg(all(unix, any(test, feature = \"x\")))]\nfn nested() -> i32 {\n    one()\n}\n\n#[cfg(all(feature = \"test\", unix))]\nfn named() -> i32 {\n    one()\n}\n\n#[cfg(any(test, unix))]\nfn either() -> i32 {\n    one()\n}\n",
+        concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "#[cfg(all(unix, any(test, feature = \"x\")))]\nfn nested() -> i32 {\n    one()\n}\n\n",
+            "#[cfg(all(feature = \"test\", unix))]\nfn named() -> i32 {\n    one()\n}\n\n",
+            "#[cfg(any(test, unix))]\nfn either() -> i32 {\n    one()\n}\n",
+        ),
         &[],
     );
     assert!(!tested(&ix, "crate.nested"));
@@ -207,7 +257,12 @@ fn a_nested_or_named_test_cfg_is_not_test_only() {
 #[test]
 fn a_bracket_in_a_string_does_not_hide_the_next_attribute() {
     let (_root, ix) = index(
-        "pub fn add() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[should_panic(expected = \"[\")]\n    #[test]\n    fn boom() {\n        assert_eq!(add(), 2);\n    }\n}\n",
+        concat!(
+            "pub fn add() -> i32 {\n    1\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    #[should_panic(expected = \"[\")]\n    #[test]\n",
+            "    fn boom() {\n        assert_eq!(add(), 2);\n    }\n}\n",
+        ),
         &[],
     );
     assert!(crate::reach::is_test_fn(&ix, index_of(&ix, "crate.tests::boom")));
@@ -216,10 +271,8 @@ fn a_bracket_in_a_string_does_not_hide_the_next_attribute() {
 /// A macro call reaches the macro it names.
 #[test]
 fn a_macro_call_reaches_its_macro() {
-    let (_root, ix) = index(
-        "macro_rules! twice {\n    ($n:expr) => {\n        $n * 2\n    };\n}\n\npub fn go() -> i32 {\n    twice!(3)\n}\n",
-        &[],
-    );
+    let (_root, ix) =
+        index("macro_rules! twice {\n    ($n:expr) => {\n        $n * 2\n    };\n}\n\npub fn go() -> i32 {\n    twice!(3)\n}\n", &[]);
     assert!(uses(&ix, "crate.go", "crate.twice"));
 }
 
@@ -228,7 +281,11 @@ fn a_macro_call_reaches_its_macro() {
 #[test]
 fn a_one_line_cfg_test_item_is_test_code() {
     let (_root, ix) = index(
-        "pub fn one() -> i32 {\n    1\n}\n\n#[cfg(test)] mod tests { fn helper() -> i32 { 1 } }\n\n#[cfg(test)] fn alone() -> i32 {\n    2\n}\n",
+        concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "#[cfg(test)] mod tests { fn helper() -> i32 { 1 } }\n\n",
+            "#[cfg(test)] fn alone() -> i32 {\n    2\n}\n",
+        ),
         &[],
     );
     assert!(tested(&ix, "crate.tests::helper"));
@@ -240,7 +297,11 @@ fn a_one_line_cfg_test_item_is_test_code() {
 #[test]
 fn attributes_on_one_line_are_all_seen() {
     let (_root, ix) = index(
-        "pub fn one() -> i32 {\n    1\n}\n\n#[allow(dead_code)] #[test]\nfn t() {\n    assert_eq!(one(), 1);\n}\n\n#[cfg(test)] #[allow(dead_code)] mod tests {\n    fn helper() -> i32 {\n        2\n    }\n}\n",
+        concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "#[allow(dead_code)] #[test]\nfn t() {\n    assert_eq!(one(), 1);\n}\n\n",
+            "#[cfg(test)] #[allow(dead_code)] mod tests {\n    fn helper() -> i32 {\n        2\n    }\n}\n",
+        ),
         &[],
     );
     assert!(crate::reach::is_test_fn(&ix, index_of(&ix, "crate.t")));
@@ -252,7 +313,12 @@ fn attributes_on_one_line_are_all_seen() {
 #[test]
 fn a_bracket_in_a_literal_does_not_hide_the_next_attribute() {
     let (_root, ix) = index(
-        "pub fn one() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[doc = r#\"a\"[b\"#]\n    #[test]\n    fn raw() {\n        assert_eq!(one(), 1);\n    }\n\n    #[allow('[')]\n    #[test]\n    fn quoted() {\n        assert_eq!(one(), 1);\n    }\n}\n",
+        concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    #[doc = r#\"a\"[b\"#]\n    #[test]\n    fn raw() {\n        assert_eq!(one(), 1);\n    }\n\n",
+            "    #[allow('[')]\n    #[test]\n    fn quoted() {\n        assert_eq!(one(), 1);\n    }\n}\n",
+        ),
         &[],
     );
     assert!(crate::reach::is_test_fn(&ix, index_of(&ix, "crate.tests::raw")));
@@ -275,7 +341,11 @@ fn a_header_all_test_cfg_module_is_test_code() {
 #[test]
 fn a_rstest_attribute_is_a_test() {
     let (_root, ix) = index(
-        "pub fn one() -> i32 {\n    1\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[rstest]\n    fn one_works() {\n        assert_eq!(one(), 1);\n    }\n}\n",
+        concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    #[rstest]\n    fn one_works() {\n        assert_eq!(one(), 1);\n    }\n}\n",
+        ),
         &[],
     );
     let t = index_of(&ix, "crate.tests::one_works");

@@ -162,7 +162,15 @@ fn view_files(root: &Path, watched: &[String], ops: &[&str], files: &[bool], fla
         match find(&items, &name, sep).as_slice() {
             [it] => out += &source_of(&file, &text, it, room),
             [] => {
-                out += &lockdown::error::<()>("E1001", op, format!("no item `{name}` in {file}; `view {file}` lists its items, `grep {name} --in {file} --context 3` finds other text")).unwrap_err().0;
+                out += &lockdown::error::<()>(
+                    "E1001",
+                    op,
+                    format!(
+                        "no item `{name}` in {file}; `view {file}` lists its items, `grep {name} --in {file} --context 3` finds other text"
+                    ),
+                )
+                .unwrap_err()
+                .0;
                 continue;
             }
             many => {

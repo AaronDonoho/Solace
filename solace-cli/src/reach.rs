@@ -103,9 +103,7 @@ pub fn outside(ix: &Index) -> HashSet<usize> {
         return (0..ix.syms.len())
             .filter(|&j| {
                 let s = &ix.syms[j];
-                s.kind_text == "extern"
-                    || in_extern(j)
-                    || ["std::process", "std::net", "Command::new"].iter().any(|m| s.text.contains(m))
+                s.kind_text == "extern" || in_extern(j) || ["std::process", "std::net", "Command::new"].iter().any(|m| s.text.contains(m))
             })
             .collect();
     }
@@ -222,7 +220,8 @@ pub fn readers(ix: &Index, fields: &[(usize, String)]) -> HashSet<usize> {
     let rec = records(ix);
     (0..ix.syms.len())
         .filter(|&r| {
-            ix.lang.field_reads(&ix.syms[r].text)
+            ix.lang
+                .field_reads(&ix.syms[r].text)
                 .iter()
                 .any(|(f, _)| fields.iter().any(|(t, g)| g == f && read_types(ix, &rec, r, f).0.contains(t)))
         })
@@ -362,8 +361,7 @@ pub fn flow(ix: &Index, origins: &[(usize, Vec<usize>)]) -> Impact {
 fn flow_calls(ix: &Index, origins: &[(usize, Vec<usize>)]) -> Impact {
     let mut impact = Impact::default();
     let mut found: HashSet<usize> = HashSet::new();
-    let mut queue: VecDeque<(usize, usize, String, bool)> =
-        origins.iter().map(|(i, _)| (*i, 0, "changed".to_string(), true)).collect();
+    let mut queue: VecDeque<(usize, usize, String, bool)> = origins.iter().map(|(i, _)| (*i, 0, "changed".to_string(), true)).collect();
     while let Some((i, steps, via, certain)) = queue.pop_front() {
         if is_test(ix, i) || !found.insert(i) {
             continue;
@@ -866,7 +864,10 @@ mod tests {
         ]);
         fs::write(
             store.root.join("solace.toml"),
-            "[commands]\ne2e = { run = [\"gleam\", \"run\", \"-m\", \"e2e\"], checks = [\"calc.add\"] }\nall = { run = [\"make\"], checks = [\"*\"] }\n",
+            concat!(
+                "[commands]\ne2e = { run = [\"gleam\", \"run\", \"-m\", \"e2e\"], ",
+                "checks = [\"calc.add\"] }\nall = { run = [\"make\"], checks = [\"*\"] }\n"
+            ),
         )
         .unwrap();
         let ix = store.index().unwrap();
@@ -888,12 +889,24 @@ mod tests {
             (
                 "src",
                 "price",
-                "import money\n\npub type Quote {\n  Quote(discount: Int, total: Int, note: String)\n}\n\npub type Rate {\n  Rate(total: Int)\n}\n\npub fn quote(cents: Int, extra: Int) -> Quote {\n  let discount = money.percent(cents, 5)\n  let total = cents + extra\n  let note = \"fixed\"\n  Quote(discount: discount, total: total, note:)\n}\n\npub fn wrap(q: Quote) -> Quote {\n  Quote(..q, total: q.total + 1, note: \"x\")\n}",
+                concat!(
+                    "import money\n\npub type Quote {\n  Quote(discount: Int, total: Int, note: String)\n}\n\n",
+                    "pub type Rate {\n  Rate(total: Int)\n}\n\n",
+                    "pub fn quote(cents: Int, extra: Int) -> Quote {\n  let discount = money.percent(cents, 5)\n",
+                    "  let total = cents + extra\n  let note = \"fixed\"\n",
+                    "  Quote(discount: discount, total: total, note:)\n}\n\n",
+                    "pub fn wrap(q: Quote) -> Quote {\n  Quote(..q, total: q.total + 1, note: \"x\")\n}"
+                ),
             ),
             (
                 "src",
                 "report",
-                "import price\n\npub fn discounts(qs: List(price.Quote)) -> Int {\n  case qs {\n    [q, ..] -> q.discount\n    [] -> 0\n  }\n}\n\npub fn totals(q) -> Int {\n  q.total\n}\n\npub fn rate(r: price.Rate) -> Int {\n  r.total\n}",
+                concat!(
+                    "import price\n\npub fn discounts(qs: List(price.Quote)) -> Int {\n  case qs {\n",
+                    "    [q, ..] -> q.discount\n    [] -> 0\n  }\n}\n\n",
+                    "pub fn totals(q) -> Int {\n  q.total\n}\n\n",
+                    "pub fn rate(r: price.Rate) -> Int {\n  r.total\n}"
+                ),
             ),
             ("src", "other", "import money\n\npub fn tip(x: Int) -> Int {\n  money.percent(x, 10)\n}"),
             ("test", "price_test", "import price\n\npub fn quote_test() {\n  assert price.quote(100, 0).total == 100\n}"),
@@ -941,12 +954,21 @@ mod tests {
             (
                 "src",
                 "app",
-                "import shellout\n\npub fn main() {\n  step()\n}\n\nfn step() {\n  helper()\n}\n\nfn helper() {\n  1\n}\n\npub fn run() {\n  shellout.command(\"ls\", [], \".\", [])\n}\n\n@external(erlang, \"erlang\", \"abs\")\npub fn abs(x: Int) -> Int",
+                concat!(
+                    "import shellout\n\npub fn main() {\n  step()\n}\n\n",
+                    "fn step() {\n  helper()\n}\n\nfn helper() {\n  1\n}\n\n",
+                    "pub fn run() {\n  shellout.command(\"ls\", [], \".\", [])\n}\n\n",
+                    "@external(erlang, \"erlang\", \"abs\")\npub fn abs(x: Int) -> Int"
+                ),
             ),
             (
                 "test",
                 "app_test",
-                "import app\n\npub fn main_test() {\n  assert app.main() == 1\n}\n\npub fn run_test() {\n  check(app.run())\n}\n\nfn check(x) {\n  app.abs(x)\n}",
+                concat!(
+                    "import app\n\npub fn main_test() {\n  assert app.main() == 1\n}\n\n",
+                    "pub fn run_test() {\n  check(app.run())\n}\n\n",
+                    "fn check(x) {\n  app.abs(x)\n}"
+                ),
             ),
         ]);
         let id = |n: &str| ix.syms.iter().position(|s| s.name == n).unwrap();
@@ -975,7 +997,11 @@ mod tests {
             "a comment-only change is not code"
         );
         assert!(
-            origins(&ix, &[("fn:main_test.a_test".to_string(), Some("import main\n\npub fn a_test() {\n  assert main.a() == 2\n}".to_string()))]).is_empty(),
+            origins(
+                &ix,
+                &[("fn:main_test.a_test".to_string(), Some("import main\n\npub fn a_test() {\n  assert main.a() == 2\n}".to_string()))]
+            )
+            .is_empty(),
             "a test's own change is not an origin"
         );
         assert_eq!(origins(&ix, &[("fn:main.b".to_string(), None)]), [(b, vec![0, 1, 2, 3, 4])], "a new symbol seeds every line");
@@ -1031,7 +1057,8 @@ mod tests {
             ("src", "odd", "import quote\n\npub fn f(n: Int) -> quote.Quote {\n    let q = quote.Quote(a: n)\n  quote.Quote(..q, b: 1)\n}"),
         ]);
         let f = ix.syms.iter().position(|s| s.name == "f").unwrap();
-        let mut fields: Vec<String> = taint(&ix, &records(&ix), f, &[1].into(), &HashSet::new(), &["n".into()]).fields.into_iter().map(|(_, g)| g).collect();
+        let mut fields: Vec<String> =
+            taint(&ix, &records(&ix), f, &[1].into(), &HashSet::new(), &["n".into()]).fields.into_iter().map(|(_, g)| g).collect();
         fields.sort();
         fields.dedup();
         assert_eq!(fields, ["a", "b"], "the whole symbol is tainted, so every field counts");
@@ -1059,7 +1086,14 @@ mod tests {
             (
                 "src",
                 "main",
-                "pub fn a() {\n  1\n}\n\npub fn b() {\n  1\n}\n\npub fn c() {\n  1\n}\n\npub fn d() {\n  1\n}\n\npub fn e() {\n  1\n}\n\npub fn f() {\n  1\n}\n\npub fn g() {\n  1\n}\n\npub fn h() {\n  1\n}\n\npub fn i() {\n  1\n}\n\npub fn j() {\n  1\n}\n\npub fn k() {\n  1\n}\n\npub fn l() {\n  1\n}",
+                concat!(
+                    "pub fn a() {\n  1\n}\n\npub fn b() {\n  1\n}\n\n",
+                    "pub fn c() {\n  1\n}\n\npub fn d() {\n  1\n}\n\n",
+                    "pub fn e() {\n  1\n}\n\npub fn f() {\n  1\n}\n\n",
+                    "pub fn g() {\n  1\n}\n\npub fn h() {\n  1\n}\n\n",
+                    "pub fn i() {\n  1\n}\n\npub fn j() {\n  1\n}\n\n",
+                    "pub fn k() {\n  1\n}\n\npub fn l() {\n  1\n}"
+                ),
             ),
             ("src", "shape", "pub type T {\n  T(a: Int, b: Int, c: Int, d: Int, e: Int, f: Int, g: Int, h: Int, i: Int)\n}"),
         ]);
@@ -1080,20 +1114,11 @@ mod tests {
             lines[0].starts_with("Reaches 4 uses (and 6 possible): callers, and readers of T.a, .b, .c, .d, .e, .f, .g, .h, and 1 more."),
             "{lines:?}"
         );
-        assert!(
-            lines[1].starts_with("No test of their own: main.b (1 step), main.c (1 step), main.d (1 step) and 1 more"),
-            "{lines:?}"
-        );
+        assert!(lines[1].starts_with("No test of their own: main.b (1 step), main.c (1 step), main.d (1 step) and 1 more"), "{lines:?}");
         assert_eq!(lines[2], "Leaves the program: main.a (prints). Also reached: e2e (`run e2e`).");
         let r = report(&ix, &impact, &["e2e (`run e2e`)".to_string()], 10_000);
-        assert!(
-            r.starts_with("main.a reaches 4 uses, nearest first:\n  main.b — 1 step, calls main.a; no test of its own\n"),
-            "{r}"
-        );
-        assert!(
-            r.contains("And 6 possible uses: readers of a field another type also declares (T.a, T.b, T.c, T.d and 2 more)"),
-            "{r}"
-        );
+        assert!(r.starts_with("main.a reaches 4 uses, nearest first:\n  main.b — 1 step, calls main.a; no test of its own\n"), "{r}");
+        assert!(r.contains("And 6 possible uses: readers of a field another type also declares (T.a, T.b, T.c, T.d and 2 more)"), "{r}");
         let r = report(&ix, &impact, &[], 10);
         assert!(r.contains("  … 4 more not shown, to fit the size limit"), "{r}");
     }

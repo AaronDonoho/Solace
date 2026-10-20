@@ -523,3 +523,41 @@ pub(crate) fn rust_syntax_error(
     let what = if what.is_empty() { "the text doesn't parse".to_string() } else { what };
     Failure(format!("{at}: {what}"), e.1)
 }
+
+/// D-158 point 2's brief lines, with real names from this project's store
+/// (task:5bc1e9311b667f05): a method and an inline test when the store has them.
+pub(crate) fn rust_brief(ix: &Index) -> String {
+    let mut out = RUST_BRIEF.to_string();
+    let by_id: HashMap<&str, usize> = ix.syms.iter().enumerate().map(|(i, s)| (s.id.as_str(), i)).collect();
+    let in_impl = |i: usize| ix.syms[i].parent.as_deref().and_then(|id| by_id.get(id)).is_some_and(|&p| ix.syms[p].kind_text == "impl");
+    let method = (0..ix.syms.len()).find(|&i| ix.syms[i].kind_text == "fn" && !ix.test[i] && in_impl(i));
+    let method = method.or_else(|| (0..ix.syms.len()).find(|&i| ix.syms[i].kind_text == "fn" && in_impl(i)));
+    if let Some(i) = method {
+        out += &format!("A method is `<module>.<Type>::<fn>`, e.g. `{}`; the module is the one holding the `impl`.\n", ix.syms[i].qname());
+    }
+    let inline_tests = |i: usize| -> Option<usize> {
+        let mut parent = ix.syms[i].parent.as_deref();
+        while let Some(id) = parent {
+            let &p = by_id.get(id)?;
+            let s = &ix.syms[p];
+            if s.kind_text == "mod" && s.text.contains('{') && s.name.rsplit("::").next() == Some("tests") {
+                return Some(p);
+            }
+            parent = s.parent.as_deref();
+        }
+        None
+    };
+    let test = (0..ix.syms.len()).find(|&i| ix.syms[i].kind_text == "fn" && crate::reach::is_test_fn(ix, i) && inline_tests(i).is_some());
+    if let Some(i) = test {
+        let t = &ix.syms[i];
+        let m = &ix.syms[inline_tests(i).unwrap()];
+        out += &format!(
+            "A test in an inline `mod tests` is `<module>.tests::<name>`, e.g. `{}`; add one with `*** Add: {}::{}.<test>`.\n",
+            t.qname(),
+            m.module,
+            m.name
+        );
+    }
+    out += "`find <text>` searches Rust source; `grep` searches other files only.\n";
+    out
+}

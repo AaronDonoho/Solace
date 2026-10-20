@@ -5,7 +5,7 @@ use crate::{
     REASON, SHOWN, agent_reference, batch, is_question, looks_like_code, panic_reply, read_hint, reset_after_panic, run_options, usage,
 };
 use crate::{board, reads};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::io::Write;
 
@@ -15,17 +15,34 @@ pub(crate) fn tool_schema() -> Value {
     if board::strategy_context().is_some() {
         return json!({
             "name": "solace",
-            "description": "Read this project's code and plan with the human; this run changes no code. Read with \
-                `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` (`--project <folder>` for a project below \
-                the root); read the plan with `strategy list [--archived]` and `strategy show <task|feature|milestone> <id>...` (one id, or several in one reply) \
-                (a task's notes in full: `strategy show note <task> <notes>`; a task's run log: `strategy show run <task> <run> [<steps>|all]`); propose \
-                a change with `strategy task|feature|milestone [<id>]` or `strategy vision`, alone in its call; reply with \
-                `strategy note`. Several reads go in one call, one per line, and run in order.",
+            "description": concat!(
+                "Read this project's code and plan with the human; this run changes no code. ",
+                "Read with `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` ",
+                "(`--project <folder>` for a project below the root); read the plan with ",
+                "`strategy list [--archived]` and `strategy show <task|feature|milestone> <id>...` ",
+                "(one id, or several in one reply) (a task's notes in full: ",
+                "`strategy show note <task> <notes>`; a task's run log: ",
+                "`strategy show run <task> <run> [<steps>|all]`); propose a change with ",
+                "`strategy task|feature|milestone [<id>]` or `strategy vision`, alone in its call; ",
+                "reply with `strategy note`. Several reads go in one call, one per line, and run in order."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "One or more commands, one per line, e.g. `strategy show feature <id>` or `view app.main --project <folder>`"},
-                    "text": {"type": "string", "description": "The reply for `strategy note`; a proposal's fields as a JSON object (`help strategy` lists them per kind); the new vision for `strategy vision`"}
+                    "command": {
+                        "type": "string",
+                        "description": concat!(
+                            "One or more commands, one per line, e.g. `strategy show feature <id>` ",
+                            "or `view app.main --project <folder>`"
+                        )
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": concat!(
+                            "The reply for `strategy note`; a proposal's fields as a JSON object ",
+                            "(`help strategy` lists them per kind); the new vision for `strategy vision`"
+                        )
+                    }
                 },
                 "required": ["command"]
             }
@@ -33,23 +50,46 @@ pub(crate) fn tool_schema() -> Value {
     }
     json!({
         "name": "solace",
-        "description": "Read, change and test this project's code. In a board run, the brief holds the reply to \
-            `session start --task`: start with the call its `Next:` line names; after a compaction notice, ask with \
-            `session remember` for the task, its notes and what this run has done. Elsewhere, start with \
-            `session start --task`: it lists the symbols most likely relevant, the workflow and \
-            the commands. Several commands \
-            go in one call, one per line, and run in order: put every independent read in the same call \
-            (`inspect a.f b.g --context`, then `view c` on the next line), never one read per call, and never send \
-            a change alone: put its check on the line after it (`test` after `submit`, `run <name>` after `write`). \
-            Keep text between calls to a line or two: all of it is re-sent \
-            on every later call. Once the work is done, stop: no recap and no repeated checks.",
+        "description": concat!(
+            "Read, change and test this project's code. In a board run, the brief holds the reply to ",
+            "`session start --task`: start with the call its `Next:` line names; after a compaction ",
+            "notice, ask with `session remember` for the task, its notes and what this run has done. ",
+            "Elsewhere, start with `session start --task`: it lists the symbols most likely relevant, ",
+            "the workflow and the commands. Several commands go in one call, one per line, and run in ",
+            "order: put every independent read in the same call (`inspect a.f b.g --context`, then ",
+            "`view c` on the next line), never one read per call, and never send a change alone: put ",
+            "its check on the line after it (`test` after `submit`, `run <name>` after `write`). Keep ",
+            "text between calls to a line or two: all of it is re-sent on every later call. Once the ",
+            "work is done, stop: no recap and no repeated checks."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "command": {"type": "string", "description": "One or more commands, one per line, e.g. `inspect checkout.pay tax.quote --context`, or `submit` then `test`"},
-                "text": {"type": "string", "description": "For submit: a patch (`*** Begin Patch` / `*** Update: <symbol or module>` / `@@` hunks) or new code; for `write` with no path: a patch of files (`*** Update File: <path>`, `*** Add File: <path>`, `*** Delete File: <path>`); the task for `session start --task`; the record, note, summary or question for `work add` and `task note|done|ask`"},
+                "command": {
+                    "type": "string",
+                    "description": concat!(
+                        "One or more commands, one per line, e.g. ",
+                        "`inspect checkout.pay tax.quote --context`, or `submit` then `test`"
+                    )
+                },
+                "text": {
+                    "type": "string",
+                    "description": concat!(
+                        "For submit: a patch (`*** Begin Patch` / `*** Update: <symbol or module>` / ",
+                        "`@@` hunks) or new code; for `write` with no path: a patch of files ",
+                        "(`*** Update File: <path>`, `*** Add File: <path>`, `*** Delete File: <path>`); ",
+                        "the task for `session start --task`; the record, note, summary or question for ",
+                        "`work add` and `task note|done|ask`"
+                    )
+                },
                 "options": {"type": "array", "items": {"type": "string"}, "description": "2–4 options, for `task ask`"},
-                "reason": {"type": "string", "description": "For a settings `write` (solace.toml, AGENTS.md): why the change, shown with the question the human approves"},
+                "reason": {
+                    "type": "string",
+                    "description": concat!(
+                        "For a settings `write` (solace.toml, AGENTS.md): why the change, ",
+                        "shown with the question the human approves"
+                    )
+                },
                 "old": {"type": "string", "description": "For `--replace`: the exact text that `text` replaces"}
             },
             "required": ["command"]

@@ -211,7 +211,8 @@ fn follow_tasks(top: &Path, fid: &str, saving: &Value) -> Result<Option<Value>, 
         held.push(saving.clone());
     }
     // A task whose home has no workflow (not a project yet) is in no column: open.
-    let closed = |t: &Value| board::flow(&scope::path(top, t["home"].as_str().unwrap_or("."))).is_ok_and(|w| board::column(&w, t)["final"] == true);
+    let closed =
+        |t: &Value| board::flow(&scope::path(top, t["home"].as_str().unwrap_or("."))).is_ok_and(|w| board::column(&w, t)["final"] == true);
     let open = held.iter().any(|t| !closed(t));
     let state = match f["state"].as_str() {
         Some("active") if !held.is_empty() && !open => "complete",
@@ -309,7 +310,9 @@ fn stored(kind: &str, mut v: Value, path: &Path) -> Value {
 fn with_slots(mut fs: Vec<Value>) -> Vec<Value> {
     let mut next = next_slot(&fs);
     let mut old: Vec<usize> = (0..fs.len()).filter(|&i| fs[i].get("colorSlot").is_none()).collect();
-    old.sort_by(|&a, &b| fs[a]["startTime"].as_u64().cmp(&fs[b]["startTime"].as_u64()).then_with(|| fs[a]["id"].as_str().cmp(&fs[b]["id"].as_str())));
+    old.sort_by(|&a, &b| {
+        fs[a]["startTime"].as_u64().cmp(&fs[b]["startTime"].as_u64()).then_with(|| fs[a]["id"].as_str().cmp(&fs[b]["id"].as_str()))
+    });
     for i in old {
         fs[i]["colorSlot"] = if fs[i]["startTime"].is_null() {
             Value::Null
@@ -437,7 +440,13 @@ pub fn find_task(top: &Path, id: &str) -> Result<Value, (u16, Failure)> {
         return board::err("E7023", format!("unknown task {id}")).map_err(|e| (404, e));
     }
     let t = board::read_task(top, &path).map_err(|e| (409, e))?;
-    Ok(json!({"id": id, "dir": t["home"], "archived": !t["archivedTime"].is_null(), "title": t["title"], "project": !board::homeless(top, t["home"].as_str().unwrap_or("."))}))
+    Ok(json!({
+        "id": id,
+        "dir": t["home"],
+        "archived": !t["archivedTime"].is_null(),
+        "title": t["title"],
+        "project": !board::homeless(top, t["home"].as_str().unwrap_or(".")),
+    }))
 }
 /// `GET /features/find/{id}` and `GET /milestones/find/{id}` (D-122): a
 /// record's title, which a bare link to it shows. 404 for no such record.
@@ -688,7 +697,9 @@ fn runs_api(top: &Path, method: &str, parts: &[&str], body: Value, system: Syste
     match (method, parts) {
         ("GET", []) => return Ok(json!(strategy_runs(top))),
         ("GET", [rid]) => {
-            let Some(mut run) = record(top, "runs", rid) else { return board::err("E7023", format!("unknown strategy run {rid}")).map_err(|e| (404, e)) };
+            let Some(mut run) = record(top, "runs", rid) else {
+                return board::err("E7023", format!("unknown strategy run {rid}")).map_err(|e| (404, e));
+            };
             run["transcript"] = json!(board::transcript(Path::new(run["log"].as_str().unwrap_or(""))));
             return Ok(run);
         }
@@ -839,7 +850,9 @@ fn build(top: &Path, rid: &str, p: &Value) -> Result<Built, Failure> {
         }
         "task" => match id {
             Some(id) => {
-                let Some(t) = board::all_tasks(top)?.into_iter().find(|t| t["id"] == id) else { return board::err("E7023", format!("unknown task {id}")) };
+                let Some(t) = board::all_tasks(top)?.into_iter().find(|t| t["id"] == id) else {
+                    return board::err("E7023", format!("unknown task {id}"));
+                };
                 let home = board::task_root(top, &t);
                 let (mut t, _) = board::change(&home, id, "PATCH", &[], fields)?;
                 board::note(&mut t, "solace", None, &format!("Changed by strategy run {rid}"));
@@ -865,7 +878,8 @@ fn proposed_task(top: &Path, rid: &str, fields: &Value) -> Result<Value, Failure
         None => vec![".".into()],
         Some(v) => {
             let ok = |d: &str| !d.is_empty() && !d.starts_with('/') && !d.split('/').any(|p| p == "..");
-            let named: Option<Vec<String>> = v.as_array().map(|a| a.iter().filter_map(Value::as_str).filter(|d| ok(d)).map(String::from).collect());
+            let named: Option<Vec<String>> =
+                v.as_array().map(|a| a.iter().filter_map(Value::as_str).filter(|d| ok(d)).map(String::from).collect());
             match named {
                 Some(n) if !n.is_empty() && n.len() == v.as_array().unwrap().len() => n,
                 _ => return board::err("E7001", "scope must be a list of project folders below the root"),
@@ -969,8 +983,12 @@ pub(super) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text
         for (kind, id) in [("feature", &fields["feature"]), ("milestone", milestone)] {
             let Some(r) = id.as_str().and_then(|id| record(top, &format!("{kind}s"), id)) else { continue };
             if matches!(r["state"].as_str(), Some("complete" | "canceled")) {
-                says += &format!("\n\nApproving also sets the {kind} {} (\"{}\", now {}) back to upcoming.", r["id"].as_str().unwrap_or(""),
-                    r["title"].as_str().unwrap_or(""), r["state"].as_str().unwrap_or(""));
+                says += &format!(
+                    "\n\nApproving also sets the {kind} {} (\"{}\", now {}) back to upcoming.",
+                    r["id"].as_str().unwrap_or(""),
+                    r["title"].as_str().unwrap_or(""),
+                    r["state"].as_str().unwrap_or("")
+                );
                 reopens.push(json!({"kind": kind, "id": r["id"]}));
             }
         }
@@ -1014,7 +1032,10 @@ fn apply_proposal(top: &Path, rid: &str, p: &Value) -> Result<String, Failure> {
         }
         Built::Task(t, new) => {
             write(top, &t)?;
-            format!("Approved and applied{}", if new { format!(": created task:{}", t["id"].as_str().unwrap_or("")) } else { String::new() })
+            format!(
+                "Approved and applied{}",
+                if new { format!(": created task:{}", t["id"].as_str().unwrap_or("")) } else { String::new() }
+            )
         }
         Built::Vision(text) => {
             write_vision(top, &text)?;
@@ -1095,7 +1116,10 @@ pub fn deliver(top: &Path, mut m: Value) -> Result<(), Failure> {
                 let sent = send(top, m)?;
                 // Waits for as long as the server lives; if it stops, the message stays for the next `serve`.
                 if applied(top, &sent) && rejected(top, &sent) {
-                    return Err(Failure("the task server could not apply the message; it was set aside in .solace/tasks/inbox/failed".into(), 1));
+                    return Err(Failure(
+                        "the task server could not apply the message; it was set aside in .solace/tasks/inbox/failed".into(),
+                        1,
+                    ));
                 }
                 return Ok(());
             }
@@ -1143,7 +1167,8 @@ pub fn drain(top: &Path) {
 /// `drain`, settling the tasks it moves into a final column only if `settle`.
 fn drain_with(top: &Path, settle: bool) {
     let Ok(entries) = fs::read_dir(inbox(top)) else { return };
-    let mut paths: Vec<PathBuf> = entries.filter_map(|e| Some(e.ok()?.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
+    let mut paths: Vec<PathBuf> =
+        entries.filter_map(|e| Some(e.ok()?.path())).filter(|p| p.extension().is_some_and(|x| x == "json")).collect();
     paths.sort();
     for p in paths {
         let bytes = fs::read(&p);
@@ -1355,7 +1380,14 @@ fn api_with(root: &Path, method: &str, parts: &[&str], body: Value, needs: Needs
 /// (`held` false) it checks again inside the operation, where nothing else
 /// writes the task, and returns None, changing nothing, when the change now
 /// needs them (`needs` says). The operation never takes a lock itself (see `op`).
-fn change(root: &Path, method: &str, parts: &[&str], body: &Value, held: bool, needs: NeedsLock) -> Result<Option<(Value, board::After)>, Failure> {
+fn change(
+    root: &Path,
+    method: &str,
+    parts: &[&str],
+    body: &Value,
+    held: bool,
+    needs: NeedsLock,
+) -> Result<Option<(Value, board::After)>, Failure> {
     let (root, method, body, top) = (root.to_path_buf(), method.to_string(), body.clone(), scope::top(root));
     let parts: Vec<String> = parts.iter().map(|p| p.to_string()).collect();
     let served = top.clone();
@@ -1390,7 +1422,8 @@ mod tests {
         root
     }
     fn stored(root: &Path) -> Vec<String> {
-        let mut names: Vec<String> = fs::read_dir(board::store_dir(root)).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
+        let mut names: Vec<String> =
+            fs::read_dir(board::store_dir(root)).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into()).collect();
         names.sort();
         names
     }
@@ -1458,7 +1491,10 @@ mod tests {
         assert_eq!(call("GET", &["features"], json!({})).unwrap(), json!([]));
         let a = call("POST", &["milestones"], json!({"title": "1.0"})).unwrap();
         let b = call("POST", &["milestones"], json!({"title": "2.0", "state": "upcoming", "targetDate": "2027-01-01"})).unwrap();
-        assert_eq!((a["state"].as_str(), b["state"].as_str(), b["targetDate"].as_str()), (Some("proposed"), Some("upcoming"), Some("2027-01-01")));
+        assert_eq!(
+            (a["state"].as_str(), b["state"].as_str(), b["targetDate"].as_str()),
+            (Some("proposed"), Some("upcoming"), Some("2027-01-01"))
+        );
         assert_eq!((a["rank"].as_f64(), b["rank"].as_f64()), (Some(1.), Some(2.)));
         let (aid, bid) = (a["id"].as_str().unwrap(), b["id"].as_str().unwrap());
         let edited = call("PATCH", &["milestones", aid], json!({"title": "1.0 final", "rank": 3})).unwrap();
@@ -1567,7 +1603,8 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        let keys: Vec<String> = rows.iter().map(|d| serde_json::from_str::<Value>(d).unwrap().as_object().unwrap().keys().next().unwrap().clone()).collect();
+        let keys: Vec<String> =
+            rows.iter().map(|d| serde_json::from_str::<Value>(d).unwrap().as_object().unwrap().keys().next().unwrap().clone()).collect();
         assert_eq!(keys, ["milestone", "feature", "feature", "removedMilestone"]);
     }
 
@@ -1653,7 +1690,8 @@ mod tests {
         assert_eq!((notes.len(), notes[0]["author"].as_str()), (1, Some("solace")));
         let text = notes[0]["text"].as_str().unwrap();
         assert!(text.contains("**Human:**\n\nPlan F") && text.contains("**Human:**\n\nAnd tasks"), "{text}");
-        for (parts, body) in [(vec![rid, "notes"], json!({"text": "late"})), (vec![rid, "end"], json!({})), (vec![rid, "stop"], json!({}))] {
+        for (parts, body) in [(vec![rid, "notes"], json!({"text": "late"})), (vec![rid, "end"], json!({})), (vec![rid, "stop"], json!({}))]
+        {
             let e = call("POST", &parts, body).unwrap_err();
             assert_eq!((e.0, e.1.0.starts_with("E7003")), (409, true), "{parts:?}: {}", e.1.0);
         }
@@ -1754,14 +1792,20 @@ mod tests {
             if kind == "task" {
                 assert_eq!((created["home"].as_str(), created["column"].as_str()), (Some("."), Some("backlog")));
                 let n = created["notes"].as_array().unwrap().last().unwrap().clone();
-                assert_eq!((n["author"].as_str(), n["text"].as_str()), (Some("solace"), Some(format!("Created by strategy run {rid}").as_str())));
+                assert_eq!(
+                    (n["author"].as_str(), n["text"].as_str()),
+                    (Some("solace"), Some(format!("Created by strategy run {rid}").as_str()))
+                );
             }
         }
         // An edit says nothing more, and the task notes the change.
         let qid = propose(&root, &rid, "task", Some("t1"), r#"{"title": "Renamed"}"#);
         assert_eq!(answer(&root, &rid, &qid, "Approve").0, "Approved and applied");
         let t1 = board::task(&root, "t1").unwrap();
-        assert_eq!((t1["title"].as_str(), t1["notes"][0]["text"].as_str()), (Some("Renamed"), Some(format!("Changed by strategy run {rid}").as_str())));
+        assert_eq!(
+            (t1["title"].as_str(), t1["notes"][0]["text"].as_str()),
+            (Some("Renamed"), Some(format!("Changed by strategy run {rid}").as_str()))
+        );
     }
 
     /// D-129: a proposed task whose scope names a folder that isn't a project is
@@ -1773,7 +1817,11 @@ mod tests {
         let rid = page_run(&root);
         for text in [r#"{"title": "Later", "scope": ["web", "api"]}"#, r#"{"title": "Half", "scope": [".", "web"]}"#] {
             let e = proposal(&root, &rid, "task", None, text).unwrap_err();
-            assert!(e.0.starts_with("E7001") && e.0.contains("is not a project") && e.0.contains("web") && e.0.contains("."), "{text}: {}", e.0);
+            assert!(
+                e.0.starts_with("E7001") && e.0.contains("is not a project") && e.0.contains("web") && e.0.contains("."),
+                "{text}: {}",
+                e.0
+            );
         }
         assert_eq!(board::all_tasks(&root).unwrap().len(), 1, "the refused proposals wrote nothing");
         assert!(proposal(&root, &rid, "task", None, r#"{"title": "Here", "scope": ["."], "dependsOn": ["t1"]}"#).is_ok());
@@ -1844,7 +1892,10 @@ mod tests {
             assert_eq!(said, "Reject");
             assert!(note.starts_with("Proposal: ") && note.ends_with("Answer: Reject"), "{note}");
         }
-        assert_eq!((records(&root, "features"), board::all_tasks(&root).unwrap(), vision(&root)["text"].as_str()), (before, tasks, Some("")));
+        assert_eq!(
+            (records(&root, "features"), board::all_tasks(&root).unwrap(), vision(&root)["text"].as_str()),
+            (before, tasks, Some(""))
+        );
         assert!(root_events(&root)[events..].iter().all(|e| e.get("strategyRun").is_some()));
     }
     /// D-122: a feature or milestone link asks for its record's title; an
@@ -1999,10 +2050,12 @@ mod tests {
             (&Value::Null, &Value::Null, &json!([]), &Value::Null, &Value::Null)
         );
         let dir = board::store_dir(&root);
-        fs::write(dir.join("t2.json"), r#"{"id":"t2","column":"complete","home":".","runs":[{"ended":50}],"finished":{"time":70}}"#).unwrap();
+        fs::write(dir.join("t2.json"), r#"{"id":"t2","column":"complete","home":".","runs":[{"ended":50}],"finished":{"time":70}}"#)
+            .unwrap();
         fs::write(dir.join("t3.json"), r#"{"id":"t3","column":"complete","home":".","runs":[]}"#).unwrap();
         assert_eq!(board::task(&root, "t2").unwrap()["closedTime"], json!(70));
-        let modified = fs::metadata(dir.join("t3.json")).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let modified =
+            fs::metadata(dir.join("t3.json")).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         assert_eq!(board::task(&root, "t3").unwrap()["closedTime"], json!(modified));
     }
 
@@ -2023,7 +2076,8 @@ mod tests {
         }
         let created = |id: &str| board::task(&root, id).unwrap()["createdTime"].clone();
         assert_eq!((created("t2"), created("t3"), created("t4")), (json!(40), json!(60), json!(30)));
-        let modified = fs::metadata(dir.join("t5.json")).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+        let modified =
+            fs::metadata(dir.join("t5.json")).unwrap().modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         assert_eq!(created("t5"), json!(modified));
     }
 
@@ -2174,7 +2228,14 @@ mod tests {
         let root = root();
         let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body).unwrap();
         let column = |tid: &str| board::task(&root, tid).unwrap()["column"].as_str().unwrap().to_string();
-        let notes = |tid: &str| board::task(&root, tid).unwrap()["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let notes = |tid: &str| {
+            board::task(&root, tid).unwrap()["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|n| n["text"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
         let new_task = |title: &str, feature: &Value| {
             let id = api(&root, "POST", &["tasks"], json!({"title": title})).unwrap()["id"].as_str().unwrap().to_string();
             api(&root, "PATCH", &["tasks", &id], json!({"feature": feature})).unwrap();
@@ -2277,13 +2338,21 @@ mod tests {
         assert_eq!(column_of(&root, "t1"), "planning");
         let n = notes_of(&root, "t1");
         assert!(n.len() == 1 && n[0].contains(&format!("feature:{}", f["id"].as_str().unwrap())), "{n:?}");
-        let order: Vec<Value> = all_events(&root).into_iter().filter(|e| e["task"]["id"] == "t1" || e["feature"]["id"] == f["id"]).collect();
+        let order: Vec<Value> =
+            all_events(&root).into_iter().filter(|e| e["task"]["id"] == "t1" || e["feature"]["id"] == f["id"]).collect();
         assert!(order.last().is_some_and(|e| e["feature"]["state"] == "active"), "the feature is saved after its task");
     }
 
     /// Every task log entry's data, in `seq` order.
     fn all_events(root: &Path) -> Vec<Value> {
-        let rows: Vec<String> = events(root).unwrap().prepare("SELECT data FROM events ORDER BY seq").unwrap().query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+        let rows: Vec<String> = events(root)
+            .unwrap()
+            .prepare("SELECT data FROM events ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
         rows.iter().map(|d| serde_json::from_str(d).unwrap()).collect()
     }
     /// How many task log entries record task `id`.
@@ -2335,7 +2404,11 @@ mod tests {
         for columns in [["backlog", "doing"], ["waiting", "planning"]] {
             let root = root();
             let toml = format!(
-                "[board]\nevents = {{ finished = \"{1}\" }}\n[[board.columns]]\nid = \"{0}\"\n[[board.columns]]\nid = \"{1}\"\n[[board.columns]]\nid = \"backlog_done\"\nfinal = true\n[board.actions]\n",
+                concat!(
+                    "[board]\nevents = {{ finished = \"{1}\" }}\n[[board.columns]]\nid = \"{0}\"\n",
+                    "[[board.columns]]\nid = \"{1}\"\n[[board.columns]]\nid = \"backlog_done\"\nfinal = true\n",
+                    "[board.actions]\n",
+                ),
                 columns[0], columns[1]
             );
             fs::write(root.join("solace.toml"), toml).unwrap();
@@ -2415,7 +2488,12 @@ mod tests {
         drain(&root);
         testing::inbox_file(&root, "0001", json!({"kind":"note","task":"t1","author":"solace","text":"older"}));
         drain(&root);
-        let texts: Vec<String> = board::task(&root, "t1").unwrap()["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap().to_string()).collect();
+        let texts: Vec<String> = board::task(&root, "t1").unwrap()["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|n| n["text"].as_str().unwrap().to_string())
+            .collect();
         assert_eq!(texts, ["newer", "older"]);
         // The same message again (a replay after a crash) is skipped.
         testing::inbox_file(&root, "0001", json!({"kind":"note","task":"t1","author":"solace","text":"older"}));
@@ -2454,7 +2532,8 @@ mod tests {
         let others = ["junk", "bare", "t1"];
         let kept = before(&others);
         let note = |tid: Value| json!({"kind": "note", "task": tid, "text": "x"});
-        for m in [note(json!("../x")), note(json!("")), note(json!(null)), note(json!("missing")), note(json!("junk")), note(json!("bare"))] {
+        for m in [note(json!("../x")), note(json!("")), note(json!(null)), note(json!("missing")), note(json!("junk")), note(json!("bare"))]
+        {
             flag_set_aside(&root, &m, "why");
         }
         // The flow can't be read while the settings are broken.
@@ -2510,7 +2589,10 @@ mod tests {
     fn next_message(top: &Path) -> PathBuf {
         let end = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if let Some(f) = fs::read_dir(inbox(top)).ok().and_then(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "json"))) {
+            if let Some(f) = fs::read_dir(inbox(top))
+                .ok()
+                .and_then(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "json")))
+            {
                 return f;
             }
             assert!(std::time::Instant::now() < end, "no message reached the inbox");
@@ -2792,7 +2874,11 @@ mod tests {
         let t = api(&root, "POST", &["tasks", &tid, "actions"], json!({"action": "plan"})).unwrap();
         assert_eq!((t["column"].as_str(), t["home"].as_str()), (Some("planning"), Some(".")), "planned at the root");
         assert_eq!(t["scope"], json!(["."]), "scoped to the root");
-        assert!(t["notes"].as_array().unwrap().iter().any(|n| n["text"].as_str().is_some_and(|x| x.contains("Moved from `web` to `.`"))), "the move is noted: {:?}", t["notes"]);
+        assert!(
+            t["notes"].as_array().unwrap().iter().any(|n| n["text"].as_str().is_some_and(|x| x.contains("Moved from `web` to `.`"))),
+            "the move is noted: {:?}",
+            t["notes"]
+        );
         assert_eq!(api(&root, "POST", &["tasks", &tid, "scope"], json!({"scope": ["sub"]})).unwrap()["home"], "sub", "its scope saves");
         let sub = root.join("sub");
         let t = api(&sub, "POST", &["tasks", &tid, "actions"], json!({"action": "cancel"})).unwrap();
@@ -2803,7 +2889,13 @@ mod tests {
     }
 
     /// A workflow whose `finished` event targets a final column, so `task done` settles.
-    const DONE_IS_FINAL: &str = "[board]\nevents = { asked = \"todo\", finished = \"done\", failed = \"todo\" }\n[[board.columns]]\nid = \"todo\"\nactions = [\"cancel\"]\n[[board.columns]]\nid = \"done\"\nfinal = true\n[[board.columns]]\nid = \"gone\"\nfinal = true\n[board.actions]\ncancel = { revert = true, to = \"gone\" }\n";
+    const DONE_IS_FINAL: &str = concat!(
+        "[board]\nevents = { asked = \"todo\", finished = \"done\", failed = \"todo\" }\n",
+        "[[board.columns]]\nid = \"todo\"\nactions = [\"cancel\"]\n",
+        "[[board.columns]]\nid = \"done\"\nfinal = true\n",
+        "[[board.columns]]\nid = \"gone\"\nfinal = true\n",
+        "[board.actions]\ncancel = { revert = true, to = \"gone\" }\n",
+    );
 
     /// One server per process, for one root. `start` runs it on its own thread; `op` sends its
     /// operations there; a second `start` says it is already running; and a `done`
@@ -2833,7 +2925,8 @@ mod tests {
         let before = board::snapshot(&s).unwrap();
         s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
         board::record(&s, &tid, "r1", &before, &board::snapshot(&s).unwrap(), None).unwrap();
-        let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+        let has_before =
+            || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
         assert!(has_before(), "the change is recorded");
         testing::inbox_file(&root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"done"}));
         let mut settled = false;

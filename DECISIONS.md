@@ -1085,6 +1085,7 @@ Why: the symbols belong to the project, while run logs and conversations can hol
 Amends D-158 point 5 (Aaron, board task "format: one Rust module", 2026-10-20). Part of the Rust symbol store and lockdown feature.
 1. In a Rust project, `format <module>` runs rustfmt on that module's written file with the project's `rustfmt.toml` and edition, then reads the formatted file back into the store. Every item in the module is rustfmt's afterwards; ids stay by name and the change is checked like a submit. A file the store doesn't hold is out of scope.
 2. `format` with no module is refused, because the crate isn't rustfmt-clean and one call would bury the task's real change; the refusal says to name a module. `submit` still formats only the items whose text changed (D-172 point 1).
+3. rustfmt keeps `reorder_modules = false` in `rustfmt.toml` as well as on `format`'s command line, so `cargo fmt --check` and `format` agree. `format` compares the formatted file's `mod` list with the whole old file's, not just its header's, so a child module after the items isn't mistaken for an added one; a real add or drop is still refused.
 Why: reshaping a module should take one call, not hand-written indentation for every item.
 
 ## D-181 Source files are read by symbol, not by path

@@ -109,7 +109,10 @@ pub fn replace(text: &str, old: Option<&str>, new: &str, all: bool) -> Result<(S
 /// Text in `apply_patch` form: `*** Begin Patch`, or a first line `*** Update…`,
 /// `*** Add…` or `*** Delete…`.
 pub fn is_patch(text: &str) -> bool {
-    text.trim_start().lines().next().is_some_and(|l| ["*** Begin Patch", "*** Update", "*** Add", "*** Delete"].iter().any(|p| l.starts_with(p)))
+    text.trim_start()
+        .lines()
+        .next()
+        .is_some_and(|l| ["*** Begin Patch", "*** Update", "*** Add", "*** Delete"].iter().any(|p| l.starts_with(p)))
 }
 
 /// A section's target: `src/pilot/seed.gleam` or `pilot/seed`, or a symbol.
@@ -142,7 +145,13 @@ pub fn retry_advice(message: &str, id: &str, cmd: &str, what: &str) -> String {
     if message.ends_with(RESEND) {
         format!("Draft {id} retained{what}. Read: `view --draft {id}`. List: `drafts`.")
     } else {
-        format!("Draft {id} retained{what}. Read: `view --draft {id}`. Fix and retry: `{cmd} --draft {id} --replace` with `old` and `text`. List: `drafts`.")
+        format!(
+            concat!(
+                "Draft {} retained{}. Read: `view --draft {}`. ",
+                "Fix and retry: `{} --draft {} --replace` with `old` and `text`. List: `drafts`.",
+            ),
+            id, what, id, cmd, id
+        )
     }
 }
 
@@ -270,18 +279,26 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
         let mut from = cursor;
         if let Some(at) = &at {
             let found = (cursor..lines.len()).chain(0..cursor).find(|&k| lines[k].trim().starts_with(at.as_str()));
-            from = found.ok_or_else(|| bad(format!("in {target} (hunk at line {hl}), no line starts with `@@ {at}`; `{show}` shows the current text.")))? + 1;
+            from = found.ok_or_else(|| {
+                bad(format!("in {target} (hunk at line {hl}), no line starts with `@@ {at}`; `{show}` shows the current text."))
+            })? + 1;
         }
         let at_k = if old.is_empty() {
             match at {
                 Some(_) => Some(from),
                 None if at_end => Some(lines.len()),
-                None => return Err(bad(format!("in {target} (hunk at line {hl}), a hunk that only adds lines needs `@@ <the line before them>`."))),
+                None => {
+                    return Err(bad(format!(
+                        "in {target} (hunk at line {hl}), a hunk that only adds lines needs `@@ <the line before them>`."
+                    )));
+                }
             }
         } else {
             // leading space is part of the line; only trailing space is forgiven (D-142)
             let same: [&dyn Fn(&str, &str) -> bool; 2] = [&|a, b| a == b, &|a, b| a.trim_end() == b.trim_end()];
-            let fits = |k: usize, eq: &dyn Fn(&str, &str) -> bool| k + old.len() <= lines.len() && old.iter().zip(&lines[k..]).all(|(o, l)| eq(o, l));
+            let fits = |k: usize, eq: &dyn Fn(&str, &str) -> bool| {
+                k + old.len() <= lines.len() && old.iter().zip(&lines[k..]).all(|(o, l)| eq(o, l))
+            };
             same.iter().find_map(|eq| (from..lines.len()).chain(0..from).find(|&k| fits(k, *eq)))
         };
         let Some(k) = at_k else {
@@ -308,9 +325,14 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
                         ("a longer line".to_string(), "`submit <name> --replace`".to_string())
                     };
                     format!(
-                        " `{}` is only part of {line}: `{}`. A patch line is a whole line: copy all of it, or change just that text with {fix} and `old` and `text`.",
+                        concat!(
+                            " `{}` is only part of {}: `{}`. ",
+                            "A patch line is a whole line: copy all of it, or change just that text with {} and `old` and `text`.",
+                        ),
                         clip(p),
-                        clip(lines[*k].trim())
+                        line,
+                        clip(lines[*k].trim()),
+                        fix
                     )
                 }
                 (None, _, Some(k)) => format!(
@@ -329,7 +351,11 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
             };
             let msg = if part.is_none() && shifted.is_none() && !first.trim().is_empty() {
                 let blank = old.iter().any(|l| l.trim().is_empty()) && !lines.iter().any(|x| x.trim_end().is_empty());
-                format!("these lines aren't adjacent in the file: `{}`{more}; copy them in order from `{show}`.{}", first.trim(), if blank { " The hunk has a blank line; the target has none." } else { "" })
+                format!(
+                    "these lines aren't adjacent in the file: `{}`{more}; copy them in order from `{show}`.{}",
+                    first.trim(),
+                    if blank { " The hunk has a blank line; the target has none." } else { "" }
+                )
             } else {
                 format!("these lines weren't found: `{}`{more}; copy them exactly from `{show}`.{hint}", quote)
             };
@@ -388,11 +414,7 @@ fn push_module_blocks(
                     Some(_) => "change it with `submit <module>`".to_string(),
                     None => store::block_note(item.kind),
                 };
-                return Err(bad(format!(
-                    "the patch changes the `{}` block {} (section at line {at_line}); {how}.",
-                    item.kind,
-                    item.name,
-                )));
+                return Err(bad(format!("the patch changes the `{}` block {} (section at line {at_line}); {how}.", item.kind, item.name,)));
             }
             push_block(blocks, &mut String::new(), module, &item.name, &item.text);
         }
@@ -421,7 +443,11 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
             }
             let path = header.split_once(':').map_or("", |p| p.1).trim();
             bad(format!(
-                "`{path}` (line {at_line}) is no symbol or module; a file other than code changes with `write` with no path, this patch as `text`. {RESEND}"
+                concat!(
+                    "`{}` (line {}) is no symbol or module; ",
+                    "a file other than code changes with `write` with no path, this patch as `text`. {}",
+                ),
+                path, at_line, RESEND
             ))
         };
         if kind == Section::Add {
@@ -485,7 +511,11 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 }
                 if file.header.trim_end() != s.header(&module)?.trim_end() {
                     return Err(bad(format!(
-                        "the patch changes {module}'s imports (section at line {at_line}); imports are added automatically (`submit --imports {module}` replaces them)."
+                        concat!(
+                            "the patch changes {}'s imports (section at line {}); ",
+                            "imports are added automatically (`submit --imports {}` replaces them).",
+                        ),
+                        module, at_line, module
                     )));
                 }
                 let items = crate::rust_submit::rust_module_items(&ix, &module, &file.items)?;
@@ -522,7 +552,11 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 _ => {
                     let qname = ix.syms[i].qname();
                     return Err(bad(format!(
-                        "the patch renames {qname} (section at line {at_line}); submit {qname} with the new text: `submit {qname}` replaces the stored symbol and may rename it, keeping its id."
+                        concat!(
+                            "the patch renames {} (section at line {}); ",
+                            "submit {} with the new text: `submit {}` replaces the stored symbol and may rename it, keeping its id.",
+                        ),
+                        qname, at_line, qname, qname
                     )));
                 }
             }
@@ -574,7 +608,11 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 Some(item) if item.name != ix.syms[*i].name => {
                     let qname = ix.syms[*i].qname();
                     return Err(bad(format!(
-                        "the patch renames {qname} (section at line {at_line}); submit {qname} with the new text: `submit {qname}` replaces the stored symbol and may rename it, keeping its id."
+                        concat!(
+                            "the patch renames {} (section at line {}); ",
+                            "submit {} with the new text: `submit {}` replaces the stored symbol and may rename it, keeping its id.",
+                        ),
+                        qname, at_line, qname, qname
                     )));
                 }
                 _ => {}
@@ -586,7 +624,11 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
         }
         if !header.is_empty() {
             return Err(bad(format!(
-                "the patch changes only {module}'s imports (section at line {at_line}); imports are added automatically (`submit --imports {module}` replaces them)."
+                concat!(
+                    "the patch changes only {}'s imports (section at line {}); ",
+                    "imports are added automatically (`submit --imports {}` replaces them).",
+                ),
+                module, at_line, module
             )));
         }
     }
@@ -610,7 +652,11 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
             }
             if base(s, &ix, &args, &text)? != expected {
                 return fail(format!(
-                    "E0107 draft {id} is stale: a symbol it replaces (or its module's imports) changed since it was created. `view --draft {id}` preserves your text; inspect current source and make a new submission."
+                    concat!(
+                        "E0107 draft {} is stale: a symbol it replaces (or its module's imports) changed since it was created. ",
+                        "`view --draft {}` preserves your text; inspect current source and make a new submission.",
+                    ),
+                    id, id
                 ));
             }
             let raw = if a.len() == 4 {
@@ -783,7 +829,12 @@ mod tests {
     fn patch_refusals_name_the_problem() {
         let s = board_project(&[(
             "src/app.gleam",
-            "import gleam/int\n\npub fn main() {\n  let x = 1\n  x\n}\n\npub fn other() {\n  2\n}\n\npub fn one() {\n let x = 1\n x\n}\n\npub fn rep(x: Int) -> Int {\n  x\n  let a = 1\n  let b = 2\n  let c = 3\n  let d = 4\n  x\n}\n",
+            concat!(
+                "import gleam/int\n\npub fn main() {\n  let x = 1\n  x\n}\n\n",
+                "pub fn other() {\n  2\n}\n\n",
+                "pub fn one() {\n let x = 1\n x\n}\n\n",
+                "pub fn rep(x: Int) -> Int {\n  x\n  let a = 1\n  let b = 2\n  let c = 3\n  let d = 4\n  x\n}\n",
+            ),
         )]);
         let original = board::snapshot(&s).unwrap();
         let cases: [(&str, &str); 23] = [
@@ -892,7 +943,8 @@ mod tests {
     fn an_unparsable_patch_is_kept_and_fixed_in_place() {
         let s = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
         let original = board::snapshot(&s).unwrap();
-        let patch = "*** Begin Patch\n*** Add: app.one\n+pub fn one() {\n+  1\n}\n*** Add: app.two\n+pub fn two() {\n+  2\n+}\n*** End Patch\n";
+        let patch =
+            "*** Begin Patch\n*** Add: app.one\n+pub fn one() {\n+  1\n}\n*** Add: app.two\n+pub fn two() {\n+  2\n+}\n*** End Patch\n";
         let err = submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
         assert!(err.contains("E0108") && err.contains("line 5 of the patch") && err.contains("Draft"), "{err}");
         let id: String = s.db.query_row("SELECT id FROM drafts", [], |r| r.get(0)).unwrap();
@@ -924,26 +976,46 @@ mod tests {
     fn whole_patch_faults_say_to_resend() {
         let s = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("src/util.gleam", "pub fn two() { 2 }\n")]);
         for (patch, why) in [
-            ("*** Begin Patch\n*** Add: kb.one\npub fn one() { 1 }\n*** End Patch\n", "`*** Add: kb.one` (line 2) has no `+` lines; every line of an Add, empty ones too, starts with `+`"),
+            (
+                "*** Begin Patch\n*** Add: kb.one\npub fn one() { 1 }\n*** End Patch\n",
+                "`*** Add: kb.one` (line 2) has no `+` lines; every line of an Add, empty ones too, starts with `+`",
+            ),
             ("*** Begin Patch\n*** End Patch\n", "the patch has no `*** Update: <name>` or `*** Add: <name>` section"),
-            ("\n*** Begin Patch\n*** Add: app.x\n+pub fn x() { 1 }\n*** End Patch\n", "line 1 of the patch: a patch must start with `*** Begin Patch`; remove the blank line before it"),
-            ("*** Begin Patch\n*** Ad: app.x\n+pub fn x() { 1 }\n*** End Patch\n", "line 2 of the patch: `*** Ad: app.x` is no section header"),
+            (
+                "\n*** Begin Patch\n*** Add: app.x\n+pub fn x() { 1 }\n*** End Patch\n",
+                "line 1 of the patch: a patch must start with `*** Begin Patch`; remove the blank line before it",
+            ),
+            (
+                "*** Begin Patch\n*** Ad: app.x\n+pub fn x() { 1 }\n*** End Patch\n",
+                "line 2 of the patch: `*** Ad: app.x` is no section header",
+            ),
             ("*** Begin Patch\n*** Add: app.x\n+// only a comment\n*** End Patch\n", "defines no function"),
             ("*** Begin Patch\n*** Update File: notes\n-one\n+1\n*** End Patch\n", "is no symbol or module"),
         ] {
             let e = submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
-            assert!(e.contains("E0108") && e.contains(why) && e.contains(RESEND) && e.contains("Draft") && !e.contains("--replace"), "{why}: {e}");
+            assert!(
+                e.contains("E0108") && e.contains(why) && e.contains(RESEND) && e.contains("Draft") && !e.contains("--replace"),
+                "{why}: {e}"
+            );
         }
         // One line without `+`, an empty one too, is a one-line fault: `--replace` fixes it.
         let empty = "*** Begin Patch\n*** Add: app.x\n+pub fn x() {\n\n+  1\n+}\n*** End Patch\n";
         let e = submit(&s, &["submit"], &mut || Ok(empty.into()), None).unwrap_err().0;
-        assert!(e.contains("line 4 of the patch: in `*** Add: app.x` every line, empty ones too, starts with `+`") && e.contains("--replace") && !e.contains(RESEND), "{e}");
+        assert!(
+            e.contains("line 4 of the patch: in `*** Add: app.x` every line, empty ones too, starts with `+`")
+                && e.contains("--replace")
+                && !e.contains(RESEND),
+            "{e}"
+        );
         // A quoted line that is the resend sentence is still a one-line fault.
         let quoted = format!("*** Begin Patch\n*** Add: app.x\n+pub fn x() {{ 1 }}\n{RESEND}\n*** End Patch\n");
         let e = submit(&s, &["submit"], &mut || Ok(quoted.clone()), None).unwrap_err().0;
         assert!(e.contains("line 4 of the patch") && e.contains("--replace"), "{e}");
         // A new module from two Add sections keeps its module comment and both sections' imports.
-        let module = "*** Begin Patch\n*** Add: kb.one\n+//// Knowledge.\n+import app\n+\n+pub fn one() -> Int { app.main() }\n*** Add: kb.two\n+import util\n+\n+pub fn two() -> Int { util.two() }\n*** End Patch\n";
+        let module = concat!(
+            "*** Begin Patch\n*** Add: kb.one\n+//// Knowledge.\n+import app\n+\n+pub fn one() -> Int { app.main() }\n",
+            "*** Add: kb.two\n+import util\n+\n+pub fn two() -> Int { util.two() }\n*** End Patch\n",
+        );
         let out = submit(&s, &["submit"], &mut || Ok(module.into()), None).unwrap();
         assert!(out.contains("kb.one") && out.contains("kb.two"), "{out}");
         let text = std::fs::read_to_string(s.root.join("src/kb.gleam")).unwrap();
@@ -985,8 +1057,11 @@ mod tests {
             let e = submit(&s, &["submit", "app.main", "--replace"], &mut || Ok("2".into()), old).unwrap_err().0;
             assert!(e.contains("E0104"), "{old:?}: {e}");
         }
-        s.db.execute("INSERT INTO drafts(id,owner,args,text,base) VALUES ('d1',?,?,?,?)", params![owner(), json!(["submit", "x", "y", "z"]).to_string(), "text", ""])
-            .unwrap();
+        s.db.execute(
+            "INSERT INTO drafts(id,owner,args,text,base) VALUES ('d1',?,?,?,?)",
+            params![owner(), json!(["submit", "x", "y", "z"]).to_string(), "text", ""],
+        )
+        .unwrap();
         let e = submit(&s, &["submit", "--draft", "d1"], &mut || Ok(String::new()), None).unwrap_err().0;
         assert!(e.contains("E0106") || e.contains("E0107"), "{e}");
     }
@@ -1013,11 +1088,21 @@ mod tests {
             ("src/app.gleam", "import calc\n\npub fn main() -> Int {\n  let x = calc.add(1)\n  let y = calc.add(2)\n  x + y\n}\n"),
         ]);
         let original = board::snapshot(&s).unwrap();
-        let missing = "*** Begin Patch\n*** Update File: src/calc.gleam\n@@\n-pub fn add(a: Int) -> Int {\n+pub fn add(a: Int, b: Int) -> Int {\n*** Update: app.main\n-  let x = calc.nope(1)\n*** End Patch\n";
+        let missing = concat!(
+            "*** Begin Patch\n*** Update File: src/calc.gleam\n@@\n",
+            "-pub fn add(a: Int) -> Int {\n+pub fn add(a: Int, b: Int) -> Int {\n",
+            "*** Update: app.main\n-  let x = calc.nope(1)\n*** End Patch\n",
+        );
         let err = submit(&s, &["submit"], &mut || Ok(missing.into()), None).unwrap_err().0;
         assert!(err.starts_with("E0108 in app.main (hunk at line 7), these lines weren't found: `let x = calc.nope(1)`"), "{err}");
         assert_eq!(board::snapshot(&s).unwrap(), original);
-        let patch = "*** Begin Patch\n*** Update File: src/calc.gleam\n@@ pub fn add(\n-pub fn add(a: Int) -> Int {\n-  a + 1\n+pub fn add(a: Int, b: Int) -> Int {\n+  a + b\n*** Update File: src/app.gleam\n@@\n-  let x = calc.add(1)\n+  let x = calc.add(1, 1)\n@@\n-  let y = calc.add(2)\n+  let y = calc.add(2, 1)\n*** Add File: calc.twice\n+pub fn twice(a: Int) -> Int {\n+  add(a, a)\n+}\n*** End Patch\n";
+        let patch = concat!(
+            "*** Begin Patch\n*** Update File: src/calc.gleam\n@@ pub fn add(\n",
+            "-pub fn add(a: Int) -> Int {\n-  a + 1\n+pub fn add(a: Int, b: Int) -> Int {\n+  a + b\n",
+            "*** Update File: src/app.gleam\n@@\n-  let x = calc.add(1)\n+  let x = calc.add(1, 1)\n",
+            "@@\n-  let y = calc.add(2)\n+  let y = calc.add(2, 1)\n",
+            "*** Add File: calc.twice\n+pub fn twice(a: Int) -> Int {\n+  add(a, a)\n+}\n*** End Patch\n",
+        );
         let out = submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap();
         assert!(out.contains("calc.add") && out.contains("app.main") && out.contains("calc.twice") && !out.contains("calc.sub"), "{out}");
         let main = s.view(&["app.main"], false, BUDGET).unwrap();

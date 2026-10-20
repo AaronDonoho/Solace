@@ -1,5 +1,5 @@
-use super::*;
 use super::testing::*;
+use super::*;
 
 /// Runs the reference layout check (D-143) on `text`: whether it passed, and its output.
 fn reference_layout(text: &str) -> (bool, String) {
@@ -52,7 +52,12 @@ fn the_reference_names_records_as_links() {
 fn reference_layout_needs_an_entry_for_every_summary_command() {
     let text = |entry: &str| {
         format!(
-            "Commands (help <command> lists them):\n  drafts                        kept drafts\n\nWorkflow\n\nCommands in full\nReading\n{entry}"
+            concat!(
+                "Commands (help <command> lists them):\n",
+                "  drafts                        kept drafts\n\n",
+                "Workflow\n\nCommands in full\nReading\n{}",
+            ),
+            entry
         )
     };
     assert_eq!(
@@ -102,8 +107,11 @@ fn reference_layout_refuses_deeper_lines_without_a_colon_before_them() {
         reference_layout(&text),
         (
             false,
-            "line 7: starts at column 20; the descriptions start at column 19\nline 8: starts at column 20; the descriptions start at column 19\n"
-                .into()
+            concat!(
+                "line 7: starts at column 20; the descriptions start at column 19\n",
+                "line 8: starts at column 20; the descriptions start at column 19\n",
+            )
+            .into()
         )
     );
 }
@@ -235,9 +243,10 @@ fn a_panicking_command_is_an_error_and_stops_the_call() {
     assert_eq!(ran, ["read a.md", "view x"]);
     assert!(out.contains("fine"), "{out}");
     assert!(
-        out.ends_with(
-            "Solace hit an internal error running `view x`: boom; nothing after it ran\n1 of 3 commands failed: view x; skipped: read b.md\n"
-        ),
+        out.ends_with(concat!(
+            "Solace hit an internal error running `view x`: boom; nothing after it ran\n",
+            "1 of 3 commands failed: view x; skipped: read b.md\n",
+        )),
         "{out}"
     );
     let mut ran = vec![];
@@ -601,7 +610,11 @@ fn submit_new_creates_a_module() {
     assert!(out.contains("(test/calc_test.gleam)"), "{out}");
     assert!(store.submit_symbols(None, Some("Bad"), "pub fn x() { 1 }").unwrap_err().0.starts_with("E1003"));
     // A whole new module in one submit: module comment, imports and several symbols.
-    let module = "//// Geometry helpers.\nimport calc\n\npub const unit = 1\n\npub type Shape {\n  Square(Int)\n}\n\npub fn area(s: Shape) -> Int {\n  let Square(n) = s\n  calc.add(n * n, unit)\n}\n";
+    let module = concat!(
+        "//// Geometry helpers.\nimport calc\n\npub const unit = 1\n\n",
+        "pub type Shape {\n  Square(Int)\n}\n\n",
+        "pub fn area(s: Shape) -> Int {\n  let Square(n) = s\n  calc.add(n * n, unit)\n}\n",
+    );
     let out = store.submit_symbols(None, Some("geo"), module).unwrap();
     assert!(out.contains("created module geo") && out.contains("geo.unit, geo.Shape, geo.area"), "{out}");
     let file = fs::read_to_string(store.root.join("src/geo.gleam")).unwrap();
@@ -746,11 +759,21 @@ fn test_runs_what_reaches_a_change() {
         .with(&[
             (
                 "src/calc.gleam",
-                "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\npub fn double(a: Int) -> Int {\n  add(a, a)\n}\n\npub fn sub(a: Int, b: Int) -> Int {\n  a - b\n}\n\n@external(erlang, \"erlang\", \"abs\")\npub fn abs(x: Int) -> Int\n",
+                concat!(
+                    "pub fn add(a: Int, b: Int) -> Int {\n  a + b\n}\n\n",
+                    "pub fn double(a: Int) -> Int {\n  add(a, a)\n}\n\n",
+                    "pub fn sub(a: Int, b: Int) -> Int {\n  a - b\n}\n\n",
+                    "@external(erlang, \"erlang\", \"abs\")\npub fn abs(x: Int) -> Int\n",
+                ),
             ),
             (
                 "test/calc_test.gleam",
-                "import calc\n\npub fn add_test() {\n  assert calc.add(1, 2) == 3\n}\n\npub fn double_test() {\n  assert calc.double(2) == 4\n}\n\npub fn sub_test() {\n  assert calc.sub(3, 1) == 3\n}\n\npub fn abs_test() {\n  assert calc.abs(-2) == 2\n}\n",
+                concat!(
+                    "import calc\n\npub fn add_test() {\n  assert calc.add(1, 2) == 3\n}\n\n",
+                    "pub fn double_test() {\n  assert calc.double(2) == 4\n}\n\n",
+                    "pub fn sub_test() {\n  assert calc.sub(3, 1) == 3\n}\n\n",
+                    "pub fn abs_test() {\n  assert calc.abs(-2) == 2\n}\n",
+                ),
             ),
         ])
         .with_packages()
@@ -785,7 +808,12 @@ fn packet_quotes_evidence_and_reproduction() {
     let store = project(&[
         (
             "src/shop.gleam",
-            "pub type Customer {\n  Customer(name: String, tier: Int)\n}\n\npub const customers = [Customer(\"Grace\", 2), Customer(\"Ada\", 1)]\n\n/// The price after the tier discount.\npub fn price(c: Customer, cents: Int) -> Int {\n  cents - c.tier * 100\n}\n",
+            concat!(
+                "pub type Customer {\n  Customer(name: String, tier: Int)\n}\n\n",
+                "pub const customers = [Customer(\"Grace\", 2), Customer(\"Ada\", 1)]\n\n",
+                "/// The price after the tier discount.\n",
+                "pub fn price(c: Customer, cents: Int) -> Int {\n  cents - c.tier * 100\n}\n",
+            ),
         ),
         (
             "test/shop_test.gleam",
@@ -1118,7 +1146,13 @@ fn a_gleam_task_with_a_rust_sibling_lists_both() {
         ("g/gleam.toml", "name = \"app\"\nversion = \"1.0.0\"\n"),
         ("g/src/app.gleam", "/// Totals an order.\npub fn total() -> Int {\n  1\n}\n"),
         ("r/Cargo.toml", testing::CARGO),
-        ("r/src/lib.rs", "//! A helper crate.\n\n/// Helps.\npub fn helper() -> i32 {\n    1\n}\n"),
+        (
+            "r/src/lib.rs",
+            concat!(
+                "//! A helper crate.\n\n/// Helps.\npub fn helper() -> i32 {\n    1\n}\n",
+                "pub struct Store;\n\nimpl Store {\n    pub fn open() -> Self {\n        Store\n    }\n}\n",
+            ),
+        ),
     ]);
     import(&root.join("g")).unwrap();
     import(&root.join("r")).unwrap();
@@ -1134,6 +1168,7 @@ fn a_gleam_task_with_a_rust_sibling_lists_both() {
     assert!(out.contains("g:\n  app — "), "{out}");
     assert!(out.contains("r:\n  crate — A helper crate."), "{out}");
     assert!(out.contains("Rust in Solace: every item has its own name"), "{out}");
+    assert!(out.contains("crate.Store::open"), "{out}");
 }
 
 /// D-158: `--project <rust>` reads Rust items with inspect, refs and find.
@@ -1238,7 +1273,10 @@ fn a_plain_refusal_omits_a_project_without_code() {
     .unwrap();
     let e = lockdown::plain::<()>(&store, Some(t["id"].as_str().unwrap()), "write").unwrap_err().0;
     assert!(
-        e.contains("this Rust project has no code that `write` handles; use files, grep, read, write and run. This task can change: . (the root), r."),
+        e.contains(concat!(
+            "this Rust project has no code that `write` handles; use files, grep, read, write and run. ",
+            "This task can change: . (the root), r.",
+        )),
         "{e}"
     );
     assert!(!e.contains("`--project"), "{e}");
@@ -1298,10 +1336,7 @@ fn rust_reference_lists_the_names_and_what_is_missing() {
 fn a_rust_format_needs_a_module() {
     let (_root, store) = testing::rust_project("pub fn helper() -> i32 {\n    1\n}\n");
     let v = lockdown::settings(&store.root).unwrap();
-    let e = lockdown::dispatch(&store, &v, &["format"], &mut || Ok(String::new()), None, 1000)
-        .unwrap()
-        .unwrap_err()
-        .0;
+    let e = lockdown::dispatch(&store, &v, &["format"], &mut || Ok(String::new()), None, 1000).unwrap().unwrap_err().0;
     assert!(e.contains("needs a module") && e.contains("rustfmt-clean"), "{e}");
 }
 

@@ -192,7 +192,9 @@ pub(super) fn refresh_stale() {
 
 fn refresh(k: &'static Kind) {
     let found = (k.discover)();
-    if !found.is_empty() && let Err(e) = note_models(&models_path(), k, found) {
+    if !found.is_empty()
+        && let Err(e) = note_models(&models_path(), k, found)
+    {
         eprintln!("solace: could not record {}'s models: {}", k.label, e.0);
     }
     REFRESHING.lock().unwrap().remove(k.name);
@@ -207,7 +209,16 @@ fn note_models(path: &Path, k: &'static Kind, found: Vec<Value>) -> Result<(), F
     for m in all[k.name]["models"].as_array().unwrap_or(&vec![]).iter() {
         let id = m["id"].as_str().unwrap_or("");
         if !id.is_empty() && !found.iter().any(|x| x["id"] == id) {
-            gone.insert(id.to_string(), json!({"id":id,"label":m["label"],"agent":m["agent"],"model":m["model"],"reason":format!("no longer offered by {}", k.label)}));
+            gone.insert(
+                id.to_string(),
+                json!({
+                    "id": id,
+                    "label": m["label"],
+                    "agent": m["agent"],
+                    "model": m["model"],
+                    "reason": format!("no longer offered by {}", k.label),
+                }),
+            );
         }
     }
     for m in &found {
@@ -253,7 +264,8 @@ fn codex_models() -> Vec<Value> {
     if !on_path("codex") {
         return vec![];
     }
-    let Ok(mut child) = Command::new("codex").arg("app-server").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else {
+    let Ok(mut child) = Command::new("codex").arg("app-server").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
+    else {
         return vec![];
     };
     let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
@@ -323,8 +335,20 @@ pub(super) fn codex_page(r: &Value) -> Vec<Value> {
         .filter(|m| m["hidden"] != true)
         .filter_map(|m| {
             let slug = m["model"].as_str()?;
-            let efforts: Vec<String> = m["supportedReasoningEfforts"].as_array().unwrap_or(&vec![]).iter().filter_map(|e| e["effort"].as_str().map(String::from)).collect();
-            Some(json!({"id":format!("codex-{slug}"),"label":m["displayName"].as_str().unwrap_or(slug),"agent":"codex","model":slug,"effort":m["defaultReasoningEffort"],"efforts":efforts}))
+            let efforts: Vec<String> = m["supportedReasoningEfforts"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|e| e["effort"].as_str().map(String::from))
+                .collect();
+            Some(json!({
+                "id": format!("codex-{slug}"),
+                "label": m["displayName"].as_str().unwrap_or(slug),
+                "agent": "codex",
+                "model": slug,
+                "effort": m["defaultReasoningEffort"],
+                "efforts": efforts,
+            }))
         })
         .collect()
 }
@@ -366,7 +390,10 @@ pub(super) fn family(m: &Value) -> Option<&'static str> {
     if let Some(f) = m["family"].as_str().and_then(|l| FAMILIES.iter().map(|(f, _)| *f).find(|f| *f == l)) {
         return Some(f);
     }
-    FAMILIES.iter().map(|(f, _)| *f).find(|f| m["id"].as_str().is_some_and(|id| id.starts_with("claude-") && id.split('-').any(|p| p == *f)))
+    FAMILIES
+        .iter()
+        .map(|(f, _)| *f)
+        .find(|f| m["id"].as_str().is_some_and(|id| id.starts_with("claude-") && id.split('-').any(|p| p == *f)))
 }
 
 /// The entry naming the latest of family `f`, rather than one exact model: decided by its id.
@@ -387,7 +414,10 @@ fn api_models(key: &str) -> Vec<Value> {
     // line, where every user's `ps` would show it.
     let Ok(out) = Command::new("sh")
         .arg("-c")
-        .arg("curl -s --max-time 15 -H \"x-api-key: $ANTHROPIC_API_KEY\" -H \"anthropic-version: 2023-06-01\" https://api.anthropic.com/v1/models")
+        .arg(concat!(
+            "curl -s --max-time 15 -H \"x-api-key: $ANTHROPIC_API_KEY\"",
+            " -H \"anthropic-version: 2023-06-01\" https://api.anthropic.com/v1/models",
+        ))
         .env("ANTHROPIC_API_KEY", key)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -408,7 +438,11 @@ pub(super) fn api_page(body: &Value) -> Vec<Value> {
         .filter(|m| m["lifecycle"].as_str().unwrap_or("active") == "active")
         .filter_map(|m| {
             let id = m["id"].as_str()?;
-            let efforts = ["low", "medium", "high", "xhigh", "max"].iter().filter(|e| m["capabilities"]["effort"][*e] == true).map(|e| e.to_string()).collect::<Vec<_>>();
+            let efforts = ["low", "medium", "high", "xhigh", "max"]
+                .iter()
+                .filter(|e| m["capabilities"]["effort"][*e] == true)
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>();
             let mut entry = json!({"id":id,"label":m["display_name"].as_str().unwrap_or(id),"agent":"claude","model":id,"efforts":efforts});
             if let Some(line) = m["line"].as_str() {
                 entry["family"] = json!(line);
@@ -422,7 +456,10 @@ pub(super) fn api_page(body: &Value) -> Vec<Value> {
 /// list is out of date, so ask the program again.
 pub(super) fn model_gone(error: &str) -> bool {
     let e = error.to_ascii_lowercase();
-    e.contains("model") && ["not found", "does not exist", "no such model", "unknown model", "is not available", "not supported"].iter().any(|p| e.contains(p))
+    e.contains("model")
+        && ["not found", "does not exist", "no such model", "unknown model", "is not available", "not supported"]
+            .iter()
+            .any(|p| e.contains(p))
 }
 
 /// The agent kind whose own sign-in model `m` uses: none for a model with its
@@ -436,7 +473,9 @@ fn sign_in(m: &Value) -> Option<&'static Kind> {
 
 /// Codex's sign-in file holds neither an API key nor a token it can renew.
 fn codex_expired(f: &Value, _now: u64) -> bool {
-    f.is_object() && f["OPENAI_API_KEY"].as_str().is_none_or(str::is_empty) && f["tokens"]["refresh_token"].as_str().is_none_or(str::is_empty)
+    f.is_object()
+        && f["OPENAI_API_KEY"].as_str().is_none_or(str::is_empty)
+        && f["tokens"]["refresh_token"].as_str().is_none_or(str::is_empty)
 }
 
 /// Claude Code's token has expired and there is no refresh token to renew it.
@@ -572,11 +611,7 @@ pub(super) fn reset_time(said: &str, now: u64, offset: &dyn Fn(Option<&str>, i64
             let (month, day) = (month(m)?, day(d)?);
             let t = at(days_from_civil(civil(today).0, month, day), off);
             // A date with no year whose day has passed this year is next year's.
-            if t <= now as i64 {
-                at(days_from_civil(civil(today).0 + 1, month, day), off)
-            } else {
-                t
-            }
+            if t <= now as i64 { at(days_from_civil(civil(today).0 + 1, month, day), off) } else { t }
         }
         [m, d, y] => at(days_from_civil(y.parse().ok()?, month(m)?, day(d)?), off),
         _ => return None,
@@ -782,7 +817,8 @@ pub(super) fn clear(path: &Path, agent: &str) -> Result<bool, Failure> {
 /// Why sign-in `agent` is held by a usage limit at `now` (seconds), if it is.
 pub(super) fn limited(path: &Path, agent: &str, now: u64) -> Option<String> {
     let m = &marks(path)[agent];
-    (m.is_object() && m["until"].as_u64().is_none_or(|u| now < u)).then(|| m["reason"].as_str().unwrap_or("usage limit reached").to_string())
+    (m.is_object() && m["until"].as_u64().is_none_or(|u| now < u))
+        .then(|| m["reason"].as_str().unwrap_or("usage limit reached").to_string())
 }
 
 /// Learns from model `m`'s run log `log`, started at `started` and ended with
@@ -793,7 +829,15 @@ pub(super) fn limited(path: &Path, agent: &str, now: u64) -> Option<String> {
 /// mark, the same list `supervise` ends a run with: a stopped, timed-out or
 /// failed run leaves it, and so does a mark set after the run started. A
 /// model on its own endpoint or program is never marked.
-pub(super) fn observe(path: &Path, m: &Value, log: &Path, now: u64, started: u64, outcome: Option<&str>, offset: &dyn Fn(Option<&str>, i64) -> Option<i64>) -> Result<(), Failure> {
+pub(super) fn observe(
+    path: &Path,
+    m: &Value,
+    log: &Path,
+    now: u64,
+    started: u64,
+    outcome: Option<&str>,
+    offset: &dyn Fn(Option<&str>, i64) -> Option<i64>,
+) -> Result<(), Failure> {
     let Some(k) = sign_in(m) else { return Ok(()) };
     let entries = transcript(log);
     if entries.iter().filter(|e| e["kind"] == "error").any(|e| (k.gone)(e["text"].as_str().unwrap_or(""))) {
@@ -829,11 +873,7 @@ pub(super) fn observe(path: &Path, m: &Value, log: &Path, now: u64, started: u64
             && entries.iter().any(|e| matches!(e["kind"].as_str(), Some("message" | "thinking" | "tool")) && !in_text(e)) =>
         {
             let m = &marks(path)[k.name];
-            if m.is_object() && m["time"].as_u64().is_none_or(|t| t <= started) {
-                clear(path, k.name).map(drop)
-            } else {
-                Ok(())
-            }
+            if m.is_object() && m["time"].as_u64().is_none_or(|t| t <= started) { clear(path, k.name).map(drop) } else { Ok(()) }
         }
         None => Ok(()),
     }
@@ -856,7 +896,8 @@ pub(super) fn availability(m: &Value) -> Option<(String, bool)> {
     let reason = cached(&format!("local:{m}"), || {
         let home = PathBuf::from(env::var_os("HOME").unwrap_or_default());
         let keys = setup::read_keys(&setup::keys_path());
-        let here = Here { home: &home, var: &|v| env::var(v).is_ok(), stored: &|id| keys[id].is_string(), installed: &on_path, now: now_ms() };
+        let here =
+            Here { home: &home, var: &|v| env::var(v).is_ok(), stored: &|id| keys[id].is_string(), installed: &on_path, now: now_ms() };
         json!(local(m, &here))
     });
     if let Some(r) = reason.as_str() {

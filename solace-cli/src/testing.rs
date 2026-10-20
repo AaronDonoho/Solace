@@ -27,8 +27,7 @@ impl Scratch {
             fs::copy(pilot.join(f), self.0.join(f)).unwrap();
         }
         let name = fs::read_to_string(self.0.join("gleam.toml")).map(|_| workspace::name(&self.0)).unwrap_or_else(|_| "app".into());
-        fs::write(self.0.join("gleam.toml"), fs::read_to_string(pilot.join("gleam.toml")).unwrap().replace("pilot_large", &name))
-            .unwrap();
+        fs::write(self.0.join("gleam.toml"), fs::read_to_string(pilot.join("gleam.toml")).unwrap().replace("pilot_large", &name)).unwrap();
         migrate::copy_tree(&pilot.join("build"), &self.0.join("build"), &|_| false).unwrap();
         self
     }

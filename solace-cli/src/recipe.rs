@@ -42,7 +42,9 @@ pub struct Recipe {
 /// or a project folder below the root.
 fn inside(p: &str) -> bool {
     let path = Path::new(p);
-    !p.is_empty() && !p.contains('\\') && path.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
+    !p.is_empty()
+        && !p.contains('\\')
+        && path.components().all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
 }
 
 /// A project folder as `workspace::members` names it.
@@ -179,7 +181,12 @@ fn declared(dir: &str, v: &toml::Value) -> Recipe {
 /// packages, compile its Gleam, run its `build` script, build its crate.
 /// `None` when it has none of `package.json`, `gleam.toml` and `Cargo.toml`.
 pub fn default(root: &Path, dir: &str) -> Option<Recipe> {
-    let step = |name: &str, run: &[&str]| Step { name: name.into(), run: run.iter().map(|s| s.to_string()).collect(), command: None, timeout: TIMEOUT };
+    let step = |name: &str, run: &[&str]| Step {
+        name: name.into(),
+        run: run.iter().map(|s| s.to_string()).collect(),
+        command: None,
+        timeout: TIMEOUT,
+    };
     let package = fs::read_to_string(root.join("package.json")).ok().map(|t| serde_json::from_str::<Value>(&t).unwrap_or(Value::Null));
     let bun = root.join("bun.lock").exists() || root.join("bun.lockb").exists();
     let mut steps = vec![];
@@ -235,7 +242,14 @@ fn order(recipes: Vec<Recipe>) -> Result<Vec<Recipe>, Failure> {
     // 0: not reached, 1: on the current path, 2: placed.
     let mut state = vec![0u8; recipes.len()];
     let (mut path, mut placed) = (vec![], vec![]);
-    fn visit(i: usize, rs: &[Recipe], index: &HashMap<&str, usize>, state: &mut [u8], path: &mut Vec<usize>, placed: &mut Vec<usize>) -> Result<(), Failure> {
+    fn visit(
+        i: usize,
+        rs: &[Recipe],
+        index: &HashMap<&str, usize>,
+        state: &mut [u8],
+        path: &mut Vec<usize>,
+        placed: &mut Vec<usize>,
+    ) -> Result<(), Failure> {
         if state[i] == 2 {
             return Ok(());
         }
@@ -244,7 +258,10 @@ fn order(recipes: Vec<Recipe>) -> Result<Vec<Recipe>, Failure> {
             let mut names: Vec<&str> = path[from..].iter().map(|&p| rs[p].project.as_str()).collect();
             names.push(rs[i].project.as_str());
             return Err(Failure(
-                format!("E6020 build order has a cycle: {}\n  each is built after the next ([build] after); remove one of them", names.join(" → ")),
+                format!(
+                    "E6020 build order has a cycle: {}\n  each is built after the next ([build] after); remove one of them",
+                    names.join(" → ")
+                ),
                 1,
             ));
         }
@@ -270,7 +287,11 @@ fn order(recipes: Vec<Recipe>) -> Result<Vec<Recipe>, Failure> {
 pub fn plan_text(top: &Path) -> Out {
     let recipes = plan(top)?;
     if recipes.is_empty() {
-        return Ok("No project has a build recipe: none declares [build] in its solace.toml, and none has gleam.toml, Cargo.toml or package.json.\n".into());
+        return Ok(concat!(
+            "No project has a build recipe: none declares [build] in its solace.toml, ",
+            "and none has gleam.toml, Cargo.toml or package.json.\n"
+        )
+        .into());
     }
     let mut out = format!("Build plan, in order ({}):\n", count(recipes.len(), "project"));
     for (i, r) in recipes.iter().enumerate() {
@@ -484,11 +505,8 @@ fn stale(top: &Path, r: &Recipe) -> Option<String> {
     if let Some(change) = recorded_change(&root, r, &parts) {
         return change;
     }
-    let changed: Vec<String> = parts
-        .iter()
-        .filter(|(_, part)| newest(part).is_some_and(|t| t > built + FRESH))
-        .map(|(name, _)| name.clone())
-        .collect();
+    let changed: Vec<String> =
+        parts.iter().filter(|(_, part)| newest(part).is_some_and(|t| t > built + FRESH)).map(|(name, _)| name.clone()).collect();
     (!changed.is_empty()).then(|| format!("{} changed after {} was built", changed.join(", "), r.outputs.join(", ")))
 }
 

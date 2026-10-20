@@ -94,11 +94,7 @@ fn rehome_task(top: &Path, t: Value) -> Result<Value, Failure> {
 /// no project (D-129).
 pub(super) fn task_root(top: &Path, t: &Value) -> PathBuf {
     let home = t["home"].as_str().unwrap_or(".");
-    if homeless(top, home) {
-        top.to_path_buf()
-    } else {
-        scope::path(top, home)
-    }
+    if homeless(top, home) { top.to_path_buf() } else { scope::path(top, home) }
 }
 /// The tasks whose home is the project `root`, in rank order.
 pub(super) fn tasks(root: &Path) -> Result<Vec<Value>, Failure> {
@@ -179,7 +175,11 @@ fn read_task_with(top: &Path, path: &Path, flows: &mut HashMap<PathBuf, Value>) 
     // Tasks saved before D-87 have no links; one already in a final column takes the
     // time it last finished, or else its file's, as when it closed.
     let modified = || {
-        fs::metadata(path).and_then(|m| m.modified()).ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
+        fs::metadata(path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs())
     };
     if t.get("closedTime").is_none() {
         for k in ["feature", "milestone", "closedTime", "archivedTime"] {
@@ -247,7 +247,8 @@ pub(super) fn adopt_tasks(top: &Path, root: &Path) -> Result<(), Failure> {
                 "UPDATE board_touches SET run=?3, name=?4 WHERE seq=(SELECT MIN(seq) FROM board_touches WHERE task=?1 AND entity=?2 AND run IS NULL)",
                 params![tid, entity, run, name],
             )?;
-            let known: i64 = st.db.query_row("SELECT COUNT(*) FROM board_touches WHERE task=?1 AND entity=?2", params![tid, entity], |r| r.get(0))?;
+            let known: i64 =
+                st.db.query_row("SELECT COUNT(*) FROM board_touches WHERE task=?1 AND entity=?2", params![tid, entity], |r| r.get(0))?;
             if filled == 0 && known == 0 {
                 st.db.execute("INSERT INTO board_touches(task,entity,run,name) VALUES (?1,?2,?3,?4)", params![tid, entity, run, name])?;
             }
@@ -373,7 +374,13 @@ fn held_by_feature(w: &Value, t: &Value, name: &str) -> bool {
 }
 /// The task's discussion run that hasn't ended, if one is going.
 fn discussion(t: &Value) -> Option<String> {
-    t["runs"].as_array().unwrap().iter().find(|r| r["kind"] == "discuss" && r["state"] != "ended").and_then(|r| r["id"].as_str()).map(String::from)
+    t["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["kind"] == "discuss" && r["state"] != "ended")
+        .and_then(|r| r["id"].as_str())
+        .map(String::from)
 }
 /// Replaces a discussion's notes with one verbatim transcript, each turn
 /// labeled with who said it.
@@ -492,17 +499,13 @@ fn used_model(log: &Path) -> Option<String> {
     // The start event is at the log's head: read line by line and stop after
     // the first 50, so a long log is not read whole on every run's end.
     let Ok(file) = fs::File::open(log) else { return None };
-    std::io::BufReader::new(file)
-        .lines()
-        .take(50)
-        .filter_map(|l| serde_json::from_str::<Value>(&l.ok()?).ok())
-        .find_map(|e| {
-            if e["type"] == "thread.started" || (e["type"] == "system" && e["subtype"] == "init") {
-                e["model"].as_str().map(String::from)
-            } else {
-                None
-            }
-        })
+    std::io::BufReader::new(file).lines().take(50).filter_map(|l| serde_json::from_str::<Value>(&l.ok()?).ok()).find_map(|e| {
+        if e["type"] == "thread.started" || (e["type"] == "system" && e["subtype"] == "init") {
+            e["model"].as_str().map(String::from)
+        } else {
+            None
+        }
+    })
 }
 fn end_runs(t: &mut Value, outcome: &str) {
     for r in t["runs"].as_array_mut().unwrap() {
@@ -693,9 +696,7 @@ fn efforts(m: &Value) -> Vec<String> {
 // Snapshot live rows only. Before-state rows never enter the semantic index.
 pub fn snapshot(s: &Store) -> Result<Value, Failure> {
     let mut out = json!({});
-    let mut st = s.db.prepare(
-        "SELECT id,module,name,kind,text,ord,revision,live,parent,sep,tail FROM symbols WHERE live=1",
-    )?;
+    let mut st = s.db.prepare("SELECT id,module,name,kind,text,ord,revision,live,parent,sep,tail FROM symbols WHERE live=1")?;
     for row in st.query_map([], |r| {
         Ok(json!([
             r.get::<_, String>(0)?,
@@ -770,7 +771,10 @@ pub fn existing_folders(root: &Path) -> HashSet<String> {
         for e in fs::read_dir(dir).into_iter().flatten().flatten() {
             let p = e.path();
             let name = file_name(p.strip_prefix(root).unwrap());
-            if !e.file_type().is_ok_and(|t| t.is_dir()) || [".solace", ".git", "build"].contains(&name.as_str()) || e.file_name() == "node_modules" {
+            if !e.file_type().is_ok_and(|t| t.is_dir())
+                || [".solace", ".git", "build"].contains(&name.as_str())
+                || e.file_name() == "node_modules"
+            {
                 continue;
             }
             if !ignores.ignored(&name) {
@@ -817,7 +821,9 @@ pub fn changes_of(s: &Store, t: &Value) -> Result<Vec<Value>, Failure> {
     let (mut out, mut seen) = (vec![], HashSet::new());
     for (dir, st) in scope_stores(s, t)? {
         let mut q = st.db.prepare("SELECT entity,run,name FROM board_touches WHERE task=?1 ORDER BY seq")?;
-        for row in q.query_map(params![tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?)))? {
+        for row in
+            q.query_map(params![tid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?, r.get::<_, Option<String>>(2)?)))?
+        {
             let (entity, run, name) = row?;
             let (run, name) = (run.unwrap_or_default(), name.unwrap_or_else(|| entity.clone()));
             if !seen.insert((dir.clone(), entity.clone())) {
@@ -866,11 +872,16 @@ pub fn adopt_pending(s: &Store, record: &Value) -> Result<(), Failure> {
         if now == before {
             continue;
         }
-        let committed: bool = s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_touches WHERE task=?1 AND run=?2 AND entity=?3)", params![tid, rid, key], |r| r.get(0))?;
+        let committed: bool = s.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM board_touches WHERE task=?1 AND run=?2 AND entity=?3)",
+            params![tid, rid, key],
+            |r| r.get(0),
+        )?;
         if committed {
             continue;
         }
-        let exists: bool = s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1 AND entity=?2)", params![tid, key], |r| r.get(0))?;
+        let exists: bool =
+            s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1 AND entity=?2)", params![tid, key], |r| r.get(0))?;
         if !exists {
             fs::create_dir_all(before_dir(&s.root, tid))?;
             let file = before_file(&s.root, tid, &name);
@@ -891,7 +902,14 @@ pub fn adopt_pending(s: &Store, record: &Value) -> Result<(), Failure> {
 }
 /// Records in `s` how to undo what a command changed there for task `tid`,
 /// and returns the task's change entries for it.
-pub fn touch(s: &Store, tid: &str, rid: &str, before: &Value, after: &Value, folders: Option<&HashSet<String>>) -> Result<Vec<Value>, Failure> {
+pub fn touch(
+    s: &Store,
+    tid: &str,
+    rid: &str,
+    before: &Value,
+    after: &Value,
+    folders: Option<&HashSet<String>>,
+) -> Result<Vec<Value>, Failure> {
     let mut out = vec![];
     let here = scope::dir(&scope::top(&s.root), &s.root);
     let keys: HashSet<_> = before.as_object().unwrap().keys().chain(after.as_object().unwrap().keys()).collect();
@@ -1213,9 +1231,11 @@ fn moved_to(projects: &[(String, Store)], dir: &str, key: &str, tid: &str) -> Op
     if !key.starts_with("symbol:") {
         return None;
     }
-    let live: Vec<&(String, Store)> = projects.iter().filter(|(d, s)| d != dir && snapshot(s).is_ok_and(|c| c[key][7].as_i64() == Some(1))).collect();
+    let live: Vec<&(String, Store)> =
+        projects.iter().filter(|(d, s)| d != dir && snapshot(s).is_ok_and(|c| c[key][7].as_i64() == Some(1))).collect();
     let gained = |s: &Store| {
-        s.db.query_row("SELECT data FROM board_before WHERE task=?1 AND entity=?2", [tid, key], |r| r.get::<_, String>(0)).is_ok_and(|d| d == "null")
+        s.db.query_row("SELECT data FROM board_before WHERE task=?1 AND entity=?2", [tid, key], |r| r.get::<_, String>(0))
+            .is_ok_and(|d| d == "null")
     };
     live.iter().find(|(_, s)| gained(s)).or(live.first()).map(|(d, _)| d.clone())
 }
@@ -1544,7 +1564,8 @@ fn settle(s: &Store, t: &Value) -> Result<(), Failure> {
     Ok(())
 }
 /// The body of a feature's Tech Debt task (D-112).
-const TECH_DEBT_BODY: &str = "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.";
+const TECH_DEBT_BODY: &str =
+    "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.";
 /// The findings of a note's `### Tech debt` section (D-112): one per top-level
 /// bullet (`-`, `*`, `+` or `1.`), with the indented lines below it. The
 /// section ends at the next heading; no section gives none.
@@ -1650,7 +1671,9 @@ pub(super) fn resettle(top: &Path) {
         }
         let left = open(&home).and_then(|s| scope_stores(&s, &t)).is_ok_and(|stores| {
             stores.iter().any(|(_, st)| {
-                st.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap_or(false)
+                st.db
+                    .query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0))
+                    .unwrap_or(false)
                     || lockdown::pending_for(&st.root, tid)
             })
         });
@@ -1940,7 +1963,8 @@ pub(super) fn guard(root: &Path, parts: Vec<&str>, body: &Value) -> Result<Vec<f
         roots.push(root.into());
         // Approving a settings proposal writes a file in the project it names.
         if let ["questions", qid] = rest
-            && let Some(dir) = t["questions"].as_array().into_iter().flatten().find(|q| q["id"] == *qid).and_then(|q| q["settings"]["project"].as_str())
+            && let Some(dir) =
+                t["questions"].as_array().into_iter().flatten().find(|q| q["id"] == *qid).and_then(|q| q["settings"]["project"].as_str())
             && members.iter().any(|m| m == dir)
         {
             roots.push(scope::path(&top, dir));
@@ -1997,7 +2021,8 @@ pub(super) fn needs_lock(root: &Path, parts: &[&str], body: &Value) -> Result<bo
         }
         ["questions", qid] => {
             let answer = body.get("text").or_else(|| body.get("option")).and_then(|v| v.as_str());
-            Ok(answer == Some("Approve") && t["questions"].as_array().into_iter().flatten().any(|q| q["id"] == *qid && !q["settings"].is_null()))
+            Ok(answer == Some("Approve")
+                && t["questions"].as_array().into_iter().flatten().any(|q| q["id"] == *qid && !q["settings"].is_null()))
         }
         _ => Ok(false),
     }
@@ -2308,7 +2333,8 @@ pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
             match (method, rest) {
                 ("PATCH", []) => {
                     // Links can change during a run and in a final column (D-87 point 4, D-100).
-                    let links_only = body.as_object().is_some_and(|o| !o.is_empty() && o.keys().all(|k| k == "feature" || k == "milestone"));
+                    let links_only =
+                        body.as_object().is_some_and(|o| !o.is_empty() && o.keys().all(|k| k == "feature" || k == "milestone"));
                     if active(&t) && !links_only {
                         return err("E7003", "run going");
                     }
@@ -2407,7 +2433,12 @@ pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
                             };
                             if let Some((d, n)) = &debt {
                                 let items = if *n == 1 { "1 tech-debt item".to_string() } else { format!("{n} tech-debt items") };
-                                note(&mut t, "solace", None, &format!("Filed {items} from the last review on task:{}.", d["id"].as_str().unwrap_or("")));
+                                note(
+                                    &mut t,
+                                    "solace",
+                                    None,
+                                    &format!("Filed {items} from the last review on task:{}.", d["id"].as_str().unwrap_or("")),
+                                );
                             }
                             After::Clean(debt.map(|(d, _)| d))
                         }
@@ -2564,7 +2595,8 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
         })?;
     }
     let mut child = spawn_agent(&at, &dir, &log, m, &prompt, &images, resume.as_deref(), persistent, [tid, rid], timeout)?;
-    let supervised = supervise(Watch::Task(root, tid), rid, &mut child, &log, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT);
+    let supervised =
+        supervise(Watch::Task(root, tid), rid, &mut child, &log, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT);
     let (started, outcome) = run_state(root, tid, rid);
     // A discussion agent that replied in plain text took its turn: its reply
     // answers like a finished run, so it clears a mark the same way.
@@ -2605,7 +2637,9 @@ fn agent_of(m: &Value) -> &str {
     m["agent"].as_str().unwrap_or("codex")
 }
 fn claude_home() -> PathBuf {
-    env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".claude"))
+    env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".claude"))
 }
 /// Whether model `m`'s agent keeps its conversation in its own folder.
 fn persists(m: &Value) -> bool {
@@ -2851,7 +2885,8 @@ fn supervise(
                 }
                 // A discussion or strategy agent that replied in plain text and exited
                 // cleanly has taken its turn: the reply is its note, and the run waits.
-                let reply = entries.iter().rev().find(|e| e["kind"] == "message").and_then(|e| e["text"].as_str()).map(str::trim).unwrap_or("");
+                let reply =
+                    entries.iter().rev().find(|e| e["kind"] == "message").and_then(|e| e["text"].as_str()).map(str::trim).unwrap_or("");
                 if matches!(r["kind"].as_str(), Some("discuss" | "strategy")) && status.success() && error.is_empty() && !reply.is_empty() {
                     watch.reply(rid, reply.to_string())?;
                     return Err(Failure("discussion reply".into(), REPLIED));
@@ -3142,7 +3177,8 @@ pub fn feature_section(top: &Path, t: &Value) -> String {
     };
     let mut out = format!("\nFeature (the feature this task is part of; its latest direction):\n- {}\n", text(&f["title"]));
     // An empty note gives no direction, so the next one is used.
-    let latest = t["notes"].as_array().into_iter().flatten().rev().find_map(|n| Some((label(n)?, text(&n["text"]))).filter(|(_, x)| !x.is_empty()));
+    let latest =
+        t["notes"].as_array().into_iter().flatten().rev().find_map(|n| Some((label(n)?, text(&n["text"]))).filter(|(_, x)| !x.is_empty()));
     if let Some((label, note)) = latest {
         let mut shown = note.clone();
         if note.chars().count() > FEATURE_CAP {
@@ -3355,8 +3391,12 @@ fn run_record(top: &Path, tid: &str, rid: &str) -> Option<Value> {
 /// The tool calls and messages of `steps`, one line each and numbered as in
 /// the run log: the latest that fit in `budget`, after how many were left out.
 fn outline(steps: &[Value], budget: usize) -> String {
-    let lines: Vec<String> =
-        steps.iter().enumerate().filter(|(_, e)| matches!(e["kind"].as_str(), Some("tool" | "message"))).map(|(i, e)| step_line(i, e) + "\n").collect();
+    let lines: Vec<String> = steps
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| matches!(e["kind"].as_str(), Some("tool" | "message")))
+        .map(|(i, e)| step_line(i, e) + "\n")
+        .collect();
     let (mut kept, mut size) = (0, 0);
     for l in lines.iter().rev() {
         // room for the line naming what's left out
@@ -3940,7 +3980,10 @@ pub(super) fn message(w: &Value, t: &mut Value, m: &Value) -> Result<(), Failure
         "settings" => {
             let i = run_at(t, rid.unwrap_or(""))?;
             if t["runs"][i]["state"] == "ended" {
-                let late = format!("A settings proposal arrived after the run ended and was not applied: {}", m["question"]["text"].as_str().unwrap_or(""));
+                let late = format!(
+                    "A settings proposal arrived after the run ended and was not applied: {}",
+                    m["question"]["text"].as_str().unwrap_or("")
+                );
                 note(t, "solace", rid, &late);
                 return Ok(());
             }
@@ -4011,7 +4054,8 @@ fn wait_discussion(s: &Store, tid: &str, rid: &str) -> Out {
         }
         let notes = t["notes"].as_array().unwrap();
         let after = notes.iter().rposition(|n| n["run"] == rid && n["author"] == "agent").map_or(0, |l| l + 1);
-        let new: Vec<&str> = notes[after..].iter().filter(|n| n["run"] == rid && n["author"] == "human").filter_map(|n| n["text"].as_str()).collect();
+        let new: Vec<&str> =
+            notes[after..].iter().filter(|n| n["run"] == rid && n["author"] == "human").filter_map(|n| n["text"].as_str()).collect();
         if !new.is_empty() && t["paused_from"].is_null() {
             let reply = format!("The human replied:\n\n{}\n", new.join("\n\n"));
             tasks::send(&scope::top(&s.root), json!({"kind":"resume","task":tid,"run":rid}))?;
@@ -4025,9 +4069,9 @@ fn wait_discussion(s: &Store, tid: &str, rid: &str) -> Out {
 #[path = "strategy.rs"]
 mod strategy;
 use strategy::start_strategy;
-pub use strategy::{strategy_command, strategy_guard};
 #[cfg(test)]
 use strategy::{strategy_brief, strategy_list, strategy_note_show, strategy_run_show, strategy_show};
+pub use strategy::{strategy_command, strategy_guard};
 /// A work run's `write solace.toml` or `write AGENTS.md`: checked now, written
 /// only when a human approves it on the board (D-38, D-45).
 /// `project` is the folder whose settings change: the home, or another project in the task (D-61).
@@ -4612,14 +4656,34 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             }
             if req.method().as_str() == "GET"
                 && (record_link
-                    || matches!(page, "/" | "/workspace" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/knowledgebase" | "/app.js" | "/fonts/sans-400.woff2" | "/fonts/sans-700.woff2" | "/fonts/mono-400.woff2"))
+                    || matches!(
+                        page,
+                        "/" | "/workspace"
+                            | "/migrate"
+                            | "/contracts"
+                            | "/strategy"
+                            | "/settings"
+                            | "/knowledgebase"
+                            | "/app.js"
+                            | "/fonts/sans-400.woff2"
+                            | "/fonts/sans-700.woff2"
+                            | "/fonts/mono-400.woff2"
+                    ))
             {
                 let (data, kind) = match page {
                     _ if record_link => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
-                    "/" | "/workspace" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/knowledgebase" => (include_bytes!("../frontend/index.html").as_slice(), "text/html"),
-                    "/fonts/sans-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-400-normal.woff2").as_slice(), "font/woff2"),
-                    "/fonts/sans-700.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-700-normal.woff2").as_slice(), "font/woff2"),
-                    "/fonts/mono-400.woff2" => (include_bytes!("../board/priv/fonts/ibm-plex-mono-latin-400-normal.woff2").as_slice(), "font/woff2"),
+                    "/" | "/workspace" | "/migrate" | "/contracts" | "/strategy" | "/settings" | "/knowledgebase" => {
+                        (include_bytes!("../frontend/index.html").as_slice(), "text/html")
+                    }
+                    "/fonts/sans-400.woff2" => {
+                        (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-400-normal.woff2").as_slice(), "font/woff2")
+                    }
+                    "/fonts/sans-700.woff2" => {
+                        (include_bytes!("../board/priv/fonts/ibm-plex-sans-latin-700-normal.woff2").as_slice(), "font/woff2")
+                    }
+                    "/fonts/mono-400.woff2" => {
+                        (include_bytes!("../board/priv/fonts/ibm-plex-mono-latin-400-normal.woff2").as_slice(), "font/woff2")
+                    }
                     _ => (include_bytes!("../frontend/priv/app.js").as_slice(), "text/javascript"),
                 };
                 let _ = req.respond(
@@ -4740,13 +4804,16 @@ impl Events {
             return String::new();
         }
         let (id, top) = (self.id(), &self.board.top);
-        let (milestones, features) = (json!({"milestones":tasks::records(top, "milestones")}), json!({"features":tasks::records(top, "features")}));
+        let (milestones, features) =
+            (json!({"milestones":tasks::records(top, "milestones")}), json!({"features":tasks::records(top, "features")}));
         let vision = json!({"vision": tasks::vision(top)});
         let runs = json!({"strategyRuns": tasks::strategy_runs(top)});
         // Tasks with no project (D-129) ride on the root's streams, marked so
         // the Strategy page can list them whatever their home.
         let homeless = json!({"tasks": all_tasks(top).unwrap_or_default().into_iter().filter(|t| t["noProject"] == true).collect::<Vec<_>>(), "noProject": true});
-        format!("id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {runs}\n\nid: {id}\ndata: {homeless}\n\n")
+        format!(
+            "id: {id}\ndata: {milestones}\n\nid: {id}\ndata: {features}\n\nid: {id}\ndata: {vision}\n\nid: {id}\ndata: {runs}\n\nid: {id}\ndata: {homeless}\n\n"
+        )
     }
     /// The workflow and tasks of the streams at `which`, as events.
     fn state_of(&self, which: &[usize]) -> String {
@@ -4794,7 +4861,11 @@ impl Events {
             // project is no member is a task with no project (D-129), shown
             // on the root's streams and marked.
             let homeless = !project.is_empty() && members.as_ref().is_ok_and(|ms| !ms.iter().any(|m| m == &project));
-            let shown = if project.is_empty() { self.at_root() } else { self.streams.iter().any(|s| s.0 == project) || (self.at_root() && homeless) };
+            let shown = if project.is_empty() {
+                self.at_root()
+            } else {
+                self.streams.iter().any(|s| s.0 == project) || (self.at_root() && homeless)
+            };
             if !shown {
                 continue;
             }
@@ -4823,11 +4894,11 @@ impl Events {
                 None => {
                     added.push(self.streams.len());
                     Connection::open(r.join(".solace/store.db"))
-                    .and_then(|db| {
-                        db.busy_timeout(Duration::from_secs(10))?;
-                        db.query_row("SELECT COALESCE(MAX(seq),0) FROM board_events", [], |row| row.get(0))
-                    })
-                    .unwrap_or(0)
+                        .and_then(|db| {
+                            db.busy_timeout(Duration::from_secs(10))?;
+                            db.query_row("SELECT COALESCE(MAX(seq),0) FROM board_events", [], |row| row.get(0))
+                        })
+                        .unwrap_or(0)
                 }
             };
             self.streams.push((d, r, seq));

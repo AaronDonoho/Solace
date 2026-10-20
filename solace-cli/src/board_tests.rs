@@ -97,7 +97,10 @@ fn a_fresh_brief_holds_the_session_start_reply() {
     let s = open(&p.root).unwrap();
     let t = api(&s.root, "POST", "/tasks", json!({"title":"Fix the order total","body":"app.total is off by one"})).unwrap();
     let brief = |kind: &str, resumed: bool| continuation_brief(&t, &json!({"id":"r1","kind":kind}), resumed, &p.root, &p.root, false).0;
-    let (reply, next) = ("\nSession start (the reply to `session start --task`):\n", "\nNext: read what the change needs in one call, one command per line: `inspect app.total");
+    let (reply, next) = (
+        "\nSession start (the reply to `session start --task`):\n",
+        "\nNext: read what the change needs in one call, one command per line: `inspect app.total",
+    );
     for kind in ["work", "investigate"] {
         let b = brief(kind, false);
         assert!(b.contains(reply) && b.contains("Symbols most likely relevant to the task") && b.contains("-- app.total"), "{kind}: {b}");
@@ -111,10 +114,16 @@ fn a_fresh_brief_holds_the_session_start_reply() {
         assert!(!b.contains(reply) && !b.contains(HELD_START), "{kind}: {b}");
     }
     let resumed = brief("work", true);
-    assert!(resumed.contains("Use the continuation context below.") && !resumed.contains(reply) && !resumed.contains(HELD_START), "{resumed}");
+    assert!(
+        resumed.contains("Use the continuation context below.") && !resumed.contains(reply) && !resumed.contains(HELD_START),
+        "{resumed}"
+    );
     fs::remove_file(p.root.join("gleam.toml")).unwrap();
     let plain = brief("work", false);
-    assert!(plain.contains(reply) && plain.contains("This project has plain files") && plain.contains("`grep <text> --in <path>`"), "{plain}");
+    assert!(
+        plain.contains(reply) && plain.contains("This project has plain files") && plain.contains("`grep <text> --in <path>`"),
+        "{plain}"
+    );
     // A folder with no store keeps the line asking for the call.
     let bare = testing::Scratch::new();
     let b = continuation_brief(&t, &json!({"id":"r1","kind":"work"}), false, &p.root, &bare, false).0;
@@ -127,7 +136,7 @@ fn a_fresh_brief_holds_the_session_start_reply() {
 #[test]
 fn a_brief_carries_the_features_latest_direction() {
     let top = testing::Scratch::new();
-    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1 .0).unwrap();
+    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1.0).unwrap();
     let runs = json!([{"id":"i1","kind":"investigate"},{"id":"w1","kind":"work"},{"id":"r1","kind":"review"},{"id":"d1","kind":"discuss"}]);
     let mut t = json!({"id":"t","runs":runs,"notes":[]});
     assert_eq!(feature_section(&top, &t), "");
@@ -157,7 +166,11 @@ fn a_brief_carries_the_features_latest_direction() {
 /// with its indented lines, and ends at the next heading.
 #[test]
 fn tech_debt_items_are_the_sections_bullets() {
-    let note = "**Assessment: Looks good**\n\n- not debt\n\n### Tech debt\n\nIntro line.\n- `app.main`: name the constant\n* `app.other`: long\n  second line\n1. `a.rs`: third\n\n### Verification\n\n- tests pass\n";
+    let note = concat!(
+        "**Assessment: Looks good**\n\n- not debt\n\n### Tech debt\n\nIntro line.\n",
+        "- `app.main`: name the constant\n* `app.other`: long\n  second line\n1. `a.rs`: third\n\n",
+        "### Verification\n\n- tests pass\n",
+    );
     assert_eq!(tech_debt_items(note), vec!["`app.main`: name the constant", "`app.other`: long\n  second line", "`a.rs`: third"]);
     assert_eq!(tech_debt_items("## Tech Debt:\n- one\n"), vec!["one"]);
     assert!(tech_debt_items("### Tech debt\n\n### Next\n- x\n").is_empty());
@@ -173,7 +186,7 @@ fn completing_a_task_files_its_reviews_tech_debt() {
     let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
     let s = open(&p.root).unwrap();
     let top = scope::top(&s.root);
-    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1 .0).unwrap();
+    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1.0).unwrap();
     let fid = f["id"].as_str().unwrap().to_string();
     let reviewed = |title: &str, feature: bool, text: &str| {
         let id = api(&s.root, "POST", "/tasks", json!({"title":title})).unwrap()["id"].as_str().unwrap().to_string();
@@ -190,17 +203,30 @@ fn completing_a_task_files_its_reviews_tech_debt() {
     };
     let act = |id: &str, action: &str| api(&s.root, "POST", &format!("/tasks/{id}/actions"), json!({"action":action})).unwrap();
     let debts = || all_tasks(&top).unwrap().into_iter().filter(|t| t["techDebt"] == true).collect::<Vec<_>>();
-    let texts = |t: &Value| t["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap().to_string()).collect::<Vec<_>>();
-    let two = "**Assessment: Looks good**\n\n### Tech debt\n\n- `app.main`: name the constant\n- `app.other`: split it\n\n### Verification\n\n- tests pass\n";
+    let texts = |t: &Value| {
+        let notes = t["notes"].as_array().unwrap();
+        notes.iter().map(|n| n["text"].as_str().unwrap().to_string()).collect::<Vec<_>>()
+    };
+    let two = concat!(
+        "**Assessment: Looks good**\n\n### Tech debt\n\n",
+        "- `app.main`: name the constant\n- `app.other`: split it\n\n",
+        "### Verification\n\n- tests pass\n",
+    );
     let a = reviewed("A", true, two);
     let done = act(&a, "complete");
     let [debt] = debts().try_into().unwrap();
     let did = debt["id"].as_str().unwrap().to_string();
-    assert_eq!((debt["title"].as_str(), debt["column"].as_str(), debt["feature"].as_str()), (Some("Search: Tech Debt"), Some("planning"), Some(fid.as_str())));
+    assert_eq!(
+        (debt["title"].as_str(), debt["column"].as_str(), debt["feature"].as_str()),
+        (Some("Search: Tech Debt"), Some("planning"), Some(fid.as_str()))
+    );
     assert_eq!(debt["scope"], done["scope"]);
     let notes = texts(&debt);
     assert_eq!(notes.len(), 2);
-    assert!(notes[0].contains(&format!("task:{a}")) && notes[0].contains("rvA") && notes[0].ends_with("`app.main`: name the constant"), "{notes:?}");
+    assert!(
+        notes[0].contains(&format!("task:{a}")) && notes[0].contains("rvA") && notes[0].ends_with("`app.main`: name the constant"),
+        "{notes:?}"
+    );
     assert!(notes[1].ends_with("`app.other`: split it"));
     assert!(texts(&done).last().unwrap().contains(&format!("Filed 2 tech-debt items from the last review on task:{did}")));
     // A second task in the feature appends to the same Tech Debt task.
@@ -230,7 +256,9 @@ fn hung_shutdown_is_killed_after_the_grace_period() {
     let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"ended","outcome":"finished"}));
     let log = p.root.join(".solace/r1.log");
     let start = Instant::now();
-    let forced = supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), Duration::from_millis(300)).unwrap();
+    let forced =
+        supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), Duration::from_millis(300))
+            .unwrap();
     assert!(forced);
     assert!(start.elapsed() >= Duration::from_millis(300) && start.elapsed() < Duration::from_secs(10));
     assert!(child.try_wait().unwrap().is_some());
@@ -373,7 +401,13 @@ fn strategy_runs_read_the_graph() {
     );
     assert!(brief.contains("in short Markdown: lead with the answer"), "{brief}");
     // D-148: records are named as links the human can click.
-    assert!(brief.contains("name tasks, features and milestones as `task:<id>`, `feature:<id>` or `milestone:<id>`, written bare and never inside backticks"), "{brief}");
+    assert!(
+        brief.contains(concat!(
+            "name tasks, features and milestones as `task:<id>`, `feature:<id>` or `milestone:<id>`, ",
+            "written bare and never inside backticks",
+        )),
+        "{brief}"
+    );
     assert!(brief.contains("- D-1 First thing") && !brief.contains("- Notes") && brief.contains("- human: Plan F"), "{brief}");
     // D-181: cite code by its printed symbol name.
     assert!(brief.contains("lockdown.dispatch") && !brief.contains("board.rs::within"), "{brief}");
@@ -463,7 +497,8 @@ fn review_delta_keeps_module_headers_budget_and_completed_baseline() {
 /// marks one with no `// SAFETY:` comment; a symbol that gains none is left out.
 #[test]
 fn a_review_lists_new_unsafe() {
-    let (root, s) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\npub fn three() -> i32 {\n    3\n}\n");
+    let (root, s) =
+        testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\npub fn three() -> i32 {\n    3\n}\n");
     let mut t = api(&root, "POST", "/tasks", json!({"title": "Unsafe"})).unwrap();
     let tid = t["id"].as_str().unwrap().to_string();
     t["runs"] = json!([{"id":"work","kind":"work","state":"ended"}]);
@@ -476,7 +511,8 @@ fn a_review_lists_new_unsafe() {
         params!["pub fn two() -> i32 {\n    // SAFETY: nothing is dereferenced.\n    unsafe { 2 }\n}\n", row("two")],
     )
     .unwrap();
-    s.db.execute("UPDATE symbols SET text=?1 WHERE id=?2", params!["pub fn three() -> &'static str {\n    \"unsafe\"\n}\n", row("three")]).unwrap();
+    s.db.execute("UPDATE symbols SET text=?1 WHERE id=?2", params!["pub fn three() -> &'static str {\n    \"unsafe\"\n}\n", row("three")])
+        .unwrap();
     let after = snapshot(&s).unwrap();
     record_listed(&s, &tid, &before, &after);
     let diff = task_diff(&s, &tid, &[], 4000).unwrap();
@@ -592,7 +628,10 @@ fn undo_keeps_a_rust_modules_file_and_nested_items() {
     assert_eq!(m.file.as_deref(), Some("src/other.rs"));
     assert_eq!(m.rel(), "src/other.rs");
     assert_eq!(at(&ix, "Outer::inner").parent.as_deref(), Some(at(&ix, "Outer").id.as_str()));
-    assert_eq!((at(&ix, "Outer").sep.clone(), at(&ix, "Outer").tail.clone()), (at(&before, "Outer").sep.clone(), at(&before, "Outer").tail.clone()));
+    assert_eq!(
+        (at(&ix, "Outer").sep.clone(), at(&ix, "Outer").tail.clone()),
+        (at(&before, "Outer").sep.clone(), at(&before, "Outer").tail.clone())
+    );
     assert_eq!(
         (at(&ix, "Outer::inner").sep.clone(), at(&ix, "Outer::inner").tail.clone()),
         (at(&before, "Outer::inner").sep.clone(), at(&before, "Outer::inner").tail.clone())
@@ -715,7 +754,11 @@ fn cancel_undoes_a_write_a_stopped_run_left_pending() {
     let t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
     let tid = t["id"].as_str().unwrap().to_string();
     lockdown::mark(&s.root, &tid, "r1").unwrap();
-    fs::write(s.root.join(".solace/pending/notes.json"), json!({"task": tid, "run": "r1", "path": "notes.txt", "bytes": b"old\n".to_vec()}).to_string()).unwrap();
+    fs::write(
+        s.root.join(".solace/pending/notes.json"),
+        json!({"task": tid, "run": "r1", "path": "notes.txt", "bytes": b"old\n".to_vec()}).to_string(),
+    )
+    .unwrap();
     fs::write(s.root.join("notes.txt"), "new\n").unwrap();
     api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action": "cancel"})).unwrap();
     assert_eq!(fs::read_to_string(s.root.join("notes.txt")).unwrap(), "old\n");
@@ -739,12 +782,18 @@ fn a_canceled_task_goes_back_to_planning() {
     let archived = api(&s.root, "POST", &format!("/tasks/{tid}/archive"), json!({})).unwrap();
     assert!(archived["archivedTime"].is_u64());
     let back = act("to_planning").unwrap();
-    assert_eq!((back["column"].as_str(), &back["archivedTime"], &back["closedTime"]), (Some("planning"), &Value::Null, &cancelled["closedTime"]));
+    assert_eq!(
+        (back["column"].as_str(), &back["archivedTime"], &back["closedTime"]),
+        (Some("planning"), &Value::Null, &cancelled["closedTime"])
+    );
     assert!(t["createdTime"].is_u64());
     assert_eq!(back["createdTime"], t["createdTime"], "D-130: bringing it back keeps when it was created");
     assert_eq!(back["title"], "Shapes");
     let last = back["notes"].as_array().unwrap().last().unwrap().clone();
-    assert_eq!((last["author"].as_str(), last["text"].as_str()), (Some("solace"), Some("The human brought this task back from Canceled to Planning.")));
+    assert_eq!(
+        (last["author"].as_str(), last["text"].as_str()),
+        (Some("solace"), Some("The human brought this task back from Canceled to Planning."))
+    );
     let mut done = back.clone();
     done["column"] = json!("complete");
     assert!(allowed(&flow(&s.root).unwrap(), &done).is_empty(), "complete offers nothing");
@@ -758,7 +807,7 @@ fn a_task_with_a_feature_is_refused_back_to_the_backlog() {
     let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
     let s = open(&p.root).unwrap();
     let top = scope::top(&s.root);
-    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1 .0).unwrap();
+    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1.0).unwrap();
     let t = api(&s.root, "POST", "/tasks", json!({"title": "Shapes"})).unwrap();
     let tid = t["id"].as_str().unwrap().to_string();
     api(&s.root, "PATCH", &format!("/tasks/{tid}"), json!({"feature": f["id"]})).unwrap();
@@ -812,7 +861,13 @@ fn back_to_planning_waits_for_the_run_and_keeps_changes() {
 }
 
 /// A workflow whose `finished` event targets a final column, so `task done` settles.
-const DONE_IS_FINAL: &str = "[board]\nevents = { asked = \"todo\", finished = \"done\", failed = \"todo\" }\n[[board.columns]]\nid = \"todo\"\nactions = [\"cancel\"]\n[[board.columns]]\nid = \"done\"\nfinal = true\n[[board.columns]]\nid = \"gone\"\nfinal = true\n[board.actions]\ncancel = { revert = true, to = \"gone\" }\n";
+const DONE_IS_FINAL: &str = concat!(
+    "[board]\nevents = { asked = \"todo\", finished = \"done\", failed = \"todo\" }\n",
+    "[[board.columns]]\nid = \"todo\"\nactions = [\"cancel\"]\n",
+    "[[board.columns]]\nid = \"done\"\nfinal = true\n",
+    "[[board.columns]]\nid = \"gone\"\nfinal = true\n",
+    "[board.actions]\ncancel = { revert = true, to = \"gone\" }\n",
+);
 
 /// D-132 point 5: in a workflow with no `planning` column, a new Tech Debt task
 /// is made in its first column.
@@ -821,7 +876,7 @@ fn tech_debt_goes_to_the_first_column_without_planning() {
     let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", DONE_IS_FINAL)]);
     let s = open(&p.root).unwrap();
     let top = scope::top(&s.root);
-    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1 .0).unwrap();
+    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1.0).unwrap();
     let mut t = api(&s.root, "POST", "/tasks", json!({"title":"A"})).unwrap();
     t["feature"] = f["id"].clone();
     t["runs"].as_array_mut().unwrap().push(json!({"id":"rv","kind":"review","state":"ended","outcome":"reviewed"}));
@@ -842,7 +897,8 @@ fn a_done_applied_by_the_server_settles() {
     let before = snapshot(&s).unwrap();
     s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
     record(&s, &tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
-    let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+    let has_before =
+        || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
     assert!(has_before());
     testing::inbox_file(&s.root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"done"}));
     tasks::drain(&s.root);
@@ -860,7 +916,8 @@ fn resettle_settles_a_final_task_left_unsettled() {
     let before = snapshot(&s).unwrap();
     s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
     record(&s, &tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
-    let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+    let has_before =
+        || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
     resettle(&s.root);
     assert!(has_before(), "a task not in a final column is left alone");
     t["column"] = json!("done");
@@ -882,7 +939,8 @@ fn a_late_done_does_not_settle_and_a_real_one_does() {
     let before = snapshot(&s).unwrap();
     s.submit_symbols(None, Some("geo"), "pub fn side() { 2 }").unwrap();
     record(&s, &tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
-    let has_before = || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+    let has_before =
+        || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
     assert!(has_before());
     testing::inbox_file(&s.root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"late"}));
     tasks::drain(&s.root);
@@ -937,7 +995,11 @@ fn a_reads_message_lands_on_its_run_and_the_outline_keeps_the_latest_steps() {
     message(&w, &mut t, &json!({"kind":"reads","task":"t","run":"r1","reads":reads})).unwrap();
     assert_eq!(t["runs"][0]["reads"], reads);
     assert!(message(&w, &mut t, &json!({"kind":"reads","task":"t","run":"r2","reads":reads})).is_err());
-    let steps = [json!({"kind":"tool","title":"view a.f","status":"completed"}), json!({"kind":"usage"}), json!({"kind":"message","text":"Done.\nmore"})];
+    let steps = [
+        json!({"kind":"tool","title":"view a.f","status":"completed"}),
+        json!({"kind":"usage"}),
+        json!({"kind":"message","text":"Done.\nmore"}),
+    ];
     assert_eq!(outline(&steps, 1000), "1 tool: view a.f (completed)\n3 message: Done.\n");
     assert_eq!(outline(&steps, 60), "Earlier steps left out: 1\n3 message: Done.\n");
     assert_eq!(outline(&steps, 10), "");
@@ -987,7 +1049,14 @@ fn a_late_agent_message_does_not_wake_an_ended_run() {
     t["runs"] = json!([{"id":"r1","kind":"work","state":"ended","outcome":"stopped"}]);
     let before = t["column"].clone();
     for command in ["ask", "done", "note"] {
-        let m = json!({"kind":"agent","task":"t","run":"r1","command":command,"text":"late","question":{"id":"q","text":"?","options":["a","b"]}});
+        let m = json!({
+            "kind": "agent",
+            "task": "t",
+            "run": "r1",
+            "command": command,
+            "text": "late",
+            "question": {"id": "q", "text": "?", "options": ["a", "b"]},
+        });
         message(&w, &mut t, &m).unwrap();
     }
     assert_eq!(t["runs"][0]["state"], "ended");
@@ -1000,7 +1069,11 @@ fn a_late_agent_message_does_not_wake_an_ended_run() {
 fn adopt_finishes_an_interrupted_move_and_refuses_a_reused_id() {
     let root = testing::Scratch::new().with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#)]);
     fs::create_dir_all(store_dir(&root)).unwrap();
-    fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"backlog","home":".","runs":[],"notes":[],"questions":[],"links":[]}"#).unwrap();
+    fs::write(
+        store_dir(&root).join("t1.json"),
+        r#"{"id":"t1","column":"backlog","home":".","runs":[],"notes":[],"questions":[],"links":[]}"#,
+    )
+    .unwrap();
     adopt_tasks(&root, &root).unwrap();
     assert!(!root.join(".solace/board/t1.json").exists());
     fs::create_dir_all(root.join(".solace/board")).unwrap();
@@ -1016,26 +1089,59 @@ fn strategy_show_run_outlines_and_picks_steps() {
     let root = testing::Scratch::new();
     let log = root.join("run.jsonl");
     let lines = [
-        json!({"type":"item.completed","item":{"id":"i1","type":"mcp_tool_call","tool":"solace","arguments":{"command":"view a"},"result":{"content":[{"type":"text","text":"pub fn a()"}]},"status":"completed"}}),
+        json!({
+            "type": "item.completed",
+            "item": {
+                "id": "i1",
+                "type": "mcp_tool_call",
+                "tool": "solace",
+                "arguments": {"command": "view a"},
+                "result": {"content": [{"type": "text", "text": "pub fn a()"}]},
+                "status": "completed",
+            },
+        }),
         json!({"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"All done.\nSecond line."}}),
         json!({"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}),
     ];
     fs::write(&log, lines.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
     let long = format!("{}.\nSecond line.", "x".repeat(120));
-    let task = json!({"id":"t1","column":"backlog","notes":[{"author":"human","time":7,"text":"A short note."},{"author":"agent","time":8,"text":long}],
-        "questions":[{"id":"q1","text":"Which one?","options":["A"],"answer":"A"},{"id":"q2","text":"Open","options":["A"]}],"conversation":[{"author":"human","text":"the thread"}],
-        "runs":[{"id":"r1","kind":"work","state":"ended","model":"fake","log":log.to_str().unwrap()}]});
+    let task = json!({
+        "id": "t1",
+        "column": "backlog",
+        "notes": [
+            {"author": "human", "time": 7, "text": "A short note."},
+            {"author": "agent", "time": 8, "text": long},
+        ],
+        "questions": [
+            {"id": "q1", "text": "Which one?", "options": ["A"], "answer": "A"},
+            {"id": "q2", "text": "Open", "options": ["A"]},
+        ],
+        "conversation": [{"author": "human", "text": "the thread"}],
+        "runs": [{"id": "r1", "kind": "work", "state": "ended", "model": "fake", "log": log.to_str().unwrap()}],
+    });
     let root = root.with(&[(".solace/board/t1.json", &task.to_string())]);
     adopt_tasks(&root, &root).unwrap();
     let shown = strategy_show(&root, "task", "t1").unwrap();
     assert_eq!(shown["links"]["runs"], json!(["r1"]));
     let rec = shown["record"].clone();
-    assert_eq!((rec["notes"].clone(), rec["questions"].clone(), rec["runs"].clone()), (json!(["1 human 7: A short note.", format!("2 agent 8: {}…", "x".repeat(100))]), json!(["1 Which one?: A", "2 Open: unanswered"]), json!(["r1 work ended fake"])));
+    assert_eq!(
+        (rec["notes"].clone(), rec["questions"].clone(), rec["runs"].clone()),
+        (
+            json!(["1 human 7: A short note.", format!("2 agent 8: {}…", "x".repeat(100))]),
+            json!(["1 Which one?: A", "2 Open: unanswered"]),
+            json!(["r1 work ended fake"])
+        )
+    );
     assert!(rec.get("conversation").is_none());
     let one = strategy_note_show(&root, "t1", "2").unwrap();
-    assert_eq!((one["task"].as_str(), one["notes"][0]["note"].as_u64(), one["notes"][0]["text"].as_str()), (Some("t1"), Some(2), Some(long.as_str())));
+    assert_eq!(
+        (one["task"].as_str(), one["notes"][0]["note"].as_u64(), one["notes"][0]["text"].as_str()),
+        (Some("t1"), Some(2), Some(long.as_str()))
+    );
     assert_eq!(strategy_note_show(&root, "t1", "all").unwrap()["notes"].as_array().unwrap().len(), 2);
-    for bad in ["0", "3", "2..1", "x", "1,,2"] { assert!(strategy_note_show(&root, "t1", bad).unwrap_err().0.starts_with("E7001"), "{bad}"); }
+    for bad in ["0", "3", "2..1", "x", "1,,2"] {
+        assert!(strategy_note_show(&root, "t1", bad).unwrap_err().0.starts_with("E7001"), "{bad}");
+    }
     let outline = strategy_run_show(&root, "t1", "r1", None).unwrap();
     assert_eq!(outline["run"]["id"], "r1");
     assert!(outline["run"].get("log").is_none());
@@ -1059,8 +1165,14 @@ fn strategy_show_run_outlines_and_picks_steps() {
     assert!(run(&["strategy", "show", "note", "t1", "2", "--from", "3"], 10_000).unwrap().contains("characters 3.."));
     // An id copied in its link form names the same record.
     assert_eq!(run(&["strategy", "show", "task", "task:t1"], 10_000).unwrap(), run(&["strategy", "show", "task", "t1"], 10_000).unwrap());
-    assert_eq!(run(&["strategy", "show", "note", "task:t1", "2"], 10_000).unwrap(), run(&["strategy", "show", "note", "t1", "2"], 10_000).unwrap());
-    assert_eq!(run(&["strategy", "show", "run", "task:t1", "r1"], 10_000).unwrap(), run(&["strategy", "show", "run", "t1", "r1"], 10_000).unwrap());
+    assert_eq!(
+        run(&["strategy", "show", "note", "task:t1", "2"], 10_000).unwrap(),
+        run(&["strategy", "show", "note", "t1", "2"], 10_000).unwrap()
+    );
+    assert_eq!(
+        run(&["strategy", "show", "run", "task:t1", "r1"], 10_000).unwrap(),
+        run(&["strategy", "show", "run", "t1", "r1"], 10_000).unwrap()
+    );
     for bad in ["0", "3", "2..1", "x", "1,,2"] {
         assert!(strategy_run_show(&root, "t1", "r1", Some(bad)).unwrap_err().0.starts_with("E7001"), "{bad}");
     }
@@ -1139,7 +1251,10 @@ fn tasks_saved_in_blocked_load_as_assigned_and_held() {
     ]);
     adopt_tasks(&root, &root).unwrap();
     let (a, b) = (task(&root, "t1").unwrap(), task(&root, "t2").unwrap());
-    assert_eq!((a["column"].as_str(), a["attention"]["reason"].as_str(), a["attention"]["hold"].as_bool()), (Some("assigned"), Some("an agent asked a question"), Some(true)));
+    assert_eq!(
+        (a["column"].as_str(), a["attention"]["reason"].as_str(), a["attention"]["hold"].as_bool()),
+        (Some("assigned"), Some("an agent asked a question"), Some(true))
+    );
     assert_eq!((b["column"].as_str(), b["attention"]["hold"].as_bool()), (Some("assigned"), Some(true)));
     // `asked` and `failed` need no target; `finished` does, and a target must exist.
     let default = include_str!("default-board.toml");
@@ -1150,10 +1265,8 @@ fn tasks_saved_in_blocked_load_as_assigned_and_held() {
 }
 #[test]
 fn tasks_move_once_into_the_root_store() {
-    let root = testing::Scratch::new().with(&[
-        (".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#),
-        (".solace/board/t1/r1.jsonl", "{}\n"),
-    ]);
+    let root = testing::Scratch::new()
+        .with(&[(".solace/board/t1.json", r#"{"id":"t1","column":"backlog"}"#), (".solace/board/t1/r1.jsonl", "{}\n")]);
     adopt_tasks(&root, &root).unwrap();
     assert!(!root.join(".solace/board/t1.json").exists());
     assert!(root.join(".solace/board/t1/r1.jsonl").exists(), "run logs stay in the project");
@@ -1219,7 +1332,19 @@ fn every_native_model_gets_a_default_effort() {
         {"id":"local","label":"L","agent":"claude","model":"q","endpoint":{"kind":"anthropic","base_url":"http://h"}},
         {"id":"bogus","label":"B","agent":"claude","model":"opus","effort":"bogus","configured":true},
     ]);
-    let all = json!({"codex":{"time":1,"models":[{"id":"codex-a","label":"A","agent":"codex","model":"a","effort":"low","efforts":["low","medium"]}]}});
+    let all = json!({
+        "codex": {
+            "time": 1,
+            "models": [{
+                "id": "codex-a",
+                "label": "A",
+                "agent": "codex",
+                "model": "a",
+                "effort": "low",
+                "efforts": ["low", "medium"],
+            }],
+        },
+    });
     let m = agents::merge_from(&configured, &all);
     let e = |id: &str| m.iter().find(|x| x["id"] == id).unwrap()["effort"].clone();
     assert_eq!(e("claude-opus-5-5"), "medium", "a preset takes medium");
@@ -1237,11 +1362,34 @@ fn every_native_model_gets_a_default_effort() {
 #[test]
 fn codex_answers_offer_their_models_and_efforts() {
     let r = json!({"data":[
-        {"id":"gpt-6-sol","model":"gpt-6-sol","displayName":"GPT-6 Sol","hidden":false,
-         "supportedReasoningEfforts":[{"effort":"low","description":"Low"},{"effort":"medium","description":"Medium"},{"effort":"high","description":"High"}],
-         "defaultReasoningEffort":"medium","isDefault":true},
-        {"id":"gpt-6-sol-mini","model":"gpt-6-sol-mini","displayName":"GPT-6 Sol Mini","hidden":true,"supportedReasoningEfforts":[],"defaultReasoningEffort":"medium"},
-        {"id":"gpt-5.6-terra","model":"gpt-5.6-terra","displayName":"GPT-5.6 Terra","supportedReasoningEfforts":[{"effort":"medium"}],"defaultReasoningEffort":"medium"}
+        {
+            "id": "gpt-6-sol",
+            "model": "gpt-6-sol",
+            "displayName": "GPT-6 Sol",
+            "hidden": false,
+            "supportedReasoningEfforts": [
+                {"effort": "low", "description": "Low"},
+                {"effort": "medium", "description": "Medium"},
+                {"effort": "high", "description": "High"},
+            ],
+            "defaultReasoningEffort": "medium",
+            "isDefault": true,
+        },
+        {
+            "id": "gpt-6-sol-mini",
+            "model": "gpt-6-sol-mini",
+            "displayName": "GPT-6 Sol Mini",
+            "hidden": true,
+            "supportedReasoningEfforts": [],
+            "defaultReasoningEffort": "medium",
+        },
+        {
+            "id": "gpt-5.6-terra",
+            "model": "gpt-5.6-terra",
+            "displayName": "GPT-5.6 Terra",
+            "supportedReasoningEfforts": [{"effort": "medium"}],
+            "defaultReasoningEffort": "medium",
+        },
     ]});
     let models = agents::codex_page(&r);
     assert_eq!(models.len(), 2, "a hidden model is left out");
@@ -1269,9 +1417,20 @@ fn claude_falls_back_to_its_aliases() {
 #[test]
 fn the_models_endpoint_lists_active_ids() {
     let body = json!({"data":[
-        {"id":"claude-opus-5-5","display_name":"Opus 5.5","lifecycle":"active","line":"opus","capabilities":{"effort":{"low":true,"medium":true,"high":true,"xhigh":true,"max":true}}},
-        {"id":"claude-old-1","display_name":"Old 1","lifecycle":"deprecated","capabilities":{"effort":{"low":true}}},
-        {"id":"claude-haiku-5","display_name":"Haiku 5","line":"haiku","capabilities":{}}
+        {
+            "id": "claude-opus-5-5",
+            "display_name": "Opus 5.5",
+            "lifecycle": "active",
+            "line": "opus",
+            "capabilities": {"effort": {"low": true, "medium": true, "high": true, "xhigh": true, "max": true}},
+        },
+        {
+            "id": "claude-old-1",
+            "display_name": "Old 1",
+            "lifecycle": "deprecated",
+            "capabilities": {"effort": {"low": true}},
+        },
+        {"id": "claude-haiku-5", "display_name": "Haiku 5", "line": "haiku", "capabilities": {}},
     ]});
     let models = agents::api_page(&body);
     assert_eq!(models.len(), 2, "a retired model is left out");
@@ -1290,10 +1449,22 @@ fn a_model_names_its_family_by_id() {
     assert_eq!(agents::family(&json!({"agent":"claude","id":"claude-opus-5-5","model":"claude-opus-5-5"})), Some("opus"));
     assert_eq!(agents::family(&json!({"agent":"claude","id":"claude-haiku-4-5","model":"claude-haiku-4-5-20251001"})), Some("haiku"));
     assert_eq!(agents::family(&json!({"agent":"claude","id":"claude-opus","model":"opus"})), Some("opus"), "an alias names its family");
-    assert_eq!(agents::family(&json!({"agent":"claude","id":"claude-opus-5-5","family":"fable"})), Some("fable"), "the endpoint's line outranks the id");
+    assert_eq!(
+        agents::family(&json!({"agent":"claude","id":"claude-opus-5-5","family":"fable"})),
+        Some("fable"),
+        "the endpoint's line outranks the id"
+    );
     assert_eq!(agents::family(&json!({"agent":"codex","id":"codex-gpt-6-astra","model":"gpt-6-astra"})), None);
-    assert_eq!(agents::family(&json!({"agent":"claude","id":"my-opus-local","model":"opus","configured":true})), None, "a configured model keeps its entry");
-    assert_eq!(agents::family(&json!({"agent":"claude","id":"claude-opus-local","model":"opus","configured":true})), Some("opus"), "a configured id with a family word joins the family");
+    assert_eq!(
+        agents::family(&json!({"agent":"claude","id":"my-opus-local","model":"opus","configured":true})),
+        None,
+        "a configured model keeps its entry"
+    );
+    assert_eq!(
+        agents::family(&json!({"agent":"claude","id":"claude-opus-local","model":"opus","configured":true})),
+        Some("opus"),
+        "a configured id with a family word joins the family"
+    );
 }
 
 /// The pick lists one entry per Claude family: the family's live exact model,
@@ -1332,12 +1503,27 @@ fn the_pick_lists_one_entry_per_claude_family() {
 #[test]
 fn a_model_off_the_offer_stays_for_the_tasks_using_it() {
     let configured = json!([{"id":"claude-opus-5-5","label":"Preset","agent":"claude","model":"claude-opus-5-5"}]);
-    let all = json!({"claude":{"time":100,"models":[]},"gone":{"claude-opus":{"id":"claude-opus","label":"Claude Code · Opus (latest)","agent":"claude","model":"opus","reason":"no longer offered by Claude Code"}}});
+    let all = json!({
+        "claude": {"time": 100, "models": []},
+        "gone": {
+            "claude-opus": {
+                "id": "claude-opus",
+                "label": "Claude Code · Opus (latest)",
+                "agent": "claude",
+                "model": "opus",
+                "reason": "no longer offered by Claude Code",
+            },
+        },
+    });
     let m = agents::merge_from(&configured, &all);
     assert_eq!(m.len(), 2, "the model stays in the list");
     let gone = m.iter().find(|x| x["id"] == "claude-opus").unwrap();
     assert_eq!(gone["gone"], true);
-    assert_eq!(agents::availability(gone), Some(("no longer offered by Claude Code".to_string(), false)), "it is not offered for a new run");
+    assert_eq!(
+        agents::availability(gone),
+        Some(("no longer offered by Claude Code".to_string(), false)),
+        "it is not offered for a new run"
+    );
     assert_eq!(gone["label"], "Opus (latest)", "a label saved before D-150 drops the agent's name");
     let saved = json!({"codex":{"time":1,"models":[{"id":"codex-x","label":"Codex · GPT-6 X","agent":"codex","model":"x"}]}});
     assert_eq!(agents::merge_from(&json!([]), &saved)[0]["label"], "GPT-6 X");
@@ -1360,7 +1546,11 @@ fn a_model_error_names_the_offer_as_out_of_date() {
 fn a_run_shows_the_model_it_used() {
     let dir = testing::Scratch::new();
     let log = dir.join("log.jsonl");
-    fs::write(&log, "{\"type\":\"assistant\"}\n{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\",\"model\":\"claude-opus-5-5\"}\n").unwrap();
+    fs::write(
+        &log,
+        "{\"type\":\"assistant\"}\n{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\",\"model\":\"claude-opus-5-5\"}\n",
+    )
+    .unwrap();
     assert_eq!(used_model(&log).as_deref(), Some("claude-opus-5-5"));
     fs::write(&log, "not json\n{\"type\":\"thread.started\",\"thread_id\":\"t1\"}\n").unwrap();
     assert_eq!(used_model(&log), None, "a start event naming no model names none");
@@ -1381,10 +1571,12 @@ fn a_run_shows_the_model_it_used() {
 #[test]
 fn endpoints_are_checked_and_passed_to_codex() {
     // An endpoint's kind must match its agent.
-    let wrong = "[[models]]\nid = \"x\"\nlabel = \"X\"\nagent = \"claude\"\nmodel = \"m\"\nendpoint = { kind = \"openai\", base_url = \"http://h\" }\n";
+    let wrong = concat!(
+        "[[models]]\nid = \"x\"\nlabel = \"X\"\nagent = \"claude\"\nmodel = \"m\"\n",
+        "endpoint = { kind = \"openai\", base_url = \"http://h\" }\n",
+    );
     assert!(parse_system(wrong).unwrap_err().0.starts_with("E6020"));
-    let m =
-        json!({"label":"Local","endpoint":{"kind":"openai","base_url":"http://localhost:11434/v1","key_env":"SOLACE_TEST_UNSET_KEY"}});
+    let m = json!({"label":"Local","endpoint":{"kind":"openai","base_url":"http://localhost:11434/v1","key_env":"SOLACE_TEST_UNSET_KEY"}});
     let args = endpoint_args(&m, false);
     assert_eq!(args[1], "model_provider=\"solace_endpoint\"");
     let provider: toml::Value = format!("p = {}", args[3].split_once('=').unwrap().1).parse().unwrap();
@@ -1396,7 +1588,10 @@ fn endpoints_are_checked_and_passed_to_codex() {
     let stored = endpoint_args(&m, true);
     let provider: toml::Value = format!("p = {}", stored[3].split_once('=').unwrap().1).parse().unwrap();
     assert_eq!(provider["p"]["env_key"].as_str(), Some(setup::KEY_VAR));
-    let bad = "[[models]]\nid = \"x\"\nlabel = \"X\"\nagent = \"codex\"\nmodel = \"m\"\nendpoint = { kind = \"openai\", base_url = \"http://h\", stored_key = \"yes\" }\n";
+    let bad = concat!(
+        "[[models]]\nid = \"x\"\nlabel = \"X\"\nagent = \"codex\"\nmodel = \"m\"\n",
+        "endpoint = { kind = \"openai\", base_url = \"http://h\", stored_key = \"yes\" }\n",
+    );
     assert!(parse_system(bad).unwrap_err().0.starts_with("E6020"));
 }
 
@@ -1406,7 +1601,13 @@ fn models_and_keys_are_set_up_from_settings() {
     let dir = testing::Scratch::new();
     let (config, keys) = (dir.join("config.toml"), dir.join("keys.json"));
     fs::write(&config, "task_timeout = 60\n").unwrap();
-    let body = json!({"label":"Command Code","agent":"codex","model":"deepseek/deepseek-v4.1-flash","base_url":"https://api.commandcode.ai/provider/v1","key":"sk-1"});
+    let body = json!({
+        "label": "Command Code",
+        "agent": "codex",
+        "model": "deepseek/deepseek-v4.1-flash",
+        "base_url": "https://api.commandcode.ai/provider/v1",
+        "key": "sk-1",
+    });
     assert_eq!(setup::save(&config, &keys, &body).unwrap(), "command-code");
     let v = parse_system(&fs::read_to_string(&config).unwrap()).unwrap();
     assert_eq!(v["task_timeout"], 60, "other settings stay");
@@ -1427,7 +1628,14 @@ fn models_and_keys_are_set_up_from_settings() {
     setup::remove(&config, &keys, "command-code").unwrap();
     assert_eq!(setup::stored(&keys, "command-code"), None);
     // A model with its own variable keeps it and needs no stored key.
-    fs::write(&config, "[[models]]\nid = \"v\"\nlabel = \"V\"\nagent = \"claude\"\nmodel = \"m\"\nendpoint = { kind = \"anthropic\", base_url = \"http://h\", key_env = \"V_KEY\" }\n").unwrap();
+    fs::write(
+        &config,
+        concat!(
+            "[[models]]\nid = \"v\"\nlabel = \"V\"\nagent = \"claude\"\nmodel = \"m\"\n",
+            "endpoint = { kind = \"anthropic\", base_url = \"http://h\", key_env = \"V_KEY\" }\n",
+        ),
+    )
+    .unwrap();
     setup::save(&config, &keys, &json!({"id":"v","label":"V","agent":"claude","model":"m","base_url":"http://h2"})).unwrap();
     let v = parse_system(&fs::read_to_string(&config).unwrap()).unwrap();
     let m = v["models"].as_array().unwrap().iter().find(|m| m["id"] == "v").unwrap().clone();
@@ -1515,8 +1723,27 @@ fn transcripts_read_codex_and_claude_logs() {
     let dir = testing::Scratch::new();
     let log = dir.join("log.jsonl");
     let codex = [
-        json!({"type":"item.started","item":{"id":"i1","type":"mcp_tool_call","tool":"solace","arguments":{"command":"view a"},"status":"in_progress"}}),
-        json!({"type":"item.completed","item":{"id":"i1","type":"mcp_tool_call","tool":"solace","arguments":{"command":"view a","text":"x"},"result":{"content":[{"type":"text","text":"pub fn a()"}]},"status":"completed"}}),
+        json!({
+            "type": "item.started",
+            "item": {
+                "id": "i1",
+                "type": "mcp_tool_call",
+                "tool": "solace",
+                "arguments": {"command": "view a"},
+                "status": "in_progress",
+            },
+        }),
+        json!({
+            "type": "item.completed",
+            "item": {
+                "id": "i1",
+                "type": "mcp_tool_call",
+                "tool": "solace",
+                "arguments": {"command": "view a", "text": "x"},
+                "result": {"content": [{"type": "text", "text": "pub fn a()"}]},
+                "status": "completed",
+            },
+        }),
         json!({"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"All **done**."}}),
         json!({"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}),
     ];
@@ -1530,7 +1757,17 @@ fn transcripts_read_codex_and_claude_logs() {
         (Some("solace view a"), Some("ok"), Some("pub fn a()"))
     );
     // D-109: Codex's failed call where only some commands failed says how many in its title.
-    let batch = json!({"type":"item.completed","item":{"id":"i3","type":"mcp_tool_call","tool":"solace","arguments":{"command":"read a\ngrep x"},"result":{"content":[{"type":"text","text":"E6002\ndocs/x\n1 of 2 commands failed: read a\n"}]},"status":"failed"}});
+    let batch = json!({
+        "type": "item.completed",
+        "item": {
+            "id": "i3",
+            "type": "mcp_tool_call",
+            "tool": "solace",
+            "arguments": {"command": "read a\ngrep x"},
+            "result": {"content": [{"type": "text", "text": "E6002\ndocs/x\n1 of 2 commands failed: read a\n"}]},
+            "status": "failed",
+        },
+    });
     fs::write(&log, batch.to_string()).unwrap();
     let t = transcript(&log);
     assert_eq!((t[0]["title"].as_str(), t[0]["status"].as_str()), (Some("solace (1 of 2 failed) read a\ngrep x"), Some("failed")));
@@ -1542,11 +1779,17 @@ fn transcripts_read_codex_and_claude_logs() {
     let stopped = batch.to_string().replace("1 of 2 commands failed: read a", "1 of 3 commands failed: write a; skipped: run t; read b");
     fs::write(&log, stopped).unwrap();
     assert_eq!(transcript(&log)[0]["title"], "solace (1 of 3 failed, 2 skipped) read a\ngrep x");
-    assert_eq!(partly_failed("failed", "E\n1 of 2 commands failed: write a; skipped: run t\n").as_deref(), Some("(1 of 2 failed, 1 skipped)"));
+    assert_eq!(
+        partly_failed("failed", "E\n1 of 2 commands failed: write a; skipped: run t\n").as_deref(),
+        Some("(1 of 2 failed, 1 skipped)")
+    );
     assert_eq!(partly_failed("failed", "E\n1 of 2 commands failed: read a\n").as_deref(), Some("(1 of 2 failed)"));
     // D-119 point 5: a command's text can hold "; ", so the count is capped at the
     // commands the reply says were left after the failure.
-    assert_eq!(partly_failed("failed", "E\n1 of 2 commands failed: write a; skipped: read x; grep y\n").as_deref(), Some("(1 of 2 failed, 1 skipped)"));
+    assert_eq!(
+        partly_failed("failed", "E\n1 of 2 commands failed: write a; skipped: read x; grep y\n").as_deref(),
+        Some("(1 of 2 failed, 1 skipped)")
+    );
     let text = codex.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n") + "\nnot json\nstill not\n";
     fs::write(&log, text).unwrap();
     let t = transcript(&log);
@@ -1554,8 +1797,26 @@ fn transcripts_read_codex_and_claude_logs() {
     assert_eq!(t[3]["text"], "not json\nstill not");
     assert_eq!(last_words(&t).unwrap(), "All **done**.");
     let claude = [
-        json!({"type":"assistant","message":{"content":[{"type":"text","text":"Looking."},{"type":"tool_use","id":"u1","name":"mcp__solace__solace","input":{"command":"test"}}]}}),
-        json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"u1","content":[{"type":"text","text":"E1 failed"}],"is_error":true}]}}),
+        json!({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Looking."},
+                    {"type": "tool_use", "id": "u1", "name": "mcp__solace__solace", "input": {"command": "test"}},
+                ],
+            },
+        }),
+        json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "u1",
+                    "content": [{"type": "text", "text": "E1 failed"}],
+                    "is_error": true,
+                }],
+            },
+        }),
     ];
     fs::write(&log, claude.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
     let t = transcript(&log);
@@ -1565,8 +1826,31 @@ fn transcripts_read_codex_and_claude_logs() {
     );
     // D-109: a batch where only some commands failed says how many in its title.
     let batch = [
-        json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"u2","name":"mcp__solace__solace","input":{"command":"read a\ngrep x"}}]}}),
-        json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"u2","content":[{"type":"text","text":"==== solace read a ====\nE6002\n==== solace grep x ====\ndocs/x\n1 of 2 commands failed: read a\n"}],"is_error":true}]}}),
+        json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "u2",
+                    "name": "mcp__solace__solace",
+                    "input": {"command": "read a\ngrep x"},
+                }],
+            },
+        }),
+        json!({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "u2",
+                    "content": [{
+                        "type": "text",
+                        "text": "==== solace read a ====\nE6002\n==== solace grep x ====\ndocs/x\n1 of 2 commands failed: read a\n",
+                    }],
+                    "is_error": true,
+                }],
+            },
+        }),
     ];
     fs::write(&log, batch.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
     let t = transcript(&log);
@@ -1587,10 +1871,22 @@ fn transcripts_read_codex_and_claude_logs() {
     assert_eq!(usage.len(), 1);
     assert_eq!(usage[0]["text"], "310 input tokens (350 read from cache), 9 output tokens; last context 300 tokens");
     // Anthropic reports input outside the cache: the total adds reads and writes.
-    let result = json!({"type":"result","usage":{"input_tokens":16,"cache_read_input_tokens":166278,"cache_creation_input_tokens":34062,"output_tokens":4040}}).to_string();
+    let result = json!({
+        "type": "result",
+        "usage": {
+            "input_tokens": 16,
+            "cache_read_input_tokens": 166278,
+            "cache_creation_input_tokens": 34062,
+            "output_tokens": 4040,
+        },
+    })
+    .to_string();
     fs::write(&log, [lines.join("\n"), result].join("\n")).unwrap();
     let usage: Vec<Value> = transcript(&log).into_iter().filter(|e| e["kind"] == "usage").collect();
-    assert_eq!(usage[0]["text"], "200356 input tokens (166278 read from cache, 34062 written to cache), 4040 output tokens; last context 300 tokens");
+    assert_eq!(
+        usage[0]["text"],
+        "200356 input tokens (166278 read from cache, 34062 written to cache), 4040 output tokens; last context 300 tokens"
+    );
     assert_eq!(last_words(&[json!({"kind":"message","text":"é".repeat(600)})]).unwrap().chars().count(), 501);
 }
 
@@ -1600,7 +1896,11 @@ fn transcripts_read_codex_and_claude_logs() {
 fn briefs_name_unfinished_dependencies() {
     // `lib` is listed as a project so a dependency homed there keeps its home:
     // a home that is no project is re-homed on load (D-160).
-    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", "projects = [\"lib\"]\n"), ("lib/.solace/keep", "")]);
+    let p = testing::project(&[
+        ("src/app.gleam", "pub fn main() { 1 }\n"),
+        ("solace.toml", "projects = [\"lib\"]\n"),
+        ("lib/.solace/keep", ""),
+    ]);
     let top = scope::top(&p.root);
     let home = scope::dir(&top, &p.root);
     let dir = store_dir(&top);
@@ -1617,7 +1917,9 @@ fn briefs_name_unfinished_dependencies() {
     put("f", &home, "planning", &["b", "c"]);
     put("n", &home, "backlog", &[]);
     let w = waiting_on(&top, "t");
-    for part in ["Depends on:\n", "- a Task a (Assigned, in lib) — unfinished", "- b Task b (Complete)\n", "- c Task c (Canceled)\n", WAITING] {
+    for part in
+        ["Depends on:\n", "- a Task a (Assigned, in lib) — unfinished", "- b Task b (Complete)\n", "- c Task c (Canceled)\n", WAITING]
+    {
         assert!(w.contains(part), "{part} missing from:\n{w}");
     }
     assert_eq!((waiting_on(&top, "f"), waiting_on(&top, "n")), (String::new(), String::new()));
@@ -1634,10 +1936,19 @@ fn briefs_name_unfinished_dependencies() {
 
 #[test]
 fn briefs_hold_what_the_agent_needs_as_text() {
-    let t = json!({"id":"t1","title":"Add coolcalc","body":"A CLI calculator.","rank":3,"stamps":{},
-        "links":[{"name":"spec","url":"http://x"}],"notes":[{"author":"human","text":"Keep it small","time":1,"run":null}],
-        "questions":[{"id":"q","text":"Syntax?","options":["a","b"],"answer":"b"}],"runs":[{"id":"r1"}],"changes":[{"entity":"symbol:x","name":"calc.add","run":"r1"}],
-        "test_commands":[{"project":"a","commands":["rust-acceptance","spacing_parity"]}]});
+    let t = json!({
+        "id": "t1",
+        "title": "Add coolcalc",
+        "body": "A CLI calculator.",
+        "rank": 3,
+        "stamps": {},
+        "links": [{"name": "spec", "url": "http://x"}],
+        "notes": [{"author": "human", "text": "Keep it small", "time": 1, "run": null}],
+        "questions": [{"id": "q", "text": "Syntax?", "options": ["a", "b"], "answer": "b"}],
+        "runs": [{"id": "r1"}],
+        "changes": [{"entity": "symbol:x", "name": "calc.add", "run": "r1"}],
+        "test_commands": [{"project": "a", "commands": ["rust-acceptance", "spacing_parity"]}],
+    });
     let b = brief(&t, "work");
     for part in [
         "Make the change",
@@ -1673,9 +1984,10 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     // D-181: source files are projections; only a module, symbol or other file is named.
     for kind in ["work", "investigate", "review", "discuss"] {
         assert!(
-            brief(&t, kind).contains(
-                "Code held as symbols is read and cited by name (`lockdown.dispatch`, `checkout.pay`), not by source path: source files are projections written by Solace."
-            ),
+            brief(&t, kind).contains(concat!(
+                "Code held as symbols is read and cited by name (`lockdown.dispatch`, `checkout.pay`), ",
+                "not by source path: source files are projections written by Solace.",
+            )),
             "{kind}: missing the projection rule"
         );
     }
@@ -1850,7 +2162,8 @@ fn a_usage_limit_marks_the_sign_in_until_it_resets_or_a_run_succeeds() {
     assert!(!other.exists());
     // Claude Code's limit, in its stream-json result, with a reset it can't read: held until cleared.
     let claude = json!({"agent":"claude","model":"m"});
-    fs::write(&log, json!({"type":"result","is_error":true,"result":"You've hit your limit · resets soon","usage":{}}).to_string()).unwrap();
+    fs::write(&log, json!({"type":"result","is_error":true,"result":"You've hit your limit · resets soon","usage":{}}).to_string())
+        .unwrap();
     agents::observe(&path, &claude, &log, NOON, NOON, Some("stopped"), &zones).unwrap();
     assert_eq!(agents::limited(&path, "claude", NOON + 365 * 86400).as_deref(), Some("Claude Code usage limit reached (resets soon)"));
     // The mark is on disk, not only in memory.
@@ -1867,7 +2180,8 @@ fn a_usage_limit_marks_the_sign_in_until_it_resets_or_a_run_succeeds() {
     assert_eq!(agents::limited(&path, "claude", NOON), None);
     // A stopped run leaves the mark, even when its agent answered: it says
     // nothing about the sign-in.
-    fs::write(&log, json!({"type":"result","is_error":true,"result":"You've hit your limit · resets soon","usage":{}}).to_string()).unwrap();
+    fs::write(&log, json!({"type":"result","is_error":true,"result":"You've hit your limit · resets soon","usage":{}}).to_string())
+        .unwrap();
     agents::observe(&path, &claude, &log, NOON, NOON, Some("stopped"), &zones).unwrap();
     fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}).to_string()).unwrap();
     agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("stopped"), &zones).unwrap();
@@ -1892,13 +2206,30 @@ fn a_usage_limit_marks_the_sign_in_until_it_resets_or_a_run_succeeds() {
     // Claude Code reports its limit as a message, not an error: a message that
     // is exactly the limit's own text marks the sign-in, and is never counted
     // as "the agent answered".
-    fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"You've hit your limit · resets 2pm (UTC)"}]}}).to_string()).unwrap();
+    fs::write(
+        &log,
+        json!({"type":"assistant","message":{"content":[{"type":"text","text":"You've hit your limit · resets 2pm (UTC)"}]}}).to_string(),
+    )
+    .unwrap();
     agents::observe(&path, &claude, &log, NOON, NOON, Some("finished"), &zones).unwrap();
     assert_eq!(agents::limited(&path, "claude", NOON).as_deref(), Some("Claude Code usage limit reached (resets 2pm (UTC))"));
     agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("finished"), &zones).unwrap();
     assert!(agents::limited(&path, "claude", NOON).is_some());
     // A passing mention inside a longer message marks nothing, and is an answer.
-    fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"I noted: You've hit your limit · resets 2pm (UTC)\nThen I carried on."}]}}).to_string()).unwrap();
+    fs::write(
+        &log,
+        json!({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "text",
+                    "text": "I noted: You've hit your limit · resets 2pm (UTC)\nThen I carried on.",
+                }],
+            },
+        })
+        .to_string(),
+    )
+    .unwrap();
     agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("finished"), &zones).unwrap();
     assert_eq!(agents::limited(&path, "claude", NOON), None);
     // Try again clears a mark.
@@ -1918,7 +2249,9 @@ fn sign_ins_are_detected_without_a_model_call() {
     let home = testing::Scratch::new();
     let none = |_: &str| false;
     let now = NOON * 1000;
-    let check = |m: &Value, var: &dyn Fn(&str) -> bool| agents::local(m, &agents::Here { home: &home, var, stored: &|_| false, installed: &|_| true, now });
+    let check = |m: &Value, var: &dyn Fn(&str) -> bool| {
+        agents::local(m, &agents::Here { home: &home, var, stored: &|_| false, installed: &|_| true, now })
+    };
     let (codex, claude) = (json!({"agent":"codex","model":"m"}), json!({"agent":"claude","model":"m"}));
     let missing = agents::Here { home: &home, var: &none, stored: &none, installed: &|_| false, now };
     assert_eq!(agents::local(&codex, &missing).unwrap(), "codex is not installed (not on PATH)");
@@ -1939,7 +2272,10 @@ fn sign_ins_are_detected_without_a_model_call() {
     assert_eq!(check(&settings, &none).unwrap(), "No key yet; add one in Settings");
     let stored = agents::Here { home: &home, var: &none, stored: &|id| id == "cc", installed: &|_| true, now };
     assert!(agents::local(&settings, &stored).is_none());
-    assert!(agents::local(&endpoint.clone(), &agents::Here { stored: &|_| true, ..stored }).is_some(), "a key for another id is not this one's");
+    assert!(
+        agents::local(&endpoint.clone(), &agents::Here { stored: &|_| true, ..stored }).is_some(),
+        "a key for another id is not this one's"
+    );
     assert!(check(&json!({"agent":"codex","model":"m","endpoint":{"base_url":"http://x"}}), &none).is_none());
     // Codex's file: a token it can renew is a sign-in; neither key nor token has expired.
     fs::create_dir_all(home.join(".codex")).unwrap();
@@ -2038,8 +2374,16 @@ fn a_run_starts_where_the_named_symbols_are() {
     assert_eq!(start_project(&a, &t("app.one and plan.answer")), "a", "a tie stays home");
     assert_eq!(start_project(&a, &t("No names here")), "a");
     assert_eq!(start_project(&a, &json!({"title": "plan.answer"})), "a", "outside its scope");
-    assert_eq!(run_project(&json!({"project": "a"}), true, &a, &t("Change `plan.answer`.")), "a", "a resumed run keeps its recorded project");
-    assert_eq!(run_project(&json!({}), true, &a, &t("Change `plan.answer`.")), "a", "a conversation saved before projects were recorded restarts at the home");
+    assert_eq!(
+        run_project(&json!({"project": "a"}), true, &a, &t("Change `plan.answer`.")),
+        "a",
+        "a resumed run keeps its recorded project"
+    );
+    assert_eq!(
+        run_project(&json!({}), true, &a, &t("Change `plan.answer`.")),
+        "a",
+        "a conversation saved before projects were recorded restarts at the home"
+    );
     assert_eq!(run_project(&json!({}), false, &a, &t("Change `plan.answer`.")), "b", "a fresh run starts where its symbols are");
 }
 
@@ -2230,7 +2574,14 @@ fn cancel_an_added_module(s: &Store) {
     let found = existing_folders(&s.root);
     let before = snapshot(s).unwrap();
     s.db.execute("INSERT INTO modules(path,dir,header) SELECT 'ui/deep/new',dir,header FROM modules WHERE path='app'", []).unwrap();
-    s.db.execute("INSERT INTO symbols(id,module,name,kind,text,ord,revision,live) SELECT 'new1','ui/deep/new',name,kind,text,ord,revision,live FROM symbols WHERE module='app'", []).unwrap();
+    s.db.execute(
+        concat!(
+            "INSERT INTO symbols(id,module,name,kind,text,ord,revision,live) ",
+            "SELECT 'new1','ui/deep/new',name,kind,text,ord,revision,live FROM symbols WHERE module='app'",
+        ),
+        [],
+    )
+    .unwrap();
     s.materialize(&s.index().unwrap()).unwrap();
     assert!(s.root.join("src/ui/deep/new.gleam").exists());
     let after = snapshot(s).unwrap();
@@ -2354,7 +2705,12 @@ fn a_homeless_task_is_rehomed_to_the_first_project_of_its_scope() {
     let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
     assert_eq!((t["home"].as_str(), t["scope"].clone(), t["noProject"].is_null()), (Some("sub"), json!(["sub"]), true), "{t}");
     let saved = fs::read_to_string(store_dir(&root).join("t1.json")).unwrap();
-    assert!(saved.contains(r#""home": "sub""#) && saved.contains("Moved from `web` to `sub`") && saved.contains("Dropped `web` from its projects"), "{saved}");
+    assert!(
+        saved.contains(r#""home": "sub""#)
+            && saved.contains("Moved from `web` to `sub`")
+            && saved.contains("Dropped `web` from its projects"),
+        "{saved}"
+    );
     assert!(root.join("sub/.solace/board/t1").is_dir(), "its folder moved to the new home");
     assert!(!root.join(".solace/board/t1").exists(), "and left the root");
     assert_eq!(task(&root.join("sub"), "t1").unwrap()["home"], "sub", "it opens from its new home");
@@ -2365,7 +2721,14 @@ fn a_homeless_task_is_rehomed_to_the_first_project_of_its_scope() {
 #[test]
 fn a_homeless_task_with_a_live_run_is_not_rehomed() {
     let root = homeless_root();
-    fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"assigned","home":"web","scope":["sub","web"],"runs":[{"id":"r1","kind":"work","state":"running"}],"notes":[]}"#).unwrap();
+    fs::write(
+        store_dir(&root).join("t1.json"),
+        concat!(
+            r#"{"id":"t1","column":"assigned","home":"web","scope":["sub","web"],"#,
+            r#""runs":[{"id":"r1","kind":"work","state":"running"}],"notes":[]}"#,
+        ),
+    )
+    .unwrap();
     let mut t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
     assert_eq!((t["home"].as_str(), t["noProject"].as_bool()), (Some("web"), Some(true)), "{t}");
     assert!(root.join(".solace/board/t1").is_dir(), "its folder stays where the run works");
@@ -2380,7 +2743,8 @@ fn a_homeless_task_with_a_live_run_is_not_rehomed() {
 #[test]
 fn a_task_with_no_project_in_its_scope_goes_to_the_root() {
     let root = homeless_root();
-    fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"backlog","home":"web","scope":["web"],"runs":[],"notes":[]}"#).unwrap();
+    fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"backlog","home":"web","scope":["web"],"runs":[],"notes":[]}"#)
+        .unwrap();
     let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
     assert_eq!((t["home"].as_str(), t["scope"].clone()), (Some("."), json!(["."])), "{t}");
     let saved = fs::read_to_string(store_dir(&root).join("t1.json")).unwrap();
@@ -2404,7 +2768,11 @@ fn a_task_stays_without_a_project_when_the_root_is_none() {
 #[test]
 fn a_saved_no_project_mark_is_dropped_on_load() {
     let root = homeless_root();
-    fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"backlog","home":".","scope":["."],"noProject":true,"runs":[],"notes":[]}"#).unwrap();
+    fs::write(
+        store_dir(&root).join("t1.json"),
+        r#"{"id":"t1","column":"backlog","home":".","scope":["."],"noProject":true,"runs":[],"notes":[]}"#,
+    )
+    .unwrap();
     let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
     assert!(t["noProject"].is_null(), "listed unmarked: {t}");
     assert!(task(&root, "t1").unwrap()["noProject"].is_null(), "opens unmarked");
@@ -2417,7 +2785,11 @@ fn an_unreadable_project_list_marks_no_task() {
     let root = homeless_root();
     fs::write(root.join("solace.toml"), "projects = 5\n").unwrap();
     // A task that needs no workflow reads whole, so the listing reaches it.
-    fs::write(store_dir(&root).join("t1.json"), r#"{"id":"t1","column":"backlog","home":"web","scope":["sub","web"],"closedTime":null,"runs":[],"notes":[]}"#).unwrap();
+    fs::write(
+        store_dir(&root).join("t1.json"),
+        r#"{"id":"t1","column":"backlog","home":"web","scope":["sub","web"],"closedTime":null,"runs":[],"notes":[]}"#,
+    )
+    .unwrap();
     let t = all_tasks(&root).unwrap().into_iter().find(|t| t["id"] == "t1").unwrap();
     assert!(t["noProject"].is_null(), "{t}");
     assert_eq!(t["home"], "web", "and stays where it is");
@@ -2453,10 +2825,7 @@ fn an_approved_fetch_clears_the_reopen_failure() {
     if !crate::language::cargo::installed() {
         return;
     }
-    let root = testing::Scratch::new().with(&[
-        ("Cargo.toml", testing::CARGO),
-        ("src/lib.rs", "pub fn one() -> i32 {\n    1\n}\n"),
-    ]);
+    let root = testing::Scratch::new().with(&[("Cargo.toml", testing::CARGO), ("src/lib.rs", "pub fn one() -> i32 {\n    1\n}\n")]);
     fs::create_dir_all(root.join(".solace")).unwrap();
     fs::write(root.join(".solace/fetch-failed"), "cargo fetch failed: stale").unwrap();
     let base = fs::read_to_string(root.join("Cargo.toml")).unwrap();
@@ -2525,7 +2894,12 @@ fn briefs_name_the_test_commands_each_project_marks() {
         ("src/app.gleam", "pub fn main() { 1 }\n"),
         (
             "solace.toml",
-            "[commands]\nunit = { run = [\"gleam\", \"test\"] }\nspacing_parity = { run = [\"true\"], test = true }\nrust-acceptance = { run = [\"true\"], test = true }\nreview = { run = [\"true\"], allowed_in_reviews = true }\n",
+            concat!(
+                "[commands]\nunit = { run = [\"gleam\", \"test\"] }\n",
+                "spacing_parity = { run = [\"true\"], test = true }\n",
+                "rust-acceptance = { run = [\"true\"], test = true }\n",
+                "review = { run = [\"true\"], allowed_in_reviews = true }\n",
+            ),
         ),
     ]);
     let s = open(&p.root).unwrap();

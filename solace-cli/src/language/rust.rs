@@ -483,7 +483,10 @@ pub fn package(root: &Path) -> Result<Vec<(String, String, File)>, Failure> {
     }
     let moved = moved_targets(&manifest, package, name);
     if !moved.is_empty() {
-        return Err(Failure(format!("Cargo.toml sets {}; Solace reads a package's files from Cargo's default places for now.", moved.join(", ")), 1));
+        return Err(Failure(
+            format!("Cargo.toml sets {}; Solace reads a package's files from Cargo's default places for now.", moved.join(", ")),
+            1,
+        ));
     }
     let mut crates: Vec<String> = ["src/lib.rs", "src/main.rs"].into_iter().filter(|f| root.join(f).is_file()).map(String::from).collect();
     for n in entries(root, "src/bin")? {
@@ -495,7 +498,12 @@ pub fn package(root: &Path) -> Result<Vec<(String, String, File)>, Failure> {
     let main = match crates.as_slice() {
         [one] => one.clone(),
         [] => return Err(Failure("This package has no crate: no `src/main.rs`, `src/lib.rs` or program in `src/bin/`.".into(), 1)),
-        _ => return Err(Failure(format!("This package has {} crates ({}); Solace holds a package of one crate.", crates.len(), crates.join(", ")), 1)),
+        _ => {
+            return Err(Failure(
+                format!("This package has {} crates ({}); Solace holds a package of one crate.", crates.len(), crates.join(", ")),
+                1,
+            ));
+        }
     };
     let mut out = vec![];
     let mut refused = vec![];
@@ -514,7 +522,10 @@ pub fn package(root: &Path) -> Result<Vec<(String, String, File)>, Failure> {
     let mut modules = HashMap::new();
     for (path, module, _) in &out {
         if let Some(first) = modules.insert(module.as_str(), path.as_str()) {
-            return Err(Failure(format!("Two modules are named `{module}` ({first}, {path}); Solace holds one module of each name for now."), 1));
+            return Err(Failure(
+                format!("Two modules are named `{module}` ({first}, {path}); Solace holds one module of each name for now."),
+                1,
+            ));
         }
     }
     Ok(out)
@@ -628,7 +639,10 @@ fn walk(
     let ok = file.refusals.is_empty();
     if ok {
         if let Some(name) = inline_file_mod(&text, &file.items) {
-            return Err(Failure(format!("{rel}: `{name}` is a `mod x;` inside an inline `mod {{ … }}`; Solace doesn't hold one there yet."), 1));
+            return Err(Failure(
+                format!("{rel}: `{name}` is a `mod x;` inside an inline `mod {{ … }}`; Solace doesn't hold one there yet."),
+                1,
+            ));
         }
     } else {
         refused.extend(file.refusals.iter().map(|r| format!("{rel}: line {} (`{}`): {}", r.line, r.quote, r.message)));
@@ -784,4 +798,3 @@ pub fn import_texts(source: &str) -> Vec<String> {
     collect(&file.items, source, &mut out);
     out
 }
-

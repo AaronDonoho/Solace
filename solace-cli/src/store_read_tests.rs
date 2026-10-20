@@ -5,20 +5,49 @@ use crate::testing::*;
 
 /// A crate whose `src/a/agents.rs` makes module `a::agents`, so a suffix name
 /// (`agents::deep`) has to resolve.
-const LIB: &str = "//! A sample crate.\n\npub mod a;\n\n/// The store.\npub struct Store {\n    pub root: String,\n}\n\nimpl Store {\n    /// Opens it.\n    pub fn open() -> Self {\n        Store { root: String::new() }\n    }\n}\n\npub fn helper() -> i32 {\n    Store::open();\n    1\n}\n";
+const LIB: &str = r#"//! A sample crate.
+
+pub mod a;
+
+/// The store.
+pub struct Store {
+    pub root: String,
+}
+
+impl Store {
+    /// Opens it.
+    pub fn open() -> Self {
+        Store { root: String::new() }
+    }
+}
+
+pub fn helper() -> i32 {
+    Store::open();
+    1
+}
+"#;
 
 /// The `a::agents` module: a container and its method, the shape of the
 /// Done-when name `board::agents.Store::open`.
-const AGENTS: &str = "pub struct Panel {\n    pub id: u32,\n}\n\nimpl Panel {\n    pub fn show() -> u32 {\n        3\n    }\n}\n\npub fn deep() -> i32 {\n    2\n}\n";
+const AGENTS: &str = r#"pub struct Panel {
+    pub id: u32,
+}
+
+impl Panel {
+    pub fn show() -> u32 {
+        3
+    }
+}
+
+pub fn deep() -> i32 {
+    2
+}
+"#;
 
 /// The sample crate, read into a new store.
 fn sample() -> (Scratch, Store) {
-    let root = Scratch::new().with(&[
-        ("Cargo.toml", CARGO),
-        ("src/lib.rs", LIB),
-        ("src/a.rs", "pub mod agents;\n"),
-        ("src/a/agents.rs", AGENTS),
-    ]);
+    let root =
+        Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", LIB), ("src/a.rs", "pub mod agents;\n"), ("src/a/agents.rs", AGENTS)]);
     import(&root).unwrap();
     let store = Store::at(&root).unwrap();
     (root, store)
@@ -115,6 +144,10 @@ fn a_rust_session_lists_names_and_the_brief() {
     assert!(out.contains("Store, Store::open, helper"), "{out}");
     assert!(out.contains("a::agents — "), "{out}");
     assert!(out.contains("Rust in Solace: every item has its own name, once per module"), "{out}");
+    assert!(out.contains("a::agents.Panel::show"), "{out}");
+    assert!(out.contains("the module is the one holding the `impl`"), "{out}");
+    assert!(out.contains("`find <text>` searches Rust source; `grep` searches other files only."), "{out}");
+    assert!(!out.contains("<module>.tests::<name>"), "{out}");
 }
 
 /// A Gleam session doesn't carry the Rust lines.
@@ -123,6 +156,9 @@ fn a_gleam_session_does_not_carry_the_brief() {
     let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
     let out = p.session(&[]).unwrap();
     assert!(!out.contains("Rust in Solace"), "{out}");
+    assert!(!out.contains("<module>.<Type>::<fn>"), "{out}");
+    assert!(!out.contains("<module>.tests::<name>"), "{out}");
+    assert!(!out.contains("`find <text>` searches Rust source; `grep` searches other files only."), "{out}");
 }
 
 /// `session start --task` carries the Rust lines too.
@@ -131,6 +167,8 @@ fn a_task_session_carries_the_brief() {
     let (_root, store) = sample();
     let out = store.task_session("change helper", None, "").unwrap();
     assert!(out.contains("Rust in Solace: every item has its own name"), "{out}");
+    assert!(out.contains("a::agents.Panel::show"), "{out}");
+    assert!(out.contains("the module is the one holding the `impl`"), "{out}");
 }
 
 /// A Rust index builds the reference graph from the names its text mentions:
@@ -161,9 +199,52 @@ fn refs_and_impact_answer_rust_names() {
 
 /// A crate whose tests sit in a `#[path]` file, an inline module and a
 /// `tests/` crate, with a helper only the tests call (D-170).
-const REACH_LIB: &str = "//! Sample.\n\npub mod other;\n\npub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n\npub fn sub(a: i32, b: i32) -> i32 {\n    a - b\n}\n\n#[cfg(test)]\n#[path = \"lib_tests.rs\"]\nmod tests;\n";
-const REACH_TESTS: &str = "use crate::add;\n\nfn helper() -> i32 {\n    add(1, 1)\n}\n\n#[test]\nfn add_works() {\n    assert_eq!(add(1, 2), 3);\n}\n\n#[test]\nfn helper_works() {\n    assert_eq!(helper(), 2);\n}\n";
-const REACH_OTHER: &str = "pub fn twice(n: i32) -> i32 {\n    n * 2\n}\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n\n    #[test]\n    fn twice_works() {\n        assert_eq!(twice(1), 2);\n    }\n}\n";
+const REACH_LIB: &str = r#"//! Sample.
+
+pub mod other;
+
+pub fn add(a: i32, b: i32) -> i32 {
+    a + b
+}
+
+pub fn sub(a: i32, b: i32) -> i32 {
+    a - b
+}
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;
+"#;
+const REACH_TESTS: &str = r#"use crate::add;
+
+fn helper() -> i32 {
+    add(1, 1)
+}
+
+#[test]
+fn add_works() {
+    assert_eq!(add(1, 2), 3);
+}
+
+#[test]
+fn helper_works() {
+    assert_eq!(helper(), 2);
+}
+"#;
+const REACH_OTHER: &str = r#"pub fn twice(n: i32) -> i32 {
+    n * 2
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn twice_works() {
+        assert_eq!(twice(1), 2);
+    }
+}
+"#;
 const REACH_INTEGRATION: &str = "use app::sub;\n\n#[test]\nfn sub_works() {\n    assert_eq!(sub(2, 1), 1);\n}\n";
 
 /// The sample crate of the test-reach checks, read into a new store.
@@ -219,4 +300,114 @@ fn an_unknown_name_suggests_by_its_leaf() {
         let e = store.resolve(&ix, miss).unwrap_err();
         assert!(e.0.contains("Similar names: crate.helper"), "{miss}: {}", e.0);
     }
+}
+
+/// A crate with a real method and a real test in an inline `mod tests`.
+const INLINE: &str = r#"pub struct Store;
+
+impl Store {
+    pub fn open() -> Self {
+        Store
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opens() {
+        Store::open();
+    }
+}
+"#;
+
+/// A crate with a free function only: no method and no inline test.
+const FREE: &str = r#"pub fn only() -> i32 {
+    1
+}
+"#;
+
+/// A Rust session names a real inline test and the header that adds another.
+#[test]
+fn a_rust_session_names_an_inline_test() {
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", INLINE)]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.session(&[]).unwrap();
+    assert!(out.contains("crate.Store::open"), "{out}");
+    assert!(out.contains("crate.tests::opens"), "{out}");
+    assert!(out.contains("*** Add: crate::tests.<test>"), "{out}");
+}
+
+/// A crate with no method and no inline test leaves those lines out.
+#[test]
+fn a_rust_session_without_examples_omits_their_lines() {
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", FREE)]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.session(&[]).unwrap();
+    assert!(!out.contains("<module>.<Type>::<fn>"), "{out}");
+    assert!(!out.contains("<module>.tests::<name>"), "{out}");
+    assert!(out.contains("`find <text>` searches Rust source; `grep` searches other files only."), "{out}");
+}
+
+/// A crate with a real test in a nested inline `mod tests`, after a `tests`
+/// module that has no test.
+const NESTED: &str = r#"#[cfg(test)]
+mod tests {
+    fn helper() {}
+}
+
+#[cfg(test)]
+mod outer {
+    #[cfg(test)]
+    mod tests {
+        #[tokio::test]
+        async fn works() {}
+    }
+}
+"#;
+
+/// A test-only method comes before a real one, so the brief must skip it.
+const METHOD_CHOICE: &str = r#"pub struct First;
+
+impl First {
+    #[cfg(test)]
+    pub fn test_only() -> Self {
+        First
+    }
+}
+
+pub struct Second;
+
+impl Second {
+    pub fn real() -> Self {
+        Second
+    }
+}
+"#;
+
+/// A session finds a real test in a nested inline `mod tests`, even when an
+/// earlier `tests` module has none, and names the full path to add one.
+#[test]
+fn a_rust_session_finds_a_nested_inline_test() {
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", NESTED)]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.session(&[]).unwrap();
+    assert!(!out.contains("<module>.<Type>::<fn>"), "{out}");
+    assert!(out.contains("crate.outer::tests::works"), "{out}");
+    assert!(out.contains("*** Add: crate::outer::tests.<test>"), "{out}");
+}
+
+/// A test-only `impl` method doesn't become the method example.
+#[test]
+fn a_rust_session_prefers_a_non_test_method() {
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", METHOD_CHOICE)]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.session(&[]).unwrap();
+    assert!(out.contains("crate.Second::real"), "{out}");
+    assert!(!out.contains("crate.First::test_only"), "{out}");
 }

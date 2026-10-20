@@ -85,7 +85,10 @@ fn check(statement: &str) -> Value {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
             '=' if depth == 0 && chars.get(i + 1) == Some(&'=') => {
-                return json!({"call":chars[..i].iter().collect::<String>().trim(),"expected":chars[i+2..].iter().collect::<String>().trim()});
+                return json!({
+                    "call": chars[..i].iter().collect::<String>().trim(),
+                    "expected": chars[i + 2..].iter().collect::<String>().trim(),
+                });
             }
             _ => {}
         }
@@ -233,7 +236,15 @@ fn requests(ix: &Index, i: usize, params: &[(String, String)]) -> Vec<Value> {
         if cons.iter().filter(|(_, fields)| !fields.is_empty()).count() >= 3 {
             return cons
                 .into_iter()
-                .map(|(name, labels)| json!({"name":spoken(&name),"fields":labels.into_iter().map(|l| l.map_or("a value".into(), |l| spaced(&l))).collect::<Vec<_>>()}))
+                .map(|(name, labels)| {
+                    json!({
+                        "name": spoken(&name),
+                        "fields": labels
+                            .into_iter()
+                            .map(|l| l.map_or("a value".into(), |l| spaced(&l)))
+                            .collect::<Vec<_>>(),
+                    })
+                })
                 .collect();
         }
     }
@@ -267,8 +278,21 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
         let (params, out) = parts(&sig, &s.name);
         let public = s.text.contains(&format!("pub fn {}(", s.name));
         areas.insert(s.module.clone());
-        nodes.push(json!({"id":s.id,"kind":if entry {"entry"} else {"logic"},"name":s.name,"module":s.module,"summary":summary,"signature":sig,"known":"derived","tests":count,"changed":changed.contains(&format!("symbol:{}",s.id)),
-            "public":public,"takes":takes(&params),"gives":if out.is_empty() {String::new()} else {words(&out)},"requests":if entry {requests(ix, i, &params)} else {vec![]}}));
+        nodes.push(json!({
+            "id": s.id,
+            "kind": if entry { "entry" } else { "logic" },
+            "name": s.name,
+            "module": s.module,
+            "summary": summary,
+            "signature": sig,
+            "known": "derived",
+            "tests": count,
+            "changed": changed.contains(&format!("symbol:{}", s.id)),
+            "public": public,
+            "takes": takes(&params),
+            "gives": if out.is_empty() { String::new() } else { words(&out) },
+            "requests": if entry { requests(ix, i, &params) } else { vec![] },
+        }));
         // State (D-55.3): taken and returned is a change, taken alone a read; only the function's own signature counts.
         for t in params.iter().map(|(_, t)| base(t)).filter(|b| state.contains(*b)).collect::<BTreeSet<_>>() {
             let returned = out.split(|c: char| !c.is_alphanumeric() && c != '_').any(|w| w == t);
@@ -305,11 +329,33 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
             Some(("reads", t)) if state.contains(t) => format!("Takes the program's {t} and doesn't return it."),
             _ => String::new(),
         };
-        nodes.push(json!({"id":format!("effect:{cat}"),"kind":"effect","name":cat,"module":"","summary":summary,"signature":"","known":"derived","tests":0,"changed":false,"calls":calls}));
+        nodes.push(json!({
+            "id": format!("effect:{cat}"),
+            "kind": "effect",
+            "name": cat,
+            "module": "",
+            "summary": summary,
+            "signature": "",
+            "known": "derived",
+            "tests": 0,
+            "changed": false,
+            "calls": calls,
+        }));
     }
     for &i in &tests {
         let s = &ix.syms[i];
-        nodes.push(json!({"id":s.id,"kind":"test","name":s.name,"module":s.module,"summary":"","signature":ix.signature(s),"known":"derived","tests":0,"changed":changed.contains(&format!("symbol:{}",s.id)),"checks":checks(&s.text)}));
+        nodes.push(json!({
+            "id": s.id,
+            "kind": "test",
+            "name": s.name,
+            "module": s.module,
+            "summary": "",
+            "signature": ix.signature(s),
+            "known": "derived",
+            "tests": 0,
+            "changed": changed.contains(&format!("symbol:{}", s.id)),
+            "checks": checks(&s.text),
+        }));
         for &j in &ix.uses[i] {
             if visible.contains(&j) {
                 edges.push(json!({"from":s.id,"to":ix.syms[j].id,"kind":"tests","known":"derived","direct":true}));
@@ -326,7 +372,19 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
         } else {
             "Unwatched: Solace doesn't search it as code. Agents can read and write it; their direct edits are undone with the task."
         };
-        nodes.push(json!({"id":format!("file:{name}"),"kind":"file","name":name,"module":"","summary":"","signature":"","known":"derived","tests":0,"changed":changed.contains(&format!("file:{name}")),"tier":tier,"sentence":sentence}));
+        nodes.push(json!({
+            "id": format!("file:{name}"),
+            "kind": "file",
+            "name": name,
+            "module": "",
+            "summary": "",
+            "signature": "",
+            "known": "derived",
+            "tests": 0,
+            "changed": changed.contains(&format!("file:{name}")),
+            "tier": tier,
+            "sentence": sentence,
+        }));
     }
     nodes.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
     // Areas (D-55.1): each source module with a function in the graph, its doc comment as the summary.
@@ -579,8 +637,17 @@ fn review_graphs(before: &Value, after: &Value, task: &Value, reach: &Value, set
         untested,
         if stored["state"].is_null() { ", tests not run yet" } else { "" }
     );
-    json!({"entries":entries,"effects":{"added":effects_added,"removed":effects_removed},"signatures":signatures,"tests":tests,"files":files,
-        "untested":reach["untested"],"suites":reach["suites"],"leaves":reach["leaves"],"summary":summary})
+    json!({
+        "entries": entries,
+        "effects": {"added": effects_added, "removed": effects_removed},
+        "signatures": signatures,
+        "tests": tests,
+        "files": files,
+        "untested": reach["untested"],
+        "suites": reach["suites"],
+        "leaves": reach["leaves"],
+        "summary": summary,
+    })
 }
 pub fn review(s: &Store, task: &Value) -> Result<Value, Failure> {
     let tid = task["id"].as_str().unwrap();
@@ -767,9 +834,13 @@ pub fn api(s: &Store, method: &str, parts: &[&str], query: &HashMap<String, Stri
                 Err(e) if cut.len() < bytes.len() && cut.len() - e.valid_up_to() < 4 => std::str::from_utf8(&cut[..e.valid_up_to()]).ok(),
                 _ => None,
             };
-            Ok(
-                json!({"path": name, "category": category, "text": text, "size": bytes.len(), "truncated": text.is_some() && cut.len() < bytes.len()}),
-            )
+            Ok(json!({
+                "path": name,
+                "category": category,
+                "text": text,
+                "size": bytes.len(),
+                "truncated": text.is_some() && cut.len() < bytes.len(),
+            }))
         }
         ("GET", ["nodes", id]) => {
             let g = graph(s)?;
@@ -919,7 +990,13 @@ pub fn main_test() {
             (
                 "src",
                 "app/api",
-                "import app/db.{type Db}\npub type Colour {\n  Red\n  Green\n  Blue\n}\npub fn paint(c: Colour) -> Int { 1 }\npub type Request {\n  CreateOrder(customer_id: Int)\n  AddItem(order_id: Int, sku: String)\n  Cancel(Int)\n}\npub fn handle(d: Db, request: Request) -> #(Db, String) { #(d, \"\") }",
+                concat!(
+                    "import app/db.{type Db}\n",
+                    "pub type Colour {\n  Red\n  Green\n  Blue\n}\n",
+                    "pub fn paint(c: Colour) -> Int { 1 }\n",
+                    "pub type Request {\n  CreateOrder(customer_id: Int)\n  AddItem(order_id: Int, sku: String)\n  Cancel(Int)\n}\n",
+                    "pub fn handle(d: Db, request: Request) -> #(Db, String) { #(d, \"\") }",
+                ),
             ),
         ]);
         let g = graph_index(&ix, &[], &HashSet::new());
@@ -931,7 +1008,11 @@ pub fn main_test() {
         assert_eq!(handle["gives"], "Db and text");
         assert_eq!(
             handle["requests"],
-            json!([{"name":"Create order","fields":["customer id"]},{"name":"Add item","fields":["order id","sku"]},{"name":"Cancel","fields":["a value"]}])
+            json!([
+                {"name": "Create order", "fields": ["customer id"]},
+                {"name": "Add item", "fields": ["order id", "sku"]},
+                {"name": "Cancel", "fields": ["a value"]},
+            ])
         );
         assert_eq!(node("app/api", "paint")["requests"], json!([]));
         assert_eq!(node("app/a", "change")["takes"], json!(["Db", "order id"]));
@@ -1066,14 +1147,20 @@ pub fn main_test() {
                 ("src/app.gleam", "pub fn main(n: Int) -> Int {\n  helper(n)\n}\n\nfn helper(n: Int) -> Int {\n  n\n}\n"),
                 (
                     "test/app_test.gleam",
-                    "import app\n\npub fn main_test() {\n  assert app.main(1) == 1\n  assert app.main(2) == 2\n  assert app.main(3) == 3\n  assert app.main(4) == 4\n  assert app.main(5) == 5\n  assert app.main(6) == 6\n  assert app.main(7) == 7\n}\n",
+                    concat!(
+                        "import app\n\npub fn main_test() {\n",
+                        "  assert app.main(1) == 1\n  assert app.main(2) == 2\n  assert app.main(3) == 3\n",
+                        "  assert app.main(4) == 4\n  assert app.main(5) == 5\n  assert app.main(6) == 6\n",
+                        "  assert app.main(7) == 7\n}\n",
+                    ),
                 ),
                 ("gleam.toml", "name=\"fixture\"\nversion=\"1.0.0\"\n"),
             ])
             .import();
         let root = p.root.clone();
         let g = board::api(&root, "GET", "/graph", json!({})).unwrap();
-        let id_of = |name: &str| g["nodes"].as_array().unwrap().iter().find(|n| n["name"] == name).unwrap()["id"].as_str().unwrap().to_string();
+        let id_of =
+            |name: &str| g["nodes"].as_array().unwrap().iter().find(|n| n["name"] == name).unwrap()["id"].as_str().unwrap().to_string();
         let node = board::api(&root, "GET", &format!("/nodes/{}", id_of("main")), json!({})).unwrap();
         assert_eq!(node["callees"], json!([id_of("helper")]));
         assert_eq!(node["callers"], json!([]));
@@ -1105,9 +1192,28 @@ pub fn main_test() {
             &[],
             &HashSet::new(),
         );
-        let task = json!({"id":"t","changes":[{"entity":"symbol:fn:app.main"}],
-            "review_tests": {"base":"x","state":"done","results":[{"id":"fn:app_test.main_test","name":"main_test","result":"unfinished","checks":[{"call":"app.main(1)","expected":"2"}]}]}});
-        let r = review_graphs(&before, &after, &task, &json!({"tests":["fn:app_test.main_test"],"untested":[],"suites":[],"leaves":[]}), &"".parse().unwrap(), Path::new("/tmp"));
+        let task = json!({
+            "id": "t",
+            "changes": [{"entity": "symbol:fn:app.main"}],
+            "review_tests": {
+                "base": "x",
+                "state": "done",
+                "results": [{
+                    "id": "fn:app_test.main_test",
+                    "name": "main_test",
+                    "result": "unfinished",
+                    "checks": [{"call": "app.main(1)", "expected": "2"}],
+                }],
+            },
+        });
+        let r = review_graphs(
+            &before,
+            &after,
+            &task,
+            &json!({"tests":["fn:app_test.main_test"],"untested":[],"suites":[],"leaves":[]}),
+            &"".parse().unwrap(),
+            Path::new("/tmp"),
+        );
         assert_eq!(
             r["signatures"],
             json!([{"id":"fn:app.main","before":"pub fn main(n: Int) -> Int","after":"pub fn main(n: Int, k: Int) -> Int"}])
@@ -1121,8 +1227,9 @@ pub fn main_test() {
 
     #[test]
     fn test_failure_blocks() {
-        let f =
-            gleam::failures("todo test/app_test.gleam:3\n test: app_test.todo_test\nassert test/app_test.gleam:6\n test: app_test.wrong_test\n");
+        let f = gleam::failures(
+            "todo test/app_test.gleam:3\n test: app_test.todo_test\nassert test/app_test.gleam:6\n test: app_test.wrong_test\n",
+        );
         assert_eq!(f["app_test.todo_test"].0, "unfinished");
         assert_eq!(f["app_test.wrong_test"].0, "wrong");
         assert!(!f.contains_key("app_test.ok_test"));

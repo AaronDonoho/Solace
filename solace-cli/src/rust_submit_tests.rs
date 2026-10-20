@@ -50,3 +50,21 @@ fn a_long_line_counts_columns_not_characters() {
     assert!(super::long_line_note("crate.x", &"\u{1fa70}".repeat(51), 100).is_some());
     assert!(super::long_line_note("crate.x", &"e\u{301}".repeat(60), 100).is_none());
 }
+
+/// A format's text still can't add or drop a `mod` (D-180).
+#[test]
+fn a_format_refuses_a_changed_mod_list() {
+    let lib = "pub fn one() -> i32 {\n    1\n}\n\nmod tests;\n";
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", crate::testing::CARGO),
+        ("src/lib.rs", lib),
+        ("src/tests.rs", "pub fn helper() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = crate::Store::at(&root).unwrap();
+    for text in ["pub fn one() -> i32 {\n    1\n}\n\nmod tests;\nmod extra;\n", "pub fn one() -> i32 {\n    1\n}\n"] {
+        let err = store.submit_module_rust("crate", text, true).unwrap_err().0;
+        assert!(err.contains("`mod` list can't change"), "{err}");
+        assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+    }
+}

@@ -1,6 +1,14 @@
 use super::*;
 
-const SRC: &str = "//// Checkout.\n\nimport gleam/list\nimport gleam/order as ordering\nimport pilot/order.{type Order, Line as L}\n\n// section\n\n/// Pays.\npub fn pay(a: Int) -> Result(\n  Int,\n  Nil,\n) {\n  list.map([], fn(x) { L(x) })\n  // helper(\"no\")\n  helper(\"a.b\")\n}\n\n@deprecated(\"x\")\nfn helper(s: String) {\n  s\n}\n\npub type Status {\n  Draft\n  /// doc\n  Cancelled(reason: String)\n}\n\nconst limit = 3\n";
+const SRC: &str = concat!(
+    "//// Checkout.\n\nimport gleam/list\nimport gleam/order as ordering\n",
+    "import pilot/order.{type Order, Line as L}\n\n// section\n\n/// Pays.\n",
+    "pub fn pay(a: Int) -> Result(\n  Int,\n  Nil,\n) {\n",
+    "  list.map([], fn(x) { L(x) })\n  // helper(\"no\")\n  helper(\"a.b\")\n}\n\n",
+    "@deprecated(\"x\")\nfn helper(s: String) {\n  s\n}\n\n",
+    "pub type Status {\n  Draft\n  /// doc\n  Cancelled(reason: String)\n}\n\n",
+    "const limit = 3\n",
+);
 
 #[test]
 fn splits_items_with_leading_comments() {
@@ -57,7 +65,15 @@ fn reference_spans_are_byte_offsets_of_the_source() {
     let code = "pub fn f(t: Task) {\n  let s = \"é Task\" // Task\n  board.go(Task(1), s)\n}";
     let spans: Vec<(String, &str)> = references_spans(code)
         .into_iter()
-        .map(|(r, a, b)| (match r { Ref::Bare(n) => n, Ref::Qualified(a, m) => format!("{a}.{m}") }, &code[a..b]))
+        .map(|(r, a, b)| {
+            (
+                match r {
+                    Ref::Bare(n) => n,
+                    Ref::Qualified(a, m) => format!("{a}.{m}"),
+                },
+                &code[a..b],
+            )
+        })
         .filter(|(n, _)| n == "Task" || n == "board.go")
         .collect();
     assert_eq!(spans, [("Task".into(), "Task"), ("board.go".into(), "board.go"), ("Task".into(), "Task")]);
@@ -66,7 +82,10 @@ fn reference_spans_are_byte_offsets_of_the_source() {
 
 #[test]
 fn record_fields_and_field_reads() {
-    let ty = "pub type Quote {\n  Quote(\n    /// the lines\n    lines: List(Line),\n    total_cents: Int,\n  )\n  Empty\n  Pair(Int, label: String)\n}";
+    let ty = concat!(
+        "pub type Quote {\n  Quote(\n    /// the lines\n    lines: List(Line),\n",
+        "    total_cents: Int,\n  )\n  Empty\n  Pair(Int, label: String)\n}",
+    );
     let none: Vec<Option<String>> = vec![];
     assert_eq!(
         record_fields(ty),
@@ -76,7 +95,11 @@ fn record_fields_and_field_reads() {
             ("Pair".to_string(), vec![None, Some("label".to_string())]),
         ]
     );
-    let code = "pub fn f(q: Quote) {\n  let t = q.total_cents\n  let Quote(lines: ls, ..) = q\n  let r = Quote(..q, total_cents: tax.rate)\n  case g(q).lines {\n    Pair(_, label:) -> label\n  }\n  r.inner.depth\n}";
+    let code = concat!(
+        "pub fn f(q: Quote) {\n  let t = q.total_cents\n  let Quote(lines: ls, ..) = q\n",
+        "  let r = Quote(..q, total_cents: tax.rate)\n  case g(q).lines {\n",
+        "    Pair(_, label:) -> label\n  }\n  r.inner.depth\n}",
+    );
     let got: Vec<(String, usize)> = field_reads(code);
     let got: Vec<(&str, usize)> = got.iter().map(|(f, l)| (f.as_str(), *l)).collect();
     assert_eq!(got, [("total_cents", 1), ("lines", 4), ("inner", 7), ("depth", 7), ("lines", 2), ("label", 5)]);
@@ -84,7 +107,12 @@ fn record_fields_and_field_reads() {
 
 #[test]
 fn locals_shadow_top_level_names() {
-    let code = "pub fn f(quote: Quote, shipping: S) -> Int {\n  let tax = tax.quote(1)\n  let assert Ok(#(db, o)) = g(o)\n  list.map([], fn(order) { order.id })\n  case x {\n    Ok(line) if line > 0 -> line + tax.total + db\n    order.Paid -> order.x\n  }\n  shipping.cost + quote.total + h(label: 1)\n}";
+    let code = concat!(
+        "pub fn f(quote: Quote, shipping: S) -> Int {\n  let tax = tax.quote(1)\n",
+        "  let assert Ok(#(db, o)) = g(o)\n  list.map([], fn(order) { order.id })\n",
+        "  case x {\n    Ok(line) if line > 0 -> line + tax.total + db\n    order.Paid -> order.x\n  }\n",
+        "  shipping.cost + quote.total + h(label: 1)\n}",
+    );
     let q = qualified(code);
     let bare = bare_names(code);
     assert_eq!(q, ["tax.quote", "list.map", "order.Paid", "order.x"]);
@@ -92,12 +120,10 @@ fn locals_shadow_top_level_names() {
     assert!(!bare.contains(&"quote".to_string()) && !bare.contains(&"line".to_string()) && !bare.contains(&"label".to_string()));
     // a `use` or `let` pattern binds its names; it doesn't refer to symbols of that name
     let bare = bare_names("pub fn f() {\n  use request <- try(g())\n  let tax = 1\n  request + tax\n}");
-    assert!(
-        bare.contains(&"g".to_string()) && !bare.contains(&"request".to_string()) && !bare.contains(&"tax".to_string()),
-        "{bare:?}"
-    );
+    assert!(bare.contains(&"g".to_string()) && !bare.contains(&"request".to_string()) && !bare.contains(&"tax".to_string()), "{bare:?}");
     // a binding starts after its whole right-hand side, however many lines it takes
-    let code = "pub fn f() {\n  use customer <- result.try(\n    customer.Customer(id: 1)\n    |> customer.validate,\n  )\n  customer.email\n}";
+    let code =
+        "pub fn f() {\n  use customer <- result.try(\n    customer.Customer(id: 1)\n    |> customer.validate,\n  )\n  customer.email\n}";
     assert_eq!(qualified(code), ["result.try", "customer.Customer", "customer.validate"]);
 }
 

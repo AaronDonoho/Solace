@@ -136,7 +136,12 @@ fn the_same_name_twice_is_refused() {
         [(
             4,
             "fn f() {}".to_string(),
-            "Not saved: `f` is defined twice in `board` (`#[cfg(unix)]`, `#[cfg(windows)]`). Keep one `f` and put the platform code inside it: `#[cfg(unix)] { … }` or `if cfg!(unix) { … }`.".to_string()
+            concat!(
+                "Not saved: `f` is defined twice in `board` (`#[cfg(unix)]`, `#[cfg(windows)]`). ",
+                "Keep one `f` and put the platform code inside it: ",
+                "`#[cfg(unix)] { … }` or `if cfg!(unix) { … }`.",
+            )
+            .to_string()
         )]
     );
     let methods = messages("impl A {\n    fn f() {}\n}\nimpl A {\n    fn f() {}\n}\nconst _: () = ();\nconst _: () = ();\n");
@@ -152,16 +157,35 @@ fn item_making_macros_and_include_are_refused() {
     let lazy = messages("lazy_static! {\n    static ref X: u8 = 1;\n}\n");
     assert_eq!(
         lazy,
-        [(1, "lazy_static! {".to_string(), "Not saved: `lazy_static! { … }` at module level makes items Solace can't hold as symbols. Write them out: `static X: LazyLock<T> = LazyLock::new(|| …);`.".to_string())]
+        [(
+            1,
+            "lazy_static! {".to_string(),
+            concat!(
+                "Not saved: `lazy_static! { … }` at module level makes items Solace can't hold as symbols. ",
+                "Write them out: `static X: LazyLock<T> = LazyLock::new(|| …);`.",
+            )
+            .to_string()
+        )]
     );
     let include = messages("include!(\"x.rs\");\n");
     assert_eq!(
         include,
-        [(1, "include!(\"x.rs\");".to_string(), "Not saved: `include!(\"x.rs\")` pastes in code Solace doesn't hold. Make it a module (`mod x;`); for data, use `include_str!(\"x.txt\")`.".to_string())]
+        [(
+            1,
+            "include!(\"x.rs\");".to_string(),
+            concat!(
+                "Not saved: `include!(\"x.rs\")` pastes in code Solace doesn't hold. ",
+                "Make it a module (`mod x;`); for data, use `include_str!(\"x.txt\")`.",
+            )
+            .to_string()
+        )]
     );
     let allowed = split("macro_rules! m {\n    () => {};\n}\nthread_local! {\n    static DB: u8 = 1;\n}\n", "board").unwrap();
     assert!(allowed.refusals.is_empty());
-    assert_eq!(allowed.items.iter().map(|p| (p.kind, p.name.as_str())).collect::<Vec<_>>(), [("macro_rules!", "m"), ("thread_local!", "DB")]);
+    assert_eq!(
+        allowed.items.iter().map(|p| (p.kind, p.name.as_str())).collect::<Vec<_>>(),
+        [("macro_rules!", "m"), ("thread_local!", "DB")]
+    );
 }
 
 #[test]
@@ -169,7 +193,15 @@ fn a_path_outside_the_parents_folder_is_refused() {
     let out = messages("#[path = \"../x.rs\"]\nmod x;\n#[path = \"board_tests.rs\"]\nmod tests;\n");
     assert_eq!(
         out,
-        [(1, "#[path = \"../x.rs\"]".to_string(), "Not saved: `#[path = \"../x.rs\"]` is outside its parent's folder. A `#[path]` module is a `.rs` file beside its parent: `#[path = \"board_tests.rs\"] mod tests;`.".to_string())]
+        [(
+            1,
+            "#[path = \"../x.rs\"]".to_string(),
+            concat!(
+                "Not saved: `#[path = \"../x.rs\"]` is outside its parent's folder. ",
+                "A `#[path]` module is a `.rs` file beside its parent: `#[path = \"board_tests.rs\"] mod tests;`.",
+            )
+            .to_string()
+        )]
     );
     let cfg = messages("#[cfg_attr(unix, path = \"os/unix.rs\")]\nmod os;\n#[cfg_attr(test, path = \"os_tests.rs\")]\nmod t;\n");
     assert_eq!(cfg.len(), 1);
@@ -219,7 +251,11 @@ fn a_negative_impl_keeps_its_bang() {
 
 #[test]
 fn leading_file_modules_stay_in_the_header_and_every_one_is_listed() {
-    let source = "//! Doc.\n#![allow(dead_code)]\nmod a;\nuse b::c;\npub mod d;\n\nfn f() {}\n\n#[cfg(test)]\n#[path = \"x_tests.rs\"]\nmod tests;\n\nmod inline {\n    mod e;\n}\n";
+    let source = concat!(
+        "//! Doc.\n#![allow(dead_code)]\nmod a;\nuse b::c;\npub mod d;\n\n",
+        "fn f() {}\n\n#[cfg(test)]\n#[path = \"x_tests.rs\"]\nmod tests;\n\n",
+        "mod inline {\n    mod e;\n}\n",
+    );
     let f = split(source, "crate").unwrap();
     assert_eq!(f.join(), source);
     assert_eq!(f.header, "//! Doc.\n#![allow(dead_code)]\nmod a;\nuse b::c;\npub mod d;\n\n");
@@ -304,13 +340,20 @@ fn a_workspace_and_a_proc_macro_crate_are_refused() {
 
 #[test]
 fn targets_moved_from_cargos_default_places_are_refused() {
-    let manifest = format!(
-        "[package]\nname = \"app\"\nautotests = false\n\n[lib]\npath = \"lib/app.rs\"\n\n[[bin]]\nname = \"app\"\npath = \"src/main.rs\"\n\n[[bin]]\nname = \"tool\"\npath = \"tools/tool.rs\"\n\n[[test]]\nname = \"it\"\npath = \"tests/it.rs\"\n"
-    );
+    let manifest = format!(concat!(
+        "[package]\nname = \"app\"\nautotests = false\n\n[lib]\npath = \"lib/app.rs\"\n\n",
+        "[[bin]]\nname = \"app\"\npath = \"src/main.rs\"\n\n",
+        "[[bin]]\nname = \"tool\"\npath = \"tools/tool.rs\"\n\n",
+        "[[test]]\nname = \"it\"\npath = \"tests/it.rs\"\n",
+    ));
     let moved = package_of(&[("Cargo.toml", &manifest), ("src/main.rs", "")]);
     assert_eq!(
         moved,
-        Err("Cargo.toml sets `[lib] path = \"lib/app.rs\"`, `[[bin]] path = \"tools/tool.rs\"`, `autotests = false`; Solace reads a package's files from Cargo's default places for now.".to_string())
+        Err(concat!(
+            "Cargo.toml sets `[lib] path = \"lib/app.rs\"`, `[[bin]] path = \"tools/tool.rs\"`, `autotests = false`; ",
+            "Solace reads a package's files from Cargo's default places for now.",
+        )
+        .to_string())
     );
     let defaults = package_of(&[("Cargo.toml", &format!("{CARGO}\n[lib]\npath = \"src/lib.rs\"\n")), ("src/lib.rs", "")]);
     assert_eq!(defaults, Ok(pairs(&[("src/lib.rs", "crate")])));
@@ -319,7 +362,10 @@ fn targets_moved_from_cargos_default_places_are_refused() {
 #[test]
 fn more_than_one_crate_is_refused_naming_its_roots() {
     let both = package_of(&[("Cargo.toml", CARGO), ("src/lib.rs", ""), ("src/main.rs", ""), ("src/bin/tool.rs", "")]);
-    assert_eq!(both, Err("This package has 3 crates (src/lib.rs, src/main.rs, src/bin/tool.rs); Solace holds a package of one crate.".to_string()));
+    assert_eq!(
+        both,
+        Err("This package has 3 crates (src/lib.rs, src/main.rs, src/bin/tool.rs); Solace holds a package of one crate.".to_string())
+    );
     let none = package_of(&[("Cargo.toml", CARGO)]);
     assert_eq!(none, Err("This package has no crate: no `src/main.rs`, `src/lib.rs` or program in `src/bin/`.".to_string()));
     let program = package_of(&[("Cargo.toml", CARGO), ("src/bin/tool/main.rs", "mod args;\n"), ("src/bin/tool/args.rs", "")]);
@@ -336,16 +382,27 @@ fn modules_solace_cant_hold_yet_fail_the_package_naming_their_files() {
         ("src/integration/x.rs", ""),
         ("tests/x.rs", ""),
     ]);
-    assert_eq!(same_name, Err("Two modules are named `integration::x` (src/integration/x.rs, tests/x.rs); Solace holds one module of each name for now.".to_string()));
+    assert_eq!(
+        same_name,
+        Err("Two modules are named `integration::x` (src/integration/x.rs, tests/x.rs); Solace holds one module of each name for now."
+            .to_string())
+    );
     let twice = package_of(&[("Cargo.toml", CARGO), ("src/main.rs", "mod x;\n#[path = \"x.rs\"]\nmod y;\n"), ("src/x.rs", "")]);
     assert_eq!(twice, Err("src/x.rs is two modules (`x`, `y`); Solace holds a file as one module for now.".to_string()));
     let cycle = package_of(&[("Cargo.toml", CARGO), ("src/main.rs", "#[path = \"main.rs\"]\nmod again;\n")]);
     assert_eq!(cycle, Err("src/main.rs is two modules (`crate`, `again`); Solace holds a file as one module for now.".to_string()));
     let outside = package_of(&[("Cargo.toml", CARGO), ("src/main.rs", "#[path = \"../x.rs\"]\nmod x;\n"), ("x.rs", "")]).unwrap_err();
-    assert!(outside.starts_with("src/main.rs: line 1 (`#[path = \"../x.rs\"]`): Not saved: `#[path = \"../x.rs\"]` is outside"), "{outside}");
+    assert!(
+        outside.starts_with("src/main.rs: line 1 (`#[path = \"../x.rs\"]`): Not saved: `#[path = \"../x.rs\"]` is outside"),
+        "{outside}"
+    );
     let inline = package_of(&[("Cargo.toml", CARGO), ("src/main.rs", "mod a {\n    mod b;\n}\n")]);
-    assert_eq!(inline, Err("src/main.rs: `a::b` is a `mod x;` inside an inline `mod { … }`; Solace doesn't hold one there yet.".to_string()));
-    let refused = package_of(&[("Cargo.toml", CARGO), ("src/main.rs", "fn main() {}\n\nlazy_static! {\n    static ref X: u8 = 1;\n}\n")]).unwrap_err();
+    assert_eq!(
+        inline,
+        Err("src/main.rs: `a::b` is a `mod x;` inside an inline `mod { … }`; Solace doesn't hold one there yet.".to_string())
+    );
+    let refused = package_of(&[("Cargo.toml", CARGO), ("src/main.rs", "fn main() {}\n\nlazy_static! {\n    static ref X: u8 = 1;\n}\n")])
+        .unwrap_err();
     assert!(refused.starts_with("src/main.rs: line 3 (`lazy_static! {`): Not saved: `lazy_static! { … }`"), "{refused}");
     let every = package_of(&[
         ("Cargo.toml", CARGO),
@@ -377,7 +434,15 @@ fn a_helper_shared_by_test_crates_is_held_once() {
         ("tests/b.rs", "mod common;\n"),
         ("tests/common/mod.rs", "pub fn setup() {}\n"),
     ]);
-    assert_eq!(got, Ok(pairs(&[("src/lib.rs", "crate"), ("tests/a.rs", "integration::a"), ("tests/common/mod.rs", "integration::common"), ("tests/b.rs", "integration::b")])));
+    assert_eq!(
+        got,
+        Ok(pairs(&[
+            ("src/lib.rs", "crate"),
+            ("tests/a.rs", "integration::a"),
+            ("tests/common/mod.rs", "integration::common"),
+            ("tests/b.rs", "integration::b")
+        ]))
+    );
 }
 
 #[test]
@@ -389,7 +454,15 @@ fn a_library_module_and_a_test_helper_may_share_a_name() {
         ("tests/a.rs", "mod common;\n"),
         ("tests/common/mod.rs", ""),
     ]);
-    assert_eq!(got, Ok(pairs(&[("src/lib.rs", "crate"), ("src/common.rs", "common"), ("tests/a.rs", "integration::a"), ("tests/common/mod.rs", "integration::common")])));
+    assert_eq!(
+        got,
+        Ok(pairs(&[
+            ("src/lib.rs", "crate"),
+            ("src/common.rs", "common"),
+            ("tests/a.rs", "integration::a"),
+            ("tests/common/mod.rs", "integration::common")
+        ]))
+    );
 }
 
 /// A module-level import is found whether or not it is re-exported; a `mod x;`
@@ -406,4 +479,3 @@ fn a_header_holds_its_imports() {
     assert!(!imports("pub fn one() {\n    use std::fmt;\n}\n"));
     assert!(!imports(""));
 }
-

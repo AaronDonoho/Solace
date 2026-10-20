@@ -12,7 +12,11 @@ pub fn plain<T>(store: &Store, tid: Option<&str>, command: &str) -> Result<T, Fa
         return error(
             "E6013",
             command,
-            "`format` needs a module in a Rust project: name one, e.g. `format crate`. The whole crate isn't rustfmt-clean, so formatting it in one call would bury a task's real change (D-158 point 5).",
+            concat!(
+                "`format` needs a module in a Rust project: name one, e.g. `format crate`. ",
+                "The whole crate isn't rustfmt-clean, so formatting it in one call would bury ",
+                "a task's real change (D-158 point 5)."
+            ),
         );
     }
     let use_ = if board::strategy_context().is_some() { "files, grep and read" } else { "files, grep, read, write and run" };
@@ -274,7 +278,10 @@ pub fn settings_file(root: &Path, name: &str) -> bool {
 }
 /// Why a Cargo.toml change that touches a protected key is refused (D-158 point 4).
 fn cargo_setting_note() -> &'static str {
-    "dependency, feature, workspace and build changes to Cargo.toml change only through a human-approved proposal: `write` it alone, with the exact new text and `reason`"
+    concat!(
+        "dependency, feature, workspace and build changes to Cargo.toml change only through ",
+        "a human-approved proposal: `write` it alone, with the exact new text and `reason`"
+    )
 }
 /// The dependency, feature and build keys of a Cargo.toml the human approves
 /// (D-158 point 4, D-177): the dependency tables, `[features]`, each
@@ -506,9 +513,10 @@ pub fn mark(root: &Path, tid: &str, rid: &str) -> Result<(), Failure> {
 /// is on disk but not yet in the task's rows.
 pub fn pending_for(root: &Path, tid: &str) -> bool {
     let Ok(dir) = fs::read_dir(root.join(".solace/pending")) else { return false };
-    dir.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).any(|p| {
-        fs::read(&p).is_ok_and(|b| serde_json::from_slice::<Value>(&b).is_ok_and(|v| v["task"].as_str() == Some(tid)))
-    })
+    dir.filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .any(|p| fs::read(&p).is_ok_and(|b| serde_json::from_slice::<Value>(&b).is_ok_and(|v| v["task"].as_str() == Some(tid))))
 }
 /// Drops the undo records a committed command wrote for run `rid`.
 pub fn drop_records(root: &Path, rid: &str) -> Result<(), Failure> {
@@ -519,7 +527,9 @@ pub fn drop_records(root: &Path, rid: &str) -> Result<(), Failure> {
     for entry in fs::read_dir(&dir)? {
         let p = entry?.path();
         if p.extension().is_some_and(|e| e == "json")
-            && fs::read(&p).is_ok_and(|b| serde_json::from_slice::<Value>(&b).is_ok_and(|v| v["run"].as_str() == Some(rid) && !extract::ahead::is_record(&v)))
+            && fs::read(&p).is_ok_and(|b| {
+                serde_json::from_slice::<Value>(&b).is_ok_and(|v| v["run"].as_str() == Some(rid) && !extract::ahead::is_record(&v))
+            })
         {
             fs::remove_file(p)?;
         }
@@ -707,8 +717,19 @@ fn build_script_warning(l: &str) -> bool {
 /// output passes through.
 pub fn condense(output: &str) -> String {
     const PROGRESS: [&str; 13] = [
-        "Compiling ", "Compiled ", "Checking ", "Finished ", "Running ", "Doc-tests ", "Downloading ", "Downloaded ", "Blocking ", "Updating ",
-        "Locking ", "Adding ", "Fresh ",
+        "Compiling ",
+        "Compiled ",
+        "Checking ",
+        "Finished ",
+        "Running ",
+        "Doc-tests ",
+        "Downloading ",
+        "Downloaded ",
+        "Blocking ",
+        "Updating ",
+        "Locking ",
+        "Adding ",
+        "Fresh ",
     ];
     let (mut out, mut warnings, mut counted) = (String::new(), 0, false);
     // `None` outside a warning; `Some(true)` in one of Gleam's, framed by `┌─`
@@ -905,7 +926,11 @@ fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, all
         && let Some(ref b) = before
         && reads(root)[name].as_str() != Some(&sha256(b))
     {
-        return error("E6005", name, "file is unread or changed since last read; `read` it again, or change part of it with `old` or a `write` patch (no path)");
+        return error(
+            "E6005",
+            name,
+            "file is unread or changed since last read; `read` it again, or change part of it with `old` or a `write` patch (no path)",
+        );
     }
     // D-109: a whole-file write that would drop most of a long file is refused;
     // a `--lines` read allows a whole write, so the size is the check.
@@ -919,7 +944,11 @@ fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, all
             "E6002",
             name,
             format!(
-                "would cut {name} from {was} lines to {now}; change part of it with `write` and a patch (no path), or `write {name}` with `old`; to replace it whole, `remove {name}` first, then `write {name}`"
+                concat!(
+                    "would cut {} from {} lines to {}; change part of it with `write` and a patch (no path), ",
+                    "or `write {}` with `old`; to replace it whole, `remove {}` first, then `write {}`"
+                ),
+                name, was, now, name, name, name
             ),
         );
     }
@@ -1010,7 +1039,8 @@ fn validate(root: &Path, v: &toml::Value, name: &str, p: &Path, text: &str) -> R
             if matches(pattern, name) {
                 let argv: Vec<String> =
                     argv.as_array().unwrap().iter().map(|x| x.as_str().unwrap().replace("{file}", &p.to_string_lossy())).collect();
-                let out = command(root, &argv, 120, BUDGET, false, false).map_err(|e| Failure(format!("E6003 validator failed\n  {}", e.0), 1))?;
+                let out = command(root, &argv, 120, BUDGET, false, false)
+                    .map_err(|e| Failure(format!("E6003 validator failed\n  {}", e.0), 1))?;
                 if !passed(&out) {
                     return error("E6003", name, out);
                 }
@@ -1089,7 +1119,10 @@ fn file_change(
         return error(
             "E6002",
             name,
-            "protected files change only through a human-approved proposal: in a work run, `write` it alone, with the exact new text and `reason`",
+            concat!(
+                "protected files change only through a human-approved proposal: in a work run, ",
+                "`write` it alone, with the exact new text and `reason`"
+            ),
         );
     }
     if t != "watched" && !t.starts_with("unwatched") {
@@ -1150,7 +1183,8 @@ fn write_patch(store: &Store, v: &toml::Value, raw: &str) -> Out {
     if !refused.is_empty() {
         return Err(Failure(format!("nothing written:\n{}", refused.join("\n")), 1));
     }
-    let changes: Vec<_> = changes.into_iter().filter(|(_, _, before, text)| text.as_deref().map(str::as_bytes) != before.as_deref()).collect();
+    let changes: Vec<_> =
+        changes.into_iter().filter(|(_, _, before, text)| text.as_deref().map(str::as_bytes) != before.as_deref()).collect();
     if changes.is_empty() {
         return fail(format!("E0108 the patch changes nothing. {}", drafts::RESEND));
     }
@@ -1214,7 +1248,13 @@ fn tree_rows(root: &Path, v: &toml::Value, dir: &Path, out: &mut Vec<(String, St
     rows_in(root, v, &mut Ignores::new(root), dir, out)
 }
 /// `tree_rows`, with one `Ignores` for the whole walk.
-fn rows_in(root: &Path, v: &toml::Value, ignores: &mut Ignores, dir: &Path, out: &mut Vec<(String, String, Option<String>)>) -> Result<(), Failure> {
+fn rows_in(
+    root: &Path,
+    v: &toml::Value,
+    ignores: &mut Ignores,
+    dir: &Path,
+    out: &mut Vec<(String, String, Option<String>)>,
+) -> Result<(), Failure> {
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
@@ -1226,12 +1266,16 @@ fn rows_in(root: &Path, v: &toml::Value, ignores: &mut Ignores, dir: &Path, out:
         } else if e.file_type()?.is_dir() {
             if t == "internal" {
                 out.push((format!("{name}/"), "internal".into(), None));
-            } else if name == "build" || name == ".git" || dependencies(&name) || patterns(v, "unwatched", &name) || ignores.ignored(&name) {
+            } else if name == "build" || name == ".git" || dependencies(&name) || patterns(v, "unwatched", &name) || ignores.ignored(&name)
+            {
                 out.push((format!("{name}/"), format!("unwatched; {} files", count_files(&p)?), None));
             } else {
                 let mut children = vec![];
                 rows_in(root, v, ignores, &p, &mut children)?;
-                if children.iter().any(|(_, tier, _): &(String, String, Option<String>)| tier == "graph" || tier == "watched" || tier == "protected") {
+                if children
+                    .iter()
+                    .any(|(_, tier, _): &(String, String, Option<String>)| tier == "graph" || tier == "watched" || tier == "protected")
+                {
                     out.push((format!("{name}/"), String::new(), None));
                     out.extend(children);
                 } else {
@@ -1442,7 +1486,10 @@ fn movable(root: &Path, v: &toml::Value, name: &str) -> Result<(), Failure> {
                 None => error(
                     "E6001",
                     name,
-                    "this source file isn't in the store yet, and Solace can't tell which module it would be: submit --new <module> with the module's name",
+                    concat!(
+                        "this source file isn't in the store yet, and Solace can't tell which module ",
+                        "it would be: submit --new <module> with the module's name"
+                    ),
                 ),
             },
         },
@@ -1483,7 +1530,13 @@ fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
     {
         use std::os::unix::ffi::OsStrExt;
         unsafe extern "C" {
-            fn renameat2(olddirfd: i32, oldpath: *const std::ffi::c_char, newdirfd: i32, newpath: *const std::ffi::c_char, flags: u32) -> i32;
+            fn renameat2(
+                olddirfd: i32,
+                oldpath: *const std::ffi::c_char,
+                newdirfd: i32,
+                newpath: *const std::ffi::c_char,
+                flags: u32,
+            ) -> i32;
         }
         const AT_FDCWD: i32 = -100;
         const RENAME_NOREPLACE: u32 = 1;
@@ -1568,8 +1621,12 @@ pub fn move_files(src: &Path, sv: &toml::Value, from: &str, dst: &Path, dv: &tom
         write_atomic(&moves_file(src), moves.to_string())?;
         const EXDEV: i32 = 18;
         return match e.kind() {
-            std::io::ErrorKind::AlreadyExists => error("E6002", &to, "something already exists there; a move never replaces a file or folder"),
-            _ if e.raw_os_error() == Some(EXDEV) => error("E6002", &to, "the two places are on different file systems, so the move can't be one step"),
+            std::io::ErrorKind::AlreadyExists => {
+                error("E6002", &to, "something already exists there; a move never replaces a file or folder")
+            }
+            _ if e.raw_os_error() == Some(EXDEV) => {
+                error("E6002", &to, "the two places are on different file systems, so the move can't be one step")
+            }
             _ => Err(e.into()),
         };
     }
@@ -1599,7 +1656,13 @@ pub fn move_files(src: &Path, sv: &toml::Value, from: &str, dst: &Path, dv: &tom
 /// (D-103, by D-84's rules): checked as a move is, undo records first, one
 /// rename that never replaces, then `text` written at the destination when
 /// given. The function returned ends it: kept, or put back with its records dropped.
-pub fn carry_file(src: &Path, from: &str, dst: &Path, to: &str, text: Option<String>) -> Result<impl FnOnce(bool) -> Result<(), Failure> + use<>, Failure> {
+pub fn carry_file(
+    src: &Path,
+    from: &str,
+    dst: &Path,
+    to: &str,
+    text: Option<String>,
+) -> Result<impl FnOnce(bool) -> Result<(), Failure> + use<>, Failure> {
     let (sv, dv) = (settings(src)?, settings(dst)?);
     let (p, q) = (reachable(src, from)?, reachable(dst, to)?);
     if !fs::symlink_metadata(&p).is_ok_and(|m| m.is_file()) {
@@ -1716,9 +1779,11 @@ pub fn dispatch(
             return Some((|| {
                 let raw = input()?;
                 if !flags.is_empty() || !drafts::is_patch(&raw) {
-                    return usage(
-                        "write with no path takes a file patch in `text`: `*** Begin Patch`, then `*** Add File: <path>`, `*** Update File: <path>` or `*** Delete File: <path>` sections; `write <path>` changes one file",
-                    );
+                    return usage(concat!(
+                        "write with no path takes a file patch in `text`: `*** Begin Patch`, then ",
+                        "`*** Add File: <path>`, `*** Update File: <path>` or `*** Delete File: <path>` ",
+                        "sections; `write <path>` changes one file"
+                    ));
                 }
                 patch_with_draft(store, v, None, &raw, budget)
             })());
@@ -1755,9 +1820,10 @@ pub fn dispatch(
         }
         return Some((|| {
             if paths.len() > 1 && a[0] == "write" {
-                return usage(
-                    "write <path> changes one file; for several, `write` with no path takes a file patch (`*** Update File: <path>` sections)",
-                );
+                return usage(concat!(
+                    "write <path> changes one file; for several, `write` with no path takes ",
+                    "a file patch (`*** Update File: <path>` sections)"
+                ));
             }
             if paths.len() > 1 && !flags.is_empty() {
                 return usage("a --lines or --tail range takes one path: read <path> --lines 3,7,10..12");
@@ -1821,7 +1887,10 @@ pub fn dispatch(
                             return error(
                                 "E6002",
                                 &name,
-                                "protected files change only through a human-approved proposal: in a work run, `write` it with the exact new text",
+                                concat!(
+                                    "protected files change only through a human-approved proposal: ",
+                                    "in a work run, `write` it with the exact new text"
+                                ),
                             );
                         }
                         not_here(root, &name)?;
@@ -1897,7 +1966,7 @@ pub fn dispatch(
                         "E6010",
                         name,
                         format!(
-                            "declared commands: {}; to add one, `write solace.toml` in a work run proposes it for approval",
+                            concat!("declared commands: {}; to add one, `write solace.toml` in a work run ", "proposes it for approval"),
                             commands.map(|c| c.keys().cloned().collect::<Vec<_>>().join(", ")).unwrap_or_default()
                         ),
                     );
@@ -1981,7 +2050,11 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
                 with the new code in `text` for submit commands. One `exec` script can make several \
                 solace calls, so read everything you need in one step.";
             let mut config = format!(
-                "sandbox_mode = \"read-only\"\napproval_policy = \"never\"\nweb_search = \"live\"\ntool_output_token_limit = 30000\ndeveloper_instructions = {}\n[features]\n",
+                concat!(
+                    "sandbox_mode = \"read-only\"\napproval_policy = \"never\"\n",
+                    "web_search = \"live\"\ntool_output_token_limit = 30000\n",
+                    "developer_instructions = {}\n[features]\n"
+                ),
                 json!(hint)
             );
             for f in [
@@ -2004,7 +2077,11 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
                 config += &format!("{f} = false\n");
             }
             config += &format!(
-                "[mcp_servers.solace]\ncommand = {}\nargs = [\"mcp\", \"--budget\", \"32000\"]\nenv_vars = [\"SOLACE_TASK\", \"SOLACE_RUN\", \"SOLACE_SESSION\", \"SOLACE_CONFIG\"]\ndefault_tools_approval_mode = \"approve\"\ntool_timeout_sec = {}\n",
+                concat!(
+                    "[mcp_servers.solace]\ncommand = {}\nargs = [\"mcp\", \"--budget\", \"32000\"]\n",
+                    "env_vars = [\"SOLACE_TASK\", \"SOLACE_RUN\", \"SOLACE_SESSION\", \"SOLACE_CONFIG\"]\n",
+                    "default_tools_approval_mode = \"approve\"\ntool_timeout_sec = {}\n"
+                ),
                 json!(binary),
                 timeout.max(3600)
             );
@@ -2016,8 +2093,38 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
                 dir.join("mcp.json"),
                 json!({"mcpServers":{"solace":{"command":binary,"args":["mcp","--budget","40000"]}}}).to_string(),
             )?;
-            fs::write(dir.join("settings.json"),json!({"disableAllHooks":true,"permissions":{"allow":["mcp__solace__solace","WebFetch","WebSearch"],"deny":["Bash","Read","Write","Edit","Glob","Grep","Agent","Task"]},"enabledPlugins":{}}).to_string())?;
-            json!({"args":["--strict-mcp-config","--mcp-config",dir.join("mcp.json"),"--settings",dir.join("settings.json"),"--setting-sources","","--disable-slash-commands","--tools","WebFetch,WebSearch","--allowedTools","mcp__solace__solace","WebFetch","WebSearch"],"env":{"MCP_TOOL_TIMEOUT":(timeout.max(3600)*1000).to_string()},"config":"settings.json"})
+            fs::write(
+                dir.join("settings.json"),
+                json!({
+                    "disableAllHooks": true,
+                    "permissions": {
+                        "allow": ["mcp__solace__solace", "WebFetch", "WebSearch"],
+                        "deny": ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent", "Task"]
+                    },
+                    "enabledPlugins": {}
+                })
+                .to_string(),
+            )?;
+            json!({
+                "args": [
+                    "--strict-mcp-config",
+                    "--mcp-config",
+                    dir.join("mcp.json"),
+                    "--settings",
+                    dir.join("settings.json"),
+                    "--setting-sources",
+                    "",
+                    "--disable-slash-commands",
+                    "--tools",
+                    "WebFetch,WebSearch",
+                    "--allowedTools",
+                    "mcp__solace__solace",
+                    "WebFetch",
+                    "WebSearch"
+                ],
+                "env": {"MCP_TOOL_TIMEOUT": (timeout.max(3600) * 1000).to_string()},
+                "config": "settings.json"
+            })
         }
         _ => return usage("agent-config codex|claude <dir>"),
     };
@@ -2026,9 +2133,16 @@ pub fn agent_config(agent: &str, dir: &Path, binary: &Path, timeout: u64) -> Out
 }
 
 /// The footer of a reply that shows a line cut by `around`.
-const GREP_CUT: &str = "Lines starting or ending with … are cut from longer lines; read the whole line with read <path> --lines <n>..<n>, and to change part of one use write <path> --replace with old/text.";
+const GREP_CUT: &str = concat!(
+    "Lines starting or ending with … are cut from longer lines; read the whole line with ",
+    "read <path> --lines <n>..<n>, and to change part of one use write <path> --replace with old/text."
+);
 /// How `grep` reads its query, for the hint after a miss that looks like a shell habit (D-109).
-pub const GREP_SYNTAX: &str = "grep takes literal text, already case-insensitive, searched as written; quotes around the whole query are dropped; no regex; the only options, at the end: `--in <path>` (one file or folder), `--context n` (1 to 5); `--project <folder>` picks the project";
+pub const GREP_SYNTAX: &str = concat!(
+    "grep takes literal text, already case-insensitive, searched as written; quotes around ",
+    "the whole query are dropped; no regex; the only options, at the end: `--in <path>` ",
+    "(one file or folder), `--context n` (1 to 5); `--project <folder>` picks the project"
+);
 
 /// `grep <text> [--in <path>] [--context n]`: case-insensitive search of the
 /// files Solace watches, and the protected settings. Source symbols are
@@ -2386,7 +2500,16 @@ mod tests {
             got,
             // D-119: lines for UTF-8 text, bytes for any other file or one over
             // watch_limit; collapsed folders keep their file count.
-            ".git/ [unwatched; 1 files]\n.gitignore [protected; 1 lines]\n.solace/ [internal]\nAGENTS.md [protected; 1 lines]\ndocs.md [watched; 3 lines]\ngleam.toml [watched; 2 lines]\nmanifest.toml [unwatched; 1 lines]\nmisc [watched; 1 lines]\nnode_modules/ [unwatched; 1 files]\npriv/\npriv/a.html [watched; 1 lines]\npriv/b.bin [unwatched (binary); 1 bytes]\npriv/generated/ [unwatched; 1 files]\npriv/ignored [unwatched; 1 lines]\npriv/large [unwatched (over limit); 101 bytes]\npriv/latin [unwatched (binary); 4 bytes]\nsolace.toml [protected; 0 lines]\nsrc/\nsrc/main.gleam [graph]\nsub/\nsub/.gitignore [protected; 1 lines]\nsub/node_modules/ [unwatched; 1 files]\n"
+            concat!(
+                ".git/ [unwatched; 1 files]\n.gitignore [protected; 1 lines]\n.solace/ [internal]\n",
+                "AGENTS.md [protected; 1 lines]\ndocs.md [watched; 3 lines]\ngleam.toml [watched; 2 lines]\n",
+                "manifest.toml [unwatched; 1 lines]\nmisc [watched; 1 lines]\nnode_modules/ [unwatched; 1 files]\n",
+                "priv/\npriv/a.html [watched; 1 lines]\npriv/b.bin [unwatched (binary); 1 bytes]\n",
+                "priv/generated/ [unwatched; 1 files]\npriv/ignored [unwatched; 1 lines]\n",
+                "priv/large [unwatched (over limit); 101 bytes]\npriv/latin [unwatched (binary); 4 bytes]\n",
+                "solace.toml [protected; 0 lines]\nsrc/\nsrc/main.gleam [graph]\nsub/\n",
+                "sub/.gitignore [protected; 1 lines]\nsub/node_modules/ [unwatched; 1 files]\n"
+            )
         );
     }
     #[test]
@@ -2484,7 +2607,11 @@ mod tests {
         // 3 and 5 are two lines apart: windows 2..4 and 4..6 touch and merge; 15 is apart.
         assert_eq!(
             got,
-            "docs/a.txt\n     2- line 2\n     3: hit three\n     4- line 4\n     5: hit five\n     6- line 6\n  …\n    14- line 14\n    15: hit fifteen\n    16- line 16\n"
+            concat!(
+                "docs/a.txt\n     2- line 2\n     3: hit three\n     4- line 4\n",
+                "     5: hit five\n     6- line 6\n  …\n    14- line 14\n",
+                "    15: hit fifteen\n    16- line 16\n"
+            )
         );
         // Without context, no gap marker and no context lines.
         assert_eq!(
@@ -2547,10 +2674,7 @@ mod tests {
         let dir = call(&s, &v, &["grep", "needle", "--in", "docs"], "", None).unwrap();
         assert_eq!(dir, "docs/a.md\n     1: needle a\ndocs/deep/b.md\n     1: needle b\n");
         assert_eq!(call(&s, &v, &["grep", "needle", "--in", "./docs/"], "", None).unwrap(), dir);
-        assert_eq!(
-            call(&s, &v, &["grep", "absent", "--in", "docs"], "", None).unwrap(),
-            "No matches for \"absent\" in docs.\n"
-        );
+        assert_eq!(call(&s, &v, &["grep", "absent", "--in", "docs"], "", None).unwrap(), "No matches for \"absent\" in docs.\n");
         // A path that is not there is refused and named.
         let e = call(&s, &v, &["grep", "needle", "--in", "docs/gone.md"], "", None).unwrap_err().0;
         assert!(e.contains("E6002") && e.contains("docs/gone.md") && e.contains("no such file or folder"), "{e}");
@@ -2691,7 +2815,8 @@ mod tests {
         let v: toml::Value = "watch_limit = 100000\n".parse().unwrap();
         fs::write(s.root.join("a.txt"), "one\ntwo\n").unwrap();
         call(&s, &v, &["read", "a.txt"], "", None).unwrap();
-        let e = call(&s, &v, &["write", "a.txt"], "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+uno\n*** End Patch\n", None).unwrap_err();
+        let e = call(&s, &v, &["write", "a.txt"], "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+uno\n*** End Patch\n", None)
+            .unwrap_err();
         assert!(e.0.contains("this text is a patch; send it with `write` and no path") && e.1 == 2, "{e:?}");
         assert_eq!(fs::read_to_string(s.root.join("a.txt")).unwrap(), "one\ntwo\n");
         assert_eq!(call(&s, &v, &["write", "a.txt"], "one\ntwo\nthree\n", None).unwrap(), "Wrote a.txt (2 → 3 lines)\n");
@@ -2717,7 +2842,10 @@ mod tests {
         fs::write(s.root.join("a.rs"), "fn a() {}\n").unwrap();
         for range in ["1340-1400", "1340..1400", "1340:1400"] {
             let e = call(&s, &v, &["read", "a.rs", range], "", None).unwrap_err();
-            assert!(e.0.contains(&format!("`{range}` is not a file")) && e.0.contains("`read a.rs --lines 1340..1400`") && e.1 == 2, "{e:?}");
+            assert!(
+                e.0.contains(&format!("`{range}` is not a file")) && e.0.contains("`read a.rs --lines 1340..1400`") && e.1 == 2,
+                "{e:?}"
+            );
         }
         let e = call(&s, &v, &["read", "a.rs:3-4"], "", None).unwrap_err().0;
         assert!(e.contains("`read a.rs --lines 3..4`"), "{e}");
@@ -2968,21 +3096,26 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; fini
     /// A build script's warning stays whole: it names the step to run (D-159).
     #[test]
     fn condense_keeps_a_build_script_warning() {
-        let output = "   Compiling solace v0.1.0 (/x/solace-cli)
-warning: solace@0.1.0: solace-cli/frontend/priv/app.js is older than its sources: run the [build] step `release` in solace-cli/frontend (`build plan` lists it)
-warning: unused import
- --> src/main.rs:1:5
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.00s
-     Running unittests src/main.rs (target/debug/deps/solace-1)
-
-running 1 test
-test a ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
-";
+        let output = concat!(
+            "   Compiling solace v0.1.0 (/x/solace-cli)\n",
+            "warning: solace@0.1.0: solace-cli/frontend/priv/app.js is older than its sources: ",
+            "run the [build] step `release` in solace-cli/frontend (`build plan` lists it)\n",
+            "warning: unused import\n",
+            " --> src/main.rs:1:5\n",
+            "    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.00s\n",
+            "     Running unittests src/main.rs (target/debug/deps/solace-1)\n",
+            "\nrunning 1 test\ntest a ... ok\n\n",
+            "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; ",
+            "finished in 0.00s\n"
+        );
         assert_eq!(
             condense(output),
-            "warning: solace@0.1.0: solace-cli/frontend/priv/app.js is older than its sources: run the [build] step `release` in solace-cli/frontend (`build plan` lists it)\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n1 warning not shown\n"
+            concat!(
+                "warning: solace@0.1.0: solace-cli/frontend/priv/app.js is older than its sources: ",
+                "run the [build] step `release` in solace-cli/frontend (`build plan` lists it)\n\n",
+                "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; ",
+                "finished in 0.00s\n1 warning not shown\n"
+            )
         );
     }
     /// Gleam's warnings, blank lines and all, become a count.
@@ -3014,8 +3147,12 @@ running your program.
     #[test]
     fn run_reply_is_condensed() {
         let (s, _) = fixture();
-        let v: toml::Value =
-            "[commands]\nsuite = { run = [\"sh\", \"-c\", \"printf 'running 2 tests\\\\ntest a ... ok\\\\ntest b ... FAILED\\\\n'; exit 1\"] }\n".parse().unwrap();
+        let v: toml::Value = concat!(
+            "[commands]\nsuite = { run = [\"sh\", \"-c\", ",
+            "\"printf 'running 2 tests\\\\ntest a ... ok\\\\ntest b ... FAILED\\\\n'; exit 1\"] }\n"
+        )
+        .parse()
+        .unwrap();
         let err = call(&s, &v, &["run", "suite"], "", None).unwrap_err();
         let (prefix, rest) = err.0.split_once('\n').unwrap();
         assert!(prefix.starts_with("exit code: 1 (") && prefix.ends_with("s)"), "{prefix}");
@@ -3029,10 +3166,16 @@ running your program.
     fn a_passing_run_records_what_the_recipe_built() {
         let recipe = |run: &str| {
             format!(
-                "[commands]\nbuild-release = {{ run = [\"sh\", \"-c\", \"{run}\"] }}\n[build]\noutputs = [\"priv/app.js\"]\nsteps = [{{ name = \"release\", command = \"build-release\" }}]\n"
+                concat!(
+                    "[commands]\nbuild-release = {{ run = [\"sh\", \"-c\", \"{}\"] }}\n",
+                    "[build]\noutputs = [\"priv/app.js\"]\n",
+                    "steps = [{{ name = \"release\", command = \"build-release\" }}]\n"
+                ),
+                run
             )
         };
-        let dir = Scratch::new().with(&[("gleam.toml", "name = \"fixture\"\nversion = \"1.0.0\"\n"), ("src/main.gleam", "pub fn main() { 1 }\n")]);
+        let dir = Scratch::new()
+            .with(&[("gleam.toml", "name = \"fixture\"\nversion = \"1.0.0\"\n"), ("src/main.gleam", "pub fn main() { 1 }\n")]);
         let p = dir.import();
         let record = p.root.join(".solace/built.json");
         let failing = recipe("echo no >&2; exit 1");
@@ -3052,8 +3195,14 @@ running your program.
     /// falls back to file times.
     #[test]
     fn a_run_that_cannot_record_what_it_built_still_passes() {
-        let recipe = "[commands]\nbuild-release = { run = [\"sh\", \"-c\", \"mkdir -p priv && echo built > priv/app.js\"] }\n[build]\noutputs = [\"priv/app.js\"]\nsteps = [{ name = \"release\", command = \"build-release\" }]\n";
-        let dir = Scratch::new().with(&[("gleam.toml", "name = \"fixture\"\nversion = \"1.0.0\"\n"), ("src/main.gleam", "pub fn main() { 1 }\n")]);
+        let recipe = concat!(
+            "[commands]\nbuild-release = { run = [\"sh\", \"-c\", ",
+            "\"mkdir -p priv && echo built > priv/app.js\"] }\n",
+            "[build]\noutputs = [\"priv/app.js\"]\n",
+            "steps = [{ name = \"release\", command = \"build-release\" }]\n"
+        );
+        let dir = Scratch::new()
+            .with(&[("gleam.toml", "name = \"fixture\"\nversion = \"1.0.0\"\n"), ("src/main.gleam", "pub fn main() { 1 }\n")]);
         let p = dir.import();
         fs::write(p.root.join("solace.toml"), recipe).unwrap();
         // A folder where the record goes makes the write fail, not the build.
@@ -3175,9 +3324,14 @@ running your program.
     #[test]
     fn a5_validation_in_place_and_recovery() {
         let (s, _) = fixture();
-        let v:toml::Value=r#"[validators]
-"priv/**" = ["python3", "-c", "import pathlib,sys; p=pathlib.Path(sys.argv[1]); print('validator output'); assert p.read_text() == 'good' and p.with_name('sibling').read_text() == 'yes'", "{file}"]
-"#.parse().unwrap();
+        let v: toml::Value = concat!(
+            r#"[validators]
+"priv/**" = ["python3", "-c", "import pathlib,sys; p=pathlib.Path(sys.argv[1]); "#,
+            r#"print('validator output'); assert p.read_text() == 'good' and p.with_name('sibling').read_text() == 'yes'", "{file}"]
+"#
+        )
+        .parse()
+        .unwrap();
         fs::write(s.root.join("priv/sibling"), "yes").unwrap();
         fs::write(s.root.join("priv/a"), "original").unwrap();
         call(&s, &v, &["read", "priv/a"], "", None).unwrap();
@@ -3198,7 +3352,11 @@ running your program.
         let (s, v) = fixture();
         fs::write(s.root.join("notes"), "one\ntwo\nthree\n").unwrap();
         fs::write(s.root.join("old"), "gone\n").unwrap();
-        let patch = "*** Begin Patch\n*** Update File: notes\n@@ one\n-two\n+2\n*** Add File: docs/new.md\n+# New\n+\n+text\n*** Delete File: old\n*** End Patch\n";
+        let patch = concat!(
+            "*** Begin Patch\n*** Update File: notes\n@@ one\n-two\n+2\n",
+            "*** Add File: docs/new.md\n+# New\n+\n+text\n",
+            "*** Delete File: old\n*** End Patch\n"
+        );
         assert_eq!(call(&s, &v, &["write"], patch, None).unwrap(), "Wrote notes\nAdded docs/new.md\nRemoved old\n");
         assert_eq!(fs::read_to_string(s.root.join("notes")).unwrap(), "one\n2\nthree\n");
         assert_eq!(fs::read_to_string(s.root.join("docs/new.md")).unwrap(), "# New\n\ntext\n");
@@ -3261,9 +3419,16 @@ running your program.
         let (s, v) = fixture();
         fs::write(s.root.join("notes"), "one\n").unwrap();
         fs::write(s.root.join("spec"), "A failed read does not stop the call (D-109).\n").unwrap();
-        let patch = "*** Begin Patch\n*** Update File: notes\n-one\n+1\n*** Update File: spec\n-does not stop the call (D-109).\n+does not stop the call (D-119).\n*** End Patch\n";
+        let patch = concat!(
+            "*** Begin Patch\n*** Update File: notes\n-one\n+1\n",
+            "*** Update File: spec\n-does not stop the call (D-109).\n",
+            "+does not stop the call (D-119).\n*** End Patch\n"
+        );
         let e = call(&s, &v, &["write"], patch, None).unwrap_err().0;
-        assert!(e.starts_with("nothing written:\n") && e.contains("is only part of line 1: `A failed read") && e.contains("write --draft"), "{e}");
+        assert!(
+            e.starts_with("nothing written:\n") && e.contains("is only part of line 1: `A failed read") && e.contains("write --draft"),
+            "{e}"
+        );
         let id = e.split("Draft ").nth(1).and_then(|r| r.split(' ').next()).unwrap().to_string();
         assert_eq!(drafts::view(&s, &id).unwrap(), patch);
         assert!(drafts::list(&s).unwrap().contains(&format!("{id}: [\"write\"] (current)")));
@@ -3288,13 +3453,17 @@ running your program.
     #[test]
     fn a_file_patch_that_fails_validation_puts_every_file_back() {
         let (s, _) = fixture();
-        let v: toml::Value = r#"[validators]
-"priv/**" = ["python3", "-c", "import pathlib,sys; p=pathlib.Path(sys.argv[1]); print('validator output'); assert p.read_text() == 'good\\n' and pathlib.Path('notes').read_text() == 'new\\n'", "{file}"]
+        let v: toml::Value = concat!(
+            r#"[validators]
+"priv/**" = ["python3", "-c", "import pathlib,sys; p=pathlib.Path(sys.argv[1]); "#,
+            r#"print('validator output'); assert p.read_text() == 'good\\n' and pathlib.Path('notes').read_text() == 'new\\n'", "{file}"]
 "#
+        )
         .parse()
         .unwrap();
         fs::write(s.root.join("notes"), "old\n").unwrap();
-        let patch = |text: &str| format!("*** Begin Patch\n*** Update File: notes\n-old\n+new\n*** Add File: priv/a\n+{text}\n*** End Patch\n");
+        let patch =
+            |text: &str| format!("*** Begin Patch\n*** Update File: notes\n-old\n+new\n*** Add File: priv/a\n+{text}\n*** End Patch\n");
         let e = call(&s, &v, &["write"], &patch("bad"), None).unwrap_err().0;
         assert!(e.starts_with("nothing written:\nE6003") && e.contains("validator output"), "{e}");
         assert_eq!(fs::read_to_string(s.root.join("notes")).unwrap(), "old\n");
@@ -3310,17 +3479,20 @@ running your program.
         let (s, _) = fixture();
         fs::write(s.root.join("priv/a"), "original").unwrap();
         fs::create_dir_all(s.root.join(".solace/pending")).unwrap();
-        fs::write(s.root.join(".solace/pending/x.json"), json!({"task":"t1","run":"r1","path":"priv/a","bytes":b"original".to_vec()}).to_string()).unwrap();
+        fs::write(
+            s.root.join(".solace/pending/x.json"),
+            json!({"task":"t1","run":"r1","path":"priv/a","bytes":b"original".to_vec()}).to_string(),
+        )
+        .unwrap();
         fs::write(s.root.join("priv/a"), "changed").unwrap();
         recover(&s.root, &s, &[board::lock(&s.root).unwrap()]).unwrap();
-        let rows: Vec<(String, String, String)> = s
-            .db
-            .prepare("SELECT task,entity,name FROM board_touches WHERE task='t1'")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
+        let rows: Vec<(String, String, String)> =
+            s.db.prepare("SELECT task,entity,name FROM board_touches WHERE task='t1'")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
         assert_eq!(rows, [("t1".to_string(), "file:priv/a".to_string(), "file:priv/a".to_string())]);
         assert_eq!(fs::read(board::before_file(&s.root, "t1", "priv/a")).unwrap(), b"original");
         assert!(!s.root.join(".solace/pending/x.json").exists());
@@ -3331,7 +3503,11 @@ running your program.
         let (s, _) = fixture();
         fs::write(s.root.join("priv/a"), "original").unwrap();
         fs::create_dir_all(s.root.join(".solace/pending")).unwrap();
-        fs::write(s.root.join(".solace/pending/x.json"), json!({"task":"t1","run":"r1","path":"priv/a","bytes":b"original".to_vec()}).to_string()).unwrap();
+        fs::write(
+            s.root.join(".solace/pending/x.json"),
+            json!({"task":"t1","run":"r1","path":"priv/a","bytes":b"original".to_vec()}).to_string(),
+        )
+        .unwrap();
         recover(&s.root, &s, &[board::lock(&s.root).unwrap()]).unwrap();
         let n: i64 = s.db.query_row("SELECT COUNT(*) FROM board_touches WHERE task='t1'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 0);
@@ -3351,14 +3527,13 @@ running your program.
         fs::write(s.root.join("priv/a"), "changed").unwrap();
         fs::write(s.root.join("priv/created"), "new").unwrap();
         recover(&s.root, &s, &[board::lock(&s.root).unwrap()]).unwrap();
-        let entities: Vec<String> = s
-            .db
-            .prepare("SELECT entity FROM board_touches WHERE task='t1' ORDER BY entity")
-            .unwrap()
-            .query_map([], |r| r.get(0))
-            .unwrap()
-            .collect::<Result<_, _>>()
-            .unwrap();
+        let entities: Vec<String> =
+            s.db.prepare("SELECT entity FROM board_touches WHERE task='t1' ORDER BY entity")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
         assert_eq!(entities, ["file:priv/a", "file:priv/created"]);
         assert_eq!(fs::read(board::before_file(&s.root, "t1", "priv/created").with_extension("absent")).unwrap(), b"");
     }
@@ -3371,9 +3546,18 @@ running your program.
         fs::create_dir_all(s.root.join(".solace/pending")).unwrap();
         let manifest = fs::read(s.root.join("gleam.toml")).unwrap();
         let files = json!([{"path":"gleam.toml","bytes":manifest}]);
-        fs::write(s.root.join(".solace/pending/run-r1.json"), json!({"task":"t1","run":"r1","files":files,"folders":["priv","priv/empty"]}).to_string()).unwrap();
-        fs::write(s.root.join(".solace/pending/x.json"), json!({"task":"t2","run":"r2","path":"priv/one/b","bytes":null,"kept":"priv"}).to_string()).unwrap();
-        fs::write(s.root.join(".solace/pending/y.json"), json!({"task":"t3","run":"r3","path":"priv/old/c","bytes":null}).to_string()).unwrap();
+        fs::write(
+            s.root.join(".solace/pending/run-r1.json"),
+            json!({"task":"t1","run":"r1","files":files,"folders":["priv","priv/empty"]}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            s.root.join(".solace/pending/x.json"),
+            json!({"task":"t2","run":"r2","path":"priv/one/b","bytes":null,"kept":"priv"}).to_string(),
+        )
+        .unwrap();
+        fs::write(s.root.join(".solace/pending/y.json"), json!({"task":"t3","run":"r3","path":"priv/old/c","bytes":null}).to_string())
+            .unwrap();
         fs::create_dir_all(s.root.join("priv/empty/new")).unwrap();
         fs::write(s.root.join("priv/empty/new/a"), "new").unwrap();
         fs::create_dir_all(s.root.join("priv/one")).unwrap();
@@ -3417,7 +3601,11 @@ running your program.
         fs::write(s.root.join("priv/a"), "changed").unwrap();
         s.db.execute("INSERT INTO board_touches(task,entity,run,name) VALUES ('t1','file:priv/a','r1','file:priv/a')", []).unwrap();
         fs::create_dir_all(s.root.join(".solace/pending")).unwrap();
-        fs::write(s.root.join(".solace/pending/x.json"), json!({"task":"t1","run":"r1","path":"priv/a","bytes":b"original".to_vec()}).to_string()).unwrap();
+        fs::write(
+            s.root.join(".solace/pending/x.json"),
+            json!({"task":"t1","run":"r1","path":"priv/a","bytes":b"original".to_vec()}).to_string(),
+        )
+        .unwrap();
         recover(&s.root, &s, &[board::lock(&s.root).unwrap()]).unwrap();
         let n: i64 = s.db.query_row("SELECT COUNT(*) FROM board_touches WHERE task='t1'", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 1);
@@ -3569,7 +3757,27 @@ running your program.
             let v = parse_settings(&format!("skills = \"{key}\"\n")).unwrap();
             assert_eq!(skills_dir(&v), key.trim_end_matches('/'));
         }
-        for bad in ["3", "true", "[\"a\"]", "\"/etc\"", "\"../x\"", "\"a/../b\"", "\"\"", "\".\"", "\"a/..\"", "\"src\"", "\"test\"", "\"src/x\"", "\"test/x\"", "\".solace\"", "\".solace/x\"", "\"./src\"", "\"./test/x\"", "\"./\"", "\"./a/../b\""] {
+        for bad in [
+            "3",
+            "true",
+            "[\"a\"]",
+            "\"/etc\"",
+            "\"../x\"",
+            "\"a/../b\"",
+            "\"\"",
+            "\".\"",
+            "\"a/..\"",
+            "\"src\"",
+            "\"test\"",
+            "\"src/x\"",
+            "\"test/x\"",
+            "\".solace\"",
+            "\".solace/x\"",
+            "\"./src\"",
+            "\"./test/x\"",
+            "\"./\"",
+            "\"./a/../b\"",
+        ] {
             assert!(parse_settings(&format!("skills = {bad}\n")).is_err(), "{bad}");
         }
     }
@@ -3671,7 +3879,8 @@ running your program.
     fn a_cargo_toml_patch_that_changes_a_dependency_is_refused() {
         let (root, store) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
         let v = settings(&root).unwrap();
-        let patch = "*** Begin Patch\n*** Update File: Cargo.toml\n@@\n edition = \"2021\"\n+[dependencies]\n+serde = \"1\"\n*** End Patch\n";
+        let patch =
+            "*** Begin Patch\n*** Update File: Cargo.toml\n@@\n edition = \"2021\"\n+[dependencies]\n+serde = \"1\"\n*** End Patch\n";
         let e = call(&store, &v, &["write"], patch, None).unwrap_err().0;
         assert!(e.contains("E6002") && e.contains("human-approved proposal"), "{e}");
         assert!(!fs::read_to_string(root.join("Cargo.toml")).unwrap().contains("serde"));
@@ -3940,7 +4149,11 @@ pub(crate) fn graph_hint(s: &Store, name: &str) -> String {
             format!("source is held as symbols; view {module} for its outline, or inspect {module}.<symbol> for one item")
         }
         Some(module) => format!("this source file isn't in the store yet: {}", new_module_hint(&module)),
-        None => "this source file isn't in the store yet, and Solace can't tell which module it would be: submit --new <module> with the module's name".to_string(),
+        None => concat!(
+            "this source file isn't in the store yet, and Solace can't tell which module ",
+            "it would be: submit --new <module> with the module's name"
+        )
+        .to_string(),
     }
 }
 

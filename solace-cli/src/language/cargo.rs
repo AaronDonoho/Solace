@@ -41,7 +41,10 @@ fn target_dir(root: &Path) -> String {
 /// `cargo check`'s arguments, as `Store::cargo` runs them.
 pub fn check_args(root: &Path) -> Vec<String> {
     let target = target_dir(root);
-    ["check", "--all-targets", "--message-format=json", "--offline", "--target-dir", target.as_str()].iter().map(|s| s.to_string()).collect()
+    ["check", "--all-targets", "--message-format=json", "--offline", "--target-dir", target.as_str()]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 /// `cargo test`'s arguments, as `Store::cargo` runs them: the tests named by
@@ -206,7 +209,9 @@ pub fn diagnostics(output: &str, files: &[FileMap]) -> Vec<Diag> {
         let path = span["file_name"].as_str().unwrap_or("");
         let row = span["line_start"].as_u64().unwrap_or(0) as usize;
         let (module, symbol, place) = match locate(files, path, row) {
-            Some((module, Some((name, first)))) => (Some(module.to_string()), Some(name.to_string()), format!("  at {name}, line {}", row + 1 - first)),
+            Some((module, Some((name, first)))) => {
+                (Some(module.to_string()), Some(name.to_string()), format!("  at {name}, line {}", row + 1 - first))
+            }
             Some((module, None)) => (Some(module.to_string()), None, format!("  at {module} imports")),
             None => (None, None, String::new()),
         };
@@ -401,8 +406,9 @@ fn edition(root: &Path) -> String {
     }
     if package.and_then(|p| p.get("edition")).and_then(|e| e.get("workspace")).and_then(|w| w.as_bool()).unwrap_or(false) {
         for dir in root.ancestors() {
-            let found = manifest(dir)
-                .and_then(|v| v.get("workspace").and_then(|w| w.get("package")).and_then(|p| p.get("edition")).and_then(|e| e.as_str()).map(String::from));
+            let found = manifest(dir).and_then(|v| {
+                v.get("workspace").and_then(|w| w.get("package")).and_then(|p| p.get("edition")).and_then(|e| e.as_str()).map(String::from)
+            });
             if let Some(edition) = found {
                 return edition;
             }

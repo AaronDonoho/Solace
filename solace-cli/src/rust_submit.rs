@@ -190,9 +190,8 @@ fn declares_module(m: &ModuleRow, own: &str, row: &ModuleRow) -> bool {
         if !(is_mod_line(line) && mod_name(line) == Some(own)) {
             continue;
         }
-        let path = path_attr(line).or_else(|| {
-            lines[..i].iter().rev().take_while(|l| l.trim_start().starts_with("#[")).find_map(|l| path_attr(l))
-        });
+        let path =
+            path_attr(line).or_else(|| lines[..i].iter().rev().take_while(|l| l.trim_start().starts_with("#[")).find_map(|l| path_attr(l)));
         if let Some(p) = path {
             let declared = if dir.is_empty() { p.to_string() } else { format!("{dir}/{p}") };
             return normalized_path(&declared) == normalized_path(target);
@@ -316,8 +315,7 @@ impl RustItem {
 /// order. A stored row the text leaves out is refused (E0102); an unpaired item
 /// is new.
 pub(crate) fn rust_module_items(ix: &Index, module: &str, pieces: &[language::rust::Piece]) -> Result<Vec<RustItem>, Failure> {
-    let roots: Vec<usize> =
-        (0..ix.syms.len()).filter(|&i| ix.syms[i].module.as_str() == module && ix.syms[i].parent.is_none()).collect();
+    let roots: Vec<usize> = (0..ix.syms.len()).filter(|&i| ix.syms[i].module.as_str() == module && ix.syms[i].parent.is_none()).collect();
     rust_items_under(ix, pieces, &roots)
 }
 
@@ -379,8 +377,8 @@ impl Store {
     /// `--new` saves it; only the items whose text changed are formatted, so
     /// unchanged items keep their bytes (D-158 point 5), unless `format
     /// <module>` has already formatted the whole module (D-180); `ord`, `sep`
-    /// and a container's `tail` follow the text. The header's `mod x;` list
-    /// can't change, and a module the store doesn't have is created by `--new`.
+    /// and a container's `tail` follow the text. The `mod x;` list can't
+    /// change, and a module the store doesn't have is created by `--new`.
     fn submit_module_rust(&self, m: &str, raw: &str, formatted: bool) -> Out {
         let ix = self.index()?;
         let Some(row) = self.resolve_module(&ix, m) else {
@@ -394,7 +392,8 @@ impl Store {
             return fail(format!("Not saved: the Rust text is outside the subset Solace holds.\n{}", lines.join("\n")));
         }
         let old = self.header(&module)?;
-        if language::rust::split(&old, &module)?.mods != file.mods {
+        let before = store::module_text(&ix, row);
+        if language::rust::split(&before, &module)?.mods != file.mods {
             return fail(format!("Not saved: the module's `mod` list can't change; {}.", store::MODULE_NOTE));
         }
         let mut items = rust_module_items(&ix, &module, &file.items)?;
@@ -407,7 +406,6 @@ impl Store {
         } else {
             format!("{}{}", file.header.trim_end(), if end.is_empty() { "\n\n" } else { end })
         };
-        let before = store::module_text(&ix, row);
         let max_width = cargo::max_width(&self.root);
         let out = self.transaction(&[], || {
             self.set_header(&module, &header)?;
@@ -514,7 +512,8 @@ impl Store {
                 None => {
                     let id = new_id(language::rust::id_kind(item.kind));
                     self.db.execute(
-                        "INSERT INTO symbols(id, module, name, kind, text, ord, revision, parent, sep, tail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        "INSERT INTO symbols(id, module, name, kind, text, ord, revision, parent, sep, tail) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                         params![id, module, item.name, item.kind, item.text, ord as i64, rev, parent, item.sep, item.tail],
                     )?;
                     self.history(&id, "create", &item.name)?;
@@ -850,7 +849,8 @@ impl Store {
     /// items land under it, and its tail holds its closing brace; every row it
     /// adds is recorded as created.
     fn rust_insert(&self, module: &str, item: &store::Submitted, parent: Option<&str>) -> Result<(), Failure> {
-        let ord: i64 = self.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", params![module], |r| r.get(0))?;
+        let ord: i64 =
+            self.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", params![module], |r| r.get(0))?;
         let last: Option<(String, Option<String>)> = self
             .db
             .prepare("SELECT id, sep FROM symbols WHERE live = 1 AND module = ?1 AND parent IS ?2 ORDER BY ord DESC LIMIT 1")?
@@ -870,7 +870,8 @@ impl Store {
         let rev = revision(&item.text);
         let id = new_id(language::rust::id_kind(item.kind));
         self.db.execute(
-            "INSERT INTO symbols(id, module, name, kind, text, ord, revision, parent, sep, tail) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO symbols(id, module, name, kind, text, ord, revision, parent, sep, tail) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![id, module, item.name, item.kind, item.text, ord, rev, parent, sep, item.tail],
         )?;
         self.history(&id, "create", &item.name)?;
@@ -884,7 +885,10 @@ impl Store {
     /// opening and closing text, and every item of the block lands inside it.
     fn rust_fill_container(&self, container: &Sym, module: &str, item: &store::Submitted) -> Result<(), Failure> {
         let rev = revision(&item.text);
-        self.db.execute("UPDATE symbols SET text = ?2, revision = ?3, tail = ?4 WHERE id = ?1", params![container.id, item.text, rev, item.tail])?;
+        self.db.execute(
+            "UPDATE symbols SET text = ?2, revision = ?3, tail = ?4 WHERE id = ?1",
+            params![container.id, item.text, rev, item.tail],
+        )?;
         for child in &item.children {
             self.rust_insert(module, child, Some(&container.id))?;
         }
@@ -1218,7 +1222,8 @@ fn long_line_note_at(name: &str, text: &str, max_width: usize, first_line: usize
     }
     let (what, verb, them) = if lines.len() == 1 { ("line", "is", "it") } else { ("lines", "are", "them") };
     Some(format!(
-        "{name}: {what} {} {verb} longer than rustfmt's max_width ({max_width}); rustfmt left {them} as written, so check the indentation or split the long literal",
+        "{name}: {what} {} {verb} longer than rustfmt's max_width ({max_width}); rustfmt left {them} \
+         as written, so check the indentation or split the long literal",
         lines.join(", ")
     ))
 }

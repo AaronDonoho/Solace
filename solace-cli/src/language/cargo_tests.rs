@@ -3,7 +3,11 @@ use crate::testing::Scratch;
 use std::path::PathBuf;
 
 fn files(module: &str, path: &str, ranges: Vec<(usize, usize, &str)>) -> Vec<FileMap> {
-    vec![FileMap { module: module.into(), file: PathBuf::from(path), ranges: ranges.into_iter().map(|(a, b, n)| (a, b, n.into())).collect() }]
+    vec![FileMap {
+        module: module.into(),
+        file: PathBuf::from(path),
+        ranges: ranges.into_iter().map(|(a, b, n)| (a, b, n.into())).collect(),
+    }]
 }
 
 fn span(file: &str, line: usize, primary: bool) -> String {
@@ -21,8 +25,12 @@ fn message(level: &str, rendered: &str, spans: &str) -> String {
 /// line rewritten (D-158 point 3).
 #[test]
 fn a_diagnostic_is_located_at_its_symbol() {
-    let rendered = "error[E0308]: mismatched types\n --> src/lib.rs:3:5\n  |\n3 |     \"two\"\n  |     ^^^^^ expected `i32`, found `&str`\n";
-    let diags = diagnostics(&message("error", rendered, &span("src/lib.rs", 3, true)), &files("crate", "/x/src/lib.rs", vec![(2, 4, "crate::one")]));
+    let rendered =
+        "error[E0308]: mismatched types\n --> src/lib.rs:3:5\n  |\n3 |     \"two\"\n  |     ^^^^^ expected `i32`, found `&str`\n";
+    let diags = diagnostics(
+        &message("error", rendered, &span("src/lib.rs", 3, true)),
+        &files("crate", "/x/src/lib.rs", vec![(2, 4, "crate::one")]),
+    );
     assert_eq!(diags.len(), 1);
     assert!(diags[0].error);
     assert_eq!(diags[0].symbol.as_deref(), Some("crate::one"));
@@ -33,9 +41,16 @@ fn a_diagnostic_is_located_at_its_symbol() {
 /// An error inside a macro follows the expansion to the call site.
 #[test]
 fn a_macro_error_is_located_at_its_call_site() {
-    let inner = "{\"file_name\":\"src/lib.rs\",\"line_start\":3,\"line_end\":3,\"is_primary\":true,\"expansion\":{\"span\":{\"file_name\":\"src/lib.rs\",\"line_start\":10,\"line_end\":10,\"is_primary\":false,\"expansion\":null},\"macro_decl_name\":\"assert_eq!\"}}";
+    let inner = concat!(
+        "{\"file_name\":\"src/lib.rs\",\"line_start\":3,\"line_end\":3,\"is_primary\":true,",
+        "\"expansion\":{\"span\":{\"file_name\":\"src/lib.rs\",\"line_start\":10,\"line_end\":10,",
+        "\"is_primary\":false,\"expansion\":null},\"macro_decl_name\":\"assert_eq!\"}}",
+    );
     let rendered = "error: no method named `nope`\n --> src/lib.rs:10:5\n";
-    let diags = diagnostics(&message("error", rendered, inner), &files("crate", "/x/src/lib.rs", vec![(2, 4, "crate::one"), (8, 12, "crate::two")]));
+    let diags = diagnostics(
+        &message("error", rendered, inner),
+        &files("crate", "/x/src/lib.rs", vec![(2, 4, "crate::one"), (8, 12, "crate::two")]),
+    );
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].symbol.as_deref(), Some("crate::two"));
     assert!(diags[0].text.contains("line 3"), "{}", diags[0].text);
@@ -48,7 +63,11 @@ fn repeats_spanless_messages_and_warnings_are_handled() {
     let files = files("crate", "/x/src/lib.rs", vec![(1, 5, "crate::one")]);
     let error = message("error", "error: boom\n --> src/lib.rs:2:1\n", &span("src/lib.rs", 2, true));
     let warning = message("warning", "warning: unused\n --> src/lib.rs:2:1\n", &span("src/lib.rs", 2, true));
-    let spanless = "{\"reason\":\"compiler-message\",\"message\":{\"rendered\":\"error: aborting due to 1 previous error\\n\",\"level\":\"error\",\"message\":\"aborting\",\"spans\":[]}}";
+    let spanless = concat!(
+        "{\"reason\":\"compiler-message\",\"message\":{\"rendered\":",
+        "\"error: aborting due to 1 previous error\\n\",\"level\":\"error\",",
+        "\"message\":\"aborting\",\"spans\":[]}}",
+    );
     let output = [error.clone(), error, warning, spanless.to_string(), "Checking app v0.1.0".to_string()].join("\n");
     let diags = diagnostics(&output, &files);
     assert_eq!(diags.len(), 2);
@@ -62,7 +81,13 @@ fn repeats_spanless_messages_and_warnings_are_handled() {
 #[test]
 fn a_failed_check_without_a_location_reports_cargos_error() {
     let json = message("error", "error: failed to run custom build command for `app`\n--- stderr\nno network\n", "");
-    let output = ["{\"reason\":\"compiler-artifact\",\"target\":{}}", "    Checking app v0.1.0 (/x)", json.as_str(), "warning: build failed, waiting for other jobs to finish..."].join("\n");
+    let output = [
+        "{\"reason\":\"compiler-artifact\",\"target\":{}}",
+        "    Checking app v0.1.0 (/x)",
+        json.as_str(),
+        "warning: build failed, waiting for other jobs to finish...",
+    ]
+    .join("\n");
     let text = failure_text(&output);
     assert!(!text.contains("compiler-artifact"), "{text}");
     assert!(!text.contains("Checking app"), "{text}");
@@ -75,7 +100,13 @@ fn a_failed_check_without_a_location_reports_cargos_error() {
 /// libtest name (D-158 point 3).
 #[test]
 fn libtest_failures_and_totals_are_read() {
-    let output = "running 2 tests\ntest board::tests::works ... ok\ntest board::tests::bad ... FAILED\n\nfailures:\n\n---- board::tests::bad stdout ----\nthread 'board::tests::bad' panicked at src/lib.rs:2:5:\nassertion failed\n\nfailures:\n    board::tests::bad\n\ntest result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+    let output = concat!(
+        "running 2 tests\ntest board::tests::works ... ok\ntest board::tests::bad ... FAILED\n\n",
+        "failures:\n\n---- board::tests::bad stdout ----\n",
+        "thread 'board::tests::bad' panicked at src/lib.rs:2:5:\nassertion failed\n\n",
+        "failures:\n    board::tests::bad\n\n",
+        "test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+    );
     assert_eq!(totals(output), (1, 1));
     let failed = failures(output);
     assert_eq!(failed.len(), 1);
@@ -129,7 +160,6 @@ fn cargo_sandbox_arguments_keep_only_target_writable() {
     assert!(line.contains("--ro-bind-try /opt/cargo/registry /opt/cargo/registry"), "{line}");
     assert!(line.contains("--ro-bind-try /opt/rustup /opt/rustup"), "{line}");
 }
-
 
 /// One item is formatted, a nested one inside its parent's opening at the
 /// project's indent, and never a whole file (D-158 point 5, D-168).
@@ -195,7 +225,11 @@ fn a_workspace_members_error_lands_on_the_projects_own_file() {
 /// shaped like a libtest status line (D-158 point 3).
 #[test]
 fn a_failed_tests_captured_output_is_kept_whole() {
-    let output = "running 1 test\ntest m::bad ... FAILED\n\nfailures:\n\n---- m::bad stdout ----\ntest m::ok ... ok\nvalue: 3\n\nfailures:\n    m::bad\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n";
+    let output = concat!(
+        "running 1 test\ntest m::bad ... FAILED\n\nfailures:\n\n---- m::bad stdout ----\n",
+        "test m::ok ... ok\nvalue: 3\n\nfailures:\n    m::bad\n\n",
+        "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+    );
     let failed = failures(output);
     assert_eq!(failed.len(), 1);
     let text = &failed["m::bad"].1;
@@ -236,7 +270,10 @@ fn a_failed_fetch_keeps_the_lockfile() {
         (".cargo/config.toml", "# A failed fetch is the point; cargo's retries only slow the test.\n[net]\nretry = 0\n"),
         (
             "Cargo.toml",
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ndep = { git = \"file:///nonexistent/solace-missing\" }\n",
+            concat!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n",
+                "[dependencies]\ndep = { git = \"file:///nonexistent/solace-missing\" }\n",
+            ),
         ),
         ("src/lib.rs", "pub fn one() -> i32 { 1 }\n"),
     ]);
@@ -284,7 +321,10 @@ fn a_failed_member_fetch_keeps_the_workspace_lockfile() {
     let before = std::fs::read(root.join("Cargo.lock")).unwrap();
     std::fs::write(
         root.join("member/Cargo.toml"),
-        "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ndep = { git = \"file:///nonexistent/solace-missing\" }\n",
+        concat!(
+            "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n",
+            "[dependencies]\ndep = { git = \"file:///nonexistent/solace-missing\" }\n",
+        ),
     )
     .unwrap();
     let message = fetch(&root.join("member")).unwrap_err().0;
@@ -340,7 +380,10 @@ fn a_fetch_waits_for_the_fetch_lock() {
         (".cargo/config.toml", "# A failed fetch is the point; cargo's retries only slow the test.\n[net]\nretry = 0\n"),
         (
             "Cargo.toml",
-            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\ndep = { git = \"file:///nonexistent/solace-missing\" }\n",
+            concat!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n",
+                "[dependencies]\ndep = { git = \"file:///nonexistent/solace-missing\" }\n",
+            ),
         ),
         ("src/lib.rs", "pub fn one() -> i32 { 1 }\n"),
         (".solace/store.db", ""),
@@ -409,4 +452,3 @@ fn max_width_comes_from_the_projects_rustfmt_settings_or_defaults_to_100() {
     let parent = Scratch::new().with(&[("rustfmt.toml", "max_width = 40\n"), ("sub/Cargo.toml", "")]);
     assert_eq!(max_width(&parent.join("sub")), 40);
 }
-

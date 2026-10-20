@@ -252,7 +252,10 @@ fn cfg_test(m: &Meta) -> bool {
 /// A meta list's own arguments, split at its commas.
 fn nested(l: &syn::MetaList) -> Vec<Meta> {
     use syn::parse::Parser;
-    syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated.parse2(l.tokens.clone()).map(|p| p.into_iter().collect()).unwrap_or_default()
+    syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated
+        .parse2(l.tokens.clone())
+        .map(|p| p.into_iter().collect())
+        .unwrap_or_default()
 }
 
 /// A name an item's text mentions.
@@ -737,7 +740,15 @@ impl<'a> Refs<'a> {
         };
         self.expand_types(&mut out);
         let mut seen = vec![];
-        out.retain(|&j| j != i && if seen.contains(&j) { false } else { seen.push(j); true });
+        out.retain(|&j| {
+            j != i
+                && if seen.contains(&j) {
+                    false
+                } else {
+                    seen.push(j);
+                    true
+                }
+        });
         out
     }
 }

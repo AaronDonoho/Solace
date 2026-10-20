@@ -19,7 +19,9 @@ fn parse(args: &[&str]) -> Result<Args, Failure> {
     while let Some(&a) = it.next() {
         match a {
             "--to-project" => {
-                to_project = Some(it.next().ok_or_else(|| Failure(format!("--to-project needs the survivor's project folder: {FORM}"), 2))?.to_string())
+                to_project = Some(
+                    it.next().ok_or_else(|| Failure(format!("--to-project needs the survivor's project folder: {FORM}"), 2))?.to_string(),
+                )
             }
             _ if a.starts_with("--") => return usage(format!("unknown option {a}: {FORM}")),
             _ => names.push(a.to_string()),
@@ -124,7 +126,8 @@ impl Store {
             return vec![];
         }
         let same = |x: &Sym| x.name == gone.name && x.kind == Kind::Type;
-        let mut out: Vec<(Option<String>, Sym)> = ix.syms.iter().filter(|x| same(x) && x.module != gone.module).map(|x| (None, x.clone())).collect();
+        let mut out: Vec<(Option<String>, Sym)> =
+            ix.syms.iter().filter(|x| same(x) && x.module != gone.module).map(|x| (None, x.clone())).collect();
         for (d, other) in others {
             out.extend(other.syms.iter().filter(|x| same(x)).map(|x| (Some(d.clone()), x.clone())));
         }
@@ -153,18 +156,33 @@ impl Store {
                 let diffs = constructor_differences(keep, gone);
                 if !is_pub_text(&keep.text) && !diffs.is_empty() {
                     format!(
-                        "\n\nHint: {k}{} has the same name but is private, and their constructors differ: {}. Make it pub and make them match, then use merge {k} {g}{}",
+                        concat!(
+                            "\n\nHint: {}{} has the same name but is private, and their constructors differ: {}. ",
+                            "Make it pub and make them match, then use merge {} {}{}",
+                        ),
+                        k,
                         at(d),
                         diffs.join("; "),
+                        k,
+                        g,
                         flag(d)
                     )
                 } else if !is_pub_text(&keep.text) {
                     format!("\n\nHint: {k}{} has the same name but is private. Make it pub, then use merge {k} {g}{}", at(d), flag(d))
                 } else if diffs.is_empty() {
                     let noun = if uses == 1 { "use" } else { "uses" };
-                    format!("\n\nHint: {k}{} has the same name. To fold {g} into it and redirect its {uses} {noun}, use merge {k} {g}{}", at(d), flag(d))
+                    format!(
+                        "\n\nHint: {k}{} has the same name. To fold {g} into it and redirect its {uses} {noun}, use merge {k} {g}{}",
+                        at(d),
+                        flag(d)
+                    )
                 } else {
-                    format!("\n\nHint: {k}{} has the same name, but their constructors differ: {}. Make them match, then use merge {k} {g}{}", at(d), diffs.join("; "), flag(d))
+                    format!(
+                        "\n\nHint: {k}{} has the same name, but their constructors differ: {}. Make them match, then use merge {k} {g}{}",
+                        at(d),
+                        diffs.join("; "),
+                        flag(d)
+                    )
                 }
             }
             _ => {
@@ -175,7 +193,16 @@ impl Store {
                     (false, false) => " (private, constructors differ)",
                 };
                 let names: Vec<String> = copies.iter().map(|(d, k)| format!("{}{}{}", k.qname(), at(d), mark(k))).collect();
-                format!("\n\nHint: {} have the same name as {g}. To fold {g} into one and redirect its uses, use merge <copy> {g} [--to-project <folder>]", names.join(", "))
+                format!(
+                    concat!(
+                        "\n\nHint: {} have the same name as {}. ",
+                        "To fold {} into one and redirect its uses, use merge <copy> {} [--to-project <folder>]",
+                    ),
+                    names.join(", "),
+                    g,
+                    g,
+                    g
+                )
             }
         }
     }
@@ -205,11 +232,14 @@ impl Store {
         let others = std::cell::OnceCell::new();
         for d in errors {
             let here = d.symbol.as_deref().and_then(|q| ix.syms.iter().find(|s| s.qname() == q)).map(|s| s.module.clone());
-            let words: Vec<&str> = d.text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '/')).map(|w| w.trim_matches('.')).collect();
+            let words: Vec<&str> =
+                d.text.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.' || c == '/')).map(|w| w.trim_matches('.')).collect();
             let qualified: Vec<(&str, &str)> = words
                 .iter()
                 .filter_map(|w| w.rsplit_once('.'))
-                .filter(|(m, t)| !m.is_empty() && m.starts_with(|c: char| c.is_ascii_lowercase()) && t.starts_with(|c: char| c.is_ascii_uppercase()))
+                .filter(|(m, t)| {
+                    !m.is_empty() && m.starts_with(|c: char| c.is_ascii_lowercase()) && t.starts_with(|c: char| c.is_ascii_uppercase())
+                })
                 .collect();
             for &(_, t) in &qualified {
                 let last = |m: &str| m.rsplit('/').next().unwrap_or(m).to_string();
@@ -230,7 +260,9 @@ impl Store {
                 // the one in the failing symbol's module goes first: it is the one left behind
                 mods.sort_by_key(|m| here.as_ref().is_none_or(|h| last(h) != *m));
                 for m in &mods {
-                    let Some(i) = ix.syms.iter().position(|s| last(&s.module) == *m && s.name == t && s.kind == Kind::Type) else { continue };
+                    let Some(i) = ix.syms.iter().position(|s| last(&s.module) == *m && s.name == t && s.kind == Kind::Type) else {
+                        continue;
+                    };
                     let others = others.get_or_init(|| self.scope_indexes());
                     let copies = Self::copies(ix, others, &ix.syms[i]);
                     if copies.iter().any(|(_, c)| mods.contains(&last(&c.module))) {
@@ -449,7 +481,11 @@ impl Store {
         }
         if !outside_users.is_empty() {
             return fail(format!(
-                "E5003 a project that depends on this one uses {}, and merge rewrites another project only when the task covers it: add the project to the task, or change those uses first\n{}",
+                concat!(
+                    "E5003 a project that depends on this one uses {}, ",
+                    "and merge rewrites another project only when the task covers it: ",
+                    "add the project to the task, or change those uses first\n{}",
+                ),
                 gone.qname(),
                 outside_users.join("\n")
             ));
@@ -604,7 +640,13 @@ mod tests {
     use super::*;
     use crate::testing::*;
 
-    const BOARD: &str = "pub type Task {\n  Task(id: Int, lane: Int)\n}\n\npub fn new_task(id: Int) -> Task {\n  Task(id, lane_of(id))\n}\n\nfn lane_of(id: Int) -> Int {\n  id % 3\n}\n\npub fn bump(t: Task) -> Task {\n  Task(..t, lane: t.lane + 1)\n}\n\npub fn lane(t: Task) -> Int {\n  case t {\n    Task(lane: l, ..) -> l\n  }\n}\n";
+    const BOARD: &str = concat!(
+        "pub type Task {\n  Task(id: Int, lane: Int)\n}\n\n",
+        "pub fn new_task(id: Int) -> Task {\n  Task(id, lane_of(id))\n}\n\n",
+        "fn lane_of(id: Int) -> Int {\n  id % 3\n}\n\n",
+        "pub fn bump(t: Task) -> Task {\n  Task(..t, lane: t.lane + 1)\n}\n\n",
+        "pub fn lane(t: Task) -> Int {\n  case t {\n    Task(lane: l, ..) -> l\n  }\n}\n",
+    );
 
     fn text(s: &Store, name: &str) -> String {
         let ix = s.index().unwrap();
@@ -629,9 +671,10 @@ mod tests {
         assert!(ix.syms.iter().all(|x| x.id != gone));
         let k = ix.syms.iter().position(|x| x.id == keep).unwrap();
         assert!(!ix.used_by[k].is_empty(), "the survivor has the references");
-        let link: (String, String) = s
-            .db
-            .query_row("SELECT action, detail FROM history WHERE symbol = ?1 ORDER BY rowid DESC LIMIT 1", [gone], |r| Ok((r.get(0)?, r.get(1)?)))
+        let link: (String, String) =
+            s.db.query_row("SELECT action, detail FROM history WHERE symbol = ?1 ORDER BY rowid DESC LIMIT 1", [gone], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
             .unwrap();
         assert_eq!(link, ("merged-into".to_string(), keep.to_string()));
     }
@@ -674,12 +717,24 @@ mod tests {
         let before = board::snapshot(&store).unwrap();
         let out = merge(&store, &["task.Task", "board.Task"]).unwrap();
         assert!(out.starts_with("Merged board.Task into task.Task\nRedirected "), "{out}");
-        assert!(text(&store, "board.new_task").contains("-> task.Task {\n  task.Task(id, lane_of(id))"), "{}", text(&store, "board.new_task"));
+        assert!(
+            text(&store, "board.new_task").contains("-> task.Task {\n  task.Task(id, lane_of(id))"),
+            "{}",
+            text(&store, "board.new_task")
+        );
         assert!(text(&store, "board.bump").contains("task.Task(..t, lane: t.lane + 1)"));
         assert!(text(&store, "board.lane").contains("task.Task(lane: l, ..) -> l"));
         assert_eq!(text(&store, "app.mk"), "pub fn mk() -> Task {\n  Task(1, 2)\n}");
-        assert!(header(&store, "app").contains("import task.{type Task, Task}") && !header(&store, "app").contains("board"), "{}", header(&store, "app"));
-        assert!(header(&store, "other").contains("import task.{Task}") && !header(&store, "other").contains("board"), "{}", header(&store, "other"));
+        assert!(
+            header(&store, "app").contains("import task.{type Task, Task}") && !header(&store, "app").contains("board"),
+            "{}",
+            header(&store, "app")
+        );
+        assert!(
+            header(&store, "other").contains("import task.{Task}") && !header(&store, "other").contains("board"),
+            "{}",
+            header(&store, "other")
+        );
         retired_into(&store, &gone, &keep);
         // the task's undo record covers the retired symbol: its before-state is live
         let after = board::snapshot(&store).unwrap();
@@ -698,8 +753,13 @@ mod tests {
         merge(&store, &["task.Task", "board.Task"]).unwrap();
         assert_ne!(text(&store, "board.new_task"), original);
         let after = board::snapshot(&store).unwrap();
-        let states: Vec<(String, Value)> =
-            before.as_object().unwrap().iter().filter(|(k, v)| after.get(k.as_str()) != Some(*v)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let states: Vec<(String, Value)> = before
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(k, v)| after.get(k.as_str()) != Some(*v))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         assert!(states.iter().any(|(k, _)| *k == format!("symbol:{gone}")), "the retired symbol is in the before-state");
         board::restore(&store, &states).unwrap();
         assert_eq!(id(&store, "board.Task"), gone);
@@ -723,7 +783,11 @@ mod tests {
     /// and patterns; the type is renamed in signatures, annotations and type arguments.
     #[test]
     fn a_bare_constructor_named_like_the_retired_type_keeps_its_name() {
-        let board = "pub type Idle {\n  Idle\n}\n\npub fn rank(s: Idle) -> Int {\n  case s {\n    Idle -> 1\n  }\n}\n\npub fn all() -> List(Idle) {\n  let xs: List(Idle) = [Idle]\n  xs\n}\n";
+        let board = concat!(
+            "pub type Idle {\n  Idle\n}\n\n",
+            "pub fn rank(s: Idle) -> Int {\n  case s {\n    Idle -> 1\n  }\n}\n\n",
+            "pub fn all() -> List(Idle) {\n  let xs: List(Idle) = [Idle]\n  xs\n}\n",
+        );
         let store = project(&[("src/board.gleam", board), ("src/state.gleam", "pub type State {\n  Idle\n}\n")]);
         merge(&store, &["state.State", "board.Idle"]).unwrap();
         assert_eq!(text(&store, "board.rank"), "pub fn rank(s: state.State) -> Int {\n  case s {\n    state.Idle -> 1\n  }\n}");
@@ -734,7 +798,11 @@ mod tests {
     /// not an annotation, so the constructor keeps its name.
     #[test]
     fn a_label_before_a_bare_constructor_is_not_an_annotation() {
-        let board = "pub type Idle {\n  Idle\n}\n\npub type Box {\n  Box(state: Idle)\n}\n\npub fn mk(b: Box) -> Box {\n  let c = Box(state: Idle)\n  let d = Box(..b, state: Idle)\n  c\n}\n";
+        let board = concat!(
+            "pub type Idle {\n  Idle\n}\n\n",
+            "pub type Box {\n  Box(state: Idle)\n}\n\n",
+            "pub fn mk(b: Box) -> Box {\n  let c = Box(state: Idle)\n  let d = Box(..b, state: Idle)\n  c\n}\n",
+        );
         let store = project(&[("src/board.gleam", board), ("src/state.gleam", "pub type State {\n  Idle\n}\n")]);
         merge(&store, &["state.State", "board.Idle"]).unwrap();
         assert_eq!(
@@ -747,12 +815,21 @@ mod tests {
     /// label in a pattern is a value too.
     #[test]
     fn labels_ignore_strings_before_a_call_and_patterns() {
-        let board = "pub type Idle {\n  Idle\n}\n\npub type Box {\n  Box(phase: Idle)\n}\n\npub fn mk(b: Box, dofn: Int) -> Int {\n  let s = \"(\"\n  let c = Box(phase: Idle)\n  case b {\n    Box(phase: Idle) -> dofn\n  }\n}\n";
+        let board = concat!(
+            "pub type Idle {\n  Idle\n}\n\n",
+            "pub type Box {\n  Box(phase: Idle)\n}\n\n",
+            "pub fn mk(b: Box, dofn: Int) -> Int {\n  let s = \"(\"\n  let c = Box(phase: Idle)\n",
+            "  case b {\n    Box(phase: Idle) -> dofn\n  }\n}\n",
+        );
         let store = project(&[("src/board.gleam", board), ("src/state.gleam", "pub type State {\n  Idle\n}\n")]);
         merge(&store, &["state.State", "board.Idle"]).unwrap();
         assert_eq!(
             text(&store, "board.mk"),
-            "pub fn mk(b: Box, dofn: Int) -> Int {\n  let s = \"(\"\n  let c = Box(phase: state.Idle)\n  case b {\n    Box(phase: state.Idle) -> dofn\n  }\n}"
+            concat!(
+                "pub fn mk(b: Box, dofn: Int) -> Int {\n  let s = \"(\"\n",
+                "  let c = Box(phase: state.Idle)\n  case b {\n",
+                "    Box(phase: state.Idle) -> dofn\n  }\n}",
+            )
         );
     }
 
@@ -761,7 +838,12 @@ mod tests {
     /// does not close the call.
     #[test]
     fn labels_ignore_words_ending_in_fn_and_brackets_in_strings_on_the_scan_path() {
-        let board = "pub type Idle {\n  Idle\n}\n\npub type Box {\n  Box(phase: Idle)\n}\n\npub fn f(s: String, i: Idle) -> Idle {\n  i\n}\n\npub fn mk(b: Box, dofn: Int) -> Box {\n  let d = dofn\n  let e = f(\")\", Idle)\n  Box(..b, phase: Idle)\n}\n";
+        let board = concat!(
+            "pub type Idle {\n  Idle\n}\n\n",
+            "pub type Box {\n  Box(phase: Idle)\n}\n\n",
+            "pub fn f(s: String, i: Idle) -> Idle {\n  i\n}\n\n",
+            "pub fn mk(b: Box, dofn: Int) -> Box {\n  let d = dofn\n  let e = f(\")\", Idle)\n  Box(..b, phase: Idle)\n}\n",
+        );
         let store = project(&[("src/board.gleam", board), ("src/state.gleam", "pub type State {\n  Idle\n}\n")]);
         merge(&store, &["state.State", "board.Idle"]).unwrap();
         assert_eq!(
@@ -794,13 +876,21 @@ mod tests {
         let store = project(&[("src/a.gleam", COPY), ("src/board.gleam", BOARD)]);
         let err = store.delete("board.Task").unwrap_err().0;
         assert!(err.starts_with("E5001 board.Task is still used by:"), "{err}");
-        assert!(err.ends_with("\n\nHint: a.Task has the same name. To fold board.Task into it and redirect its 3 uses, use merge a.Task board.Task"), "{err}");
+        assert!(
+            err.ends_with(
+                "\n\nHint: a.Task has the same name. To fold board.Task into it and redirect its 3 uses, use merge a.Task board.Task"
+            ),
+            "{err}"
+        );
         assert_eq!(err.matches("Hint:").count(), 1);
 
         let store = project(&[("src/a.gleam", "pub type Task {\n  Task(id: Int, column: Int)\n}\n"), ("src/board.gleam", BOARD)]);
         let err = store.delete("board.Task").unwrap_err().0;
         assert!(
-            err.ends_with("Hint: a.Task has the same name, but their constructors differ: Task field 2: column in a.Task, lane in board.Task. Make them match, then use merge a.Task board.Task"),
+            err.ends_with(concat!(
+                "Hint: a.Task has the same name, but their constructors differ: ",
+                "Task field 2: column in a.Task, lane in board.Task. Make them match, then use merge a.Task board.Task",
+            )),
             "{err}"
         );
 
@@ -819,9 +909,13 @@ mod tests {
         assert!(err.contains("Hint: solace_task.Task (components) has the same name."), "{err}");
         assert!(err.ends_with("use merge solace_task.Task board.Task --to-project components"), "{err}");
         // the board case: a submit in web mixing board.Task with solace_task.Task
-        let root = two_projects(&format!("{}\n[dependencies]\ncomponents = {{ path = \"../components\" }}\n", plain("web")), &plain("components"));
+        let root =
+            two_projects(&format!("{}\n[dependencies]\ncomponents = {{ path = \"../components\" }}\n", plain("web")), &plain("components"));
         let store = Store::at(&root.join("web")).unwrap();
-        let err = store.submit_symbols(Some("board.bump"), None, "import solace_task\n\npub fn bump(t: solace_task.Task) -> Task {\n  t\n}").unwrap_err().0;
+        let err = store
+            .submit_symbols(Some("board.bump"), None, "import solace_task\n\npub fn bump(t: solace_task.Task) -> Task {\n  t\n}")
+            .unwrap_err()
+            .0;
         assert!(err.starts_with("Not saved"), "{err}");
         assert!(err.contains("Hint: solace_task.Task (components) has the same name.") && err.contains("--to-project components"), "{err}");
         assert!(!err.contains("Unknown module"), "{err}");
@@ -832,7 +926,11 @@ mod tests {
     /// several refused symbols give one hint.
     #[test]
     fn the_hint_is_for_public_types_once() {
-        let store = project(&[("src/a.gleam", "pub fn lane(x: Int) -> Int {\n  x\n}\n"), ("src/board.gleam", BOARD), ("src/app.gleam", "import board\n\npub fn l(t: board.Task) -> Int {\n  board.lane(t)\n}\n")]);
+        let store = project(&[
+            ("src/a.gleam", "pub fn lane(x: Int) -> Int {\n  x\n}\n"),
+            ("src/board.gleam", BOARD),
+            ("src/app.gleam", "import board\n\npub fn l(t: board.Task) -> Int {\n  board.lane(t)\n}\n"),
+        ]);
         let err = store.delete("board.lane").unwrap_err().0;
         assert!(err.starts_with("E5001") && !err.contains("Hint:"), "{err}");
 
@@ -844,16 +942,25 @@ mod tests {
         let store = project(&[("src/a.gleam", "type Task {\n  Task(id: Int, column: Int)\n}\n"), ("src/board.gleam", BOARD)]);
         let err = store.delete("board.Task").unwrap_err().0;
         assert!(
-            err.ends_with("Hint: a.Task has the same name but is private, and their constructors differ: Task field 2: column in a.Task, lane in board.Task. Make it pub and make them match, then use merge a.Task board.Task"),
+            err.ends_with(concat!(
+                "Hint: a.Task has the same name but is private, and their constructors differ: ",
+                "Task field 2: column in a.Task, lane in board.Task. ",
+                "Make it pub and make them match, then use merge a.Task board.Task",
+            )),
             "{err}"
         );
 
         // several copies: the private one is marked
-        let store = project(&[("src/a.gleam", COPY), ("src/c.gleam", "type Task {\n  Task(id: Int, lane: Int)\n}\n"), ("src/board.gleam", BOARD)]);
+        let store =
+            project(&[("src/a.gleam", COPY), ("src/c.gleam", "type Task {\n  Task(id: Int, lane: Int)\n}\n"), ("src/board.gleam", BOARD)]);
         let err = store.delete("board.Task").unwrap_err().0;
         assert!(err.contains("c.Task (private)") && !err.contains("a.Task (") && err.contains("have the same name as board.Task"), "{err}");
 
-        let store = project(&[("src/a.gleam", COPY), ("src/board.gleam", BOARD), ("src/app.gleam", "import board\n\npub fn l(t: board.Task) -> Int {\n  board.lane(t)\n}\n")]);
+        let store = project(&[
+            ("src/a.gleam", COPY),
+            ("src/board.gleam", BOARD),
+            ("src/app.gleam", "import board\n\npub fn l(t: board.Task) -> Int {\n  board.lane(t)\n}\n"),
+        ]);
         let err = store.delete_all(&["board.Task", "board.lane"], usize::MAX).unwrap_err().0;
         assert!(err.starts_with("E5001 nothing deleted."), "{err}");
         assert_eq!(err.matches("Hint:").count(), 1, "{err}");
@@ -904,7 +1011,10 @@ mod tests {
             ("solace.toml", "projects = [\"web\", \"components\"]\n"),
             ("web/gleam.toml", web_toml),
             ("web/src/board.gleam", BOARD),
-            ("web/test/board_test.gleam", "import board\n\npub fn round_trip_test() {\n  let t = board.Task(1, 2)\n  assert t.id == 1\n}\n"),
+            (
+                "web/test/board_test.gleam",
+                "import board\n\npub fn round_trip_test() {\n  let t = board.Task(1, 2)\n  assert t.id == 1\n}\n",
+            ),
             ("components/gleam.toml", components_toml),
             ("components/src/solace_task.gleam", "pub type Task {\n  Task(id: Int, lane: Int)\n}\n"),
         ]);
@@ -923,7 +1033,13 @@ mod tests {
         let root = two_projects(&plain("web"), &plain("components"));
         let store = Store::at(&root.join("web")).unwrap();
         let err = merge(&store, &args).unwrap_err().0;
-        assert!(err.starts_with("E5009 board, board_test use board.Task, and web does not depend on components: add components = { path = \"../components\" } to web/gleam.toml"), "{err}");
+        assert!(
+            err.starts_with(concat!(
+                "E5009 board, board_test use board.Task, and web does not depend on components: ",
+                "add components = { path = \"../components\" } to web/gleam.toml",
+            )),
+            "{err}"
+        );
         let err = merge(&store, &args[..2]).unwrap_err().0;
         assert!(err.contains("it is in components: use merge solace_task.Task board.Task --to-project components"), "{err}");
 
@@ -932,7 +1048,8 @@ mod tests {
         let err = merge(&store, &args).unwrap_err().0;
         assert!(err.starts_with("E5002 components already depends on web") && err.contains("Task (by board.new_task)"), "{err}");
 
-        let root = two_projects(&format!("{}\n[dependencies]\ncomponents = {{ path = \"../components\" }}\n", plain("web")), &plain("components"));
+        let root =
+            two_projects(&format!("{}\n[dependencies]\ncomponents = {{ path = \"../components\" }}\n", plain("web")), &plain("components"));
         let store = Store::at(&root.join("web")).unwrap();
         let gone = id(&store, "board.Task");
         let out = merge(&store, &args).unwrap();

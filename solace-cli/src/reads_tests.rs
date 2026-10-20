@@ -42,7 +42,17 @@ fn remember_gives_the_task_the_window_and_the_steps() {
     )]);
     let top = scope::top(&store.root);
     let log = store.root.join("run.jsonl");
-    let step = json!({"type":"item.completed","item":{"id":"i1","type":"mcp_tool_call","tool":"solace","arguments":{"command":"view calc.add"},"result":{"content":[{"type":"text","text":"pub fn add"}]},"status":"completed"}});
+    let step = json!({
+        "type": "item.completed",
+        "item": {
+            "id": "i1",
+            "type": "mcp_tool_call",
+            "tool": "solace",
+            "arguments": {"command": "view calc.add"},
+            "result": {"content": [{"type": "text", "text": "pub fn add"}]},
+            "status": "completed"
+        }
+    });
     std::fs::write(&log, step.to_string()).unwrap();
     let s = board::open(&store.root).unwrap();
     let mut t = board::api(&s.root, "POST", "/tasks", json!({"title":"Fix calc","body":"calc.add is off"})).unwrap();
@@ -166,7 +176,13 @@ fn a_deleted_symbol_differs_and_an_unopened_store_does_not() {
 /// long window keeps the symbols it read.
 #[test]
 fn the_cap_drops_the_oldest_entry_the_window_no_longer_needs() {
-    let read = |n: usize, recent: bool| Served { project: ".".into(), symbol: format!("a.f{n}"), revision: "1".into(), recent, latest: "1".into() };
+    let read = |n: usize, recent: bool| Served {
+        project: ".".into(),
+        symbol: format!("a.f{n}"),
+        revision: "1".into(),
+        recent,
+        latest: "1".into(),
+    };
     let mut reads = Reads::default();
     reads.record(&(0..=60).map(|i| read(i, i > 0)).collect::<Vec<_>>());
     assert_eq!(reads.symbols.len(), 60);

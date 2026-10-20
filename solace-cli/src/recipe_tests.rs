@@ -24,7 +24,9 @@ fn a_bad_build_section_names_its_field() {
         let e = invalid(text);
         assert!(e.starts_with("E6020") && e.contains(field), "{text}: {e}");
     }
-    assert!(lockdown::parse_settings("[build]\noutputs = [\"priv/app.js\"]\nsteps = [{ name = \"a\", run = [\"x\"], timeout = 600 }]").is_ok());
+    assert!(
+        lockdown::parse_settings("[build]\noutputs = [\"priv/app.js\"]\nsteps = [{ name = \"a\", run = [\"x\"], timeout = 600 }]").is_ok()
+    );
 }
 
 /// A root of folders `a`, `b` and `c`, each with `files`. One with a
@@ -134,10 +136,22 @@ fn a_cycle_is_refused_and_named() {
 fn a_step_reuses_a_declared_command() {
     let top = workspace(&[(
         "a/solace.toml",
-        "[commands]\nbuild-release = { run = [\"sh\", \"-c\", \"make\"], timeout = 900 }\n[build]\noutputs = [\"priv/app.js\"]\nsteps = [{ name = \"release\", command = \"build-release\" }]\n",
+        concat!(
+            "[commands]\nbuild-release = { run = [\"sh\", \"-c\", \"make\"], timeout = 900 }\n",
+            "[build]\noutputs = [\"priv/app.js\"]\n",
+            "steps = [{ name = \"release\", command = \"build-release\" }]\n"
+        ),
     )]);
     let r = of(&top, "a").unwrap().unwrap();
-    assert_eq!(r.steps, [Step { name: "release".into(), run: vec!["sh".into(), "-c".into(), "make".into()], command: Some("build-release".into()), timeout: 900 }]);
+    assert_eq!(
+        r.steps,
+        [Step {
+            name: "release".into(),
+            run: vec!["sh".into(), "-c".into(), "make".into()],
+            command: Some("build-release".into()),
+            timeout: 900
+        }]
+    );
     assert_eq!(r.outputs, ["priv/app.js"]);
     assert!(plan_text(&top).unwrap().contains("- release (command build-release): sh -c make [timeout 900 s]"));
 }
@@ -214,7 +228,14 @@ fn the_plan_marks_outputs_older_than_their_sources() {
 fn record_fixture() -> (Scratch, std::time::SystemTime) {
     let top = Scratch::new().with(&[
         ("solace.toml", "projects = [\"a\", \"b\"]\n"),
-        ("a/solace.toml", "[commands]\nbuild-release = { run = [\"x\"] }\n[build]\noutputs = [\"priv/app.js\"]\nsteps = [{ name = \"release\", command = \"build-release\" }]\n"),
+        (
+            "a/solace.toml",
+            concat!(
+                "[commands]\nbuild-release = { run = [\"x\"] }\n[build]\n",
+                "outputs = [\"priv/app.js\"]\n",
+                "steps = [{ name = \"release\", command = \"build-release\" }]\n"
+            ),
+        ),
         ("a/gleam.toml", "name = \"a\"\nversion = \"1.0.0\"\n[dependencies]\nb = { path = \"../b\" }\n"),
         ("a/src/a.gleam", ""),
         ("a/priv/app.js", ""),
@@ -263,7 +284,10 @@ fn a_recorded_build_names_a_changed_source() {
 fn a_recorded_build_names_a_new_manifest() {
     let (top, _) = recorded();
     fs::write(top.join("a/package.json"), "{}").unwrap();
-    assert_eq!(out_of_date(&top).as_deref(), Some("   out of date: a/package.json changed since priv/app.js was built: run step `release`"));
+    assert_eq!(
+        out_of_date(&top).as_deref(),
+        Some("   out of date: a/package.json changed since priv/app.js was built: run step `release`")
+    );
 }
 
 /// D-166: when an output changed since the record, the plan falls back to file times.
@@ -305,7 +329,11 @@ fn a_record_for_a_changed_command_falls_back_to_file_times() {
     let (top, built) = recorded();
     fs::write(
         top.join("a/solace.toml"),
-        "[commands]\nbuild-release = { run = [\"x\"] }\nother = { run = [\"y\"] }\n[build]\noutputs = [\"priv/app.js\"]\nsteps = [{ name = \"release\", command = \"other\" }]\n",
+        concat!(
+            "[commands]\nbuild-release = { run = [\"x\"] }\nother = { run = [\"y\"] }\n",
+            "[build]\noutputs = [\"priv/app.js\"]\n",
+            "steps = [{ name = \"release\", command = \"other\" }]\n"
+        ),
     )
     .unwrap();
     fs::write(top.join("a/src/a.gleam"), "// changed\n").unwrap();

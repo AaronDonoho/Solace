@@ -56,7 +56,30 @@ mod tests {
 }
 "####;
 
-const PY: &str = "import os\n\n\nclass View(unittest.TestCase):\n    \"\"\"Views.\"\"\"\n\n    def setUp(self):\n        self.x = '''\ndef fake():\n'''\n        x = \"'''\"\n\n    @skip\n    def test_one(self):\n        def inner():\n            pass\n        inner()\n\n\ndef helper(a,\n           b):\n    \"\"\"Helps.\"\"\"\n    return a\n";
+const PY: &str = r#"import os
+
+
+class View(unittest.TestCase):
+    """Views."""
+
+    def setUp(self):
+        self.x = '''
+def fake():
+'''
+        x = "'''"
+
+    @skip
+    def test_one(self):
+        def inner():
+            pass
+        inner()
+
+
+def helper(a,
+           b):
+    """Helps."""
+    return a
+"#;
 
 #[test]
 fn rust_items_take_their_docs_and_skip_strings_and_nested_fns() {
@@ -155,7 +178,11 @@ fn view_gives_an_outline_or_an_item_and_names_a_miss() {
     let item = run(&["view", "src/lib.rs::Store::open"], 32_000).unwrap();
     assert_eq!(
         item,
-        "src/lib.rs:11..16\n11:     /// Opens it.\n12:     pub fn open() -> Self {\n13:         let brace = '{';\n14:         let s = \"}\";\n15:         Store { root: PathBuf::new() }\n16:     }\n"
+        concat!(
+            "src/lib.rs:11..16\n11:     /// Opens it.\n12:     pub fn open() -> Self {\n",
+            "13:         let brace = '{';\n14:         let s = \"}\";\n",
+            "15:         Store { root: PathBuf::new() }\n16:     }\n"
+        )
     );
     let e = run(&["view", "lib.rs"], 32_000).unwrap();
     assert!(e.contains("E1002") && e.contains("src/other/lib.rs"), "{e}");

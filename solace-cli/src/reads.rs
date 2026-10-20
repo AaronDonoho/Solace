@@ -243,7 +243,10 @@ fn opened(top: &Path, reads: &Reads) -> Vec<(String, Store, Index)> {
 /// gone, which differs from every revision the run was served, and `None`
 /// when its store won't open — a store that won't open is no change.
 fn current_revision(stores: &[(String, Store, Index)], r: &Served) -> Option<String> {
-    stores.iter().find(|(p, _, _)| *p == r.project).map(|(_, s, ix)| s.resolve(ix, &r.symbol).map(|i| revision(&ix.syms[i].text)).unwrap_or_default())
+    stores
+        .iter()
+        .find(|(p, _, _)| *p == r.project)
+        .map(|(_, s, ix)| s.resolve(ix, &r.symbol).map(|i| revision(&ix.syms[i].text)).unwrap_or_default())
 }
 
 /// A symbol a task run was served, at the revision served; `recent` while it

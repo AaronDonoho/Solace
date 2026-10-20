@@ -43,11 +43,7 @@ pub(crate) fn row_names(l: &str) -> Vec<&str> {
 /// The first call a session start ends with (D-145); a strategy run gets no
 /// workflow, so none.
 pub(crate) fn next_call(call: &str, strategy: bool) -> String {
-    if strategy {
-        String::new()
-    } else {
-        format!("\nNext: read what the change needs in one call, one command per line: {call}.\n")
-    }
+    if strategy { String::new() } else { format!("\nNext: read what the change needs in one call, one command per line: {call}.\n") }
 }
 
 /// `help [command]` for agents: every option, without host commands, and task

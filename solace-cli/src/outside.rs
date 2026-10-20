@@ -101,8 +101,12 @@ impl Written {
             return Ok(());
         }
         let extract = crate::extract::ahead::created(&self.root);
-        let gone: Vec<String> =
-            self.files.keys().filter(|rel| !keep.contains(*rel) && !self.bad.contains_key(*rel) && !extract.contains(*rel)).cloned().collect();
+        let gone: Vec<String> = self
+            .files
+            .keys()
+            .filter(|rel| !keep.contains(*rel) && !self.bad.contains_key(*rel) && !extract.contains(*rel))
+            .cloned()
+            .collect();
         for rel in gone {
             if !self.unchanged(&rel) {
                 continue;
@@ -280,11 +284,16 @@ fn read_in(s: &Store, rel: &str, text: Option<&str>) -> Result<Result<(), String
     };
     let parsed = s.lang().split(text);
     if let Some(twice) = language::repeated(&parsed.items).first() {
-        return Ok(Err(format!("{rel} defines `{twice}` twice; Solace left it as it is and reads it again once fixed")));
+        return Ok(Err(format!(
+            "{} defines `{}` twice; Solace left it as it is and reads it again \
+             once fixed",
+            rel, twice
+        )));
     }
     // ON CONFLICT keeps a Rust module's `file` (D-158).
     s.db.execute(
-        "INSERT INTO modules(path, dir, header) VALUES (?1, ?2, ?3) ON CONFLICT(path) DO UPDATE SET dir=excluded.dir, header=excluded.header",
+        "INSERT INTO modules(path, dir, header) VALUES (?1, ?2, ?3) ON CONFLICT(path) \
+         DO UPDATE SET dir=excluded.dir, header=excluded.header",
         params![module, dir, parsed.header],
     )?;
     for (ord, item) in parsed.items.iter().enumerate() {
@@ -462,26 +471,28 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         tasks::deliver(&top, json!({"kind":"note","task":tid,"run":rid,"author":"solace","text":text}))?;
         return Ok(format!("{hidden}Note: {text}"));
     }
-    let tid = match open
-        .iter()
-        .map(|(_, t)| t)
-        .find(|t| t["unexpected"] == true && board::task(&s.root, t["id"].as_str().unwrap_or("")).is_ok())
-    {
-        Some(t) => t["id"].as_str().unwrap().to_string(),
-        None => {
-            let rank = all.iter().filter_map(|(_, t)| t["rank"].as_f64()).fold(0., f64::min) - 1.;
-            let mut t = board::new_task(
-                TITLE,
-                "Code changed outside Solace while no agent was working. Complete this task to keep the changes, or cancel it to restore the code Solace had. No agent starts work until it is completed or canceled.",
-                &flow["events"]["finished"],
-                rank,
-            );
-            t["unexpected"] = json!(true);
-            t["home"] = json!(here);
-            tasks::deliver(&top, json!({"kind":"create","new":t}))?;
-            t["id"].as_str().unwrap().to_string()
-        }
-    };
+    let tid =
+        match open.iter().map(|(_, t)| t).find(|t| t["unexpected"] == true && board::task(&s.root, t["id"].as_str().unwrap_or("")).is_ok())
+        {
+            Some(t) => t["id"].as_str().unwrap().to_string(),
+            None => {
+                let rank = all.iter().filter_map(|(_, t)| t["rank"].as_f64()).fold(0., f64::min) - 1.;
+                let mut t = board::new_task(
+                    TITLE,
+                    concat!(
+                        "Code changed outside Solace while no agent was working. Complete this task to keep ",
+                        "the changes, or cancel it to restore the code Solace had. No agent starts work until ",
+                        "it is completed or canceled."
+                    ),
+                    &flow["events"]["finished"],
+                    rank,
+                );
+                t["unexpected"] = json!(true);
+                t["home"] = json!(here);
+                tasks::deliver(&top, json!({"kind":"create","new":t}))?;
+                t["id"].as_str().unwrap().to_string()
+            }
+        };
     if !unexpected.is_empty() {
         board::record(s, &tid, "outside", &bf, &af, None)?;
     }
@@ -614,11 +625,7 @@ mod tests {
         assert_eq!(note, "Note: Changed outside Solace during this run and added to this task: app.two.\n");
         let t = board::task(&s.root, t["id"].as_str().unwrap()).unwrap();
         let changes = board::changes_of(&s, &t).unwrap();
-        assert!(
-            changes.iter().any(|c| c["entity"].as_str().is_some_and(|e| e.starts_with("symbol:"))),
-            "{}",
-            json!(changes)
-        );
+        assert!(changes.iter().any(|c| c["entity"].as_str().is_some_and(|e| e.starts_with("symbol:"))), "{}", json!(changes));
         assert_eq!(board::tasks(&s.root).unwrap().len(), 1);
     }
 
@@ -662,7 +669,10 @@ mod tests {
     #[test]
     fn a_reordered_symbol_keeps_its_text_and_takes_its_new_place() {
         let s = app();
-        let ord = |name: &str| s.db.query_row("SELECT ord FROM symbols WHERE module = 'app' AND name = ?1 AND live = 1", [name], |r| r.get::<_, i64>(0)).unwrap();
+        let ord = |name: &str| {
+            s.db.query_row("SELECT ord FROM symbols WHERE module = 'app' AND name = ?1 AND live = 1", [name], |r| r.get::<_, i64>(0))
+                .unwrap()
+        };
         let before = (ord("one"), ord("two"));
         assert!(before.0 < before.1);
         let swapped = "pub fn two() -> Int {\n  2\n}\n\npub fn one() -> Int {\n  1\n}\n";

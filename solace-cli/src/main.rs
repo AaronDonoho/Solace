@@ -29,7 +29,6 @@ mod view;
 mod workspace;
 
 use language::{Import, Item, Kind, Language, Ref, cargo, gleam};
-use store::{projection, store_rust_file};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -38,9 +37,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::{env, fs};
 use std::time::Duration;
 use std::{cell::RefCell, rc::Rc};
+use std::{env, fs};
+use store::{projection, store_rust_file};
 
 mod reference;
 pub(crate) use reference::*;
@@ -496,7 +496,10 @@ fn strategy_run(rid: &str, args: &[String], input: &mut dyn FnMut() -> Out, budg
         let why = match command {
             "task" => "a strategy run replies with `strategy note`; task commands are refused",
             c if HOST.contains(&c) => "host command is unavailable in a run",
-            _ => "a strategy run changes no code and only reads: strategy list | show | note, and view, inspect, refs, find, grep, files and read (with --project <folder> for another project)",
+            _ => {
+                "a strategy run changes no code and only reads: strategy list | show | note, and view, inspect, \
+                 refs, find, grep, files and read (with --project <folder> for another project)"
+            }
         };
         return lockdown::error("E7010", command, why);
     }
@@ -893,7 +896,8 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
             if board::strategy_context().is_some() {
                 "`--project` only reads (view, inspect, refs, find, grep, files, read)"
             } else {
-                "`--project` only reads (view, inspect, refs, find, grep, files, read) here; in a board run, it also changes the task's other projects"
+                "`--project` only reads (view, inspect, refs, find, grep, files, read) here; in a board run, \
+                 it also changes the task's other projects"
             },
         );
     }
@@ -902,7 +906,14 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
     let own = Store::root().ok();
     let root = match workspace::enclosing(own.as_deref().unwrap_or(&here))? {
         Some(root) => root,
-        None => own.clone().ok_or_else(|| Failure("No Solace root here: migrate an existing project (`solace serve`, then Migrate this project) or make a new one with `solace create <name>`.".into(), 1))?,
+        None => own.clone().ok_or_else(|| {
+            Failure(
+                "No Solace root here: migrate an existing project (`solace serve`, then Migrate this project) or \
+                 make a new one with `solace create <name>`."
+                    .into(),
+                1,
+            )
+        })?,
     };
     let members = workspace::members(&root)?;
     let dir = &project_folder(&root, own.as_deref(), dir, &members);
@@ -953,9 +964,11 @@ fn hinted(out: Out, here: &Path) -> Out {
         }
         let lines: Vec<String> = text
             .split('\n')
-            .map(|line| match line.split_once(MARK).and_then(|(_, rest)| rest.split_whitespace().next()).and_then(|name| elsewhere(here, name)) {
-                Some(d) => format!("{line}\nfound in {d}: add --project {d}"),
-                None => line.to_string(),
+            .map(|line| {
+                match line.split_once(MARK).and_then(|(_, rest)| rest.split_whitespace().next()).and_then(|name| elsewhere(here, name)) {
+                    Some(d) => format!("{line}\nfound in {d}: add --project {d}"),
+                    None => line.to_string(),
+                }
             })
             .collect();
         lines.join("\n")
@@ -1054,7 +1067,8 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
         ["work", "list"] | ["work"] => store.work_list(),
         ["work", "done", id] => store.work_done(id),
         _ => usage(format!(
-            "Unknown command: {}\nCommands: session, inspect, view, refs, impact, find, submit, drafts, delete, extract, merge, check, test, probe, work, files, read, write, remove, move, build, format, run, task.",
+            "Unknown command: {}\nCommands: session, inspect, view, refs, impact, find, submit, drafts, delete, \
+             extract, merge, check, test, probe, work, files, read, write, remove, move, build, format, run, task.",
             a.join(" ")
         )),
     }
@@ -1541,14 +1555,14 @@ impl Store {
             ("modules", "owns_dir", "INTEGER"),
         ] {
             // A store of the root's board alone has no `symbols` or `modules`.
-            let exists: bool = db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0))?;
+            let exists: bool =
+                db.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [table], |r| r.get(0))?;
             if exists && !has_column(db, table, col)? {
                 db.execute(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl}"), [])?;
             }
         }
         Ok(())
     }
-
 
     fn open() -> Result<Store, Failure> {
         Store::at(&Store::root()?)
@@ -1583,7 +1597,8 @@ impl Store {
             }
             if !dir.pop() {
                 return fail(
-                    "No Solace store found (.solace/store.db). Bring existing code in by migrating it: run `solace serve` here and choose Migrate this project.",
+                    "No Solace store found (.solace/store.db). Bring existing code in by migrating it: \
+                     run `solace serve` here and choose Migrate this project.",
                 );
             }
         }
@@ -1592,7 +1607,8 @@ impl Store {
     fn index(&self) -> Result<Index, Failure> {
         // A store only peeked at may be older than its nested-item columns (checked once in `peek`).
         let nested = if self.nested { "parent, sep, tail" } else { "NULL, NULL, ''" };
-        let mut stmt = self.db.prepare(&format!("SELECT id, module, name, kind, text, {nested} FROM symbols WHERE live = 1 ORDER BY module, ord"))?;
+        let mut stmt =
+            self.db.prepare(&format!("SELECT id, module, name, kind, text, {nested} FROM symbols WHERE live = 1 ORDER BY module, ord"))?;
         let syms: Vec<Sym> = stmt
             .query_map([], |r| {
                 let kind: String = r.get(3)?;
@@ -1613,9 +1629,7 @@ impl Store {
         let owns = if self.owns_dir { "owns_dir" } else { "NULL" };
         let mut stmt = self.db.prepare(&format!("SELECT path, dir, header, {file}, {owns} FROM modules ORDER BY dir, path"))?;
         let modules: Vec<ModuleRow> = stmt
-            .query_map([], |r| {
-                Ok(ModuleRow { path: r.get(0)?, dir: r.get(1)?, header: r.get(2)?, file: r.get(3)?, owns_dir: r.get(4)? })
-            })?
+            .query_map([], |r| Ok(ModuleRow { path: r.get(0)?, dir: r.get(1)?, header: r.get(2)?, file: r.get(3)?, owns_dir: r.get(4)? }))?
             .collect::<Result<_, _>>()?;
 
         Ok(Index::build(self.lang(), syms, modules, language::is_rust(&self.root)))
@@ -1713,7 +1727,8 @@ impl Store {
         for d in diags.iter().filter(|d| d.error) {
             if let Some(sym) = &d.symbol {
                 self.db.execute(
-                    "INSERT INTO broken VALUES (?1, ?2) ON CONFLICT(symbol) DO UPDATE SET diagnostic = diagnostic || char(10, 10) || excluded.diagnostic",
+                    "INSERT INTO broken VALUES (?1, ?2) ON CONFLICT(symbol) DO UPDATE SET diagnostic = \
+                     diagnostic || char(10, 10) || excluded.diagnostic",
                     params![sym, d.text],
                 )?;
             }
@@ -1743,9 +1758,7 @@ impl Store {
         }
         match found.as_slice() {
             [i] => Ok(*i),
-            [] => {
-                fail(format!("E1001 unknown name: {input}{}", store::similar_hint(ix, input)))
-            }
+            [] => fail(format!("E1001 unknown name: {input}{}", store::similar_hint(ix, input))),
             many => {
                 let list: Vec<String> = many.iter().map(|&i| format!("  {} ({})", ix.syms[i].qname(), ix.syms[i].kind_text)).collect();
                 fail(format!("E1002 ambiguous name: {input} could be\n{}", list.join("\n")))
@@ -1839,7 +1852,7 @@ impl Store {
         }
         out += &format!("\nTest modules (tests): {}\n", tests.join(", "));
         if rust {
-            out += &format!("\n{}", store::RUST_BRIEF);
+            out += &format!("\n{}", store::rust_brief(&ix));
         }
         out += &self.session_end(&ix, EXAMPLE_CALL, tid.as_deref())?;
         Ok(out)
@@ -2036,8 +2049,9 @@ impl Store {
             }
             modules += &format!("Test modules: {}\n", tests.join(", "));
         }
-        if rust || others.iter().any(|(_, s, _)| language::is_rust(&s.root)) {
-            modules += &format!("\n{}", store::RUST_BRIEF);
+        let rust_ix = if rust { Some(&ix) } else { others.iter().find(|(_, s, _)| language::is_rust(&s.root)).map(|(_, _, x)| x) };
+        if let Some(rust_ix) = rust_ix {
+            modules += &format!("\n{}", store::rust_brief(rust_ix));
         }
 
         // Direct matches: rare task words weigh more; a word in the name
@@ -2188,7 +2202,8 @@ impl Store {
         out += deps;
         let marked = if others.is_empty() { "" } else { "; one marked `(<folder>)` is in that project: add `--project <folder>`" };
         out += &format!(
-            "Symbols most likely relevant to the task, best first (signatures; `>` lines quote code that names the task's terms; `inspect` for code{marked}):\n{packet}{repro}\n{modules}"
+            "Symbols most likely relevant to the task, best first (signatures; `>` lines quote code that names the task's terms; \
+             `inspect` for code{marked}):\n{packet}{repro}\n{modules}"
         );
         let start: Vec<usize> = ranked.iter().filter(|&&(p, _)| p == 0).map(|&(_, i)| i).take(3).collect();
         let call = if !start.is_empty() {
@@ -2264,7 +2279,9 @@ impl Store {
                 }
             } else {
                 match self.resolve(&ix, name) {
-                    Ok(i) => (format!("// ── {} ({}) ──\n{}\n\n", ix.syms[i].qname(), ix.syms[i].kind_text, ix.syms[i].text), vec![&ix.syms[i]]),
+                    Ok(i) => {
+                        (format!("// ── {} ({}) ──\n{}\n\n", ix.syms[i].qname(), ix.syms[i].kind_text, ix.syms[i].text), vec![&ix.syms[i]])
+                    }
                     Err(e) => (self.dependency(name).ok_or(e)?, vec![]),
                 }
             };
@@ -2475,11 +2492,7 @@ impl Store {
         }
         for u in users {
             let q = ix.syms[u].qname();
-            out += &if shown_earlier(&q) {
-                format!("-- {q} (above)\n")
-            } else {
-                format!("-- {q}\n{}\n", ix.signature(&ix.syms[u]))
-            };
+            out += &if shown_earlier(&q) { format!("-- {q} (above)\n") } else { format!("-- {q}\n{}\n", ix.signature(&ix.syms[u])) };
             out += &call_lines(&ix, u, i);
             mark_shown(q);
         }
@@ -2504,7 +2517,9 @@ impl Store {
         };
         let origins = if names.is_empty() {
             let Some(before) = before else {
-                return Ok("Tests haven't passed in full yet, so there is no earlier state to compare with. Name the symbols: `impact <name>...`.\n".into());
+                return Ok("Tests haven't passed in full yet, so there is no earlier state to compare with. Name the symbols: \
+                     `impact <name>...`.\n"
+                    .into());
             };
             reach::origins(&ix, &before)
         } else {
@@ -2585,7 +2600,15 @@ impl Store {
         let (Target::Imports(m) | Target::Module(m)) = target;
         let module = self
             .resolve_module(&ix, m)
-            .ok_or_else(|| Failure(format!("E1003 unknown module: {m}; create it with a patch `*** Add: {m}`: its module comment, imports and code, every line `+`."), 1))?
+            .ok_or_else(|| {
+                Failure(
+                    format!(
+                        "E1003 unknown module: {m}; create it with a patch `*** Add: {m}`: its module comment, \
+                         imports and code, every line `+`."
+                    ),
+                    1,
+                )
+            })?
             .path
             .clone();
         let mut notes = vec![];
@@ -2602,7 +2625,8 @@ impl Store {
                         existing.iter().filter(|s| !submitted.contains(&name_key(&s.name, s.kind))).map(|s| s.name.clone()).collect();
                     if !missing.is_empty() {
                         return fail(format!(
-                            "E0102 the module text leaves out: {}. Nothing was saved. Removing a symbol must be explicit (solace delete <name>).",
+                            "E0102 the module text leaves out: {}. Nothing was saved. Removing a symbol must be explicit \
+                             (solace delete <name>).",
                             missing.join(", ")
                         ));
                     }
@@ -2615,7 +2639,9 @@ impl Store {
                             notes.push(format!("added `import {path}` to {module}"));
                         }
                         if test {
-                            notes.extend(weak_asserts(&item.text, &aliases(&header)).into_iter().map(|w| format!("{module}.{}: {w}", item.name)));
+                            notes.extend(
+                                weak_asserts(&item.text, &aliases(&header)).into_iter().map(|w| format!("{module}.{}: {w}", item.name)),
+                            );
                         }
                         match existing.iter().find(|s| name_key(&s.name, s.kind) == name_key(&item.name, item.kind)) {
                             Some(e) if e.text == item.text => {}
@@ -2662,7 +2688,11 @@ impl Store {
             if !own_errors.is_empty() {
                 let text: Vec<&str> = own_errors.iter().map(|d| d.text.as_str()).collect();
                 let module_syms: Vec<String> = self.index()?.syms.iter().filter(|s| s.module == module).map(Sym::qname).collect();
-                return fail(format!("Not saved: the submitted text has errors.\n\n{}{}", text.join("\n\n"), self.callee_hint(&own_errors, &module_syms)?));
+                return fail(format!(
+                    "Not saved: the submitted text has errors.\n\n{}{}",
+                    text.join("\n\n"),
+                    self.callee_hint(&own_errors, &module_syms)?
+                ));
             }
             if whole_module {
                 let after = self.index()?;
@@ -3221,7 +3251,8 @@ impl Store {
             ok || count == failed.len()
         } else {
             summary.is_some_and(|l| {
-                let number = |word: &str| l.split(word).next().and_then(|p| p.split_whitespace().last()).and_then(|n| n.parse::<usize>().ok());
+                let number =
+                    |word: &str| l.split(word).next().and_then(|p| p.split_whitespace().last()).and_then(|n| n.parse::<usize>().ok());
                 let count = if l.contains("no failures") { Some(0) } else { number(" failure") };
                 ok || count == Some(failed.len())
             })
@@ -3302,7 +3333,10 @@ impl Store {
         }
         let rows = self
             .db
-            .prepare("SELECT s.id, b.text FROM symbols s LEFT JOIN test_base b ON b.id = s.id WHERE s.live = 1 AND (b.text IS NULL OR b.text != s.text)")?
+            .prepare(
+                "SELECT s.id, b.text FROM symbols s LEFT JOIN test_base b ON b.id = s.id \
+                 WHERE s.live = 1 AND (b.text IS NULL OR b.text != s.text)",
+            )?
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?;
         Ok(Some(rows))
@@ -3710,7 +3744,8 @@ fn trace_wrap(s: &Sym) -> String {
     let q = s.qname();
     let args: String = names.iter().map(|n| format!(", {n}")).collect();
     format!(
-        "{renamed}\n\n{}fn {}({}) {{\n  echo #(\"solace-call\", \"{q}\"{args})\n  let r = {inner}({})\n  echo #(\"solace-return\", \"{q}\", r)\n  r\n}}",
+        "{renamed}\n\n{}fn {}({}) {{\n  echo #(\"solace-call\", \"{q}\"{args})\n  \
+         let r = {inner}({})\n  echo #(\"solace-return\", \"{q}\", r)\n  r\n}}",
         if public { "pub " } else { "" },
         s.name,
         decls.join(", "),
@@ -3991,10 +4026,8 @@ fn strip_ansi(s: &str) -> String {
 /// file can end with it; an exact match is the shallowest, and the shallowest
 /// is the project's own file.
 fn locate<'a>(files: &'a [FileMap], path: &str, line: usize) -> Option<(&'a str, Option<(&'a str, usize)>)> {
-    let f = files
-        .iter()
-        .filter(|f| f.file.to_string_lossy() == path || f.file.ends_with(path))
-        .min_by_key(|f| f.file.components().count())?;
+    let f =
+        files.iter().filter(|f| f.file.to_string_lossy() == path || f.file.ends_with(path)).min_by_key(|f| f.file.components().count())?;
     let sym = f.ranges.iter().find(|r| r.0 <= line && line <= r.1).map(|r| (r.2.as_str(), r.0));
     Some((&f.module, sym))
 }

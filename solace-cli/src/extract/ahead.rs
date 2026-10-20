@@ -21,9 +21,7 @@ pub(crate) fn is_record(v: &Value) -> bool {
 /// Whether project `root` holds an extract's record: its files may be half
 /// written, so nothing reads them in as outside changes until it is settled.
 pub(crate) fn waiting(root: &Path) -> bool {
-    fs::read_dir(root.join(".solace/pending")).is_ok_and(|d| {
-        d.flatten().any(|e| e.file_name().to_string_lossy().starts_with("extract-"))
-    })
+    fs::read_dir(root.join(".solace/pending")).is_ok_and(|d| d.flatten().any(|e| e.file_name().to_string_lossy().starts_with("extract-")))
 }
 
 fn run(record: &Value) -> &str {
@@ -84,7 +82,11 @@ fn text(v: &Value) -> String {
 /// `add_dependency`'s to make.
 fn gained(before: &str, after: &str) -> Vec<String> {
     let had: HashSet<&str> = before.lines().map(str::trim).collect();
-    after.lines().filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('[') && !had.contains(l.trim())).map(String::from).collect()
+    after
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('[') && !had.contains(l.trim()))
+        .map(String::from)
+        .collect()
 }
 
 /// The files an extract record in project `root` shows the command created:
@@ -179,7 +181,10 @@ pub(crate) fn recover(held: &[PathBuf]) -> Result<(), Failure> {
                     Some(l) => _locks.push(l),
                     None => {
                         return Err(Failure(
-                            format!("E7028 an interrupted extract also changed {}, which another command holds now; try again", p.display()),
+                            format!(
+                                "E7028 an interrupted extract also changed {}, which another command holds now; try again",
+                                p.display()
+                            ),
                             1,
                         ));
                     }
@@ -199,7 +204,10 @@ fn edited(p: &Value) -> Vec<String> {
     for v in [&now, &p["files_before"], &p["files_after"]] {
         paths.extend(v.as_object().into_iter().flatten().map(|(k, _)| k.clone()));
     }
-    paths.into_iter().filter(|k| now[k.as_str()] != p["files_before"][k.as_str()] && now[k.as_str()] != p["files_after"][k.as_str()]).collect()
+    paths
+        .into_iter()
+        .filter(|k| now[k.as_str()] != p["files_before"][k.as_str()] && now[k.as_str()] != p["files_after"][k.as_str()])
+        .collect()
 }
 
 /// Whether project `p`'s part of the extract committed: its rows are as the
@@ -212,7 +220,11 @@ fn done(s: &Store, p: &Value, tid: &str, rid: &str) -> Result<bool, Failure> {
         return Ok(rows.iter().all(|k| snap[k.as_str()] == after[k.as_str()]));
     }
     for k in after.keys() {
-        let n: bool = s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_touches WHERE task=?1 AND run=?2 AND entity=?3)", params![tid, rid, k], |r| r.get(0))?;
+        let n: bool = s.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM board_touches WHERE task=?1 AND run=?2 AND entity=?3)",
+            params![tid, rid, k],
+            |r| r.get(0),
+        )?;
         if !n {
             return Ok(false);
         }
@@ -272,7 +284,10 @@ fn undo(s: &Store, p: &Value, tid: &str, rid: &str, keep: &[String]) -> Result<(
         for k in p["before"].as_object().into_iter().flatten().map(|(k, _)| k) {
             s.db.execute("DELETE FROM board_touches WHERE task=?1 AND run=?2 AND entity=?3", params![tid, rid, k])?;
         }
-        s.db.execute("DELETE FROM board_before WHERE task=?1 AND entity NOT IN (SELECT entity FROM board_touches WHERE task=?1)", params![tid])?;
+        s.db.execute(
+            "DELETE FROM board_before WHERE task=?1 AND entity NOT IN (SELECT entity FROM board_touches WHERE task=?1)",
+            params![tid],
+        )?;
         Ok(())
     })();
     match undone {

@@ -49,10 +49,7 @@ fn replace(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
 
 /// The key model `m`'s endpoint uses: the stored one, else its `key_env` variable's.
 pub(super) fn endpoint_key(m: &Value) -> Option<String> {
-    m["id"]
-        .as_str()
-        .and_then(|id| stored(&keys_path(), id))
-        .or_else(|| m["endpoint"]["key_env"].as_str().and_then(|k| env::var(k).ok()))
+    m["id"].as_str().and_then(|id| stored(&keys_path(), id)).or_else(|| m["endpoint"]["key_env"].as_str().and_then(|k| env::var(k).ok()))
 }
 
 fn settings(config: &Path) -> Result<toml::Table, Failure> {
@@ -62,7 +59,8 @@ fn settings(config: &Path) -> Result<toml::Table, Failure> {
 
 /// An id made from a label: "Command Code" is `command-code`.
 fn slug(label: &str) -> String {
-    let words: Vec<String> = label.to_lowercase().split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect();
+    let words: Vec<String> =
+        label.to_lowercase().split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).map(String::from).collect();
     words.join("-")
 }
 

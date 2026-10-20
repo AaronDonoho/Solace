@@ -36,7 +36,8 @@ fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
     fs::create_dir_all(&dir)?;
     let prompt = strategy_brief(top, &run);
     let launched = spawn_agent(top, &dir, &log, &m, &prompt, &[], None, persists(&m), [STRATEGY, rid], timeout);
-    let supervised = launched.and_then(|mut child| supervise(Watch::Strategy(top), rid, &mut child, &log, false, Duration::from_secs(timeout), GRACEFUL_EXIT));
+    let supervised = launched
+        .and_then(|mut child| supervise(Watch::Strategy(top), rid, &mut child, &log, false, Duration::from_secs(timeout), GRACEFUL_EXIT));
     let outcome = tasks::strategy_run(top, rid).and_then(|r| r["outcome"].as_str().map(String::from));
     // A strategy agent that replied in plain text took its turn: its reply
     // answers like a finished run, so it clears a mark the same way.
@@ -51,12 +52,64 @@ fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
     supervised.map(drop)
 }
 /// A strategy run's role (Spec 15 §6).
-const STRATEGY_ROLE: &str = "Plan with the human: the tasks, features, milestones and vision on the Strategy page. Propose the smallest version that meets the need, and name in your note what you left out. Say once if the need or vision doesn't justify part of a request. This run is read-only: it changes no code, and every plan change is the human's. To propose one, send `strategy task|feature|milestone` (the id to edit, none to create) and the request's fields as a JSON object in `text`, or `strategy vision` with the new vision in `text`, alone in its call; it waits for the human's approval, and the reply says which, with a new record's id. The fields: a task `title`, `body`, `feature`, `milestone`, `dependsOn` (task ids), with `scope` (the workspace's project folders, listed in the brief) only when creating; a feature `title`, `body`, `milestone`, `state` (proposed: suggested, not agreed; upcoming: agreed and queued; active: work started, and only then do its tasks show on the board; complete, which an active feature becomes by itself once all its tasks are final; or canceled); a milestone `title`, `body`, `targetDate`, `state`; and `rank` for any of them only when editing. Any other field is refused. A `title` names the work in a few words (about 3–7), prefixed with the feature's short name when that helps (`extract: JS FFI files`); mechanism, conditions, error codes and lists go in `body`. The human sees a proposal as its fields: `body` rendered as Markdown, the others as plain text. An edit shows only the fields that change, as `old → new`, with the body as a diff; a create shows all of them. Read the plan with `strategy list` (a line per record, then the vision; `--archived` adds archived tasks) and `strategy show <task|feature|milestone> <id>...` (several ids at once), which gives the ids the record links to, then the record in brief: a task's notes, questions and runs one line each. `strategy show note <task> <notes>` gives those notes in full (`3,7,10..12`, or `all`); a reply stops at the end of a note and names the rest in a `Next:` line, and a note too long for one reply comes in parts, its `Next:` line ending in `--from <n>` to read on. A task's run log is `strategy show run <task> <run>` (one line per step), then `strategy show run <task> <run> 3,7,10..12` for those in full, or `all`, stopping the same way. Read code with `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` (`help <command>` gives its options), adding `--project <folder>` for a project below the root; `grep` searches its text as written, case-insensitive (quotes around the whole text are dropped), with no options, regex or path filter; `read <path> --lines 5..9` reads lines of a file. Cite code by name (`lockdown.dispatch`, `checkout.pay`), not `file:line`: line numbers move. In notes and proposals, name tasks, features and milestones as `task:<id>`, `feature:<id>` or `milestone:<id>`, written bare and never inside backticks: a bare reference renders as a link with the record's title, and a code span stays literal. The human's message is the last note. Reply only with `strategy note`: `command` is just `strategy note`, and the whole reply goes in `text`, in short Markdown: lead with the answer, then only what the human needs to act on. The call waits and returns the human's next message. Text outside `strategy note` shows only in this run's live transcript on the page, so anything the human should keep goes in a `strategy note`. Keep replying until a call says the run has ended, then stop.";
+const STRATEGY_ROLE: &str = concat!(
+    "Plan with the human: the tasks, features, milestones and vision on the Strategy page. ",
+    "Propose the smallest version that meets the need, and name in your note what you left out. ",
+    "Say once if the need or vision doesn't justify part of a request. ",
+    "This run is read-only: it changes no code, and every plan change is the human's. ",
+    "To propose one, send `strategy task|feature|milestone` (the id to edit, none to create) ",
+    "and the request's fields as a JSON object in `text`, ",
+    "or `strategy vision` with the new vision in `text`, alone in its call; ",
+    "it waits for the human's approval, and the reply says which, with a new record's id. ",
+    "The fields: a task `title`, `body`, `feature`, `milestone`, `dependsOn` (task ids), ",
+    "with `scope` (the workspace's project folders, listed in the brief) only when creating; ",
+    "a feature `title`, `body`, `milestone`, `state` (proposed: suggested, not agreed; upcoming: agreed and queued; ",
+    "active: work started, and only then do its tasks show on the board; ",
+    "complete, which an active feature becomes by itself once all its tasks are final; or canceled); ",
+    "a milestone `title`, `body`, `targetDate`, `state`; and `rank` for any of them only when editing. ",
+    "Any other field is refused. ",
+    "A `title` names the work in a few words (about 3–7), ",
+    "prefixed with the feature's short name when that helps (`extract: JS FFI files`); ",
+    "mechanism, conditions, error codes and lists go in `body`. ",
+    "The human sees a proposal as its fields: `body` rendered as Markdown, the others as plain text. ",
+    "An edit shows only the fields that change, as `old → new`, with the body as a diff; a create shows all of them. ",
+    "Read the plan with `strategy list` (a line per record, then the vision; `--archived` adds archived tasks) ",
+    "and `strategy show <task|feature|milestone> <id>...` (several ids at once), ",
+    "which gives the ids the record links to, then the record in brief: ",
+    "a task's notes, questions and runs one line each. ",
+    "`strategy show note <task> <notes>` gives those notes in full (`3,7,10..12`, or `all`); ",
+    "a reply stops at the end of a note and names the rest in a `Next:` line, ",
+    "and a note too long for one reply comes in parts, its `Next:` line ending in `--from <n>` to read on. ",
+    "A task's run log is `strategy show run <task> <run>` (one line per step), ",
+    "then `strategy show run <task> <run> 3,7,10..12` for those in full, or `all`, stopping the same way. ",
+    "Read code with `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` (`help <command>` gives its options), ",
+    "adding `--project <folder>` for a project below the root; ",
+    "`grep` searches its text as written, case-insensitive ",
+    "(quotes around the whole text are dropped), with no options, regex or path filter; ",
+    "`read <path> --lines 5..9` reads lines of a file. ",
+    "Cite code by name (`lockdown.dispatch`, `checkout.pay`), not `file:line`: line numbers move. ",
+    "In notes and proposals, name tasks, features and milestones as `task:<id>`, `feature:<id>` or `milestone:<id>`, ",
+    "written bare and never inside backticks: ",
+    "a bare reference renders as a link with the record's title, and a code span stays literal. ",
+    "The human's message is the last note. ",
+    "Reply only with `strategy note`: `command` is just `strategy note`, and the whole reply goes in `text`, in short Markdown: ",
+    "lead with the answer, then only what the human needs to act on. ",
+    "The call waits and returns the human's next message. ",
+    "Text outside `strategy note` shows only in this run's live transcript on the page, ",
+    "so anything the human should keep goes in a `strategy note`. ",
+    "Keep replying until a call says the run has ended, then stop.",
+);
 /// How many decision titles a strategy run's brief lists, the latest.
 const RECENT_DECISIONS: usize = 10;
 /// A strategy run's prompt: its role, the record it started on, the vision, decision titles and notes.
 pub(super) fn strategy_brief(top: &Path, run: &Value) -> String {
-    let mut out = format!("You are planning with the human on this project's Strategy page. You work only through the Solace tool: there is no shell and no file access.\n{STRATEGY_ROLE}\n");
+    let mut out = format!(
+        concat!(
+            "You are planning with the human on this project's Strategy page. ",
+            "You work only through the Solace tool: there is no shell and no file access.\n{}\n",
+        ),
+        STRATEGY_ROLE
+    );
     let c = &run["context"];
     match (c["kind"].as_str(), c["id"].as_str()) {
         (Some(kind @ ("task" | "feature" | "milestone")), Some(id)) => match strategy_show(top, kind, id) {
@@ -73,7 +126,10 @@ pub(super) fn strategy_brief(top: &Path, run: &Value) -> String {
     let projects = workspace::members(top).unwrap_or_default();
     let own = projects.iter().any(|p| p == ".");
     if !own {
-        out += &format!("\nThe root is a folder of projects, not a project: add `--project <folder>` to every read. Its projects: {}.\n", projects.join(", "));
+        out += &format!(
+            "\nThe root is a folder of projects, not a project: add `--project <folder>` to every read. Its projects: {}.\n",
+            projects.join(", ")
+        );
     }
     // The root's own skills (D-27); a folder of projects has no project the run can read them from.
     if own {
@@ -81,9 +137,14 @@ pub(super) fn strategy_brief(top: &Path, run: &Value) -> String {
     }
     out += &format!("A proposed task's `scope` takes only these project folders: {}.\n", projects.join(", "));
     let decisions = fs::read_to_string(top.join("DECISIONS.md")).unwrap_or_default();
-    let titles: Vec<String> = decisions.lines().filter_map(|l| l.strip_prefix("## ")).filter(|l| l.starts_with("D-")).map(|l| format!("- {l}")).collect();
+    let titles: Vec<String> =
+        decisions.lines().filter_map(|l| l.strip_prefix("## ")).filter(|l| l.starts_with("D-")).map(|l| format!("- {l}")).collect();
     if !titles.is_empty() {
-        let how = if own { "`grep D-<n>`, then `read DECISIONS.md --lines a..b`, reads one" } else { "titles only: the file is in no project, so this run can't read it" };
+        let how = if own {
+            "`grep D-<n>`, then `read DECISIONS.md --lines a..b`, reads one"
+        } else {
+            "titles only: the file is in no project, so this run can't read it"
+        };
         // The most recent only, so the brief stays short as decisions accumulate.
         let earlier = titles.len().saturating_sub(RECENT_DECISIONS);
         let rest = match earlier {
@@ -95,7 +156,9 @@ pub(super) fn strategy_brief(top: &Path, run: &Value) -> String {
     }
     let notes: Vec<String> = run["notes"]
         .as_array()
-        .map(|ns| ns.iter().map(|n| format!("- {}: {}", n["author"].as_str().unwrap_or(""), n["text"].as_str().unwrap_or("").trim())).collect())
+        .map(|ns| {
+            ns.iter().map(|n| format!("- {}: {}", n["author"].as_str().unwrap_or(""), n["text"].as_str().unwrap_or("").trim())).collect()
+        })
         .unwrap_or_default();
     if !notes.is_empty() {
         out += &format!("\nNotes so far:\n{}\n", notes.join("\n"));
@@ -142,7 +205,8 @@ pub(super) fn strategy_show(top: &Path, kind: &str, id: &str) -> Result<Value, F
             let Some(m) = tasks::record(top, "milestones", id) else { return err("E7023", format!("unknown milestone {id}")) };
             let held: Vec<&Value> = all.iter().filter(|t| t["milestone"] == id).collect();
             let features = tasks::records(top, "features");
-            let features: Vec<&Value> = features.iter().filter(|f| f["milestone"] == id || held.iter().any(|t| t["feature"] == f["id"])).collect();
+            let features: Vec<&Value> =
+                features.iter().filter(|f| f["milestone"] == id || held.iter().any(|t| t["feature"] == f["id"])).collect();
             (m, json!({"features": ids(&features), "tasks": ids(&held)}))
         }
         _ => return err("E7001", "strategy show takes task, feature or milestone, and an id; or run, a task id and a run id"),
@@ -185,11 +249,21 @@ fn step_list(spec: &str, n: usize) -> Result<Vec<usize>, Failure> {
 /// One line for a note: its number, author, time, and first line cut to 100.
 fn note_line(i: usize, n: &Value) -> String {
     let time = n["time"].as_u64().map(|t| t.to_string()).unwrap_or(String::new());
-    format!("{} {} {time}: {}", i + 1, n["author"].as_str().unwrap_or(""), cut_line(n["text"].as_str().unwrap_or("").lines().next().unwrap_or("")))
+    format!(
+        "{} {} {time}: {}",
+        i + 1,
+        n["author"].as_str().unwrap_or(""),
+        cut_line(n["text"].as_str().unwrap_or("").lines().next().unwrap_or(""))
+    )
 }
 /// One line for a question: its number, text's first line, and answer.
 fn question_line(i: usize, q: &Value) -> String {
-    format!("{} {}: {}", i + 1, cut_line(q["text"].as_str().unwrap_or("").lines().next().unwrap_or("")), q["answer"].as_str().unwrap_or("unanswered"))
+    format!(
+        "{} {}: {}",
+        i + 1,
+        cut_line(q["text"].as_str().unwrap_or("").lines().next().unwrap_or("")),
+        q["answer"].as_str().unwrap_or("unanswered")
+    )
 }
 /// One line for a run: its id, kind, state and model.
 fn run_line(r: &Value) -> String {
@@ -217,7 +291,8 @@ pub(super) fn strategy_run_show(top: &Path, tid: &str, rid: &str, steps: Option<
         return err("E7023", format!("task {tid} has no run {rid}"));
     };
     // Token counts tell an agent nothing about the work, so they are not steps.
-    let entries: Vec<Value> = transcript(Path::new(run["log"].as_str().unwrap_or(""))).into_iter().filter(|e| e["kind"] != "usage").collect();
+    let entries: Vec<Value> =
+        transcript(Path::new(run["log"].as_str().unwrap_or(""))).into_iter().filter(|e| e["kind"] != "usage").collect();
     run.as_object_mut().map(|o| o.remove("log"));
     if entries.is_empty() && steps.is_some() {
         return err("E7001", format!("run {rid} has no steps"));
@@ -259,13 +334,16 @@ fn in_parts(mut reply: Value, key: &str, number: &str, next: &str, from: usize, 
     let long = longest_text(&first);
     let chars: Vec<char> = long.as_ref().map(|(_, t)| t.chars().collect()).unwrap_or_default();
     if from > 0 {
-        let Some((field, _)) = &long else { return err("E7001", "--from reads on in the text of the first note or step named, and it has none") };
+        let Some((field, _)) = &long else {
+            return err("E7001", "--from reads on in the text of the first note or step named, and it has none");
+        };
         if from >= chars.len() {
             return err("E7001", format!("--from {from} is past the end: its {field} has {} characters", chars.len()));
         }
         items[0] = with_part(&first, field, &chars, from, chars.len());
     }
-    let rest = |taken: usize| if taken < items.len() { format!("Next: {next} {}\n", number_list(&numbers[taken..])) } else { String::new() };
+    let rest =
+        |taken: usize| if taken < items.len() { format!("Next: {next} {}\n", number_list(&numbers[taken..])) } else { String::new() };
     let render = |some: &[Value]| {
         let mut part = reply.clone();
         part[key] = json!(some);
@@ -382,7 +460,14 @@ pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut
         ["strategy", "show", "run", tid, rid] => Ok(pretty(strategy_run_show(top, tid, rid, None)?)),
         ["strategy", "show", "run", tid, rid, steps, rest @ ..] => {
             let from = from_flag(rest)?;
-            in_parts(strategy_run_show(top, tid, rid, Some(steps))?, "steps", "step", &format!("strategy show run {tid} {rid}"), from, budget)
+            in_parts(
+                strategy_run_show(top, tid, rid, Some(steps))?,
+                "steps",
+                "step",
+                &format!("strategy show run {tid} {rid}"),
+                from,
+                budget,
+            )
         }
         ["strategy", "show", "note", tid, notes, rest @ ..] => {
             let from = from_flag(rest)?;
@@ -395,7 +480,10 @@ pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut
         }
         ["strategy", "note", rest @ ..] => {
             if rest.first().is_some_and(|w| w.starts_with("--")) {
-                return err("E7015", "nothing was sent. Resend with `command` set to just `strategy note` and the whole reply in the `text` argument");
+                return err(
+                    "E7015",
+                    "nothing was sent. Resend with `command` set to just `strategy note` and the whole reply in the `text` argument",
+                );
             }
             let text = if rest.is_empty() { input()? } else { rest.join(" ") };
             if text.trim().is_empty() {
@@ -413,12 +501,26 @@ pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut
         }
         ["strategy", kind @ ("task" | "feature" | "milestone" | "vision"), rest @ ..] => {
             if rest.first().is_some_and(|w| w.starts_with("--")) {
-                return err("E7015", format!("nothing was sent. Resend with `command` set to just `strategy {kind}` (and the id to edit) and the proposal in the `text` argument"));
+                return err(
+                    "E7015",
+                    format!(
+                        concat!(
+                            "nothing was sent. Resend with `command` set to just `strategy {}` ",
+                            "(and the id to edit) and the proposal in the `text` argument",
+                        ),
+                        kind
+                    ),
+                );
             }
             let id = match (*kind, rest) {
                 (_, []) => None,
                 ("task" | "feature" | "milestone", [id]) => Some(*id),
-                _ => return usage("strategy task|feature|milestone [<id>] with the fields as JSON in `text`, or strategy vision with the new text in `text`"),
+                _ => {
+                    return usage(concat!(
+                        "strategy task|feature|milestone [<id>] with the fields as JSON in `text`, ",
+                        "or strategy vision with the new text in `text`",
+                    ));
+                }
             };
             let text = input()?;
             if text.trim().is_empty() {
@@ -436,9 +538,13 @@ pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut
             }
             wait_answer(top, rid, &qid)
         }
-        _ => usage(
-            "strategy list [--archived] | strategy show <task|feature|milestone> <id>... | strategy show note <task> <notes> [--from <n>] | strategy show run <task> <run> [<steps>|all] [--from <n>] | strategy note, with the reply in `text` | strategy task|feature|milestone [<id>] or strategy vision, with the proposal in `text`",
-        ),
+        _ => usage(concat!(
+            "strategy list [--archived] | strategy show <task|feature|milestone> <id>... | ",
+            "strategy show note <task> <notes> [--from <n>] | ",
+            "strategy show run <task> <run> [<steps>|all] [--from <n>] | ",
+            "strategy note, with the reply in `text` | ",
+            "strategy task|feature|milestone [<id>] or strategy vision, with the proposal in `text`",
+        )),
     }
 }
 /// Holds a strategy run's proposal until the human answers it or ends the run.
@@ -508,7 +614,11 @@ mod tests {
         assert!(cut.len() <= 250 && at > 0 && cut.ends_with(&format!("Next: strategy show note t1 1..3,5 --from {at}\n")), "{cut}");
         assert!(cut.contains(&format!("\"part\": \"text, characters 0..{at} of 300\"")), "{cut}");
         let on = shown(at, 10_000).unwrap();
-        assert!(on.contains(&format!("\"part\": \"text, characters {at}..300 of 300\"")) && on.contains(&format!("\"text\": \"{}\"", "x".repeat(300 - at))), "{on}");
+        assert!(
+            on.contains(&format!("\"part\": \"text, characters {at}..300 of 300\""))
+                && on.contains(&format!("\"text\": \"{}\"", "x".repeat(300 - at))),
+            "{on}"
+        );
         assert!(!on.contains("Next:") && on.contains("\"note\": 5"), "{on}");
         assert!(shown(300, 10_000).unwrap_err().0.starts_with("E7001"));
         assert_eq!(from_flag(&["--from", "12"]).unwrap(), 12);
