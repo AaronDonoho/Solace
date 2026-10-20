@@ -327,16 +327,18 @@ pub fn protected(root: &Path) -> Option<PathBuf> {
 }
 
 /// The arguments that run `argv` in `root` under bubblewrap: no network, only
-/// `root/target` writable, Cargo's and rustup's caches and the toolchain
-/// read-only (D-158 point 4). `home` is the home folder, emptied first so a
-/// build script can't read what else is in it; with `None` it is left as it
-/// is. `cargo_home` and `rustup_home` are where Cargo and rustup keep their
-/// caches, which a machine may put elsewhere (`CARGO_HOME`, `RUSTUP_HOME`).
+/// `root/target` writable; Cargo's and rustup's caches, the toolchain, and the
+/// folders a project's `[sandbox] read` names read-only (D-158 point 4). `home`
+/// is the home folder, emptied first so a build script can't read what else is
+/// in it; with `None` it is left as it is. `cargo_home` and `rustup_home` are
+/// where Cargo and rustup keep their caches, which a machine may put elsewhere
+/// (`CARGO_HOME`, `RUSTUP_HOME`).
 pub fn cargo_sandbox_args(argv: &[String], root: &Path, home: Option<&Path>, cargo_home: &Path, rustup_home: &Path) -> Vec<String> {
-    let mut a: Vec<String> = ["--die-with-parent", "--unshare-net", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let mut a: Vec<String> =
+        ["--die-with-parent", "--unshare-net", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
     if let Some(home) = home {
         let home = home.to_string_lossy().to_string();
         a.extend(["--tmpfs".to_string(), home]);
@@ -345,6 +347,12 @@ pub fn cargo_sandbox_args(argv: &[String], root: &Path, home: Option<&Path>, car
             a.extend(["--ro-bind-try".to_string(), p.clone(), p]);
         }
         let p = rustup_home.to_string_lossy().to_string();
+        a.extend(["--ro-bind-try".to_string(), p.clone(), p]);
+    }
+    // A project's tests may read fixtures beside it. Only the folders it names
+    // come back after the home folder was emptied, never the whole root.
+    for p in sandbox_reads(root) {
+        let p = p.to_string_lossy().to_string();
         a.extend(["--ro-bind-try".to_string(), p.clone(), p]);
     }
     let target = root.join("target").to_string_lossy().to_string();
@@ -391,6 +399,9 @@ pub fn cargo_sandboxed(argv: &[String], root: &Path) -> Command {
         }
     };
     c.current_dir(root);
+    for key in TASK_ENV {
+        c.env_remove(key);
+    }
     c
 }
 
@@ -1328,6 +1339,9 @@ pub fn adopt(copy: &Path, step: &dyn Fn(&str)) -> Result<PathBuf, Failure> {
     }
     state["adopted"] = json!(true);
     save(&original, &state)?;
+    // The copy's store is canonical, but the root it replaced may hold an older
+    // `.solace/.gitignore`; upgrade it now that the store is in its place (D-179).
+    crate::outside::share_store(&original)?;
     fs::remove_file(journal(parent))?;
     Ok(original)
 }
@@ -1713,3 +1727,62 @@ mod tests {
         assert_eq!(relative(Path::new("/a"), Path::new("/a/x")), PathBuf::from("x"));
     }
 }
+
+/// A test run from a task must not see the agent's task context (D-71): the
+/// same five variables the `rust-*` commands unset with `env -u`.
+#[cfg(test)]
+#[test]
+fn a_sandboxed_command_drops_the_agents_task_context() {
+    let dir =
+        crate::testing::Scratch::new().with(&[("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")]);
+    let argv: Vec<String> = ["cargo", "check"].iter().map(|s| s.to_string()).collect();
+    let command = cargo_sandboxed(&argv, &dir);
+    let mut removed = 0;
+    for (name, value) in command.get_envs() {
+        if value.is_none() {
+            for key in TASK_ENV {
+                if name == std::ffi::OsStr::new(key) {
+                    removed += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(removed, TASK_ENV.len());
+}
+
+/// A sandbox mounts only the folders a project declares in `[sandbox] read`,
+/// so a member's build script cannot read the whole Solace root (D-158 point 4).
+#[cfg(test)]
+#[test]
+fn a_sandbox_in_a_solace_root_mounts_the_root_read_only() {
+    let top = crate::testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"app\"]\n"),
+        ("app/solace.toml", "[sandbox]\nread = [\"../fixtures\", \"/opt/shared\"]\n"),
+        ("app/Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+    ]);
+    let root = top.join("app");
+    let argv: Vec<String> = ["cargo", "check"].iter().map(|s| s.to_string()).collect();
+    let args = cargo_sandbox_args(&argv, &root, Some(Path::new("/home/x")), Path::new("/home/x/.cargo"), Path::new("/home/x/.rustup"));
+    let line = args.join(" ");
+    let top = top.display().to_string();
+    assert!(line.contains(&format!("--ro-bind-try {top}/fixtures {top}/fixtures")), "{line}");
+    assert!(line.contains("--ro-bind-try /opt/shared /opt/shared"), "{line}");
+    assert!(line.contains(&format!("--ro-bind {top}/app {top}/app")), "{line}");
+    assert!(line.contains(&format!("--bind {top}/app/target {top}/app/target")), "{line}");
+    assert!(!line.contains(&format!("--ro-bind {top} {top}")), "the whole root is not mounted: {line}");
+}
+
+/// The folders a project's `[sandbox] read` names, resolved against its root,
+/// so a sandboxed command can read fixtures beside the project (D-158 point 4).
+fn sandbox_reads(root: &Path) -> Vec<PathBuf> {
+    let Ok(v) = crate::lockdown::settings(root) else { return vec![] };
+    v.get("sandbox")
+        .and_then(|s| s.get("read"))
+        .and_then(|r| r.as_array())
+        .map(|paths| paths.iter().filter_map(|p| p.as_str()).map(|p| lexical(&root.join(p))).collect())
+        .unwrap_or_default()
+}
+
+/// The environment a task run sets; a sandboxed command must not inherit it
+/// (D-71).
+const TASK_ENV: [&str; 5] = ["SOLACE_TASK", "SOLACE_RUN", "SOLACE_SESSION", "SOLACE_CONFIG", "SOLACE_BIN"];

@@ -120,6 +120,20 @@ pub fn parse_settings(s: &str) -> Result<toml::Value, Failure> {
             }
         }
     }
+    // `[sandbox] read`: folders outside the project a sandboxed command may
+    // read (D-158 point 4).
+    if let Some(t) = v.get("sandbox") {
+        let t = t.as_table().ok_or_else(|| invalid("sandbox"))?;
+        for (key, value) in t {
+            if key != "read" {
+                return Err(invalid(key));
+            }
+            let paths = value.as_array().ok_or_else(|| invalid(key))?;
+            if paths.iter().any(|p| p.as_str().is_none_or(|p| p.is_empty())) {
+                return Err(invalid(key));
+            }
+        }
+    }
     // `[build]`: the project's build recipe (D-131).
     recipe::check(&v)?;
     Ok(v)
@@ -3574,5 +3588,16 @@ running your program.
         let before = format!("{base}\n[features]\ndefault = []\n");
         assert!(cargo_settings_changed(before.as_bytes(), &format!("{base}\n[features]\ndefault = [\"extra\"]\n")));
         assert!(!cargo_settings_changed(before.as_bytes(), &before.replace("0.1.0", "0.2.0")));
+    }
+}
+
+/// `[sandbox] read` is a list of non-empty paths, and no other sandbox key is
+/// accepted (D-158 point 4).
+#[cfg(test)]
+#[test]
+fn sandbox_read_is_a_list_of_paths() {
+    assert!(parse_settings("[sandbox]\nread = [\"../fixtures\"]\n").is_ok());
+    for bad in ["[sandbox]\nread = \"../fixtures\"\n", "[sandbox]\nread = [\"\"]\n", "[sandbox]\nwrite = []\n"] {
+        assert!(parse_settings(bad).is_err(), "{bad}");
     }
 }

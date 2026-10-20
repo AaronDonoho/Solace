@@ -1074,3 +1074,9 @@ Amends D-57 point 3 and D-59 (Aaron, board task "Workspace: add a Rust package i
 2. `language::rust::package` reads and refuses the whole package before anything is written, naming each line outside the subset, so a refusal leaves the folder and the project list unchanged. Without `cargo`, the add goes ahead and says the dependencies weren't fetched (D-176).
 3. Gleam still comes in by migration. Rust migration (copy, check, swap) and multi-crate workspaces stay deferred (D-158 point 6).
 Why: a Cargo package already has the files Solace would project, so copying and swapping it would change nothing while risking the original.
+
+## D-179 The symbol store is committed, but its local files are not
+Amends D-58 point 6 (Aaron, board task "Adopt solace-cli into the store", 2026-10-19). Part of the Rust symbol store and lockdown feature.
+1. Each project's `.solace/.gitignore` shares the symbol database (`store.db`), the approved list (`approved`) and itself. Everything else in `.solace/` stays ignored: locks, command logs, per-session caches, undo records, migration scratch, and `board/` run data, conversations and images.
+2. The per-project files stay for now; an old file that hid the store is upgraded in place, while a file a human has edited is left alone. Replacing them with one file at the root is a later task.
+Why: the symbols belong to the project, while run logs and conversations can hold private data and the other files change constantly.

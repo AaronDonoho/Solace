@@ -1,4 +1,5 @@
-# Only the approved list is shared (D-58).
+# Solace's symbol store is committed; local caches, locks, logs and board data are not (D-179).
 *
 !.gitignore
 !approved
+!store.db

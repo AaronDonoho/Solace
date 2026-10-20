@@ -783,6 +783,9 @@ class Root(unittest.TestCase):
         self.assertIn('projects = ["app"]', settings)
         self.assertIn('watch_limit', settings)
         self.assertTrue((self.root/'.solace/.gitignore').exists())
+        ignore = (self.root/'.solace/.gitignore').read_text()
+        for shared in ['!.gitignore', '!approved', '!store.db']:
+            self.assertIn(shared, ignore)
         with open(self.root/'solace.toml', 'a') as f: f.write('tool = { run = ["python3", "tool.py"] }\n')
         self.assertIn('plain files', self.cli('session', 'start'))
         self.assertIn('app (pilot)', self.cli('session', 'start'))
@@ -1550,7 +1553,7 @@ class Root(unittest.TestCase):
         body = 'pub fn one() {\n  1\n}\n'
         for d in ['a', 'b']: project(self.root/d, body=body)
         self.migrate()
-        self.assertIn('approved', (self.root/'b/.solace/.gitignore').read_text())
+        self.assertIn('!store.db', (self.root/'b/.solace/.gitignore').read_text())
         self.start()
         edited = body.replace('  1', '  2')
         (self.root/'b/src/app.gleam').write_text(edited)
@@ -1571,6 +1574,31 @@ class Root(unittest.TestCase):
         self.assertEqual((self.root/'b/src/app.gleam').read_text(), body)
         # A command in the project sees nothing new.
         self.assertNotIn('outside Solace', self.cli('check', cwd=self.root/'b'))
+
+    def test_the_store_is_shared_but_its_local_files_are_not(self):
+        # D-179: the symbol database and approved list are committed; locks,
+        # logs, caches, migration scratch and board run data stay ignored.
+        project(self.root/'a')
+        self.migrate('--project', 'a')
+        store = self.root/'a/.solace'
+        local = ['lock', 'fetch.lock', 'command-1.log', 'reads-1.json', 'moves-1.json',
+                 'migration.json', 'migration-inventory.json', 'board/run-log.txt']
+        for name in local:
+            (store/name).parent.mkdir(parents=True, exist_ok=True)
+            (store/name).write_text('local\n')
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True, capture_output=True)
+        status = subprocess.run(
+            ['git', '-C', str(self.root), 'status', '--porcelain', '--untracked-files=all', '--', 'a/.solace'],
+            text=True, capture_output=True, check=True).stdout
+        for name in ['.gitignore', 'approved', 'store.db']:
+            self.assertIn(f'?? a/.solace/{name}', status)
+        for name in local:
+            self.assertNotIn(f'a/.solace/{name}', status)
+        # A line the human adds to the file survives the next command.
+        ignore = store/'.gitignore'
+        ignore.write_text(ignore.read_text() + '!keep.txt\n')
+        self.cli('session', 'start', cwd=self.root/'a')
+        self.assertIn('!keep.txt', ignore.read_text())
 
     def test_a_request_creates_one_task(self):
         # D-77: Strategy's New task names a request; a repeated create, in turn or at once, returns the first one's task.

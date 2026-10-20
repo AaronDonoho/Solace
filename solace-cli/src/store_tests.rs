@@ -76,6 +76,9 @@ fn a_copy_of_this_crate_is_imported_and_written_back_exactly() {
     let rels: Vec<String> = paths.iter().map(|p| p.strip_prefix(crate_dir).unwrap().to_string_lossy().replace('\\', "/")).collect();
     let root = Scratch::new();
     fs::copy(crate_dir.join("Cargo.toml"), root.join("Cargo.toml")).unwrap();
+    // The lockfile pins the versions already in cargo's cache, so the import
+    // resolves them offline inside Solace's sandbox.
+    fs::copy(crate_dir.join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
     for rel in &rels {
         fs::create_dir_all(root.join(rel).parent().unwrap()).unwrap();
         fs::copy(crate_dir.join(rel), root.join(rel)).unwrap();

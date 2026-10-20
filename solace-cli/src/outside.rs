@@ -192,7 +192,8 @@ fn save_approved(root: &Path, map: &BTreeMap<String, String>) -> Result<(), Fail
     for (k, h) in map {
         text += &format!("{h} {k}\n");
     }
-    write_atomic(&root.join(".solace/approved"), text)
+    write_atomic(&root.join(".solace/approved"), text)?;
+    share_store(root)
 }
 
 fn header_key(path: &str) -> String {
@@ -214,9 +215,7 @@ fn approval(key: &str, row: &Value) -> Option<(String, String)> {
 pub fn approve_all(s: &Store) -> Result<(), Failure> {
     let snap = board::snapshot(s)?;
     let map = snap.as_object().unwrap().iter().filter_map(|(k, v)| approval(k, v)).collect();
-    save_approved(&s.root, &map)?;
-    fs::write(s.root.join(".solace/.gitignore"), "# Only the approved list is shared (D-58).\n*\n!.gitignore\n!approved\n")?;
-    Ok(())
+    save_approved(&s.root, &map)
 }
 
 /// A completed task's changes become approved: each entity's name before the
@@ -317,6 +316,7 @@ pub enum Mode {
 /// Reads in every graph file changed outside Solace. Returns a note for the
 /// command's reply, or "" when nothing changed. The caller holds the lock.
 pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
+    share_store(&s.root)?;
     let mut w = Written::load(&s.root);
     if !w.known {
         // A store from before D-58: what it holds is what Solace last wrote.
@@ -700,3 +700,60 @@ mod tests {
         assert_eq!(file(&s), APP.replace("  1", "  7"));
     }
 }
+
+/// The symbol store is committed with the project, but what is local to this
+/// checkout is not (D-179): locks, logs, caches, undo records and board data
+/// stay ignored, while `store.db`, `approved` and this file are shared.
+pub fn share_store(root: &Path) -> Result<(), Failure> {
+    let dir = root.join(".solace");
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let path = dir.join(".gitignore");
+    let current = fs::read_to_string(&path).ok();
+    // Upgrade the files earlier versions wrote; any other text is the human's
+    // and is left alone.
+    if current.as_deref().is_none_or(|text| OLD_STORE_IGNORES.contains(&text)) {
+        fs::write(&path, STORE_IGNORE)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn the_store_is_committed_with_the_project() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn one() { 1 }\n")]);
+    let path = p.root.join(".solace/.gitignore");
+    let shared = fs::read_to_string(&path).unwrap();
+    assert!(shared.contains("!store.db") && shared.contains("!approved") && shared.contains("!.gitignore"), "{shared}");
+    // The old file hid the store; the interim one hid nothing. Both upgrade.
+    fs::write(&path, "# Only the approved list is shared (D-58).\n*\n!.gitignore\n!approved\n").unwrap();
+    share_store(&p.root).unwrap();
+    let upgraded = fs::read_to_string(&path).unwrap();
+    assert!(upgraded.contains("!store.db"), "{upgraded}");
+    fs::write(&path, "# Solace's store is committed with the project.\n").unwrap();
+    share_store(&p.root).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), STORE_IGNORE);
+    // A bare `*` from an older setup hid everything too.
+    fs::write(&path, "*\n").unwrap();
+    share_store(&p.root).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), STORE_IGNORE);
+    // A file the human has edited is left as it is.
+    fs::write(&path, "# mine\n*\n!/custom\n").unwrap();
+    share_store(&p.root).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "# mine\n*\n!/custom\n");
+    // A folder with no store gets no ignore file.
+    let bare = crate::testing::Scratch::new();
+    share_store(&bare).unwrap();
+    assert!(!bare.join(".solace").exists());
+}
+
+/// What a store shares: the symbol database, the approved list and this file.
+const STORE_IGNORE: &str = concat!(
+    "# Solace's symbol store is committed; local caches, locks, logs and board data are not (D-179).\n",
+    "*\n!.gitignore\n!approved\n!store.db\n"
+);
+
+/// The files earlier versions wrote: one hid the store; the interim one hid nothing.
+const OLD_STORE_IGNORES: [&str; 3] =
+    ["# Only the approved list is shared (D-58).\n*\n!.gitignore\n!approved\n", "# Solace's store is committed with the project.\n", "*\n"];
