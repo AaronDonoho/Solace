@@ -194,9 +194,16 @@ fn reopen(root: &Path) {
         return;
     }
     let marker = root.join(".solace/fetch-failed");
-    if !crate::language::cargo::installed() {
-        let _ = fs::remove_file(marker);
-        return;
+    match crate::language::reason(crate::language::RUST) {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            let _ = fs::remove_file(&marker);
+            return;
+        }
+        Err(e) => {
+            let _ = fs::write(&marker, e.0.trim());
+            return;
+        }
     }
     let _ = crate::language::cargo::reopen(root);
 }
@@ -715,5 +722,16 @@ mod tests {
         // Its agents can't reach the project below it.
         let v = lockdown::settings(&root).unwrap();
         assert_eq!(lockdown::tier(&root, &v, "frontend/gleam.toml", None), "internal");
+    }
+
+    /// A malformed settings file is reported on the project's lane.
+    #[test]
+    fn reopening_reports_invalid_settings() {
+        let root = Scratch::new().with(&[("Cargo.toml", crate::testing::CARGO)]);
+        fs::create_dir_all(root.join(".solace")).unwrap();
+        let bad = Scratch::new().with(&[("system.toml", "[languages]\nrust = 1\n")]);
+        crate::board::with_config(&bad.join("system.toml"), || reopen(&root));
+        let reported = fs::read_to_string(root.join(".solace/fetch-failed")).unwrap();
+        assert!(reported.contains("E6020"), "{reported}");
     }
 }

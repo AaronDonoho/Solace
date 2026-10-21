@@ -17,20 +17,17 @@ pub const MISSING: &str = "Needs the Rust toolchain (`cargo`)";
 /// type errors are fixed, so one fix can take a second round (D-158 point 3).
 pub const ROUND_NOTE: &str = "Fixing these may show more errors: Rust checks borrows only once types check.";
 
-/// Whether `cargo` is on `PATH`. Looked up on every call, so a toolchain
-/// installed while a server runs is found without restarting it.
+/// Whether `cargo` can be used: it is on `PATH` and Rust is turned on in the
+/// system settings. An unreadable or invalid settings file leaves it unusable.
+/// Callers that must report that error use `language::reason` instead.
+/// Looked up on every call, so a toolchain installed while a server runs is
+/// found without restarting it.
 pub fn installed() -> bool {
-    search_path("cargo").is_some()
+    search_path("cargo").is_some() && crate::language::enabled(crate::language::RUST).unwrap_or(false)
 }
 
 fn search_path(program: &str) -> Option<PathBuf> {
-    #[cfg(test)]
-    if let Some(found) = PATH_OVERRIDE.with(|p| p.borrow().as_ref().map(|dirs| dirs.iter().map(|d| d.join(program)).find(|p| p.is_file())))
-    {
-        return found;
-    }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(program)).find(|p| p.is_file())
+    crate::language::paths::search_path(program)
 }
 
 /// The project's own build folder, so every check reuses it (D-158 point 3).
@@ -499,18 +496,9 @@ pub(crate) fn max_width(root: &Path) -> usize {
         .map_or(100, |width| width.max(1) as usize)
 }
 
-#[cfg(test)]
-thread_local! {
-    /// A test thread's `PATH`, in place of the process's.
-    static PATH_OVERRIDE: std::cell::RefCell<Option<Vec<PathBuf>>> = const { std::cell::RefCell::new(None) };
-}
-
 /// Runs `f` with `PATH` read as `dirs`, so a test can act as a machine with or
 /// without a tool.
 #[cfg(test)]
 pub(crate) fn with_path<T>(dirs: &[PathBuf], f: impl FnOnce() -> T) -> T {
-    let old = PATH_OVERRIDE.with(|p| p.replace(Some(dirs.to_vec())));
-    let out = f();
-    PATH_OVERRIDE.with(|p| *p.borrow_mut() = old);
-    out
+    crate::language::paths::with_path(dirs, f)
 }

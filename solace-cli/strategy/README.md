@@ -146,11 +146,16 @@ collapses it to one line: the shown run's state and model, or whether a run is o
 
 - **Data.** The root's `/events` replays `{strategyRuns}` (no notes) after `{vision}` and sends `{strategyRun}` in
   full after every change, with no `project`. A replayed run keeps the notes the page already has. The model list
-  is `GET /models`, one entry per Claude family (see the components README). The pick offers only models that
-  can start, each shown by its label (`solace_task.agent_option`, D-150), and a remembered alias the list no
-  longer shows becomes its family's entry (`solace_task.remembered`); under it, `solace_task.unavailable_view` gives the
-  others' reasons, with Try again (`POST /models/try-again`) for a usage limit, and with none that can start,
-  `solace_task.no_agents_view` says what to set up, or that every model is held by a usage limit.
+  is `GET /models`, one entry per Claude family (see the components README). It loads with the page and refreshes
+  when the Strategy page reconnects or catches up and after live run or task updates. A fresh list keeps the picked
+  model and effort while they remain available and falls back only when the pick disappears; a refresh keeps an
+  unavailable pick that is still listed, narrows or clears its effort, and leaves the old list unchanged when the
+  refresh fails. The pick offers only models that can start, each shown by its label (`solace_task.agent_option`,
+  D-150), and a remembered alias the list no longer shows becomes its family's entry (`solace_task.remembered`);
+  under it, `solace_task.unavailable_view` gives the others' reasons, with Try again (`POST /models/try-again`) for
+  a usage limit, and with none that can start, `solace_task.no_agents_view` says what to set up, or that every model
+  is held by a usage limit. A run's state names the model its agent used when the start event reports one, otherwise
+  its requested model, resolved to that same label; an unknown id stays raw.
 - **Attention.** A live `{strategyRun}` where a run goes waiting (its agent replied) or asks a new proposal sends
   the host `attention` (D-107), which flags the Strategy tab while another page shows; a replay sends nothing.
 - **Layout.** Below the shell's menu the page fills the window: the tab content scrolls on its own, and the panel

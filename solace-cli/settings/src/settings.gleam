@@ -54,6 +54,8 @@ pub type Model {
     unsubscribe: Option(fn() -> Nil),
     /// The models set up on this computer, from the system settings.
     models: List(Entry),
+    /// The languages on this computer, from the system settings.
+    languages: List(Language),
     /// The model being added or edited.
     form: Form,
     /// Why the last change was refused, "" when it wasn't.
@@ -74,6 +76,10 @@ pub type Msg {
   Disconnected
   /// The server's model list, or why it refused a change.
   ModelsLoaded(String)
+  /// The server's language list, or why it refused a change.
+  LanguagesLoaded(String)
+  /// Turns a language on or off in the system settings.
+  ToggleLanguage(String, Bool)
   /// Opens a model in the form.
   EditModel(Entry)
   /// Empties the form for a new model.
@@ -127,6 +133,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               )
             }),
             call("/models", "GET", ""),
+            call_languages("GET", ""),
           ]),
         )
       }
@@ -151,6 +158,15 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
         Error(_) -> #(Model(..model, error: refusal(text)), effect.none())
       }
+    LanguagesLoaded(text) ->
+      case json.parse(text, languages_decoder()) {
+        Ok(languages) -> #(Model(..model, languages:, error: ""), effect.none())
+        Error(_) -> #(Model(..model, error: refusal(text)), effect.none())
+      }
+    ToggleLanguage(id, enabled) -> #(
+      model,
+      call_languages("POST", language_body(id, enabled)),
+    )
     EditModel(e) -> #(
       Model(
         ..model,
@@ -231,7 +247,15 @@ pub fn view(model: Model) -> Element(Msg) {
       html.h2([attribute.id("appearance")], [html.text("Appearance")]),
       theme_control(model.dark),
     ]),
+    languages_section(model),
     models_section(model),
+    case model.error {
+      "" -> element.none()
+      e ->
+        html.p([attribute.class("error"), attribute.role("alert")], [
+          html.text(e),
+        ])
+    },
   ])
 }
 
@@ -247,6 +271,7 @@ const view_styles =
 .settings section+section{margin-top:var(--space-6)}
 .settings h3{margin:16px 0 8px;font-size:inherit}
 .models{margin:0;padding:0 0 0 18px}.models li{margin:6px 0}.models button{margin-right:8px}
+.languages{margin:0;padding:0;list-style:none}.languages li{margin:6px 0}
 .field{display:grid;gap:4px;margin:8px 0;max-width:480px}
 .settings .error{color:var(--ink);font-weight:600}
 .switch{display:flex;align-items:center;gap:10px;width:fit-content;cursor:pointer}
@@ -302,7 +327,14 @@ pub const blank_form = Form("", "", "codex", "", "", "", False)
 
 /// The page before it hears from anywhere.
 pub fn initial(dark: Bool) -> Model {
-  Model(dark:, unsubscribe: None, models: [], form: blank_form, error: "")
+  Model(
+    dark:,
+    unsubscribe: None,
+    models: [],
+    languages: [],
+    form: blank_form,
+    error: "",
+  )
 }
 
 @external(javascript, "./api.mjs", "request")
@@ -372,13 +404,6 @@ pub fn models_section(model: Model) -> Element(Msg) {
     ]),
     html.ul([attribute.class("models")], list.map(model.models, model_row)),
     model_form(model.form),
-    case model.error {
-      "" -> element.none()
-      e ->
-        html.p([attribute.class("error"), attribute.role("alert")], [
-          html.text(e),
-        ])
-    },
   ])
 }
 
@@ -473,4 +498,75 @@ pub fn model_form(f: Form) -> Element(Msg) {
       },
     ],
   )
+}
+
+/// A language Solace can use on this computer, as `GET /languages` lists it.
+pub type Language {
+  Language(id: String, label: String, enabled: Bool, installed: Bool)
+}
+
+/// The languages in a `GET /languages` reply.
+pub fn languages_decoder() -> decode.Decoder(List(Language)) {
+  decode.list({
+    use id <- decode.field("id", decode.string)
+    use label <- decode.field("label", decode.string)
+    use enabled <- decode.field("enabled", decode.bool)
+    use installed <- decode.field("installed", decode.bool)
+    decode.success(Language(id:, label:, enabled:, installed:))
+  })
+}
+
+/// The languages route; its reply is the language list, or a refusal.
+fn call_languages(method: String, body: String) -> Effect(Msg) {
+  effect.from(fn(send) {
+    request("/languages", method, body, fn(text) { send(LanguagesLoaded(text)) })
+  })
+}
+
+fn language_body(id: String, enabled: Bool) -> String {
+  json.to_string(
+    json.object([
+      #("id", json.string(id)),
+      #("enabled", json.bool(enabled)),
+    ]),
+  )
+}
+
+/// The languages on this computer, each with its switch and missing state.
+pub fn languages_section(model: Model) -> Element(Msg) {
+  html.section([attribute.attribute("aria-labelledby", "languages")], [
+    html.h2([attribute.id("languages")], [html.text("Languages")]),
+    html.p([], [
+      html.text(
+        "Turn a language off on this computer, even when its toolchain is installed. Its projects stay readable, but changes, checks and tests are refused until it is turned back on.",
+      ),
+    ]),
+    html.ul(
+      [attribute.class("languages")],
+      list.map(model.languages, language_row),
+    ),
+  ])
+}
+
+fn language_row(l: Language) -> Element(Msg) {
+  html.li([], [
+    html.label([attribute.class("switch")], [
+      html.input([
+        attribute.type_("checkbox"),
+        attribute.role("switch"),
+        attribute.checked(l.enabled),
+        event.on_check(fn(enabled) { ToggleLanguage(l.id, enabled) }),
+      ]),
+      html.text(l.label),
+    ]),
+    case l.installed {
+      True -> element.none()
+      False ->
+        html.p([attribute.class("reason")], [
+          html.text(
+            "Not found on this computer; its projects say its toolchain is missing.",
+          ),
+        ])
+    },
+  ])
 }

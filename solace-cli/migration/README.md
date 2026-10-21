@@ -20,6 +20,13 @@ bun test test/migration.test.mjs test/migration_states.test.mjs   # command: mig
 python3 test/browser.py                                           # command: migration-browser (needs a browser)
 ```
 
+## Projects
+
+The Projects section lists the root's projects from `GET /projects`. Under a
+project, `needs` says why Solace can't use its tools: its toolchain is missing,
+or the language is turned off in Settings (D-22). Reads still work; changing or
+checking code is refused.
+
 ## Layout
 
 - `src/migration.gleam`: the component.

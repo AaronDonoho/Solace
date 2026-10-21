@@ -5,6 +5,7 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 import gleeunit/should
+import lustre/effect
 import lustre/element
 import solace_task as task
 
@@ -70,6 +71,29 @@ pub fn workflow_actions_and_errors_test() {
       task.Changed("{\"code\":\"E7006\",\"message\":\"Approval required\"}"),
     )
   model.error |> should.equal("Approval required")
+  // An action's server error is shown unchanged, not replaced by the
+  // lost-connection text; a late reply after it is ignored.
+  let #(model, _) = task.update(model, task.Action("assign"))
+  model.acting |> should.equal("assign")
+  let #(model, _) =
+    task.update(
+      model,
+      task.Acted(
+        model.generation,
+        "{\"code\":\"E7006\",\"message\":\"Approval required\"}",
+      ),
+    )
+  model.acting |> should.equal("")
+  model.error |> should.equal("Approval required")
+  let #(late, _) =
+    task.update(
+      model,
+      task.Acted(
+        model.generation,
+        "{\"id\":\"1\",\"title\":\"Fix checkout\",\"body\":\"Details\",\"column\":\"triage\",\"rank\":1}",
+      ),
+    )
+  late |> should.equal(model)
 }
 
 /// A reply for a task opened before, and a workflow from the project shown
@@ -175,7 +199,14 @@ pub fn working_status_notes_and_transcript_test() {
 pub fn notes_newest_first_with_agent_and_finished_test() {
   let model =
     loaded(
-      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"needs_review\",\"rank\":1,\"finished\":{\"kind\":\"work\",\"outcome\":\"finished\",\"time\":3},\"notes\":[{\"author\":\"human\",\"run\":null,\"text\":\"older\",\"time\":1},{\"author\":\"agent\",\"run\":\"r1\",\"text\":\"newer\",\"time\":2}],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"claude-opus\",\"effort\":\"high\",\"log\":\"/l\",\"outcome\":\"finished\"}]}",
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"needs_review\",\"rank\":1,\"finished\":{\"kind\":\"work\",\"outcome\":\"finished\",\"time\":3},\"notes\":[{\"author\":\"human\",\"run\":null,\"text\":\"older\",\"time\":1},{\"author\":\"agent\",\"run\":\"r1\",\"text\":\"newer\",\"time\":2}],\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"claude-opus\",\"effort\":\"high\",\"log\":\"/l\",\"outcome\":\"finished\",\"used\":\"claude-opus-5-5\"}]}",
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded(
+        "[{\"id\":\"claude-opus-5-5\",\"label\":\"Opus Current\"}]",
+      ),
     )
   let assert Some(t) = model.task
   task.status(t) |> should.equal("Agent finished")
@@ -183,8 +214,11 @@ pub fn notes_newest_first_with_agent_and_finished_test() {
   let rendered = html(model)
   rendered |> string.contains("status finished") |> should.be_true
   rendered
-  |> string.contains("agent · work · claude-opus · high")
+  |> string.contains("agent · work · Opus Current · high")
   |> should.be_true
+  rendered
+  |> string.contains("agent · work · claude-opus · high")
+  |> should.be_false
   let assert [_, after] = string.split(rendered, "newer")
   after |> string.contains("older") |> should.be_true
 }
@@ -373,7 +407,7 @@ pub fn an_action_waits_for_its_reply_test() {
   // A second click while waiting sends nothing more.
   let #(again, _) = task.update(model, task.Action("assign"))
   again |> should.equal(model)
-  let #(model, _) = task.update(model, task.Acted(text))
+  let #(model, _) = task.update(model, task.Acted(model.generation, text))
   model.acting |> should.equal("")
   let assert Ok(t) = json.parse(text, task.task_decoder())
   task.acting_text(task.Task(..t, runs: []), "assign")
@@ -1360,6 +1394,7 @@ pub fn proposal_unchanged_fields_are_hidden_test() {
     )
     |> element.to_string
   shown |> string.contains("<dt>title</dt>") |> should.be_false
+  shown |> string.contains("<p>Old:</p>") |> should.be_false
   shown
   |> string.contains("<dt>state</dt><dd>planned → active</dd>")
   |> should.be_true
@@ -1391,50 +1426,7 @@ pub fn proposal_short_field_shows_old_to_new_test() {
   shown
   |> string.contains("<dt>dependsOn</dt><dd>(none) → Index</dd>")
   |> should.be_true
-}
-
-/// The body shows as a line diff: lines the two bodies share collapse to one
-/// muted line, a removed line is struck, an added one marked, in the body's
-/// order, and a toggle shows the new body as Markdown; the vision's new text
-/// diffs the same way.
-pub fn proposal_body_shows_as_a_diff_test() {
-  let assert Ok(p) =
-    json.parse(
-      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"Keep me\\n\\nAdd me\"},\"before\":{\"body\":\"Keep me\\n\\nDrop me\"}}",
-      task.proposal_decoder(),
-    )
-  let shown =
-    task.proposal_view(
-      "",
-      p,
-      ["Approve", "Reject"],
-      "",
-      fn(_, _) { "Index" },
-      False,
-      fn(o) { o },
-    )
-    |> element.to_string
-  shown |> string.contains("1 line unchanged") |> should.be_true
-  shown |> string.contains("<del>- Drop me</del>") |> should.be_true
-  shown |> string.contains("+ Add me") |> should.be_true
-  shown |> string.contains("<summary>New body</summary>") |> should.be_true
-  let assert Ok(vision) =
-    json.parse(
-      "{\"kind\":\"vision\",\"fields\":{\"text\":\"Keep me\\n\\nAdd me\"},\"before\":{\"text\":\"Keep me\\n\\nDrop me\"}}",
-      task.proposal_decoder(),
-    )
-  task.proposal_view(
-    "",
-    vision,
-    ["Approve", "Reject"],
-    "",
-    fn(_, _) { "" },
-    False,
-    fn(o) { o },
-  )
-  |> element.to_string
-  |> string.contains("<del>- Drop me</del>")
-  |> should.be_true
+  shown |> string.contains("<p>Old:</p>") |> should.be_false
 }
 
 /// An edit whose fields all match the record's current values says "No
@@ -1458,41 +1450,7 @@ pub fn proposal_that_changes_nothing_says_so_test() {
     |> element.to_string
   shown |> string.contains("No change") |> should.be_true
   shown |> string.contains("<dt>title</dt>") |> should.be_false
-}
-
-/// The line diff keeps the body's order: a line edited in the middle shows
-/// where it is, between the muted lines before it and after it.
-pub fn proposal_body_shows_a_change_in_its_place_test() {
-  let assert Ok(p) =
-    json.parse(
-      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"One\\n\\nTwo edited\\n\\nThree\"},\"before\":{\"body\":\"One\\n\\nTwo\\n\\nThree\"}}",
-      task.proposal_decoder(),
-    )
-  let shown =
-    task.proposal_view(
-      "",
-      p,
-      ["Approve", "Reject"],
-      "",
-      fn(_, _) { "Index" },
-      False,
-      fn(o) { o },
-    )
-    |> element.to_string
-  // The struck line comes after the muted line for the lines before it, the
-  // added line after the struck one, and the muted line for the lines after
-  // it after the added one.
-  case string.split(shown, "<del>- Two</del>") {
-    [before, after] -> {
-      before |> string.contains("1 line unchanged") |> should.be_true
-      case string.split(after, "+ Two edited") {
-        [_, tail] ->
-          tail |> string.contains("1 line unchanged") |> should.be_true
-        _ -> should.be_true(False)
-      }
-    }
-    _ -> should.be_true(False)
-  }
+  shown |> string.contains("<p>Old:</p>") |> should.be_false
 }
 
 /// A vision proposal whose text is the vision's says "No change", as an edit
@@ -1515,11 +1473,13 @@ pub fn a_vision_proposal_that_changes_nothing_says_so_test() {
     )
     |> element.to_string
   shown |> string.contains("No change") |> should.be_true
-  shown |> string.contains("lines unchanged") |> should.be_false
+  shown |> string.contains("<p>Old:</p>") |> should.be_false
+  shown |> string.contains("<del>") |> should.be_false
 }
 
-/// A body that differs only in the space around its lines, or in blank lines,
-/// is not a change; a changed line beside respaced ones shows only that line.
+/// A body or vision text that differs only in the space around its lines, or
+/// in blank lines, is not a change; a changed line beside respaced ones shows
+/// the complete old and new values.
 pub fn proposal_body_that_only_changes_spacing_says_no_change_test() {
   let show = fn(json_text) {
     let assert Ok(p) = json.parse(json_text, task.proposal_decoder())
@@ -1540,13 +1500,25 @@ pub fn proposal_body_that_only_changes_spacing_says_no_change_test() {
     )
   same |> string.contains("No change") |> should.be_true
   same |> string.contains("<dt>body</dt>") |> should.be_false
+  same |> string.contains("<p>Old:</p>") |> should.be_false
   let one =
     show(
       "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"One\\nTwo\\nThree\"},\"before\":{\"body\":\"One \\n  Two\\nFour\"}}",
     )
-  one |> string.contains("2 lines unchanged") |> should.be_true
-  one |> string.contains("<del>- Four</del>") |> should.be_true
-  one |> string.contains("+ Three") |> should.be_true
+  one
+  |> string.contains("<p>Old:</p><pre>One \n  Two\nFour</pre>")
+  |> should.be_true
+  one
+  |> string.contains("<p>New:</p><pre>One\nTwo\nThree</pre>")
+  |> should.be_true
+  one |> string.contains("<del>") |> should.be_false
+  one |> string.contains("+ Three") |> should.be_false
+  let vision_same =
+    show(
+      "{\"kind\":\"vision\",\"fields\":{\"text\":\"One\\n\\nTwo\"},\"before\":{\"text\":\"One \\n  Two\"}}",
+    )
+  vision_same |> string.contains("No change") |> should.be_true
+  vision_same |> string.contains("<p>Old:</p>") |> should.be_false
 }
 
 /// A vision proposal saved without `before` shows its text as Markdown under
@@ -1945,20 +1917,31 @@ pub fn usage_limits_can_be_tried_again_test() {
   html(model) |> string.contains("unavailable</summary>") |> should.be_false
 }
 
-/// A run shows the model its agent used, when its start event named one;
-/// an alias says which model it resolved to.
+/// A run shows one current label for the model its agent used, when its start
+/// event named one; without a used model it names its requested model, and an
+/// id the list lacks stays raw.
 pub fn a_run_names_the_model_it_used_test() {
   let model =
     loaded(
-      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"needs_review\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"claude-opus\",\"effort\":\"high\",\"log\":\"/l\",\"outcome\":\"finished\",\"used\":\"claude-opus-5-5\"}]}",
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"needs_review\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"claude-opus\",\"effort\":\"high\",\"log\":\"/l\",\"outcome\":\"finished\",\"used\":\"claude-opus-5-5\"},{\"id\":\"r2\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"claude-opus-5-5\",\"effort\":\"low\",\"log\":\"/l\",\"outcome\":\"finished\",\"used\":\"\"},{\"id\":\"r3\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"alias\",\"effort\":\"\",\"log\":\"/l\",\"outcome\":\"finished\",\"used\":\"unknown\"}]}",
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded("[{\"id\":\"claude-opus-5-5\",\"label\":\"Opus 5.5\"}]"),
     )
   let assert Some(t) = model.task
-  let assert [run] = t.runs
-  run.used |> should.equal("claude-opus-5-5")
+  let assert [one, two, three] = t.runs
+  one.used |> should.equal("claude-opus-5-5")
+  two.used |> should.equal("")
+  three.used |> should.equal("unknown")
   let #(model, _) = task.update(model, task.Tab("runs"))
-  html(model)
-  |> string.contains("work · claude-opus · high · claude-opus-5-5")
-  |> should.be_true
+  let rendered = html(model)
+  rendered |> string.contains("work · Opus 5.5 · high") |> should.be_true
+  rendered |> string.contains("work · Opus 5.5 · low") |> should.be_true
+  rendered |> string.contains("work · unknown") |> should.be_true
+  rendered |> string.contains("work · claude-opus · high") |> should.be_false
+  rendered |> string.contains("work · claude-opus-5-5") |> should.be_false
 }
 
 /// Every model held by a usage limit: one line about the limits, not the
@@ -2602,4 +2585,340 @@ pub fn small_control_has_its_shared_declarations_test() {
   assert string.contains(css, "border-radius:0")
   assert string.contains(css, "min-height:var(--control-h-small)")
   assert string.contains(css, "cursor:pointer")
+}
+
+/// A lost reply is not a failed action: it says the task is being checked,
+/// then the run appears when the task is fetched again.
+pub fn a_lost_action_reply_checks_the_task_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"runs\":[]}",
+    )
+  let #(model, _) = task.update(model, task.Action("review"))
+  model.acting |> should.equal("review")
+  let lost =
+    "{\"connectionLost\":true,\"message\":\"Connection lost; the request may not have completed.\"}"
+  let #(model, _) = task.update(model, task.Acted(model.generation, lost))
+  model.acting |> should.equal("")
+  model.error |> should.equal("Connection lost; checking the task…")
+  model.error |> string.contains("TypeError") |> should.be_false
+  model.error |> string.contains("Load Failed") |> should.be_false
+  let with_run =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"runs\":[{\"id\":\"r2\",\"kind\":\"review\",\"state\":\"running\",\"model\":\"m\",\"started\":1,\"log\":\"\"}]}"
+  let #(model, _) =
+    task.update(model, task.Refetched(model.generation, with_run))
+  model.error |> should.equal("")
+  let assert Some(t) = model.task
+  let assert [run] = t.runs
+  run.id |> should.equal("r2")
+}
+
+/// Choosing another task clears the old error at once; later successful
+/// transcript, review, model, and staged task loads clear it too.
+pub fn switching_tasks_and_successful_loads_clear_errors_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+    )
+  let model =
+    task.Model(
+      ..model,
+      connected: True,
+      error: "TypeError: Load Failed",
+      acting: "review",
+    )
+  let #(model, _) = task.update(model, task.TaskChanged("2"))
+  model.error |> should.equal("")
+  model.acting |> should.equal("")
+  model.task |> should.not_equal(None)
+  model.staged |> should.not_equal(None)
+  // A late action reply for the task shown before changes nothing.
+  let #(late, _) =
+    task.update(
+      model,
+      task.Acted(
+        model.generation - 1,
+        "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+      ),
+    )
+  late |> should.equal(model)
+  // A successful staged task load clears an error that arrived while switching.
+  let #(model, _) =
+    task.update(
+      task.Model(..model, error: "TypeError: Load Failed"),
+      task.TaskLoaded(
+        model.generation,
+        "{\"id\":\"2\",\"title\":\"Two\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+      ),
+    )
+  model.error |> should.equal("")
+  model.staged |> should.not_equal(None)
+  // A successful transcript load clears it.
+  let #(model, _) =
+    task.update(
+      task.Model(..model, watching: "r1", error: "TypeError: Load Failed"),
+      task.TranscriptLoaded(
+        "r1",
+        "{\"state\":\"running\",\"transcript\":[{\"kind\":\"message\",\"text\":\"Looking\"}]}",
+      ),
+    )
+  model.error |> should.equal("")
+  // A successful review load clears it; a failed one leaves it alone.
+  let #(model, _) =
+    task.update(
+      task.Model(..model, error: "TypeError: Load Failed"),
+      task.ReviewLoaded("{\"review\":{\"summary\":\"Looks good\"}}"),
+    )
+  model.error |> should.equal("")
+  model.review_summary |> should.equal("Looks good")
+  let #(model, _) =
+    task.update(
+      task.Model(..model, error: "Connection lost; checking the task…"),
+      task.ReviewLoaded("{\"message\":\"Not found\"}"),
+    )
+  model.error |> should.equal("Connection lost; checking the task…")
+  // Successful model loads clear it.
+  let #(model, _) =
+    task.update(
+      task.Model(..model, error: "TypeError: Load Failed"),
+      task.ModelsLoaded("[{\"id\":\"a\",\"label\":\"A\"}]"),
+    )
+  model.error |> should.equal("")
+  let #(model, _) =
+    task.update(
+      task.Model(..model, error: "TypeError: Load Failed"),
+      task.ModelsRefreshed("[{\"id\":\"a\",\"label\":\"A\"}]"),
+    )
+  model.error |> should.equal("")
+}
+
+/// A lost action reply from the task shown before doesn't clear an action
+/// started on the task shown now.
+pub fn a_late_action_reply_from_another_task_is_dropped_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+    )
+  let #(model, _) = task.update(model, task.Action("review"))
+  let sent = model.generation
+  let model = task.Model(..model, connected: True)
+  let #(model, _) = task.update(model, task.TaskChanged("2"))
+  let #(model, _) =
+    task.update(
+      model,
+      task.TaskLoaded(
+        model.generation,
+        "{\"id\":\"2\",\"title\":\"Two\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.WorkflowLoaded(model.generation, "{\"columns\":[]}"),
+    )
+  let #(model, _) = task.update(model, task.Action("review"))
+  model.acting |> should.equal("review")
+  let #(model, _) =
+    task.update(
+      model,
+      task.Acted(
+        sent,
+        "{\"connectionLost\":true,\"message\":\"Connection lost; checking the task…\"}",
+      ),
+    )
+  model.acting |> should.equal("review")
+  model.error |> should.equal("")
+}
+
+/// A changed body or vision text shows its complete old and new values under
+/// `Old:` and `New:`, not a line diff; the new body still opens as Markdown.
+pub fn proposal_body_shows_old_and_new_test() {
+  let assert Ok(p) =
+    json.parse(
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"Keep me\\n\\nAdd me\"},\"before\":{\"body\":\"Keep me\\n\\nDrop me\"}}",
+      task.proposal_decoder(),
+    )
+  let shown =
+    task.proposal_view(
+      "",
+      p,
+      ["Approve", "Reject"],
+      "",
+      fn(_, _) { "Index" },
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  shown
+  |> string.contains("<p>Old:</p><pre>Keep me\n\nDrop me</pre>")
+  |> should.be_true
+  shown
+  |> string.contains("<p>New:</p><pre>Keep me\n\nAdd me</pre>")
+  |> should.be_true
+  shown |> string.contains("<del>") |> should.be_false
+  shown |> string.contains("+ Add me") |> should.be_false
+  shown |> string.contains("<summary>New body</summary>") |> should.be_true
+  let assert Ok(vision) =
+    json.parse(
+      "{\"kind\":\"vision\",\"fields\":{\"text\":\"Keep me\\n\\nAdd me\"},\"before\":{\"text\":\"Keep me\\n\\nDrop me\"}}",
+      task.proposal_decoder(),
+    )
+  let shown =
+    task.proposal_view(
+      "",
+      vision,
+      ["Approve", "Reject"],
+      "",
+      fn(_, _) { "" },
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  shown
+  |> string.contains("<p>Old:</p><pre>Keep me\n\nDrop me</pre>")
+  |> should.be_true
+  shown
+  |> string.contains("<p>New:</p><pre>Keep me\n\nAdd me</pre>")
+  |> should.be_true
+  shown |> string.contains("<del>") |> should.be_false
+  shown |> string.contains("<summary>New body</summary>") |> should.be_true
+}
+
+/// A change in the middle keeps both complete values in their original order.
+pub fn proposal_body_old_and_new_keep_their_order_test() {
+  let assert Ok(p) =
+    json.parse(
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"One\\n\\nTwo edited\\n\\nThree\"},\"before\":{\"body\":\"One\\n\\nTwo\\n\\nThree\"}}",
+      task.proposal_decoder(),
+    )
+  let shown =
+    task.proposal_view(
+      "",
+      p,
+      ["Approve", "Reject"],
+      "",
+      fn(_, _) { "Index" },
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  let old = "<p>Old:</p><pre>One\n\nTwo\n\nThree</pre>"
+  let new = "<p>New:</p><pre>One\n\nTwo edited\n\nThree</pre>"
+  case string.split(shown, old) {
+    [_, after_old] -> after_old |> string.contains(new) |> should.be_true
+    _ -> should.be_true(False)
+  }
+  shown |> string.contains("<del>") |> should.be_false
+  shown |> string.contains("+ Two edited") |> should.be_false
+}
+
+/// The proposal's long values are readable wrapped blocks, not a line diff.
+pub fn proposal_styles_show_old_and_new_test() {
+  task.proposal_styles
+  |> string.contains(".proposal .old-new")
+  |> should.be_true
+  task.proposal_styles
+  |> string.contains("white-space:pre-wrap")
+  |> should.be_true
+  task.proposal_styles |> string.contains(".body-diff") |> should.be_false
+  task.proposal_styles
+  |> string.contains("text-decoration:line-through")
+  |> should.be_false
+}
+
+/// A lost reply to a change from the task shown before doesn't report an
+/// error or refresh the task shown now.
+pub fn a_late_lost_change_reply_is_dropped_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+    )
+  let sent = model.generation
+  let model = task.Model(..model, connected: True)
+  let #(model, _) = task.update(model, task.TaskChanged("2"))
+  let #(model, _) =
+    task.update(
+      model,
+      task.TaskLoaded(
+        model.generation,
+        "{\"id\":\"2\",\"title\":\"Two\",\"body\":\"\",\"column\":\"x\",\"rank\":1}",
+      ),
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.WorkflowLoaded(model.generation, "{\"columns\":[]}"),
+    )
+  let #(after, _) =
+    task.update(
+      model,
+      task.ChangedAt(
+        sent,
+        "{\"connectionLost\":true,\"message\":\"Connection lost; the request may not have completed.\"}",
+      ),
+    )
+  after |> should.equal(model)
+}
+
+/// A lost models reply, as Try again gets, says the request may not have
+/// completed; it doesn't claim the task is being checked.
+pub fn a_lost_models_reply_does_not_claim_a_task_check_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1}",
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded(
+        "{\"connectionLost\":true,\"message\":\"Connection lost; the request may not have completed.\"}",
+      ),
+    )
+  model.error
+  |> should.equal("Connection lost; the request may not have completed.")
+}
+
+/// A refetch that also loses its connection replaces the "checking" message
+/// with the generic one; a stale refetch changes nothing.
+pub fn a_lost_refetch_shows_the_generic_message_test() {
+  let model =
+    task.Model(
+      ..loaded(
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1}",
+      ),
+      error: "Connection lost; checking the task…",
+    )
+  let lost =
+    "{\"connectionLost\":true,\"message\":\"Connection lost; the request may not have completed.\"}"
+  let #(stale, stale_effect) =
+    task.update(model, task.Refetched(model.generation + 1, lost))
+  stale |> should.equal(model)
+  stale_effect |> should.equal(effect.none())
+  let #(model, _) = task.update(model, task.Refetched(model.generation, lost))
+  model.error
+  |> should.equal("Connection lost; the request may not have completed.")
+}
+
+pub fn a_renamed_model_label_updates_a_shown_run_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"needs_review\",\"rank\":1,\"runs\":[{\"id\":\"r1\",\"kind\":\"work\",\"state\":\"ended\",\"model\":\"claude-opus\",\"effort\":\"high\",\"log\":\"/l\",\"outcome\":\"finished\",\"used\":\"claude-opus-5-5\"}]}",
+    )
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded("[{\"id\":\"claude-opus-5-5\",\"label\":\"Opus 5.5\"}]"),
+    )
+  let #(model, _) = task.update(model, task.Tab("runs"))
+  html(model) |> string.contains("work · Opus 5.5 · high") |> should.be_true
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsRefreshed(
+        "[{\"id\":\"claude-opus-5-5\",\"label\":\"Opus Renamed\"}]",
+      ),
+    )
+  let rendered = html(model)
+  rendered |> string.contains("work · Opus Renamed · high") |> should.be_true
+  rendered |> string.contains("work · Opus 5.5 · high") |> should.be_false
 }

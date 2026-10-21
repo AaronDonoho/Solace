@@ -64,6 +64,10 @@ stored choice (`solace-theme`) before first paint and holds every page's dark
 colours; registering Settings makes the shell follow a theme chosen in another
 window.
 
+The Settings page also turns Gleam and Rust on or off for the whole computer
+(D-22); a project of a language turned off shows that on the Workspace page,
+while reads still work and changes, checks and tests are refused.
+
 ## Build
 
 `solace-cli/build.rs` runs this project's `build-release` command as part of

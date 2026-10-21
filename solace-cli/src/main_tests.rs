@@ -1181,14 +1181,13 @@ fn read_project_reads_a_rust_project() {
     ]);
     import(&root).unwrap();
     import(&root.join("r")).unwrap();
-    let _here = crate::Within::enter(&root).unwrap();
     for (args, want) in [
         (&["inspect", "crate.helper"][..], "crate.helper (fn)"),
         (&["refs", "crate.helper"][..], "crate.caller"),
         (&["find", "helper"][..], "crate.helper"),
     ] {
-        let args: Vec<String> = args.iter().map(|s| (*s).to_string()).collect();
-        let got = read_project("r", &args, 10_000).unwrap();
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let got = crate::with_root(&root, || crate::read_project("r", &args, 10_000)).unwrap();
         assert!(got.contains(want), "{args:?}: {got}");
     }
 }
@@ -1324,9 +1323,14 @@ fn rust_reference_lists_the_names_and_what_is_missing() {
     ] {
         assert!(REFERENCE.contains(part), "{part} missing:\n{REFERENCE}");
     }
-    for wrong in
-        ["<module>::tests.<name>", "drafts::tests.", "submit --new <module>::tests.<test>", "board.rs::within", "board.rs::Store::view"]
-    {
+    for wrong in [
+        "<module>::tests.<name>",
+        "drafts::tests.",
+        "submit --new <module>::tests.<test>",
+        "submit --new <module>.tests::<test>",
+        "board.rs::within",
+        "board.rs::Store::view",
+    ] {
         assert!(!REFERENCE.contains(wrong), "{wrong} still in:\n{REFERENCE}");
     }
 }
@@ -1396,4 +1400,21 @@ fn a_rust_format_names_the_missing_tool() {
     let dir = testing::Scratch::new().with(&[("cargo", "")]);
     let no_rustfmt = crate::language::cargo::with_path(&[dir.0.clone()], &format);
     assert!(no_rustfmt.contains("E6013") && no_rustfmt.contains(crate::language::cargo::RUSTFMT_MISSING), "{no_rustfmt}");
+}
+
+/// D-57: without an owning store, a read finds the root from the working folder.
+#[test]
+fn read_project_finds_its_root_from_the_working_folder() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"r\"]\n"),
+        ("r/Cargo.toml", testing::CARGO),
+        ("r/src/lib.rs", "pub fn helper() -> i32 {\n    1\n}\n"),
+    ]);
+    import(&root).unwrap();
+    import(&root.join("r")).unwrap();
+    let got = crate::read_project_in(&["inspect", "crate.helper"], &root.join("r"), None, "r", 10_000).unwrap();
+    assert!(got.contains("crate.helper (fn)"), "{got}");
+    let outside = testing::Scratch::new();
+    let e = crate::read_project_in(&["inspect", "crate.helper"], &outside, None, "r", 10_000).unwrap_err();
+    assert!(e.0.contains("No Solace root here"), "{}", e.0);
 }

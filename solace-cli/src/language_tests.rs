@@ -28,3 +28,19 @@ fn a_store_records_its_language() {
     assert_eq!(named(crate::Store::at(&plain.0).unwrap()), None);
     assert_eq!(named(crate::Store::peek(&plain.0).unwrap()), None);
 }
+
+/// Both tools use the one PATH lookup, so a test's fixed folders find them.
+#[test]
+fn a_language_tool_is_found_on_the_path() {
+    let dir = crate::testing::Scratch::new().with(&[("cargo", ""), ("gleam", ""), ("only-in-this-folder", "")]);
+    crate::language::paths::with_path(&[dir.0.clone()], || {
+        assert!(super::installed(super::RUST));
+        assert!(super::installed(super::GLEAM));
+        assert!(super::on_path("only-in-this-folder"));
+    });
+    crate::language::paths::with_path(&[], || {
+        assert!(!super::installed(super::RUST));
+        assert!(!super::installed(super::GLEAM));
+        assert!(!super::on_path("only-in-this-folder"));
+    });
+}

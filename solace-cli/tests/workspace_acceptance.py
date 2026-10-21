@@ -482,6 +482,56 @@ class Root(unittest.TestCase):
                 after[rel] = p.read_bytes()
         self.assertEqual(after, before)
 
+    def test_a_language_turned_off_in_settings_is_refused_and_readable(self):
+        # D-22: a language switched off behaves as if its toolchain were
+        # missing, even when it is installed. Reads still reach its store.
+        project(self.root/'gleam')
+        cargo_package(self.root/'rust', body='pub fn one() -> i32 { 1 }\nfn main() {}\n')
+        self.migrate('--project', 'gleam')
+        config = self.root/'.git/system.toml'
+        config.write_text(config.read_text() + '[languages]\ngleam = false\nrust = false\n')
+        self.start()
+        status, app = self.call('GET', '/app.js')
+        self.assertEqual(status, 200)
+        self.assertIn('Turn a language off on this computer', app)
+        self.api('POST', '/projects', {'dir': 'rust'})
+
+        languages = {l['id']: l for l in self.api('GET', '/languages')}
+        self.assertEqual(set(languages), {'gleam', 'rust'})
+        self.assertEqual((languages['gleam']['enabled'], languages['rust']['enabled']), (False, False))
+        # Both toolchains are installed; being off is what refuses them.
+        self.assertTrue(languages['gleam']['installed'])
+        self.assertTrue(languages['rust']['installed'])
+
+        needs = {p['dir']: p['needs'] for p in self.api('GET', '/projects')['projects']}
+        self.assertEqual(needs['gleam'], 'Gleam is turned off in Settings')
+        self.assertEqual(needs['rust'], 'Rust is turned off in Settings')
+
+        # Reads still work in both stores.
+        self.assertIn('pub fn one()', self.cli('view', 'app.one', cwd=self.root/'gleam'))
+        self.assertIn('pub fn one()', self.cli('inspect', 'crate.one', '--project', 'rust'))
+
+        # Every changing or checking command is refused, naming the setting.
+        for project_dir, symbol in [('gleam', 'app.one'), ('rust', 'crate.one')]:
+            for command in (['check'], ['test'], ['submit', symbol]):
+                out = self.cli(*command, cwd=self.root/project_dir,
+                               input='pub fn one() { 2 }' if command[0] == 'submit' else None, ok=False)
+                self.assertIn('E6013', out)
+                self.assertIn('is turned off in Settings', out)
+
+        # Turning one back on clears only its message and keeps the rest.
+        languages = {l['id']: l for l in self.api('POST', '/languages', {'id': 'gleam', 'enabled': True})}
+        self.assertTrue(languages['gleam']['enabled'])
+        needs = {p['dir']: p['needs'] for p in self.api('GET', '/projects')['projects']}
+        self.assertNotIn('turned off', needs['gleam'])
+        self.assertEqual(needs['rust'], 'Rust is turned off in Settings')
+        text = config.read_text()
+        self.assertIn('task_timeout = 20', text)
+        self.assertIn('[[models]]', text)
+        self.assertIn('id = "fake"', text)
+        self.assertIn('gleam = true', text)
+        self.assertIn('rust = false', text)
+
     def test_folder_of_projects(self):
         # Two projects with the same package name: lanes are keyed by folder.
         # a has no target, so the board reports Gleam's default.

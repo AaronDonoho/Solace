@@ -41,6 +41,13 @@ call is a turn that re-reads the conversation, so work in few calls:
    where the code can't say it; never restate what the code does or address the
    reviewer (that goes in your summary). Never put secrets or keys in code, logs
    or notes.
+   Reuse existing code before adding new code, extracting common patterns;
+   prefer small, stateless, self-documenting functions.
+   Keep modules and functions small and focused around one domain or component,
+   and use clear names for new symbols. Put new code in the module that owns its concern,
+   within the boundaries task:2414798176c466e4 creates.
+   Keep thoughts, decisions and directives out of code comments and the UI, and
+   details or decisions of implementation or development out of the UI.
    Make the smallest complete change: prefer the standard library and
    installed dependencies over new code; add nothing the task doesn't need.
    Complete includes its tests and every caller. Never drop validation,
@@ -88,6 +95,13 @@ human approves; the skills folder (Skills, below): `read` only; .solace/ and
 nested projects: their own commands; gleam.toml: `write` (validated, recorded with the task),
 never `move` or `remove`; any other file, ignored or not: `read`, `write`,
 `move`, `remove`.
+
+Reviewing
+  Flag duplication and large modules, filing minor ones as tech debt.
+  Don't allow cross-domain concerns in the same module.
+  Flag excessively long functions and dead code as tech debt.
+  Keep thoughts, decisions and directives out of code comments and the UI;
+  keep details or decisions of implementation or development out of the UI.
 
 Commands in full
 Reading

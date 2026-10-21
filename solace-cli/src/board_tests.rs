@@ -2019,6 +2019,38 @@ fn briefs_hold_what_the_agent_needs_as_text() {
             "{kind}"
         );
     }
+    // Maintainability: each role gets the direction it acts on, and both share
+    // the comment and UI rules.
+    let work = brief(&t, "work");
+    let review = brief(&t, "review");
+    for kind in ["work", "review"] {
+        assert!(
+            brief(&t, kind).contains(
+                "Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI."
+            ),
+            "{kind}: missing the comment and UI rules"
+        );
+    }
+    for rule in [
+        "Reuse existing code before adding new code, extracting common patterns",
+        "small, stateless, self-documenting functions",
+        "small and focused around one domain or component",
+        "clear names for new symbols",
+        "the module that owns its concern",
+        "task:2414798176c466e4",
+    ] {
+        assert!(work.contains(rule), "work: missing {rule}");
+        assert!(!review.contains(rule), "review: unexpected {rule}");
+    }
+    for rule in [
+        "Flag duplication and large modules",
+        "minor ones as tech debt",
+        "cross-domain concerns in the same module",
+        "excessively long functions and dead code",
+    ] {
+        assert!(review.contains(rule), "review: missing {rule}");
+        assert!(!work.contains(rule), "work: unexpected {rule}");
+    }
     // D-182: only a work run is told to run every test, once, after its last change.
     for kind in ["work", "investigate", "review", "discuss"] {
         let prompt = brief(&t, kind);
@@ -2935,7 +2967,24 @@ fn briefs_name_the_test_commands_each_project_marks() {
     let t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
     fs::write(bad.root.join("solace.toml"), "[commands]\nspacing_parity = { run = [\"true\"], test = \"yes\" }\n").unwrap();
     let brief = continuation_brief(&t, &run, false, &bad.root, &bad.root, false).0;
-    assert!(brief.contains("the marked test commands could not be read") && brief.contains("E6020"), "{brief}");
+    assert!(brief.contains("the marked test commands could not be read: project .: E6020"), "{brief}");
+    // A bad project is named without hiding another project's marks in either order.
+    let mixed = testing::project(&[
+        ("src/app.gleam", "pub fn main() { 1 }\n"),
+        ("solace.toml", "projects = [\"web\"]\n[commands]\nrust-acceptance = { run = [\"true\"], test = true }\n"),
+        ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+        ("web/src/app.gleam", "pub fn main() { 1 }\n"),
+        ("web/solace.toml", "[commands]\nspacing_parity = { run = [\"true\"], test = \"yes\" }\n"),
+    ]);
+    let s = open(&mixed.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"T"})).unwrap();
+    t["home"] = json!(".");
+    for scope in [json!([".", "web"]), json!(["web", "."])] {
+        t["scope"] = scope;
+        let brief = continuation_brief(&t, &run, false, &mixed.root, &mixed.root, false).0;
+        assert!(brief.contains("and `run <name>` for: .: rust-acceptance;"), "{brief}");
+        assert!(brief.contains("the marked test commands could not be read for: project web: E6020"), "{brief}");
+    }
 }
 
 /// A changed container is covered when a test reaches one of its items.
@@ -2955,4 +3004,275 @@ fn a_container_reached_through_its_items_is_tested() {
     let reached: std::collections::HashSet<usize> =
         ix.syms.iter().enumerate().filter(|(_, x)| x.name == "Store::open").map(|(i, _)| i).collect();
     assert_eq!(with_context(&tid, "r1", || s.task_untested(&ix, &reached)), None);
+}
+
+/// A busy first project does not leave a later project's writes in its WAL.
+#[test]
+fn settling_flushes_every_project_after_a_busy_one() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"busy\", \"later\"]\n"),
+        ("busy/gleam.toml", "name = \"busy\"\nversion = \"1.0.0\"\n"),
+        ("busy/src/app.gleam", "pub fn one() {\n  1\n}\n"),
+        ("later/gleam.toml", "name = \"later\"\nversion = \"1.0.0\"\n"),
+        ("later/src/app.gleam", "pub fn one() {\n  1\n}\n"),
+    ]);
+    for d in ["busy", "later"] {
+        crate::import(&root.join(d)).unwrap();
+    }
+    let (busy, later) = (open(&root.join("busy")).unwrap(), open(&root.join("later")).unwrap());
+    let mut t = api(&busy.root, "POST", "/tasks", json!({"title": "Both"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["scope"] = json!(["busy", "later"]);
+    for st in [&busy, &later] {
+        st.db.query_row("PRAGMA wal_autocheckpoint=0", [], |_| Ok(())).unwrap();
+        st.db.execute("INSERT INTO board_before VALUES (?1,'symbol:x','null')", [&tid]).unwrap();
+        // A row for another task survives settling, so a copy of the main file
+        // shows whether this project's WAL was flushed.
+        st.db.execute("INSERT INTO board_before VALUES ('other','symbol:y','null')", []).unwrap();
+        let wal = st.root.join(".solace/store.db-wal");
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0, "the change is not in the WAL");
+    }
+    let reader = rusqlite::Connection::open(busy.root.join(".solace/store.db")).unwrap();
+    reader.execute_batch("BEGIN").unwrap();
+    let rows: i64 = reader.query_row("SELECT COUNT(*) FROM board_before", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 2);
+    let e = settle(&busy, &t).unwrap_err();
+    assert_eq!(e.0.matches("E7028").count(), 1, "{}", e.0);
+    assert!(e.0.contains("pending in busy"), "{}", e.0);
+    assert!(!e.0.contains("later"), "{}", e.0);
+    reader.execute_batch("ROLLBACK").unwrap();
+    let copy = later.root.join(".solace/copied.db");
+    std::fs::copy(later.root.join(".solace/store.db"), &copy).unwrap();
+    let c = rusqlite::Connection::open(&copy).unwrap();
+    let kept: i64 = c.query_row("SELECT COUNT(*) FROM board_before WHERE task='other'", [], |r| r.get(0)).unwrap();
+    assert_eq!(kept, 1, "later's WAL was not flushed");
+    let undone: i64 = c.query_row("SELECT COUNT(*) FROM board_before WHERE task=?1", [&tid], |r| r.get(0)).unwrap();
+    assert_eq!(undone, 0, "later's undo row was not dropped");
+}
+
+/// A busy checkpoint is named once, not once per wrapping layer.
+#[test]
+fn settling_reports_a_busy_flush_once() {
+    assert!(super::settle_result(vec![], vec![]).is_ok());
+    let e = super::settle_result(vec!["a".into(), "b".into()], vec![]).unwrap_err();
+    assert_eq!(e.0.matches("E7028").count(), 1, "{}", e.0);
+    assert!(e.0.contains("pending in a, b"), "{}", e.0);
+}
+
+/// A checkpoint error that is not a busy log keeps its own message and code.
+#[test]
+fn settling_keeps_a_non_busy_checkpoint_error() {
+    let e = super::settle_result(vec![], vec![("b".into(), Failure("E1234 disk full".into(), 7))]).unwrap_err();
+    assert_eq!(e.0, "b: E1234 disk full");
+    assert!(!e.0.contains("E7028"), "{}", e.0);
+    assert_eq!(e.1, 7);
+    let e = super::settle_result(vec!["a".into()], vec![("b".into(), Failure("E1234 disk full".into(), 7))]).unwrap_err();
+    assert!(e.0.starts_with("b: E1234 disk full"), "{}", e.0);
+    assert!(e.0.contains("Also, flushing store.db is pending in a"), "{}", e.0);
+    assert!(!e.0.contains("E7028"), "{}", e.0);
+    assert_eq!(e.1, 7);
+}
+
+#[test]
+fn languages_are_on_unless_turned_off() {
+    let v = parse_system("").unwrap();
+    assert_eq!(v["languages"], json!({"gleam": true, "rust": true}));
+    let v = parse_system("[languages]\ngleam = false\n").unwrap();
+    assert_eq!(v["languages"], json!({"gleam": false, "rust": true}));
+    assert!(parse_system("[languages]\ngleam = 1\n").is_err());
+    assert!(parse_system("[languages]\npython = false\n").is_err());
+}
+
+#[test]
+fn turning_a_language_off_is_saved_with_the_rest() {
+    let root = testing::Scratch::new().with(&[("system.toml", "task_timeout = 42\n")]);
+    let config = root.join("system.toml");
+    setup::save_language(&config, &json!({"id": "gleam", "enabled": false})).unwrap();
+    setup::save_language(&config, &json!({"id": "rust", "enabled": false})).unwrap();
+    let v: toml::Value = fs::read_to_string(&config).unwrap().parse().unwrap();
+    assert_eq!(v["languages"]["gleam"].as_bool(), Some(false));
+    assert_eq!(v["languages"]["rust"].as_bool(), Some(false));
+    assert_eq!(v["task_timeout"].as_integer(), Some(42));
+    setup::save_language(&config, &json!({"id": "gleam", "enabled": true})).unwrap();
+    let v: toml::Value = fs::read_to_string(&config).unwrap().parse().unwrap();
+    assert_eq!(v["languages"]["gleam"].as_bool(), Some(true));
+    assert_eq!(v["languages"]["rust"].as_bool(), Some(false));
+    assert_eq!(v["task_timeout"].as_integer(), Some(42));
+    assert!(setup::save_language(&config, &json!({"id": "python", "enabled": false})).is_err());
+}
+
+#[test]
+fn malformed_language_settings_are_an_error_not_off() {
+    let root = testing::Scratch::new().with(&[("system.toml", "[languages]\ngleam = 1\n")]);
+    assert!(super::language_enabled_at(&root.join("system.toml"), "gleam").is_err());
+    let root = testing::Scratch::new().with(&[("system.toml", "[languages]\ngleam = false\n")]);
+    assert!(!super::language_enabled_at(&root.join("system.toml"), "gleam").unwrap());
+}
+
+/// When entries share the model string a run used, the later current entry
+/// names the alias; the alias still runs its own model.
+#[test]
+fn a_later_entry_names_the_shared_model() {
+    let configured = json!([{"id":"claude-opus","label":"Opus (latest)","agent":"claude","model":"opus"}]);
+    let all = json!({
+        "codex":{"models":[
+            {"id":"first","label":"First","agent":"codex","model":"claude-opus-5-5"},
+            {"id":"second","label":"Second","agent":"codex","model":"claude-opus-5-5"}
+        ]},
+        "used":{"claude-opus":"claude-opus-5-5"}
+    });
+    let m = agents::merge_from(&configured, &all);
+    assert_eq!(m[0]["label"], "Second");
+    assert_eq!(m[0]["model"], "opus");
+}
+
+/// Maintainability direction is in the shared reference, not only the briefs.
+#[test]
+fn the_reference_guides_maintainable_code() {
+    let step = REFERENCE
+        .split_once("2. Change and test in one call")
+        .and_then(|(_, rest)| rest.split_once("\n3. Fix only what the reply reports"))
+        .map(|(step, _)| step)
+        .expect("workflow step 2");
+    let review = REFERENCE
+        .split_once("\nReviewing\n")
+        .and_then(|(_, rest)| rest.split_once("\n\nCommands in full"))
+        .map(|(review, _)| review)
+        .expect("review checklist");
+    for rule in [
+        "Reuse existing code before adding new code, extracting common patterns",
+        "small, stateless, self-documenting functions",
+        "modules and functions small and focused around one domain or component",
+        "clear names for new symbols",
+        "the module that owns its concern",
+        "task:2414798176c466e4",
+    ] {
+        assert!(step.contains(rule), "workflow step 2: missing {rule}");
+    }
+    for rule in [
+        "thoughts, decisions and directives out of code comments and the UI",
+        "details or decisions of implementation or development out of the UI",
+    ] {
+        assert!(step.contains(rule), "workflow step 2: missing {rule}");
+    }
+    for rule in [
+        "Flag duplication and large modules",
+        "minor ones as tech debt",
+        "cross-domain concerns in the same module",
+        "excessively long functions and dead code",
+        "thoughts, decisions and directives out of code comments and the UI",
+        "details or decisions of implementation or development out of the UI",
+    ] {
+        assert!(review.contains(rule), "review checklist: missing {rule}");
+    }
+}
+
+/// A malformed settings file is reported, not read as a missing toolchain.
+#[test]
+fn reverting_reports_invalid_settings() {
+    let (_p, s) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let t = api(&s.root, "POST", "/tasks", json!({"title": "Rust"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    let id: String = s.db.query_row("SELECT id FROM symbols WHERE name='one'", [], |r| r.get(0)).unwrap();
+    let mut before = snapshot(&s).unwrap();
+    before[format!("symbol:{id}")][4] = json!("pub fn one() -> i32 { \"two\" }");
+    let after = snapshot(&s).unwrap();
+    record(&s, &tid, "r1", &before, &after, None).unwrap();
+    crate::extract::ahead::begin(&tid, "x", &[&s.root]).unwrap();
+    let pending = s.root.join(".solace/pending");
+    fs::create_dir_all(&pending).unwrap();
+    fs::write(pending.join("undo.json"), json!({"path":"priv/note","bytes":b"changed".to_vec()}).to_string()).unwrap();
+    fs::create_dir_all(s.root.join("priv")).unwrap();
+    fs::write(s.root.join("priv/note"), "original").unwrap();
+    let bad = testing::Scratch::new().with(&[("system.toml", "[languages]\nrust = 1\n")]);
+    let mut t = task(&s.root, &tid).unwrap();
+    let e = super::with_config(&bad.join("system.toml"), || revert(&s, &mut t)).unwrap_err();
+    assert!(e.0.contains("E6020"), "{}", e.0);
+    assert!(pending.join("extract-x.json").exists(), "recovery ran before the settings check");
+    assert!(pending.join("undo.json").exists(), "recovery ran before the settings check");
+    assert_eq!(fs::read_to_string(s.root.join("priv/note")).unwrap(), "original");
+}
+
+/// A model save and a language save share one lock, so neither update is lost.
+#[test]
+fn parallel_model_and_language_writes_keep_both() {
+    let root = testing::Scratch::new().with(&[("system.toml", "task_timeout = 42\n")]);
+    let (config, keys) = (root.join("system.toml"), root.join("keys.json"));
+    let held = setup::settings_lock(&config).unwrap();
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+    *setup::LOCK_ATTEMPT.lock().unwrap() = Some(attempt_tx);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let language = {
+        let (config, done) = (config.clone(), done_tx.clone());
+        std::thread::spawn(move || {
+            done.send(setup::save_language(&config, &json!({"id": "rust", "enabled": false})).map(|_| ())).unwrap();
+        })
+    };
+    let model = {
+        let (config, keys, done) = (config.clone(), keys.clone(), done_tx);
+        std::thread::spawn(move || {
+            let body = json!({"label": "Local", "agent": "codex", "model": "gpt-5", "base_url": "http://localhost:1"});
+            done.send(setup::save(&config, &keys, &body).map(|_| ())).unwrap();
+        })
+    };
+    let lock = config.with_extension("lock");
+    let mut waiting = 0;
+    while waiting < 2 {
+        waiting += usize::from(attempt_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap() == lock);
+    }
+    assert!(done_rx.recv_timeout(std::time::Duration::from_millis(300)).is_err(), "a settings write ran while the lock was held");
+    *setup::LOCK_ATTEMPT.lock().unwrap() = None;
+    drop(held);
+    for _ in 0..2 {
+        done_rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap().unwrap();
+    }
+    language.join().unwrap();
+    model.join().unwrap();
+    let v: toml::Value = fs::read_to_string(&config).unwrap().parse().unwrap();
+    assert_eq!(v["languages"]["rust"].as_bool(), Some(false));
+    assert!(v["models"].as_array().unwrap().iter().any(|m| m["id"].as_str() == Some("local")));
+    assert_eq!(v["task_timeout"].as_integer(), Some(42));
+}
+
+/// A checkpoint failure in each of two projects reaches `settle`'s collection loop.
+#[test]
+fn settling_keeps_every_non_busy_checkpoint_error() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"a\", \"b\"]\n"),
+        ("a/gleam.toml", "name = \"a\"\nversion = \"1.0.0\"\n"),
+        ("a/src/app.gleam", "pub fn one() {\n  1\n}\n"),
+        ("b/gleam.toml", "name = \"b\"\nversion = \"1.0.0\"\n"),
+        ("b/src/app.gleam", "pub fn one() {\n  1\n}\n"),
+    ]);
+    for d in ["a", "b"] {
+        crate::import(&root.join(d)).unwrap();
+    }
+    let (a, b) = (open(&root.join("a")).unwrap(), open(&root.join("b")).unwrap());
+    let mut t = api(&a.root, "POST", "/tasks", json!({"title": "Both"})).unwrap();
+    t["scope"] = json!(["a", "b"]);
+    // An open write transaction makes each checkpoint fail, beyond the busy log
+    // that `settle_result` reports as pending.
+    crate::COMMAND_DB.set(vec![(a.root.clone(), a.db.clone()), (b.root.clone(), b.db.clone())]);
+    for st in [&a, &b] {
+        st.db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    }
+    let e = settle(&a, &t).unwrap_err();
+    crate::COMMAND_DB.set(vec![]);
+    for st in [&a, &b] {
+        st.db.execute_batch("ROLLBACK").unwrap();
+    }
+    assert_eq!(e.0, "a: store error: database table is locked\nb: store error: database table is locked", "{}", e.0);
+    assert_eq!(e.1, 1);
+}
+
+/// Every project's checkpoint error is reported, with the first one's code.
+#[test]
+fn settle_result_keeps_every_non_busy_checkpoint_error() {
+    let e = super::settle_result(
+        vec!["a".into()],
+        vec![("b".into(), Failure("E1234 disk full".into(), 7)), ("c".into(), Failure("E5678 read only".into(), 9))],
+    )
+    .unwrap_err();
+    assert_eq!(e.0, "b: E1234 disk full\nc: E5678 read only\nAlso, flushing store.db is pending in a.", "{}", e.0);
+    assert_eq!(e.1, 7);
 }

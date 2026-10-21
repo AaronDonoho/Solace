@@ -8,8 +8,15 @@ export function no_root() { return null; }
 export function request(base, path, method, body, receive) {
   fetch((path.startsWith('/p/') ? '' : prefix(base)) + path, { method, headers: { 'Content-Type': 'application/json' },
     ...(method === 'GET' ? {} : { body }) })
-    .then(async response => receive(await response.text()))
-    .catch(error => receive(JSON.stringify({ message: String(error) })));
+    .then(response => response.text())
+    .then(
+      text => receive(text),
+      () => receive(JSON.stringify({
+        connectionLost: true,
+        message: 'Connection lost; the request may not have completed.',
+      })),
+    )
+    .catch(error => console.error(error));
 }
 export function events(base, receive, ready = () => {}) {
   const source = new EventSource(prefix(base) + '/events');
@@ -196,13 +203,21 @@ export function images(target, insert, fail) {
     event.preventDefault();
     for (const file of list) {
       fetch(`${base}/tasks/${task}/files`, { method: 'POST', body: file })
-        .then(async response => {
-          const v = await response.json();
-          if (!v.url) return fail(v.message || 'Image upload failed');
-          const alt = file.name.replace(/\.[^.]*$/, '').replace(/[[\]]/g, '') || 'image';
-          insert(editor, `![${alt}](${v.url})`);
-        })
-        .catch(error => fail(String(error)));
+        .then(
+          response => response.json().then(
+            v => {
+              if (!v.url) return fail(v.message || 'Image upload failed');
+              const alt = file.name.replace(/\.[^.]*$/, '').replace(/[[\]]/g, '') || 'image';
+              try {
+                insert(editor, `![${alt}](${v.url})`);
+              } catch {
+                fail('Image uploaded, but could not be inserted.');
+              }
+            },
+            () => fail('Image upload failed'),
+          ),
+          () => fail('Connection lost; the image was not uploaded.'),
+        );
     }
   };
   const from = e => e.composedPath?.()[0] || e.target;

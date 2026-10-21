@@ -80,6 +80,7 @@ pub(super) fn save(config: &Path, keys: &Path, body: &Value) -> Result<String, F
     if id.is_empty() {
         return err("E7001", "label needs a letter or digit");
     }
+    let _lock = settings_lock(config)?;
     let mut doc = settings(config)?;
     if !doc.contains_key("models") {
         doc.insert("models".into(), toml::Value::Array(vec![]));
@@ -116,6 +117,7 @@ pub(super) fn save(config: &Path, keys: &Path, body: &Value) -> Result<String, F
 
 /// Removes configured model `id` and its stored key.
 pub(super) fn remove(config: &Path, keys: &Path, id: &str) -> Result<(), Failure> {
+    let _lock = settings_lock(config)?;
     let mut doc = settings(config)?;
     let Some(models) = doc.get_mut("models").and_then(|v| v.as_array_mut()) else {
         return err("E7001", format!("no configured model {id}"));
@@ -130,3 +132,41 @@ pub(super) fn remove(config: &Path, keys: &Path, id: &str) -> Result<(), Failure
     agents::forget_local();
     Ok(())
 }
+
+/// Turns system language `id` on or off, preserving the rest of the settings.
+pub(super) fn save_language(config: &Path, body: &Value) -> Result<(), Failure> {
+    let id = body["id"]
+        .as_str()
+        .filter(|id| matches!(*id, "gleam" | "rust"))
+        .ok_or_else(|| Failure("E7001 language must be gleam or rust".into(), 1))?;
+    let enabled = body["enabled"].as_bool().ok_or_else(|| Failure("E7001 enabled must be true or false".into(), 1))?;
+    let _lock = settings_lock(config)?;
+    let mut doc = settings(config)?;
+    let languages = doc.entry("languages").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let languages =
+        languages.as_table_mut().ok_or_else(|| Failure("E6020 invalid system settings: languages must be a table".into(), 1))?;
+    languages.insert(id.to_string(), toml::Value::Boolean(enabled));
+    let text = toml::to_string(&doc).map_err(|e| Failure(e.to_string(), 1))?;
+    parse_system(&text)?;
+    replace(config, text.as_bytes())
+}
+
+/// The lock on `config`'s changes, so a read-modify-write can't lose another
+/// writer's update.
+pub(super) fn settings_lock(config: &Path) -> Result<fs::File, Failure> {
+    let path = config.with_extension("lock");
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    #[cfg(test)]
+    if let Some(attempt) = LOCK_ATTEMPT.lock().unwrap().as_ref() {
+        if crate::try_lock_file(&path)?.is_none() {
+            let _ = attempt.send(path.clone());
+        }
+    }
+    crate::lock_file(&path)
+}
+
+#[cfg(test)]
+/// Test hook: receives a lock path when a writer finds it already held.
+pub(super) static LOCK_ATTEMPT: std::sync::Mutex<Option<std::sync::mpsc::Sender<PathBuf>>> = std::sync::Mutex::new(None);

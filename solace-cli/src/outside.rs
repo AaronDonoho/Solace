@@ -871,8 +871,7 @@ fn hidden_note(w: &mut Written, root: &Path) -> String {
 
 /// Flushes the write-ahead log into `store.db`, the file a commit copies (D-179).
 pub(crate) fn checkpoint(s: &Store) -> Result<(), Failure> {
-    let (busy, _, _): (i64, i64, i64) = s.db.query_row("PRAGMA wal_checkpoint(FULL)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
-    checkpointed(busy)
+    checkpointed(if checkpoint_pending(s)? { 1 } else { 0 })
 }
 
 /// Whether a checkpoint finished, or stopped partway because the database was busy.
@@ -889,4 +888,10 @@ fn a_busy_checkpoint_is_reported() {
     assert!(checkpointed(0).is_ok());
     let e = checkpointed(1).unwrap_err();
     assert!(e.0.starts_with("E7028"), "{}", e.0);
+}
+
+/// Whether a full checkpoint left frames unflushed because the log was busy.
+pub(crate) fn checkpoint_pending(s: &Store) -> Result<bool, Failure> {
+    let (busy, _, _): (i64, i64, i64) = s.db.query_row("PRAGMA wal_checkpoint(FULL)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    Ok(busy != 0)
 }

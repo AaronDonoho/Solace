@@ -322,10 +322,13 @@ mod tests {
 }
 "#;
 
-/// A crate with a free function only: no method and no inline test.
+/// A crate with a free function and a top-level `#[test]` outside `mod tests`.
 const FREE: &str = r#"pub fn only() -> i32 {
     1
 }
+
+#[test]
+fn outside() {}
 "#;
 
 /// A Rust session names a real inline test and the header that adds another.
@@ -340,7 +343,8 @@ fn a_rust_session_names_an_inline_test() {
     assert!(out.contains("*** Add: crate::tests.<test>"), "{out}");
 }
 
-/// A crate with no method and no inline test leaves those lines out.
+/// A crate with no method and no inline test leaves those lines out, even
+/// with a top-level `#[test]`.
 #[test]
 fn a_rust_session_without_examples_omits_their_lines() {
     let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", FREE)]);
@@ -399,6 +403,7 @@ fn a_rust_session_finds_a_nested_inline_test() {
     assert!(!out.contains("<module>.<Type>::<fn>"), "{out}");
     assert!(out.contains("crate.outer::tests::works"), "{out}");
     assert!(out.contains("*** Add: crate::outer::tests.<test>"), "{out}");
+    assert!(out.contains("<module>.outer::tests::<name>"), "{out}");
 }
 
 /// A test-only `impl` method doesn't become the method example.
@@ -410,4 +415,46 @@ fn a_rust_session_prefers_a_non_test_method() {
     let out = store.session(&[]).unwrap();
     assert!(out.contains("crate.Second::real"), "{out}");
     assert!(!out.contains("crate.First::test_only"), "{out}");
+}
+
+/// An `impl` with only a test-only method: the brief still names it.
+const TEST_ONLY_METHOD: &str = r#"pub struct Only;
+
+impl Only {
+    #[cfg(test)]
+    pub fn test_only() -> Self {
+        Only
+    }
+}
+"#;
+
+/// With no non-test method, a test-only `impl` method is the example.
+#[test]
+fn a_rust_session_falls_back_to_a_test_only_method() {
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", TEST_ONLY_METHOD)]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.session(&[]).unwrap();
+    assert!(out.contains("crate.Only::test_only"), "{out}");
+}
+
+/// A crate whose only test is under a non-`tests` module inside `mod tests`.
+const DEEP: &str = r#"#[cfg(test)]
+mod tests {
+    mod inner {
+        #[test]
+        fn works() {}
+    }
+}
+"#;
+
+/// The ancestor walk finds `tests` above a non-`tests` module.
+#[test]
+fn a_rust_session_finds_a_test_below_a_module_inside_tests() {
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", DEEP)]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.session(&[]).unwrap();
+    assert!(out.contains("crate.tests::inner::works"), "{out}");
+    assert!(out.contains("*** Add: crate::tests.<test>"), "{out}");
 }

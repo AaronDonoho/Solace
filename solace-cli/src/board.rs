@@ -517,6 +517,10 @@ fn end_runs(t: &mut Value, outcome: &str) {
 }
 /// The system settings file: `SOLACE_CONFIG`, else `~/.config/solace/config.toml`.
 fn config_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = TEST_CONFIG.with(|p| p.borrow().clone()) {
+        return path;
+    }
     env::var_os("SOLACE_CONFIG")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".config/solace/config.toml"))
@@ -534,8 +538,9 @@ fn parse_system(text: &str) -> Result<Value, Failure> {
     let mut v = serde_json::to_value(v).map_err(|e| Failure(e.to_string(), 1))?;
     let invalid = || {
         Failure(
-            "E6020 invalid system settings: expected positive task_timeout and [[models]] with id, label, agent and model or run argv; \
-             an endpoint needs kind \"openai\" (agent codex) or \"anthropic\" (agent claude) and base_url"
+            "E6020 invalid system settings: expected positive task_timeout, a [languages] table of true/false gleam and rust, \
+             and [[models]] with id, label, agent and model or run argv; an endpoint needs kind \"openai\" (agent codex) \
+             or \"anthropic\" (agent claude) and base_url"
                 .into(),
             1,
         )
@@ -562,6 +567,19 @@ fn parse_system(text: &str) -> Result<Value, Failure> {
     if v.get("task_timeout").is_some_and(|v| v.as_u64().is_none_or(|n| n == 0)) {
         return Err(invalid());
     }
+    if let Some(languages) = v.get("languages") {
+        let Some(languages) = languages.as_object() else {
+            return Err(invalid());
+        };
+        if languages.keys().any(|id| !matches!(id.as_str(), "gleam" | "rust")) || languages.values().any(|enabled| !enabled.is_boolean()) {
+            return Err(invalid());
+        }
+    }
+    let languages = json!({
+        "gleam": v.get("languages").and_then(|l| l.get("gleam")).cloned().unwrap_or(json!(true)),
+        "rust": v.get("languages").and_then(|l| l.get("rust")).cloned().unwrap_or(json!(true)),
+    });
+    v["languages"] = languages;
     if let Some(models) = v.get("models") {
         let mut ids = HashSet::new();
         for m in models.as_array().ok_or_else(invalid)? {
@@ -1447,6 +1465,9 @@ fn checkable(root: &Path, cargo: bool) -> bool {
 fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap().to_string();
     let projects = scope_stores(s, t)?;
+    // Malformed settings are reported before recovery, which may undo another run's work.
+    let cargo =
+        projects.iter().any(|(_, st)| crate::language::is_rust(&st.root)) && crate::language::reason(crate::language::RUST)?.is_none();
     // An extract a stopped run left between its projects' commits is undone first (D-135).
     extract::ahead::recover(&projects.iter().map(|(_, st)| st.root.clone()).collect::<Vec<_>>())?;
     // Under the locks, what a stopped run left half-written becomes the task's own rows first.
@@ -1507,7 +1528,7 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
         for (dir, st, _) in &plans {
             // A project of plain files (D-60) has no code to type-check; the restored files say
             // which it is now.
-            if checkable(&st.root, crate::language::cargo::installed())
+            if checkable(&st.root, cargo)
                 && let Err(e) = st.check()
             {
                 failed = Some((dir.as_str(), *st, e));
@@ -1554,14 +1575,18 @@ fn revert(s: &Store, t: &mut Value) -> Result<(), Failure> {
 fn settle(s: &Store, t: &Value) -> Result<(), Failure> {
     let tid = t["id"].as_str().unwrap();
     clear_reviews(s, tid)?;
-    for (_, st) in scope_stores(s, t)? {
+    let (mut pending, mut failed) = (vec![], vec![]);
+    for (dir, st) in scope_stores(s, t)? {
         lockdown::recover(&st.root, &st, &[])?;
         outside::approve(&st, tid)?;
         drop_before(&st, tid)?;
-        outside::checkpoint(&st)
-            .map_err(|e| Failure(format!("E7028 the task is settled; only flushing store.db is pending\n  {}", e.0), e.1))?;
+        match outside::checkpoint_pending(&st) {
+            Ok(false) => {}
+            Ok(true) => pending.push(dir),
+            Err(e) => failed.push((dir, e)),
+        }
     }
-    Ok(())
+    settle_result(pending, failed)
 }
 /// The body of a feature's Tech Debt task (D-112).
 const TECH_DEBT_BODY: &str =
@@ -3046,9 +3071,10 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
     packet["home"] = json!(scope::dir(&scope::top(root), here));
     // D-182: a work brief names the marked test commands of every project it covers.
     if kind == "work" {
-        match marked_tests(&scope::top(root), &packet) {
-            Ok(tests) => packet["test_commands"] = json!(tests),
-            Err(e) => packet["test_commands_error"] = json!(e.0),
+        let (tests, errors) = marked_tests(&scope::top(root), &packet);
+        packet["test_commands"] = json!(tests);
+        if !errors.is_empty() {
+            packet["test_commands_error"] = json!(errors.join("; "));
         }
     }
     let mut out = brief(&packet, kind);
@@ -3506,20 +3532,21 @@ fn brief(t: &Value, kind: &str) -> String {
         format!(", and `run <name>` for: {suites}")
     };
     let tests = match t["test_commands_error"].as_str() {
-        Some(e) => format!("; the marked test commands could not be read: {e}"),
+        Some(e) if marked.is_empty() => format!("{tests}; the marked test commands could not be read: {e}"),
+        Some(e) => format!("{tests}; the marked test commands could not be read for: {e}"),
         None => tests,
     };
     // A task in a feature files its review's minor findings as the feature's tech debt (D-112).
     let debt = if t["feature"].is_string() { format!(" {TECH_DEBT_ASK}") } else { String::new() };
     let role = match kind {
         "review" => format!(
-            "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed. A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names. Keep the concern-by-concern focus. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. {read_only} Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
+            "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed. A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names. Keep the concern-by-concern focus. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. Flag duplication and large modules, filing minor ones as tech debt; don't allow cross-domain concerns in the same module, and flag excessively long functions and dead code as tech debt. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. {read_only} Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
         ),
         "discuss" => format!(
             "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
         ),
         "work" => format!(
-            "Make the change this task describes. {start} {ask} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
+            "Make the change this task describes. {start} {ask} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Reuse existing code before adding new code, extracting common patterns. Prefer small, stateless, self-documenting functions; keep modules and functions small and focused around one domain or component. Use clear names for new symbols. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Follow the module boundaries the refactor task:2414798176c466e4 creates: put new code in the module that owns its concern. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
         ),
         _ => format!(
             "Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. A plan assigns every file change to whoever does the work, as an edit (`submit` or `write`) or a settings proposal (`write` with `reason`), never to the human, who never edits files or runs commands. A plan is the smallest complete change (the reference's step 2) and names every module or symbol it changes and every non-source file it reaches. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work, and anything you didn't check."
@@ -4145,10 +4172,10 @@ fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
         return Ok(());
     }
     // A Cargo.toml dependency change needs a fetch outside the sandbox, and a
-    // machine without cargo can't fill the cache (D-158 point 4).
+    // machine without cargo, or with Rust turned off, can't fill the cache (D-158 point 4).
     let cargo = file.ends_with("Cargo.toml") && lockdown::cargo_settings_changed(current.as_bytes(), proposed);
-    if cargo && !crate::language::cargo::installed() {
-        q["answer"] = json!(format!("Not applied: E6013 {}", crate::language::cargo::MISSING));
+    if cargo && let Some(why) = crate::language::reason(crate::language::RUST)? {
+        q["answer"] = json!(format!("Not applied: E6013 {why}"));
         return Ok(());
     }
     let existed = p.exists();
@@ -4266,16 +4293,18 @@ impl Board {
                 } else {
                     (format!("/p/{}", percent_encode(&dir)), dir.clone())
                 };
-                let needs = if !crate::language::is_rust(&root) {
-                    String::new()
-                } else if !crate::language::cargo::installed() {
-                    crate::language::cargo::MISSING.to_string()
-                } else {
-                    fs::read_to_string(root.join(".solace/fetch-failed"))
-                        .ok()
-                        .map(|t| t.trim().to_string())
-                        .filter(|t| !t.is_empty())
-                        .unwrap_or_default()
+                let needs = match crate::language::id(&root) {
+                    Some(id) => match crate::language::reason(id) {
+                        Ok(Some(reason)) => reason,
+                        Ok(None) if id == crate::language::RUST => fs::read_to_string(root.join(".solace/fetch-failed"))
+                            .ok()
+                            .map(|t| t.trim().to_string())
+                            .filter(|t| !t.is_empty())
+                            .unwrap_or_default(),
+                        Ok(None) => String::new(),
+                        Err(e) => e.0,
+                    },
+                    None => String::new(),
                 };
                 json!({"dir":dir,"label":label,"name":workspace::name(&root),"target":workspace::target(&root),"base":base,"needs":needs})
             })
@@ -4355,6 +4384,8 @@ impl Board {
         let path = url.split('?').next().unwrap_or("");
         match (method, path) {
             ("GET", "/projects") => return self.listing(),
+            ("GET", "/languages") => return languages(),
+            ("POST", "/languages") => return setup::save_language(&config_path(), body).and_then(|_| languages()),
             ("GET", "/models") => return models(),
             ("POST", "/models/try-again") => return agents::try_again(body).and_then(|_| models()),
             ("POST", "/models") => return setup::save(&config_path(), &setup::keys_path(), body).and_then(|_| models()),
@@ -4561,6 +4592,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             }
             // The root's own routes; `/events` merges every project's when it has several.
             let own = path == "/projects"
+                || path == "/languages"
                 || path == "/models"
                 || path.starts_with("/projects/")
                 || path == "/migration"
@@ -4980,12 +5012,20 @@ mod tests;
 
 /// The `[commands]` each project of the task marks with `test = true`, in
 /// project order and sorted by name (D-182). A project with none is left out;
-/// a settings file that cannot be read is an error, not an empty project.
-fn marked_tests(top: &Path, t: &Value) -> Result<Vec<Value>, Failure> {
+/// a settings file that cannot be read is named, and the other projects' marks
+/// are kept.
+fn marked_tests(top: &Path, t: &Value) -> (Vec<Value>, Vec<String>) {
     let home = t["home"].as_str().unwrap_or("");
     let mut found = vec![];
+    let mut errors = vec![];
     for dir in scope::of(t, home) {
-        let settings = lockdown::settings(&scope::path(top, &dir))?;
+        let settings = match lockdown::settings(&scope::path(top, &dir)) {
+            Ok(settings) => settings,
+            Err(e) => {
+                errors.push(format!("project {dir}: {}", e.0));
+                continue;
+            }
+        };
         let Some(commands) = settings.get("commands").and_then(|c| c.as_table()) else { continue };
         let mut names: Vec<&str> =
             commands.iter().filter(|(_, c)| c.get("test").and_then(|x| x.as_bool()) == Some(true)).map(|(name, _)| name.as_str()).collect();
@@ -4994,7 +5034,7 @@ fn marked_tests(top: &Path, t: &Value) -> Result<Vec<Value>, Failure> {
             found.push(json!({"project": dir, "commands": names}));
         }
     }
-    Ok(found)
+    (found, errors)
 }
 
 #[cfg(test)]
@@ -5010,5 +5050,75 @@ pub(super) fn with_context<T>(tid: &str, rid: &str, f: impl FnOnce() -> T) -> T 
     let old = TEST_CONTEXT.with(|c| c.replace(Some((tid.to_string(), rid.to_string()))));
     let out = f();
     TEST_CONTEXT.with(|c| *c.borrow_mut() = old);
+    out
+}
+
+/// The task is settled once every project's writes are approved; a busy flush
+/// leaves only `store.db` behind, while any other failure keeps its own error.
+fn settle_result(pending: Vec<String>, failed: Vec<(String, Failure)>) -> Result<(), Failure> {
+    if let Some((_, e)) = failed.first() {
+        let reasons: Vec<String> = failed.iter().map(|(dir, e)| format!("{dir}: {}", e.0)).collect();
+        let also =
+            if pending.is_empty() { String::new() } else { format!("\nAlso, flushing store.db is pending in {}.", pending.join(", ")) };
+        return Err(Failure(format!("{}{also}", reasons.join("\n")), e.1));
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+    err("E7028", format!("the task is settled; only flushing store.db is pending in {}", pending.join(", ")))
+}
+
+/// Whether the system settings leave language `id` on; an absent setting is on.
+pub(crate) fn language_enabled(id: &str) -> Result<bool, Failure> {
+    language_enabled_at(&config_path(), id)
+}
+
+/// Why language `id` cannot use its tools, if it cannot: turned off first, then
+/// a toolchain that is not installed.
+pub(crate) fn language_reason(id: &str) -> Result<Option<String>, Failure> {
+    if !crate::language::enabled(id)? {
+        return Ok(Some(crate::language::off(id).to_string()));
+    }
+    if !crate::language::installed(id) {
+        return Ok(Some(crate::language::missing(id).to_string()));
+    }
+    Ok(None)
+}
+
+/// The system languages and whether each is on and found on this computer.
+fn languages() -> Result<Value, Failure> {
+    let p = config_path();
+    let v = parse_system(&if p.exists() { fs::read_to_string(p)? } else { String::new() })?;
+    let mut out = vec![];
+    for id in [crate::language::GLEAM, crate::language::RUST] {
+        out.push(json!({
+            "id": id,
+            "label": crate::language::label(id),
+            "enabled": v["languages"][id].as_bool().unwrap_or(true),
+            "installed": crate::language::installed(id),
+        }));
+    }
+    Ok(json!(out))
+}
+
+/// Whether `config` leaves language `id` on; an absent setting is on.
+fn language_enabled_at(config: &Path, id: &str) -> Result<bool, Failure> {
+    let v = parse_system(&if config.exists() { fs::read_to_string(config)? } else { String::new() })?;
+    Ok(v["languages"][id].as_bool().unwrap_or(true))
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's system settings file, in place of `SOLACE_CONFIG` and the home folder's.
+    static TEST_CONFIG: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with `config_path` reading `path`, so a test drives settings without
+/// changing the process's environment.
+#[cfg(test)]
+pub(crate) fn with_config<T>(path: &Path, f: impl FnOnce() -> T) -> T {
+    let old = TEST_CONFIG.with(|p| p.replace(Some(path.to_path_buf())));
+    let out = f();
+    TEST_CONFIG.with(|p| *p.borrow_mut() = old);
     out
 }

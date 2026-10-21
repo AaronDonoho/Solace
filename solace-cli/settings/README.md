@@ -28,6 +28,16 @@ calls `settings.set_theme`, which sets the attribute, stores the value and
 publishes it. `settings.register()` makes the page follow a theme chosen in
 another window.
 
+## Languages
+
+The Languages section lists Gleam and Rust from `GET /languages`, each with a
+switch and whether its toolchain is installed. A switch sends `POST /languages`
+with `{"id": ..., "enabled": ...}`; the reply is the new list. Both languages
+are on unless the system settings turn one off. A language turned off behaves
+as if its toolchain were missing: its projects stay readable, but `submit`,
+`check` and `test` are refused and the Workspace page says the language is
+turned off (D-22).
+
 ## Models
 
 The Models section lists the models set up in `~/.config/solace/config.toml`

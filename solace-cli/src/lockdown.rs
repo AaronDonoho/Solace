@@ -1946,6 +1946,15 @@ pub fn dispatch(
     if a[0] == "build" && a.len() > 1 {
         return Some(usage("build takes no arguments; `build plan` lists every project's build recipe, in order"));
     }
+    if matches!(a[0], "build" | "format")
+        && let Some(id) = language::id(root)
+    {
+        match language::reason(id) {
+            Ok(Some(why)) => return Some(error("E6013", a[0], why)),
+            Err(e) => return Some(Err(e)),
+            Ok(None) => {}
+        }
+    }
     if a[0] == "format" && language::is_rust(root) {
         return Some(match a {
             ["format"] => {
@@ -1978,8 +1987,8 @@ pub fn dispatch(
                 argv.extend(a[2..].iter().map(|s| s.to_string()));
                 (argv, c.get("timeout").and_then(|x| x.as_integer()).unwrap_or(120) as u64)
             } else if a[0] == "build" && language::is_rust(root) {
-                if !cargo::installed() {
-                    return error("E6013", "build", cargo::MISSING);
+                if let Some(why) = language::reason(language::RUST)? {
+                    return error("E6013", "build", why);
                 }
                 let mut argv = vec!["cargo".to_string()];
                 argv.extend(cargo::build_args(root));

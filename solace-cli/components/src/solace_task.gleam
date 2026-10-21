@@ -327,7 +327,12 @@ pub type Msg {
   ProjectsLoaded(String)
   ReviewLoaded(String)
   Changed(String)
-  Acted(String)
+  /// A change's reply, with the task opening it was sent for: a reply for
+  /// another opening is dropped.
+  ChangedAt(Int, String)
+  /// An action's reply, with the task opening it was sent for: a reply for
+  /// another opening is dropped.
+  Acted(Int, String)
   AgentSelected(String)
   EffortSelected(String)
   Text(String)
@@ -493,7 +498,7 @@ fn send(
       path,
       method,
       json.to_string(json.object(fields)),
-      fn(text) { dispatch(Changed(text)) },
+      fn(text) { dispatch(ChangedAt(model.generation, text)) },
     )
   })
 }
@@ -532,6 +537,8 @@ fn open(model: Model) -> #(Model, Effect(Msg)) {
         generation: model.generation + 1,
         staged: Some(#(None, None)),
         copy: #(model.copy.0 + 1, model.copy.1),
+        error: "",
+        acting: "",
       )
     False ->
       Model(
@@ -887,7 +894,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Ok(task) ->
           case model.staged {
             Some(#(_, w)) ->
-              settle(Model(..model, staged: Some(#(Some(task), w))))
+              settle(Model(..model, staged: Some(#(Some(task), w)), error: ""))
             None -> show(model, task)
           }
         Error(_) -> #(
@@ -903,10 +910,15 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Some(t), Ok(fresh)
           if generation == model.generation && t.id == fresh.id
         -> {
-          let #(model, deps) = want_deps(Model(..model, task: Some(fresh)))
+          let #(model, deps) =
+            want_deps(Model(..model, task: Some(fresh), error: ""))
           #(model, effect.batch([review(model, fresh), deps]))
         }
-        _, _ -> #(model, effect.none())
+        _, _ ->
+          case generation == model.generation, connection_lost(text) {
+            True, True -> #(Model(..model, error: error(text)), effect.none())
+            _, _ -> #(model, effect.none())
+          }
       }
     WorkflowLoaded(generation, text) if generation == model.generation ->
       case json.parse(text, workflow_decoder()) {
@@ -936,24 +948,9 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     ModelsLoaded(text) ->
       case json.parse(text, decode.list(agent_decoder())) {
         Ok(models) -> {
-          // The remembered agent stays if it is still available; its effort
-          // stays if the agent still offers it.
-          let kept = remembered(models, model.model)
-          let chosen = case kept {
-            Ok(a) -> Ok(a)
-            Error(_) -> list.find(models, fn(a) { a.available })
-          }
-          let id = result.map(chosen, fn(a) { a.id }) |> result.unwrap("")
-          let effort = case kept {
-            Ok(a) ->
-              case list.contains(a.efforts, model.effort) {
-                True -> model.effort
-                False -> ""
-              }
-            Error(_) -> ""
-          }
+          let #(id, effort) = models_chosen(models, model.model, model.effort)
           #(
-            Model(..model, models: models, model: id, effort: effort),
+            Model(..model, models: models, model: id, effort: effort, error: ""),
             effect.none(),
           )
         }
@@ -963,17 +960,14 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     // its effort stays only while the model still offers it.
     ModelsRefreshed(text) ->
       case json.parse(text, decode.list(agent_decoder())) {
-        Ok(models) ->
-          case list.find(models, fn(a) { a.id == model.model }) {
-            Ok(a) -> {
-              let effort = case list.contains(a.efforts, model.effort) {
-                True -> model.effort
-                False -> ""
-              }
-              #(Model(..model, models: models, effort: effort), effect.none())
-            }
-            Error(_) -> update(model, ModelsLoaded(text))
-          }
+        Ok(models) -> {
+          let #(id, effort) =
+            models_refreshed(models, model.model, model.effort)
+          #(
+            Model(..model, models: models, model: id, effort: effort, error: ""),
+            effect.none(),
+          )
+        }
         Error(_) -> #(model, effect.none())
       }
     // The Scope tab's projects; without them it lists none.
@@ -982,14 +976,35 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Ok(projects) -> #(Model(..model, projects: projects), effect.none())
         Error(_) -> #(model, effect.none())
       }
-    ReviewLoaded(text) -> {
-      let summary =
-        json.parse(text, decode.at(["review", "summary"], decode.string))
-        |> result.unwrap("")
-      #(Model(..model, review_summary: summary), effect.none())
-    }
+    ReviewLoaded(text) ->
+      case json.parse(text, decode.at(["review", "summary"], decode.string)) {
+        Ok(summary) -> #(
+          Model(..model, review_summary: summary, error: ""),
+          effect.none(),
+        )
+        Error(_) -> #(Model(..model, review_summary: ""), effect.none())
+      }
     // The reply to an action; it may have waited for the agent's command (D-77 point 5).
-    Acted(text) -> update(Model(..model, acting: ""), Changed(text))
+    // A lost reply doesn't mean the action failed: the task is fetched again,
+    // and the run shows if the action started one.
+    Acted(generation, _) if generation != model.generation -> #(
+      model,
+      effect.none(),
+    )
+    Acted(_, text) ->
+      case model.acting, connection_lost(text) {
+        "", _ -> #(model, effect.none())
+        _, True -> {
+          let model = Model(..model, acting: "", error: checking)
+          #(model, refresh(model))
+        }
+        _, False -> update(Model(..model, acting: ""), Changed(text))
+      }
+    ChangedAt(generation, _) if generation != model.generation -> #(
+      model,
+      effect.none(),
+    )
+    ChangedAt(_, text) -> update(model, Changed(text))
     Changed(text) ->
       case json.parse(text, task_decoder()) {
         // A reply for the task shown before another opened.
@@ -1025,7 +1040,11 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           let #(model, deps) = want_deps(model)
           #(model, effect.batch([moved, refresh(model), deps]))
         }
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
+        Error(_) ->
+          case connection_lost(text) {
+            True -> #(Model(..model, error: checking), refresh(model))
+            False -> #(Model(..model, error: error(text)), effect.none())
+          }
       }
     Watch(rid) -> #(
       Model(..model, watching: rid, entries: []),
@@ -1063,7 +1082,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         decode.success(#(state, entries))
       }
       case json.parse(text, decoder) {
-        Ok(#(_, entries)) -> #(Model(..model, entries: entries), effect.none())
+        Ok(#(_, entries)) -> #(
+          Model(..model, entries: entries, error: ""),
+          effect.none(),
+        )
         Error(_) -> #(Model(..model, error: error(text)), effect.none())
       }
     }
@@ -1181,7 +1203,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
                   "/tasks/" <> t.id <> "/actions",
                   "POST",
                   json.to_string(json.object(fields)),
-                  fn(text) { dispatch(Acted(text)) },
+                  fn(text) { dispatch(Acted(model.generation, text)) },
                 )
               }),
             )
@@ -1735,24 +1757,20 @@ pub fn settings_diff(base: String, proposed: String) -> String {
 }
 
 /// An agent note names its run, as the run list does.
-pub fn author(t: Task, n: Note) -> String {
+pub fn author(models: List(Agent), t: Task, n: Note) -> String {
   case n.author, list.find(t.runs, fn(r) { r.id == n.run }) {
-    "agent", Ok(r) -> "agent · " <> run_label(r)
+    "agent", Ok(r) -> "agent · " <> run_label(models, r)
     who, _ -> who
   }
 }
 
-fn run_label(r: Run) -> String {
+fn run_label(models: List(Agent), r: Run) -> String {
   r.kind
   <> " · "
-  <> r.model
+  <> run_model_label(models, r.model, r.used)
   <> case r.effort {
     "" -> ""
     effort -> " · " <> effort
-  }
-  <> case r.used {
-    "" -> ""
-    used -> " · " <> used
   }
 }
 
@@ -1919,7 +1937,7 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
         }),
       ),
       h.div([a.class("panel"), a.role("tabpanel")], case model.tab {
-        "notes" -> notes_view(model.base, t)
+        "notes" -> notes_view(model.base, model.models, t)
         "questions" -> questions_view(model.base, t)
         "runs" -> list.map(list.reverse(t.runs), fn(r) { run_view(model, r) })
         "changes" -> [
@@ -2141,7 +2159,11 @@ fn questions_view(base: String, t: Task) -> List(Element(Msg)) {
 }
 
 /// Newest first. Each keeps its position, which names it to the API.
-fn notes_view(base: String, t: Task) -> List(Element(Msg)) {
+fn notes_view(
+  base: String,
+  models: List(Agent),
+  t: Task,
+) -> List(Element(Msg)) {
   t.notes
   |> list.index_map(fn(n, i) { #(n, i) })
   |> list.reverse
@@ -2157,7 +2179,7 @@ fn notes_view(base: String, t: Task) -> List(Element(Msg)) {
           ],
           [h.text(ui_label("delete"))],
         ),
-        h.strong([], [h.text(author(t, n))]),
+        h.strong([], [h.text(author(models, t, n))]),
         h.small([], [h.text(clock(n.time))]),
       ]),
       md(base, n.text),
@@ -2182,7 +2204,7 @@ fn run_view(model: Model, r: Run) -> Element(Msg) {
   }
   h.article([a.class("run")], [
     h.header([], [
-      h.strong([], [h.text(run_label(r))]),
+      h.strong([], [h.text(run_label(model.models, r))]),
       h.span([a.class("state " <> r.state)], [
         h.text(case r.state, r.outcome {
           "ended", "" -> "ended"
@@ -2439,12 +2461,13 @@ fn field_order(a: #(String, String), b: #(String, String)) -> order.Order {
 }
 
 /// A strategy run's proposal in human terms: what it creates or changes. An
-/// edit shows only the fields that change, a short one as `old → new` with a
-/// record titled by `name`, and the body as a diff, with a toggle to see the
-/// new body as Markdown; the vision's new text diffs against the vision. A
-/// body or text that differs only in the space around its lines, or in blank
-/// lines, counts as unchanged. One that changes nothing, the vision included,
-/// says "No change". A create, and a proposal saved before `before`, show
+/// edit shows only the fields that change: a short one as `old → new` with a
+/// record titled by `name`, and the body as full `Old:` and `New:` sections
+/// with a toggle to see the new body as Markdown; the vision's new text shows
+/// the same sections. A body or text that differs only in the space around its
+/// lines, or in blank lines, counts as unchanged. One that changes nothing,
+/// the vision included, says "No change". A create, and a proposal saved
+/// before `before`, show
 /// every field, the vision its text as Markdown; the records Approve
 /// also sets `upcoming` follow, then its options until it is answered, and the
 /// answer after. `name(kind, id)` is a record's title, "" when it isn't
@@ -2519,7 +2542,7 @@ pub fn proposal_view(
         "vision" ->
           case list.key_find(p.fields, "text") {
             Ok(new) -> [
-              body_diff(dict.get(p.before, "text") |> result.unwrap(""), new),
+              old_and_new(dict.get(p.before, "text") |> result.unwrap(""), new),
               new_body(base, new),
             ]
             Error(_) -> []
@@ -2535,7 +2558,7 @@ pub fn proposal_view(
                     h.dd([], [
                       case f.0 {
                         "body" ->
-                          body_diff(
+                          old_and_new(
                             dict.get(p.before, "body") |> result.unwrap(""),
                             f.1,
                           )
@@ -2591,7 +2614,7 @@ pub fn proposal_view(
 /// The proposal display's look (`proposal_view`), for the pages that show
 /// it. Colors come from the page's custom properties.
 pub const proposal_styles =
-  ".proposal{border:1px solid var(--edge);background:var(--paper);padding:8px 12px;margin:8px 0}.proposal h4{margin:0 0 6px;font-size:15px}.proposal dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 12px;margin:6px 0}.proposal dt{color:var(--soft);font-size:13px}.proposal dd{margin:0;overflow-wrap:anywhere}.proposal .reopens{color:var(--warn-text);font-weight:600}.proposal .actions{display:flex;gap:6px}.proposal .answer{font-weight:600}.proposal .nochange{color:var(--soft);font-style:italic}.proposal .body-diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;max-width:760px}.proposal .body-diff p.same{color:var(--soft);margin:4px 0}.proposal .body-diff .para{margin:4px 0}.proposal .body-diff pre{margin:0;white-space:pre-wrap}.proposal .body-diff del{color:var(--revision);text-decoration:line-through}.proposal .body-diff .add{color:var(--ok-text)}.proposal details.new-body{margin:6px 0}.proposal details.new-body>summary{cursor:pointer;color:var(--soft)}\n"
+  ".proposal{border:1px solid var(--edge);background:var(--paper);padding:8px 12px;margin:8px 0}.proposal h4{margin:0 0 6px;font-size:15px}.proposal dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 12px;margin:6px 0}.proposal dt{color:var(--soft);font-size:13px}.proposal dd{margin:0;overflow-wrap:anywhere}.proposal .reopens{color:var(--warn-text);font-weight:600}.proposal .actions{display:flex;gap:6px}.proposal .answer{font-weight:600}.proposal .nochange{color:var(--soft);font-style:italic}.proposal .old-new{margin:6px 0;max-width:760px}.proposal .old-new p{color:var(--soft);font-size:13px;margin:4px 0}.proposal .old-new pre{margin:0 0 8px;font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}.proposal .old-new pre:last-child{margin-bottom:0}.proposal details.new-body{margin:6px 0}.proposal details.new-body>summary{cursor:pointer;color:var(--soft)}\n"
 
 /// What the task's last run finished with, "" when nothing is to be looked at.
 fn outcome(t: Task) -> String {
@@ -2874,80 +2897,6 @@ fn old_to_new(
   <> shown(f.1)
 }
 
-/// The proposed body against the record's current one, as a line diff in the
-/// body's order: the lines the two share at the start and at the end collapse
-/// to one muted line each, a line only in the old body is struck, one only in
-/// the new one is marked, in place. Lines are compared with their surrounding
-/// space removed, and blank lines are left out, so a paragraph break added or
-/// removed doesn't show; moving a line break does.
-/// ponytail: common prefix and suffix, not an LCS; fine for a task body.
-fn body_diff(old: String, new: String) -> Element(msg) {
-  let o = text_lines(old)
-  let n = text_lines(new)
-  let prefix = shared_lines(o, n)
-  let suffix =
-    int.min(
-      shared_lines(list.reverse(o), list.reverse(n)),
-      int.min(list.length(o), list.length(n)) - prefix,
-    )
-  let dropped =
-    o |> list.drop(prefix) |> list.take(list.length(o) - prefix - suffix)
-  let added =
-    n |> list.drop(prefix) |> list.take(list.length(n) - prefix - suffix)
-  let muted = fn(count: Int) {
-    h.p([a.class("same")], [
-      h.text(
-        "… "
-        <> int.to_string(count)
-        <> " "
-        <> case count {
-          1 -> "line"
-          _ -> "lines"
-        }
-        <> " unchanged",
-      ),
-    ])
-  }
-  let block = fn(ls: List(String), mark: String) {
-    h.div([a.class("para " <> mark)], [
-      h.pre(
-        [],
-        list.map(ls, fn(l) {
-          case mark {
-            "add" -> h.span([a.class("add")], [h.text("+ " <> string.trim(l))])
-            _ -> h.del([], [h.text("- " <> string.trim(l))])
-          }
-        }),
-      ),
-    ])
-  }
-  h.div(
-    [a.class("body-diff")],
-    list.append(
-      case prefix {
-        0 -> []
-        _ -> [muted(prefix)]
-      },
-      list.append(
-        case list.length(dropped) {
-          0 -> []
-          _ -> [block(dropped, "del")]
-        },
-        list.append(
-          case list.length(added) {
-            0 -> []
-            _ -> [block(added, "add")]
-          },
-          case suffix {
-            0 -> []
-            _ -> [muted(suffix)]
-          },
-        ),
-      ),
-    ),
-  )
-}
-
 /// The toggle to see the proposed body rendered as Markdown.
 fn new_body(base: String, text: String) -> Element(msg) {
   h.details([a.class("new-body")], [
@@ -2956,20 +2905,8 @@ fn new_body(base: String, text: String) -> Element(msg) {
   ])
 }
 
-/// How many lines at the start of the two lists match, compared with their
-/// surrounding space removed.
-fn shared_lines(a: List(String), b: List(String)) -> Int {
-  case a, b {
-    [x, ..rest_a], [y, ..rest_b] ->
-      case string.trim(x) == string.trim(y) {
-        True -> 1 + shared_lines(rest_a, rest_b)
-        False -> 0
-      }
-    _, _ -> 0
-  }
-}
-
-/// A body's lines as `body_diff` compares them: trimmed, blank ones left out.
+/// A body's lines as change detection compares them: trimmed, blank ones left
+/// out, so space around lines and blank lines alone make no change.
 fn text_lines(text: String) -> List(String) {
   string.split(text, "\n")
   |> list.map(string.trim)
@@ -3497,3 +3434,81 @@ fn dep_view(model: Model, id: String, dep: Option(Dep)) -> Element(Msg) {
 /// rule adds those itself.
 pub const small_control =
   "font:inherit;font-size:13px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;min-height:var(--control-h-small);cursor:pointer"
+
+/// Whether a reply says its request's connection was lost, so an action may
+/// have run even though its reply never arrived.
+fn connection_lost(text: String) -> Bool {
+  json.parse(text, decode.at(["connectionLost"], decode.bool))
+  |> result.unwrap(False)
+}
+
+/// The full current and proposed values, labeled `Old:` and `New:` in their
+/// original order.
+fn old_and_new(old: String, new: String) -> Element(msg) {
+  h.div([a.class("old-new")], [
+    h.p([], [h.text("Old:")]),
+    h.pre([], [h.text(old)]),
+    h.p([], [h.text("New:")]),
+    h.pre([], [h.text(new)]),
+  ])
+}
+
+/// The model and effort a fresh list chooses: the remembered model when it can
+/// start, a Claude alias's family when the pick is gone, else the first model
+/// that can start. The effort stays only while the chosen model offers it.
+pub fn models_chosen(
+  models: List(Agent),
+  id: String,
+  effort: String,
+) -> #(String, String) {
+  let kept = remembered(models, id)
+  let chosen = case kept {
+    Ok(a) -> Ok(a)
+    Error(_) -> list.find(models, fn(a) { a.available })
+  }
+  let model = result.map(chosen, fn(a) { a.id }) |> result.unwrap("")
+  let chosen_effort = case kept {
+    Ok(a) ->
+      case list.contains(a.efforts, effort) {
+        True -> effort
+        False -> ""
+      }
+    Error(_) -> ""
+  }
+  #(model, chosen_effort)
+}
+
+/// The model and effort a refreshed list keeps: an id the list still names
+/// stays picked even when it can't start now, and its effort stays only while
+/// offered; an id the list dropped falls back as a fresh list would.
+pub fn models_refreshed(
+  models: List(Agent),
+  id: String,
+  effort: String,
+) -> #(String, String) {
+  case list.find(models, fn(a) { a.id == id }) {
+    Ok(a) -> #(id, case list.contains(a.efforts, effort) {
+      True -> effort
+      False -> ""
+    })
+    Error(_) -> models_chosen(models, id, effort)
+  }
+}
+
+/// What the UI says while it checks a task after a lost reply.
+const checking = "Connection lost; checking the task…"
+
+pub fn run_model_label(
+  models: List(Agent),
+  model: String,
+  used: String,
+) -> String {
+  let id = case used {
+    "" -> model
+    used -> used
+  }
+  case list.find(models, fn(m) { m.id == id }) {
+    Ok(m) -> agent_option(m)
+    Error(_) -> id
+  }
+}

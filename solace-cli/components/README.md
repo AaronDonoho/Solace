@@ -99,10 +99,10 @@ hide elsewhere, so the text saved is exactly what was typed.
 Strategy page's planning panel: "Create task *Index*", "Change feature *Search*" or "Replace the vision",
 then a line for each record Approve also sets back to `upcoming`, the question's options until it is
 answered and the answer after. An edit shows only the fields that change (D-115): a short one as
-`old → new`, a record id by its title, and the body as a line diff in its order — shared lines collapsed,
-removed lines struck, added ones marked, ignoring the space around lines and blank lines — with a toggle
-showing the new body as Markdown; the vision's text diffs against the vision the same way. A proposal with
-nothing to change, the vision included, says "No change". A create, and a proposal saved before `before`
+`old → new`, a record id by its title, and the body as full `Old:` and `New:` sections in their original
+order, ignoring the space around lines and blank lines when deciding what changed, with a toggle showing
+the new body as Markdown; the vision's text shows the same sections. A proposal with nothing to change,
+the vision included, says "No change". A create, and a proposal saved before `before`
 was kept, show every field, the body (and the vision's text) as Markdown. `proposal_decoder` reads
 `{kind, id?, fields, base?, reopens?, before?}`; `proposal_styles` is its look, with colors from the
 page. `entry_view`, `entry_decoder`, `note_decoder` and `agent_decoder` are public for the same panel.

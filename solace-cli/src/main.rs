@@ -904,54 +904,7 @@ fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
     // From a project, or from a folder of projects with none at its root.
     let here = env::current_dir()?;
     let own = Store::root().ok();
-    let root = match workspace::enclosing(own.as_deref().unwrap_or(&here))? {
-        Some(root) => root,
-        None => own.clone().ok_or_else(|| {
-            Failure(
-                "No Solace root here: migrate an existing project (`solace serve`, then Migrate this project) or \
-                 make a new one with `solace create <name>`."
-                    .into(),
-                1,
-            )
-        })?,
-    };
-    let members = workspace::members(&root)?;
-    let dir = &project_folder(&root, own.as_deref(), dir, &members);
-    if !members.iter().any(|m| m == dir) {
-        return lockdown::error(
-            "E6007",
-            dir,
-            format!(
-                "not a project under this Solace root: `--project` takes a folder from the Solace root; its projects: {}",
-                members.join(", ")
-            ),
-        );
-    }
-    let target = scope::path(&root, dir);
-    // A board run's agent must still be running, as for any command.
-    let _guard = match (board::context(), &own) {
-        (Some((tid, rid)), Some(own)) => Some(board::agent_guard(&scope::home(own, &tid)?, &tid, &rid, &a, &[])?),
-        _ => None,
-    };
-    let store = Store::peek(&target)?;
-    let settings = lockdown::settings(&store.root)?;
-    if let Some(out) = lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
-        return out;
-    }
-    // A Rust project has no `Language`; its store's symbols are read as any
-    // other's (D-158), so only a project of plain files is refused.
-    if store.lang.is_none() && !language::is_rust(&store.root) {
-        let task = board::context().map(|(tid, _)| tid);
-        return lockdown::plain(&store, task.as_deref(), command);
-    }
-    let out = match a.as_slice() {
-        ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
-        ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
-        ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
-        ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
-        _ => usage(format!("{} --project {dir}: give what to read", a.join(" "))),
-    };
-    hinted(out, &store.root)
+    read_project_in(&a, &here, own.as_deref(), dir, budget)
 }
 
 /// Each `E1001 unknown name` line of a reply, followed by the project that
@@ -1018,6 +971,12 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
     let store = Store::open()?;
     let settings = lockdown::settings(&store.root)?;
     let task = board::context().map(|(tid, _)| tid);
+    if matches!(a[0], "check" | "test" | "submit" | "delete")
+        && let Some(id) = language::id(&store.root)
+        && let Some(why) = language::reason(id)?
+    {
+        return lockdown::error("E6013", a[0], why);
+    }
     if let Some(out) = lockdown::dispatch(&store, &settings, &a, input, old, budget) {
         return out;
     }
@@ -1498,11 +1457,14 @@ fn dependencies(root: &Path, has_cargo: bool) -> Out {
     if !language::is_rust(root) {
         return Ok(String::new());
     }
+    if let Some(why) = language::reason(language::RUST)? {
+        return Ok(format!("Dependencies not fetched: {why}\n"));
+    }
     if has_cargo {
         cargo::fetch(root)?;
         Ok(String::new())
     } else {
-        Ok(format!("Dependencies not fetched: {}\n", cargo::MISSING))
+        Ok(format!("Dependencies not fetched: {}\n", language::missing(language::RUST)))
     }
 }
 
@@ -1688,6 +1650,11 @@ impl Store {
 
     /// Runs the language's tool (`gleam check`, `gleam test`) in the project.
     fn tool(&self, args: &[&str]) -> Result<(bool, String), Failure> {
+        if let Some(id) = language::id(&self.root)
+            && let Some(why) = language::reason(id)?
+        {
+            return Err(Failure(format!("E6013 {why}"), 1));
+        }
         let mut argv = vec![self.lang().tool().to_string()];
         argv.extend(args.iter().map(|s| s.to_string()));
         // whole, so every failure is parsed; the reply is trimmed later
@@ -1697,6 +1664,9 @@ impl Store {
 
     /// Runs `cargo` in the project (D-158): the exit code and its output.
     fn cargo(&self, args: &[&str], timeout: u64) -> Result<(bool, String), Failure> {
+        if let Some(why) = language::reason(language::RUST)? {
+            return Err(Failure(format!("E6013 {why}"), 1));
+        }
         let mut argv = vec!["cargo".to_string()];
         argv.extend(args.iter().map(|s| s.to_string()));
         let text = lockdown::command(&self.root, &argv, timeout, usize::MAX, false, true)?;
@@ -1706,6 +1676,11 @@ impl Store {
     /// Type-checks the project and records which symbols are broken, with
     /// their errors, so the next reply can report only what changed (D-46).
     fn check_all(&self, ix: &Index) -> Result<Vec<Diag>, Failure> {
+        if let Some(id) = language::id(&self.root)
+            && let Some(why) = language::reason(id)?
+        {
+            return Err(Failure(format!("E6013 {why}"), 1));
+        }
         let files = self.materialize(ix)?;
         let diags = if language::is_rust(&self.root) {
             let args = cargo::check_args(&self.root);
@@ -4279,4 +4254,59 @@ pub(crate) fn with_root<T>(root: &Path, f: impl FnOnce() -> T) -> T {
     let out = f();
     TEST_ROOT.with(|r| *r.borrow_mut() = old);
     out
+}
+
+/// `read_project` from an explicit working folder and owning project, so a test
+/// never changes the process-wide working folder.
+fn read_project_in(a: &[&str], here: &Path, own: Option<&Path>, dir: &str, budget: usize) -> Out {
+    let command = a.first().copied().unwrap_or("");
+    // From a project, or from a folder of projects with none at its root.
+    let root = match workspace::enclosing(own.unwrap_or(here))? {
+        Some(root) => root,
+        None => own.map(Path::to_path_buf).ok_or_else(|| {
+            Failure(
+                "No Solace root here: migrate an existing project (`solace serve`, then Migrate this project) or \
+                 make a new one with `solace create <name>`."
+                    .into(),
+                1,
+            )
+        })?,
+    };
+    let members = workspace::members(&root)?;
+    let dir = &project_folder(&root, own, dir, &members);
+    if !members.iter().any(|m| m == dir) {
+        return lockdown::error(
+            "E6007",
+            dir,
+            format!(
+                "not a project under this Solace root: `--project` takes a folder from the Solace root; its projects: {}",
+                members.join(", ")
+            ),
+        );
+    }
+    let target = scope::path(&root, dir);
+    // A board run's agent must still be running, as for any command.
+    let _guard = match (board::context(), own) {
+        (Some((tid, rid)), Some(own)) => Some(board::agent_guard(&scope::home(own, &tid)?, &tid, &rid, &a, &[])?),
+        _ => None,
+    };
+    let store = Store::peek(&target)?;
+    let settings = lockdown::settings(&store.root)?;
+    if let Some(out) = lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
+        return out;
+    }
+    // A Rust project has no `Language`; its store's symbols are read as any
+    // other's (D-158), so only a project of plain files is refused.
+    if store.lang.is_none() && !language::is_rust(&store.root) {
+        let task = board::context().map(|(tid, _)| tid);
+        return lockdown::plain(&store, task.as_deref(), command);
+    }
+    let out = match a {
+        ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
+        ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
+        ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
+        ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
+        _ => usage(format!("{} --project {dir}: give what to read", a.join(" "))),
+    };
+    hinted(out, &store.root)
 }

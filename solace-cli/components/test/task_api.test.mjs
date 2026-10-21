@@ -280,6 +280,45 @@ test('transport uses the base it is given; explicit project paths stay absolute'
   }
 });
 
+test('a rejected request reports a lost connection, not the browser exception', async () => {
+  const oldFetch = globalThis.fetch;
+  const replies = [];
+  globalThis.fetch = async () => { throw new TypeError('Load Failed'); };
+  try {
+    const api = await import('../src/task_api.mjs');
+    await new Promise(resolve => api.request('', '/tasks/t1', 'GET', '', text => {
+      replies.push(text);
+      resolve();
+    }));
+    expect(JSON.parse(replies[0])).toEqual({
+      connectionLost: true,
+      message: 'Connection lost; the request may not have completed.',
+    });
+    expect(replies[0]).not.toContain('Load Failed');
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+test('a receive callback that throws is not reported as a lost connection', async () => {
+  const oldFetch = globalThis.fetch;
+  const oldError = console.error;
+  const replies = [], errors = [];
+  console.error = error => errors.push(error);
+  globalThis.fetch = async () => new Response('{}');
+  try {
+    const api = await import('../src/task_api.mjs');
+    api.request('', '/tasks/t1', 'GET', '', text => {
+      replies.push(text);
+      throw new Error('UI callback failed');
+    });
+    await settle();
+    expect(replies).toEqual(['{}']);
+    expect(errors.map(error => error.message)).toEqual(['UI callback failed']);
+  } finally {
+    console.error = oldError;
+    globalThis.fetch = oldFetch;
+  }
+});
+
 test('editor helpers act on the shadow root they are given, and only on its own editors', async () => {
   const oldFetch = globalThis.fetch;
   const uploads = [], inserted = [];
@@ -339,6 +378,57 @@ test('an image pasted or dropped inside an editor\'s own shadow root uploads to 
     page.listeners.get('paste')(event);
     await settle();
     expect(uploads.length).toBe(2);
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+test('a rejected image upload says the connection was lost, not the browser exception', async () => {
+  const oldFetch = globalThis.fetch;
+  const failures = [];
+  const listeners = new Map();
+  const root = { addEventListener: (name, fn) => listeners.set(name, fn) };
+  const input = { classList: { contains: name => name === 'md-image' }, dataset: { task: 't1', for: 'body', base: '' },
+    files: [{ type: 'image/png', name: 'shot.png' }], value: 'shot', getRootNode: () => root };
+  globalThis.fetch = async () => { throw new TypeError('Load Failed'); };
+  try {
+    const api = await import('../src/task_api.mjs');
+    api.images(root, () => {}, text => failures.push(text));
+    listeners.get('change')({ target: input, composedPath: () => [input, root], preventDefault() {} });
+    for (let i = 0; i < 20 && !failures.length; i++) await Bun.sleep(1);
+    expect(failures).toEqual(['Connection lost; the image was not uploaded.']);
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+test('a failed insert after an upload is not reported as a lost upload', async () => {
+  const oldFetch = globalThis.fetch;
+  const failures = [];
+  const listeners = new Map();
+  const root = { addEventListener: (name, fn) => listeners.set(name, fn) };
+  const input = { classList: { contains: name => name === 'md-image' }, dataset: { task: 't1', for: 'body', base: '' },
+    files: [{ type: 'image/png', name: 'shot.png' }], value: 'shot', getRootNode: () => root };
+  globalThis.fetch = async () => Response.json({ url: '/tasks/t1/files/0123456789abcdef.png' });
+  try {
+    const api = await import('../src/task_api.mjs');
+    api.images(root, () => { throw new Error('editor failed'); }, text => failures.push(text));
+    listeners.get('change')({ target: input, composedPath: () => [input, root], preventDefault() {} });
+    for (let i = 0; i < 20 && !failures.length; i++) await Bun.sleep(1);
+    expect(failures).toEqual(['Image uploaded, but could not be inserted.']);
+  } finally { globalThis.fetch = oldFetch; }
+});
+
+test('a non-JSON image reply is a failed upload, not a lost connection', async () => {
+  const oldFetch = globalThis.fetch;
+  const failures = [];
+  const listeners = new Map();
+  const root = { addEventListener: (name, fn) => listeners.set(name, fn) };
+  const input = { classList: { contains: name => name === 'md-image' }, dataset: { task: 't1', for: 'body', base: '' },
+    files: [{ type: 'image/png', name: 'shot.png' }], value: 'shot', getRootNode: () => root };
+  globalThis.fetch = async () => new Response('<html>Bad Gateway</html>', { status: 502 });
+  try {
+    const api = await import('../src/task_api.mjs');
+    api.images(root, () => {}, text => failures.push(text));
+    listeners.get('change')({ target: input, composedPath: () => [input, root], preventDefault() {} });
+    for (let i = 0; i < 20 && !failures.length; i++) await Bun.sleep(1);
+    expect(failures).toEqual(['Image upload failed']);
   } finally { globalThis.fetch = oldFetch; }
 });
 
@@ -522,6 +612,43 @@ test('the editor sends what its buttons ask for, and wraps the selection in plac
     await settle();
     expect(sent).toContainEqual(['POST', '/tasks/t1/scope', { scope: ['a', 'b'] }]);
   } finally { browser.restore(); delete globalThis.confirm; }
+});
+
+test('a lost save reply checks the task again', async () => {
+  const browser = fakeBrowser();
+  const calls = [];
+  globalThis.fetch = async (path, options) => {
+    calls.push([options?.method ?? 'GET', path]);
+    if (options?.method === 'PATCH') throw new TypeError('Load Failed');
+    return new Promise(() => {});
+  };
+  try {
+    const t = mount();
+    t.dispatch(new task.TaskLoaded(t.model.generation, JSON.stringify({ id: 't1', title: 'T', body: '', column: 'assigned', rank: 1 })));
+    t.dispatch(new task.Edit(true));
+    t.dispatch(new task.Title('T2'));
+    t.dispatch(new task.Save());
+    await settle();
+    expect(calls).toContainEqual(['PATCH', '/tasks/t1']);
+    expect(calls).toContainEqual(['GET', '/tasks/t1']);
+    expect(t.model.error).toBe('Connection lost; checking the task…');
+  } finally { browser.restore(); }
+});
+
+test('a late lost change reply does not refresh the task shown now', async () => {
+  const browser = fakeBrowser();
+  try {
+    const t = mount();
+    t.dispatch(new task.TaskLoaded(t.model.generation, JSON.stringify({ id: 't1', title: 'One', body: '', column: 'x', rank: 1 })));
+    const sent = t.model.generation;
+    t.dispatch(new task.TaskChanged('t2'));
+    t.dispatch(new task.TaskLoaded(t.model.generation, JSON.stringify({ id: 't2', title: 'Two', body: '', column: 'x', rank: 1 })));
+    const before = browser.paths.length;
+    t.dispatch(new task.ChangedAt(sent, JSON.stringify({ connectionLost: true, message: 'Connection lost; the request may not have completed.' })));
+    await settle();
+    expect(browser.paths.length).toBe(before);
+    expect(t.model.error).toBe('');
+  } finally { browser.restore(); }
 });
 
 test('<solace-task> registers once, however many parts of the page ask', async () => {

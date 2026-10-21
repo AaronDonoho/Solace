@@ -38,15 +38,21 @@ fn a_path_that_climbs_matches_the_file_it_names() {
 
 #[test]
 fn a_format_says_which_tool_is_missing() {
-    assert_eq!(super::format_missing(false, false), Some(crate::language::cargo::MISSING));
-    assert_eq!(super::format_missing(true, false), Some(crate::language::cargo::RUSTFMT_MISSING));
-    assert_eq!(super::format_missing(true, true), None);
+    let missing = crate::language::cargo::MISSING.to_string();
+    assert_eq!(super::format_missing(Some(missing.clone()), false), Some(missing));
+    assert_eq!(super::format_missing(None, false), Some(crate::language::cargo::RUSTFMT_MISSING.to_string()));
+    assert_eq!(super::format_missing(None, true), None);
 }
 
 #[test]
 fn a_long_line_counts_columns_not_characters() {
+    let flag = "\u{1f1fa}\u{1f1f8}";
     assert!(super::long_line_note("crate.x", &"\t".repeat(26), 100).is_some());
     assert!(super::long_line_note("crate.x", &"界".repeat(51), 100).is_some());
+    assert!(super::long_line_note("crate.x", &"\u{1f1e6}\u{200b}".repeat(51), 100).is_some());
+    assert!(super::long_line_note("crate.x", &flag.repeat(26), 100).is_none());
+    assert!(super::long_line_note("crate.x", &flag.repeat(51), 100).is_some());
+    assert!(super::long_line_note("crate.x", &"\u{1f680}".repeat(51), 100).is_some());
     assert!(super::long_line_note("crate.x", &"\u{1fa70}".repeat(51), 100).is_some());
     assert!(super::long_line_note("crate.x", &"e\u{301}".repeat(60), 100).is_none());
 }
@@ -67,4 +73,13 @@ fn a_format_refuses_a_changed_mod_list() {
         assert!(err.contains("`mod` list can't change"), "{err}");
         assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
     }
+}
+
+/// A malformed settings file is reported, not read as a missing toolchain.
+#[test]
+fn formatting_reports_invalid_settings() {
+    let (_root, store) = crate::testing::rust_project("pub fn helper() -> i32 {\n    1\n}\n");
+    let bad = crate::testing::Scratch::new().with(&[("system.toml", "[languages]\nrust = 1\n")]);
+    let e = crate::board::with_config(&bad.join("system.toml"), || store.format_module_rust("crate")).unwrap_err();
+    assert!(e.0.contains("E6020"), "{}", e.0);
 }

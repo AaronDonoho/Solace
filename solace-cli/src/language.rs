@@ -9,6 +9,7 @@ pub mod cargo;
 pub mod gleam;
 pub mod rust;
 pub mod rust_refs;
+mod paths;
 
 use crate::{Diag, Failure, FileMap};
 use gleam::Gleam;
@@ -188,3 +189,68 @@ pub fn of(root: &Path) -> &'static dyn Language {
 #[cfg(test)]
 #[path = "language_tests.rs"]
 mod tests;
+
+pub const GLEAM: &str = "gleam";
+
+pub const RUST: &str = "rust";
+
+/// The language's name as Settings shows it.
+pub fn label(id: &str) -> &'static str {
+    match id {
+        GLEAM => "Gleam",
+        RUST => "Rust",
+        _ => "",
+    }
+}
+
+/// Whether the language's toolchain is on `PATH`, regardless of whether the
+/// language is turned on in settings.
+pub fn installed(id: &str) -> bool {
+    match id {
+        GLEAM => on_path("gleam"),
+        RUST => on_path("cargo"),
+        _ => false,
+    }
+}
+
+pub fn missing(id: &str) -> &'static str {
+    match id {
+        GLEAM => "Needs the Gleam toolchain (`gleam`)",
+        RUST => "Needs the Rust toolchain (`cargo`)",
+        _ => "Needs its toolchain",
+    }
+}
+
+pub fn off(id: &str) -> &'static str {
+    match id {
+        GLEAM => "Gleam is turned off in Settings",
+        RUST => "Rust is turned off in Settings",
+        _ => "This language is turned off in Settings",
+    }
+}
+
+fn on_path(program: &str) -> bool {
+    crate::language::paths::search_path(program).is_some()
+}
+
+/// The language of `root`, as the system settings name it.
+pub fn id(root: &Path) -> Option<&'static str> {
+    if is_rust(root) {
+        Some(RUST)
+    } else if root.join("gleam.toml").exists() {
+        Some(GLEAM)
+    } else {
+        None
+    }
+}
+
+/// Why a language's projects can't use its tools, if they can't.
+pub fn reason(id: &str) -> Result<Option<String>, Failure> {
+    crate::board::language_reason(id)
+}
+
+/// Whether the system settings leave the language on. An unreadable or
+/// invalid settings file is an error, never a silent yes.
+pub fn enabled(id: &str) -> Result<bool, Failure> {
+    crate::board::language_enabled(id)
+}

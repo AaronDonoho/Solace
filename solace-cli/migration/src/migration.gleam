@@ -840,9 +840,10 @@ pub type Projects {
   )
 }
 
-/// A project on the root's board: its folder, label and package name.
+/// A project on the root's board: its folder, label and package name, and
+/// why its tools can't be used, "" when they can.
 pub type Project {
-  Project(dir: String, label: String, name: String)
+  Project(dir: String, label: String, name: String, needs: String)
 }
 
 /// A project found in the root's folder: Gleam (migrated) or Rust (added in place).
@@ -986,7 +987,8 @@ fn projects_decoder() -> decode.Decoder(#(List(Project), List(Found))) {
     use dir <- decode.field("dir", decode.string)
     use label <- decode.optional_field("label", dir, decode.string)
     use name <- decode.field("name", decode.string)
-    decode.success(Project(dir, label, name))
+    use needs <- decode.optional_field("needs", "", decode.string)
+    decode.success(Project(dir, label, name, needs))
   }
   let found = {
     use dir <- decode.field("dir", decode.string)
@@ -1026,6 +1028,10 @@ fn projects_view(p: Projects) -> Element(Msg) {
                 "." -> h.small([], [h.text("(this folder)")])
                 dir ->
                   button(solace_task.ui_label("remove"), RemoveProject(dir))
+              },
+              case l.needs {
+                "" -> h.text("")
+                needs -> h.small([], [h.text(needs)])
               },
             ])
           }),

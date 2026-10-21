@@ -314,6 +314,9 @@ pub type Msg {
   PlanEffort(String)
   /// The reply to `GET /models`.
   ModelsLoaded(String)
+  /// The models fetched again on catch-up or a live run or task update: a
+  /// failed reply changes nothing, and a pick the list still has stays.
+  ModelsRefreshed(String)
   /// A usage limit's Try again: the agent kind whose limit to clear.
   TryAgainModel(String)
   /// Starts a strategy run on the panel's context with the typed message.
@@ -1328,10 +1331,17 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       effect.none(),
     )
     Live(text) -> {
-      let fx = case projects_event(text) {
-        True -> get(model, "/projects", ProjectsLoaded)
-        False -> effect.none()
-      }
+      let fx =
+        effect.batch([
+          case projects_event(text) {
+            True -> get(model, "/projects", ProjectsLoaded)
+            False -> effect.none()
+          },
+          case models_event(text) {
+            True -> get(model, "/models", ModelsRefreshed)
+            False -> effect.none()
+          },
+        ])
       case knows(model, text) {
         True -> {
           let #(next, more) =
@@ -1346,10 +1356,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         False -> #(Model(..model, replay: [text, ..model.replay]), fx)
       }
     }
-    CaughtUp -> #(
-      resync(settle(Model(..model, caught_up: True))),
-      effect.none(),
-    )
+    CaughtUp -> {
+      let model = resync(settle(Model(..model, caught_up: True)))
+      #(model, get(model, "/models", ModelsRefreshed))
+    }
     PlanCollapse -> #(
       Model(..model, plan_collapsed: !model.plan_collapsed),
       effect.none(),
@@ -1433,28 +1443,38 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     ModelsLoaded(text) ->
       case json.parse(text, decode.list(solace_task.agent_decoder())) {
         Ok(models) -> {
-          let kept = solace_task.remembered(models, model.plan_model)
-          let id = case kept {
-            Ok(a) -> a.id
-            Error(_) ->
-              list.find(models, fn(a) { a.available })
-              |> result.map(fn(a) { a.id })
-              |> result.unwrap("")
-          }
-          // The effort stays only while the kept model still offers it.
-          let plan_effort = case kept {
-            Ok(a) ->
-              case list.contains(a.efforts, model.plan_effort) {
-                True -> model.plan_effort
-                False -> ""
-              }
-            Error(_) -> ""
-          }
+          let #(plan_model, plan_effort) =
+            solace_task.models_chosen(
+              models,
+              model.plan_model,
+              model.plan_effort,
+            )
           #(
             Model(
               ..model,
               models: models,
-              plan_model: id,
+              plan_model: plan_model,
+              plan_effort: plan_effort,
+            ),
+            effect.none(),
+          )
+        }
+        Error(_) -> #(model, effect.none())
+      }
+    ModelsRefreshed(text) ->
+      case json.parse(text, decode.list(solace_task.agent_decoder())) {
+        Ok(models) -> {
+          let #(plan_model, plan_effort) =
+            solace_task.models_refreshed(
+              models,
+              model.plan_model,
+              model.plan_effort,
+            )
+          #(
+            Model(
+              ..model,
+              models: models,
+              plan_model: plan_model,
               plan_effort: plan_effort,
             ),
             effect.none(),
@@ -2064,11 +2084,15 @@ fn get(model: Model, path: String, msg: fn(String) -> Msg) -> Effect(Msg) {
 /// milestones (Spec 15): the root's own `GET /tasks` holds only its project.
 fn start(model: Model) -> #(Model, Effect(Msg)) {
   let model = Model(..stop(model), caught_up: False, replay: [])
+  let models = case model.models {
+    [] -> get(model, "/models", ModelsLoaded)
+    _ -> get(model, "/models", ModelsRefreshed)
+  }
   #(
     model,
     effect.batch([
       get(model, "/projects", ProjectsLoaded),
-      get(model, "/models", ModelsLoaded),
+      models,
       effect.from(fn(send) {
         send(
           Listening(
@@ -3753,3 +3777,10 @@ fn drag_card(
   y: Int,
   done: fn(Int) -> Nil,
 ) -> Nil
+
+/// Whether a live update is one the planner shows: a strategy run or a task.
+/// These also refresh the model list, so a config edit reaches the pick.
+pub fn models_event(text: String) -> Bool {
+  ["strategyRun", "strategyRuns", "task", "tasks", "removed"]
+  |> list.any(fn(key) { result.is_ok(at(text, key, decode.dynamic)) })
+}

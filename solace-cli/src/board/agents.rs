@@ -126,7 +126,7 @@ pub(super) fn merge_from(configured: &Value, all: &Value) -> Vec<Value> {
         m["effort"] = json!(default_effort(m));
         if let Some(used) = all["used"][m["id"].as_str().unwrap_or("")].as_str() {
             if names_family(m) {
-                m["label"] = labels.iter().find(|(model, _)| model == used).map_or(json!(used), |(_, l)| l.clone());
+                m["label"] = labels.iter().rev().find(|(model, _)| model == used).map_or(json!(used), |(_, l)| l.clone());
             }
         }
     }

@@ -2334,9 +2334,17 @@ pub fn the_plan_offers_only_models_that_can_start_test() {
   assert !string.contains(shown(again), "unavailable</summary>")
 }
 
-/// A plan run names the model its agent used, when its start event named
-/// one; an alias says which model it resolved to.
+/// A plan run shows the one label of the model its agent used, when its start
+/// event named one; an alias says which model it resolved to. Without a used
+/// model it names its requested model, and an id the list lacks stays raw.
 pub fn a_plan_run_names_the_model_it_used_test() {
+  let model =
+    step(
+      planned(),
+      strategy.ModelsLoaded(
+        "[{\"id\":\"claude-opus\",\"label\":\"Opus (latest)\"},{\"id\":\"claude-opus-5-5\",\"label\":\"Opus 5.5\"}]",
+      ),
+    )
   let run = fn(used) {
     plan.Run(
       id: "r1",
@@ -2352,9 +2360,25 @@ pub fn a_plan_run_names_the_model_it_used_test() {
       used: used,
     )
   }
-  assert plan.state_text(run("")) == "Ended: planned · claude-opus"
-  assert plan.state_text(run("claude-opus-5-5"))
-    == "Ended: planned · claude-opus · claude-opus-5-5"
+  assert plan.state_text(run(""), model.models)
+    == "Ended: planned · Opus (latest)"
+  assert plan.state_text(run("claude-opus-5-5"), model.models)
+    == "Ended: planned · Opus 5.5"
+  assert plan.state_text(run("unknown"), model.models)
+    == "Ended: planned · unknown"
+  assert !string.contains(
+    plan.state_text(run("claude-opus-5-5"), model.models),
+    "claude-opus",
+  )
+  let renamed =
+    step(
+      model,
+      strategy.ModelsRefreshed(
+        "[{\"id\":\"claude-opus-5-5\",\"label\":\"Opus Renamed\"}]",
+      ),
+    )
+  assert plan.state_text(run("claude-opus-5-5"), renamed.models)
+    == "Ended: planned · Opus Renamed"
 }
 
 /// Cards take the shared card padding, small controls the small height, and
@@ -2568,4 +2592,98 @@ pub fn a_second_move_waits_for_the_first_test() {
   // The keyboard's move holds the others too.
   let moved = step(model, strategy.MoveFeature("f1", 3.0))
   assert moved.feature_saving
+}
+
+/// A fresh list chooses the first model that can start; a refresh keeps a pick
+/// the list still has, even when it can't start, and narrows its effort. A
+/// failed refresh changes nothing.
+pub fn the_plan_models_follow_refreshes_test() {
+  let shown = fn(model) { element.to_string(strategy.view(model)) }
+  let initial =
+    step(
+      planned(),
+      strategy.ModelsLoaded(
+        "[{\"id\":\"a\",\"label\":\"A\",\"available\":false,\"reason\":\"not installed\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\",\"high\"]}]",
+      ),
+    )
+  assert initial.plan_model == "b"
+  let chosen =
+    initial
+    |> step(strategy.PlanModel("b"))
+    |> step(strategy.PlanEffort("high"))
+  let failed = step(chosen, strategy.ModelsRefreshed("oops"))
+  assert failed.models == chosen.models
+  assert failed.plan_model == "b"
+  assert failed.plan_effort == "high"
+  let held =
+    step(
+      chosen,
+      strategy.ModelsRefreshed(
+        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached\",\"limit\":true,\"efforts\":[\"low\",\"high\"]}]",
+      ),
+    )
+  assert held.plan_model == "b"
+  assert held.plan_effort == "high"
+  assert string.contains(shown(held), "B: Codex usage limit reached")
+  assert string.contains(shown(held), ">Try again</button>")
+  let narrowed =
+    step(
+      held,
+      strategy.ModelsRefreshed(
+        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\"]}]",
+      ),
+    )
+  assert narrowed.plan_model == "b"
+  assert narrowed.plan_effort == ""
+  let dropped =
+    step(narrowed, strategy.ModelsRefreshed("[{\"id\":\"a\",\"label\":\"A\"}]"))
+  assert dropped.plan_model == "a"
+  assert dropped.plan_effort == ""
+}
+
+/// The working state and Earlier runs name the same one model label: the model
+/// a run used when its start event named one, else its requested model.
+pub fn the_working_state_and_earlier_runs_show_one_model_label_test() {
+  let model =
+    planned()
+    |> step(
+      strategy.Live(
+        json.to_string(
+          json.object([
+            #(
+              "strategyRun",
+              run("r5", "running", #("page", ""), 40, [
+                #("used", json.string("claude-opus-5-5")),
+              ]),
+            ),
+          ]),
+        ),
+      ),
+    )
+    |> step(strategy.ModelsLoaded(
+      "[{\"id\":\"fake\",\"label\":\"Fake model\"},{\"id\":\"claude-opus\",\"label\":\"Opus (latest)\"},{\"id\":\"claude-opus-5-5\",\"label\":\"Opus 5.5\"}]",
+    ))
+    |> step(strategy.ShowPlan("r5"))
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "Working · Opus 5.5")
+  assert string.contains(page, "Ended: planned · Fake model")
+  assert !string.contains(page, "fake")
+  assert !string.contains(page, "claude-opus")
+  let collapsed = step(model, strategy.PlanCollapse)
+  let page = element.to_string(strategy.view(collapsed))
+  assert string.contains(page, "Working · Opus 5.5")
+  assert !string.contains(page, "claude-opus")
+}
+
+/// Live strategy-run and task updates refresh the model list; feature, vision
+/// and workflow updates do not.
+pub fn live_run_and_task_updates_refresh_the_models_test() {
+  assert strategy.models_event("{\"strategyRun\":{\"id\":\"r\"}}")
+  assert strategy.models_event("{\"strategyRuns\":[]}")
+  assert strategy.models_event("{\"task\":{\"id\":\"t\"}}")
+  assert strategy.models_event("{\"tasks\":[]}")
+  assert strategy.models_event("{\"removed\":\"t\"}")
+  assert !strategy.models_event("{\"feature\":{\"id\":\"f\"}}")
+  assert !strategy.models_event("{\"vision\":{\"text\":\"\"}}")
+  assert !strategy.models_event("{\"workflow\":{}}")
 }

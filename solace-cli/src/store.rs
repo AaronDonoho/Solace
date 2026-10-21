@@ -552,7 +552,11 @@ pub(crate) fn rust_brief(ix: &Index) -> String {
         let t = &ix.syms[i];
         let m = &ix.syms[inline_tests(i).unwrap()];
         out += &format!(
-            "A test in an inline `mod tests` is `<module>.tests::<name>`, e.g. `{}`; add one with `*** Add: {}::{}.<test>`.\n",
+            concat!(
+                "A test in an inline `mod tests` is `<module>.tests::<name>`, or ",
+                "`<module>.outer::tests::<name>` when the `tests` module is nested, e.g. `{}`; ",
+                "add one with `*** Add: {}::{}.<test>`.\n",
+            ),
             t.qname(),
             m.module,
             m.name

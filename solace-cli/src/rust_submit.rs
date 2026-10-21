@@ -735,35 +735,21 @@ impl Store {
     }
 
     /// The container to add an item to, named in `n` (D-168): the whole name,
-    /// or a cut whose prefix is a module and whose next segment names a
-    /// container in it; a cut that is no module names a container itself. The
-    /// first `impl` when several share the name; several other containers with
-    /// it are ambiguous.
+    /// or a cut whose prefix names a container itself; a module prefix is not a
+    /// container. The first `impl` when several share the name; several other
+    /// containers with it are ambiguous.
     pub(crate) fn rust_container_in(&self, ix: &Index, n: &str) -> Result<Option<usize>, Failure> {
         if let Some(i) = rust_container(ix, n)? {
             return Ok(Some(i));
         }
         let mut cuts: Vec<usize> = n.match_indices("::").map(|(i, _)| i).chain(n.match_indices('.').map(|(i, _)| i)).collect();
         cuts.sort_unstable();
-        for (j, &at) in cuts.iter().enumerate().rev() {
+        for &at in cuts.iter().rev() {
             let prefix = &n[..at];
-            let Some(module) = self.resolve_module(ix, prefix) else {
-                if let Some(i) = rust_container(ix, prefix)? {
-                    return Ok(Some(i));
-                }
+            if self.resolve_module(ix, prefix).is_some() {
                 continue;
-            };
-            let start = at + if n[at..].starts_with("::") { 2 } else { 1 };
-            let end = cuts.get(j + 1).copied().unwrap_or(n.len());
-            let found: Vec<usize> = (0..ix.syms.len())
-                .filter(|&i| {
-                    let s = &ix.syms[i];
-                    // `mod x;` names a module, not a container with items to add.
-                    let file_mod = s.kind_text == "mod" && s.text.trim_end().ends_with(';');
-                    !file_mod && s.module == module.path && s.name.as_str() == &n[start..end] && container_kind(&s.kind_text)
-                })
-                .collect();
-            if let Some(i) = rust_one(&found, ix, &n[..end])? {
+            }
+            if let Some(i) = rust_container(ix, prefix)? {
                 return Ok(Some(i));
             }
         }
@@ -1115,7 +1101,8 @@ impl Store {
         let Some(row) = self.resolve_module(&ix, m) else {
             return fail(format!("E1003 unknown module: {m}; `format` takes a module the store holds"));
         };
-        if let Some(message) = format_missing(cargo::installed(), cargo::rustfmt_installed()) {
+        let reason = crate::language::reason(crate::language::RUST)?;
+        if let Some(message) = format_missing(reason, cargo::rustfmt_installed()) {
             return crate::lockdown::error("E6013", "format", message);
         }
         let module = row.path.clone();
@@ -1168,24 +1155,26 @@ fn long_line_notes(ix: &Index, module: &str, items: &[RustItem], max_width: usiz
     out
 }
 
-/// Why `format` can't run: the toolchain, then rustfmt.
-fn format_missing(has_cargo: bool, has_rustfmt: bool) -> Option<&'static str> {
-    if !has_cargo {
-        Some(cargo::MISSING)
-    } else if !has_rustfmt {
-        Some(cargo::RUSTFMT_MISSING)
-    } else {
-        None
-    }
+/// Why `format` can't run: the language's setting or toolchain, then rustfmt.
+fn format_missing(reason: Option<String>, has_rustfmt: bool) -> Option<String> {
+    reason.or_else(|| (!has_rustfmt).then(|| cargo::RUSTFMT_MISSING.to_string()))
 }
 
 /// How wide `line` prints: a tab reaches the next 4-column stop, a wide
-/// character takes two columns, and a combining mark none.
+/// character or a regional-indicator pair takes two columns, and a combining
+/// mark none.
 fn display_width(line: &str) -> usize {
     let mut width = 0;
-    for c in line.chars() {
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
         width += match c {
             '\t' => 4 - width % 4,
+            '\u{1f1e6}'..='\u{1f1ff}' => {
+                if chars.peek().is_some_and(|next| matches!(*next, '\u{1f1e6}'..='\u{1f1ff}')) {
+                    chars.next();
+                }
+                2
+            }
             '\u{0300}'..='\u{036f}'
             | '\u{1ab0}'..='\u{1aff}'
             | '\u{1dc0}'..='\u{1dff}'
@@ -1204,6 +1193,7 @@ fn display_width(line: &str) -> usize {
             | '\u{ff00}'..='\u{ff60}'
             | '\u{ffe0}'..='\u{ffe6}'
             | '\u{1f300}'..='\u{1f64f}'
+            | '\u{1f680}'..='\u{1f6ff}'
             | '\u{1f900}'..='\u{1f9ff}'
             | '\u{1fa70}'..='\u{1faff}'
             | '\u{20000}'..='\u{3fffd}' => 2,

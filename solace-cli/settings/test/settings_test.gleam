@@ -156,3 +156,49 @@ pub fn the_form_edits_a_model_and_never_shows_its_key_test() {
   assert settings.update(new, settings.SaveModel).0 == new
   assert settings.update(typed, settings.DeleteModel(entry)).0 == typed
 }
+
+/// The Languages section shows each switch and missing state; a reply updates
+/// the list, and a refusal says why and keeps it.
+pub fn languages_show_and_toggle_test() {
+  let off =
+    "[{\"id\":\"gleam\",\"label\":\"Gleam\",\"enabled\":false,\"installed\":true},{\"id\":\"rust\",\"label\":\"Rust\",\"enabled\":true,\"installed\":false}]"
+  let loaded =
+    settings.update(settings.initial(False), settings.LanguagesLoaded(off)).0
+  assert loaded.languages
+    == [
+      settings.Language("gleam", "Gleam", False, True),
+      settings.Language("rust", "Rust", True, False),
+    ]
+  let page = element.to_string(settings.view(loaded))
+  assert string.contains(page, "Languages</h2>")
+  assert string.contains(page, ">Gleam</label>")
+  assert string.contains(page, ">Rust</label>")
+  assert string.contains(page, "Not found on this computer")
+  assert string.contains(page, "even when its toolchain is installed")
+  // A toggle leaves the page as it is until the server replies.
+  assert settings.update(loaded, settings.ToggleLanguage("gleam", True)).0
+    == loaded
+  let on =
+    "[{\"id\":\"gleam\",\"label\":\"Gleam\",\"enabled\":true,\"installed\":true},{\"id\":\"rust\",\"label\":\"Rust\",\"enabled\":true,\"installed\":false}]"
+  let toggled = settings.update(loaded, settings.LanguagesLoaded(on)).0
+  assert toggled.languages
+    == [
+      settings.Language("gleam", "Gleam", True, True),
+      settings.Language("rust", "Rust", True, False),
+    ]
+  let refused =
+    settings.update(
+      loaded,
+      settings.LanguagesLoaded(
+        "{\"message\":\"E7001 enabled must be true or false\"}",
+      ),
+    ).0
+  assert refused.languages == loaded.languages
+  assert refused.error == "E7001 enabled must be true or false"
+  assert string.contains(
+    element.to_string(settings.view(refused)),
+    "E7001 enabled must be true or false",
+  )
+  assert settings.update(loaded, settings.LanguagesLoaded("oops")).0.error
+    == "Solace could not be reached"
+}

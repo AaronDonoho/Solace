@@ -222,8 +222,9 @@ pub fn marker() -> Element(msg) {
   )
 }
 
-/// What a run is doing, or how it ended, and its model.
-pub fn state_text(run: Run) -> String {
+/// What a run is doing, or how it ended, and the one label of the model its
+/// agent used.
+pub fn state_text(run: Run, models: List(solace_task.Agent)) -> String {
   case run.state {
     "running" -> "Working"
     "waiting" -> "Waiting for you"
@@ -234,11 +235,7 @@ pub fn state_text(run: Run) -> String {
       }
   }
   <> " · "
-  <> run.model
-  <> case run.used {
-    "" -> ""
-    used -> " · " <> used
-  }
+  <> solace_task.run_model_label(models, run.model, run.used)
 }
 
 /// What the panel shows and what it sends. `shown` is the run open in it;
@@ -360,7 +357,7 @@ pub fn view(base: String, p: Panel(msg)) -> Element(msg) {
 /// The collapsed panel's one line.
 fn summary(p: Panel(msg)) -> String {
   case p.shown, open_on(p.runs, p.context) {
-    Some(run), _ -> state_text(run)
+    Some(run), _ -> state_text(run, p.models)
     None, Some(_) -> "A run on this is open"
     None, None -> "No run open"
   }
@@ -740,9 +737,9 @@ fn bar(p: Panel(msg)) -> Element(msg) {
   let #(class, state) = case p.shown, open_on(p.runs, p.context) {
     Some(Run(state: "running", ..) as run), _ -> #(
       "state working",
-      state_text(run),
+      state_text(run, p.models),
     )
-    Some(run), _ -> #("state", state_text(run))
+    Some(run), _ -> #("state", state_text(run, p.models))
     None, Some(_) -> #("state", "A run on this is open")
     None, None -> #("state", "No run open")
   }
@@ -784,7 +781,7 @@ fn bar(p: Panel(msg)) -> Element(msg) {
                       attribute.value(run.id),
                       attribute.selected(run.id == current),
                     ],
-                    clock(run.started) <> " · " <> state_text(run),
+                    clock(run.started) <> " · " <> state_text(run, p.models),
                   )
                 })
               ],

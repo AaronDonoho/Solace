@@ -846,7 +846,7 @@ fn a_whole_module_type_error_keeps_the_draft() {
     assert_eq!(text_of(&root, "src/lib.rs"), lib);
 }
 
-/// A whole module can't change the header's `mod` list (D-168).
+/// A whole module can't change the file's `mod` list (D-168).
 #[test]
 fn a_whole_module_refuses_a_changed_mod_list() {
     if !cargo::installed() {
@@ -1315,9 +1315,11 @@ fn an_ambiguous_container_within_a_module_is_refused() {
     }
     let (_root, store) = rust_project("extern \"C\" {}\n\nextern \"C\" {}\n");
     let ix = store.index().unwrap();
-    let found: Vec<usize> = (0..ix.syms.len()).filter(|&i| ix.syms[i].name == "extern \"C\"").collect();
-    let err = crate::rust_submit::rust_one(&found, &ix, "crate.extern \"C\"").unwrap_err().0;
-    assert!(err.contains("E1002 ambiguous name: crate.extern \"C\"") && err.contains("crate.extern \"C\" (extern)"), "{err}");
+    // The second name misses the direct lookup, so the cut loop must refuse it.
+    for input in ["crate.extern \"C\"", "crate.extern \"C\".member"] {
+        let err = store.rust_container_in(&ix, input).unwrap_err().0;
+        assert!(err.contains("E1002 ambiguous name: crate.extern \"C\"") && err.contains("crate.extern \"C\" (extern)"), "{err}");
+    }
 }
 
 /// A container tail that changed on its own still has its long line named.
@@ -1357,4 +1359,23 @@ fn a_whole_module_format_keeps_a_trailing_mod_list() {
     assert!(out.contains("Saved crate."), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), "pub fn one() -> i32 {\n    1\n}\n\nmod tests;\n");
     assert_eq!(ids(&store), before);
+}
+
+/// A whole-module submit accepts a child `mod` that follows its items (D-168).
+#[test]
+fn a_whole_module_submit_keeps_a_trailing_mod_list() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", testing::CARGO),
+        ("src/lib.rs", "pub fn one() -> i32 {\n    1\n}\n\nmod tests;\n"),
+        ("src/tests.rs", "pub fn helper() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let text = "pub fn one() -> i32 {\n    2\n}\n\nmod tests;\n";
+    let out = store.submit(crate::Target::Module("crate"), text).unwrap();
+    assert!(out.contains("Saved crate."), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), text);
 }

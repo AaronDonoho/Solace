@@ -136,7 +136,7 @@ pub fn projects_section_test() {
     migration.update(
       model,
       migration.ProjectsLoaded(
-        "{\"workspace\":true,\"projects\":[{\"dir\":\".\",\"label\":\"root\",\"name\":\"app\",\"base\":\"\"},{\"dir\":\"a\",\"label\":\"a\",\"name\":\"pa\",\"base\":\"/p/a\"}],\"found\":[{\"dir\":\"tools\",\"name\":\"tools\",\"imported\":true,\"member\":false},{\"dir\":\"old\",\"name\":\"old\",\"imported\":false,\"member\":false},{\"dir\":\"rs\",\"name\":\"solace\",\"imported\":false,\"member\":false,\"language\":\"rust\"}]}",
+        "{\"workspace\":true,\"projects\":[{\"dir\":\".\",\"label\":\"root\",\"name\":\"app\",\"base\":\"\"},{\"dir\":\"a\",\"label\":\"a\",\"name\":\"pa\",\"base\":\"/p/a\",\"needs\":\"Gleam is turned off in Settings\"}],\"found\":[{\"dir\":\"tools\",\"name\":\"tools\",\"imported\":true,\"member\":false},{\"dir\":\"old\",\"name\":\"old\",\"imported\":false,\"member\":false},{\"dir\":\"rs\",\"name\":\"solace\",\"imported\":false,\"member\":false,\"language\":\"rust\"}]}",
         True,
       ),
     )
@@ -157,6 +157,7 @@ pub fn projects_section_test() {
       <> solace_task.ui_label("remove")
       <> "</button>",
   )
+  assert string.contains(html, "<small>Gleam is turned off in Settings</small>")
   assert string.contains(
     html,
     ">" <> solace_task.ui_label("add") <> "</button>",
