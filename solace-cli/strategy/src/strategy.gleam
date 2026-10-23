@@ -87,13 +87,20 @@ pub type Model {
     milestone_draft: Option(roadmap.Draft),
     /// A milestone save sent and not yet answered.
     milestone_saving: Bool,
-    /// The Roadmap tab's refusal: a save, move or delete, a feature's target
-    /// or a task's dependencies.
+    /// A feature target PATCH sent and not yet answered.
+    milestone_targeting: Bool,
+    /// The Roadmap tab's refusal: a save or delete, a feature's target or a
+    /// task's dependencies.
     milestone_error: String,
     /// The `request` id of the open new milestone's create (Spec 15).
     milestone_request: String,
     /// The milestone whose delete is being confirmed.
     milestone_deleting: Option(String),
+    /// The milestones shown expanded on the Roadmap, by id; kept for the page
+    /// session.
+    milestone_open: List(String),
+    /// The words searched for a feature to add to the open milestone.
+    milestone_feature_query: String,
     /// The task whose dependency editor is open: its project and id.
     depends_open: Option(#(String, String)),
     /// The words searched for a new dependency.
@@ -265,20 +272,21 @@ pub type Msg {
   NewMilestone
   /// Opens the form on the milestone with this id.
   EditMilestone(String)
+  /// A milestone heading: shows its body, features and tasks, or hides them.
+  ToggleMilestone(String)
   CancelMilestone
   MilestoneTitle(String)
   MilestoneText(String)
   /// The target date as the input gives it, "" for none.
   MilestoneTargetDate(String)
+  /// The words searched for a feature to add to the open milestone.
+  MilestoneFeatureQuery(String)
   MilestoneState(String)
   MilestoneFormat(String, String)
   MilestoneBlock(String)
   SaveMilestone
   /// The reply to a milestone save: the milestone as it is now, or a refusal.
   MilestoneSaved(String)
-  /// Moves the milestone with this id to this rank: one PATCH.
-  MoveMilestone(String, Float)
-  MilestoneMoved(String)
   /// Asks to confirm deleting the milestone with this id.
   DeleteMilestone(String)
   CancelDeleteMilestone
@@ -831,24 +839,35 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         milestone_draft: Some(roadmap.new_draft()),
         milestone_error: "",
         milestone_request: request_id(),
+        milestone_feature_query: "",
       ),
       effect.none(),
     )
     EditMilestone(id) if !model.milestone_saving ->
       case list.find(model.milestones, fn(m) { m.id == id }) {
-        Ok(m) -> #(
-          Model(
-            ..model,
-            milestone_draft: Some(roadmap.draft_of(m)),
-            milestone_error: "",
-          ),
-          effect.none(),
-        )
+        Ok(m) -> {
+          let model = expand_milestone(model, m.id)
+          #(
+            Model(
+              ..model,
+              milestone_draft: Some(roadmap.draft_of(m)),
+              milestone_error: "",
+              milestone_feature_query: "",
+            ),
+            effect.none(),
+          )
+        }
         Error(_) -> #(model, effect.none())
       }
     NewMilestone | EditMilestone(_) -> #(model, effect.none())
+    ToggleMilestone(id) -> #(toggle_milestone(model, id), effect.none())
     CancelMilestone -> #(
-      Model(..model, milestone_draft: None, milestone_error: ""),
+      Model(
+        ..model,
+        milestone_draft: None,
+        milestone_error: "",
+        milestone_feature_query: "",
+      ),
       effect.none(),
     )
     MilestoneTitle(title) ->
@@ -864,6 +883,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           date -> Some(date)
         })
       })
+    MilestoneFeatureQuery(query) -> #(
+      Model(..model, milestone_feature_query: query),
+      effect.none(),
+    )
     MilestoneFormat(before, after) ->
       case model.milestone_draft {
         Some(d) -> #(
@@ -960,39 +983,6 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           effect.none(),
         )
       }
-    MoveMilestone(id, rank) -> #(
-      Model(..model, milestone_error: ""),
-      effect.from(fn(send) {
-        request(
-          model.prefix,
-          "/milestones/" <> id,
-          "PATCH",
-          json.to_string(json.object([#("rank", json.float(rank))])),
-          fn(reply) { send(MilestoneMoved(reply)) },
-        )
-      }),
-    )
-    // A reply after the milestone was removed doesn't bring it back.
-    MilestoneMoved(text) ->
-      case json.parse(text, features.milestone_decoder()) {
-        Ok(m) -> #(
-          Model(
-            ..model,
-            milestones: case
-              list.any(model.milestones, fn(x) { x.id == m.id })
-            {
-              True -> keep(model.milestones, m, fn(m) { m.id })
-              False -> model.milestones
-            },
-            milestone_error: "",
-          ),
-          effect.none(),
-        )
-        Error(_) -> #(
-          Model(..model, milestone_error: error(text)),
-          effect.none(),
-        )
-      }
     DeleteMilestone(id) if model.milestone_draft == None -> #(
       Model(..model, milestone_deleting: Some(id), milestone_error: ""),
       effect.none(),
@@ -1017,17 +1007,21 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     // The `{removedMilestone}`, `{feature}` and `{task}` events update the page.
     MilestoneDeleted(text) ->
       case json.parse(text, features.milestone_decoder()) {
-        Ok(_) -> #(
-          Model(..model, milestone_deleting: None, milestone_error: ""),
-          effect.none(),
-        )
+        Ok(m) -> {
+          let model = collapse_milestone(model, m.id)
+          #(
+            Model(..model, milestone_deleting: None, milestone_error: ""),
+            effect.none(),
+          )
+        }
         Error(_) -> #(
           Model(..model, milestone_error: error(text)),
           effect.none(),
         )
       }
+    TargetFeature(_, _) if model.milestone_targeting -> #(model, effect.none())
     TargetFeature(id, milestone) -> #(
-      Model(..model, milestone_error: ""),
+      Model(..model, milestone_error: "", milestone_targeting: True),
       effect.from(fn(send) {
         request(
           model.prefix,
@@ -1055,11 +1049,16 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               False -> model.features
             },
             milestone_error: "",
+            milestone_targeting: False,
           ),
           effect.none(),
         )
         Error(_) -> #(
-          Model(..model, milestone_error: error(text)),
+          Model(
+            ..model,
+            milestone_error: error(text),
+            milestone_targeting: False,
+          ),
           effect.none(),
         )
       }
@@ -1643,13 +1642,15 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       },
     )
     Focus(_, _, "") -> #(model, effect.none())
-    Focus("feature", _, id) ->
+    Focus("feature", _, id) -> {
+      let model = expand_feature_milestone(model, id)
       show_record(
         Model(..model, focused_feature: Some(id)),
         Features,
         "feature",
         id,
       )
+    }
     FocusFeature(id) -> #(
       Model(..model, focused_feature: case model.focused_feature == Some(id) {
         True -> None
@@ -1657,7 +1658,8 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }),
       effect.none(),
     )
-    Focus("milestone", _, id) -> show_record(model, Roadmap, "milestone", id)
+    Focus("milestone", _, id) ->
+      show_record(expand_milestone(model, id), Roadmap, "milestone", id)
     // `<solace-task>` scrolls into view now, or once the task loads. A link
     // names the task's home folder; a homeless task's row (D-129) lives in
     // the homeless bucket.
@@ -1745,14 +1747,14 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Error(_), Some(#(d, id, "")) if d == dir && id == pid -> {
           let #(picked, project) = case model.new_task {
             Some(t) -> #(
-              case t.feature, t.milestone {
-                "", _ -> "milestone"
-                _, "" -> "feature"
-                _, _ -> "feature and milestone"
+              case new_task_links(t) {
+                [#("feature", _)] -> "feature"
+                [#("milestone", _)] -> "milestone"
+                _ -> "feature or milestone"
               },
               t.project,
             )
-            None -> #("feature/milestone", root_dir(model))
+            None -> #("feature or milestone", root_dir(model))
           }
           #(
             Model(
@@ -1902,18 +1904,16 @@ solace-task{display:block;margin-top:16px}
   <> solace_task.small_control
   <> ";padding:0 8px;margin-left:6px}.feature .edit:hover,.feature .toggle:hover{background:var(--hover)}.feature .edit:disabled{color:var(--soft);cursor:default}.feature .edit:focus-visible,.feature .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .new-task{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 2px}.new-task input,.new-task select{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;min-height:var(--control-h-small)}.new-task input{min-width:220px}.new-task input::placeholder{color:var(--soft);opacity:1}.new-task :focus-visible{outline:3px solid var(--focus);outline-offset:2px}.new-task .edit{margin-left:0}.new-task [role=alert]{flex-basis:100%;margin:2px 0}
+.milestone h3 .toggle{font:inherit;color:inherit;background:none;border:0;padding:0;min-height:0;text-align:left;cursor:pointer}.milestone h3 .toggle:hover{text-decoration:underline}.milestone h3 .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .milestone h3 .edit{"
   <> solace_task.small_control
   <> ";font-weight:400;padding:0 8px;margin-left:6px}.milestone h3 .edit:hover{background:var(--hover)}.milestone h3 .edit:disabled{color:var(--soft);cursor:default}
 .milestone .target{font-size:13px;font-weight:400;color:var(--soft);margin-left:6px}
-.feature h4 select{"
-  <> solace_task.small_control
-  <> ";font-weight:400;padding:1px 6px;margin-left:6px}
 .feature-tasks .depends{font-size:13px;color:var(--soft)}
 .feature-tasks li .edit{margin-left:6px}
-.depends-edit{border:1px solid var(--line);margin:4px 0 8px;padding:6px 10px}.depends-edit ul{list-style:none;margin:4px 0;padding:0}.depends-edit li{margin:2px 0}.depends-edit li .edit{margin:0 6px 0 0}.depends-edit p{font-size:13px;margin:4px 0}
-.depends-edit input{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;min-height:var(--control-h-small);min-width:260px;margin:4px 0}.depends-edit input::placeholder{color:var(--soft);opacity:1}
-.milestone h3 .edit:focus-visible,.feature h4 select:focus-visible,.depends-edit :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.picker{border:1px solid var(--line);margin:4px 0 8px;padding:6px 10px}.picker ul{list-style:none;margin:4px 0;padding:0}.picker li{margin:2px 0}.picker li .edit{margin:0 6px 0 0}.picker p{font-size:13px;margin:4px 0}
+.picker input{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;min-height:var(--control-h-small);min-width:260px;margin:4px 0}.picker input::placeholder{color:var(--soft);opacity:1}
+.milestone h3 .edit:focus-visible,.picker :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .pager{display:flex;align-items:center;gap:10px;margin:10px 0 2px}
 .pager button{font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:6px 14px;cursor:pointer}.pager button:hover{background:var(--hover)}.pager button:disabled{color:var(--soft);cursor:default}.pager button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
 .pager .count{font-size:13px;color:var(--soft)}
@@ -2037,9 +2037,12 @@ pub fn new(tab: Tab) -> Model {
     feature_deleting: None,
     milestone_draft: None,
     milestone_saving: False,
+    milestone_targeting: False,
     milestone_error: "",
     milestone_request: "",
     milestone_deleting: None,
+    milestone_open: [],
+    milestone_feature_query: "",
     depends_open: None,
     depends_query: "",
     task_titles: [],
@@ -2691,6 +2694,7 @@ fn row_view(model: Model, dir: String, row: Row) -> Element(Msg) {
           feature_pairs(model),
           row.feature,
           "Feature of " <> row.title,
+          False,
           fn(v) { Link(dir, row.id, "feature", v) },
         ),
       ]),
@@ -2699,6 +2703,7 @@ fn row_view(model: Model, dir: String, row: Row) -> Element(Msg) {
           milestone_pairs(model),
           row.milestone,
           "Milestone of " <> row.title,
+          row.feature != None,
           fn(v) { Link(dir, row.id, "milestone", v) },
         ),
       ]),
@@ -2718,12 +2723,13 @@ fn row_view(model: Model, dir: String, row: Row) -> Element(Msg) {
   )
 }
 
-/// An inline link: "(none)" and every record. A link to a record not loaded
-/// yet shows its id.
+/// An inline link: "(none)" and every record, disabled when it can't change.
+/// A link to a record not loaded yet shows its id.
 fn link_select(
   records: List(#(String, String)),
   link: Option(String),
   name: String,
+  disabled: Bool,
   msg: fn(String) -> Msg,
 ) -> Element(Msg) {
   let chosen = option.unwrap(link, "")
@@ -2733,18 +2739,25 @@ fn link_select(
     True -> records
     False -> list.append(records, [#(chosen, chosen)])
   }
-  html.select([attribute.attribute("aria-label", name), event.on_change(msg)], [
-    html.option(
-      [attribute.value(""), attribute.selected(chosen == "")],
-      "(none)",
-    ),
-    ..list.map(records, fn(r) {
+  html.select(
+    [
+      attribute.attribute("aria-label", name),
+      attribute.disabled(disabled),
+      event.on_change(msg),
+    ],
+    [
       html.option(
-        [attribute.value(r.0), attribute.selected(r.0 == chosen)],
-        r.1,
-      )
-    })
-  ])
+        [attribute.value(""), attribute.selected(chosen == "")],
+        "(none)",
+      ),
+      ..list.map(records, fn(r) {
+        html.option(
+          [attribute.value(r.0), attribute.selected(r.0 == chosen)],
+          r.1,
+        )
+      })
+    ],
+  )
 }
 
 /// The API prefix the open task's project answers at: a workspace project's
@@ -3038,20 +3051,7 @@ fn task_dir(model: Model) -> String {
 /// The Roadmap tab: the milestones with their features, and every project's
 /// tasks with their dependencies, homeless ones (D-129) included.
 fn roadmap_view(model: Model) -> List(Element(Msg)) {
-  let tasks =
-    list.flat_map(task_dirs(model), fn(dir) {
-      list.map(rows_of(model, dir), fn(r) {
-        roadmap.Task(
-          dir,
-          r.id,
-          r.title,
-          r.feature,
-          r.milestone,
-          r.depends,
-          r.closed != None,
-        )
-      })
-    })
+  let tasks = roadmap_tasks(model)
   roadmap.view(
     model.prefix,
     model.milestones,
@@ -3061,7 +3061,10 @@ fn roadmap_view(model: Model) -> List(Element(Msg)) {
     roadmap.Editor(
       draft: model.milestone_draft,
       saving: model.milestone_saving,
+      targeting: model.milestone_targeting,
       error: model.milestone_error,
+      expanded: model.milestone_open,
+      on_toggle: ToggleMilestone,
       on_new: NewMilestone,
       on_edit: EditMilestone,
       on_title: MilestoneTitle,
@@ -3072,7 +3075,6 @@ fn roadmap_view(model: Model) -> List(Element(Msg)) {
       on_block: MilestoneBlock,
       on_save: SaveMilestone,
       on_cancel: CancelMilestone,
-      on_move: MoveMilestone,
       // A milestone removed while confirming no longer holds the list.
       deleting: case model.milestone_deleting {
         Some(id) ->
@@ -3086,6 +3088,8 @@ fn roadmap_view(model: Model) -> List(Element(Msg)) {
       on_confirm_delete: ConfirmDeleteMilestone,
       on_cancel_delete: CancelDeleteMilestone,
       on_target: TargetFeature,
+      feature_query: model.milestone_feature_query,
+      on_feature_query: MilestoneFeatureQuery,
       on_depends: SetDepends,
       depends_open: model.depends_open,
       depends_query: model.depends_query,
@@ -3413,10 +3417,14 @@ pub type NewTask {
 /// The new task's description editor.
 const new_task_id = "new-task-text"
 
-/// The links a new task's PATCH sends: the feature and milestone picked.
+/// The links a new task's PATCH sends: its feature, whose milestone it takes,
+/// or else the milestone picked.
 pub fn new_task_links(task: NewTask) -> List(#(String, String)) {
-  [#("feature", task.feature), #("milestone", task.milestone)]
-  |> list.filter(fn(f) { f.1 != "" })
+  case task.feature, task.milestone {
+    "", "" -> []
+    "", milestone -> [#("milestone", milestone)]
+    feature, _ -> [#("feature", feature)]
+  }
 }
 
 /// Changes the open new task; nothing when its form is closed.
@@ -3509,12 +3517,16 @@ fn new_task_view(model: Model) -> Element(Msg) {
             [#("", "(none)"), ..feature_pairs(model)],
             NewTaskFeature,
           ),
-          select(
-            "Milestone",
-            d.milestone,
-            [#("", "(none)"), ..milestone_pairs(model)],
-            NewTaskMilestone,
-          ),
+          case d.feature {
+            "" ->
+              select(
+                "Milestone",
+                d.milestone,
+                [#("", "(none)"), ..milestone_pairs(model)],
+                NewTaskMilestone,
+              )
+            _ -> element.none()
+          },
         ]),
         case model.new_task_error {
           "" -> element.none()
@@ -3783,4 +3795,61 @@ fn drag_card(
 pub fn models_event(text: String) -> Bool {
   ["strategyRun", "strategyRuns", "task", "tasks", "removed"]
   |> list.any(fn(key) { result.is_ok(at(text, key, decode.dynamic)) })
+}
+
+/// Shows the Roadmap's milestone `id` expanded.
+fn expand_milestone(model: Model, id: String) -> Model {
+  case list.contains(model.milestone_open, id) {
+    True -> model
+    False -> Model(..model, milestone_open: [id, ..model.milestone_open])
+  }
+}
+
+/// Shows the feature's milestone expanded, when it is loaded.
+fn expand_feature_milestone(model: Model, id: String) -> Model {
+  let target = case list.find(model.features, fn(f) { f.id == id }) {
+    Ok(feature) -> feature.milestone
+    Error(_) -> None
+  }
+  case target {
+    Some(mid) ->
+      case list.any(model.milestones, fn(m) { m.id == mid }) {
+        True -> expand_milestone(model, mid)
+        False -> model
+      }
+    None -> model
+  }
+}
+
+/// Opens or closes the Roadmap's milestone `id`.
+fn toggle_milestone(model: Model, id: String) -> Model {
+  case list.contains(model.milestone_open, id) {
+    True -> collapse_milestone(model, id)
+    False -> expand_milestone(model, id)
+  }
+}
+
+/// Every project's tasks as the Roadmap shows them.
+fn roadmap_tasks(model: Model) -> List(roadmap.Task) {
+  list.flat_map(task_dirs(model), fn(dir) {
+    list.map(rows_of(model, dir), fn(r) {
+      roadmap.Task(
+        dir,
+        r.id,
+        r.title,
+        r.feature,
+        r.milestone,
+        r.depends,
+        r.closed != None,
+      )
+    })
+  })
+}
+
+/// Hides the Roadmap's milestone `id`.
+fn collapse_milestone(model: Model, id: String) -> Model {
+  Model(
+    ..model,
+    milestone_open: list.filter(model.milestone_open, fn(open) { open != id }),
+  )
 }

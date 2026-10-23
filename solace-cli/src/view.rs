@@ -350,7 +350,7 @@ fn graph_index(ix: &Index, files: &[(String, String)], changed: &HashSet<String>
             "name": s.name,
             "module": s.module,
             "summary": "",
-            "signature": ix.signature(s),
+            "signature": crate::index::signature(ix, s),
             "known": "derived",
             "tests": 0,
             "changed": changed.contains(&format!("symbol:{}", s.id)),
@@ -483,7 +483,7 @@ fn version(s: &Store, v: Version<'_>) -> Result<Index, Failure> {
         }
     }
     syms.sort_by(|a, b| a.module.cmp(&b.module).then(a.name.cmp(&b.name)));
-    Ok(Index::build(s.lang(), syms, modules, language::is_rust(&s.root)))
+    Ok(crate::index::build(s.lang(), syms, modules, language::is_rust(&s.root)))
 }
 /// What the task's changes reach (D-44): its tests (those it changed, and
 /// those that reach a symbol it changed or read a field the change reaches),
@@ -893,7 +893,7 @@ mod tests {
     use testing::*;
     #[test]
     fn c1_graph_has_entries_effects_and_tests() {
-        let ix = test_index(&[
+        let ix = crate::index::test_index(&[
             (
                 "src",
                 "app",
@@ -940,7 +940,7 @@ pub fn main_test() {
         for (dir, path, text) in &owned {
             sources.push((dir.as_str(), path.as_str(), text.as_str()));
         }
-        let g = graph_index(&test_index(&sources), &[], &HashSet::new());
+        let g = graph_index(&crate::index::test_index(&sources), &[], &HashSet::new());
         assert!(g["nodes"].as_array().unwrap().iter().any(|n| n["module"] == "pilot/api" && n["name"] == "handle" && n["kind"] == "entry"));
         assert!(g["nodes"].as_array().unwrap().iter().any(|n| {
             n["module"] == "pilot/date_test"
@@ -979,7 +979,7 @@ pub fn main_test() {
             format!("import app/db.{{type Db}}\npub fn change(d: Db, order_id: Int) -> Db {{ d }}\npub fn read_{m}(d: Db) -> Int {{ 1 }}")
         };
         let (a, b) = (changer("a"), changer("b"));
-        let ix = test_index(&[
+        let ix = crate::index::test_index(&[
             (
                 "src",
                 "app/db",
@@ -1033,7 +1033,8 @@ pub fn main_test() {
         );
         assert_eq!(g["areas"][3], json!({"id":"app/db","name":"db","summary":"The program's data."}));
         // Two modules aren't enough to call a type state.
-        let ix = test_index(&[("src", "app/db", "pub type Db {\n  Db(n: Int)\n}"), ("src", "app/a", &a), ("src", "app/b", &b)]);
+        let ix =
+            crate::index::test_index(&[("src", "app/db", "pub type Db {\n  Db(n: Int)\n}"), ("src", "app/a", &a), ("src", "app/b", &b)]);
         assert!(!graph_index(&ix, &[], &HashSet::new())["nodes"].as_array().unwrap().iter().any(|n| n["kind"] == "effect"));
     }
     #[test]
@@ -1075,9 +1076,14 @@ pub fn main_test() {
     }
     #[test]
     fn c3_review_shows_a_new_reachable_write() {
-        let before = graph_index(&test_index(&[("src", "app", "pub fn main() { work() }\nfn work() { 1 }")]), &[], &HashSet::new());
+        let before =
+            graph_index(&crate::index::test_index(&[("src", "app", "pub fn main() { work() }\nfn work() { 1 }")]), &[], &HashSet::new());
         let after = graph_index(
-            &test_index(&[("src", "app", "import simplifile\npub fn main() { work() }\nfn work() { simplifile.write(\"a\", \"b\") }")]),
+            &crate::index::test_index(&[(
+                "src",
+                "app",
+                "import simplifile\npub fn main() { work() }\nfn work() { simplifile.write(\"a\", \"b\") }",
+            )]),
             &[],
             &HashSet::new(),
         );
@@ -1177,7 +1183,7 @@ pub fn main_test() {
     #[test]
     fn review_graphs_show_signatures_unfinished_and_changed_checks() {
         let before = graph_index(
-            &test_index(&[
+            &crate::index::test_index(&[
                 ("src", "app", "pub fn main(n: Int) -> Int {\n  n\n}"),
                 ("test", "app_test", "import app\n\npub fn main_test() {\n  assert app.main(1) == 1\n}"),
             ]),
@@ -1185,7 +1191,7 @@ pub fn main_test() {
             &HashSet::new(),
         );
         let after = graph_index(
-            &test_index(&[
+            &crate::index::test_index(&[
                 ("src", "app", "pub fn main(n: Int, k: Int) -> Int {\n  n\n}"),
                 ("test", "app_test", "import app\n\npub fn main_test() {\n  assert app.main(1) == 2\n}"),
             ]),

@@ -52,9 +52,10 @@ call is a turn that re-reads the conversation, so work in few calls:
    installed dependencies over new code; add nothing the task doesn't need.
    Complete includes its tests and every caller. Never drop validation,
    data-loss handling or security. Fix a reported bug once, at its cause.
-3. Fix only what the reply reports, then `test` again; look at what it lists
-   as reached by no test. Once `test` passes, the code is done (it type-checks
-   first; no `check`).
+3. Fix only what the reply reports, then `test` again. If the reply names a
+   symbol no test reaches, add a test for it. When `test` passes and every part
+   of the task is changed, the code is done: finish with `task done`. `test`
+   type-checks first, so don't run `check` or `probe` after it.
 Changing a signature or adding a field: `inspect <type or fn> --context` lists
 every construction or call site; patch the type or function and every site in
 one `submit` (`*** Update: <module>` holds several hunks), then `test`.
@@ -171,6 +172,10 @@ Changing (the new code is in `text`)
                                 <module>` a new module (module comment,
                                 imports, code); every line of an Add, empty
                                 ones too, starts with `+`.
+                                A new symbol after unchanged context is an
+                                add; a real rename goes under its own
+                                `*** Add:` header. A module changes with
+                                `*** Update: <module>` (no `module:` prefix).
                                 Checked together; a hunk that doesn't match
                                 changes nothing (E0108). A patch line is a
                                 whole line: for part of one, use --replace.
@@ -212,7 +217,10 @@ Changing (the new code is in `text`)
                                 public symbols are rewritten with --to-project
                                 when the task covers them; others are refused
                                 (E5003).
-                                Gleam only: Rust extract is deferred (D-158 point 6).
+                                Same-project Rust (D-185): moves named
+                                items with their identity; --to-project is
+                                refused. Impls and nested test modules are
+                                deferred.
   merge <keep> <drop> [--to-project <folder>]
                                 fold a duplicate into its copy: <keep> keeps its
                                 identity, <drop> is retired (history:
@@ -298,7 +306,10 @@ Adding
 
 Formatting
   format <module>               rustfmt the whole module, with the project's
-                                rustfmt.toml and edition; its ids stay by name
+                                rustfmt.toml and edition; its ids stay by name.
+                                A file that differs from the store (E0104) is
+                                replaced by the store's text; its copy is kept
+                                under .solace/outside/
   submit                        formats only the items its text changes
 
 Searching
@@ -319,10 +330,10 @@ without `cargo`, those commands are refused.
 `max_width`: rustfmt left them as written, so check their indentation or split
 the long literal.
 
-Not available for Rust: `probe`, `extract`, `merge`.
+Not available for Rust: `probe`, `merge`.
   test <name>                   instead of `probe`: add a `#[test]` and run it
-  submit + delete               instead of `extract` or `merge`: add the item
-                                where it belongs, then delete the old one
+  submit + delete               instead of `merge`: add the item where it
+                                belongs, then delete the old one
 
 Files: every file is in one tier, by the first rule that matches, and the tier
 is what says what you may do with the file. `files` prints each file's tier. A
@@ -458,11 +469,15 @@ move and format are refused, and so is run, except for commands marked
   task diff [name...]           what this task changed, against its state before;
                                 `impact` with no names is the same
   task note                     add a note; completes a review run
+                                Only this call records a review's feedback; a final
+                                message is not. If it is refused, resend it; claim it
+                                was recorded only when the reply says `Recorded.`
   task ask                      a question, with 2–4 `options`; waits for the
                                 human's answer. Check the task's Questions and
                                 Notes first for what is already answered (a
                                 discussion's answers are notes).
-                                Each option's `text` gives a short example of its outcome.
+                                The question's `text` gives each option a
+                                short example of its outcome.
                                 Never asks the human to change a file: make the
                                 change yourself, or ask to add a project
   task done                     finish: a work run's summary goes to human
@@ -506,10 +521,11 @@ command not listed here is refused.
                                 task: title, body, feature, milestone,
                                 dependsOn (task ids), and scope (project folders, as
                                 the brief lists them; every one must be a project)
-                                only when creating. feature: title, body,
-                                milestone, state. milestone: title, body,
-                                targetDate, state. Any of them: rank only when
-                                editing. state: proposed|upcoming|active|
+                                only when creating. A task with a feature takes the
+                                feature's milestone, so name only one of the two.
+                                feature: title, body, milestone, state. milestone:
+                                title, body, targetDate, state. Any of them: rank
+                                only when editing. state: proposed|upcoming|active|
                                 complete|canceled. Other fields are refused.
                                 A title is the work in 3-7 words (`extract: JS FFI
                                 files`); details go in body. The human sees

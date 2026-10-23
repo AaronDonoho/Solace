@@ -206,3 +206,20 @@ fn emptying_a_shared_helper_removes_every_declaration() {
     assert_eq!(text_of(&p, "tests/a.rs"), "pub fn a() -> i32 {\n    1\n}\n");
     assert_eq!(text_of(&p, "tests/b.rs"), "pub fn b() -> i32 {\n    2\n}\n");
 }
+
+/// Deleting an impl's last member takes the impl with it (D-187).
+#[test]
+fn deleting_the_last_method_drops_its_impl() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        1\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.delete_all(&["crate.Store::open"], usize::MAX).unwrap();
+    assert!(out.starts_with("Deleted crate.Store::open."), "{out}");
+    assert!(out.contains("Dropped empty impl crate.Store."), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "pub struct Store;\n");
+    let ix = store.index().unwrap();
+    assert!(!ix.syms.iter().any(|s| s.kind_text == "impl"), "{}", text_of(&root, "src/lib.rs"));
+    assert!(store.resolve(&ix, "crate.Store::open").is_err());
+}

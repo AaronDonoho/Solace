@@ -417,8 +417,8 @@ fn a_formatted_item_is_reused() {
     assert_eq!(format_item(&dir, text, None).unwrap(), "sentinel\n");
 }
 
-/// A whole module is formatted on its written file with the project's settings,
-/// and its child modules keep their bytes (D-180).
+/// A whole module's text is formatted with the project's settings, and neither
+/// its written file nor its child modules are touched (D-180).
 #[test]
 fn a_whole_module_is_formatted_without_its_children() {
     if search_path("rustfmt").is_none() {
@@ -433,9 +433,10 @@ fn a_whole_module_is_formatted_without_its_children() {
     ]);
     let lib = dir.join("src/lib.rs");
     let child = dir.join("src/a.rs");
-    let out = format_module(&dir, &lib).unwrap();
+    let source = fs::read_to_string(&lib).unwrap();
+    let out = format_module(&dir, &source).unwrap();
     assert_eq!(out, "mod b;\nmod a;\n\npub fn one() -> i32 {\n\t1\n}\n");
-    assert_eq!(fs::read_to_string(&lib).unwrap(), out);
+    assert_eq!(fs::read_to_string(&lib).unwrap(), source);
     assert_eq!(fs::read_to_string(&child).unwrap(), "pub fn a( ) -> i32 { 2 }\n");
 }
 
@@ -451,4 +452,42 @@ fn max_width_comes_from_the_projects_rustfmt_settings_or_defaults_to_100() {
     assert_eq!(max_width(&set), 30);
     let parent = Scratch::new().with(&[("rustfmt.toml", "max_width = 40\n"), ("sub/Cargo.toml", "")]);
     assert_eq!(max_width(&parent.join("sub")), 40);
+}
+
+/// A whole module's syntax error names its line and leaves the project's files
+/// alone (D-180).
+#[test]
+fn a_whole_module_syntax_error_names_a_line() {
+    if search_path("rustfmt").is_none() {
+        return;
+    }
+    let dir = Scratch::new().with(&[("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n")]);
+    let e = format_module(&dir, "pub fn two( {} \n").unwrap_err().0;
+    assert!(e.contains("E0100 syntax error at line") && !e.contains("format-"), "{e}");
+}
+
+/// One `cargo check --message-format=json` line for a private function.
+const PRIVATE_CHECK: &str = concat!(
+    r#"{"reason":"compiler-message","message":{"rendered":"error[E0603]: function `helper` is private\n --> src/lib.rs:5:9\n  |\n"#,
+    r#"5 |     crate::helper();\n  |            ^^^^^^ private function\n","level":"error","message":"function `helper` is private","#,
+    r#""spans":[{"file_name":"src/lib.rs","line_start":5,"line_end":5,"is_primary":true,"expansion":null}]}}"#,
+);
+
+/// One `cargo check --message-format=json` line for a missing method.
+const MISSING_METHOD_CHECK: &str = concat!(
+    r#"{"reason":"compiler-message","message":{"rendered":"error[E0599]: no method named `open` found for struct `Store`"#,
+    r#" in the current scope\n --> src/lib.rs:6:9\n  |\n6 |     store.open();\n"#,
+    r#"  |           ^^^^ method not found in `Store`\n","level":"error","#,
+    r#""message":"no method named `open` found for struct `Store` in the current scope","#,
+    r#""spans":[{"file_name":"src/lib.rs","line_start":6,"line_end":6,"is_primary":true,"expansion":null}]}}"#,
+);
+
+/// Captured check output gives the title and the two names a shared cause groups by.
+#[test]
+fn a_grouped_error_title_comes_from_cargos_output() {
+    let output = format!("{PRIVATE_CHECK}\n{MISSING_METHOD_CHECK}");
+    let diags = diagnostics(&output, &files("crate", "/x/src/lib.rs", vec![(1, 10, "crate::one")]));
+    assert_eq!(diags.len(), 2);
+    let causes: Vec<String> = diags.iter().map(|d| crate::error_cause(d).unwrap().1).collect();
+    assert_eq!(causes, ["`helper` is private", "`open` is missing on `Store`"]);
 }

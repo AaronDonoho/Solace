@@ -263,6 +263,24 @@ class Board(unittest.TestCase):
         self.action(t, 'approve'); self.action(t, 'complete')
         self.assertFalse(checkpoint.parent.exists())
 
+    def test_a_review_without_a_note_records_its_assessment(self):
+        assessment = '**Assessment: Looks good**\n\n### Findings\n\nFine.'
+        t = self.completed([])
+        t, _, _ = self.review(t, [{'say': assessment}])
+        rid = t['runs'][-1]['id']
+        self.assertEqual(t['runs'][-1]['outcome'], 'reviewed')
+        self.assertEqual(t['finished']['outcome'], 'reviewed')
+        self.assertEqual(t['column'], 'needs_review')
+        note = t['notes'][-1]
+        self.assertEqual((note['author'], note['run'], note['text']), ('agent', rid, assessment))
+        self.assertIsNone(t['attention'])
+        # A clean review with no assessment still fails.
+        t = self.completed([])
+        t, _, _ = self.review(t, [{'say': 'No assessment.'}])
+        self.assertNotEqual(t['runs'][-1]['outcome'], 'reviewed')
+        self.assertEqual(t['column'], 'needs_review')
+        self.assertIn('without finishing', t['attention']['reason'])
+
     def test_completed_reviews_file_tech_debt_on_the_feature(self):  # D-112
         f = self.api('POST', '/features', {'title':'Search'})
         def reviewed(feature, finding):
@@ -599,12 +617,17 @@ class Board(unittest.TestCase):
         # A failing test holds back the task done.
         t,reply=ran([{'command':'submit\ntest\ntask done done','text':patch(1)}])
         self.assertIn('1 of 3 commands failed: test; skipped: task done done (the test failed)\n',reply)
+        self.assertNotIn('Next:',reply)
         self.assertNotEqual(t['column'],'needs_review');self.action(t,'cancel')
         # A pass that leaves a changed symbol no test reaches holds it back too.
         t,reply=ran([{'command':'submit app.two\ntest\ntask done done','text':'pub fn two() { 20 }'}])
-        self.assertIn('No test reaches app.two.\n',reply)
+        self.assertIn('No test reaches app.two.\nNext: add a test for app.two; then, if every part of the task is changed, finish with task done.\n',reply)
         self.assertIn('Skipped: task done done (no test reaches app.two)\n',reply)
         self.assertNotEqual(t['column'],'needs_review');self.action(t,'cancel')
+        # A passing test alone ends with the next step.
+        t,reply=ran([{'command':'submit\ntest','text':patch(10)}])
+        self.assertTrue(reply.endswith('Next: if every part of the task is changed, finish with task done.\n'),reply)
+        self.action(t,'cancel')
         # A clean pass finishes the task in the same call.
         t=self.assign([{'command':'submit\ntest\ntask done done','text':patch(10)}])
         self.wait(t,lambda x:x['column']=='needs_review')
@@ -1302,8 +1325,8 @@ class Board(unittest.TestCase):
         m=self.api('POST','/milestones',{'title':'M1'})
         f=self.api('POST','/features',{'title':'Feature F1','milestone':m['id']})
         t1,t2=self.create(),self.create()
-        self.api('PATCH','/tasks/'+t1['id'],{'feature':f['id'],'milestone':None})
-        self.api('PATCH','/tasks/'+t2['id'],{'feature':f['id'],'milestone':m['id']})
+        self.api('PATCH','/tasks/'+t1['id'],{'feature':f['id']})
+        self.api('PATCH','/tasks/'+t2['id'],{'feature':f['id']})
         # A finished work run gives the agent a run log to read.
         t3=self.completed([]);r3=t3['runs'][-1]['id'];t3id=t3['id']
         on_f={'kind':'feature','id':f['id']}
@@ -1333,7 +1356,7 @@ class Board(unittest.TestCase):
         self.assertIn(t3id,out[1])
         shown=json.loads(out[2])
         self.assertEqual((shown['record']['title'],shown['links']['milestone'],sorted(shown['links']['tasks'])),('Feature F1',m['id'],sorted([t1['id'],t2['id']])))
-        self.assertEqual(json.loads(out[3])['links'],{'features':[f['id']],'tasks':[t2['id']]})
+        self.assertEqual(json.loads(out[3])['links'],{'features':[f['id']],'tasks':[t1['id'],t2['id']]})
         for r in out[4:7]:self.assertTrue(r.startswith('E7010'),r)
         # Outside a strategy run, strategy commands are refused.
         p=subprocess.run([BIN,'strategy','list'],cwd=self.root,env=self.env,text=True,capture_output=True)

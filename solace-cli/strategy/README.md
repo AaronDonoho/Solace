@@ -48,8 +48,8 @@ The root's features grouped by target milestone (D-87), with a form to create an
   canceled feature has no Start. A refused start shows in the alert above the groups, as a refused move does.
 - **Delete.** **Delete** asks inside the page: "Delete *title*? Its N tasks lose their link to it; the tasks stay."
   (N counts the linked tasks of every project). Confirming sends `DELETE /features/{id}`; the server clears the
-  tasks' `feature`, and its `{task}` and `{removedFeature}` events update the page. A refused move or delete shows
-  in an alert above the groups.
+  tasks' `feature`, and each keeps the milestone it had; its `{task}` and `{removedFeature}` events update the page.
+  A refused move or delete shows in an alert above the groups.
 - **New task.** Each feature ends with a small form: a title and **Add task** (disabled while the title is blank).
   It sends `POST {base}/tasks {title, body: "", request}`, then `PATCH {base}/tasks/{id} {feature}` through the
   same `Link`/`Patched` as the Tasks tab's inline links. `request` is chosen per feature and kept until a create
@@ -65,22 +65,31 @@ The root's milestones, each with its features and their tasks, drawn by `src/roa
 
 - **Data.** The same stream as the Features tab, and every project's tasks with their `dependsOn` (a task saved
   before D-87 reads as `[]`).
-- **Groups.** Milestones in rank order (then id), empty ones too. A task is in its own milestone, else in its
-  feature's target. A milestone holds the features that target it and those with a task in it (D-87 point 2), each
-  once, by rank then id, each with its tasks there; then its tasks with no feature, under "No feature". Last, "No
-  milestone", when it holds anything: the features in no milestone and those with a task in none. A task with
-  neither a milestone nor a feature is not on the roadmap (the Tasks tab lists it).
-- **A milestone** shows its title, a state badge, its `targetDate` and its body as Markdown. **New milestone** opens a
-  form above the groups, and **Edit** opens it in place of the heading: a title, a date input for `targetDate`, the
-  description (textarea `milestone-text`) and a state select. **Save** sends `POST /milestones {title, body, state,
-  targetDate?, request}`, or `PATCH /milestones/{id}` with only the changed fields (a cleared date as null), as the
-  feature form does; a refusal shows in an alert and keeps the form.
-- **Reorder.** **Up** and **Down** send one `PATCH /milestones/{id} {rank}`, computed as for features
-  (`features.rank_move`).
+- **Groups.** Milestones by target date, earliest first; those with no date follow by rank then id, empty ones
+  too. A task is in its own milestone, else in its feature's target. A milestone holds the features that target it
+  (D-188), each once, by rank then id, each with its tasks there; then its tasks with no feature, under "No feature".
+  A feature never appears under a milestone only because it has a task there. Last, "No milestone", when it holds
+  anything: the features in no milestone or one not loaded. A task with neither a milestone nor a feature is not on
+  the roadmap (the Tasks tab lists it).
+- **A milestone** starts collapsed. Its heading shows the title, a state badge, its `targetDate` and its feature
+  count, with **Edit** and **Delete**; the count is the features the group holds (D-87 point 2). Clicking the heading
+  opens its body as Markdown, its features and their tasks; clicking again closes it. "No milestone" has no heading
+  controls and stays open. A milestone link (D-122) opens it before scrolling to it; a feature link opens its
+  target milestone, and **Edit** also opens it. The open milestones last for the page session only.
+  **New milestone** opens a form above the groups, and **Edit** opens it in place of the heading: a title, a date
+  input for `targetDate`, the description (textarea `milestone-text`) and a state select. **Save** sends
+  `POST /milestones {title, body, state, targetDate?, request}`, or `PATCH /milestones/{id}` with only the changed
+  fields (a cleared date as null), as the feature form does; a refusal shows in an alert and keeps the form. An
+  **Edit** also lists the features targeting the milestone, by rank then id, each with **Remove**, then a search over
+  the other features by title.
 - **Delete.** "Delete *title*? Its N features and M tasks lose their link to it; they stay." (the features that
   target it, the tasks whose milestone it is). Confirming sends `DELETE /milestones/{id}`; the server's events
   update the page.
-- **Move a feature.** Each feature's milestone select sends `PATCH /features/{id} {milestone}` (null for "(none)").
+- **Features in a milestone.** An edited milestone lists the features targeting it, by rank then id, each with
+  **Remove**; below is a search over the other features, with **Add**. Every word of the search must be in the title,
+  ignoring case, and the first 10 show. **Add** sends `PATCH /features/{id} {milestone}` and **Remove** sends
+  `{milestone: null}`; both apply at once, so **Save** and **Cancel** do not undo them. Adding a feature in another
+  milestone moves it. A refusal shows in the form's alert above **Save**.
 - **Dependencies.** A task with dependencies says "depends on" and their titles (with the project, for another
   project's task). A task's **Dependencies** opens its editor, one task at a time: each dependency with **Remove**,
   then a search over every task of the root, in any project or milestone (the server checks `dependsOn` across the
@@ -119,17 +128,20 @@ backlog**). A task's details offer **Back to planning** from Assigned, Review an
   new sort goes back to page 1. The sort stays across filter changes and tab switches for the page session, not
   across reloads; the open row stays open and its details stay below the table.
 - **Inline links.** Each row's feature and milestone selects send `PATCH {base}/tasks/{id}` with that one field
-  (null clears it), allowed in final columns and during runs (D-87, D-100).
+  (null clears it), allowed in final columns and during runs (D-87, D-100). A task with a feature takes its
+  feature's milestone, so its milestone select is disabled; the server refuses a change (`E7001`).
 - **New task.** **New task** above the filters opens a form there: a title, the description in
   `solace_task.editor` (textarea `new-task-text`, the feature form's tools), a project select in a workspace
   (defaulting to the root's own project; none with a single project), and feature and milestone selects with
-  "(none)". **Create** (disabled while the title is blank) sends `POST {base}/tasks {title, body, request}`, then,
-  when a feature or milestone is picked, one `PATCH {base}/tasks/{id}` with both through the same `Links`/`Patched`
-  path as the inline links. `request` is chosen when the form opens and kept until a create succeeds, so a retry
-  makes one task; one create at a time, shared with the Features tab's form. A refused create keeps the draft
-  ("Couldn't create the task: …"); a refused link says "The task was created without its feature: …" (or
-  milestone, or feature and milestone), opens the task and leaves an empty form. On success the form closes and
-  the task opens below the list, as a row click does. **Cancel** closes the form, except while a create is sent.
+  "(none)"; the milestone select hides while a feature is picked, since the task takes the feature's milestone.
+  **Create** (disabled while the title is blank) sends `POST {base}/tasks {title, body, request}`, then, when a
+  feature or milestone is picked, one `PATCH {base}/tasks/{id}`: the feature, whose milestone it takes, or else the
+  milestone, through the same `Links`/`Patched` path as the inline links. `request` is chosen when the form opens
+  and kept until a create succeeds, so a retry makes one task; one create at a time, shared with the Features tab's
+  form. A refused create keeps the draft ("Couldn't create the task: …"); a refused link says "The task was
+  created without its feature: …" (or milestone), opens the task and leaves an empty form. On success the form
+  closes and the task opens below the list, as a row click does. **Cancel** closes the form, except while a create
+  is sent.
 - **Task links (D-98).** The shell's `focus` property, `{dir, id, n}`, opens the task on this tab, from any tab,
   and asks `<solace-task>` to scroll it into view (its `reveal`). The shell sends here a linked task that is
   archived, so off the board.

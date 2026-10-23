@@ -259,24 +259,24 @@ fn nested(l: &syn::MetaList) -> Vec<Meta> {
 }
 
 /// A name an item's text mentions.
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Mention {
     /// `a::b::c`, and a bare name as a one-segment path.
     Path(Vec<String>),
     /// A method call `.f(`.
     Method(String),
+    /// A field access `.f` that is not a call.
+    Field(String),
     /// A macro call `name!`.
     Macro(String),
 }
 
 /// The names `text` mentions, each with its 0-based line in `text`.
 fn mentions(text: &str) -> Vec<(Mention, usize)> {
-    let Ok(stream) = text.parse::<TokenStream>() else { return vec![] };
-    let mut out = vec![];
-    scan(&stream, &mut out);
-    out
+    scanned(text).into_iter().map(|m| (m.mention, m.line)).collect()
 }
 
-fn scan(stream: &TokenStream, out: &mut Vec<(Mention, usize)>) {
+fn scan(stream: &TokenStream, text: &str, starts: &[usize], out: &mut Vec<Spanned>) {
     let trees: Vec<TokenTree> = stream.clone().into_iter().collect();
     let mut i = 0;
     let mut after_dot = false;
@@ -284,12 +284,12 @@ fn scan(stream: &TokenStream, out: &mut Vec<(Mention, usize)>) {
         match &trees[i] {
             // A macro's arguments are a group: their calls are mentions too.
             TokenTree::Group(g) => {
-                scan(&g.stream(), out);
+                scan(&g.stream(), text, starts, out);
                 after_dot = false;
                 i += 1;
             }
             TokenTree::Punct(p) => {
-                after_dot = p.as_char() == '.' && p.spacing() != Spacing::Joint;
+                after_dot = p.as_char() == '.' && p.spacing() != Spacing::Joint && !previous_punct(&trees, i, '.');
                 i += 1;
             }
             TokenTree::Literal(_) => {
@@ -298,12 +298,15 @@ fn scan(stream: &TokenStream, out: &mut Vec<(Mention, usize)>) {
             }
             TokenTree::Ident(id) => {
                 let line = id.span().start().line.saturating_sub(1);
+                let start = byte_at(text, starts, id.span().start());
+                let mut end = byte_at(text, starts, id.span().end());
                 let dot = after_dot;
                 let mut segs = vec![id.to_string()];
                 let mut j = i + 1;
                 while j + 2 < trees.len() && is_path_sep(&trees[j], &trees[j + 1]) {
                     if let TokenTree::Ident(n) = &trees[j + 2] {
                         segs.push(n.to_string());
+                        end = byte_at(text, starts, n.span().end());
                         j += 3;
                     } else {
                         break;
@@ -312,15 +315,18 @@ fn scan(stream: &TokenStream, out: &mut Vec<(Mention, usize)>) {
                 let call = matches!(trees.get(j), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis);
                 let macro_call = segs.len() == 1
                     && matches!(trees.get(j), Some(TokenTree::Punct(p)) if p.as_char() == '!' && p.spacing() != Spacing::Joint);
+                let range = start..end;
                 if macro_call {
-                    out.push((Mention::Macro(segs[0].clone()), line));
+                    out.push(Spanned { mention: Mention::Macro(segs[0].clone()), line, range });
                     j += 1;
                 } else if segs.len() > 1 {
-                    out.push((Mention::Path(segs.clone()), line));
+                    out.push(Spanned { mention: Mention::Path(segs.clone()), line, range });
                 } else if dot && call {
-                    out.push((Mention::Method(segs[0].clone()), line));
+                    out.push(Spanned { mention: Mention::Method(segs[0].clone()), line, range });
+                } else if dot {
+                    out.push(Spanned { mention: Mention::Field(segs[0].clone()), line, range });
                 } else {
-                    out.push((Mention::Path(segs.clone()), line));
+                    out.push(Spanned { mention: Mention::Path(segs.clone()), line, range });
                 }
                 i = j;
                 after_dot = false;
@@ -462,9 +468,11 @@ struct Refs<'a> {
     children: HashMap<&'a str, Vec<usize>>,
     macros: HashMap<&'a str, Vec<usize>>,
     module_paths: HashSet<&'a str>,
+    inline_modules: HashMap<String, usize>,
     names: HashMap<&'a str, HashMap<&'a str, Vec<usize>>>,
     heads: HashMap<&'a str, HashMap<&'a str, Vec<usize>>>,
     imports: HashMap<&'a str, Vec<Import>>,
+    container_imports: HashMap<&'a str, Vec<Import>>,
     leaves: HashMap<&'a str, Vec<usize>>,
     impls: HashMap<String, Vec<usize>>,
 }
@@ -477,9 +485,11 @@ impl<'a> Refs<'a> {
             children: HashMap::new(),
             macros: HashMap::new(),
             module_paths: modules.iter().map(|m| m.path.as_str()).collect(),
+            inline_modules: HashMap::new(),
             names: HashMap::new(),
             heads: HashMap::new(),
             imports: HashMap::new(),
+            container_imports: HashMap::new(),
             leaves: HashMap::new(),
             impls: HashMap::new(),
         };
@@ -490,6 +500,9 @@ impl<'a> Refs<'a> {
             }
             if s.kind_text == "macro_rules!" || s.kind_text == "macro" {
                 r.macros.entry(leaf(&s.name)).or_default().push(i);
+            }
+            if s.kind_text == "mod" {
+                r.inline_modules.insert(inline_path(&s.module, &s.name), i);
             }
             r.names.entry(s.module.as_str()).or_default().entry(s.name.as_str()).or_default().push(i);
             if !s.name.contains("::") {
@@ -502,18 +515,23 @@ impl<'a> Refs<'a> {
                 r.impls.entry(type_key(ty)).or_default().push(i);
             }
         }
-        for m in modules {
-            let mut imports = header_uses(&m.header);
-            for s in syms.iter().filter(|s| s.module == m.path && s.kind_text == "use") {
-                imports.extend(parse_use(&s.name));
+        r.imports = modules.iter().map(|m| (m.path.as_str(), header_uses(&m.header))).collect();
+        for s in syms.iter().filter(|s| s.kind_text == "use" || s.kind_text == "mod") {
+            if s.kind_text == "use" {
+                let imports = parse_use(&s.name);
+                match enclosing_mod(&r, s.parent.as_deref()) {
+                    Some(k) => r.container_imports.entry(syms[k].id.as_str()).or_default().extend(imports),
+                    None => r.imports.entry(s.module.as_str()).or_default().extend(imports),
+                }
+            } else if let Ok(trees) = container_use_trees(&s.text) {
+                r.container_imports.entry(s.id.as_str()).or_default().extend(trees.into_iter().flat_map(|(_, tree)| parse_use(&tree)));
             }
-            r.imports.insert(m.path.as_str(), imports);
         }
         r
     }
 
     fn module_exists(&self, m: &str) -> bool {
-        self.module_paths.contains(m)
+        self.module_paths.contains(m) || self.inline_modules.contains_key(m)
     }
 
     fn parent_module(&self, m: &str) -> Option<String> {
@@ -526,33 +544,13 @@ impl<'a> Refs<'a> {
     /// The module a path segment names, from `m`: `crate`, `self`, `super`, a
     /// module of the crate, or a module an import of `m` names.
     fn module_named(&self, m: &str, name: &str) -> Option<String> {
-        match name {
-            "crate" => return Some("crate".to_string()),
-            "self" => return Some(m.to_string()),
-            "super" => return self.parent_module(m),
-            _ => {}
-        }
-        // The crate root is named `crate` on its own: its children are top level.
-        let child = if m == "crate" { name.to_string() } else { format!("{m}::{name}") };
-        if self.module_exists(&child) {
-            return Some(child);
-        }
-        if self.module_exists(name) {
-            return Some(name.to_string());
-        }
-        let imps = self.imports.get(m)?;
-        for imp in imps.iter().filter(|i| !i.glob && i.local == name) {
-            if let Some(m2) = self.resolve_use_module(m, &imp.path) {
-                return Some(m2);
-            }
-        }
-        None
+        module_named_in(self, m, None, name)
     }
 
     /// The module a `use` path names (`super::*` -> the parent module).
-    fn resolve_use_module(&self, m: &str, path: &[String]) -> Option<String> {
+    fn resolve_use_module(&self, m: &str, scope: Option<usize>, path: &[String]) -> Option<String> {
         let (first, rest) = path.split_first()?;
-        let mut cur = self.module_named(m, first)?;
+        let mut cur = module_named_in(self, m, scope, first)?;
         for seg in rest {
             cur = self.module_named(&cur, seg)?;
         }
@@ -560,7 +558,7 @@ impl<'a> Refs<'a> {
     }
 
     /// The module and item name a `use` path names.
-    fn resolve_use(&self, m: &str, path: &[String]) -> Option<(String, String)> {
+    fn resolve_use(&self, m: &str, scope: Option<usize>, path: &[String]) -> Option<(String, String)> {
         let (first, rest) = path.split_first()?;
         if rest.is_empty() {
             return None;
@@ -568,8 +566,8 @@ impl<'a> Refs<'a> {
         // An unknown first segment may be another crate (the library's name in
         // an integration test): resolve the rest from this crate's root.
         let mut cur = match first.as_str() {
-            "crate" | "self" | "super" => self.module_named(m, first)?,
-            other => self.module_named(m, other).unwrap_or_else(|| "crate".to_string()),
+            "crate" | "self" | "super" => module_named_in(self, m, scope, first)?,
+            other => module_named_in(self, m, scope, other).unwrap_or_else(|| "crate".to_string()),
         };
         for seg in &rest[..rest.len() - 1] {
             cur = self.module_named(&cur, seg)?;
@@ -579,22 +577,35 @@ impl<'a> Refs<'a> {
 
     fn symbols_named(&self, module: &str, name: &str) -> Vec<usize> {
         let mut out = vec![];
-        if let Some(v) = self.heads.get(module).and_then(|h| h.get(name)) {
+        let (base, prefix) = name_scope(self, module);
+        if let Some(p) = prefix {
+            if let Some(v) = self.names.get(base).and_then(|h| h.get(format!("{p}::{name}").as_str())) {
+                out.extend(v);
+            }
+            return out;
+        }
+        if let Some(v) = self.heads.get(base).and_then(|h| h.get(name)) {
             out.extend(v);
         }
-        if let Some(v) = self.names.get(module).and_then(|h| h.get(name)) {
+        if let Some(v) = self.names.get(base).and_then(|h| h.get(name)) {
             out.extend(v);
         }
         out
     }
 
     fn locals(&self, m: &str, name: &str) -> Vec<usize> {
-        self.heads.get(m).and_then(|h| h.get(name)).cloned().unwrap_or_default()
+        let (base, prefix) = name_scope(self, m);
+        match prefix {
+            Some(p) => self.names.get(base).and_then(|h| h.get(format!("{p}::{name}").as_str())).cloned().unwrap_or_default(),
+            None => self.heads.get(base).and_then(|h| h.get(name)).cloned().unwrap_or_default(),
+        }
     }
 
     /// The symbols of `m` whose name is `joined` or ends with `::joined`.
     fn names_in(&self, m: &str, joined: &str) -> Vec<usize> {
-        let Some(map) = self.names.get(m) else { return vec![] };
+        let (base, prefix) = name_scope(self, m);
+        let Some(map) = self.names.get(base) else { return vec![] };
+        let joined = prefix.map_or_else(|| joined.to_string(), |p| format!("{p}::{joined}"));
         let mut out = vec![];
         for (name, idxs) in map {
             if *name == joined || name.ends_with(&format!("::{joined}")) {
@@ -606,26 +617,33 @@ impl<'a> Refs<'a> {
 
     /// The names `m`'s imports bring into scope, globs followed through the
     /// imported module's own imports.
-    fn import_visible(&self, m: &str, name: &str) -> Vec<usize> {
+    fn import_visible(&self, m: &str, i: usize, name: &str) -> Vec<usize> {
         let mut out = vec![];
         let mut seen = HashSet::new();
-        self.import_visible_in(m, name, &mut seen, &mut out);
+        self.import_visible_in(m, symbol_scope(self, i), name, &mut seen, &mut out);
         out
     }
 
-    fn import_visible_in(&self, m: &str, name: &str, seen: &mut HashSet<String>, out: &mut Vec<usize>) {
-        if !seen.insert(m.to_string()) {
+    fn import_visible_in(
+        &self,
+        m: &str,
+        scope: Option<usize>,
+        name: &str,
+        seen: &mut HashSet<(String, Option<usize>)>,
+        out: &mut Vec<usize>,
+    ) {
+        if !seen.insert((m.to_string(), scope)) {
             return;
         }
-        let Some(imps) = self.imports.get(m) else { return };
+        let Some(imps) = imports_for(self, m, scope) else { return };
         for imp in imps {
             if imp.glob {
-                if let Some(g) = self.resolve_use_module(m, &imp.path) {
+                if let Some(g) = self.resolve_use_module(m, scope, &imp.path) {
                     out.extend(self.symbols_named(&g, name));
-                    self.import_visible_in(&g, name, seen, out);
+                    self.import_visible_in(&g, None, name, seen, out);
                 }
             } else if imp.local == name
-                && let Some((m2, n)) = self.resolve_use(m, &imp.path)
+                && let Some((m2, n)) = self.resolve_use(m, scope, &imp.path)
             {
                 out.extend(self.symbols_named(&m2, &n));
             }
@@ -683,14 +701,13 @@ impl<'a> Refs<'a> {
         {
             segs[0] = t;
         }
+        let scope = symbol_scope(self, i);
         let (start, rest): (String, Vec<String>) = match segs[0].as_str() {
-            "crate" => ("crate".to_string(), segs[1..].to_vec()),
-            "self" => (m.to_string(), segs[1..].to_vec()),
-            "super" => match self.parent_module(m) {
+            "crate" | "self" | "super" => match module_named_in(self, m, scope, &segs[0]) {
                 Some(p) => (p, segs[1..].to_vec()),
                 None => return self.fallback(&segs),
             },
-            _ => (m.to_string(), segs.clone()),
+            _ => (scope_module(self, m, scope), segs.clone()),
         };
         let mut cur = start;
         let mut k = 0;
@@ -713,7 +730,7 @@ impl<'a> Refs<'a> {
         let mut out = self.names_in(&cur, &joined);
         if k == 0 {
             let head = rest[0].clone();
-            for idx in self.locals(&cur, &head).into_iter().chain(self.import_visible(&cur, &head)) {
+            for idx in self.locals(&cur, &head).into_iter().chain(self.import_visible(&cur, i, &head)) {
                 let mo = self.syms[idx].module.clone();
                 out.extend(self.names_in(&mo, &joined));
             }
@@ -731,11 +748,8 @@ impl<'a> Refs<'a> {
             // A method name may belong to any type: link to all of them.
             Mention::Method(f) => self.leaves.get(f.as_str()).cloned().unwrap_or_default(),
             Mention::Macro(n) => self.macros.get(n.as_str()).cloned().unwrap_or_default(),
-            Mention::Path(segs) if segs.len() == 1 => {
-                let mut v = self.locals(m, &segs[0]);
-                v.extend(self.import_visible(m, &segs[0]));
-                v
-            }
+            Mention::Field(f) => self.bare(i, m, f),
+            Mention::Path(segs) if segs.len() == 1 => self.bare(i, m, &segs[0]),
             Mention::Path(segs) => self.path(m, i, segs),
         };
         self.expand_types(&mut out);
@@ -751,6 +765,51 @@ impl<'a> Refs<'a> {
         });
         out
     }
+
+    /// Items beside `i` in the `#[cfg(test)]` module holding it, named `name`.
+    fn test_siblings(&self, i: usize, name: &str) -> Vec<usize> {
+        let mut chain = vec![];
+        let mut in_tests = false;
+        let mut parent = self.syms[i].parent.as_deref();
+        while let Some(id) = parent {
+            let Some(&k) = self.by_id.get(id) else { return vec![] };
+            if self.syms[k].kind_text != "mod" {
+                parent = self.syms[k].parent.as_deref();
+                continue;
+            }
+            chain.push(id);
+            if cfg_test_in(&outer_attrs(&self.syms[k].text)) {
+                in_tests = true;
+                break;
+            }
+            parent = self.syms[k].parent.as_deref();
+        }
+        if !in_tests {
+            return vec![];
+        }
+        for id in chain {
+            let kids = self.children.get(id).map(Vec::as_slice).unwrap_or_default();
+            let hits: Vec<usize> = kids.iter().copied().filter(|&c| leaf(&self.syms[c].name) == name).collect();
+            if !hits.is_empty() {
+                return hits;
+            }
+        }
+        vec![]
+    }
+
+    /// Resolve a bare name with the caller's inline-module items shadowing
+    /// names its `use super::*` imports bring into scope.
+    fn bare(&self, i: usize, m: &str, name: &str) -> Vec<usize> {
+        let siblings = self.test_siblings(i, name);
+        if !siblings.is_empty() {
+            return siblings;
+        }
+        let mut out = self.locals(m, name);
+        out.extend(self.import_visible(m, i, name));
+        out
+    }
+
+
 }
 
 /// Whether each symbol is test code (D-170): the `tests/` folder, anything
@@ -847,3 +906,1490 @@ fn mod_decl_name(line: &str) -> Option<String> {
 #[cfg(test)]
 #[path = "rust_refs_tests.rs"]
 mod tests;
+
+/// A mention, its 0-based line, and its byte range in the item's text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Spanned {
+    mention: Mention,
+    line: usize,
+    range: std::ops::Range<usize>,
+}
+
+/// The names `text` mentions, with the byte range of each.
+fn scanned(text: &str) -> Vec<Spanned> {
+    let Ok(stream) = text.parse::<TokenStream>() else { return vec![] };
+    let starts = line_starts(text);
+    let mut out = vec![];
+    scan(&stream, text, &starts, &mut out);
+    out
+}
+
+/// Where each line starts in `text`.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = vec![0];
+    starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+    starts
+}
+
+/// The byte offset of a token position. A column counts characters, not bytes.
+fn byte_at(text: &str, starts: &[usize], at: proc_macro2::LineColumn) -> usize {
+    let start = starts.get(at.line.saturating_sub(1)).copied().unwrap_or(text.len());
+    let end = text[start..].find('\n').map_or(text.len(), |i| start + i);
+    let add = text[start..end].char_indices().nth(at.column).map_or(end - start, |(i, _)| i);
+    start + add
+}
+
+/// A name that is bound, or a declaration that must not be rewritten, over a
+/// byte range of an item's text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Binding {
+    name: String,
+    range: std::ops::Range<usize>,
+    /// Whether the name is a type or module, so it also shadows the start of
+    /// a longer path.
+    types: bool,
+}
+
+/// The names an item's text binds, with the part of the text each covers.
+struct Scopes {
+    bindings: Vec<Binding>,
+    imports: Vec<std::ops::Range<usize>>,
+    sites: Vec<Site>,
+}
+
+fn scan_scopes(text: &str, member: bool, context: &ScopeContext<'_, '_>) -> Scopes {
+    let mut scopes = Scopes { bindings: vec![], imports: vec![], sites: vec![] };
+    if let Ok(stream) = text.parse::<TokenStream>() {
+        let trees: Vec<TokenTree> = stream.into_iter().collect();
+        let starts = line_starts(text);
+        collect_scopes(&trees, 0, text.len(), member, text, &starts, context, &mut scopes);
+    }
+    scopes
+}
+
+/// Whether a binding hides the path `segs` at `at`: any binding hides a bare
+/// name, only a type or module hides the start of a longer path.
+fn shadowed(scopes: &Scopes, segs: &[String], at: usize) -> bool {
+    let Some(name) = segs.first() else { return false };
+    scopes.bindings.iter().any(|b| &b.name == name && b.range.contains(&at) && (segs.len() == 1 || b.types))
+}
+
+/// The mention ranges that are declarations or are shadowed by a binding; a
+/// `member` of an `impl` or `trait` does not bind its own name. A `use` inside
+/// a block is a site or shadows its local name, never an ordinary path mention.
+fn bound(text: &str, mentions: &[Spanned], member: bool, context: &ScopeContext<'_, '_>) -> (HashSet<std::ops::Range<usize>>, Vec<Site>) {
+    let scopes = scan_scopes(text, member, context);
+    let in_import =
+        |range: &std::ops::Range<usize>| scopes.imports.iter().any(|import| import.start <= range.start && range.end <= import.end);
+    let hidden = mentions
+        .iter()
+        .filter(|m| match &m.mention {
+            Mention::Macro(_) | Mention::Field(_) => true,
+            Mention::Path(segs) => in_import(&m.range) || shadowed(&scopes, segs, m.range.start),
+            Mention::Method(_) => false,
+        })
+        .map(|m| m.range.clone())
+        .collect();
+    (hidden, scopes.sites)
+}
+
+/// A name in a pattern: a binding, or a field name that is only an exclusion.
+struct PatternName {
+    name: String,
+    range: std::ops::Range<usize>,
+    binds: bool,
+}
+
+fn pattern_names(trees: &[TokenTree], text: &str, starts: &[usize]) -> Vec<PatternName> {
+    let mut out = vec![];
+    collect_pattern(trees, text, starts, &mut out);
+    out
+}
+
+fn collect_pattern(trees: &[TokenTree], text: &str, starts: &[usize], out: &mut Vec<PatternName>) {
+    let mut i = 0;
+    while i < trees.len() {
+        match &trees[i] {
+            TokenTree::Group(g) if g.delimiter() == Delimiter::Brace => {
+                struct_pattern(g, text, starts, out);
+                i += 1;
+            }
+            TokenTree::Group(g) => {
+                let kids: Vec<TokenTree> = g.stream().into_iter().collect();
+                collect_pattern(&kids, text, starts, out);
+                i += 1;
+            }
+            TokenTree::Ident(id) => {
+                let name = id.to_string();
+                let binds = !is_keyword(&name)
+                    && !name.starts_with('_')
+                    && !name.chars().next().is_some_and(char::is_uppercase)
+                    && !path_adjacent(trees, i);
+                if binds {
+                    out.push(PatternName { name, range: token_range(&trees[i], text, starts), binds: true });
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+fn struct_pattern(group: &proc_macro2::Group, text: &str, starts: &[usize], out: &mut Vec<PatternName>) {
+    let kids: Vec<TokenTree> = group.stream().into_iter().collect();
+    for part in comma_parts(&kids) {
+        if let Some(TokenTree::Ident(id)) = part.first() {
+            let name = id.to_string();
+            if !is_keyword(&name) && !name.starts_with('_') && !name.chars().next().is_some_and(char::is_uppercase) {
+                let range = token_range(&part[0], text, starts);
+                if is_colon(part.get(1)) {
+                    out.push(PatternName { name, range, binds: false });
+                    collect_pattern(&part[2..], text, starts, out);
+                } else {
+                    out.push(PatternName { name, range, binds: true });
+                }
+                continue;
+            }
+        }
+        collect_pattern(part, text, starts, out);
+    }
+}
+
+fn add_pattern(names: Vec<PatternName>, from: usize, to: usize, out: &mut Vec<Binding>) {
+    for name in names {
+        out.push(Binding { name: name.name.clone(), range: name.range, types: false });
+        if name.binds {
+            out.push(Binding { name: name.name, range: from..to, types: false });
+        }
+    }
+}
+
+fn comma_parts(trees: &[TokenTree]) -> Vec<&[TokenTree]> {
+    let (mut angle, mut start, mut out) = (0i32, 0, vec![]);
+    for (i, tree) in trees.iter().enumerate() {
+        if let TokenTree::Punct(p) = tree {
+            match p.as_char() {
+                '<' => angle += 1,
+                '>' if angle > 0 => angle -= 1,
+                ',' if angle == 0 => {
+                    out.push(&trees[start..i]);
+                    start = i + 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    out.push(&trees[start..]);
+    out.into_iter().filter(|p| !p.is_empty()).collect()
+}
+
+fn before_colon(trees: &[TokenTree]) -> &[TokenTree] {
+    for (i, tree) in trees.iter().enumerate() {
+        if is_colon(Some(tree)) && !is_colon(trees.get(i.wrapping_sub(1))) && !is_colon(trees.get(i + 1)) {
+            return &trees[..i];
+        }
+    }
+    trees
+}
+
+fn is_colon(tree: Option<&TokenTree>) -> bool {
+    matches!(tree, Some(TokenTree::Punct(p)) if p.as_char() == ':')
+}
+
+fn path_adjacent(trees: &[TokenTree], i: usize) -> bool {
+    let sep = |a: Option<&TokenTree>, b: Option<&TokenTree>| {
+        matches!(a, Some(TokenTree::Punct(p)) if p.as_char() == ':') && matches!(b, Some(TokenTree::Punct(p)) if p.as_char() == ':')
+    };
+    (i >= 2 && sep(trees.get(i - 2), trees.get(i - 1))) || sep(trees.get(i + 1), trees.get(i + 2))
+}
+
+fn is_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "union"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+    )
+}
+
+fn token_range(tree: &TokenTree, text: &str, starts: &[usize]) -> std::ops::Range<usize> {
+    byte_at(text, starts, tree.span().start())..byte_at(text, starts, tree.span().end())
+}
+
+fn find_word(trees: &[TokenTree], from: usize, word: &str) -> Option<usize> {
+    (from..trees.len()).find(|&i| matches!(&trees[i], TokenTree::Ident(id) if id.to_string() == word))
+}
+
+fn find_punct(trees: &[TokenTree], from: usize, c: char) -> Option<usize> {
+    (from..trees.len()).find(|&i| matches!(&trees[i], TokenTree::Punct(p) if p.as_char() == c))
+}
+
+fn find_arrow(trees: &[TokenTree], from: usize) -> Option<usize> {
+    (from..trees.len().saturating_sub(1)).find(|&i| {
+        matches!(&trees[i], TokenTree::Punct(p) if p.as_char() == '=') && matches!(&trees[i + 1], TokenTree::Punct(p) if p.as_char() == '>')
+    })
+}
+
+fn next_group(trees: &[TokenTree], from: usize, delimiter: Delimiter) -> Option<usize> {
+    (from..trees.len()).find(|&i| matches!(&trees[i], TokenTree::Group(g) if g.delimiter() == delimiter))
+}
+
+fn is_block_brace(trees: &[TokenTree], group: usize) -> bool {
+    let mut i = group;
+    while i > 0 {
+        i -= 1;
+        match &trees[i] {
+            TokenTree::Ident(id)
+                if matches!(
+                    id.to_string().as_str(),
+                    "if" | "while"
+                        | "for"
+                        | "match"
+                        | "loop"
+                        | "else"
+                        | "fn"
+                        | "impl"
+                        | "trait"
+                        | "struct"
+                        | "enum"
+                        | "union"
+                        | "mod"
+                        | "extern"
+                        | "unsafe"
+                        | "async"
+                        | "const"
+                        | "static"
+                ) =>
+            {
+                return true;
+            }
+            TokenTree::Punct(p) if p.as_char() == ';' => return false,
+            TokenTree::Group(g) if g.delimiter() == Delimiter::Brace => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
+fn field_names(group: &proc_macro2::Group, text: &str, starts: &[usize], out: &mut Vec<Binding>) {
+    let kids: Vec<TokenTree> = group.stream().into_iter().collect();
+    for part in comma_parts(&kids) {
+        if matches!(part.first(), Some(TokenTree::Punct(p)) if p.as_char() == '.') {
+            continue;
+        }
+        let mut i = 0;
+        while i < part.len() {
+            match &part[i] {
+                TokenTree::Punct(p) if p.as_char() == '#' => {
+                    i += 1;
+                    if matches!(part.get(i), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Bracket) {
+                        i += 1;
+                    }
+                }
+                TokenTree::Ident(id) if id.to_string() == "pub" => {
+                    i += 1;
+                    if matches!(part.get(i), Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Parenthesis) {
+                        i += 1;
+                    }
+                }
+                TokenTree::Ident(id) => {
+                    let name = id.to_string();
+                    if !is_keyword(&name) && !name.starts_with('_') {
+                        out.push(Binding { name, range: token_range(&part[i], text, starts), types: false });
+                    }
+                    break;
+                }
+                _ => i += 1,
+            }
+        }
+    }
+}
+
+fn collect_scopes(
+    trees: &[TokenTree],
+    scope_start: usize,
+    scope_end: usize,
+    container: bool,
+    text: &str,
+    starts: &[usize],
+    context: &ScopeContext<'_, '_>,
+    out: &mut Scopes,
+) {
+    let scope = scope_start..scope_end;
+    let mut i = 0;
+    while i < trees.len() {
+        match &trees[i] {
+            TokenTree::Group(_) => nested_scopes(trees, i, &scope, text, starts, context, out),
+            TokenTree::Ident(_) => {
+                word_bindings(trees, i, &scope, container, text, starts, context, out);
+                literal_fields(trees, i, text, starts, &mut out.bindings);
+            }
+            TokenTree::Punct(p) if p.as_char() == '|' && closure_start(trees, i) => {
+                i = closure_binding(trees, i, text, starts, &mut out.bindings)
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+fn previous_is(trees: &[TokenTree], i: usize, word: &str) -> bool {
+    matches!(i.checked_sub(1).and_then(|j| trees.get(j)), Some(TokenTree::Ident(id)) if id.to_string() == word)
+}
+
+fn next_is(trees: &[TokenTree], i: usize, word: &str) -> bool {
+    matches!(trees.get(i + 1), Some(TokenTree::Ident(id)) if id.to_string() == word)
+}
+
+fn closure_start(trees: &[TokenTree], i: usize) -> bool {
+    if i == 0 {
+        return true;
+    }
+    match &trees[i - 1] {
+        TokenTree::Ident(id) => matches!(id.to_string().as_str(), "move" | "return" | "else" | "async"),
+        TokenTree::Punct(p) => matches!(p.as_char(), '=' | '(' | ',' | '{' | ';' | '>' | '<' | '|' | '&' | ':' | '!' | '+' | '-' | '*'),
+        TokenTree::Group(_) => false,
+        TokenTree::Literal(_) => false,
+    }
+}
+
+fn closure_body(trees: &[TokenTree], from: usize, text: &str, starts: &[usize], bar_end: usize) -> usize {
+    if let Some(TokenTree::Group(g)) = trees.get(from)
+        && g.delimiter() == Delimiter::Brace
+    {
+        return token_range(&trees[from], text, starts).end;
+    }
+    let stop = find_punct(trees, from, ',').or_else(|| find_punct(trees, from, ';')).unwrap_or(trees.len());
+    if stop > from { token_range(&trees[stop - 1], text, starts).end } else { bar_end }
+}
+
+fn owner_keyword(trees: &[TokenTree], group: usize) -> Option<String> {
+    let mut i = group;
+    while i > 0 {
+        i -= 1;
+        match &trees[i] {
+            TokenTree::Ident(id) => {
+                let word = id.to_string();
+                if matches!(word.as_str(), "impl" | "trait" | "fn" | "struct" | "enum" | "union" | "mod" | "extern") {
+                    return Some(word);
+                }
+            }
+            TokenTree::Punct(p) if p.as_char() == ';' => return None,
+            TokenTree::Group(g) if g.delimiter() == Delimiter::Brace => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn match_arms(trees: &[TokenTree], text: &str, starts: &[usize], out: &mut Vec<Binding>) {
+    let mut from = 0;
+    while from < trees.len() {
+        let Some(arrow) = find_arrow(trees, from) else { break };
+        let pattern = &trees[from..arrow];
+        let guard = find_word(pattern, 0, "if").unwrap_or(pattern.len());
+        let pattern = &pattern[..guard];
+        let end = pattern.last().map_or(0, |t| token_range(t, text, starts).end);
+        let after = arrow + 2;
+        let (body_end, next) = match trees.get(after) {
+            Some(TokenTree::Group(g)) if g.delimiter() == Delimiter::Brace => (token_range(&trees[after], text, starts).end, after + 1),
+            _ => {
+                let comma = find_punct(trees, after, ',').unwrap_or(trees.len());
+                let end = if comma > after { token_range(&trees[comma - 1], text, starts).end } else { end };
+                (end, comma + 1)
+            }
+        };
+        add_pattern(pattern_names(pattern, text, starts), end, body_end, out);
+        from = next;
+    }
+}
+
+/// How an exact resolution reached its target.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Via {
+    /// A name defined in the mentioning module.
+    Own,
+    /// A name a `use` line binds, with the local name it binds.
+    Import(String),
+    /// A name a glob import brings into scope.
+    Glob,
+    /// A qualified path, including `self::`, `super::` and `crate::`.
+    Path,
+}
+
+/// One place a moved item is named.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Site {
+    /// The bytes to replace.
+    pub range: std::ops::Range<usize>,
+    /// The `as name` part of an aliased import, when there is one.
+    pub alias: Option<std::ops::Range<usize>>,
+    /// The path as written.
+    pub segs: Vec<String>,
+    /// How many leading `segs` are written before `range`, in an enclosing
+    /// `use` group's prefix.
+    pub outside: usize,
+    /// The item the mention resolves to.
+    pub target: usize,
+    /// How the name reached that item.
+    pub via: Via,
+    /// The symbol whose text holds the range; `None` for a module header.
+    pub symbol: Option<usize>,
+}
+
+/// Every unshadowed path mention of `syms[target]`, in any symbol's text.
+#[cfg(test)]
+pub fn rewrite_sites(syms: &[Sym], modules: &[ModuleRow], target: usize) -> Vec<Site> {
+    let refs = Refs::new(syms, modules);
+    rewrite_sites_in(&refs, syms, target)
+}
+
+/// Resolve one path mention to one item, without a last-name fallback.
+fn resolve_exact(refs: &Refs, m: &str, i: usize, segs: &[String]) -> Option<(usize, Via)> {
+    if segs.is_empty() {
+        return None;
+    }
+    if segs.len() == 1 {
+        return bare_exact(refs, m, i, &segs[0]);
+    }
+    let mut segs = segs.to_vec();
+    if segs[0] == "Self" {
+        segs[0] = refs.container_name(i)?;
+        return associated_exact(refs, m, &segs);
+    }
+    let scope = symbol_scope(refs, i);
+    let (module, rest, via) = match segs[0].as_str() {
+        "crate" | "self" | "super" => (module_named_in(refs, m, scope, &segs[0])?, &segs[1..], Via::Path),
+        head => {
+            if let Some(module) = module_named_in(refs, m, scope, head) {
+                (module, &segs[1..], Via::Path)
+            } else if item_visible(refs, m, i, head) {
+                return associated_exact(refs, m, &segs);
+            } else {
+                return None;
+            }
+        }
+    };
+    exact_in(refs, &module, rest, via)
+}
+
+fn bare_exact(refs: &Refs, m: &str, i: usize, name: &str) -> Option<(usize, Via)> {
+    let own = item_targets(refs, refs.locals(m, name));
+    if !own.is_empty() {
+        return one_target(own, Via::Own);
+    }
+    if let Some(named) = named_imports(refs, m, i, name) {
+        return one_target(item_targets(refs, named), Via::Import(name.to_string()));
+    }
+    one_target(item_targets(refs, refs.import_visible(m, i, name)), Via::Glob)
+}
+
+fn item_visible(refs: &Refs, m: &str, i: usize, name: &str) -> bool {
+    !refs.locals(m, name).is_empty() || !refs.import_visible(m, i, name).is_empty()
+}
+
+fn associated_exact(refs: &Refs, m: &str, segs: &[String]) -> Option<(usize, Via)> {
+    one_target(item_targets(refs, refs.names_in(m, &segs.join("::"))), Via::Path)
+}
+
+fn exact_in(refs: &Refs, module: &str, rest: &[String], via: Via) -> Option<(usize, Via)> {
+    let mut cur = module.to_string();
+    let mut k = 0;
+    while k < rest.len() {
+        if let Some(next) = refs.module_named(&cur, &rest[k]) {
+            cur = next;
+            k += 1;
+        } else {
+            break;
+        }
+    }
+    if k == rest.len() {
+        return None;
+    }
+    let joined = rest[k..].join("::");
+    let targets = if joined.contains("::") { refs.names_in(&cur, &joined) } else { refs.symbols_named(&cur, &joined) };
+    one_target(item_targets(refs, targets), via)
+}
+
+fn one_target(mut targets: Vec<usize>, via: Via) -> Option<(usize, Via)> {
+    targets.sort_unstable();
+    targets.dedup();
+    match targets.as_slice() {
+        [one] => Some((*one, via)),
+        _ => None,
+    }
+}
+
+/// The `use` tree sites of `module`: its header's lines and its `use` symbols.
+pub fn use_sites(syms: &[Sym], modules: &[ModuleRow], module: &str) -> Result<Vec<Site>, crate::Failure> {
+    let refs = Refs::new(syms, modules);
+    let mut out = vec![];
+    let unparsed = unparsed_imports(module);
+    if let Some(row) = modules.iter().find(|m| m.path == module) {
+        for (base, tree) in container_use_trees(&row.header).map_err(&unparsed)? {
+            use_tree_sites(&refs, module, base, &tree, None, None, &mut out);
+        }
+    }
+    for (i, symbol) in syms
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.module == module && (s.kind_text == "use" || s.kind_text == "mod"))
+    {
+        for (base, tree) in container_use_trees(&symbol.text).map_err(&unparsed)? {
+            use_tree_sites(&refs, module, base, &tree, Some(i), None, &mut out);
+        }
+    }
+    Ok(out)
+}
+
+/// Each `use` tree in `text`, with the byte offset where the tree starts.
+fn use_trees(text: &str) -> Result<Vec<(usize, &str)>, syn::Error> {
+    Ok(crate::language::rust::import_tree_ranges(text)?.into_iter().map(|range| (range.start, &text[range])).collect())
+}
+
+fn use_tree_sites(refs: &Refs, module: &str, base: usize, text: &str, symbol: Option<usize>, target: Option<usize>, out: &mut Vec<Site>) {
+    let starts = line_starts(text);
+    let Ok(tree) = syn::parse_str::<syn::UseTree>(text) else { return };
+    let scope = symbol.and_then(|i| symbol_scope(refs, i));
+    recurse_use_tree(refs, module, scope, &tree, &mut vec![], None, base, text, &starts, symbol, target, out);
+}
+
+fn use_span(text: &str, starts: &[usize], span: proc_macro2::Span) -> std::ops::Range<usize> {
+    byte_at(text, starts, span.start())..byte_at(text, starts, span.end())
+}
+
+fn recurse_use_tree(
+    refs: &Refs,
+    module: &str,
+    scope: Option<usize>,
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    root: Option<(usize, usize)>,
+    base: usize,
+    text: &str,
+    starts: &[usize],
+    symbol: Option<usize>,
+    target: Option<usize>,
+    out: &mut Vec<Site>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let at = base + use_span(text, starts, path.ident.span()).start;
+            let root = Some(root.unwrap_or((at, prefix.len())));
+            prefix.push(path.ident.to_string());
+            recurse_use_tree(refs, module, scope, &path.tree, prefix, root, base, text, starts, symbol, target, out);
+            prefix.pop();
+        }
+        syn::UseTree::Name(name) => {
+            let leaf = name.ident.to_string();
+            if leaf == "self" {
+                return;
+            }
+            let mut segs = prefix.clone();
+            segs.push(leaf.clone());
+            if let Some(found) = use_site_target(refs, module, scope, &segs, target) {
+                let span = use_span(text, starts, name.ident.span());
+                let (start, outside) = root.unwrap_or((base + span.start, prefix.len()));
+                out.push(Site { range: start..base + span.end, alias: None, segs, outside, target: found, via: Via::Import(leaf), symbol });
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            let leaf = rename.ident.to_string();
+            if leaf == "self" {
+                return;
+            }
+            let mut segs = prefix.clone();
+            segs.push(leaf);
+            if let Some(found) = use_site_target(refs, module, scope, &segs, target) {
+                let span = use_span(text, starts, rename.ident.span());
+                let (start, outside) = root.unwrap_or((base + span.start, prefix.len()));
+                let alias_start = base + byte_at(text, starts, rename.as_token.span.start());
+                let alias_end = base + use_span(text, starts, rename.rename.span()).end;
+                let alias = alias_start..alias_end;
+                let via = Via::Import(rename.rename.to_string());
+                out.push(Site { range: start..base + span.end, alias: Some(alias), segs, outside, target: found, via, symbol });
+            }
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                recurse_use_tree(refs, module, scope, item, prefix, None, base, text, starts, symbol, target, out);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn use_target(refs: &Refs, module: &str, scope: Option<usize>, segs: &[String]) -> Option<usize> {
+    match use_targets(refs, module, scope, segs).as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
+}
+
+/// Targets a name can denote: an `impl` row is a container, not an item.
+fn item_targets(refs: &Refs, targets: Vec<usize>) -> Vec<usize> {
+    targets.into_iter().filter(|&i| !matches!(refs.syms[i].kind_text.as_str(), "impl" | "use" | "mod" | "extern")).collect()
+}
+
+/// The byte just past a group's opening delimiter.
+fn group_start(tree: &TokenTree, text: &str, starts: &[usize]) -> usize {
+    match tree {
+        TokenTree::Group(group) => byte_at(text, starts, group.span_open().end()),
+        _ => 0,
+    }
+}
+
+fn previous_punct(trees: &[TokenTree], i: usize, c: char) -> bool {
+    matches!(i.checked_sub(1).and_then(|j| trees.get(j)), Some(TokenTree::Punct(p)) if p.as_char() == c)
+}
+
+/// A `let` in `if let`, `while let` or a let chain, which binds only in the body.
+fn is_condition_let(trees: &[TokenTree], i: usize) -> bool {
+    previous_is(trees, i, "if") || previous_is(trees, i, "while") || previous_punct(trees, i, '&')
+}
+
+/// The name an item keyword at `at` declares; `None` for `'static`, `*const`,
+/// `&raw const`, `fn(…)` types and a method named like a keyword.
+fn declared_name(trees: &[TokenTree], at: usize) -> Option<usize> {
+    if ['\'', '*', '.'].iter().any(|&c| previous_punct(trees, at, c)) || previous_is(trees, at, "raw") {
+        return None;
+    }
+    let name = if next_is(trees, at, "mut") { at + 2 } else { at + 1 };
+    match trees.get(name) {
+        Some(TokenTree::Ident(id)) if !is_keyword(&id.to_string()) => Some(name),
+        _ => None,
+    }
+}
+
+/// A function's parameter list: the first parenthesized group outside its generics.
+fn params_group(trees: &[TokenTree], from: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for i in from..trees.len() {
+        match &trees[i] {
+            TokenTree::Punct(p) if p.as_char() == '<' => depth += 1,
+            TokenTree::Punct(p) if p.as_char() == '>' && !previous_punct(trees, i, '-') => depth = depth.saturating_sub(1),
+            TokenTree::Punct(p) if p.as_char() == ';' => return None,
+            TokenTree::Group(g) if g.delimiter() == Delimiter::Brace => return None,
+            TokenTree::Group(g) if depth == 0 && g.delimiter() == Delimiter::Parenthesis => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The longest prefix of a path mention in `syms[i]` that names `target`.
+fn path_site(refs: &Refs, i: usize, range: &std::ops::Range<usize>, segs: &[String], target: usize) -> Option<Site> {
+    let symbol = &refs.syms[i];
+    (1..=segs.len()).rev().find_map(|k| {
+        let (found, via) = resolve_exact(refs, &symbol.module, i, &segs[..k])?;
+        if found != target {
+            return None;
+        }
+        let end = if k == segs.len() { range.end } else { prefix_end(&symbol.text, range, &segs[..k])? };
+        Some(Site { range: range.start..end, alias: None, segs: segs[..k].to_vec(), outside: 0, target, via, symbol: Some(i) })
+    })
+}
+
+/// The byte just past `segs`, the leading segments of the path in `range`.
+fn prefix_end(text: &str, range: &std::ops::Range<usize>, segs: &[String]) -> Option<usize> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut at = range.start;
+    for seg in segs {
+        let found = text[at..range.end]
+            .match_indices(seg.as_str())
+            .map(|(p, _)| at + p)
+            .find(|&p| !text[..p].ends_with(ident) && !text[p + seg.len()..].starts_with(ident))?;
+        at = found + seg.len();
+    }
+    Some(at)
+}
+
+/// The items `m`'s non-glob imports bind to the local `name`, or `None` when
+/// no named import binds it.
+fn named_imports(refs: &Refs, m: &str, i: usize, name: &str) -> Option<Vec<usize>> {
+    let scope = symbol_scope(refs, i);
+    let imps = imports_for(refs, m, scope)?;
+    let named: Vec<&Import> = imps.iter().filter(|imp| !imp.glob && imp.local == name).collect();
+    if named.is_empty() {
+        return None;
+    }
+    Some(
+        named
+            .into_iter()
+            .filter_map(|imp| refs.resolve_use(m, scope, &imp.path))
+            .flat_map(|(module, leaf)| refs.symbols_named(&module, &leaf))
+            .collect(),
+    )
+}
+
+/// The bindings inside the group at `i`: a brace group is its own scope.
+fn nested_scopes(
+    trees: &[TokenTree],
+    i: usize,
+    scope: &std::ops::Range<usize>,
+    text: &str,
+    starts: &[usize],
+    context: &ScopeContext<'_, '_>,
+    out: &mut Scopes,
+) {
+    let TokenTree::Group(g) = &trees[i] else { return };
+    let nested = g.delimiter() == Delimiter::Brace;
+    let (start, end) =
+        if nested { (group_start(&trees[i], text, starts), token_range(&trees[i], text, starts).end) } else { (scope.start, scope.end) };
+    let inside = nested && matches!(owner_keyword(trees, i).as_deref(), Some("impl" | "trait"));
+    let kids: Vec<TokenTree> = g.stream().into_iter().collect();
+    collect_scopes(&kids, start, end, inside, text, starts, context, out);
+}
+
+/// The bindings the keyword at `i` introduces, if it is one that binds.
+fn word_bindings(
+    trees: &[TokenTree],
+    i: usize,
+    scope: &std::ops::Range<usize>,
+    container: bool,
+    text: &str,
+    starts: &[usize],
+    context: &ScopeContext<'_, '_>,
+    out: &mut Scopes,
+) {
+    match trees[i].to_string().as_str() {
+        "let" if is_condition_let(trees, i) => condition_let_binding(trees, i, text, starts, &mut out.bindings),
+        "let" => let_binding(trees, i, scope.end, text, starts, &mut out.bindings),
+        "for" => for_binding(trees, i, text, starts, &mut out.bindings),
+        "match" => match_binding(trees, i, text, starts, &mut out.bindings),
+        "use" => use_binding(trees, i, scope.end, text, starts, context, out),
+        "fn" => fn_binding(trees, i, scope, container, text, starts, &mut out.bindings),
+        "struct" | "enum" | "union" | "const" | "static" | "type" | "trait" => {
+            item_binding(trees, i, scope, container, text, starts, &mut out.bindings)
+        }
+        _ => {}
+    }
+}
+
+/// `if let` and `while let`: the pattern binds in the block that follows.
+fn condition_let_binding(trees: &[TokenTree], i: usize, text: &str, starts: &[usize], out: &mut Vec<Binding>) {
+    let Some(sep) = find_punct(trees, i + 1, '=') else { return };
+    let Some(body) = next_group(trees, sep + 1, Delimiter::Brace) else { return };
+    let names = pattern_names(before_colon(&trees[i + 1..sep]), text, starts);
+    add_pattern(names, group_start(&trees[body], text, starts), token_range(&trees[body], text, starts).end, out);
+}
+
+/// A `let` statement: the pattern binds from its `;` to the end of the scope.
+fn let_binding(trees: &[TokenTree], i: usize, scope_end: usize, text: &str, starts: &[usize], out: &mut Vec<Binding>) {
+    let sep = find_punct(trees, i + 1, '=').or_else(|| find_punct(trees, i + 1, ';')).unwrap_or(trees.len());
+    let pattern = before_colon(&trees[i + 1..sep]);
+    let end = find_punct(trees, i + 1, ';').map_or(scope_end, |s| token_range(&trees[s], text, starts).end);
+    add_pattern(pattern_names(pattern, text, starts), end, scope_end, out);
+}
+
+/// A `for` loop: the pattern binds in the loop's body. `for<'a>` and an
+/// `impl … for` header are not loops.
+fn for_binding(trees: &[TokenTree], i: usize, text: &str, starts: &[usize], out: &mut Vec<Binding>) {
+    if in_impl_header(trees, i) || previous_punct(trees, i + 2, '<') {
+        return;
+    }
+    let Some(at) = find_word(trees, i + 1, "in") else { return };
+    let Some(body) = next_group(trees, at + 1, Delimiter::Brace) else { return };
+    let names = pattern_names(&trees[i + 1..at], text, starts);
+    add_pattern(names, group_start(&trees[body], text, starts), token_range(&trees[body], text, starts).end, out);
+}
+
+/// Whether `impl` comes before `i` in the same statement.
+fn in_impl_header(trees: &[TokenTree], i: usize) -> bool {
+    trees[..i]
+        .iter()
+        .rev()
+        .take_while(|t| match t {
+            TokenTree::Punct(p) => p.as_char() != ';',
+            TokenTree::Group(g) => g.delimiter() != Delimiter::Brace,
+            _ => true,
+        })
+        .any(|t| matches!(t, TokenTree::Ident(id) if id.to_string() == "impl"))
+}
+
+/// A `match`: each arm's pattern binds in that arm.
+fn match_binding(trees: &[TokenTree], i: usize, text: &str, starts: &[usize], out: &mut Vec<Binding>) {
+    let Some(body) = next_group(trees, i + 1, Delimiter::Brace) else { return };
+    let TokenTree::Group(g) = &trees[body] else { return };
+    let kids: Vec<TokenTree> = g.stream().into_iter().collect();
+    match_arms(&kids, text, starts, out);
+}
+
+/// A `use` inside a block: a name that resolves anywhere but the target binds
+/// from its `;` to the end of the scope; a name that resolves to the target is
+/// an import site instead.
+fn use_binding(
+    trees: &[TokenTree],
+    i: usize,
+    scope_end: usize,
+    text: &str,
+    starts: &[usize],
+    context: &ScopeContext<'_, '_>,
+    out: &mut Scopes,
+) {
+    let Some(semi) = find_punct(trees, i + 1, ';') else { return };
+    if semi == i + 1 {
+        return;
+    }
+    let semi_range = token_range(&trees[semi], text, starts);
+    let tree_start = token_range(&trees[i + 1], text, starts).start;
+    let tree = &text[tree_start..semi_range.start];
+    out.imports.push(tree_start..semi_range.start);
+    use_tree_sites(context.refs, context.module, tree_start, tree, Some(context.symbol), context.target, &mut out.sites);
+    for import in parse_use(tree).into_iter().filter(|import| !import.glob) {
+        if block_use_binds(context.refs, context.module, symbol_scope(context.refs, context.symbol), context.target, &import.path) {
+            out.bindings.push(Binding { name: import.local, range: semi_range.end..scope_end, types: true });
+        }
+    }
+}
+
+/// A `fn`: its name binds in the scope, its parameters in its body.
+fn fn_binding(
+    trees: &[TokenTree],
+    i: usize,
+    scope: &std::ops::Range<usize>,
+    container: bool,
+    text: &str,
+    starts: &[usize],
+    out: &mut Vec<Binding>,
+) {
+    let Some(name) = declared_name(trees, i) else { return };
+    out.extend(declaration(trees, name, scope, container, false, text, starts));
+    let Some(params) = params_group(trees, name + 1) else { return };
+    let TokenTree::Group(g) = &trees[params] else { return };
+    let body = next_group(trees, params + 1, Delimiter::Brace);
+    let body = body.map(|b| token_range(&trees[b], text, starts)).unwrap_or(scope.end..scope.end);
+    let kids: Vec<TokenTree> = g.stream().into_iter().collect();
+    for part in comma_parts(&kids) {
+        add_pattern(pattern_names(before_colon(part), text, starts), body.start, body.end, out);
+    }
+}
+
+/// A local `struct`, `enum`, `union`, `const`, `static`, `type` or `trait`:
+/// its name binds in the scope; a struct's or enum's fields are declarations.
+fn item_binding(
+    trees: &[TokenTree],
+    i: usize,
+    scope: &std::ops::Range<usize>,
+    container: bool,
+    text: &str,
+    starts: &[usize],
+    out: &mut Vec<Binding>,
+) {
+    let Some(name) = declared_name(trees, i) else { return };
+    let word = trees[i].to_string();
+    let types = !matches!(word.as_str(), "const" | "static");
+    out.extend(declaration(trees, name, scope, container, types, text, starts));
+    if matches!(word.as_str(), "struct" | "enum" | "union")
+        && let Some(body) = next_group(trees, name + 1, Delimiter::Brace)
+        && let TokenTree::Group(g) = &trees[body]
+    {
+        field_names(g, text, starts, out);
+    }
+}
+
+/// A declared name's own token, and outside an `impl` or `trait` the scope
+/// it binds.
+fn declaration(
+    trees: &[TokenTree],
+    name: usize,
+    scope: &std::ops::Range<usize>,
+    container: bool,
+    types: bool,
+    text: &str,
+    starts: &[usize],
+) -> Vec<Binding> {
+    let word = trees[name].to_string();
+    let mut out = vec![Binding { name: word.clone(), range: token_range(&trees[name], text, starts), types }];
+    if !container {
+        out.push(Binding { name: word, range: scope.clone(), types });
+    }
+    out
+}
+
+/// A struct literal's or pattern's field names after a name at `i`.
+fn literal_fields(trees: &[TokenTree], i: usize, text: &str, starts: &[usize], out: &mut Vec<Binding>) {
+    let word = trees[i].to_string();
+    if let Some(TokenTree::Group(g)) = trees.get(i + 1)
+        && g.delimiter() == Delimiter::Brace
+        && (!is_keyword(&word) || word == "Self")
+        && !is_block_brace(trees, i + 1)
+    {
+        field_names(g, text, starts, out);
+    }
+}
+
+/// A closure at `i`: its parameters bind in its body. Returns the index of the
+/// closing `|`, or `i` when there is none.
+fn closure_binding(trees: &[TokenTree], i: usize, text: &str, starts: &[usize], out: &mut Vec<Binding>) -> usize {
+    let Some(close) = (i + 1..trees.len()).find(|&j| matches!(&trees[j], TokenTree::Punct(p) if p.as_char() == '|')) else {
+        return i;
+    };
+    let names = pattern_names(&trees[i + 1..close], text, starts);
+    let bar_end = token_range(&trees[close], text, starts).end;
+    let body = closure_body(trees, close + 1, text, starts, bar_end);
+    add_pattern(names, bar_end, body, out);
+    close
+}
+
+/// The exact rewrite a scope scan is for.
+struct ScopeContext<'a, 'b> {
+    refs: &'a Refs<'b>,
+    module: &'a str,
+    symbol: usize,
+    target: Option<usize>,
+}
+
+/// The item a block `use` names in this crate; a foreign or unknown head names
+/// an item the target cannot be.
+fn block_use_target(refs: &Refs, module: &str, scope: Option<usize>, path: &[String]) -> Option<usize> {
+    match block_use_targets(refs, module, scope, path)?.as_slice() {
+        [one] => Some(*one),
+        _ => None,
+    }
+}
+
+fn use_targets(refs: &Refs, module: &str, scope: Option<usize>, segs: &[String]) -> Vec<usize> {
+    let Some((module, name)) = refs.resolve_use(module, scope, segs) else { return vec![] };
+    let mut targets = item_targets(refs, refs.symbols_named(&module, &name));
+    targets.sort_unstable();
+    targets.dedup();
+    targets
+}
+
+fn block_use_targets(refs: &Refs, module: &str, scope: Option<usize>, path: &[String]) -> Option<Vec<usize>> {
+    let first = path.first()?;
+    if !matches!(first.as_str(), "crate" | "self" | "super") && module_named_in(refs, module, scope, first).is_none() {
+        return None;
+    }
+    Some(use_targets(refs, module, scope, path))
+}
+
+fn block_use_binds(refs: &Refs, module: &str, scope: Option<usize>, target: Option<usize>, path: &[String]) -> bool {
+    let Some(target) = target else { return true };
+    let Some(targets) = block_use_targets(refs, module, scope, path) else { return true };
+    match targets.as_slice() {
+        [] => true,
+        [one] => *one != target,
+        _ => false,
+    }
+}
+
+fn use_site_target(refs: &Refs, module: &str, scope: Option<usize>, segs: &[String], target: Option<usize>) -> Option<usize> {
+    let found = if target.is_some() { block_use_target(refs, module, scope, segs) } else { use_target(refs, module, scope, segs) };
+    found.filter(|&found| target.is_none_or(|want| found == want))
+}
+
+/// The failure for `module`'s imports that don't parse.
+fn unparsed_imports(module: &str) -> impl Fn(syn::Error) -> crate::Failure + '_ {
+    move |e| crate::Failure(format!("imports in {module} don't parse: {e}"), 1)
+}
+
+/// One `use` tree's binding, and where it is written.
+#[derive(Clone, Debug)]
+pub(crate) struct ImportSite {
+    pub local: String,
+    pub path: Vec<String>,
+    pub range: std::ops::Range<usize>,
+    pub alias: Option<std::ops::Range<usize>>,
+    pub outside: usize,
+    /// Whether this imports every name of `path` (`use path::*`).
+    pub glob: bool,
+}
+
+/// Every import binding of `module`: its header's lines, its `use` symbols and
+/// the imports an inline module holds before its first item.
+pub(crate) fn import_sites(syms: &[Sym], modules: &[ModuleRow], module: &str, root_only: bool) -> Result<Vec<ImportSite>, crate::Failure> {
+    let unparsed = unparsed_imports(module);
+    let mut out = vec![];
+    if let Some(row) = modules.iter().find(|m| m.path == module) {
+        out.extend(import_sites_in(&row.header).map_err(&unparsed)?);
+    }
+    for symbol in syms.iter().filter(|s| {
+        s.module == module
+            && if root_only { s.kind_text == "use" && s.parent.is_none() } else { s.kind_text == "use" || s.kind_text == "mod" }
+    }) {
+        out.extend(import_sites_in(&symbol.text).map_err(&unparsed)?);
+    }
+    Ok(out)
+}
+
+/// The import bindings `text` holds.
+pub(crate) fn import_sites_in(text: &str) -> Result<Vec<ImportSite>, syn::Error> {
+    let mut out = vec![];
+    for (base, tree) in container_use_trees(text)? {
+        let Ok(parsed) = syn::parse_str::<syn::UseTree>(&tree) else { continue };
+        let starts = line_starts(&tree);
+        collect_import_sites(&parsed, &mut vec![], None, base, &tree, &starts, &mut out);
+    }
+    Ok(out)
+}
+
+/// Each `use` tree in `text`, with where it starts. A container's stored text
+/// can stop before its closing brace, so a failed parse is retried closed.
+fn container_use_trees(text: &str) -> Result<Vec<(usize, String)>, syn::Error> {
+    match use_trees(text) {
+        Ok(trees) => Ok(trees.into_iter().map(|(base, tree)| (base, tree.to_string())).collect()),
+        Err(_) => {
+            let closed = format!("{text}\n}}");
+            Ok(use_trees(&closed)?.into_iter().map(|(base, tree)| (base, tree.to_string())).collect())
+        }
+    }
+}
+
+fn collect_import_sites(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    root: Option<(usize, usize)>,
+    base: usize,
+    text: &str,
+    starts: &[usize],
+    out: &mut Vec<ImportSite>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let at = base + use_span(text, starts, path.ident.span()).start;
+            let root = Some(root.unwrap_or((at, prefix.len())));
+            prefix.push(path.ident.to_string());
+            collect_import_sites(&path.tree, prefix, root, base, text, starts, out);
+            prefix.pop();
+        }
+        syn::UseTree::Name(name) => {
+            let leaf = name.ident.to_string();
+            let span = use_span(text, starts, name.ident.span());
+            if leaf == "self" {
+                let Some(local) = prefix.last().cloned() else { return };
+                let (start, outside) = root.unwrap_or((base + span.start, 1));
+                out.push(ImportSite { local, path: prefix.clone(), range: start..base + span.end, alias: None, outside, glob: false });
+                return;
+            }
+            let mut path = prefix.clone();
+            path.push(leaf.clone());
+            let (start, outside) = root.unwrap_or((base + span.start, prefix.len()));
+            out.push(ImportSite { local: leaf, path, range: start..base + span.end, alias: None, outside, glob: false });
+        }
+        syn::UseTree::Rename(rename) => {
+            let leaf = rename.ident.to_string();
+            if leaf == "self" {
+                return;
+            }
+            let mut path = prefix.clone();
+            path.push(leaf);
+            let span = use_span(text, starts, rename.ident.span());
+            let (start, outside) = root.unwrap_or((base + span.start, prefix.len()));
+            let alias_start = base + byte_at(text, starts, rename.as_token.span.start());
+            let alias_end = base + use_span(text, starts, rename.rename.span()).end;
+            out.push(ImportSite {
+                local: rename.rename.to_string(),
+                path,
+                range: start..base + span.end,
+                alias: Some(alias_start..alias_end),
+                outside,
+                glob: false,
+            });
+        }
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_import_sites(item, prefix, None, base, text, starts, out);
+            }
+        }
+        syn::UseTree::Glob(glob) => {
+            let span = use_span(text, starts, glob.star_token.span);
+            let (start, outside) = root.unwrap_or((base + span.start, prefix.len()));
+            out.push(ImportSite {
+                local: "*".to_string(),
+                path: prefix.clone(),
+                range: start..base + span.end,
+                alias: None,
+                outside,
+                glob: true,
+            });
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ImplOwner {
+    One(usize),
+    Other,
+    Ambiguous(Vec<usize>),
+}
+
+fn impl_self_type(name: &str) -> Option<Vec<String>> {
+    let ty = name.trim();
+    let ty = if let Some(rest) = ty.strip_prefix('<') {
+        rest.split_once(" as ").map_or_else(|| rest.trim_end_matches('>').trim(), |(ty, _)| ty.trim())
+    } else {
+        ty
+    };
+    type_path(&syn::parse_str(ty).ok()?)
+}
+
+fn type_path(ty: &syn::Type) -> Option<Vec<String>> {
+    match ty {
+        syn::Type::Path(p) if p.qself.is_none() => Some(p.path.segments.iter().map(|s| s.ident.to_string()).collect()),
+        syn::Type::Reference(r) => type_path(&r.elem),
+        syn::Type::Paren(p) => type_path(&p.elem),
+        syn::Type::Group(g) => type_path(&g.elem),
+        syn::Type::Ptr(p) => type_path(&p.elem),
+        syn::Type::Slice(s) => type_path(&s.elem),
+        syn::Type::Array(a) => type_path(&a.elem),
+        _ => None,
+    }
+}
+
+fn exact_targets(refs: &Refs, m: &str, i: usize, segs: &[String]) -> Vec<usize> {
+    if segs.is_empty() {
+        return vec![];
+    }
+    if segs.len() == 1 {
+        return bare_targets(refs, m, i, &segs[0]);
+    }
+    let mut segs = segs.to_vec();
+    if segs[0] == "Self" {
+        let Some(name) = refs.container_name(i) else {
+            return vec![];
+        };
+        segs[0] = name;
+        return associated_targets(refs, m, &segs);
+    }
+    let scope = symbol_scope(refs, i);
+    let (module, rest) = match segs[0].as_str() {
+        "crate" | "self" | "super" => match module_named_in(refs, m, scope, &segs[0]) {
+            Some(module) => (module, &segs[1..]),
+            None => return vec![],
+        },
+        head => {
+            if let Some(module) = module_named_in(refs, m, scope, head) {
+                (module, &segs[1..])
+            } else if item_visible(refs, m, i, head) {
+                return associated_targets(refs, m, &segs);
+            } else {
+                return vec![];
+            }
+        }
+    };
+    exact_targets_in(refs, &module, rest)
+}
+
+fn bare_targets(refs: &Refs, m: &str, i: usize, name: &str) -> Vec<usize> {
+    let own = item_targets(refs, refs.locals(m, name));
+    if !own.is_empty() {
+        return own;
+    }
+    if let Some(named) = named_imports(refs, m, i, name) {
+        return item_targets(refs, named);
+    }
+    item_targets(refs, refs.import_visible(m, i, name))
+}
+
+fn associated_targets(refs: &Refs, m: &str, segs: &[String]) -> Vec<usize> {
+    item_targets(refs, refs.names_in(m, &segs.join("::")))
+}
+
+fn exact_targets_in(refs: &Refs, module: &str, rest: &[String]) -> Vec<usize> {
+    let mut cur = module.to_string();
+    let mut k = 0;
+    while k < rest.len() {
+        if let Some(next) = refs.module_named(&cur, &rest[k]) {
+            cur = next;
+            k += 1;
+        } else {
+            break;
+        }
+    }
+    if k == rest.len() {
+        return vec![];
+    }
+    let joined = rest[k..].join("::");
+    let targets = if joined.contains("::") { refs.names_in(&cur, &joined) } else { refs.symbols_named(&cur, &joined) };
+    item_targets(refs, targets)
+}
+
+/// The trait an `impl` header names and its resolved type, when both are exact.
+pub(crate) fn impl_trait(syms: &[Sym], modules: &[ModuleRow], i: usize) -> Option<(usize, Vec<String>)> {
+    let rest = syms[i].name.trim().strip_prefix('<')?.strip_suffix('>')?;
+    let (_, trait_name) = rest.split_once(" as ")?;
+    let trait_name = trait_name.trim();
+    let segs = type_path(&syn::parse_str(trait_name).ok()?)?;
+    let refs = Refs::new(syms, modules);
+    let mut targets = exact_targets(&refs, &syms[i].module, i, &segs);
+    targets.sort_unstable();
+    targets.dedup();
+    match targets.as_slice() {
+        [one] => Some((*one, segs)),
+        _ => None,
+    }
+}
+
+/// Resolve several impl owners against one reference index.
+pub(crate) fn impl_owner_batch(syms: &[Sym], modules: &[ModuleRow], indices: &[usize]) -> Vec<ImplOwner> {
+    let refs = Refs::new(syms, modules);
+    indices.iter().map(|&i| impl_owner_in(&refs, i)).collect()
+}
+
+fn impl_owner_in(refs: &Refs<'_>, i: usize) -> ImplOwner {
+    let Some(segs) = impl_self_type(&refs.syms[i].name) else {
+        return ImplOwner::Other;
+    };
+    let mut targets = exact_targets(refs, &refs.syms[i].module, i, &segs);
+    targets.sort_unstable();
+    targets.dedup();
+    match targets.as_slice() {
+        [one] => ImplOwner::One(*one),
+        [] => ImplOwner::Other,
+        many => ImplOwner::Ambiguous(many.to_vec()),
+    }
+}
+
+fn enclosing_mod<'a>(refs: &Refs<'a>, mut parent: Option<&'a str>) -> Option<usize> {
+    while let Some(id) = parent {
+        let k = *refs.by_id.get(id)?;
+        if refs.syms[k].kind_text == "mod" {
+            return Some(k);
+        }
+        parent = refs.syms[k].parent.as_deref();
+    }
+    None
+}
+
+fn symbol_scope<'a>(refs: &Refs<'a>, i: usize) -> Option<usize> {
+    if refs.syms[i].kind_text == "mod" { Some(i) } else { enclosing_mod(refs, refs.syms[i].parent.as_deref()) }
+}
+
+fn imports_for<'a, 'b>(refs: &'a Refs<'b>, m: &str, scope: Option<usize>) -> Option<&'a Vec<Import>> {
+    match scope {
+        Some(k) => refs.container_imports.get(refs.syms[k].id.as_str()),
+        None => refs.inline_modules.get(m).map_or_else(|| refs.imports.get(m), |&k| refs.container_imports.get(refs.syms[k].id.as_str())),
+    }
+}
+
+fn module_named_in(refs: &Refs, m: &str, scope: Option<usize>, name: &str) -> Option<String> {
+    match name {
+        "crate" => return Some("crate".to_string()),
+        "self" => return Some(scope_module(refs, m, scope)),
+        "super" => return scope.map_or_else(|| refs.parent_module(m), |k| Some(super_module(refs, m, k))),
+        _ => {}
+    }
+    let current = scope_module(refs, m, scope);
+    // The crate root is named `crate` on its own: its children are top level.
+    let child = if current == "crate" && refs.module_exists(name) { name.to_string() } else { inline_path(&current, name) };
+    if refs.module_exists(&child) {
+        return Some(child);
+    }
+    if refs.module_exists(name) {
+        return Some(name.to_string());
+    }
+    let imps = imports_for(refs, m, scope)?;
+    for imp in imps.iter().filter(|i| !i.glob && i.local == name) {
+        if let Some(m2) = refs.resolve_use_module(m, scope, &imp.path) {
+            return Some(m2);
+        }
+    }
+    None
+}
+
+fn mentioned_names_in(refs: &Refs, syms: &[Sym]) -> Vec<HashSet<String>> {
+    syms.iter()
+        .enumerate()
+        .map(|(i, symbol)| {
+            if symbol.kind_text == "use" {
+                return HashSet::new();
+            }
+            let text = &symbol.text;
+            let mentions = scanned(text);
+            let context = ScopeContext { refs, module: symbol.module.as_str(), symbol: i, target: None };
+            let scopes = scan_scopes(text, refs.container_name(i).is_some(), &context);
+            let in_import =
+                |range: &std::ops::Range<usize>| scopes.imports.iter().any(|import| import.start <= range.start && range.end <= import.end);
+            mentions
+                .into_iter()
+                .filter_map(|mention| match mention.mention {
+                    Mention::Path(segs) => {
+                        if in_import(&mention.range) || shadowed(&scopes, &segs, mention.range.start) {
+                            None
+                        } else {
+                            segs.into_iter().next()
+                        }
+                    }
+                    Mention::Macro(name) => Some(name),
+                    Mention::Method(_) | Mention::Field(_) => None,
+                })
+                .collect()
+        })
+        .collect()
+}
+
+pub(crate) struct References<'a> {
+    refs: Refs<'a>,
+    modules: &'a [ModuleRow],
+    pub(crate) mentioned: Vec<HashSet<String>>,
+}
+
+pub(crate) fn references<'a>(syms: &'a [Sym], modules: &'a [ModuleRow]) -> References<'a> {
+    let refs = Refs::new(syms, modules);
+    let mentioned = mentioned_names_in(&refs, syms);
+    References { refs, modules, mentioned }
+}
+
+pub(crate) fn references_external_imports(refs: &References, module: &str, root_only: bool) -> Result<Vec<ImportSite>, crate::Failure> {
+    Ok(import_sites(refs.refs.syms, refs.modules, module, root_only)?
+        .into_iter()
+        .filter(|site| block_use_targets(&refs.refs, module, None, &site.path).is_none())
+        .collect())
+}
+
+/// The traits `module` imports by name, with the import that binds each.
+pub(crate) fn imported_traits(refs: &References, module: &str) -> Result<Vec<(usize, ImportSite)>, crate::Failure> {
+    let mut out = vec![];
+    for site in import_sites(refs.refs.syms, refs.modules, module, true)? {
+        if site.glob {
+            continue;
+        }
+        let Some((m, name)) = refs.refs.resolve_use(module, None, &site.path) else { continue };
+        for i in refs.refs.symbols_named(&m, &name) {
+            if refs.refs.syms[i].kind_text == "trait"
+                && !out.iter().any(|(j, s): &(usize, ImportSite)| *j == i && s.path == site.path && s.local == site.local)
+            {
+                out.push((i, site.clone()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `trait_i` declares any of `methods`.
+pub(crate) fn trait_has_method(refs: &References, trait_i: usize, methods: &HashSet<String>) -> bool {
+    refs.refs.children.get(refs.refs.syms[trait_i].id.as_str()).is_some_and(|kids| {
+        kids.iter().any(|&k| methods.contains(leaf(&refs.refs.syms[k].name)))
+    })
+}
+
+/// `syms[i]`'s text with unshadowed mentions of `from` renamed to `to`: a path's
+/// first segment or a macro call. Imports inside the item keep their own names.
+pub(crate) fn rename_name(refs: &References, i: usize, from: &str, to: &str) -> String {
+    let symbol = &refs.refs.syms[i];
+    let text = &symbol.text;
+    let mentions = scanned(text);
+    let context = ScopeContext { refs: &refs.refs, module: symbol.module.as_str(), symbol: i, target: None };
+    let scopes = scan_scopes(text, refs.refs.container_name(i).is_some(), &context);
+    let in_import =
+        |range: &std::ops::Range<usize>| scopes.imports.iter().any(|import| import.start <= range.start && range.end <= import.end);
+    let mut ranges: Vec<std::ops::Range<usize>> = mentions
+        .into_iter()
+        .filter_map(|mention| match &mention.mention {
+            Mention::Path(segs) if segs.first().is_some_and(|seg| seg == from) => {
+                if in_import(&mention.range) || shadowed(&scopes, segs, mention.range.start) {
+                    None
+                } else {
+                    Some(mention.range.start..mention.range.start + from.len())
+                }
+            }
+            Mention::Macro(name) if name == from => Some(mention.range),
+            _ => None,
+        })
+        .collect();
+    ranges.sort_by(|a, b| b.start.cmp(&a.start));
+    let mut out = text.clone();
+    for range in ranges {
+        out.replace_range(range, to);
+    }
+    out
+}
+
+fn inline_path(module: &str, name: &str) -> String {
+    format!("{module}::{name}")
+}
+
+fn name_scope<'a>(refs: &'a Refs<'_>, m: &'a str) -> (&'a str, Option<&'a str>) {
+    refs.inline_modules.get(m).map_or((m, None), |&k| {
+        let s = &refs.syms[k];
+        (s.module.as_str(), Some(s.name.as_str()))
+    })
+}
+
+fn scope_module(refs: &Refs, m: &str, scope: Option<usize>) -> String {
+    scope.map_or_else(|| m.to_string(), |k| inline_path(m, &refs.syms[k].name))
+}
+
+fn super_module(refs: &Refs, m: &str, scope: usize) -> String {
+    refs.syms[scope].name.rsplit_once("::").map_or_else(|| m.to_string(), |(parent, _)| inline_path(m, parent))
+}
+
+pub(crate) fn rewrite_sites_refs(refs: &References, target: usize) -> Vec<Site> {
+    rewrite_sites_in(&refs.refs, refs.refs.syms, target)
+}
+
+fn rewrite_sites_in(refs: &Refs, syms: &[Sym], target: usize) -> Vec<Site> {
+    let mut out = vec![];
+    for (i, symbol) in syms.iter().enumerate() {
+        if symbol.kind_text == "use" {
+            continue;
+        }
+        let text = &symbol.text;
+        let mentions = scanned(text);
+        let context = ScopeContext { refs: &refs, module: symbol.module.as_str(), symbol: i, target: Some(target) };
+        let (bound, sites) = bound(text, &mentions, refs.container_name(i).is_some(), &context);
+        out.extend(sites);
+        for mention in mentions {
+            if bound.contains(&mention.range) {
+                continue;
+            }
+            let Mention::Path(segs) = &mention.mention else { continue };
+            out.extend(path_site(&refs, i, &mention.range, segs, target));
+        }
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum CallKind {
+    Method,
+    Macro,
+}
+
+/// The method or macro names `text` calls, for finding the imports they need.
+pub(crate) fn called_names(text: &str, kind: CallKind) -> HashSet<String> {
+    scanned(text)
+        .into_iter()
+        .filter_map(|m| match (kind, m.mention) {
+            (CallKind::Method, Mention::Method(name)) | (CallKind::Macro, Mention::Macro(name)) => Some(name),
+            _ => None,
+        })
+        .collect()
+}

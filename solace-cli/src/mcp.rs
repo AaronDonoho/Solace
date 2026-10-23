@@ -112,13 +112,23 @@ fn tool_call(msg: &Value, budget: usize, single_reads: &mut usize, run_reads: &m
     if let Some(run) = run_reads.as_mut() {
         run.start_call();
     }
+    // A patch belongs in `text`; `command` holds only the verb.
+    if patch_in_command(&commands) {
+        out = "the patch goes in `text`; `command` is just `submit`; nothing in this call ran.\n".to_string();
+        is_error = true;
+    }
     // Code sent as command lines rather than in `text` (run 11): one error for the
     // call, and nothing runs.
-    if let Some(code) = commands.iter().find(|c| looks_like_code(c)) {
+    if !is_error && let Some(code) = commands.iter().find(|c| looks_like_code(c)) {
         out = format!(
             "Not a command: {code}\nThis looks like code. Code (for probe, submit) goes in `text`, \
             not in `command`; nothing in this call ran.\n"
         );
+        is_error = true;
+    }
+    // A shell suffix is not part of a Solace command: name it and run nothing.
+    if !is_error && let Some(suffix) = commands.iter().find_map(|c| shell_suffix(c)) {
+        out = format!("commands are not shell: drop `{suffix}`; nothing in this call ran.\n");
         is_error = true;
     }
     // A question is complete in itself: no note or other action beside it.
@@ -235,4 +245,100 @@ mod tests {
         assert_eq!(out["isError"], json!(true));
         assert!(out["content"][0]["text"].as_str().unwrap().starts_with("No command given."));
     }
+
+    #[test]
+    fn a_patch_in_command_is_refused() {
+        let msg = json!({"params": {"arguments": {"command": "*** Begin Patch\n*** Update: app.main\n*** End Patch"}}});
+        let (mut reads, mut run) = (0, None);
+        let out = tool_call(&msg, 10_000, &mut reads, &mut run);
+        assert_eq!(out["isError"], json!(true));
+        assert_eq!(out["content"][0]["text"], json!("the patch goes in `text`; `command` is just `submit`; nothing in this call ran.\n"));
+    }
+
+    #[test]
+    fn a_shell_suffix_is_refused_once_with_its_text() {
+        let msg = json!({"params": {"arguments": {"command": "view x 2>/dev/null || true\nview y | head"}}});
+        let (mut reads, mut run) = (0, None);
+        let out = tool_call(&msg, 10_000, &mut reads, &mut run);
+        assert_eq!(out["isError"], json!(true));
+        assert_eq!(out["content"][0]["text"], json!("commands are not shell: drop `2>/dev/null || true`; nothing in this call ran.\n"));
+    }
+
+    #[test]
+    fn a_quoted_pipe_in_grep_still_runs() {
+        let root = crate::testing::Scratch::new().with(&[("notes.md", "a|b\n")]);
+        let msg = json!({"params": {"arguments": {"command": "grep \"a|b\" --in notes.md"}}});
+        let (mut reads, mut run) = (0, None);
+        let out = crate::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        assert!(!out["content"][0]["text"].as_str().unwrap().contains("commands are not shell"), "{out}");
+    }
+
+    #[test]
+    fn patch_in_command_is_told_from_a_plain_command() {
+        assert!(patch_in_command(&["submit", "*** Begin Patch", "*** End Patch"]));
+        assert!(!patch_in_command(&["submit", "*** Update: app.main"]));
+    }
+
+    #[test]
+    fn shell_suffix_names_the_part_to_drop() {
+        assert_eq!(shell_suffix("view x 2>/dev/null || true"), Some("2>/dev/null || true"));
+        assert_eq!(shell_suffix("find x | head"), Some("| head"));
+        assert_eq!(shell_suffix("make && test"), Some("&& test"));
+        assert_eq!(shell_suffix("inspect a.B<'a>::f 2>/dev/null"), Some("2>/dev/null"));
+    }
+
+    #[test]
+    fn shell_suffix_ignores_a_quoted_pipe() {
+        assert_eq!(shell_suffix("grep \"a|b\" src"), None);
+        assert_eq!(shell_suffix("find 'x || y'"), None);
+    }
+
+    #[test]
+    fn shell_suffix_ignores_rust_angles() {
+        assert_eq!(shell_suffix("inspect language::rust_refs.Refs<'a>::resolve"), None);
+        assert_eq!(shell_suffix("inspect crate.<Failure as From<std::io::Error>>::from"), None);
+        assert_eq!(shell_suffix("grep ->"), None);
+        assert_eq!(shell_suffix("grep Vec<u8>"), None);
+    }
+
+    #[test]
+    fn a_rust_name_with_angles_is_not_shell() {
+        let root = crate::testing::Scratch::new();
+        let msg = json!({"params": {"arguments": {"command": "inspect language::rust_refs.Refs<'a>::resolve"}}});
+        let (mut reads, mut run) = (0, None);
+        let out = crate::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        assert!(!out["content"][0]["text"].as_str().unwrap().contains("commands are not shell"), "{out}");
+    }
+}
+
+/// Whether the command lines hold a patch, which belongs in `text`.
+fn patch_in_command(lines: &[&str]) -> bool {
+    lines.iter().any(|line| line.starts_with("*** Begin Patch"))
+}
+
+/// The shell part of a command line: its first unquoted redirect or operator,
+/// through the end of the line. `None` when the line is a plain Solace command.
+fn shell_suffix(line: &str) -> Option<&str> {
+    let bytes = line.as_bytes();
+    let mut quote = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        match quote {
+            Some(q) if bytes[i] == q => quote = None,
+            Some(_) => {}
+            None => match bytes[i] {
+                b'"' => quote = Some(b'"'),
+                b'\'' if line[i + 1..].contains('\'') => quote = Some(b'\''),
+                b'|' => return Some(&line[i..]),
+                b'&' if bytes.get(i + 1) == Some(&b'&') => return Some(&line[i..]),
+                b'2' if bytes.get(i + 1) == Some(&b'>') && (i == 0 || bytes[i - 1].is_ascii_whitespace()) => {
+                    return Some(&line[i..]);
+                }
+                b'>' | b'<' if i == 0 || bytes[i - 1].is_ascii_whitespace() => return Some(&line[i..]),
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    None
 }

@@ -21,12 +21,12 @@ pub(crate) struct RustTarget {
 /// its `dir`, the `mod <name>;` line its parent's header takes (`None` for a
 /// test crate root, which `integration::x` names and no line declares), and the
 /// header of the text that made it.
-struct RustNew {
-    module: String,
-    file: String,
-    dir: String,
-    line: Option<(String, String)>,
-    header: String,
+pub(crate) struct RustNew {
+    pub(crate) module: String,
+    pub(crate) file: String,
+    pub(crate) dir: String,
+    pub(crate) line: Option<(String, String)>,
+    pub(crate) header: String,
 }
 
 /// The `// ── <name> ──` blocks of a plain `submit`, each name and text
@@ -65,12 +65,13 @@ fn nested(item: &store::Submitted) -> Vec<&store::Submitted> {
     std::iter::once(item).chain(item.children.iter().flat_map(nested)).collect()
 }
 
-/// The namespace a Rust item's name lives in (D-168): a struct and a `fn` of
-/// one name don't clash, two types or two values of one name do.
-fn rust_namespace(kind: &str) -> u8 {
+/// The namespace bits a Rust item's name lives in (D-168): a type, a value, or
+/// a macro. A type and a value of one name don't clash; two of either do.
+pub(crate) fn rust_namespace(kind: &str) -> u8 {
     match kind {
-        "struct" | "enum" | "union" | "type" | "trait" => 1,
-        "const" | "static" => 2,
+        "struct" | "enum" | "union" | "type" | "trait" | "mod" => TYPE_NAMESPACE,
+        "fn" | "const" | "static" => VALUE_NAMESPACE,
+        "macro_rules!" | "macro" => MACRO_NAMESPACE,
         _ => 0,
     }
 }
@@ -108,7 +109,7 @@ fn is_mod_line(line: &str) -> bool {
 
 /// A module header with `mod <name>;` after its last `mod` line, or at its end
 /// when it has none (D-168), keeping what followed its last line.
-fn add_mod(header: &str, name: &str) -> String {
+pub(crate) fn add_mod(header: &str, name: &str) -> String {
     let body = header.trim_end();
     let end = &header[body.len()..];
     let end = if end.is_empty() { "\n" } else { end.strip_prefix('\n').unwrap_or(end) };
@@ -216,7 +217,7 @@ fn parent_of(module: &str) -> &str {
 }
 
 /// A symbol and every item nested in it, in the store's order (D-173).
-fn rust_descendants(ix: &Index, i: usize) -> Vec<usize> {
+pub(crate) fn rust_descendants(ix: &Index, i: usize) -> Vec<usize> {
     let mut out = vec![i];
     let mut ids = vec![ix.syms[i].id.clone()];
     let mut at = 0;
@@ -323,9 +324,12 @@ fn rust_items_under(ix: &Index, pieces: &[language::rust::Piece], stored: &[usiz
     let mut used = vec![false; stored.len()];
     let mut out = vec![];
     for p in pieces {
-        let namespace = rust_namespace(p.kind);
-        let hit = (0..stored.len())
-            .find(|&k| !used[k] && ix.syms[stored[k]].name == p.name && rust_namespace(&ix.syms[stored[k]].kind_text) == namespace);
+        let namespace = rust_namespaces(p.kind, &p.text);
+        let hit = (0..stored.len()).find(|&k| {
+            !used[k]
+                && ix.syms[stored[k]].name == p.name
+                && rust_namespaces(&ix.syms[stored[k]].kind_text, &ix.syms[stored[k]].text) == namespace
+        });
         if let Some(k) = hit {
             used[k] = true;
         }
@@ -381,6 +385,7 @@ impl Store {
     /// change, and a module the store doesn't have is created by `--new`.
     fn submit_module_rust(&self, m: &str, raw: &str, formatted: bool) -> Out {
         let ix = self.index()?;
+        self.refuse_drift(&ix)?;
         let Some(row) = self.resolve_module(&ix, m) else {
             return self.submit_symbols_rust(None, Some(m), raw, false);
         };
@@ -409,11 +414,15 @@ impl Store {
         let max_width = cargo::max_width(&self.root);
         let out = self.transaction(&[], || {
             self.set_header(&module, &header)?;
-            let (mut changed, mut added): (Vec<String>, Vec<String>) = (vec![], vec![]);
+            let (mut changed, mut added): (Vec<(String, String)>, Vec<(String, String)>) = (vec![], vec![]);
             self.rust_save_items(&module, None, &items, &ix, &mut changed, &mut added)?;
+            let dropped = self.rust_prune_impls(&[module.clone()])?;
             let after_ix = self.index()?;
+            let live: HashSet<&str> = after_ix.syms.iter().map(|s| s.id.as_str()).collect();
+            changed.retain(|(id, _)| live.contains(id.as_str()));
+            added.retain(|(id, _)| live.contains(id.as_str()));
             let after = after_ix.modules.iter().find(|r| r.path == module).map(|r| store::module_text(&after_ix, r));
-            if after.as_deref() == Some(before.as_str()) {
+            if after.as_deref() == Some(before.as_str()) && dropped.is_empty() {
                 let mut out = format!("Unchanged: {module}. The text equals the stored symbols, so nothing was saved or checked.\n");
                 if formatted {
                     out += &note_lines(&long_line_notes(&ix, &module, &items, max_width, true));
@@ -428,12 +437,21 @@ impl Store {
             };
             let errors: Vec<&Diag> = diags.iter().filter(|d| d.error && own(d)).collect();
             if !errors.is_empty() {
-                let text: Vec<&str> = errors.iter().map(|d| d.text.as_str()).collect();
-                return fail(format!("Not saved: the submitted text has errors.\n\n{}\n{}", text.join("\n\n"), cargo::ROUND_NOTE));
+                return fail(format!(
+                    "Not saved: the submitted text has errors.\n\n{}\n{}",
+                    crate::group_errors(&errors),
+                    cargo::ROUND_NOTE
+                ));
             }
-            let list = |v: &[String]| if v.is_empty() { "none".to_string() } else { v.join(", ") };
-            let mut out = format!("Saved {module}.\n");
-            out += &format!("Note: {module}: changed {}; added {}\n", list(&changed), list(&added));
+            let list = |v: &[(String, String)]| {
+                if v.is_empty() { "none".to_string() } else { v.iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>().join(", ") }
+            };
+            let mut out = if after.as_deref() == Some(before.as_str()) {
+                String::new()
+            } else {
+                format!("Saved {module}.\nNote: {module}: changed {}; added {}\n", list(&changed), list(&added))
+            };
+            out += &dropped_impls_note(&dropped);
             out += &warning_summary(diags.iter().filter(|d| !d.error && own(d)));
             out += &broken_report(&before_broken, &diags);
             out += &note_lines(&long_line_notes(&ix, &module, &items, max_width, formatted));
@@ -490,8 +508,8 @@ impl Store {
         parent: Option<&str>,
         items: &[RustItem],
         ix: &Index,
-        changed: &mut Vec<String>,
-        added: &mut Vec<String>,
+        changed: &mut Vec<(String, String)>,
+        added: &mut Vec<(String, String)>,
     ) -> Result<(), Failure> {
         for (ord, item) in items.iter().enumerate() {
             let rev = revision(&item.text);
@@ -505,7 +523,7 @@ impl Store {
                     )?;
                     if edited {
                         self.history(&id, "edit", &item.name)?;
-                        changed.push(item.name.clone());
+                        changed.push((id.clone(), item.name.clone()));
                     }
                     self.rust_save_items(module, Some(id.as_str()), &item.children, ix, changed, added)?;
                 }
@@ -517,7 +535,7 @@ impl Store {
                         params![id, module, item.name, item.kind, item.text, ord as i64, rev, parent, item.sep, item.tail],
                     )?;
                     self.history(&id, "create", &item.name)?;
-                    added.push(item.name.clone());
+                    added.push((id.clone(), item.name.clone()));
                     self.rust_save_items(module, Some(id.as_str()), &item.children, ix, changed, added)?;
                 }
             }
@@ -531,6 +549,7 @@ impl Store {
     /// a patch's blocks are already rustfmt's text, so they are not formatted again.
     pub(crate) fn submit_symbols_rust(&self, name: Option<&str>, new_in: Option<&str>, raw: &str, formatted: bool) -> Out {
         let ix = self.index()?;
+        self.refuse_drift(&ix)?;
         let blocks = submit_blocks(name, new_in, raw)?;
         if blocks.is_empty() {
             return fail("E0101 nothing to submit.");
@@ -599,15 +618,22 @@ impl Store {
                             && Some(i) != target.parent
                             && s.module == target.module
                             && s.name == item.name
-                            && rust_namespace(&s.kind_text) == rust_namespace(item.kind)
+                            && rust_namespaces_overlap(&s.kind_text, &s.text, item.kind, &item.text)
                     });
                     if let Some(i) = clash {
                         return fail(format!("E1004 {} already exists; submit to it instead.", ix.syms[i].qname()));
                     }
+                    if rust_namespaces(item.kind, &item.text) & TYPE_NAMESPACE != 0
+                        && ix.modules.iter().any(|m| module_path_named(&target.module, &item.name, &m.path))
+                    {
+                        return fail(format!("E1004 {}.{} already exists; submit to it instead.", target.module, item.name));
+                    }
                     let twice = plan.iter().any(|(m, .., items)| {
                         m == &target.module
                             && items.iter().any(|p| {
-                                nested(p).iter().any(|c| c.name == item.name && rust_namespace(c.kind) == rust_namespace(item.kind))
+                                nested(p)
+                                    .iter()
+                                    .any(|c| c.name == item.name && rust_namespaces_overlap(c.kind, &c.text, item.kind, &item.text))
                             })
                     });
                     if twice {
@@ -697,6 +723,20 @@ impl Store {
                 out += &note_lines(&long);
                 return Ok(out);
             }
+            let mut touched: Vec<String> = plan.iter().map(|(module, ..)| module.clone()).collect();
+            unique(&mut touched);
+            let dropped = self.rust_prune_impls(&touched)?;
+            for (qname, _) in &dropped {
+                let submitted_impl =
+                    plan.iter().any(|(m, .., items)| items.iter().any(|i| i.kind == "impl" && format!("{m}.{}", i.name) == *qname));
+                if submitted_impl {
+                    for list in [&mut saved, &mut unchanged] {
+                        if let Some(p) = list.iter().position(|s| s == qname) {
+                            list.remove(p);
+                        }
+                    }
+                }
+            }
             let mut modules: HashSet<&str> = plan.iter().map(|p| p.0.as_str()).collect();
             // A new module's `mod` line lands in its parent's header, so an error
             // cargo reports against the parent is this submit's too (D-168).
@@ -710,13 +750,20 @@ impl Store {
             let diags = self.check_all(&ix)?;
             let errors: Vec<&Diag> = diags.iter().filter(|d| d.error && own(d)).collect();
             if !errors.is_empty() {
-                let text: Vec<&str> = errors.iter().map(|d| d.text.as_str()).collect();
-                return fail(format!("Not saved: the submitted text has errors.\n\n{}\n{}", text.join("\n\n"), cargo::ROUND_NOTE));
+                return fail(format!(
+                    "Not saved: the submitted text has errors.\n\n{}\n{}",
+                    crate::group_errors(&errors),
+                    cargo::ROUND_NOTE
+                ));
             }
-            let mut out = format!("Saved {}.\n", saved.join(", "));
+            let mut out = String::new();
+            if !saved.is_empty() {
+                out += &format!("Saved {}.\n", saved.join(", "));
+            }
             if !unchanged.is_empty() {
                 out += &format!("Unchanged (the same as stored): {}.\n", unchanged.join(", "));
             }
+            out += &dropped_impls_note(&dropped);
             out += &warning_summary(diags.iter().filter(|d| !d.error && own(d)));
             out += &broken_report(&before_broken, &diags);
             let mut long = vec![];
@@ -801,7 +848,7 @@ impl Store {
     /// crate root (`tests/x.rs`, D-169). `None` when a part is no identifier or
     /// names a keyword, when the parent module isn't there, or when the name it
     /// would land under is a module the store already has.
-    fn rust_created(&self, ix: &Index, name: &str) -> Option<RustNew> {
+    pub(crate) fn rust_created(&self, ix: &Index, name: &str) -> Option<RustNew> {
         let parts: Vec<&str> = name.split("::").collect();
         if !parts.iter().all(|p| identifier(p)) {
             return None;
@@ -887,6 +934,7 @@ impl Store {
     /// removes a module. Then cargo checks the module.
     fn submit_imports_rust(&self, m: &str, raw: &str) -> Out {
         let ix = self.index()?;
+        self.refuse_drift(&ix)?;
         let Some(module) = self.resolve_module(&ix, m).map(|r| r.path.clone()) else {
             return fail(format!("E1003 unknown module: {m}"));
         };
@@ -986,21 +1034,13 @@ impl Store {
             for j in &gone {
                 self.retire(&ix.syms[*j].id, "")?;
             }
+            let dropped = self.rust_prune_impls(&emptied)?;
             let mut retired: Vec<String> = vec![];
             self.rust_prune_modules(&mut emptied, &mut retired)?;
             // The file's ending hangs on its last row; every row this delete
             // took hands its separator to the new last one, so the file keeps
             // its ending (a `mod x;` item the prune took counts too).
-            let ix = self.index()?;
-            for (module, id, sep) in &endings {
-                if ix.syms.iter().any(|s| &s.id == id) {
-                    continue;
-                }
-                if let Some(s) = ix.syms.iter().filter(|s| &s.module == module && s.parent.is_none()).next_back() {
-                    let sep = sep.clone().unwrap_or_else(|| "\n".into());
-                    self.db.execute("UPDATE symbols SET sep = ?2 WHERE id = ?1", params![&s.id, sep])?;
-                }
-            }
+            self.rust_fix_endings(&endings)?;
             let ix = self.index()?;
             let diags = self.check_all(&ix)?;
             let key = |d: &Diag| d.symbol.clone().or_else(|| d.module.clone().map(|m| format!("{m} imports")));
@@ -1031,6 +1071,7 @@ impl Store {
                 let retired = if retired.contains(module) { format!("; module {module} retired") } else { String::new() };
                 text += &format!("Deleted {qname}{retired}.\n");
             }
+            text += &dropped_impls_note(&dropped);
             Ok(lockdown::trim_output(&text, budget) + &broken_report(&before, &diags))
         })?;
         Ok(out)
@@ -1042,7 +1083,7 @@ impl Store {
     /// (D-136). A parent this empties is looked at too; `crate` stays, and a test
     /// crate's file (`tests/x.rs`, D-169) is found by Cargo itself, so it loses
     /// only its row and its file and no parent is touched.
-    fn rust_prune_modules(&self, todo: &mut Vec<String>, retired: &mut Vec<String>) -> Result<(), Failure> {
+    pub(crate) fn rust_prune_modules(&self, todo: &mut Vec<String>, retired: &mut Vec<String>) -> Result<(), Failure> {
         unique(todo);
         while let Some(module) = todo.pop() {
             if module == "crate" {
@@ -1092,10 +1133,12 @@ impl Store {
         Ok(())
     }
 
-    /// `format <module>` in a Rust store (D-180): rustfmt the module's written
-    /// file whole, then save every item through the whole-module submit path,
+    /// `format <module>` in a Rust store (D-180): rustfmt the module's stored
+    /// text whole, then save every item through the whole-module submit path,
     /// so ids stay by name and the result is checked with cargo. A file the
-    /// store doesn't hold is not a module it can format.
+    /// store doesn't hold is not a module it can format. A file that differs
+    /// from the store is repaired first, since `format` is the one repair
+    /// command.
     pub(crate) fn format_module_rust(&self, m: &str) -> Out {
         let ix = self.index()?;
         let Some(row) = self.resolve_module(&ix, m) else {
@@ -1106,22 +1149,90 @@ impl Store {
             return crate::lockdown::error("E6013", "format", message);
         }
         let module = row.path.clone();
-        let files = self.materialize(&ix)?;
-        let Some(map) = files.iter().find(|f| f.module == module) else {
-            return fail(format!("E1003 unknown module: {m}"));
-        };
-        let text = cargo::format_module(&self.root, &map.file).map_err(|e| {
+        let note = self.repair_drift(&ix, row)?;
+        self.materialize(&ix)?;
+        let (source, ranges) = store::projection(&ix, row);
+        let text = cargo::format_module(&self.root, &source).map_err(|e| {
             let line =
                 e.0.strip_prefix("Not saved: E0100 syntax error at line ")
                     .and_then(|rest| rest.split_once(':'))
                     .and_then(|(line, _)| line.trim().parse::<usize>().ok());
             let label = line
-                .and_then(|line| map.ranges.iter().find(|(first, last, _)| *first <= line && line <= *last).map(|(.., name)| name.clone()))
+                .and_then(|line| ranges.iter().find(|(first, last, _)| *first <= line && line <= *last).map(|(.., name)| name.clone()))
                 .unwrap_or_else(|| module.clone());
-            let lines = map.ranges.iter().map(|(_, last, _)| *last).max().unwrap_or(1);
-            store::rust_syntax_error(e, &label, None, &module, 0, lines)
+            let lines = ranges.iter().map(|(_, last, _)| *last).max().unwrap_or(1);
+            add_repair_note(store::rust_syntax_error(e, &label, None, &module, 0, lines), note.as_deref())
         })?;
-        self.submit_module_rust(m, &text, true)
+        let out = self.submit_module_rust(m, &text, true).map_err(|e| add_repair_note(e, note.as_deref()))?;
+        Ok(match note {
+            Some(note) => format!("{note}\n{out}"),
+            None => out,
+        })
+    }
+
+    /// Saves a module file that differs from the store under `.solace/outside/`
+    /// before a repair overwrites it, and returns the note that names it.
+    fn repair_drift(&self, ix: &Index, row: &ModuleRow) -> Result<Option<String>, Failure> {
+        let module = row.path.clone();
+        let rel = row.rel();
+        let Ok(disk) = std::fs::read_to_string(self.root.join(&rel)) else { return Ok(None) };
+        let names = store::drift(ix, row, &disk);
+        if names.is_empty() {
+            return Ok(None);
+        }
+        let names = names.join(", ");
+        let differs = format!("E0104 {rel} differs from the store in: {names}.");
+        let again = format!("Run `format {module}` again after fixing it.");
+        let kept = match crate::outside::keep(&self.root, &rel, disk.as_bytes()) {
+            Ok(kept) => kept,
+            Err(e) => return fail(format!("{differs} The current file could not be kept: {}. {again}", e.0)),
+        };
+        if let Err(e) = self.record_module_file(row, disk.as_bytes()) {
+            return fail(format!("{differs} The current file is kept at {kept}, but the store could not record it: {}. {again}", e.0));
+        }
+        Ok(Some(format!("Repaired {rel}: it differed from the store in: {names}. The file it replaced is kept at {kept}.")))
+    }
+
+    /// Retires the inherent `impl` rows a write left with no members (D-158,
+    /// D-187). A trait impl is named `<Type as Trait>`, so a plain name is
+    /// inherent; an impl with any member stays. A dropped last row hands its
+    /// separator to the row before it, so the file keeps its ending. Each
+    /// returned pair is the dropped impl's qname and its name.
+    pub(crate) fn rust_prune_impls(&self, modules: &[String]) -> Result<Vec<(String, String)>, Failure> {
+        let ix = self.index()?;
+        let endings = rust_endings(&ix);
+        let mut dropped: Vec<(String, String)> = vec![];
+        for s in &ix.syms {
+            if s.kind_text != "impl" || s.name.starts_with('<') || !modules.contains(&s.module) {
+                continue;
+            }
+            if ix.syms.iter().any(|c| c.parent.as_deref() == Some(s.id.as_str())) {
+                continue;
+            }
+            self.retire(&s.id, "")?;
+            dropped.push((s.qname(), s.name.clone()));
+        }
+        if dropped.is_empty() {
+            return Ok(dropped);
+        }
+        self.rust_fix_endings(&endings)?;
+        Ok(dropped)
+    }
+
+    /// Hands the separator of each module's former last row, if it is gone, to
+    /// the new last row, so the file keeps its ending.
+    fn rust_fix_endings(&self, endings: &[(String, String, Option<String>)]) -> Result<(), Failure> {
+        let ix = self.index()?;
+        for (module, id, sep) in endings {
+            if ix.syms.iter().any(|s| &s.id == id) {
+                continue;
+            }
+            if let Some(s) = ix.syms.iter().filter(|s| &s.module == module && s.parent.is_none()).next_back() {
+                let sep = sep.clone().unwrap_or_else(|| "\n".into());
+                self.db.execute("UPDATE symbols SET sep = ?2 WHERE id = ?1", params![&s.id, sep])?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1243,4 +1354,50 @@ pub(crate) fn rust_one(found: &[usize], ix: &Index, input: &str) -> Result<Optio
             fail(format!("E1002 ambiguous name: {input} could be\n{}", list.join("\n")))
         }
     }
+}
+
+/// Keeps a repair's note ahead of a later error, since the file was already
+/// replaced and its copy named.
+fn add_repair_note(e: Failure, note: Option<&str>) -> Failure {
+    match note {
+        Some(note) => Failure(format!("{note}\n{}", e.0), e.1),
+        None => e,
+    }
+}
+
+pub(crate) const TYPE_NAMESPACE: u8 = 1;
+
+pub(crate) const VALUE_NAMESPACE: u8 = 2;
+
+pub(crate) const MACRO_NAMESPACE: u8 = 4;
+
+/// Every namespace an item's name lives in: a unit or tuple struct also names
+/// a value constructor, so it clashes with a `fn` of the same name.
+pub(crate) fn rust_namespaces(kind: &str, text: &str) -> u8 {
+    let mut namespaces = rust_namespace(kind);
+    let braced = syn::parse_str::<syn::ItemStruct>(text).is_ok_and(|item| matches!(item.fields, syn::Fields::Named(_)));
+    if kind == "struct" && !braced {
+        namespaces |= VALUE_NAMESPACE;
+    }
+    namespaces
+}
+
+/// Whether two items of one module would clash by sharing a namespace.
+pub(crate) fn rust_namespaces_overlap(a_kind: &str, a_text: &str, b_kind: &str, b_text: &str) -> bool {
+    rust_namespaces(a_kind, a_text) & rust_namespaces(b_kind, b_text) != 0
+}
+
+/// Whether `path` names a child module `name` of `module`.
+pub(crate) fn module_path_named(module: &str, name: &str, path: &str) -> bool {
+    let child = if module == "crate" { name.to_string() } else { format!("{module}::{name}") };
+    path == child || path == format!("crate::{child}")
+}
+
+/// The reply line naming the empty impls a write dropped; empty when none.
+pub(crate) fn dropped_impls_note(dropped: &[(String, String)]) -> String {
+    if dropped.is_empty() {
+        return String::new();
+    }
+    let names = dropped.iter().map(|(q, _)| q.as_str()).collect::<Vec<_>>().join(", ");
+    format!("Dropped empty impl {names}.\n")
 }

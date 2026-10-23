@@ -440,11 +440,14 @@ fn rustfmt_line(stderr: &str, offset: usize) -> Option<usize> {
 static FORMATTED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<(String, String, Option<Vec<u8>>), String>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-/// Formats a whole module's written file with the project's `rustfmt.toml` and
-/// edition (D-180), leaving child modules alone. The file is put back on a
-/// failed run, so a syntax error changes nothing.
-pub fn format_module(root: &Path, file: &Path) -> Result<String, Failure> {
-    let before = fs::read_to_string(file)?;
+/// Formats a whole module's text with the project's `rustfmt.toml` and edition
+/// (D-180), leaving child modules alone. The text goes through a scratch file,
+/// so a failed run changes no module file.
+pub fn format_module(root: &Path, source: &str) -> Result<String, Failure> {
+    let dir = root.join(".solace");
+    fs::create_dir_all(&dir)?;
+    let file = dir.join(format!("format-{}.rs", crate::unique_id()));
+    fs::write(&file, source)?;
     let mut argv: Vec<String> = vec!["rustfmt".into(), "--edition".into(), edition(root)];
     if let Some(config) = config_path(root) {
         argv.push("--config-path".into());
@@ -454,11 +457,12 @@ pub fn format_module(root: &Path, file: &Path) -> Result<String, Failure> {
     argv.push("skip_children=true,reorder_modules=false".into());
     argv.push(file.to_string_lossy().to_string());
     let output = Command::new(&argv[0]).args(&argv[1..]).output();
+    let formatted = fs::read_to_string(&file).unwrap_or_else(|_| source.to_string());
+    fs::remove_file(&file).ok();
     let output = output?;
     if !output.status.success() {
-        let restored = fs::write(file, &before);
         let message = strip_ansi(&String::from_utf8_lossy(&output.stderr));
-        let lines = before.lines().count().max(1);
+        let lines = source.lines().count().max(1);
         let line = rustfmt_line(&message, 0).unwrap_or(1).min(lines);
         let path = file.to_string_lossy();
         let summary = message
@@ -468,13 +472,9 @@ pub fn format_module(root: &Path, file: &Path) -> Result<String, Failure> {
             .or_else(|| message.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with("-->")))
             .unwrap_or("the text doesn't parse")
             .replace(&*path, "the module");
-        let mut out = format!("Not saved: E0100 syntax error at line {line}: {summary}");
-        if let Err(e) = restored {
-            out += &format!("\nThe module file could not be put back after rustfmt: {e}");
-        }
-        return fail(out);
+        return fail(format!("Not saved: E0100 syntax error at line {line}: {summary}"));
     }
-    Ok(fs::read_to_string(file)?)
+    Ok(formatted)
 }
 
 /// A Rust project's `format` needs this on `PATH`; without it the command is

@@ -11,6 +11,7 @@ use std::collections::BTreeSet;
 
 pub(crate) mod ahead;
 mod merge;
+mod rust;
 
 const MODULE_HINT: &str = "to move a whole module, use move src/x.gleam src/y.gleam";
 
@@ -709,12 +710,12 @@ fn merged(dep: &Index, source: &Index) -> Index {
             owns_dir: m.owns_dir,
         })
         .collect();
-    Index::build(source.lang, syms, modules, false)
+    crate::index::build(source.lang, syms, modules, false)
 }
 
 /// `body` in a transaction of each store, the first outermost; the last one
 /// takes away the files it created when the body fails.
-fn nested(stores: &[&Store], created: &[PathBuf], body: &mut dyn FnMut() -> Out) -> Out {
+fn nested<T>(stores: &[&Store], created: &[PathBuf], body: &mut dyn FnMut() -> Result<T, Failure>) -> Result<T, Failure> {
     match stores {
         [] => body(),
         [last] => last.transaction(created, || body()),
@@ -1182,6 +1183,15 @@ impl Store {
     /// `extract <symbols…> --to <module>` (D-103).
     pub(crate) fn extract(&self, args: &[&str], budget: usize) -> Out {
         let p = parse(args)?;
+        if crate::language::is_rust(&self.root) {
+            if p.to_project.is_some() {
+                return fail(concat!(
+                    "E6013 `extract --to-project` is not available for Rust; ",
+                    "extract within this project with --to <module> (D-185)"
+                ));
+            }
+            return rust::extract(self, &p, budget);
+        }
         let ix = self.index()?;
         let top = scope::top(&self.root);
         let mine = scope::dir(&top, &self.root);
@@ -1201,9 +1211,7 @@ impl Store {
                 if lockdown::same_project(&dir, &self.root) {
                     None
                 } else if crate::language::is_rust(&dir) {
-                    return fail(format!(
-                        "E6013 {d} is a Rust project (Cargo.toml): `extract` is Gleam only; Rust extract is deferred (D-158 point 6)"
-                    ));
+                    return fail(format!("E6013 {d} is a Rust project: `--to-project` is not available for Rust (D-185)"));
                 } else if !dir.join("gleam.toml").exists() {
                     return fail(format!("E6013 {d} has no code held as symbols to extract into"));
                 } else {
@@ -1213,11 +1221,6 @@ impl Store {
                 }
             }
         };
-        let in_target = |m: &str, name: &str| match &dest {
-            Some(d) => d.ix.syms.iter().any(|s| s.module == m && s.name == name),
-            None => ix.syms.iter().any(|s| s.module == m && s.name == name),
-        };
-
         // the target, in its forgiving forms
         let mut to = p.to.trim().trim_end_matches(".gleam").to_string();
         for pre in ["src/", "test/"] {
@@ -1241,54 +1244,7 @@ impl Store {
             }
         }
 
-        // the symbols
-        let mut listed: Vec<usize> = vec![];
-        let mut already: Vec<String> = vec![];
-        for name in &p.names {
-            if name.ends_with(".gleam") {
-                return fail(MODULE_HINT);
-            }
-            match self.resolve(&ix, name) {
-                Ok(i) if dest.is_none() && ix.syms[i].module == to => already.push(ix.syms[i].qname()),
-                Ok(i) => {
-                    if !listed.contains(&i) {
-                        listed.push(i)
-                    }
-                }
-                Err(e) if e.0.starts_with("E1002") => {
-                    let (m, n) = match name.rsplit_once('.') {
-                        Some((m, n)) => (Some(m.replace('.', "/")), n),
-                        None => (None, name.as_str()),
-                    };
-                    let found: Vec<usize> = (0..ix.syms.len())
-                        .filter(|&i| {
-                            let s = &ix.syms[i];
-                            s.name == n && m.as_ref().is_none_or(|m| s.module == *m || s.module.ends_with(&format!("/{m}")))
-                        })
-                        .collect();
-                    if found.iter().any(|&i| ix.syms[i].module == to) && found.iter().any(|&i| ix.syms[i].module != to) {
-                        let list: Vec<String> = found.iter().map(|&i| ix.syms[i].qname()).collect();
-                        return fail(format!(
-                            "E1004 {name} resolves in both the source and {to}: {}; name the module, e.g. {}",
-                            list.join(", "),
-                            list[0]
-                        ));
-                    }
-                    return Err(e);
-                }
-                Err(e) => {
-                    if self.resolve_module(&ix, name).is_some() {
-                        return fail(MODULE_HINT);
-                    }
-                    let last = name.rsplit('.').next().unwrap_or(name);
-                    if in_target(&to, last) {
-                        already.push(format!("{to}.{last}"));
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
-        }
+        let (listed, already) = resolve_listed(self, &ix, &p.names, &dest, &to)?;
         if listed.is_empty() {
             return Ok(format!("{} already in {to}; nothing changed.\n", already.join(", ")));
         }
@@ -1533,8 +1489,8 @@ impl Store {
                 deps.push(Dependent { dir: d.clone(), store, ix });
                 continue;
             }
-            let Ok(other) = board::open(&dir) else { continue };
-            let Ok(dix) = other.index() else { continue };
+            let other = board::open(&dir).map_err(|e| Failure(format!("{d}: {}", e.0), e.1))?;
+            let dix = other.index().map_err(|e| Failure(format!("{d}: {}", e.0), e.1))?;
             for s in &dix.syms {
                 let header = dix.modules.iter().find(|m| m.path == s.module).map_or("", |m| m.header.as_str());
                 let imps = dix.lang.imports(header);
@@ -1663,7 +1619,7 @@ impl Store {
 
         // modules to create
         let mut created: Vec<(String, &str)> = vec![];
-        if !has(&to) {
+        if !has(&to) && (0..n).any(|i| moved[i] && newmod[i] == to) {
             created.push((to.clone(), if target_is_test { "test" } else { "src" }));
         }
         if !moved_tests.is_empty() && !target_is_test && !has(&test_to) && !created.iter().any(|c| c.0 == test_to) {
@@ -1813,7 +1769,7 @@ impl Store {
                     }
                 }
             }
-            let checked = (|| -> Out {
+            let checked = (|| -> Result<Finished, Failure> {
                 let mut bad: Vec<String> = vec![];
                 // the destination's files first: Gleam reads a path dependency from disk
                 if let Some(d) = &dest {
@@ -1848,7 +1804,7 @@ impl Store {
                     .filter(|(_, e)| self.resolve(&ix2, e).is_err())
                     .map(|(s, e)| format!("suite {s} entry {e}"))
                     .collect();
-                Ok(format!("{}\u{1}{}", gone.join("\u{2}"), retired.join("\u{2}")))
+                Ok(Finished { gone, retired })
             })();
             // every end runs, so a failing one never leaves the rest undecided
             let (a, b) = (end_all(tomls, checked.is_ok()), end_all(carried, checked.is_ok()));
@@ -1862,193 +1818,35 @@ impl Store {
         stores.extend(deps.iter().map(|dp| &dp.store));
         stores.extend(dest.as_ref().map(|d| &d.store));
         let mut body = body;
-        let suites_after = nested(&stores, &created_files, &mut body)?;
-        let (gone, retired) = suites_after.split_once('\u{1}').unwrap_or(("", ""));
+        let finished = nested(&stores, &created_files, &mut body)?;
+        let (gone, retired) = (finished.gone, finished.retired);
 
-        // the reply: names and counts
-        let q = |i: usize| ix.syms[i].qname();
-        let mut out = format!("Moved {}", listed.iter().map(|&i| q(i)).collect::<Vec<_>>().join(", "));
-        if !helpers.is_empty() {
-            let names: Vec<&str> = helpers.iter().map(|&i| ix.syms[i].name.as_str()).collect();
-            out += &format!(" (+{} helper{}: {})", helpers.len(), if helpers.len() == 1 { "" } else { "s" }, names.join(", "));
-        }
-        out += &format!(" to {to}{}\n", dest.as_ref().map_or(String::new(), |d| format!(" in {}", d.dir)));
-        let mut gained: Vec<String> = dep.iter().map(|_| workspace::name(&self.root)).collect();
-        gained.extend(deps.iter().zip(&dep_lines).filter(|(_, l)| l.is_some()).map(|(dp, _)| workspace::name(&dp.store.root)));
-        if let Some(d) = dest.as_ref().filter(|_| !gained.is_empty()) {
-            out += &format!("Dependency added: {} -> {}\n", gained.join(", "), workspace::name(&d.store.root));
-        }
-        if !already.is_empty() {
-            out += &format!("Already in {to}: {}\n", already.join(", "));
-        }
-        if !now_pub.is_empty() {
-            out +=
-                &format!("Now pub: {} (new revision)\n", now_pub.iter().map(|&i| ix.syms[i].name.as_str()).collect::<Vec<_>>().join(", "));
-        }
-        if plan.edits > 0 {
-            out += &format!(
-                "Rewrote {} reference{} in {} module{}\n",
-                plan.edits,
-                if plan.edits == 1 { "" } else { "s" },
-                plan.edited.len(),
-                if plan.edited.len() == 1 { "" } else { "s" }
-            );
-        }
-        for (dp, p) in deps.iter().zip(&dplans).filter(|(_, p)| p.edits > 0) {
-            let plural = |k: usize| if k == 1 { "" } else { "s" };
-            out += &format!(
-                "Rewrote {} reference{} in {} module{} in {}\n",
-                p.edits,
-                plural(p.edits),
-                p.edited.len(),
-                plural(p.edited.len()),
-                dp.dir
-            );
-        }
-        if !moved_tests.is_empty() {
-            out += &format!(
-                "Tests moved: {}\n",
-                moved_tests.iter().map(|&t| format!("{} -> {}", q(t), newmod[t])).collect::<Vec<_>>().join(", ")
-            );
-        }
-        for c in &carries {
-            let imports = if c.text.is_some() { " (its imports rewritten)" } else { "" };
-            out += &format!("Moved file {} to {}: {}{imports}\n", c.from, dest.as_ref().map_or("", |d| d.dir.as_str()), c.to);
-        }
-        if !ffi.is_empty() {
-            out += &format!("Rewrote FFI paths: {}\n", ffi.join(", "));
-        }
-        for m in created.iter().map(|c| &c.0) {
-            out += &format!("Created module {m}\n");
-        }
-        if !retired.is_empty() {
-            out += &format!("Retired module {}\n", retired.replace('\u{2}', ", "));
-        }
-        for note in notes {
-            out += &format!("{note}\n");
-        }
-        for g in gone.split('\u{2}').filter(|g| !g.is_empty()) {
-            out += &format!("Not rewritten: {g} no longer resolves\n");
-        }
-        // the declared suites that reach moved code (D-44): JavaScript FFI paths
-        // aren't type-checked, so a suite is what catches a wrong one
-        let ids: HashSet<&str> = (0..n).filter(|&i| moved[i]).map(|i| ix.syms[i].id.as_str()).collect();
-        let at = |x: &Index| -> Vec<usize> { (0..x.syms.len()).filter(|&i| ids.contains(x.syms[i].id.as_str())).collect() };
-        let mut suites = vec![];
-        match &dest {
-            None => {
-                let x = self.index()?;
-                suites.extend(reach::reached(&reach::suites(self, &x)?, &at(&x)));
-            }
-            Some(d) => {
-                let x = d.store.index()?;
-                let hits = at(&x);
-                for (name, r) in reach::suites(&d.store, &x)? {
-                    if !hits.is_empty() && r.as_ref().is_none_or(|r| hits.iter().any(|j| r.contains(j))) {
-                        suites.push(format!("{name} in {0} (`run {name} --project {0}`)", d.dir));
-                    }
-                }
-                // and this project's suites that reach code now calling across the packages
-                let callers: HashSet<&str> =
-                    (0..n).filter(|&h| !moved[h] && ix.uses[h].iter().any(|&u| moved[u])).map(|h| ix.syms[h].id.as_str()).collect();
-                let sx = self.index()?;
-                let there: Vec<usize> = (0..sx.syms.len()).filter(|&i| callers.contains(sx.syms[i].id.as_str())).collect();
-                if !there.is_empty() {
-                    suites.extend(reach::reached(&reach::suites(self, &sx)?, &there));
-                }
-                // and each covered dependent's suites that reach the code rewritten there
-                for (dp, p) in deps.iter().zip(&dplans) {
-                    let rewritten: HashSet<&str> =
-                        dp.ix.syms.iter().enumerate().filter(|(i, s)| p.newtext[*i] != s.text).map(|(_, s)| s.id.as_str()).collect();
-                    if rewritten.is_empty() {
-                        continue;
-                    }
-                    let x = dp.store.index()?;
-                    let there: Vec<usize> = (0..x.syms.len()).filter(|&i| rewritten.contains(x.syms[i].id.as_str())).collect();
-                    for (name, r) in reach::suites(&dp.store, &x)? {
-                        if !there.is_empty() && r.as_ref().is_none_or(|r| there.iter().any(|j| r.contains(j))) {
-                            suites.push(format!("{name} in {0} (`run {name} --project {0}`)", dp.dir));
-                        }
-                    }
-                }
-            }
-        }
-        if !suites.is_empty() {
-            out += &format!("Also reached: {}\n", suites.join(", "));
-        } else if !ffi.is_empty() || !carries.is_empty() {
-            out += concat!(
-                "JavaScript FFI paths are not type-checked, and no declared suite reaches the moved code: ",
-                "run the JavaScript tests, or declare them in solace.toml with `checks` (D-44)\n",
-            );
-        }
-        // JavaScript that imports moved code from its old compiled module
-        let mut moved_names: HashSet<String> = HashSet::new();
-        for i in (0..n).filter(|&i| moved[i]) {
-            moved_names.insert(ix.syms[i].name.clone());
-            if ix.syms[i].kind == Kind::Type {
-                moved_names.extend(ix.lang.constructors(&ix.syms[i].text));
-            }
-        }
-        let olds: Vec<Vec<String>> = old_modules
-            .iter()
-            .map(|m| {
-                let mut p = module_dir(m);
-                p.push(format!("{}.mjs", tail(m)));
-                p
-            })
-            .collect();
-        let mut js_hits = vec![];
-        for f in js_files(&self.root) {
-            let Ok(text) = fs::read_to_string(self.root.join(&f)) else { continue };
-            for imp in js_imports(&text) {
-                if olds.contains(&ffi_norm(&out_dir(&f), &imp.spec)) && imp.names.iter().any(|x| moved_names.contains(x)) {
-                    js_hits.push(format!("{f}:{}", imp.line));
-                }
-            }
-        }
-        if !js_hits.is_empty() {
-            let (s, it) = if js_hits.len() == 1 { ("", "it") } else { ("s", "them") };
-            out += &format!(
-                "Not rewritten: JavaScript import{s} of moved code from its old module ({}): change {it} with `write`\n",
-                js_hits.join(", ")
-            );
-        }
-        // places outside the code that name a moved symbol, in qualified form only
-        let mut needles: Vec<String> = (0..n).filter(|&i| moved[i]).map(|i| format!("{}.{}", ix.syms[i].module, ix.syms[i].name)).collect();
-        needles.extend(old_modules.iter().map(|m| format!("-m {m}")));
-        let (mut hits, mut files): (Vec<String>, BTreeSet<String>) = (vec![], BTreeSet::new());
-        if let Ok(settings) = lockdown::settings(&self.root)
-            && let Ok(paths) = lockdown::watched_paths(&self.root, &settings)
-        {
-            for path in paths {
-                let Ok(text) = fs::read_to_string(self.root.join(&path)) else { continue };
-                for (k, line) in text.lines().enumerate() {
-                    let found = needles.iter().any(|nd| {
-                        line.match_indices(nd.as_str()).any(|(at, _)| {
-                            let word = |c: char| c.is_alphanumeric() || c == '_' || c == '/';
-                            !line[..at].ends_with(word) && !line[at + nd.len()..].starts_with(word)
-                        })
-                    });
-                    if found {
-                        hits.push(format!("{path}:{}", k + 1));
-                        files.insert(path.clone());
-                    }
-                }
-            }
-        }
-        if !hits.is_empty() {
-            let shown: Vec<&str> = hits.iter().take(5).map(String::as_str).collect();
-            let more = if hits.len() > 5 { ", …" } else { "" };
-            out += &format!(
-                "Not rewritten: {} place{} in {} file{} ({}{more})\n",
-                hits.len(),
-                if hits.len() == 1 { "" } else { "s" },
-                files.len(),
-                if files.len() == 1 { "" } else { "s" },
-                shown.join(", ")
-            );
-        }
-        Ok(lockdown::trim_output(&out, budget))
+        let reply = ExtractReply {
+            s: self,
+            ix: &ix,
+            listed: &listed,
+            helpers: &helpers,
+            to: &to,
+            dest: &dest,
+            dep: &dep,
+            deps: &deps,
+            dep_lines: &dep_lines,
+            already: &already,
+            now_pub: &now_pub,
+            plan: &plan,
+            dplans: &dplans,
+            moved_tests: &moved_tests,
+            newmod: &newmod,
+            carries: &carries,
+            ffi: &ffi,
+            created: &created,
+            retired: &retired,
+            notes: &notes,
+            gone: &gone,
+            moved: &moved,
+            old_modules: &old_modules,
+        };
+        extract_reply_text(&reply, budget)
     }
 }
 
@@ -2672,4 +2470,315 @@ mod tests {
         assert!(!root.join("web/src/a").exists() && root.join("web/src").is_dir());
         assert_eq!(fs::read_to_string(root.join("components/src/ui/board_ffi.mjs")).unwrap(), carried);
     }
+
+    /// A dependent project whose store will not open is an error, not a skip.
+    #[test]
+    fn a_dependent_store_that_will_not_open_is_reported() {
+        let root = Scratch::new().with(&[
+            ("solace.toml", "projects = [\"web\", \"front\"]\n"),
+            ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+            ("web/src/board.gleam", BOARD),
+            ("front/gleam.toml", "name = \"front\"\nversion = \"1.0.0\"\n\n[dependencies]\nweb = { path = \"../web\" }\n"),
+            ("front/src/front.gleam", "import board\n\npub fn view(t: board.Task) -> Int {\n  t.id\n}\n"),
+            ("front/.solace/store.db", "not a database"),
+        ]);
+        import(&root.join("web")).unwrap();
+        let store = Store::at(&root.join("web")).unwrap();
+        let err = extract(&store, &["board.Task", "--to", "task"]).unwrap_err().0;
+        assert!(err.contains("front") && err.contains("database"), "{err}");
+    }
+}
+
+/// What an extract reports after its stores commit: suites that stopped
+/// resolving and the modules it retired.
+struct Finished {
+    gone: Vec<String>,
+    retired: Vec<String>,
+}
+
+struct ExtractReply<'a> {
+    s: &'a Store,
+    ix: &'a Index,
+    listed: &'a [usize],
+    helpers: &'a [usize],
+    to: &'a str,
+    dest: &'a Option<Dest>,
+    dep: &'a Option<(String, String)>,
+    deps: &'a [Dependent],
+    dep_lines: &'a [Option<String>],
+    already: &'a [String],
+    now_pub: &'a [usize],
+    plan: &'a Plan<'a>,
+    dplans: &'a [Plan<'a>],
+    moved_tests: &'a [usize],
+    newmod: &'a [String],
+    carries: &'a [Carry],
+    ffi: &'a [String],
+    created: &'a [(String, &'a str)],
+    retired: &'a [String],
+    notes: &'a [String],
+    gone: &'a [String],
+    moved: &'a [bool],
+    old_modules: &'a BTreeSet<String>,
+}
+
+fn extract_reply_text(r: &ExtractReply<'_>, budget: usize) -> Result<String, Failure> {
+    let mut out = extract_summary(r);
+    out += &extract_suites(r)?;
+    out += &extract_javascript(r);
+    out += &extract_outside(r);
+    Ok(lockdown::trim_output(&out, budget))
+}
+
+fn extract_summary(r: &ExtractReply<'_>) -> String {
+    let ix = r.ix;
+    let q = |i: usize| ix.syms[i].qname();
+    let mut out = format!("Moved {}", r.listed.iter().map(|&i| q(i)).collect::<Vec<_>>().join(", "));
+    if !r.helpers.is_empty() {
+        let names: Vec<&str> = r.helpers.iter().map(|&i| ix.syms[i].name.as_str()).collect();
+        out += &format!(" (+{} helper{}: {})", r.helpers.len(), if r.helpers.len() == 1 { "" } else { "s" }, names.join(", "));
+    }
+    out += &format!(" to {}{}\n", r.to, r.dest.as_ref().map_or(String::new(), |d| format!(" in {}", d.dir)));
+    let mut gained: Vec<String> = r.dep.iter().map(|_| workspace::name(&r.s.root)).collect();
+    gained.extend(r.deps.iter().zip(r.dep_lines).filter(|(_, l)| l.is_some()).map(|(dp, _)| workspace::name(&dp.store.root)));
+    if let Some(d) = r.dest.as_ref().filter(|_| !gained.is_empty()) {
+        out += &format!("Dependency added: {} -> {}\n", gained.join(", "), workspace::name(&d.store.root));
+    }
+    if !r.already.is_empty() {
+        out += &format!("Already in {}: {}\n", r.to, r.already.join(", "));
+    }
+    if !r.now_pub.is_empty() {
+        out += &format!("Now pub: {} (new revision)\n", r.now_pub.iter().map(|&i| ix.syms[i].name.as_str()).collect::<Vec<_>>().join(", "));
+    }
+    if r.plan.edits > 0 {
+        out += &format!(
+            "Rewrote {} reference{} in {} module{}\n",
+            r.plan.edits,
+            if r.plan.edits == 1 { "" } else { "s" },
+            r.plan.edited.len(),
+            if r.plan.edited.len() == 1 { "" } else { "s" }
+        );
+    }
+    for (dp, p) in r.deps.iter().zip(r.dplans).filter(|(_, p)| p.edits > 0) {
+        let plural = |k: usize| if k == 1 { "" } else { "s" };
+        out += &format!(
+            "Rewrote {} reference{} in {} module{} in {}\n",
+            p.edits,
+            plural(p.edits),
+            p.edited.len(),
+            plural(p.edited.len()),
+            dp.dir
+        );
+    }
+    if !r.moved_tests.is_empty() {
+        out += &format!(
+            "Tests moved: {}\n",
+            r.moved_tests.iter().map(|&t| format!("{} -> {}", q(t), r.newmod[t])).collect::<Vec<_>>().join(", ")
+        );
+    }
+    for c in r.carries {
+        let imports = if c.text.is_some() { " (its imports rewritten)" } else { "" };
+        out += &format!("Moved file {} to {}: {}{imports}\n", c.from, r.dest.as_ref().map_or("", |d| d.dir.as_str()), c.to);
+    }
+    if !r.ffi.is_empty() {
+        out += &format!("Rewrote FFI paths: {}\n", r.ffi.join(", "));
+    }
+    for m in r.created.iter().map(|c| &c.0) {
+        out += &format!("Created module {m}\n");
+    }
+    if !r.retired.is_empty() {
+        out += &format!("Retired module {}\n", r.retired.join(", "));
+    }
+    for note in r.notes {
+        out += &format!("{note}\n");
+    }
+    for g in r.gone.iter().filter(|g| !g.is_empty()) {
+        out += &format!("Not rewritten: {g} no longer resolves\n");
+    }
+    out
+}
+
+fn extract_suites(r: &ExtractReply<'_>) -> Result<String, Failure> {
+    let ix = r.ix;
+    let ids: HashSet<&str> = (0..ix.syms.len()).filter(|&i| r.moved[i]).map(|i| ix.syms[i].id.as_str()).collect();
+    let at = |x: &Index| -> Vec<usize> { (0..x.syms.len()).filter(|&i| ids.contains(x.syms[i].id.as_str())).collect() };
+    let mut suites = vec![];
+    match r.dest {
+        None => {
+            let x = r.s.index()?;
+            suites.extend(reach::reached(&reach::suites(r.s, &x)?, &at(&x)));
+        }
+        Some(d) => {
+            let x = d.store.index()?;
+            let hits = at(&x);
+            for (name, reached) in reach::suites(&d.store, &x)? {
+                if !hits.is_empty() && reached.as_ref().is_none_or(|r| hits.iter().any(|j| r.contains(j))) {
+                    suites.push(format!("{name} in {0} (`run {name} --project {0}`)", d.dir));
+                }
+            }
+            let callers: HashSet<&str> = (0..ix.syms.len())
+                .filter(|&h| !r.moved[h] && ix.uses[h].iter().any(|&u| r.moved[u]))
+                .map(|h| ix.syms[h].id.as_str())
+                .collect();
+            let sx = r.s.index()?;
+            let there: Vec<usize> = (0..sx.syms.len()).filter(|&i| callers.contains(sx.syms[i].id.as_str())).collect();
+            if !there.is_empty() {
+                suites.extend(reach::reached(&reach::suites(r.s, &sx)?, &there));
+            }
+            for (dp, p) in r.deps.iter().zip(r.dplans) {
+                let rewritten: HashSet<&str> =
+                    dp.ix.syms.iter().enumerate().filter(|(i, s)| p.newtext[*i] != s.text).map(|(_, s)| s.id.as_str()).collect();
+                if rewritten.is_empty() {
+                    continue;
+                }
+                let x = dp.store.index()?;
+                let there: Vec<usize> = (0..x.syms.len()).filter(|&i| rewritten.contains(x.syms[i].id.as_str())).collect();
+                for (name, reached) in reach::suites(&dp.store, &x)? {
+                    if !there.is_empty() && reached.as_ref().is_none_or(|r| there.iter().any(|j| r.contains(j))) {
+                        suites.push(format!("{name} in {0} (`run {name} --project {0}`)", dp.dir));
+                    }
+                }
+            }
+        }
+    }
+    if !suites.is_empty() {
+        Ok(format!("Also reached: {}\n", suites.join(", ")))
+    } else if !r.ffi.is_empty() || !r.carries.is_empty() {
+        Ok(concat!(
+            "JavaScript FFI paths are not type-checked, and no declared suite reaches the moved code: ",
+            "run the JavaScript tests, or declare them in solace.toml with `checks` (D-44)\n",
+        )
+        .to_string())
+    } else {
+        Ok(String::new())
+    }
+}
+
+fn extract_javascript(r: &ExtractReply<'_>) -> String {
+    let ix = r.ix;
+    let mut moved_names: HashSet<String> = HashSet::new();
+    for i in (0..ix.syms.len()).filter(|&i| r.moved[i]) {
+        moved_names.insert(ix.syms[i].name.clone());
+        if ix.syms[i].kind == Kind::Type {
+            moved_names.extend(ix.lang.constructors(&ix.syms[i].text));
+        }
+    }
+    let olds: Vec<Vec<String>> = r
+        .old_modules
+        .iter()
+        .map(|m| {
+            let mut p = module_dir(m);
+            p.push(format!("{}.mjs", tail(m)));
+            p
+        })
+        .collect();
+    let mut js_hits = vec![];
+    for f in js_files(&r.s.root) {
+        let Ok(text) = fs::read_to_string(r.s.root.join(&f)) else { continue };
+        for imp in js_imports(&text) {
+            if olds.contains(&ffi_norm(&out_dir(&f), &imp.spec)) && imp.names.iter().any(|x| moved_names.contains(x)) {
+                js_hits.push(format!("{f}:{}", imp.line));
+            }
+        }
+    }
+    if js_hits.is_empty() {
+        return String::new();
+    }
+    let (s, it) = if js_hits.len() == 1 { ("", "it") } else { ("s", "them") };
+    format!("Not rewritten: JavaScript import{s} of moved code from its old module ({}): change {it} with `write`\n", js_hits.join(", "))
+}
+
+fn extract_outside(r: &ExtractReply<'_>) -> String {
+    let ix = r.ix;
+    let mut needles: Vec<String> =
+        (0..ix.syms.len()).filter(|&i| r.moved[i]).map(|i| format!("{}.{}", ix.syms[i].module, ix.syms[i].name)).collect();
+    needles.extend(r.old_modules.iter().map(|m| format!("-m {m}")));
+    let (mut hits, mut files): (Vec<String>, BTreeSet<String>) = (vec![], BTreeSet::new());
+    if let Ok(settings) = lockdown::settings(&r.s.root)
+        && let Ok(paths) = lockdown::watched_paths(&r.s.root, &settings)
+    {
+        for path in paths {
+            let Ok(text) = fs::read_to_string(r.s.root.join(&path)) else { continue };
+            for (k, line) in text.lines().enumerate() {
+                let found = needles.iter().any(|nd| {
+                    line.match_indices(nd.as_str()).any(|(at, _)| {
+                        let word = |c: char| c.is_alphanumeric() || c == '_' || c == '/';
+                        !line[..at].ends_with(word) && !line[at + nd.len()..].starts_with(word)
+                    })
+                });
+                if found {
+                    hits.push(format!("{path}:{}", k + 1));
+                    files.insert(path.clone());
+                }
+            }
+        }
+    }
+    if hits.is_empty() {
+        return String::new();
+    }
+    let shown: Vec<&str> = hits.iter().take(5).map(String::as_str).collect();
+    let more = if hits.len() > 5 { ", …" } else { "" };
+    format!(
+        "Not rewritten: {} place{} in {} file{} ({}{more})\n",
+        hits.len(),
+        if hits.len() == 1 { "" } else { "s" },
+        files.len(),
+        if files.len() == 1 { "" } else { "s" },
+        shown.join(", ")
+    )
+}
+
+fn resolve_listed(s: &Store, ix: &Index, names: &[String], dest: &Option<Dest>, to: &str) -> Result<(Vec<usize>, Vec<String>), Failure> {
+    let in_target = |m: &str, name: &str| match dest {
+        Some(d) => d.ix.syms.iter().any(|s| s.module == m && s.name == name),
+        None => ix.syms.iter().any(|s| s.module == m && s.name == name),
+    };
+    let mut listed: Vec<usize> = vec![];
+    let mut already: Vec<String> = vec![];
+    for name in names {
+        if name.ends_with(".gleam") {
+            return fail(MODULE_HINT);
+        }
+        match s.resolve(ix, name) {
+            Ok(i) if dest.is_none() && ix.syms[i].module == to => already.push(ix.syms[i].qname()),
+            Ok(i) => {
+                if !listed.contains(&i) {
+                    listed.push(i)
+                }
+            }
+            Err(e) if e.0.starts_with("E1002") => {
+                let (m, n) = match name.rsplit_once('.') {
+                    Some((m, n)) => (Some(m.replace('.', "/")), n),
+                    None => (None, name.as_str()),
+                };
+                let found: Vec<usize> = (0..ix.syms.len())
+                    .filter(|&i| {
+                        let s = &ix.syms[i];
+                        s.name == n && m.as_ref().is_none_or(|m| s.module == *m || s.module.ends_with(&format!("/{m}")))
+                    })
+                    .collect();
+                if found.iter().any(|&i| ix.syms[i].module == to) && found.iter().any(|&i| ix.syms[i].module != to) {
+                    let list: Vec<String> = found.iter().map(|&i| ix.syms[i].qname()).collect();
+                    return fail(format!(
+                        "E1004 {name} resolves in both the source and {to}: {}; name the module, e.g. {}",
+                        list.join(", "),
+                        list[0]
+                    ));
+                }
+                return Err(e);
+            }
+            Err(e) => {
+                if s.resolve_module(ix, name).is_some() {
+                    return fail(MODULE_HINT);
+                }
+                let last = name.rsplit('.').next().unwrap_or(name);
+                if in_target(to, last) {
+                    already.push(format!("{to}.{last}"));
+                } else {
+                    return Err(e);
+                }
+            }
+        }
+    }
+    Ok((listed, already))
 }

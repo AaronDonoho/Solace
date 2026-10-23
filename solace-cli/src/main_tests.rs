@@ -36,7 +36,8 @@ fn the_reference_never_hands_a_file_change_to_the_human() {
     assert!(REFERENCE.contains("The human never edits files or runs commands"));
     assert!(REFERENCE.contains("Never asks the human to change a file"));
     // D-153: a question shows each option's outcome.
-    assert!(REFERENCE.contains("Each option's `text` gives a short example of its outcome"));
+    assert!(REFERENCE.contains("The question's `text` gives each option a"));
+    assert!(REFERENCE.contains("short example of its outcome"));
     assert!(!agent_reference(false).contains("task ask"), "outside a board run");
 }
 /// D-148: the reference tells agents to write a record's reference bare, so it
@@ -366,9 +367,10 @@ fn agent_reference_leaves_out_host_and_task_commands() {
     // behavior); D-102: the file tiers. D-123: no byte cap; it is kept as
     // brief as understanding it allows, and `help` keeps every option.
     assert!(r.contains("Files by tier") && r.contains("ignored or not"));
+    assert!(r.contains("every part\n   of the change is made") && !r.contains("of the task is changed"));
     // D-158 point 6: the reference names both languages and the Gleam-only commands.
     assert!(r.contains("Files by tier: a Gleam project's src/ and test/ *.gleam, and a Rust project's"), "both languages: {r}");
-    assert!(REFERENCE.contains("Gleam only") && REFERENCE.contains("Rust extract is deferred (D-158 point 6)"), "{REFERENCE}");
+    assert!(REFERENCE.contains("Same-project Rust (D-185)") && REFERENCE.contains("Gleam only: Rust merge is deferred"), "{REFERENCE}");
     assert!(
         r.contains("Changing a signature or adding a field")
             && r.contains("one at the level the task reports")
@@ -1025,7 +1027,7 @@ fn prune_keeps_an_edited_file_and_a_rollback_leaves_none() {
     let note = outside::absorb(&store, outside::Mode::Notice).unwrap();
     assert!(note.contains("other.four"), "{note}");
     assert!(module_paths(&store).contains(&"other".to_string()));
-    let out = store.transaction(&[], || {
+    let out = store.transaction::<String>(&[], || {
         store.submit_symbols(None, Some("temp"), "pub fn t() -> Int { 1 }")?;
         fail("stop")
     });
@@ -1248,7 +1250,11 @@ fn a_rust_destination_says_gleam_only() {
         } else {
             store.merge(&args, usize::MAX).unwrap_err().0
         };
-        assert!(e.contains("Gleam only") && e.contains("deferred (D-158 point 6)"), "{command}: {e}");
+        if command == "extract" {
+            assert!(e.contains("Rust project") && e.contains("--to-project") && e.contains("D-185"), "extract: {e}");
+        } else {
+            assert!(e.contains("Gleam only") && e.contains("deferred (D-158 point 6)"), "merge: {e}");
+        }
         assert!(!e.contains("no Gleam code"), "{command}: {e}");
     }
 }
@@ -1319,7 +1325,7 @@ fn rust_reference_lists_the_names_and_what_is_missing() {
         "a .py or plain-file .rs file's outline",
         "`view <file>` are refused",
         "[graph]",
-        "Not available for Rust: `probe`, `extract`, `merge`.",
+        "Not available for Rust: `probe`, `merge`.",
     ] {
         assert!(REFERENCE.contains(part), "{part} missing:\n{REFERENCE}");
     }
@@ -1342,23 +1348,6 @@ fn a_rust_format_needs_a_module() {
     let v = lockdown::settings(&store.root).unwrap();
     let e = lockdown::dispatch(&store, &v, &["format"], &mut || Ok(String::new()), None, 1000).unwrap().unwrap_err().0;
     assert!(e.contains("needs a module") && e.contains("rustfmt-clean"), "{e}");
-}
-
-/// D-180: a module that doesn't parse names its item and is not saved.
-#[test]
-fn a_rust_format_syntax_error_names_the_item_and_saves_nothing() {
-    if !crate::language::cargo::installed() || !crate::language::cargo::rustfmt_installed() {
-        return;
-    }
-    let (root, store) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n");
-    let broken = "pub fn one() -> i32 {\n    1\n}\n\npub fn two( {} \n";
-    fs::write(root.join("src/lib.rs"), broken).unwrap();
-    let v = lockdown::settings(&store.root).unwrap();
-    let e = lockdown::dispatch(&store, &v, &["format", "crate"], &mut || Ok(String::new()), None, 1000).unwrap().unwrap_err().0;
-    assert!(e.contains("crate.two") && e.contains("Not saved"), "{e}");
-    let two = store.index().unwrap().syms.into_iter().find(|s| s.name == "two").unwrap();
-    assert_eq!(two.text, "pub fn two() -> i32 {\n    2\n}");
-    assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap(), broken);
 }
 
 /// D-180: `format` takes one module the store holds: extra operands are a
@@ -1417,4 +1406,79 @@ fn read_project_finds_its_root_from_the_working_folder() {
     let outside = testing::Scratch::new();
     let e = crate::read_project_in(&["inspect", "crate.helper"], &outside, None, "r", 10_000).unwrap_err();
     assert!(e.0.contains("No Solace root here"), "{}", e.0);
+}
+
+/// D-184: a pass in a work run names the next step, with a test first for a change no test reaches.
+#[test]
+fn a_pass_names_the_next_step() {
+    assert_eq!(next_step(None, true), "Next: if every part of the task is changed, finish with task done.\n");
+    assert_eq!(
+        next_step(Some("app.two"), true),
+        "Next: add a test for app.two; then, if every part of the task is changed, finish with task done.\n"
+    );
+    assert_eq!(next_step(None, false), "");
+    assert_eq!(next_step(Some("app.two"), false), "");
+}
+
+#[test]
+fn grouped_privacy_errors_name_the_fix_once() {
+    let mut diags: Vec<Diag> = (0..6)
+        .map(|n| Diag {
+            error: true,
+            module: None,
+            symbol: Some(format!("crate.site{n}")),
+            text: format!("error[E0603]: function `helper` is private\n  at crate.site{n}, line 1"),
+        })
+        .collect();
+    diags.extend((0..6).map(|n| Diag {
+        error: true,
+        module: None,
+        symbol: Some(format!("crate.call{n}")),
+        text: format!("error[E0599]: no method named `open` found for struct `Store` in the current scope\n  at crate.call{n}, line 1"),
+    }));
+    diags.push(Diag { error: true, module: None, symbol: Some("crate.other".into()), text: "error: something else".into() });
+    let out = broken_report(&HashMap::new(), &diags);
+    assert!(out.contains("`helper` is private (6 places): make it `pub(crate)`"), "{out}");
+    assert!(out.contains("`open` is missing on `Store` (6 places): add the method or fix the call"), "{out}");
+    assert_eq!(out.matches("error: something else").count(), 1, "{out}");
+    for n in 0..6 {
+        assert!(out.contains(&format!("at crate.site{n}, line 1")), "{out}");
+    }
+}
+
+/// D-180: `format` reads the store's text, so a broken file on disk is named
+/// and repaired rather than formatted, and the store's items stay saved.
+#[test]
+fn a_rust_format_repairs_a_broken_file_from_the_store() {
+    if !crate::language::cargo::installed() || !crate::language::cargo::rustfmt_installed() {
+        return;
+    }
+    let lib = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+    let (root, store) = testing::rust_project(lib);
+    let broken = "pub fn one() -> i32 {\n    1\n}\n\npub fn two( {} \n";
+    fs::write(root.join("src/lib.rs"), broken).unwrap();
+    let v = lockdown::settings(&store.root).unwrap();
+    let out = lockdown::dispatch(&store, &v, &["format", "crate"], &mut || Ok(String::new()), None, 1000).unwrap().unwrap();
+    assert!(out.contains("Repaired src/lib.rs") && out.contains("crate.two"), "{out}");
+    assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+    let kept = testing::kept_copy(&root, &out);
+    assert_eq!(fs::read_to_string(kept).unwrap(), broken);
+    let two = store.index().unwrap().syms.into_iter().find(|s| s.name == "two").unwrap();
+    assert_eq!(two.text, "pub fn two() -> i32 {\n    2\n}");
+}
+
+/// A command line with only `--project <dir>` is refused, not a panic.
+#[test]
+fn a_project_with_no_command_is_refused_by_the_cli() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let t = board::api(&p.root, "POST", "/tasks", json!({"title":"Project"})).unwrap();
+    let tid = t["id"].as_str().unwrap();
+    let e = crate::with_root(&p.root, || {
+        board::with_context(tid, "r", || {
+            crate::run_options(&["--project".to_string(), ".".to_string()], &mut || Ok(String::new()), None, 10_000, &[])
+        })
+    })
+    .unwrap_err();
+    assert!(e.0.starts_with(PROJECT_ONLY.trim_end()));
+    assert_eq!(e.1, 2);
 }

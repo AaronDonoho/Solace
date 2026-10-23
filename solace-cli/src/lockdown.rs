@@ -466,6 +466,9 @@ pub fn recover(root: &Path, store: &Store, _held: &[fs::File]) -> Result<(), Fai
     for entry in dir {
         let p = entry?.path();
         if p.extension().is_some_and(|e| e == "json") {
+            if p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("tasks-")) {
+                continue;
+            }
             // A record that can't be read was never fully written, so its change
             // never started: drop it rather than fail every later command.
             match fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
@@ -4096,6 +4099,23 @@ running your program.
         let v = toml::Value::Table(Default::default());
         let e = call(&s, &v, &["view", "test/foo.gleam"], "", None).unwrap_err().0;
         assert!(e.contains("E6001") && e.contains("submit --new foo_test") && !e.contains("view foo"), "{e}");
+    }
+
+    /// A task batch belongs to the task server: recovery leaves its journal
+    /// and files alone.
+    #[test]
+    fn a_task_batch_journal_is_left_for_the_task_server() {
+        let (s, _) = fixture();
+        let before = br#"{"id":"t1","column":"backlog"}"#.to_vec();
+        let p = s.root.join(".solace/tasks/t1.json");
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, br#"{"id":"t1","column":"planning"}"#).unwrap();
+        fs::create_dir_all(s.root.join(".solace/pending")).unwrap();
+        let record = json!({"files": [{"path": ".solace/tasks/t1.json", "bytes": before}]});
+        fs::write(s.root.join(".solace/pending/tasks-crash.json"), record.to_string()).unwrap();
+        recover(&s.root, &s, &[board::lock(&s.root).unwrap()]).unwrap();
+        assert_eq!(fs::read(&p).unwrap(), br#"{"id":"t1","column":"planning"}"#);
+        assert!(s.root.join(".solace/pending/tasks-crash.json").exists());
     }
 }
 

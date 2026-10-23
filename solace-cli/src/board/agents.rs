@@ -121,7 +121,13 @@ pub(super) fn merge_from(configured: &Value, all: &Value) -> Vec<Value> {
             out.push(m);
         }
     }
-    let labels: Vec<(Value, Value)> = out.iter().map(|m| (m["model"].clone(), m["label"].clone())).collect();
+    // A current entry names a shared model before a gone entry does.
+    let labels: Vec<(Value, Value)> = out
+        .iter()
+        .filter(|m| m["gone"].as_bool() == Some(true))
+        .chain(out.iter().filter(|m| m["gone"].as_bool() != Some(true)))
+        .map(|m| (m["model"].clone(), m["label"].clone()))
+        .collect();
     for m in &mut out {
         m["effort"] = json!(default_effort(m));
         if let Some(used) = all["used"][m["id"].as_str().unwrap_or("")].as_str() {

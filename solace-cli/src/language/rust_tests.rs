@@ -469,13 +469,19 @@ fn a_library_module_and_a_test_helper_may_share_a_name() {
 /// and an item's own imports are not (D-168).
 #[test]
 fn a_header_holds_its_imports() {
-    assert!(imports("use std::fmt;\n\n"));
-    assert!(imports("pub use std::fmt::Debug;\n"));
-    assert!(imports("pub(crate) use fmt;\n"));
-    assert_eq!(import_texts("use std::fmt;\n\n"), vec!["use std::fmt;".to_string()]);
-    assert_eq!(import_texts("pub use std::fmt::Debug;\n"), vec!["pub use std::fmt::Debug;".to_string()]);
-    assert_eq!(import_texts("mod inner {\n    use std::fmt;\n}\n"), vec!["use std::fmt;".to_string()]);
-    assert!(!imports("//! doc\npub mod x;\n"));
-    assert!(!imports("pub fn one() {\n    use std::fmt;\n}\n"));
-    assert!(!imports(""));
+    assert!(imports("use std::fmt;\n\n").unwrap());
+    assert!(imports("pub use std::fmt::Debug;\n").unwrap());
+    assert!(imports("pub(crate) use fmt;\n").unwrap());
+    assert_eq!(import_texts("use std::fmt;\n\n").unwrap(), vec!["use std::fmt;".to_string()]);
+    assert_eq!(import_texts("pub use std::fmt::Debug;\n").unwrap(), vec!["pub use std::fmt::Debug;".to_string()]);
+    assert_eq!(import_texts("mod inner {\n    use std::fmt;\n}\n").unwrap(), vec!["use std::fmt;".to_string()]);
+    let attributed = "#[cfg(test)] use std::fmt;\nmod inner { use std::fmt::Debug; }\n";
+    assert_eq!(
+        import_tree_ranges(attributed).unwrap().into_iter().map(|r| &attributed[r]).collect::<Vec<_>>(),
+        vec!["std::fmt", "std::fmt::Debug"]
+    );
+    assert!(!imports("//! doc\npub mod x;\n").unwrap());
+    assert!(!imports("pub fn one() {\n    use std::fmt;\n}\n").unwrap());
+    assert!(!imports("").unwrap());
+    assert!(import_texts("use a::{;").is_err());
 }

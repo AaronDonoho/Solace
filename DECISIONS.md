@@ -1102,3 +1102,50 @@ Part of the Agent Tooling Efficiency feature (Aaron, board task "briefs: name th
 2. A work brief names each scope project's marked commands once, after its last change: `test --all` still runs the toolchain's tests, then `run <name>` for the marked suites. A suite names its project when the task spans more than one, even if only one project marks it; a project with none adds nothing.
 3. `test --all` remains the whole toolchain suite; the marker only keeps the brief from making the agent guess which declared commands are tests.
 Why: overlapping declared suites made an agent run the same tests several times, before and after a one-line fix.
+
+## D-183 A review's final assessment is its note
+Part of the Agent Tooling Efficiency feature (Aaron, board task "review: recover a lost note", 2026-10-21). Amends D-76 and Spec 15 §6.
+1. A review that exits cleanly, with no transcript error and no feedback recorded, records its last message as its feedback and ends `reviewed` only when the message's first line is exactly `**Assessment: Looks good**` or `**Assessment: Needs work**`.
+2. A refused or failed `task note` is recovered this way; a call that replied `Recorded.` is already on its way and is not repeated.
+3. The recovered message takes the `task note` path: the review checkpoint, any changed-during-review note and the `reviewed` transition. It adds no attention and leaves an existing mark in place.
+4. A final message is not a note in general. Work and investigate runs still fail when they exit without finishing.
+Why: a clean review with a complete assessment was marked failed only because its final message was not a `task note` call; the assessment was already the feedback the human needed.
+
+## D-184 A passing test in a work run names the next step
+Amends D-152 and Spec 3 §1 (Aaron, board task "test: a Next line on a pass", 2026-10-21). Part of the Agent Tooling Efficiency feature.
+1. In a work run, a passing `test` reply ends `Next: if every part of the task is changed, finish with task done.` A failing reply, or a `test` outside a work run, has no such line.
+2. When the pass names a change the task made that no test reaches, the line says `Next: add a test for <names>; then, if every part of the task is changed, finish with task done.`
+3. The reference says "When `test` passes and every part of the task is changed, the code is done: finish with `task done`. `test` type-checks first, so don't run `check` or `probe` after it." Spec 3 §1 records the line.
+Why: runs 8 and 12 spent extra `probe`/`check` calls after a passing test instead of finishing.
+
+## D-185 Rust `extract` works within one project
+Part of the Rust symbol store and lockdown feature (Aaron, board task "extract: Rust command, same project", 2026-10-22). Amends D-158 point 6 and Spec 1 §5.
+1. `extract <symbols…> --to <module>` moves named Rust items and the private helpers only they use to another module of the same crate, keeping their identity and revision unless their text changes. A new target module is created with its `mod` declaration; an emptied source module is retired. `--to-project` stays refused (`E6013`).
+2. References are rewritten only through the scoped resolver's `rewrite_sites` and `use_sites`: a bare name an import binds stays bare while the import is retargeted, and a name no import binds is qualified. Moved items and retained private helpers used across the new module boundary become `pub(crate)`.
+3. A test that would be split from what it tests is refused (`E5002`); impls and nested test modules are not movable yet (`E6013`, named with task:cecf5788c7f06aa3), and import carrying or namespaces wait on task:f9b3a60e7dd8547f. A name the target already has is `E1004`.
+4. One transaction gated on cargo: a check failure restores every row, file and history entry and shows the errors.
+Why: Rust extract was refused as "Gleam only" even though the Rust resolver and store already had the pieces; same-project moves are the smallest useful step and cross-project work stays deferred.
+
+## D-186 An investigation reports requirements, not edits
+(Aaron, board task "briefs: outcomes, not edits", 2026-10-22). Part of the Agent Tooling Efficiency feature. Amends D-147 point 2, D-156 point 2 and Spec 15 §6.
+1. An investigation's report states the required behavior, constraints, acceptance criteria and risks, plus anything it didn't check. It may name the symbols, modules and non-source files that need attention.
+2. It does not prescribe implementation, edits, submission shape or checks: no plan assigning file changes, no count or kind of `submit`/`write` calls, and no test commands. A smaller option is still offered with `task ask` when it changes what the human gets.
+3. A report never assigns a change to the human, who never edits files or runs commands; any needed change, a settings change included, is the worker's. Probing and tests are only for defining the issue more thoroughly.
+4. A work run keeps ownership of edits and checks, including `submit` then `test`, `write` then `run <name>`, and `test --all`.
+Why: an investigation answers what must be true, not what to do; prescribing edits and submission calls made it a plan the worker only followed, and cost calls.
+
+## D-187 Rust `extract` moves impls and tests with their type
+(Aaron, board task "extract: Rust impls and test modules", 2026-10-22). Part of the Rust symbol store and lockdown feature. Amends D-185 point 3.
+1. A moved type takes its inherent and trait `impl` blocks, matched by the path the impl header resolves to, not by last name: `impl vendor::Task` stays when local `Task` moves. An ambiguous owner is refused (`E6013`) naming it.
+2. A test that reaches only moved code moves, including one inside `#[cfg(test)] mod tests`: a whole container moves as it is; a partial move creates a container with `#[cfg(test)]` and `use super::*` in the target (`E1004` if the target has that name). A test that also reaches staying code is `E5002`. Private helpers a test uses move with it.
+3. Nested methods, `use` items and `impl` rows cannot be selected directly (`E6013`); select the type or container.
+4. `pub(crate)` promotion applies to top-level items and inherent methods only, never trait-impl methods (`E0449`).
+Why: a type without its impls, or a test cut off from its subject, would not build; import carrying and namespaces stay with task:f9b3a60e7dd8547f.
+
+## D-188 A task's milestone follows its feature
+Amends D-87 point 2 and Spec 15 §1 (Aaron, board task "tasks inherit their feature's milestone", 2026-10-22). Part of the Roadmap: milestone usability feature.
+1. A task with a feature always has that feature's milestone; only a task with no feature has a milestone of its own. Giving a task a feature sets its milestone to the feature's, even over one it had. Removing the feature keeps the milestone it had.
+2. Changing a feature's milestone moves every task linked to it to that milestone, including tasks in a final column and archived tasks. A `PATCH` that sets a task's `milestone` while it has a feature is refused (`E7001`); the feature's milestone is the one place to change it.
+3. A task saved before this change takes its feature's milestone when loaded; a task with no feature keeps its own milestone.
+4. On the Roadmap, a feature appears only under the milestone it targets, never under a milestone that holds one of its tasks. A feature with no target milestone, or one not loaded, is under "No milestone".
+Why: tasks could drift from their feature and the Roadmap showed a feature under every milestone with one of its tasks, so the Rust store tasks showed no milestone even though their feature was in Native Rust (Subset) Support.

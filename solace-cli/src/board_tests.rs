@@ -2,13 +2,7 @@ use super::*;
 
 /// A task with one run `r1` in `run`'s state, and a hung agent in its own process group.
 fn supervised(run: Value) -> (testing::Project, String, std::process::Child) {
-    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-    let s = open(&p.root).unwrap();
-    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Supervise"})).unwrap();
-    t["runs"] = json!([run]);
-    tasks::put(&s, &t).unwrap();
-    let child = Command::new("sleep").arg("45").process_group(0).spawn().unwrap();
-    (p, t["id"].as_str().unwrap().to_string(), child)
+    launched(run, Command::new("sleep").arg("45").process_group(0).spawn().unwrap())
 }
 
 /// D-78: the file is the record, so a log that can't take the change doesn't fail it.
@@ -1993,8 +1987,8 @@ fn briefs_hold_what_the_agent_needs_as_text() {
     }
     let plan = brief(&t, "investigate");
     assert!(
-        plan.contains("names every module or symbol it changes and every non-source file it reaches")
-            && !plan.contains("names every file it reaches"),
+        plan.contains("Report the required behavior, constraints, acceptance criteria and risks")
+            && !plan.contains("names every module or symbol it changes"),
         "{plan}"
     );
     // D-119 point 6: check what is already answered before asking.
@@ -2004,20 +1998,23 @@ fn briefs_hold_what_the_agent_needs_as_text() {
         assert!(brief(&t, kind).contains("give each option a short example of the outcome the human would see"), "{kind}");
     }
     assert!(brief(&t, "investigate").contains("Investigate this task"));
-    // D-147: a plan never hands a file change to the human.
-    assert!(brief(&t, "investigate").contains("never to the human, who never edits files or runs commands"));
-    // D-156: each role gets the smallest-complete-change guidance it acts on.
+    // D-147: a report never hands a file change to the human.
     assert!(
-        brief(&t, "investigate").contains("A plan is the smallest complete change")
-            && brief(&t, "investigate").contains("anything you didn't check")
+        brief(&t, "investigate")
+            .contains("The human never edits files or runs commands; any needed change, a settings change included, is the worker's")
+    );
+    // D-156/D-186: an investigation reports requirements, not a plan for edits.
+    assert!(
+        brief(&t, "investigate").contains("anything you didn't check")
+            && !brief(&t, "investigate").contains("A plan is the smallest complete change")
     );
     assert!(brief(&t, "work").contains("what you skipped and risks the human must know"));
     assert!(brief(&t, "review").contains("Flag code the task didn't need, places it missed"));
+    for kind in ["work", "investigate", "discuss"] {
+        assert!(!brief(&t, kind).contains("smallest complete change"), "{kind}");
+    }
     for kind in ["work", "discuss"] {
-        assert!(
-            !brief(&t, kind).contains("smallest complete change") && !brief(&t, kind).contains("Flag code the task didn't need"),
-            "{kind}"
-        );
+        assert!(!brief(&t, kind).contains("Flag code the task didn't need"), "{kind}");
     }
     // Maintainability: each role gets the direction it acts on, and both share
     // the comment and UI rules.
@@ -2080,6 +2077,14 @@ fn briefs_hold_what_the_agent_needs_as_text() {
             && !r.contains("small batches"),
         "{r}"
     );
+    assert!(
+        r.contains("Only a `task note` call records the feedback")
+            && r.contains("don't claim it was recorded unless the reply says `Recorded.`"),
+        "{r}"
+    );
+    for kind in ["work", "investigate", "discuss"] {
+        assert!(!brief(&t, kind).contains("Only a `task note` call records the feedback"), "{kind}");
+    }
     assert!(
         r.contains("Task changes:\n- calc.add")
             && r.contains("`task note`, the feedback in `text`")
@@ -3275,4 +3280,250 @@ fn settle_result_keeps_every_non_busy_checkpoint_error() {
     .unwrap_err();
     assert_eq!(e.0, "b: E1234 disk full\nc: E5678 read only\nAlso, flushing store.db is pending in a.", "{}", e.0);
     assert_eq!(e.1, 7);
+}
+
+/// A task with run `run`, whose agent exits with `code` after writing `lines` to its log.
+fn exited(run: Value, code: i32, lines: &[Value]) -> (testing::Project, String, std::process::Child, std::path::PathBuf) {
+    let rid = run["id"].as_str().unwrap().to_string();
+    let (p, tid, child) = launched(run, Command::new("sh").arg("-c").arg(format!("exit {code}")).process_group(0).spawn().unwrap());
+    let log = p.root.join(".solace").join(format!("{rid}.log"));
+    fs::write(&log, lines.iter().map(|line| line.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
+    (p, tid, child, log)
+}
+
+fn launched(run: Value, child: std::process::Child) -> (testing::Project, String, std::process::Child) {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Supervise"})).unwrap();
+    t["runs"] = json!([run]);
+    tasks::put(&s, &t).unwrap();
+    (p, t["id"].as_str().unwrap().to_string(), child)
+}
+
+/// A Codex log entry where the agent says `text`.
+fn agent_says(text: &str) -> Value {
+    json!({"type":"item.completed","item":{"type":"agent_message","text":text}})
+}
+
+#[test]
+fn a_review_that_exits_with_its_assessment_is_reviewed() {
+    let assessment = "**Assessment: Looks good**\n\n### Findings\n\nFine.";
+    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[agent_says(assessment)]);
+    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    let t = task(&p.root, &tid).unwrap();
+    assert_eq!(t["runs"][0]["outcome"], "reviewed");
+    assert_eq!(t["finished"]["outcome"], "reviewed");
+    assert!(t["attention"].is_null());
+    assert!(t["notes"].as_array().unwrap().iter().any(|n| n["author"] == "agent" && n["run"] == "r1" && n["text"] == assessment));
+}
+
+#[test]
+fn a_refused_review_note_still_recovers() {
+    let assessment = "**Assessment: Needs work**\n\n### Findings\n\nFix it.";
+    let refused = json!({
+        "type":"item.completed",
+        "item":{
+            "id":"i1",
+            "type":"mcp_tool_call",
+            "tool":"solace",
+            "arguments":{"command":"task note"},
+            "result":{"content":[{"type":"text","text":"E7015\nnothing was sent"}]},
+            "status":"failed"
+        }
+    });
+    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[refused, agent_says(assessment)]);
+    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    let t = task(&p.root, &tid).unwrap();
+    assert_eq!(t["runs"][0]["outcome"], "reviewed");
+    assert!(t["notes"].as_array().unwrap().iter().any(|n| n["run"] == "r1" && n["text"] == assessment));
+}
+
+#[test]
+fn a_review_fallback_keeps_existing_attention() {
+    let assessment = "**Assessment: Looks good**\n\nFine.";
+    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[agent_says(assessment)]);
+    tasks::update(&p.root, &tid, |t| {
+        t["attention"] = json!({"reason":"look here","time":1});
+        Ok(())
+    })
+    .unwrap();
+    let before = task(&p.root, &tid).unwrap()["attention"].clone();
+    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    assert_eq!(task(&p.root, &tid).unwrap()["attention"], before);
+}
+
+#[test]
+fn a_review_with_recorded_feedback_is_not_noted_twice() {
+    let assessment = "**Assessment: Looks good**\n\nFine.";
+    let (p, tid, _child, _log) = exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[agent_says(assessment)]);
+    tasks::update(&p.root, &tid, |t| {
+        note(t, "agent", Some("r1"), assessment);
+        Ok(())
+    })
+    .unwrap();
+    let before = task(&p.root, &tid).unwrap()["notes"].as_array().unwrap().len();
+    assert!(!record_review(&Watch::Task(&p.root, &tid), "r1", assessment).unwrap());
+    let t = task(&p.root, &tid).unwrap();
+    assert_eq!(t["notes"].as_array().unwrap().len(), before);
+    assert_eq!(t["runs"][0]["state"], "running");
+}
+
+#[test]
+fn a_review_without_an_assessment_still_fails() {
+    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[agent_says("Done.")]);
+    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    let t = task(&p.root, &tid).unwrap();
+    assert_eq!(t["runs"][0]["state"], "ended");
+    assert_ne!(t["runs"][0]["outcome"], "reviewed");
+    assert!(t["attention"]["reason"].as_str().unwrap().contains("without finishing"));
+    assert!(
+        t["notes"].as_array().unwrap().iter().any(|n| n["author"] == "solace" && n["text"].as_str().unwrap().contains("without finishing"))
+    );
+}
+
+#[test]
+fn only_a_clean_labeled_review_recovers() {
+    let assessment = "**Assessment: Looks good**\n\nFine.";
+    let review = json!({"kind":"review"});
+    let said = [json!({"kind":"message","text":assessment})];
+    assert_eq!(recoverable_review(&review, true, &said).as_deref(), Some(assessment));
+    assert!(recoverable_review(&review, false, &said).is_none());
+    let error = [json!({"kind":"error","text":"boom"}), json!({"kind":"message","text":assessment})];
+    assert!(recoverable_review(&review, true, &error).is_none());
+    for kind in ["work", "investigate"] {
+        let run = json!({"kind":kind});
+        assert!(recoverable_review(&run, true, &said).is_none(), "{kind}");
+    }
+    for text in ["**Assessment: Looks good** extra", "**Assessment: Looks good", "Assessment: Looks good"] {
+        let wrong = [json!({"kind":"message","text":text})];
+        assert!(recoverable_review(&review, true, &wrong).is_none(), "{text}");
+    }
+    assert!(recoverable_review(&review, true, &[]).is_none());
+    let recorded = [
+        json!({"kind":"tool","title":"solace task note","output":"Recorded.\n","status":"ok"}),
+        json!({"kind":"message","text":assessment}),
+    ];
+    assert!(recoverable_review(&review, true, &recorded).is_none());
+    let queued = [
+        json!({
+            "kind":"tool",
+            "title":"solace task note",
+            "output":"Recorded; it reaches the board when `solace serve` runs.\n",
+            "status":"ok"
+        }),
+        json!({"kind":"message","text":assessment}),
+    ];
+    assert!(recoverable_review(&review, true, &queued).is_none());
+    let refused = [
+        json!({"kind":"tool","title":"solace task note","output":"E7015\nnothing was sent","status":"failed"}),
+        json!({"kind":"message","text":assessment}),
+    ];
+    assert_eq!(recoverable_review(&review, true, &refused).as_deref(), Some(assessment));
+}
+
+/// D-184: only a work run names the next step.
+#[test]
+fn a_review_run_gets_no_next_step() {
+    let (root, s) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let mut t = api(&root, "POST", "/tasks", json!({"title": "Review"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([
+        {"id":"r1","kind":"review","state":"running"},
+        {"id":"r2","kind":"work","state":"running"}
+    ]);
+    tasks::put(&s, &t).unwrap();
+    assert_eq!(with_context(&tid, "r1", || crate::next_step(Some("app.one"), work_run(&root))), "");
+    assert_eq!(
+        with_context(&tid, "r2", || crate::next_step(None, work_run(&root))),
+        "Next: if every part of the task is changed, finish with task done.\n"
+    );
+}
+
+/// A current entry names a shared model before a gone entry does.
+#[test]
+fn a_current_model_names_the_shared_model_before_a_gone_one() {
+    let configured = json!([{"id":"claude-opus","label":"Opus (latest)","agent":"claude","model":"opus"}]);
+    let all = json!({
+        "codex":{"models":[
+            {"id":"second","label":"Second","agent":"codex","model":"claude-opus-5-5"}
+        ]},
+        "gone":{
+            "old":{"id":"old","label":"Gone","agent":"codex","model":"claude-opus-5-5"}
+        },
+        "used":{"claude-opus":"claude-opus-5-5"}
+    });
+    let m = agents::merge_from(&configured, &all);
+    assert_eq!(m[0]["label"], "Second", "a current entry names the shared model");
+
+    let gone_only = json!({
+        "gone":{"old":{"id":"old","label":"Gone","agent":"codex","model":"claude-opus-5-5"}},
+        "used":{"claude-opus":"claude-opus-5-5"}
+    });
+    let m = agents::merge_from(&configured, &gone_only);
+    assert_eq!(m[0]["label"], "Gone", "a gone entry still names it when no current one does");
+}
+
+/// D-186: an investigation states outcomes and constraints, not a plan that
+/// assigns edits, submission calls or checks.
+#[test]
+fn investigate_briefs_report_requirements_not_edits() {
+    let code = json!({
+        "id": "t1",
+        "title": "Add coolcalc",
+        "body": "A CLI calculator.",
+        "notes": [],
+        "questions": [],
+        "links": [],
+        "changes": [{"entity": "symbol:x", "name": "calc.add", "run": "r1"}],
+        "test_commands": [{"project": "a", "commands": ["rust-acceptance"]}],
+    });
+    let settings = json!({
+        "id": "t2",
+        "title": "Tune the build",
+        "body": "Allow the new test command.",
+        "notes": [],
+        "questions": [],
+        "links": [],
+        "changes": [{"entity": "file:solace.toml", "name": "solace.toml", "run": "r2"}],
+    });
+    for (label, task, named) in [("code change", &code, "calc.add"), ("settings change", &settings, "solace.toml")] {
+        let prompt = brief(task, "investigate");
+        for required in [
+            "Investigate this task",
+            "Report the required behavior, constraints, acceptance criteria and risks",
+            "Name the symbols, modules and non-source files that need attention",
+            "anything you didn't check",
+            named,
+        ] {
+            assert!(prompt.contains(required), "{label}: missing {required}\n{prompt}");
+        }
+        assert!(prompt.contains(&format!("Task changes:\n- {named}")), "{label}: missing the change it names\n{prompt}");
+        for directive in [
+            "`submit` then `test`",
+            "`write` then `run",
+            "`test --all`",
+            "settings proposal",
+            "To change `solace.toml` or `AGENTS.md`, `write` it alone",
+        ] {
+            assert!(!prompt.contains(directive), "{label}: unexpected {directive}\n{prompt}");
+        }
+        assert!(prompt.contains("This run is read-only"), "{label}: missing the read-only notice\n{prompt}");
+        assert!(
+            prompt.contains("Probe or run tests only when needed to more thoroughly define the issue."),
+            "{label}: missing the limit on probes and tests\n{prompt}"
+        );
+        assert!(!prompt.contains("Use those to verify (for example test suites)"), "{label}\n{prompt}");
+    }
+    let review = brief(&code, "review");
+    assert!(review.contains("Use those to verify (for example test suites)"), "{review}");
+    assert!(!review.contains("Probe or run tests only when needed"), "{review}");
+    let work = brief(&code, "work");
+    for owned in [
+        "`submit` then `test`",
+        "`write` then `run <name>`",
+        "`test --all`",
+        "To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.",
+    ] {
+        assert!(work.contains(owned), "work: missing {owned}\n{work}");
+    }
 }

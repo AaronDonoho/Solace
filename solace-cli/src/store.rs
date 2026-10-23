@@ -150,9 +150,12 @@ pub fn submit_items(
     }
     // A block's `use` items are the module's imports, which `submit --imports`
     // writes; an item block's own are dropped, so saving one loses them.
-    if language::rust::imports(text) {
-        let imports: Vec<String> =
-            language::rust::import_texts(text).into_iter().map(|import| import.split_whitespace().collect::<Vec<_>>().join(" ")).collect();
+    if language::rust::imports(text).map_err(|e| Failure(format!("Not saved: {label}: {e}"), 1))? {
+        let imports: Vec<String> = language::rust::import_texts(text)
+            .map_err(|e| Failure(format!("Not saved: {label}: {e}"), 1))?
+            .into_iter()
+            .map(|import| import.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
         let imports: Vec<String> = imports.iter().map(|import| format!("`{import}`")).collect();
         return fail(format!("Not saved: block {label} carries {}; imports go through `submit --imports {module}`.", imports.join(", ")));
     }
@@ -374,16 +377,56 @@ pub(crate) fn names(s: &Sym, input: &str) -> bool {
         .any(|m| s.module == *m || s.module.ends_with(&format!("/{m}")) || s.module.ends_with(&format!("::{m}")))
 }
 
-/// An unknown-name hint for `resolve`: the symbols whose name contains `input`'s
-/// leaf, the part after its last `.` or `::` (`app.mian` suggests by `mian`);
-/// empty when none are close.
+/// An unknown-name hint for `resolve`: the stored names nearest `input`'s leaf,
+/// the part after its last `.`, `::` or `/` (`app.mian` suggests by `mian`),
+/// then the names in the module its prefix names; empty when none are close.
 pub(crate) fn similar_hint(ix: &Index, input: &str) -> String {
-    let leaf = input.rsplit(['.', ':']).next().unwrap_or(input).to_lowercase();
+    let normalized = input.replace("::", ".").replace('/', ".");
+    let leaf = normalized.rsplit('.').next().unwrap_or("");
     if leaf.is_empty() {
         return String::new();
     }
-    let similar: Vec<String> = ix.syms.iter().filter(|s| s.name.to_lowercase().contains(&leaf)).take(10).map(|s| s.qname()).collect();
-    if similar.is_empty() { String::new() } else { format!("\nSimilar names: {}", similar.join(", ")) }
+    let prefix = normalized.strip_suffix(leaf).unwrap_or("").trim_end_matches('.');
+    let mut module = module_named(ix, prefix);
+    if module.is_none() {
+        let mut parts: Vec<&str> = prefix.split('.').filter(|part| !part.is_empty()).collect();
+        while parts.pop().is_some() {
+            if let Some(found) = module_named(ix, &parts.join(".")) {
+                module = Some(found);
+                break;
+            }
+        }
+    }
+    let lower = leaf.to_lowercase();
+    let mut similar: Vec<String> = vec![];
+    for s in ix.syms.iter() {
+        if similar.len() >= 10 {
+            break;
+        }
+        if s.name.rsplit("::").next().is_some_and(|name| name.eq_ignore_ascii_case(leaf)) {
+            push_similar(&mut similar, s.qname());
+        }
+    }
+    for s in ix.syms.iter() {
+        if similar.len() >= 10 {
+            break;
+        }
+        if s.name.to_lowercase().contains(&lower) {
+            push_similar(&mut similar, s.qname());
+        }
+    }
+    if let Some(module) = module {
+        for s in ix.syms.iter().filter(|s| s.module == module.path) {
+            if push_similar(&mut similar, s.qname()) {
+                break;
+            }
+        }
+    }
+    if similar.is_empty() {
+        String::new()
+    } else {
+        format!("\nSimilar names: {} (a nested symbol is `<module>.<container>::<name>`)", similar.join(", "))
+    }
 }
 
 /// Whether `m` holds tests: Gleam's `test/` or a Rust crate's `tests/` (D-169).
@@ -444,7 +487,7 @@ pub(crate) fn module_outline(ix: &Index, m: &ModuleRow, broken: &HashMap<String,
         text += &format!("{}\n\n", doc.join("\n"));
     }
     for s in ix.syms.iter().filter(|s| s.module == m.path) {
-        text += &format!("{}{}\n\n", ix.signature(s), if broken.contains_key(&s.qname()) { "  // BROKEN" } else { "" });
+        text += &format!("{}{}\n\n", crate::index::signature(ix, s), if broken.contains_key(&s.qname()) { "  // BROKEN" } else { "" });
     }
     text
 }
@@ -460,7 +503,7 @@ fn walk_by_parent<'a>(
 ) {
     for s in groups.get(&parent).map(Vec::as_slice).unwrap_or(&[]) {
         out.push_str(&"  ".repeat(depth));
-        out.push_str(&ix.signature(s));
+        out.push_str(&crate::index::signature(ix, s));
         if broken.contains_key(&s.qname()) {
             out.push_str("  // BROKEN");
         }
@@ -564,4 +607,95 @@ pub(crate) fn rust_brief(ix: &Index) -> String {
     }
     out += "`find <text>` searches Rust source; `grep` searches other files only.\n";
     out
+}
+
+/// The module a name or path names: exact, or a unique suffix, with `.`, `::`
+/// or `/` between its parts (D-158).
+pub(crate) fn module_named<'a>(ix: &'a Index, input: &str) -> Option<&'a ModuleRow> {
+    let flat = input.replace("::", "/").replace('.', "/");
+    let forms = [flat.clone(), flat.replace('/', "::"), input.to_string()];
+    if let Some(m) = ix.modules.iter().find(|m| forms.contains(&m.path)) {
+        return Some(m);
+    }
+    let suffix: Vec<&ModuleRow> = ix
+        .modules
+        .iter()
+        .filter(|m| forms.iter().any(|form| m.path.ends_with(&format!("/{form}")) || m.path.ends_with(&format!("::{form}"))))
+        .collect();
+    (suffix.len() == 1).then(|| suffix[0])
+}
+
+/// Adds `qname` to the hint unless it is there already, stopping at ten names.
+fn push_similar(similar: &mut Vec<String>, qname: String) -> bool {
+    if similar.len() < 10 && !similar.contains(&qname) {
+        similar.push(qname);
+    }
+    similar.len() >= 10
+}
+
+/// The symbols whose own text differs between the store's projection and
+/// `disk`, as qualified names. A header difference is `header`; text outside
+/// the symbols is named by the module. Empty when the two agree.
+pub(crate) fn drift(ix: &Index, m: &ModuleRow, disk: &str) -> Vec<String> {
+    let (stored, _) = projection(ix, m);
+    if stored == disk {
+        return vec![];
+    }
+    let Ok(disk_file) = language::rust::split(disk, &m.path) else {
+        return unparsed_drift(ix, m, disk);
+    };
+    let Ok(stored_file) = language::rust::split(&stored, &m.path) else {
+        return vec![m.path.clone()];
+    };
+    let mut names = vec![];
+    if stored_file.header.trim_end() != disk_file.header.trim_end() {
+        names.push("header".to_string());
+    }
+    let (mut before, mut after) = (HashMap::new(), HashMap::new());
+    drift_pieces(&stored_file.items, &mut before);
+    drift_pieces(&disk_file.items, &mut after);
+    let mut all: Vec<&String> = before.keys().chain(after.keys()).collect();
+    all.sort();
+    all.dedup();
+    for name in all {
+        if before.get(name) != after.get(name) {
+            names.push(format!("{}.{name}", m.path));
+        }
+    }
+    if names.is_empty() {
+        names.push(m.path.clone());
+    }
+    names
+}
+
+/// `pieces` as their own text and closing tail, by name and in order, so two
+/// blocks of one name pair by occurrence.
+fn drift_pieces(pieces: &[language::rust::Piece], out: &mut HashMap<String, Vec<(String, String)>>) {
+    for p in pieces {
+        let (head, tail) = if p.children.is_empty() {
+            (p.text.trim_end().to_string(), String::new())
+        } else {
+            (p.text.clone(), p.tail.trim_end().to_string())
+        };
+        out.entry(p.name.clone()).or_default().push((head, tail));
+        drift_pieces(&p.children, out);
+    }
+}
+
+/// The stored symbols whose own text is absent from a file that doesn't parse,
+/// so a broken file still names what it loses.
+fn unparsed_drift(ix: &Index, m: &ModuleRow, disk: &str) -> Vec<String> {
+    let mut names: Vec<String> = ix
+        .syms
+        .iter()
+        .filter(|s| s.module == m.path)
+        .filter(|s| !disk.contains(&s.text) || (!s.tail.is_empty() && !disk.contains(&s.tail)))
+        .map(|s| s.qname())
+        .collect();
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        names.push(m.path.clone());
+    }
+    names
 }

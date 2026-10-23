@@ -90,3 +90,13 @@ pub(crate) fn inbox_file(root: &Path, id: &str, mut m: Value) {
     fs::write(&part, m.to_string()).unwrap();
     fs::rename(&part, dir.join(format!("{id}.json"))).unwrap();
 }
+
+/// The repair copy a reply says it kept, as a path under the project root.
+pub(crate) fn kept_copy(root: &std::path::Path, reply: &str) -> std::path::PathBuf {
+    let kept = reply
+        .split("kept at ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("no kept copy in reply: {reply}"));
+    root.join(kept.trim_end_matches(|c: char| c == '.' || c == ','))
+}

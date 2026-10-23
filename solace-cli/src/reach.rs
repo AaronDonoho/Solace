@@ -248,7 +248,7 @@ pub fn field_refs(ix: &Index, ty: usize, field: &str) -> String {
                 "-- {}{}\n{}\n",
                 ix.syms[r].qname(),
                 if certain { "" } else { " (possible: another type has this field)" },
-                ix.signature(&ix.syms[r])
+                crate::index::signature(ix, &ix.syms[r])
             );
         }
     }
@@ -838,7 +838,7 @@ mod tests {
     /// `refs Type.field`: who reads one field, sure or possible (D-44).
     #[test]
     fn field_refs_list_the_readers_of_a_field() {
-        let ix = test_index(&[
+        let ix = crate::index::test_index(&[
             ("src", "price", "pub type Quote {\n  Quote(discount: Int, total: Int)\n}\n\npub type Rate {\n  Rate(total: Int)\n}"),
             (
                 "src",
@@ -884,7 +884,7 @@ mod tests {
 
     #[test]
     fn flow_follows_lets_fields_and_helpers() {
-        let ix = test_index(&[
+        let ix = crate::index::test_index(&[
             ("src", "money", "pub fn percent(x: Int, p: Int) -> Int {\n  x * p / 100\n}"),
             (
                 "src",
@@ -950,7 +950,7 @@ mod tests {
 
     #[test]
     fn coverage_and_always_run() {
-        let ix = test_index(&[
+        let ix = crate::index::test_index(&[
             (
                 "src",
                 "app",
@@ -987,7 +987,7 @@ mod tests {
     /// all; changed lines that are comments don't seed.
     #[test]
     fn origins_seed_the_changed_lines_and_skip_what_is_not_code() {
-        let ix = test_index(&[
+        let ix = crate::index::test_index(&[
             ("src", "main", "pub fn a() -> Int {\n  1\n}\n\npub fn b() -> Int {\n  2\n  // c\n  3\n}"),
             ("test", "main_test", "import main\n\npub fn a_test() {\n  assert main.a() == 1\n}"),
         ]);
@@ -1020,7 +1020,7 @@ mod tests {
     /// A changed type seeds its users at the lines that name it, not at a call.
     #[test]
     fn a_type_change_seeds_the_lines_that_name_it() {
-        let ix = test_index(&[
+        let ix = crate::index::test_index(&[
             ("src", "shape", "pub type Shape {\n  Shape(a: Int)\n}"),
             ("src", "use", "import shape\n\npub fn f(s: shape.Shape) -> Int {\n  1\n}"),
         ]);
@@ -1035,7 +1035,7 @@ mod tests {
     /// an argument that isn't tainted reaches none.
     #[test]
     fn piped_and_positional_arguments_taint_the_parameters_they_carry() {
-        let ix = test_index(&[
+        let ix = crate::index::test_index(&[
             ("src", "lib", "pub fn double(n: Int) -> Int {\n  n * 2\n}"),
             ("src", "main", "import lib\n\npub fn f(x: Int, y: Int) -> Int {\n  x |> lib.double()\n  lib.double(x)\n  lib.double(y)\n}"),
         ]);
@@ -1052,7 +1052,7 @@ mod tests {
     /// takes the whole symbol, so every field of a record it writes counts.
     #[test]
     fn an_unformatted_body_is_taken_as_a_whole() {
-        let ix = test_index(&[
+        let ix = crate::index::test_index(&[
             ("src", "quote", "pub type Quote {\n  Quote(a: Int, b: Int)\n}"),
             ("src", "odd", "import quote\n\npub fn f(n: Int) -> quote.Quote {\n    let q = quote.Quote(a: n)\n  quote.Quote(..q, b: 1)\n}"),
         ]);
@@ -1068,7 +1068,7 @@ mod tests {
     /// is seeded by the symbol it writes, as an alias is.
     #[test]
     fn unqualified_imports_count_as_writing_the_symbol() {
-        let ix = test_index(&[
+        let ix = crate::index::test_index(&[
             ("src", "lib", "pub fn make() -> Int {\n  1\n}"),
             ("src", "plain", "import lib.{make}\n\npub fn a() {\n  make()\n}"),
             ("src", "renamed", "import lib.{make as m}\n\npub fn b() {\n  m()\n}"),
@@ -1082,7 +1082,7 @@ mod tests {
     /// past three, possible fields past four, and uses past the size limit.
     #[test]
     fn the_note_and_the_report_cut_their_lists() {
-        let ix = test_index(&[
+        let ix = crate::index::test_index(&[
             (
                 "src",
                 "main",

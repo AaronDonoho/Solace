@@ -20,7 +20,9 @@ fn stat(path: &Path) -> Option<(u64, u128)> {
 }
 
 /// What Solace last wrote to each graph file: `hash size mtime path` lines,
-/// and `! hash path` for a version it couldn't read in and already reported.
+/// `! hash path` for a version it couldn't read in and already reported,
+/// `? digest` for the ignore file that last hid the store, and
+/// `# old-copies-removed` once the old id-keyed copies are gone.
 pub struct Written {
     root: PathBuf,
     files: BTreeMap<String, (String, u64, u128)>,
@@ -29,6 +31,8 @@ pub struct Written {
     hidden: Option<String>,
     /// False for a store from before D-58 that has no record yet.
     pub known: bool,
+    /// True once copies under the old id-keyed layout have been removed.
+    old_copies_removed: bool,
     dirty: bool,
 }
 
@@ -36,7 +40,12 @@ impl Written {
     pub fn load(root: &Path) -> Written {
         let text = fs::read_to_string(root.join(".solace/written"));
         let (mut files, mut bad, mut hidden) = (BTreeMap::new(), BTreeMap::new(), None);
+        let mut old_copies_removed = false;
         for line in text.as_deref().unwrap_or("").lines() {
+            if line == OLD_COPIES_REMOVED {
+                old_copies_removed = true;
+                continue;
+            }
             if let Some(h) = line.strip_prefix("? ") {
                 hidden = Some(h.to_string());
                 continue;
@@ -50,12 +59,16 @@ impl Written {
                 files.insert(path.to_string(), (h.to_string(), size.parse().unwrap_or(0), time.parse().unwrap_or(0)));
             }
         }
-        Written { root: root.into(), files, bad, hidden, known: text.is_ok(), dirty: false }
+        Written { root: root.into(), files, bad, hidden, known: text.is_ok(), old_copies_removed, dirty: false }
     }
 
     pub fn save(&mut self) -> Result<(), Failure> {
         if self.dirty {
             let mut text: String = self.hidden.iter().map(|h| format!("? {h}\n")).collect();
+            if self.old_copies_removed {
+                text.push_str(OLD_COPIES_REMOVED);
+                text.push('\n');
+            }
             text.extend(self.files.iter().map(|(p, (h, size, time))| format!("{h} {size} {time} {p}\n")));
             text.extend(self.bad.iter().map(|(p, h)| format!("! {h} {p}\n")));
             write_atomic(&self.root.join(".solace/written"), text)?;
@@ -352,6 +365,11 @@ pub fn absorb(s: &Store, mode: Mode) -> Result<String, Failure> {
         approve_all(s)?;
     }
     let disk = graph_files(s)?;
+    if !w.old_copies_removed {
+        remove_old_copies(&s.root, &disk)?;
+        w.old_copies_removed = true;
+        w.dirty = true;
+    }
     let mut changed: Vec<(String, Option<Vec<u8>>)> = vec![];
     for rel in &disk {
         let path = s.root.join(rel);
@@ -722,6 +740,63 @@ mod tests {
         assert_eq!(approved(&s.root).get("app.one"), Some(&digest(b"pub fn one() -> Int {\n  1\n}")));
         assert_eq!(file(&s), APP.replace("  1", "  7"));
     }
+
+    /// A repair copy is the only one for its path, git-ignored, and never scanned.
+    #[test]
+    fn a_kept_copy_replaces_the_last_one_and_is_never_project_source() {
+        let p = project(&[("src/app.gleam", APP)]);
+        let lost = "pub fn lost() -> Int {\n  9\n}\n";
+        let kept = keep(&p.root, "src/app.gleam", lost.as_bytes()).unwrap();
+        assert_eq!(kept, ".solace/outside/src/app.gleam");
+        let mut ignores = crate::lockdown::Ignores::new(&p.root);
+        assert!(ignores.ignored(&kept));
+        let v = crate::lockdown::settings(&p.root).unwrap();
+        let files = crate::lockdown::dispatch(&p, &v, &["files"], &mut || Ok(String::new()), None, 1000).unwrap().unwrap();
+        assert!(files.contains(".solace/ [internal]") && !files.contains("outside/src/app.gleam"), "{files}");
+        let grep = crate::lockdown::dispatch(&p, &v, &["grep", "lost"], &mut || Ok(String::new()), None, 1000).unwrap().unwrap();
+        assert!(grep.starts_with("No matches for \"lost\""), "{grep}");
+        keep(&p.root, "src/app.gleam", b"newer").unwrap();
+        assert_eq!(fs::read_to_string(p.root.join(&kept)).unwrap(), "newer");
+        assert_eq!(fs::read_dir(p.root.join(".solace/outside")).unwrap().count(), 1);
+    }
+
+    /// Copies from the old id-keyed layout go; path-keyed copies stay.
+    #[test]
+    fn old_id_copies_are_removed() {
+        let s = app();
+        let old = s.root.join(".solace/outside").join(crate::unique_id());
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("app.gleam"), "lost").unwrap();
+        keep(&s.root, "src/app.gleam", b"kept").unwrap();
+        absorb(&s, Mode::Command).unwrap();
+        assert!(!old.exists());
+        assert!(s.root.join(".solace/outside/src/app.gleam").exists());
+    }
+
+    /// Cleanup runs once; an old-id folder made afterward is left alone.
+    #[test]
+    fn old_copies_are_removed_once() {
+        let s = app();
+        let first = s.root.join(".solace/outside").join(crate::unique_id());
+        fs::create_dir_all(&first).unwrap();
+        absorb(&s, Mode::Command).unwrap();
+        assert!(!first.exists());
+        let later = s.root.join(".solace/outside").join(crate::unique_id());
+        fs::create_dir_all(&later).unwrap();
+        absorb(&s, Mode::Command).unwrap();
+        assert!(later.exists());
+    }
+
+    /// A 16-hex source folder is a current path key, not an old id.
+    #[test]
+    fn a_16_hex_source_folder_keeps_its_copy() {
+        let s = app();
+        let name = "0123456789abcdef";
+        let copy = s.root.join(".solace/outside").join(name);
+        fs::create_dir_all(&copy).unwrap();
+        remove_old_copies(&s.root, &[format!("{name}/app.gleam")]).unwrap();
+        assert!(copy.exists());
+    }
 }
 
 /// The symbol store is committed with the project, but what is local to this
@@ -895,3 +970,35 @@ pub(crate) fn checkpoint_pending(s: &Store) -> Result<bool, Failure> {
     let (busy, _, _): (i64, i64, i64) = s.db.query_row("PRAGMA wal_checkpoint(FULL)", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
     Ok(busy != 0)
 }
+
+/// Keeps a changed file's bytes under `.solace/outside/<path>`, replacing any
+/// earlier copy, so a repair that writes over it loses nothing.
+pub fn keep(root: &Path, rel: &str, bytes: &[u8]) -> Result<String, Failure> {
+    let kept = format!(".solace/outside/{rel}");
+    let path = root.join(&kept);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    fs::write(&path, bytes)?;
+    Ok(kept)
+}
+
+/// Removes copies kept under the old `.solace/outside/<id>/` layout; a folder
+/// that starts a stored source path is a current copy and stays.
+fn remove_old_copies(root: &Path, files: &[String]) -> Result<(), Failure> {
+    let Ok(entries) = fs::read_dir(root.join(".solace/outside")) else { return Ok(()) };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let old_id = name.len() == 16 && name.bytes().all(|b| b.is_ascii_hexdigit());
+        if !old_id || !entry.path().is_dir() {
+            continue;
+        }
+        let source_folder = files.iter().any(|f| f.split('/').next() == Some(name.as_str()));
+        if !source_folder {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+const OLD_COPIES_REMOVED: &str = "# old-copies-removed";

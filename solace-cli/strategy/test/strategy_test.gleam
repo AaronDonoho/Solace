@@ -709,7 +709,7 @@ pub fn open_runs_mark_their_records_until_they_end_test() {
   )
   assert string.contains(
     page(model),
-    "<h3 data-milestone-id=\"m1\">Launch <span class=\"state\">proposed</span>"
+    "<h3 data-milestone-id=\"m1\"><button aria-expanded=\"false\" class=\"toggle\" type=\"button\">Launch <span class=\"state\">proposed</span>"
       <> marker,
   )
   let ended =
@@ -736,7 +736,7 @@ pub fn open_runs_mark_their_records_until_they_end_test() {
   assert markers(ended) == 1
   assert string.contains(
     page(ended),
-    "<h3 data-milestone-id=\"m1\">Launch <span class=\"state\">proposed</span>"
+    "<h3 data-milestone-id=\"m1\"><button aria-expanded=\"false\" class=\"toggle\" type=\"button\">Launch <span class=\"state\">proposed</span>"
       <> marker,
   )
 }
@@ -1335,6 +1335,7 @@ pub fn a_feature_or_milestone_link_opens_its_tab_test() {
   let #(model, _) =
     strategy.update(model, strategy.Focus("milestone", "", "m1"))
   assert model.tab == strategy.Roadmap
+  assert model.milestone_open == ["m1"]
   assert model.selected == None
   assert model.reveal == #("", 0)
   let #(same, _) = strategy.update(model, strategy.Focus("feature", "", ""))
@@ -1423,6 +1424,7 @@ pub fn shared_labels_on_the_pages_test() {
     )
   let model = step(model, strategy.Select(strategy.Roadmap))
   assert string.contains(shown(model), button("new_milestone"))
+  let model = step(model, strategy.ToggleMilestone("m1"))
   assert string.contains(shown(model), button("dependencies"))
   // Vision: Save and Cancel.
   let model = step(model, strategy.Select(strategy.Vision))
@@ -1434,7 +1436,7 @@ pub fn shared_labels_on_the_pages_test() {
 /// Text areas fill their container: the composer's markdown editor is a
 /// block, so it fills the box; the plan panel's is shorter and scrolls past
 /// 40dvh; and the composer box, the plan panel's composer, and the feature,
-/// vision, feature-form and depends-edit panels have no `max-width` of their
+/// vision, feature-form and picker panels have no `max-width` of their
 /// own.
 pub fn textareas_fill_their_container_test() {
   let assert [css, ..] =
@@ -1459,7 +1461,7 @@ pub fn textareas_fill_their_container_test() {
   assert !string.contains(css, ".feature{max-width")
   assert !string.contains(css, ".vision{max-width")
   assert !string.contains(css, ".feature-form{max-width")
-  assert !string.contains(css, ".depends-edit{max-width")
+  assert !string.contains(css, ".picker{max-width")
   assert string.contains(
     css,
     ".feature{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-3)}",
@@ -1474,7 +1476,7 @@ pub fn textareas_fill_their_container_test() {
   )
   assert string.contains(
     css,
-    ".depends-edit{border:1px solid var(--line);margin:4px 0 8px;padding:6px 10px}",
+    ".picker{border:1px solid var(--line);margin:4px 0 8px;padding:6px 10px}",
   )
 }
 
@@ -1776,13 +1778,16 @@ pub fn the_new_task_request_is_kept_across_a_refused_create_test() {
 pub fn the_new_task_links_only_what_was_picked_test() {
   let draft = strategy.NewTask("Index", "", "web", "", "")
   assert strategy.new_task_links(draft) == []
+  let loose = strategy.NewTask(..draft, milestone: "m1")
+  assert strategy.new_task_links(loose) == [#("milestone", "m1")]
+  assert json.to_string(strategy.links_body(strategy.new_task_links(loose)))
+    == "{\"milestone\":\"m1\"}"
   assert strategy.new_task_links(strategy.NewTask(..draft, feature: "f1"))
     == [#("feature", "f1")]
   let both = strategy.NewTask(..draft, feature: "f1", milestone: "m1")
-  assert strategy.new_task_links(both)
-    == [#("feature", "f1"), #("milestone", "m1")]
+  assert strategy.new_task_links(both) == [#("feature", "f1")]
   assert json.to_string(strategy.links_body(strategy.new_task_links(both)))
-    == "{\"feature\":\"f1\",\"milestone\":\"m1\"}"
+    == "{\"feature\":\"f1\"}"
   let created = json.to_string(task("t9", "Index", "", "backlog", "", 0))
   // Nothing picked: no link, the form closes and the task opens.
   let model =
@@ -2686,4 +2691,131 @@ pub fn live_run_and_task_updates_refresh_the_models_test() {
   assert !strategy.models_event("{\"feature\":{\"id\":\"f\"}}")
   assert !strategy.models_event("{\"vision\":{\"text\":\"\"}}")
   assert !strategy.models_event("{\"workflow\":{}}")
+}
+
+pub fn a_milestone_feature_query_and_target_replies_test() {
+  let model =
+    workspace()
+    |> step(strategy.Live(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\"}]}",
+    ))
+    |> step(strategy.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\",\"milestone\":\"m1\"}]}",
+    ))
+    |> step(strategy.EditMilestone("m1"))
+    |> step(strategy.MilestoneFeatureQuery("sea"))
+  assert model.milestone_feature_query == "sea"
+  assert model.milestone_draft != None
+  let added =
+    step(
+      model,
+      strategy.FeatureTargeted(
+        "{\"id\":\"f1\",\"title\":\"Search\",\"milestone\":\"m1\"}",
+      ),
+    )
+  assert added.milestone_error == ""
+  assert added.milestone_draft != None
+  assert added.features
+    == [features.Feature("f1", "Search", "", Some("m1"), 0.0, "proposed", None)]
+  let removed =
+    step(
+      added,
+      strategy.FeatureTargeted(
+        "{\"id\":\"f1\",\"title\":\"Search\",\"milestone\":null}",
+      ),
+    )
+  assert removed.features
+    == [features.Feature("f1", "Search", "", None, 0.0, "proposed", None)]
+  let refused =
+    step(
+      removed,
+      strategy.FeatureTargeted(
+        "{\"code\":\"E7023\",\"message\":\"E7023 unknown milestone m9\"}",
+      ),
+    )
+  assert refused.milestone_error == "E7023 unknown milestone m9"
+  assert step(model, strategy.CancelMilestone).milestone_feature_query == ""
+}
+
+pub fn a_feature_link_or_edit_opens_its_milestone_and_a_heading_toggles_it_test() {
+  let model =
+    workspace()
+    |> step(strategy.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\",\"milestone\":\"m1\"}]}",
+    ))
+    |> step(strategy.Live(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\"},{\"id\":\"m2\",\"title\":\"Later\"}]}",
+    ))
+    |> step(
+      strategy.Live(
+        message(".", [
+          #("tasks", json.array([task_in("t2", "f1", "m2")], fn(t) { t })),
+        ]),
+      ),
+    )
+  assert model.milestone_open == []
+  let #(linked, _) = strategy.update(model, strategy.Focus("feature", "", "f1"))
+  assert linked.tab == strategy.Features
+  assert linked.milestone_open == ["m1"]
+  let edited = step(model, strategy.EditMilestone("m1"))
+  assert edited.milestone_open == ["m1"]
+  let closed = step(edited, strategy.ToggleMilestone("m1"))
+  assert closed.milestone_open == []
+  let opened = step(closed, strategy.ToggleMilestone("m1"))
+  assert opened.milestone_open == ["m1"]
+  let removed =
+    step(
+      opened,
+      strategy.MilestoneDeleted("{\"id\":\"m1\",\"title\":\"Launch\"}"),
+    )
+  assert removed.milestone_open == []
+  assert strategy.new(strategy.Roadmap).milestone_open == []
+}
+
+fn task_in(id: String, feature: String, milestone: String) -> json.Json {
+  json.object([
+    #("id", json.string(id)),
+    #("title", json.string(id)),
+    #("body", json.string("")),
+    #("column", json.string("backlog")),
+    #("feature", json.string(feature)),
+    #("milestone", json.string(milestone)),
+    #("dependsOn", json.array([], json.string)),
+    #("createdTime", json.int(60)),
+    #("closedTime", json.null()),
+  ])
+}
+
+pub fn a_second_target_waits_for_the_first_test() {
+  let model =
+    workspace()
+    |> step(strategy.Live(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\"},{\"id\":\"m2\",\"title\":\"Next\"}]}",
+    ))
+    |> step(strategy.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"One\",\"milestone\":\"m1\"},{\"id\":\"f2\",\"title\":\"Two\",\"milestone\":\"m1\"}]}",
+    ))
+    |> step(strategy.EditMilestone("m1"))
+  let first = step(model, strategy.TargetFeature("f1", "m2"))
+  assert first.milestone_targeting
+  let second = step(first, strategy.TargetFeature("f2", "m2"))
+  assert second == first
+  let refused =
+    step(
+      second,
+      strategy.FeatureTargeted(
+        "{\"code\":\"E7023\",\"message\":\"E7023 unknown milestone m9\"}",
+      ),
+    )
+  assert !refused.milestone_targeting
+  assert refused.milestone_error == "E7023 unknown milestone m9"
+  let replied =
+    step(
+      first,
+      strategy.FeatureTargeted(
+        "{\"id\":\"f1\",\"title\":\"One\",\"milestone\":\"m2\"}",
+      ),
+    )
+  assert !replied.milestone_targeting
+  assert replied.milestone_error == ""
 }

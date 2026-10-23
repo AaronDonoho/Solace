@@ -352,3 +352,678 @@ fn a_rstest_attribute_is_a_test() {
     assert!(crate::reach::is_test_fn(&ix, t));
     assert!(crate::reach::test_symbols(&ix).contains(&t));
 }
+
+/// A local, a field, a method call and a closure parameter that share an
+/// item's name are never rewrite sites.
+#[test]
+fn a_local_field_method_or_closure_named_like_an_item_is_no_site() {
+    let (_root, ix) = index(
+        concat!(
+            "pub struct Holder {\n    pub make: i32,\n}\n\n",
+            "pub fn make() -> i32 {\n    1\n}\n\n",
+            "impl Holder {\n    pub fn make(&self) -> i32 {\n        2\n    }\n}\n\n",
+            "pub fn go() -> i32 {\n",
+            "    let make = 1;\n",
+            "    let h = Holder { make: 2 };\n",
+            "    let f = |make: i32| make + 1;\n",
+            "    make + h.make + h.make() + f(1)\n",
+            "}\n",
+        ),
+        &[],
+    );
+    let make = index_of(&ix, "crate.make");
+    let method = index_of(&ix, "crate.Holder::make");
+    assert!(super::rewrite_sites(&ix.syms, &ix.modules, make).is_empty());
+    assert!(super::rewrite_sites(&ix.syms, &ix.modules, method).is_empty());
+}
+
+/// A `match` arm binding and a destructured parameter bind only in their own
+/// bodies, so neither is a rewrite site.
+#[test]
+fn a_match_binding_or_destructured_parameter_is_no_site() {
+    let (_root, ix) = index(
+        concat!(
+            "pub struct Holder {\n    pub make: i32,\n}\n\n",
+            "pub fn make() -> i32 {\n    1\n}\n\n",
+            "pub fn destructured(Holder { make }: Holder) -> i32 {\n    make\n}\n\n",
+            "pub fn matched(value: Option<i32>) -> i32 {\n",
+            "    match value {\n",
+            "        Some(make) => make,\n",
+            "        None => 0,\n",
+            "    }\n",
+            "}\n",
+        ),
+        &[],
+    );
+    assert!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).is_empty());
+}
+
+/// `vendor::make` and `std::collections::HashMap` have no crate item at their
+/// head, so they never fall back to a crate item with the same leaf.
+#[test]
+fn a_foreign_path_does_not_resolve_to_a_crate_item() {
+    let (_root, ix) = index(
+        concat!(
+            "pub struct HashMap;\n\n",
+            "pub fn make() -> i32 {\n    1\n}\n\n",
+            "pub fn go() -> i32 {\n",
+            "    let _map = std::collections::HashMap::new();\n",
+            "    vendor::make() + make()\n",
+            "}\n",
+        ),
+        &[],
+    );
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make"));
+    assert_eq!(sites.len(), 1);
+    assert_eq!(sites[0].target, index_of(&ix, "crate.make"));
+    assert_eq!(sites[0].via, super::Via::Own);
+}
+
+/// A call before a shadowing `let`, or after the block that held it, still
+/// names the item.
+#[test]
+fn a_call_before_a_shadowing_let_and_after_its_block_is_a_site() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn make() -> i32 {\n    1\n}\n\n",
+            "pub fn go() -> i32 {\n",
+            "    let before = make();\n",
+            "    {\n        let make = 2;\n        let inside = make;\n    }\n",
+            "    let after = make();\n",
+            "    before + after\n",
+            "}\n",
+        ),
+        &[],
+    );
+    let make = index_of(&ix, "crate.make");
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, make);
+    let go = index_of(&ix, "crate.go");
+    let hits: Vec<_> = sites.iter().filter(|s| s.symbol == Some(go)).collect();
+    assert_eq!(hits.len(), 2);
+    assert!(hits.iter().all(|s| s.via == super::Via::Own));
+}
+
+/// A bare name an import binds, an `as` alias, a group member, and
+/// `self::`/`super::`/`crate::` use paths are all reported.
+#[test]
+fn imports_aliases_and_groups_are_sites() {
+    let (_root, ix) = index(
+        concat!(
+            "mod a;\n\nuse crate::a::{make as m, Task as T};\n\n",
+            "pub fn root_make() -> i32 {\n    3\n}\n\n",
+            "pub fn go(value: T) -> i32 {\n    m()\n}\n",
+        ),
+        &[(
+            "src/a.rs",
+            concat!(
+                "use super::root_make;\nuse self::Task;\n\n",
+                "pub struct Task;\n\npub fn make() -> i32 {\n    root_make()\n}\n\n",
+                "impl Task {\n    pub fn new() -> i32 {\n        2\n    }\n}\n",
+            ),
+        )],
+    );
+    let header = ix.modules.iter().find(|m| m.path == "crate").unwrap().header.as_str();
+    let sites = super::use_sites(&ix.syms, &ix.modules, "crate").unwrap();
+    let make = index_of(&ix, "a.make");
+    let task = index_of(&ix, "a.Task");
+    assert_eq!(sites.len(), 2);
+    let make_site = sites.iter().find(|s| s.target == make).unwrap();
+    assert_eq!(make_site.via, super::Via::Import("m".into()));
+    assert_eq!(&header[make_site.range.clone()], "make");
+    assert_eq!(make_site.outside, 2);
+    assert_eq!(&header[make_site.alias.clone().unwrap()], "as m");
+    let task_site = sites.iter().find(|s| s.target == task).unwrap();
+    assert_eq!(task_site.via, super::Via::Import("T".into()));
+    assert_eq!(&header[task_site.alias.clone().unwrap()], "as T");
+
+    let sub = ix.modules.iter().find(|m| m.path == "a").unwrap().header.as_str();
+    let sub_sites = super::use_sites(&ix.syms, &ix.modules, "a").unwrap();
+    assert_eq!(sub_sites.len(), 2);
+    let root_make = index_of(&ix, "crate.root_make");
+    let parent = sub_sites.iter().find(|s| s.target == root_make).unwrap();
+    assert_eq!(&sub[parent.range.clone()], "super::root_make");
+    assert_eq!(parent.outside, 0);
+    let own = sub_sites.iter().find(|s| s.target == task).unwrap();
+    assert_eq!(&sub[own.range.clone()], "self::Task");
+
+    let go = index_of(&ix, "crate.go");
+    let make_mentions = super::rewrite_sites(&ix.syms, &ix.modules, make);
+    assert!(make_mentions.iter().any(|s| s.symbol == Some(go) && s.via == super::Via::Import("m".into())));
+    let task_mentions = super::rewrite_sites(&ix.syms, &ix.modules, task);
+    assert!(task_mentions.iter().any(|s| s.symbol == Some(go) && s.via == super::Via::Import("T".into())));
+}
+
+/// Field mentions stay in the over-approximating graph, so test reach does not
+/// change even though they are not rewrite sites.
+#[test]
+fn a_field_mention_still_reaches_an_item_for_the_graph() {
+    let (_root, ix) = index("pub struct Holder;\npub fn make() -> i32 {\n    1\n}\npub fn go(h: Holder) -> i32 {\n    h.make\n}\n", &[]);
+    assert!(uses(&ix, "crate.go", "crate.make"));
+}
+
+/// `if let`, `while let` and `for` pattern bindings cover their own blocks.
+#[test]
+fn if_let_while_let_and_for_bindings_are_no_sites() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn make() -> i32 {\n    1\n}\n\n",
+            "pub fn go(values: Vec<Option<i32>>) -> i32 {\n",
+            "    if let Some(make) = values.first() {\n        let _ = make;\n    }\n",
+            "    while let Some(make) = values.first() {\n        let _ = make;\n        break;\n    }\n",
+            "    for make in values {\n        let _ = make;\n    }\n",
+            "    0\n",
+            "}\n",
+        ),
+        &[],
+    );
+    assert!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).is_empty());
+}
+
+/// A local `fn`, `const`, `static`, `type`, `struct`, `enum` or `trait`
+/// shadows a same-named item in its block.
+#[test]
+fn local_declarations_named_like_an_item_are_no_sites() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn make() -> i32 {\n    1\n}\n\n",
+            "pub fn go() -> i32 {\n",
+            "    {\n        fn make() -> i32 { 2 }\n        let _ = make();\n    }\n",
+            "    {\n        const make: i32 = 2;\n        let _ = make;\n    }\n",
+            "    {\n        static make: i32 = 2;\n        let _ = make;\n    }\n",
+            "    {\n        type make = i32;\n        let _: make = 0;\n    }\n",
+            "    {\n        struct make;\n        let _ = make;\n    }\n",
+            "    {\n        enum make { A }\n        let _: make = make::A;\n    }\n",
+            "    {\n        trait make {}\n        let _: &dyn make = &();\n    }\n",
+            "    0\n",
+            "}\n",
+        ),
+        &[],
+    );
+    assert!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).is_empty());
+}
+
+/// A `use` row nested in an inline module is reported with its own symbol range.
+#[test]
+fn a_use_symbol_inside_a_module_is_a_site() {
+    let (_root, ix) = index(
+        concat!(
+            "pub mod inner {\n    pub fn go() -> i32 {\n        1\n    }\n\n",
+            "    use crate::make;\n\n    pub fn more() -> i32 {\n        make()\n    }\n}\n\n",
+            "pub fn make() -> i32 {\n    1\n}\n",
+        ),
+        &[],
+    );
+    let use_sym = ix.syms.iter().position(|s| s.kind_text == "use").expect("a use symbol");
+    let sites = super::use_sites(&ix.syms, &ix.modules, &ix.syms[use_sym].module).unwrap();
+    let make = index_of(&ix, "crate.make");
+    assert!(sites.iter().any(|s| s.symbol == Some(use_sym) && s.target == make));
+}
+
+/// Qualified paths say they reached their item by path, including `self::`,
+/// `super::` and `crate::`.
+#[test]
+fn qualified_self_super_and_crate_paths_resolve() {
+    let (_root, ix) = index(
+        concat!("mod a;\n\npub fn root_make() -> i32 {\n    1\n}\n\n", "pub fn go() -> i32 {\n    crate::a::make() + a::make()\n}\n",),
+        &[("src/a.rs", "pub fn make() -> i32 {\n    2\n}\n\npub fn inner() -> i32 {\n    self::make() + super::root_make()\n}\n")],
+    );
+    let make = index_of(&ix, "a.make");
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, make);
+    assert_eq!(sites.iter().filter(|s| s.via == super::Via::Path).count(), 3);
+    let root = index_of(&ix, "crate.root_make");
+    let root_sites = super::rewrite_sites(&ix.syms, &ix.modules, root);
+    assert!(root_sites.iter().any(|s| s.via == super::Via::Path));
+}
+
+/// A binding covers the `for` or `if let` body, not the expression that
+/// produces its value.
+#[test]
+fn for_and_if_let_conditions_are_sites() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn make() -> Option<i32> {\n    Some(1)\n}\n\n",
+            "pub fn go() -> i32 {\n",
+            "    if let Some(make) = make() {\n        let _ = make;\n    }\n",
+            "    for make in make().into_iter() {\n        let _ = make;\n    }\n",
+            "    0\n",
+            "}\n",
+        ),
+        &[],
+    );
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make"));
+    assert_eq!(sites.iter().filter(|s| s.symbol == Some(index_of(&ix, "crate.go"))).count(), 2);
+}
+
+/// `let make = make();` names the item in its initializer; a local `fn make`
+/// declared later in a block shadows the whole block.
+#[test]
+fn a_let_initializer_is_a_site_and_a_later_local_item_shadows_its_block() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn make() -> i32 {\n    1\n}\n\n",
+            "pub fn go() -> i32 {\n    let make = make();\n    make\n}\n\n",
+            "pub fn early() -> i32 {\n    let first = make();\n    fn make() -> i32 {\n        2\n    }\n    first\n}\n",
+        ),
+        &[],
+    );
+    let make = index_of(&ix, "crate.make");
+    let go = index_of(&ix, "crate.go");
+    let early = index_of(&ix, "crate.early");
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, make);
+    let in_go: Vec<_> = sites.iter().filter(|s| s.symbol == Some(go)).collect();
+    assert_eq!(in_go.len(), 1);
+    assert_eq!(&ix.syms[go].text[in_go[0].range.clone()], "make");
+    assert!(ix.syms[go].text[in_go[0].range.end..].starts_with("()"));
+    assert!(!sites.iter().any(|s| s.symbol == Some(early)));
+}
+
+/// A method's own name is not in bare scope inside its body.
+#[test]
+fn a_method_name_does_not_hide_a_free_fn() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn parse() -> i32 {\n    1\n}\n\n",
+            "pub struct Reader;\n\n",
+            "impl Reader {\n    pub fn parse(&self) -> i32 {\n        parse()\n    }\n}\n",
+        ),
+        &[],
+    );
+    let parse = index_of(&ix, "crate.parse");
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, parse);
+    assert_eq!(sites.len(), 1);
+    assert_ne!(sites[0].symbol, Some(parse));
+}
+
+/// `'static`, `*const`, `fn()` types, a `union` method and a generic `Fn(…)`
+/// bound declare nothing; a struct update's base is a site.
+#[test]
+fn keyword_types_and_struct_updates_bind_nothing() {
+    let (_root, ix) = index(
+        concat!(
+            "pub struct Config;\n\n",
+            "pub fn kinds(c: &'static Config, p: *const Config, f: fn() -> Config, s: &Config) -> Config {\n",
+            "    s.union(s);\n    Config\n}\n\n",
+            "pub fn value() -> u32 {\n    1\n}\n\n",
+            "pub fn run<F: Fn(u32) -> u32>(value: F) -> u32 {\n    value(2)\n}\n\n",
+            "pub struct Holder {\n    pub a: i32,\n    pub b: i32,\n}\n\n",
+            "pub fn defaults() -> Holder {\n    Holder { a: 0, b: 0 }\n}\n\n",
+            "pub fn update() -> Holder {\n    Holder { a: 1, ..defaults() }\n}\n",
+        ),
+        &[],
+    );
+    let config = index_of(&ix, "crate.Config");
+    let kinds = index_of(&ix, "crate.kinds");
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, config);
+    assert_eq!(sites.iter().filter(|s| s.symbol == Some(kinds)).count(), 6);
+    let value = index_of(&ix, "crate.value");
+    let run = index_of(&ix, "crate.run");
+    assert!(!super::rewrite_sites(&ix.syms, &ix.modules, value).iter().any(|s| s.symbol == Some(run)));
+    let defaults = index_of(&ix, "crate.defaults");
+    let update = index_of(&ix, "crate.update");
+    assert!(super::rewrite_sites(&ix.syms, &ix.modules, defaults).iter().any(|s| s.symbol == Some(update)));
+}
+
+/// `crate::a::Task::new()`, an imported `Task::new()` and `a::Kind::A` give a
+/// site for the type; a group member's range starts at its own root.
+#[test]
+fn a_type_prefix_of_a_path_is_a_site() {
+    let (_root, ix) = index(
+        concat!(
+            "mod a;\n\nuse crate::{a::Task, a::make};\n\n",
+            "pub fn go() -> i32 {\n    let _k = a::Kind::A;\n    crate::a::Task::new() + Task::new() + make()\n}\n",
+        ),
+        &[(
+            "src/a.rs",
+            concat!(
+                "pub struct Task;\n\npub enum Kind {\n    A,\n}\n\n",
+                "pub fn make() -> i32 {\n    1\n}\n\n",
+                "impl Task {\n    pub fn new() -> i32 {\n        2\n    }\n}\n",
+            ),
+        )],
+    );
+    let go = index_of(&ix, "crate.go");
+    let text = &ix.syms[go].text;
+    let task = index_of(&ix, "a.Task");
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, task);
+    let mut written: Vec<&str> = sites.iter().filter(|s| s.symbol == Some(go)).map(|s| &text[s.range.clone()]).collect();
+    written.sort_unstable();
+    assert_eq!(written, ["Task", "crate::a::Task"]);
+    let kind = index_of(&ix, "a.Kind");
+    let kinds = super::rewrite_sites(&ix.syms, &ix.modules, kind);
+    assert_eq!(kinds.iter().map(|s| &text[s.range.clone()]).collect::<Vec<_>>(), ["a::Kind"]);
+    let header = ix.modules.iter().find(|m| m.path == "crate").unwrap().header.as_str();
+    let mut members: Vec<&str> =
+        super::use_sites(&ix.syms, &ix.modules, "crate").unwrap().iter().map(|s| &header[s.range.clone()]).collect();
+    members.sort_unstable();
+    assert_eq!(members, ["a::Task", "a::make"]);
+}
+
+/// A bare name reached only through `use a::*;` says so.
+#[test]
+fn a_name_a_glob_brings_is_via_glob() {
+    let (_root, ix) =
+        index("mod a;\n\nuse a::*;\n\npub fn go() -> i32 {\n    make()\n}\n", &[("src/a.rs", "pub fn make() -> i32 {\n    1\n}\n")]);
+    let make = index_of(&ix, "a.make");
+    let go = index_of(&ix, "crate.go");
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, make);
+    assert!(sites.iter().any(|s| s.symbol == Some(go) && s.via == super::Via::Glob));
+}
+
+/// A named import from another crate hides a glob that brings a crate item.
+#[test]
+fn a_named_external_import_hides_a_glob() {
+    let (_root, ix) = index(
+        "mod a;\n\nuse vendor::make;\nuse a::*;\n\npub fn go() -> i32 {\n    make()\n}\n",
+        &[("src/a.rs", "pub fn make() -> i32 {\n    1\n}\n")],
+    );
+    let make = index_of(&ix, "a.make");
+    assert!(super::rewrite_sites(&ix.syms, &ix.modules, make).is_empty());
+}
+
+/// A `use` inside a function body hides a same-named crate item after it.
+#[test]
+fn a_use_in_a_block_binds_its_name() {
+    let (_root, ix) = index("pub fn make() -> i32 {\n    1\n}\n\npub fn go() -> i32 {\n    use vendor::make;\n    make()\n}\n", &[]);
+    assert!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).is_empty());
+}
+
+/// The `for` of `impl Trait for X` or `for<'a>` binds nothing in a later loop.
+#[test]
+fn impl_headers_and_higher_ranked_types_are_no_loops() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn make() -> i32 {\n    1\n}\n\n",
+            "pub fn one() {\n    struct S;\n    trait Tr {}\n    impl Tr for S {}\n    drop(make);\n",
+            "    for x in [1] {\n        let _ = make() + x;\n    }\n}\n\n",
+            "pub fn two() {\n    let _f: for<'a> fn(&'a i32) = |_| {};\n    drop(make);\n",
+            "    for x in [1] {\n        let _ = make() + x;\n    }\n}\n",
+        ),
+        &[],
+    );
+    assert_eq!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).len(), 4);
+}
+
+/// `&raw const make` borrows the item; it declares nothing.
+#[test]
+fn a_raw_const_borrow_is_a_site() {
+    let (_root, ix) = index("pub static make: i32 = 1;\n\npub fn go() -> *const i32 {\n    &raw const make\n}\n", &[]);
+    assert_eq!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).len(), 1);
+}
+
+/// A closure after `&` or a struct field's `:` binds its parameters.
+#[test]
+fn closures_after_a_borrow_or_a_field_bind_their_parameters() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn make() -> i32 {\n    1\n}\n\npub struct H {\n    pub h: fn(i32) -> i32,\n}\n\n",
+            "pub fn go() -> i32 {\n    let f = &|make: i32| make + 1;\n    let g = H { h: |make| make };\n    f(2) + (g.h)(3)\n}\n",
+        ),
+        &[],
+    );
+    assert!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).is_empty());
+}
+
+/// A `let` named like a module hides the bare name, not `module::item`.
+#[test]
+fn a_local_value_does_not_hide_a_module_path() {
+    let (_root, ix) = index(
+        "mod store;\n\npub fn go() -> i32 {\n    let store = 1;\n    store::helper() + store\n}\n",
+        &[("src/store.rs", "pub fn helper() -> i32 {\n    1\n}\n")],
+    );
+    assert_eq!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "store.helper")).len(), 1);
+}
+
+/// `use ` inside an attribute's string starts no `use` tree; `pub(crate) use` does.
+#[test]
+fn use_inside_a_line_is_no_use_tree() {
+    let (_root, ix) = index(
+        "#![doc = \"to use a::make;\"]\n\nmod a;\n\npub(crate) use a::make;\n",
+        &[("src/a.rs", "pub fn make() -> i32 {\n    1\n}\n")],
+    );
+    assert_eq!(super::use_sites(&ix.syms, &ix.modules, "crate").unwrap().len(), 1);
+}
+
+/// A `use crate::make;` inside a function leaves `make()` naming the item.
+#[test]
+fn a_block_use_of_a_crate_item_is_a_site() {
+    let (_root, ix) = index("pub fn make() -> i32 {\n    1\n}\n\npub fn go() -> i32 {\n    use crate::make;\n    make()\n}\n", &[]);
+    let go = index_of(&ix, "crate.go");
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make"));
+    assert_eq!(sites.iter().filter(|s| s.symbol == Some(go)).count(), 2);
+    let import = sites.iter().find(|s| s.symbol == Some(go) && &ix.syms[go].text[s.range.clone()] == "crate::make").unwrap();
+    assert_eq!(import.via, super::Via::Import("make".into()));
+}
+
+/// Block imports that resolve to another crate item hide the target's name.
+#[test]
+fn block_uses_of_other_items_hide_their_local_name() {
+    let (_root, ix) = index(
+        concat!(
+            "mod a;\nmod other;\n\npub fn make() -> i32 {\n    1\n}\n\n",
+            "pub fn go() -> i32 {\n",
+            "    let one = {\n        use crate::other::make;\n        make()\n    };\n",
+            "    let two = {\n        use a::make;\n        make()\n    };\n",
+            "    let three = {\n        use std::hint::black_box as make;\n        make(one)\n    };\n",
+            "    one + two + three\n}\n",
+        ),
+        &[("src/a.rs", "pub fn make() -> i32 {\n    2\n}\n"), ("src/other.rs", "pub fn make() -> i32 {\n    3\n}\n")],
+    );
+    assert!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).is_empty());
+}
+
+/// A block import that resolves to the target is an import site.
+#[test]
+fn block_uses_of_the_target_are_import_sites() {
+    let (_root, ix) = index(
+        "mod a;\n\npub fn make() -> i32 {\n    1\n}\n\npub fn go() -> i32 {\n    use a::make;\n    make()\n}\n",
+        &[("src/a.rs", "pub fn make() -> i32 {\n    2\n}\n")],
+    );
+    let make = index_of(&ix, "a.make");
+    let go = index_of(&ix, "crate.go");
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, make);
+    let import = sites.iter().find(|s| s.symbol == Some(go) && &ix.syms[go].text[s.range.clone()] == "a::make").unwrap();
+    assert_eq!((import.target, import.via.clone()), (make, super::Via::Import("make".into())));
+}
+
+/// A use after an attribute, or inside a one-line inline module, has a tree.
+#[test]
+fn one_line_attribute_and_inline_module_uses_are_trees() {
+    let text = "#[cfg(test)] use a::make;\nmod m { use b::more; }\n";
+    let trees: Vec<&str> = super::use_trees(text).unwrap().into_iter().map(|(_, tree)| tree).collect();
+    assert_eq!(trees, vec!["a::make", "b::more"]);
+}
+
+/// A closure after `<`, `!`, `+`, `-`, `*` or `[` binds its parameters.
+#[test]
+fn closures_after_operators_and_in_generic_contexts_bind_their_parameters() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn make() -> i32 {\n    1\n}\n\n",
+            "macro_rules! touch {\n    ($($t:tt)*) => {};\n}\n\n",
+            "pub fn go() {\n",
+            "    touch!(<|make| make>);\n",
+            "    touch!(!|make| make);\n",
+            "    touch!(+|make| make);\n",
+            "    touch!(-|make| make);\n",
+            "    touch!(*|make| make);\n",
+            "    touch!([|make| make]);\n",
+            "}\n",
+        ),
+        &[],
+    );
+    assert!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).is_empty());
+}
+
+#[test]
+fn an_ambiguous_block_use_does_not_hide_the_target() {
+    let (_root, mut ix) = index(
+        concat!("mod x;\n\npub fn make() -> i32 {\n    1\n}\n\n", "pub fn go() -> i32 {\n    use crate::x::make;\n    make()\n}\n",),
+        &[("src/x.rs", "pub fn make() -> i32 {\n    2\n}\n")],
+    );
+    let mut duplicate = ix.syms.iter().find(|s| s.qname() == "x.make").unwrap().clone();
+    duplicate.id = "extra:x.make".into();
+    duplicate.kind_text = "struct".into();
+    ix.syms.push(duplicate);
+    let go = index_of(&ix, "crate.go");
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make"));
+    assert!(sites.iter().any(|s| s.symbol == Some(go) && &ix.syms[go].text[s.range.clone()] == "make"));
+}
+
+#[test]
+fn a_header_that_does_not_parse_is_reported() {
+    let (_root, mut ix) = index("pub fn make() -> i32 {\n    1\n}\n", &[]);
+    ix.modules.iter_mut().find(|m| m.path == "crate").unwrap().header = "use a::{;".into();
+    let err = super::use_sites(&ix.syms, &ix.modules, "crate").unwrap_err();
+    assert!(err.0.contains("imports in crate don't parse"), "{}", err.0);
+}
+
+#[test]
+fn a_use_symbol_that_does_not_parse_is_reported() {
+    let (_root, mut ix) = index(
+        "pub mod inner {\n    pub fn go() -> i32 {\n        1\n    }\n\n    use crate::make;\n}\n\npub fn make() -> i32 {\n    1\n}\n",
+        &[],
+    );
+    let i = ix.syms.iter().position(|s| s.kind_text == "use").unwrap();
+    let module = ix.syms[i].module.clone();
+    ix.syms[i].text = "use crate::{;".into();
+    let err = super::use_sites(&ix.syms, &ix.modules, &module).unwrap_err();
+    assert!(err.0.contains("don't parse"), "{}", err.0);
+}
+
+/// A local variable named like an import is not a mention of it.
+#[test]
+fn a_local_binding_is_no_mentioned_name() {
+    let (_root, ix) = index("use vendor::make;\n\npub fn go() -> i32 {\n    let make = 1;\n    make\n}\n", &[]);
+    let go = index_of(&ix, "crate.go");
+    let names = super::references(&ix.syms, &ix.modules).mentioned;
+    assert!(!names[go].contains("make"), "{:?}", names[go]);
+}
+
+/// An unqualified call reaches a sibling inside the same inline module.
+#[test]
+fn a_call_to_an_item_in_an_inline_module_resolves() {
+    let (_root, ix) = index(
+        concat!(
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    fn check(value: i32) {\n        assert_eq!(value, 1);\n    }\n\n",
+            "    #[test]\n    fn make_works() {\n        check(1);\n    }\n}\n",
+        ),
+        &[],
+    );
+    assert!(uses(&ix, "crate.tests::make_works", "crate.tests::check"));
+}
+
+/// A test module's helper is seen from the test module only.
+#[test]
+fn a_test_helper_does_not_leak_to_its_enclosing_module() {
+    let (_root, ix) = index(
+        concat!(
+            "fn helper() -> i32 {\n    1\n}\n\n",
+            "fn production() -> i32 {\n    helper()\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    fn helper() -> i32 {\n        2\n    }\n\n",
+            "    #[test]\n    fn works() {\n        assert_eq!(helper(), 2);\n    }\n}\n",
+        ),
+        &[],
+    );
+    assert!(uses(&ix, "crate.production", "crate.helper"));
+    assert!(!uses(&ix, "crate.production", "crate.tests::helper"));
+    assert!(uses(&ix, "crate.tests::works", "crate.tests::helper"));
+    assert!(!uses(&ix, "crate.tests::works", "crate.helper"));
+}
+
+/// An impl belongs to the type its header names, not to a same-leaf type elsewhere.
+#[test]
+fn an_impl_owner_is_resolved_by_path() {
+    let (_root, ix) = index(
+        concat!(
+            "pub struct Task;\n\nimpl Task {\n    pub fn local() {}\n}\n\n",
+            "pub mod vendor {\n    pub struct Task;\n}\n\n",
+            "impl vendor::Task {\n    pub fn extra() {}\n}\n",
+        ),
+        &[],
+    );
+    let local = ix.syms.iter().position(|s| s.name == "Task" && s.module == "crate").unwrap();
+    let impls: Vec<usize> = (0..ix.syms.len()).filter(|&i| ix.syms[i].kind_text == "impl").collect();
+    assert_eq!(impls.len(), 2);
+    use crate::language::rust_refs::{ImplOwner, impl_owner_batch};
+    let owners: Vec<ImplOwner> = impl_owner_batch(&ix.syms, &ix.modules, &impls);
+    assert!(owners.iter().any(|o| matches!(o, ImplOwner::One(t) if *t == local)));
+    assert!(owners.iter().any(|o| matches!(o, ImplOwner::One(t) if *t != local)));
+}
+
+/// A crafted index can have two same-named types for one impl owner.
+#[test]
+fn an_ambiguous_impl_owner_names_both_types() {
+    let syms = vec![
+        sym("type:a.Task", "Task", "struct Task;"),
+        sym("type:b.Task", "Task", "struct Task;"),
+        sym("impl:Task", "Task", "impl Task {}"),
+    ];
+    let owners = crate::language::rust_refs::impl_owner_batch(&syms, &[module()], &[2]);
+    assert!(matches!(&owners[..], [crate::language::rust_refs::ImplOwner::Ambiguous(ids)] if ids == &vec![0, 1]), "{owners:?}");
+}
+
+fn sym(id: &str, name: &str, text: &str) -> crate::index::Sym {
+    crate::index::Sym {
+        id: id.to_string(),
+        module: "crate".to_string(),
+        name: name.to_string(),
+        kind: crate::language::Kind::Type,
+        kind_text: if text.starts_with("impl") { "impl" } else { "struct" }.to_string(),
+        text: text.to_string(),
+        parent: None,
+        sep: None,
+        tail: String::new(),
+    }
+}
+
+fn module() -> crate::index::ModuleRow {
+    crate::index::ModuleRow {
+        path: "crate".to_string(),
+        dir: "src".to_string(),
+        header: String::new(),
+        file: Some("lib.rs".to_string()),
+        owns_dir: Some(false),
+    }
+}
+
+#[test]
+fn an_inline_modules_import_stays_in_that_module() {
+    let (_root, ix) = index(
+        concat!(
+            "mod a;\n\n",
+            "pub mod before {\n",
+            "    use crate::a::Task;\n\n",
+            "    pub fn inside() -> Task {\n        Task\n    }\n}\n\n",
+            "pub mod after {\n",
+            "    pub fn first() {}\n\n",
+            "    use crate::a::Other;\n\n",
+            "    pub fn inside() -> Other {\n        Other\n    }\n}\n\n",
+            "pub fn outside() -> Task {\n    Task\n}\n\n",
+            "pub fn outside_other() -> Other {\n    Other\n}\n",
+        ),
+        &[("src/a.rs", "pub struct Task;\npub struct Other;\n")],
+    );
+    assert!(uses(&ix, "crate.before::inside", "a.Task"));
+    assert!(uses(&ix, "crate.after::inside", "a.Other"));
+    assert!(!uses(&ix, "crate.outside", "a.Task"));
+    assert!(!uses(&ix, "crate.outside_other", "a.Other"));
+}
+
+#[test]
+fn self_and_super_in_inline_modules_resolve() {
+    let (_root, ix) = index(
+        concat!(
+            "mod outer {\n",
+            "    pub fn outer_make() -> i32 {\n        1\n    }\n\n",
+            "    mod inner {\n",
+            "        pub fn inner_make() -> i32 {\n            2\n        }\n\n",
+            "        pub fn go() -> i32 {\n            self::inner_make() + super::outer_make()\n        }\n",
+            "    }\n}\n",
+        ),
+        &[],
+    );
+    assert!(uses(&ix, "crate.outer::inner::go", "crate.outer::inner::inner_make"));
+    assert!(uses(&ix, "crate.outer::inner::go", "crate.outer::outer_make"));
+}

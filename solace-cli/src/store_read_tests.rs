@@ -458,3 +458,27 @@ fn a_rust_session_finds_a_test_below_a_module_inside_tests() {
     assert!(out.contains("crate.tests::inner::works"), "{out}");
     assert!(out.contains("*** Add: crate::tests.<test>"), "{out}");
 }
+
+/// A wrong separator still lists the nearest stored names: the same leaf and
+/// the names in the same module.
+#[test]
+fn a_wrong_separator_still_suggests_the_nearest_names() {
+    let (_root, store) = sample();
+    let ix = store.index().unwrap();
+    for miss in ["crate::hel", "crate.tests.name"] {
+        let e = store.resolve(&ix, miss).unwrap_err();
+        assert!(e.0.contains("crate.helper"), "{miss}: {}", e.0);
+        assert!(e.0.contains("crate.Store"), "{miss}: {}", e.0);
+        assert!(e.0.contains("<module>.<container>::<name>"), "{miss}: {}", e.0);
+    }
+}
+
+/// A common leaf stops the hint at ten names instead of scanning every symbol.
+#[test]
+fn a_common_leaf_lists_at_most_ten_names() {
+    let lib: String = (0..12).map(|n| format!("pub fn item{n}() -> i32 {{\n    {n}\n}}\n")).collect::<Vec<_>>().join("\n");
+    let (_root, store) = crate::testing::rust_project(&lib);
+    let ix = store.index().unwrap();
+    let hint = similar_hint(&ix, "crate.item");
+    assert_eq!(hint.matches("crate.item").count(), 10, "{hint}");
+}

@@ -29,8 +29,10 @@ pub type Feature {
   )
 }
 
-/// A milestone: a planned release, ordered by `rank`. `target_date` is the
-/// `targetDate` the server keeps as written ("2027-01-01").
+/// A milestone: a planned release. Features and milestone pickers order
+/// milestones by `rank`; the Roadmap orders them by `target_date`.
+/// `target_date` is the `targetDate` the server keeps as written
+/// ("2027-01-01").
 pub type Milestone {
   Milestone(
     id: String,
@@ -519,10 +521,7 @@ pub fn changes(feature: Feature, draft: Draft) -> List(#(String, json.Json)) {
 
 /// Milestones by rank, then id.
 pub fn ranked(milestones: List(Milestone)) -> List(Milestone) {
-  list.sort(milestones, fn(a, b) {
-    float.compare(a.rank, b.rank)
-    |> order.break_tie(string.compare(a.id, b.id))
-  })
+  list.sort(milestones, by_rank)
 }
 
 /// The form for a new feature or an edit: title, description, state and
@@ -782,4 +781,10 @@ pub fn grip_key(key: String) -> Option(Bool) {
     "ArrowDown" -> Some(False)
     _ -> None
   }
+}
+
+/// Milestones by rank, then id.
+pub fn by_rank(a: Milestone, b: Milestone) -> order.Order {
+  float.compare(a.rank, b.rank)
+  |> order.break_tie(string.compare(a.id, b.id))
 }

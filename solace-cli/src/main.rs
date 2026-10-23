@@ -44,6 +44,7 @@ use store::{projection, store_rust_file};
 
 mod reference;
 pub(crate) use reference::*;
+mod index;
 /// The largest reply, in bytes (about 8k tokens). Agents cut longer tool
 /// output (Codex at about 10k tokens), so `inspect` and `view` trim by
 /// priority to fit rather than being cut mid-document (D-14). `solace mcp
@@ -180,6 +181,9 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
             let dir =
                 a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder; session start lists them".into(), 2))?;
             rest = [&args[..i], &args[i + 2..]].concat();
+            if rest.is_empty() {
+                return usage(PROJECT_ONLY.trim_end());
+            }
             match scoped(dir, &rest)? {
                 Some(target) => (&rest[..], Some(target)),
                 None => return read_project(dir, &rest, budget),
@@ -1103,48 +1107,16 @@ fn stdin() -> Result<String, Failure> {
 
 // --- the store --------------------------------------------------------------
 
-#[derive(Clone)]
-struct Sym {
-    id: String,
-    module: String,
-    name: String,
-    kind: Kind,
-    /// The kind as the source writes it; `Kind` keeps only Gleam's three (D-158).
-    kind_text: String,
-    text: String,
-    /// The enclosing `impl`, `trait`, `extern` or inline `mod`, by id (Rust).
-    parent: Option<String>,
-    /// What follows the item in its file; `None`: Gleam's blank line.
-    sep: Option<String>,
-    /// A container's text after its last child.
-    tail: String,
-}
+pub(crate) type Sym = index::Sym;
 
 impl Sym {
-    fn qname(&self) -> String {
-        format!("{}.{}", self.module, self.name)
-    }
-    fn item(&self) -> Item {
-        Item { kind: self.kind, name: self.name.clone(), text: self.text.clone() }
-    }
+
 }
 
-struct ModuleRow {
-    path: String,
-    dir: String,
-    header: String,
-    /// Its file from the project root, written exactly (Rust); `None` for Gleam.
-    file: Option<String>,
-    /// Whether its `mod x;` children sit beside its file (Rust); `None` for
-    /// Gleam or a store written before the column (D-168).
-    owns_dir: Option<bool>,
-}
+pub(crate) type ModuleRow = index::ModuleRow;
 
 impl ModuleRow {
-    /// Its file from the project root.
-    fn rel(&self) -> String {
-        self.file.clone().unwrap_or_else(|| outside::file_of(&self.dir, &self.path))
-    }
+
 }
 
 struct Store {
@@ -1169,103 +1141,10 @@ thread_local! {
     static COMMAND_DB: RefCell<Vec<(PathBuf, Rc<Connection>)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// All live symbols and modules, with the reference graph resolved.
-struct Index {
-    lang: &'static dyn Language,
-    /// Rust's: signatures come from the file's text, and its graph is not built yet.
-    rust: bool,
-    syms: Vec<Sym>,
-    modules: Vec<ModuleRow>,
-    uses: Vec<Vec<usize>>,
-    /// The reverse of `uses`: the symbols that use each one, in order.
-    used_by: Vec<Vec<usize>>,
-    /// Every resolved reference: (symbol, line in the user's text).
-    at: Vec<Vec<(usize, usize)>>,
-    /// Whether each symbol is test code (D-170).
-    test: Vec<bool>,
-}
+pub(crate) type Index = index::Index;
 
 impl Index {
-    fn build(lang: &'static dyn Language, syms: Vec<Sym>, modules: Vec<ModuleRow>, rust: bool) -> Index {
-        // A Rust store's graph comes from the names its text mentions, resolved
-        // against the module's `use` lines and the crate's item names (D-170).
-        if rust {
-            let g = language::rust_refs::graph(&syms, &modules);
-            return Index { lang, rust, syms, modules, uses: g.uses, used_by: g.used_by, at: g.at, test: g.test };
-        }
-        // (module, name) -> symbol, for names and for type constructors
-        let mut names: HashMap<(&str, &str), usize> = HashMap::new();
-        for (i, s) in syms.iter().enumerate() {
-            names.insert((&s.module, &s.name), i);
-        }
-        let mut ctors: Vec<(String, String, usize)> = vec![];
-        for (i, s) in syms.iter().enumerate() {
-            if s.kind == Kind::Type {
-                for c in lang.constructors(&s.text) {
-                    ctors.push((s.module.clone(), c, i));
-                }
-            }
-        }
-        for (m, c, i) in &ctors {
-            names.entry((m, c)).or_insert(*i);
-        }
-        let imports: HashMap<&str, Vec<Import>> = modules.iter().map(|m| (m.path.as_str(), lang.imports(&m.header))).collect();
-        let at: Vec<Vec<(usize, usize)>> = syms
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let imps = &imports[s.module.as_str()];
-                let mut found = vec![];
-                for (r, line) in lang.references_at(&s.text) {
-                    let target = match &r {
-                        Ref::Qualified(alias, member) => {
-                            imps.iter().find(|imp| &imp.alias == alias).and_then(|imp| names.get(&(imp.module.as_str(), member.as_str())))
-                        }
-                        Ref::Bare(name) => names.get(&(s.module.as_str(), name.as_str())).or_else(|| {
-                            imps.iter().find_map(|imp| {
-                                imp.unqualified
-                                    .iter()
-                                    .find(|(_, local)| local == name)
-                                    .and_then(|(orig, _)| names.get(&(imp.module.as_str(), orig.as_str())))
-                            })
-                        }),
-                    };
-                    if let Some(&t) = target
-                        && t != i
-                    {
-                        found.push((t, line));
-                    }
-                }
-                found
-            })
-            .collect();
-        let uses: Vec<Vec<usize>> = at
-            .iter()
-            .map(|found| {
-                let mut uses: Vec<usize> = vec![];
-                for &(t, _) in found {
-                    if !uses.contains(&t) {
-                        uses.push(t);
-                    }
-                }
-                uses
-            })
-            .collect();
-        let mut used_by = vec![vec![]; syms.len()];
-        for (j, us) in uses.iter().enumerate() {
-            for &u in us {
-                used_by[u].push(j);
-            }
-        }
-        let test: Vec<bool> = syms.iter().map(|s| modules.iter().any(|m| m.path == s.module && store::is_test(m))).collect();
-        Index { lang, rust, syms, modules, uses, used_by, at, test }
-    }
 
-    /// The item's signature as `view` and `inspect` show it: Rust's from its own
-    /// text (D-162), Gleam's from its `Language`.
-    fn signature(&self, s: &Sym) -> String {
-        if self.rust { orientation::rust_signature(&s.text, &s.kind_text) } else { self.lang.signature(&s.item()) }
-    }
 }
 
 enum Target<'a> {
@@ -1594,11 +1473,10 @@ impl Store {
             .query_map([], |r| Ok(ModuleRow { path: r.get(0)?, dir: r.get(1)?, header: r.get(2)?, file: r.get(3)?, owns_dir: r.get(4)? }))?
             .collect::<Result<_, _>>()?;
 
-        Ok(Index::build(self.lang(), syms, modules, language::is_rust(&self.root)))
+        Ok(index::build(self.lang(), syms, modules, language::is_rust(&self.root)))
     }
 
-    // --- writing files --------------------------------------------------------
-
+    // --- writing files ------------------------------------------------------------
     /// Writes every module's file from the store. Returns, per file, the line
     /// range of each symbol, for mapping compiler output back to symbols.
     fn materialize(&self, ix: &Index) -> Result<Vec<FileMap>, Failure> {
@@ -1682,6 +1560,7 @@ impl Store {
             return Err(Failure(format!("E6013 {why}"), 1));
         }
         let files = self.materialize(ix)?;
+        self.refuse_drift(ix)?;
         let diags = if language::is_rust(&self.root) {
             let args = cargo::check_args(&self.root);
             let argv: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1782,18 +1661,7 @@ impl Store {
     }
 
     fn resolve_module<'a>(&self, ix: &'a Index, input: &str) -> Option<&'a ModuleRow> {
-        // A module path may be written with `.`, `::` or `/`; the store keeps `::`
-        // for Rust (`a::agents`) and `/` for Gleam (D-158).
-        let forms = [input.replace('.', "/"), input.replace('.', "::"), input.to_string()];
-        if let Some(m) = ix.modules.iter().find(|m| forms.contains(&m.path)) {
-            return Some(m);
-        }
-        let suffix: Vec<&ModuleRow> = ix
-            .modules
-            .iter()
-            .filter(|m| forms.iter().any(|f| m.path.ends_with(&format!("/{f}")) || m.path.ends_with(&format!("::{f}"))))
-            .collect();
-        if suffix.len() == 1 { Some(suffix[0]) } else { None }
+        store::module_named(ix, input)
     }
 
     /// The symbol index (one line per source symbol), test modules, and open
@@ -2157,7 +2025,7 @@ impl Store {
             let (folder, _, pix) = projects[p];
             let s = &pix.syms[i];
             let at = folder.map(|d| format!(" ({d})")).unwrap_or_default();
-            let entry = format!("-- {}{at}\n{}\n", s.qname(), pix.signature(s));
+            let entry = format!("-- {}{at}\n{}\n", s.qname(), index::signature(pix, s));
             let mut quoted = String::new();
             for e in evidence(&s.text, &evidence_terms) {
                 let line = format!("  > {e}\n");
@@ -2371,7 +2239,7 @@ impl Store {
             } else if !shown.insert(u) {
                 format!("-- {q} (above)\n")
             } else {
-                format!("-- {q}\n{}\n", ix.signature(&ix.syms[u]))
+                format!("-- {q}\n{}\n", index::signature(ix, &ix.syms[u]))
             }
         };
         let used_by = ix.used_by[i].clone();
@@ -2467,7 +2335,8 @@ impl Store {
         }
         for u in users {
             let q = ix.syms[u].qname();
-            out += &if shown_earlier(&q) { format!("-- {q} (above)\n") } else { format!("-- {q}\n{}\n", ix.signature(&ix.syms[u])) };
+            out +=
+                &if shown_earlier(&q) { format!("-- {q} (above)\n") } else { format!("-- {q}\n{}\n", index::signature(&ix, &ix.syms[u])) };
             out += &call_lines(&ix, u, i);
             mark_shown(q);
         }
@@ -2693,7 +2562,7 @@ impl Store {
 
     /// Runs `body` in one store transaction: committed, or rolled back with
     /// `created` files removed and the project files written again from the store.
-    fn transaction(&self, created: &[PathBuf], body: impl FnOnce() -> Out) -> Out {
+    fn transaction<T>(&self, created: &[PathBuf], body: impl FnOnce() -> Result<T, Failure>) -> Result<T, Failure> {
         // A savepoint, so it nests inside a command's outer transaction (D-77 point 7).
         self.db.execute_batch("SAVEPOINT solace_tx")?;
         match body() {
@@ -3154,6 +3023,7 @@ impl Store {
         }
         let untested = self.task_untested(&ix, &reached);
         UNTESTED.with(|u| *u.borrow_mut() = untested.clone());
+        let next = next_step(untested.as_deref(), board::work_run(&self.root));
         let untested = untested.map_or(String::new(), |names| format!("No test reaches {names}.\n"));
         // Suites outside `gleam test` that reach a change since tests last passed.
         let changed: Vec<usize> =
@@ -3178,7 +3048,7 @@ impl Store {
             if !errors.is_empty() {
                 return fail(format!("Tests did not compile:\n\n{}", errors.join("\n\n")));
             }
-            return Ok(head + &also + &untested);
+            return Ok(head + &also + &untested + &next);
         }
         let files = self.materialize(&ix)?;
         let result = if rust {
@@ -3264,7 +3134,7 @@ impl Store {
             }
         }
         out += &also;
-        if ok { Ok(out + &untested) } else { fail(out) }
+        if ok { Ok(out + &untested + &next) } else { fail(out) }
     }
 
     /// D-152: this task's changed symbols in this project, outside test modules,
@@ -3454,6 +3324,48 @@ impl Store {
         match self.db.execute("UPDATE work SET open = 0 WHERE id = ?1", [id])? {
             0 => fail(format!("No work record #{id}.")),
             _ => Ok(format!("Work record #{id} closed.\n")),
+        }
+    }
+
+    /// The first Rust module file that no longer matches the store: its
+    /// differing symbols, and the one command that repairs it.
+    fn drift_error(&self, ix: &Index) -> Result<Option<Failure>, Failure> {
+        if !language::is_rust(&self.root) {
+            return Ok(None);
+        }
+        for m in ix.modules.iter().filter(|m| m.file.is_some()) {
+            let rel = m.rel();
+            let Ok(disk) = fs::read_to_string(self.root.join(&rel)) else { continue };
+            let names = store::drift(ix, m, &disk);
+            if !names.is_empty() {
+                return Ok(Some(Failure(
+                    format!(
+                        "E0104 {rel} differs from the store in: {}. Nothing was saved. Run `format {}` to replace it \
+                         with the store's text; the replaced file is kept under `.solace/outside/`.",
+                        names.join(", "),
+                        m.path
+                    ),
+                    1,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Accepts a module file's bytes as what Solace last wrote, so the next
+    /// projection writes over a file left behind by an interrupted change.
+    fn record_module_file(&self, m: &ModuleRow, bytes: &[u8]) -> Result<(), Failure> {
+        let rel = m.rel();
+        let mut written = outside::Written::load(&self.root);
+        written.record(&rel, bytes);
+        written.save()
+    }
+
+    /// Refuses while a module file differs from the store.
+    fn refuse_drift(&self, ix: &Index) -> Result<(), Failure> {
+        match self.drift_error(ix)? {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 }
@@ -4153,9 +4065,14 @@ fn broken_report(before: &HashMap<String, String>, diags: &[Diag]) -> String {
             out += &format!("  {}: {}{more}\n", place(all[0]), error_message(all[0]));
         }
     }
-    // new errors, grouped by message: (message, first in full, the rest)
+    // new errors: one summary per shared cause, then the rest grouped by message
+    let new: Vec<&Diag> = errors.iter().copied().filter(|d| !d.symbol.as_ref().is_some_and(|s| same.contains(&s))).collect();
+    let (caused, rest): (Vec<&Diag>, Vec<&Diag>) = new.into_iter().partition(|d| error_cause(d).is_some());
+    if !caused.is_empty() {
+        out += &format!("\n{}\n", group_errors(&caused));
+    }
     let mut groups: Vec<(String, &Diag, Vec<&Diag>)> = vec![];
-    for d in errors.iter().filter(|d| !d.symbol.as_ref().is_some_and(|s| same.contains(&s))) {
+    for d in rest {
         let m = error_message(d);
         match groups.iter_mut().find(|g| g.0 == m) {
             Some(g) => g.2.push(d),
@@ -4198,30 +4115,6 @@ fn error_line(d: &Diag) -> String {
         .lines()
         .find_map(|l| l.trim_start().strip_prefix(n.as_str()).and_then(|r| r.strip_prefix(" │")))
         .map_or(String::new(), |r| r.trim_start_matches(|c: char| " │╭╰─·".contains(c)).trim_end().to_string())
-}
-
-/// An index built from (dir, module, source) triples, for tests.
-#[cfg(test)]
-fn test_index(sources: &[(&str, &str, &str)]) -> Index {
-    let (mut syms, mut modules) = (vec![], vec![]);
-    for (dir, path, text) in sources {
-        let m = gleam::split(text);
-        modules.push(ModuleRow { path: (*path).into(), dir: (*dir).into(), header: m.header, file: None, owns_dir: None });
-        for item in m.items {
-            syms.push(Sym {
-                id: format!("fn:{path}.{}", item.name),
-                module: (*path).into(),
-                name: item.name,
-                kind: item.kind,
-                kind_text: item.kind.as_str().to_string(),
-                text: item.text,
-                parent: None,
-                sep: None,
-                tail: String::new(),
-            });
-        }
-    }
-    Index::build(&gleam::Gleam, syms, modules, false)
 }
 
 /// Fixtures for every module's tests.
@@ -4309,4 +4202,73 @@ fn read_project_in(a: &[&str], here: &Path, own: Option<&Path>, dir: &str, budge
         _ => usage(format!("{} --project {dir}: give what to read", a.join(" "))),
     };
     hinted(out, &store.root)
+}
+
+/// D-184: the next step after a passing test in a work run.
+fn next_step(untested: Option<&str>, in_work_run: bool) -> String {
+    if !in_work_run {
+        return String::new();
+    }
+    untested.map_or_else(
+        || "Next: if every part of the task is changed, finish with task done.\n".to_string(),
+        |names| format!("Next: add a test for {names}; then, if every part of the task is changed, finish with task done.\n"),
+    )
+}
+
+/// The shared cause of a Rust error that repeats at many sites: a key to group
+/// by and the cause written for the summary, or `None` to print it in full.
+fn error_cause(d: &Diag) -> Option<(String, String)> {
+    let title = d.text.lines().next()?.trim();
+    let code = title.strip_prefix("error[")?.split_once(']')?.0;
+    if !matches!(code, "E0603" | "E0624" | "E0616" | "E0599") {
+        return None;
+    }
+    let items: Vec<&str> = title.split('`').skip(1).step_by(2).collect();
+    if items.is_empty() {
+        return None;
+    }
+    let item = items[0];
+    let cause = match code {
+        "E0603" | "E0624" => format!("`{item}` is private"),
+        "E0616" if items.len() > 1 => format!("`{item}` is private on `{}`", items[1]),
+        "E0599" if items.len() > 1 => format!("`{item}` is missing on `{}`", items[1]),
+        _ => return None,
+    };
+    let site = d.module.as_deref().unwrap_or("");
+    Some((format!("{code} {site} {}", items.join(" ")), cause))
+}
+
+/// The fix for a shared cause, named once instead of at every site.
+fn cause_fix(key: &str) -> &'static str {
+    if key.starts_with("E0599") { "add the method or fix the call" } else { "make it `pub(crate)`" }
+}
+
+/// Errors of one cause print as one line naming the item and the fix, with each
+/// site below; every other error prints in full as before.
+fn group_errors(errors: &[&Diag]) -> String {
+    let mut groups: Vec<(String, String, Vec<&Diag>)> = vec![];
+    let mut plain: Vec<&str> = vec![];
+    for d in errors {
+        match error_cause(d) {
+            Some((key, cause)) => match groups.iter_mut().find(|g| g.0 == key) {
+                Some(g) => g.2.push(d),
+                None => groups.push((key, cause, vec![d])),
+            },
+            None => plain.push(&d.text),
+        }
+    }
+    let mut parts: Vec<String> = vec![];
+    for (key, cause, ds) in groups {
+        if ds.len() == 1 {
+            parts.push(ds[0].text.clone());
+            continue;
+        }
+        let mut part = format!("{cause} ({} places): {}", ds.len(), cause_fix(&key));
+        for d in ds {
+            part += &format!("\n  at {}", place(d));
+        }
+        parts.push(part);
+    }
+    parts.extend(plain.into_iter().map(String::from));
+    parts.join("\n\n")
 }

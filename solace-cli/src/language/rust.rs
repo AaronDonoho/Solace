@@ -483,10 +483,7 @@ pub fn package(root: &Path) -> Result<Vec<(String, String, File)>, Failure> {
     }
     let moved = moved_targets(&manifest, package, name);
     if !moved.is_empty() {
-        return Err(Failure(
-            format!("Cargo.toml sets {}; Solace reads a package's files from Cargo's default places for now.", moved.join(", ")),
-            1,
-        ));
+        return Err(Failure(format!("Cargo.toml sets {}; Solace reads a package's files from Cargo's default places for now.", moved.join(", ")), 1));
     }
     let mut crates: Vec<String> = ["src/lib.rs", "src/main.rs"].into_iter().filter(|f| root.join(f).is_file()).map(String::from).collect();
     for n in entries(root, "src/bin")? {
@@ -498,12 +495,7 @@ pub fn package(root: &Path) -> Result<Vec<(String, String, File)>, Failure> {
     let main = match crates.as_slice() {
         [one] => one.clone(),
         [] => return Err(Failure("This package has no crate: no `src/main.rs`, `src/lib.rs` or program in `src/bin/`.".into(), 1)),
-        _ => {
-            return Err(Failure(
-                format!("This package has {} crates ({}); Solace holds a package of one crate.", crates.len(), crates.join(", ")),
-                1,
-            ));
-        }
+        _ => return Err(Failure(format!("This package has {} crates ({}); Solace holds a package of one crate.", crates.len(), crates.join(", ")), 1)),
     };
     let mut out = vec![];
     let mut refused = vec![];
@@ -522,10 +514,7 @@ pub fn package(root: &Path) -> Result<Vec<(String, String, File)>, Failure> {
     let mut modules = HashMap::new();
     for (path, module, _) in &out {
         if let Some(first) = modules.insert(module.as_str(), path.as_str()) {
-            return Err(Failure(
-                format!("Two modules are named `{module}` ({first}, {path}); Solace holds one module of each name for now."),
-                1,
-            ));
+            return Err(Failure(format!("Two modules are named `{module}` ({first}, {path}); Solace holds one module of each name for now."), 1));
         }
     }
     Ok(out)
@@ -639,10 +628,7 @@ fn walk(
     let ok = file.refusals.is_empty();
     if ok {
         if let Some(name) = inline_file_mod(&text, &file.items) {
-            return Err(Failure(
-                format!("{rel}: `{name}` is a `mod x;` inside an inline `mod {{ … }}`; Solace doesn't hold one there yet."),
-                1,
-            ));
+            return Err(Failure(format!("{rel}: `{name}` is a `mod x;` inside an inline `mod {{ … }}`; Solace doesn't hold one there yet."), 1));
         }
     } else {
         refused.extend(file.refusals.iter().map(|r| format!("{rel}: line {} (`{}`): {}", r.line, r.quote, r.message)));
@@ -717,8 +703,8 @@ fn is_string(l: &proc_macro2::Literal) -> bool {
 /// Whether `source` holds a module-level `use`: parsed, so `pub use` and
 /// `pub(crate) use` count, and an inline `mod`'s imports — which a nested save
 /// would drop as a child row — are found (D-168).
-pub fn imports(source: &str) -> bool {
-    !import_texts(source).is_empty()
+pub fn imports(source: &str) -> Result<bool, syn::Error> {
+    Ok(!import_texts(source)?.is_empty())
 }
 
 /// Whether an item is a `use`, an inline `mod`'s items included (D-168).
@@ -776,25 +762,37 @@ pub fn child_module(path: &str, file: &str, owns_dir: bool, name: &str) -> Strin
 mod tests;
 
 /// The source text of every module-level `use`, an inline `mod`'s included.
-pub fn import_texts(source: &str) -> Vec<String> {
-    fn collect(items: &[Item], source: &str, out: &mut Vec<String>) {
+pub fn import_texts(source: &str) -> Result<Vec<String>, syn::Error> {
+    Ok(import_ranges(source)?.into_iter().map(|(item, _)| source[item].trim().to_string()).collect())
+}
+
+/// The item and tree byte ranges of every module-level `use`, an inline
+/// `mod`'s included.
+pub(crate) fn import_ranges(source: &str) -> Result<Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>, syn::Error> {
+    fn collect(items: &[Item], out: &mut Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>) {
         for item in items {
             if !item_use(item) {
                 continue;
             }
             match item {
-                Item::Use(_) => out.push(source[item.span().byte_range()].trim().to_string()),
+                Item::Use(i) => out.push((i.span().byte_range(), i.tree.span().byte_range())),
                 Item::Mod(m) => {
                     if let Some((_, items)) = &m.content {
-                        collect(items, source, out);
+                        collect(items, out);
                     }
                 }
                 _ => {}
             }
         }
     }
-    let Ok(file) = syn::parse_file(source) else { return vec![] };
+    let file = syn::parse_file(source)?;
     let mut out = vec![];
-    collect(&file.items, source, &mut out);
-    out
+    collect(&file.items, &mut out);
+    Ok(out)
 }
+
+/// The byte range of every module-level `use` tree, an inline `mod`'s included.
+pub(crate) fn import_tree_ranges(source: &str) -> Result<Vec<std::ops::Range<usize>>, syn::Error> {
+    Ok(import_ranges(source)?.into_iter().map(|(_, tree)| tree).collect())
+}
+

@@ -171,13 +171,19 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     expect(html()).toMatch(/<solace-task [^>]*base dir="no-project"[^>]*task="t9"/);
     // A live update of the open task reaches its details and its row.
     dispatch(new strategy.Open('web', 't2'));
-    events.enqueue(encode(frame({ project: 'web', task: { ...newer, title: 'Newer, renamed' } }, 1)));
+    newer = { ...newer, title: 'Newer, renamed' };
+    events.enqueue(encode(frame({ project: 'web', task: newer }, 1)));
     await until(() => Array.from(model.live).some(m => m[1].includes('renamed')));
     expect(html()).toContain('Newer, renamed');
     // An inline link is one PATCH to the task's project; the reply updates the row.
+    expect(html()).toContain('aria-label="Milestone of Newer, renamed"');
+    expect(html()).not.toMatch(/aria-label="Milestone of Newer, renamed"[^>]*disabled/);
     dispatch(new strategy.Link('web', 't2', 'feature', 'f1'));
     await until(() => row('t2').feature[0] === 'f1');
     expect(patch).toEqual({ feature: 'f1' });
+    // The feature brings its milestone: the row still shows it, but can't change it.
+    expect(html()).toMatch(/aria-label="Milestone of Newer, renamed"[^>]*disabled/);
+    expect(html()).toContain('aria-label="Feature of Newer, renamed"');
     // The Features tab groups by milestone in rank order, then "No milestone"; a feature lists its tasks from every project.
     dispatch(new strategy.Select(new strategy.Features()));
     // A compact card shows its body, tasks and new-task form only while focused.
@@ -200,6 +206,7 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     expect(html()).toMatch(/<solace-task [^>]*task="t2"/);
     dispatch(new strategy.Link('web', 't2', 'feature', ''));
     await until(() => patch.feature === null);
+    await until(() => !/aria-label="Milestone of Newer, renamed"[^>]*disabled/.test(html()));
     for (const pair of [['GET', '/projects'], ['GET', '/workflow'], ['GET', '/p/web/workflow'], ['GET', '/events'], ['PATCH', '/p/web/tasks/t2']]) expect(requests).toContainEqual(pair);
   } finally {
     controllers.forEach(c => c.abort()); server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
@@ -410,12 +417,12 @@ test('Features tab creates a feature and edits it with only the changed fields',
   }
 });
 
-// The Roadmap: a feature shows in its target and in every milestone holding one of its tasks (D-87 point 2).
-test('Roadmap tab edits milestones, retargets a feature and sets dependencies, showing E7024 and E7025', async () => {
+// The Roadmap: a feature shows only in its target milestone (D-188).
+test('Roadmap tab edits milestones, adds and removes features and sets dependencies, showing E7024 and E7025', async () => {
   const task = { body: '', rank: 1, column: 'backlog', paused_from: null, stamps: {}, links: [], runs: [], questions: [], closedTime: null };
   const tasks = {
     t1: { ...task, id: 't1', title: 'Index', feature: 'f1', milestone: 'm1', dependsOn: [] },
-    t2: { ...task, id: 't2', title: 'Csv', feature: 'f2', milestone: 'm1', dependsOn: [] },
+    t2: { ...task, id: 't2', title: 'Csv', feature: 'f2', milestone: 'm2', dependsOn: [] },
     t3: { ...task, id: 't3', title: 'Docs', feature: null, milestone: 'm2', dependsOn: [] },
   };
   const milestones = { m1: { id: 'm1', title: 'Launch', body: '', rank: 1, state: 'proposed' }, m2: { id: 'm2', title: 'Later', body: '', rank: 2, targetDate: '2027-06-01', state: 'upcoming' } };
@@ -434,7 +441,11 @@ test('Roadmap tab edits milestones, retargets a feature and sets dependencies, s
     const [, kind, id] = path.split('/');
     if (kind === 'milestones' && req.method === 'PATCH') return Response.json(milestones[id] = { ...milestones[id], ...body });
     if (kind === 'milestones' && req.method === 'DELETE') { calls.push(['DELETE', path]); return Response.json(milestones[id]); }
-    if (kind === 'features' && req.method === 'PATCH') return Response.json(records[id] = { ...records[id], ...body });
+    if (kind === 'features' && req.method === 'PATCH') {
+      const feature = records[id] = { ...records[id], ...body };
+      if ('milestone' in body) for (const t of Object.values(tasks)) if (t.feature === id) t.milestone = body.milestone;
+      return Response.json(feature);
+    }
     if (kind === 'tasks' && req.method === 'PATCH') {
       const deps = body.dependsOn;
       if (deps.some(d => d === id || !tasks[d])) return Response.json({ code: 'E7024', message: 'E7024 a task can depend only on another existing task; ' + id + ' is not one' }, { status: 400 });
@@ -463,7 +474,11 @@ test('Roadmap tab edits milestones, retargets a feature and sets dependencies, s
   let model;
   const noop = () => {};
   const dispatch = msg => { let effect; [model, effect] = strategy.update(model, msg); perform(effect, dispatch, noop, noop, noop, noop, noop, noop); };
-  const panel = () => { const all = to_string(strategy.view(model)); return all.slice(all.indexOf('id="panel-roadmap"')); };
+  const panel = () => {
+    const all = to_string(strategy.view(model));
+    const start = all.indexOf('id="panel-roadmap"'), end = all.indexOf('id="panel-tasks"');
+    return all.slice(start, end > start ? end : undefined);
+  };
   const until = async predicate => {
     for (let i = 0; i < 200; i++) { if (predicate()) return; await Bun.sleep(10); }
     throw new Error('UI did not reach expected state: ' + panel());
@@ -472,44 +487,79 @@ test('Roadmap tab edits milestones, retargets a feature and sets dependencies, s
   try {
     model = strategy.new$(new strategy.Roadmap());
     dispatch(new strategy.Connected());
-    await until(() => panel().includes('Csv'));
-    // Milestones in rank order; Export targets Later and shows in Launch too, through its task.
-    expect(panel().indexOf('Launch')).toBeLessThan(panel().indexOf('Later'));
+    await until(() => panel().includes('Launch'));
+    // Milestones start collapsed: the heading shows the state, date and feature count.
+    expect(panel().indexOf('Later')).toBeLessThan(panel().indexOf('Launch'));
     expect(panel()).toContain('class="target">2027-06-01<');
-    expect(count('<h4>Export')).toBe(2);
+    expect(count('1 feature')).toBe(2);
+    expect(panel()).toContain('aria-label="Edit Launch"');
+    expect(panel()).toContain('aria-label="Delete Launch"');
+    expect(panel()).toContain('aria-expanded="false"');
+    expect(panel()).not.toContain('Csv');
+    expect(panel()).not.toContain('<h4>Search');
+    // A heading opens its body, features and tasks; "No milestone" stays open.
+    dispatch(new strategy.ToggleMilestone('m1'));
+    dispatch(new strategy.ToggleMilestone('m2'));
+    await until(() => panel().includes('Csv'));
+    expect(panel()).toContain('aria-expanded="true"');
+    // Milestones by target date, then undated ones; each feature shows once, under its target.
+    expect(count('<h4>Search')).toBe(1);
+    expect(count('<h4>Export')).toBe(1);
+    expect(panel()).not.toContain('aria-label="Milestone of Search"');
+    expect(panel()).not.toContain('aria-label="Milestone of Export"');
     // Dependencies are edited one task at a time.
-    expect(panel()).not.toContain('class="depends-edit"');
+    expect(panel()).not.toContain('class="picker"');
     // Create with a target date: the form has its own textarea and a date input.
     dispatch(new strategy.NewMilestone());
     expect(panel()).toContain('id="milestone-text"');
     expect(panel()).toContain('type="date"');
+    expect(panel()).not.toContain('feature-picker');
     dispatch(new strategy.MilestoneTitle('2.0'));
     dispatch(new strategy.MilestoneTargetDate('2027-01-01'));
     dispatch(new strategy.SaveMilestone());
     await until(() => !panel().includes('id="milestone-text"'));
     expect(calls.at(-1)).toEqual(['POST', '/milestones', { title: '2.0', body: '', state: 'proposed', targetDate: '2027-01-01', request: expect.any(String) }]);
     expect(panel()).toContain('class="target">2027-01-01<');
+    expect(panel().indexOf('2.0')).toBeLessThan(panel().indexOf('Later'));
+    expect(panel().indexOf('Later')).toBeLessThan(panel().indexOf('Launch'));
     // Edit: only the changed field.
     dispatch(new strategy.EditMilestone('m1'));
+    // The form lists the milestone's features and searches the other ones.
+    expect(panel()).toContain('class="picker"');
+    expect(panel()).toContain('aria-label="Remove Search"');
+    expect(panel()).toContain('aria-label="Add Export"');
+    dispatch(new strategy.MilestoneFeatureQuery('exp'));
+    expect(panel()).toContain('aria-label="Add Export"');
+    expect(panel()).not.toContain('aria-label="Add Search"');
+    dispatch(new strategy.MilestoneFeatureQuery('zzz'));
+    expect(panel()).toContain('No feature matches.');
+    dispatch(new strategy.MilestoneFeatureQuery(''));
+    // Add moves Export from Later, at once and outside Save.
+    dispatch(new strategy.TargetFeature('f2', 'm1'));
+    await until(() => panel().includes('aria-label="Remove Export"'));
+    expect(calls.at(-1)).toEqual(['PATCH', '/features/f2', { milestone: 'm1' }]);
+    expect(panel()).toContain('aria-label="Remove Search"');
+    expect(panel()).toContain('No other feature to add.');
+    // Remove sends null and keeps the form open.
+    dispatch(new strategy.TargetFeature('f2', ''));
+    await until(() => panel().includes('aria-label="Add Export"'));
+    expect(calls.at(-1)).toEqual(['PATCH', '/features/f2', { milestone: null }]);
+    expect(panel()).toContain('id="milestone-text"');
     dispatch(new strategy.MilestoneState('active'));
     dispatch(new strategy.SaveMilestone());
     await until(() => !panel().includes('id="milestone-text"'));
     expect(calls.at(-1)).toEqual(['PATCH', '/milestones/m1', { state: 'active' }]);
-    // Reorder: one PATCH; Later moves above Launch.
-    dispatch(new strategy.MoveMilestone('m2', 0));
-    await until(() => panel().indexOf('Later') < panel().indexOf('Launch'));
-    expect(calls.at(-1)).toEqual(['PATCH', '/milestones/m2', { rank: 0 }]);
-    // Move a feature to another milestone: Search targets Later, and stays in Launch through its task.
-    dispatch(new strategy.TargetFeature('f1', 'm2'));
-    await until(() => count('<h4>Search') === 2);
-    expect(calls.at(-1)).toEqual(['PATCH', '/features/f1', { milestone: 'm2' }]);
+    // Rank is not a Roadmap control.
+    expect(panel()).not.toContain('aria-label="Move up Launch"');
+    expect(panel()).not.toContain('aria-label="Move down Launch"');
+    expect(calls.filter(c => c[2] && 'rank' in c[2])).toEqual([]);
     // Dependencies: set, then the server's refusals show.
     dispatch(new strategy.SetDepends('.', 't2', toList(['t1'])));
     await until(() => panel().includes('depends on Index'));
     expect(calls.at(-1)).toEqual(['PATCH', '/tasks/t2', { dependsOn: ['t1'] }]);
     // Any task of the root is offered, in another milestone too; Csv would make a cycle, so it isn't.
     dispatch(new strategy.OpenDepends('.', 't1'));
-    expect(count('class="depends-edit"')).toBe(1);
+    expect(count('class="picker"')).toBe(1);
     expect(panel()).toContain('aria-label="Depend on Docs"');
     expect(panel()).not.toContain('aria-label="Depend on Csv"');
     dispatch(new strategy.DependsQuery('csv'));
@@ -524,7 +574,7 @@ test('Roadmap tab edits milestones, retargets a feature and sets dependencies, s
     await until(() => panel().includes('E7024 a task can depend only on another existing task'));
     // Delete asks first, naming what loses its link.
     dispatch(new strategy.DeleteMilestone('m1'));
-    expect(panel()).toContain('Delete <em>Launch</em>? Its 0 features and 2 tasks lose their link to it; they stay.');
+    expect(panel()).toContain('Delete <em>Launch</em>? Its 1 feature and 1 task lose their link to it; they stay.');
     dispatch(new strategy.ConfirmDeleteMilestone());
     await until(() => calls.at(-1)[0] === 'DELETE');
     expect(calls.at(-1)).toEqual(['DELETE', '/milestones/m1']);
@@ -610,9 +660,9 @@ test('Features tab adds a task to a feature, then links it; a refused link says 
   }
 });
 
-// The Tasks tab's own new task: POST to the picked project, then one PATCH with the feature and milestone picked;
-// with none picked no PATCH goes out. Either way the form closes and the task opens below the list.
-test('Tasks tab creates a task, links its feature and milestone in one PATCH, then opens it', async () => {
+// The Tasks tab's own new task: POST to the picked project, then one PATCH with the feature (whose milestone it
+// takes) or the milestone; with none picked no PATCH goes out. Either way the form closes and the task opens below.
+test('Tasks tab creates a task, links its feature or milestone, then opens it', async () => {
   const calls = [];
   let n = 0;
   const blank = { body: '', rank: 1, column: 'backlog', paused_from: null, stamps: {}, links: [], runs: [], questions: [], feature: null, milestone: null, dependsOn: [], closedTime: null };
@@ -668,21 +718,31 @@ test('Tasks tab creates a task, links its feature and milestone in one PATCH, th
     dispatch(new strategy.NewTaskProject('web'));
     dispatch(new strategy.NewTaskTitle('Index'));
     dispatch(new strategy.NewTaskText('Some **text**'));
-    dispatch(new strategy.NewTaskFeature('f1'));
     dispatch(new strategy.NewTaskMilestone('m1'));
+    dispatch(new strategy.NewTaskFeature('f1'));
+    // The feature brings its milestone, so the task's own picker hides.
+    expect(html()).not.toContain('name="milestone"');
     dispatch(new strategy.CreateTask());
     await until(() => calls.length === 2 && /<solace-task [^>]*task="t1"/.test(html()));
     expect(calls[0]).toEqual(['POST', '/p/web/tasks', { title: 'Index', body: 'Some **text**', request: expect.any(String) }]);
-    expect(calls[1]).toEqual(['PATCH', '/p/web/tasks/t1', { feature: 'f1', milestone: 'm1' }]);
+    expect(calls[1]).toEqual(['PATCH', '/p/web/tasks/t1', { feature: 'f1' }]);
     expect(model.new_task instanceof None).toBe(true);
+    // A task with no feature keeps a milestone picked.
+    dispatch(new strategy.NewTaskOpen());
+    dispatch(new strategy.NewTaskProject('web'));
+    dispatch(new strategy.NewTaskTitle('Loose'));
+    dispatch(new strategy.NewTaskMilestone('m1'));
+    dispatch(new strategy.CreateTask());
+    await until(() => calls.length === 4 && /<solace-task [^>]*task="t2"/.test(html()));
+    expect(calls.at(-1)).toEqual(['PATCH', '/p/web/tasks/t2', { milestone: 'm1' }]);
     // Nothing picked: the create alone, and the task opens.
     dispatch(new strategy.NewTaskOpen());
     dispatch(new strategy.NewTaskProject('web'));
     dispatch(new strategy.NewTaskTitle('Plain'));
     dispatch(new strategy.CreateTask());
-    await until(() => /<solace-task [^>]*task="t2"/.test(html()));
+    await until(() => /<solace-task [^>]*task="t3"/.test(html()));
     await Bun.sleep(30);
-    expect(calls.map(c => c[0])).toEqual(['POST', 'PATCH', 'POST']);
+    expect(calls.map(c => c[0])).toEqual(['POST', 'PATCH', 'POST', 'PATCH', 'POST']);
     expect(model.new_task instanceof None).toBe(true);
   } finally {
     server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
@@ -692,6 +752,7 @@ test('Tasks tab creates a task, links its feature and milestone in one PATCH, th
 // D-93: the planning panel starts a run on the selected task, follows it live, answers its proposal and ends it.
 test('Planning panel starts a run on the selection, answers a proposal, keeps across tabs and reopens past runs', async () => {
   const calls = [];
+  const requests = [];
   const blank = { body: '', rank: 1, column: 'backlog', paused_from: null, stamps: {}, links: [], runs: [], questions: [], feature: null, milestone: null, dependsOn: [], closedTime: null };
   const onTask = { kind: 'task', id: 't1' };
   const past = { id: 'r0', kind: 'strategy', model: 'fake', state: 'ended', outcome: 'planned', started: 100, context: onTask, notes: [{ author: 'solace', text: 'An earlier plan' }], questions: [] };
@@ -700,6 +761,7 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
   let r1, events;
   const server = Bun.serve({ port: 0, fetch: async req => {
     const path = new URL(req.url).pathname;
+    requests.push([req.method, path]);
     const body = req.method === 'POST' ? await req.json() : null;
     if (body) calls.push([path, body]);
     if (path === '/events') return new Response(new ReadableStream({ start(c) { events = c; c.enqueue(encode(
@@ -753,6 +815,7 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
   const html = () => to_string(strategy.view(model));
   // The panel alone: from the aside to the first tab panel.
   const panel = () => { const all = html(); return all.slice(all.indexOf('<aside'), all.indexOf('</aside>')); };
+  const models = () => requests.filter(([method, path]) => method === 'GET' && path === '/models').length;
   const until = async predicate => {
     for (let i = 0; i < 200; i++) { if (predicate()) return; await Bun.sleep(10); }
     throw new Error('UI did not reach expected state: ' + panel());
@@ -760,7 +823,8 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
   try {
     model = strategy.new$(new strategy.Tasks());
     dispatch(new strategy.Connected());
-    await until(() => html().includes('class="open">Index<') && panel().includes('Fake') && events);
+    await until(() => html().includes('class="open">Index<') && panel().includes('Fake') && events && models() >= 2);
+    expect(models()).toBe(2);
     // Unavailable models aren't offered; the line under the pick says why.
     expect(panel()).not.toContain('value="big"');
     expect(panel()).toContain('<summary>1 more model unavailable</summary><ul><li>Big: no key</li></ul>');
@@ -770,19 +834,25 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     expect(panel()).toContain('Plan context: task <em>Index</em>');
     expect(panel()).toContain('aria-label="Earlier runs"');
     expect(panel()).not.toContain('Runs on this');
-    expect(panel()).toContain('Ended: planned · fake');
+    expect(panel()).toContain('Ended: planned · Fake');
     dispatch(new strategy.PlanText('Plan the index'));
     dispatch(new strategy.StartPlan());
     await until(() => panel().includes('Looking at Index'));
     expect(calls[0]).toEqual(['/strategy/runs', { model: 'fake', text: 'Plan the index', context: onTask }]);
-    expect(panel()).toContain('Working · fake');
+    expect(panel()).toContain('Working · Fake');
     expect(panel()).toContain('strategy list');
     // The task's row shows the open run's marker.
     expect(html()).toMatch(/class="open">Index<\/button><span class="planning"/);
     // The agent replies and proposes, live.
     r1 = { ...r1, state: 'waiting', notes: [...r1.notes, { author: 'agent', text: 'Shall I add a ranking task?' }], questions: [proposal] };
+    requests.length = 0;
     events.enqueue(encode(frame({ strategyRun: r1 }, 1)));
-    await until(() => panel().includes('Shall I add a ranking task?'));
+    await until(() => panel().includes('Shall I add a ranking task?') && models() === 1);
+    // A task update refreshes the model list too.
+    requests.length = 0;
+    events.enqueue(encode(frame({ project: '.', task: { ...blank, id: 't1', title: 'Index' } }, 2)));
+    await until(() => models() === 1);
+    expect(models()).toBe(1);
     expect(panel()).toContain('Create task<em> Ranking</em>');
     expect(panel()).toContain('Approving also sets the feature <em>Search</em> back to upcoming.');
     // Another tab: the panel and its run stay.
@@ -798,7 +868,7 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     await until(() => calls.length === 3 && model.plan_text === '');
     expect(calls.at(-1)).toEqual(['/strategy/runs/r1/notes', { text: 'Thanks' }]);
     dispatch(new strategy.EndPlan());
-    await until(() => panel().includes('Ended: planned · fake') && panel().includes('The conversation'));
+    await until(() => panel().includes('Ended: planned · Fake') && panel().includes('The conversation'));
     expect(calls.at(-1)).toEqual(['/strategy/runs/r1/end', {}]);
     expect(panel()).not.toContain('id="plan-text"');
     expect(html()).not.toContain('class="planning"');
@@ -815,6 +885,11 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     expect(panel()).not.toContain('id="plan-text"');
     expect(panel()).toContain('<option selected value="r0">');
     expect(panel()).toContain('>New run</button>');
+    // The page refreshes its models once catch-up replays what it missed.
+    requests.length = 0;
+    dispatch(new strategy.CaughtUp());
+    await until(() => models() === 1);
+    expect(models()).toBe(1);
   } finally {
     controllers.forEach(c => c.abort()); server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
   }

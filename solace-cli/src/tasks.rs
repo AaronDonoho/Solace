@@ -28,6 +28,7 @@ fn server_for(top: &Path) -> Option<&'static Server> {
 /// Starts the task server for the root `top`: first the messages left in the
 /// inbox, then each operation and message in the order they arrive.
 pub fn start(top: &Path) -> Result<(), Failure> {
+    recover(top)?;
     let (jobs, queue) = mpsc::channel::<Job>();
     let root = top.to_path_buf();
     let thread = std::thread::spawn(move || {
@@ -109,48 +110,20 @@ pub fn update<R: Send + 'static>(
 }
 
 fn write(top: &Path, t: &Value) -> Result<(), Failure> {
-    let id = t["id"].as_str().unwrap_or("").to_string();
-    if !board::valid_id(&id) {
-        return board::err("E7001", "invalid task id");
-    }
-    // An active feature's tasks are never in Backlog (D-134).
-    let mut t = t.clone();
-    // The mark comes from the home on each load (D-160): it never goes in the file.
-    t.as_object_mut().unwrap().remove("noProject");
-    plan(top, &mut t);
-    let path = board::store_dir(top).join(format!("{id}.json"));
-    let was: Option<Value> = fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok());
-    // A feature follows its tasks (D-128): only a new task, a moved one or a
-    // changed link can change it. It is worked out with this save in place, so
-    // a save that makes its own feature active again is planned before the
-    // task is written, once (D-134). The feature is saved after the task, so a
-    // failed task save leaves it as it was.
-    let mut changed = Vec::new();
-    if was.as_ref().is_none_or(|w| w["feature"] != t["feature"] || w["column"] != t["column"]) {
-        let old = was.as_ref().map_or(Value::Null, |w| w["feature"].clone());
-        let mut fids: Vec<String> = [&old, &t["feature"]].into_iter().filter_map(Value::as_str).map(String::from).collect();
-        fids.dedup();
-        for fid in fids {
-            match follow_tasks(top, &fid, &t) {
-                Ok(Some(f)) => {
-                    if t["feature"] == fid.as_str() {
-                        board::plan_for_feature(top, &mut t, &f);
-                    }
-                    changed.push(f);
-                }
-                Ok(None) => {}
-                Err(e) => eprintln!("updating feature {fid}: {}", e.0),
+    let batch = batch(top)?;
+    match write_task(top, t, None) {
+        Ok((home, t, changed)) => match finish_write(top, &home, &t, &changed) {
+            Ok(()) => batch_commit(batch),
+            Err(e) => {
+                batch_rollback(batch);
+                Err(e)
             }
+        },
+        Err(e) => {
+            batch_rollback(batch);
+            Err(e)
         }
     }
-    replace_file(&board::store_dir(top), &id, &t)?;
-    log(top, t["home"].as_str().unwrap_or("."), &json!({"task":t}));
-    for f in changed {
-        if let Err(e) = save_record(top, "features", &f) {
-            eprintln!("updating feature {}: {}", f["id"].as_str().unwrap_or(""), e.0);
-        }
-    }
-    Ok(())
 }
 /// Re-homes a task whose home is no project (D-160), as one operation of the task
 /// server: it reads the task again, so two loads move it once, moves its folder,
@@ -334,7 +307,7 @@ fn keep_slots(top: &Path) -> Result<(), Failure> {
     for (was, f) in stored.iter().zip(with_slots(stored.clone())) {
         let id = f["id"].as_str().unwrap_or("");
         if was.get("colorSlot").is_none() && !f["colorSlot"].is_null() && board::valid_id(id) {
-            replace_file(&strategy_dir(top, "features"), id, &f)?;
+            batch_replace(&strategy_dir(top, "features").join(format!("{id}.json")), &f)?;
         }
     }
     Ok(())
@@ -354,44 +327,55 @@ fn mark_start(top: &Path, kind: &str, v: &mut Value) {
         v["colorSlot"] = json!(next_slot(&others));
     }
 }
-/// Writes a record and logs it as a root event, as `save_record` does; a
-/// feature saved `active` plans its Backlog tasks (D-134).
+/// Writes a record and logs it as a root event, as `save_record` does. A
+/// feature saved `active` plans its Backlog tasks (D-134); one whose milestone
+/// changed moves its tasks with it (D-188).
 fn put_record(top: &Path, kind: &str, v: &Value) -> Result<(), Failure> {
+    recover(top)?;
     let id = v["id"].as_str().unwrap_or("");
+    let was = if kind == "features" { record(top, kind, id) } else { None };
+    let moved = was.as_ref().is_some_and(|old| old["milestone"] != v["milestone"]);
     let active = kind == "features" && v["state"] == "active";
-    save_record(top, kind, v)?;
-    if active {
+    if kind == "features" && (active || moved) {
+        let mut tasks = vec![];
         for mut t in board::all_tasks(top)?.into_iter().filter(|t| t["feature"] == id) {
-            if board::plan_for_feature(top, &mut t, v) {
-                write(top, &t)?;
+            let mut changed = moved;
+            if moved {
+                t["milestone"] = v["milestone"].clone();
+            }
+            if active && board::plan_for_feature(top, &mut t, v) {
+                changed = true;
+            }
+            if changed {
+                tasks.push(t);
             }
         }
+        write_tasks_then(top, &tasks, Some(v), || save_record_in(top, kind, v))?;
+    } else {
+        save_record(top, kind, v)?;
     }
     Ok(())
 }
 /// Writes a record and logs it as a root event: no project (D-87 point 7).
 fn save_record(top: &Path, kind: &str, v: &Value) -> Result<(), Failure> {
-    let id = v["id"].as_str().unwrap_or("");
-    if !board::valid_id(id) {
-        return board::err("E7001", "invalid id");
+    let batch = batch(top)?;
+    match save_record_in(top, kind, v) {
+        Ok(()) => batch_commit(batch),
+        Err(e) => {
+            batch_rollback(batch);
+            Err(e)
+        }
     }
-    if kind == "features" {
-        keep_slots(top)?;
-    }
-    replace_file(&strategy_dir(top, kind), id, v)?;
-    let event = if kind == "milestones" { json!({"milestone": v}) } else { json!({"feature": v}) };
-    log(top, "", &event);
-    Ok(())
 }
+/// Removes a record and queues its event, in the open batch.
 fn remove_record(top: &Path, kind: &str, id: &str) -> Result<(), Failure> {
     if kind == "features" {
         keep_slots(top)?;
     }
     let dir = strategy_dir(top, kind);
-    fs::remove_file(dir.join(format!("{id}.json")))?;
-    fs::File::open(&dir)?.sync_all()?;
+    batch_remove(&dir.join(format!("{id}.json")))?;
     let event = if kind == "milestones" { json!({"removedMilestone": id}) } else { json!({"removedFeature": id}) };
-    log(top, "", &event);
+    batch_log("", &event);
     Ok(())
 }
 /// The rank a new record takes at the end of its group: all milestones, or the
@@ -405,6 +389,7 @@ fn end_rank(top: &Path, kind: &str, milestone: &Value, except: &str) -> f64 {
 /// and a change is one operation. An error comes with its HTTP status: 404 for an
 /// unknown id in the path, 400 for one in the body, else 409.
 pub fn strategy_api(top: &Path, method: &str, parts: &[&str], body: Value) -> Result<Value, (u16, Failure)> {
+    recover(top).map_err(|e| (409, e))?;
     if method == "GET" && parts.len() == 1 {
         return Ok(json!(records(top, parts[0])));
     }
@@ -432,6 +417,7 @@ fn strategy(top: &Path, method: &str, parts: &[&str], req: &Value, status: &mut 
 /// the board, on the Strategy page; and its title, which a bare link shows
 /// (D-122). 404 for no such task.
 pub fn find_task(top: &Path, id: &str) -> Result<Value, (u16, Failure)> {
+    recover(&scope::top(top)).map_err(|e| (409, e))?;
     if !board::valid_id(id) {
         return board::err("E7001", "invalid task id").map_err(|e| (400, e));
     }
@@ -451,6 +437,7 @@ pub fn find_task(top: &Path, id: &str) -> Result<Value, (u16, Failure)> {
 /// `GET /features/find/{id}` and `GET /milestones/find/{id}` (D-122): a
 /// record's title, which a bare link to it shows. 404 for no such record.
 pub fn find_record(top: &Path, kind: &str, id: &str) -> Result<Value, (u16, Failure)> {
+    recover(top).map_err(|e| (409, e))?;
     if !board::valid_id(id) {
         return board::err("E7001", format!("invalid {} id", singular(kind))).map_err(|e| (400, e));
     }
@@ -553,22 +540,38 @@ fn edited(top: &Path, kind: &str, id: &str, req: &Value, status: &mut u16) -> Re
     mark_start(top, kind, &mut v);
     Ok(v)
 }
-/// Deletes a record. Its features and tasks lose their link first, so a crash
-/// between the steps leaves no link to a missing record (D-87 point 5).
+/// Deletes a record. Its features and tasks lose their link in the same batch,
+/// so a failure or crash leaves no link to a missing record (D-87 point 5).
 fn delete_record(top: &Path, kind: &str, id: &str, status: &mut u16) -> Result<Value, Failure> {
+    recover(top)?;
     let Some(v) = record(top, kind, id) else { return unknown_id(kind, id, status, 404) };
+    let mut tasks: Vec<Value>;
+    let features: Vec<Value>;
     if kind == "milestones" {
-        for mut f in records(top, "features").into_iter().filter(|f| f["milestone"] == id) {
-            f["milestone"] = Value::Null;
-            put_record(top, "features", &f)?;
+        tasks = board::all_tasks(top)?.into_iter().filter(|t| t["milestone"] == id).collect();
+        for t in &mut tasks {
+            t["milestone"] = Value::Null;
         }
+        features = records(top, "features")
+            .into_iter()
+            .filter(|f| f["milestone"] == id)
+            .map(|mut f| {
+                f["milestone"] = Value::Null;
+                f
+            })
+            .collect();
+    } else {
+        let link = singular(kind);
+        tasks = board::all_tasks(top)?.into_iter().filter(|t| t[link] == id).collect();
+        for t in &mut tasks {
+            t[link] = Value::Null;
+        }
+        features = Vec::new();
     }
-    let link = singular(kind);
-    for mut t in board::all_tasks(top)?.into_iter().filter(|t| t[link] == id) {
-        t[link] = Value::Null;
-        write(top, &t)?;
-    }
-    remove_record(top, kind, id)?;
+    write_tasks_then(top, &tasks, None, || {
+        write_features(top, &features)?;
+        remove_record(top, kind, id)
+    })?;
     Ok(v)
 }
 
@@ -1335,6 +1338,7 @@ pub fn api(root: &Path, method: &str, parts: &[&str], body: Value) -> Result<Val
 type NeedsLock = fn(&Path, &[&str], &Value) -> Result<bool, Failure>;
 /// `api`, with `needs` deciding whether a change takes the locks.
 fn api_with(root: &Path, method: &str, parts: &[&str], body: Value, needs: NeedsLock) -> Result<Value, Failure> {
+    recover(&scope::top(root))?;
     if method == "GET" {
         return board::read_task_api(root, parts);
     }
@@ -2129,8 +2133,10 @@ mod tests {
         assert_eq!(t["archivedTime"], Value::Null);
     }
 
-    /// D-87: a feature brings its milestone to a task with none; links are checked,
-    /// editable in a final column and during a run, and cleared by a delete.
+    /// D-87, D-188: a feature brings its milestone to a task and overrides one
+    /// the task had; a featured task's milestone cannot be set. Links are
+    /// checked, editable in a final column and during a run, and cleared by a
+    /// delete while the milestone stays.
     #[test]
     fn task_links_are_set_checked_and_cleared() {
         let root = root();
@@ -2141,32 +2147,43 @@ mod tests {
         let f = call("POST", &["features"], json!({"title": "F", "milestone": m1["id"]}));
         let t1 = api(&root, "POST", &["tasks"], json!({"title": "T1"})).unwrap();
         let t1 = t1["id"].as_str().unwrap();
+        assert_eq!(patch(t1, json!({"milestone": m2["id"]})).unwrap()["milestone"], m2["id"], "a task with no feature owns its milestone");
         let t = patch(t1, json!({"feature": f["id"]})).unwrap();
-        assert_eq!((&t["feature"], &t["milestone"]), (&f["id"], &m1["id"]), "an empty milestone takes the feature's");
-        let t = patch(t1, json!({"milestone": m2["id"]})).unwrap();
+        assert_eq!((&t["feature"], &t["milestone"]), (&f["id"], &m1["id"]), "a feature brings its milestone and replaces one");
+        let refused = patch(t1, json!({"milestone": m2["id"]})).unwrap_err();
+        assert!(refused.0.starts_with("E7001") && refused.0.contains("feature's milestone"), "{}", refused.0);
+        assert_eq!(board::task(&root, t1).unwrap()["milestone"], m1["id"], "a refused milestone changes nothing");
         let t2 = api(&root, "POST", &["tasks"], json!({"title": "T2"})).unwrap();
         let t2id = t2["id"].as_str().unwrap();
-        assert_eq!(patch(t1, json!({"feature": f["id"]})).unwrap()["milestone"], m2["id"], "a set milestone stays");
-        assert_eq!(patch(t2id, json!({"feature": f["id"], "milestone": null})).unwrap()["milestone"], Value::Null, "the request's wins");
+        assert_eq!(code(patch(t2id, json!({"feature": f["id"], "milestone": null}))), "E7001");
+        assert!(board::task(&root, t2id).unwrap()["feature"].is_null(), "a refused link changes nothing");
+        assert_eq!(patch(t2id, json!({"feature": f["id"]})).unwrap()["milestone"], m1["id"]);
+        let bare = call("POST", &["features"], json!({"title": "Bare"}));
+        assert!(patch(t2id, json!({"feature": bare["id"]})).unwrap()["milestone"].is_null(), "a feature with no milestone gives none");
+        assert_eq!(patch(t2id, json!({"feature": f["id"]})).unwrap()["milestone"], m1["id"]);
+        let t = patch(t1, json!({"feature": null})).unwrap();
+        assert!(t["feature"].is_null());
+        assert_eq!(t["milestone"], m1["id"], "removing a feature keeps the milestone");
+        assert_eq!(patch(t1, json!({"milestone": m2["id"]})).unwrap()["milestone"], m2["id"], "the task owns it again");
         assert_eq!(code(patch(t1, json!({"feature": "nope"}))), "E7023");
         assert_eq!(code(patch(t1, json!({"dependsOn": [t1]}))), "E7024");
         assert_eq!(code(patch(t1, json!({"dependsOn": ["nope"]}))), "E7024");
         assert_eq!(patch(t1, json!({"dependsOn": [t2id]})).unwrap()["dependsOn"], json!([t2id]));
         assert_eq!(code(patch(t2id, json!({"dependsOn": [t1]}))), "E7025");
-        assert_eq!(board::task(&root, t1).unwrap()["milestone"], t["milestone"]);
+        assert_eq!(board::task(&root, t1).unwrap()["dependsOn"], json!([t2id]));
 
         // During a run, and in a final column, only the links change; an empty edit is refused too.
         let mut busy = board::task(&root, t2id).unwrap();
         busy["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
         write(&root, &busy).unwrap();
-        assert_eq!(patch(t2id, json!({"milestone": m1["id"]})).unwrap()["milestone"], m1["id"]);
+        assert_eq!(code(patch(t2id, json!({"milestone": m2["id"]}))), "E7001");
         assert_eq!(code(patch(t2id, json!({"title": "no"}))), "E7003");
         assert_eq!(code(patch(t2id, json!({}))), "E7003");
         let mut done = board::task(&root, t2id).unwrap();
         done["runs"] = json!([]);
         done["column"] = json!("complete");
         write(&root, &done).unwrap();
-        assert_eq!(patch(t2id, json!({"milestone": null})).unwrap()["milestone"], Value::Null);
+        assert_eq!(code(patch(t2id, json!({"milestone": null}))), "E7001");
         assert_eq!(code(patch(t2id, json!({"title": "no", "feature": null}))), "E7004");
         assert_eq!(code(patch(t2id, json!({}))), "E7004");
 
@@ -2175,8 +2192,10 @@ mod tests {
             assert_eq!(board::task(&root, id).unwrap()["feature"], Value::Null);
         }
         assert_eq!(board::task(&root, t1).unwrap()["milestone"], m2["id"], "the milestone stays");
+        assert_eq!(board::task(&root, t2id).unwrap()["milestone"], m1["id"]);
         call("DELETE", &["milestones", m2["id"].as_str().unwrap()], json!({}));
         assert_eq!(board::task(&root, t1).unwrap()["milestone"], Value::Null);
+        assert_eq!(board::task(&root, t2id).unwrap()["milestone"], m1["id"], "another milestone stays");
     }
 
     /// D-128: an active feature completes when every task it has is in a final
@@ -2253,6 +2272,7 @@ mod tests {
 
         call("PATCH", &["features", f["id"].as_str().unwrap()], json!({"state": "active"}));
         assert_eq!(column("t1"), "planning");
+        assert_eq!(record(&root, "features", f["id"].as_str().unwrap()).unwrap()["state"], json!("active"));
         let moved = notes("t1");
         assert_eq!(moved.len(), 1);
         assert_eq!(moved[0], format!("Moved to Planning: its feature feature:{} is active.", f["id"].as_str().unwrap()));
@@ -2938,5 +2958,908 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         assert!(settled, "the server applied the done and settled the task off its own thread");
+    }
+
+    /// D-188: changing a feature's milestone moves every task linked to it,
+    /// including a closed and an archived one; clearing it moves them to none.
+    #[test]
+    fn a_feature_milestone_moves_all_its_tasks() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body).unwrap();
+        let patch = |tid: &str, body: Value| api(&root, "PATCH", &["tasks", tid], body);
+        let (m1, m2) = (call("POST", &["milestones"], json!({"title": "1"})), call("POST", &["milestones"], json!({"title": "2"})));
+        let f = call("POST", &["features"], json!({"title": "F", "milestone": m1["id"]}));
+        let mut ids = vec![];
+        for _ in 0..3 {
+            let t = api(&root, "POST", &["tasks"], json!({"title": "T"})).unwrap();
+            let id = t["id"].as_str().unwrap().to_string();
+            patch(&id, json!({"feature": f["id"]})).unwrap();
+            ids.push(id);
+        }
+        let (open, closed, archived) = (&ids[0], &ids[1], &ids[2]);
+        let mut done = board::task(&root, closed).unwrap();
+        done["column"] = json!("complete");
+        write(&root, &done).unwrap();
+        let mut gone = board::task(&root, archived).unwrap();
+        gone["column"] = json!("complete");
+        gone["archivedTime"] = json!(1);
+        write(&root, &gone).unwrap();
+
+        let raw =
+            |id: &str| -> Value { serde_json::from_slice(&fs::read(board::store_dir(&root).join(format!("{id}.json"))).unwrap()).unwrap() };
+        call("PATCH", &["features", f["id"].as_str().unwrap()], json!({"milestone": m2["id"]}));
+        for id in [open, closed, archived] {
+            assert_eq!(raw(id)["milestone"], m2["id"], "{id}");
+        }
+        call("PATCH", &["features", f["id"].as_str().unwrap()], json!({"milestone": null}));
+        for id in [open, closed, archived] {
+            assert!(raw(id)["milestone"].is_null(), "{id}");
+        }
+    }
+
+    /// D-188: a task saved with a feature takes that feature's milestone when
+    /// loaded, including an archived task and one whose saved milestone differs.
+    #[test]
+    fn an_old_task_takes_its_features_milestone() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body).unwrap();
+        let (m1, m2) = (call("POST", &["milestones"], json!({"title": "1"})), call("POST", &["milestones"], json!({"title": "2"})));
+        let f = call("POST", &["features"], json!({"title": "F", "milestone": m1["id"]}));
+        let dir = board::store_dir(&root);
+        for (id, saved, archived) in [("t8", Value::Null, Value::Null), ("t9", m2["id"].clone(), json!(1))] {
+            let t = json!({"id": id, "column": "planning", "home": ".", "feature": f["id"], "milestone": saved,
+                "dependsOn": [], "createdTime": 1, "closedTime": null, "archivedTime": archived, "notes": [], "runs": []});
+            fs::write(dir.join(format!("{id}.json")), serde_json::to_vec(&t).unwrap()).unwrap();
+        }
+        let t = json!({"id": "t10", "column": "planning", "home": ".", "feature": null, "milestone": m2["id"],
+            "dependsOn": [], "createdTime": 1, "closedTime": null, "archivedTime": null, "notes": [], "runs": []});
+        fs::write(dir.join("t10.json"), serde_json::to_vec(&t).unwrap()).unwrap();
+        for id in ["t8", "t9"] {
+            assert_eq!(board::task(&root, id).unwrap()["milestone"], m1["id"], "{id}");
+        }
+        assert_eq!(board::task(&root, "t10").unwrap()["milestone"], m2["id"], "a task with no feature keeps its own");
+    }
+
+    /// D-188: a cascade that cannot write one task puts every task back and
+    /// leaves the feature on its old milestone.
+    #[test]
+    fn a_failed_milestone_cascade_changes_no_task() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body).unwrap();
+        let (m1, m2) = (call("POST", &["milestones"], json!({"title": "1"})), call("POST", &["milestones"], json!({"title": "2"})));
+        let f = call("POST", &["features"], json!({"title": "F", "milestone": m1["id"]}));
+        let t = api(&root, "POST", &["tasks"], json!({"title": "T"})).unwrap();
+        let id = t["id"].as_str().unwrap().to_string();
+        api(&root, "PATCH", &["tasks", id.as_str()], json!({"feature": f["id"]})).unwrap();
+        let dir = board::store_dir(&root);
+        let bad = json!({"id": "bad/id", "column": "backlog", "home": ".", "feature": f["id"], "milestone": m1["id"], "rank": 2.0,
+            "dependsOn": [], "createdTime": 1, "closedTime": null, "archivedTime": null, "notes": [], "runs": []});
+        fs::write(dir.join("bad.json"), serde_json::to_vec(&bad).unwrap()).unwrap();
+        let before = task_events(&root, &id);
+        let e = strategy_api(&root, "PATCH", &["features", f["id"].as_str().unwrap()], json!({"milestone": m2["id"]})).unwrap_err();
+        assert!(e.1.0.contains("invalid task id"), "{}", e.1.0);
+        let raw: Value = serde_json::from_slice(&fs::read(dir.join(format!("{id}.json"))).unwrap()).unwrap();
+        assert_eq!(raw["milestone"], m1["id"]);
+        assert_eq!(record(&root, "features", f["id"].as_str().unwrap()).unwrap()["milestone"], m1["id"]);
+        assert_eq!(task_events(&root, &id), before, "the failed cascade logs no task save");
+    }
+
+    /// Deleting a milestone clears its features and writes each linked task once.
+    #[test]
+    fn deleting_a_milestone_writes_each_task_once() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body).unwrap();
+        let m = call("POST", &["milestones"], json!({"title": "M"}));
+        let f = call("POST", &["features"], json!({"title": "F", "milestone": m["id"]}));
+        let t = api(&root, "POST", &["tasks"], json!({"title": "T"})).unwrap();
+        let id = t["id"].as_str().unwrap().to_string();
+        api(&root, "PATCH", &["tasks", id.as_str()], json!({"feature": f["id"]})).unwrap();
+        let before = task_events(&root, &id);
+        call("DELETE", &["milestones", m["id"].as_str().unwrap()], json!({}));
+        assert_eq!(task_events(&root, &id), before + 1);
+        let raw: Value = serde_json::from_slice(&fs::read(board::store_dir(&root).join(format!("{id}.json"))).unwrap()).unwrap();
+        assert!(raw["milestone"].is_null());
+    }
+
+    /// D-87: a feature save that fails while deleting a milestone puts back
+    /// the features already cleared, and logs none of them.
+    #[test]
+    fn a_failed_milestone_delete_restores_its_features() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body).unwrap();
+        let m = call("POST", &["milestones"], json!({"title": "M"}));
+        let f1 = call("POST", &["features"], json!({"title": "First", "milestone": m["id"]}));
+        let f2 = call("POST", &["features"], json!({"title": "Second", "milestone": m["id"]}));
+        let dir = strategy_dir(&root, "features");
+        let bad = json!({"id": "bad/id", "title": "Bad", "rank": 3.0, "milestone": m["id"], "state": "upcoming",
+            "startTime": null, "colorSlot": null});
+        fs::write(dir.join("bad.json"), serde_json::to_vec(&bad).unwrap()).unwrap();
+        let before = root_events(&root).len();
+        let e = strategy_api(&root, "DELETE", &["milestones", m["id"].as_str().unwrap()], json!({})).unwrap_err();
+        assert!(e.1.0.starts_with("E7001"), "{}", e.1.0);
+        for f in [&f1, &f2] {
+            assert_eq!(record(&root, "features", f["id"].as_str().unwrap()).unwrap()["milestone"], m["id"]);
+        }
+        assert_eq!(record(&root, "milestones", m["id"].as_str().unwrap()).unwrap()["title"], json!("M"));
+        assert_eq!(root_events(&root).len(), before, "the failed delete logs nothing");
+    }
+
+    /// A slot fix belongs to the batch that writes the features: a failed
+    /// cascade puts it back instead of leaving it saved.
+    #[test]
+    fn a_failed_feature_batch_puts_back_a_kept_slot() {
+        let root = root();
+        let call = |m: &str, parts: &[&str], body: Value| strategy_api(&root, m, parts, body).unwrap();
+        let m = call("POST", &["milestones"], json!({"title": "M"}));
+        let dir = strategy_dir(&root, "features");
+        fs::create_dir_all(&dir).unwrap();
+        let old = json!({"id": "old", "title": "Old", "state": "active", "rank": 1, "startTime": 10,
+            "milestone": m["id"]});
+        fs::write(dir.join("old.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+        let bad = json!({"id": "bad/id", "title": "Bad", "rank": 2, "milestone": m["id"], "state": "upcoming",
+            "startTime": null});
+        fs::write(dir.join("bad.json"), serde_json::to_vec(&bad).unwrap()).unwrap();
+        let e = strategy_api(&root, "DELETE", &["milestones", m["id"].as_str().unwrap()], json!({})).unwrap_err();
+        assert!(e.1.0.starts_with("E7001"), "{}", e.1.0);
+        let saved: Value = serde_json::from_slice(&fs::read(dir.join("old.json")).unwrap()).unwrap();
+        assert!(saved.get("colorSlot").is_none(), "the kept slot went back with the batch");
+        assert_eq!(saved["milestone"], m["id"]);
+        assert!(task_journals(&root).is_empty(), "no journal is left: {:?}", task_journals(&root));
+    }
+
+    /// A crash partway through a batch leaves its journal, and recovery puts
+    /// back the files written so far.
+    #[test]
+    fn a_crashed_task_batch_is_put_back() {
+        let root = root();
+        let dir = board::store_dir(&root);
+        let before = fs::read(dir.join("t1.json")).unwrap();
+        fs::write(dir.join("t1.json"), serde_json::to_vec(&json!({"id": "t1", "column": "planning", "home": "."})).unwrap()).unwrap();
+        fs::write(dir.join("t2.json"), serde_json::to_vec(&json!({"id": "t2", "column": "planning", "home": "."})).unwrap()).unwrap();
+        let pending = root.join(".solace/pending");
+        fs::create_dir_all(&pending).unwrap();
+        let record = json!({"files": [
+            {"path": ".solace/tasks/t1.json", "bytes": before.clone()},
+            {"path": ".solace/tasks/t2.json", "bytes": null}
+        ]});
+        fs::write(pending.join("tasks-crash.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+        recover(&root).unwrap();
+        assert_eq!(fs::read(dir.join("t1.json")).unwrap(), before);
+        assert!(!dir.join("t2.json").exists());
+        assert!(!pending.join("tasks-crash.json").exists());
+    }
+
+    /// A batch that finishes drops its journal.
+    #[test]
+    fn a_successful_batch_leaves_no_journal() {
+        let root = root();
+        let mut t = board::task(&root, "t1").unwrap();
+        t["title"] = json!("Changed");
+        write(&root, &t).unwrap();
+        assert_eq!(board::task(&root, "t1").unwrap()["title"], json!("Changed"));
+        assert!(task_journals(&root).is_empty(), "{:?}", task_journals(&root));
+    }
+
+    /// Creating a task through the API leaves its file and no journal.
+    #[test]
+    fn a_created_task_is_on_disk() {
+        let root = root();
+        strategy_api(&root, "POST", &["features"], json!({"title": "F"})).unwrap();
+        assert!(task_journals(&root).is_empty(), "the feature batch is committed: {:?}", task_journals(&root));
+        let t = api(&root, "POST", &["tasks"], json!({"title": "Created"})).unwrap();
+        let id = t["id"].as_str().unwrap();
+        assert!(board::store_dir(&root).join(format!("{id}.json")).exists());
+        assert!(task_journals(&root).is_empty(), "{:?}", task_journals(&root));
+    }
+
+    fn task_journals(root: &std::path::Path) -> Vec<String> {
+        fs::read_dir(root.join(".solace/pending"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with("tasks-"))
+            .collect()
+    }
+
+    /// A journal whose batch holds its file lock belongs to a running process.
+    #[test]
+    fn a_live_journal_is_not_put_back() {
+        let root = root();
+        let dir = board::store_dir(&root);
+        let pending = root.join(".solace/pending");
+        fs::create_dir_all(&pending).unwrap();
+        fs::write(dir.join("t2.json"), b"{}").unwrap();
+        let record = json!({"files": [{"path": ".solace/tasks/t2.json", "bytes": null}]});
+        fs::write(pending.join("tasks-live.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+        let owner = try_lock_file(&pending.join("tasks-live.lock")).unwrap().unwrap();
+        recover(&root).unwrap();
+        assert!(dir.join("t2.json").exists());
+        assert!(pending.join("tasks-live.json").exists());
+        drop(owner);
+        recover(&root).unwrap();
+        assert!(!dir.join("t2.json").exists());
+        assert!(!pending.join("tasks-live.json").exists());
+    }
+
+    #[test]
+    fn a_journal_path_outside_the_root_is_refused() {
+        let root = root();
+        let outside = root.parent().unwrap().join("journal-outside.txt");
+        fs::write(&outside, b"keep").unwrap();
+        let pending = root.join(".solace/pending");
+        fs::create_dir_all(&pending).unwrap();
+        let record = json!({"files": [{"path": "../journal-outside.txt", "bytes": null}]});
+        fs::write(pending.join("tasks-escape.json"), serde_json::to_vec(&record).unwrap()).unwrap();
+        assert!(recover(&root).is_err());
+        assert_eq!(fs::read(&outside).unwrap(), b"keep");
+        fs::remove_file(&outside).unwrap();
+    }
+
+    /// Recovery acts only on a journal; a lock file without one belongs to no
+    /// batch it can finish, so it is left alone.
+    #[test]
+    fn a_lock_without_a_journal_is_left_alone() {
+        let root = root();
+        let pending = root.join(".solace/pending");
+        fs::create_dir_all(&pending).unwrap();
+        let lock = pending.join("tasks-orphan.lock");
+        fs::write(&lock, b"").unwrap();
+        recover(&root).unwrap();
+        assert!(lock.exists());
+    }
+
+    /// Each newly kept file appends one journal line instead of rewriting the
+    /// whole journal.
+    #[test]
+    fn a_batch_journals_each_file_as_one_line() {
+        let root = root();
+        let dir = board::store_dir(&root);
+        let t2 = dir.join("t2.json");
+        fs::write(&t2, b"{}").unwrap();
+        let batch = batch(&root).unwrap();
+        batch_keep(&dir.join("t1.json")).unwrap();
+        batch_keep(&t2).unwrap();
+        assert_eq!(fs::read_to_string(journal_path()).unwrap().lines().count(), 2);
+        batch_rollback(batch);
+    }
+
+    /// Appended journal lines restore in reverse; a last line that was never
+    /// finished names no change.
+    #[test]
+    fn an_appended_journal_puts_back_every_file() {
+        let root = root();
+        let dir = board::store_dir(&root);
+        let before = fs::read(dir.join("t1.json")).unwrap();
+        fs::write(dir.join("t1.json"), b"{}").unwrap();
+        fs::write(dir.join("t2.json"), b"{}").unwrap();
+        let pending = root.join(".solace/pending");
+        fs::create_dir_all(&pending).unwrap();
+        let mut journal =
+            [json!({"path": ".solace/tasks/t1.json", "bytes": before.clone()}), json!({"path": ".solace/tasks/t2.json", "bytes": null})]
+                .iter()
+                .map(|entry| serde_json::to_string(entry).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+        journal.push_str("\n{\"path\":");
+        fs::write(pending.join("tasks-lines.json"), journal).unwrap();
+        recover(&root).unwrap();
+        assert_eq!(fs::read(dir.join("t1.json")).unwrap(), before);
+        assert!(!dir.join("t2.json").exists());
+        assert!(!pending.join("tasks-lines.json").exists());
+    }
+
+    /// Queued events are logged after the files commit, and a rollback drops
+    /// them.
+    #[test]
+    fn a_batch_logs_only_what_it_commits() {
+        let root = root();
+        let before = root_events(&root).len();
+        let dropped = batch(&root).unwrap();
+        batch_log("", &json!({"dropped": true}));
+        batch_rollback(dropped);
+        assert_eq!(root_events(&root).len(), before);
+        let kept = batch(&root).unwrap();
+        batch_log("", &json!({"kept": true}));
+        batch_commit(kept).unwrap();
+        assert_eq!(root_events(&root).last().unwrap(), &json!({"kept": true}));
+    }
+
+    /// A nested batch shares the outer journal and events, so an outer rollback
+    /// puts back its files and logs none of its events.
+    #[test]
+    fn a_nested_batch_rolls_back_with_the_outer() {
+        let root = root();
+        let kept = board::store_dir(&root).join("t2.json");
+        let before = root_events(&root).len();
+        let outer = batch(&root).unwrap();
+        let journals = task_journals(&root);
+        let inner = batch(&root).unwrap();
+        assert_eq!(task_journals(&root), journals);
+        batch_replace(&kept, &json!({"id": "t2"})).unwrap();
+        batch_log("", &json!({"nested": true}));
+        batch_commit(inner).unwrap();
+        assert_eq!(root_events(&root).len(), before, "a nested commit logs nothing yet");
+        batch_rollback(outer);
+        assert!(!kept.exists(), "the outer rollback puts back the nested file");
+        assert_eq!(root_events(&root).len(), before, "the outer rollback logs no nested event");
+    }
+
+    /// A nested batch queues its events for the outer commit.
+    #[test]
+    fn a_nested_batch_logs_when_the_outer_commits() {
+        let root = root();
+        let before = root_events(&root).len();
+        let outer = batch(&root).unwrap();
+        let inner = batch(&root).unwrap();
+        batch_log("", &json!({"nested": true}));
+        batch_commit(inner).unwrap();
+        assert_eq!(root_events(&root).len(), before);
+        batch_commit(outer).unwrap();
+        assert_eq!(root_events(&root).last(), Some(&json!({"nested": true})));
+    }
+
+    /// A nested rollback puts back the outer files and keeps the outer from
+    /// logging anything.
+    #[test]
+    fn a_nested_batch_failure_stops_the_outer_commit() {
+        let root = root();
+        let kept = board::store_dir(&root).join("t2.json");
+        let before = root_events(&root).len();
+        let outer = batch(&root).unwrap();
+        let inner = batch(&root).unwrap();
+        batch_replace(&kept, &json!({"id": "t2"})).unwrap();
+        batch_log("", &json!({"nested": true}));
+        batch_rollback(inner);
+        assert!(batch_commit(outer).is_err());
+        assert!(!kept.exists());
+        assert_eq!(root_events(&root).len(), before);
+    }
+
+    /// A feature follow-up that cannot be saved fails the batch, so the task
+    /// and its event are put back too.
+    #[test]
+    fn a_feature_that_cannot_follow_its_task_rolls_back() {
+        let root = root();
+        let task = board::store_dir(&root).join("t2.json");
+        let before = root_events(&root).len();
+        let batch = batch(&root).unwrap();
+        batch_replace(&task, &json!({"id": "t2"})).unwrap();
+        let e = finish_write(&root, ".", &json!({"id": "t2"}), &[json!({"id": "bad/id"})]).unwrap_err();
+        assert!(e.0.starts_with("E7001"), "{}", e.0);
+        batch_rollback(batch);
+        assert!(!task.exists());
+        assert_eq!(root_events(&root).len(), before, "the failed follow-up logs no task save");
+        assert!(task_journals(&root).is_empty(), "{:?}", task_journals(&root));
+    }
+
+    fn journal_path() -> PathBuf {
+        with_batch(|active| active.as_ref().expect("an open batch").journal.clone())
+    }
+
+    /// An outer handle dropped without a finish puts its files back and releases
+    /// the thread's batch.
+    #[test]
+    fn dropping_an_outer_batch_rolls_it_back() {
+        let root = root();
+        let kept = board::store_dir(&root).join("t2.json");
+        let before = root_events(&root).len();
+        {
+            let _batch = batch(&root).unwrap();
+            batch_replace(&kept, &json!({"id": "t2"})).unwrap();
+            batch_log("", &json!({"dropped": true}));
+        }
+        assert!(!kept.exists());
+        assert_eq!(root_events(&root).len(), before);
+        assert!(task_journals(&root).is_empty(), "{:?}", task_journals(&root));
+        assert!(with_batch(|active| active.is_none()));
+    }
+
+    /// An unfinished nested handle keeps the outer batch from committing.
+    #[test]
+    fn dropping_a_nested_batch_fails_the_outer() {
+        let root = root();
+        let outer = batch(&root).unwrap();
+        drop(batch(&root).unwrap());
+        assert!(batch_commit(outer).is_err());
+        assert!(task_journals(&root).is_empty(), "{:?}", task_journals(&root));
+        assert!(with_batch(|active| active.is_none()));
+    }
+}
+
+/// Writes task `t`, returning what to log and the features that follow it.
+/// `feature` is the feature being saved, when its tasks are written with it.
+fn write_task(top: &Path, t: &Value, feature: Option<&Value>) -> Result<(String, Value, Vec<Value>), Failure> {
+    let id = t["id"].as_str().unwrap_or("").to_string();
+    if !board::valid_id(&id) {
+        return board::err("E7001", "invalid task id");
+    }
+    // An active feature's tasks are never in Backlog (D-134).
+    let mut t = t.clone();
+    // The mark comes from the home on each load (D-160): it never goes in the file.
+    t.as_object_mut().unwrap().remove("noProject");
+    match feature {
+        Some(f) => {
+            board::plan_for_feature(top, &mut t, f);
+        }
+        None => {
+            plan(top, &mut t);
+        }
+    }
+    let path = board::store_dir(top).join(format!("{id}.json"));
+    let was: Option<Value> = fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    // A feature follows its tasks (D-128): only a new task, a moved one or a
+    // changed link can change it. It is worked out with this save in place, so
+    // a save that makes its own feature active again is planned before the
+    // task is written, once (D-134). The feature is saved after the task, so a
+    // failed task save leaves it as it was.
+    let mut changed = Vec::new();
+    if feature.is_none() && was.as_ref().is_none_or(|w| w["feature"] != t["feature"] || w["column"] != t["column"]) {
+        let old = was.as_ref().map_or(Value::Null, |w| w["feature"].clone());
+        let mut fids: Vec<String> = [&old, &t["feature"]].into_iter().filter_map(Value::as_str).map(String::from).collect();
+        fids.dedup();
+        for fid in fids {
+            match follow_tasks(top, &fid, &t) {
+                Ok(Some(f)) => {
+                    if t["feature"] == fid.as_str() {
+                        board::plan_for_feature(top, &mut t, &f);
+                    }
+                    changed.push(f);
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("updating feature {fid}: {}", e.0),
+            }
+        }
+    }
+    batch_replace(&board::store_dir(top).join(format!("{id}.json")), &t)?;
+    let home = t["home"].as_str().unwrap_or(".").to_string();
+    Ok((home, t, changed))
+}
+
+fn finish_write(top: &Path, home: &str, t: &Value, changed: &[Value]) -> Result<(), Failure> {
+    batch_log(home, &json!({"task":t}));
+    for f in changed {
+        save_record_in(top, "features", f)?;
+    }
+    Ok(())
+}
+
+/// Writes tasks as one change and lets their features follow, then `after`, as
+/// one journaled batch. If writing or `after` fails, every file is put back, so
+/// a cascade leaves no task on the old milestone and a power loss leaves a
+/// record to put them back.
+fn write_tasks_then<T>(
+    top: &Path,
+    tasks: &[Value],
+    feature: Option<&Value>,
+    after: impl FnOnce() -> Result<T, Failure>,
+) -> Result<T, Failure> {
+    let batch = batch(top)?;
+    let mut written: Vec<WrittenTask> = Vec::new();
+    let mut failed = None;
+    for t in tasks {
+        match write_task(top, t, feature) {
+            Ok((home, task, changed)) => written.push(WrittenTask { home, task, changed }),
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
+    }
+    let out = match failed {
+        Some(e) => Err(e),
+        None => (|| {
+            for w in &written {
+                finish_write(top, &w.home, &w.task, &w.changed)?;
+            }
+            after()
+        })(),
+    };
+    match out {
+        Ok(out) => batch_commit(batch).map(|()| out),
+        Err(e) => {
+            batch_rollback(batch);
+            Err(e)
+        }
+    }
+}
+
+/// A task written by `write_tasks_then`, with what to log once every write has
+/// succeeded.
+struct WrittenTask {
+    home: String,
+    task: Value,
+    changed: Vec<Value>,
+}
+
+/// Puts `<dir>/<name>` back as `before`; a file that did not exist is removed.
+/// A failed restore is reported, so an inconsistent store leaves a trace, and
+/// returns false.
+fn restore_file(dir: &Path, name: &str, before: Option<Vec<u8>>) -> bool {
+    let restored = match before {
+        Some(bytes) => replace_bytes(dir, name, &bytes),
+        None => fs::remove_file(dir.join(name)).map_err(Failure::from),
+    };
+    if let Err(e) = &restored {
+        eprintln!("restoring {name}: {}", e.0);
+    }
+    restored.is_ok()
+}
+
+/// Logs a saved milestone or feature as a root event.
+fn log_record(kind: &str, v: &Value) {
+    let event = if kind == "milestones" { json!({"milestone": v}) } else { json!({"feature": v}) };
+    batch_log("", &event);
+}
+
+/// Writes every feature in the open batch, then logs them. The slot fixes belong to
+/// the same batch, so a failed cascade puts them back too.
+fn write_features(top: &Path, features: &[Value]) -> Result<(), Failure> {
+    if features.is_empty() {
+        return Ok(());
+    }
+    keep_slots(top)?;
+    let dir = strategy_dir(top, "features");
+    for f in features {
+        let id = f["id"].as_str().unwrap_or("");
+        if !board::valid_id(id) {
+            return board::err("E7001", "invalid id");
+        }
+        batch_replace(&dir.join(format!("{id}.json")), f)?;
+    }
+    for f in features {
+        log_record("features", f);
+    }
+    Ok(())
+}
+
+/// A handle to the thread's task batch: whether it began the batch and whether
+/// it has finished. A nested batch joins the outer one.
+struct Batch {
+    outer: bool,
+    finished: bool,
+}
+
+/// Starts a batch, first putting back one a crash left unfinished.
+fn batch(top: &Path) -> Result<Batch, Failure> {
+    if let Some(nested) = with_batch(|active| match active {
+        Some(active) if active.top.as_path() == top => Ok(Some(Batch { outer: false, finished: false })),
+        Some(_) => Err(Failure("another task batch is open on this thread".into(), 1)),
+        None => Ok(None),
+    })? {
+        return Ok(nested);
+    }
+    let lock = BATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    recover_locked(top)?;
+    let (journal, live_lock) = claim_journal(top)?;
+    with_batch(|active| {
+        *active = Some(ActiveBatch {
+            top: top.to_path_buf(),
+            journal,
+            files: Vec::new(),
+            events: Vec::new(),
+            failed: false,
+            _thread_lock: Some(lock),
+            _live_lock: live_lock,
+        });
+    });
+    Ok(Batch { outer: true, finished: false })
+}
+
+/// Records `p`'s bytes before its first change in the open batch.
+fn batch_keep(p: &Path) -> Result<(), Failure> {
+    let Some((rel, journal, before)) = with_batch(|active| -> Result<Option<(String, PathBuf, Option<Vec<u8>>)>, Failure> {
+        let active = active.as_mut().ok_or_else(|| Failure("the task batch is no longer open".into(), 1))?;
+        let rel = p.strip_prefix(&active.top).map_err(|_| Failure("task store path outside its root".into(), 1))?;
+        let rel = rel.to_string_lossy().into_owned();
+        if active.files.iter().any(|(name, _)| *name == rel) {
+            return Ok(None);
+        }
+        Ok(Some((rel, active.journal.clone(), fs::read(p).ok())))
+    })?
+    else {
+        return Ok(());
+    };
+    batch_save(&journal, &rel, &before)?;
+    with_batch(|active| {
+        if let Some(active) = active.as_mut() {
+            active.files.push((rel, before));
+        }
+    });
+    Ok(())
+}
+
+/// Appends one file's before bytes to the journal before it changes.
+fn batch_save(journal: &Path, path: &str, before: &Option<Vec<u8>>) -> Result<(), Failure> {
+    let entry = json!({"path": path, "bytes": before});
+    let dir = journal.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(dir)?;
+    let mut file = fs::OpenOptions::new().create(true).append(true).open(journal)?;
+    file.write_all(&serde_json::to_vec(&entry).unwrap())?;
+    file.write_all(b"\n")?;
+    file.sync_all()?;
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+/// Rewrites `p` as `v`, journaling its before bytes first.
+fn batch_replace(p: &Path, v: &Value) -> Result<(), Failure> {
+    batch_keep(p)?;
+    let dir = p.parent().unwrap_or(Path::new("."));
+    let name = p.file_name().and_then(|n| n.to_str()).ok_or_else(|| Failure("invalid task store path".into(), 1))?;
+    replace_bytes(dir, name, &serde_json::to_vec_pretty(v).unwrap())
+}
+
+/// Removes `p`, journaling its before bytes first.
+fn batch_remove(p: &Path) -> Result<(), Failure> {
+    batch_keep(p)?;
+    fs::remove_file(p)?;
+    fs::File::open(p.parent().unwrap_or(Path::new(".")))?.sync_all()?;
+    Ok(())
+}
+
+/// Keeps the batch's files and drops its journal.
+fn batch_commit(mut batch: Batch) -> Result<(), Failure> {
+    if !batch.outer {
+        batch.finished = true;
+        return Ok(());
+    }
+    let Some(mut active) = with_batch(|active| active.take()) else {
+        batch.finished = true;
+        return Err(Failure("the task batch is no longer open".into(), 1));
+    };
+    batch.finished = true;
+    if active.failed {
+        restore_batch(active);
+        return Err(Failure("a nested task batch failed".into(), 1));
+    }
+    if !active.journal.exists() {
+        log_events(&active.top, &mut active.events);
+        batch_finish(active);
+        return Ok(());
+    }
+    let dir = active.journal.parent().unwrap_or(Path::new("."));
+    let dropped = fs::remove_file(&active.journal).and_then(|_| fs::File::open(dir).and_then(|f| f.sync_all()));
+    if let Err(e) = dropped {
+        restore_batch(active);
+        return Err(e.into());
+    }
+    log_events(&active.top, &mut active.events);
+    batch_finish(active);
+    Ok(())
+}
+
+fn batch_rollback(mut batch: Batch) {
+    batch.finished = true;
+    if !batch.outer {
+        with_batch(|active| {
+            if let Some(active) = active.as_mut() {
+                active.failed = true;
+            }
+        });
+        return;
+    }
+    if let Some(active) = with_batch(|active| active.take()) {
+        restore_batch(active);
+    }
+}
+
+/// Puts back the files of a batch a crash left unfinished, if its journal is
+/// still there. A batch on this thread skips recovery: its own journal is live.
+fn recover(top: &Path) -> Result<(), Failure> {
+    if with_batch(|active| active.is_some()) {
+        return Ok(());
+    }
+    let _lock = BATCH_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    recover_locked(top)
+}
+
+/// Writes a record and logs it as a root event, in the open batch.
+fn save_record_in(top: &Path, kind: &str, v: &Value) -> Result<(), Failure> {
+    let id = v["id"].as_str().unwrap_or("");
+    if !board::valid_id(id) {
+        return board::err("E7001", "invalid id");
+    }
+    if kind == "features" {
+        keep_slots(top)?;
+    }
+    batch_replace(&strategy_dir(top, kind).join(format!("{id}.json")), v)?;
+    log_record(kind, v);
+    Ok(())
+}
+
+/// Serializes batches and recovery across threads of one process.
+static BATCH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Runs `f` with this thread's active batch, if any.
+fn with_batch<R>(f: impl FnOnce(&mut Option<ActiveBatch>) -> R) -> R {
+    thread_local! {
+        static ACTIVE: std::cell::RefCell<Option<ActiveBatch>> = const { std::cell::RefCell::new(None) };
+    }
+    ACTIVE.with(|active| f(&mut active.borrow_mut()))
+}
+
+/// Drops the batch's live mark, so the next one takes the lock.
+fn batch_finish(batch: ActiveBatch) {
+    let lock = batch.journal.with_extension("lock");
+    drop(batch);
+    let _ = fs::remove_file(lock);
+}
+
+/// Puts back every task batch journal a crash left unfinished. A batch another
+/// process is still running holds its journal's file lock, so it is left alone.
+fn recover_locked(top: &Path) -> Result<(), Failure> {
+    let pending = top.join(".solace/pending");
+    let Ok(entries) = fs::read_dir(&pending) else { return Ok(()) };
+    let stems: std::collections::BTreeSet<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|e| e == "json")
+                && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("tasks-"))
+        })
+        .map(|p| p.with_extension(""))
+        .collect();
+    for stem in stems {
+        let lock = stem.with_extension("lock");
+        let Some(owner) = try_lock_file(&lock)? else { continue };
+        let recovered = recover_journal(top, &stem.with_extension("json"));
+        drop(owner);
+        let _ = fs::remove_file(&lock);
+        recovered?;
+    }
+    Ok(())
+}
+
+/// Puts back the files named by a task batch journal.
+fn restore_record_locked(top: &Path, record: &Value) -> Result<(), Failure> {
+    let Some(files) = record["files"].as_array() else { return Ok(()) };
+    for file in files.iter().rev() {
+        let p = journal_target(top, file["path"].as_str().unwrap_or(""))?;
+        if let Some(a) = file["bytes"].as_array() {
+            let dir = p.parent().unwrap_or(top);
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            replace_bytes(dir, name, &crate::json_bytes(a))?;
+        } else if p.exists() {
+            fs::remove_file(&p)?;
+            fs::File::open(p.parent().unwrap_or(top))?.sync_all()?;
+        }
+    }
+    Ok(())
+}
+
+/// A fresh journal path and the file lock that tells other processes its batch is live.
+fn claim_journal(top: &Path) -> Result<(PathBuf, fs::File), Failure> {
+    let pending = top.join(".solace/pending");
+    fs::create_dir_all(&pending)?;
+    let journal = pending.join(format!("tasks-{}.json", crate::unique_id()));
+    let owner = try_lock_file(&journal.with_extension("lock"))?.ok_or_else(|| Failure("the task journal is already in use".into(), 1))?;
+    let prepared = (|| -> Result<(), Failure> {
+        fs::File::create(&journal)?.sync_all()?;
+        fs::File::open(&pending)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = prepared {
+        drop(owner);
+        let _ = fs::remove_file(journal.with_extension("lock"));
+        return Err(e);
+    }
+    Ok((journal, owner))
+}
+
+/// Puts back the files one dead batch's journal names, then drops it.
+fn recover_journal(top: &Path, journal: &Path) -> Result<(), Failure> {
+    let Ok(bytes) = fs::read(journal) else { return Ok(()) };
+    let record = journal_record(&bytes)?;
+    restore_record_locked(top, &record)?;
+    fs::remove_file(journal)?;
+    fs::File::open(journal.parent().unwrap_or(top))?.sync_all()?;
+    Ok(())
+}
+
+/// The file a journal entry names, which must lie inside the root.
+fn journal_target(top: &Path, name: &str) -> Result<PathBuf, Failure> {
+    let rel = Path::new(name);
+    if rel.as_os_str().is_empty() || !rel.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        return board::err("E7001", "invalid task journal");
+    }
+    Ok(top.join(rel))
+}
+
+/// Queues a root event for the batch, after its files commit.
+fn batch_log(project: &str, data: &Value) {
+    with_batch(|active| {
+        if let Some(active) = active.as_mut() {
+            active.events.push((project.to_string(), data.clone()));
+        }
+    });
+}
+
+/// Logs what the committed batch changed, after every file is in place.
+fn log_events(top: &Path, events: &mut Vec<(String, Value)>) {
+    for (project, data) in std::mem::take(events) {
+        log(top, &project, &data);
+    }
+}
+
+/// A journal's files in change order, from either a whole record or appended
+/// lines; an unfinished last line names no change.
+fn journal_record(bytes: &[u8]) -> Result<Value, Failure> {
+    let Ok(text) = std::str::from_utf8(bytes) else { return board::err("E7001", "invalid task journal") };
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(json!({"files": []}));
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(text) {
+        if let Some(files) = v["files"].as_array() {
+            return Ok(json!({"files": files}));
+        }
+        if v["path"].is_string() {
+            return Ok(json!({"files": [v]}));
+        }
+        return board::err("E7001", "invalid task journal");
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let mut files = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<Value>(line) {
+            Ok(v) if v["path"].is_string() => files.push(v),
+            Ok(_) => return board::err("E7001", "invalid task journal"),
+            Err(_) if lines[i + 1..].iter().all(|l| l.trim().is_empty()) => break,
+            Err(_) => return board::err("E7001", "invalid task journal"),
+        }
+    }
+    Ok(json!({"files": files}))
+}
+
+/// The task-store files written whole or nothing: each changed path's bytes
+/// before its first change, the events to log once committed, the process-wide
+/// lock (outermost batch only) and the file lock that marks its journal live.
+struct ActiveBatch {
+    top: PathBuf,
+    journal: PathBuf,
+    files: Vec<(String, Option<Vec<u8>>)>,
+    events: Vec<(String, Value)>,
+    /// A nested batch failed, so the outer one must not commit.
+    failed: bool,
+    _thread_lock: Option<std::sync::MutexGuard<'static, ()>>,
+    _live_lock: fs::File,
+}
+
+/// Puts every file back and drops the journal; a file that cannot be put back
+/// keeps the journal, so the next batch tries again.
+fn restore_batch(batch: ActiveBatch) {
+    let restored = batch.files.iter().rev().fold(true, |ok, (path, before)| {
+        let p = batch.top.join(path);
+        let dir = p.parent().unwrap_or(Path::new("."));
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        restore_file(dir, name, before.clone()) && ok
+    });
+    if restored {
+        let _ = fs::remove_file(&batch.journal);
+    }
+    batch_finish(batch);
+}
+
+impl Drop for Batch {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        if self.outer {
+            if let Some(active) = with_batch(|active| active.take()) {
+                restore_batch(active);
+            }
+        } else {
+            with_batch(|active| {
+                if let Some(active) = active.as_mut() {
+                    active.failed = true;
+                }
+            });
+        }
     }
 }

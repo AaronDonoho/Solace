@@ -439,7 +439,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
         let header = raw.lines().nth(at_line - 1).unwrap_or("");
         let not_code = |e: Failure| {
             if !header.contains(" File:") {
-                return e;
+                return if e.0.starts_with("E1001") { bad_target(s, &ix, &target, at_line) } else { e };
             }
             let path = header.split_once(':').map_or("", |p| p.1).trim();
             bad(format!(
@@ -450,186 +450,13 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 path, at_line, RESEND
             ))
         };
+        let mut c = SectionContext { s, ix: &ix, target: &target, at_line, blocks: &mut blocks, bad: &bad, not_code: &not_code };
         if kind == Section::Add {
-            let text: String = hunks[0].1.iter().map(|l| format!("{}\n", &l[1..])).collect();
-            let (header, items): (String, Vec<(String, String)>) = if rust {
-                let container = s.rust_container_in(&ix, &target)?.map(|i| &ix.syms[i]);
-                let f = language::rust::split(&text, &target).map_err(|e| {
-                    store::rust_syntax_error(
-                        e,
-                        &target,
-                        container.map(|c| (c.name.as_str(), c.text.as_str(), c.kind_text.as_str())),
-                        container.map_or("", |c| c.module.as_str()),
-                        0,
-                        text.lines().count().max(1),
-                    )
-                })?;
-                // A block's own text is not an item: it comes in whole through
-                // `submit --new <module>` (D-168).
-                if let Some(p) = f.items.iter().find(|p| store::is_block(p)) {
-                    return Err(bad(format!("{}.", store::block_note(p.kind))));
-                }
-                (f.header, f.items.into_iter().map(|p| (p.name, p.text)).collect())
-            } else {
-                let m = s.lang().split(&text);
-                (m.header, m.items.into_iter().map(|i| (i.name, i.text)).collect())
-            };
-            let module = match target.rsplit_once('.') {
-                Some((m, n)) if items.iter().any(|(name, _)| name.as_str() == n) => m.to_string(),
-                _ => target.clone(),
-            };
-            if items.is_empty() {
-                return Err(not_code(bad(format!("`*** Add: {target}` (line {at_line}) defines no function, type or constant. {RESEND}"))));
-            }
-            let mut header = header;
-            for (name, item) in &items {
-                let text = s.rust_block_text(&ix, &module, name, item);
-                push_block(&mut blocks, &mut header, &module, name, &text);
-            }
-            continue;
-        }
-        // In a Rust store a section updates one item: its text goes as one block
-        // under the name the store has for it, and the Rust submit path parses
-        // it in its parent's wrapper (D-168).
-        if rust {
-            // A `*** Update:` that names a module applies its hunks to the
-            // module's whole file (D-168): every changed or added item goes as
-            // one block; the header has its own commands.
-            if !target.contains('.')
-                && let Some(m) = s.resolve_module(&ix, &target)
-            {
-                let module = m.path.clone();
-                let before = store::module_text(&ix, m);
-                let mut lines: Vec<String> = before.lines().map(String::from).collect();
-                apply_hunks(&target, &format!("view {target}"), &mut lines, hunks, false)?;
-                let after = lines.join("\n");
-                let file = language::rust::split(&after, &module).map_err(|e| bad(e.0))?;
-                if !file.refusals.is_empty() {
-                    let lines: Vec<String> =
-                        file.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
-                    return Err(bad(lines.join("\n")));
-                }
-                if file.header.trim_end() != s.header(&module)?.trim_end() {
-                    return Err(bad(format!(
-                        concat!(
-                            "the patch changes {}'s imports (section at line {}); ",
-                            "imports are added automatically (`submit --imports {}` replaces them).",
-                        ),
-                        module, at_line, module
-                    )));
-                }
-                let items = crate::rust_submit::rust_module_items(&ix, &module, &file.items)?;
-                push_module_blocks(&mut blocks, &ix, &module, &items, at_line, &bad)?;
-                continue;
-            }
-            let Some(i) = crate::rust_submit::rust_symbol(&ix, &target)? else {
-                if let Some(c) = crate::rust_submit::rust_container(&ix, &target)? {
-                    return Err(bad(format!("{}.", store::block_note(&ix.syms[c].kind_text))));
-                }
-                return Err(not_code(bad(format!("`*** Update: {target}` (line {at_line}) is no symbol. {RESEND}"))));
-            };
-            let mut lines: Vec<String> = ix.syms[i].text.lines().map(String::from).collect();
-            apply_hunks(&target, &format!("view {target}"), &mut lines, hunks, false)?;
-            let text = lines.join("\n");
-            if text == ix.syms[i].text {
-                continue;
-            }
-            let parent = ix.syms[i]
-                .parent
-                .as_ref()
-                .and_then(|p| ix.syms.iter().find(|x| &x.id == p))
-                .map(|p| (p.name.as_str(), p.text.as_str(), p.kind_text.as_str()));
-            let qname = ix.syms[i].qname();
-            let items = store::submit_items(&s.root, &ix.syms[i].module, &qname, parent, &text, false)?;
-            match items.as_slice() {
-                [] => {
-                    return Err(bad(format!(
-                        "the patch leaves nothing of {} (section at line {at_line}); use `delete <name>`.",
-                        ix.syms[i].qname()
-                    )));
-                }
-                [one] if one.name == ix.syms[i].name => {}
-                _ => {
-                    let qname = ix.syms[i].qname();
-                    return Err(bad(format!(
-                        concat!(
-                            "the patch renames {} (section at line {}); ",
-                            "submit {} with the new text: `submit {}` replaces the stored symbol and may rename it, keeping its id.",
-                        ),
-                        qname, at_line, qname, qname
-                    )));
-                }
-            }
-            push_block(&mut blocks, &mut String::new(), &ix.syms[i].module, &ix.syms[i].name, &items[0].text);
-            continue;
-        }
-        // The target's text, a unit per symbol (and a module's header first).
-        let (module, mut units): (String, Vec<(Option<usize>, String)>) = match s.resolve_module(&ix, &target) {
-            Some(m) => (
-                m.path.clone(),
-                std::iter::once((None, m.header.clone()))
-                    .chain(ix.syms.iter().enumerate().filter(|(_, x)| x.module == m.path).map(|(i, x)| (Some(i), x.text.clone())))
-                    .collect(),
-            ),
-            None => {
-                let i = s.resolve(&ix, &target).map_err(not_code)?;
-                (ix.syms[i].module.clone(), vec![(Some(i), ix.syms[i].text.clone())])
-            }
-        };
-        // One list of lines, with a separator no hunk can match between units.
-        const SEP: &str = "\u{0}";
-        let mut lines: Vec<String> =
-            units.iter().map(|u| u.1.clone()).collect::<Vec<_>>().join(&format!("\n{SEP}\n")).lines().map(String::from).collect();
-        apply_hunks(&target, &format!("view {target}"), &mut lines, hunks, false)?;
-        let joined = lines.join("\n");
-        let texts: Vec<&str> = joined.split(&format!("\n{SEP}\n")).collect();
-        if texts.len() != units.len() {
-            return Err(bad(format!("in {target} (section at line {at_line}), a hunk spans two symbols; give each symbol its own hunk.")));
-        }
-        for (u, t) in units.iter_mut().zip(&texts) {
-            u.1 = t.trim_end().to_string();
-        }
-        // A changed header's imports go with the module's first changed symbol.
-        let mut header = match &units[0] {
-            (None, h) if h.trim() != s.resolve_module(&ix, &module).map_or("", |m| m.header.trim()) => h.clone(),
-            _ => String::new(),
-        };
-        for (i, text) in units.iter().filter_map(|(i, t)| Some((i.as_ref()?, t))) {
-            if *text == ix.syms[*i].text {
-                continue;
-            }
-            match s.lang().split(text).items.first() {
-                None => {
-                    return Err(bad(format!(
-                        "the patch leaves nothing of {} (section at line {at_line}); use `delete <name>`.",
-                        ix.syms[*i].qname()
-                    )));
-                }
-                Some(item) if item.name != ix.syms[*i].name => {
-                    let qname = ix.syms[*i].qname();
-                    return Err(bad(format!(
-                        concat!(
-                            "the patch renames {} (section at line {}); ",
-                            "submit {} with the new text: `submit {}` replaces the stored symbol and may rename it, keeping its id.",
-                        ),
-                        qname, at_line, qname, qname
-                    )));
-                }
-                _ => {}
-            }
-            let mut head = std::mem::take(&mut header);
-            for item in s.lang().split(text).items.iter().filter(|x| x.text != ix.syms[*i].text) {
-                push_block(&mut blocks, &mut head, &module, &item.name, &item.text);
-            }
-        }
-        if !header.is_empty() {
-            return Err(bad(format!(
-                concat!(
-                    "the patch changes only {}'s imports (section at line {}); ",
-                    "imports are added automatically (`submit --imports {}` replaces them).",
-                ),
-                module, at_line, module
-            )));
+            add_blocks(&mut c, rust, &hunks)?;
+        } else if rust {
+            rust_update_blocks(&mut c, hunks)?;
+        } else {
+            unit_update_blocks(&mut c, hunks)?;
         }
     }
     if blocks.is_empty() {
@@ -919,7 +746,7 @@ mod tests {
         assert!(patch_blocks(&s, hunk).unwrap_err().0.contains("in app.main (hunk at line 3)"));
         let rename = "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n+pub fn primary() {\n*** End Patch\n";
         let e = patch_blocks(&s, rename).unwrap_err().0;
-        assert!(e.contains("renames app.main (section at line 2)") && e.contains("submit app.main") && e.contains("keeping its id"), "{e}");
+        assert!(e.contains("renames app.main (section at line 2)") && e.contains("`*** Add:`") && !e.contains("submit app.main"), "{e}");
         let e = patch_blocks(&s, "*** Begin Patch\n*** Move: app.main\n*** End Patch\n").unwrap_err().0;
         assert!(e.contains("submit app.main") && e.contains("keeping its id"), "{e}");
         let moved = "*** Begin Patch\n*** Update: app.main\n@@\n-  let x = 1\n+  let x = 2\n*** Move to: app.primary\n*** End Patch\n";
@@ -1141,4 +968,269 @@ mod tests {
         assert!(out.starts_with("Replaced 4 occurrences.") && out.contains("Saved app.five"), "{out}");
         assert_eq!(s.view(&["app.five"], false, BUDGET).unwrap().matches(" + 2").count(), 4);
     }
+
+    /// A Rust update that adds an item after unchanged context adds it; it is
+    /// not a rename of the stored symbol.
+    #[test]
+    fn an_add_after_unchanged_context_is_an_add() {
+        let (_root, s) = rust_project("pub fn main() {\n    1\n}\n");
+        let patch = concat!(
+            "*** Begin Patch\n*** Update: crate.main\n@@\n",
+            " pub fn main() {\n     1\n }\n",
+            "+pub fn extra() {\n+    2\n+}\n",
+            "*** End Patch\n",
+        );
+        let blocks = patch_blocks(&s, patch).unwrap();
+        assert!(blocks.contains("// ── crate.main ──"), "{blocks}");
+        assert!(blocks.contains("// ── crate.extra ──") && blocks.contains("pub fn extra()"), "{blocks}");
+        let (_root, s) = rust_project("pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n");
+        let patch = concat!(
+            "*** Begin Patch\n*** Update: crate.Store::open\n@@\n",
+            "     pub fn open(&self) -> i32 {\n",
+            "         2\n",
+            "     }\n",
+            "+    pub fn extra(&self) -> i32 {\n",
+            "+        3\n",
+            "+    }\n",
+            "*** End Patch\n",
+        );
+        let blocks = patch_blocks(&s, patch).unwrap();
+        assert!(blocks.contains("// ── crate.Store::open ──"), "{blocks}");
+        assert!(blocks.contains("// ── crate.Store::extra ──") && blocks.contains("pub fn extra"), "{blocks}");
+    }
+
+    /// A `module:` prefix and a source path name the header that works; an
+    /// unknown name lists the nearest stored names.
+    #[test]
+    fn an_unknown_target_names_the_header_or_the_names() {
+        let (_root, s) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+        let header = patch_blocks(&s, "*** Begin Patch\n*** Update: module:crate\n*** End Patch\n").unwrap_err().0;
+        assert!(header.contains("`*** Update: crate`") && header.contains("help submit"), "{header}");
+        let path = patch_blocks(&s, "*** Begin Patch\n*** Update: src/lib.rs\n*** End Patch\n").unwrap_err().0;
+        assert!(path.contains("`*** Update: crate`"), "{path}");
+        let unknown = patch_blocks(&s, "*** Begin Patch\n*** Update: crate.nope\n*** End Patch\n").unwrap_err().0;
+        assert!(unknown.contains("Similar names:") && unknown.contains("crate.one"), "{unknown}");
+    }
+}
+
+/// The refusal for an `*** Update:` that names no symbol (E0108): a module or
+/// a source path gets the header that works, and another name the nearest names.
+fn bad_target(s: &Store, ix: &Index, target: &str, at_line: usize) -> Failure {
+    let name = target.strip_prefix("module:").unwrap_or(target);
+    let module = s
+        .resolve_module(ix, name)
+        .map(|m| m.path.clone())
+        .or_else(|| ["", "src/", "test/"].iter().find_map(|prefix| crate::lockdown::module_of_file(s, &format!("{prefix}{name}"))));
+    if let Some(module) = module {
+        return Failure(
+            format!(
+                "E0108 `*** Update: {target}` (line {at_line}) is no symbol; \
+                 a module changes with `*** Update: {module}` (see `help submit`)."
+            ),
+            1,
+        );
+    }
+    Failure(format!("E0108 `*** Update: {target}` (line {at_line}) is no symbol. {RESEND}{}", store::similar_hint(ix, target)), 1)
+}
+
+/// The refusal for an update that leaves none of `qname`.
+fn nothing_left(qname: &str, at_line: usize) -> String {
+    format!("the patch leaves nothing of {qname} (section at line {at_line}); use `delete <name>`.")
+}
+
+/// The refusal for an update whose stored name is not among its items.
+fn renamed(qname: &str, at_line: usize) -> String {
+    format!("the patch renames {qname} (section at line {at_line}); put the new symbol under its own `*** Add:` header.")
+}
+
+fn add_blocks(c: &mut SectionContext<'_>, rust: bool, hunks: &[Hunk]) -> Result<(), Failure> {
+    let blocks = &mut *c.blocks;
+    let text: String = hunks[0].1.iter().map(|l| format!("{}\n", &l[1..])).collect();
+    let (header, items): (String, Vec<(String, String)>) = if rust {
+        let container = c.s.rust_container_in(c.ix, c.target)?.map(|i| &c.ix.syms[i]);
+        let f = language::rust::split(&text, c.target).map_err(|e| {
+            store::rust_syntax_error(
+                e,
+                c.target,
+                container.map(|owner| (owner.name.as_str(), owner.text.as_str(), owner.kind_text.as_str())),
+                container.map_or("", |owner| owner.module.as_str()),
+                0,
+                text.lines().count().max(1),
+            )
+        })?;
+        // A block's own text is not an item: it comes in whole through
+        // `submit --new <module>` (D-168).
+        if let Some(p) = f.items.iter().find(|p| store::is_block(p)) {
+            return Err((c.bad)(format!("{}.", store::block_note(p.kind))));
+        }
+        (f.header, f.items.into_iter().map(|p| (p.name, p.text)).collect())
+    } else {
+        let m = c.s.lang().split(&text);
+        (m.header, m.items.into_iter().map(|i| (i.name, i.text)).collect())
+    };
+    let module = match c.target.rsplit_once('.') {
+        Some((m, n)) if items.iter().any(|(name, _)| name.as_str() == n) => m.to_string(),
+        _ => c.target.to_string(),
+    };
+    if items.is_empty() {
+        return Err((c.not_code)((c.bad)(format!(
+            "`*** Add: {}` (line {}) defines no function, type or constant. {RESEND}",
+            c.target, c.at_line
+        ))));
+    }
+    let mut header = header;
+    for (name, item) in &items {
+        let text = c.s.rust_block_text(c.ix, &module, name, item);
+        push_block(blocks, &mut header, &module, name, &text);
+    }
+    Ok(())
+}
+
+fn rust_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<(), Failure> {
+    if !c.target.contains('.')
+        && let Some(m) = c.s.resolve_module(c.ix, c.target)
+    {
+        return rust_module_update_blocks(c, m, hunks);
+    }
+    rust_symbol_update_blocks(c, hunks)
+}
+
+fn unit_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<(), Failure> {
+    let blocks = &mut *c.blocks;
+    // The target's text, a unit per symbol (and a module's header first).
+    let (module, mut units): (String, Vec<(Option<usize>, String)>) = match c.s.resolve_module(c.ix, c.target) {
+        Some(m) => (
+            m.path.clone(),
+            std::iter::once((None, m.header.clone()))
+                .chain(c.ix.syms.iter().enumerate().filter(|(_, x)| x.module == m.path).map(|(i, x)| (Some(i), x.text.clone())))
+                .collect(),
+        ),
+        None => {
+            let i = c.s.resolve(c.ix, c.target).map_err(|e| (c.not_code)(e))?;
+            (c.ix.syms[i].module.clone(), vec![(Some(i), c.ix.syms[i].text.clone())])
+        }
+    };
+    // One list of lines, with a separator no hunk can match between units.
+    const SEP: &str = "\u{0}";
+    let mut lines: Vec<String> =
+        units.iter().map(|u| u.1.clone()).collect::<Vec<_>>().join(&format!("\n{SEP}\n")).lines().map(String::from).collect();
+    apply_hunks(c.target, &format!("view {}", c.target), &mut lines, hunks, false)?;
+    let joined = lines.join("\n");
+    let texts: Vec<&str> = joined.split(&format!("\n{SEP}\n")).collect();
+    if texts.len() != units.len() {
+        return Err((c.bad)(format!(
+            "in {} (section at line {}), a hunk spans two symbols; give each symbol its own hunk.",
+            c.target, c.at_line
+        )));
+    }
+    for (u, t) in units.iter_mut().zip(&texts) {
+        u.1 = t.trim_end().to_string();
+    }
+    // A changed header's imports go with the module's first changed symbol.
+    let mut header = match &units[0] {
+        (None, h) if h.trim() != c.s.resolve_module(c.ix, &module).map_or("", |m| m.header.trim()) => h.clone(),
+        _ => String::new(),
+    };
+    for (i, text) in units.iter().filter_map(|(i, t)| Some((i.as_ref()?, t))) {
+        if *text == c.ix.syms[*i].text {
+            continue;
+        }
+        let split = c.s.lang().split(text);
+        if split.items.is_empty() {
+            return Err((c.bad)(nothing_left(&c.ix.syms[*i].qname(), c.at_line)));
+        }
+        let Some(own) = split.items.iter().find(|item| item.name == c.ix.syms[*i].name) else {
+            return Err((c.bad)(renamed(&c.ix.syms[*i].qname(), c.at_line)));
+        };
+        let mut head = std::mem::take(&mut header);
+        push_block(blocks, &mut head, &module, &c.ix.syms[*i].name, &own.text);
+        for item in split.items.iter().filter(|item| item.name != c.ix.syms[*i].name) {
+            push_block(blocks, &mut head, &module, &item.name, &item.text);
+        }
+    }
+    if !header.is_empty() {
+        return Err((c.bad)(format!(
+            concat!(
+                "the patch changes only {}'s imports (section at line {}); ",
+                "imports are added automatically (`submit --imports {}` replaces them).",
+            ),
+            module, c.at_line, module
+        )));
+    }
+    Ok(())
+}
+
+/// What every section of a patch is turned into blocks with.
+struct SectionContext<'a> {
+    s: &'a Store,
+    ix: &'a Index,
+    target: &'a str,
+    at_line: usize,
+    blocks: &'a mut String,
+    bad: &'a dyn Fn(String) -> Failure,
+    not_code: &'a dyn Fn(Failure) -> Failure,
+}
+
+/// A `*** Update:` that names a module applies its hunks to the module's
+/// whole file (D-168): every changed or added item goes as one block; the
+/// header has its own commands.
+fn rust_module_update_blocks(c: &mut SectionContext<'_>, m: &ModuleRow, hunks: Vec<Hunk>) -> Result<(), Failure> {
+    let module = m.path.clone();
+    let before = store::module_text(c.ix, m);
+    let mut lines: Vec<String> = before.lines().map(String::from).collect();
+    apply_hunks(c.target, &format!("view {}", c.target), &mut lines, hunks, false)?;
+    let after = lines.join("\n");
+    let file = language::rust::split(&after, &module).map_err(|e| (c.bad)(e.0))?;
+    if !file.refusals.is_empty() {
+        let lines: Vec<String> = file.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
+        return Err((c.bad)(lines.join("\n")));
+    }
+    if file.header.trim_end() != c.s.header(&module)?.trim_end() {
+        return Err((c.bad)(format!(
+            concat!(
+                "the patch changes {}'s imports (section at line {}); ",
+                "imports are added automatically (`submit --imports {}` replaces them).",
+            ),
+            module, c.at_line, module
+        )));
+    }
+    let items = crate::rust_submit::rust_module_items(c.ix, &module, &file.items)?;
+    push_module_blocks(c.blocks, c.ix, &module, &items, c.at_line, &c.bad)
+}
+
+fn rust_symbol_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<(), Failure> {
+    let blocks = &mut *c.blocks;
+    let Some(i) = crate::rust_submit::rust_symbol(c.ix, c.target)? else {
+        if let Some(container) = crate::rust_submit::rust_container(c.ix, c.target)? {
+            return Err((c.bad)(format!("{}.", store::block_note(&c.ix.syms[container].kind_text))));
+        }
+        return Err((c.not_code)(bad_target(c.s, c.ix, c.target, c.at_line)));
+    };
+    let mut lines: Vec<String> = c.ix.syms[i].text.lines().map(String::from).collect();
+    apply_hunks(c.target, &format!("view {}", c.target), &mut lines, hunks, false)?;
+    let text = lines.join("\n");
+    if text == c.ix.syms[i].text {
+        return Ok(());
+    }
+    let parent = c.ix.syms[i]
+        .parent
+        .as_ref()
+        .and_then(|p| c.ix.syms.iter().find(|x| &x.id == p))
+        .map(|p| (p.name.as_str(), p.text.as_str(), p.kind_text.as_str()));
+    let qname = c.ix.syms[i].qname();
+    let items = store::submit_items(&c.s.root, &c.ix.syms[i].module, &qname, parent, &text, false)?;
+    if items.is_empty() {
+        return Err((c.bad)(nothing_left(&c.ix.syms[i].qname(), c.at_line)));
+    }
+    let stored = c.ix.syms[i].name.clone();
+    let Some(own) = items.iter().find(|item| item.name == stored) else {
+        return Err((c.bad)(renamed(&c.ix.syms[i].qname(), c.at_line)));
+    };
+    let module = c.ix.syms[i].module.clone();
+    push_block(blocks, &mut String::new(), &module, &stored, &own.text);
+    for item in items.iter().filter(|item| item.name != stored) {
+        let text = c.s.rust_block_text(c.ix, &module, &item.name, &item.text);
+        push_block(blocks, &mut String::new(), &module, &item.name, &text);
+    }
+    Ok(())
 }

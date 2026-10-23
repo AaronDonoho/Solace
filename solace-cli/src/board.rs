@@ -109,15 +109,16 @@ pub(super) fn all_tasks(top: &Path) -> Result<Vec<Value>, Failure> {
     if !dir.exists() {
         return Ok(out);
     }
-    // Each home's workflow is read at most once per listing.
+    // Each home's workflow and each feature is read at most once per listing.
     let mut flows = HashMap::new();
+    let mut features = HashMap::new();
     // A list that can't be read counts every home as a project, as `homeless` does.
     let members = workspace::members(top);
     for entry in fs::read_dir(dir)? {
         let p = entry?.path();
         if p.extension().is_some_and(|x| x == "json") {
             // One unreadable file (empty after a crash) must not hide the rest.
-            match read_task_with(top, &p, &mut flows) {
+            match read_task_with(top, &p, &mut flows, &mut features) {
                 Ok(t) => {
                     // A re-home that fails (a folder that can't move) is logged and
                     // leaves the task as it was, marked: one task must not hide the listing.
@@ -144,10 +145,16 @@ pub(super) fn all_tasks(top: &Path) -> Result<Vec<Value>, Failure> {
     Ok(out)
 }
 pub(super) fn read_task(top: &Path, path: &Path) -> Result<Value, Failure> {
-    read_task_with(top, path, &mut HashMap::new())
+    read_task_with(top, path, &mut HashMap::new(), &mut HashMap::new())
 }
-/// `read_task`, taking each home's workflow from `flows` once it has been read.
-fn read_task_with(top: &Path, path: &Path, flows: &mut HashMap<PathBuf, Value>) -> Result<Value, Failure> {
+/// `read_task`, taking each home's workflow and each feature from `flows` and
+/// `features` once they have been read.
+fn read_task_with(
+    top: &Path,
+    path: &Path,
+    flows: &mut HashMap<PathBuf, Value>,
+    features: &mut HashMap<String, Option<Value>>,
+) -> Result<Value, Failure> {
     let mut t: Value = serde_json::from_slice(&fs::read(path)?).map_err(|e| Failure(e.to_string(), 1))?;
     // The default workflow's `done` column is now `complete`; tasks saved before still say `done`.
     let home = scope::path(top, t["home"].as_str().unwrap_or("."));
@@ -192,6 +199,13 @@ fn read_task_with(top: &Path, path: &Path, flows: &mut HashMap<PathBuf, Value>) 
             let ended = t["runs"].as_array().into_iter().flatten().filter_map(|r| r["ended"].as_u64());
             let last = ended.chain(t["finished"]["time"].as_u64()).max();
             t["closedTime"] = json!(last.unwrap_or_else(modified));
+        }
+    }
+    // A task with a feature takes the feature's milestone on load (D-188).
+    if let Some(fid) = t["feature"].as_str().map(String::from) {
+        let feature = features.entry(fid).or_insert_with_key(|fid| tasks::record(top, "features", fid));
+        if let Some(f) = feature {
+            t["milestone"] = f["milestone"].clone();
         }
     }
     // Tasks saved before D-130 have no createdTime: the earlier of their first note's
@@ -2285,9 +2299,10 @@ pub(super) fn plan_for_feature(top: &Path, t: &mut Value, f: &Value) -> bool {
     note(t, "solace", None, &format!("Moved to Planning: its feature feature:{id} is active."));
     true
 }
-/// Sets a task's `feature`, `milestone` and `dependsOn` from a `PATCH` (D-87).
-/// A feature given to a task with no milestone brings its own, unless the
-/// request names one, and a task given an `active` feature is planned (D-132).
+/// Sets a task's `feature`, `milestone` and `dependsOn` from a `PATCH` (D-87,
+/// D-188). A feature given always brings its milestone, even over one the
+/// task had; a task with a feature cannot set its milestone directly, and a
+/// task given an `active` feature is planned (D-132).
 pub(super) fn set_links(top: &Path, t: &mut Value, body: &Value) -> Result<(), Failure> {
     for (k, kind) in [("feature", "features"), ("milestone", "milestones")] {
         match body.get(k) {
@@ -2297,16 +2312,25 @@ pub(super) fn set_links(top: &Path, t: &mut Value, body: &Value) -> Result<(), F
             Some(_) => return err("E7001", format!("invalid {k}")),
         }
     }
+    let feature = match body.get("feature") {
+        Some(Value::Null) => None,
+        Some(Value::String(id)) => Some(id.clone()),
+        Some(_) => return err("E7001", "invalid feature"),
+        None => t["feature"].as_str().map(String::from),
+    };
+    if body.get("milestone").is_some() && feature.is_some() {
+        return err("E7001", "a task with a feature takes the feature's milestone; change the feature's milestone instead");
+    }
     if let Some(f) = body.get("feature") {
-        if let Some(id) = f.as_str()
-            && t["milestone"].is_null()
-            && body.get("milestone").is_none()
-        {
-            t["milestone"] = tasks::record(top, "features", id).map_or(Value::Null, |r| r["milestone"].clone());
-        }
-        t["feature"] = f.clone();
-        if let Some(r) = f.as_str().and_then(|id| tasks::record(top, "features", id)) {
-            plan_for_feature(top, t, &r);
+        match f {
+            Value::String(id) => {
+                t["feature"] = f.clone();
+                if let Some(r) = tasks::record(top, "features", id) {
+                    t["milestone"] = r["milestone"].clone();
+                    plan_for_feature(top, t, &r);
+                }
+            }
+            _ => t["feature"] = Value::Null,
         }
     }
     if let Some(m) = body.get("milestone") {
@@ -2916,6 +2940,11 @@ fn supervise(
                     watch.reply(rid, reply.to_string())?;
                     return Err(Failure("discussion reply".into(), REPLIED));
                 }
+                if let Some(assessment) = recoverable_review(r, status.success(), &entries)
+                    && record_review(&watch, rid, &assessment)?
+                {
+                    return Ok(false);
+                }
                 let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
                 let message = format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
                 watch.fail(rid, &message)?;
@@ -3506,9 +3535,12 @@ fn task_sections(t: &Value) -> String {
 
 fn brief(t: &Value, kind: &str) -> String {
     let start = START;
-    let ask = "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. In the question's `text`, give each option a short example of the outcome the human would see (what a user sees, what a command prints, what a page shows, what a file or record ends up as), not how the code would change; the `options` stay short labels matching the bold names in the examples. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it. To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
+    let ask = "If you need a decision from the human, check the Notes so far and Questions below, if any, for what is already answered (a discussion run can't `task ask`, so its answers are notes); else ask with `task ask` (`text` and 2–4 `options`); the call waits for the answer. In the question's `text`, give each option a short example of the outcome the human would see (what a user sees, what a command prints, what a page shows, what a file or record ends up as), not how the code would change; the `options` stay short labels matching the bold names in the examples. A question carries its own explanation and is the only command in its call: don't add a `task note` beside it.";
+    let settings = "To change `solace.toml` or `AGENTS.md`, `write` it alone, with the why in `reason`.";
     let responses = "`text` and `options` are arguments of the Solace tool, beside `command`: in a task message, `command` is just the command (such as `task note`), and the whole message, however long, goes in `text`, never in `command` and never as a `--text` flag. Write human-facing task messages in Markdown, including the text sent to task tools. Divide the body into relevant sections with short headings (for example, ### Findings and ### Verification), with blank lines around headings and lists. Omit irrelevant sections. Keep messages short: lead with the answer or outcome, then only what the human needs to act on; don't restate the task or narrate your steps. When asking a question, explain what you need and why it matters (for example, ### Question and ### Why this matters); in `text`, give each option a short example of its outcome in the human's terms, its name in bold, and keep the `options` labels short, matching the bold names.";
-    let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `merge`, `write`, `remove` and `format` are refused, and `run <name>` works only for commands marked `allowed_in_reviews` in `solace.toml`: use those to verify (for example test suites).";
+    let read_only = "This run is read-only: reading, `check`, `test`, `build` and `probe` work; `submit`, `delete`, `extract`, `merge`, `write`, `remove` and `format` are refused, and `run <name>` works only for commands marked `allowed_in_reviews` in `solace.toml`.";
+    let verify = "Use those to verify (for example test suites).";
+    let define = "Probe or run tests only when needed to more thoroughly define the issue.";
     let common = "Code held as symbols is read and cited by name (`lockdown.dispatch`, `checkout.pay`), not by source path: source files are projections written by Solace.";
     let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
     let list = |k: &str| t[k].as_array().cloned().unwrap_or_default();
@@ -3540,16 +3572,16 @@ fn brief(t: &Value, kind: &str) -> String {
     let debt = if t["feature"].is_string() { format!(" {TECH_DEBT_ASK}") } else { String::new() };
     let role = match kind {
         "review" => format!(
-            "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed. A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names. Keep the concern-by-concern focus. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. Flag duplication and large modules, filing minor ones as tech debt; don't allow cross-domain concerns in the same module, and flag excessively long functions and dead code as tech debt. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. {read_only} Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
+            "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed. A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names. Keep the concern-by-concern focus. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. Flag duplication and large modules, filing minor ones as tech debt; don't allow cross-domain concerns in the same module, and flag excessively long functions and dead code as tech debt. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. {read_only} {verify} Only a `task note` call records the feedback; a final message is not recorded. If the call is refused, resend it, and don't claim it was recorded unless the reply says `Recorded.` Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
         ),
         "discuss" => format!(
-            "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
+            "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} {verify} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
         ),
         "work" => format!(
-            "Make the change this task describes. {start} {ask} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Reuse existing code before adding new code, extracting common patterns. Prefer small, stateless, self-documenting functions; keep modules and functions small and focused around one domain or component. Use clear names for new symbols. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Follow the module boundaries the refactor task:2414798176c466e4 creates: put new code in the module that owns its concern. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
+            "Make the change this task describes. {start} {ask} {settings} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Reuse existing code before adding new code, extracting common patterns. Prefer small, stateless, self-documenting functions; keep modules and functions small and focused around one domain or component. Use clear names for new symbols. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Follow the module boundaries the refactor task:2414798176c466e4 creates: put new code in the module that owns its concern. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
         ),
         _ => format!(
-            "Investigate this task before any work on it: answer what it asks, or find out what the change involves and plan it. A plan assigns every file change to whoever does the work, as an edit (`submit` or `write`) or a settings proposal (`write` with `reason`), never to the human, who never edits files or runs commands. A plan is the smallest complete change (the reference's step 2) and names every module or symbol it changes and every non-source file it reaches. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {start} {ask} Finish with `task done`, the report in `text`: your findings, or the plan for whoever does the work, and anything you didn't check."
+            "Investigate this task before any work on it: answer what it asks, or find out what the change involves. Report the required behavior, constraints, acceptance criteria and risks, and anything you didn't check. Name the symbols, modules and non-source files that need attention when that helps define the work. Don't prescribe implementation, edits, submission shape or checks. The human never edits files or runs commands; any needed change, a settings change included, is the worker's to make. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {define} {start} {ask} Finish with `task done`, the report in `text`."
         ),
     };
     let mut out = format!(
@@ -3895,18 +3927,7 @@ pub fn task_command(
         Some("done" | "ask") if discussing => return err("E7010", "a discussion goes on until the human ends it; reply with task note"),
         Some("note") => {
             if t["runs"][i]["kind"] == "review" {
-                let path = review_path(&s.root, tid, rid)?;
-                if let Ok(bytes) = fs::read(&path) {
-                    let mut checkpoint: Value = serde_json::from_slice(&bytes).map_err(|e| Failure(e.to_string(), 1))?;
-                    let current = review_state(s, &t)?;
-                    checkpoint["changed_during_review"] = json!(
-                        checkpoint["context"] != current["context"]
-                            || checkpoint["instructions"] != current["instructions"]
-                            || checkpoint["projects"] != current["projects"]
-                    );
-                    m["changed_during_review"] = checkpoint["changed_during_review"].clone();
-                    write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap())?;
-                }
+                m = review_message(s, tid, &t, rid, &text)?;
             }
         }
         Some("done") => {
@@ -5121,4 +5142,85 @@ pub(crate) fn with_config<T>(path: &Path, f: impl FnOnce() -> T) -> T {
     let out = f();
     TEST_CONFIG.with(|p| *p.borrow_mut() = old);
     out
+}
+
+/// Marks whether the project or instructions changed since the run's review checkpoint.
+fn review_changed(s: &Store, t: &Value, rid: &str) -> Result<bool, Failure> {
+    let path = review_path(&s.root, t["id"].as_str().unwrap(), rid)?;
+    let Ok(bytes) = fs::read(&path) else {
+        return Ok(false);
+    };
+    let mut checkpoint: Value = serde_json::from_slice(&bytes).map_err(|e| Failure(e.to_string(), 1))?;
+    let current = review_state(s, t)?;
+    let changed = checkpoint["context"] != current["context"]
+        || checkpoint["instructions"] != current["instructions"]
+        || checkpoint["projects"] != current["projects"];
+    checkpoint["changed_during_review"] = json!(changed);
+    write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap())?;
+    Ok(changed)
+}
+
+/// The agent message a review's feedback travels in, after its checkpoint is marked.
+fn review_message(s: &Store, tid: &str, t: &Value, rid: &str, text: &str) -> Result<Value, Failure> {
+    let mut m = json!({"kind":"agent","task":tid,"run":rid,"command":"note","text":text});
+    m["changed_during_review"] = json!(review_changed(s, t, rid)?);
+    Ok(m)
+}
+
+/// Whether an agent note for this review run is already on the task.
+fn review_feedback_recorded(t: &Value, rid: &str) -> bool {
+    t["notes"].as_array().is_some_and(|notes| notes.iter().any(|n| n["author"] == "agent" && n["run"] == rid))
+}
+
+/// A review's final message counts only when its first line is exactly an assessment label.
+fn review_assessment(reply: &str) -> bool {
+    matches!(reply.trim().lines().next().map(str::trim_end), Some("**Assessment: Looks good**" | "**Assessment: Needs work**"))
+}
+
+/// A clean review's last message, when nothing already recorded its feedback.
+fn recoverable_review(r: &Value, success: bool, entries: &[Value]) -> Option<String> {
+    if r["kind"] != "review" || !success || entries.iter().any(|e| e["kind"] == "error") {
+        return None;
+    }
+    let recorded = entries.iter().any(|e| {
+        e["kind"] == "tool"
+            && e["title"].as_str().is_some_and(|title| title.contains("task note"))
+            && e["output"].as_str().is_some_and(|output| output.starts_with("Recorded"))
+    });
+    if recorded {
+        return None;
+    }
+    let reply = entries.iter().rev().find(|e| e["kind"] == "message").and_then(|e| e["text"].as_str())?;
+    review_assessment(reply).then(|| reply.trim().to_string())
+}
+
+/// Records a review's recovered assessment through the same path as `task note`.
+fn record_review(watch: &Watch, rid: &str, text: &str) -> Result<bool, Failure> {
+    let Watch::Task(root, tid) = watch else {
+        return Ok(false);
+    };
+    let s = open(root)?;
+    let t = task(root, tid)?;
+    let i = run_at(&t, rid)?;
+    if t["runs"][i]["kind"] != "review" {
+        return Ok(false);
+    }
+    let m = review_message(&s, tid, &t, rid, text)?;
+    let w = flow(root)?;
+    let rid = rid.to_string();
+    tasks::update(root, tid, move |t| {
+        let i = run_at(t, &rid)?;
+        if t["runs"][i]["state"] == "ended" || review_feedback_recorded(t, &rid) {
+            return Ok(false);
+        }
+        message(&w, t, &m)?;
+        Ok(true)
+    })
+}
+
+/// Whether the current board run is a work run, which may finish with `task done`.
+pub fn work_run(root: &Path) -> bool {
+    let Some((tid, rid)) = context() else { return false };
+    let Ok(t) = scope::home(root, &tid).and_then(|home| task(&home, &tid)) else { return false };
+    run_at(&t, &rid).is_ok_and(|i| t["runs"][i]["kind"].as_str() == Some("work"))
 }

@@ -1069,9 +1069,9 @@ fn an_add_to_an_inline_mod_names_its_container() {
     assert!(!err.contains(".solace/format-"), "{err}");
 }
 
-/// A Rust patch rename is refused with the stored name that keeps its id.
+/// A Rust patch rename is refused with the header that adds a new symbol.
 #[test]
-fn a_patch_rename_says_to_submit_the_stored_name() {
+fn a_patch_rename_names_the_add_header() {
     if !cargo::installed() {
         return;
     }
@@ -1079,7 +1079,7 @@ fn a_patch_rename_says_to_submit_the_stored_name() {
     let (root, store) = rust_project(lib);
     let patch = "*** Begin Patch\n*** Update: crate.one\n@@\n-pub fn one() -> i32 {\n+pub fn two() -> i32 {\n*** End Patch\n";
     let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
-    assert!(err.contains("submit crate.one") && err.contains("keeping its id"), "{err}");
+    assert!(err.contains("renames crate.one") && err.contains("`*** Add:`") && !err.contains("submit crate.one"), "{err}");
     assert_eq!(text_of(&root, "src/lib.rs"), lib);
 }
 
@@ -1171,7 +1171,7 @@ fn a_whole_module_format_rolls_back_with_the_command() {
     let (root, store) = rust_project(lib);
     let ids = |s: &Store| s.index().unwrap().syms.iter().map(|x| x.id.clone()).collect::<Vec<_>>();
     let before = ids(&store);
-    let out = store.transaction(&[], || {
+    let out = store.transaction::<String>(&[], || {
         store.format_module_rust("crate")?;
         crate::fail("stop")
     });
@@ -1226,6 +1226,7 @@ fn a_format_names_a_line_rustfmt_leaves_even_when_it_saves_nothing() {
     let line = saved.lines().position(|line| line.chars().count() > 100).expect("rustfmt left the long line") + 1;
     assert!(out.contains(&format!("crate.MESSAGE: line {line}")), "{out}");
     assert!(out.contains("as written"), "{out}");
+    assert!(crate::outside::Written::load(&root).unchanged("src/lib.rs"));
 }
 
 /// A nested item's name is not prefixed twice in the long-line note.
@@ -1378,4 +1379,212 @@ fn a_whole_module_submit_keeps_a_trailing_mod_list() {
     let out = store.submit(crate::Target::Module("crate"), text).unwrap();
     assert!(out.contains("Saved crate."), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), text);
+}
+
+/// A file left behind by a format is named on submit, and `format` repairs it
+/// before the sequence continues.
+#[test]
+fn a_stale_module_file_is_named_and_format_repairs_it() {
+    if !cargo::installed() || !crate::language::cargo::rustfmt_installed() {
+        return;
+    }
+    let lib =
+        "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        1\n    }\n}\n\npub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    store.submit_symbols(None, Some("crate.Store"), "pub fn two(&self) -> i32 {\n    2\n}\n").unwrap();
+    store.submit_symbols(None, Some("crate"), "pub fn three() -> i32 {\n    3\n}\n").unwrap();
+    // rustfmt ran on the file, but the record kept the text from before it.
+    fs::write(root.join("src/lib.rs"), lib).unwrap();
+    let err = store.submit_symbols(None, Some("crate"), "pub fn four() -> i32 {\n    Store.two() + three()\n}\n").unwrap_err().0;
+    assert!(err.contains("E0104"), "{err}");
+    assert!(err.contains("crate.Store::two") && err.contains("crate.three"), "{err}");
+    assert!(err.contains("`format crate`"), "{err}");
+    assert!(err.contains("replace it with the store's text"), "{err}");
+    let out = store.format_module_rust("crate").unwrap();
+    assert!(out.contains("Repaired src/lib.rs") && out.contains("crate.Store::two"), "{out}");
+    let kept = crate::testing::kept_copy(&root, &out);
+    assert_eq!(fs::read_to_string(kept).unwrap(), lib);
+    assert!(crate::outside::Written::load(&root).unchanged("src/lib.rs"));
+    let text = text_of(&root, "src/lib.rs");
+    assert!(text.contains("pub fn two") && text.contains("pub fn three"), "{text}");
+    let out = store.submit_symbols(None, Some("crate"), "pub fn four() -> i32 {\n    Store.two() + three()\n}\n").unwrap();
+    assert!(out.contains("Saved crate.four"), "{out}");
+    assert!(text_of(&root, "src/lib.rs").contains("pub fn four"), "{}", text_of(&root, "src/lib.rs"));
+}
+
+/// A drift message names every differing symbol and the one repair command.
+#[test]
+fn a_drift_message_names_the_symbols_and_the_repair_command() {
+    let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        1\n    }\n}\n";
+    let (root, store) = rust_project(lib);
+    fs::write(root.join("src/lib.rs"), lib.replace("        1\n", "        2\n")).unwrap();
+    let err = store.check_report(false).unwrap_err().0;
+    assert!(err.contains("E0104"), "{err}");
+    assert!(err.contains("crate.Store::open"), "{err}");
+    assert!(err.contains("`format crate`"), "{err}");
+}
+
+/// A repair is reported even when the formatted text then fails its check:
+/// the file was already replaced, so its copy must be named.
+#[test]
+fn a_format_keeps_its_repair_note_when_the_check_fails() {
+    if !cargo::installed() || !crate::language::cargo::rustfmt_installed() {
+        return;
+    }
+    let lib = "pub fn one( ) -> i32 {\n    \"no\"\n}\n";
+    let (root, store) = rust_project(lib);
+    let disk = "pub fn one() -> i32 {\n    1\n}\n";
+    fs::write(root.join("src/lib.rs"), disk).unwrap();
+    let err = store.format_module_rust("crate").unwrap_err().0;
+    assert!(err.contains("Repaired src/lib.rs") && err.contains("kept at .solace/outside/"), "{err}");
+    let kept = crate::testing::kept_copy(&root, &err);
+    assert_eq!(fs::read_to_string(kept).unwrap(), disk);
+}
+
+/// `fn Foo` and `mod Foo` share no namespace, so a submit adds the function.
+#[test]
+fn a_function_beside_a_module_is_saved() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("pub mod Foo {}\n");
+    let out = store.submit_symbols(None, Some("crate"), "pub fn Foo() -> i32 {\n    1\n}\n").unwrap();
+    assert!(out.contains("Saved crate.Foo"), "{out}");
+    assert!(text_of(&root, "src/lib.rs").contains("pub fn Foo"));
+}
+
+/// A unit struct names a type and a value, so `mod Foo` is an E1004 clash.
+#[test]
+fn a_struct_beside_a_module_is_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let (_root, store) = rust_project("pub mod Foo {}\n");
+    let err = store.submit_symbols(None, Some("crate"), "pub struct Foo;\n").unwrap_err().0;
+    assert!(err.starts_with("E1004") && err.contains("Foo"), "{err}");
+}
+
+/// A function and a constant share the value namespace, so cargo never sees
+/// the duplicate: submit refuses it first.
+#[test]
+fn a_function_beside_a_const_is_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let (_root, store) = rust_project("pub const Foo: i32 = 1;\n");
+    let err = store.submit_symbols(None, Some("crate"), "pub fn Foo() {}\n").unwrap_err().0;
+    assert!(err.starts_with("E1004") && err.contains("Foo"), "{err}");
+}
+
+/// A `mod Foo;` declaration in the target's header is a type-namespace clash.
+#[test]
+fn a_struct_beside_a_file_module_is_refused() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", "pub mod Foo;\n"), ("src/Foo.rs", "pub fn inside() {}\n")]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let err = store.submit_symbols(None, Some("crate"), "pub struct Foo;\n").unwrap_err().0;
+    assert!(err.starts_with("E1004") && err.contains("Foo"), "{err}");
+}
+
+/// A `mod Foo;` declaration is a type, so a value `fn Foo` does not clash.
+#[test]
+fn a_function_beside_a_file_module_is_saved() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", "pub mod Foo;\n"), ("src/Foo.rs", "pub fn inside() {}\n")]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.submit_symbols(None, Some("crate"), "pub fn Foo() -> i32 {\n    1\n}\n").unwrap();
+    assert!(out.contains("Saved crate.Foo"), "{out}");
+    assert!(text_of(&root, "src/lib.rs").contains("pub fn Foo"));
+}
+
+/// Saving a module drops an empty inherent impl, keeping its alias, its user,
+/// and a trait impl with no members.
+#[test]
+fn a_saved_module_drops_an_empty_inherent_impl() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = concat!(
+        "pub struct Sym;\n\n",
+        "pub type Alias = Sym;\n\n",
+        "pub trait Marker {}\n\n",
+        "impl Alias {}\n\n",
+        "impl Marker for Alias {}\n\n",
+        "pub fn take(_: Alias) {}\n",
+    );
+    let (root, store) = rust_project(lib);
+    let ix = store.index().unwrap();
+    let text = super::module_text(&ix, &ix.modules[0]);
+    let out = store.submit(crate::Target::Module("crate"), &text).unwrap();
+    assert!(out.contains("Dropped empty impl crate.Alias."), "{out}");
+    let text = text_of(&root, "src/lib.rs");
+    assert!(!text.contains("impl Alias {}"), "{text}");
+    assert!(text.contains("pub type Alias = Sym;"), "{text}");
+    assert!(text.contains("impl Marker for Alias {}"), "{text}");
+    assert!(text.contains("pub fn take(_: Alias) {}"), "{text}");
+    let ix = store.index().unwrap();
+    assert!(!ix.syms.iter().any(|s| s.kind_text == "impl" && !s.name.starts_with('<')));
+    assert!(ix.syms.iter().any(|s| s.kind_text == "impl" && s.name == "<Alias as Marker>"));
+}
+
+/// Editing an alias that shares its name with an empty inherent impl still
+/// refuses a broken edit: dropping the impl doesn't hide the alias's errors.
+#[test]
+fn an_item_save_beside_an_empty_impl_still_checks_its_alias() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = concat!(
+        "pub struct Sym;\n\n",
+        "pub struct Other;\n\n",
+        "pub type Alias = Sym;\n\n",
+        "impl Alias {}\n\n",
+        "pub fn take(_: Alias) {}\n"
+    );
+    let (_root, store) = rust_project(lib);
+    let broken = store.submit_symbols(Some("crate.Alias"), None, "pub type Alias = Missing;\n");
+    assert!(broken.is_err(), "{broken:?}");
+    let saved = store.submit_symbols(Some("crate.Alias"), None, "pub type Alias = Other;\n").unwrap();
+    assert!(saved.contains("Saved crate.Alias."), "{saved}");
+    assert!(saved.contains("Dropped empty impl crate.Alias."), "{saved}");
+}
+
+/// A dropped empty impl doesn't remove a type of the same name from the
+/// changed list: the saved text is right, and so is the reply.
+#[test]
+fn a_saved_module_keeps_a_same_named_type_in_its_changed_note() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("pub struct Alias {\n    pub value: i32,\n}\n\nimpl Alias {}\n");
+    let text = "pub struct Alias {\n    pub value: u64,\n}\n\nimpl Alias {}\n";
+    let out = store.submit(crate::Target::Module("crate"), text).unwrap();
+    assert!(out.contains("changed Alias"), "{out}");
+    assert!(out.contains("Dropped empty impl crate.Alias."), "{out}");
+    let written = text_of(&root, "src/lib.rs");
+    assert!(written.contains("pub value: u64"), "{written}");
+    assert!(!written.contains("impl Alias"), "{written}");
+}
+
+/// A dropped empty impl doesn't remove a newly added type of the same name
+/// from the added list.
+#[test]
+fn a_saved_module_keeps_a_same_named_added_type_in_its_note() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("pub fn placeholder() {}\n\nimpl Alias {}\n");
+    let text = concat!("pub fn placeholder() {}\n\n", "pub struct Alias {\n    pub value: i32,\n}\n\n", "impl Alias {}\n");
+    let out = store.submit(crate::Target::Module("crate"), text).unwrap();
+    assert!(out.contains("added Alias"), "{out}");
+    assert!(out.contains("Dropped empty impl crate.Alias."), "{out}");
+    let written = text_of(&root, "src/lib.rs");
+    assert!(written.contains("pub struct Alias {"), "{written}");
+    assert!(!written.contains("impl Alias"), "{written}");
 }
