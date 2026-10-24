@@ -1055,6 +1055,13 @@ pub fn events(top: &Path) -> Result<Connection, Failure> {
     let db = Connection::open(board::store_dir(top).join("events.db"))?;
     db.busy_timeout(Duration::from_secs(10))?;
     db.execute_batch("PRAGMA journal_mode=WAL;")?;
+    let auto: i64 = db.query_row("PRAGMA auto_vacuum", [], |r| r.get(0))?;
+    if auto != 1 {
+        // Reclaim deleted rows as they commit, so appends never run a blocking vacuum.
+        if let Err(e) = db.execute_batch("PRAGMA auto_vacuum=FULL; VACUUM;") {
+            eprintln!("solace: could not enable autovacuum on the task log: {e}");
+        }
+    }
     db.execute_batch("CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY, project TEXT NOT NULL, data TEXT NOT NULL)")?;
     Ok(db)
 }
@@ -1063,12 +1070,19 @@ pub fn events(top: &Path) -> Result<Connection, Failure> {
 /// repeat a note or action): the board catches up from the files when it next
 /// connects (D-78).
 fn log(top: &Path, project: &str, data: &Value) {
-    let appended = events(top).and_then(|db| {
-        db.execute("INSERT INTO events(project,data) VALUES (?1,?2)", params![project, data.to_string()])?;
-        Ok(())
-    });
-    if let Err(e) = appended {
-        eprintln!("the task log did not take a change: {}", e.0);
+    let db = match events(top) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("the task log did not take a change: {}", e.0);
+            return;
+        }
+    };
+    if let Err(e) = db.execute("INSERT INTO events(project,data) VALUES (?1,?2)", params![project, data.to_string()]) {
+        eprintln!("the task log did not take a change: {e}");
+        return;
+    }
+    if let Err(e) = prune_event_log(&db) {
+        eprintln!("the task log did not prune: {}", e.0);
     }
 }
 
@@ -1238,16 +1252,19 @@ fn failed_dir(top: &Path) -> PathBuf {
 pub fn rejected(top: &Path, path: &Path) -> bool {
     path.file_name().is_some_and(|n| failed_dir(top).join(n).exists())
 }
-/// Settles task `tid`, which a message just moved into a final column. On the
-/// server's thread that is a step of its own (D-77 point 5): settling takes
-/// project locks, and a holder of those may be waiting on this thread. Elsewhere
-/// (no server, as tests) it runs here.
-fn settle_later(top: &Path, tid: String) {
-    let on_server = server_for(top).is_some_and(|s| s.thread == std::thread::current().id());
+/// Settles task `tid`, which a change just moved into a final column, after the
+/// reply. Where this process serves the root it runs on a thread of its own
+/// (D-77 point 5): settling takes project locks, and a holder of those may be
+/// waiting on this thread. Elsewhere (no server, as tests) it runs here.
+pub(super) fn settle_later(top: &Path, tid: String) {
     let top = top.to_path_buf();
-    let run = move || {
-        if let Err(e) = board::settle_final(&top, &tid) {
+    let on_server = server_for(&top).is_some();
+    let run = move || match board::settle_final(&top, &tid) {
+        Ok(()) if settle_failed(&top, &tid) => clear_settle_failed(&top, &tid),
+        Ok(()) => {}
+        Err(e) => {
             eprintln!("settling task {tid}: {}", e.0);
+            flag_settle_failed(&top, &tid, &e.0);
         }
     };
     if on_server {
@@ -1376,8 +1393,12 @@ fn api_with(root: &Path, method: &str, parts: &[&str], body: Value, needs: Needs
             change(root, method, parts, &body, true, needs)?.ok_or_else(|| Failure("the task's projects were not locked".into(), 1))?
         }
     };
+    let settle = matches!(&after, board::After::Clean(_));
     board::after(&board::task_root(&scope::top(root), &t), &t, after);
     drop(guard);
+    if settle {
+        settle_later(&scope::top(root), t["id"].as_str().unwrap().to_string());
+    }
     Ok(t)
 }
 /// One change to a task, as an operation. Without its projects' locks
@@ -2922,9 +2943,8 @@ mod tests {
     /// the server applies settles on a thread of its own (D-77 point 5).
     #[test]
     fn the_task_server_runs_its_operations_on_its_own_thread() {
-        let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", DONE_IS_FINAL)]);
-        let root = p.root.clone();
-        start(&root).unwrap();
+        let (_serial, root) = served_root();
+        fs::write(root.join("solace.toml"), DONE_IS_FINAL).unwrap();
         let ran_on = op(&root, move || Ok(std::thread::current().id())).unwrap();
         assert_eq!(ran_on, SERVER.get().unwrap().thread, "the operation ran on the server's thread");
         assert_ne!(ran_on, std::thread::current().id());
@@ -2949,14 +2969,7 @@ mod tests {
             || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
         assert!(has_before(), "the change is recorded");
         testing::inbox_file(&root, "0001", json!({"kind":"agent","task":tid,"run":"r1","command":"done","text":"done"}));
-        let mut settled = false;
-        for _ in 0..400 {
-            if board::task(&root, &tid).unwrap()["column"] == "done" && !has_before() {
-                settled = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        let settled = wait_until(|| board::task(&root, &tid).unwrap()["column"] == "done" && !has_before());
         assert!(settled, "the server applied the done and settled the task off its own thread");
     }
 
@@ -3364,6 +3377,175 @@ mod tests {
         assert!(batch_commit(outer).is_err());
         assert!(task_journals(&root).is_empty(), "{:?}", task_journals(&root));
         assert!(with_batch(|active| active.is_none()));
+    }
+
+    /// Past the cap only the newest row stays, and numbering still moves forward.
+    #[test]
+    fn the_task_log_keeps_its_newest_row_after_a_hundred_events() {
+        let root = root();
+        for n in 0..100 {
+            log(&root, "", &json!({"n": n}));
+        }
+        let shape = || {
+            events(&root)
+                .unwrap()
+                .query_row("SELECT COUNT(*), MAX(seq) FROM events", [], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+                .unwrap()
+        };
+        assert_eq!(shape(), (100, 100));
+        log(&root, "", &json!({"n": 100}));
+        assert_eq!(all_events(&root), vec![json!({"n": 100})]);
+        assert_eq!(shape(), (1, 101));
+        log(&root, "", &json!({"n": 101}));
+        assert_eq!(shape(), (2, 102));
+        for n in 102..=200 {
+            log(&root, "", &json!({"n": n}));
+        }
+        assert_eq!(all_events(&root), vec![json!({"n": 200})]);
+        assert_eq!(shape(), (1, 201));
+    }
+
+    /// Pruning gives the deleted rows' pages back to the file system.
+    #[test]
+    fn pruning_the_task_log_shrinks_its_file() {
+        let root = root();
+        let mode: i64 = events(&root).unwrap().query_row("PRAGMA auto_vacuum", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode, 1, "the event log uses autovacuum");
+        let pad = "x".repeat(4096);
+        for n in 0..100 {
+            log(&root, "", &json!({"n": n, "pad": pad.as_str()}));
+        }
+        let pages = || -> i64 { events(&root).unwrap().query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap() };
+        let before = pages();
+        log(&root, "", &json!({"n": 100, "pad": pad.as_str()}));
+        let after = pages();
+        assert!(after < before, "{after} pages should be fewer than {before}");
+    }
+
+    /// A delete outside a prune still returns its pages.
+    #[test]
+    fn pages_freed_outside_a_prune_are_reclaimed() {
+        let root = root();
+        let pad = "x".repeat(4096);
+        for n in 0..100 {
+            log(&root, "", &json!({"n": n, "pad": pad.as_str()}));
+        }
+        let pages = || -> i64 { events(&root).unwrap().query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap() };
+        let before = pages();
+        events(&root).unwrap().execute("DELETE FROM events WHERE seq < 100", []).unwrap();
+        let after = pages();
+        assert!(after < before, "{after} pages should be fewer than {before}");
+    }
+
+    /// An event log made before autovacuum gains it once.
+    #[test]
+    fn an_old_event_log_switches_to_full_autovacuum() {
+        let root = root();
+        let path = board::store_dir(&root).join("events.db");
+        let old = rusqlite::Connection::open(&path).unwrap();
+        old.execute_batch(
+            "PRAGMA journal_mode=WAL; CREATE TABLE events(seq INTEGER PRIMARY KEY, project TEXT NOT NULL, data TEXT NOT NULL);",
+        )
+        .unwrap();
+        old.execute("INSERT INTO events(project,data) VALUES ('', '{}')", []).unwrap();
+        drop(old);
+        let db = events(&root).unwrap();
+        let mode: i64 = db.query_row("PRAGMA auto_vacuum", [], |r| r.get(0)).unwrap();
+        assert_eq!(mode, 1);
+    }
+
+    /// The one root this process's task server serves, and a lock that keeps
+    /// the tests using it apart. A process has one server, so both tests share
+    /// the root it serves; each starts from an empty task store.
+    fn served_root() -> (std::sync::MutexGuard<'static, ()>, PathBuf) {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        static ROOT: std::sync::OnceLock<testing::Scratch> = std::sync::OnceLock::new();
+        let lock = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = ROOT.get_or_init(|| {
+            let root = testing::Scratch::new().with(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", DONE_IS_FINAL)]);
+            crate::import(root.0.as_path()).unwrap();
+            start(root.0.as_path()).unwrap();
+            root
+        });
+        let root = root.0.clone();
+        clear_tasks(&root);
+        (lock, root)
+    }
+
+    /// A change's reply comes back before the settle it starts: while the
+    /// settle waits for the task's project lock, the reply has already moved
+    /// the task and its undo records are still there.
+    #[test]
+    fn a_reply_comes_before_the_settle_it_starts() {
+        let (_serial, root) = served_root();
+        fs::write(root.join("solace.toml"), include_str!("default-board.toml")).unwrap();
+        let t = api(&root, "POST", &["tasks"], json!({"title": "Reply"})).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        let mut t = t;
+        t["runs"] = json!([{"id": "r2", "kind": "work", "state": "ended", "outcome": "stopped"}]);
+        write(&root, &t).unwrap();
+        api(&root, "POST", &["tasks", &tid, "actions"], json!({"action": "plan"})).unwrap();
+        let s = board::open(&root).unwrap();
+        let before = board::snapshot(&s).unwrap();
+        s.submit_symbols(None, Some("geo2"), "pub fn side2() { 3 }").unwrap();
+        board::record(&s, &tid, "r2", &before, &board::snapshot(&s).unwrap(), None).unwrap();
+        let has_before =
+            || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+        let held = board::lock(&root).unwrap();
+        let reply = api_with(&root, "POST", &["tasks", &tid, "actions"], json!({"action": "complete"}), |_, _, _| Ok(false)).unwrap();
+        assert_eq!(reply["column"], "complete");
+        assert!(has_before(), "the reply came back before the settle dropped the undo records");
+        drop(held);
+        let settled = wait_until(|| !has_before());
+        assert!(settled, "the deferred settle ran after the reply");
+    }
+
+    /// Removes the tasks and event log a test before left in the shared root,
+    /// leaving the server's lock and inbox in place.
+    fn clear_tasks(root: &Path) {
+        let top = root.to_path_buf();
+        op(root, move || {
+            let dir = board::store_dir(&top);
+            if let Ok(entries) = fs::read_dir(&dir) {
+                for entry in entries {
+                    let p = entry?.path();
+                    if p.is_file() && p.extension().is_some_and(|x| x == "json") {
+                        fs::remove_file(p)?;
+                    }
+                }
+            }
+            for name in ["events.db", "events.db-wal", "events.db-shm"] {
+                let path = dir.join(name);
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    /// Whether `done` holds within the ten seconds a deferred settle may take.
+    fn wait_until(done: impl Fn() -> bool) -> bool {
+        for _ in 0..400 {
+            if done() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        false
+    }
+
+    /// A test that runs after one that logged events starts with an empty log.
+    #[test]
+    fn clearing_a_served_root_clears_its_event_log() {
+        let (lock, root) = served_root();
+        log(&root, "", &json!({"earlier": true}));
+        assert!(!root_events(&root).is_empty());
+        drop(lock);
+        let (_lock, root) = served_root();
+        let logged = root_events(&root);
+        assert!(logged.is_empty(), "{logged:?}");
     }
 }
 
@@ -3862,4 +4044,78 @@ impl Drop for Batch {
             });
         }
     }
+}
+
+/// The log keeps its newest row once it passes this many events: older rows
+/// only spare a reconnecting board a snapshot.
+const EVENT_LOG_LIMIT: i64 = 100;
+
+/// Keeps the task log bounded without restarting its numbering: the newest row
+/// stays, so the next event still gets a higher `seq`. A board whose position
+/// is now outside the log rebuilds from the files (D-78).
+fn prune_event_log(db: &Connection) -> Result<(), Failure> {
+    let count: i64 = db.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))?;
+    if count > EVENT_LOG_LIMIT {
+        db.execute("DELETE FROM events WHERE seq < (SELECT MAX(seq) FROM events)", [])?;
+    }
+    Ok(())
+}
+
+/// Leaves a `solace` note and an attention flag on a task whose deferred settle
+/// failed, so a human learns that its undo records may still be present. The
+/// marker makes the next `resettle` try again even when no rows remain.
+fn flag_settle_failed(top: &Path, tid: &str, why: &str) {
+    let root = top.to_path_buf();
+    let call = root.clone();
+    let id = tid.to_string();
+    let reason = why.to_string();
+    let result = op(&root, move || {
+        let mut t = board::task(&call, &id)?;
+        if t["settleFailed"] == true {
+            return Ok(());
+        }
+        t["settleFailed"] = json!(true);
+        board::note(&mut t, "solace", None, &format!("{SETTLE_FAILED_NOTE} {reason}\n\nSolace will try again when this board is served."));
+        board::flag(&mut t, SETTLE_FAILED_REASON);
+        write(&call, &t)
+    });
+    if let Err(e) = result {
+        eprintln!("recording the settling failure of task {tid}: {}", e.0);
+    }
+}
+
+/// Clears the failure left by `flag_settle_failed`: the marker, the note, and
+/// the attention flag it set, never another reason the task may carry.
+fn clear_settle_failed(top: &Path, tid: &str) {
+    let root = top.to_path_buf();
+    let call = root.clone();
+    let id = tid.to_string();
+    let result = op(&root, move || {
+        let mut t = board::task(&call, &id)?;
+        if t["settleFailed"] != true {
+            return Ok(());
+        }
+        t.as_object_mut().unwrap().remove("settleFailed");
+        if t["attention"]["reason"] == SETTLE_FAILED_REASON {
+            t["attention"] = Value::Null;
+        }
+        if let Some(notes) = t["notes"].as_array_mut() {
+            notes.retain(|n| {
+                !(n["author"] == "solace" && n["run"].is_null() && n["text"].as_str().is_some_and(|s| s.starts_with(SETTLE_FAILED_NOTE)))
+            });
+        }
+        write(&call, &t)
+    });
+    if let Err(e) = result {
+        eprintln!("clearing the settling failure of task {tid}: {}", e.0);
+    }
+}
+
+pub(super) const SETTLE_FAILED_REASON: &str = "settling this task failed";
+
+pub(super) const SETTLE_FAILED_NOTE: &str = "Settling this task failed:";
+
+/// Whether task `tid` still carries the marker of a failed deferred settle.
+fn settle_failed(top: &Path, tid: &str) -> bool {
+    board::task(top, tid).is_ok_and(|t| t["settleFailed"] == true)
 }

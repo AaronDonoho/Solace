@@ -256,6 +256,8 @@ pub type Panel(msg) {
     /// A request sent and not yet answered.
     sending: Bool,
     error: String,
+    /// A model refresh sent and not yet answered.
+    refreshing: Bool,
     models: List(solace_task.Agent),
     model: String,
     effort: String,
@@ -272,8 +274,8 @@ pub type Panel(msg) {
     on_block: fn(String) -> msg,
     on_model: fn(String) -> msg,
     on_effort: fn(String) -> msg,
-    /// A usage limit's Try again: the agent kind whose limit to clear.
-    on_try_again: fn(String) -> msg,
+    /// Try again: recheck every model and clear the holds.
+    on_try_again: msg,
     on_start: msg,
     on_send: msg,
     /// A question's id and the option chosen.
@@ -451,7 +453,7 @@ fn run_view(base: String, p: Panel(msg), run: Run) -> List(Element(msg)) {
                     small(o, p.sending || !open, p.on_answer(q.id, o))
                   }),
                 )
-              answer -> html.p([], [html.text("Answer: " <> answer)])
+              answer -> solace_task.answer_view(base, answer)
             },
           ])
       }
@@ -497,11 +499,13 @@ fn agent_choice(p: Panel(msg)) -> Element(msg) {
     [], _ -> element.none()
     _, [] ->
       html.div([attribute.class("filters")], [
+        solace_task.refresh_button(p.on_try_again, p.refreshing),
         solace_task.no_agents_view(p.models),
-        solace_task.unavailable_view(p.models, p.on_try_again),
+        solace_task.unavailable_view(p.models),
       ])
     _, models ->
-      html.div([attribute.class("filters")], [
+      html.div([attribute.class("filters agent-choice")], [
+        solace_task.refresh_button(p.on_try_again, p.refreshing),
         html.select(
           [
             attribute.value(p.model),
@@ -523,71 +527,48 @@ fn agent_choice(p: Panel(msg)) -> Element(msg) {
         ),
         case list.find(models, fn(m) { m.id == p.model }) {
           Ok(m) if m.efforts != [] ->
-            html.select(
-              [
-                attribute.value(p.effort),
-                attribute.attribute(
-                  "aria-label",
-                  solace_task.ui_label("effort"),
-                ),
-                event.on_input(p.on_effort),
-              ],
-              [
-                html.option(
-                  [attribute.value(""), attribute.selected(p.effort == "")],
-                  case m.effort {
-                    "" -> solace_task.ui_label("default_effort")
-                    effort ->
-                      solace_task.ui_label("default_effort")
-                      <> " ("
-                      <> effort
-                      <> ")"
-                  },
-                ),
-                ..list.map(m.efforts, fn(effort) {
-                  html.option(
-                    [
-                      attribute.value(effort),
-                      attribute.selected(effort == p.effort),
-                    ],
-                    effort,
-                  )
-                })
-              ],
+            solace_task.effort_pick(
+              "plan-effort",
+              p.effort,
+              m.effort,
+              m.efforts,
+              p.on_effort,
             )
           _ -> element.none()
         },
-        solace_task.unavailable_view(p.models, p.on_try_again),
+        solace_task.unavailable_view(p.models),
       ])
   }
 }
 
 /// The panel's look; colors come from the page's custom properties.
 pub const styles =
-  ".plan{grid-column:2;grid-row:2;position:relative;display:flex;flex-direction:column;min-height:0;box-sizing:border-box;width:clamp(280px,var(--plan-width,380px),60vw);background:var(--paper);border-left:2px solid var(--edge);padding:12px 16px 0}.plan.collapsed{width:auto;min-width:160px;padding-bottom:12px}
-.plan>header,.plan-bar,.plan-compose{flex:none}.plan-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0 -16px;padding:0 16px 12px}
-.plan-bar{border-bottom:1px solid var(--edge);padding:0 0 8px;margin-bottom:4px}.plan-bar .plan-context{margin:6px 0 4px}.plan-bar select{"
+  ".plan{grid-column:2;grid-row:2;position:relative;display:flex;flex-direction:column;min-height:0;box-sizing:border-box;width:clamp(280px,var(--plan-width,380px),60vw);background:var(--paper);border-left:2px solid var(--edge);padding:var(--space-3) var(--space-4) 0}.plan.collapsed{width:auto;min-width:160px;padding-bottom:var(--space-3)}
+.plan>header,.plan-bar,.plan-compose{flex:none}.plan-body{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;margin:0 calc(-1 * var(--space-4));padding:0 var(--space-4) var(--space-3)}
+.plan-bar{border-bottom:1px solid var(--edge);padding:0 0 var(--space-2);margin-bottom:var(--space-1)}.plan-bar .plan-context{margin:var(--space-1) 0}.plan-bar select{"
   <> solace_task.small_control
-  <> ";padding:2px 6px;max-width:100%}
-.plan-compose{border-top:1px solid var(--edge);padding:8px 0 12px}.plan-compose .filters{margin:0 0 8px}.plan-compose .vision-actions{margin:8px 0 0}
+  <> ";padding:var(--space-1) var(--space-2);max-width:100%}
+.plan-compose{border-top:1px solid var(--edge);padding:var(--space-2) 0 var(--space-3)}.plan-compose .filters{margin:0 0 var(--space-2)}.plan-compose .vision-actions{margin:var(--space-2) 0 0}
 .plan .composer{margin:0}.plan .composer solace-md-editor{--md-min-height:5lh;--md-max-height:40dvh}
 .plan-resize{position:absolute;left:-7px;top:0;bottom:0;width:12px;cursor:col-resize;touch-action:none;z-index:1}.plan-resize:hover{background:var(--line);opacity:.6}.plan .plan-resize:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
-.plan header{display:flex;align-items:center;gap:8px}.plan h2{margin:0;font-size:17px;flex:1}.plan h3{font-size:14px;margin:16px 0 4px}
-.plan p{margin:6px 0}.plan .plan-summary,.plan .plan-context{color:var(--soft);font-size:13px}.plan-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.plan header{display:flex;align-items:center;gap:var(--space-2)}.plan h2{margin:0;font-size:var(--h2);flex:1}.plan h3{font-size:var(--h4);margin:var(--space-4) 0 var(--space-1)}
+.plan p{margin:var(--space-1) 0}.plan .plan-summary,.plan .plan-context{color:var(--soft);font-size:13px}.plan-meta{display:flex;align-items:center;gap:var(--space-2);flex-wrap:wrap}
 .plan .edit,.plan .vision-actions button{"
   <> solace_task.small_control
-  <> ";padding:0 10px}.plan .edit:hover,.plan .vision-actions button:hover{background:var(--hover)}.plan button:disabled{color:var(--soft);cursor:default}
-.plan label{display:block;font-size:13px;color:var(--soft);margin:8px 0 2px}.plan .filters label{margin:0}.plan .filters select{max-width:100%}
+  <> ";padding:0 var(--space-3)}.plan .edit:hover,.plan .vision-actions button:hover{background:var(--hover)}.plan button:disabled{color:var(--soft);cursor:default}
+.plan label{display:block;font-size:13px;color:var(--soft);margin:var(--space-2) 0 0}.plan .filters label{margin:0}.plan .filters select{max-width:100%}
+.plan .agent-choice>select{flex:1 1 5rem;min-width:0;width:auto}.plan .agent-choice>.effort-pick{flex:none;margin:0}.plan .agent-choice>.unavailable{flex-basis:100%}
 .plan :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.plan-note{border-top:1px solid var(--line);padding:6px 0}.plan-note.human strong{color:var(--focus)}.plan-note .md p{color:var(--ink)}
-.plan-transcript{margin:8px 0;border-left:1px solid var(--edge);padding-left:8px}.plan-transcript>summary{cursor:pointer;color:var(--soft)}.plan-transcript pre{background:var(--code);padding:6px;white-space:pre-wrap;overflow:auto;max-height:240px;font:12px 'IBM Plex Mono',ui-monospace,monospace}.plan-transcript .entry{margin:4px 0}.plan-transcript .tool.ok .icon{color:var(--ok-text)}.plan-transcript .tool.failed .icon{color:var(--revision)}
-.working::before,.planning::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--entry);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before,.planning::before{animation:none}}
-.planning{font-size:11px;font-weight:400;text-transform:uppercase;letter-spacing:.08em;color:var(--ok-text);border:1px solid var(--ok-text);padding:1px 6px;margin-left:6px;white-space:nowrap}
-.plan .plan-new{position:sticky;bottom:8px;display:block;margin:8px 0 0 auto;font:inherit;font-size:13px;color:var(--paper);background:var(--focus);border:1px solid var(--focus);border-radius:0;padding:4px 12px;cursor:pointer;z-index:1}
-@media (max-width:900px){.plan{display:block;width:auto;border-left:0;border-top:2px solid var(--edge);padding:12px 16px}.plan-body{overflow:visible;margin:0;padding:0}.plan-resize{display:none}}
+.plan-note{border-top:1px solid var(--line);padding:var(--space-1) 0}.plan-note.human strong{color:var(--focus)}.plan-note .md p{color:var(--ink)}
+.plan-transcript{margin:var(--space-2) 0;border-left:1px solid var(--edge);padding-left:var(--space-2)}.plan-transcript>summary{cursor:pointer;color:var(--soft)}.plan-transcript pre{background:var(--code);padding:var(--space-1);white-space:pre-wrap;overflow:auto;max-height:240px;font:12px 'IBM Plex Mono',ui-monospace,monospace}.plan-transcript .entry{margin:var(--space-1) 0}
+.working::before,.planning::before{content:\"\";display:inline-block;width:var(--space-2);height:var(--space-2);border-radius:50%;background:var(--entry);margin-right:var(--space-1);animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before,.planning::before{animation:none}}
+.planning{font-size:11px;font-weight:400;text-transform:uppercase;letter-spacing:.08em;color:var(--ok-text);border:1px solid var(--ok-text);padding:1px var(--space-1);white-space:nowrap}
+.plan .plan-new{position:sticky;bottom:var(--space-2);display:block;margin:var(--space-2) 0 0 auto;font:inherit;font-size:13px;color:var(--paper);background:var(--focus);border:1px solid var(--focus);border-radius:0;padding:var(--space-1) var(--space-3);cursor:pointer;z-index:1}
+@media (max-width:900px){.plan{display:block;width:auto;border-left:0;border-top:2px solid var(--edge);padding:var(--space-3) var(--space-4)}.plan-body{overflow:visible;margin:0;padding:0}.plan-resize{display:none}}
 "
   <> solace_task.proposal_styles
   <> solace_task.model_styles
+  <> solace_task.effort_pick_styles
 
 /// The narrowest the panel gets, in pixels.
 pub const min_width = 280

@@ -261,7 +261,7 @@ class Board(unittest.TestCase):
         self.assertIn('missing or legacy review checkpoint', prompt)
         self.assertIn('Full task diff', replies[0])
         self.action(t, 'approve'); self.action(t, 'complete')
-        self.assertFalse(checkpoint.parent.exists())
+        self.wait(t, lambda x: not checkpoint.parent.exists())
 
     def test_a_review_without_a_note_records_its_assessment(self):
         assessment = '**Assessment: Looks good**\n\n### Findings\n\nFine.'
@@ -1507,7 +1507,7 @@ class Board(unittest.TestCase):
         models=listed()
         # Every model on the sign-in is unavailable, with the reason; the list stays complete.
         for id in ['signed-in','codex-gpt-6-sol']:
-            self.assertEqual((models[id]['available'],models[id]['reason'],models[id]['limit']),(False,'Codex usage limit reached',True),id)
+            self.assertEqual((models[id]['available'],models[id]['reason'],models[id]['retry']),(False,'Codex usage limit reached',True),id)
         self.assertIn('codex-gpt-6-astra',models)
         # A model on its own endpoint or program isn't on the sign-in.
         for id in ['native','fake']:self.assertTrue(models[id]['available'],models[id])
@@ -1522,12 +1522,54 @@ class Board(unittest.TestCase):
         self.assertTrue(models['signed-in']['available'],models['signed-in'])
         self.assertEqual(self.api('POST','/models/try-again',{'agent':'nobody'},'E7001')['code'],'E7001')
 
+    def test_the_agents_own_sign_in_status_decides_and_refresh_rechecks(self):
+        # The status command is the truth: a key variable and a token file don't override it.
+        status=self.root/'status';status.write_text('out')
+        with (self.root/'system.toml').open('a') as f:
+            f.write('\n[[models]]\nid="signed-in"\nlabel="Signed in"\nagent="codex"\nmodel="fixture"\n')
+            f.write('\n[[models]]\nid="gateway"\nlabel="Gateway"\nagent="claude"\nmodel="x"\nendpoint={kind="anthropic",base_url="http://localhost:1"}\n')
+        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        self.env['SOLACE_FAKE_STATUS']=str(status)
+        self.serve()
+        models={m['id']:m for m in self.api('GET','/models')}
+        self.assertEqual((models['signed-in']['available'],models['signed-in']['reason']),(False,'codex is not signed in'))
+        # An endpoint model needs its own key, not Claude's sign-in.
+        self.assertTrue(models['gateway']['available'],models['gateway'])
+        # Signing in shows after the refresh; signing out again shows too.
+        status.write_text('in')
+        models={m['id']:m for m in self.api('POST','/models/try-again',{})}
+        self.assertTrue(models['signed-in']['available'],models['signed-in'])
+        status.write_text('out')
+        models={m['id']:m for m in self.api('POST','/models/try-again',{})}
+        self.assertFalse(models['signed-in']['available'])
+        # Claude Code refusing an endpoint model holds that model alone, with
+        # its reason; Try again and a later successful run each clear it.
+        status.write_text('in')
+        models={m['id']:m for m in self.api('POST','/models/try-again',{})}
+        self.assertTrue(models['signed-in']['available'],models['signed-in'])
+        def gateway(available):
+            end=time.monotonic()+5
+            while True:
+                models={m['id']:m for m in self.api('GET','/models')}
+                if models['gateway']['available']==available or time.monotonic()>end:return models
+                time.sleep(.05)
+        def refuse():
+            t=self.create([{'exit':1,'error':'There is an issue with the selected model (x): model not found'}])
+            self.action(t,'plan');self.action(t,'assign',model='gateway')
+        refuse()
+        models=gateway(False)
+        self.assertEqual((models['gateway']['available'],models['gateway']['retry']),(False,True),models['gateway'])
+        self.assertIn('selected model',models['gateway']['reason'])
+        self.assertTrue(models['signed-in']['available'],models['signed-in'])
+        models={m['id']:m for m in self.api('POST','/models/try-again',{})}
+        self.assertTrue(models['gateway']['available'],models['gateway'])
+
     def test_a_plain_discussion_reply_clears_a_limit_mark(self):
         # A mark whose reset has passed leaves the model available but stays until an answer.
         with (self.root/'system.toml').open('a') as f:
             f.write('\n[[models]]\nid="signed-in"\nlabel="Signed in"\nagent="codex"\nmodel="fixture"\n')
         self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
-        limits=self.root/'agent-limits.json'
+        limits=self.root/'agent-holds.json'
         limits.write_text(json.dumps({'codex':{'reason':'Codex usage limit reached','until':1,'time':1}}))
         self.env['OPENAI_API_KEY']='test-key'
         self.serve()
@@ -1544,7 +1586,7 @@ class Board(unittest.TestCase):
         with (self.root/'system.toml').open('a') as f:
             f.write('\n[[models]]\nid="signed-in"\nlabel="Signed in"\nagent="codex"\nmodel="fixture"\n')
         self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
-        limits=self.root/'agent-limits.json'
+        limits=self.root/'agent-holds.json'
         limits.write_text(json.dumps({'codex':{'reason':'Codex usage limit reached','until':1,'time':1}}))
         self.env['OPENAI_API_KEY']='test-key'
         self.serve()

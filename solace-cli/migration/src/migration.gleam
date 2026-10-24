@@ -67,6 +67,7 @@ pub type Msg {
   ProjectName(String)
   ProjectDir(String)
   ProjectTarget(String)
+  ProjectLanguage(String)
   CreateProject
 }
 
@@ -260,6 +261,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     | ProjectName(_)
     | ProjectDir(_)
     | ProjectTarget(_)
+    | ProjectLanguage(_)
     | CreateProject -> {
       let #(projects, fx) = update_projects(model.projects, msg)
       #(Model(..model, projects: projects), fx)
@@ -834,6 +836,7 @@ pub type Projects {
     name: String,
     dir: String,
     target: String,
+    language: String,
     /// The project being removed: its dir, whether the second step (deleting
     /// its files) shows, and the name typed to confirm it.
     removing: Option(#(String, Bool, String)),
@@ -857,7 +860,8 @@ pub type Found {
   )
 }
 
-pub const no_projects = Projects(False, [], [], "", "", "", "erlang", None)
+pub const no_projects =
+  Projects(False, [], [], "", "", "", "erlang", "gleam", None)
 
 /// The Projects section's messages. Every change to the list answers with
 /// the new list, which the board's lanes follow through its event stream.
@@ -957,14 +961,19 @@ fn update_projects(p: Projects, msg: Msg) -> #(Projects, Effect(Msg)) {
     ProjectName(text) -> #(Projects(..p, name: text), effect.none())
     ProjectDir(text) -> #(Projects(..p, dir: text), effect.none())
     ProjectTarget(text) -> #(Projects(..p, target: text), effect.none())
-    CreateProject -> #(
-      p,
-      projects_request("/projects/new", "POST", [
+    ProjectLanguage(text) -> #(Projects(..p, language: text), effect.none())
+    CreateProject -> {
+      let fields = [
         #("name", json.string(p.name)),
         #("dir", json.string(p.dir)),
-        #("target", json.string(p.target)),
-      ]),
-    )
+        #("language", json.string(p.language)),
+      ]
+      let fields = case p.language {
+        "rust" -> fields
+        _ -> list.append(fields, [#("target", json.string(p.target))])
+      }
+      #(p, projects_request("/projects/new", "POST", fields))
+    }
     _ -> #(p, effect.none())
   }
 }
@@ -1004,8 +1013,8 @@ fn projects_decoder() -> decode.Decoder(#(List(Project), List(Found))) {
 }
 
 /// The root's projects: remove one, add a Gleam or Rust project found in the
-/// folder, or create a new Gleam project. Existing Gleam code is brought in
-/// by the section below; a Rust package is added in place.
+/// folder, or create a new one. Existing Gleam code is brought in by the
+/// section below; a Rust package is added in place.
 fn projects_view(p: Projects) -> Element(Msg) {
   case p.listed {
     False -> h.text("")
@@ -1101,12 +1110,23 @@ fn projects_view(p: Projects) -> Element(Msg) {
             e.on_input(ProjectDir),
           ]),
           h.label([], [
-            h.text("Runs on"),
-            h.select([a.value(p.target), e.on_input(ProjectTarget)], [
-              h.option([a.value("erlang")], "Erlang (BEAM)"),
-              h.option([a.value("javascript")], "JavaScript"),
+            h.text("Language"),
+            h.select([a.value(p.language), e.on_input(ProjectLanguage)], [
+              h.option([a.value("gleam")], "Gleam"),
+              h.option([a.value("rust")], "Rust"),
             ]),
           ]),
+          case p.language {
+            "rust" -> h.text("")
+            _ ->
+              h.label([], [
+                h.text("Runs on"),
+                h.select([a.value(p.target), e.on_input(ProjectTarget)], [
+                  h.option([a.value("erlang")], "Erlang (BEAM)"),
+                  h.option([a.value("javascript")], "JavaScript"),
+                ]),
+              ])
+          },
           button(solace_task.ui_label("create_project"), CreateProject),
         ]),
       ])

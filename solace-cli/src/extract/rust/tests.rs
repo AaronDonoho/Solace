@@ -171,11 +171,11 @@ fn an_impl_method_or_impl_row_is_refused_and_a_use_moves() {
     if !ready() {
         return;
     }
-    let (_root, s) = rust_project(concat!(
+    let (root, s) = rust_project(concat!(
         "pub struct S;\n\nimpl S {\n    pub fn new() -> Self {\n        S\n    }\n}\n\n",
         "pub trait Named {\n    fn name(&self) -> u8;\n}\n\n",
         "impl Named for S {\n    fn name(&self) -> u8 {\n        0\n    }\n}\n\n",
-        "use std::fmt;\n",
+        "use std::fmt;\n\npub fn keep() -> fmt::Result {\n    Ok(())\n}\n",
     ));
     let err = extract(&s, &["crate.S::new", "--to", "helpers"]).unwrap_err().0;
     assert!(err.starts_with("E6013") && err.contains("nested method"), "{err}");
@@ -185,6 +185,8 @@ fn an_impl_method_or_impl_row_is_refused_and_a_use_moves() {
     assert!(out.contains("Moved crate.std::fmt"), "{out}");
     let ix = s.index().unwrap();
     assert!(ix.syms.iter().any(|sym| sym.module == "helpers" && sym.kind_text == "use"));
+    let source = written(&root, "src/lib.rs");
+    assert!(source.contains("use std::fmt;"), "{source}");
     let errors: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| d.error).map(|d| d.text).collect();
     assert!(errors.is_empty(), "{errors:?}");
 }
@@ -1069,7 +1071,7 @@ fn an_inline_modules_import_is_not_carried() {
 
 #[test]
 fn header_modules_with_attributes_are_named() {
-    assert_eq!(super::header_mod_names("#[cfg(test)] mod tests;\npub mod other;\n"), vec!["tests", "other"]);
+    assert_eq!(super::header_mod_names("#[cfg(test)] mod tests;\npub mod other;\n").unwrap(), vec!["tests", "other"]);
 }
 
 #[test]
@@ -1084,7 +1086,7 @@ fn a_word_ending_in_mod_is_not_a_declaration() {
 
 #[test]
 fn prelude_derive_and_macro_names_are_known() {
-    for name in ["Debug", "Hash", "format", "assert_eq", "vec", "println"] {
+    for name in ["fn", "i32", "std", "Debug", "Hash", "format", "assert_eq", "vec", "println"] {
         assert!(super::is_prelude_name(name), "{name}");
     }
     assert!(!super::is_prelude_name("HashMap"));
@@ -1156,4 +1158,47 @@ fn a_move_drops_an_empty_inherent_impl() {
         ix.syms.iter().filter(|sym| sym.module == "model" && sym.kind_text == "impl" && !sym.name.starts_with('<')).collect();
     assert_eq!(inherent.len(), 1, "{:?}", inherent.iter().map(|s| &s.name).collect::<Vec<_>>());
     assert!(ix.syms.iter().any(|c| c.parent.as_deref() == Some(inherent[0].id.as_str())));
+}
+
+#[test]
+fn header_modules_in_a_truncated_header_are_named() {
+    assert_eq!(super::header_mod_names("pub mod other;\nmod inline {\n").unwrap(), vec!["other"]);
+}
+
+#[test]
+fn a_header_module_list_that_does_not_parse_is_reported() {
+    assert!(super::header_mod_names("pub mod ;\n").is_err());
+}
+
+#[test]
+fn an_unused_moved_use_does_not_stay() {
+    if !ready() {
+        return;
+    }
+    let (root, s) = rust_project("pub fn keep() -> i32 {\n    1\n}\n\nuse std::fmt;\n");
+    extract(&s, &["crate.std::fmt", "--to", "helpers"]).unwrap();
+    let source = written(&root, "src/lib.rs");
+    assert!(!source.contains("fmt"), "{source}");
+}
+
+#[test]
+fn an_unused_moved_pub_use_does_not_stay() {
+    if !ready() {
+        return;
+    }
+    let (root, s) = rust_project("pub fn keep() -> i32 {\n    1\n}\n\npub use std::fmt;\n");
+    extract(&s, &["crate.std::fmt", "--to", "helpers"]).unwrap();
+    let source = written(&root, "src/lib.rs");
+    assert!(!source.contains("fmt"), "{source}");
+}
+
+#[test]
+fn a_staying_moved_use_keeps_its_attributes() {
+    if !ready() {
+        return;
+    }
+    let (root, s) = rust_project("pub fn keep() -> fmt::Result {\n    Ok(())\n}\n\n#[allow(unused_imports)] use std::fmt;\n");
+    extract(&s, &["crate.std::fmt", "--to", "helpers"]).unwrap();
+    let source = written(&root, "src/lib.rs");
+    assert!(source.contains("#[allow(unused_imports)] use std::fmt;"), "{source}");
 }

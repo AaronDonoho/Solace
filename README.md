@@ -17,57 +17,67 @@ The benchmark harness (`bench/`), the pilots (`bench/pilot/`, `bench/pilot-large
 
 ## Install
 
-Start from a machine with nothing but a terminal. Linux and macOS are supported (Solace is developed on Linux; on Windows use WSL). Steps 1 to 3 install the tools, step 4 builds the `solace` CLI, step 5 builds the desktop app, and step 6 is optional.
+Start from a machine with nothing but a terminal. Linux and macOS are supported (Solace is developed on Linux; on Windows use WSL). Steps 1 and 2 install what Solace uses, step 3 installs what builds it, steps 4 to 6 build and install it, and step 7 is optional.
 
-### 1. Install the tools
+### 1. What Solace uses
 
-Solace is built with Rust, and its web clients are compiled by Gleam and bundled by Bun during the build. Projects run on Gleam and Erlang. You need all four, plus Git and a C compiler (used to build the bundled SQLite).
+The app checks for these tools when it opens and shows this same list, with the install step for your system. None of them blocks the board from opening, but each is highly recommended: without Gleam or Erlang, projects can't build or run; without an agent, no task can run; without Git, there is no history to switch branches with; and on Linux, bubblewrap makes the folder a migration protects read-only to Solace's commands and runs Rust commands without network access, writing only `target/` and `Cargo.lock`.
 
-| Tool | What it's for | Tested version |
+| Tool | What it's for | Version |
 | --- | --- | --- |
-| Rust and Cargo | builds Solace | 1.98.1 |
-| Gleam | builds the board; Solace runs it on your project to format, check, test and build | 1.18.1 |
-| Erlang/OTP | runs Gleam projects | 29 |
-| Bun | bundles the board's and the frontend's web clients | 1.2.23 |
+| Gleam | formats, checks, tests and builds your projects | 1.18.1 or newer |
+| Erlang/OTP | runs Gleam projects | 29 or newer |
+| An agent | Codex CLI or Claude Code; does the work you assign | current |
+| bubblewrap | makes a migration's original folder read-only to Solace's commands, and runs Rust commands without network access, writing only `target/` and `Cargo.lock` (Linux) | current |
+| Git | keeps your project's history and lets you switch branches | current |
 
-**macOS** (install [Homebrew](https://brew.sh) first if you don't have it; it also installs the compiler tools):
+**macOS** (if `brew` is missing, install Homebrew first):
 
 ```sh
-brew install rustup gleam erlang oven-sh/bun/bun git
-rustup default stable
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+brew install gleam erlang git
+brew install codex   # or: curl -fsSL https://claude.ai/install.sh | bash
 ```
 
 **Ubuntu or Debian:**
 
 ```sh
 sudo apt update
-sudo apt install -y build-essential curl git unzip erlang bubblewrap
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-curl -fsSL https://bun.sh/install | bash
+sudo apt install -y build-essential curl libssl-dev libncurses-dev m4 bubblewrap git
+# Gleam isn't in apt. Download the x86_64-unknown-linux-musl (or aarch64-unknown-linux-musl)
+# archive from https://github.com/gleam-lang/gleam/releases, then:
+tar xf gleam-*-unknown-linux-musl.tar.gz && sudo install -m 755 gleam /usr/local/bin/gleam
+# Ubuntu's and Debian's erlang package can be older than OTP 29. Build OTP 29:
+cd /tmp
+curl -LO https://github.com/erlang/otp/releases/download/OTP-29.0/otp_src_29.0.tar.gz
+tar xf otp_src_29.0.tar.gz && cd otp_src_29.0
+./configure --prefix=/usr/local && make && sudo make install
+cd -
+# Then install one agent:
+curl -fsSL https://claude.ai/install.sh | bash
 ```
 
-Gleam isn't in apt. Download the `x86_64-unknown-linux-musl` (or `aarch64-unknown-linux-musl`) archive from the [Gleam releases page](https://github.com/gleam-lang/gleam/releases), then unpack it and put it on your `PATH`:
-
-```sh
-tar xf gleam-*-linux.tar.gz && sudo install -m 755 gleam /usr/local/bin/gleam
-```
+For Codex instead, download a release binary from [the Codex releases page](https://github.com/openai/codex/releases).
 
 **Arch Linux:**
 
 ```sh
-sudo pacman -S --needed base-devel git rustup gleam erlang bun bubblewrap
-rustup default stable
+sudo pacman -S --needed gleam erlang bubblewrap git
+# Then install one agent:
+curl -fsSL https://claude.ai/install.sh | bash
 ```
 
-Other systems: install the four tools from [rustup.rs](https://rustup.rs), [gleam.run](https://gleam.run/install/), [erlang.org](https://www.erlang.org/downloads) and [bun.sh](https://bun.sh).
+For Codex instead, download a release binary from [the Codex releases page](https://github.com/openai/codex/releases).
+
+Other systems: install [Gleam](https://gleam.run/install/), [Erlang](https://www.erlang.org/downloads), [Git](https://git-scm.com/downloads), [bubblewrap](https://github.com/containers/bubblewrap) and one agent from step 2.
 
 Open a new terminal so the tools are on your `PATH`, then check them:
 
 ```sh
-cargo --version && gleam --version && erl -noshell -eval 'io:format("OTP ~s~n",[erlang:system_info(otp_release)]),halt().' && bun --version
+gleam --version && erl -noshell -eval 'io:format("OTP ~s~n",[erlang:system_info(otp_release)]),halt().' && git --version
 ```
 
-Each should print a version. If one says "command not found", its installer printed a line to add to your shell profile; follow it and open a new terminal.
+On Linux, `bwrap --version` should print a version too. Each should print a version. If one says "command not found", its installer printed a line to add to your shell profile; follow it and open a new terminal.
 
 ### 2. Get an AI agent
 
@@ -78,14 +88,48 @@ Solace doesn't contain a model. The board hands tasks to an agent program that y
 
 Agent runs use those services and may cost money. You can install and look around the board without an agent, but no task will run until one is signed in. The board offers only the models that can start; a line under the list says why the others can't (not installed, not signed in, or a usage limit reached), and **Try again** brings back a model held by a usage limit.
 
-### 3. Get the code
+### 3. What builds Solace
+
+Solace itself is built with Rust, its web clients are compiled by Gleam and bundled by Bun, and the bundled SQLite needs a C compiler. You only need these to build it; a release install does not.
+
+| Tool | What it's for | Tested version |
+| --- | --- | --- |
+| Rust and Cargo | builds Solace | 1.98.1 |
+| Bun | bundles the board's and the frontend's web clients | 1.2.23 |
+| A C compiler | builds the bundled SQLite | system |
+
+**macOS** (Homebrew's compiler tools cover the C compiler):
+
+```sh
+brew install rustup bun
+rustup default stable
+```
+
+**Ubuntu or Debian:**
+
+```sh
+sudo apt install -y build-essential curl unzip
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+curl -fsSL https://bun.sh/install | bash
+```
+
+**Arch Linux:**
+
+```sh
+sudo pacman -S --needed base-devel rustup bun
+rustup default stable
+```
+
+Other systems: install [Rust](https://rustup.rs), [Bun](https://bun.sh) and a C compiler.
+
+### 4. Get the code
 
 ```sh
 git clone https://github.com/AaronDonoho/Solace.git
 cd Solace
 ```
 
-### 4. Build and install the `solace` CLI
+### 5. Build and install the `solace` CLI
 
 From the repository root:
 
@@ -97,7 +141,7 @@ solace --help
 
 The first build takes a minute or two. The binary is self-contained (web clients and guide included); running it still needs Gleam, Erlang and an agent.
 
-### 5. Build and install the desktop app
+### 6. Build and install the desktop app
 
 Only the Linux packages have been tested; macOS is untested and Windows isn't supported. Run everything from the repository root.
 
@@ -116,7 +160,7 @@ cargo install tauri-cli --version '^2' --locked
 cargo tauri build
 ```
 
-This also rebuilds the CLI from step 4 and packs it into the app.
+This also rebuilds the CLI from step 5 and packs it into the app.
 
 **3. Install the app** (one line for your system):
 
@@ -127,10 +171,6 @@ This also rebuilds the CLI from step 4 and packs it into the app.
 | macOS | `open solace-app/target/release/bundle/dmg/*.dmg`, then drag Solace into Applications |
 
 Then open Solace from your launcher and choose your project's folder.
-
-### 6. Optional: bubblewrap
-
-On Linux, install bubblewrap (`bwrap`; the Ubuntu line above already includes it) so your folder is read-only to every command Solace runs during a migration. Without it the migration still works, but without that protection.
 
 ### 7. For working on Solace itself: test tools
 
@@ -177,7 +217,7 @@ solace migrate --report        # see what Solace checked
 solace migrate --adopt --yes   # switch to the copy
 ```
 
-Install bubblewrap (`bwrap`) so your folder is read-only to every command Solace runs during a migration. The copy has the same code as your original, errors included: a build or test that fails before migrating fails in the copy too. Solace won't switch if a check found a problem or your folder changed after the copy was made. `solace create` refuses existing names and unmanaged Gleam folders.
+Install bubblewrap (`bwrap`) so Solace's commands see your original folder as read-only during a migration and Rust commands run without network access. The copy has the same code as your original, errors included: a build or test that fails before migrating fails in the copy too. Solace won't switch if a check found a problem or your folder changed after the copy was made. `solace create` refuses existing names and unmanaged Gleam folders.
 
 Open the board, create a task and move it to planning. There you can have an agent *investigate* it first, which changes nothing and reports findings or a plan (complete the task there if it only needed an answer), then assign it to a model to do the work. Solace starts the agent, puts the agent's notes and questions on the task, and moves the task to *Review* when the agent has finished. A task that is waiting on you stays where it is and is marked *Needs attention*, with the reason (an agent's question, or a run that stopped), and one whose agent has finished is marked as such. Effort is chosen separately from the model. Notes are written in a markdown editor and can include images, which agents also see. Cards show which tasks have an agent working, and each run on a task can be followed live: the agent's messages, and each command it runs with its result. The **Knowledgebase** page (`/knowledgebase`, in the menu bar) explains the whole workflow for humans; old `/guide` links lead there. The guide is built into the binary.
 
@@ -192,7 +232,7 @@ solace create my_app # create a new project below this folder after confirmation
 solace serve         # one board, with a lane per project
 ```
 
-The **Projects** section of the **Workspace** page removes projects, re-lists removed projects that still have a store, and creates new ones: give a package name, and optionally a folder and the target (Erlang or JavaScript), and Solace runs `gleam new` (without a nested git repository inside one) and sets the project up. `solace serve` in an empty folder starts an empty root, so a new project can be made entirely from the Workspace page. `solace create <name>` adds a new project to the enclosing root. To migrate several existing projects, run `solace migrate --yes --project api --project web` in their common folder, review the report, then run `solace migrate --adopt --yes`. The whole folder is copied and keeps its original path after adoption. The root's `solace.toml` keeps the list beside the root project's own settings:
+The **Projects** section of the **Workspace** page removes projects, re-lists removed projects that still have a store, and creates new ones: choose **Language** (**Gleam** or **Rust**), give a package name, and optionally a folder; for a Gleam project, also choose the target (Erlang or JavaScript), which a Rust package doesn't have. Solace runs `gleam new` or `cargo new` (without a nested git repository inside one) and sets the project up; a new Rust project is a one-crate binary package. `solace serve` in an empty folder starts an empty root, so a new project can be made entirely from the Workspace page. `solace create <name>` adds a new Gleam project to the enclosing root. To migrate several existing projects, run `solace migrate --yes --project api --project web` in their common folder, review the report, then run `solace migrate --adopt --yes`. The whole folder is copied and keeps its original path after adoption. The root's `solace.toml` keeps the list beside the root project's own settings:
 
 ```toml
 projects = ["bench/pilot", "bench/pilot-large", "solace-cli/board"]
@@ -269,7 +309,7 @@ Solace puts every file in the project into one category, named for what Solace d
 
 File writes enforce `watch_limit`, stale-write checks and any matching validators. `gleam.toml` must still parse after a write and can't be removed. Watched and unwatched file contents stay out of symbol searches. Running a launcher still requires a declared command; writing a script does not set its executable bit.
 
-Agents get no shell and no file tools, only the Solace MCP tool and web access. Code is meant to change through tasks, but Solace never writes over a source file it didn't write last. An edit made outside Solace (by hand, by another tool, by `git pull` or a branch switch) is read into the store. If an agent is working, the edit joins its task. Otherwise it waits on an **Unexpected Changes** task, marked with a hazard sign, until you complete it (keep the changes) or cancel it (restore Solace's code); no agent starts work meanwhile. Code that was approved in Solace, such as a teammate's pulled work, is read in quietly through `.solace/approved`, which you commit; project setup adds a `.solace/.gitignore` that keeps the rest of `.solace/` out of git. Migration reports source differences before you adopt the copy.
+Agents get no shell and no file tools, only the Solace MCP tool and web access. Code is meant to change through tasks, but Solace never writes over a source file it didn't write last. An edit made outside Solace (by hand, by another tool, by `git pull` or a branch switch) is read into the store. If an agent is working, the edit joins its task. Otherwise it waits on an **Unexpected Changes** task, marked with a hazard sign, until you complete it (keep the changes) or cancel it (restore Solace's code); no agent starts work meanwhile. Code that was approved in Solace, such as a teammate's pulled work, is read in quietly through `.solace/approved`, which you commit; Solace keeps one marked block in the root `.gitignore` that commits every project's `store.db` and `approved` and ignores the rest of each `.solace/`. Migration reports source differences before you adopt the copy.
 
 ### Running an agent yourself
 

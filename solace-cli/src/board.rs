@@ -1,6 +1,7 @@
 use super::*;
 use std::os::unix::process::CommandExt;
 use std::time::{Duration, Instant};
+mod prerequisites;
 
 pub fn lock(root: &Path) -> Result<fs::File, Failure> {
     fs::create_dir_all(root.join(".solace"))?;
@@ -1679,8 +1680,8 @@ pub(super) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize)>,
     Ok(Some((debt, items.len())))
 }
 /// Settles task `tid` once the task server has moved it into a final column
-/// (D-77 point 5, Option B): a step of its own, never on the server's thread, that
-/// takes the scope's locks like a human action does. It reads the task again
+/// (D-77 point 5, Option B): a step of its own, after the reply, that takes the
+/// scope's locks the human action took. It reads the task again
 /// under them, so a task that has left the final column since is not settled, and
 /// it can run again: approving and dropping records twice changes nothing.
 pub(super) fn settle_final(top: &Path, tid: &str) -> Result<(), Failure> {
@@ -1698,15 +1699,19 @@ pub(super) fn settle_final(top: &Path, tid: &str) -> Result<(), Failure> {
     }
     Ok(())
 }
-/// Settles every task already in a final column that still has undo records,
-/// which a stop or a crash between the move and its settle leaves behind.
+/// Settles every task already in a final column that still has undo records or
+/// whose deferred settle failed, which a stop, a crash, or a failed flush leaves
+/// behind.
 pub(super) fn resettle(top: &Path) {
     for t in all_tasks(top).unwrap_or_default() {
         let (Some(tid), Some(home)) = (t["id"].as_str(), t["home"].as_str()) else { continue };
         let home = scope::path(top, home);
-        let Ok(w) = flow(&home) else { continue };
-        if column(&w, &t)["final"] != true {
-            continue;
+        let marked = t["settleFailed"] == true;
+        if !marked {
+            let Ok(w) = flow(&home) else { continue };
+            if column(&w, &t)["final"] != true {
+                continue;
+            }
         }
         let left = open(&home).and_then(|s| scope_stores(&s, &t)).is_ok_and(|stores| {
             stores.iter().any(|(_, st)| {
@@ -1716,8 +1721,8 @@ pub(super) fn resettle(top: &Path) {
                     || lockdown::pending_for(&st.root, tid)
             })
         });
-        if left && let Err(e) = settle_final(top, tid) {
-            eprintln!("settling task {tid}: {}", e.0);
+        if left || marked {
+            tasks::settle_later(top, tid.to_string());
         }
     }
 }
@@ -1901,14 +1906,17 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
         let rid = unique_id();
         let kind = if run == "new_work" { "work" } else { run };
         let log = s.root.join(".solace/board").join(t["id"].as_str().unwrap()).join(format!("{rid}.jsonl"));
-        t["runs"].as_array_mut().unwrap().push(json!({"id":rid,"kind":kind,"model":m["id"],"effort":m["effort"],"state":"running","started":now(),"log":log,"fresh":run == "new_work" || a["revert"] == true}));
-        if kind == "review" {
-            let mut checkpoint = review_state(s, t)?;
-            checkpoint["run"] = json!(rid);
-            let path = review_path(&s.root, t["id"].as_str().unwrap(), &rid)?;
-            fs::create_dir_all(path.parent().unwrap())?;
-            write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap())?;
-        }
+        let entry = json!({
+            "id":rid,
+            "kind":kind,
+            "model":m["id"],
+            "effort":m["effort"],
+            "state":"running",
+            "started":now(),
+            "log":log,
+            "fresh":run == "new_work" || a["revert"] == true
+        });
+        t["runs"].as_array_mut().unwrap().push(entry);
         // The discussion's first message is its first turn.
         if kind == "discuss" {
             note(t, "human", Some(&rid), body["text"].as_str().unwrap_or(""));
@@ -1922,14 +1930,14 @@ fn action(s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<Option<(S
     }
     if column(w, t)["final"] == true {
         end_runs(t, "completed");
-        settle(s, t)?;
     }
     Ok(None)
 }
 
 /// The models this Solace install knows; the same for every project. One entry
-/// per Claude family, with why it can't start; `limit`: the reason is a usage
-/// limit a human may clear ("Try again", `POST /models/try-again`).
+/// per Claude family, with why it can't start; `retry`: the reason is a mark a
+/// human may clear ("Try again", `POST /models/try-again`); `sign_in`: that
+/// mark is an expired sign-in.
 fn models() -> Result<Value, Failure> {
     // Serve the last list; ask a kind whose answer is stale, in the background.
     agents::refresh_stale();
@@ -1940,11 +1948,13 @@ fn models() -> Result<Value, Failure> {
             .iter()
             .map(|m| {
                 let status = agents::availability(m);
-                let limit = status.as_ref().is_some_and(|s| s.1);
-                let reason = status.map(|s| s.0);
+                let retry = status.as_ref().is_some_and(|s| s.retry);
+                let sign_in = status.as_ref().is_some_and(|s| s.sign_in);
+                let reason = status.map(|s| s.reason);
                 // Whether a key is stored, never the key.
                 let has_key = m["id"].as_str().is_some_and(|id| keys[id].is_string());
-                json!({"id":m["id"],"label":m["label"],"model":m["model"],"agent":m["agent"],"effort":m["effort"],"efforts":efforts(m),"available":reason.is_none(),"reason":reason,"limit":limit,
+                json!({"id":m["id"],"label":m["label"],"model":m["model"],"agent":m["agent"],"effort":m["effort"],"efforts":efforts(m),
+                    "available":reason.is_none(),"reason":reason,"retry":retry,"sign_in":sign_in,
                     "configured":m["configured"] == true,"base_url":m["endpoint"]["base_url"],"has_key":has_key})
             })
             .collect::<Vec<_>>()
@@ -2016,9 +2026,10 @@ pub(super) fn guard(root: &Path, parts: Vec<&str>, body: &Value) -> Result<Vec<f
     }
 }
 /// Whether a human change to a task changes code, so it takes its projects'
-/// locks (D-77 point 5): undoing the task's changes or settling them in a final
-/// column, or approving a settings proposal. Cancelling a task that never had
-/// changes, and every other change, is task-only. Reads without a lock.
+/// locks (D-77 point 5): undoing the task's changes, a final move that still has
+/// changes or a live work run, or approving a settings proposal. Settling that
+/// move happens after the reply, under the same locks. Cancelling a task that
+/// never had changes, and every other change, is task-only. Reads without a lock.
 pub(super) fn needs_lock(root: &Path, parts: &[&str], body: &Value) -> Result<bool, Failure> {
     let ["tasks", tid, rest @ ..] = parts else { return Ok(false) };
     let Ok(t) = task(root, tid) else { return Ok(false) };
@@ -2446,55 +2457,7 @@ pub(super) fn change(root: &Path, tid: &str, method: &str, rest: &[&str], body: 
                     }
                     continue_answered(&mut t);
                 }
-                ("POST", ["actions"]) => {
-                    let name = body["action"].as_str().unwrap_or("");
-                    // A task with no project (D-129) can't run: no project has
-                    // an agent to work on it. Cancel, archive and editing are
-                    // the human's own, and need no project.
-                    if t["noProject"] == true && !w["actions"][name]["run"].is_null() {
-                        return err("E7003", format!("{name} needs a project; this task has none"));
-                    }
-                    let was_final = column(&w, &t)["final"] == true;
-                    let launch = action(&s, &w, &mut t, body)?;
-                    // A held question or a stopped work run stays flagged until the run
-                    // continues, restarts, stops or the task settles (D-82).
-                    let a = &w["actions"][name];
-                    let resolves = matches!(a["run"].as_str(), Some("work" | "new_work" | "investigate"))
-                        || a["revert"] == true
-                        || name == "stop"
-                        || column(&w, &t)["final"] == true;
-                    if t["attention"]["hold"] != true || resolves {
-                        t["attention"] = Value::Null;
-                    }
-                    t["finished"] = Value::Null;
-                    let after = match launch {
-                        Some((rid, m)) => After::Start(rid, m),
-                        None if column(&w, &t)["final"] == true => {
-                            // Completed with its changes kept, not canceled: the last
-                            // review's tech debt goes to the feature (D-112).
-                            let debt = if !was_final && a["revert"] != true {
-                                tech_debt(&scope::top(root), &t).unwrap_or_else(|e| {
-                                    eprintln!("filing tech debt of task {tid}: {}", e.0);
-                                    None
-                                })
-                            } else {
-                                None
-                            };
-                            if let Some((d, n)) = &debt {
-                                let items = if *n == 1 { "1 tech-debt item".to_string() } else { format!("{n} tech-debt items") };
-                                note(
-                                    &mut t,
-                                    "solace",
-                                    None,
-                                    &format!("Filed {items} from the last review on task:{}.", d["id"].as_str().unwrap_or("")),
-                                );
-                            }
-                            After::Clean(debt.map(|(d, _)| d))
-                        }
-                        None => After::Nothing,
-                    };
-                    return Ok((t, after));
-                }
+                ("POST", ["actions"]) => return act(root, &s, &w, &mut t, body).map(|after| (t, after)),
                 _ => return err("E7001", "unknown route"),
             }
         }
@@ -2508,7 +2471,11 @@ fn start(root: PathBuf, t: Value, rid: String, m: Value) {
             // A follow-up may be queued while the previous agent is exiting.
             // Never open one provider conversation in two processes.
             let _guard = conversation_lock(&root, tid)?;
-            let result = agent_process(&root, &task(&root, tid)?, &rid, &m, true);
+            let t = task(&root, tid)?;
+            if t["runs"].as_array().unwrap().iter().any(|r| r["id"] == rid && r["kind"] == "review") {
+                write_review_checkpoint(&root, &t, &rid)?;
+            }
+            let result = agent_process(&root, &t, &rid, &m, true);
             let mut result = match result {
                 Err(Failure(_, SESSION_GONE)) => agent_process(&root, &task(&root, tid)?, &rid, &m, false),
                 other => other,
@@ -2645,7 +2612,7 @@ fn agent_process(root: &Path, t: &Value, rid: &str, m: &Value, allow_resume: boo
     }
     let mut child = spawn_agent(&at, &dir, &log, m, &prompt, &images, resume.as_deref(), persistent, [tid, rid], timeout)?;
     let supervised =
-        supervise(Watch::Task(root, tid), rid, &mut child, &log, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT);
+        supervise(Watch::Task(root, tid), rid, &mut child, &log, m, resume.is_some(), Duration::from_secs(timeout), GRACEFUL_EXIT);
     let (started, outcome) = run_state(root, tid, rid);
     // A discussion agent that replied in plain text took its turn: its reply
     // answers like a finished run, so it clears a mark the same way.
@@ -2868,7 +2835,10 @@ fn spawn_agent(
         }
     }
     cmd.env("SOLACE_TASK", ids[0]).env("SOLACE_RUN", ids[1]).env("SOLACE_SESSION", ids[1]).env("SOLACE_BIN", &binary);
-    let mut child = cmd.spawn()?;
+    let mut child = cmd.spawn().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => Failure(agents::missing_program_at_launch(m), 1),
+        _ => Failure(e.to_string(), 1),
+    })?;
     let mut stdin = child.stdin.take().unwrap();
     if agent == "claude" && custom.is_none() && !images.is_empty() {
         // Claude Code takes images only inside a stream-json user message.
@@ -2897,6 +2867,7 @@ fn supervise(
     rid: &str,
     child: &mut std::process::Child,
     log: &Path,
+    m: &Value,
     resumed: bool,
     timeout: Duration,
     grace: Duration,
@@ -2945,8 +2916,10 @@ fn supervise(
                 {
                     return Ok(false);
                 }
-                let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
-                let message = format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default());
+                let message = agents::stopped(m, &entries).unwrap_or_else(|| {
+                    let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
+                    format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default())
+                });
                 watch.fail(rid, &message)?;
             }
             return Ok(false);
@@ -4406,6 +4379,7 @@ impl Board {
         match (method, path) {
             ("GET", "/projects") => return self.listing(),
             ("GET", "/languages") => return languages(),
+            ("GET", "/setup") => return Ok(prerequisites::check()),
             ("POST", "/languages") => return setup::save_language(&config_path(), body).and_then(|_| languages()),
             ("GET", "/models") => return models(),
             ("POST", "/models/try-again") => return agents::try_again(body).and_then(|_| models()),
@@ -4429,7 +4403,15 @@ impl Board {
             ("POST", "/projects/new") => {
                 let name = field("name")?;
                 let dir = body["dir"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or(name);
-                workspace::new_project(&self.top, dir, name, body["target"] == "javascript")?;
+                let project = match &body["language"] {
+                    Value::Null => workspace::NewProject::Gleam { javascript: body["target"] == "javascript" },
+                    Value::String(language) if language == "gleam" => {
+                        workspace::NewProject::Gleam { javascript: body["target"] == "javascript" }
+                    }
+                    Value::String(language) if language == "rust" => workspace::NewProject::Rust,
+                    other => return err("E7001", format!("language must be \"gleam\" or \"rust\", not {other}")),
+                };
+                workspace::new_project(&self.top, dir, name, project)?;
                 dir.to_string()
             }
             ("DELETE", p) if p.starts_with("/projects/") => {
@@ -4475,6 +4457,10 @@ impl Board {
             return Err(e);
         }
         self.listing()
+    }
+
+    fn new(top: PathBuf, port: u16) -> Self {
+        Board { top, held: Default::default(), editing: Default::default(), port, step: Default::default(), failed: Default::default() }
     }
 }
 
@@ -4532,14 +4518,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
     }
     let server = tiny_http::Server::http(("127.0.0.1", port)).map_err(|e| Failure(e.to_string(), 1))?;
     let port = server.server_addr().to_ip().map_or(port, |a| a.port());
-    let board = std::sync::Arc::new(Board {
-        top,
-        held: Default::default(),
-        editing: Default::default(),
-        port,
-        step: Default::default(),
-        failed: Default::default(),
-    });
+    let board = std::sync::Arc::new(Board::new(top, port));
     for (dir, root) in board.projects()? {
         board.claim(&dir, &root)?;
     }
@@ -4614,6 +4593,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
             // The root's own routes; `/events` merges every project's when it has several.
             let own = path == "/projects"
                 || path == "/languages"
+                || path == "/setup"
                 || path == "/models"
                 || path.starts_with("/projects/")
                 || path == "/migration"
@@ -4816,6 +4796,8 @@ impl Events {
     fn new(board: std::sync::Arc<Board>, root: Option<PathBuf>, last: Option<&str>) -> Events {
         let seen: HashMap<String, i64> = last.and_then(|l| serde_json::from_str(l).ok()).unwrap_or_default();
         let at = |d: &str| seen.get(d).copied().unwrap_or(0);
+        let tasks = at("tasks");
+        let fresh = seen.is_empty() || task_position_stale(&board.top, tasks);
         let (merged, streams) = match root {
             Some(root) => {
                 let d = scope::dir(&board.top, &root);
@@ -4823,7 +4805,7 @@ impl Events {
             }
             None => (true, board.projects().unwrap_or_default().into_iter().map(|(d, r)| (d.clone(), r, at(&d))).collect()),
         };
-        Events { fresh: seen.is_empty(), board, merged, tasks: at("tasks"), streams, caught_up: false, bytes: Default::default() }
+        Events { fresh, board, merged, tasks, streams, caught_up: false, bytes: Default::default() }
     }
     /// What a new stream starts from: the log positions first, then the files,
     /// so a change made in between is seen again as an event, never missed.
@@ -4900,6 +4882,10 @@ impl Events {
             return Ok(None);
         }
         let db = tasks::events(&self.board.top).map_err(|e| std::io::Error::other(e.0))?;
+        if task_log_stale(&db, self.tasks).map_err(|e| std::io::Error::other(e.to_string()))? {
+            self.fresh = true;
+            return Ok(None);
+        }
         let members = workspace::members(&self.board.top);
         loop {
             let row = db
@@ -4908,7 +4894,19 @@ impl Events {
                 })
                 .optional()
                 .map_err(std::io::Error::other)?;
-            let Some((seq, project, data)) = row else { return Ok(None) };
+            let Some((seq, project, data)) = row else {
+                let last: Option<i64> = db.query_row("SELECT MAX(seq) FROM events", [], |r| r.get(0)).map_err(std::io::Error::other)?;
+                if last.is_some_and(|last| self.tasks > last) {
+                    self.fresh = true;
+                }
+                return Ok(None);
+            };
+            // A prune between polls leaves a gap: rebuilding from the files is
+            // the only way to include what the stream no longer holds.
+            if seq != self.tasks + 1 {
+                self.fresh = true;
+                return Ok(None);
+            }
             self.tasks = seq;
             // A row with no project is a root record's (D-87); a row whose
             // project is no member is a task with no project (D-129), shown
@@ -4967,62 +4965,71 @@ impl Read for Events {
         if out.is_empty() {
             return Ok(0);
         }
-        let n = self.bytes.read(out)?;
-        if n > 0 {
-            return Ok(n);
-        }
-        if self.fresh {
-            self.fresh = false;
-            let text = self.snapshot()?;
-            if !text.is_empty() {
-                self.bytes = std::io::Cursor::new(text.into_bytes());
-                return self.bytes.read(out);
+        loop {
+            let n = self.bytes.read(out)?;
+            if n > 0 {
+                return Ok(n);
             }
-        }
-        for _ in 0..10 {
-            if self.merged
-                && let Some(text) = self.members_changed()?
-            {
-                self.bytes = std::io::Cursor::new(text.into_bytes());
-                return self.bytes.read(out);
-            }
-            for i in 0..self.streams.len() {
-                let (dir, root, seq) = &self.streams[i];
-                // Opened on each poll, not kept: a kept connection would follow a store
-                // that adopting or undoing a migration moved away.
-                let db = Connection::open(root.join(".solace/store.db")).map_err(std::io::Error::other)?;
-                db.busy_timeout(Duration::from_secs(10)).map_err(std::io::Error::other)?;
-                let row = db
-                    .query_row("SELECT seq,data FROM board_events WHERE seq>? ORDER BY seq LIMIT 1", [*seq], |r| {
-                        Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
-                    })
-                    .optional()
-                    .map_err(std::io::Error::other)?;
-                if let Some((seq, data)) = row {
-                    let dir = dir.clone();
-                    self.streams[i].2 = seq;
-                    let mut v: Value = serde_json::from_str(&data).map_err(std::io::Error::other)?;
-                    if self.merged {
-                        v["project"] = json!(dir);
-                    }
-                    self.bytes = std::io::Cursor::new(format!("id: {}\ndata: {v}\n\n", self.id()).into_bytes());
+            if self.fresh {
+                self.fresh = false;
+                let text = self.snapshot()?;
+                if !text.is_empty() {
+                    self.bytes = std::io::Cursor::new(text.into_bytes());
                     return self.bytes.read(out);
                 }
             }
-            // Workflow events first, so a replay draws the columns before their tasks.
-            if let Some(text) = self.next_task()? {
-                self.bytes = std::io::Cursor::new(text.into_bytes());
-                return self.bytes.read(out);
+            for _ in 0..10 {
+                if self.merged
+                    && let Some(text) = self.members_changed()?
+                {
+                    self.bytes = std::io::Cursor::new(text.into_bytes());
+                    return self.bytes.read(out);
+                }
+                for i in 0..self.streams.len() {
+                    let (dir, root, seq) = &self.streams[i];
+                    // Opened on each poll, not kept: a kept connection would follow a store
+                    // that adopting or undoing a migration moved away.
+                    let db = Connection::open(root.join(".solace/store.db")).map_err(std::io::Error::other)?;
+                    db.busy_timeout(Duration::from_secs(10)).map_err(std::io::Error::other)?;
+                    let row = db
+                        .query_row("SELECT seq,data FROM board_events WHERE seq>? ORDER BY seq LIMIT 1", [*seq], |r| {
+                            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                        })
+                        .optional()
+                        .map_err(std::io::Error::other)?;
+                    if let Some((seq, data)) = row {
+                        let dir = dir.clone();
+                        self.streams[i].2 = seq;
+                        let mut v: Value = serde_json::from_str(&data).map_err(std::io::Error::other)?;
+                        if self.merged {
+                            v["project"] = json!(dir);
+                        }
+                        self.bytes = std::io::Cursor::new(format!("id: {}\ndata: {v}\n\n", self.id()).into_bytes());
+                        return self.bytes.read(out);
+                    }
+                }
+                // Workflow events first, so a replay draws the columns before their tasks.
+                if let Some(text) = self.next_task()? {
+                    self.bytes = std::io::Cursor::new(text.into_bytes());
+                    return self.bytes.read(out);
+                }
+                // A prune during this stream left a gap: start over from the files.
+                if self.fresh {
+                    break;
+                }
+                if !self.caught_up {
+                    self.caught_up = true;
+                    self.bytes = std::io::Cursor::new(b"event: ready\ndata: {}\n\n".to_vec());
+                    return self.bytes.read(out);
+                }
+                std::thread::sleep(Duration::from_millis(100));
             }
-            if !self.caught_up {
-                self.caught_up = true;
-                self.bytes = std::io::Cursor::new(b"event: ready\ndata: {}\n\n".to_vec());
-                return self.bytes.read(out);
+            if self.fresh {
+                continue;
             }
-            std::thread::sleep(Duration::from_millis(100));
+            self.bytes = std::io::Cursor::new(b": keepalive\n\n".to_vec());
+            return self.bytes.read(out);
         }
-        self.bytes = std::io::Cursor::new(b": keepalive\n\n".to_vec());
-        self.bytes.read(out)
     }
 }
 
@@ -5223,4 +5230,79 @@ pub fn work_run(root: &Path) -> bool {
     let Some((tid, rid)) = context() else { return false };
     let Ok(t) = scope::home(root, &tid).and_then(|home| task(&home, &tid)) else { return false };
     run_at(&t, &rid).is_ok_and(|i| t["runs"][i]["kind"].as_str() == Some("work"))
+}
+
+/// Whether a stream's task position is outside what the log still holds: its
+/// older rows were pruned, or the log restarted its numbering. Either way the
+/// stream starts from the files again (D-78).
+fn task_log_stale(db: &Connection, tasks: i64) -> rusqlite::Result<bool> {
+    let (first, last): (Option<i64>, Option<i64>) =
+        db.query_row("SELECT MIN(seq), MAX(seq) FROM events", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok(first.zip(last).is_some_and(|(first, last)| tasks < first - 1 || tasks > last))
+}
+
+/// `task_log_stale` for a starting stream; a log that can't be read leaves the
+/// position usable, as before pruning existed.
+fn task_position_stale(top: &Path, tasks: i64) -> bool {
+    store_dir(top).is_dir() && tasks::events(top).is_ok_and(|db| task_log_stale(&db, tasks).unwrap_or(false))
+}
+
+/// Writes task `t`'s checkpoint for review run `rid` before its agent starts,
+/// so the reply that queued the review does not wait for the whole store.
+fn write_review_checkpoint(root: &Path, t: &Value, rid: &str) -> Result<(), Failure> {
+    let mut checkpoint = review_state(&open(root)?, t)?;
+    checkpoint["run"] = json!(rid);
+    let path = review_path(root, t["id"].as_str().unwrap(), rid)?;
+    fs::create_dir_all(path.parent().unwrap())?;
+    write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap())
+}
+
+/// Applies `body`'s action to `t`: launching its run, or moving it.
+fn act(root: &Path, s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result<After, Failure> {
+    let name = body["action"].as_str().unwrap_or("");
+    // A task with no project (D-129) can't run: no project has an agent to
+    // work on it. Cancel, archive and editing are the human's own, and need no
+    // project.
+    if t["noProject"] == true && !w["actions"][name]["run"].is_null() {
+        return err("E7003", format!("{name} needs a project; this task has none"));
+    }
+    let tid = t["id"].as_str().unwrap_or("").to_string();
+    let was_final = column(w, t)["final"] == true;
+    let launch = action(s, w, t, body)?;
+    // A held question or a stopped work run stays flagged until the run
+    // continues, restarts, stops or the task settles (D-82).
+    let a = &w["actions"][name];
+    let resolves = matches!(a["run"].as_str(), Some("work" | "new_work" | "investigate"))
+        || a["revert"] == true
+        || name == "stop"
+        || column(w, t)["final"] == true;
+    if t["attention"]["hold"] != true || resolves {
+        t["attention"] = Value::Null;
+    }
+    t["finished"] = Value::Null;
+    match launch {
+        Some((rid, m)) => Ok(After::Start(rid, m)),
+        None if column(w, t)["final"] == true => Ok(completed(root, &tid, t, was_final, a)),
+        None => Ok(After::Nothing),
+    }
+}
+
+/// A completed task's last review files its tech debt on its feature (D-112);
+/// its conversation goes.
+fn completed(root: &Path, tid: &str, t: &mut Value, was_final: bool, a: &Value) -> After {
+    // Completed with its changes kept, not canceled: the last review's tech
+    // debt goes to the feature.
+    let debt = if !was_final && a["revert"] != true {
+        tech_debt(&scope::top(root), t).unwrap_or_else(|e| {
+            eprintln!("filing tech debt of task {tid}: {}", e.0);
+            None
+        })
+    } else {
+        None
+    };
+    if let Some((d, n)) = &debt {
+        let items = if *n == 1 { "1 tech-debt item".to_string() } else { format!("{n} tech-debt items") };
+        note(t, "solace", None, &format!("Filed {items} from the last review on task:{}.", d["id"].as_str().unwrap_or("")));
+    }
+    After::Clean(debt.map(|(d, _)| d))
 }

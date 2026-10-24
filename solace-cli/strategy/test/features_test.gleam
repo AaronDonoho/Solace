@@ -3,18 +3,7 @@ import gleam/json
 import gleam/option.{None, Some}
 
 fn feature(id: String, milestone: String, rank: Float) -> features.Feature {
-  features.Feature(
-    id,
-    id,
-    "",
-    case milestone {
-      "" -> None
-      m -> Some(m)
-    },
-    rank,
-    "upcoming",
-    None,
-  )
+  feature_in_state(id, milestone, rank, "upcoming")
 }
 
 pub fn the_decoder_defaults_everything_but_the_id_test() {
@@ -60,7 +49,7 @@ pub fn groups_follow_milestone_rank_then_feature_rank_then_id_test() {
     ])
   assert groups
     == [
-      features.Group(
+      features.Open(
         Some(features.Milestone("m1", "Launch", 1.0, "", None, "proposed")),
         [
           feature("c", "m1", 0.5),
@@ -68,17 +57,17 @@ pub fn groups_follow_milestone_rank_then_feature_rank_then_id_test() {
           feature("b", "m1", 1.0),
         ],
       ),
-      features.Group(
+      features.Open(
         Some(features.Milestone("m2", "Later", 2.0, "", None, "proposed")),
         [
           feature("d", "m2", 1.0),
         ],
       ),
-      features.Group(
+      features.Open(
         Some(features.Milestone("m3", "Empty", 3.0, "", None, "proposed")),
         [],
       ),
-      features.Group(None, [
+      features.Open(None, [
         feature("gone", "m9", 0.0),
         feature("loose", "", 0.0),
       ]),
@@ -173,4 +162,60 @@ pub fn the_grip_reorders_with_the_arrow_keys_only_test() {
   assert features.grip_key("ArrowUp") == Some(True)
   assert features.grip_key("ArrowDown") == Some(False)
   assert features.grip_key("Tab") == None
+}
+
+fn feature_in_state(
+  id: String,
+  milestone: String,
+  rank: Float,
+  state: String,
+) -> features.Feature {
+  features.Feature(
+    id,
+    id,
+    "",
+    case milestone {
+      "" -> None
+      m -> Some(m)
+    },
+    rank,
+    state,
+    None,
+  )
+}
+
+pub fn closed_features_form_one_group_after_milestones_test() {
+  let m1 = features.Milestone("m1", "Launch", 1.0, "", None, "proposed")
+  let m2 = features.Milestone("m2", "Later", 2.0, "", None, "proposed")
+  let groups =
+    features.groups([m2, m1], [
+      feature("open", "m1", 0.5),
+      feature_in_state("done", "m1", 1.0, "complete"),
+      feature("loose", "", 3.0),
+      feature_in_state("dropped", "", 2.0, "canceled"),
+      feature_in_state("gone", "m9", 2.0, "complete"),
+    ])
+  assert groups
+    == [
+      features.Open(Some(m1), [feature("open", "m1", 0.5)]),
+      features.Open(Some(m2), []),
+      features.Open(None, [feature("loose", "", 3.0)]),
+      features.Closed([
+        feature_in_state("done", "m1", 1.0, "complete"),
+        feature_in_state("dropped", "", 2.0, "canceled"),
+        feature_in_state("gone", "m9", 2.0, "complete"),
+      ]),
+    ]
+}
+
+pub fn no_closed_group_when_no_feature_is_closed_test() {
+  let m1 = features.Milestone("m1", "Launch", 1.0, "", None, "proposed")
+  assert features.groups([m1], [
+      feature("in", "m1", 1.0),
+      feature("loose", "", 0.0),
+    ])
+    == [
+      features.Open(Some(m1), [feature("in", "m1", 1.0)]),
+      features.Open(None, [feature("loose", "", 0.0)]),
+    ]
 }

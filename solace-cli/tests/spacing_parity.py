@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Checks the values the pages share from one place.
 
-Two kinds of drift the UI polish pass kept finding:
+Three kinds of drift the UI polish pass kept finding:
 
 - The spacing and control tokens. `solace_task.spacing_styles` sets them for
   every page, and the shell's `index.html` carries its own copy of the same
@@ -12,23 +12,36 @@ Two kinds of drift the UI polish pass kept finding:
   the other way — "Cancelled" for Canceled, "Needs Review" for Review — is a
   fault: the board never shows that spelling, so what a test checks and what a
   person reads drifts from what ships.
+- The setup tools. The first-run checklist's `board::prerequisites.tool_label`
+  names them, and the README's "What Solace uses" table lists them. A tool in
+  one and not the other is a fault: the app and the install guide drift apart.
 
 Usage: spacing_parity.py [path ...]
-With paths, only those files are checked for labels; the token check always
-reads its own two files. Exit 0 when they agree; exit 1 with one line per fault.
+With paths, only those files are checked for labels; the token and setup checks
+always read their own files. Exit 0 when they agree; exit 1 with one line per fault.
 """
 import re
 import sys
 from pathlib import Path
 
 CLI = Path(__file__).resolve().parent.parent
+README = CLI.parent/'README.md'
 BOARD = CLI/'src/default-board.toml'
+PREREQUISITES = CLI/'src/board/prerequisites.rs'
 TOKENS = CLI/'components/src/solace_task.gleam'
 HTML = CLI/'frontend/index.html'
 SKIP = {'target', 'node_modules', '.solace', 'build', 'dist'}
 
 SHARED = ('--space-', '--control-', '--pad-', '--tab-')
 HEADINGS = ('--h2', '--h3', '--h4')
+DEBIAN_SETUP = (
+    'tar xf gleam-*-unknown-linux-musl.tar.gz',
+    'otp_src_29.0.tar.gz',
+    './configure --prefix=/usr/local && make && sudo make install',
+)
+MACOS_SETUP = (
+    '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"',
+)
 
 # A fixture's column, as Gleam builds it and as a workflow answers it.
 FIXTURES = [
@@ -55,6 +68,40 @@ def final_columns():
         found = re.search(r'id\s*=\s*"([^"]+)"', block)
         if found and re.search(r'^\s*final\s*=\s*true\b', block, re.M):
             out.add(found.group(1))
+    return out
+
+def setup_tools():
+    """The checklist's tool labels, as board::prerequisites.tool_label names them."""
+    text = PREREQUISITES.read_text(encoding='utf-8')
+    body = text.split('fn tool_label', 1)[1].split('\n}', 1)[0]
+    return re.findall(r'Tool::\w+ => "([^"]+)"', body)
+
+def readme_setup_section():
+    """The README's "What Solace uses" section, or nothing when it is missing."""
+    text = README.read_text(encoding='utf-8')
+    if '### 1. What Solace uses' not in text: return ''
+    return text.split('### 1. What Solace uses', 1)[1].split('\n### ', 1)[0]
+
+def readme_setup_tools():
+    """The tools in the README's "What Solace uses" table, in order."""
+    section = readme_setup_section()
+    cells = [cell.strip() for cell in re.findall(r'^\| ([^|]+?) \|', section, re.M)]
+    return [cell for cell in cells if cell != 'Tool' and not cell.startswith('-')]
+
+def setup_faults():
+    """One line per tool the checklist and the README's install section disagree on."""
+    want, have = setup_tools(), readme_setup_tools()
+    out = []
+    if not want: out.append(f'{rel(PREREQUISITES)}: no tool labels found')
+    missing = [tool for tool in want if tool not in have]
+    extra = [tool for tool in have if tool not in want]
+    if missing: out.append(f'{rel(README)}: the setup list is missing {", ".join(missing)}')
+    if extra: out.append(f'{rel(README)}: the setup list adds {", ".join(extra)}')
+    if want and not missing and not extra and want != have:
+        out.append(f'{rel(README)}: the setup tools are out of order')
+    section = readme_setup_section()
+    out += [f'{rel(README)}: the Debian setup is missing "{step}"' for step in DEBIAN_SETUP if step not in section]
+    out += [f'{rel(README)}: the macOS setup is missing "{step}"' for step in MACOS_SETUP if step not in section]
     return out
 
 def drift(board, finals):
@@ -116,14 +163,14 @@ def label_faults(paths, board):
 
 def checked(args):
     if args: return [Path(a) for a in args]
-    files = [CLI.parent/'README.md']
+    files = [README]
     files += [p for p in CLI.rglob('*')
               if p.is_file() and p.suffix in {'.gleam', '.mjs', '.js'} and not set(p.parts) & SKIP]
     return files + [p for p in CLI.rglob('README.md') if not set(p.parts) & SKIP]
 
 def main():
     if not BOARD.exists(): sys.exit(f'no {rel(BOARD)}')
-    faults = token_faults() + label_faults(checked(sys.argv[1:]), labels())
+    faults = token_faults() + label_faults(checked(sys.argv[1:]), labels()) + setup_faults()
     for fault in faults: print(fault)
     sys.exit(1 if faults else 0)
 

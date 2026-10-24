@@ -319,7 +319,7 @@ pub fn view(
   })
 }
 
-/// A milestone's heading: its title, state, target date and feature count,
+/// A milestone's heading: its title, state, target date and feature progress,
 /// with Edit and Delete; then the delete's confirmation, and its body when
 /// expanded.
 fn milestone_view(
@@ -355,20 +355,23 @@ fn milestone_view(
           event.on_click(editor.on_toggle(milestone.id)),
         ],
         [
-          html.text(milestone.title),
-          html.text(" "),
-          html.span([attribute.class("state")], [html.text(milestone.state)]),
-          case shown.planning {
-            True -> plan.marker()
-            False -> element.none()
-          },
-          case milestone.target_date {
-            Some(d) if d != "" ->
-              html.span([attribute.class("target")], [html.text(d)])
-            _ -> element.none()
-          },
-          html.span([attribute.class("feature-count")], [
-            html.text(feature_count(shown.count)),
+          html.span([attribute.class("title")], [html.text(milestone.title)]),
+          html.span([attribute.class("facts")], [
+            html.span([attribute.class(features.state_class(milestone.state))], [
+              html.text(milestone.state),
+            ]),
+            case shown.planning {
+              True -> plan.marker()
+              False -> element.none()
+            },
+            case milestone.target_date {
+              Some(d) if d != "" ->
+                html.span([attribute.class("target")], [html.text(d)])
+              _ -> element.none()
+            },
+            html.span([attribute.class("feature-count")], [
+              html.text(feature_count(shown.progress.0, shown.progress.1)),
+            ]),
           ]),
         ],
       ),
@@ -429,7 +432,9 @@ fn feature_view(feature: Feature, tasks: Element(msg)) -> Element(msg) {
     html.h4([], [
       html.text(feature.title),
       html.text(" "),
-      html.span([attribute.class("state")], [html.text(feature.state)]),
+      html.span([attribute.class(features.state_class(feature.state))], [
+        html.text(feature.state),
+      ]),
     ]),
     tasks,
   ])
@@ -886,12 +891,18 @@ fn by_rank(a: Feature, b: Feature) -> order.Order {
   |> order.break_tie(string.compare(a.id, b.id))
 }
 
-/// "1 feature" or "3 features".
-fn feature_count(count: Int) -> String {
-  case count {
-    1 -> "1 feature"
-    count -> int.to_string(count) <> " features"
+/// "2 / 3 features complete", or "1 / 1 feature complete".
+fn feature_count(complete: Int, total: Int) -> String {
+  let noun = case total {
+    1 -> "feature"
+    _ -> "features"
   }
+  int.to_string(complete)
+  <> " / "
+  <> int.to_string(total)
+  <> " "
+  <> noun
+  <> " complete"
 }
 
 /// The Roadmap tab's shared view state.
@@ -907,10 +918,15 @@ type Page(msg) {
   )
 }
 
-/// The milestone heading's facts: what a delete unlinks, the feature count,
+/// The milestone heading's facts: what a delete unlinks, the feature progress,
 /// and whether it is planned or expanded.
 type Shown {
-  Shown(held: #(Int, Int), count: Int, planning: Bool, expanded: Bool)
+  Shown(
+    held: #(Int, Int),
+    progress: #(Int, Int),
+    planning: Bool,
+    expanded: Bool,
+  )
 }
 
 /// A milestone's section: its heading, then its body when open.
@@ -919,7 +935,12 @@ fn group_view(page: Page(msg), group: Group) -> Element(msg) {
     task_list(ts, page.tasks, page.open, page.editor, page.busy)
   }
   let head = case group.milestone {
-    Some(m) -> heading_view(page, m, list.length(group.features))
+    Some(m) ->
+      heading_view(
+        page,
+        m,
+        feature_progress(list.map(group.features, fn(f) { f.0 })),
+      )
     None -> [html.h3([], [html.text("No milestone")])]
   }
   // "No milestone" has no heading to open or close.
@@ -951,7 +972,7 @@ fn group_view(page: Page(msg), group: Group) -> Element(msg) {
 fn heading_view(
   page: Page(msg),
   milestone: Milestone,
-  count: Int,
+  progress: #(Int, Int),
 ) -> List(Element(msg)) {
   case page.editor.draft {
     Some(Draft(id: Some(id), ..) as draft) if id == milestone.id -> [
@@ -969,11 +990,19 @@ fn heading_view(
         page.busy,
         Shown(
           held: held,
-          count: count,
+          progress: progress,
           planning: list.contains(page.planning, milestone.id),
           expanded: list.contains(page.editor.expanded, milestone.id),
         ),
       )
     }
   }
+}
+
+/// A milestone's completed features, and its features that are not canceled.
+fn feature_progress(fs: List(Feature)) -> #(Int, Int) {
+  #(
+    list.count(fs, fn(f) { f.state == "complete" }),
+    list.count(fs, fn(f) { f.state != "canceled" }),
+  )
 }

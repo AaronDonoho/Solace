@@ -184,6 +184,8 @@ pub fn working_status_notes_and_transcript_test() {
       ),
     )
   let rendered = html(model)
+  rendered |> string.contains("class=\"tool ok\"") |> should.be_true
+  rendered |> string.contains("✓") |> should.be_true
   rendered |> string.contains("solace view a") |> should.be_true
   rendered |> string.contains("Hide activity") |> should.be_true
   // A transcript for a run no longer watched is dropped.
@@ -229,7 +231,7 @@ pub fn effort_choice_test() {
     task.update(
       model,
       task.ModelsLoaded(
-        "[{\"id\":\"c\",\"label\":\"Claude\",\"effort\":\"medium\",\"efforts\":[\"low\",\"max\"]}]",
+        "[{\"id\":\"c\",\"label\":\"Claude\",\"effort\":\"medium\",\"efforts\":[\"low\",\"medium\",\"max\"]}]",
       ),
     )
   let #(model, _) =
@@ -240,13 +242,134 @@ pub fn effort_choice_test() {
         "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
       ),
     )
-  let rendered = html(model)
-  rendered |> string.contains("Default (medium)") |> should.be_true
-  rendered |> string.contains(">max</option>") |> should.be_true
+  let rendered = body(model)
+  rendered |> string.contains("class=\"effort-pick\"") |> should.be_true
+  rendered |> string.contains("role=\"group\"") |> should.be_true
+  rendered
+  |> string.contains("aria-label=\"" <> task.ui_label("effort") <> "\"")
+  |> should.be_true
+  rendered |> string.contains(">Effort</span>") |> should.be_true
+  rendered |> string.contains(">Low</span>") |> should.be_true
+  rendered |> string.contains(">Med</span>") |> should.be_true
+  rendered |> string.contains(">Max</span>") |> should.be_true
+  rendered |> string.contains(">Default</span>") |> should.be_false
+  rendered |> string.contains("title=\"low\"") |> should.be_true
+  rendered |> string.contains("title=\"medium\"") |> should.be_true
+  rendered |> string.contains("title=\"max\"") |> should.be_true
+  rendered
+  |> string.contains("class=\"effort-stop\" title=\"low\"")
+  |> should.be_true
+  // With no effort chosen, the model's default shows as chosen and sends "".
+  rendered
+  |> string.contains("checked name=\"effort-1\" type=\"radio\" value>")
+  |> should.be_true
+  rendered |> string.contains(">max</option>") |> should.be_false
+  let assert [css, ..] = string.split(html(model), "</style>")
+  css
+  |> string.contains(".effort-pick{display:flex;align-items:center;gap:.5rem;")
+  |> should.be_true
+  css
+  |> string.contains(
+    ".effort-pick label{position:relative;display:block;flex:none;width:2.375rem;",
+  )
+  |> should.be_true
+  css
+  |> string.contains(
+    ".effort-pick .effort-stops{display:flex;flex-wrap:nowrap}",
+  )
+  |> should.be_true
+  css |> string.contains(".effort-pick label span{") |> should.be_true
+  css
+  |> string.contains(".effort-pick label:hover span{background:var(--hover)}")
+  |> should.be_true
+  css
+  |> string.contains("background:var(--ink);color:var(--paper);font-weight:600")
+  |> should.be_true
+  css
+  |> string.contains(
+    ".effort-pick label:hover input:checked+span{background:var(--hover);color:var(--ink)}",
+  )
+  |> should.be_true
+  task.effort_pick_styles
+  |> string.contains(task.small_control)
+  |> should.be_true
+  css |> string.contains("effort-default") |> should.be_false
+  task.effort_value("medium", "medium") |> should.equal("")
+  task.effort_value("low", "medium") |> should.equal("low")
   let #(model, _) = task.update(model, task.EffortSelected("max"))
   model.effort |> should.equal("max")
+  body(model)
+  |> string.contains("checked name=\"effort-1\" type=\"radio\" value=\"max\"")
+  |> should.be_true
   let #(model, _) = task.update(model, task.AgentSelected("c"))
   model.effort |> should.equal("")
+  body(model)
+  |> string.contains("checked name=\"effort-1\" type=\"radio\" value>")
+  |> should.be_true
+  // No default: one segment for the effort, and nothing chosen.
+  let #(no_default, _) =
+    task.update(
+      fresh("2"),
+      task.ModelsLoaded(
+        "[{\"id\":\"d\",\"label\":\"D\",\"efforts\":[\"minimal\"]}]",
+      ),
+    )
+  let #(no_default, _) =
+    task.update(
+      no_default,
+      task.TaskLoaded(
+        no_default.generation,
+        "{\"id\":\"2\",\"title\":\"T2\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
+      ),
+    )
+  let single = body(no_default)
+  single |> string.contains(">Minimal</span>") |> should.be_true
+  single |> string.contains("title=\"minimal\"") |> should.be_true
+  single
+  |> string.contains("style=\"font-size:calc(4em / 5);\"")
+  |> should.be_true
+  single |> string.contains("checked name=\"effort-2\"") |> should.be_false
+  single
+  |> string.split("name=\"effort-2\"")
+  |> list.length
+  |> should.equal(2)
+  // One effort with a default: its one segment is chosen and sends "".
+  let #(one, _) =
+    task.update(
+      fresh("4"),
+      task.ModelsLoaded(
+        "[{\"id\":\"f\",\"label\":\"F\",\"effort\":\"low\",\"efforts\":[\"low\"]}]",
+      ),
+    )
+  let #(one, _) =
+    task.update(
+      one,
+      task.TaskLoaded(
+        one.generation,
+        "{\"id\":\"4\",\"title\":\"T4\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
+      ),
+    )
+  let only = body(one)
+  only |> string.contains(">Low</span>") |> should.be_true
+  only
+  |> string.contains("checked name=\"effort-4\" type=\"radio\" value>")
+  |> should.be_true
+  only |> string.split("name=\"effort-4\"") |> list.length |> should.equal(2)
+  // No efforts: no control.
+  let #(none, _) =
+    task.update(
+      fresh("3"),
+      task.ModelsLoaded("[{\"id\":\"e\",\"label\":\"E\"}]"),
+    )
+  let #(none, _) =
+    task.update(
+      none,
+      task.TaskLoaded(
+        none.generation,
+        "{\"id\":\"3\",\"title\":\"T3\",\"body\":\"\",\"column\":\"planning\",\"rank\":1}",
+      ),
+    )
+  body(none) |> string.contains("effort-pick") |> should.be_false
 }
 
 pub fn models_loaded_keeps_choice_test() {
@@ -880,8 +1003,9 @@ pub fn handed_messages_apply_in_order_once_test() {
 }
 
 /// A strategy proposal shows what it creates or changes, its fields with the
-/// title first, the record Approve reopens by name, and Approve and Reject;
-/// answered, it shows the answer instead.
+/// title first, record ids as links by title or `kind:id`, the record Approve
+/// reopens as a link, and Approve and Reject; answered, it shows the answer
+/// instead, its created record as a link.
 pub fn proposal_display_test() {
   let assert Ok(p) =
     json.parse(
@@ -907,11 +1031,23 @@ pub fn proposal_display_test() {
     })
     |> element.to_string
   open |> string.contains("Create task<em> Index</em>") |> should.be_true
-  open
-  |> string.contains(
-    "Approving also sets the feature <em>Search</em> back to upcoming.",
-  )
-  |> should.be_true
+  let feature = between(open, "<dt>feature</dt><dd>", "</dd>")
+  feature |> string.contains("href=\"/feature/f1\"") |> should.be_true
+  feature |> string.contains("data-feature=\"f1\"") |> should.be_true
+  feature |> string.contains(">Search</a>") |> should.be_true
+  let depends = between(open, "<dt>dependsOn</dt><dd>", "</dd>")
+  depends |> string.contains("href=\"/task/t1\"") |> should.be_true
+  depends |> string.contains("data-task=\"t1\"") |> should.be_true
+  depends |> string.contains(">task:t1</a>") |> should.be_true
+  depends |> string.contains("href=\"/task/t2\"") |> should.be_true
+  depends |> string.contains("data-task=\"t2\"") |> should.be_true
+  depends |> string.contains(">task:t2</a>") |> should.be_true
+  open |> string.contains("<dt>milestone</dt><dd>(none)</dd>") |> should.be_true
+  let reopened =
+    between(open, "Approving also sets the feature ", " back to upcoming.")
+  reopened |> string.contains("href=\"/feature/f1\"") |> should.be_true
+  reopened |> string.contains("data-feature=\"f1\"") |> should.be_true
+  reopened |> string.contains(">Search</a>") |> should.be_true
   open |> string.contains(">Approve</button>") |> should.be_true
   open |> string.contains(">Reject</button>") |> should.be_true
   let answered =
@@ -919,13 +1055,24 @@ pub fn proposal_display_test() {
       "",
       p,
       ["Approve", "Reject"],
-      "Created task t9",
+      "Approved and applied: created task:0123456789abcdef",
       name,
       False,
       fn(o) { o },
     )
     |> element.to_string
-  answered |> string.contains("Answer: Created task t9") |> should.be_true
+  answered
+  |> string.contains("Answer: Approved and applied: created ")
+  |> should.be_true
+  answered
+  |> string.contains("<div class=\"answer\">")
+  |> should.be_true
+  answered
+  |> string.contains("href=\"/task/0123456789abcdef\"")
+  |> should.be_true
+  answered
+  |> string.contains("data-task=\"0123456789abcdef\"")
+  |> should.be_true
   answered |> string.contains(">Approve</button>") |> should.be_false
 }
 
@@ -1400,11 +1547,12 @@ pub fn proposal_unchanged_fields_are_hidden_test() {
   |> should.be_true
 }
 
-/// A changed short field shows `old → new`, a record id by its title.
+/// A changed short field shows `old → new`, each record id a link titled by
+/// the record's name or `kind:id`.
 pub fn proposal_short_field_shows_old_to_new_test() {
   let assert Ok(p) =
     json.parse(
-      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"feature\":\"f1\",\"dependsOn\":[\"t2\"]},\"before\":{\"feature\":\"f0\",\"dependsOn\":[]}}",
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"feature\":\"f1\",\"dependsOn\":[\"t2\"],\"milestone\":\"m1\"},\"before\":{\"feature\":\"f0\",\"dependsOn\":[],\"milestone\":\"m2\"},\"reopens\":[{\"kind\":\"feature\",\"id\":\"f1\"}]}",
       task.proposal_decoder(),
     )
   let name = fn(kind, id) {
@@ -1420,12 +1568,32 @@ pub fn proposal_short_field_shows_old_to_new_test() {
       o
     })
     |> element.to_string
-  shown
-  |> string.contains("<dt>feature</dt><dd>Old → Search</dd>")
-  |> should.be_true
-  shown
-  |> string.contains("<dt>dependsOn</dt><dd>(none) → Index</dd>")
-  |> should.be_true
+  let feature = between(shown, "<dt>feature</dt><dd>", "</dd>")
+  feature |> string.contains("href=\"/feature/f0\"") |> should.be_true
+  feature |> string.contains("data-feature=\"f0\"") |> should.be_true
+  feature |> string.contains(">Old</a>") |> should.be_true
+  feature |> string.contains("href=\"/feature/f1\"") |> should.be_true
+  feature |> string.contains("data-feature=\"f1\"") |> should.be_true
+  feature |> string.contains(">Search</a>") |> should.be_true
+  feature |> string.contains(" → ") |> should.be_true
+  let depends = between(shown, "<dt>dependsOn</dt><dd>", "</dd>")
+  depends |> string.contains("(none) → ") |> should.be_true
+  depends |> string.contains("href=\"/task/t2\"") |> should.be_true
+  depends |> string.contains("data-task=\"t2\"") |> should.be_true
+  depends |> string.contains(">Index</a>") |> should.be_true
+  let milestone = between(shown, "<dt>milestone</dt><dd>", "</dd>")
+  milestone |> string.contains("href=\"/milestone/m2\"") |> should.be_true
+  milestone |> string.contains("data-milestone=\"m2\"") |> should.be_true
+  milestone |> string.contains(">milestone:m2</a>") |> should.be_true
+  milestone |> string.contains("href=\"/milestone/m1\"") |> should.be_true
+  milestone |> string.contains("data-milestone=\"m1\"") |> should.be_true
+  milestone |> string.contains(">milestone:m1</a>") |> should.be_true
+  milestone |> string.contains(" → ") |> should.be_true
+  let reopened =
+    between(shown, "Approving also sets the feature ", " back to upcoming.")
+  reopened |> string.contains("href=\"/feature/f1\"") |> should.be_true
+  reopened |> string.contains("data-feature=\"f1\"") |> should.be_true
+  reopened |> string.contains(">Search</a>") |> should.be_true
   shown |> string.contains("<p>Old:</p>") |> should.be_false
 }
 
@@ -1506,10 +1674,14 @@ pub fn proposal_body_that_only_changes_spacing_says_no_change_test() {
       "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"One\\nTwo\\nThree\"},\"before\":{\"body\":\"One \\n  Two\\nFour\"}}",
     )
   one
-  |> string.contains("<p>Old:</p><pre>One \n  Two\nFour</pre>")
+  |> string.contains(
+    "<p>Old:</p><pre class=\"old-value\">One \n  Two\nFour</pre>",
+  )
   |> should.be_true
   one
-  |> string.contains("<p>New:</p><pre>One\nTwo\nThree</pre>")
+  |> string.contains(
+    "<p>New:</p><pre class=\"new-value\">One\nTwo\nThree</pre>",
+  )
   |> should.be_true
   one |> string.contains("<del>") |> should.be_false
   one |> string.contains("+ Three") |> should.be_false
@@ -1876,7 +2048,7 @@ pub fn usage_limits_can_be_tried_again_test() {
     task.update(
       model,
       task.ModelsLoaded(
-        "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached (resets 3:45 PM)\",\"limit\":true},{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"codex\",\"available\":false,\"reason\":\"codex is not installed\",\"limit\":false}]",
+        "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached (resets 3:45 PM)\",\"retry\":true},{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"codex\",\"available\":false,\"reason\":\"codex is not installed\",\"retry\":false}]",
       ),
     )
   let #(model, _) =
@@ -1895,26 +2067,56 @@ pub fn usage_limits_can_be_tried_again_test() {
   rendered
   |> string.contains("<summary>2 models unavailable</summary>")
   |> should.be_true
-  // Only the usage limit has Try again.
+  // One icon button, left of where the pick would be, even with none to pick.
   rendered
-  |> string.contains(
-    "Sol: Codex usage limit reached (resets 3:45 PM)<button type=\"button\">Try again</button>",
-  )
+  |> string.contains("aria-label=\"Try again\"")
+  |> should.be_true
+  rendered |> string.contains("⟳</button>") |> should.be_true
+  rendered
+  |> string.contains("<li>Sol: Codex usage limit reached (resets 3:45 PM)</li>")
   |> should.be_true
   rendered
   |> string.contains("<li>Luna: codex is not installed</li>")
   |> should.be_true
   // Try again's reply is the model list as it is now: the cleared model is offered.
-  let #(model, _) = task.update(model, task.TryAgain("codex"))
+  let #(model, _) = task.update(model, task.TryAgain)
+  // While the recheck is in flight, the button is disabled.
+  model.refreshing |> should.be_true
   let #(model, _) =
     task.update(
       model,
       task.ModelsLoaded(
-        "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":true,\"limit\":false}]",
+        "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":true}]",
       ),
     )
+  model.refreshing |> should.be_false
   model.model |> should.equal("sol")
-  html(model) |> string.contains("unavailable</summary>") |> should.be_false
+  let rendered = html(model)
+  rendered |> string.contains("unavailable</summary>") |> should.be_false
+  // The icon stays left of the pick when a model can start.
+  rendered |> string.contains("⟳</button><select") |> should.be_true
+  // An expired sign-in is also a mark Try again clears.
+  let #(model, _) =
+    task.update(
+      model,
+      task.ModelsLoaded(
+        "[{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"claude\",\"available\":false,\"reason\":\"Claude Code's sign-in has expired. Open Claude Code once and sign in, then press Try again.\",\"retry\":true,\"sign_in\":true}]",
+      ),
+    )
+  let rendered = html(model)
+  rendered
+  |> string.contains(
+    "sign-in has expired. Open Claude Code once and sign in, then press Try again.",
+  )
+  |> should.be_true
+  rendered
+  |> string.contains("aria-label=\"Try again\"")
+  |> should.be_true
+  rendered
+  |> string.contains(
+    "Every model is held. Each reason is shown below; the Try again button above checks them again.",
+  )
+  |> should.be_true
 }
 
 /// A run shows one current label for the model its agent used, when its start
@@ -1963,7 +2165,7 @@ pub fn all_models_held_by_usage_limits_says_so_test() {
   }
   let rendered =
     loaded(
-      "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached (resets 3:45 PM)\",\"limit\":true},{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"claude\",\"available\":false,\"reason\":\"Claude Code usage limit reached (resets 8pm)\",\"limit\":true}]",
+      "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached (resets 3:45 PM)\",\"retry\":true},{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"claude\",\"available\":false,\"reason\":\"Claude Code usage limit reached (resets 8pm)\",\"retry\":true}]",
     )
   rendered
   |> string.contains("Every model is held by a usage limit")
@@ -1971,10 +2173,33 @@ pub fn all_models_held_by_usage_limits_says_so_test() {
   rendered |> string.contains("No model can start yet") |> should.be_false
   rendered |> string.contains("claude.ai/install.sh") |> should.be_false
   rendered |> string.contains("<select") |> should.be_false
+  // At least one expired sign-in: the line claims no usage limit or reset.
+  let rendered =
+    loaded(
+      "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex's sign-in has expired. Open Codex once and sign in, then press Try again.\",\"retry\":true,\"sign_in\":true},{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"claude\",\"available\":false,\"reason\":\"Claude Code usage limit reached (resets 8pm)\",\"retry\":true,\"sign_in\":false}]",
+    )
+  rendered
+  |> string.contains(
+    "Every model is held. Each reason is shown below; the Try again button above checks them again.",
+  )
+  |> should.be_true
+  rendered
+  |> string.contains("held by a usage limit")
+  |> should.be_false
+  rendered |> string.contains("reset shown below") |> should.be_false
+  rendered
+  |> string.contains(
+    "sign-in has expired. Open Codex once and sign in, then press Try again.",
+  )
+  |> should.be_true
+  rendered
+  |> string.contains("aria-label=\"Try again\"")
+  |> should.be_true
+  rendered |> string.contains("No model can start yet") |> should.be_false
   // A model that isn't installed: the install steps stand.
   let rendered =
     loaded(
-      "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached\",\"limit\":true},{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"claude\",\"available\":false,\"reason\":\"claude is not installed\",\"limit\":false}]",
+      "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached\",\"retry\":true},{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"claude\",\"available\":false,\"reason\":\"claude is not installed\",\"retry\":false}]",
     )
   rendered |> string.contains("No model can start yet") |> should.be_true
   rendered |> string.contains("claude.ai/install.sh") |> should.be_true
@@ -2004,6 +2229,10 @@ pub fn controls_share_two_heights_test() {
 pub fn editor_toolbar_shares_the_small_height_test() {
   assert string.contains(
     task.editor_styles,
+    ".toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px}",
+  )
+  assert string.contains(
+    task.editor_styles,
     ".toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}",
   )
   assert string.contains(
@@ -2016,9 +2245,9 @@ pub fn editor_toolbar_shares_the_small_height_test() {
   )
 }
 
-/// With the `bar` attribute the host's bar shows the title, Copy ID, column
-/// and status, so the details leave them out; without it, as on the
-/// Strategy page, they show.
+/// With the `bar` attribute, as on the board, the host's bar shows the title,
+/// Copy ID, column and status, so the details leave them out; without it, as
+/// on the Strategy page, they show.
 pub fn a_barred_detail_leaves_its_heading_to_the_host_test() {
   let model =
     loaded(
@@ -2667,7 +2896,7 @@ pub fn switching_tasks_and_successful_loads_clear_errors_test() {
   let #(model, _) =
     task.update(
       task.Model(..model, error: "TypeError: Load Failed"),
-      task.ReviewLoaded("{\"review\":{\"summary\":\"Looks good\"}}"),
+      task.ReviewLoaded("{\"summary\":\"Looks good\"}"),
     )
   model.error |> should.equal("")
   model.review_summary |> should.equal("Looks good")
@@ -2731,7 +2960,8 @@ pub fn a_late_action_reply_from_another_task_is_dropped_test() {
 }
 
 /// A changed body or vision text shows its complete old and new values under
-/// `Old:` and `New:`, not a line diff; the new body still opens as Markdown.
+/// `Old:` and `New:`, not a line diff; the new body shows as Markdown without
+/// a click.
 pub fn proposal_body_shows_old_and_new_test() {
   let assert Ok(p) =
     json.parse(
@@ -2750,13 +2980,20 @@ pub fn proposal_body_shows_old_and_new_test() {
     )
     |> element.to_string
   shown
-  |> string.contains("<p>Old:</p><pre>Keep me\n\nDrop me</pre>")
+  |> string.contains(
+    "<p>Old:</p><pre class=\"old-value\">Keep me\n\nDrop me</pre>",
+  )
   |> should.be_true
   shown
-  |> string.contains("<p>New:</p><pre>Keep me\n\nAdd me</pre>")
+  |> string.contains(
+    "<p>New:</p><pre class=\"new-value\">Keep me\n\nAdd me</pre>",
+  )
   |> should.be_true
   shown |> string.contains("<del>") |> should.be_false
   shown |> string.contains("+ Add me") |> should.be_false
+  shown
+  |> string.contains("<details class=\"new-body\" open>")
+  |> should.be_true
   shown |> string.contains("<summary>New body</summary>") |> should.be_true
   let assert Ok(vision) =
     json.parse(
@@ -2775,12 +3012,19 @@ pub fn proposal_body_shows_old_and_new_test() {
     )
     |> element.to_string
   shown
-  |> string.contains("<p>Old:</p><pre>Keep me\n\nDrop me</pre>")
+  |> string.contains(
+    "<p>Old:</p><pre class=\"old-value\">Keep me\n\nDrop me</pre>",
+  )
   |> should.be_true
   shown
-  |> string.contains("<p>New:</p><pre>Keep me\n\nAdd me</pre>")
+  |> string.contains(
+    "<p>New:</p><pre class=\"new-value\">Keep me\n\nAdd me</pre>",
+  )
   |> should.be_true
   shown |> string.contains("<del>") |> should.be_false
+  shown
+  |> string.contains("<details class=\"new-body\" open>")
+  |> should.be_true
   shown |> string.contains("<summary>New body</summary>") |> should.be_true
 }
 
@@ -2802,8 +3046,9 @@ pub fn proposal_body_old_and_new_keep_their_order_test() {
       fn(o) { o },
     )
     |> element.to_string
-  let old = "<p>Old:</p><pre>One\n\nTwo\n\nThree</pre>"
-  let new = "<p>New:</p><pre>One\n\nTwo edited\n\nThree</pre>"
+  let old = "<p>Old:</p><pre class=\"old-value\">One\n\nTwo\n\nThree</pre>"
+  let new =
+    "<p>New:</p><pre class=\"new-value\">One\n\nTwo edited\n\nThree</pre>"
   case string.split(shown, old) {
     [_, after_old] -> after_old |> string.contains(new) |> should.be_true
     _ -> should.be_true(False)
@@ -2812,7 +3057,9 @@ pub fn proposal_body_old_and_new_keep_their_order_test() {
   shown |> string.contains("+ Two edited") |> should.be_false
 }
 
-/// The proposal's long values are readable wrapped blocks, not a line diff.
+/// The proposal's long values are readable wrapped blocks, not a line diff;
+/// old and new values carry the page's deletion and addition tints while
+/// their labels stay soft.
 pub fn proposal_styles_show_old_and_new_test() {
   task.proposal_styles
   |> string.contains(".proposal .old-new")
@@ -2820,6 +3067,19 @@ pub fn proposal_styles_show_old_and_new_test() {
   task.proposal_styles
   |> string.contains("white-space:pre-wrap")
   |> should.be_true
+  task.proposal_styles
+  |> string.contains(".proposal .old-new pre.old-value{background:var(--del)}")
+  |> should.be_true
+  task.proposal_styles
+  |> string.contains(".proposal .old-new pre.new-value{background:var(--add)}")
+  |> should.be_true
+  task.proposal_styles
+  |> string.contains(".proposal .old-new p{color:var(--soft)")
+  |> should.be_true
+  task.proposal_styles
+  |> string.contains(".proposal .answer{font-weight:600}")
+  |> should.be_true
+  task.proposal_styles |> string.contains("#") |> should.be_false
   task.proposal_styles |> string.contains(".body-diff") |> should.be_false
   task.proposal_styles
   |> string.contains("text-decoration:line-through")
@@ -2921,4 +3181,64 @@ pub fn a_renamed_model_label_updates_a_shown_run_test() {
   let rendered = html(model)
   rendered |> string.contains("work · Opus Renamed · high") |> should.be_true
   rendered |> string.contains("work · Opus 5.5 · high") |> should.be_false
+}
+
+/// The one task-status mark says each outcome: a check or cross with its
+/// label, and an ellipsis for a status that is still going.
+pub fn status_mark_says_each_outcome_test() {
+  let mark = fn(status, label) {
+    element.to_string(task.status_mark(status, label))
+  }
+  let complete = mark("ok", "Complete")
+  complete |> string.contains("class=\"tool ok\"") |> should.be_true
+  complete |> string.contains("role=\"img\"") |> should.be_true
+  complete |> string.contains("aria-label=\"Complete\"") |> should.be_true
+  complete |> string.contains("✓") |> should.be_true
+  let failed = mark("failed", "Canceled")
+  failed |> string.contains("class=\"tool failed\"") |> should.be_true
+  failed |> string.contains("aria-label=\"Canceled\"") |> should.be_true
+  failed |> string.contains("✗") |> should.be_true
+  let running = mark("running", "")
+  running |> string.contains("class=\"tool running\"") |> should.be_true
+  running |> string.contains("…") |> should.be_true
+  running |> string.contains("role=\"img\"") |> should.be_false
+  running |> string.contains("aria-label") |> should.be_false
+}
+
+/// The task detail carries the shared ✓/✗ mark styles, so its transcript
+/// and a page's task lists cannot drift apart.
+pub fn tool_mark_styles_are_shared_test() {
+  task.tool_styles
+  |> string.contains(".tool.ok .icon{color:var(--ok-text)}")
+  |> should.be_true
+  task.tool_styles
+  |> string.contains(".tool.failed .icon{color:var(--revision)}")
+  |> should.be_true
+  let assert [css, ..] = string.split(html(fresh("1")), "</style>")
+  css |> string.contains(task.tool_styles) |> should.be_true
+}
+
+pub fn effort_label_test() {
+  task.effort_label("low") |> should.equal("Low")
+  task.effort_label("medium") |> should.equal("Med")
+  task.effort_label("high") |> should.equal("High")
+  task.effort_label("xhigh") |> should.equal("X-Hi")
+  task.effort_label("max") |> should.equal("Max")
+  task.effort_label("minimal") |> should.equal("Minimal")
+}
+
+/// An answered question's answer is Markdown, so a `task:<id>` in it is a link.
+pub fn an_answered_question_links_its_task_reference_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q\",\"text\":\"Which task?\",\"options\":[\"Yes\",\"No\"],\"answer\":\"task:0123456789abcdef\"}]}",
+    )
+  let #(model, _) = task.update(model, task.Tab("questions"))
+  let rendered = html(model)
+  rendered
+  |> string.contains("href=\"/task/0123456789abcdef\"")
+  |> should.be_true
+  rendered
+  |> string.contains("data-task=\"0123456789abcdef\"")
+  |> should.be_true
 }

@@ -2,7 +2,8 @@
 
 The Lustre shell registers the board, contract view, migration, strategy and
 settings components, draws its own Knowledgebase page (the guide, D-140), and
-uses modem for menu navigation and browser back/forward navigation.
+uses modem for menu navigation and `src/history.mjs` for browser Back and
+Forward, including Strategy tabs and a record link's focus.
 
 | Page | Component |
 | --- | --- |
@@ -17,15 +18,22 @@ uses modem for menu navigation and browser back/forward navigation.
 Unknown paths fall back to the board. /migration remains the JSON API, and
 /projects the projects API.
 
+A Strategy tab change adds `/strategy?tab=<name>` to the history, and Back and
+Forward restore that tab in the mounted page. A direct address naming a tab
+opens on it; an unknown tab shows Vision.
+
 ## Task, feature and milestone links (D-98, D-122)
 
 Markdown on every page draws `task:<id>` and `[label](task:<id>)` as links to
 `/task/<id>`, and `feature:<id>`, `milestone:<id>` the same way, to
 `/feature/<id>` and `/milestone/<id>`. A plain click on one is followed in-page
 by `src/task_link.mjs` (the links live in the pages' shadow roots, where modem
-doesn't route); a click with a modifier key held, or loading the address
-directly, reaches the shell at that address, which resolves it the same way
-and replaces it in the history. For a task the shell asks `GET /tasks/find/{id}`:
+doesn't route). It adds a history entry for the page and focus it opens, even
+when that page is already shown; Back and Forward restore the page, its tab and
+the focused record. Loading the record's address directly reaches the shell at
+that address, which resolves it and replaces the entry with the page it opens,
+so no dead entry remains. A click with a modifier key held keeps the browser's
+new-tab behavior. For a task the shell asks `GET /tasks/find/{id}`:
 
 - on the board (not archived, in a project): the Board page shows, and
   `<solace-board>` gets the task in its `focus` property, `{dir, id, n}`;

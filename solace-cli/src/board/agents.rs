@@ -1,9 +1,9 @@
 //! The agents Solace runs, and whether each can start right now. Each agent
 //! kind is one entry in `KINDS`: its program, where its sign-in is kept, and
-//! how it says a usage limit was reached, so another harness is one more entry.
-//! The checks are local and make no model call. A usage limit is learned from a
-//! run that hit it and kept in `agent-limits.json`, beside the system settings,
-//! so it outlasts a restart.
+//! how it says a usage limit was reached or its sign-in expired, so another
+//! harness is one more entry. The checks are local and make no model call. A
+//! hold learned from a run, a usage limit or an expired sign-in, is kept in
+//! `agent-holds.json`, beside the system settings, so it outlasts a restart.
 use super::*;
 use std::sync::{LazyLock, Mutex};
 
@@ -13,8 +13,13 @@ pub(super) struct Kind {
     pub name: &'static str,
     /// What the human calls it.
     pub label: &'static str,
-    /// Sign-in files, from the home folder.
+    /// The folder holding this agent's sign-in files.
+    pub folder: fn() -> PathBuf,
+    /// Sign-in files, from that folder.
     pub files: &'static [&'static str],
+    /// The program's arguments that say whether it is signed in, with no
+    /// model call; empty when it has none.
+    pub status: &'static [&'static str],
     /// Variables holding an API key; any one set is a sign-in.
     pub keys: &'static [&'static str],
     /// The macOS keychain item that may hold the sign-in instead of a file.
@@ -24,6 +29,13 @@ pub(super) struct Kind {
     /// Whether an error is this agent saying a usage limit was reached, and
     /// then the reset time it names, if any.
     pub limit: fn(&str) -> Option<Option<String>>,
+    /// Whether an error is this agent saying its sign-in has expired.
+    pub signed_out: fn(&str) -> bool,
+    /// Whether a message is exactly this agent saying its sign-in expired.
+    pub signed_out_whole: fn(&str) -> bool,
+    /// How this agent says it needs an update: whether an error says so, and
+    /// whether a message is exactly that; none when it says so some other way.
+    pub update: Option<(fn(&str) -> bool, fn(&str) -> bool)>,
     /// The models this agent offers now, asked of the program itself; an
     /// empty answer keeps the presets and the configured models.
     pub discover: fn() -> Vec<Value>,
@@ -35,22 +47,32 @@ pub(super) const KINDS: &[Kind] = &[
     Kind {
         name: "codex",
         label: "Codex",
-        files: &[".codex/auth.json"],
+        folder: codex_folder,
+        files: &["auth.json"],
+        status: &["login", "status"],
         keys: &["OPENAI_API_KEY"],
         keychain: None,
         expired: codex_expired,
         limit: codex_limit,
+        signed_out: codex_signed_out,
+        signed_out_whole: codex_signed_out_whole,
+        update: None,
         discover: codex_models,
         gone: model_gone,
     },
     Kind {
         name: "claude",
         label: "Claude Code",
-        files: &[".claude/.credentials.json"],
+        folder: super::claude_home,
+        files: &[".credentials.json"],
+        status: &["auth", "status"],
         keys: &["ANTHROPIC_API_KEY"],
         keychain: Some("Claude Code-credentials"),
         expired: claude_expired,
         limit: claude_limit,
+        signed_out: claude_signed_out,
+        signed_out_whole: claude_signed_out_whole,
+        update: Some((claude_update, claude_update_whole)),
         discover: claude_models,
         gone: model_gone,
     },
@@ -678,7 +700,10 @@ pub(super) fn zone_offset(zone: Option<&str>, at: i64) -> Option<i64> {
 
 /// What a detection reads from this computer, so tests can give their own.
 pub(super) struct Here<'a> {
-    pub home: &'a Path,
+    /// The folder holding an agent's sign-in files.
+    pub folder: &'a dyn Fn(&Kind) -> PathBuf,
+    /// What an agent's own status command says: signed in or not, none when it can't say.
+    pub status: &'a dyn Fn(&Kind) -> Option<bool>,
     /// Whether an environment variable is set.
     pub var: &'a dyn Fn(&str) -> bool,
     /// Whether a key is stored for a model id (Settings).
@@ -694,12 +719,12 @@ pub(super) struct Here<'a> {
 /// expired, or on macOS the keychain).
 pub(super) fn local(m: &Value, here: &Here) -> Option<String> {
     if let Some(argv) = m["run"].as_array() {
-        let program = argv[0].as_str().unwrap_or("");
-        return (!(here.installed)(program)).then(|| format!("{program} is not installed"));
+        let program = argv.first().and_then(|p| p.as_str()).unwrap_or("");
+        return (!(here.installed)(program)).then(|| missing_program(m));
     }
     let agent = m["agent"].as_str().unwrap_or("");
     if !(here.installed)(agent) {
-        return Some(format!("{agent} is not installed (not on PATH)"));
+        return Some(missing_program(m));
     }
     if let Some(e) = m.get("endpoint") {
         if m["id"].as_str().is_some_and(|id| (here.stored)(id)) {
@@ -714,13 +739,19 @@ pub(super) fn local(m: &Value, here: &Here) -> Option<String> {
         };
     }
     let k = kind(agent)?;
+    match (here.status)(k) {
+        Some(true) => return None,
+        Some(false) => return Some(format!("{agent} is not signed in")),
+        None => {}
+    }
     if k.keys.iter().any(|v| (here.var)(v)) {
         return None;
     }
+    let folder = (here.folder)(k);
     let files: Vec<Value> = k
         .files
         .iter()
-        .map(|f| here.home.join(f))
+        .map(|f| folder.join(f))
         .filter(|p| p.exists())
         .map(|p| fs::read(p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null))
         .collect();
@@ -780,24 +811,23 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
-/// Where usage-limit marks are kept: beside the system settings, the same for every project.
-pub(super) fn limits_path() -> PathBuf {
-    config_path().with_file_name("agent-limits.json")
-}
-
 fn marks(path: &Path) -> Value {
     cached(&format!("marks:{}", path.display()), || {
         fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}))
     })
 }
 
-fn save_marks(path: &Path, marks: &Value) -> Result<(), Failure> {
+pub(super) fn save_marks(path: &Path, marks: &Value) -> Result<(), Failure> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_vec_pretty(marks).unwrap())?;
     fs::rename(tmp, path)?;
+    if path.ends_with("agent-holds.json") {
+        // The old filename is no longer read.
+        let _ = fs::remove_file(path.with_file_name("agent-limits.json"));
+    }
     forget_marks();
     Ok(())
 }
@@ -805,9 +835,7 @@ fn save_marks(path: &Path, marks: &Value) -> Result<(), Failure> {
 /// Marks sign-in `agent` as held by a usage limit, until `until` (seconds
 /// since the epoch) or, without one, until cleared.
 pub(super) fn mark(path: &Path, agent: &str, reason: &str, until: Option<u64>) -> Result<(), Failure> {
-    let mut all = marks(path);
-    all[agent] = json!({"reason":reason,"until":until,"time":now()});
-    save_marks(path, &all)
+    write_mark(path, agent, reason, until, None)
 }
 
 /// Clears sign-in `agent`'s mark; says whether there was one.
@@ -820,21 +848,16 @@ pub(super) fn clear(path: &Path, agent: &str) -> Result<bool, Failure> {
     Ok(had)
 }
 
-/// Why sign-in `agent` is held by a usage limit at `now` (seconds), if it is.
-pub(super) fn limited(path: &Path, agent: &str, now: u64) -> Option<String> {
-    let m = &marks(path)[agent];
-    (m.is_object() && m["until"].as_u64().is_none_or(|u| now < u))
-        .then(|| m["reason"].as_str().unwrap_or("usage limit reached").to_string())
-}
-
 /// Learns from model `m`'s run log `log`, started at `started` and ended with
-/// `outcome`, whether its sign-in hit a usage limit. The agent's own error
-/// saying so marks the sign-in until the reset it names; so does a message
-/// that is exactly such a saying, as Claude Code reports its limit with
+/// `outcome`, whether its sign-in expired or hit a usage limit. The agent's
+/// own error saying so marks the sign-in; a usage limit holds until the reset
+/// it names, and an expired sign-in until cleared. So does a message that is
+/// exactly such a saying, as Claude Code reports its limit with
 /// `is_error: false`. A run that ended with a successful outcome clears a
 /// mark, the same list `supervise` ends a run with: a stopped, timed-out or
 /// failed run leaves it, and so does a mark set after the run started. A
-/// model on its own endpoint or program is never marked.
+/// model on its own program is never marked. A model on its own endpoint is
+/// marked alone, when the agent refuses it.
 pub(super) fn observe(
     path: &Path,
     m: &Value,
@@ -844,82 +867,407 @@ pub(super) fn observe(
     outcome: Option<&str>,
     offset: &dyn Fn(Option<&str>, i64) -> Option<i64>,
 ) -> Result<(), Failure> {
-    let Some(k) = sign_in(m) else { return Ok(()) };
+    let Some(k) = sign_in(m) else { return observe_refusal(path, m, log, started, outcome) };
     let entries = transcript(log);
-    if entries.iter().filter(|e| e["kind"] == "error").any(|e| (k.gone)(e["text"].as_str().unwrap_or(""))) {
+    if model_is_gone(k, &entries) {
         mark_stale(k.name);
     }
-    // A limit said as the whole of an agent's message, not a passing mention
-    // inside one: Claude Code writes its limit as a message, not an error.
-    let in_text = |e: &Value| {
-        e["kind"] == "message"
-            && e["text"].as_str().is_some_and(|t| {
-                let t = t.trim();
-                !t.contains('\n') && (k.limit)(t).is_some()
-            })
-    };
-    let hit = entries
-        .iter()
-        .filter(|e| e["kind"] == "error")
-        .find_map(|e| (k.limit)(e["text"].as_str().unwrap_or("")))
-        .or_else(|| entries.iter().filter(|e| in_text(e)).find_map(|e| (k.limit)(e["text"].as_str().unwrap_or(""))));
-    match hit {
-        Some(said) => {
-            let until = said.as_deref().and_then(|s| reset_time(s, now, offset));
-            let reason = match &said {
-                Some(s) => format!("{} usage limit reached (resets {s})", k.label),
-                None => format!("{} usage limit reached", k.label),
-            };
-            mark(path, k.name, &reason, until)
-        }
-        // The agent answered: its sign-in works again. Only a run that ended
-        // with a successful outcome says that, and only a mark set before it
-        // started is this run's.
-        None if outcome.is_some_and(|o| matches!(o, "finished" | "reported" | "reviewed" | "discussed" | "planned"))
-            && entries.iter().any(|e| matches!(e["kind"].as_str(), Some("message" | "thinking" | "tool")) && !in_text(e)) =>
-        {
-            let m = &marks(path)[k.name];
-            if m.is_object() && m["time"].as_u64().is_none_or(|t| t <= started) { clear(path, k.name).map(drop) } else { Ok(()) }
-        }
+    if said(&entries, k.signed_out, k.signed_out_whole) {
+        return mark_sign_in(path, k.name, &sign_in_message(k));
+    }
+    match limit_hit(k, &entries) {
+        Some(said) => mark_limit(path, k, said, now, offset),
+        None if succeeded(outcome) && answered(k, &entries) => clear_before(path, k.name, started),
         None => Ok(()),
     }
 }
 
 /// After a run of model `m`, started at `started` and ended with `outcome`:
-/// what its log says about its sign-in's limit.
+/// what its log says about its sign-in's usage limit or expiry.
 pub(super) fn after_run(m: &Value, log: &Path, started: u64, outcome: Option<&str>) {
-    if let Err(e) = observe(&limits_path(), m, log, now(), started, outcome, &zone_offset) {
-        eprintln!("solace: could not record the agent's usage limit: {}", e.0);
+    if let Err(e) = observe(&holds_path(), m, log, now(), started, outcome, &zone_offset) {
+        eprintln!("solace: could not record the agent's sign-in: {}", e.0);
     }
+    forget_local();
 }
 
-/// Why model `m` can't start right now, and whether that is a usage limit a
-/// human may clear. Checks only what is on this computer, cached for `FRESH`.
-pub(super) fn availability(m: &Value) -> Option<(String, bool)> {
+/// Why model `m` can't start right now, and whether that is a mark a human
+/// may clear. Checks only what is on this computer, cached for `FRESH`.
+pub(super) fn availability(m: &Value) -> Option<Status> {
     if m["gone"] == true {
-        return Some((m["reason"].as_str().unwrap_or("no longer offered by its agent").to_string(), false));
+        return Some(Status {
+            reason: m["reason"].as_str().unwrap_or("no longer offered by its agent").to_string(),
+            retry: false,
+            sign_in: false,
+        });
     }
-    let reason = cached(&format!("local:{m}"), || {
-        let home = PathBuf::from(env::var_os("HOME").unwrap_or_default());
-        let keys = setup::read_keys(&setup::keys_path());
-        let here =
-            Here { home: &home, var: &|v| env::var(v).is_ok(), stored: &|id| keys[id].is_string(), installed: &on_path, now: now_ms() };
-        json!(local(m, &here))
-    });
+    let reason = cached(&format!("local:{m}"), || json!(local_now(m)));
     if let Some(r) = reason.as_str() {
-        return Some((r.to_string(), false));
+        return Some(Status { reason: r.to_string(), retry: false, sign_in: false });
     }
-    limited(&limits_path(), sign_in(m)?.name, now()).map(|r| (r, true))
+    let key = hold_key(m)?;
+    let reason = held(&holds_path(), &key, now())?;
+    Some(Status { reason, retry: true, sign_in: sign_in_mark(&holds_path(), &key, now()) })
 }
 
 /// Why a model can't be started right now, if it can't.
 pub fn unavailable(m: &Value) -> Option<String> {
-    availability(m).map(|(r, _)| r)
+    availability(m).map(|s| s.reason)
 }
 
-/// "Try again": clears the usage-limit mark of the sign-in `body.agent` names.
+/// "Try again": clears the mark of the sign-in `body.agent` names, or every
+/// mark without one, and the cached availability.
 pub(super) fn try_again(body: &Value) -> Result<(), Failure> {
-    let Some(agent) = body["agent"].as_str().filter(|a| kind(a).is_some()) else { return err("E7001", "an agent kind is required") };
-    clear(&limits_path(), agent)?;
+    match body["agent"].as_str() {
+        None => save_marks(&holds_path(), &json!({}))?,
+        Some(agent) if kind(agent).is_some() => {
+            clear(&holds_path(), agent)?;
+        }
+        Some(_) => return err("E7001", "the agent must be a known kind"),
+    }
+    forget_local();
     Ok(())
+}
+
+/// Codex's sign-in errors: a token it can no longer refresh or use.
+pub(super) fn codex_signed_out(error: &str) -> bool {
+    CODEX_SIGNED_OUT.iter().any(|s| error.contains(s))
+}
+
+/// Claude Code's sign-in errors: an OAuth session it let expire.
+pub(super) fn claude_signed_out(error: &str) -> bool {
+    CLAUDE_SIGNED_OUT.iter().any(|s| error.contains(s))
+}
+
+/// Claude Code's update errors: it can't continue on this version.
+pub(super) fn claude_update(error: &str) -> bool {
+    CLAUDE_UPDATE.iter().any(|s| error.contains(s))
+}
+
+/// Whether `entries` show the agent saying `says`: in an error, or as the
+/// whole of a single-line message, never as a passing mention.
+pub(super) fn said(entries: &[Value], says: fn(&str) -> bool, whole: fn(&str) -> bool) -> bool {
+    entries.iter().any(|e| match e["kind"].as_str() {
+        Some("error") => e["text"].as_str().is_some_and(says),
+        Some("message") => e["text"].as_str().is_some_and(|t| {
+            let t = t.trim();
+            !t.contains('\n') && whole(t)
+        }),
+        _ => false,
+    })
+}
+
+/// What to do when `k`'s sign-in has expired.
+pub(super) fn sign_in_message(k: &Kind) -> String {
+    format!("{}'s sign-in has expired. Open {} once and sign in, then press Try again.", k.label, k.label)
+}
+
+/// What to do when `k` needs an update.
+pub(super) fn update_message(k: &Kind) -> String {
+    format!("{} needs an update. Update {}, then start the task again.", k.label, k.label)
+}
+
+/// What to do when model `m`'s program is not on this computer.
+pub(super) fn missing_program(m: &Value) -> String {
+    format!("{} is not installed. Install it.", program_name(m))
+}
+
+/// Why model `m`'s run stopped, in words a human can act on, when its output
+/// says its sign-in expired or its program needs an update.
+pub(super) fn stopped(m: &Value, entries: &[Value]) -> Option<String> {
+    if !m["run"].is_null() {
+        return None;
+    }
+    let k = kind(m["agent"].as_str()?)?;
+    if sign_in(m).is_some() && said(entries, k.signed_out, k.signed_out_whole) {
+        return Some(sign_in_message(k));
+    }
+    match k.update {
+        Some((update, whole)) if said(entries, update, whole) => Some(update_message(k)),
+        _ => None,
+    }
+}
+
+/// Why a model can't start now: its reason, whether Try again can clear it,
+/// and whether that hold is an expired sign-in.
+pub(super) struct Status {
+    pub(super) reason: String,
+    pub(super) retry: bool,
+    pub(super) sign_in: bool,
+}
+
+/// The mark holding sign-in `agent` at `now` (seconds), if any.
+pub(super) fn held_mark(path: &Path, agent: &str, now: u64) -> Option<Value> {
+    let m = &marks(path)[agent];
+    (m.is_object() && m["until"].as_u64().is_none_or(|u| now < u)).then(|| m.clone())
+}
+
+pub(super) fn held_reason(m: &Value) -> String {
+    m["reason"].as_str().unwrap_or("usage limit reached").to_string()
+}
+
+/// Whether the mark holding sign-in `agent` at `now` is an expired sign-in.
+pub(super) fn sign_in_mark(path: &Path, agent: &str, now: u64) -> bool {
+    held_mark(path, agent, now).is_some_and(|m| m["kind"] == "sign_in")
+}
+
+pub(super) fn write_mark(path: &Path, agent: &str, reason: &str, until: Option<u64>, kind: Option<&str>) -> Result<(), Failure> {
+    let mut all = marks(path);
+    let mut m = json!({"reason":reason,"until":until,"time":now()});
+    if let Some(kind) = kind {
+        m["kind"] = json!(kind);
+    }
+    all[agent] = m;
+    save_marks(path, &all)
+}
+
+/// Marks sign-in `agent` as held by an expired sign-in, until cleared.
+pub(super) fn mark_sign_in(path: &Path, agent: &str, reason: &str) -> Result<(), Failure> {
+    write_mark(path, agent, reason, None, Some("sign_in"))
+}
+
+pub(super) fn model_is_gone(k: &Kind, entries: &[Value]) -> bool {
+    entries.iter().filter(|e| e["kind"] == "error").any(|e| (k.gone)(e["text"].as_str().unwrap_or("")))
+}
+
+/// A limit said as the whole of an agent's message, not a passing mention
+/// inside one: Claude Code writes its limit as a message, not an error.
+pub(super) fn limit_message(k: &Kind, e: &Value) -> bool {
+    e["kind"] == "message"
+        && e["text"].as_str().is_some_and(|t| {
+            let t = t.trim();
+            !t.contains('\n') && (k.limit)(t).is_some()
+        })
+}
+
+pub(super) fn limit_hit(k: &Kind, entries: &[Value]) -> Option<Option<String>> {
+    entries
+        .iter()
+        .filter(|e| e["kind"] == "error")
+        .find_map(|e| (k.limit)(e["text"].as_str().unwrap_or("")))
+        .or_else(|| entries.iter().filter(|e| limit_message(k, e)).find_map(|e| (k.limit)(e["text"].as_str().unwrap_or(""))))
+}
+
+pub(super) fn answered(k: &Kind, entries: &[Value]) -> bool {
+    entries.iter().any(|e| matches!(e["kind"].as_str(), Some("message" | "thinking" | "tool")) && !limit_message(k, e))
+}
+
+pub(super) fn succeeded(outcome: Option<&str>) -> bool {
+    outcome.is_some_and(|o| matches!(o, "finished" | "reported" | "reviewed" | "discussed" | "planned"))
+}
+
+pub(super) fn mark_limit(
+    path: &Path,
+    k: &Kind,
+    said: Option<String>,
+    now: u64,
+    offset: &dyn Fn(Option<&str>, i64) -> Option<i64>,
+) -> Result<(), Failure> {
+    let until = said.as_deref().and_then(|s| reset_time(s, now, offset));
+    let reason = match &said {
+        Some(s) => format!("{} usage limit reached (resets {s})", k.label),
+        None => format!("{} usage limit reached", k.label),
+    };
+    mark(path, k.name, &reason, until)
+}
+
+/// The agent answered: its sign-in works again. Only a run that ended with a
+/// successful outcome says that, and only a mark set before it started is
+/// this run's.
+pub(super) fn clear_before(path: &Path, agent: &str, started: u64) -> Result<(), Failure> {
+    let m = &marks(path)[agent];
+    if m.is_object() && m["time"].as_u64().is_none_or(|t| t <= started) { clear(path, agent).map(drop) } else { Ok(()) }
+}
+
+/// Where agents' marks are kept, a usage limit or an expired sign-in: beside
+/// the system settings, the same for every project.
+pub(super) fn holds_path() -> PathBuf {
+    config_path().with_file_name("agent-holds.json")
+}
+
+/// Why sign-in `agent` is held at `now` (seconds), if it is.
+pub(super) fn held(path: &Path, agent: &str, now: u64) -> Option<String> {
+    held_mark(path, agent, now).map(|m| held_reason(&m))
+}
+
+/// Whether a message is exactly Codex saying its sign-in expired.
+pub(super) fn codex_signed_out_whole(error: &str) -> bool {
+    whole_in(error, &CODEX_SIGNED_OUT)
+}
+
+/// Whether a message is exactly Claude Code saying its sign-in expired.
+pub(super) fn claude_signed_out_whole(error: &str) -> bool {
+    whole_in(error, &CLAUDE_SIGNED_OUT)
+}
+
+/// Whether a message is exactly Claude Code saying it needs an update.
+pub(super) fn claude_update_whole(error: &str) -> bool {
+    whole_in(error, &CLAUDE_UPDATE)
+}
+
+pub(super) const CODEX_SIGNED_OUT: [&str; 2] = ["Your access token could not be refreshed", "Please log out and sign in again"];
+
+pub(super) const CLAUDE_SIGNED_OUT: [&str; 3] =
+    ["Failed to authenticate: OAuth session expired and could not be refreshed", "OAuth token has expired", "Please run /login"];
+
+pub(super) const CLAUDE_UPDATE: [&str; 2] = ["needs an update", "is required to continue"];
+
+/// Whether `text`, trimmed, is one of `markers`.
+pub(super) fn whole_in(text: &str, markers: &[&str]) -> bool {
+    markers.contains(&text.trim())
+}
+
+/// Model `m`'s program, as its command or kind names it.
+pub(super) fn program_name(m: &Value) -> &str {
+    m["run"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|p| p.as_str())
+        .or_else(|| kind(m["agent"].as_str().unwrap_or("")).map(|k| k.label))
+        .or_else(|| m["agent"].as_str())
+        .unwrap_or("The program")
+}
+
+/// What to do when model `m`'s program is not on this computer and a task is starting.
+pub(super) fn missing_program_at_launch(m: &Value) -> String {
+    format!("{} is not installed. Install it, then start the task again.", program_name(m))
+}
+
+/// Whether an agent can start now: one is signed in, none is installed, or one
+/// is installed but needs its sign-in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum AgentCheck {
+    Ready,
+    Missing,
+    SignedOut { name: &'static str, label: &'static str },
+}
+
+/// Why model `m` can't start from what is on this computer, checked now.
+pub(super) fn local_now(m: &Value) -> Option<String> {
+    let keys = setup::read_keys(&setup::keys_path());
+    let here = Here {
+        folder: &|k| (k.folder)(),
+        status: &|k| cached(&format!("local:status:{}", k.name), || json!(program_status(k))).as_bool(),
+        var: &|v| nonempty_key(env::var(v).ok()),
+        stored: &|id| keys[id].is_string(),
+        installed: &on_path,
+        now: now_ms(),
+    };
+    local(m, &here)
+}
+
+/// Whether an agent is installed and signed in, checked now instead of from the cache.
+pub(super) fn check_now() -> AgentCheck {
+    let installed: Vec<&Kind> = KINDS.iter().filter(|k| on_path(k.name)).collect();
+    if installed.is_empty() {
+        return AgentCheck::Missing;
+    }
+    if installed.iter().any(|k| local_now(&json!({"agent": k.name})).is_none()) {
+        return AgentCheck::Ready;
+    }
+    let k = installed[0];
+    AgentCheck::SignedOut { name: k.name, label: k.label }
+}
+
+/// Codex's folder: `CODEX_HOME`, else `.codex` in the home folder.
+fn codex_folder() -> PathBuf {
+    env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".codex"))
+}
+
+/// Whether an environment variable's value is a key: set and not blank.
+pub(super) fn nonempty_key(value: Option<String>) -> bool {
+    value.is_some_and(|v| !v.trim().is_empty())
+}
+
+/// How long an agent's status command may take.
+const STATUS_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Whether agent `k` says it is signed in, asked of its status command. None
+/// when it has none, can't run it, takes longer than `STATUS_DEADLINE`, or
+/// answers unclearly.
+fn program_status(k: &Kind) -> Option<bool> {
+    if k.status.is_empty() {
+        return None;
+    }
+    let mut child = Command::new(k.name).args(k.status).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()?;
+    let out = child.stdout.take().map(read_pipe);
+    let err = child.stderr.take().map(read_pipe);
+    let started = Instant::now();
+    let exit = loop {
+        match child.try_wait() {
+            Ok(Some(exit)) => break exit,
+            Ok(None) if started.elapsed() < STATUS_DEADLINE => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let mut said = String::new();
+    if let Some(part) = out.and_then(|handle| handle.join().ok()) {
+        said.push_str(&part);
+    }
+    if let Some(part) = err.and_then(|handle| handle.join().ok()) {
+        said.push_str(&part);
+    }
+    status_answer(exit.success(), &said)
+}
+
+/// What a status command's output says: JSON with `loggedIn`, or words
+/// saying the agent is or is not logged in. None when it says neither.
+pub(super) fn status_answer(success: bool, said: &str) -> Option<bool> {
+    if let Some(logged_in) = serde_json::from_str::<Value>(said.trim()).ok().and_then(|v| v["loggedIn"].as_bool()) {
+        return Some(logged_in);
+    }
+    let said = said.to_ascii_lowercase();
+    if ["not logged in", "not signed in"].iter().any(|w| said.contains(w)) {
+        return Some(false);
+    }
+    (success && ["logged in", "signed in"].iter().any(|w| said.contains(w))).then_some(true)
+}
+
+/// Learns from a run of a model on its own endpoint: the agent refusing the
+/// model holds that model alone; a run that answers clears it.
+fn observe_refusal(path: &Path, m: &Value, log: &Path, started: u64, outcome: Option<&str>) -> Result<(), Failure> {
+    let (Some(key), Some(k)) = (hold_key(m), kind(m["agent"].as_str().unwrap_or(""))) else { return Ok(()) };
+    let entries = transcript(log);
+    match refusal(k, &entries) {
+        Some(reason) => write_mark(path, &key, &reason, None, Some("refusal")),
+        None if succeeded(outcome) && answered(k, &entries) => clear_before(path, &key, started),
+        None => Ok(()),
+    }
+}
+
+/// The first line of the error where agent `k` refuses the model, or says its sign-in expired.
+pub(super) fn refusal(k: &Kind, entries: &[Value]) -> Option<String> {
+    entries
+        .iter()
+        .filter(|e| e["kind"] == "error")
+        .filter_map(|e| e["text"].as_str())
+        .find(|t| (k.gone)(t) || (k.signed_out)(t))
+        .map(|t| t.lines().next().unwrap_or(t).trim().chars().take(240).collect())
+}
+
+/// The key of the mark that holds model `m` back: its agent's sign-in, or,
+/// for a model on its own endpoint, that model alone.
+pub(super) fn hold_key(m: &Value) -> Option<String> {
+    if let Some(k) = sign_in(m) {
+        return Some(k.name.to_string());
+    }
+    kind(m["agent"].as_str()?)?;
+    (m.get("endpoint").is_some() && m["run"].is_null()).then(|| match m["id"].as_str() {
+        Some(id) if !id.is_empty() => format!("model:{id}"),
+        _ => format!("model:{}:{}", m["agent"].as_str().unwrap_or(""), m["model"].as_str().unwrap_or("")),
+    })
+}
+
+/// Reads `pipe` while its program runs, so an answer larger than the pipe
+/// buffer can't stall the program.
+fn read_pipe(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
+    std::thread::spawn(move || {
+        let mut said = String::new();
+        let _ = pipe.read_to_string(&mut said);
+        said
+    })
 }

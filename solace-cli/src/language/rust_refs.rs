@@ -2267,8 +2267,8 @@ pub(crate) fn references<'a>(syms: &'a [Sym], modules: &'a [ModuleRow]) -> Refer
     References { refs, modules, mentioned }
 }
 
-pub(crate) fn references_external_imports(refs: &References, module: &str, root_only: bool) -> Result<Vec<ImportSite>, crate::Failure> {
-    Ok(import_sites(refs.refs.syms, refs.modules, module, root_only)?
+pub(crate) fn references_external_imports(refs: &References, module: &str) -> Result<Vec<ImportSite>, crate::Failure> {
+    Ok(import_sites(refs.refs.syms, refs.modules, module, true)?
         .into_iter()
         .filter(|site| block_use_targets(&refs.refs, module, None, &site.path).is_none())
         .collect())

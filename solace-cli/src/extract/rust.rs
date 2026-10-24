@@ -127,6 +127,7 @@ fn rewrite(
     }
     let cx = Rewrite { ix, moved, newmod, target, targets, sites, use_keys, sources, mentioned, in_sources, external };
     let (mut promote, import_ok) = rewrite_imports(&cx, groups, &mut newtext, &mut newheaders);
+    restore_moved_use_imports(&cx, &mut newheaders)?;
     for module in &cx.sources {
         drop_unused_external_imports(&cx, module, &mut newtext, &mut newheaders)?;
         drop_unused_local_imports(&cx, module, local_sites, &mut newtext, &mut newheaders)?;
@@ -385,7 +386,7 @@ fn external_imports(
     let mut carried = vec![];
     let modules: BTreeSet<String> = (0..ix.syms.len()).filter(|&i| moved[i]).map(|i| ix.syms[i].module.clone()).collect();
     for module in modules {
-        let sites = language::rust_refs::references_external_imports(refs, &module, true)?;
+        let sites = language::rust_refs::references_external_imports(refs, &module)?;
         let module_moved: Vec<usize> = (0..ix.syms.len()).filter(|&i| moved[i] && ix.syms[i].module == module).collect();
         let named: HashSet<String> = language::rust_refs::import_sites(&ix.syms, &ix.modules, &module, true)?
             .into_iter()
@@ -1253,23 +1254,11 @@ fn local_import_uses(
     let modules: BTreeSet<String> = (0..ix.syms.len()).filter(|&i| moved[i]).map(|i| ix.syms[i].module.clone()).collect();
     for module in modules {
         let stays = |i: usize| !moved[i] || newmod[i] == module;
-        let moved_methods: HashSet<String> = (0..ix.syms.len())
-            .filter(|&i| moved[i] && ix.syms[i].module == module)
-            .flat_map(|i| language::rust_refs::called_names(&ix.syms[i].text, language::rust_refs::CallKind::Method))
-            .collect();
-        let staying_methods: HashSet<String> = (0..ix.syms.len())
-            .filter(|&i| ix.syms[i].module == module && stays(i))
-            .flat_map(|i| language::rust_refs::called_names(&ix.syms[i].text, language::rust_refs::CallKind::Method))
-            .collect();
-        let moved_macros: HashSet<String> = (0..ix.syms.len())
-            .filter(|&i| moved[i] && ix.syms[i].module == module)
-            .flat_map(|i| language::rust_refs::called_names(&ix.syms[i].text, language::rust_refs::CallKind::Macro))
-            .collect();
-        let staying_macros: HashSet<String> = (0..ix.syms.len())
-            .filter(|&i| ix.syms[i].module == module && stays(i))
-            .flat_map(|i| language::rust_refs::called_names(&ix.syms[i].text, language::rust_refs::CallKind::Macro))
-            .collect();
-        let external: HashSet<(String, Vec<String>, bool)> = language::rust_refs::references_external_imports(refs, &module, true)?
+        let moved_methods = called_names_where(ix, language::rust_refs::CallKind::Method, |i| moved[i] && ix.syms[i].module == module);
+        let staying_methods = called_names_where(ix, language::rust_refs::CallKind::Method, |i| ix.syms[i].module == module && stays(i));
+        let moved_macros = called_names_where(ix, language::rust_refs::CallKind::Macro, |i| moved[i] && ix.syms[i].module == module);
+        let staying_macros = called_names_where(ix, language::rust_refs::CallKind::Macro, |i| ix.syms[i].module == module && stays(i));
+        let external: HashSet<(String, Vec<String>, bool)> = language::rust_refs::references_external_imports(refs, &module)?
             .into_iter()
             .map(|site| (site.local, site.path, site.glob))
             .collect();
@@ -1333,134 +1322,7 @@ fn is_known_name(ix: &Index, module: &str, name: &str) -> bool {
 
 /// Rust syntax and prelude names, which a glob never has to supply.
 fn is_prelude_name(name: &str) -> bool {
-    matches!(
-        name,
-        "as" | "async"
-            | "await"
-            | "break"
-            | "const"
-            | "continue"
-            | "crate"
-            | "dyn"
-            | "else"
-            | "enum"
-            | "extern"
-            | "false"
-            | "fn"
-            | "for"
-            | "if"
-            | "impl"
-            | "in"
-            | "let"
-            | "loop"
-            | "match"
-            | "mod"
-            | "move"
-            | "mut"
-            | "pub"
-            | "ref"
-            | "return"
-            | "static"
-            | "struct"
-            | "trait"
-            | "true"
-            | "type"
-            | "unsafe"
-            | "use"
-            | "where"
-            | "while"
-            | "self"
-            | "super"
-            | "Self"
-            | "std"
-            | "core"
-            | "alloc"
-            | "i8"
-            | "i16"
-            | "i32"
-            | "i64"
-            | "i128"
-            | "isize"
-            | "u8"
-            | "u16"
-            | "u32"
-            | "u64"
-            | "u128"
-            | "usize"
-            | "f32"
-            | "f64"
-            | "bool"
-            | "char"
-            | "str"
-            | "String"
-            | "Vec"
-            | "Box"
-            | "Option"
-            | "Some"
-            | "None"
-            | "Result"
-            | "Ok"
-            | "Err"
-            | "Clone"
-            | "Copy"
-            | "Default"
-            | "Drop"
-            | "Eq"
-            | "PartialEq"
-            | "Ord"
-            | "PartialOrd"
-            | "Iterator"
-            | "IntoIterator"
-            | "From"
-            | "Into"
-            | "TryFrom"
-            | "TryInto"
-            | "AsRef"
-            | "AsMut"
-            | "ToOwned"
-            | "ToString"
-            | "Send"
-            | "Sync"
-            | "Sized"
-            | "Fn"
-            | "FnMut"
-            | "FnOnce"
-            | "Debug"
-            | "Hash"
-            | "assert"
-            | "assert_eq"
-            | "assert_ne"
-            | "cfg"
-            | "column"
-            | "compile_error"
-            | "concat"
-            | "dbg"
-            | "debug_assert"
-            | "debug_assert_eq"
-            | "debug_assert_ne"
-            | "env"
-            | "eprint"
-            | "eprintln"
-            | "file"
-            | "format"
-            | "include"
-            | "include_bytes"
-            | "include_str"
-            | "line"
-            | "matches"
-            | "module_path"
-            | "option_env"
-            | "panic"
-            | "print"
-            | "println"
-            | "stringify"
-            | "todo"
-            | "unimplemented"
-            | "unreachable"
-            | "vec"
-            | "write"
-            | "writeln"
-    )
+    is_rust_keyword(name) || is_primitive_type(name) || is_std_prelude_item(name) || is_std_crate_root(name) || is_builtin_macro(name)
 }
 
 /// Adds the carried imports to `target`, aliasing one whose local name the
@@ -1520,7 +1382,7 @@ fn target_names(ix: &Index, header: &str, target: &str) -> Result<HashSet<String
     for site in language::rust_refs::import_sites_in(header).map_err(|e| Failure(format!("imports in {target} don't parse: {e}"), 1))? {
         names.insert(site.local);
     }
-    names.extend(header_mod_names(header));
+    names.extend(header_mod_names(header).map_err(|e| Failure(format!("modules in {target} don't parse: {e}"), 1))?);
     for symbol in ix.syms.iter().filter(|s| s.module == target && s.parent.is_none() && s.kind_text == "use") {
         for site in
             language::rust_refs::import_sites_in(&symbol.text).map_err(|e| Failure(format!("imports in {target} don't parse: {e}"), 1))?
@@ -1588,15 +1450,16 @@ fn is_mod_declaration(text: &str, range: &Range<usize>) -> bool {
 }
 
 /// The names a header's `mod name;` lines declare.
-fn header_mod_names(header: &str) -> Vec<String> {
-    let Ok(file) = syn::parse_file(header) else { return vec![] };
-    file.items
+fn header_mod_names(header: &str) -> Result<Vec<String>, syn::Error> {
+    let file = syn::parse_file(header).or_else(|_| syn::parse_file(&format!("{header}\n}}")))?;
+    Ok(file
+        .items
         .into_iter()
         .filter_map(|item| match item {
             syn::Item::Mod(m) if m.content.is_none() => Some(m.ident.to_string()),
             _ => None,
         })
-        .collect()
+        .collect())
 }
 
 fn post_move_check(s: &Store, before: &HashMap<String, String>) -> Result<(), Failure> {
@@ -1691,4 +1554,216 @@ fn rewrite_move<'a>(
     }
 
     Ok(RustMove { ix, target, create, moved, helpers, already, going, newtext, newheaders, promote })
+}
+
+fn called_names_where(ix: &Index, kind: language::rust_refs::CallKind, wanted: impl Fn(usize) -> bool) -> HashSet<String> {
+    (0..ix.syms.len()).filter(|&i| wanted(i)).flat_map(|i| language::rust_refs::called_names(&ix.syms[i].text, kind)).collect()
+}
+
+fn is_rust_keyword(name: &str) -> bool {
+    matches!(
+        name,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "static"
+            | "struct"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "self"
+            | "super"
+            | "Self"
+    )
+}
+
+fn is_primitive_type(name: &str) -> bool {
+    matches!(
+        name,
+        "i8" | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+            | "bool"
+            | "char"
+            | "str"
+    )
+}
+
+fn is_std_prelude_item(name: &str) -> bool {
+    matches!(
+        name,
+        "String"
+            | "Vec"
+            | "Box"
+            | "Option"
+            | "Some"
+            | "None"
+            | "Result"
+            | "Ok"
+            | "Err"
+            | "Clone"
+            | "Copy"
+            | "Default"
+            | "Drop"
+            | "Eq"
+            | "PartialEq"
+            | "Ord"
+            | "PartialOrd"
+            | "Iterator"
+            | "IntoIterator"
+            | "From"
+            | "Into"
+            | "TryFrom"
+            | "TryInto"
+            | "AsRef"
+            | "AsMut"
+            | "ToOwned"
+            | "ToString"
+            | "Send"
+            | "Sync"
+            | "Sized"
+            | "Fn"
+            | "FnMut"
+            | "FnOnce"
+            | "Debug"
+            | "Hash"
+    )
+}
+
+fn is_std_crate_root(name: &str) -> bool {
+    matches!(name, "std" | "core" | "alloc")
+}
+
+fn is_builtin_macro(name: &str) -> bool {
+    matches!(
+        name,
+        "assert"
+            | "assert_eq"
+            | "assert_ne"
+            | "cfg"
+            | "column"
+            | "compile_error"
+            | "concat"
+            | "dbg"
+            | "debug_assert"
+            | "debug_assert_eq"
+            | "debug_assert_ne"
+            | "env"
+            | "eprint"
+            | "eprintln"
+            | "file"
+            | "format"
+            | "include"
+            | "include_bytes"
+            | "include_str"
+            | "line"
+            | "matches"
+            | "module_path"
+            | "option_env"
+            | "panic"
+            | "print"
+            | "println"
+            | "stringify"
+            | "todo"
+            | "unimplemented"
+            | "unreachable"
+            | "vec"
+            | "write"
+            | "writeln"
+    )
+}
+
+/// Puts a moved top-level `use` back in its source header so the later unused
+/// import pass can keep it when staying code still needs it.
+fn restore_moved_use_imports(cx: &Rewrite<'_>, newheaders: &mut HashMap<String, String>) -> Result<(), Failure> {
+    for (_, symbol) in cx.ix.syms.iter().enumerate().filter(|(i, s)| cx.moved[*i] && s.parent.is_none() && s.kind_text == "use") {
+        let mut header = newheaders.get(&symbol.module).cloned().unwrap_or_default();
+        let mut existing: HashSet<(String, Vec<String>, bool)> = language::rust_refs::import_sites_in(&header)
+            .map_err(|e| Failure(format!("imports in {} don't parse: {e}", symbol.module), 1))?
+            .into_iter()
+            .map(|site| (site.local, site.path, site.glob))
+            .collect();
+        let sites = language::rust_refs::import_sites_in(&symbol.text)
+            .map_err(|e| Failure(format!("imports in {} don't parse: {e}", symbol.module), 1))?;
+        let stays = |j: usize| !cx.moved[j] || cx.newmod[j] == symbol.module;
+        let mentioned = |local: &str| {
+            cx.in_sources.get(&symbol.module).is_some_and(|users| users.iter().any(|&j| stays(j) && cx.mentioned[j].contains(local)))
+        };
+        let needed_glob = sites.iter().any(|site| site.glob) && staying_needs_glob(cx, &symbol.module)?;
+        for site in sites {
+            let needed = if site.glob { needed_glob } else { mentioned(&site.local) };
+            if !needed {
+                continue;
+            }
+            if !existing.insert((site.local.clone(), site.path.clone(), site.glob)) {
+                continue;
+            }
+            let visibility = use_visibility(&symbol.text, &site.range);
+            let attributes = use_attributes(&symbol.text, &site.range);
+            let path = site.path.join("::");
+            let line = if site.glob {
+                format!("use {path}::*;")
+            } else if site.local == leaf(&path) {
+                format!("use {path};")
+            } else {
+                format!("use {path} as {};", site.local)
+            };
+            let prefix = if attributes.is_empty() { visibility } else { format!("{attributes} {visibility}") };
+            header = add_import_line(&header, &format!("{prefix}{line}"));
+        }
+        newheaders.insert(symbol.module.clone(), header);
+    }
+    Ok(())
+}
+
+/// The attributes written before the `use` whose tree holds `range`.
+fn use_attributes(text: &str, range: &Range<usize>) -> String {
+    let Ok(ranges) = language::rust::import_ranges(text) else {
+        return String::new();
+    };
+    let Some((item, tree)) = ranges.into_iter().find(|(_, tree)| tree.start <= range.start && range.end <= tree.end) else {
+        return String::new();
+    };
+    let Some(head) = text[item.start..tree.start].trim().strip_suffix("use") else {
+        return String::new();
+    };
+    let head = head.trim();
+    let visibility = use_visibility(text, range);
+    head.strip_suffix(visibility.trim()).unwrap_or(head).trim().to_string()
 }

@@ -6,6 +6,12 @@ The Strategy page (D-90): a Lustre web component, `<solace-strategy>`, compiled 
 It draws a tablist with four panels, one per tab: Vision, Features, Roadmap, Tasks. The tab shown is kept in the
 URL (`/strategy?tab=tasks`), so a reload returns to it; an unknown or missing value shows Vision.
 
+## Record state labels
+
+Feature and milestone state labels share one color mapping: `proposed` is purple, `upcoming` is blue, `active` is
+green, `complete` is black, and `canceled` is gray. The labels have readable text in both themes and stay uppercase;
+an unknown state keeps the neutral label. Task workflow columns and the `<solace-task>` status badge are separate.
+
 ## Vision tab
 
 The root's vision (D-91): one Markdown document, shown with `md` and edited with `editor` from the components
@@ -20,18 +26,23 @@ project (and its `editor_styles`).
 
 ## Features tab
 
-The root's features grouped by target milestone (D-87), with a form to create and edit them, drawn by
-`src/features.gleam` (D-90: one component per tab).
+The root's features grouped by target milestone (D-87), with complete and canceled features in one `Closed`
+section after the milestones, and a form to create and edit them, drawn by `src/features.gleam` (D-90: one
+component per tab).
 
 - **Data.** The root's `/events` replays `{milestones}` and `{features}` and sends `{milestone}`, `{feature}`,
   `{removedMilestone}` and `{removedFeature}` as they change. A feature is `{id, title, body, milestone?, rank,
   state}` and a milestone `{id, title, body, rank, targetDate?, state}`; every field but `id` is optional (no state
   reads as `proposed`, no rank as 0).
 - **Groups.** Milestones in rank order (then id), empty ones too ("No features."), then "No milestone" for the
-  features with none (or one not loaded), shown only when there are any. Inside a group, features by rank, then id.
+  open features with none (or one not loaded), shown only when there are any, then "Closed" for every feature
+  whose state is `complete` or `canceled`, shown only when there are any. A closed feature appears only under
+  "Closed", even when it has a milestone. Inside every group, features by rank, then id. The Roadmap tab is
+  unchanged and still shows features under their milestones.
 - **A feature** shows its title, a state badge, its body as Markdown (`solace_task.md`) and its linked tasks: the
-  tasks of every project with `feature == id`. Clicking a task sends `Open(dir, id)`: the task opens below the list
-  on the Tasks tab, which is selected.
+  tasks of every project with `feature == id`. A task in the `complete` or `cancelled` column shows the run
+  transcript's green ✓ or red ✗; other tasks show neither. Clicking a task sends `Open(dir, id)`: the task opens
+  below the list on the Tasks tab, which is selected.
 - **Create and edit.** **New feature** opens a form above the groups, and a feature's **Edit** opens it in the
   feature's place: a title, the description in `solace_task.editor` (textarea `feature-text`), a state select
   (`proposed`, `upcoming`, `active`, `complete`, `canceled`) and a milestone select with "(none)". **Save** sends
@@ -72,10 +83,13 @@ The root's milestones, each with its features and their tasks, drawn by `src/roa
   anything: the features in no milestone or one not loaded. A task with neither a milestone nor a feature is not on
   the roadmap (the Tasks tab lists it).
 - **A milestone** starts collapsed. Its heading shows the title, a state badge, its `targetDate` and its feature
-  count, with **Edit** and **Delete**; the count is the features the group holds (D-87 point 2). Clicking the heading
-  opens its body as Markdown, its features and their tasks; clicking again closes it. "No milestone" has no heading
-  controls and stays open. A milestone link (D-122) opens it before scrolling to it; a feature link opens its
-  target milestone, and **Edit** also opens it. The open milestones last for the page session only.
+  progress, with **Edit** and **Delete**; progress counts the group's features that are not `canceled` (D-87 point
+  2), and of those, the ones that are `complete`: "2 / 3 features complete". One counted feature reads
+  "1 / 1 feature complete", and none reads "0 / 0 features complete". The count stays in the heading whether the
+  milestone is open or closed. Clicking the heading opens its body as Markdown, its features and their tasks;
+  clicking again closes it. "No milestone" has no heading controls and stays open. A milestone link (D-122) opens
+  it before scrolling to it; a feature link opens its target milestone, and **Edit** also opens it. The open
+  milestones last for the page session only.
   **New milestone** opens a form above the groups, and **Edit** opens it in place of the heading: a title, a date
   input for `targetDate`, the description (textarea `milestone-text`) and a state select. **Save** sends
   `POST /milestones {title, body, state, targetDate?, request}`, or `PATCH /milestones/{id}` with only the changed
@@ -114,7 +128,7 @@ backlog**). A task's details offer **Back to planning** from Assigned, Review an
   whose home is no project (with `noProject: true`, D-129); updates follow live (Spec 15).
 - **A task with no project (D-129).** The root task store can hold a task whose home is no project of the
   workspace: it is in no board lane. The tab lists it with its project cell reading "No project", the project
-  filter offers "(no project)", and a task link opens it below the list with its details read from the root;
+  filter offers "(no project)", and a task link opens it in the bottom band with its details read from the root;
   the human can cancel and archive it there. Its column labels come from the root's workflow.
 - **Sort and filter on the client.** Filters for column, project, feature and milestone ("(none)" keeps tasks
   without one); the search needs every word in the title or the body. Notes and changes are not in `GET /tasks`,
@@ -126,29 +140,34 @@ backlog**). A task's details offer **Back to planning** from Assigned, Review an
   label with "No project" last; feature and milestone by title; created and closed by time. A task without the
   value (no feature, milestone or time) goes last either way, and ties fall back to the title, then the id. A
   new sort goes back to page 1. The sort stays across filter changes and tab switches for the page session, not
-  across reloads; the open row stays open and its details stay below the table.
-- **Inline links.** Each row's feature and milestone selects send `PATCH {base}/tasks/{id}` with that one field
-  (null clears it), allowed in final columns and during runs (D-87, D-100). A task with a feature takes its
-  feature's milestone, so its milestone select is disabled; the server refuses a change (`E7001`).
+  across reloads; the open row stays open and its details stay in the bottom band.
+- **Inline links.** Each row's feature select sends `PATCH {base}/tasks/{id}` with `{feature}` (null clears it),
+  allowed in final columns and during runs (D-87, D-100). The Milestone cell is a read-only link to
+  `/milestone/{id}` (D-122): the loaded title, or the id when the milestone is not loaded; a task with no
+  milestone shows `—`. A task with a feature takes its feature's milestone; the server refuses a direct change
+  (`E7001`).
 - **New task.** **New task** above the filters opens a form there: a title, the description in
   `solace_task.editor` (textarea `new-task-text`, the feature form's tools), a project select in a workspace
   (defaulting to the root's own project; none with a single project), and feature and milestone selects with
   "(none)"; the milestone select hides while a feature is picked, since the task takes the feature's milestone.
   **Create** (disabled while the title is blank) sends `POST {base}/tasks {title, body, request}`, then, when a
   feature or milestone is picked, one `PATCH {base}/tasks/{id}`: the feature, whose milestone it takes, or else the
-  milestone, through the same `Links`/`Patched` path as the inline links. `request` is chosen when the form opens
+  milestone, through the same `Links`/`Patched` path as a row's Feature link. `request` is chosen when the form opens
   and kept until a create succeeds, so a retry makes one task; one create at a time, shared with the Features tab's
   form. A refused create keeps the draft ("Couldn't create the task: …"); a refused link says "The task was
   created without its feature: …" (or milestone), opens the task and leaves an empty form. On success the form
-  closes and the task opens below the list, as a row click does. **Cancel** closes the form, except while a create
+  closes and the task opens in the bottom band, as a row click does. **Cancel** closes the form, except while a create
   is sent.
 - **Task links (D-98).** The shell's `focus` property, `{dir, id, n}`, opens the task on this tab, from any tab,
   and asks `<solace-task>` to scroll it into view (its `reveal`). The shell sends here a linked task that is
   archived, so off the board.
-- **Details.** A row opens `<solace-task>` (components project) below the list, `hosted`: this page hands it the
-  task's events in `live`, with the updates of the tasks it depends on (for its Depends on line, from any
-  project), and follows it when it moves to another project. The page defines the full colour set
-  (light in the component's styles, dark in `index.html` and the shell), since `<solace-task>` sets none.
+- **Details.** A row opens `<solace-task>` (components project) in a band pinned below the table and pager,
+  `hosted`: this page hands it the task's events in `live`, with the updates of the tasks it depends on (for its
+  Depends on line, from any project), and follows it when it moves to another project. The band's bar names the
+  task, its column and status, and toggles its details; collapsed, only the bar shows, and the task stays mounted
+  so its loaded state and events survive. Selecting a task expands the band; with no selection there is no band.
+  The table takes the remaining height and scrolls. The page defines the full color set (light in the component's
+  styles, dark in `index.html` and the shell), since `<solace-task>` sets none.
 
 ## Planning panel
 
@@ -181,8 +200,10 @@ collapses it to one line: the shown run's state and model, or whether a run is o
 - **Context.** Start plans the task open on the Tasks tab, else the whole project (`{kind: "page"}`). The panel
   says which: "Planning Context: Whole Project", or "Planning Context: task *title*" (feature and milestone the
   same way). A context with an open run offers **Open it** instead of Start (the server allows one, `E7003`).
-- **Start.** The model, its effort when it offers several, and the first message: `POST /strategy/runs {model,
-  effort?, text, context}`. The reply's run is shown.
+- **Start.** The model and its effort when it offers several (an inline "Effort" label and rectangular
+  segments, one per effort, with the model's default chosen until another is) sit side by side when
+  they fit. Then the first message: `POST /strategy/runs {model, effort?, text, context}`. Choosing
+  the default effort sends no effort. The reply's run is shown.
 - **A run** shows what it is on, its state ("Working", "Waiting for you", "Ended: planned"), its notes (You, Agent,
   Solace), its proposals and the agent's transcript (`GET /strategy/runs/{rid}`, fetched again every 1.5 s while
   the agent works, in one chain that a reconnect or another run ends). While open: the message box, **Send**

@@ -30,7 +30,7 @@ test('A11: <solace-task> uses only the HTTP API, including live task and workflo
     if (path === '/events') return new Response(new ReadableStream({ start(c) { events = c; c.enqueue(new TextEncoder().encode('event: ready\ndata: {}\n\n')); } }), { headers: { 'Content-Type': 'text/event-stream' } });
     if (path === '/projects') return Response.json({ workspace: false, projects: [{ dir: '', name: 'fixture', base: '' }], found: [] });
     if (path === '/models') return Response.json([{ id: 'fake', label: 'Fake' }]);
-    if (req.method === 'GET') return Response.json(path === '/graph' ? { review: { summary: '1 effects added, 0 signature changed, 0 test unfinished' } } : path === '/workflow' ? workflow : current);
+    if (req.method === 'GET') return Response.json(path === '/graph/review' ? { summary: '1 effects added, 0 signature changed, 0 test unfinished' } : path === '/workflow' ? workflow : current);
     const body = await req.json();
     if (path.endsWith('/actions')) {
       if (body.action === 'complete') return Response.json({ code: 'E7006', message: 'Approval required' }, { status: 409 });
@@ -120,12 +120,14 @@ test('A11: <solace-task> uses only the HTTP API, including live task and workflo
     for (const pair of [['GET', '/projects'], ['GET', '/workflow'], ['GET', '/tasks/t1'], ['GET', '/models'], ['GET', '/events'], ['PATCH', '/tasks/t1'], ['POST', '/tasks/t1/notes'], ['POST', '/tasks/t1/actions'], ['POST', '/tasks/t1/questions/q1']]) expect(requests).toContainEqual(pair);
     t.dispatch(new task.Tab('runs')); expect(t.html()).toContain('/logs/r1');
     // Events carry no changes: one arriving fetches the task's own, then its review.
+    // The review is one summary, not the project's whole graph.
     current.changes = [{ name: 'app.main' }];
     send({ task: { ...current, changes: undefined } });
     t.dispatch(new task.Tab('changes'));
     await until(() => t.html().includes('1 effects added'));
     expect(t.html()).toContain('/contracts?task=t1');
-    expect(requests).toContainEqual(['GET', '/graph']);
+    expect(requests).toContainEqual(['GET', '/graph/review']);
+    expect(requests).not.toContainEqual(['GET', '/graph']);
   } finally {
     if (confirmOriginal === undefined) delete globalThis.confirm;
     else globalThis.confirm = confirmOriginal;

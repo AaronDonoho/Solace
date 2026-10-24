@@ -641,6 +641,33 @@ class Root(unittest.TestCase):
         self.api('DELETE', '/projects/b')
         self.assertTrue((self.root/'b/.solace/store.db').exists())
 
+    def test_a_new_rust_project_is_a_cargo_package(self):
+        # D-192: the New project form creates a one-crate Cargo binary package
+        # and lists it, so `found` stops offering it.
+        self.start()
+        v = self.api('POST', '/projects/new', {'name': 'rusty', 'language': 'rust'})
+        self.assertIn('rusty', [p['dir'] for p in v['projects']])
+        for f in ['Cargo.toml', 'src/main.rs', 'solace.toml', '.solace/store.db']:
+            self.assertTrue((self.root/'rusty'/f).exists(), f)
+        self.assertFalse((self.root/'rusty/.git').exists())
+        self.assertNotIn('rusty', [f['dir'] for f in self.api('GET', '/projects')['found']])
+        self.assertIn('fn main', self.cli('view', 'crate.main', '--project', 'rusty'))
+        # A taken folder and a name Cargo refuses leave no folder and no member.
+        (self.root/'taken').mkdir()
+        self.refused('POST', '/projects/new', {'name': 'taken', 'language': 'rust'}, 'already exists')
+        self.assertEqual(list((self.root/'taken').iterdir()), [])
+        self.refused('POST', '/projects/new', {'name': 'a b', 'dir': 'bad', 'language': 'rust'}, 'invalid character')
+        self.assertFalse((self.root/'bad').exists())
+        self.assertEqual([p['dir'] for p in self.api('GET', '/projects')['projects'] if p['dir'] != '.'], ['rusty'])
+
+    def test_a_new_rust_project_is_refused_without_cargo(self):
+        # D-192: unlike Add, a new Rust package can't be made without Cargo.
+        self.env = {**self.env, 'PATH': str(self.root/'no-tools')}
+        self.start()
+        self.refused('POST', '/projects/new', {'name': 'rusty', 'language': 'rust'}, 'Needs the Rust toolchain (`cargo`)')
+        self.assertFalse((self.root/'rusty').exists())
+        self.assertNotIn('rusty', [p['dir'] for p in self.api('GET', '/projects')['projects']])
+
     def test_mcp_serves_the_command_tool(self):
         project(self.root, body='pub fn one() { 1 }\n\npub fn two() { one() + 1 }\n')
         self.migrate()
@@ -768,6 +795,10 @@ class Root(unittest.TestCase):
             self.refused('POST', '/projects', {'dir': '../x'}, 'migrating')
             self.refused('POST', '/projects/new', {'name': 'ok', 'dir': '../out'}, 'below the root')
             self.refused('POST', '/projects/new', {'name': 'ok', 'dir': 'link/new'}, 'without symlinks')
+            status, v = self.call('POST', '/projects/new', {'name': 'ok', 'language': 'python'})
+            self.assertEqual(status, 409)
+            self.assertIn('"gleam" or "rust"', v['message'])
+            self.assertFalse((self.root/'ok').exists())
             self.refused('POST', '/projects/new', {'name': 'Bad-Name'}, "isn't a Gleam package name")
             self.refused('POST', '/projects/new', {'name': 'a'}, 'already exists')
             self.assertFalse((outside/'ext/.solace').exists())
@@ -844,9 +875,10 @@ class Root(unittest.TestCase):
         settings = (self.root/'solace.toml').read_text()
         self.assertIn('projects = ["app"]', settings)
         self.assertIn('watch_limit', settings)
-        self.assertTrue((self.root/'.solace/.gitignore').exists())
-        ignore = (self.root/'.solace/.gitignore').read_text()
-        for shared in ['!.gitignore', '!approved', '!store.db']:
+        self.assertTrue((self.root/'.gitignore').exists())
+        self.assertFalse((self.root/'.solace/.gitignore').exists())
+        ignore = (self.root/'.gitignore').read_text()
+        for shared in ['**/.solace/*', '!**/.solace/store.db', '!**/.solace/approved']:
             self.assertIn(shared, ignore)
         with open(self.root/'solace.toml', 'a') as f: f.write('tool = { run = ["python3", "tool.py"] }\n')
         self.assertIn('plain files', self.cli('session', 'start'))
@@ -1615,7 +1647,7 @@ class Root(unittest.TestCase):
         body = 'pub fn one() {\n  1\n}\n'
         for d in ['a', 'b']: project(self.root/d, body=body)
         self.migrate()
-        self.assertIn('!store.db', (self.root/'b/.solace/.gitignore').read_text())
+        self.assertIn('!**/.solace/store.db', (self.root/'.gitignore').read_text())
         self.start()
         edited = body.replace('  1', '  2')
         (self.root/'b/src/app.gleam').write_text(edited)
@@ -1650,14 +1682,16 @@ class Root(unittest.TestCase):
             (store/name).write_text('local\n')
         subprocess.run(['git', 'init', '-q', str(self.root)], check=True, capture_output=True)
         status = subprocess.run(
-            ['git', '-C', str(self.root), 'status', '--porcelain', '--untracked-files=all', '--', 'a/.solace'],
+            ['git', '-C', str(self.root), 'status', '--porcelain', '--untracked-files=all', '--', '.gitignore', 'a/.solace'],
             text=True, capture_output=True, check=True).stdout
-        for name in ['.gitignore', 'approved', 'store.db']:
+        self.assertIn('?? .gitignore', status)
+        for name in ['approved', 'store.db']:
             self.assertIn(f'?? a/.solace/{name}', status)
+        self.assertFalse((store/'.gitignore').exists())
         for name in local:
             self.assertNotIn(f'a/.solace/{name}', status)
-        # A line the human adds to the file survives the next command.
-        ignore = store/'.gitignore'
+        # A line the human adds to the root file survives the next command.
+        ignore = self.root/'.gitignore'
         ignore.write_text(ignore.read_text() + '!keep.txt\n')
         self.cli('session', 'start', cwd=self.root/'a')
         self.assertIn('!keep.txt', ignore.read_text())

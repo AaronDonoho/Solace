@@ -3,6 +3,7 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 import gleam/string
 import gleeunit
 import lustre/element
@@ -99,6 +100,9 @@ pub fn row_decoder_reads_links_and_closed_time_test() {
       None,
       Some(60),
       Some(70),
+      "",
+      "",
+      [],
       ["t0"],
     )
   // A task saved before D-87 has none of the fields.
@@ -107,13 +111,45 @@ pub fn row_decoder_reads_links_and_closed_time_test() {
       "{\"id\":\"t2\",\"title\":\"Old\",\"body\":\"\",\"column\":\"backlog\"}",
       strategy.row_decoder(),
     )
-  assert #(old.feature, old.milestone, old.created, old.closed, old.depends)
-    == #(None, None, None, None, [])
+  assert #(
+      old.feature,
+      old.milestone,
+      old.created,
+      old.closed,
+      old.paused,
+      old.finished,
+      old.runs,
+      old.depends,
+    )
+    == #(None, None, None, None, "", "", [], [])
+  // The server sends null for a field it has no value for.
+  let assert Ok(nulls) =
+    json.parse(
+      "{\"id\":\"t3\",\"title\":\"Nulls\",\"body\":\"\",\"column\":\"backlog\",\"paused_from\":null,\"finished\":null,\"runs\":[]}",
+      strategy.row_decoder(),
+    )
+  assert #(nulls.paused, nulls.finished, nulls.runs) == #("", "", [])
 }
 
 pub fn closed_tasks_come_newest_first_then_open_ones_test() {
   let row = fn(id, title, closed) {
-    #(".", strategy.Row(id, title, "", "done", None, None, None, closed, []))
+    #(
+      ".",
+      strategy.Row(
+        id,
+        title,
+        "",
+        "done",
+        None,
+        None,
+        None,
+        closed,
+        "",
+        "",
+        [],
+        [],
+      ),
+    )
   }
   let order =
     strategy.sorted([
@@ -137,6 +173,9 @@ pub fn filters_keep_column_project_links_and_words_test() {
       None,
       Some(1),
       Some(5),
+      "",
+      "",
+      [],
       [],
     )
   let all = strategy.Filters("", "", "", "", "")
@@ -705,11 +744,11 @@ pub fn open_runs_mark_their_records_until_they_end_test() {
   assert string.contains(page(model), "Index</button>" <> marker)
   assert string.contains(
     page(model),
-    "<h4>Search <span class=\"state\">proposed</span>" <> marker,
+    "<h4>Search <span class=\"state state-proposed\">proposed</span>" <> marker,
   )
   assert string.contains(
     page(model),
-    "<h3 data-milestone-id=\"m1\"><button aria-expanded=\"false\" class=\"toggle\" type=\"button\">Launch <span class=\"state\">proposed</span>"
+    "<h3 data-milestone-id=\"m1\"><button aria-expanded=\"false\" class=\"toggle\" type=\"button\"><span class=\"title\">Launch</span><span class=\"facts\"><span class=\"state state-proposed\">proposed</span>"
       <> marker,
   )
   let ended =
@@ -736,7 +775,7 @@ pub fn open_runs_mark_their_records_until_they_end_test() {
   assert markers(ended) == 1
   assert string.contains(
     page(ended),
-    "<h3 data-milestone-id=\"m1\"><button aria-expanded=\"false\" class=\"toggle\" type=\"button\">Launch <span class=\"state\">proposed</span>"
+    "<h3 data-milestone-id=\"m1\"><button aria-expanded=\"false\" class=\"toggle\" type=\"button\"><span class=\"title\">Launch</span><span class=\"facts\"><span class=\"state state-proposed\">proposed</span>"
       <> marker,
   )
 }
@@ -880,7 +919,7 @@ pub fn a_proposal_shows_and_one_answer_is_sent_at_a_time_test() {
   assert string.contains(page, "Create task<em> Index</em>")
   assert string.contains(
     page,
-    "Approving also sets the feature <em>Search</em> back to upcoming.",
+    "Approving also sets the feature <a data-feature=\"f1\" href=\"/feature/f1\">Search</a> back to upcoming.",
   )
   assert string.contains(page, ">Approve</button>")
   // D-115: an edit shows only the fields that change, a short one as old →
@@ -1476,7 +1515,7 @@ pub fn textareas_fill_their_container_test() {
   )
   assert string.contains(
     css,
-    ".picker{border:1px solid var(--line);margin:4px 0 8px;padding:6px 10px}",
+    ".picker{border:1px solid var(--line);margin:var(--space-1) 0 var(--space-2);padding:var(--space-1) var(--space-3)}",
   )
 }
 
@@ -1555,7 +1594,10 @@ pub fn page_uses_the_shared_control_styles_test() {
 pub fn filters_inputs_fill_their_labels_test() {
   let assert [css, ..] =
     element.to_string(strategy.view(planned())) |> string.split("</style>")
-  assert string.contains(css, ".filters input{min-width:240px;margin:0}")
+  assert string.contains(
+    css,
+    ".filters input,.filters select{width:100%;margin:0}",
+  )
 }
 
 /// D-129: a task event marked `noProject` lands in the homeless bucket,
@@ -1871,14 +1913,11 @@ fn numbers(from: Int, to: Int) -> List(Int) {
 /// A workspace with `n` open tasks in the root's project, titled so the
 /// default order is the tasks' own.
 fn many(n: Int) -> strategy.Model {
-  let tasks =
-    numbers(1, n)
-    |> list.map(fn(i) {
-      task("t" <> int.to_string(i), title_of(i), "", "backlog", "", 0)
-    })
   workspace()
   |> step(
-    strategy.Live(message(".", [#("tasks", json.array(tasks, fn(t) { t }))])),
+    strategy.Live(
+      message(".", [#("tasks", json.array(task_list(n), fn(t) { t }))]),
+    ),
   )
 }
 
@@ -1892,35 +1931,42 @@ fn title_of(i: Int) -> String {
 
 pub fn the_tasks_tab_pages_its_rows_test() {
   assert strategy.pages(0) == 1
-  assert strategy.pages(25) == 1
-  assert strategy.pages(26) == 2
-  assert strategy.pages(96) == 4
-  let rows = strategy.visible(many(96))
-  let ids_on = fn(page: Int) {
-    strategy.page_rows(rows, page) |> list.map(fn(pair) { pair.1.id })
+  assert strategy.pages(1) == 1
+  assert strategy.pages(10) == 1
+  assert strategy.pages(11) == 2
+  assert strategy.pages(25) == 3
+  assert strategy.pages(26) == 3
+  let ids_on = fn(total: Int, page: Int) {
+    strategy.page_rows(strategy.visible(many(total)), page)
+    |> list.map(fn(pair) { pair.1.id })
   }
   let named = fn(from: Int, to: Int) {
     numbers(from, to) |> list.map(fn(i) { "t" <> int.to_string(i) })
   }
-  assert ids_on(1) == named(1, 25)
-  assert ids_on(2) == named(26, 50)
-  assert ids_on(4) == named(76, 96)
+  assert ids_on(0, 1) == []
+  assert ids_on(1, 1) == named(1, 1)
+  assert ids_on(10, 1) == named(1, 10)
+  assert ids_on(11, 1) == named(1, 10)
+  assert ids_on(11, 2) == named(11, 11)
+  assert ids_on(25, 2) == named(11, 20)
+  assert ids_on(25, 3) == named(21, 25)
+  assert ids_on(26, 3) == named(21, 26)
   // Past the end: the last page, never an empty one.
-  assert ids_on(9) == named(76, 96)
-  assert strategy.page_text(2, 96) == "page 2 of 4, 96 tasks"
+  assert ids_on(26, 9) == named(21, 26)
+  assert strategy.page_text(2, 26) == "page 2 of 3, 26 tasks"
   assert strategy.page_text(1, 1) == "page 1 of 1, 1 task"
   assert strategy.page_text(9, 0) == "page 1 of 1, 0 tasks"
 }
 
 pub fn the_tasks_tab_shows_one_page_with_its_count_test() {
-  let model = many(30) |> step(strategy.Page(2))
+  let model = many(30) |> step(strategy.Page(3))
   let page = element.to_string(strategy.view(model))
-  assert string.contains(page, "task-26")
+  assert string.contains(page, "task-30")
   assert !string.contains(page, "task-01")
-  assert string.contains(page, "page 2 of 2, 30 tasks")
+  assert string.contains(page, "page 3 of 3, 30 tasks")
   // Prev is greyed out on the first page, Next on the last.
   let first = element.to_string(strategy.view(many(30)))
-  assert string.contains(first, "page 1 of 2, 30 tasks")
+  assert string.contains(first, "page 1 of 3, 30 tasks")
   // A button's own tag: the `<button` opening its label.
   let tag_of = fn(html: String, label: String) {
     let assert Ok(#(before, _)) = string.split_once(html, label)
@@ -1953,7 +1999,7 @@ pub fn the_task_detail_stays_below_the_table_and_pager_test() {
     string.byte_size(before)
   }
   let table = at("</table>")
-  let count = at("page 2 of 2, 30 tasks")
+  let count = at("page 2 of 3, 30 tasks")
   let detail = at("<solace-task")
   assert table < count && count < detail
   // The detail shows even when its row is on another page.
@@ -1963,7 +2009,7 @@ pub fn the_task_detail_stays_below_the_table_and_pager_test() {
 pub fn a_task_link_opens_the_page_holding_the_task_test() {
   let model = many(30) |> step(strategy.Focus("task", ".", "t27"))
   assert model.selected == Some(#(".", "t27"))
-  assert model.page == 2
+  assert model.page == 3
   let page = element.to_string(strategy.view(model))
   assert string.contains(page, "task-27")
 }
@@ -2242,12 +2288,30 @@ pub fn a_backlog_row_offers_plan_test() {
   assert refused.error != ""
   let opened =
     element.to_string(strategy.view(step(model, strategy.Open(".", "b"))))
-  assert string.contains(opened, "hosted strategy task=\"b\"")
+  assert string.contains(opened, "hosted")
+  assert string.contains(opened, "strategy")
+  assert string.contains(opened, "task=\"b\"")
 }
 
 pub fn titles_sort_without_regard_to_case_test() {
   let row = fn(id, title) {
-    #("web", strategy.Row(id, title, "", "backlog", None, None, None, None, []))
+    #(
+      "web",
+      strategy.Row(
+        id,
+        title,
+        "",
+        "backlog",
+        None,
+        None,
+        None,
+        None,
+        "",
+        "",
+        [],
+        [],
+      ),
+    )
   }
   let rows = [row("1", "Zebra"), row("2", "add x"), row("3", "Apple")]
   let titles = fn(rows: List(#(String, strategy.Row))) {
@@ -2285,12 +2349,13 @@ pub fn a_single_project_new_task_form_has_no_project_picker_test() {
   )
 }
 
-/// Unavailable models aren't offered: a line under the pick says why, with
-/// Try again for a usage limit, and with none that can start, what to set up.
+/// Unavailable models aren't offered: a line under the pick says why, an
+/// icon beside the pick tries again, and with none that can start, what to
+/// set up.
 pub fn the_plan_offers_only_models_that_can_start_test() {
   let shown = fn(model) { element.to_string(strategy.view(model)) }
   let sol =
-    "{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached\",\"limit\":true}"
+    "{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached\",\"retry\":true}"
   let model =
     planned()
     |> step(strategy.ModelsLoaded(
@@ -2306,8 +2371,10 @@ pub fn the_plan_offers_only_models_that_can_start_test() {
   )
   assert string.contains(
     shown(model),
-    "Sol: Codex usage limit reached<button type=\"button\">Try again</button>",
+    "<li>Sol: Codex usage limit reached</li>",
   )
+  assert string.contains(shown(model), "aria-label=\"Try again\"")
+  assert string.contains(shown(model), "⟳</button><select")
   assert !string.contains(shown(model), "No model can start yet")
   // None can start, every one held by a usage limit: the limits line, not
   // the install steps the agents are already past.
@@ -2316,6 +2383,7 @@ pub fn the_plan_offers_only_models_that_can_start_test() {
   assert !string.contains(shown(none), "No model can start yet")
   assert !string.contains(shown(none), "claude.ai/install.sh")
   assert string.contains(shown(none), "<summary>1 model unavailable</summary>")
+  assert string.contains(shown(none), "⟳</button>")
   // A model that isn't installed: the install steps stand.
   let setup =
     step(
@@ -2323,18 +2391,20 @@ pub fn the_plan_offers_only_models_that_can_start_test() {
       strategy.ModelsLoaded(
         "["
         <> sol
-        <> ",{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"claude\",\"available\":false,\"reason\":\"claude is not installed\",\"limit\":false}]",
+        <> ",{\"id\":\"luna\",\"label\":\"Luna\",\"agent\":\"claude\",\"available\":false,\"reason\":\"claude is not installed\",\"retry\":false}]",
       ),
     )
   assert string.contains(shown(setup), "No model can start yet")
   assert string.contains(shown(setup), "claude.ai/install.sh")
   // Try again's reply is the list as it is now: the model is offered again.
+  let again = step(none, strategy.TryAgainModel)
+  assert again.plan_refreshing
   let again =
-    none
-    |> step(strategy.TryAgainModel("codex"))
+    again
     |> step(strategy.ModelsLoaded(
       "[{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":true}]",
     ))
+  assert !again.plan_refreshing
   assert string.contains(shown(again), ">Sol</option>")
   assert !string.contains(shown(again), "unavailable</summary>")
 }
@@ -2387,7 +2457,7 @@ pub fn a_plan_run_names_the_model_it_used_test() {
 }
 
 /// Cards take the shared card padding, small controls the small height, and
-/// the Tasks table's date columns align right with their headings.
+/// the page spaces its filters, table, band and headings with the tokens.
 pub fn strategy_uses_the_shared_spacing_test() {
   let page = element.to_string(strategy.view(planned()))
   assert string.contains(page, "--control-h:36px")
@@ -2400,11 +2470,29 @@ pub fn strategy_uses_the_shared_spacing_test() {
     ".vision{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card)}",
   )
   assert string.contains(page, ".plan-bar select{")
+  assert string.contains(page, ".plan p{margin:var(--space-1) 0}")
   // The plan panel's selects take the shared small-control declarations, and
   // add the padding and width that are theirs.
   assert string.contains(
     page,
-    solace_task.small_control <> ";padding:2px 6px;max-width:100%}",
+    solace_task.small_control
+      <> ";padding:var(--space-1) var(--space-2);max-width:100%}",
+  )
+  assert string.contains(
+    page,
+    ".filters{display:flex;flex-wrap:wrap;gap:var(--space-2) var(--space-4)",
+  )
+  assert string.contains(
+    page,
+    ".tasks th{text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.08em;padding:var(--space-2) var(--space-3)",
+  )
+  assert string.contains(
+    page,
+    ".detail-bar{display:flex;flex-wrap:wrap;gap:var(--space-1) var(--space-3)",
+  )
+  assert string.contains(
+    page,
+    ".milestone h3 .facts{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-2)",
   )
   assert string.contains(
     page,
@@ -2412,8 +2500,18 @@ pub fn strategy_uses_the_shared_spacing_test() {
   )
   assert string.contains(
     page,
-    "white-space:nowrap;color:var(--soft);text-align:right;font-variant-numeric:tabular-nums}",
+    ".tabs{display:flex;background:var(--sheet);border-bottom:2px solid var(--edge);min-height:var(--tabs-height);box-sizing:border-box}",
   )
+  assert string.contains(
+    page,
+    ".tasks .created,.tasks .closed{color:var(--soft);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}",
+  )
+  assert string.contains(
+    page,
+    ".tasks .created span,.tasks .closed span{display:block}",
+  )
+  assert !string.contains(page, ".tasks .created,.tasks .closed{display:flex")
+  assert string.contains(page, ".tasks .planning{margin-left:var(--space-1)}")
 }
 
 /// The Tasks tab's search keeps a task whose id a query word names, bare or
@@ -2624,13 +2722,13 @@ pub fn the_plan_models_follow_refreshes_test() {
     step(
       chosen,
       strategy.ModelsRefreshed(
-        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached\",\"limit\":true,\"efforts\":[\"low\",\"high\"]}]",
+        "[{\"id\":\"a\",\"label\":\"A\"},{\"id\":\"b\",\"label\":\"B\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached\",\"retry\":true,\"efforts\":[\"low\",\"high\"]}]",
       ),
     )
   assert held.plan_model == "b"
   assert held.plan_effort == "high"
   assert string.contains(shown(held), "B: Codex usage limit reached")
-  assert string.contains(shown(held), ">Try again</button>")
+  assert string.contains(shown(held), "aria-label=\"Try again\"")
   let narrowed =
     step(
       held,
@@ -2818,4 +2916,873 @@ pub fn a_second_target_waits_for_the_first_test() {
     )
   assert !replied.milestone_targeting
   assert replied.milestone_error == ""
+}
+
+/// A focused feature's tasks show the run transcript's marks: a green check
+/// for a complete task, a red cross for a canceled one, and neither for an
+/// open task.
+pub fn a_focused_features_tasks_show_complete_and_canceled_marks_test() {
+  let model =
+    workspace()
+    |> step(
+      strategy.Live(
+        message(".", [
+          #(
+            "tasks",
+            json.preprocessed_array([
+              task("t1", "Done", "", "complete", "f1", 10),
+              task("t2", "Stopped", "", "cancelled", "f1", 20),
+              task("t3", "Open", "", "backlog", "f1", 0),
+            ]),
+          ),
+        ]),
+      ),
+    )
+    |> step(strategy.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\",\"body\":\"Find things fast\",\"milestone\":\"m1\"}]}",
+    ))
+    |> step(strategy.Live(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\"}]}",
+    ))
+    |> step(strategy.Select(strategy.Features))
+    |> step(strategy.Focus("feature", "", "f1"))
+  let html = element.to_string(strategy.view(model))
+  let row = fn(title) {
+    let assert Ok(found) =
+      string.split(html, "<li")
+      |> list.find(fn(row) { string.contains(row, ">" <> title <> "</button>") })
+    found
+  }
+  let complete = row("Done")
+  assert string.contains(complete, "tool ok")
+  assert string.contains(complete, "aria-label=\"Complete\"")
+  assert string.contains(complete, "✓")
+  assert !string.contains(complete, "✗")
+  let canceled = row("Stopped")
+  assert string.contains(canceled, "tool failed")
+  assert string.contains(canceled, "aria-label=\"Canceled\"")
+  assert string.contains(canceled, "✗")
+  assert !string.contains(canceled, "✓")
+  let open = row("Open")
+  assert !string.contains(open, "class=\"tool")
+  assert !string.contains(open, "✓")
+  assert !string.contains(open, "✗")
+  assert string.contains(html, ".tool.ok .icon{color:var(--ok-text)}")
+  assert string.contains(html, ".tool.failed .icon{color:var(--revision)}")
+}
+
+fn task_list(n: Int) -> List(json.Json) {
+  numbers(1, n)
+  |> list.map(fn(i) {
+    task("t" <> int.to_string(i), title_of(i), "", "backlog", "", 0)
+  })
+}
+
+pub fn a_live_update_that_shrinks_the_list_shows_a_page_with_rows_test() {
+  let model = many(26) |> step(strategy.Page(3))
+  let model =
+    step(
+      model,
+      strategy.Live(
+        message(".", [#("tasks", json.array(task_list(11), fn(t) { t }))]),
+      ),
+    )
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "task-11")
+  assert !string.contains(page, "task-10")
+  assert string.contains(page, "page 2 of 2, 11 tasks")
+}
+
+pub fn the_filter_comboboxes_match_each_field_and_order_by_title_test() {
+  let model =
+    sortable()
+    |> step(strategy.ProjectsLoaded(
+      "{\"workspace\":true,\"projects\":[{\"dir\":\".\",\"label\":\"Root\",\"name\":\"r\",\"base\":\"\"},{\"dir\":\"web\",\"label\":\"Site\",\"name\":\"web\",\"base\":\"/p/web\"}]}",
+    ))
+  let found = fn(field, text) {
+    list.map(strategy.filter_suggestions(model, field, text), fn(item) {
+      item.id
+    })
+  }
+  // A project matches its folder or its label; features and milestones match
+  // their titles or ids.
+  assert found(strategy.ProjectField, "web") == ["web"]
+  assert found(strategy.ProjectField, "SIT") == ["web"]
+  assert found(strategy.FeatureField, "f2") == ["f2"]
+  assert found(strategy.FeatureField, "alp") == ["f2"]
+  assert found(strategy.MilestoneField, "m2") == ["m2"]
+  assert found(strategy.MilestoneField, "soon") == ["m2"]
+  // The empty query lists each filter's choices by title, with the no-link
+  // and no-project choices kept.
+  assert found(strategy.ProjectField, "") == ["no-project", ".", "web"]
+  assert found(strategy.FeatureField, "") == ["-", "f2", "f1"]
+  assert found(strategy.MilestoneField, "") == ["-", "m1", "m2"]
+}
+
+pub fn a_filter_combobox_chooses_clears_and_shows_no_matches_test() {
+  let model = sortable()
+  let typed = step(model, strategy.FilterText(strategy.FeatureField, "f1"))
+  assert typed.filters.feature == ""
+  let chosen =
+    typed
+    |> step(strategy.FilterKey(strategy.FeatureField, "ArrowDown"))
+    |> step(strategy.FilterKey(strategy.FeatureField, "Enter"))
+  assert chosen.filters.feature == "f1"
+  assert ids(chosen) == ["c", "a"]
+  assert string.contains(
+    element.to_string(strategy.view(chosen)),
+    "value=\"Beta\"",
+  )
+  let missing =
+    step(chosen, strategy.FilterText(strategy.MilestoneField, "zzz"))
+  assert missing.filters.milestone == ""
+  assert string.contains(
+    element.to_string(strategy.view(missing)),
+    "No matches.",
+  )
+  let escaped =
+    step(missing, strategy.FilterKey(strategy.MilestoneField, "Escape"))
+  assert escaped.filters.milestone == ""
+  assert !string.contains(
+    element.to_string(strategy.view(escaped)),
+    "No matches.",
+  )
+  let blurred =
+    step(
+      step(chosen, strategy.FilterText(strategy.FeatureField, "alp")),
+      strategy.FilterBlur(strategy.FeatureField),
+    )
+  assert blurred.filters.feature == "f1"
+  let page = element.to_string(strategy.view(blurred))
+  assert string.contains(page, "value=\"Beta\"")
+  assert string.contains(page, "aria-expanded=\"false\"")
+  assert !string.contains(page, "No matches.")
+  let clicked =
+    step(model, strategy.FilterChoose(strategy.MilestoneField, "m2"))
+  assert clicked.filters.milestone == "m2"
+  assert ids(clicked) == ["c"]
+  let cleared = step(chosen, strategy.FilterText(strategy.FeatureField, ""))
+  assert cleared.filters.feature == ""
+  assert list.length(ids(cleared)) == 5
+}
+
+pub fn the_filter_combobox_navigates_and_marks_the_active_option_test() {
+  let model =
+    sortable() |> step(strategy.FilterText(strategy.FeatureField, "a"))
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "role=\"combobox\"")
+  assert string.contains(page, "role=\"listbox\"")
+  assert string.contains(page, "role=\"option\"")
+  assert string.contains(page, "class=\"options\"")
+  assert string.contains(page, "for=\"filter-feature-input\"")
+  assert string.contains(page, ">Feature</label>")
+  assert string.contains(page, "class=\"choice\"")
+  assert string.contains(page, "aria-expanded=\"true\"")
+  let model =
+    step(model, strategy.FilterKey(strategy.FeatureField, "ArrowDown"))
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(
+    page,
+    "aria-activedescendant=\"filter-feature-option-0\"",
+  )
+  let model =
+    step(model, strategy.FilterKey(strategy.FeatureField, "ArrowDown"))
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(
+    page,
+    "aria-activedescendant=\"filter-feature-option-1\"",
+  )
+  let model = step(model, strategy.FilterKey(strategy.FeatureField, "ArrowUp"))
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(
+    page,
+    "aria-activedescendant=\"filter-feature-option-0\"",
+  )
+  let chosen = step(model, strategy.FilterKey(strategy.FeatureField, "Enter"))
+  assert chosen.filters.feature == "f2"
+  assert ids(chosen) == ["b"]
+  let opened = step(chosen, strategy.FilterOpen(strategy.FeatureField))
+  let page = element.to_string(strategy.view(opened))
+  assert string.contains(
+    page,
+    "aria-activedescendant=\"filter-feature-option-1\"",
+  )
+  assert string.contains(page, "aria-selected=\"true\"")
+  let closed = step(chosen, strategy.FilterBlur(strategy.FeatureField))
+  let page = element.to_string(strategy.view(closed))
+  assert string.contains(page, "aria-controls=\"filter-feature-list\"")
+  assert string.contains(page, "id=\"filter-feature-list\"")
+  assert string.contains(page, "aria-expanded=\"false\"")
+}
+
+pub fn duplicate_filter_titles_stay_distinct_by_id_test() {
+  let model =
+    sortable()
+    |> step(strategy.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Same\"},{\"id\":\"f2\",\"title\":\"Same\"}]}",
+    ))
+    |> step(strategy.Live(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Same\"},{\"id\":\"m2\",\"title\":\"Same\"}]}",
+    ))
+  let ids_for = fn(field) {
+    list.map(strategy.filter_suggestions(model, field, "same"), fn(item) {
+      item.id
+    })
+  }
+  assert ids_for(strategy.FeatureField) == ["f1", "f2"]
+  assert ids_for(strategy.MilestoneField) == ["m1", "m2"]
+  let first = step(model, strategy.FilterChoose(strategy.FeatureField, "f1"))
+  let second = step(model, strategy.FilterChoose(strategy.FeatureField, "f2"))
+  assert ids(first) == ["c", "a"]
+  assert ids(second) == ["b"]
+  let page =
+    model
+    |> step(strategy.FilterOpen(strategy.FeatureField))
+    |> strategy.view
+    |> element.to_string
+  assert string.contains(page, "class=\"hint\">f1")
+  assert string.contains(page, "class=\"hint\">f2")
+}
+
+pub fn the_query_combines_with_all_three_filters_test() {
+  let model =
+    sortable()
+    |> step(strategy.FilterChoose(strategy.ProjectField, "web"))
+    |> step(strategy.FilterChoose(strategy.FeatureField, "f1"))
+    |> step(strategy.FilterChoose(strategy.MilestoneField, "m2"))
+  let matching =
+    step(
+      model,
+      strategy.Filter(strategy.Filters(..model.filters, query: "fix")),
+    )
+  assert ids(matching) == ["c"]
+  let none =
+    step(
+      model,
+      strategy.Filter(strategy.Filters(..model.filters, query: "add")),
+    )
+  assert ids(none) == []
+}
+
+/// The selected task's band shows its title and toggle, hides the details
+/// when collapsed, and expands them again.
+pub fn the_task_band_collapses_and_expands_test() {
+  let model = many(3) |> step(strategy.Open(".", "t2"))
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "class=\"detail-band\"")
+  assert string.contains(page, "aria-expanded=\"true\"")
+  assert string.contains(page, "aria-controls=\"task-details\"")
+  assert string.contains(
+    page,
+    "aria-label=\"Collapse the task details: task-02\"",
+  )
+  assert string.contains(page, "id=\"task-details\"")
+  assert string.contains(page, "<solace-task bar")
+  let assert Ok(#(_, bar)) =
+    string.split_once(page, "<header class=\"detail-bar\"")
+  let assert Ok(#(bar, _)) = string.split_once(bar, "</header>")
+  assert string.contains(bar, "task-02")
+  assert string.contains(bar, "class=\"meta\"")
+  assert string.contains(bar, "backlog")
+  let model = step(model, strategy.ToggleTask)
+  assert model.task_collapsed
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "class=\"detail-band collapsed\"")
+  assert string.contains(page, "aria-expanded=\"false\"")
+  assert string.contains(
+    page,
+    "aria-label=\"Expand the task details: task-02\"",
+  )
+  assert string.contains(page, "<solace-task bar")
+  assert string.contains(
+    page,
+    ".detail-band.collapsed>solace-task{height:0 !important;overflow:hidden;visibility:hidden}",
+  )
+  let model = step(model, strategy.ToggleTask)
+  assert !model.task_collapsed
+  let page = element.to_string(strategy.view(model))
+  assert !string.contains(page, "class=\"detail-band collapsed\"")
+  assert string.contains(page, "aria-expanded=\"true\"")
+}
+
+/// With no selected task the Tasks tab has no band.
+pub fn the_tasks_tab_has_no_band_without_a_selection_test() {
+  let page = many(3) |> strategy.view |> element.to_string
+  assert !string.contains(page, "class=\"detail-band")
+  assert !string.contains(page, "<solace-task")
+}
+
+/// Selecting another task, or a task link, while the band is collapsed
+/// updates the band and expands it.
+pub fn selecting_a_task_expands_its_band_test() {
+  let model =
+    many(3)
+    |> step(strategy.Open(".", "t1"))
+    |> step(strategy.ToggleTask)
+  assert model.task_collapsed
+  let model = step(model, strategy.Open(".", "t2"))
+  assert model.selected == Some(#(".", "t2"))
+  assert !model.task_collapsed
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "aria-expanded=\"true\"")
+  assert string.contains(page, "task=\"t2\"")
+  let model = step(model, strategy.ToggleTask)
+  let model = step(model, strategy.Focus("task", ".", "t3"))
+  assert model.selected == Some(#(".", "t3"))
+  assert !model.task_collapsed
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "aria-expanded=\"true\"")
+  assert string.contains(page, "task=\"t3\"")
+}
+
+/// Paging changes the rows under the band; the selected task and whether its
+/// band is collapsed stay as they were.
+pub fn the_selected_task_stays_in_the_band_across_pages_test() {
+  let model =
+    many(30)
+    |> step(strategy.Open(".", "t3"))
+    |> step(strategy.ToggleTask)
+    |> step(strategy.Page(2))
+  assert model.selected == Some(#(".", "t3"))
+  assert model.task_collapsed
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "page 2 of 3, 30 tasks")
+  assert string.contains(page, "class=\"detail-band collapsed\"")
+  assert string.contains(page, "task=\"t3\"")
+  let assert Ok(#(_, bar)) =
+    string.split_once(page, "<header class=\"detail-bar\"")
+  let assert Ok(#(bar, _)) = string.split_once(bar, "</header>")
+  assert string.contains(bar, "task-03")
+}
+
+/// The collapsed bar names the row as it is now, and falls back to the id
+/// when its row is not loaded.
+pub fn the_task_bar_falls_back_to_the_id_and_follows_a_live_rename_test() {
+  let model =
+    many(3)
+    |> step(strategy.Open(".", "t2"))
+    |> step(strategy.ToggleTask)
+  let renamed =
+    strategy.Live(
+      message(".", [
+        #(
+          "task",
+          json.object([
+            #("id", json.string("t2")),
+            #("title", json.string("Renamed")),
+            #("column", json.string("done")),
+            #("finished", json.object([#("outcome", json.string("finished"))])),
+          ]),
+        ),
+      ]),
+    )
+  let model = step(model, renamed)
+  let page = element.to_string(strategy.view(model))
+  let assert Ok(#(_, bar)) =
+    string.split_once(page, "<header class=\"detail-bar\"")
+  let assert Ok(#(bar, _)) = string.split_once(bar, "</header>")
+  assert string.contains(bar, "Renamed")
+  assert string.contains(bar, "Agent finished")
+  let model = strategy.Model(..model, rows: [])
+  let page = element.to_string(strategy.view(model))
+  let assert Ok(#(_, bar)) =
+    string.split_once(page, "<header class=\"detail-bar\"")
+  let assert Ok(#(bar, _)) = string.split_once(bar, "</header>")
+  assert string.contains(bar, "t2")
+}
+
+/// The Tasks panel's display rules apply only while it is shown, and its
+/// narrow layout keeps the table and band in the same height contract.
+pub fn the_tasks_panel_is_hidden_on_another_tab_and_keeps_its_height_test() {
+  let model =
+    many(3)
+    |> step(strategy.Open(".", "t1"))
+    |> step(strategy.Select(strategy.Vision))
+  let page = element.to_string(strategy.view(model))
+  let assert Ok(#(before, _)) = string.split_once(page, "id=\"panel-tasks\"")
+  let tag = string.split(before, "<section") |> list.last |> result.unwrap("")
+  assert string.contains(tag, "hidden")
+  assert string.contains(
+    page,
+    ".strategy>[role=tabpanel][hidden]{display:none}",
+  )
+  assert string.contains(
+    page,
+    ".strategy>#panel-tasks:not([hidden]){display:flex",
+  )
+  assert !string.contains(page, ".strategy>#panel-tasks{display:flex")
+  assert string.contains(
+    page,
+    ".strategy>#panel-tasks:not([hidden]){display:flex;height:calc(var(--view-height) - var(--tabs-height))",
+  )
+  assert string.contains(
+    page,
+    ".tabs{display:flex;background:var(--sheet);border-bottom:2px solid var(--edge);min-height:var(--tabs-height);box-sizing:border-box}",
+  )
+  assert string.contains(
+    page,
+    "--view-height:calc(100dvh - var(--shell-height))",
+  )
+  assert !string.contains(
+    page,
+    ".strategy>#panel-tasks>.tasks-scroll{overflow:visible}",
+  )
+}
+
+/// The Features tab after the stream sends these records.
+fn features_page(milestones: String, features: String) -> String {
+  features_model(milestones, features) |> features_panel
+}
+
+pub fn closed_features_leave_their_milestone_and_show_once_test() {
+  let page =
+    features_page(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\",\"rank\":1}]}",
+      "{\"features\":[{\"id\":\"open\",\"title\":\"Open\",\"milestone\":\"m1\",\"rank\":1,\"state\":\"active\"},{\"id\":\"done\",\"title\":\"Done\",\"milestone\":\"m1\",\"rank\":3,\"state\":\"complete\"},{\"id\":\"dropped\",\"title\":\"Dropped\",\"rank\":2,\"state\":\"canceled\"}]}",
+    )
+  let count = fn(page, needle) { list.length(string.split(page, needle)) - 1 }
+  assert in_order(page, ["Launch", "Open", "Closed", "Dropped", "Done"])
+  assert count(page, "data-feature-id=\"done\"") == 1
+  assert count(page, "data-feature-id=\"dropped\"") == 1
+  assert string.contains(page, "class=\"state state-complete\">complete<")
+  assert string.contains(page, "class=\"state state-canceled\">canceled<")
+}
+
+pub fn a_page_without_closed_features_has_no_closed_section_test() {
+  let page =
+    features_page(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\",\"rank\":1}]}",
+      "{\"features\":[{\"id\":\"open\",\"title\":\"Open\",\"milestone\":\"m1\",\"state\":\"active\"}]}",
+    )
+  assert string.contains(page, ">Open <span")
+  assert !string.contains(page, ">Closed<")
+}
+
+pub fn a_page_with_every_feature_closed_stays_usable_test() {
+  let model =
+    features_model(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\",\"rank\":1},{\"id\":\"m2\",\"title\":\"Later\",\"rank\":2}]}",
+      "{\"features\":[{\"id\":\"done\",\"title\":\"Done\",\"milestone\":\"m1\",\"rank\":2,\"state\":\"complete\"},{\"id\":\"dropped\",\"title\":\"Dropped\",\"rank\":1,\"state\":\"canceled\"}]}",
+    )
+  let page = features_panel(model)
+  assert in_order(page, [
+    "Launch",
+    "No features.",
+    "Later",
+    "No features.",
+    "Closed",
+    "Dropped",
+    "Done",
+  ])
+  assert string.contains(page, "aria-label=\"Delete Dropped\"")
+  assert string.contains(page, "class=\"edit\"")
+  assert !string.contains(page, ">No milestone<")
+  let editing = step(model, strategy.EditFeature("dropped"))
+  let form = features_panel(editing)
+  let count = fn(page, needle) { list.length(string.split(page, needle)) - 1 }
+  assert string.contains(form, "class=\"feature-form\"")
+  assert count(form, "data-feature-id=\"dropped\"") == 1
+  assert string.contains(form, "id=\"feature-form\"")
+  assert string.contains(form, "value=\"Dropped\"")
+  assert string.contains(form, ">▾ Edit Dropped</button>")
+}
+
+fn features_model(milestones: String, features: String) -> strategy.Model {
+  workspace()
+  |> step(strategy.Live(milestones))
+  |> step(strategy.Live(features))
+  |> step(strategy.Select(strategy.Features))
+}
+
+fn features_panel(model: strategy.Model) -> String {
+  let page = model |> strategy.view |> element.to_string
+  let assert Ok(#(_, after)) = string.split_once(page, "id=\"panel-features\"")
+  let assert Ok(#(features, _)) =
+    string.split_once(after, "<section aria-labelledby=\"tab-roadmap\"")
+  features
+}
+
+/// New feature and Edit open the bottom band expanded, and a collapsed band
+/// keeps the draft it shows when reopened.
+pub fn the_feature_band_opens_expanded_and_keeps_its_draft_test() {
+  let model =
+    features_model(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\",\"rank\":1}]}",
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\",\"milestone\":\"m1\"}]}",
+    )
+  let page = fn(model) { features_panel(model) }
+  let new = step(model, strategy.NewFeature)
+  assert !new.feature_collapsed
+  let opened = page(new)
+  assert string.contains(opened, "class=\"detail-band\"")
+  assert string.contains(opened, "aria-expanded=\"true\"")
+  assert string.contains(opened, "aria-controls=\"feature-form\"")
+  assert string.contains(
+    opened,
+    "aria-label=\"Collapse the feature details: New feature\"",
+  )
+  assert string.contains(opened, "id=\"feature-form\"")
+  let assert Ok(#(stack, band)) =
+    string.split_once(opened, "<div class=\"detail-band\"")
+  assert string.contains(stack, "class=\"features-scroll\"")
+  assert !string.contains(stack, "id=\"feature-text\"")
+  assert string.contains(band, "id=\"feature-text\"")
+  let typed = step(new, strategy.FeatureTitle("Export"))
+  let collapsed = step(typed, strategy.ToggleFeature)
+  assert collapsed.feature_collapsed
+  assert collapsed.feature_draft
+    == Some(features.Draft(None, "Export", "", "proposed", None))
+  let folded = page(collapsed)
+  assert string.contains(folded, "class=\"detail-band collapsed\"")
+  assert string.contains(folded, "aria-expanded=\"false\"")
+  assert string.contains(
+    folded,
+    "aria-label=\"Expand the feature details: New feature\"",
+  )
+  assert string.contains(folded, "value=\"Export\"")
+  assert string.contains(
+    element.to_string(strategy.view(collapsed)),
+    ".detail-band.collapsed>.feature-form{display:none}",
+  )
+  let reopened = step(collapsed, strategy.ToggleFeature)
+  assert !reopened.feature_collapsed
+  assert reopened.feature_draft == collapsed.feature_draft
+  assert string.contains(page(reopened), "value=\"Export\"")
+  let editing =
+    reopened
+    |> step(strategy.CancelFeature)
+    |> step(strategy.EditFeature("f1"))
+  assert !editing.feature_collapsed
+  let editing_page = page(editing)
+  assert string.contains(
+    editing_page,
+    "aria-label=\"Collapse the feature details: Edit Search\"",
+  )
+  let assert Ok(#(stack, band)) =
+    string.split_once(editing_page, "<div class=\"detail-band\"")
+  assert string.contains(stack, "data-feature-id=\"f1\"")
+  assert !string.contains(stack, "id=\"feature-text\"")
+  assert string.contains(band, "value=\"Search\"")
+  let typing = step(editing, strategy.FeatureTitle("Export"))
+  assert string.contains(
+    page(typing),
+    "aria-label=\"Collapse the feature details: Edit Search\"",
+  )
+  assert !string.contains(page(typing), "Edit Export")
+}
+
+/// A refusal stays in the band, and Cancel closes it and clears the draft.
+pub fn cancel_closes_the_feature_band_and_a_refusal_stays_in_it_test() {
+  let model =
+    features_model("", "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\"}]}")
+    |> step(strategy.EditFeature("f1"))
+    |> step(strategy.FeatureMilestone("m9"))
+  let refused =
+    step(
+      model,
+      strategy.FeatureSaved(
+        "{\"code\":\"E7023\",\"message\":\"E7023 unknown milestone m9\"}",
+      ),
+    )
+  assert refused.feature_draft != None
+  let band = fn(page) {
+    let assert Ok(#(_, band)) =
+      string.split_once(page, "<div class=\"detail-band\"")
+    band
+  }
+  let shown = band(features_panel(refused))
+  assert string.contains(shown, "role=\"alert\"")
+  assert string.contains(shown, "E7023 unknown milestone m9")
+  let cancelled = step(refused, strategy.CancelFeature)
+  assert cancelled.feature_draft == None
+  let page = features_panel(cancelled)
+  assert !string.contains(page, "class=\"detail-band")
+  assert !string.contains(page, "id=\"feature-text\"")
+}
+
+/// The feature stack scrolls in the space the band leaves, and the narrow
+/// layout has no fixed page height.
+pub fn the_features_stack_scrolls_under_the_band_test() {
+  let model =
+    features_model("", "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\"}]}")
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "class=\"features-scroll\"")
+  assert string.contains(
+    page,
+    ".strategy>#panel-features:not([hidden]){display:flex;flex-direction:column;overflow:hidden;padding-bottom:0}",
+  )
+  assert string.contains(
+    page,
+    ".strategy>#panel-features:not([hidden])>.features-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}",
+  )
+  assert string.contains(
+    page,
+    ".detail-band>.feature-form{flex:none;max-height:min(45dvh,calc(100dvh - 190px));overflow-y:auto;margin:0}",
+  )
+  assert string.contains(
+    page,
+    ".strategy>#panel-features:not([hidden]){display:flex;flex-direction:column;overflow:visible;padding:var(--space-6);padding-bottom:0}.strategy>#panel-features:not([hidden])>.features-scroll{flex:none;overflow:visible}",
+  )
+  assert !string.contains(
+    page,
+    ".strategy>#panel-features:not([hidden]){display:flex;height:calc",
+  )
+}
+
+/// D-189: a tab change is shown, and the shell's tab change restores it without writing another one.
+pub fn a_tab_change_and_history_restore_the_tab_test() {
+  let initial = strategy.new(strategy.Vision)
+  let model = strategy.Model(..initial, page: 3)
+  let #(model, _) = strategy.update(model, strategy.Select(strategy.Features))
+  assert model.tab == strategy.Features
+  assert model.page == 3
+  let #(model, _) = strategy.update(model, strategy.TabShown(strategy.Roadmap))
+  assert model.tab == strategy.Roadmap
+  assert model.page == 3
+  let #(same, _) = strategy.update(model, strategy.Select(strategy.Roadmap))
+  assert same.tab == strategy.Roadmap
+  assert same.page == 3
+}
+
+/// Outside a browser registering reports the error instead of crashing.
+pub fn register_outside_browser_test() {
+  assert result.is_error(strategy.register())
+}
+
+/// A Created or Closed cell holds its date above its time, so the column can
+/// narrow; the raw seconds still sort the row.
+pub fn the_date_columns_stack_their_date_and_time_test() {
+  let page = element.to_string(strategy.view(sortable()))
+  assert string.contains(page, "<td class=\"created\"><span class=\"date\">")
+  assert string.contains(page, "<td class=\"closed\"><span class=\"date\">")
+  assert string.contains(page, "</span><span class=\"time\">")
+}
+
+/// A task's milestone cell links its record: the loaded title, the id until
+/// it loads, and a dash when there is none. The Feature selector stays.
+pub fn a_milestone_cell_links_its_record_test() {
+  let task = fn(id, title, milestone) {
+    json.object([
+      #("id", json.string(id)),
+      #("title", json.string(title)),
+      #("body", json.string("")),
+      #("column", json.string("backlog")),
+      #("feature", json.null()),
+      #("milestone", milestone),
+      #("dependsOn", json.array([], json.string)),
+      #("createdTime", json.int(60)),
+      #("closedTime", json.null()),
+    ])
+  }
+  let model =
+    workspace()
+    |> step(strategy.Live(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\"}]}",
+    ))
+    |> step(
+      strategy.Live(
+        message(".", [
+          #(
+            "tasks",
+            json.array(
+              [
+                task("t1", "Loaded", json.string("m1")),
+                task("t2", "Unloaded", json.string("m2")),
+                task("t3", "None", json.null()),
+                task("t4", "Blank", json.string("")),
+              ],
+              fn(t) { t },
+            ),
+          ),
+        ]),
+      ),
+    )
+  let page = element.to_string(strategy.view(model))
+  let row = fn(title) {
+    let assert Ok(found) =
+      string.split(page, "<tr")
+      |> list.find(fn(r) { string.contains(r, ">" <> title <> "</button>") })
+    found
+  }
+  let milestone = fn(row) {
+    let assert Ok(found) =
+      string.split(row, "<td")
+      |> list.find(fn(cell) {
+        string.contains(cell, "/milestone/") || string.contains(cell, ">—</td>")
+      })
+    found
+  }
+  let loaded = row("Loaded")
+  assert string.contains(loaded, "aria-label=\"Feature of Loaded\"")
+  assert string.contains(
+    milestone(loaded),
+    "<a aria-label=\"Launch, milestone of Loaded\" href=\"/milestone/m1\">Launch</a>",
+  )
+  assert !string.contains(milestone(loaded), "<select")
+  let unloaded = row("Unloaded")
+  assert string.contains(
+    milestone(unloaded),
+    "<a aria-label=\"m2, milestone of Unloaded\" href=\"/milestone/m2\">m2</a>",
+  )
+  assert !string.contains(milestone(unloaded), "<select")
+  let without = row("None")
+  assert string.contains(milestone(without), ">—</td>")
+  assert !string.contains(milestone(without), "<select")
+  let blank = row("Blank")
+  assert string.contains(milestone(blank), ">—</td>")
+  assert !string.contains(milestone(blank), "<select")
+}
+
+/// Features and milestones share one class per state, with neutral fallback.
+pub fn record_state_labels_share_one_color_class_test() {
+  let states = ["proposed", "upcoming", "active", "complete", "canceled"]
+  let colors = [
+    #("proposed", "#6a5ba6"),
+    #("upcoming", "#2f6db5"),
+    #("active", "#1f7d35"),
+    #("complete", "#000"),
+    #("canceled", "#46575a"),
+  ]
+  let milestones =
+    "{\"milestones\":[{\"id\":\"m-proposed\",\"title\":\"Proposed milestone\",\"rank\":1,\"state\":\"proposed\"},{\"id\":\"m-upcoming\",\"title\":\"Upcoming milestone\",\"rank\":2,\"state\":\"upcoming\"},{\"id\":\"m-active\",\"title\":\"Active milestone\",\"rank\":3,\"state\":\"active\"},{\"id\":\"m-complete\",\"title\":\"Complete milestone\",\"rank\":4,\"state\":\"complete\"},{\"id\":\"m-canceled\",\"title\":\"Canceled milestone\",\"rank\":5,\"state\":\"canceled\"},{\"id\":\"m-mystery\",\"title\":\"Mystery milestone\",\"rank\":6,\"state\":\"mystery\"}]}"
+  let features =
+    "{\"features\":[{\"id\":\"f-proposed\",\"title\":\"Proposed feature\",\"rank\":1,\"milestone\":\"m-proposed\",\"state\":\"proposed\"},{\"id\":\"f-upcoming\",\"title\":\"Upcoming feature\",\"rank\":2,\"milestone\":\"m-proposed\",\"state\":\"upcoming\"},{\"id\":\"f-active\",\"title\":\"Active feature\",\"rank\":3,\"milestone\":\"m-proposed\",\"state\":\"active\"},{\"id\":\"f-complete\",\"title\":\"Complete feature\",\"rank\":4,\"milestone\":\"m-proposed\",\"state\":\"complete\"},{\"id\":\"f-canceled\",\"title\":\"Canceled feature\",\"rank\":5,\"milestone\":\"m-proposed\",\"state\":\"canceled\"},{\"id\":\"f-mystery\",\"title\":\"Mystery feature\",\"rank\":6,\"milestone\":\"m-proposed\",\"state\":\"mystery\"}]}"
+  let html =
+    workspace()
+    |> step(strategy.Live(milestones))
+    |> step(strategy.Live(features))
+    |> step(strategy.ToggleMilestone("m-proposed"))
+    |> strategy.view
+    |> element.to_string
+  let count = fn(html, text) { list.length(string.split(html, text)) - 1 }
+  list.each(states, fn(state) {
+    let label =
+      "<span class=\"state state-" <> state <> "\">" <> state <> "</span>"
+    // A feature card, a milestone heading and a roadmap feature row.
+    assert count(html, label) == 3
+    assert string.contains(
+      html,
+      ".state.state-" <> state <> "{background:var(--state-" <> state <> ")",
+    )
+  })
+  list.each(colors, fn(color) {
+    assert string.contains(html, "--state-" <> color.0 <> ":" <> color.1 <> ";")
+  })
+  assert string.contains(html, "--state-ink:#fff")
+  // The exact markup shows a state label carries no inline color.
+  assert count(html, "<span class=\"state\">mystery</span>") == 3
+  assert !string.contains(html, "state-mystery")
+}
+
+/// The panel draws the shared effort pick: the model's efforts, its default
+/// shown until another is chosen, and the effort it sends.
+pub fn the_plan_draws_the_shared_effort_pick_test() {
+  let model =
+    planned()
+    |> step(strategy.ModelsLoaded(
+      "[{\"id\":\"m\",\"label\":\"M\",\"effort\":\"medium\",\"efforts\":[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]},{\"id\":\"n\",\"label\":\"N\",\"effort\":\"high\",\"efforts\":[\"low\",\"high\"]}]",
+    ))
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "class=\"effort-pick\"")
+  assert string.contains(page, "class=\"filters agent-choice\"")
+  assert string.contains(page, "role=\"group\"")
+  assert string.contains(page, "aria-label=\"Effort\"")
+  assert string.contains(
+    page,
+    ".effort-pick label{position:relative;display:block;flex:none;width:2.375rem;",
+  )
+  assert string.contains(page, ".effort-pick>.effort-name{")
+  assert string.contains(page, ">Effort</span>")
+  assert string.contains(page, ">Low</span>")
+  assert string.contains(page, ">Med</span>")
+  assert string.contains(page, ">High</span>")
+  assert string.contains(page, ">X-Hi</span>")
+  assert string.contains(page, ">Max</span>")
+  assert !string.contains(page, ">Default</span>")
+  assert string.contains(page, "title=\"xhigh\"")
+  assert string.contains(
+    page,
+    ".effort-pick label:hover span{background:var(--hover)}",
+  )
+  assert string.contains(
+    page,
+    ".effort-pick input:checked+span{background:var(--ink);color:var(--paper);font-weight:600}",
+  )
+  assert string.contains(
+    page,
+    ".effort-pick label:hover input:checked+span{background:var(--hover);color:var(--ink)}",
+  )
+  assert string.contains(
+    page,
+    ".plan .agent-choice>select{flex:1 1 5rem;min-width:0;width:auto}",
+  )
+  assert string.contains(
+    page,
+    ".plan .agent-choice>.effort-pick{flex:none;margin:0}",
+  )
+  assert string.contains(
+    page,
+    ".plan .agent-choice>.unavailable{flex-basis:100%}",
+  )
+  // Nothing chosen: the model's default (medium) is chosen and sends "".
+  assert string.contains(
+    page,
+    "checked name=\"plan-effort\" type=\"radio\" value>",
+  )
+  assert !string.contains(
+    page,
+    "checked name=\"plan-effort\" type=\"radio\" value=\"medium\"",
+  )
+  let chosen = step(model, strategy.PlanEffort("high"))
+  assert chosen.plan_effort == "high"
+  let page = element.to_string(strategy.view(chosen))
+  assert string.contains(
+    page,
+    "checked name=\"plan-effort\" type=\"radio\" value=\"high\"",
+  )
+  let default = step(chosen, strategy.PlanEffort(""))
+  assert default.plan_effort == ""
+  let page = element.to_string(strategy.view(default))
+  assert string.contains(
+    page,
+    "checked name=\"plan-effort\" type=\"radio\" value>",
+  )
+  let changed = step(chosen, strategy.PlanModel("n"))
+  assert changed.plan_model == "n"
+  assert changed.plan_effort == ""
+  let page = element.to_string(strategy.view(changed))
+  assert string.contains(page, ">High</span>")
+  assert string.contains(
+    page,
+    "checked name=\"plan-effort\" type=\"radio\" value>",
+  )
+}
+
+/// An answered question without a proposal shows its answer as Markdown, so a
+/// `task:<id>` in it is a link, as a proposal's answer is.
+pub fn a_plain_question_answer_links_its_task_reference_test() {
+  let reply =
+    json.to_string(
+      run("r6", "waiting", #("page", ""), 70, [
+        #(
+          "questions",
+          json.preprocessed_array([
+            json.object([
+              #("id", json.string("q1")),
+              #("text", json.string("Which task?")),
+              #("options", json.array(["Yes", "No"], json.string)),
+              #("answer", json.string("task:0123456789abcdef")),
+            ]),
+          ]),
+        ),
+      ]),
+    )
+  let model =
+    planned()
+    |> step(strategy.PlanText("Plan search"))
+    |> step(strategy.StartPlan)
+    |> step(strategy.PlanReplied(True, reply))
+  let page = element.to_string(strategy.view(model))
+  assert string.contains(page, "href=\"/task/0123456789abcdef\"")
+  assert string.contains(page, "data-task=\"0123456789abcdef\"")
 }

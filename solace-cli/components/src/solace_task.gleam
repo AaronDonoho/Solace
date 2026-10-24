@@ -201,8 +201,10 @@ pub type Agent {
     efforts: List(String),
     /// The agent kind whose sign-in it uses, "" when not given.
     agent: String,
-    /// Unavailable for a usage limit, which Try again clears.
-    limit: Bool,
+    /// Unavailable for a hold Try again clears: a usage limit or an expired sign-in.
+    retry: Bool,
+    /// The mark is an expired sign-in, cleared by signing in and Try again.
+    sign_in: Bool,
     /// The model string the agent runs, "" for a model with a `run` argv.
     model: String,
   )
@@ -263,6 +265,9 @@ pub type Model {
     /// The action sent and not yet answered: its buttons are disabled
     /// meanwhile, so one click makes one request. "" when none.
     acting: String,
+    /// A model refresh sent and not yet answered: its button is disabled
+    /// meanwhile, so one click makes one request.
+    refreshing: Bool,
     watching: String,
     entries: List(Entry),
     /// The live transcript polling chain; an ended chain schedules nothing.
@@ -322,8 +327,9 @@ pub type Msg {
   /// The models fetched again with the task (see `refresh`): a failed reply
   /// changes nothing, and a pick the list still has stays.
   ModelsRefreshed(String)
-  /// A usage limit's Try again: the agent kind whose limit to clear.
-  TryAgain(String)
+  /// Try again: every model's availability is checked again and the holds
+  /// a run left are cleared.
+  TryAgain
   ProjectsLoaded(String)
   ReviewLoaded(String)
   Changed(String)
@@ -459,6 +465,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       editing: False,
       tab: "details",
       acting: "",
+      refreshing: False,
       watching: "",
       entries: [],
       poll: 0,
@@ -595,7 +602,7 @@ fn transcript(model: Model, rid: String) -> Effect(Msg) {
 fn review(model: Model, t: Task) -> Effect(Msg) {
   case t.changes {
     [] -> effect.none()
-    _ -> get(model.base, "/graph?task=" <> t.id, ReviewLoaded)
+    _ -> get(model.base, "/graph/review?task=" <> t.id, ReviewLoaded)
   }
 }
 
@@ -933,14 +940,15 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
       }
     WorkflowLoaded(_, _) -> #(model, effect.none())
-    TryAgain(agent) -> #(
-      model,
+    TryAgain if model.refreshing -> #(model, effect.none())
+    TryAgain -> #(
+      Model(..model, refreshing: True),
       effect.from(fn(send) {
         request(
           "",
           "/models/try-again",
           "POST",
-          json.to_string(json.object([#("agent", json.string(agent))])),
+          json.to_string(json.object([])),
           fn(text) { send(ModelsLoaded(text)) },
         )
       }),
@@ -950,11 +958,21 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Ok(models) -> {
           let #(id, effort) = models_chosen(models, model.model, model.effort)
           #(
-            Model(..model, models: models, model: id, effort: effort, error: ""),
+            Model(
+              ..model,
+              models: models,
+              model: id,
+              effort: effort,
+              error: "",
+              refreshing: False,
+            ),
             effect.none(),
           )
         }
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
+        Error(_) -> #(
+          Model(..model, error: error(text), refreshing: False),
+          effect.none(),
+        )
       }
     // A pick held by a usage limit stays chosen, so a limit doesn't swap the model unasked;
     // its effort stays only while the model still offers it.
@@ -977,7 +995,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         Error(_) -> #(model, effect.none())
       }
     ReviewLoaded(text) ->
-      case json.parse(text, decode.at(["review", "summary"], decode.string)) {
+      case json.parse(text, decode.at(["summary"], decode.string)) {
         Ok(summary) -> #(
           Model(..model, review_summary: summary, error: ""),
           effect.none(),
@@ -1642,7 +1660,8 @@ pub fn agent_decoder() -> decode.Decoder(Agent) {
     "",
     decode.one_of(decode.string, [decode.success("")]),
   )
-  use limit <- decode.optional_field("limit", False, decode.bool)
+  use retry <- decode.optional_field("retry", False, decode.bool)
+  use sign_in <- decode.optional_field("sign_in", False, decode.bool)
   use model <- decode.optional_field(
     "model",
     "",
@@ -1656,7 +1675,8 @@ pub fn agent_decoder() -> decode.Decoder(Agent) {
     effort,
     efforts,
     agent,
-    limit,
+    retry,
+    sign_in,
     model,
   ))
 }
@@ -2005,8 +2025,9 @@ fn agent_choice(model: Model) -> Element(Msg) {
   case model.models, ready {
     [_, ..], [] ->
       h.div([a.class("agent")], [
+        refresh_button(TryAgain, model.refreshing),
         no_agents_view(model.models),
-        unavailable_view(model.models, TryAgain),
+        unavailable_view(model.models),
       ])
     _, _ -> agent_pick(model, ready, chosen)
   }
@@ -2151,7 +2172,7 @@ fn questions_view(base: String, t: Task) -> List(Element(Msg)) {
                 [button(other, Answer(q.id, ""))],
               ),
             )
-          answer -> h.p([], [h.text("Answer: " <> answer)])
+          answer -> answer_view(base, answer)
         },
       ])
     ])
@@ -2245,13 +2266,7 @@ pub fn entry_view(base: String, e: Entry) -> Element(msg) {
     "tool" ->
       h.details([a.class("entry tool " <> e.status)], [
         h.summary([], [
-          h.span([a.class("icon")], [
-            h.text(case e.status {
-              "ok" -> "✓"
-              "failed" -> "✗"
-              _ -> "…"
-            }),
-          ]),
+          status_mark(e.status, ""),
           h.code([], [h.text(e.title)]),
         ]),
         case e.input {
@@ -2327,7 +2342,7 @@ pub fn projects_pick(
   ])
 }
 
-/// The project switches' look, shared with the board's new-task form.
+/// The project switches' look: a rounded track and a round thumb.
 pub const projects_pick_styles =
   ".projects-pick{margin:8px 0}.projects-pick label{display:flex;align-items:center;gap:10px;margin:6px 0;cursor:pointer}.projects-pick input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:34px;height:20px;padding:0;margin:0;border:1px solid var(--edge);border-radius:10px;background:var(--well);cursor:pointer;transition:background .15s}.projects-pick input::before{content:\"\";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--paper);border:1px solid var(--edge);box-sizing:border-box;transition:transform .15s}.projects-pick input:checked{background:var(--focus)}.projects-pick input:checked::before{transform:translateX(14px)}.projects-pick input:focus-visible{outline:3px solid var(--focus);outline-offset:2px}.projects-pick[disabled] label,.projects-pick[disabled] input{opacity:.5;cursor:default}@media (prefers-reduced-motion:reduce){.projects-pick input,.projects-pick input::before{transition:none}}\n"
 
@@ -2336,11 +2351,12 @@ pub const projects_pick_styles =
 /// board's dark theme reaches the detail.
 const task_styles =
   control_styles
+  <> tool_styles
   <> projects_pick_styles
   <> editor_styles
   <> model_styles
   <> ":host{display:block;container-type:inline-size}input,textarea,pre,code,.md,.detail > .heading > h2,.record > .panel > article > p,.record > .panel > p,.record > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}
-button,input,textarea,select{font:inherit;padding:var(--control-pad);margin:var(--space-1);border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.detail{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}.muted{color:var(--soft)}.note .delete{float:right;margin:0 0 4px 8px;font-size:13px;padding:0 8px}
+button,input,textarea,select{font:inherit;padding:var(--control-pad);margin:var(--space-1);border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.detail{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.muted{color:var(--soft)}.note .delete{float:right;margin:0 0 4px 8px;font-size:13px;padding:0 8px}
 .meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}
 .tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}
 details.note>summary{display:block;min-height:var(--control-h-small);cursor:pointer;list-style:none}details.note>summary>small{display:inline}details.note>summary>*+*{margin-left:8px}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);margin-right:8px}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}
@@ -2363,13 +2379,14 @@ article{border-bottom-color:var(--line)}.transcript{border-left:1px solid var(--
 .md pre,.transcript pre,.diff,code{background:var(--code);color:var(--ink)}
 @media(prefers-reduced-motion:no-preference){button{transition:background-color .12s ease-out}}
 .detail[aria-busy=true]{animation:stale 0s .3s forwards}@keyframes stale{to{opacity:.6}}"
+  <> effort_pick_styles
 
 /// The markdown editor's look (`editor`), shared with the pages that use it.
 /// Colors come from the page's custom properties. The Image tool is a `label`
 /// around a file picker, so it takes the toolbar's box model: its border-box
 /// min-height is the toolbar's small height, as a button's is.
 pub const editor_styles =
-  ".composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}.composer solace-md-editor{display:block;border-top:1px solid var(--line)}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px;padding:4px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-flex;align-items:center;box-sizing:border-box;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}
+  ".composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}.composer solace-md-editor{display:block;border-top:1px solid var(--line)}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-flex;align-items:center;box-sizing:border-box;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}
 .composer solace-md-editor{border-top:1px solid var(--edge)}.toolbar .button{border-color:var(--edge);background:var(--paper)}.toolbar .button:hover{background:var(--hover)}
 "
 
@@ -2461,17 +2478,17 @@ fn field_order(a: #(String, String), b: #(String, String)) -> order.Order {
 }
 
 /// A strategy run's proposal in human terms: what it creates or changes. An
-/// edit shows only the fields that change: a short one as `old → new` with a
-/// record titled by `name`, and the body as full `Old:` and `New:` sections
-/// with a toggle to see the new body as Markdown; the vision's new text shows
+/// edit shows only the fields that change: a short one as `old → new`, each
+/// record id a link titled by `name`, and the body as full `Old:` and `New:`
+/// sections with the new body shown as Markdown; the vision's new text shows
 /// the same sections. A body or text that differs only in the space around its
 /// lines, or in blank lines, counts as unchanged. One that changes nothing,
 /// the vision included, says "No change". A create, and a proposal saved
-/// before `before`, show
-/// every field, the vision its text as Markdown; the records Approve
-/// also sets `upcoming` follow, then its options until it is answered, and the
-/// answer after. `name(kind, id)` is a record's title, "" when it isn't
-/// loaded.
+/// before `before`, show every field and each record id as a link, the vision
+/// its text as Markdown; the records Approve also sets `upcoming` follow,
+/// then its options until it is answered, and the answer after, with its
+/// record references as links.
+/// `name(kind, id)` is a record's title, "" when it isn't loaded.
 pub fn proposal_view(
   base: String,
   p: Proposal,
@@ -2526,12 +2543,10 @@ pub fn proposal_view(
         list.flat_map(p.fields, fn(f) {
           [
             h.dt([], [h.text(f.0)]),
-            h.dd([], [
-              case f.0 {
-                "body" -> md(base, f.1)
-                _ -> h.text(f.1)
-              },
-            ]),
+            h.dd([], case f.0 {
+              "body" -> [md(base, f.1)]
+              _ -> short_value(f.0, f.1, name)
+            }),
           ]
         }),
       ),
@@ -2555,16 +2570,15 @@ pub fn proposal_view(
                 list.flat_map(fields, fn(f) {
                   [
                     h.dt([], [h.text(f.0)]),
-                    h.dd([], [
-                      case f.0 {
-                        "body" ->
-                          old_and_new(
-                            dict.get(p.before, "body") |> result.unwrap(""),
-                            f.1,
-                          )
-                        _ -> h.text(old_to_new(p, f, name))
-                      },
-                    ]),
+                    h.dd([], case f.0 {
+                      "body" -> [
+                        old_and_new(
+                          dict.get(p.before, "body") |> result.unwrap(""),
+                          f.1,
+                        ),
+                      ]
+                      _ -> old_to_new(p, f, name)
+                    }),
                   ]
                 }),
               ),
@@ -2582,13 +2596,9 @@ pub fn proposal_view(
       fields_view,
       list.append(
         list.map(p.reopens, fn(r) {
-          let shown = case name(r.0, r.1) {
-            "" -> r.1
-            title -> title
-          }
           h.p([a.class("reopens")], [
             h.text("Approving also sets the " <> r.0 <> " "),
-            h.em([], [h.text(shown)]),
+            record_link(r.0, r.1, name),
             h.text(" back to upcoming."),
           ])
         }),
@@ -2603,7 +2613,7 @@ pub fn proposal_view(
                   ])
                 }),
               )
-            answer -> h.p([a.class("answer")], [h.text("Answer: " <> answer)])
+            answer -> answer_view(base, answer)
           },
         ],
       ),
@@ -2612,9 +2622,10 @@ pub fn proposal_view(
 }
 
 /// The proposal display's look (`proposal_view`), for the pages that show
-/// it. Colors come from the page's custom properties.
+/// it. Colors come from the page's custom properties; the old and new values
+/// take the page's deletion and addition tints.
 pub const proposal_styles =
-  ".proposal{border:1px solid var(--edge);background:var(--paper);padding:8px 12px;margin:8px 0}.proposal h4{margin:0 0 6px;font-size:15px}.proposal dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 12px;margin:6px 0}.proposal dt{color:var(--soft);font-size:13px}.proposal dd{margin:0;overflow-wrap:anywhere}.proposal .reopens{color:var(--warn-text);font-weight:600}.proposal .actions{display:flex;gap:6px}.proposal .answer{font-weight:600}.proposal .nochange{color:var(--soft);font-style:italic}.proposal .old-new{margin:6px 0;max-width:760px}.proposal .old-new p{color:var(--soft);font-size:13px;margin:4px 0}.proposal .old-new pre{margin:0 0 8px;font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}.proposal .old-new pre:last-child{margin-bottom:0}.proposal details.new-body{margin:6px 0}.proposal details.new-body>summary{cursor:pointer;color:var(--soft)}\n"
+  ".proposal{border:1px solid var(--edge);background:var(--paper);padding:8px 12px;margin:8px 0}.proposal h4{margin:0 0 6px;font-size:15px}.proposal dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 12px;margin:6px 0}.proposal dt{color:var(--soft);font-size:13px}.proposal dd{margin:0;overflow-wrap:anywhere}.proposal .reopens{color:var(--warn-text);font-weight:600}.proposal .actions{display:flex;gap:6px}.proposal .answer{font-weight:600}.proposal .nochange{color:var(--soft);font-style:italic}.proposal .old-new{margin:6px 0;max-width:760px}.proposal .old-new p{color:var(--soft);font-size:13px;margin:4px 0}.proposal .old-new pre{margin:0 0 8px;font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}.proposal .old-new pre.old-value{background:var(--del)}.proposal .old-new pre.new-value{background:var(--add)}.proposal .old-new pre:last-child{margin-bottom:0}.proposal details.new-body{margin:6px 0}.proposal details.new-body>summary{cursor:pointer;color:var(--soft)}\n"
 
 /// What the task's last run finished with, "" when nothing is to be looked at.
 fn outcome(t: Task) -> String {
@@ -2869,37 +2880,23 @@ pub fn feature_colors(
   })
 }
 
-/// A changed short field as `old → new`: a record id shows as its title,
-/// falling back to the id.
+/// A changed short field as `old → new`: a record id is a link titled by
+/// `name`, falling back to `kind:id`.
 fn old_to_new(
   p: Proposal,
   f: #(String, String),
   name: fn(String, String) -> String,
-) -> String {
-  let titled = fn(kind, id) {
-    case name(kind, id) {
-      "" -> id
-      title -> title
-    }
-  }
-  let shown = fn(value: String) {
-    case f.0 {
-      "feature" | "milestone" -> titled(f.0, value)
-      "dependsOn" ->
-        string.split(value, ", ")
-        |> list.map(fn(id) { titled("task", id) })
-        |> string.join(", ")
-      _ -> value
-    }
-  }
-  shown(dict.get(p.before, f.0) |> result.unwrap("(none)"))
-  <> " → "
-  <> shown(f.1)
+) -> List(Element(msg)) {
+  list.flatten([
+    short_value(f.0, dict.get(p.before, f.0) |> result.unwrap("(none)"), name),
+    [h.text(" → ")],
+    short_value(f.0, f.1, name),
+  ])
 }
 
-/// The toggle to see the proposed body rendered as Markdown.
+/// The proposed body rendered as Markdown; its section starts open.
 fn new_body(base: String, text: String) -> Element(msg) {
-  h.details([a.class("new-body")], [
+  h.details([a.class("new-body"), a.open(True)], [
     h.summary([], [h.text("New body")]),
     md(base, text),
   ])
@@ -2955,13 +2952,11 @@ pub const ui_labels: List(#(String, String)) = [
   #("find_task", "Find a task"),
   #("dependencies", "Dependencies"),
   #("effort", "Effort"),
-  #("default_effort", "Default"),
   #("pick_model", "Select a model"),
   #("try_again", "Try again"),
   #("project", "Project"),
   #("remove_only", "Remove only"),
   #("delete_permanently", "Delete permanently"),
-  #("edit_feature", "Edit feature"),
   #("edit_milestone", "Edit milestone"),
   #("delete_note", "Delete note"),
   #("plan_marker", "A plan run is open on this"),
@@ -3033,6 +3028,7 @@ fn agent_pick(
   chosen: Result(Agent, Nil),
 ) -> Element(Msg) {
   h.div([a.class("agent")], [
+    refresh_button(TryAgain, model.refreshing),
     h.select(
       [
         a.value(model.model),
@@ -3051,27 +3047,12 @@ fn agent_pick(
     ),
     case chosen {
       Ok(m) if m.efforts != [] ->
-        h.select(
-          [
-            a.value(model.effort),
-            a.attribute("aria-label", ui_label("effort")),
-            e.on_input(EffortSelected),
-          ],
-          [
-            h.option(
-              [a.value(""), a.selected(model.effort == "")],
-              case m.effort {
-                "" -> ui_label("default_effort")
-                effort -> ui_label("default_effort") <> " (" <> effort <> ")"
-              },
-            ),
-            ..list.map(m.efforts, fn(effort) {
-              h.option(
-                [a.value(effort), a.selected(effort == model.effort)],
-                effort,
-              )
-            })
-          ],
+        effort_pick(
+          "effort-" <> model.id,
+          model.effort,
+          m.effort,
+          m.efforts,
+          EffortSelected,
         )
       _ -> h.text("")
     },
@@ -3079,12 +3060,8 @@ fn agent_pick(
 }
 
 /// Under a model pick: how many models can't start now, opening why each
-/// can't, so the human knows what to install or sign in to. A usage limit
-/// has Try again, which sends `try_again(agent)`.
-pub fn unavailable_view(
-  models: List(Agent),
-  try_again: fn(String) -> msg,
-) -> Element(msg) {
+/// can't, so the human knows what to install or sign in to.
+pub fn unavailable_view(models: List(Agent)) -> Element(msg) {
   let any_ready = list.any(models, fn(m) { m.available })
   case list.filter(models, fn(m) { !m.available }) {
     [] -> h.text("")
@@ -3096,16 +3073,7 @@ pub fn unavailable_view(
         h.ul(
           [],
           list.map(gone, fn(m) {
-            h.li([], [
-              h.text(m.label <> ": " <> m.reason),
-              case m.limit {
-                True ->
-                  h.button([a.type_("button"), e.on_click(try_again(m.agent))], [
-                    h.text(ui_label("try_again")),
-                  ])
-                False -> h.text("")
-              },
-            ])
+            h.li([], [h.text(m.label <> ": " <> m.reason)])
           }),
         ),
       ])
@@ -3126,17 +3094,20 @@ pub fn unavailable_count(n: Int, more: Bool) -> String {
 }
 
 /// What to set up when no model can start: an agent program, signed in
-/// (the README's "Get an AI agent"). When every model is held by a usage
-/// limit the install steps would mislead: the agents are installed, and
-/// `unavailable_view` shows each limit's reset and its Try again.
+/// (the README's "Get an AI agent"). When every model is held the install
+/// steps would mislead: the agents are installed, and `unavailable_view`
+/// shows each reason; the refresh button above checks them again.
 pub fn no_agents_view(models: List(Agent)) -> Element(msg) {
-  case list.any(models, fn(m) { !m.limit }) {
+  case list.any(models, fn(m) { !m.retry }) {
     False ->
       h.div([a.class("no-agents"), a.role("status")], [
         h.p([], [
-          h.text(
-            "Every model is held by a usage limit. It lifts at the reset shown below; Try again clears one.",
-          ),
+          h.text(case list.any(models, fn(m) { m.sign_in }) {
+            True ->
+              "Every model is held. Each reason is shown below; the Try again button above checks them again."
+            False ->
+              "Every model is held by a usage limit. It lifts at the reset shown below; the Try again button above clears them."
+          }),
         ]),
       ])
     True ->
@@ -3443,13 +3414,13 @@ fn connection_lost(text: String) -> Bool {
 }
 
 /// The full current and proposed values, labeled `Old:` and `New:` in their
-/// original order.
+/// original order; their values take the page's deletion and addition tints.
 fn old_and_new(old: String, new: String) -> Element(msg) {
   h.div([a.class("old-new")], [
     h.p([], [h.text("Old:")]),
-    h.pre([], [h.text(old)]),
+    h.pre([a.class("old-value")], [h.text(old)]),
     h.p([], [h.text("New:")]),
-    h.pre([], [h.text(new)]),
+    h.pre([a.class("new-value")], [h.text(new)]),
   ])
 }
 
@@ -3511,4 +3482,202 @@ pub fn run_model_label(
     Ok(m) -> agent_option(m)
     Error(_) -> id
   }
+}
+
+/// The run transcript's task-status mark, shared with pages that list tasks.
+/// `label` names the outcome to a screen reader; "" leaves the icon unnamed,
+/// as a transcript tool's status is.
+pub fn status_mark(status: String, label: String) -> Element(msg) {
+  h.span([a.class("tool " <> status)], [
+    h.span(
+      [
+        a.class("icon"),
+        case label {
+          "" -> a.none()
+          _ -> a.role("img")
+        },
+        case label {
+          "" -> a.none()
+          _ -> a.attribute("aria-label", label)
+        },
+      ],
+      [
+        h.text(case status {
+          "ok" -> "✓"
+          "failed" -> "✗"
+          _ -> "…"
+        }),
+      ],
+    ),
+  ])
+}
+
+/// The ✓/✗ task marks' layout and colors, shared by the task detail and the
+/// pages that list tasks.
+pub const tool_styles =
+  ".tool .icon{display:inline-block;width:1.2em}.tool.ok .icon{color:var(--ok-text)}.tool.failed .icon{color:var(--revision)}\n"
+
+/// A record reference as a link, titled by `name`, or `kind:id` while the
+/// record isn't loaded.
+fn record_link(
+  kind: String,
+  id: String,
+  name: fn(String, String) -> String,
+) -> Element(msg) {
+  case id {
+    "" | "(none)" -> h.text(id)
+    _ -> {
+      let shown = case name(kind, id) {
+        "" -> kind <> ":" <> id
+        title -> title
+      }
+      h.a([a.href("/" <> kind <> "/" <> id), a.attribute("data-" <> kind, id)], [
+        h.text(shown),
+      ])
+    }
+  }
+}
+
+/// A short field's value: a record id as its link, `dependsOn` as links to
+/// its comma-joined task ids, anything else as text.
+fn short_value(
+  field: String,
+  value: String,
+  name: fn(String, String) -> String,
+) -> List(Element(msg)) {
+  case field {
+    "feature" | "milestone" -> [record_link(field, value, name)]
+    "dependsOn" ->
+      case value {
+        "" | "(none)" -> [h.text(value)]
+        _ ->
+          string.split(value, ", ")
+          |> list.map(fn(id) { record_link("task", id, name) })
+          |> list.intersperse(h.text(", "))
+      }
+    _ -> [h.text(value)]
+  }
+}
+
+/// The effort pick's look: an inline name and fixed rem segments that never
+/// wrap, drawn as the page's small controls, with every segment shaded on
+/// hover and the chosen one in the menu's ink-and-paper contrast.
+pub const effort_pick_styles =
+  ".effort-pick{display:flex;align-items:center;gap:.5rem;border:0;padding:0;margin:.5rem 0;width:max-content;min-width:0}.effort-pick>.effort-name{font-size:.8125rem;color:var(--soft);line-height:1;white-space:nowrap}.effort-pick .effort-stops{display:flex;flex-wrap:nowrap}.effort-pick label{position:relative;display:block;flex:none;width:2.375rem;margin:0;font-size:.8125rem;line-height:1;cursor:pointer}.effort-pick label+label{margin-left:-1px}.effort-pick input{position:absolute;width:1px;height:1px;margin:0;opacity:0;pointer-events:none}.effort-pick label span{display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:100%;height:var(--control-h-small);padding:0 .125rem;white-space:nowrap;overflow:hidden;"
+  <> small_control
+  <> ";transition:background .15s}.effort-pick label:hover span{background:var(--hover)}.effort-pick input:checked+span{background:var(--ink);color:var(--paper);font-weight:600}.effort-pick label:hover input:checked+span{background:var(--hover);color:var(--ink)}.effort-pick input:focus-visible{outline:none}.effort-pick input:focus-visible+span{outline:3px solid var(--focus);outline-offset:2px}@media (prefers-reduced-motion:reduce){.effort-pick span{transition:none}}"
+
+/// A segmented effort's short label; the full name stays in its title.
+pub fn effort_label(effort: String) -> String {
+  case effort {
+    "low" -> "Low"
+    "medium" -> "Med"
+    "high" -> "High"
+    "xhigh" -> "X-Hi"
+    "max" -> "Max"
+    _ -> string.capitalise(effort)
+  }
+}
+
+// Effort labels shrink to fit their fixed segment, down to 0.8em; the
+// title keeps the full name.
+fn effort_size(label: String) -> String {
+  let n = int.min(5, int.max(4, string.length(label)))
+  "calc(4em / " <> int.to_string(n) <> ")"
+}
+
+/// The effort choice: each effort in the agent's order, as a segmented
+/// control of native radios with its name beside it. The model's default
+/// shows as chosen while none is; choosing it sends "", so the task keeps
+/// following the model, and any other effort sends its name (D-149).
+pub fn effort_pick(
+  group: String,
+  chosen: String,
+  default_effort: String,
+  efforts: List(String),
+  on_pick: fn(String) -> msg,
+) -> Element(msg) {
+  h.div(
+    [
+      a.class("effort-pick"),
+      a.attribute("role", "group"),
+      a.attribute("aria-label", ui_label("effort")),
+    ],
+    [
+      h.span([a.class("effort-name")], [h.text(ui_label("effort"))]),
+      h.div(
+        [a.class("effort-stops")],
+        list.map(efforts, fn(effort) {
+          effort_stop(
+            group,
+            effort,
+            default_effort,
+            effort_chosen(effort, chosen, default_effort),
+            on_pick,
+          )
+        }),
+      ),
+    ],
+  )
+}
+
+fn effort_stop(
+  group: String,
+  effort: String,
+  default_effort: String,
+  checked: Bool,
+  on_pick: fn(String) -> msg,
+) -> Element(msg) {
+  let label = effort_label(effort)
+  h.label([a.class("effort-stop"), a.title(effort)], [
+    h.input([
+      a.type_("radio"),
+      a.name(group),
+      a.value(effort_value(effort, default_effort)),
+      a.checked(checked),
+      e.on_input(on_pick),
+    ]),
+    h.span([a.style("font-size", effort_size(label))], [h.text(label)]),
+  ])
+}
+
+/// The value an effort segment sends: the model's default sends "", so a
+/// choice of it keeps following the model, and any other sends its name.
+pub fn effort_value(effort: String, default_effort: String) -> String {
+  case effort == default_effort {
+    True -> ""
+    False -> effort
+  }
+}
+
+fn effort_chosen(
+  effort: String,
+  chosen: String,
+  default_effort: String,
+) -> Bool {
+  case chosen {
+    "" -> effort == default_effort
+    _ -> effort == chosen
+  }
+}
+
+/// An answer as Markdown, so a record reference in it is a link.
+pub fn answer_view(base: String, answer: String) -> Element(msg) {
+  h.div([a.class("answer")], [md(base, "Answer: " <> answer)])
+}
+
+/// The icon button left of a model pick: it rechecks every model and clears
+/// the holds a run left, sending `on_click`.
+pub fn refresh_button(on_click: msg, busy: Bool) -> Element(msg) {
+  h.button(
+    [
+      a.type_("button"),
+      a.class("refresh-models"),
+      a.attribute("aria-label", ui_label("try_again")),
+      a.title(ui_label("try_again")),
+      a.disabled(busy),
+      e.on_click(on_click),
+    ],
+    [h.text("⟳")],
+  )
 }

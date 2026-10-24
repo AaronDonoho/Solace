@@ -250,9 +250,17 @@ fn hung_shutdown_is_killed_after_the_grace_period() {
     let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"ended","outcome":"finished"}));
     let log = p.root.join(".solace/r1.log");
     let start = Instant::now();
-    let forced =
-        supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), Duration::from_millis(300))
-            .unwrap();
+    let forced = supervise(
+        Watch::Task(&p.root, &tid),
+        "r1",
+        &mut child,
+        &log,
+        &json!({}),
+        false,
+        Duration::from_secs(3600),
+        Duration::from_millis(300),
+    )
+    .unwrap();
     assert!(forced);
     assert!(start.elapsed() >= Duration::from_millis(300) && start.elapsed() < Duration::from_secs(10));
     assert!(child.try_wait().unwrap().is_some());
@@ -267,7 +275,10 @@ fn graceful_exit_is_not_forced() {
     let mut child = Command::new("sleep").arg("0.2").process_group(0).spawn().unwrap();
     let log = p.root.join(".solace/r1.log");
     let start = Instant::now();
-    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    assert!(
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_secs(3600), GRACEFUL_EXIT)
+            .unwrap()
+    );
     assert!(start.elapsed() < Duration::from_secs(10));
 }
 
@@ -277,11 +288,16 @@ fn interrupted_and_timed_out_agents_are_killed() {
     let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"ended","outcome":"interrupted"}));
     let log = p.root.join(".solace/r1.log");
     let start = Instant::now();
-    assert!(supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    assert!(
+        supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap()
+    );
     assert!(start.elapsed() < Duration::from_secs(10));
     let (p, tid, mut child) = supervised(json!({"id":"r1","kind":"work","state":"running"}));
     let log = p.root.join(".solace/r1.log");
-    assert!(supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_millis(200), GRACEFUL_EXIT).unwrap());
+    assert!(
+        supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_millis(200), GRACEFUL_EXIT)
+            .unwrap()
+    );
     assert!(child.try_wait().unwrap().is_some());
     let t = task(&p.root, &tid).unwrap();
     assert_eq!(t["runs"][0]["state"], "ended");
@@ -394,6 +410,18 @@ fn strategy_runs_read_the_graph() {
         "{brief}"
     );
     assert!(brief.contains("in short Markdown: lead with the answer"), "{brief}");
+    assert!(brief.contains(super::strategy::STRATEGY_ROLE), "{brief}");
+    // D-156: every strategy run reads the request literally, assumes rather than
+    // asks, separates its recommendation, invents no preconditions and stays conversational.
+    for guidance in [
+        "Read the human's message literally",
+        "make the smallest grounded assumption, name it in one line",
+        "merely a cursory suggestion, not a prescription",
+        "Don't make measurement, investigation, benchmarking or another step a precondition",
+        "Keep notes conversational",
+    ] {
+        assert!(brief.contains(guidance), "{guidance}: {brief}");
+    }
     // D-148: records are named as links the human can click.
     assert!(
         brief.contains(concat!(
@@ -1513,11 +1541,10 @@ fn a_model_off_the_offer_stays_for_the_tasks_using_it() {
     assert_eq!(m.len(), 2, "the model stays in the list");
     let gone = m.iter().find(|x| x["id"] == "claude-opus").unwrap();
     assert_eq!(gone["gone"], true);
-    assert_eq!(
-        agents::availability(gone),
-        Some(("no longer offered by Claude Code".to_string(), false)),
-        "it is not offered for a new run"
-    );
+    let status: agents::Status = agents::availability(gone).unwrap();
+    assert_eq!(status.reason, "no longer offered by Claude Code", "it is not offered for a new run");
+    assert!(!status.retry);
+    assert!(!status.sign_in);
     assert_eq!(gone["label"], "Opus (latest)", "a label saved before D-150 drops the agent's name");
     let saved = json!({"codex":{"time":1,"models":[{"id":"codex-x","label":"Codex · GPT-6 X","agent":"codex","model":"x"}]}});
     assert_eq!(agents::merge_from(&json!([]), &saved)[0]["label"], "GPT-6 X");
@@ -2110,7 +2137,8 @@ fn briefs_hold_what_the_agent_needs_as_text() {
 #[test]
 fn unavailable_models_say_why() {
     let missing = json!({"agent":"codex","run":["solace-no-such-program"]});
-    assert_eq!(unavailable(&missing).unwrap(), "solace-no-such-program is not installed");
+    assert_eq!(unavailable(&missing).unwrap(), "solace-no-such-program is not installed. Install it.");
+    assert_eq!(agents::unavailable(&missing), unavailable(&missing));
     assert!(unavailable(&json!({"agent":"codex","run":["sh"]})).is_none());
     let agent = json!({"agent":"solace-no-such-agent","model":"m"});
     assert!(unavailable(&agent).unwrap().contains("not installed"));
@@ -2180,17 +2208,18 @@ fn agents_say_when_a_usage_limit_is_reached_and_when_it_resets() {
 fn a_usage_limit_marks_the_sign_in_until_it_resets_or_a_run_succeeds() {
     let fixture: Value = serde_json::from_str(USAGE_LIMITS).unwrap();
     let dir = testing::Scratch::new();
-    let (path, log) = (dir.join("agent-limits.json"), dir.join("log.jsonl"));
+    let (path, log) = (dir.join("agent-holds.json"), dir.join("log.jsonl"));
     let codex = json!({"agent":"codex","model":"m"});
     let said = fixture["codex"][3]["said"].as_str().unwrap();
     fs::write(&log, json!({"type":"error","message":said}).to_string()).unwrap();
     agents::observe(&path, &codex, &log, NOON, NOON, Some("stopped"), &zones).unwrap();
     let reason = "Codex usage limit reached (resets 3:45 PM)";
-    assert_eq!(agents::limited(&path, "codex", NOON).as_deref(), Some(reason));
-    assert_eq!(agents::limited(&path, "codex", 1_791_992_699).as_deref(), Some(reason));
+    assert_eq!(agents::held(&path, "codex", NOON).as_deref(), Some(reason));
+    assert!(!agents::sign_in_mark(&path, "codex", NOON));
+    assert_eq!(agents::held(&path, "codex", 1_791_992_699).as_deref(), Some(reason));
     // It lifts at the reset time, and holds only Codex's sign-in.
-    assert_eq!(agents::limited(&path, "codex", 1_791_992_700), None);
-    assert_eq!(agents::limited(&path, "claude", NOON), None);
+    assert_eq!(agents::held(&path, "codex", 1_791_992_700), None);
+    assert_eq!(agents::held(&path, "claude", NOON), None);
     // A model on its own endpoint, or with its own program, isn't on the sign-in.
     let other = dir.join("other.json");
     for m in [json!({"agent":"codex","model":"m","endpoint":{"base_url":"http://x"}}), json!({"agent":"codex","run":["sh"]})] {
@@ -2202,43 +2231,43 @@ fn a_usage_limit_marks_the_sign_in_until_it_resets_or_a_run_succeeds() {
     fs::write(&log, json!({"type":"result","is_error":true,"result":"You've hit your limit · resets soon","usage":{}}).to_string())
         .unwrap();
     agents::observe(&path, &claude, &log, NOON, NOON, Some("stopped"), &zones).unwrap();
-    assert_eq!(agents::limited(&path, "claude", NOON + 365 * 86400).as_deref(), Some("Claude Code usage limit reached (resets soon)"));
+    assert_eq!(agents::held(&path, "claude", NOON + 365 * 86400).as_deref(), Some("Claude Code usage limit reached (resets soon)"));
     // The mark is on disk, not only in memory.
     agents::forget_marks();
-    assert!(agents::limited(&path, "claude", NOON).is_some());
+    assert!(agents::held(&path, "claude", NOON).is_some());
     // A run that got no answer leaves it.
     fs::write(&log, "").unwrap();
-    agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("finished"), &zones).unwrap();
-    assert!(agents::limited(&path, "claude", NOON).is_some());
+    agents::observe(&path, &claude, &log, NOON, NOON + 3650 * 86400, Some("finished"), &zones).unwrap();
+    assert!(agents::held(&path, "claude", NOON).is_some());
     // A run whose agent answered clears it: one that finished, started after
     // the mark was set.
     fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}).to_string()).unwrap();
-    agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("finished"), &zones).unwrap();
-    assert_eq!(agents::limited(&path, "claude", NOON), None);
+    agents::observe(&path, &claude, &log, NOON, NOON + 3650 * 86400, Some("finished"), &zones).unwrap();
+    assert_eq!(agents::held(&path, "claude", NOON), None);
     // A stopped run leaves the mark, even when its agent answered: it says
     // nothing about the sign-in.
     fs::write(&log, json!({"type":"result","is_error":true,"result":"You've hit your limit · resets soon","usage":{}}).to_string())
         .unwrap();
     agents::observe(&path, &claude, &log, NOON, NOON, Some("stopped"), &zones).unwrap();
     fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}).to_string()).unwrap();
-    agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("stopped"), &zones).unwrap();
-    assert!(agents::limited(&path, "claude", NOON).is_some());
+    agents::observe(&path, &claude, &log, NOON, NOON + 3650 * 86400, Some("stopped"), &zones).unwrap();
+    assert!(agents::held(&path, "claude", NOON).is_some());
     // A finished run started before the mark leaves it too: its answers came
     // before the limit was hit.
     agents::observe(&path, &claude, &log, NOON, NOON, Some("finished"), &zones).unwrap();
-    assert!(agents::limited(&path, "claude", NOON).is_some());
-    agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("finished"), &zones).unwrap();
-    assert_eq!(agents::limited(&path, "claude", NOON), None);
+    assert!(agents::held(&path, "claude", NOON).is_some());
+    agents::observe(&path, &claude, &log, NOON, NOON + 3650 * 86400, Some("finished"), &zones).unwrap();
+    assert_eq!(agents::held(&path, "claude", NOON), None);
     // A run that succeeded clears the mark whatever its successful outcome:
     // reviewed, discussed and planned count as `finished` does, the list
     // `supervise` ends a run with. A mark set after the run started stays.
     fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}).to_string()).unwrap();
     for o in ["reviewed", "discussed", "planned"] {
-        agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some(o), &zones).unwrap();
-        assert_eq!(agents::limited(&path, "claude", NOON), None, "{o}");
+        agents::observe(&path, &claude, &log, NOON, NOON + 3650 * 86400, Some(o), &zones).unwrap();
+        assert_eq!(agents::held(&path, "claude", NOON), None, "{o}");
         agents::mark(&path, "claude", "Claude Code usage limit reached", Some(NOON + 3600)).unwrap();
         agents::observe(&path, &claude, &log, NOON, NOON, Some(o), &zones).unwrap();
-        assert!(agents::limited(&path, "claude", NOON).is_some(), "{o}");
+        assert!(agents::held(&path, "claude", NOON).is_some(), "{o}");
     }
     // Claude Code reports its limit as a message, not an error: a message that
     // is exactly the limit's own text marks the sign-in, and is never counted
@@ -2249,9 +2278,9 @@ fn a_usage_limit_marks_the_sign_in_until_it_resets_or_a_run_succeeds() {
     )
     .unwrap();
     agents::observe(&path, &claude, &log, NOON, NOON, Some("finished"), &zones).unwrap();
-    assert_eq!(agents::limited(&path, "claude", NOON).as_deref(), Some("Claude Code usage limit reached (resets 2pm (UTC))"));
-    agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("finished"), &zones).unwrap();
-    assert!(agents::limited(&path, "claude", NOON).is_some());
+    assert_eq!(agents::held(&path, "claude", NOON).as_deref(), Some("Claude Code usage limit reached (resets 2pm (UTC))"));
+    agents::observe(&path, &claude, &log, NOON, NOON + 3650 * 86400, Some("finished"), &zones).unwrap();
+    assert!(agents::held(&path, "claude", NOON).is_some());
     // A passing mention inside a longer message marks nothing, and is an answer.
     fs::write(
         &log,
@@ -2267,8 +2296,8 @@ fn a_usage_limit_marks_the_sign_in_until_it_resets_or_a_run_succeeds() {
         .to_string(),
     )
     .unwrap();
-    agents::observe(&path, &claude, &log, NOON, NOON + 10 * 86400, Some("finished"), &zones).unwrap();
-    assert_eq!(agents::limited(&path, "claude", NOON), None);
+    agents::observe(&path, &claude, &log, NOON, NOON + 3650 * 86400, Some("finished"), &zones).unwrap();
+    assert_eq!(agents::held(&path, "claude", NOON), None);
     // Try again clears a mark.
     assert!(agents::clear(&path, "codex").unwrap());
     assert!(!agents::clear(&path, "codex").unwrap());
@@ -2286,12 +2315,14 @@ fn sign_ins_are_detected_without_a_model_call() {
     let home = testing::Scratch::new();
     let none = |_: &str| false;
     let now = NOON * 1000;
+    let folder = |k: &agents::Kind| home.join(if k.name == "codex" { ".codex" } else { ".claude" });
+    let unknown = |_: &agents::Kind| None;
     let check = |m: &Value, var: &dyn Fn(&str) -> bool| {
-        agents::local(m, &agents::Here { home: &home, var, stored: &|_| false, installed: &|_| true, now })
+        agents::local(m, &agents::Here { folder: &folder, status: &unknown, var, stored: &|_| false, installed: &|_| true, now })
     };
     let (codex, claude) = (json!({"agent":"codex","model":"m"}), json!({"agent":"claude","model":"m"}));
-    let missing = agents::Here { home: &home, var: &none, stored: &none, installed: &|_| false, now };
-    assert_eq!(agents::local(&codex, &missing).unwrap(), "codex is not installed (not on PATH)");
+    let missing = agents::Here { folder: &folder, status: &unknown, var: &none, stored: &none, installed: &|_| false, now };
+    assert_eq!(agents::local(&codex, &missing).unwrap(), "Codex is not installed. Install it.");
     assert_eq!(check(&codex, &none).unwrap(), "codex is not signed in");
     // The keychain is asked on macOS only; elsewhere no file and no key is no sign-in.
     if !cfg!(target_os = "macos") {
@@ -2307,7 +2338,7 @@ fn sign_ins_are_detected_without_a_model_call() {
     // A key stored from Settings is enough; an endpoint naming no key needs none.
     let settings = json!({"id":"cc","agent":"codex","model":"m","endpoint":{"base_url":"http://x","stored_key":true}});
     assert_eq!(check(&settings, &none).unwrap(), "No key yet; add one in Settings");
-    let stored = agents::Here { home: &home, var: &none, stored: &|id| id == "cc", installed: &|_| true, now };
+    let stored = agents::Here { folder: &folder, status: &unknown, var: &none, stored: &|id| id == "cc", installed: &|_| true, now };
     assert!(agents::local(&settings, &stored).is_none());
     assert!(
         agents::local(&endpoint.clone(), &agents::Here { stored: &|_| true, ..stored }).is_some(),
@@ -3309,7 +3340,10 @@ fn agent_says(text: &str) -> Value {
 fn a_review_that_exits_with_its_assessment_is_reviewed() {
     let assessment = "**Assessment: Looks good**\n\n### Findings\n\nFine.";
     let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[agent_says(assessment)]);
-    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    assert!(
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_secs(3600), GRACEFUL_EXIT)
+            .unwrap()
+    );
     let t = task(&p.root, &tid).unwrap();
     assert_eq!(t["runs"][0]["outcome"], "reviewed");
     assert_eq!(t["finished"]["outcome"], "reviewed");
@@ -3332,7 +3366,10 @@ fn a_refused_review_note_still_recovers() {
         }
     });
     let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[refused, agent_says(assessment)]);
-    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    assert!(
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_secs(3600), GRACEFUL_EXIT)
+            .unwrap()
+    );
     let t = task(&p.root, &tid).unwrap();
     assert_eq!(t["runs"][0]["outcome"], "reviewed");
     assert!(t["notes"].as_array().unwrap().iter().any(|n| n["run"] == "r1" && n["text"] == assessment));
@@ -3348,7 +3385,10 @@ fn a_review_fallback_keeps_existing_attention() {
     })
     .unwrap();
     let before = task(&p.root, &tid).unwrap()["attention"].clone();
-    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    assert!(
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_secs(3600), GRACEFUL_EXIT)
+            .unwrap()
+    );
     assert_eq!(task(&p.root, &tid).unwrap()["attention"], before);
 }
 
@@ -3371,7 +3411,10 @@ fn a_review_with_recorded_feedback_is_not_noted_twice() {
 #[test]
 fn a_review_without_an_assessment_still_fails() {
     let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"review","state":"running"}), 0, &[agent_says("Done.")]);
-    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    assert!(
+        !supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &json!({}), false, Duration::from_secs(3600), GRACEFUL_EXIT)
+            .unwrap()
+    );
     let t = task(&p.root, &tid).unwrap();
     assert_eq!(t["runs"][0]["state"], "ended");
     assert_ne!(t["runs"][0]["outcome"], "reviewed");
@@ -3526,4 +3569,459 @@ fn investigate_briefs_report_requirements_not_edits() {
     ] {
         assert!(work.contains(owned), "work: missing {owned}\n{work}");
     }
+}
+
+fn event_board(top: PathBuf) -> std::sync::Arc<Board> {
+    std::sync::Arc::new(Board::new(top, 0))
+}
+
+/// A position the pruned log can no longer reach gets the file snapshot.
+#[test]
+fn an_event_id_before_the_pruned_log_starts_from_the_files() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    api(&s.root, "POST", "/tasks", json!({"title":"During gap"})).unwrap();
+    let top = scope::top(&p.root);
+    let db = tasks::events(&top).unwrap();
+    db.execute("INSERT INTO events(project,data) VALUES ('', '{\"older\":true}')", []).unwrap();
+    db.execute("INSERT INTO events(project,data) VALUES ('', '{\"newest\":true}')", []).unwrap();
+    db.execute("DELETE FROM events WHERE seq < (SELECT MAX(seq) FROM events)", []).unwrap();
+    let last = json!({"tasks": 1, ".": 0}).to_string();
+    let mut reader = Events::new(event_board(top), Some(p.root.clone()), Some(&last));
+    let mut text = String::new();
+    let mut buf = [0; 8192];
+    while !text.contains("event: ready") {
+        let n = reader.read(&mut buf).unwrap();
+        assert!(n > 0);
+        text.push_str(std::str::from_utf8(&buf[..n]).unwrap());
+    }
+    assert!(text.contains("\"workflow\""), "no workflow snapshot in {text}");
+    assert!(text.contains("During gap"), "no task snapshot in {text}");
+    assert!(!text.contains("\"newest\":true"), "replayed only part of the gap in {text}");
+}
+
+/// A current position still gets just what followed it, without a snapshot.
+#[test]
+fn an_event_id_at_the_newest_log_row_replays_only_new_events() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = scope::top(&p.root);
+    let db = tasks::events(&top).unwrap();
+    db.execute("INSERT INTO events(project,data) VALUES ('', '{\"older\":true}')", []).unwrap();
+    let last = json!({"tasks": 1, ".": 0}).to_string();
+    let mut reader = Events::new(event_board(top), Some(p.root.clone()), Some(&last));
+    db.execute("INSERT INTO events(project,data) VALUES ('', '{\"newest\":true}')", []).unwrap();
+    let mut buf = [0; 8192];
+    let n = reader.read(&mut buf).unwrap();
+    let text = std::str::from_utf8(&buf[..n]).unwrap();
+    assert!(text.contains("\"newest\":true"), "{text}");
+    assert!(!text.contains("\"workflow\""), "{text}");
+}
+
+/// A position past the log's end, as after a recreated log, also snaps.
+#[test]
+fn an_event_id_past_the_log_starts_from_the_files() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = scope::top(&p.root);
+    let db = tasks::events(&top).unwrap();
+    db.execute("INSERT INTO events(project,data) VALUES ('', '{}')", []).unwrap();
+    db.execute("INSERT INTO events(project,data) VALUES ('', '{}')", []).unwrap();
+    db.execute("DELETE FROM events WHERE seq < 2", []).unwrap();
+    let fresh = |tasks: i64| {
+        let last = json!({"tasks": tasks, ".": 0}).to_string();
+        Events::new(event_board(top.clone()), Some(p.root.clone()), Some(&last)).fresh
+    };
+    assert!(fresh(0));
+    assert!(!fresh(1));
+    assert!(!fresh(2));
+    assert!(fresh(3));
+}
+
+/// A connected stream that loses rows between polls rebuilds from the files.
+#[test]
+fn a_prune_while_a_stream_is_open_starts_it_from_the_files() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = scope::top(&p.root);
+    let db = tasks::events(&top).unwrap();
+    db.execute("INSERT INTO events(project,data) VALUES ('', '{\"older\":true}')", []).unwrap();
+    let last = json!({"tasks": 1, ".": 0}).to_string();
+    let mut reader = Events::new(event_board(top.clone()), Some(p.root.clone()), Some(&last));
+    let mut buf = [0; 8192];
+    let n = reader.read(&mut buf).unwrap();
+    assert!(std::str::from_utf8(&buf[..n]).unwrap().contains("event: ready"));
+    db.execute("INSERT INTO events(project,data) VALUES ('', '{\"kept\":true}')", []).unwrap();
+    db.execute("INSERT INTO events(project,data) VALUES ('', '{\"newest\":true}')", []).unwrap();
+    db.execute("DELETE FROM events WHERE seq < (SELECT MAX(seq) FROM events)", []).unwrap();
+    let n = reader.read(&mut buf).unwrap();
+    let text = std::str::from_utf8(&buf[..n]).unwrap();
+    assert!(text.contains("\"workflow\""), "no snapshot after a live prune in {text}");
+    assert!(!text.contains("\"kept\":true"), "replayed only part of the gap in {text}");
+}
+
+#[test]
+fn agents_say_when_their_sign_in_has_expired_or_they_need_an_update() {
+    let fixture: Value = serde_json::from_str(USAGE_LIMITS).unwrap();
+    for k in agents::KINDS {
+        for said in fixture["sign_in"][k.name].as_array().unwrap() {
+            assert!((k.signed_out)(said.as_str().unwrap()), "{said}");
+        }
+        if let Some((update, _)) = k.update {
+            for said in fixture["update"][k.name].as_array().unwrap() {
+                assert!(update(said.as_str().unwrap()), "{said}");
+            }
+        }
+        for said in fixture["not_limits"].as_array().unwrap() {
+            let said = said.as_str().unwrap();
+            assert!(!(k.signed_out)(said) && !k.update.is_some_and(|(update, _)| update(said)), "{said}");
+        }
+    }
+}
+
+#[test]
+fn a_sign_in_failure_marks_the_sign_in_until_try_again_or_a_successful_run() {
+    let fixture: Value = serde_json::from_str(USAGE_LIMITS).unwrap();
+    let dir = testing::Scratch::new();
+    let (path, log) = (dir.join("agent-holds.json"), dir.join("log.jsonl"));
+    let claude = json!({"agent":"claude","model":"m"});
+    let said = fixture["sign_in"]["claude"][0].as_str().unwrap();
+    fs::write(&log, json!({"type":"error","message":said}).to_string()).unwrap();
+    agents::observe(&path, &claude, &log, NOON, NOON, Some("stopped"), &zones).unwrap();
+    let reason = "Claude Code's sign-in has expired. Open Claude Code once and sign in, then press Try again.";
+    // It has no reset: it holds until cleared, even far in the future.
+    assert_eq!(agents::held(&path, "claude", NOON + 365 * 86400).as_deref(), Some(reason));
+    assert!(agents::sign_in_mark(&path, "claude", NOON));
+    assert!(agents::clear(&path, "claude").unwrap());
+    agents::mark_sign_in(&path, "claude", reason).unwrap();
+    assert!(agents::sign_in_mark(&path, "claude", NOON));
+    // A run that answers clears it.
+    fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}).to_string()).unwrap();
+    agents::observe(&path, &claude, &log, NOON, NOON + 3650 * 86400, Some("finished"), &zones).unwrap();
+    assert_eq!(agents::held(&path, "claude", NOON), None);
+    // An update needed is not a sign-in mark.
+    let none = dir.join("none.json");
+    let update = fixture["update"]["claude"][0].as_str().unwrap();
+    fs::write(&log, json!({"type":"error","message":update}).to_string()).unwrap();
+    agents::observe(&none, &claude, &log, NOON, NOON, Some("stopped"), &zones).unwrap();
+    assert!(!none.exists());
+    // A passing mention inside a longer message marks nothing.
+    fs::write(
+        &log,
+        json!({"type":"assistant","message":{"content":[{"type":"text","text":"I saw: OAuth token has expired\nThen I carried on."}]}})
+            .to_string(),
+    )
+    .unwrap();
+    agents::observe(&none, &claude, &log, NOON, NOON, Some("finished"), &zones).unwrap();
+    assert!(!none.exists());
+}
+
+#[test]
+fn a_sign_in_failure_is_a_plain_message() {
+    let said = "Failed to authenticate: OAuth session expired and could not be refreshed";
+    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"work","state":"running"}), 1, &[json!({"type":"error","message":said})]);
+    let m = json!({"agent":"claude","model":"m"});
+    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &m, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    let t = task(&p.root, &tid).unwrap();
+    let plain = "Claude Code's sign-in has expired. Open Claude Code once and sign in, then press Try again.";
+    assert_eq!(t["attention"]["reason"], plain);
+    assert_eq!(t["runs"][0]["outcome"], plain);
+    assert!(t["notes"].as_array().unwrap().iter().any(|n| n["author"] == "solace" && n["text"] == plain));
+    assert!(!t["notes"].as_array().unwrap().iter().any(|n| n["text"].as_str().unwrap_or("").contains("agent exited")));
+    // The raw words are still in the run's transcript.
+    assert!(transcript(&log).iter().any(|e| e["text"] == said));
+}
+
+#[test]
+fn an_update_needed_is_a_plain_message() {
+    let said = "Claude Code needs an update. A newer version (2.0.0 or higher) is required to continue.";
+    let (p, tid, mut child, log) = exited(json!({"id":"r1","kind":"work","state":"running"}), 1, &[json!({"type":"error","message":said})]);
+    let m = json!({"agent":"claude","model":"m"});
+    assert!(!supervise(Watch::Task(&p.root, &tid), "r1", &mut child, &log, &m, false, Duration::from_secs(3600), GRACEFUL_EXIT).unwrap());
+    let t = task(&p.root, &tid).unwrap();
+    assert_eq!(t["attention"]["reason"], "Claude Code needs an update. Update Claude Code, then start the task again.");
+    assert_eq!(t["runs"][0]["outcome"], "Claude Code needs an update. Update Claude Code, then start the task again.");
+}
+
+#[test]
+fn a_missing_program_is_reported_plainly_at_launch() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let dir = testing::Scratch::new();
+    let log = dir.join("log.jsonl");
+    let m = json!({"agent":"codex","run":["solace-no-such-program"]});
+    let e = spawn_agent(&p.root, &dir, &log, &m, "", &[], None, false, ["t", "r"], 60).unwrap_err();
+    assert_eq!(e.0, "solace-no-such-program is not installed. Install it, then start the task again.");
+}
+
+#[test]
+fn sign_in_helpers_say_what_happened_and_what_to_do() {
+    let codex = agents::kind("codex").unwrap();
+    let claude = agents::kind("claude").unwrap();
+    let _: &agents::Kind = claude;
+    assert!(agents::codex_signed_out("Your access token could not be refreshed"));
+    assert!(agents::claude_signed_out("OAuth token has expired"));
+    assert!(agents::claude_update("A newer version (2.0 or higher) is required to continue."));
+    assert_eq!(agents::sign_in_message(codex), "Codex's sign-in has expired. Open Codex once and sign in, then press Try again.");
+    assert_eq!(agents::update_message(claude), "Claude Code needs an update. Update Claude Code, then start the task again.");
+    assert_eq!(agents::missing_program(&json!({"agent":"claude"})), "Claude Code is not installed. Install it.");
+    assert_eq!(agents::program_name(&json!({"agent":"claude"})), "Claude Code");
+    assert_eq!(agents::missing_program(&json!({"agent":"claude","run":[]})), "Claude Code is not installed. Install it.");
+    assert_eq!(
+        agents::missing_program_at_launch(&json!({"agent":"claude","run":[]})),
+        "Claude Code is not installed. Install it, then start the task again."
+    );
+    assert!(agents::codex_signed_out_whole("Please log out and sign in again"));
+    assert!(!agents::codex_signed_out_whole("I saw: Please log out and sign in again"));
+    assert!(agents::claude_signed_out_whole("OAuth token has expired"));
+    assert!(!agents::claude_signed_out_whole("I saw: OAuth token has expired"));
+    assert!(agents::claude_update_whole("is required to continue"));
+    assert!(!agents::claude_update_whole("I saw: is required to continue"));
+    assert!(claude.update.is_some());
+    assert!(codex.update.is_none());
+    assert!(agents::whole_in("Please run /login", &agents::CLAUDE_SIGNED_OUT));
+    assert!(agents::CLAUDE_SIGNED_OUT.contains(&"Please run /login"));
+    assert!(agents::CLAUDE_UPDATE.contains(&"needs an update"));
+    assert!(agents::CODEX_SIGNED_OUT.contains(&"Please log out and sign in again"));
+    let entries = [json!({"kind":"error","text":"OAuth token has expired"})];
+    assert!(agents::said(&entries, agents::claude_signed_out, agents::claude_signed_out_whole));
+    let login = [json!({"kind":"error","text":"Invalid API key · Please run /login"})];
+    assert!(agents::said(&login, agents::claude_signed_out, agents::claude_signed_out_whole));
+    assert_eq!(agents::stopped(&json!({"agent":"claude","model":"m"}), &login).unwrap(), agents::sign_in_message(claude));
+    assert!(agents::said(
+        &[json!({"kind":"message","text":"Please run /login"})],
+        agents::claude_signed_out,
+        agents::claude_signed_out_whole
+    ));
+    assert!(!agents::said(
+        &[json!({"kind":"message","text":"I saw: Please run /login"})],
+        agents::claude_signed_out,
+        agents::claude_signed_out_whole
+    ));
+    assert_eq!(agents::stopped(&json!({"agent":"claude","model":"m"}), &entries).unwrap(), agents::sign_in_message(claude));
+    assert!(agents::stopped(&json!({"agent":"claude","model":"m","run":["sh"]}), &entries).is_none());
+    assert!(agents::stopped(&json!({"agent":"claude","model":"m","endpoint":{"base_url":"http://x"}}), &entries).is_none());
+    let limit = [json!({"kind":"error","text":"You've hit your limit · resets 2pm (UTC)"})];
+    assert!(agents::stopped(&json!({"agent":"claude","model":"m"}), &limit).is_none());
+    let update = [json!({"kind":"error","text":"A newer version (2.0 or higher) is required to continue."})];
+    assert_eq!(agents::stopped(&json!({"agent":"claude","model":"m"}), &update).unwrap(), agents::update_message(claude));
+    assert!(agents::stopped(&json!({"agent":"codex","model":"m"}), &update).is_none());
+}
+
+#[test]
+fn an_ended_strategy_run_starts_nothing() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = scope::top(&p.root);
+    let runs = top.join(".solace/strategy/runs");
+    fs::create_dir_all(&runs).unwrap();
+    fs::write(runs.join("r1.json"), json!({"id":"r1","kind":"strategy","state":"ended"}).to_string()).unwrap();
+    assert!(super::strategy::strategy_process(&top, "r1").is_ok());
+    assert!(super::strategy::strategy_process(&top, "r9").unwrap_err().0.starts_with("E7023"));
+}
+
+#[test]
+fn agent_hold_helpers_cover_each_case() {
+    let claude = agents::kind("claude").unwrap();
+    let codex = agents::kind("codex").unwrap();
+    assert!(agents::holds_path().ends_with("agent-holds.json"));
+    let limit = json!({"kind":"error","text":"You've hit your limit · resets 2pm (UTC)"});
+    let said = [limit.clone()];
+    assert!(agents::limit_hit(claude, &said).is_some());
+    let whole = json!({"kind":"message","text":"You've hit your limit · resets 2pm (UTC)"});
+    assert!(agents::limit_hit(claude, &[whole.clone()]).is_some());
+    let mention = json!({"kind":"message","text":"I noted: You've hit your limit · resets 2pm (UTC)\nThen I carried on."});
+    assert!(agents::limit_hit(claude, &[mention]).is_none());
+    assert!(!agents::limit_message(claude, &limit));
+    assert!(agents::limit_message(claude, &whole));
+    assert!(agents::answered(claude, &[json!({"kind":"message","text":"Done."})]));
+    assert!(!agents::answered(claude, &said));
+    assert!(agents::succeeded(Some("finished")));
+    assert!(agents::succeeded(Some("reviewed")));
+    assert!(!agents::succeeded(Some("stopped")));
+    let gone = [json!({"kind":"error","text":"model not found"})];
+    assert!(agents::model_is_gone(codex, &gone));
+    assert!(!agents::model_is_gone(claude, &said));
+    assert_eq!(agents::held_reason(&json!({"reason":"held"})), "held");
+    assert_eq!(agents::held_reason(&json!({})), "usage limit reached");
+    let dir = testing::Scratch::new();
+    let path = dir.join("agent-holds.json");
+    let old = dir.join("agent-limits.json");
+    fs::write(&old, "{}").unwrap();
+    agents::save_marks(&path, &json!({})).unwrap();
+    assert!(!old.exists());
+    agents::write_mark(&path, "claude", "held", Some(NOON + 60), Some("sign_in")).unwrap();
+    assert!(agents::held_mark(&path, "claude", NOON).is_some());
+    assert!(agents::held_mark(&path, "claude", NOON + 60).is_none());
+    agents::mark_limit(&path, claude, Some("2pm (UTC)".into()), NOON, &zones).unwrap();
+    assert_eq!(agents::held(&path, "claude", NOON).as_deref(), Some("Claude Code usage limit reached (resets 2pm (UTC))"));
+    agents::mark_sign_in(&path, "claude", "sign-in").unwrap();
+    agents::clear_before(&path, "claude", u64::MAX).unwrap();
+    assert_eq!(agents::held(&path, "claude", NOON), None);
+}
+
+/// A task in Planning with one recorded change, moved to its final column
+/// without settling: its undo records are still in the store.
+fn unsettled_final_task() -> (testing::Project, String) {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Fast move"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"ended","outcome":"stopped"}]);
+    tasks::put(&s, &t).unwrap();
+    api(&s.root, "POST", &format!("/tasks/{tid}/actions"), json!({"action":"plan"})).unwrap();
+    let before = snapshot(&s).unwrap();
+    s.submit_symbols(None, Some("geo"), "pub fn side() {\n  2\n}\n").unwrap();
+    record(&s, &tid, "r1", &before, &snapshot(&s).unwrap(), None).unwrap();
+    let (t, after) = change(&s.root, &tid, "POST", &["actions"], &json!({"action":"complete"})).unwrap();
+    assert!(matches!(after, After::Clean(_)));
+    tasks::put(&s, &t).unwrap();
+    (p, tid)
+}
+
+#[test]
+fn a_final_move_replies_before_its_undo_records_are_dropped() {
+    let (p, tid) = unsettled_final_task();
+    let s = open(&p.root).unwrap();
+    let has_before =
+        || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+    assert_eq!(task(&s.root, &tid).unwrap()["column"], "complete");
+    assert!(has_before(), "the move was written before its undo records were dropped");
+    settle_final(&s.root, &tid).unwrap();
+    assert!(!has_before(), "the deferred settle dropped them");
+}
+
+#[test]
+fn a_failed_deferred_settle_is_flagged_and_resettle_clears_it() {
+    let (p, tid) = unsettled_final_task();
+    let s = open(&p.root).unwrap();
+    let has_before =
+        || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+    let failures = |t: &Value| {
+        t["notes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["text"].as_str().is_some_and(|s| s.starts_with(crate::tasks::SETTLE_FAILED_NOTE)))
+            .count()
+    };
+    fs::write(s.root.join("solace.toml"), "not = [").unwrap();
+    tasks::settle_later(&s.root, tid.clone());
+    let t = task(&s.root, &tid).unwrap();
+    assert_eq!(t["settleFailed"], true);
+    assert_eq!(t["attention"]["reason"], crate::tasks::SETTLE_FAILED_REASON);
+    assert_eq!(failures(&t), 1);
+    assert!(has_before());
+    tasks::settle_later(&s.root, tid.clone());
+    assert_eq!(failures(&task(&s.root, &tid).unwrap()), 1, "a repeated failure adds no note");
+    fs::remove_file(s.root.join("solace.toml")).unwrap();
+    resettle(&s.root);
+    let t = task(&s.root, &tid).unwrap();
+    assert!(t["settleFailed"].is_null());
+    assert!(t["attention"].is_null());
+    assert_eq!(failures(&t), 0);
+    assert!(!has_before());
+    let approved = s.root.join(".solace/approved");
+    assert!(approved.exists());
+    fs::remove_file(&approved).unwrap();
+    tasks::settle_later(&s.root, tid);
+    assert!(!approved.exists(), "a retry approves nothing twice");
+}
+
+#[test]
+fn resettle_retries_a_marked_task_without_undo_records() {
+    let (p, tid) = unsettled_final_task();
+    let s = open(&p.root).unwrap();
+    drop_before(&s, &tid).unwrap();
+    let mut t = task(&s.root, &tid).unwrap();
+    t["settleFailed"] = json!(true);
+    tasks::put(&s, &t).unwrap();
+    resettle(&s.root);
+    assert!(task(&s.root, &tid).unwrap()["settleFailed"].is_null());
+}
+
+/// A new project's language is `gleam` when absent and otherwise must name
+/// one of the two languages, whatever JSON type it came as.
+#[test]
+fn a_new_project_language_is_gleam_or_rust() {
+    let root = testing::Scratch::new();
+    let board = event_board(root.to_path_buf());
+    for language in [json!("python"), json!(5)] {
+        let body = json!({"name": "ok", "language": language});
+        let e = board.projects_api("POST", "/projects/new", &body).unwrap_err().0;
+        assert!(e.contains("language must be \"gleam\" or \"rust\""), "{e}");
+    }
+    assert!(!root.join("ok").exists());
+}
+
+#[test]
+fn a_missing_agent_program_is_checked_now() {
+    let reason = agents::local_now(&json!({"run": ["solace-agent-that-does-not-exist"]}));
+    assert!(reason.as_ref().is_some_and(|reason| reason.contains("is not installed")), "{reason:?}");
+}
+
+#[test]
+fn an_agents_status_answer_is_the_sign_in() {
+    assert_eq!(agents::status_answer(true, r#"{"loggedIn":true,"authMethod":"claude.ai"}"#), Some(true));
+    assert_eq!(agents::status_answer(false, r#"{"loggedIn":false}"#), Some(false));
+    assert_eq!(agents::status_answer(true, "Logged in using ChatGPT"), Some(true));
+    assert_eq!(agents::status_answer(false, "Not logged in"), Some(false));
+    assert_eq!(agents::status_answer(false, "error: unrecognized subcommand"), None);
+    assert_eq!(agents::status_answer(true, ""), None);
+    assert!(!agents::nonempty_key(Some("  ".into())) && !agents::nonempty_key(None));
+    assert!(agents::nonempty_key(Some("sk-x".into())));
+    let home = testing::Scratch::new();
+    let (codex, claude) = (json!({"agent":"codex","model":"m"}), json!({"agent":"claude","model":"m"}));
+    let elsewhere = home.join("elsewhere");
+    let folder = |k: &agents::Kind| if k.name == "claude" { elsewhere.clone() } else { home.join(".codex") };
+    let no_key = |_: &str| false;
+    let (signed_in, signed_out, unknown) = (Some(true), Some(false), None);
+    let local = |m: &Value, answer: Option<bool>| {
+        agents::local(
+            m,
+            &agents::Here {
+                folder: &folder,
+                status: &move |_| answer,
+                var: &no_key,
+                stored: &no_key,
+                installed: &|_| true,
+                now: NOON * 1000,
+            },
+        )
+    };
+    // Signed in by the program's word, with no file and no key.
+    assert!(local(&claude, signed_in).is_none());
+    assert!(local(&codex, signed_in).is_none());
+    // A token file with a refresh token can't override a signed-out answer.
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::write(home.join(".codex/auth.json"), json!({"tokens":{"refresh_token":"r"}}).to_string()).unwrap();
+    assert!(local(&codex, unknown).is_none());
+    assert_eq!(local(&codex, signed_out).unwrap(), "codex is not signed in");
+    // Claude's file is read from its configured folder, not the home folder.
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::write(home.join(".claude/.credentials.json"), json!({"claudeAiOauth":{"refreshToken":"r"}}).to_string()).unwrap();
+    if !cfg!(target_os = "macos") {
+        assert_eq!(local(&claude, unknown).unwrap(), "claude is not signed in");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join(".credentials.json"), json!({"claudeAiOauth":{"refreshToken":"r"}}).to_string()).unwrap();
+        assert!(local(&claude, unknown).is_none());
+    }
+}
+
+#[test]
+fn an_agents_refusal_of_an_endpoint_model_holds_that_model_alone() {
+    let dir = testing::Scratch::new();
+    let (path, log) = (dir.join("agent-holds.json"), dir.join("log.jsonl"));
+    let endpoint = json!({"id":"gw","agent":"claude","model":"x","endpoint":{"base_url":"http://x"}});
+    let native = json!({"agent":"claude","model":"m"});
+    assert_eq!(agents::hold_key(&endpoint).as_deref(), Some("model:gw"));
+    assert_eq!(agents::hold_key(&native).as_deref(), Some("claude"));
+    assert_eq!(
+        agents::hold_key(&json!({"agent":"claude","model":"x","endpoint":{"base_url":"http://x"}})).as_deref(),
+        Some("model:claude:x")
+    );
+    fs::write(&log, json!({"type":"error","message":"There is an issue with the selected model (x): model not found"}).to_string())
+        .unwrap();
+    agents::observe(&path, &endpoint, &log, NOON, NOON, Some("stopped"), &zones).unwrap();
+    assert_eq!(agents::held(&path, "model:gw", NOON).as_deref(), Some("There is an issue with the selected model (x): model not found"));
+    assert!(!agents::sign_in_mark(&path, "model:gw", NOON));
+    assert_eq!(agents::held(&path, "claude", NOON), None);
+    fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}).to_string()).unwrap();
+    agents::observe(&path, &endpoint, &log, NOON, NOON + 3650 * 86400, Some("finished"), &zones).unwrap();
+    assert_eq!(agents::held(&path, "model:gw", NOON), None);
 }

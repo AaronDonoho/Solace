@@ -92,7 +92,7 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
       'event: ready\ndata: {}\n\n')); } }), { headers: { 'Content-Type': 'text/event-stream' } });
     if (path === '/projects') return Response.json({ workspace: true, projects: [{ dir: '.', label: 'root', name: 'root', base: '' }, { dir: 'web', label: 'web', name: 'web', base: '/p/web' }], found: [] });
     if (path.endsWith('/workflow')) return Response.json(workflow);
-    if (req.method === 'PATCH' && path === '/p/web/tasks/t2') { patch = await req.json(); newer = { ...newer, ...patch }; return Response.json(newer); }
+    if (req.method === 'PATCH' && path === '/p/web/tasks/t2') { patch = await req.json(); newer = { ...newer, ...patch }; if (patch.feature) newer.milestone = 'm1'; return Response.json(newer); }
     return Response.json({ message: 'unexpected ' + path }, { status: 404 });
   }});
   const fetchOriginal = globalThis.fetch;
@@ -141,13 +141,16 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     expect(page.indexOf('Older')).toBeLessThan(page.indexOf('Still open'));
     expect(page).toContain('Backlog');
     // D-130: a Created column, in the closed column's format.
-    const { clock } = await import('../src/api.mjs');
+    const { clock_date, clock_time } = await import('../src/api.mjs');
     expect(page).toContain('<button class="sort">Created</button></th>');
-    expect(page).toContain('<td class="created">' + clock(50) + '</td>');
+    expect(page).toContain('<td class="created"><span class="date">' + clock_date(50) + '</span><span class="time">' + clock_time(50) + '</span></td>');
+    expect(page).toContain('<td class="closed"><span class="date">' + clock_date(100) + '</span><span class="time">' + clock_time(100) + '</span></td>');
     // D-129: a task with no project shows on the Tasks tab, marked, and the Project filter offers it.
     expect(page).toContain('Homeless task');
     expect(page).toContain('>No project</td>');
-    expect(page).toContain('(no project)');
+    dispatch(new strategy.FilterOpen(new strategy.ProjectField()));
+    expect(html()).toContain('(no project)');
+    dispatch(new strategy.FilterBlur(new strategy.ProjectField()));
     // Filters and search run on the client.
     dispatch(new strategy.Filter(new strategy.Filters('', 'web', '', '', '')));
     expect(html()).not.toContain('Older');
@@ -175,14 +178,15 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     events.enqueue(encode(frame({ project: 'web', task: newer }, 1)));
     await until(() => Array.from(model.live).some(m => m[1].includes('renamed')));
     expect(html()).toContain('Newer, renamed');
-    // An inline link is one PATCH to the task's project; the reply updates the row.
-    expect(html()).toContain('aria-label="Milestone of Newer, renamed"');
-    expect(html()).not.toMatch(/aria-label="Milestone of Newer, renamed"[^>]*disabled/);
+    // A task with no milestone shows a dash; the Feature link is one PATCH to the task's project.
+    expect(html()).toContain('<td>—</td>');
+    expect(html()).not.toContain('aria-label="Milestone of Newer, renamed:');
     dispatch(new strategy.Link('web', 't2', 'feature', 'f1'));
     await until(() => row('t2').feature[0] === 'f1');
     expect(patch).toEqual({ feature: 'f1' });
-    // The feature brings its milestone: the row still shows it, but can't change it.
-    expect(html()).toMatch(/aria-label="Milestone of Newer, renamed"[^>]*disabled/);
+    // D-188: the feature brings its milestone; the cell is a read-only record link.
+    await until(() => html().includes('aria-label="Milestone of Newer, renamed: Launch"'));
+    expect(html()).toContain('<a aria-label="Milestone of Newer, renamed: Launch" href="/milestone/m1">Launch</a>');
     expect(html()).toContain('aria-label="Feature of Newer, renamed"');
     // The Features tab groups by milestone in rank order, then "No milestone"; a feature lists its tasks from every project.
     dispatch(new strategy.Select(new strategy.Features()));
@@ -196,7 +200,7 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     expect(at('Empty')).toBeLessThan(at('No features.'));
     expect(at('No features.')).toBeLessThan(at('No milestone'));
     expect(at('No milestone')).toBeLessThan(at('Loose'));
-    expect(list).toContain('class="state">active<');
+    expect(list).toContain('class="state state-active">active<');
     expect(list).toContain('<strong>fast</strong>');
     expect(at('Newer')).toBeGreaterThan(at('Search'));
     expect(at('Newer')).toBeLessThan(at('Empty'));
@@ -206,7 +210,8 @@ test('Tasks tab merges every project, sorts and filters, opens a task and links 
     expect(html()).toMatch(/<solace-task [^>]*task="t2"/);
     dispatch(new strategy.Link('web', 't2', 'feature', ''));
     await until(() => patch.feature === null);
-    await until(() => !/aria-label="Milestone of Newer, renamed"[^>]*disabled/.test(html()));
+    await until(() => row('t2').feature instanceof None);
+    expect(html()).toContain('<a aria-label="Milestone of Newer, renamed: Launch" href="/milestone/m1">Launch</a>');
     for (const pair of [['GET', '/projects'], ['GET', '/workflow'], ['GET', '/p/web/workflow'], ['GET', '/events'], ['PATCH', '/p/web/tasks/t2']]) expect(requests).toContainEqual(pair);
   } finally {
     controllers.forEach(c => c.abort()); server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
@@ -368,7 +373,7 @@ test('Features tab creates a feature and edits it with only the changed fields',
     dispatch(new strategy.SaveFeature());
     await until(() => !html().includes('id="feature-text"'));
     expect(patch).toEqual({ state: 'active' });
-    expect(html()).toContain('class="state">active<');
+    expect(html()).toContain('class="state state-active">active<');
     // A refusal shows its error and keeps the form.
     dispatch(new strategy.EditFeature('f1'));
     dispatch(new strategy.FeatureMilestone('m9'));
@@ -396,7 +401,7 @@ test('Features tab creates a feature and edits it with only the changed fields',
     await until(() => html().includes('E7003'));
     expect(moves).toEqual([{ rank: 0 }]);
     expect(html()).toContain('aria-label="Start Tags"');
-    expect(html()).toContain('class="state">proposed<');
+    expect(html()).toContain('class="state state-proposed">proposed<');
     refuse = false;
     dispatch(new strategy.StartFeature('f3'));
     await until(() => !html().includes('aria-label="Start Tags"'));
@@ -505,8 +510,6 @@ test('Roadmap tab edits milestones, adds and removes features and sets dependenc
     // Milestones by target date, then undated ones; each feature shows once, under its target.
     expect(count('<h4>Search')).toBe(1);
     expect(count('<h4>Export')).toBe(1);
-    expect(panel()).not.toContain('aria-label="Milestone of Search"');
-    expect(panel()).not.toContain('aria-label="Milestone of Export"');
     // Dependencies are edited one task at a time.
     expect(panel()).not.toContain('class="picker"');
     // Create with a target date: the form has its own textarea and a date input.
@@ -854,7 +857,7 @@ test('Planning panel starts a run on the selection, answers a proposal, keeps ac
     await until(() => models() === 1);
     expect(models()).toBe(1);
     expect(panel()).toContain('Create task<em> Ranking</em>');
-    expect(panel()).toContain('Approving also sets the feature <em>Search</em> back to upcoming.');
+    expect(panel()).toContain('Approving also sets the feature <a data-feature="f1" href="/feature/f1">Search</a> back to upcoming.');
     // Another tab: the panel and its run stay.
     dispatch(new strategy.Select(new strategy.Features()));
     expect(panel()).toContain('Shall I add a ranking task?');

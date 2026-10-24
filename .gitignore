@@ -38,3 +38,8 @@ target/
 
 # JS dependencies
 node_modules/
+# Solace: shared store files begin; setup replaces the lines below (D-179).
+**/.solace/*
+!**/.solace/store.db
+!**/.solace/approved
+# Solace: shared store files end.

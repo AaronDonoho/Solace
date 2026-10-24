@@ -23,7 +23,7 @@ pub(super) fn start_strategy(top: PathBuf, rid: String) {
 }
 /// Runs strategy run `rid`'s agent until it exits. It always starts a fresh
 /// conversation, in a folder beside the run's log, removed after.
-fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
+pub(super) fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
     let Some(run) = tasks::strategy_run(top, rid) else { return err("E7023", format!("unknown strategy run {rid}")) };
     if run["state"] == "ended" {
         return Ok(());
@@ -36,8 +36,9 @@ fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
     fs::create_dir_all(&dir)?;
     let prompt = strategy_brief(top, &run);
     let launched = spawn_agent(top, &dir, &log, &m, &prompt, &[], None, persists(&m), [STRATEGY, rid], timeout);
-    let supervised = launched
-        .and_then(|mut child| supervise(Watch::Strategy(top), rid, &mut child, &log, false, Duration::from_secs(timeout), GRACEFUL_EXIT));
+    let supervised = launched.and_then(|mut child| {
+        supervise(Watch::Strategy(top), rid, &mut child, &log, &m, false, Duration::from_secs(timeout), GRACEFUL_EXIT)
+    });
     let outcome = tasks::strategy_run(top, rid).and_then(|r| r["outcome"].as_str().map(String::from));
     // A strategy agent that replied in plain text took its turn: its reply
     // answers like a finished run, so it clears a mark the same way.
@@ -52,10 +53,19 @@ fn strategy_process(top: &Path, rid: &str) -> Result<(), Failure> {
     supervised.map(drop)
 }
 /// A strategy run's role (Spec 15 §6).
-const STRATEGY_ROLE: &str = concat!(
+pub(super) const STRATEGY_ROLE: &str = concat!(
     "Plan with the human: the tasks, features, milestones and vision on the Strategy page. ",
     "Propose the smallest version that meets the need, and name in your note what you left out. ",
     "Say once if the need or vision doesn't justify part of a request. ",
+    "Read the human's message literally: the problem or need is the request, so don't invent a process around it; ",
+    "ground the plan in the records and code you read, and say what is uncertain rather than filling it in. ",
+    "When something is missing, make the smallest grounded assumption, name it in one line, and ask only when ",
+    "the choice changes what will be built or risks real loss. ",
+    "Keep what the human asked for separate from what you recommend; if you propose a specific solution, ",
+    "say plainly that it is merely a cursory suggestion, not a prescription, and the human decides. ",
+    "Don't make measurement, investigation, benchmarking or another step a precondition unless the human asked ",
+    "for it, or a decision or spec requires it; if one isn't feasible here, say so briefly and still propose the next useful action. ",
+    "Keep notes conversational: use plain language, and explain any term a non-specialist may not know. ",
     "This run is read-only: it changes no code, and every plan change is the human's. ",
     "To propose one, send `strategy task|feature|milestone` (the id to edit, none to create) ",
     "and the request's fields as a JSON object in `text`, ",
@@ -625,4 +635,6 @@ mod tests {
         assert!(from_flag(&["--from", "x"]).is_err() && from_flag(&["2"]).is_err());
         assert_eq!(number_list(&[3, 7, 10, 11, 12, 2]), "3,7,10..12,2");
     }
+
+
 }

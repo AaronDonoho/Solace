@@ -27,7 +27,7 @@ pub struct Written {
     root: PathBuf,
     files: BTreeMap<String, (String, u64, u128)>,
     bad: BTreeMap<String, String>,
-    /// Digest of the ignore file that last hid the store, so the note is said once per change.
+    /// Digest of the ignore files that last hid the store, so the note is said once per change.
     hidden: Option<String>,
     /// False for a store from before D-58 that has no record yet.
     pub known: bool,
@@ -588,7 +588,7 @@ mod tests {
         assert_eq!(absorb(&s, Mode::Notice).unwrap(), "");
     }
 
-    /// D-58.7: code whose hashes are on the approved list (a pull of work
+    /// D-58.6: code whose hashes are on the approved list (a pull of work
     /// done through Solace) is read in without a task; completing a task
     /// puts its changes on the list.
     #[test]
@@ -797,69 +797,122 @@ mod tests {
         remove_old_copies(&s.root, &[format!("{name}/app.gleam")]).unwrap();
         assert!(copy.exists());
     }
+
+    #[cfg(test)]
+    #[test]
+    fn a_root_ignore_that_still_hides_the_store_is_flagged() {
+        let s = crate::testing::project(&[("src/app.gleam", "pub fn one() -> Int {\n  1\n}\n")]);
+        crate::board::open(&s.root).unwrap();
+        let root = s.root.join(".gitignore");
+        fs::write(&root, format!("{STORE_IGNORE}*.db\n")).unwrap();
+        let note = absorb(&s, Mode::Notice).unwrap();
+        assert!(note.contains("still ignores store.db"), "{note}");
+        fs::write(&root, format!("{STORE_IGNORE}*.db\n!**/.solace/store.db\n")).unwrap();
+        let fixed = absorb(&s, Mode::Notice).unwrap();
+        assert!(!fixed.contains("still ignores store.db"), "{fixed}");
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn ignores_store_sees_an_excluded_store_directory() {
+        assert!(ignores_store(".solace/\n!**/.solace/store.db\n", "."));
+        assert!(ignores_store("**/.solace\n!**/.solace/store.db\n", "project"));
+        assert!(ignores_store("project/.solace/\n!project/.solace/store.db\n", "project"));
+        assert!(!ignores_store("!.solace/\n!**/.solace/store.db\n", "."));
+        assert!(!ignores_store("other/.solace/\n!other/.solace/store.db\n", "project"));
+        assert!(ignores_store(".solace/\n!**/.solace/store.db\n", "project"));
+        assert!(ignores_store(".solace/\n!**/.solace/store.db\n", "two/nested"));
+        assert!(ignores_store("*/.solace/\n", "project"));
+        assert!(!ignores_store("*/.solace/\n", "two/nested"));
+        assert!(ignores_store("/.solace/\n", "."));
+        assert!(!ignores_store("/.solace/\n", "project"));
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn ignores_store_sees_store_file_patterns_at_their_paths() {
+        assert!(ignores_store("*\n", "project"));
+        assert!(ignores_store("**\n", "project"));
+        assert!(ignores_store("**/*\n", "project"));
+        assert!(ignores_store("store.db\n", "project"));
+        assert!(ignores_store("*.db\n", "project"));
+        assert!(ignores_store("store.*\n", "project"));
+        assert!(ignores_store("**/.solace/store.db\n", "project"));
+        assert!(!ignores_store("/store.db\n", "."));
+        assert!(!ignores_store("/store.db\n", "project"));
+        assert!(!ignores_store("/*.db\n", "project"));
+        assert!(!ignores_store("/store.*\n", "project"));
+        assert!(ignores_store("/*\n", "."));
+        assert!(ignores_store("/*\n", "project"));
+        assert!(ignores_store("/*\n!/.solace/store.db\n", "."));
+        assert!(!ignores_store("/*\n!/.solace\n", "."));
+        assert!(ignores_store("/project\n", "project"));
+        assert!(!ignores_store("/project\n", "one"));
+        assert!(ignores_store("project/\n", "project"));
+        assert!(ignores_store("/.solace/store.db\n", "."));
+        assert!(!ignores_store("/.solace/store.db\n", "project"));
+        assert!(ignores_store("/project/.solace/store.db\n", "project"));
+    }
 }
 
-/// The symbol store is committed with the project, but what is local to this
-/// checkout is not (D-179): locks, logs, caches, undo records and board data
-/// stay ignored, while `store.db`, `approved` and this file are shared.
-pub fn share_store(root: &Path) -> Result<(), Failure> {
-    let dir = root.join(".solace");
-    if !dir.is_dir() {
+/// Every project's symbol store is committed with the Solace root, but what is
+/// local to each checkout is not (D-179): locks, logs, caches, undo records and
+/// board data stay ignored, while each `store.db` and `approved` is shared.
+pub fn share_store(project: &Path) -> Result<(), Failure> {
+    if !project.join(".solace").is_dir() {
         return Ok(());
     }
-    let path = dir.join(".gitignore");
-    let current = fs::read_to_string(&path).ok();
-    // Upgrade the files earlier versions wrote; any other text is the human's
-    // and is left alone.
-    if current.as_deref().is_none_or(|text| OLD_STORE_IGNORES.contains(&text)) {
-        fs::write(&path, STORE_IGNORE)?;
-    }
-    Ok(())
+    share_root_ignore(&scope::top(project))?;
+    remove_generated_store_ignore(project)
 }
 
+/// D-179: one root block shares every store; setting up again leaves it alone.
 #[cfg(test)]
 #[test]
 fn the_store_is_committed_with_the_project() {
     let p = crate::testing::project(&[("src/app.gleam", "pub fn one() { 1 }\n")]);
-    let path = p.root.join(".solace/.gitignore");
-    let shared = fs::read_to_string(&path).unwrap();
-    assert!(shared.contains("!store.db") && shared.contains("!approved") && shared.contains("!.gitignore"), "{shared}");
-    // The old file hid the store; the interim one hid nothing. Both upgrade.
-    fs::write(&path, "# Only the approved list is shared (D-58).\n*\n!.gitignore\n!approved\n").unwrap();
-    share_store(&p.root).unwrap();
-    let upgraded = fs::read_to_string(&path).unwrap();
-    assert!(upgraded.contains("!store.db"), "{upgraded}");
-    fs::write(&path, "# Solace's store is committed with the project.\n").unwrap();
-    share_store(&p.root).unwrap();
-    assert_eq!(fs::read_to_string(&path).unwrap(), STORE_IGNORE);
-    // A bare `*` from an older setup hid everything too.
-    fs::write(&path, "*\n").unwrap();
-    share_store(&p.root).unwrap();
-    assert_eq!(fs::read_to_string(&path).unwrap(), STORE_IGNORE);
-    // A file the human has edited is left as it is.
-    fs::write(&path, "# mine\n*\n!/custom\n").unwrap();
-    share_store(&p.root).unwrap();
-    assert_eq!(fs::read_to_string(&path).unwrap(), "# mine\n*\n!/custom\n");
-    // A folder with no store gets no ignore file.
-    let bare = crate::testing::Scratch::new();
-    share_store(&bare).unwrap();
-    assert!(!bare.join(".solace").exists());
+    assert!(!p.root.join(".solace/.gitignore").exists());
+
+    let root = root_with_two_projects();
+    share_store(&root.join("one")).unwrap();
+    let once = fs::read_to_string(root.join(".gitignore")).unwrap();
+    assert_eq!(once, STORE_IGNORE);
+    share_store(&root.join("two/nested")).unwrap();
+    assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), STORE_IGNORE);
+    assert_eq!(once.matches(BLOCK_START).count(), 1);
+    assert!(!root.join("one/.solace/.gitignore").exists());
+    assert!(!root.join("two/nested/.solace/.gitignore").exists());
 }
 
-/// What a store shares: the symbol database, the approved list and this file.
+/// What the root's block shares from every project (D-179, D-191).
 const STORE_IGNORE: &str = concat!(
-    "# Solace's symbol store is committed; local caches, locks, logs and board data are not (D-179).\n",
-    "*\n!.gitignore\n!approved\n!store.db\n"
+    "# Solace: shared store files begin; setup replaces the lines below (D-179).\n",
+    "**/.solace/*\n",
+    "!**/.solace/store.db\n",
+    "!**/.solace/approved\n",
+    "# Solace: shared store files end.\n"
 );
 
-/// The files earlier versions wrote: one hid the store; the interim one hid nothing.
-const OLD_STORE_IGNORES: [&str; 3] =
-    ["# Only the approved list is shared (D-58).\n*\n!.gitignore\n!approved\n", "# Solace's store is committed with the project.\n", "*\n"];
+/// The per-project files earlier setup wrote, and migration copies still do.
+const OLD_STORE_IGNORES: [&str; 4] = [
+    "# Only the approved list is shared (D-58).\n*\n!.gitignore\n!approved\n",
+    "# Solace's store is committed with the project.\n",
+    "*\n",
+    concat!(
+        "# Solace's symbol store is committed; local caches, locks, logs and board data are not (D-179).\n",
+        "*\n!.gitignore\n!approved\n!store.db\n"
+    ),
+];
 
-/// Whether the text of the store's `.gitignore` still hides `store.db`: an older
-/// variant `share_store` doesn't know, or a human's edit. Such a file is left
-/// alone (D-179), but the caller says so, since a commit would leave the store out.
-fn ignores_store(text: &str) -> bool {
+/// Whether the ignore text still hides `store.db` for `here`, the project's
+/// folder from the root: an older variant `share_store` doesn't know, or a
+/// human's edit. Such files are left alone (D-179), but the caller says so,
+/// since a commit would leave the store out.
+fn ignores_store(text: &str, here: &str) -> bool {
+    let here = here.replace('\\', "/");
+    let store = if here == "." { ".solace".to_string() } else { format!("{here}/.solace") };
+    let file = format!("{store}/store.db");
+    let mut dirs: Vec<(String, bool)> = store_dirs(&store).into_iter().map(|dir| (dir, false)).collect();
     let mut ignored = false;
     for line in text.lines() {
         let line = line.trim();
@@ -870,16 +923,19 @@ fn ignores_store(text: &str) -> bool {
             Some(p) => (true, p),
             None => (false, line),
         };
+        let anchored = pattern.starts_with('/');
         let p = pattern.trim_start_matches('/');
-        let hides = matches!(p, "*" | "**" | "**/*" | "store.db" | "*.db" | "store.*")
-            || p.ends_with("/store.db")
-            || p.ends_with("/store.*")
-            || p.ends_with("/*.db");
-        if hides {
+        let dir_pattern = p.trim_end_matches('/');
+        for (dir, hidden) in &mut dirs {
+            if hides_path(dir_pattern, anchored, dir) {
+                *hidden = !negated;
+            }
+        }
+        if !p.ends_with('/') && hides_path(p, anchored, &file) {
             ignored = !negated;
         }
     }
-    ignored
+    ignored || dirs.into_iter().any(|(_, hidden)| hidden)
 }
 
 /// Approving marks the changes; checkpointing puts them in the file a commit copies.
@@ -923,13 +979,13 @@ fn an_ignore_file_that_still_hides_the_store_is_flagged() {
     assert!(regressed.contains("still ignores store.db"), "{regressed}");
 }
 
-/// The note that the ignore file still hides the store, said once for each
-/// version of that file. Clearing the state when it stops hiding means a later
+/// The note that the ignore files still hide the store, said once for each
+/// version of them. Clearing the state when it stops hiding means a later
 /// regression is reported again.
 fn hidden_note(w: &mut Written, root: &Path) -> String {
-    let text = fs::read_to_string(root.join(".solace/.gitignore")).ok();
-    let hiding = text.as_deref().is_some_and(ignores_store);
-    let stamp = text.as_deref().map(|t| digest(t.as_bytes()));
+    let text = ignore_text(root);
+    let hiding = ignores_store(&text, &scope::dir(&scope::top(root), root));
+    let stamp = (!text.is_empty()).then(|| digest(text.as_bytes()));
     if !hiding {
         if w.hidden.take().is_some() {
             w.dirty = true;
@@ -941,7 +997,7 @@ fn hidden_note(w: &mut Written, root: &Path) -> String {
     }
     w.hidden = stamp;
     w.dirty = true;
-    "Note: .solace/.gitignore still ignores store.db; remove that pattern so the symbol store is committed.\n".to_string()
+    "Note: an ignore file still ignores store.db; remove that pattern so the symbol store is committed.\n".to_string()
 }
 
 /// Flushes the write-ahead log into `store.db`, the file a commit copies (D-179).
@@ -1002,3 +1058,189 @@ fn remove_old_copies(root: &Path, files: &[String]) -> Result<(), Failure> {
 }
 
 const OLD_COPIES_REMOVED: &str = "# old-copies-removed";
+
+/// The markers around the block Solace keeps current in the root's `.gitignore`.
+const BLOCK_START: &str = "# Solace: shared store files begin; setup replaces the lines below (D-179).\n";
+
+const BLOCK_END: &str = "# Solace: shared store files end.\n";
+
+/// Keeps one marked block in the root's `.gitignore`, leaving the rest alone.
+fn share_root_ignore(root: &Path) -> Result<(), Failure> {
+    let path = root.join(".gitignore");
+    let current = match fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.into()),
+    };
+    let wanted = current.as_deref().map_or_else(|| STORE_IGNORE.to_string(), with_store_block);
+    if current.as_deref() != Some(wanted.as_str()) {
+        crate::write_atomic(&path, wanted)?;
+    }
+    Ok(())
+}
+
+fn with_store_block(text: &str) -> String {
+    let Some(start) = text.rfind(BLOCK_START) else {
+        return append_store_block(text);
+    };
+    let Some(end) = text[start..].find(BLOCK_END).map(|i| start + i + BLOCK_END.len()) else {
+        return append_store_block(text);
+    };
+    format!("{}{STORE_IGNORE}{}", &text[..start], &text[end..])
+}
+
+fn append_store_block(text: &str) -> String {
+    let newline = if text.is_empty() || text.ends_with('\n') { "" } else { "\n" };
+    format!("{text}{newline}{STORE_IGNORE}")
+}
+
+/// Removes only a per-project file some Solace version generated; a human's
+/// file stays where it is and still applies below the root's block.
+fn remove_generated_store_ignore(project: &Path) -> Result<(), Failure> {
+    let path = project.join(".solace/.gitignore");
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok(());
+    };
+    if OLD_STORE_IGNORES.contains(&text) {
+        fs::remove_file(&path)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn root_with_two_projects() -> crate::testing::Scratch {
+    crate::testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"one\", \"two/nested\"]\n"),
+        (".solace/store.db", ""),
+        ("one/.solace/store.db", ""),
+        ("two/nested/.solace/store.db", ""),
+    ])
+}
+
+#[cfg(test)]
+#[test]
+fn only_the_store_block_is_changed() {
+    let root = root_with_two_projects();
+    fs::write(root.join(".gitignore"), format!("# keep before\n{BLOCK_START}# old contents\n{BLOCK_END}# keep after\n")).unwrap();
+    share_store(&root.join("one")).unwrap();
+    assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), format!("# keep before\n{STORE_IGNORE}# keep after\n"));
+
+    fs::write(root.join(".gitignore"), "# no final newline").unwrap();
+    share_store(&root.join("one")).unwrap();
+    assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), format!("# no final newline\n{STORE_IGNORE}"));
+
+    let partial = format!("# keep\n{BLOCK_START}# no end marker\n");
+    fs::write(root.join(".gitignore"), &partial).unwrap();
+    share_store(&root.join("one")).unwrap();
+    let appended = format!("{partial}{STORE_IGNORE}");
+    assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), appended);
+    share_store(&root.join("one")).unwrap();
+    assert_eq!(fs::read_to_string(root.join(".gitignore")).unwrap(), appended);
+}
+
+#[cfg(test)]
+#[test]
+fn generated_store_ignores_are_removed_and_an_edited_one_stays() {
+    let root = root_with_two_projects();
+    let path = root.join("one/.solace/.gitignore");
+    for old in OLD_STORE_IGNORES {
+        fs::write(&path, old).unwrap();
+        share_store(&root.join("one")).unwrap();
+        assert!(!path.exists(), "{old:?}");
+    }
+    fs::write(&path, "# mine\n*\n!/custom\n").unwrap();
+    share_store(&root.join("one")).unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "# mine\n*\n!/custom\n");
+    fs::write(&path, [0xff, 0xfe]).unwrap();
+    share_store(&root.join("one")).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), [0xff, 0xfe]);
+}
+
+#[cfg(test)]
+#[test]
+fn a_folder_without_a_store_gets_no_ignore_file() {
+    let bare = crate::testing::Scratch::new();
+    share_store(&bare).unwrap();
+    assert!(!bare.join(".solace").exists());
+    assert!(!bare.join(".gitignore").exists());
+}
+
+/// D-191: the generated block keeps the store committed, and its markers match.
+#[cfg(test)]
+#[test]
+fn the_generated_store_ignore_is_pinned() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn one() { 1 }\n")]);
+    assert!(STORE_IGNORE.starts_with(BLOCK_START));
+    assert!(STORE_IGNORE.ends_with(BLOCK_END));
+    assert_eq!(
+        fs::read_to_string(p.root.join(".gitignore")).unwrap(),
+        concat!(
+            "# Solace: shared store files begin; setup replaces the lines below (D-179).\n",
+            "**/.solace/*\n",
+            "!**/.solace/store.db\n",
+            "!**/.solace/approved\n",
+            "# Solace: shared store files end.\n",
+        )
+    );
+}
+
+/// The root's ignore lines, then the store's own, as one heuristic list. They
+/// are relative to different folders, so a leading `/` is only approximate.
+fn ignore_text(project: &Path) -> String {
+    let mut text = fs::read_to_string(scope::top(project).join(".gitignore")).unwrap_or_default();
+    let store = fs::read_to_string(project.join(".solace/.gitignore")).unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(&store);
+    text
+}
+
+#[cfg(test)]
+#[test]
+fn another_projects_store_directory_is_not_this_projects_warning() {
+    let root = root_with_two_projects();
+    fs::write(root.join(".gitignore"), "two/nested/.solace/\n").unwrap();
+    let one = root.join("one");
+    let mut w = Written::load(&one);
+    assert_eq!(hidden_note(&mut w, &one), "");
+    let nested = root.join("two/nested");
+    let mut w = Written::load(&nested);
+    assert!(hidden_note(&mut w, &nested).contains("still ignores store.db"));
+}
+
+#[cfg(test)]
+#[test]
+fn a_bare_store_directory_ignore_still_warns_for_a_nested_project() {
+    let root = root_with_two_projects();
+    fs::write(root.join(".gitignore"), ".solace/\n").unwrap();
+    let nested = root.join("two/nested");
+    let mut w = Written::load(&nested);
+    assert!(hidden_note(&mut w, &nested).contains("still ignores store.db"));
+}
+
+/// Whether a `.gitignore` pattern covers `path`. A pattern with no slash
+/// matches at any depth, as in gitignore, unless it is anchored to the root.
+fn hides_path(pattern: &str, anchored: bool, path: &str) -> bool {
+    let pattern = if anchored || pattern.contains('/') { pattern.to_string() } else { format!("**/{pattern}") };
+    globset::GlobBuilder::new(&pattern).literal_separator(true).build().is_ok_and(|g| g.compile_matcher().is_match(path))
+}
+
+/// `store` and its ancestor folders, as paths from the root.
+fn store_dirs(store: &str) -> Vec<String> {
+    let mut dirs = Vec::new();
+    let mut dir = String::new();
+    for part in store.split('/') {
+        if !dir.is_empty() {
+            dir.push('/');
+        }
+        dir.push_str(part);
+        dirs.push(dir.clone());
+    }
+    dirs
+}

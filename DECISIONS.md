@@ -310,9 +310,9 @@ Amends D-17 and D-61 point 4; builds on D-18 (Aaron, 2026-10-07).
 2. Tasks have no home project and never move. Run logs, conversations and review checkpoints stay in each project's `.solace/board/<tid>/`. Existing tasks move into the root store once, on `serve`, under the serve lock.
 3. Agents send messages, not writes (`task note`, `task done`, `ask`, verification, settings proposals). A message is in `<root>/.solace/tasks/inbox/` (written, synced, renamed) before it is acknowledged, and is applied again after a restart. With no server running, messages wait until `serve` starts.
 4. What a task changed, and how to undo it, lives only in each project's `store.db`, keyed by task id (`board_touches` gains `run` and `name`; the task file drops `changes`). Symbol changes and their undo rows commit in one SQLite savepoint. A file's before-state is written ahead (atomically) in `.solace/pending/` before the file changes, and recovery at the next command or `serve` finishes or drops it, so a crash leaves a change with its undo or neither. Stores use WAL with a busy timeout, so the task server reads changes without the project lock. Undo goes by task id alone.
-5. Task-only actions take no project lock: create, edit, move, note, stop, cancelling a task that never had changes, scope and answers. `agent_guard` reads run state from the task store. Actions that change code take the store lock of each project they touch: undo, moving into a final column when that undoes or settles the task's changes, approving a settings proposal, accepting outside changes, adding or removing a project. A scope change stays lock-free: a project with the task's changes can't leave its scope (`E7013`), and a project that leaves takes its lock with it; which task changed what is told apart later (Aaron, 2026-10-07).
+5. Task-only actions take no project lock: create, edit, move, note, stop, cancelling a task that never had changes, scope and answers. `agent_guard` reads run state from the task store. Actions that change code take the store lock of each project they touch: undo, moving into a final column when that undoes the task's changes or leaves some to settle, approving a settings proposal, accepting outside changes, adding or removing a project. A final move's settle runs after the reply, on its own thread when a server is running (point 7). A scope change stays lock-free: a project with the task's changes can't leave its scope (`E7013`), and a project that leaves takes its lock with it; which task changed what is told apart later (Aaron, 2026-10-07).
 6. Create is idempotent: `POST /tasks` carries a client `request` id, and the same id returns the same task.
-7. Addition to point 5 (Aaron, 2026-10-07): `task done` settles nothing in the agent. The server settles (approves, drops undo records) after it applies the move into a final column, as a step of its own off the writer thread that takes the scope locks like a human action, re-reads the task and settles only if it is still final. It can run again, and `serve` runs it for final tasks that still have undo records. Undo and settle first adopt any pending record of the task under the locks, and a pending record makes cancel take them.
+7. Addition to point 5 (Aaron, 2026-10-07): `task done` settles nothing in the agent. The server settles (approves, drops undo records) after it applies the move into a final column and replies; when a server is running, that settle runs after the reply on a thread of its own, and it takes the scope locks like a human action, re-reads the task and settles only if it is still final. It can run again, and `serve` runs it for final tasks that still have undo records. Undo and settle first adopt any pending record of the task under the locks, and a pending record makes cancel take them.
 Why: every board write took the project lock, so a long agent command blocked task-only actions, and repeated clicks queued up and made duplicate tasks (four on 2026-10-06).
 
 ## D-78 A new board connection starts from a snapshot
@@ -1077,8 +1077,8 @@ Why: a Cargo package already has the files Solace would project, so copying and 
 
 ## D-179 The symbol store is committed, but its local files are not
 Amends D-58 point 6 (Aaron, board task "Adopt solace-cli into the store", 2026-10-19). Part of the Rust symbol store and lockdown feature.
-1. Each project's `.solace/.gitignore` shares the symbol database (`store.db`), the approved list (`approved`) and itself. Everything else in `.solace/` stays ignored: locks, command logs, per-session caches, undo records, migration scratch, and `board/` run data, conversations and images.
-2. The per-project files stay for now; an old file that hid the store is upgraded in place, while a file a human has edited is left alone. Replacing them with one file at the root is a later task.
+1. One marked block in the Solace root's `.gitignore` shares every project's symbol database (`store.db`) and approved list (`approved`). Everything else in each `.solace/` stays ignored: locks, command logs, per-session caches, undo records, migration scratch, and `board/` run data, conversations and images.
+2. Setup creates the root file when missing and replaces only its own marked block, leaving human text byte-for-byte; running setup again changes nothing. This is Solace's exception to D-68. A project's `.solace/.gitignore` is removed only when it is a file an earlier Solace version generated; one a human edited is left alone.
 Why: the symbols belong to the project, while run logs and conversations can hold private data and the other files change constantly.
 
 ## D-180 A Rust module can be formatted whole
@@ -1149,3 +1149,29 @@ Amends D-87 point 2 and Spec 15 §1 (Aaron, board task "tasks inherit their feat
 3. A task saved before this change takes its feature's milestone when loaded; a task with no feature keeps its own milestone.
 4. On the Roadmap, a feature appears only under the milestone it targets, never under a milestone that holds one of its tasks. A feature with no target milestone, or one not loaded, is under "No milestone".
 Why: tasks could drift from their feature and the Roadmap showed a feature under every milestone with one of its tasks, so the Rust store tasks showed no milestone even though their feature was in Native Rust (Subset) Support.
+
+## D-189 Back and Forward retrace Strategy tabs and record links
+Amends D-90 point 3 (Aaron, board task "nav: Back follows tabs and links", 2026-10-22).
+1. A Strategy tab change adds a history entry for `/strategy?tab=<name>`, rather than replacing the current one; Back and Forward restore the named tab in the mounted page. A missing or unknown value still shows Vision.
+2. Following a task, feature or milestone link adds an entry for the resulting page and focus, including when the link's page is already shown; Back and Forward restore the page, tab and focused record. A direct record address is resolved in place, replacing its entry.
+3. Modified clicks keep the browser's new-tab behavior.
+Why: Back and Forward should retrace every navigation the human made, not only page changes.
+
+## D-190 A stopped agent's raw exit text stays in its run log
+(Aaron, board task "agents: plain messages for sign-in failures", 2026-10-23). Part of the Works out of the box feature.
+1. When a run stops because its agent's sign-in expired, its program needs an update or the program is missing, the task shows what happened and what to do. The exit status and the agent's own words do not appear on the task, in a notice or in the run's outcome.
+2. The run log is the run's technical details. It holds both the agent's output and the exit status, because the launch sends stdout and stderr there. The Runs tab opens it with Watch, and the run names its log file.
+Why: a task has no separate technical-details area, and the run log already keeps the raw text the agent wrote.
+
+## D-191 Setup's shared store block is pinned
+Amends D-58 by adding point 7, D-179 point 1 and Spec 15 §4 (Aaron, board task "setup: keep store.db in git", 2026-10-23). Part of the Works out of the box feature.
+1. The root `.gitignore` block shares every project's `.solace/store.db` and `.solace/approved`. Every other file below `.solace/`, including SQLite sidecars (`store.db-wal`, `store.db-shm`), locks, logs, caches, undo records and run data, stays ignored.
+2. Setup's exact block is pinned by a test, so changing what is shared or ignored takes a deliberate test change.
+Why: an ignore that hid `store.db` left the symbol store out of the project, while committing sidecars or local run state would add churn and private data.
+
+## D-192 A new project is a Gleam project or a Cargo package
+Amends D-158 and Spec 15 §4 (Aaron, board task "setup: new Rust project", 2026-10-23). Part of the Works out of the box feature.
+1. The Workspace page's New project form creates a Gleam project or a one-crate Cargo package. `POST /projects/new` takes `language: "gleam" | "rust"`; missing means `gleam`, and any other value is refused with `E7001`, naming both. `target` applies only to Gleam.
+2. For Rust, `cargo new <dir> --name <name>` runs in the root, without a nested git repository inside one, then `setup`; the result is a binary package with `src/main.rs` and Cargo's chosen edition, added in place as D-178 does. `cargo new` checks the name and its refusal is shown as written. A failed run leaves no folder, so a refusal changes no project list. Without `cargo`, a new Rust project is refused before anything is created; unlike Add, a new Rust package can't be made without it.
+3. `solace create` stays Gleam-only. Rust libraries, multi-crate workspaces and migration of existing Rust code stay out of scope (D-178 adds Rust code in place).
+Why: the form could make only Gleam projects, so starting a Rust project needed a shell and `cargo new`; the same form should do it, with Cargo's own name checks and no half-made folder.

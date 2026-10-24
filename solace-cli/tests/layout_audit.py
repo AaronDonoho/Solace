@@ -62,6 +62,7 @@ class Fixture:
         self.bin = bin
         self.tmp = tempfile.mkdtemp(prefix='solace-layout-')
         self.server = None
+        self.run_id = None
     def start(self):
         self.root = Path(self.tmp)/'fixture'
         self.root.mkdir()
@@ -95,6 +96,8 @@ class Fixture:
         vision = self.api('GET', '/vision')
         self.api('PUT', '/vision', {'text': '# Why\nA calm board for agent work.\n\n- Humans set direction\n- Agents do the work', 'base': vision['revision']})
         m = self.api('POST', '/milestones', {'title': '1.0 Beta'})
+        # A dated milestone shows the heading's state, date and feature count together.
+        m = self.api('PATCH', f'/milestones/{m["id"]}', {'targetDate': '2027-01-01', 'state': 'active'})
         # An active feature's tasks show on the board; an upcoming one's stay on Strategy (D-128).
         layout = self.api('POST', '/features', {'title': 'Layout pass', 'milestone': m['id'], 'state': 'active'})
         themes = self.api('POST', '/features', {'title': 'Themes', 'milestone': m['id']})
@@ -128,9 +131,22 @@ class Fixture:
         while self.api('GET', f'{base}/tasks/{t["id"]}')['column'] != 'needs_review':
             if time.monotonic() > end: fail('the fixture run did not finish', 1)
             time.sleep(.1)
+        # An open run on an open task shows the Plan badge, so its gap is measured.
+        run_base, run_task = tasks[4]
+        self.run_id = self.api('POST', '/strategy/runs', {
+            'model': 'fake',
+            'text': json.dumps([{'command': 'strategy note', 'text': 'Waiting for review.'}]),
+            'context': {'kind': 'task', 'id': run_task['id']},
+        })['id']
         return t
     def close(self):
         if self.server:
+            if self.run_id:
+                try:
+                    c = http.client.HTTPConnection('127.0.0.1', self.port, timeout=5)
+                    c.request('POST', f'/strategy/runs/{self.run_id}/end')
+                    c.getresponse().read(); c.close()
+                except Exception: pass
             self.server.terminate()
             try: self.server.wait(timeout=3)
             except subprocess.TimeoutExpired: self.server.kill()
@@ -250,11 +266,29 @@ MEASURE = r"""
   }
   // A task element sized by its content would shrink to nothing: its
   // styles give it `container-type:inline-size`.
+  const gaps = [];
+  const itemName = el => (el.textContent || el.localName).trim().slice(0, 24) || el.localName;
+  const itemGaps = (parent, group) => {
+    const items = [...parent.children].filter(shown);
+    for (let i = 1; i < items.length; i++) {
+      const a = items[i - 1].getBoundingClientRect(), b = items[i].getBoundingClientRect();
+      if (Math.abs(a.top - b.top) > 12) continue;
+      gaps.push({ group, left: itemName(items[i - 1]), right: itemName(items[i]), gap: r1(b.left - a.right) });
+    }
+  };
+  for (const [el, hosts] of all) {
+    if (!shown(el)) continue;
+    if (el.matches('.milestone h3 .facts')) itemGaps(el, path(el, hosts));
+    if (el.matches('.tasks tbody tr')) {
+      const first = el.querySelector('td:first-child');
+      if (first) itemGaps(first, path(el, hosts) + ' first cell');
+    }
+  }
   const hosts = [];
   for (const [el, on] of all) {
     if (el.localName === 'solace-task') hosts.push({ sel: path(el, on), width: r1(el.getBoundingClientRect().width) });
   }
-  return { controls, labels, padding, tabs, lanes, hosts };
+  return { controls, labels, padding, tabs, lanes, hosts, gaps };
 }
 """
 
@@ -387,6 +421,8 @@ def audit_band(browser, fixture, task, out):
 
 def address(page, task):
     if page == 'board': return '/', '.lane'
+    if page == 'strategy-roadmap': return '/strategy?tab=roadmap', '.milestone h3 .toggle'
+    if page == 'strategy-tasks': return '/strategy?tab=tasks', 'button.open'
     if page.startswith('strategy-'): return '/strategy?tab=' + page.split('-', 1)[1], 'button'
     if page == 'settings': return '/settings', 'button'
     return '/task/' + task['id'], '.detail'
@@ -407,6 +443,9 @@ def report(name, theme, m, shot):
     if not m['labels']: print('  none')
     print('padding (top right bottom left ×count)')
     for k in sorted(m['padding']): print(f'  {k} ×{m["padding"][k]}')
+    print('item gaps (between adjacent inline items)')
+    for g in m['gaps']: print(f'  {g["group"]}: {g["left"]} → {g["right"]}: {g["gap"]:.1f}px')
+    if not m['gaps']: print('  none')
     print('tab bars (top in page, height)')
     for t in m['tabs']: print(f'  {t["sel"]}: top {t["top"]:.1f} height {t["height"]:.1f}')
     if not m['tabs']: print('  none')
@@ -460,7 +499,14 @@ def main(args):
                     context.add_init_script(f"try {{ localStorage.setItem('solace-theme', '{theme}') }} catch {{}}")
                     page = context.new_page()
                     page.goto(fixture.url + url, wait_until='load')
-                    try: page.wait_for_function(READY, arg=ready, timeout=10000)
+                    try:
+                        page.wait_for_function(READY, arg=ready, timeout=10000)
+                        # The heading's date/count and the Tasks band need their panels showing.
+                        if name == 'strategy-roadmap':
+                            page.locator('.milestone h3 .toggle').first.click(timeout=5000)
+                        if name == 'strategy-tasks':
+                            page.locator('button.open').first.click(timeout=5000)
+                            page.wait_for_function(READY, arg='.detail-band', timeout=10000)
                     except PlaywrightError: print(f'\nlayout_audit: {name} · {theme}: no {ready} after 10 s; measured as it was')
                     page.evaluate('document.fonts.ready.then(() => 0)')
                     page.wait_for_timeout(600)

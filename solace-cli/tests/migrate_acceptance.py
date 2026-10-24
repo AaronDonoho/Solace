@@ -97,6 +97,11 @@ class Migrate(unittest.TestCase):
         for rel, v in before.items():
             self.assertIn(rel, copied)
             if v.startswith('link') or v == 'folder' or rel.startswith(('app/src', 'app/test')): continue
+            if rel == '.gitignore':
+                ignore = (self.copy/rel).read_text()
+                self.assertIn('data.bin\n', ignore)
+                self.assertIn('**/.solace/*', ignore)
+                continue
             self.assertEqual(copied[rel].split()[0], v.split()[0], rel)
         self.assertIn('! run.sh contains your original folder\'s path', out)
         self.assertIn('Your original folder was read-only to every command Solace ran' if BWRAP else 'Solace couldn\'t make your original folder read-only', out)

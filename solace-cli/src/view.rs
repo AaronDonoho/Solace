@@ -771,6 +771,11 @@ pub fn percent_decode(s: &str) -> String {
 
 pub fn api(s: &Store, method: &str, parts: &[&str], query: &HashMap<String, String>, body: &Value) -> Result<Value, Failure> {
     match (method, parts) {
+        ("GET", ["graph", "review"]) => {
+            let tid = query.get("task").ok_or_else(|| Failure("E7001 task required".into(), 1))?;
+            let (_, t) = task_here(s, tid)?;
+            Ok(json!({"summary": review(s, &t)?["summary"].clone()}))
+        }
         ("GET", ["graph"]) => {
             let mut g = graph(s)?;
             if let Some(tid) = query.get("task") {
@@ -1240,5 +1245,20 @@ pub fn main_test() {
         assert_eq!(f["app_test.wrong_test"].0, "wrong");
         assert!(!f.contains_key("app_test.ok_test"));
         assert_eq!(f["app_test.wrong_test"].1, "assert test/app_test.gleam:6\ntest: app_test.wrong_test");
+    }
+
+    #[test]
+    fn review_api_returns_only_the_summary() {
+        let p = Scratch::new()
+            .with(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("gleam.toml", "name=\"fixture\"\nversion=\"1.0.0\"\n")])
+            .import();
+        let root = p.root.clone();
+        let t = board::api(&root, "POST", "/tasks", json!({"title": "Review"})).unwrap();
+        let id = t["id"].as_str().unwrap();
+        let graph = board::api(&root, "GET", &format!("/graph?task={id}"), json!({})).unwrap();
+        let review = board::api(&root, "GET", &format!("/graph/review?task={id}"), json!({})).unwrap();
+        assert_eq!(review["summary"], graph["review"]["summary"]);
+        assert_eq!(review.as_object().unwrap().len(), 1);
+        assert!(board::api(&root, "GET", "/graph/review", json!({})).is_err());
     }
 }

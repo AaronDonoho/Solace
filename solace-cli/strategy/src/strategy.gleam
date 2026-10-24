@@ -1,5 +1,7 @@
+import combobox
 import features
 import gleam/bool
+import gleam/dict
 import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/int
@@ -19,6 +21,7 @@ import lustre/event
 import plan
 import roadmap
 import solace_task
+import text_order
 
 /// Registers the element on its own, for `index.html`.
 pub fn main() {
@@ -44,13 +47,18 @@ pub type Model {
     features: List(features.Feature),
     milestones: List(features.Milestone),
     filters: Filters,
+    project_box: combobox.State,
+    feature_box: combobox.State,
+    milestone_box: combobox.State,
     /// The Tasks tab's page, from 1.
     page: Int,
     /// The Tasks tab's sort: the heading clicked and whether it is ascending,
     /// None for the default order. Kept for the page session.
     sort: Option(#(SortKey, Bool)),
-    /// The task open below the list: the project it is stored in, and its id.
+    /// The task open in the bottom band: the project it is stored in, and its id.
     selected: Option(#(String, String)),
+    /// Whether the selected task's band is collapsed to its bar.
+    task_collapsed: Bool,
     error: String,
     source: Option(Source),
     /// The `base` attribute: this instance's API prefix, "" for the page's.
@@ -72,6 +80,8 @@ pub type Model {
     vision_error: String,
     /// The feature being written on the Features tab, None when no form is open.
     feature_draft: Option(features.Draft),
+    /// Whether the feature band is collapsed to its bar.
+    feature_collapsed: Bool,
     /// A feature save sent and not yet answered.
     feature_saving: Bool,
     feature_error: String,
@@ -151,6 +161,8 @@ pub type Model {
     models: List(solace_task.Agent),
     plan_model: String,
     plan_effort: String,
+    /// A model refresh sent and not yet answered.
+    plan_refreshing: Bool,
     /// The shadow root, once it has rendered, for the editor's tools.
     root: dynamic.Dynamic,
     /// The task a task link asked to show (D-98), and how many times one was
@@ -163,6 +175,8 @@ pub type Model {
 
 pub type Msg {
   Select(Tab)
+  /// The shell shows this tab: a load, Back or Forward.
+  TabShown(Tab)
   ProjectsLoaded(String)
   WorkflowLoaded(String, String)
   Live(String)
@@ -178,13 +192,25 @@ pub type Msg {
   FocusFeature(String)
   /// `<solace-task>` says the open task now lives in another project.
   TaskMoved(String, String)
+  /// Collapse the selected task's band to its bar, or expand it back.
+  ToggleTask
   Filter(Filters)
+  /// Text typed in a Tasks filter's combobox.
+  FilterText(FilterField, String)
+  /// A click in a Tasks filter's combobox.
+  FilterOpen(FilterField)
+  /// A key in a Tasks filter's combobox.
+  FilterKey(FilterField, String)
+  /// A Tasks filter suggestion: the filter and the record's id.
+  FilterChoose(FilterField, String)
+  /// A Tasks filter's input lost focus.
+  FilterBlur(FilterField)
   /// The Tasks tab's Prev or Next: the page to show.
   Page(Int)
   /// A Tasks tab heading: sorts by it ascending, or flips its direction.
   SortBy(SortKey)
-  /// An inline link: the task's project and id, "feature" or "milestone",
-  /// and the record's id, "" for none.
+  /// An inline link: the task's project and id, the field to set, and the
+  /// record's id, "" for none.
   Link(String, String, String, String)
   /// Links as one PATCH: the task's project and id, and each field with its
   /// record's id, "" for none.
@@ -215,6 +241,8 @@ pub type Msg {
   /// Opens the form on the feature with this id.
   EditFeature(String)
   CancelFeature
+  /// Collapse the feature band to its bar, or expand it back.
+  ToggleFeature
   FeatureTitle(String)
   FeatureText(String)
   FeatureState(String)
@@ -325,8 +353,8 @@ pub type Msg {
   /// The models fetched again on catch-up or a live run or task update: a
   /// failed reply changes nothing, and a pick the list still has stays.
   ModelsRefreshed(String)
-  /// A usage limit's Try again: the agent kind whose limit to clear.
-  TryAgainModel(String)
+  /// Try again: recheck every model and clear the holds.
+  TryAgainModel
   /// Starts a strategy run on the panel's context with the typed message.
   StartPlan
   /// Sends the typed message to the shown run.
@@ -353,9 +381,6 @@ pub type Msg {
 
 @external(javascript, "./api.mjs", "tab_query")
 fn tab_query() -> String
-
-@external(javascript, "./api.mjs", "set_tab")
-fn set_tab(name: String) -> Nil
 
 pub fn tabs() -> List(Tab) {
   [Vision, Features, Roadmap, Tasks]
@@ -416,10 +441,12 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
 
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
   case msg {
+    Select(tab) if tab == model.tab -> #(model, effect.none())
     Select(tab) -> #(
       Model(..model, tab: tab),
-      effect.from(fn(_) { set_tab(tab_name(tab)) }),
+      event.emit("tab", json.string(tab_name(tab))),
     )
+    TabShown(tab) -> #(Model(..model, tab: tab), effect.none())
     Connected -> {
       let #(model, fx) = start(Model(..model, connected: True))
       let #(model, plan_fx) = case model.plan_open {
@@ -534,6 +561,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       Model(
         ..model,
         feature_draft: Some(features.new_draft()),
+        feature_collapsed: False,
         feature_error: "",
         feature_request: request_id(),
       ),
@@ -545,6 +573,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           Model(
             ..model,
             feature_draft: Some(features.draft_of(f)),
+            feature_collapsed: False,
             feature_error: "",
           ),
           effect.none(),
@@ -553,9 +582,22 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       }
     NewFeature | EditFeature(_) -> #(model, effect.none())
     CancelFeature -> #(
-      Model(..model, feature_draft: None, feature_error: ""),
+      Model(
+        ..model,
+        feature_draft: None,
+        feature_collapsed: False,
+        feature_error: "",
+      ),
       effect.none(),
     )
+    ToggleFeature ->
+      case model.feature_draft {
+        None -> #(model, effect.none())
+        Some(_) -> #(
+          Model(..model, feature_collapsed: !model.feature_collapsed),
+          effect.none(),
+        )
+      }
     FeatureTitle(title) ->
       edit_feature(model, fn(d) { features.Draft(..d, title: title) })
     FeatureText(body) ->
@@ -662,6 +704,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             ..model,
             features: keep(model.features, f, fn(f) { f.id }),
             feature_draft: None,
+            feature_collapsed: False,
             feature_saving: False,
             feature_error: "",
           ),
@@ -699,8 +742,10 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     DropFeature(id, index) if !model.feature_saving -> {
       let group =
         features.groups(model.milestones, model.features)
-        |> list.find(fn(g) { list.any(g.features, fn(f) { f.id == id }) })
-        |> result.map(fn(g) { g.features })
+        |> list.find(fn(g) {
+          list.any(features.group_features(g), fn(f) { f.id == id })
+        })
+        |> result.map(features.group_features)
         |> result.unwrap([])
       case
         features.drop_rank(group, id, index),
@@ -1427,14 +1472,15 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     PlanEffort(effort) -> #(Model(..model, plan_effort: effort), effect.none())
     // The model picked stays while it is available; without the list the
     // server takes its default.
-    TryAgainModel(agent) -> #(
-      model,
+    TryAgainModel if model.plan_refreshing -> #(model, effect.none())
+    TryAgainModel -> #(
+      Model(..model, plan_refreshing: True),
       effect.from(fn(send) {
         request(
           model.prefix,
           "/models/try-again",
           "POST",
-          json.to_string(json.object([#("agent", json.string(agent))])),
+          json.to_string(json.object([])),
           fn(text) { send(ModelsLoaded(text)) },
         )
       }),
@@ -1454,11 +1500,12 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
               models: models,
               plan_model: plan_model,
               plan_effort: plan_effort,
+              plan_refreshing: False,
             ),
             effect.none(),
           )
         }
-        Error(_) -> #(model, effect.none())
+        Error(_) -> #(Model(..model, plan_refreshing: False), effect.none())
       }
     ModelsRefreshed(text) ->
       case json.parse(text, decode.list(solace_task.agent_decoder())) {
@@ -1635,10 +1682,16 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
     )
     // From the Features tab the task shows on the Tasks tab.
     Open(dir, id) -> #(
-      Model(..model, tab: Tasks, selected: Some(#(dir, id)), live: []),
+      Model(
+        ..model,
+        tab: Tasks,
+        selected: Some(#(dir, id)),
+        task_collapsed: False,
+        live: [],
+      ),
       case model.tab {
         Tasks -> effect.none()
-        _ -> effect.from(fn(_) { set_tab(tab_name(Tasks)) })
+        _ -> event.emit("tab", json.string(tab_name(Tasks)))
       },
     )
     Focus(_, _, "") -> #(model, effect.none())
@@ -1670,6 +1723,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           ..model,
           tab: Tasks,
           selected: Some(#(dir, id)),
+          task_collapsed: False,
           page: page_of(visible(model), dir, id, model.page),
           live: case model.selected == Some(#(dir, id)) {
             True -> model.live
@@ -1677,7 +1731,7 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           },
           reveal: #(id, model.reveal.1 + 1),
         ),
-        effect.from(fn(_) { set_tab(tab_name(Tasks)) }),
+        effect.none(),
       )
     }
     TaskMoved(dir, id) ->
@@ -1688,10 +1742,66 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         )
         _ -> #(model, effect.none())
       }
+    ToggleTask ->
+      case model.selected {
+        None -> #(model, effect.none())
+        Some(_) -> #(
+          Model(..model, task_collapsed: !model.task_collapsed),
+          effect.none(),
+        )
+      }
     Filter(filters) -> #(
       Model(..model, filters: filters, page: 1),
       effect.none(),
     )
+    FilterText(field, text) -> {
+      let f = filter(field)
+      case text {
+        "" -> {
+          let model = f.set_chosen(model, "")
+          #(
+            f.set_box(model, combobox.typing(combobox.blank(), "")),
+            effect.none(),
+          )
+        }
+        _ -> #(
+          f.set_box(model, combobox.typing(f.box(model), text)),
+          effect.none(),
+        )
+      }
+    }
+    FilterOpen(field) -> {
+      let f = filter(field)
+      let box = f.box(model)
+      case box.open {
+        True -> #(model, effect.none())
+        False -> #(
+          f.set_box(
+            model,
+            combobox.opened(box, f.items(model), f.chosen(model)),
+          ),
+          effect.none(),
+        )
+      }
+    }
+    FilterKey(field, key) -> {
+      let f = filter(field)
+      let #(box, picked) =
+        combobox.key(f.box(model), key, f.items(model), f.chosen(model))
+      let model = f.set_box(model, box)
+      case picked {
+        Some(id) -> #(f.set_chosen(model, id), effect.none())
+        None -> #(model, scroll_filter_option(f.key, key, box))
+      }
+    }
+    FilterChoose(field, id) -> {
+      let f = filter(field)
+      #(f.set_box(f.set_chosen(model, id), combobox.blank()), effect.none())
+    }
+    FilterBlur(field) -> {
+      let f = filter(field)
+      #(f.set_box(model, combobox.blank()), effect.none())
+    }
     Page(n) -> #(Model(..model, page: n), effect.none())
     SortBy(key) -> {
       let ascending = case model.sort {
@@ -1844,80 +1954,18 @@ pub fn view(model: Model) -> Element(Msg) {
 /// shell's for `/strategy`).
 const view_styles =
   solace_task.control_styles
-  <> ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a}
-.strategy{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;height:calc(100dvh - 56px);overflow:hidden;background:var(--sheet);color:var(--ink);display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto minmax(0,1fr)}
-.strategy>.tabs{grid-column:1/-1}.strategy>[role=tabpanel]{grid-column:1;grid-row:2;min-width:0;min-height:0;overflow:auto}
-@media (max-width:900px){.strategy{display:block;height:auto;overflow:visible}.strategy>[role=tabpanel]{overflow:visible}}
-.tabs{display:flex;background:var(--sheet);border-bottom:2px solid var(--edge)}
-.tabs button{font:inherit;color:inherit;border:0;border-right:1px solid var(--line);background:transparent;padding:var(--tab-pad);cursor:pointer}
-.tabs button:hover{background:var(--hover)}
-.tabs button[aria-selected=true]{background:var(--paper);font-weight:700;box-shadow:inset 0 -3px var(--ink)}
-.tabs button:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
-[role=tabpanel]{padding:var(--space-6)}
-[role=tabpanel] p{color:var(--soft);margin:8px 0}
-[role=alert]{color:var(--revision)}
-.filters{display:flex;flex-wrap:wrap;gap:8px 16px;align-items:flex-end;margin:0 0 16px}
-.filters label{display:flex;flex-direction:column;gap:4px;font-size:13px;color:var(--soft)}
-.filters input,.filters select,.tasks select{font:inherit;font-size:15px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:6px 8px}
-.filters input{min-width:240px;margin:0}.filters input::placeholder{color:var(--soft);opacity:1}
-.filters :focus-visible,.tasks :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.tasks{width:100%;border-collapse:collapse;background:var(--paper);border:1px solid var(--edge)}
-.tasks th{text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.08em;padding:8px 10px;border-bottom:2px solid var(--edge)}
-.tasks th .sort{font:inherit;font-weight:700;color:var(--ink);text-transform:inherit;letter-spacing:inherit;background:none;border:0;padding:0;min-height:0;text-align:inherit;cursor:pointer;white-space:nowrap}.tasks th .sort:hover{text-decoration:underline}
-.tasks td{padding:6px 10px;border-top:1px solid var(--line);vertical-align:middle}
-.tasks tr:hover td{background:var(--hover)}.tasks tr[aria-current=true] td{background:var(--sel)}
-.tasks .open{font:inherit;font-weight:600;color:var(--ink);background:none;border:0;padding:0;min-height:0;text-align:left;cursor:pointer}
-.tasks .open:hover{text-decoration:underline}
-.tasks .act{"
-  <> solace_task.small_control
-  <> ";padding:0 8px;margin-left:8px}.tasks .act:hover{background:var(--hover)}
-.tasks .created,.tasks .closed{white-space:nowrap;color:var(--soft);text-align:right;font-variant-numeric:tabular-nums}
-.tasks th:nth-last-child(-n+2){text-align:right}
-.tasks .homeless{font-size:13px;color:var(--soft);margin-left:6px;white-space:nowrap}
-solace-task{display:block;margin-top:16px}
-.milestone{margin:0 0 var(--space-5)}.milestone h3{margin:0 0 var(--space-2);font-size:var(--h3);border-bottom:1px solid var(--line)}
-.feature{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-3)}
-.feature h4{margin:0 0 4px;font-size:var(--h4)}
-.feature-count{font-size:13px;color:var(--soft);margin:4px 0}
-.state{font-size:11px;text-transform:uppercase;letter-spacing:.08em;border:1px solid var(--line);padding:1px 6px;margin-left:6px;color:var(--soft);font-weight:400}
-.feature-tasks{margin:6px 0 0;padding-left:20px}
-.feature .open{font:inherit;color:var(--ink);background:none;border:0;padding:0;min-height:0;text-align:left;cursor:pointer}.feature .open:hover{text-decoration:underline}
-.feature .open:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.feature.revealed,.milestone h3.revealed{outline:3px solid var(--focus);outline-offset:2px}
-.feature{display:flex;gap:var(--space-2);position:relative;transition:transform .15s ease}.feature-body{flex:1;min-width:0}
-.feature .grip{flex:none;align-self:stretch;width:20px;margin:0;padding:0;font:inherit;font-size:14px;color:var(--muted,inherit);background:none;border:0;border-radius:0;cursor:grab;touch-action:none}.feature .grip:hover{background:var(--line)}.feature .grip:disabled{cursor:default;opacity:.4}.feature .grip:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.feature.dragging{transition:none;z-index:2;box-shadow:0 6px 18px rgba(0,0,0,.18);cursor:grabbing}.feature.dragging .grip{cursor:grabbing}
-"
+  <> solace_task.tool_styles
+  <> shell_styles
+  <> filter_styles
+  <> tasks_styles
+  <> feature_styles
+  <> state_styles
+  <> roadmap_styles
+  <> detail_styles
+  <> vision_styles
+  <> narrow_styles
   <> solace_task.editor_styles
   <> plan.styles
-  <> ".vision{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card)}
-.vision .md p,.vision .md li{color:var(--ink)}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}
-.md pre{background:var(--code);padding:8px;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace}.md code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px}
-.vision-actions{display:flex;flex-wrap:wrap;gap:8px;margin:12px 4px}
-.vision-count{margin:4px;font-size:13px}[role=tabpanel] .vision-count[role=alert]{color:var(--revision);font-weight:600}
-.vision-actions button,.toolbar button,.toolbar .button{font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;cursor:pointer}.vision-actions button{padding:6px 14px}
-.vision-actions button:hover,.toolbar button:hover{background:var(--hover)}.vision-actions button:disabled{color:var(--soft);cursor:default}
-.vision-actions button:focus-visible,.toolbar button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.composer solace-md-editor{--md-min-height:320px}
-.feature-form{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-4)}.feature-form h3{margin:0 0 10px;font-size:var(--h3)}.feature-form .filters{margin:10px 0}
-.feature .edit,.feature .toggle{"
-  <> solace_task.small_control
-  <> ";padding:0 8px;margin-left:6px}.feature .edit:hover,.feature .toggle:hover{background:var(--hover)}.feature .edit:disabled{color:var(--soft);cursor:default}.feature .edit:focus-visible,.feature .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.new-task{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:8px 0 2px}.new-task input,.new-task select{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;min-height:var(--control-h-small)}.new-task input{min-width:220px}.new-task input::placeholder{color:var(--soft);opacity:1}.new-task :focus-visible{outline:3px solid var(--focus);outline-offset:2px}.new-task .edit{margin-left:0}.new-task [role=alert]{flex-basis:100%;margin:2px 0}
-.milestone h3 .toggle{font:inherit;color:inherit;background:none;border:0;padding:0;min-height:0;text-align:left;cursor:pointer}.milestone h3 .toggle:hover{text-decoration:underline}.milestone h3 .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.milestone h3 .edit{"
-  <> solace_task.small_control
-  <> ";font-weight:400;padding:0 8px;margin-left:6px}.milestone h3 .edit:hover{background:var(--hover)}.milestone h3 .edit:disabled{color:var(--soft);cursor:default}
-.milestone .target{font-size:13px;font-weight:400;color:var(--soft);margin-left:6px}
-.feature-tasks .depends{font-size:13px;color:var(--soft)}
-.feature-tasks li .edit{margin-left:6px}
-.picker{border:1px solid var(--line);margin:4px 0 8px;padding:6px 10px}.picker ul{list-style:none;margin:4px 0;padding:0}.picker li{margin:2px 0}.picker li .edit{margin:0 6px 0 0}.picker p{font-size:13px;margin:4px 0}
-.picker input{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:2px 6px;min-height:var(--control-h-small);min-width:260px;margin:4px 0}.picker input::placeholder{color:var(--soft);opacity:1}
-.milestone h3 .edit:focus-visible,.picker :focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.pager{display:flex;align-items:center;gap:10px;margin:10px 0 2px}
-.pager button{font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:6px 14px;cursor:pointer}.pager button:hover{background:var(--hover)}.pager button:disabled{color:var(--soft);cursor:default}.pager button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
-.pager .count{font-size:13px;color:var(--soft)}
-"
 
 pub fn register() -> Result(Nil, lustre.Error) {
   // The open task's details are `<solace-task>`, registered once per page.
@@ -1925,6 +1973,9 @@ pub fn register() -> Result(Nil, lustre.Error) {
   lustre.register(
     lustre.component(init, update, view, [
       component.on_attribute_change("base", fn(base) { Ok(BaseChanged(base)) }),
+      component.on_attribute_change("tab", fn(name) {
+        Ok(TabShown(tab_from("?tab=" <> name)))
+      }),
       // The shell's `focus` property, `{kind, dir, id, n}`: `n` makes asking
       // again news. Without a kind it is a task.
       component.on_property_change("focus", {
@@ -1948,7 +1999,8 @@ pub type Project {
 }
 
 /// A task as the Tasks tab lists it: what `/events` carries that the list
-/// shows, filters and searches (D-87). Notes and changes are not part of it.
+/// shows, filters and searches, and the fields its band's status line needs
+/// (D-87). Notes and changes are not part of it.
 pub type Row {
   Row(
     id: String,
@@ -1961,6 +2013,11 @@ pub type Row {
     created: Option(Int),
     /// When the task first reached a final column, in seconds; None while open.
     closed: Option(Int),
+    /// The paused state, the last outcome, and each run's kind and state, for
+    /// the band's meta line.
+    paused: String,
+    finished: String,
+    runs: List(#(String, String)),
     /// The ids of the tasks this one depends on (D-87).
     depends: List(String),
   )
@@ -2001,9 +2058,6 @@ fn events(
 @external(javascript, "./api.mjs", "close_events")
 fn close_events(source: Source) -> Nil
 
-@external(javascript, "./api.mjs", "clock")
-fn clock(seconds: Int) -> String
-
 /// A page on `tab` with nothing loaded yet.
 pub fn new(tab: Tab) -> Model {
   Model(
@@ -2015,9 +2069,13 @@ pub fn new(tab: Tab) -> Model {
     features: [],
     milestones: [],
     filters: Filters("", "", "", "", ""),
+    project_box: combobox.blank(),
+    feature_box: combobox.blank(),
+    milestone_box: combobox.blank(),
     page: 1,
     sort: None,
     selected: None,
+    task_collapsed: False,
     error: "",
     source: None,
     prefix: "",
@@ -2031,6 +2089,7 @@ pub fn new(tab: Tab) -> Model {
     saving: False,
     vision_error: "",
     feature_draft: None,
+    feature_collapsed: False,
     feature_saving: False,
     feature_error: "",
     feature_request: "",
@@ -2069,6 +2128,7 @@ pub fn new(tab: Tab) -> Model {
     models: [],
     plan_model: "",
     plan_effort: "",
+    plan_refreshing: False,
     root: no_root(),
     reveal: #("", 0),
     focused_feature: None,
@@ -2388,6 +2448,25 @@ pub fn row_decoder() -> decode.Decoder(Row) {
     None,
     decode.optional(decode.int),
   )
+  use paused <- decode.optional_field(
+    "paused_from",
+    "",
+    decode.one_of(decode.string, [decode.success("")]),
+  )
+  use finished <- decode.optional_field(
+    "finished",
+    "",
+    decode.one_of(decode.at(["outcome"], decode.string), [decode.success("")]),
+  )
+  use runs <- decode.optional_field(
+    "runs",
+    [],
+    decode.list({
+      use kind <- decode.field("kind", decode.string)
+      use state <- decode.field("state", decode.string)
+      decode.success(#(kind, state))
+    }),
+  )
   use depends <- decode.optional_field(
     "dependsOn",
     [],
@@ -2402,6 +2481,9 @@ pub fn row_decoder() -> decode.Decoder(Row) {
     milestone,
     created,
     closed,
+    paused,
+    finished,
+    runs,
     depends,
   ))
 }
@@ -2437,7 +2519,7 @@ pub fn sorted(rows: List(#(String, Row))) -> List(#(String, Row)) {
       Some(x), Some(y) -> int.compare(y, x)
       Some(_), None -> order.Lt
       None, Some(_) -> order.Gt
-      None, None -> compare_text({ a.1 }.title, { b.1 }.title)
+      None, None -> text_order.compare({ a.1 }.title, { b.1 }.title)
     }
   })
 }
@@ -2506,36 +2588,40 @@ fn column_label(model: Model, dir: String, column: String) -> String {
 }
 
 /// The Tasks tab: the filters, one page of rows, the page controls with the
-/// count, and the open task's details below them.
+/// count, and the open task's band below them.
 fn tasks_view(model: Model) -> List(Element(Msg)) {
   let rows = visible(model)
   let total = list.length(rows)
   let page = shown_page(model.page, total)
   [
-    new_task_view(model),
-    filters_view(model),
-    case model.error {
-      "" -> element.none()
-      text -> html.p([attribute.role("alert")], [html.text(text)])
-    },
-    case rows {
-      [] -> html.p([], [html.text("No tasks match.")])
-      _ ->
-        html.table([attribute.class("tasks")], [
-          html.thead([], [
-            html.tr(
+    html.div([attribute.class("tasks-tools")], [
+      new_task_view(model),
+      filters_view(model),
+      case model.error {
+        "" -> element.none()
+        text -> html.p([attribute.role("alert")], [html.text(text)])
+      },
+    ]),
+    html.div([attribute.class("tasks-scroll")], [
+      case rows {
+        [] -> html.p([], [html.text("No tasks match.")])
+        _ ->
+          html.table([attribute.class("tasks")], [
+            html.thead([], [
+              html.tr(
+                [],
+                list.map(headings(model), fn(h) { heading_view(model, h) }),
+              ),
+            ]),
+            html.tbody(
               [],
-              list.map(headings(model), fn(h) { heading_view(model, h) }),
+              list.map(page_rows(rows, page), fn(pair) {
+                row_view(model, pair.0, pair.1)
+              }),
             ),
-          ]),
-          html.tbody(
-            [],
-            list.map(page_rows(rows, page), fn(pair) {
-              row_view(model, pair.0, pair.1)
-            }),
-          ),
-        ])
-    },
+          ])
+      },
+    ]),
     html.div([attribute.class("pager")], [
       html.button(
         [
@@ -2559,10 +2645,7 @@ fn tasks_view(model: Model) -> List(Element(Msg)) {
         [html.text("Next →")],
       ),
     ]),
-    case model.selected {
-      Some(#(dir, id)) -> task_view(model, dir, id)
-      None -> element.none()
-    },
+    task_band(model),
   ]
 }
 
@@ -2591,7 +2674,6 @@ fn headings(model: Model) -> List(#(String, SortKey)) {
 
 fn filters_view(model: Model) -> Element(Msg) {
   let f = model.filters
-  let records = fn(rs: List(#(String, String))) { [#("-", "(none)"), ..rs] }
   html.div([attribute.class("filters")], [
     html.label([], [
       html.text("Search"),
@@ -2609,22 +2691,11 @@ fn filters_view(model: Model) -> Element(Msg) {
       fn(v) { Filter(Filters(..f, column: v)) },
     ),
     case model.workspace {
-      True ->
-        choice(
-          "Project",
-          f.project,
-          list.map(model.projects, fn(p) { #(p.dir, p.label) })
-            |> list.append([#(homeless_dir, "(no project)")]),
-          fn(v) { Filter(Filters(..f, project: v)) },
-        )
+      True -> filter_box(model, ProjectField)
       False -> element.none()
     },
-    choice("Feature", f.feature, records(feature_pairs(model)), fn(v) {
-      Filter(Filters(..f, feature: v))
-    }),
-    choice("Milestone", f.milestone, records(milestone_pairs(model)), fn(v) {
-      Filter(Filters(..f, milestone: v))
-    }),
+    filter_box(model, FeatureField),
+    filter_box(model, MilestoneField),
   ])
 }
 
@@ -2694,42 +2765,30 @@ fn row_view(model: Model, dir: String, row: Row) -> Element(Msg) {
           feature_pairs(model),
           row.feature,
           "Feature of " <> row.title,
-          False,
           fn(v) { Link(dir, row.id, "feature", v) },
         ),
       ]),
       html.td([], [
-        link_select(
-          milestone_pairs(model),
-          row.milestone,
-          "Milestone of " <> row.title,
-          row.feature != None,
-          fn(v) { Link(dir, row.id, "milestone", v) },
-        ),
+        milestone_cell(model, row),
       ]),
-      html.td([attribute.class("created")], [
-        html.text(case row.created {
-          Some(seconds) -> clock(seconds)
-          None -> ""
-        }),
-      ]),
-      html.td([attribute.class("closed")], [
-        html.text(case row.closed {
-          Some(seconds) -> clock(seconds)
-          None -> ""
-        }),
-      ]),
+      html.td([attribute.class("created")], case row.created {
+        Some(seconds) -> clock_cell(seconds)
+        None -> []
+      }),
+      html.td([attribute.class("closed")], case row.closed {
+        Some(seconds) -> clock_cell(seconds)
+        None -> []
+      }),
     ],
   )
 }
 
-/// An inline link: "(none)" and every record, disabled when it can't change.
+/// An inline link: "(none)" and every record.
 /// A link to a record not loaded yet shows its id.
 fn link_select(
   records: List(#(String, String)),
   link: Option(String),
   name: String,
-  disabled: Bool,
   msg: fn(String) -> Msg,
 ) -> Element(Msg) {
   let chosen = option.unwrap(link, "")
@@ -2742,7 +2801,6 @@ fn link_select(
   html.select(
     [
       attribute.attribute("aria-label", name),
-      attribute.disabled(disabled),
       event.on_change(msg),
     ],
     [
@@ -2781,7 +2839,9 @@ fn task_view(model: Model, dir: String, id: String) -> Element(Msg) {
       attribute.attribute("base", task_base(model, dir)),
       attribute.attribute("dir", dir),
       attribute.attribute("task", id),
+      attribute.id("task-details"),
       attribute.attribute("hosted", ""),
+      attribute.attribute("bar", ""),
       // Back to backlog is offered from Planning only here (D-132).
       attribute.attribute("strategy", ""),
       case model.workspace {
@@ -2963,62 +3023,38 @@ fn features_view(model: Model) -> List(Element(Msg)) {
   let tasks =
     list.flat_map(task_dirs(model), fn(dir) {
       list.map(rows_of(model, dir), fn(r) {
-        #(dir, r.id, r.title, r.feature, r.closed != None)
+        #(dir, r.id, r.title, r.feature, r.closed != None, r.column)
       })
     })
-  features.view(
-    model.prefix,
-    model.milestones,
-    model.features,
-    tasks,
-    Open,
-    features.Editor(
-      draft: model.feature_draft,
-      saving: model.feature_saving,
-      error: model.feature_error,
-      on_new: NewFeature,
-      on_edit: EditFeature,
-      on_title: FeatureTitle,
-      on_text: FeatureText,
-      on_state: FeatureState,
-      on_milestone: FeatureMilestone,
-      on_format: FeatureFormat,
-      on_block: FeatureBlock,
-      on_save: SaveFeature,
-      on_cancel: CancelFeature,
-      on_move: MoveFeature,
-      on_grab: GrabFeature,
-      on_start: StartFeature,
-      // A feature removed while confirming no longer holds the list.
-      deleting: case model.feature_deleting {
-        Some(id) ->
-          case list.any(model.features, fn(f) { f.id == id }) {
-            True -> Some(id)
-            False -> None
-          }
-        None -> None
-      },
-      on_delete: DeleteFeature,
-      on_confirm_delete: ConfirmDeleteFeature,
-      on_cancel_delete: CancelDeleteFeature,
-      focused: model.focused_feature,
-      on_focus: FocusFeature,
+  let editor = feature_editor(model)
+  [
+    html.div(
+      [attribute.class("features-scroll")],
+      features.view(
+        model.prefix,
+        model.milestones,
+        model.features,
+        tasks,
+        Open,
+        editor,
+        features.TaskForm(
+          titles: model.task_titles,
+          errors: model.task_errors,
+          projects: case model.workspace {
+            True -> list.map(model.projects, fn(p) { #(p.dir, p.label) })
+            False -> []
+          },
+          project: task_dir(model),
+          saving: model.task_saving,
+          on_title: TaskTitle,
+          on_project: TaskProject,
+          on_add: AddTask,
+        ),
+        plan.open_ids(model.runs, "feature"),
+      ),
     ),
-    features.TaskForm(
-      titles: model.task_titles,
-      errors: model.task_errors,
-      projects: case model.workspace {
-        True -> list.map(model.projects, fn(p) { #(p.dir, p.label) })
-        False -> []
-      },
-      project: task_dir(model),
-      saving: model.task_saving,
-      on_title: TaskTitle,
-      on_project: TaskProject,
-      on_add: AddTask,
-    ),
-    plan.open_ids(model.runs, "feature"),
-  )
+    feature_band(model, editor),
+  ]
 }
 
 /// Changes the open feature draft; nothing when no form is open.
@@ -3207,6 +3243,7 @@ fn plan_view(model: Model) -> Element(Msg) {
       text: model.plan_text,
       sending: model.plan_sending,
       error: model.plan_error,
+      refreshing: model.plan_refreshing,
       models: model.models,
       model: model.plan_model,
       effort: model.plan_effort,
@@ -3347,10 +3384,7 @@ fn show_record(
 ) -> #(Model, Effect(Msg)) {
   #(
     Model(..model, tab: tab),
-    effect.batch([
-      effect.from(fn(_) { set_tab(tab_name(tab)) }),
-      effect.after_paint(fn(_, root) { reveal_card(root, kind, id) }),
-    ]),
+    effect.after_paint(fn(_, root) { reveal_card(root, kind, id) }),
   )
 }
 
@@ -3438,8 +3472,8 @@ fn edit_new_task(
   }
 }
 
-/// The Tasks tab's new task is made: the form closes and the task opens
-/// below the list, as a row click does.
+/// The Tasks tab's new task is made: the form closes and the task opens in
+/// the bottom band, as a row click does.
 fn new_task_done(model: Model, dir: String, id: String) -> Model {
   Model(
     ..model,
@@ -3449,6 +3483,7 @@ fn new_task_done(model: Model, dir: String, id: String) -> Model {
     task_saving: None,
     task_linking: None,
     selected: Some(#(dir, id)),
+    task_collapsed: False,
     live: [],
   )
 }
@@ -3558,7 +3593,7 @@ fn new_task_view(model: Model) -> Element(Msg) {
 }
 
 /// Tasks per page on the Tasks tab.
-pub const page_size = 25
+pub const page_size = 10
 
 /// How many pages `total` tasks make, at least one.
 pub fn pages(total: Int) -> Int {
@@ -3665,7 +3700,7 @@ pub fn sort_rows(
           None, None -> order.Eq
         }
         |> order.lazy_break_tie(fn() {
-          compare_text({ a.1 }.title, { b.1 }.title)
+          text_order.compare({ a.1 }.title, { b.1 }.title)
         })
         |> order.lazy_break_tie(fn() { string.compare({ a.1 }.id, { b.1 }.id) })
         |> order.lazy_break_tie(fn() { string.compare(a.0, b.0) })
@@ -3683,9 +3718,7 @@ fn sort_value(
   pair: #(String, Row),
 ) -> Option(SortValue) {
   let #(dir, row) = pair
-  let title = fn(pairs, id) {
-    Text(list.key_find(pairs, id) |> result.unwrap(id))
-  }
+  let title = fn(pairs, id) { Text(record_title(pairs, id)) }
   case key {
     ByTitle -> Some(Text(row.title))
     ByColumn -> rank(ranks, row.column, 0) |> option.map(Number)
@@ -3712,7 +3745,7 @@ fn rank(ids: List(String), id: String, at: Int) -> Option(Int) {
 
 fn compare_values(a: SortValue, b: SortValue) -> order.Order {
   case a, b {
-    Text(x), Text(y) -> compare_text(x, y)
+    Text(x), Text(y) -> text_order.compare(x, y)
     Number(x), Number(y) -> int.compare(x, y)
     Text(_), Number(_) -> order.Lt
     Number(_), Text(_) -> order.Gt
@@ -3773,13 +3806,6 @@ fn plan_button(model: Model, dir: String, row: Row) -> Element(Msg) {
     }
     Error(_) -> element.none()
   }
-}
-
-/// Text in the order a person expects: letters compare without regard to
-/// case, and only equal-looking texts fall back to the exact comparison.
-fn compare_text(a: String, b: String) -> order.Order {
-  string.compare(string.lowercase(a), string.lowercase(b))
-  |> order.lazy_break_tie(fn() { string.compare(a, b) })
 }
 
 @external(javascript, "./api.mjs", "drag_card")
@@ -3853,3 +3879,553 @@ fn collapse_milestone(model: Model, id: String) -> Model {
     milestone_open: list.filter(model.milestone_open, fn(open) { open != id }),
   )
 }
+
+/// A Tasks filter with its own typed text, open list and active suggestion.
+pub type FilterField {
+  ProjectField
+  FeatureField
+  MilestoneField
+}
+
+fn filter_box(model: Model, field: FilterField) -> Element(Msg) {
+  let f = filter(field)
+  combobox.view(
+    f.name,
+    f.key,
+    f.box(model),
+    f.chosen(model),
+    f.items(model),
+    combobox.Handlers(
+      on_text: fn(text) { FilterText(field, text) },
+      on_open: FilterOpen(field),
+      on_key: fn(pressed) { FilterKey(field, pressed) },
+      on_choose: fn(id) { FilterChoose(field, id) },
+      on_blur: FilterBlur(field),
+    ),
+  )
+}
+
+/// The suggestions a Tasks filter shows for `text`.
+pub fn filter_suggestions(
+  model: Model,
+  field: FilterField,
+  text: String,
+) -> List(combobox.Item) {
+  let f = filter(field)
+  combobox.matches(f.items(model), text)
+}
+
+/// The selected task's band, pinned below the table and pager. The task stays
+/// mounted while collapsed so its loaded details and live events survive.
+fn task_band(model: Model) -> Element(Msg) {
+  case model.selected {
+    None -> element.none()
+    Some(#(dir, id)) -> {
+      let title = task_title(model, dir, id)
+      detail_band(
+        model.task_collapsed,
+        task_bar(
+          case title {
+            "" -> id
+            title -> title
+          },
+          task_meta(model, dir, id),
+          model.task_collapsed,
+        ),
+        task_view(model, dir, id),
+      )
+    }
+  }
+}
+
+/// The band's bar: the task's title, its column, and the control that
+/// collapses or expands its details.
+fn task_bar(
+  title: String,
+  meta: Element(Msg),
+  collapsed: Bool,
+) -> Element(Msg) {
+  detail_bar(title, meta, collapsed, "task-details", "task details", ToggleTask)
+}
+
+/// The selected task's title from the loaded rows, "" when not loaded.
+fn task_title(model: Model, dir: String, id: String) -> String {
+  task_row(model, dir, id)
+  |> result.map(fn(row) { row.title })
+  |> result.unwrap("")
+}
+
+/// The selected task's row, when it is loaded.
+fn task_row(model: Model, dir: String, id: String) -> Result(Row, Nil) {
+  list.find(rows_of(model, dir), fn(row) { row.id == id })
+}
+
+/// The task's meta line: its column, status and no-project marker.
+fn task_meta(model: Model, dir: String, id: String) -> Element(Msg) {
+  case task_row(model, dir, id) {
+    Error(_) -> element.none()
+    Ok(row) ->
+      html.span(
+        [attribute.class("meta")],
+        solace_task.meta(
+          task_workflow(model, dir),
+          row_task(row, dir == homeless_dir),
+        ),
+      )
+  }
+}
+
+/// The project's workflow, or an empty one when it has not loaded.
+fn task_workflow(model: Model, dir: String) -> solace_task.Workflow {
+  let dir = case dir == homeless_dir {
+    True -> root_dir(model)
+    False -> dir
+  }
+  list.key_find(model.workflows, dir)
+  |> result.unwrap(solace_task.Workflow([], dict.new()))
+}
+
+/// A task built from the row and its event fields, for the component's meta
+/// line. The details themselves stay in `<solace-task>`.
+fn row_task(row: Row, no_project: Bool) -> solace_task.Task {
+  solace_task.Task(
+    id: row.id,
+    title: row.title,
+    body: row.body,
+    column: row.column,
+    rank: 0.0,
+    paused: row.paused,
+    notes: [],
+    questions: [],
+    runs: list.map(row.runs, fn(run) {
+      solace_task.Run(
+        id: "",
+        kind: run.0,
+        state: run.1,
+        model: "",
+        effort: "",
+        log: "",
+        outcome: "",
+        started: 0,
+        ended: 0,
+        used: "",
+      )
+    }),
+    links: [],
+    changes: [],
+    stamps: [],
+    attention: "",
+    finished: row.finished,
+    unexpected: False,
+    tech_debt: False,
+    scope: [],
+    archived: False,
+    depends: row.depends,
+    feature: row.feature,
+    no_project: no_project,
+  )
+}
+
+/// One Tasks filter's name, combobox id, model fields and suggestions.
+type FilterBox {
+  FilterBox(
+    name: String,
+    key: String,
+    box: fn(Model) -> combobox.State,
+    set_box: fn(Model, combobox.State) -> Model,
+    chosen: fn(Model) -> String,
+    set_chosen: fn(Model, String) -> Model,
+    items: fn(Model) -> List(combobox.Item),
+  )
+}
+
+fn filter(field: FilterField) -> FilterBox {
+  case field {
+    ProjectField ->
+      FilterBox(
+        name: "Project",
+        key: "filter-project",
+        box: fn(m) { m.project_box },
+        set_box: fn(m, box) { Model(..m, project_box: box) },
+        chosen: fn(m) { m.filters.project },
+        set_chosen: fn(m, id) {
+          with_filter(m, fn(f) { Filters(..f, project: id) })
+        },
+        items: project_filter_items,
+      )
+    FeatureField ->
+      FilterBox(
+        name: "Feature",
+        key: "filter-feature",
+        box: fn(m) { m.feature_box },
+        set_box: fn(m, box) { Model(..m, feature_box: box) },
+        chosen: fn(m) { m.filters.feature },
+        set_chosen: fn(m, id) {
+          with_filter(m, fn(f) { Filters(..f, feature: id) })
+        },
+        items: feature_filter_items,
+      )
+    MilestoneField ->
+      FilterBox(
+        name: "Milestone",
+        key: "filter-milestone",
+        box: fn(m) { m.milestone_box },
+        set_box: fn(m, box) { Model(..m, milestone_box: box) },
+        chosen: fn(m) { m.filters.milestone },
+        set_chosen: fn(m, id) {
+          with_filter(m, fn(f) { Filters(..f, milestone: id) })
+        },
+        items: milestone_filter_items,
+      )
+  }
+}
+
+fn with_filter(model: Model, change: fn(Filters) -> Filters) -> Model {
+  Model(..model, filters: change(model.filters), page: 1)
+}
+
+fn project_filter_items(model: Model) -> List(combobox.Item) {
+  list.map(model.projects, fn(p) {
+    combobox.Item(p.dir, p.label, "folder " <> p.dir, [p.label, p.dir])
+  })
+  |> list.append([
+    combobox.Item(homeless_dir, "(no project)", "folder " <> homeless_dir, [
+      "(no project)",
+      homeless_dir,
+    ]),
+  ])
+}
+
+fn linked_filter_items(
+  records: List(#(String, String)),
+) -> List(combobox.Item) {
+  list.append(
+    [combobox.Item("-", "(none)", "", ["(none)", "-"])],
+    list.map(records, fn(record) {
+      combobox.Item(record.0, record.1, record.0, [record.1, record.0])
+    }),
+  )
+}
+
+fn feature_filter_items(model: Model) -> List(combobox.Item) {
+  linked_filter_items(feature_pairs(model))
+}
+
+fn milestone_filter_items(model: Model) -> List(combobox.Item) {
+  linked_filter_items(milestone_pairs(model))
+}
+
+fn scroll_filter_option(
+  key: String,
+  pressed: String,
+  box: combobox.State,
+) -> Effect(Msg) {
+  case box.open, box.active {
+    True, Some(index) ->
+      case pressed {
+        "ArrowDown" | "ArrowUp" ->
+          effect.after_paint(fn(_, root) {
+            scroll_option(root, combobox.option_id(key, index))
+          })
+        _ -> effect.none()
+      }
+    _, _ -> effect.none()
+  }
+}
+
+@external(javascript, "./api.mjs", "scroll_option")
+fn scroll_option(root: dynamic.Dynamic, id: String) -> Nil
+
+fn feature_editor(model: Model) -> features.Editor(Msg) {
+  features.Editor(
+    draft: model.feature_draft,
+    saving: model.feature_saving,
+    error: model.feature_error,
+    on_new: NewFeature,
+    on_edit: EditFeature,
+    on_title: FeatureTitle,
+    on_text: FeatureText,
+    on_state: FeatureState,
+    on_milestone: FeatureMilestone,
+    on_format: FeatureFormat,
+    on_block: FeatureBlock,
+    on_save: SaveFeature,
+    on_cancel: CancelFeature,
+    on_move: MoveFeature,
+    on_grab: GrabFeature,
+    on_start: StartFeature,
+    // A feature removed while confirming no longer holds the list.
+    deleting: case model.feature_deleting {
+      Some(id) ->
+        case list.any(model.features, fn(f) { f.id == id }) {
+          True -> Some(id)
+          False -> None
+        }
+      None -> None
+    },
+    on_delete: DeleteFeature,
+    on_confirm_delete: ConfirmDeleteFeature,
+    on_cancel_delete: CancelDeleteFeature,
+    focused: model.focused_feature,
+    on_focus: FocusFeature,
+  )
+}
+
+/// The feature form's band, pinned below the stack. The form stays mounted
+/// while collapsed so its draft survives.
+fn feature_band(model: Model, editor: features.Editor(Msg)) -> Element(Msg) {
+  case model.feature_draft {
+    None -> element.none()
+    Some(draft) -> {
+      let title = case draft.id {
+        None -> solace_task.ui_label("new_feature")
+        Some(id) ->
+          solace_task.ui_label("edit") <> " " <> stored_feature_title(model, id)
+      }
+      detail_band(
+        model.feature_collapsed,
+        detail_bar(
+          title,
+          element.none(),
+          model.feature_collapsed,
+          "feature-form",
+          "feature details",
+          ToggleFeature,
+        ),
+        features.form(model.prefix, model.milestones, editor, draft),
+      )
+    }
+  }
+}
+
+fn detail_band(
+  collapsed: Bool,
+  bar: Element(Msg),
+  body: Element(Msg),
+) -> Element(Msg) {
+  html.div(
+    [
+      attribute.class(case collapsed {
+        True -> "detail-band collapsed"
+        False -> "detail-band"
+      }),
+    ],
+    [bar, body],
+  )
+}
+
+fn detail_bar(
+  title: String,
+  meta: Element(Msg),
+  collapsed: Bool,
+  controls: String,
+  subject: String,
+  on_toggle: Msg,
+) -> Element(Msg) {
+  let label =
+    case collapsed {
+      True -> "Expand the "
+      False -> "Collapse the "
+    }
+    <> subject
+    <> ": "
+    <> title
+  html.header([attribute.class("detail-bar")], [
+    html.button(
+      [
+        attribute.class("detail-toggle"),
+        attribute.attribute("aria-expanded", case collapsed {
+          True -> "false"
+          False -> "true"
+        }),
+        attribute.attribute("aria-controls", controls),
+        attribute.attribute("aria-label", label),
+        event.on_click(on_toggle),
+      ],
+      [
+        html.text(case collapsed {
+          True -> "▸ "
+          False -> "▾ "
+        }),
+        html.text(title),
+      ],
+    ),
+    meta,
+  ])
+}
+
+fn stored_feature_title(model: Model, id: String) -> String {
+  case list.find(model.features, fn(f) { f.id == id }) {
+    Ok(feature) ->
+      case feature.title {
+        "" -> id
+        title -> title
+      }
+    Error(_) -> id
+  }
+}
+
+const shell_styles =
+  ":host{display:block;--sheet:#f7f6f0;--paper:#fffefa;--ink:#172226;--soft:#46575a;--line:#94a7a5;--edge:#172226;--hover:#e7eeea;--focus:#174f78;--well:#eceee6;--code:#eef1ec;--add:#dcefe2;--del:#f6dcdc;--sel:#bfd5ce;--frame:#e9f1ee99;--ok-text:#1a6b30;--warn-text:#8a4a0a;--shadow:#17222626;--grid:#dce7e1;--revision:#a32628;--entry:#23883a;--logic:#2f6db5;--effect:#b8691b;--test:#6a5ba6;--file:#8c8470;--area:#3d7f7a}
+.strategy{font:15px/1.45 'IBM Plex Sans',system-ui,sans-serif;--shell-height:56px;--tabs-height:44px;--view-height:calc(100dvh - var(--shell-height));height:var(--view-height);overflow:hidden;background:var(--sheet);color:var(--ink);display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-rows:auto minmax(0,1fr)}
+.strategy>.tabs{grid-column:1/-1}.strategy>[role=tabpanel]{grid-column:1;grid-row:2;min-width:0;min-height:0;overflow:auto}.strategy>[role=tabpanel][hidden]{display:none}
+@media (max-width:900px){.strategy{display:block;height:auto;overflow:visible}.strategy>[role=tabpanel]{overflow:visible}}
+.tabs{display:flex;background:var(--sheet);border-bottom:2px solid var(--edge);min-height:var(--tabs-height);box-sizing:border-box}
+.tabs button{font:inherit;color:inherit;border:0;border-right:1px solid var(--line);background:transparent;padding:var(--tab-pad);cursor:pointer}
+.tabs button:hover{background:var(--hover)}
+.tabs button[aria-selected=true]{background:var(--paper);font-weight:700;box-shadow:inset 0 -3px var(--ink)}
+.tabs button:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
+[role=tabpanel]{padding:var(--space-6)}
+[role=tabpanel] p{color:var(--soft);margin:8px 0}
+[role=alert]{color:var(--revision)}"
+
+const filter_styles =
+  ".filters{display:flex;flex-wrap:wrap;gap:var(--space-2) var(--space-4);align-items:flex-end;margin:0 0 var(--space-4)}
+.filters>label,.filters>.combobox{flex:1 1 0;min-width:0}
+.filters label{display:flex;flex-direction:column;gap:var(--space-1);font-size:13px;color:var(--soft)}
+.filters .combobox{display:flex;flex-direction:column;gap:var(--space-1);font-size:13px;color:var(--soft)}
+.filters input,.filters select,.tasks select{font:inherit;font-size:15px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:var(--control-pad)}
+.filters input,.filters select{width:100%;margin:0}.filters input::placeholder{color:var(--soft);opacity:1}
+.filters .choice{position:relative;min-width:0}
+.filters .combobox input{width:100%}
+.filters .options{position:absolute;z-index:5;top:calc(100% + var(--space-1));left:0;min-width:100%;max-height:240px;overflow:auto;margin:0;padding:0;list-style:none;background:var(--paper);border:1px solid var(--edge);box-shadow:0 6px 18px var(--shadow)}
+.filters .options li{display:flex;gap:var(--space-3);justify-content:space-between;align-items:baseline;padding:var(--space-1) var(--space-2);color:var(--ink);cursor:pointer;white-space:nowrap}
+.filters .options li.active,.filters .options li:hover{background:var(--hover)}
+.filters .options li[aria-selected=true]{background:var(--sel)}
+.filters .options .hint{color:var(--soft);font-size:12px}
+.filters .options .no-match{color:var(--soft);cursor:default}.filters .options .no-match:hover{background:transparent}
+.filters :focus-visible,.tasks :focus-visible{outline:3px solid var(--focus);outline-offset:2px}"
+
+const tasks_styles =
+  ".tasks{width:100%;border-collapse:collapse;background:var(--paper);border:1px solid var(--edge)}
+.tasks th{text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.08em;padding:var(--space-2) var(--space-3);border-bottom:2px solid var(--edge)}
+.tasks th .sort{font:inherit;font-weight:700;color:var(--ink);text-transform:inherit;letter-spacing:inherit;background:none;border:0;padding:0;min-height:0;text-align:inherit;cursor:pointer;white-space:nowrap}.tasks th .sort:hover{text-decoration:underline}
+.tasks td{padding:var(--space-1) var(--space-3);border-top:1px solid var(--line);vertical-align:middle}
+.tasks tr:hover td{background:var(--hover)}.tasks tr[aria-current=true] td{background:var(--sel)}
+.tasks .open{font:inherit;font-weight:600;color:var(--ink);background:none;border:0;padding:0;min-height:0;text-align:left;cursor:pointer}
+.tasks .open:hover{text-decoration:underline}
+.tasks .act{"
+  <> solace_task.small_control
+  <> ";padding:0 var(--space-2);margin-left:var(--space-2)}.tasks .act:hover{background:var(--hover)}
+.tasks .created,.tasks .closed{color:var(--soft);text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.tasks .created span,.tasks .closed span{display:block}
+.tasks th:nth-last-child(-n+2){text-align:right}
+.tasks .planning{margin-left:var(--space-1)}
+.tasks .homeless{font-size:13px;color:var(--soft);margin-left:var(--space-1);white-space:nowrap}
+.strategy>#panel-tasks:not([hidden]){display:flex;flex-direction:column;overflow:hidden;padding-bottom:0}
+.strategy>#panel-tasks:not([hidden])>.tasks-tools,.strategy>#panel-tasks:not([hidden])>.pager{flex:none}
+.strategy>#panel-tasks:not([hidden])>.tasks-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+.pager{display:flex;align-items:center;gap:var(--space-3);margin:var(--space-2) 0 0}
+.pager button{font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:var(--control-pad);cursor:pointer}.pager button:hover{background:var(--hover)}.pager button:disabled{color:var(--soft);cursor:default}.pager button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.pager .count{font-size:13px;color:var(--soft)}"
+
+const feature_styles =
+  ".strategy>#panel-features:not([hidden]){display:flex;flex-direction:column;overflow:hidden;padding-bottom:0}
+.strategy>#panel-features:not([hidden])>.features-scroll{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable}
+.feature{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-3)}
+.feature h4{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1);margin:0 0 var(--space-1);font-size:var(--h4)}
+.feature-count{font-size:13px;color:var(--soft);margin:0}
+.feature .feature-count{margin:var(--space-1) 0}
+.feature-tasks{margin:var(--space-1) 0 0;padding-left:var(--space-5)}
+.feature .open{font:inherit;color:var(--ink);background:none;border:0;padding:0;min-height:0;text-align:left;cursor:pointer}.feature .open:hover{text-decoration:underline}
+.feature .open:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.feature.revealed,.milestone h3.revealed{outline:3px solid var(--focus);outline-offset:2px}
+.feature{display:flex;gap:var(--space-2);position:relative;transition:transform .15s ease}.feature-body{flex:1;min-width:0}
+.feature .grip{flex:none;align-self:stretch;width:var(--space-5);margin:0;padding:0;font:inherit;font-size:14px;color:var(--muted,inherit);background:none;border:0;border-radius:0;cursor:grab;touch-action:none}.feature .grip:hover{background:var(--line)}.feature .grip:disabled{cursor:default;opacity:.4}.feature .grip:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.feature.dragging{transition:none;z-index:2;box-shadow:0 6px 18px rgba(0,0,0,.18);cursor:grabbing}.feature.dragging .grip{cursor:grabbing}
+.feature-form{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card);margin:0 0 var(--space-4)}.feature-form h3{margin:0 0 var(--space-3);font-size:var(--h3)}.feature-form .filters{margin:var(--space-2) 0}
+.feature .edit,.feature .toggle{"
+  <> solace_task.small_control
+  <> ";padding:0 var(--space-2)}.feature .edit:hover,.feature .toggle:hover{background:var(--hover)}.feature .edit:disabled{color:var(--soft);cursor:default}.feature .edit:focus-visible,.feature .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.new-task{display:flex;flex-wrap:wrap;gap:var(--space-1);align-items:center;margin:var(--space-2) 0 0}.new-task input,.new-task select{font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:var(--space-1) var(--space-2);min-height:var(--control-h-small)}.new-task input{flex:1 1 0;min-width:0}.new-task input::placeholder{color:var(--soft);opacity:1}.new-task :focus-visible{outline:3px solid var(--focus);outline-offset:2px}.new-task [role=alert]{flex-basis:100%;margin:var(--space-1) 0}"
+
+const roadmap_styles =
+  ".milestone{margin:0 0 var(--space-5)}.milestone h3{display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-2);margin:0 0 var(--space-2);font-size:var(--h3);border-bottom:1px solid var(--line)}
+.milestone h3 .toggle{display:flex;flex:1;flex-wrap:wrap;align-items:baseline;gap:var(--space-2);min-width:0;font:inherit;color:inherit;background:none;border:0;padding:0;min-height:0;text-align:left;cursor:pointer}.milestone h3 .toggle:hover{text-decoration:underline}.milestone h3 .toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.milestone h3 .facts{display:flex;flex-wrap:wrap;align-items:baseline;gap:var(--space-2);min-width:0;font-weight:400}
+.milestone h3 .edit{"
+  <> solace_task.small_control
+  <> ";font-weight:400;padding:0 var(--space-2)}.milestone h3 .edit:hover{background:var(--hover)}.milestone h3 .edit:disabled{color:var(--soft);cursor:default}
+.milestone h3 .target{font-size:13px;font-weight:400;color:var(--soft)}
+.feature-tasks .depends{font-size:13px;color:var(--soft)}
+.feature-tasks li .edit{margin-left:var(--space-1)}
+.picker{border:1px solid var(--line);margin:var(--space-1) 0 var(--space-2);padding:var(--space-1) var(--space-3)}.picker ul{list-style:none;margin:var(--space-1) 0;padding:0}.picker li{margin:0}.picker li .edit{margin:0 var(--space-1) 0 0}.picker p{font-size:13px;margin:var(--space-1) 0}
+.picker input{flex:1 1 0;width:100%;min-width:0;font:inherit;font-size:14px;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;padding:var(--space-1) var(--space-2);min-height:var(--control-h-small);margin:var(--space-1) 0}.picker input::placeholder{color:var(--soft);opacity:1}
+.milestone h3 .edit:focus-visible,.picker :focus-visible{outline:3px solid var(--focus);outline-offset:2px}"
+
+const detail_styles =
+  ".detail-band{flex:none;display:flex;flex-direction:column;position:relative;border-top:2px solid var(--edge);background:var(--paper);margin-top:var(--space-2)}
+.detail-band>solace-task{flex:none;height:min(45dvh,calc(100dvh - 190px));min-height:0;overflow-y:auto;visibility:visible;transition:height .18s ease-out,visibility .18s;margin:0}
+.detail-band.collapsed>solace-task{height:0 !important;overflow:hidden;visibility:hidden}
+.detail-band>.feature-form{flex:none;max-height:min(45dvh,calc(100dvh - 190px));overflow-y:auto;margin:0}
+.detail-band.collapsed>.feature-form{display:none}
+.detail-bar{display:flex;flex-wrap:wrap;gap:var(--space-1) var(--space-3);align-items:center;padding:var(--space-1) 0}.detail-bar .meta{display:flex;gap:var(--space-3);align-items:center;margin:0;color:var(--soft);font-size:13px}
+.detail-toggle{border:0;background:transparent;font-weight:700;font-size:17px;margin:0;padding:var(--space-1) var(--space-3);min-height:var(--control-h-small)}
+.detail-toggle:hover{background:var(--hover)}
+.detail-toggle:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+solace-task{display:block;margin-top:var(--space-4)}"
+
+const vision_styles =
+  ".vision{background:var(--paper);border:1px solid var(--edge);padding:var(--pad-card)}
+.vision .md p,.vision .md li{color:var(--ink)}.md p,.md ul,.md ol,.md blockquote{margin:var(--space-1) 0}.md blockquote{padding-left:var(--space-2);border-left:3px solid var(--line);color:var(--soft)}
+.md pre{background:var(--code);padding:var(--space-2);overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace}.md code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px var(--space-1)}
+.vision-actions{display:flex;flex-wrap:wrap;gap:var(--space-2);margin:var(--space-3) var(--space-1)}
+.vision-count{margin:var(--space-1);font-size:13px}[role=tabpanel] .vision-count[role=alert]{color:var(--revision);font-weight:600}
+.vision-actions button,.toolbar button,.toolbar .button{font:inherit;color:var(--ink);background:var(--paper);border:1px solid var(--edge);border-radius:0;cursor:pointer}.vision-actions button{padding:var(--control-pad)}
+.vision-actions button:hover,.toolbar button:hover{background:var(--hover)}.vision-actions button:disabled{color:var(--soft);cursor:default}
+.vision-actions button:focus-visible,.toolbar button:focus-visible{outline:3px solid var(--focus);outline-offset:2px}
+.composer solace-md-editor{--md-min-height:320px}"
+
+const narrow_styles =
+  "@media (max-width:900px){.strategy>#panel-tasks:not([hidden]){display:flex;height:calc(var(--view-height) - var(--tabs-height));overflow:hidden;padding:var(--space-6);padding-bottom:0}.detail-band>solace-task{height:min(50dvh,calc(100dvh - 230px))}.strategy>#panel-features:not([hidden]){display:flex;flex-direction:column;overflow:visible;padding:var(--space-6);padding-bottom:0}.strategy>#panel-features:not([hidden])>.features-scroll{flex:none;overflow:visible}}"
+
+@external(javascript, "./api.mjs", "clock_date")
+fn clock_date(seconds: Int) -> String
+
+@external(javascript, "./api.mjs", "clock_time")
+fn clock_time(seconds: Int) -> String
+
+/// A moment as the two lines of a date column: its date, then its time.
+fn clock_cell(seconds: Int) -> List(Element(Msg)) {
+  [
+    html.span([attribute.class("date")], [html.text(clock_date(seconds))]),
+    html.span([attribute.class("time")], [html.text(clock_time(seconds))]),
+  ]
+}
+
+/// A record's title, or its id when the record isn't loaded.
+fn record_title(records: List(#(String, String)), id: String) -> String {
+  list.key_find(records, id) |> result.unwrap(id)
+}
+
+/// A task's milestone: a link to its record, or its id until the record
+/// loads. A task with no milestone shows a dash.
+fn milestone_cell(model: Model, row: Row) -> Element(Msg) {
+  case row.milestone {
+    None -> html.text("—")
+    Some("") -> html.text("—")
+    Some(id) -> {
+      let title = record_title(milestone_pairs(model), id)
+      html.a(
+        [
+          attribute.attribute("href", "/milestone/" <> id),
+          attribute.attribute(
+            "aria-label",
+            title <> ", milestone of " <> row.title,
+          ),
+        ],
+        [html.text(title)],
+      )
+    }
+  }
+}
+
+const state_styles =
+  ":host{--state-proposed:#6a5ba6;--state-upcoming:#2f6db5;--state-active:#1f7d35;--state-complete:#000;--state-canceled:#46575a;--state-ink:#fff}
+.state{font-size:11px;text-transform:uppercase;letter-spacing:.08em;border:1px solid var(--line);padding:1px var(--space-1);color:var(--soft);font-weight:400}
+.state.state-proposed{background:var(--state-proposed);border-color:var(--state-proposed);color:var(--state-ink)}
+.state.state-upcoming{background:var(--state-upcoming);border-color:var(--state-upcoming);color:var(--state-ink)}
+.state.state-active{background:var(--state-active);border-color:var(--state-active);color:var(--state-ink)}
+.state.state-complete{background:var(--state-complete);border-color:var(--state-complete);color:var(--state-ink)}
+.state.state-canceled{background:var(--state-canceled);border-color:var(--state-canceled);color:var(--state-ink)}
+"

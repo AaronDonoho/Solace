@@ -17,6 +17,7 @@ import lustre/element/html
 import migration
 import modem
 import settings
+import setup
 import solace_board
 import solace_task
 import strategy
@@ -38,7 +39,8 @@ pub type Route {
   /// The Workspace page (D-146): the workspace and its migration. `/migrate` lands here.
   Workspace
   Contracts(base: String)
-  Strategy
+  /// The Strategy page and the tab its address names.
+  Strategy(tab: String)
   Settings
   /// The Knowledgebase page (D-140): the shell's own page, holding the guide. `/guide` lands here.
   Knowledgebase
@@ -48,17 +50,26 @@ pub type Route {
 }
 
 pub type Msg {
-  RouteChanged(Route)
+  /// A page's address changed: its route, and the state saved with that entry.
+  RouteChanged(Route, String)
+  /// A Strategy tab's event: the tab shown changed.
+  TabChanged(String)
   /// A link was clicked in a page: the record's kind and id.
   Follow(String, String)
-  /// The reply to `GET /<kind>s/find/{id}`: the kind, the id, the reply, and whether the link's own address
-  /// is replaced in the history (it was loaded or reached by back or forward) rather than added to.
-  Found(String, String, String, Bool)
+  /// The reply to `GET /<kind>s/find/{id}`: the kind, the id, the reply, whether the link's own address
+  /// is replaced in the history (it was loaded or reached by back or forward) rather than added to, and
+  /// the route and visit count when it was asked. A reply after the page was left is ignored, even when
+  /// it is shown again.
+  Found(String, String, String, Bool, Route, Int)
   /// A page's `attention` event: something there needs the human. The page's element.
   Attention(String)
   /// The reply to `GET /workflow`: the root project's columns, which the
   /// Knowledgebase's column table follows (D-140).
   WorkflowLoaded(String)
+  /// The reply to `GET /setup`: which recommended tools are still missing.
+  SetupLoaded(String)
+  /// The checklist's **Check again** button.
+  CheckSetup
 }
 
 pub fn route(uri: Uri) -> Route {
@@ -66,7 +77,13 @@ pub fn route(uri: Uri) -> Route {
     [] -> Board
     ["workspace"] | ["migrate"] -> Workspace
     ["contracts"] -> Contracts("")
-    ["strategy"] -> Strategy
+    ["strategy"] -> {
+      let query = case uri.query {
+        Some(query) -> query
+        None -> ""
+      }
+      Strategy(strategy.tab_name(strategy.tab_from(query)))
+    }
     ["settings"] -> Settings
     ["knowledgebase"] | ["guide"] -> Knowledgebase
     ["p", dir, "contracts"] -> Contracts("/p/" <> dir)
@@ -92,6 +109,7 @@ pub fn page(
   })
   let attributes = case route {
     Contracts(base) if base != "" -> [attribute.attribute("base", base)]
+    Strategy(tab) -> [attribute.attribute("tab", tab)]
     _ -> []
   }
   let attributes = case focus.page == page_of(route) && focus.id != "" {
@@ -117,6 +135,7 @@ pub fn page(
     page_of(route),
     [
       event.on("attention", decode.success(Attention(page_of(route)))),
+      event.on("tab", tab_changed()),
       ..attributes
     ],
     [],
@@ -138,12 +157,16 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   }
   // A link's address shows the board until the record is found.
   let #(shown, found) = case initial {
-    RecordLink(kind, id) -> #(Board, find(kind, id, True))
+    RecordLink(kind, id) -> #(Board, find(kind, id, True, Board, 0))
     _ -> #(initial, effect.none())
   }
   // The board and Strategy are open from the start, hidden, so they hear of
   // what needs the human and can flag their tab.
-  let opened = [shown] |> open(Board) |> open(Strategy)
+  let strategy_page = case initial {
+    Strategy(tab) -> Strategy(tab)
+    _ -> Strategy(strategy.tab_name(strategy.Vision))
+  }
+  let opened = [shown] |> open(Board) |> open(strategy_page)
   #(
     Model(
       route: shown,
@@ -151,9 +174,11 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       focus: no_focus,
       attention: [],
       columns: [],
+      visits: 0,
+      setup: [],
     ),
     effect.batch([
-      modem.init(fn(uri) { RouteChanged(route(uri)) }),
+      modem.init(fn(uri) { RouteChanged(route(uri), history_state()) }),
       effect.from(fn(send) {
         follow_links(fn(kind, id) { send(Follow(kind, id)) })
       }),
@@ -163,6 +188,10 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       effect.from(fn(send) {
         load_workflow(fn(text) { send(WorkflowLoaded(text)) })
       }),
+      // The first-run checklist asks what this computer still needs.
+      effect.from(fn(send) { load_setup(fn(text) { send(SetupLoaded(text)) }) }),
+      // A tool that breaks after it passed brings the checklist back.
+      effect.from(fn(send) { recheck_setup(fn() { send(CheckSetup) }) }),
       found,
       renamed,
     ]),
@@ -186,30 +215,76 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
           effect.none(),
         )
       }
-    RouteChanged(RecordLink(kind, id)) -> #(model, find(kind, id, True))
-    RouteChanged(route) -> show(model, route)
-    Follow(kind, id) -> #(model, find(kind, id, False))
-    Found(kind, id, reply, replace) ->
-      case target(kind, reply) {
-        OnBoard(dir) -> go(model, Board, "/", kind, dir, id, replace)
-        InStrategy(dir) ->
-          go(model, Strategy, "/strategy", kind, dir, id, replace)
-        nowhere -> {
-          let text = case nowhere {
-            Missing -> missing_text(kind)
-            _ -> failed_text(kind)
-          }
+    TabChanged(name) -> {
+      let next = strategy_route(name)
+      case model.route == next {
+        True -> #(model, effect.none())
+        False -> {
+          let #(model, shown) = show(model, next)
           #(
             model,
             effect.batch([
-              effect.from(fn(_) { toast(text) }),
-              case replace {
-                True -> modem.replace("/", None, None)
-                False -> effect.none()
-              },
+              shown,
+              effect.from(fn(_) {
+                navigate(
+                  "/strategy",
+                  query_of(next),
+                  // The mounted page keeps its record focus; a tab entry
+                  // holds none, so restoring it never switches tabs.
+                  "{}",
+                  False,
+                )
+              }),
             ]),
           )
         }
+      }
+    }
+    RouteChanged(RecordLink(kind, id), _) -> #(
+      model,
+      find(kind, id, True, model.route, model.visits),
+    )
+    RouteChanged(route, state) -> {
+      let focus = restored_focus(state)
+      let focus = case focus.page == page_of(route) {
+        True -> focus
+        False -> no_focus
+      }
+      show(Model(..model, focus: focus), route)
+    }
+    Follow(kind, id) -> #(
+      model,
+      find(kind, id, False, model.route, model.visits),
+    )
+    Found(kind, id, reply, replace, asked, visits) ->
+      case page_of(asked) == page_of(model.route) && visits == model.visits {
+        False -> #(model, effect.none())
+        True ->
+          case target(kind, reply) {
+            OnBoard(dir) -> go(model, Board, "/", kind, dir, id, replace)
+            InStrategy(dir) ->
+              go(model, record_route(kind), "/strategy", kind, dir, id, replace)
+            nowhere -> {
+              let text = case nowhere {
+                Missing -> missing_text(kind)
+                _ -> failed_text(kind)
+              }
+              case replace {
+                True -> {
+                  let #(model, shown) = show(model, Board)
+                  #(
+                    model,
+                    effect.batch([
+                      effect.from(fn(_) { toast(text) }),
+                      shown,
+                      effect.from(fn(_) { navigate("/", "", "{}", True) }),
+                    ]),
+                  )
+                }
+                False -> #(model, effect.from(fn(_) { toast(text) }))
+              }
+            }
+          }
       }
     // A reply that is not a workflow (a server that is down, a project with no
     // board section) keeps a loaded workflow, or gives the guide its known
@@ -229,6 +304,17 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
             _ -> #(model, effect.none())
           }
       }
+    // A reply that is not a checklist keeps the one shown: a server that is
+    // down says nothing about this computer.
+    SetupLoaded(text) ->
+      case setup.decode(text) {
+        Ok(items) -> #(Model(..model, setup: items), effect.none())
+        Error(_) -> #(model, effect.none())
+      }
+    CheckSetup -> #(
+      model,
+      effect.from(fn(send) { load_setup(fn(text) { send(SetupLoaded(text)) }) }),
+    )
   }
 }
 
@@ -261,6 +347,7 @@ fn link(
 
 pub fn view(model: Model) -> Element(Msg) {
   let shown = page_of(model.route)
+  let tab = strategy_tab(model)
   let link = fn(path, label, route) {
     let page = page_of(route)
     link(path, label, shown == page, list.contains(model.attention, page))
@@ -268,12 +355,13 @@ pub fn view(model: Model) -> Element(Msg) {
   element.fragment([
     html.nav([attribute.class("menu")], [
       link("/workspace", "Workspace", Workspace),
-      link("/strategy", "Strategy", Strategy),
+      link(strategy_path(tab), "Strategy", Strategy(tab)),
       link("/", "Board", Board),
       link("/contracts", "Contracts", Contracts("")),
       link("/knowledgebase", "Knowledgebase", Knowledgebase),
       link("/settings", "Settings", Settings),
     ]),
+    setup.view(model.setup, CheckSetup),
     ..list.map(model.opened, fn(r) {
       page(r, page_of(r) == shown, model.focus, model.columns)
     })
@@ -552,6 +640,11 @@ pub type Model {
     focus: Focus,
     attention: List(String),
     columns: List(solace_task.Column),
+    /// How many times the shown page changed; a lookup asked before a change
+    /// ignores its reply, even when the page is shown again.
+    visits: Int,
+    /// The tools the first-run check still recommends; [] hides the checklist.
+    setup: List(setup.Item),
   )
 }
 
@@ -561,7 +654,7 @@ pub fn page_of(route: Route) -> String {
     Board -> "solace-board"
     Workspace -> "solace-migration"
     Contracts(_) -> "solace-contracts"
-    Strategy -> "solace-strategy"
+    Strategy(_) -> "solace-strategy"
     Settings -> "solace-settings"
     Knowledgebase -> "solace-knowledgebase"
     RecordLink(_, _) -> "solace-board"
@@ -593,14 +686,19 @@ fn enter_scroll(page: String) -> Nil
 /// Shows a route's page; its tab no longer needs attention.
 fn show(model: Model, route: Route) -> #(Model, Effect(Msg)) {
   let entering = page_of(route)
+  let leaving = page_of(model.route)
   let next =
     Model(
       ..model,
       route: route,
       opened: open(model.opened, route),
       attention: list.filter(model.attention, fn(p) { p != entering }),
+      visits: case leaving == entering {
+        True -> model.visits
+        False -> model.visits + 1
+      },
     )
-  case page_of(model.route) == entering {
+  case leaving == entering {
     True -> #(next, effect.none())
     False -> {
       leave_scroll(page_of(model.route))
@@ -665,8 +763,8 @@ pub fn missing_text(kind: String) -> String {
 }
 
 /// Opens a found record on `route`'s page: the page gets it in its `focus` property. The address changes to
-/// the page's, added to the history for a click, in place of the task link's own address otherwise; a click
-/// on the page shown changes nothing.
+/// the page's, added to the history for a click, even on the page shown, and in place of the link's own
+/// address for a load or a history move.
 fn go(
   model: Model,
   route: Route,
@@ -676,23 +774,32 @@ fn go(
   id: String,
   replace: Bool,
 ) -> #(Model, Effect(Msg)) {
-  let model =
-    Model(
-      ..model,
-      focus: Focus(page_of(route), kind, dir, id, model.focus.n + 1),
-    )
-  case replace, page_of(model.route) == page_of(route) {
-    True, _ -> #(model, modem.replace(path, None, None))
-    False, True -> #(model, effect.none())
-    False, False -> #(model, modem.push(path, None, None))
-  }
+  let focus = Focus(page_of(route), kind, dir, id, model.focus.n + 1)
+  let #(model, shown) = show(Model(..model, focus: focus), route)
+  #(
+    model,
+    effect.batch([
+      shown,
+      effect.from(fn(_) {
+        navigate(path, query_of(route), focus_state(focus), replace)
+      }),
+    ]),
+  )
 }
 
 /// Asks the server about record `id` of `kind`: where a task is (D-98), whether a feature or milestone is
-/// (D-122).
-fn find(kind: String, id: String, replace: Bool) -> Effect(Msg) {
+/// (D-122), and the route and visit count when it was asked.
+fn find(
+  kind: String,
+  id: String,
+  replace: Bool,
+  asked: Route,
+  visits: Int,
+) -> Effect(Msg) {
   effect.from(fn(send) {
-    find_record(kind, id, fn(reply) { send(Found(kind, id, reply, replace)) })
+    find_record(kind, id, fn(reply) {
+      send(Found(kind, id, reply, replace, asked, visits))
+    })
   })
 }
 
@@ -735,3 +842,128 @@ pub fn renamed_path(path: String) -> Option(String) {
 
 @external(javascript, "./workflow.mjs", "load_workflow")
 fn load_workflow(receive: fn(String) -> Nil) -> Nil
+
+/// The route for a Strategy tab name, Vision for an unknown one.
+fn strategy_route(tab: String) -> Route {
+  Strategy(strategy.tab_name(strategy.tab_from("tab=" <> tab)))
+}
+
+/// The record's page: a feature opens Features, a milestone Roadmap and a task Tasks.
+fn record_route(kind: String) -> Route {
+  let tab = case kind {
+    "feature" -> strategy.Features
+    "milestone" -> strategy.Roadmap
+    _ -> strategy.Tasks
+  }
+  Strategy(strategy.tab_name(tab))
+}
+
+/// The tab shown on Strategy, or the tab it will open on.
+fn strategy_tab(model: Model) -> String {
+  case model.route {
+    Strategy(tab) -> tab
+    _ ->
+      case
+        list.find(model.opened, fn(route) {
+          page_of(route) == "solace-strategy"
+        })
+      {
+        Ok(Strategy(tab)) -> tab
+        _ -> strategy.tab_name(strategy.Vision)
+      }
+  }
+}
+
+/// The menu's address for a Strategy tab: Vision has no query.
+pub fn strategy_path(tab: String) -> String {
+  case strategy_query(tab) {
+    "" -> "/strategy"
+    query -> "/strategy?" <> query
+  }
+}
+
+/// The query a route's address carries.
+fn query_of(route: Route) -> String {
+  case route {
+    Strategy(tab) -> strategy_query(tab)
+    _ -> ""
+  }
+}
+
+fn focus_json(focus: Focus) -> json.Json {
+  json.object([
+    #("page", json.string(focus.page)),
+    #("kind", json.string(focus.kind)),
+    #("dir", json.string(focus.dir)),
+    #("id", json.string(focus.id)),
+    #("n", json.int(focus.n)),
+  ])
+}
+
+/// The page focus kept in a history entry.
+fn focus_state(focus: Focus) -> String {
+  json.object([#("focus", focus_json(focus))]) |> json.to_string
+}
+
+fn focus_decoder() -> decode.Decoder(Focus) {
+  use page <- decode.field("page", decode.string)
+  use kind <- decode.field("kind", decode.string)
+  use dir <- decode.field("dir", decode.string)
+  use id <- decode.field("id", decode.string)
+  use n <- decode.field("n", decode.int)
+  decode.success(Focus(page, kind, dir, id, n))
+}
+
+/// The focus a history entry holds; none when it holds none.
+fn restored_focus(state: String) -> Focus {
+  let decoder = {
+    use focus <- decode.optional_field("focus", no_focus, focus_decoder())
+    decode.success(focus)
+  }
+  case json.parse(state, decoder) {
+    Ok(focus) -> focus
+    Error(_) -> no_focus
+  }
+}
+
+fn tab_changed() -> decode.Decoder(Msg) {
+  use name <- decode.then(decode.string)
+  decode.success(TabChanged(name))
+}
+
+fn navigate(path: String, query: String, state: String, replace: Bool) -> Nil {
+  history_navigate(path, query, state, history_move(replace))
+}
+
+@external(javascript, "./history.mjs", "navigate")
+fn history_navigate(
+  path: String,
+  query: String,
+  state: String,
+  move: String,
+) -> Nil
+
+/// Whether a history change adds an entry or replaces the one shown: a click adds one, a load or a
+/// history move replaces it.
+pub fn history_move(replace: Bool) -> String {
+  case replace {
+    True -> "replace"
+    False -> "push"
+  }
+}
+
+fn strategy_query(tab: String) -> String {
+  case tab {
+    "vision" -> ""
+    _ -> "tab=" <> tab
+  }
+}
+
+@external(javascript, "./history.mjs", "state")
+fn history_state() -> String
+
+@external(javascript, "./setup_ffi.mjs", "load_setup")
+fn load_setup(receive: fn(String) -> Nil) -> Nil
+
+@external(javascript, "./setup_ffi.mjs", "recheck_setup")
+fn recheck_setup(receive: fn() -> Nil) -> Nil

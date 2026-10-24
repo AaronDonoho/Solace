@@ -1,6 +1,7 @@
 // The page's document handlers. The decisions live in frontend.gleam (blocks_drag, keeps_new_tab, find_opens, next_match, count_text, to_markdown), where they are tested.
 import { blocks_drag, keeps_new_tab, find_opens, next_match, count_text, to_markdown, Text as HtmlText, Tag } from '../build/dev/javascript/frontend/frontend.mjs';
 import { toList } from '../build/dev/javascript/frontend/gleam.mjs';
+import { watch_shadow_hosts } from './shadow_watch.mjs';
 
 export function guard(root) {
   // A markdown editor, <solace-md-editor>, keeps its text in a shadow root of its own: it is found on the path.
@@ -165,34 +166,31 @@ function find(doc) {
   // The per-frame check for movement, and where the current match was last drawn.
   let following = 0;
   let drawnAt = '';
-  const watched = new WeakSet();
-
   // Each open shadow root gets its own observer; a change inside one re-runs the search. Attributes count too:
   // opening or closing a <details> (notes, transcript entries) shows or hides text without a childList change.
   // A component drawn inside a page later (a task's <solace-task> in the board) brings its own root to watch.
   // Text changing where nothing is drawn (a hidden page, a closed <details>) can't move a match: it is ignored.
-  const shadowObserver = new MutationObserver(records => {
-    for (const r of records) for (const n of r.addedNodes) if (n.nodeType === 1) watch(n);
-    if (!bar.hidden && records.some(r => r.type === 'attributes' || drawn(r.target))) { redraw(); schedule(); }
-  });
   // Layout can shift with no mutation at all (images loading, fonts swapping): the boxes follow.
   const resized = new ResizeObserver(() => redraw());
-  // Watches an element's shadow root, once; whether it was new.
-  const watchHost = el => {
-    const shadow = el.shadowRoot;
-    if (!shadow || watched.has(shadow)) return false;
-    watched.add(shadow);
-    shadowObserver.observe(shadow, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['open', 'hidden', 'class', 'style'] });
-    resized.observe(el);
-    // Scroll and toggle events aren't composed: they never leave the shadow root.
-    shadow.addEventListener('scroll', redraw, { capture: true, passive: true });
-    shadow.addEventListener('toggle', () => { if (!bar.hidden) { redraw(); schedule(); } }, true);
-    return true;
-  };
-  const watch = node => {
-    const all = node.querySelectorAll ? [node, ...node.querySelectorAll('*')] : [];
-    for (const el of all) if (watchHost(el)) watch(el.shadowRoot);
-  };
+  const { watch, unwatch } = watch_shadow_hosts({
+    observe: { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['open', 'hidden', 'class', 'style'] },
+    changed: (records, shadow) => {
+      if (!bar.hidden && records.some(r => r.type === 'attributes' || drawn(r.target))) { redraw(); schedule(); }
+    },
+    host: (el, shadow) => {
+      resized.observe(el);
+      // Scroll and toggle events aren't composed: they never leave the shadow root.
+      const scroll = redraw;
+      const toggle = () => { if (!bar.hidden) { redraw(); schedule(); } };
+      shadow.addEventListener('scroll', scroll, { capture: true, passive: true });
+      shadow.addEventListener('toggle', toggle, true);
+      return () => {
+        resized.unobserve(el);
+        shadow.removeEventListener('scroll', scroll, { capture: true });
+        shadow.removeEventListener('toggle', toggle, true);
+      };
+    },
+  });
   // The document observer discovers new components, sees a page shown or hidden (a menu tab switched: the
   // shell sets `hidden` on its pages, outside any shadow root), and sees text taken out of the page (a lane
   // collapsed): the count drops with the marks. The bar's and the marks' changes never trigger a search.
@@ -202,7 +200,10 @@ function find(doc) {
       if (bar.contains(r.target) || marks.contains(r.target)) continue;
       if (r.type === 'attributes') { changed = true; switched = true; continue; }
       for (const n of r.addedNodes) if (n.nodeType === 1 && n !== marks && n !== bar) { watch(n); changed = true; }
-      for (const n of r.removedNodes) changed = true;
+      for (const n of r.removedNodes) {
+        if (n.nodeType === 1 && !n.isConnected) unwatch(n);
+        changed = true;
+      }
     }
     if (changed && !bar.hidden) schedule();
   }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden'] });

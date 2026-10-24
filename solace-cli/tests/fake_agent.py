@@ -7,6 +7,12 @@ import time
 import tomllib
 from pathlib import Path
 
+if sys.argv[1:3] in (['login', 'status'], ['auth', 'status']) and os.environ.get('SOLACE_FAKE_STATUS'):
+    # The agent's own sign-in status: the file says `in` or `out`, so a test can sign out and back in.
+    signed_in = Path(os.environ['SOLACE_FAKE_STATUS']).read_text().strip() == 'in'
+    print(json.dumps({'loggedIn': signed_in}))
+    sys.exit(0 if signed_in else 1)
+
 if len(sys.argv) > 1 and sys.argv[1] == 'app-server':
     # Solace asks which models Codex offers: answer `model/list` from the fixture.
     models = json.loads(Path(os.environ.get('SOLACE_FAKE_MODELS', Path(__file__).with_name('fake_models.json'))).read_text())

@@ -12,18 +12,7 @@ fn milestone(id: String, rank: Float) -> features.Milestone {
 }
 
 fn feature(id: String, target: String, rank: Float) -> features.Feature {
-  features.Feature(
-    id,
-    id,
-    "",
-    case target {
-      "" -> None
-      m -> Some(m)
-    },
-    rank,
-    "upcoming",
-    None,
-  )
+  feature_in_state(id, target, rank, "upcoming")
 }
 
 fn task(id: String, feature: String, milestone: String) -> roadmap.Task {
@@ -237,8 +226,8 @@ pub fn a_milestone_starts_collapsed_and_its_heading_opens_it_test() {
   assert string.contains(closed, "Launch")
   assert string.contains(closed, ">active<")
   assert string.contains(closed, "2027-01-01")
-  assert string.contains(closed, "1 feature")
-  assert !string.contains(closed, "2 features")
+  assert string.contains(closed, "0 / 1 feature complete")
+  assert !string.contains(closed, "1 / 1 feature complete")
   assert string.contains(closed, "Edit Launch")
   assert string.contains(closed, "Delete Launch")
   assert string.contains(closed, "aria-expanded=\"false\"")
@@ -329,4 +318,119 @@ pub fn a_milestone_feature_search_names_the_saved_title_test() {
     "aria-label=\"Find a feature for Edited title\"",
   )
   assert string.contains(html, "class=\"picker\"")
+}
+
+fn feature_in_state(
+  id: String,
+  target: String,
+  rank: Float,
+  state: String,
+) -> features.Feature {
+  features.Feature(
+    id,
+    id,
+    "",
+    case target {
+      "" -> None
+      m -> Some(m)
+    },
+    rank,
+    state,
+    None,
+  )
+}
+
+pub fn a_milestone_heading_counts_progress_and_leaves_canceled_features_out_test() {
+  let render = fn(expanded) {
+    let elements =
+      roadmap.view(
+        "",
+        [milestone("m1", 1.0)],
+        [
+          feature_in_state("done-a", "m1", 1.0, "complete"),
+          feature_in_state("done-b", "m1", 2.0, "complete"),
+          feature_in_state("active", "m1", 3.0, "active"),
+          feature_in_state("canceled", "m1", 4.0, "canceled"),
+        ],
+        [],
+        fn(_, _) { Nil },
+        editor(None, expanded),
+        [],
+      )
+    element.to_string(html.div([], elements))
+  }
+  let closed = render([])
+  assert string.contains(closed, "2 / 3 features complete")
+  assert !string.contains(closed, "2 / 4 features complete")
+  let open = render(["m1"])
+  assert string.contains(open, "2 / 3 features complete")
+  assert string.contains(open, "<h4>done-a")
+  assert string.contains(open, "<h4>canceled")
+}
+
+pub fn milestone_heading_progress_handles_all_none_one_and_zero_features_test() {
+  let elements =
+    roadmap.view(
+      "",
+      [
+        milestone("all", 1.0),
+        milestone("none", 2.0),
+        milestone("one", 3.0),
+        milestone("zero", 4.0),
+      ],
+      [
+        feature_in_state("all-a", "all", 1.0, "complete"),
+        feature_in_state("all-b", "all", 2.0, "complete"),
+        feature_in_state("none-a", "none", 1.0, "proposed"),
+        feature_in_state("none-b", "none", 2.0, "active"),
+        feature_in_state("one-a", "one", 1.0, "complete"),
+      ],
+      [],
+      fn(_, _) { Nil },
+      editor(None, []),
+      [],
+    )
+  let page = element.to_string(html.div([], elements))
+  let all = milestone_section(page, "all")
+  assert string.contains(all, "2 / 2 features complete")
+  let none = milestone_section(page, "none")
+  assert string.contains(none, "0 / 2 features complete")
+  let one = milestone_section(page, "one")
+  assert string.contains(one, "1 / 1 feature complete")
+  let zero = milestone_section(page, "zero")
+  assert string.contains(zero, "0 / 0 features complete")
+}
+
+fn milestone_section(page: String, id: String) -> String {
+  let marker = "data-milestone-id=\"" <> id <> "\""
+  let assert Ok(#(_, after)) = string.split_once(page, marker)
+  let assert Ok(#(section, _)) = string.split_once(after, "</section>")
+  section
+}
+
+pub fn milestone_heading_groups_its_state_date_and_count_test() {
+  let elements =
+    roadmap.view(
+      "",
+      [dated_milestone("m1", 1.0, "2027-01-01")],
+      [feature_in_state("done", "m1", 1.0, "complete")],
+      [],
+      fn(_, _) { Nil },
+      editor(None, []),
+      [],
+    )
+  let page = element.to_string(html.div([], elements))
+  let section = milestone_section(page, "m1")
+  let assert Ok(#(_, after)) =
+    string.split_once(section, "<span class=\"facts\">")
+  let assert Ok(#(facts, _)) = string.split_once(after, "</span></button>")
+  assert string.contains(
+    facts,
+    "<span class=\"state state-proposed\">proposed</span>",
+  )
+  assert string.contains(facts, "<span class=\"target\">2027-01-01</span>")
+  assert string.contains(
+    facts,
+    "<span class=\"feature-count\">1 / 1 feature complete</span>",
+  )
 }

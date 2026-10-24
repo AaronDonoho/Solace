@@ -108,7 +108,7 @@ pub fn sections() -> List(Section) {
     Section(
       "projects",
       "Several projects on one board",
-      "<p>One board can show several Gleam projects: those in one folder, the <em>root</em>. The root's own project, if the folder is a Gleam project, comes first, then any project in a folder below it. The <strong>Projects</strong> section of the <strong>Workspace</strong> page (<code>/workspace</code>) adds an already set up project back to the board, removes one, or creates a new one: give a package name, and optionally a folder and whether it runs on Erlang or JavaScript, and Solace runs <code>gleam new</code> and sets the project up. Every project stays inside the root; a folder outside it, or reached through a link, is refused. The list is kept in the root's <code>solace.toml</code>.</p>
+      "<p>One board can show several projects: those in one folder, the <em>root</em>. The root's own project, if it has one, comes first, then any project in a folder below it. The <strong>Projects</strong> section of the <strong>Workspace</strong> page (<code>/workspace</code>) adds an already set up project back to the board, removes one, or creates a new one: choose <strong>Language</strong> (<strong>Gleam</strong> or <strong>Rust</strong>), give a package name, and optionally a folder; for a Gleam project, also choose whether it runs on Erlang or JavaScript (<strong>Runs on</strong> applies only to Gleam). Solace runs <code>gleam new</code> or <code>cargo new</code> and sets the project up. Every project stays inside the root; a folder outside it, or reached through a link, is refused. The list is kept in the root's <code>solace.toml</code>.</p>
 <p>Each project keeps its own tasks, settings, <code>AGENTS.md</code> and agents, and agents in different projects can work at the same time. An agent changes only its own project, but can read the others, for example to see how a project it depends on works. Reading never waits for another project's agent. A lane names its project's folder, counts its tasks, and has its own <em>Contract view</em>; select the folder name to fold the lane away. When every project uses the same columns they share one header row; otherwise each lane names its own. Notices start with the project's folder. A notice's Show task button opens its task on the tab that has the news (Questions for a question, Notes when the run left a note, else Runs) and scrolls it into view.</p>",
     ),
     Section(
@@ -219,7 +219,7 @@ smoke = { run = [\"gleam\", \"run\", \"-m\", \"smoke\"], timeout = 60 }</pre>
       "limits",
       "Limits for now",
       "<ul>
-<li>Projects must be written in Gleam.</li>
+<li>Projects are written in Gleam or Rust; a Rust project is one crate.</li>
 <li>One agent works on a project at a time. While one is working, assigning another task in that project is refused.</li>
 <li>A task belongs to one project. Its agent can read the other projects but can't change them, even one its project depends on.</li>
 <li>Tasks that are still open aren't kept apart: a later task sees the unapproved changes of earlier ones.</li>

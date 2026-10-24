@@ -398,31 +398,32 @@ pub fn package_name(name: &str) -> bool {
     name.starts_with(|c: char| c.is_ascii_lowercase()) && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
 }
 
-/// A new Gleam project at `dir` (`gleam new`), set up and listed.
-pub fn new_project(root: &Path, dir: &str, name: &str, javascript: bool) -> Out {
+/// A new project at `dir`, set up and listed: a Gleam project (`gleam new`)
+/// or a one-crate Cargo package (`cargo new`).
+pub fn new_project(root: &Path, dir: &str, name: &str, project: NewProject) -> Out {
     if !contained(root, dir) {
         return lockdown::error("E6002", dir, "expected a folder below the root, reached without symlinks");
     }
-    if !package_name(name) {
+    if matches!(project, NewProject::Gleam { .. }) && !package_name(name) {
         return fail(format!("{name:?} isn't a Gleam package name: use lowercase letters, digits and _, starting with a letter."));
     }
     if root.join(dir).exists() {
         return fail(format!("{dir} already exists."));
     }
-    let mut cmd = Command::new("gleam");
-    cmd.args(["new", dir, "--name", name, "--skip-github"]).current_dir(root);
-    if javascript {
-        cmd.args(["--template", "javascript"]);
+    match project {
+        NewProject::Gleam { javascript } => {
+            gleam_new(root, dir, name, javascript)?;
+            setup(root, dir)
+        }
+        NewProject::Rust => {
+            let existing = root.join(dir).ancestors().find(|p| p.exists()).map(Path::to_path_buf);
+            let out = rust_new(root, dir, name).and_then(|()| setup(root, dir));
+            if out.is_err() {
+                remove_created(root, dir, existing.as_deref().unwrap_or(root));
+            }
+            out
+        }
     }
-    // Inside a repository, the project joins it rather than starting its own.
-    if root.ancestors().any(|d| d.join(".git").exists()) {
-        cmd.arg("--skip-git");
-    }
-    let out = cmd.output().map_err(|e| Failure(format!("could not run gleam: {e}"), 1))?;
-    if !out.status.success() {
-        return fail(format!("gleam new failed:\n{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)));
-    }
-    setup(root, dir)
 }
 
 /// `solace create <name> [--javascript] [--yes]`: a brand-new Gleam project
@@ -447,7 +448,8 @@ pub fn create(here: &Path, args: &[&str]) -> Out {
     if !migrate::confirm(&question, args.contains(&"--yes"))? {
         return Ok("\nNothing was created.\n".into());
     }
-    Ok(format!("\n{}", new_project(&root, &dir, name, args.contains(&"--javascript"))?))
+    let project = NewProject::Gleam { javascript: args.contains(&"--javascript") };
+    Ok(format!("\n{}", new_project(&root, &dir, name, project)?))
 }
 
 #[cfg(test)]
@@ -600,12 +602,18 @@ mod tests {
         let root = Scratch::new();
         fs::create_dir_all(root.join("taken")).unwrap();
         for dir in ["../x", "/x", "a/../b", "a\\b", ""] {
-            assert!(new_project(&root, dir, "fine", false).unwrap_err().0.contains("E6002"), "{dir}");
+            assert!(new_project(&root, dir, "fine", NewProject::Gleam { javascript: false }).unwrap_err().0.contains("E6002"), "{dir}");
         }
         for name in ["Bad", "1st", "a-b", "", "a b"] {
-            assert!(new_project(&root, "fresh", name, false).unwrap_err().0.contains("isn't a Gleam package name"), "{name}");
+            assert!(
+                new_project(&root, "fresh", name, NewProject::Gleam { javascript: false })
+                    .unwrap_err()
+                    .0
+                    .contains("isn't a Gleam package name"),
+                "{name}"
+            );
         }
-        assert!(new_project(&root, "taken", "fine", true).unwrap_err().0.contains("already exists"));
+        assert!(new_project(&root, "taken", "fine", NewProject::Gleam { javascript: true }).unwrap_err().0.contains("already exists"));
         assert!(package_name("a_1") && !package_name("_a"));
     }
 
@@ -622,16 +630,16 @@ mod tests {
         }
         // Not inside a repository: the project starts its own.
         let root = Scratch::new();
-        new_project(&root, "erl", "erl", false).unwrap();
+        new_project(&root, "erl", "erl", NewProject::Gleam { javascript: false }).unwrap();
         assert_eq!(target(&root.join("erl")), "erlang");
         assert!(root.join("erl/.git").exists(), "outside a repository the project starts its own");
-        new_project(&root, "js", "js", true).unwrap();
+        new_project(&root, "js", "js", NewProject::Gleam { javascript: true }).unwrap();
         assert_eq!(target(&root.join("js")), "javascript");
         assert!(members(&root).unwrap().contains(&"js".to_string()), "a new project is listed");
         // Inside a repository it joins that one.
         let repo = Scratch::new();
         fs::create_dir_all(repo.join(".git")).unwrap();
-        new_project(&repo, "inner", "inner", false).unwrap();
+        new_project(&repo, "inner", "inner", NewProject::Gleam { javascript: false }).unwrap();
         assert!(!repo.join("inner/.git").exists(), "inside a repository there is no nested one");
     }
 
@@ -643,7 +651,7 @@ mod tests {
         }
         let root = Scratch::new();
         // Package names that collide with Gleam's own are refused by the toolchain, not by `package_name`.
-        let err = new_project(&root, "gleam", "gleam", false).unwrap_err().0;
+        let err = new_project(&root, "gleam", "gleam", NewProject::Gleam { javascript: false }).unwrap_err().0;
         assert!(err.contains("gleam new failed"), "{err}");
         assert!(!members(&root).unwrap().contains(&"gleam".to_string()));
     }
@@ -734,4 +742,125 @@ mod tests {
         let reported = fs::read_to_string(root.join(".solace/fetch-failed")).unwrap();
         assert!(reported.contains("E6020"), "{reported}");
     }
+
+    /// A new Rust project is Cargo's binary package, listed and no longer found.
+    #[test]
+    fn new_project_creates_a_rust_package() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let root = Scratch::new();
+        fs::create_dir_all(root.join(".git")).unwrap();
+        new_project(&root, "app", "app", NewProject::Rust).unwrap();
+        assert!(root.join("app/src/main.rs").is_file());
+        assert!(root.join("app/solace.toml").exists());
+        assert!(root.join("app/.solace/store.db").exists());
+        assert!(!root.join("app/.git").exists(), "inside a repository there is no nested one");
+        assert_eq!(members(&root).unwrap(), [".", "app"]);
+        assert!(!found(&root).unwrap().iter().any(|f| f["dir"] == "app"), "a listed project is not offered again");
+        // A taken folder is refused before cargo runs and stays as it was.
+        fs::create_dir(root.join("taken")).unwrap();
+        assert!(new_project(&root, "taken", "taken", NewProject::Rust).unwrap_err().0.contains("already exists"));
+        assert_eq!(fs::read_dir(root.join("taken")).unwrap().count(), 0);
+        assert_eq!(members(&root).unwrap(), [".", "app"]);
+    }
+
+    /// Cargo's own name check refuses a Rust project, and nothing is left behind.
+    #[test]
+    fn new_project_reports_a_failing_cargo_new() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let root = Scratch::new();
+        let err = new_project(&root, "bad", "a b", NewProject::Rust).unwrap_err().0;
+        assert!(err.contains("invalid character"), "{err}");
+        assert!(!root.join("bad").exists());
+        assert!(members(&root).unwrap().is_empty());
+    }
+
+    /// A refusal after `cargo new` takes back the folders it made, including
+    /// parents for a nested `dir`, but leaves folders that were already there.
+    #[test]
+    fn new_project_removes_a_refusals_folders_but_keeps_older_ones() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let root = Scratch::new().with(&[("solace.toml", "projects = [\"a/b\"]\n")]);
+        let err = new_project(&root, "a/b", "b", NewProject::Rust).unwrap_err().0;
+        assert!(err.contains("already a project"), "{err}");
+        assert!(!root.join("a").exists(), "the parent cargo made for the nested project is gone");
+
+        let root = Scratch::new().with(&[("solace.toml", "projects = [\"a/b\"]\n")]);
+        fs::create_dir(root.join("a")).unwrap();
+        let err = new_project(&root, "a/b", "b", NewProject::Rust).unwrap_err().0;
+        assert!(err.contains("already a project"), "{err}");
+        assert!(root.join("a").is_dir(), "a folder that was there before the refusal stays");
+        assert!(!root.join("a/b").exists());
+    }
+}
+
+/// The language of a project the New project form creates.
+#[derive(Clone, Copy)]
+pub enum NewProject {
+    Gleam { javascript: bool },
+    Rust,
+}
+
+/// `gleam new`, inside a repository joining it rather than starting its own.
+fn gleam_new(root: &Path, dir: &str, name: &str, javascript: bool) -> Result<(), Failure> {
+    let mut cmd = Command::new("gleam");
+    cmd.args(["new", dir, "--name", name, "--skip-github"]).current_dir(root);
+    if javascript {
+        cmd.args(["--template", "javascript"]);
+    }
+    if in_repository(root) {
+        cmd.arg("--skip-git");
+    }
+    let out = cmd.output().map_err(|e| Failure(format!("could not run gleam: {e}"), 1))?;
+    if !out.status.success() {
+        return fail(format!("gleam new failed:\n{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)));
+    }
+    Ok(())
+}
+
+/// `cargo new` for a binary package, refused before it starts when Rust's tools
+/// can't be used. Cargo checks the name and its refusal is its own words.
+fn rust_new(root: &Path, dir: &str, name: &str) -> Result<(), Failure> {
+    if let Some(why) = crate::language::reason(crate::language::RUST)? {
+        return fail(why);
+    }
+    let mut cmd = Command::new("cargo");
+    cmd.args(["new", dir, "--name", name]).current_dir(root);
+    if in_repository(root) {
+        cmd.args(["--vcs", "none"]);
+    }
+    let out = cmd.output().map_err(|e| Failure(format!("could not run cargo: {e}"), 1))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let output = match (stdout.trim_end(), stderr.trim_end()) {
+        ("", stderr) => stderr.to_string(),
+        (stdout, "") => stdout.to_string(),
+        (stdout, stderr) => format!("{stdout}\n{stderr}"),
+    };
+    fail(output)
+}
+
+/// Removes a folder a failed `cargo new` or setup left, and the empty parents it
+/// made for it, stopping at `keep` so a refusal changes nothing else.
+fn remove_created(root: &Path, dir: &str, keep: &Path) {
+    let path = root.join(dir);
+    let _ = fs::remove_dir_all(&path);
+    for parent in path.ancestors().skip(1) {
+        if parent == keep || fs::remove_dir(parent).is_err() {
+            break;
+        }
+    }
+}
+
+/// Whether `root` sits inside a Git repository, so a new project joins it.
+fn in_repository(root: &Path) -> bool {
+    root.ancestors().any(|d| d.join(".git").exists())
 }

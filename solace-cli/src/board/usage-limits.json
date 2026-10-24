@@ -1,5 +1,5 @@
 {
-  "about": "What agents say when a usage limit is reached, as they say it. Codex: UsageLimitReachedError in codex-rs/protocol/src/error.rs and its tests (openai/codex), with a time where they format one. Claude Code: its messages as reported in anthropics/claude-code issues 24428, 42261, 89863 and 9236, and its older pipe form. `resets` is the reset time the message names, null when none. `not_limits` are errors that must not mark a sign-in.",
+  "about": "What agents say when they can't continue, as they say it: a usage limit, an expired sign-in or a needed update. Codex: UsageLimitReachedError in codex-rs/protocol/src/error.rs and its tests (openai/codex), with a time where they format one. Claude Code: its messages as reported in anthropics/claude-code issues 24428, 42261, 89863 and 9236, and its older pipe form. `resets` is the reset time the message names, null when none. `sign_in` and `update` are the wordings for an expired sign-in or a program that is too old. `not_limits` are errors that must not mark a sign-in.",
   "codex": [
     {"said": "You’ve hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/settings/usage to purchase more credits or try again later.", "resets": null},
     {"said": "You’ve hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again later.", "resets": null},
@@ -18,6 +18,24 @@
     {"said": "Claude usage limit reached. Your limit will reset at 3pm", "resets": "3pm"},
     {"said": "Claude AI usage limit reached|1760000000", "resets": "Oct 9, 2025 8:53 AM (UTC)"}
   ],
+  "sign_in": {
+    "codex": [
+      "Your access token could not be refreshed",
+      "Please log out and sign in again"
+    ],
+    "claude": [
+      "Failed to authenticate: OAuth session expired and could not be refreshed",
+      "OAuth token has expired",
+      "Please run /login"
+    ]
+  },
+  "update": {
+    "codex": [],
+    "claude": [
+      "needs an update",
+      "is required to continue"
+    ]
+  },
   "not_limits": [
     "shared rollout token budget exhausted",
     "rate limit exceeded: Rate limit reached for gpt-6-sol",

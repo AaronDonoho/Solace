@@ -44,9 +44,11 @@ pub type Milestone {
   )
 }
 
-/// A milestone (None for "No milestone") and its features in order.
+/// A Features-tab section: a milestone (`None` for "No milestone"), or the
+/// closed features.
 pub type Group {
-  Group(milestone: Option(Milestone), features: List(Feature))
+  Open(milestone: Option(Milestone), features: List(Feature))
+  Closed(features: List(Feature))
 }
 
 /// A feature in the stream. A new record starts `proposed` (D-87).
@@ -84,9 +86,9 @@ pub fn milestone_decoder() -> decode.Decoder(Milestone) {
   decode.success(Milestone(id, title, rank, body, target_date, state))
 }
 
-/// The milestones by rank then id, each with its features by rank then id
-/// (empty ones too), then the features with no milestone, or one that is not
-/// loaded, when there are any.
+/// The milestones by rank then id, each with its open features by rank then id
+/// (empty ones too), then the open features with no milestone, or one that is
+/// not loaded, when there are any, and the closed features in one last group.
 pub fn groups(
   milestones: List(Milestone),
   features: List(Feature),
@@ -104,17 +106,25 @@ pub fn groups(
       None -> False
     }
   }
-  let loose = list.filter(features, fn(f) { !known(f) })
+  let open = list.filter(features, fn(f) { !is_closed(f) })
+  let loose = list.filter(open, fn(f) { !known(f) })
+  let closed = in_order(list.filter(features, is_closed))
   list.append(
-    list.map(ordered, fn(m) {
-      Group(
-        Some(m),
-        in_order(list.filter(features, fn(f) { f.milestone == Some(m.id) })),
-      )
-    }),
-    case loose {
+    list.append(
+      list.map(ordered, fn(m) {
+        Open(
+          Some(m),
+          in_order(list.filter(open, fn(f) { f.milestone == Some(m.id) })),
+        )
+      }),
+      case loose {
+        [] -> []
+        _ -> [Open(None, in_order(loose))]
+      },
+    ),
+    case closed {
       [] -> []
-      _ -> [Group(None, in_order(loose))]
+      _ -> [Closed(closed)]
     },
   )
 }
@@ -124,7 +134,7 @@ fn feature_view(
   feature: Feature,
   color: String,
   group: List(Feature),
-  tasks: List(#(String, String, String, Option(String), Bool)),
+  tasks: List(#(String, String, String, Option(String), Bool, String)),
   open: fn(String, String) -> msg,
   editor: Editor(msg),
   new_task: TaskForm(msg),
@@ -204,7 +214,9 @@ fn feature_view(
         html.h4([], [
           html.text(feature.title),
           html.text(" "),
-          html.span([attribute.class("state")], [html.text(feature.state)]),
+          html.span([attribute.class(state_class(feature.state))], [
+            html.text(feature.state),
+          ]),
           case planning {
             True -> plan.marker()
             False -> element.none()
@@ -308,6 +320,7 @@ fn feature_view(
               [attribute.class("feature-tasks")],
               list.map(linked, fn(t) {
                 html.li([], [
+                  task_mark(t.5),
                   html.button(
                     [
                       attribute.type_("button"),
@@ -329,19 +342,20 @@ fn feature_view(
   )
 }
 
-/// The Features tab: a group per milestone, then "No milestone". `tasks` are
-/// every project's tasks as (project, id, title, feature, final); a click on
-/// one sends `open(project, id)`. The form for a new feature shows above the
-/// groups; an edited feature's form shows in its place. Each feature ends
-/// with a form for a new task linked to it. `planning` are the features with
-/// an open planning run, which show a marker. A started feature's edge has
-/// the color its tasks' cards show on the board. Only the focused feature
-/// shows its body, tasks and new-task form; the others show a task count.
+/// The Features tab: a group per milestone, then "No milestone" and "Closed".
+/// `tasks` are
+/// every project's tasks as (project, id, title, feature, final, column); a click on
+/// one sends `open(project, id)`. The feature form shows in the tab's bottom
+/// band, not among the cards. Each feature ends with a form for a new task
+/// linked to it. `planning` are the features with an open planning run, which
+/// show a marker. A started feature's edge has the color its tasks' cards
+/// show on the board. Only the focused feature shows its body, tasks and
+/// new-task form; the others show a task count.
 pub fn view(
   base: String,
   milestones: List(Milestone),
   features: List(Feature),
-  tasks: List(#(String, String, String, Option(String), Bool)),
+  tasks: List(#(String, String, String, Option(String), Bool, String)),
   open: fn(String, String) -> msg,
   editor: Editor(msg),
   new_task: TaskForm(msg),
@@ -349,58 +363,49 @@ pub fn view(
 ) -> List(Element(msg)) {
   let colors =
     solace_task.feature_colors(list.map(features, fn(f) { #(f.id, f.slot) }))
-  let top = case editor.draft {
-    Some(Draft(id: None, ..) as draft) -> [
-      form(base, milestones, editor, draft),
-    ]
-    _ -> [
-      case editor.draft, editor.error {
-        None, message if message != "" ->
-          html.p([attribute.role("alert")], [html.text(message)])
-        _, _ -> element.none()
-      },
-      html.div([attribute.class("vision-actions")], [
-        html.button(
-          [
-            attribute.type_("button"),
-            attribute.disabled(editor.draft != None),
-            event.on_click(editor.on_new),
-          ],
-          [html.text(solace_task.ui_label("new_feature"))],
-        ),
-      ]),
-    ]
-  }
+  let top = [
+    case editor.draft, editor.error {
+      None, message if message != "" ->
+        html.p([attribute.role("alert")], [html.text(message)])
+      _, _ -> element.none()
+    },
+    html.div([attribute.class("vision-actions")], [
+      html.button(
+        [
+          attribute.type_("button"),
+          attribute.disabled(editor.draft != None),
+          event.on_click(editor.on_new),
+        ],
+        [html.text(solace_task.ui_label("new_feature"))],
+      ),
+    ]),
+  ]
   let shown = fn(f: Feature, group) {
-    case editor.draft {
-      Some(Draft(id: Some(id), ..) as draft) if id == f.id ->
-        form(base, milestones, editor, draft)
-      _ ->
-        feature_view(
-          base,
-          f,
-          list.key_find(colors, f.id) |> result.unwrap(""),
-          group,
-          tasks,
-          open,
-          editor,
-          new_task,
-          list.contains(planning, f.id),
-        )
-    }
+    feature_view(
+      base,
+      f,
+      list.key_find(colors, f.id) |> result.unwrap(""),
+      group,
+      tasks,
+      open,
+      editor,
+      new_task,
+      list.contains(planning, f.id),
+    )
   }
   list.append(top, case milestones, features {
     [], [] -> [html.p([], [html.text("No features yet.")])]
     _, _ ->
       list.map(groups(milestones, features), fn(g) {
+        let title = case g {
+          Open(Some(m), _) -> m.title
+          Open(None, _) -> "No milestone"
+          Closed(_) -> "Closed"
+        }
+        let group = group_features(g)
         html.section([attribute.class("milestone")], [
-          html.h3([], [
-            html.text(case g.milestone {
-              Some(m) -> m.title
-              None -> "No milestone"
-            }),
-          ]),
-          ..case g.features {
+          html.h3([], [html.text(title)]),
+          ..case group {
             [] -> [html.p([], [html.text("No features.")])]
             fs -> list.map(fs, shown(_, fs))
           }
@@ -524,9 +529,10 @@ pub fn ranked(milestones: List(Milestone)) -> List(Milestone) {
   list.sort(milestones, by_rank)
 }
 
-/// The form for a new feature or an edit: title, description, state and
-/// milestone. A refusal (`E7001`, `E7023`) shows above Save and keeps the draft.
-fn form(
+/// The form for a new feature or an edit, shown in the Features tab's bottom
+/// band: title, description, state and milestone. A refusal (`E7001`,
+/// `E7023`) shows above Save and keeps the draft.
+pub fn form(
   base: String,
   milestones: List(Milestone),
   editor: Editor(msg),
@@ -566,22 +572,7 @@ fn form(
       }
     None -> listed
   }
-  let attrs = case draft.id {
-    None -> [attribute.class("feature-form")]
-    // The form stands where the feature's card would: `api.mjs` finds the card
-    // by this id to reveal or drag it.
-    Some(id) -> [
-      attribute.class("feature-form"),
-      attribute.attribute("data-feature-id", id),
-    ]
-  }
-  html.div(attrs, [
-    html.h3([], [
-      html.text(case draft.id {
-        None -> solace_task.ui_label("new_feature")
-        Some(_) -> solace_task.ui_label("edit_feature")
-      }),
-    ]),
+  html.div([attribute.class("feature-form"), attribute.id("feature-form")], [
     html.div([attribute.class("filters")], [
       html.label([], [
         html.text("Title"),
@@ -787,4 +778,39 @@ pub fn grip_key(key: String) -> Option(Bool) {
 pub fn by_rank(a: Milestone, b: Milestone) -> order.Order {
   float.compare(a.rank, b.rank)
   |> order.break_tie(string.compare(a.id, b.id))
+}
+
+/// A complete or canceled task carries the run transcript's mark, so a task
+/// reads the same here and in its run.
+fn task_mark(column: String) -> Element(msg) {
+  case column {
+    "complete" -> solace_task.status_mark("ok", "Complete")
+    "cancelled" -> solace_task.status_mark("failed", "Canceled")
+    _ -> element.none()
+  }
+}
+
+/// Whether a feature belongs in the Closed section.
+fn is_closed(feature: Feature) -> Bool {
+  case feature.state {
+    "complete" | "canceled" -> True
+    _ -> False
+  }
+}
+
+/// A section's features in order.
+pub fn group_features(group: Group) -> List(Feature) {
+  case group {
+    Open(_, features) -> features
+    Closed(features) -> features
+  }
+}
+
+/// The label class for a state: its own color class, or the neutral class for
+/// one this page does not know.
+pub fn state_class(state: String) -> String {
+  case list.contains(states, state) {
+    True -> "state state-" <> state
+    False -> "state"
+  }
 }

@@ -1196,53 +1196,9 @@ impl Store {
         let top = scope::top(&self.root);
         let mine = scope::dir(&top, &self.root);
         let members = workspace::members(&top).unwrap_or_default();
-        let exists = |m: &str| ix.modules.iter().any(|r| r.path == m);
 
-        // the destination project, with --to-project
-        let dest = match &p.to_project {
-            None => None,
-            Some(d) => {
-                // `../x` and `./x` resolve against this project, as `--project` does (D-126 point 3).
-                let d = project_folder(&top, Some(&self.root), d, &members);
-                if !members.iter().any(|m| *m == d) {
-                    return fail(format!("E6007 {d} is not a project under this Solace root; its projects: {}", members.join(", ")));
-                }
-                let dir = scope::path(&top, &d);
-                if lockdown::same_project(&dir, &self.root) {
-                    None
-                } else if crate::language::is_rust(&dir) {
-                    return fail(format!("E6013 {d} is a Rust project: `--to-project` is not available for Rust (D-185)"));
-                } else if !dir.join("gleam.toml").exists() {
-                    return fail(format!("E6013 {d} has no code held as symbols to extract into"));
-                } else {
-                    let store = Store::at(&dir)?;
-                    let ix = store.index()?;
-                    Some(Dest { dir: d.to_string(), store, ix })
-                }
-            }
-        };
-        // the target, in its forgiving forms
-        let mut to = p.to.trim().trim_end_matches(".gleam").to_string();
-        for pre in ["src/", "test/"] {
-            if let Some(r) = to.strip_prefix(pre) {
-                to = r.to_string();
-                break;
-            }
-        }
-        if let Some(d) = &dest {
-            if !d.has(&to) && !d.store.lang().valid_module_path(&to) {
-                return fail(format!("{to} is not a module name; use --to <module>, e.g. --to solace_task"));
-            }
-        } else if !exists(&to) {
-            if let Some((prefix, module)) = to.rsplit_once('/')
-                && let Some(d) = members.iter().find(|d| **d != mine && (d.as_str() == prefix || d.ends_with(&format!("/{prefix}"))))
-            {
-                return fail(format!("use --to {module} --to-project {d}"));
-            }
-            if !self.lang().valid_module_path(&to) {
-                return fail(format!("{to} is not a module name; use --to <module>, e.g. --to solace_task"));
-            }
-        }
+        let dest = destination(self, &p, &top, &members)?;
+        let to = target_module(self, &ix, &p, &dest, &mine, &members)?;
 
         let (listed, already) = resolve_listed(self, &ix, &p.names, &dest, &to)?;
         if listed.is_empty() {
@@ -1256,277 +1212,17 @@ impl Store {
             return fail("source symbols do not go to a test module (*_test): use --to <module>");
         }
 
-        // a module that exists in a project connected through gleam.toml
-        let mut notes: Vec<String> = vec![];
-        if dest.is_none() && !exists(&to) {
-            for d in members.iter().filter(|d| **d != mine) {
-                let dir = scope::path(&top, d);
-                if !["src", "test"].iter().any(|t| dir.join(t).join(format!("{to}.gleam")).exists()) {
-                    continue;
-                }
-                if self.connected(&dir) {
-                    return fail(format!("{to} is in {d}; add --to-project {d}"));
-                }
-                notes.push(format!("Created module {to}; a module of that name exists in the unrelated project {d}."));
-            }
-        }
+        let notes = module_notes(self, &dest, &ix, &to, &top, &mine, &members)?;
 
-        // what moves: the symbols, their helpers, the tests that reach only moved code
+        let SymbolMoves { moved, helpers, moved_tests, test_to, newmod } = moves(&ix, &listed, &to, target_is_test);
         let n = ix.syms.len();
-        let mut moved = vec![false; n];
-        for &i in &listed {
-            moved[i] = true;
-        }
-        let mut helpers: Vec<usize> = vec![];
-        bring_helpers(&ix, &mut moved, &mut helpers);
-        let mut moved_tests: Vec<usize> = vec![];
-        if !target_is_test {
-            for t in reach::test_symbols(&ix) {
-                let c = reach::covered(&ix, t);
-                if !moved[t] && !c.is_empty() && c.iter().all(|&u| moved[u]) {
-                    moved_tests.push(t);
-                }
-            }
-            for &t in &moved_tests {
-                moved[t] = true;
-            }
-            let mut test_helpers = vec![];
-            bring_helpers(&ix, &mut moved, &mut test_helpers);
-            helpers.extend(test_helpers);
-        }
-        let test_to = if target_is_test { to.clone() } else { format!("{to}_test") };
-        let newmod: Vec<String> = (0..n)
-            .map(|i| match (moved[i], is_test(&ix, i)) {
-                (false, _) => ix.syms[i].module.clone(),
-                (true, true) => test_to.clone(),
-                (true, false) => to.clone(),
-            })
-            .collect();
-        let has = |m: &str| match &dest {
-            Some(d) => d.has(m),
-            None => exists(m),
-        };
 
-        // a module the destination gains is new to every package connected to it or to
-        // the source: Gleam module names are unique within a dependency graph
-        if let Some(d) = &dest {
-            let linked = package_graph(&top, &members, &[mine.as_str(), d.dir.as_str()]);
-            for m in [&to, &test_to] {
-                if !(0..n).any(|i| moved[i] && newmod[i] == *m) {
-                    continue;
-                }
-                if has(m) {
-                    // the destination's module is not new, but a module of that name the source keeps clashes with it
-                    if (0..n).any(|i| !moved[i] && ix.syms[i].module == *m) {
-                        return fail(format!(
-                            concat!(
-                                "E1004 module {} is in this project too and stays; ",
-                                "Gleam module names are unique across packages that depend on each other: pick another module name",
-                            ),
-                            m
-                        ));
-                    }
-                    continue;
-                }
-                if exists(m) {
-                    return fail(format!(
-                        concat!(
-                            "E1004 module {} is in this project too; ",
-                            "Gleam module names are unique across packages that depend on each other: pick another module name",
-                        ),
-                        m
-                    ));
-                }
-                for other in linked.iter().filter(|o| **o != mine && **o != d.dir) {
-                    let dir = scope::path(&top, other);
-                    if ["src", "test"].iter().any(|t| dir.join(t).join(format!("{m}.gleam")).exists()) {
-                        return fail(format!(
-                            concat!(
-                                "E1004 module {} is in {}, a package connected to {} or {}; ",
-                                "Gleam module names are unique across them: pick another module name",
-                            ),
-                            m, other, mine, d.dir
-                        ));
-                    }
-                }
-            }
-        }
+        check_module_clashes(&ix, &dest, &top, &mine, &members, &to, &test_to, &moved, &newmod)?;
+        check_symbol_clashes(&ix, &dest, &moved, &newmod)?;
+        check_opaque(&ix, &moved)?;
+        let source_needs = check_cycles(&ix, &moved, &newmod, &dest, &self.root, &mine)?;
 
-        // names taken in the target
-        for i in (0..n).filter(|&i| moved[i]) {
-            let s = &ix.syms[i];
-            let clash = (0..n).find(|&j| {
-                j != i
-                    && newmod[j] == newmod[i]
-                    && ix.syms[j].name == s.name
-                    && (ix.syms[j].kind == Kind::Type) == (s.kind == Kind::Type)
-                    && (!moved[j] || ix.syms[j].module != s.module)
-            });
-            if let Some(j) = clash {
-                return fail(format!(
-                    "E1004 {} already exists in {}; {} cannot move there; to fold {} into it, use merge {} {}",
-                    ix.syms[j].qname(),
-                    newmod[i],
-                    s.qname(),
-                    s.qname(),
-                    ix.syms[j].qname(),
-                    s.qname()
-                ));
-            }
-            if let Some(d) = &dest
-                && let Some(t) =
-                    d.ix.syms.iter().find(|t| t.module == newmod[i] && t.name == s.name && (t.kind == Kind::Type) == (s.kind == Kind::Type))
-            {
-                return fail(format!(
-                    "E1004 {} already exists in {} ({}); {} cannot move there; to fold {} into it, use merge {} {} --to-project {}",
-                    t.qname(),
-                    newmod[i],
-                    d.dir,
-                    s.qname(),
-                    s.qname(),
-                    t.qname(),
-                    s.qname(),
-                    d.dir
-                ));
-            }
-        }
-
-        // an opaque type stays with the code that builds or matches its constructors
-        for x in 0..n {
-            let s = &ix.syms[x];
-            if s.kind != Kind::Type || !s.text.lines().any(|l| l.starts_with("pub opaque type ")) {
-                continue;
-            }
-            let users: Vec<usize> = ix.used_by[x].iter().copied().filter(|&j| constructs(&ix, j, x)).collect();
-            let apart: Vec<String> = users.iter().filter(|&&j| moved[j] != moved[x]).map(|&j| ix.syms[j].qname()).collect();
-            if !apart.is_empty() {
-                let verb = if moved[x] { "extract them too" } else { "extract it too" };
-                return fail(format!("E5006 {} is opaque; its constructors are used by {}; {verb}", s.name, apart.join(", ")));
-            }
-        }
-
-        // a module cycle, or with --to-project a package cycle: the source comes to
-        // depend on the destination, which gains no dependency (D-103)
-        let graph = |at: &dyn Fn(usize) -> String| {
-            let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-            for h in 0..n {
-                for &u in &ix.uses[h] {
-                    if at(h) != at(u) {
-                        edges.entry(at(h)).or_default().insert(at(u));
-                    }
-                }
-            }
-            edges
-        };
-        let moved_uses_staying = |why: &str| -> Out {
-            let mut stay: Vec<(usize, Vec<String>)> = vec![];
-            for m in (0..n).filter(|&m| moved[m]) {
-                for &u in ix.uses[m].iter().filter(|&&u| !moved[u]) {
-                    match stay.iter_mut().find(|(s, _)| *s == u) {
-                        Some((_, by)) => by.push(ix.syms[m].name.clone()),
-                        None => stay.push((u, vec![ix.syms[m].name.clone()])),
-                    }
-                }
-            }
-            let (mut seen, mut stack) = (HashSet::new(), stay.iter().map(|(u, _)| *u).collect::<Vec<_>>());
-            while let Some(u) = stack.pop() {
-                if seen.insert(u) {
-                    stack.extend(ix.uses[u].iter().filter(|&&v| !moved[v]));
-                }
-            }
-            let list: Vec<String> = stay.iter().map(|(u, by)| format!("{} (by {})", ix.syms[*u].name, by.join(", "))).collect();
-            fail(format!(
-                "E5002 moved code uses {} symbol{} that stay{why}: {} (moving them would bring {} in total)",
-                stay.len(),
-                if stay.len() == 1 { "" } else { "s" },
-                list.join(", "),
-                seen.len()
-            ))
-        };
-        let staying_uses_moved = |why: &str| -> Out {
-            let mut back: Vec<String> = vec![];
-            for h in (0..n).filter(|&h| !moved[h]) {
-                for &u in ix.uses[h].iter().filter(|&&u| moved[u]) {
-                    back.push(format!("{} (by {})", ix.syms[u].name, ix.syms[h].name));
-                }
-            }
-            fail(format!("E5002 staying code uses {} moved symbols and {why}: {}", back.len(), back.join(", ")))
-        };
-        let source_needs = (0..n).any(|h| !moved[h] && ix.uses[h].iter().any(|&u| moved[u]));
-        if let Some(d) = &dest {
-            let dest_needs = (0..n).any(|m| moved[m] && ix.uses[m].iter().any(|&u| !moved[u]));
-            let reaches = depends_on(&d.store.root, &self.root);
-            if source_needs && reaches {
-                return staying_uses_moved(&format!("{} already depends on {mine}, so this would close a package loop", d.dir));
-            }
-            if dest_needs && !reaches {
-                return moved_uses_staying(&format!(" in {mine}, and {} gains no dependency on it", d.dir));
-            }
-        } else if cyclic(&graph(&|i| newmod[i].clone())) && !cyclic(&graph(&|i| ix.syms[i].module.clone())) {
-            let any_stay = (0..n).any(|m| moved[m] && ix.uses[m].iter().any(|&u| !moved[u]));
-            return if any_stay { moved_uses_staying("") } else { staying_uses_moved("closes an import loop") };
-        }
-
-        // projects that depend on this one and use a moved public symbol; with
-        // --to-project, those the task covers are rewritten (D-103)
-        let names = name_map(&ix);
-        let outside: HashMap<&(String, String), usize> =
-            names.iter().filter(|&(_, &x)| moved[x] && is_pub_text(&ix.syms[x].text)).map(|(k, &x)| (k, x)).collect();
-        let mut users: Vec<String> = vec![];
-        let mut deps: Vec<Dependent> = vec![];
-        for d in members.iter().filter(|d| **d != mine) {
-            let dir = scope::path(&top, d);
-            let Some(me) = self.root.canonicalize().ok() else { break };
-            if !path_deps(&dir).contains(&me) {
-                continue;
-            }
-            if let Some(dt) = &dest
-                && *d != dt.dir
-                && covered(&dir)
-            {
-                let store = Store::at(&dir)?;
-                let ix = store.index()?;
-                deps.push(Dependent { dir: d.clone(), store, ix });
-                continue;
-            }
-            let other = board::open(&dir).map_err(|e| Failure(format!("{d}: {}", e.0), e.1))?;
-            let dix = other.index().map_err(|e| Failure(format!("{d}: {}", e.0), e.1))?;
-            for s in &dix.syms {
-                let header = dix.modules.iter().find(|m| m.path == s.module).map_or("", |m| m.header.as_str());
-                let imps = dix.lang.imports(header);
-                for r in dix.lang.references(&s.text) {
-                    let hit = match &r {
-                        Ref::Qualified(alias, member) => imps
-                            .iter()
-                            .find(|i| &i.alias == alias)
-                            .filter(|i| outside.contains_key(&(i.module.clone(), member.clone())))
-                            .map(|i| format!("{}.{member}", i.module)),
-                        Ref::Bare(b) => imps.iter().find_map(|i| {
-                            i.unqualified
-                                .iter()
-                                .find(|(o, l)| l == b && outside.contains_key(&(i.module.clone(), o.clone())))
-                                .map(|(o, _)| format!("{}.{o}", i.module))
-                        }),
-                    };
-                    if let Some(hit) = hit {
-                        let line = format!("{d}: {} uses {hit}", s.qname());
-                        if !users.contains(&line) {
-                            users.push(line);
-                        }
-                    }
-                }
-            }
-        }
-        if !users.is_empty() {
-            return fail(format!(
-                concat!(
-                    "E5003 a project that depends on this one uses moved symbols, ",
-                    "and extract rewrites another project only with --to-project when the task covers it: ",
-                    "change those uses first, add the project to the task, or move less\n{}",
-                ),
-                users.join("\n")
-            ));
-        }
+        let (names, deps) = scan_dependents(self, &ix, &top, &mine, &members, &dest, &moved)?;
 
         // JavaScript FFI files: with --to-project, those the moved code uses go along
         let carries = match &dest {
@@ -1534,319 +1230,61 @@ impl Store {
             None => vec![],
         };
 
-        // the rewrite
-        let mut headers: HashMap<String, String> = ix.modules.iter().map(|m| (m.path.clone(), m.header.clone())).collect();
-        let mut foreign = HashSet::new();
-        if let Some(d) = &dest {
-            for m in d.ix.modules.iter().filter(|m| m.path == to || m.path == test_to) {
-                headers.insert(m.path.clone(), m.header.clone());
-            }
-            for s in d.ix.syms.iter().filter(|s| s.module == to || s.module == test_to) {
-                foreign.insert((s.module.clone(), s.name.clone()));
-                if s.kind == Kind::Type {
-                    foreign.extend(d.ix.lang.constructors(&s.text).into_iter().map(|c| (s.module.clone(), c)));
-                }
-            }
-        }
-        let mut plan = Plan {
-            ix: &ix,
-            names: names.clone(),
-            headers,
-            foreign,
-            moved: moved.clone(),
-            newmod: newmod.clone(),
-            newtext: ix.syms.iter().map(|s| s.text.clone()).collect(),
-            needs: BTreeMap::new(),
-            upto: n,
-            edits: 0,
-            edited: BTreeSet::new(),
-            redirect: None,
-            hits: 0,
-            hit_in: BTreeSet::new(),
-        };
-        plan.rewrite()?;
-        let mut now_pub: Vec<usize> = vec![];
-        for x in 0..n {
-            if !is_pub_text(&plan.newtext[x]) && ix.used_by[x].iter().any(|&j| newmod[j] != newmod[x]) {
-                plan.newtext[x] = make_pub(&plan.newtext[x]);
-                now_pub.push(x);
-            }
-        }
-        // JavaScript FFI paths are relative to the compiled module: a move to
-        // another folder, or a carried file's new place, rewrites them
-        let mut ffi: Vec<String> = vec![];
-        for h in (0..n).filter(|&h| moved[h]) {
-            let (was, now) = (module_dir(&ix.syms[h].module), module_dir(&newmod[h]));
-            let mut edits = vec![];
-            for (a, b, path) in ffi_spans(&plan.newtext[h]) {
-                let target = ffi_norm(&was, &path);
-                let goes = carries.iter().find(|c| c.old == target).map_or(target, |c| c.new.clone());
-                let new = ffi_rel(&now, &goes);
-                if new != path {
-                    ffi.push(format!("{} {path} -> {new}", ix.syms[h].qname()));
-                    edits.push((a, b, new));
-                }
-            }
-            if !edits.is_empty() {
-                plan.newtext[h] = spliced(&plan.newtext[h], edits);
-            }
-        }
+        let (plan, now_pub, ffi) = build_rewrite(&ix, &dest, &to, &test_to, &moved, &newmod, &names, &carries)?;
 
         // the dependents' references, resolved across their store and the source's
         let joint: Vec<Index> = deps.iter().map(|dp| merged(&dp.ix, &ix)).collect();
-        let mut dplans: Vec<Plan> = vec![];
-        for (dp, jx) in deps.iter().zip(&joint) {
-            let k = dp.ix.syms.len();
-            let mut dplan = Plan {
-                ix: jx,
-                names: name_map(jx),
-                headers: dp.ix.modules.iter().map(|m| (m.path.clone(), m.header.clone())).collect(),
-                foreign: HashSet::new(),
-                moved: std::iter::repeat_n(false, k).chain(moved.iter().copied()).collect(),
-                newmod: dp.ix.syms.iter().map(|s| s.module.clone()).chain(newmod.iter().cloned()).collect(),
-                newtext: jx.syms.iter().map(|s| s.text.clone()).collect(),
-                needs: BTreeMap::new(),
-                upto: k,
-                edits: 0,
-                edited: BTreeSet::new(),
-                redirect: None,
-                hits: 0,
-                hit_in: BTreeSet::new(),
-            };
-            dplan.rewrite()?;
-            dplans.push(dplan);
-        }
+        let dplans = deps.iter().zip(&joint).map(|(dp, jx)| dependent_plan(dp, jx, &moved, &newmod)).collect::<Result<Vec<_>, _>>()?;
 
-        // modules to create
-        let mut created: Vec<(String, &str)> = vec![];
-        if !has(&to) && (0..n).any(|i| moved[i] && newmod[i] == to) {
-            created.push((to.clone(), if target_is_test { "test" } else { "src" }));
-        }
-        if !moved_tests.is_empty() && !target_is_test && !has(&test_to) && !created.iter().any(|c| c.0 == test_to) {
-            created.push((test_to.clone(), "test"));
-        }
+        let created = created_modules(self, &dest, &ix, &to, &test_to, target_is_test, &moved, &newmod, &moved_tests)?;
         let tgt: &Store = dest.as_ref().map_or(self, |d| &d.store);
         let created_files: Vec<PathBuf> = created.iter().map(|(m, dir)| tgt.root.join(dir).join(format!("{m}.gleam"))).collect();
-        if created_files.iter().any(|f| f.exists()) {
-            return fail("E0101 the new module's file already exists outside the store; import or resolve it before creating this module");
-        }
 
-        // the dependency the source gains on the destination
-        let dep = match &dest {
-            Some(d) if source_needs && !path_deps(&self.root).iter().any(|p| d.store.root.canonicalize().ok().as_ref() == Some(p)) => {
-                let name = workspace::name(&d.store.root);
-                Some((name.clone(), format!("{name} = {{ path = \"{}\" }}", relative(&mine, &d.dir))))
-            }
-            _ => None,
-        };
-        // and the dependency each dependent gains, when it now imports the destination
-        let dep_lines: Vec<Option<String>> = deps
-            .iter()
-            .zip(&dplans)
-            .map(|(dp, p)| {
-                let d = dest.as_ref()?;
-                let imports = p.needs.values().flatten().any(|nd| nd.module == to || nd.module == test_to);
-                let has = d.store.root.canonicalize().ok().is_some_and(|c| path_deps(&dp.store.root).contains(&c));
-                (imports && !has).then(|| format!("{} = {{ path = \"{}\" }}", workspace::name(&d.store.root), relative(&dp.dir, &d.dir)))
-            })
-            .collect();
+        let (dep, dep_lines) = dependency_lines(self, &dest, &deps, &dplans, source_needs, &mine, &to, &test_to);
 
-        // what the suites name now, to list those that stop resolving
-        let suites_before: Vec<(String, String)> =
-            reach::entries(self)?.into_iter().filter(|(_, e)| self.resolve(&ix, e).is_ok()).collect();
-        let before = self.broken()?;
-        let dest_broken = match &dest {
-            Some(d) => d.store.broken()?,
-            None => HashMap::new(),
-        };
-        let deps_broken = deps.iter().map(|dp| dp.store.broken()).collect::<Result<Vec<_>, _>>()?;
+        let Baseline { suites_before, before, dest_broken, deps_broken } = baseline(self, &ix, &dest, &deps)?;
 
         let old_modules: BTreeSet<String> = (0..n).filter(|&i| moved[i]).map(|i| ix.syms[i].module.clone()).collect();
-        let body = || {
-            for (path, dir) in &created {
-                tgt.db.execute("INSERT INTO modules(path, dir, header) VALUES (?1, ?2, ?3)", params![path, dir, ""])?;
-            }
-            for i in 0..n {
-                let s = &ix.syms[i];
-                if moved[i]
-                    && let Some(d) = &dest
-                {
-                    // the same identity in the destination; the source keeps the retired row and its history
-                    let (kind, rev): (String, String) =
-                        self.db.query_row("SELECT kind, revision FROM symbols WHERE id = ?1", [&s.id], |r| Ok((r.get(0)?, r.get(1)?)))?;
-                    let rev = if plan.newtext[i] != s.text { revision(&plan.newtext[i]) } else { rev };
-                    let ord: i64 =
-                        tgt.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [&newmod[i]], |r| r.get(0))?;
-                    tgt.db.execute(
-                        "INSERT OR REPLACE INTO symbols(id,module,name,kind,text,ord,revision,live) VALUES (?1,?2,?3,?4,?5,?6,?7,1)",
-                        params![s.id, newmod[i], s.name, kind, plan.newtext[i], ord, rev],
-                    )?;
-                    tgt.history(&s.id, "move", &format!("{mine}: {}", s.module))?;
-                    self.db.execute("UPDATE symbols SET live = 0 WHERE id = ?1", [&s.id])?;
-                    self.history(&s.id, "move", &format!("to {}: {}", d.dir, newmod[i]))?;
-                    continue;
-                }
-                if moved[i] {
-                    let ord: i64 =
-                        self.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [&newmod[i]], |r| r.get(0))?;
-                    self.db.execute("UPDATE symbols SET module = ?2, ord = ?3 WHERE id = ?1", params![s.id, newmod[i], ord])?;
-                    self.history(&s.id, "move", &s.module)?;
-                }
-                if plan.newtext[i] != s.text {
-                    self.db.execute(
-                        "UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1",
-                        params![s.id, plan.newtext[i], revision(&plan.newtext[i])],
-                    )?;
-                    if !moved[i] {
-                        self.history(&s.id, "edit", &s.name)?;
-                    }
-                }
-            }
-            // headers: the imports each module now needs, minus those the move made unused
-            let mut headers: Vec<(String, String, &Store)> = ix.modules.iter().map(|m| (m.path.clone(), m.header.clone(), self)).collect();
-            headers.extend(created.iter().map(|(m, _)| (m.clone(), String::new(), tgt)));
-            if let Some(d) = &dest {
-                headers.extend(
-                    d.ix.modules.iter().filter(|m| m.path == to || m.path == test_to).map(|m| (m.path.clone(), m.header.clone(), tgt)),
-                );
-            }
-            let finals = write_headers(&plan, &headers)?;
-            // the dependents: their rewritten symbols and imports
-            for (dp, p) in deps.iter().zip(&dplans) {
-                for (i, s) in dp.ix.syms.iter().enumerate() {
-                    if p.newtext[i] != s.text {
-                        dp.store.db.execute(
-                            "UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1",
-                            params![s.id, p.newtext[i], revision(&p.newtext[i])],
-                        )?;
-                        dp.store.history(&s.id, "edit", &s.name)?;
-                    }
-                }
-                let modules: Vec<(String, String, &Store)> =
-                    dp.ix.modules.iter().map(|m| (m.path.clone(), m.header.clone(), &dp.store)).collect();
-                write_headers(p, &modules)?;
-            }
-            // a source module the move emptied goes, unless another module imports it
-            let mut retired = vec![];
-            for m in &old_modules {
-                let empty = !(0..n).any(|i| newmod[i] == *m);
-                let imported = finals.iter().any(|(o, h)| o != m && ix.lang.imports(h).iter().any(|i| i.module == *m));
-                if empty && !imported {
-                    self.db.execute("DELETE FROM modules WHERE path = ?1", [m])?;
-                    retired.push(m.clone());
-                }
-            }
-            // the JavaScript files the moved code takes along; one that fails puts back those before it
-            let mut carried = vec![];
-            for c in &carries {
-                match lockdown::carry_file(&self.root, &c.from, &tgt.root, &c.to, c.text.clone()) {
-                    Ok(end) => carried.push(end),
-                    Err(e) => {
-                        return Err(with_put_back(e, end_all(carried, false)));
-                    }
-                }
-            }
-            // the dependencies the source and the dependents gain; one that fails puts back those before it
-            let mut adds: Vec<(&Path, &str)> = vec![];
-            if let Some((_, line)) = &dep {
-                adds.push((self.root.as_path(), line.as_str()));
-            }
-            for (dp, line) in deps.iter().zip(&dep_lines) {
-                if let Some(line) = line {
-                    adds.push((dp.store.root.as_path(), line.as_str()));
-                }
-            }
-            let mut tomls = vec![];
-            for (root, line) in adds {
-                let changed = fs::read_to_string(root.join("gleam.toml"))
-                    .map_err(Failure::from)
-                    .and_then(|text| lockdown::change_file(root, "gleam.toml", &add_dependency(&text, line)));
-                match changed {
-                    Ok(end) => tomls.push(end),
-                    Err(e) => {
-                        let (a, b) = (end_all(tomls, false), end_all(carried, false));
-                        return Err(with_put_back(e, a.and(b)));
-                    }
-                }
-            }
-            let checked = (|| -> Result<Finished, Failure> {
-                let mut bad: Vec<String> = vec![];
-                // the destination's files first: Gleam reads a path dependency from disk
-                if let Some(d) = &dest {
-                    let diags = tgt.check_all(&tgt.index()?)?;
-                    bad.extend(
-                        diags
-                            .iter()
-                            .filter(|g| g.error && g.symbol.as_ref().is_none_or(|s| !dest_broken.contains_key(s)))
-                            .map(|g| format!("{}: {}", d.dir, g.text)),
-                    );
-                }
-                let ix2 = self.index()?;
-                let diags = self.check_all(&ix2)?;
-                bad.extend(
-                    diags.iter().filter(|g| g.error && g.symbol.as_ref().is_none_or(|s| !before.contains_key(s))).map(|g| g.text.clone()),
-                );
-                // the dependents last: they read both from disk
-                for (dp, broken) in deps.iter().zip(&deps_broken) {
-                    let diags = dp.store.check_all(&dp.store.index()?)?;
-                    bad.extend(
-                        diags
-                            .iter()
-                            .filter(|g| g.error && g.symbol.as_ref().is_none_or(|s| !broken.contains_key(s)))
-                            .map(|g| format!("{}: {}", dp.dir, g.text)),
-                    );
-                }
-                if !bad.is_empty() {
-                    return fail(format!("Not moved: the result does not type-check, so nothing changed.\n\n{}", bad.join("\n\n")));
-                }
-                let gone: Vec<String> = suites_before
-                    .iter()
-                    .filter(|(_, e)| self.resolve(&ix2, e).is_err())
-                    .map(|(s, e)| format!("suite {s} entry {e}"))
-                    .collect();
-                Ok(Finished { gone, retired })
-            })();
-            // every end runs, so a failing one never leaves the rest undecided
-            let (a, b) = (end_all(tomls, checked.is_ok()), end_all(carried, checked.is_ok()));
-            a?;
-            b?;
-            checked
-        };
-        // a transaction in each store, the destination's innermost: a failure
-        // anywhere rolls them all back
-        let mut stores: Vec<&Store> = vec![self];
-        stores.extend(deps.iter().map(|dp| &dp.store));
-        stores.extend(dest.as_ref().map(|d| &d.store));
-        let mut body = body;
-        let finished = nested(&stores, &created_files, &mut body)?;
-        let (gone, retired) = (finished.gone, finished.retired);
-
-        let reply = ExtractReply {
+        let move_plan = MovePlan {
             s: self,
             ix: &ix,
-            listed: &listed,
-            helpers: &helpers,
-            to: &to,
-            dest: &dest,
-            dep: &dep,
-            deps: &deps,
-            dep_lines: &dep_lines,
-            already: &already,
-            now_pub: &now_pub,
-            plan: &plan,
-            dplans: &dplans,
-            moved_tests: &moved_tests,
-            newmod: &newmod,
-            carries: &carries,
-            ffi: &ffi,
-            created: &created,
-            retired: &retired,
-            notes: &notes,
-            gone: &gone,
-            moved: &moved,
-            old_modules: &old_modules,
+            listed,
+            helpers,
+            to,
+            test_to,
+            mine: &mine,
+            dest,
+            dep,
+            deps,
+            dep_lines,
+            already,
+            now_pub,
+            plan,
+            dplans,
+            moved_tests,
+            newmod,
+            carries,
+            ffi,
+            created,
+            notes,
+            moved,
+            old_modules,
         };
-        extract_reply_text(&reply, budget)
+        let finished = {
+            let mut stores: Vec<&Store> = vec![self];
+            stores.extend(move_plan.deps.iter().map(|dp| &dp.store));
+            stores.extend(move_plan.dest.as_ref().map(|d| &d.store));
+            let run = MoveRun {
+                plan: &move_plan,
+                before: &before,
+                dest_broken: &dest_broken,
+                deps_broken: &deps_broken,
+                suites_before: &suites_before,
+            };
+            let mut body = || run_move(&run);
+            nested(&stores, &created_files, &mut body)?
+        };
+        extract_reply_text(&move_plan, &finished, budget)
     }
 }
 
@@ -2496,41 +1934,15 @@ struct Finished {
     retired: Vec<String>,
 }
 
-struct ExtractReply<'a> {
-    s: &'a Store,
-    ix: &'a Index,
-    listed: &'a [usize],
-    helpers: &'a [usize],
-    to: &'a str,
-    dest: &'a Option<Dest>,
-    dep: &'a Option<(String, String)>,
-    deps: &'a [Dependent],
-    dep_lines: &'a [Option<String>],
-    already: &'a [String],
-    now_pub: &'a [usize],
-    plan: &'a Plan<'a>,
-    dplans: &'a [Plan<'a>],
-    moved_tests: &'a [usize],
-    newmod: &'a [String],
-    carries: &'a [Carry],
-    ffi: &'a [String],
-    created: &'a [(String, &'a str)],
-    retired: &'a [String],
-    notes: &'a [String],
-    gone: &'a [String],
-    moved: &'a [bool],
-    old_modules: &'a BTreeSet<String>,
-}
-
-fn extract_reply_text(r: &ExtractReply<'_>, budget: usize) -> Result<String, Failure> {
-    let mut out = extract_summary(r);
+fn extract_reply_text(r: &MovePlan<'_>, done: &Finished, budget: usize) -> Result<String, Failure> {
+    let mut out = extract_summary(r, done);
     out += &extract_suites(r)?;
     out += &extract_javascript(r);
     out += &extract_outside(r);
     Ok(lockdown::trim_output(&out, budget))
 }
 
-fn extract_summary(r: &ExtractReply<'_>) -> String {
+fn extract_summary(r: &MovePlan<'_>, done: &Finished) -> String {
     let ix = r.ix;
     let q = |i: usize| ix.syms[i].qname();
     let mut out = format!("Moved {}", r.listed.iter().map(|&i| q(i)).collect::<Vec<_>>().join(", "));
@@ -2540,7 +1952,7 @@ fn extract_summary(r: &ExtractReply<'_>) -> String {
     }
     out += &format!(" to {}{}\n", r.to, r.dest.as_ref().map_or(String::new(), |d| format!(" in {}", d.dir)));
     let mut gained: Vec<String> = r.dep.iter().map(|_| workspace::name(&r.s.root)).collect();
-    gained.extend(r.deps.iter().zip(r.dep_lines).filter(|(_, l)| l.is_some()).map(|(dp, _)| workspace::name(&dp.store.root)));
+    gained.extend(r.deps.iter().zip(&r.dep_lines).filter(|(_, l)| l.is_some()).map(|(dp, _)| workspace::name(&dp.store.root)));
     if let Some(d) = r.dest.as_ref().filter(|_| !gained.is_empty()) {
         out += &format!("Dependency added: {} -> {}\n", gained.join(", "), workspace::name(&d.store.root));
     }
@@ -2559,7 +1971,7 @@ fn extract_summary(r: &ExtractReply<'_>) -> String {
             if r.plan.edited.len() == 1 { "" } else { "s" }
         );
     }
-    for (dp, p) in r.deps.iter().zip(r.dplans).filter(|(_, p)| p.edits > 0) {
+    for (dp, p) in r.deps.iter().zip(&r.dplans).filter(|(_, p)| p.edits > 0) {
         let plural = |k: usize| if k == 1 { "" } else { "s" };
         out += &format!(
             "Rewrote {} reference{} in {} module{} in {}\n",
@@ -2576,7 +1988,7 @@ fn extract_summary(r: &ExtractReply<'_>) -> String {
             r.moved_tests.iter().map(|&t| format!("{} -> {}", q(t), r.newmod[t])).collect::<Vec<_>>().join(", ")
         );
     }
-    for c in r.carries {
+    for c in &r.carries {
         let imports = if c.text.is_some() { " (its imports rewritten)" } else { "" };
         out += &format!("Moved file {} to {}: {}{imports}\n", c.from, r.dest.as_ref().map_or("", |d| d.dir.as_str()), c.to);
     }
@@ -2586,24 +1998,24 @@ fn extract_summary(r: &ExtractReply<'_>) -> String {
     for m in r.created.iter().map(|c| &c.0) {
         out += &format!("Created module {m}\n");
     }
-    if !r.retired.is_empty() {
-        out += &format!("Retired module {}\n", r.retired.join(", "));
+    if !done.retired.is_empty() {
+        out += &format!("Retired module {}\n", done.retired.join(", "));
     }
-    for note in r.notes {
+    for note in &r.notes {
         out += &format!("{note}\n");
     }
-    for g in r.gone.iter().filter(|g| !g.is_empty()) {
+    for g in done.gone.iter().filter(|g| !g.is_empty()) {
         out += &format!("Not rewritten: {g} no longer resolves\n");
     }
     out
 }
 
-fn extract_suites(r: &ExtractReply<'_>) -> Result<String, Failure> {
+fn extract_suites(r: &MovePlan<'_>) -> Result<String, Failure> {
     let ix = r.ix;
     let ids: HashSet<&str> = (0..ix.syms.len()).filter(|&i| r.moved[i]).map(|i| ix.syms[i].id.as_str()).collect();
     let at = |x: &Index| -> Vec<usize> { (0..x.syms.len()).filter(|&i| ids.contains(x.syms[i].id.as_str())).collect() };
     let mut suites = vec![];
-    match r.dest {
+    match &r.dest {
         None => {
             let x = r.s.index()?;
             suites.extend(reach::reached(&reach::suites(r.s, &x)?, &at(&x)));
@@ -2625,7 +2037,7 @@ fn extract_suites(r: &ExtractReply<'_>) -> Result<String, Failure> {
             if !there.is_empty() {
                 suites.extend(reach::reached(&reach::suites(r.s, &sx)?, &there));
             }
-            for (dp, p) in r.deps.iter().zip(r.dplans) {
+            for (dp, p) in r.deps.iter().zip(&r.dplans) {
                 let rewritten: HashSet<&str> =
                     dp.ix.syms.iter().enumerate().filter(|(i, s)| p.newtext[*i] != s.text).map(|(_, s)| s.id.as_str()).collect();
                 if rewritten.is_empty() {
@@ -2654,7 +2066,7 @@ fn extract_suites(r: &ExtractReply<'_>) -> Result<String, Failure> {
     }
 }
 
-fn extract_javascript(r: &ExtractReply<'_>) -> String {
+fn extract_javascript(r: &MovePlan<'_>) -> String {
     let ix = r.ix;
     let mut moved_names: HashSet<String> = HashSet::new();
     for i in (0..ix.syms.len()).filter(|&i| r.moved[i]) {
@@ -2688,7 +2100,7 @@ fn extract_javascript(r: &ExtractReply<'_>) -> String {
     format!("Not rewritten: JavaScript import{s} of moved code from its old module ({}): change {it} with `write`\n", js_hits.join(", "))
 }
 
-fn extract_outside(r: &ExtractReply<'_>) -> String {
+fn extract_outside(r: &MovePlan<'_>) -> String {
     let ix = r.ix;
     let mut needles: Vec<String> =
         (0..ix.syms.len()).filter(|&i| r.moved[i]).map(|i| format!("{}.{}", ix.syms[i].module, ix.syms[i].name)).collect();
@@ -2781,4 +2193,754 @@ fn resolve_listed(s: &Store, ix: &Index, names: &[String], dest: &Option<Dest>, 
         }
     }
     Ok((listed, already))
+}
+
+/// What an extract decided before its transaction: what moves, where to, the
+/// rewrites, and the files and modules it creates.
+struct MovePlan<'a> {
+    s: &'a Store,
+    ix: &'a Index,
+    listed: Vec<usize>,
+    helpers: Vec<usize>,
+    to: String,
+    test_to: String,
+    mine: &'a str,
+    dest: Option<Dest>,
+    dep: Option<(String, String)>,
+    deps: Vec<Dependent>,
+    dep_lines: Vec<Option<String>>,
+    already: Vec<String>,
+    now_pub: Vec<usize>,
+    plan: Plan<'a>,
+    dplans: Vec<Plan<'a>>,
+    moved_tests: Vec<usize>,
+    newmod: Vec<String>,
+    carries: Vec<Carry>,
+    ffi: Vec<String>,
+    created: Vec<(String, &'a str)>,
+    notes: Vec<String>,
+    moved: Vec<bool>,
+    old_modules: BTreeSet<String>,
+}
+
+fn destination(s: &Store, p: &Args, top: &Path, members: &[String]) -> Result<Option<Dest>, Failure> {
+    let Some(d) = &p.to_project else { return Ok(None) };
+    // `../x` and `./x` resolve against this project, as `--project` does (D-126 point 3).
+    let d = project_folder(top, Some(&s.root), d, members);
+    if !members.iter().any(|m| *m == d) {
+        return fail(format!("E6007 {d} is not a project under this Solace root; its projects: {}", members.join(", ")));
+    }
+    let dir = scope::path(top, &d);
+    if lockdown::same_project(&dir, &s.root) {
+        Ok(None)
+    } else if crate::language::is_rust(&dir) {
+        fail(format!("E6013 {d} is a Rust project: `--to-project` is not available for Rust (D-185)"))
+    } else if !dir.join("gleam.toml").exists() {
+        fail(format!("E6013 {d} has no code held as symbols to extract into"))
+    } else {
+        let store = Store::at(&dir)?;
+        let ix = store.index()?;
+        Ok(Some(Dest { dir: d.to_string(), store, ix }))
+    }
+}
+
+fn target_module(s: &Store, ix: &Index, p: &Args, dest: &Option<Dest>, mine: &str, members: &[String]) -> Result<String, Failure> {
+    let mut to = p.to.trim().trim_end_matches(".gleam").to_string();
+    for pre in ["src/", "test/"] {
+        if let Some(r) = to.strip_prefix(pre) {
+            to = r.to_string();
+            break;
+        }
+    }
+    let exists = |m: &str| ix.modules.iter().any(|r| r.path == m);
+    if let Some(d) = dest {
+        if !d.has(&to) && !d.store.lang().valid_module_path(&to) {
+            return fail(format!("{to} is not a module name; use --to <module>, e.g. --to solace_task"));
+        }
+    } else if !exists(&to) {
+        if let Some((prefix, module)) = to.rsplit_once('/')
+            && let Some(d) = members.iter().find(|d| d.as_str() != mine && (d.as_str() == prefix || d.ends_with(&format!("/{prefix}"))))
+        {
+            return fail(format!("use --to {module} --to-project {d}"));
+        }
+        if !s.lang().valid_module_path(&to) {
+            return fail(format!("{to} is not a module name; use --to <module>, e.g. --to solace_task"));
+        }
+    }
+    Ok(to)
+}
+
+fn module_notes(
+    s: &Store,
+    dest: &Option<Dest>,
+    ix: &Index,
+    to: &str,
+    top: &Path,
+    mine: &str,
+    members: &[String],
+) -> Result<Vec<String>, Failure> {
+    let mut notes = vec![];
+    if dest.is_some() || ix.modules.iter().any(|r| r.path == to) {
+        return Ok(notes);
+    }
+    for d in members.iter().filter(|d| d.as_str() != mine) {
+        let dir = scope::path(top, d);
+        if !["src", "test"].iter().any(|t| dir.join(t).join(format!("{to}.gleam")).exists()) {
+            continue;
+        }
+        if s.connected(&dir) {
+            return fail(format!("{to} is in {d}; add --to-project {d}"));
+        }
+        notes.push(format!("Created module {to}; a module of that name exists in the unrelated project {d}."));
+    }
+    Ok(notes)
+}
+
+struct SymbolMoves {
+    moved: Vec<bool>,
+    helpers: Vec<usize>,
+    moved_tests: Vec<usize>,
+    test_to: String,
+    newmod: Vec<String>,
+}
+
+/// The symbols, helpers and tests that move, and the module each symbol lands in.
+fn moves(ix: &Index, listed: &[usize], to: &str, target_is_test: bool) -> SymbolMoves {
+    let n = ix.syms.len();
+    let mut moved = vec![false; n];
+    for &i in listed {
+        moved[i] = true;
+    }
+    let mut helpers = vec![];
+    bring_helpers(ix, &mut moved, &mut helpers);
+    let mut moved_tests = vec![];
+    if !target_is_test {
+        for t in reach::test_symbols(ix) {
+            let c = reach::covered(ix, t);
+            if !moved[t] && !c.is_empty() && c.iter().all(|&u| moved[u]) {
+                moved_tests.push(t);
+            }
+        }
+        for &t in &moved_tests {
+            moved[t] = true;
+        }
+        let mut test_helpers = vec![];
+        bring_helpers(ix, &mut moved, &mut test_helpers);
+        helpers.extend(test_helpers);
+    }
+    let test_to = if target_is_test { to.to_string() } else { format!("{to}_test") };
+    let newmod = (0..n)
+        .map(|i| match (moved[i], is_test(ix, i)) {
+            (false, _) => ix.syms[i].module.clone(),
+            (true, true) => test_to.clone(),
+            (true, false) => to.to_string(),
+        })
+        .collect();
+    SymbolMoves { moved, helpers, moved_tests, test_to, newmod }
+}
+
+fn check_module_clashes(
+    ix: &Index,
+    dest: &Option<Dest>,
+    top: &Path,
+    mine: &str,
+    members: &[String],
+    to: &str,
+    test_to: &str,
+    moved: &[bool],
+    newmod: &[String],
+) -> Result<(), Failure> {
+    let Some(d) = dest else { return Ok(()) };
+    let linked = package_graph(top, members, &[mine, d.dir.as_str()]);
+    let has = |m: &str| d.has(m);
+    for m in [to, test_to] {
+        if !(0..ix.syms.len()).any(|i| moved[i] && newmod[i] == m) {
+            continue;
+        }
+        if has(m) {
+            // the destination's module is not new, but a module of that name the source keeps clashes with it
+            if (0..ix.syms.len()).any(|i| !moved[i] && ix.syms[i].module == m) {
+                return fail(format!(
+                    concat!(
+                        "E1004 module {} is in this project too and stays; ",
+                        "Gleam module names are unique across packages that depend on each other: pick another module name",
+                    ),
+                    m
+                ));
+            }
+            continue;
+        }
+        if ix.modules.iter().any(|r| r.path == m) {
+            return fail(format!(
+                concat!(
+                    "E1004 module {} is in this project too; ",
+                    "Gleam module names are unique across packages that depend on each other: pick another module name",
+                ),
+                m
+            ));
+        }
+        for other in linked.iter().filter(|o| o.as_str() != mine && o.as_str() != d.dir) {
+            let dir = scope::path(top, other);
+            if ["src", "test"].iter().any(|t| dir.join(t).join(format!("{m}.gleam")).exists()) {
+                return fail(format!(
+                    concat!(
+                        "E1004 module {} is in {}, a package connected to {} or {}; ",
+                        "Gleam module names are unique across them: pick another module name",
+                    ),
+                    m, other, mine, d.dir
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_symbol_clashes(ix: &Index, dest: &Option<Dest>, moved: &[bool], newmod: &[String]) -> Result<(), Failure> {
+    let n = ix.syms.len();
+    for i in (0..n).filter(|&i| moved[i]) {
+        let s = &ix.syms[i];
+        let clash = (0..n).find(|&j| {
+            j != i
+                && newmod[j] == newmod[i]
+                && ix.syms[j].name == s.name
+                && (ix.syms[j].kind == Kind::Type) == (s.kind == Kind::Type)
+                && (!moved[j] || ix.syms[j].module != s.module)
+        });
+        if let Some(j) = clash {
+            return fail(format!(
+                "E1004 {} already exists in {}; {} cannot move there; to fold {} into it, use merge {} {}",
+                ix.syms[j].qname(),
+                newmod[i],
+                s.qname(),
+                s.qname(),
+                ix.syms[j].qname(),
+                s.qname()
+            ));
+        }
+        if let Some(d) = dest
+            && let Some(t) =
+                d.ix.syms.iter().find(|t| t.module == newmod[i] && t.name == s.name && (t.kind == Kind::Type) == (s.kind == Kind::Type))
+        {
+            return fail(format!(
+                "E1004 {} already exists in {} ({}); {} cannot move there; to fold {} into it, use merge {} {} --to-project {}",
+                t.qname(),
+                newmod[i],
+                d.dir,
+                s.qname(),
+                s.qname(),
+                t.qname(),
+                s.qname(),
+                d.dir
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_opaque(ix: &Index, moved: &[bool]) -> Result<(), Failure> {
+    for x in 0..ix.syms.len() {
+        let s = &ix.syms[x];
+        if s.kind != Kind::Type || !s.text.lines().any(|l| l.starts_with("pub opaque type ")) {
+            continue;
+        }
+        let users: Vec<usize> = ix.used_by[x].iter().copied().filter(|&j| constructs(ix, j, x)).collect();
+        let apart: Vec<String> = users.iter().filter(|&&j| moved[j] != moved[x]).map(|&j| ix.syms[j].qname()).collect();
+        if !apart.is_empty() {
+            let verb = if moved[x] { "extract them too" } else { "extract it too" };
+            return fail(format!("E5006 {} is opaque; its constructors are used by {}; {verb}", s.name, apart.join(", ")));
+        }
+    }
+    Ok(())
+}
+
+fn check_cycles(
+    ix: &Index,
+    moved: &[bool],
+    newmod: &[String],
+    dest: &Option<Dest>,
+    source_root: &Path,
+    mine: &str,
+) -> Result<bool, Failure> {
+    let n = ix.syms.len();
+    let graph = |at: &dyn Fn(usize) -> String| {
+        let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for h in 0..n {
+            for &u in &ix.uses[h] {
+                if at(h) != at(u) {
+                    edges.entry(at(h)).or_default().insert(at(u));
+                }
+            }
+        }
+        edges
+    };
+    let moved_uses_staying = |why: &str| -> Result<bool, Failure> {
+        let mut stay: Vec<(usize, Vec<String>)> = vec![];
+        for m in (0..n).filter(|&m| moved[m]) {
+            for &u in ix.uses[m].iter().filter(|&&u| !moved[u]) {
+                match stay.iter_mut().find(|(s, _)| *s == u) {
+                    Some((_, by)) => by.push(ix.syms[m].name.clone()),
+                    None => stay.push((u, vec![ix.syms[m].name.clone()])),
+                }
+            }
+        }
+        let (mut seen, mut stack) = (HashSet::new(), stay.iter().map(|(u, _)| *u).collect::<Vec<_>>());
+        while let Some(u) = stack.pop() {
+            if seen.insert(u) {
+                stack.extend(ix.uses[u].iter().filter(|&&v| !moved[v]));
+            }
+        }
+        let list: Vec<String> = stay.iter().map(|(u, by)| format!("{} (by {})", ix.syms[*u].name, by.join(", "))).collect();
+        fail(format!(
+            "E5002 moved code uses {} symbol{} that stay{why}: {} (moving them would bring {} in total)",
+            stay.len(),
+            if stay.len() == 1 { "" } else { "s" },
+            list.join(", "),
+            seen.len()
+        ))
+    };
+    let staying_uses_moved = |why: &str| -> Result<bool, Failure> {
+        let mut back: Vec<String> = vec![];
+        for h in (0..n).filter(|&h| !moved[h]) {
+            for &u in ix.uses[h].iter().filter(|&&u| moved[u]) {
+                back.push(format!("{} (by {})", ix.syms[u].name, ix.syms[h].name));
+            }
+        }
+        fail(format!("E5002 staying code uses {} moved symbols and {why}: {}", back.len(), back.join(", ")))
+    };
+    let source_needs = (0..n).any(|h| !moved[h] && ix.uses[h].iter().any(|&u| moved[u]));
+    if let Some(d) = dest {
+        let dest_needs = (0..n).any(|m| moved[m] && ix.uses[m].iter().any(|&u| !moved[u]));
+        let reaches = depends_on(&d.store.root, source_root);
+        if source_needs && reaches {
+            return staying_uses_moved(&format!("{} already depends on {mine}, so this would close a package loop", d.dir));
+        }
+        if dest_needs && !reaches {
+            return moved_uses_staying(&format!(" in {mine}, and {} gains no dependency on it", d.dir));
+        }
+    } else if cyclic(&graph(&|i| newmod[i].clone())) && !cyclic(&graph(&|i| ix.syms[i].module.clone())) {
+        let any_stay = (0..n).any(|m| moved[m] && ix.uses[m].iter().any(|&u| !moved[u]));
+        return if any_stay { moved_uses_staying("") } else { staying_uses_moved("closes an import loop") };
+    }
+    Ok(source_needs)
+}
+
+fn scan_dependents(
+    s: &Store,
+    ix: &Index,
+    top: &Path,
+    mine: &str,
+    members: &[String],
+    dest: &Option<Dest>,
+    moved: &[bool],
+) -> Result<(HashMap<(String, String), usize>, Vec<Dependent>), Failure> {
+    let names = name_map(ix);
+    let outside: HashMap<&(String, String), usize> =
+        names.iter().filter(|&(_, &x)| moved[x] && is_pub_text(&ix.syms[x].text)).map(|(k, &x)| (k, x)).collect();
+    let mut users: Vec<String> = vec![];
+    let mut deps: Vec<Dependent> = vec![];
+    for d in members.iter().filter(|d| d.as_str() != mine) {
+        let dir = scope::path(top, d);
+        let Some(me) = s.root.canonicalize().ok() else { break };
+        if !path_deps(&dir).contains(&me) {
+            continue;
+        }
+        if let Some(dt) = dest
+            && d.as_str() != dt.dir
+            && covered(&dir)
+        {
+            let store = Store::at(&dir)?;
+            let ix = store.index()?;
+            deps.push(Dependent { dir: d.clone(), store, ix });
+            continue;
+        }
+        let other = board::open(&dir).map_err(|e| Failure(format!("{d}: {}", e.0), e.1))?;
+        let dix = other.index().map_err(|e| Failure(format!("{d}: {}", e.0), e.1))?;
+        for sym in &dix.syms {
+            let header = dix.modules.iter().find(|m| m.path == sym.module).map_or("", |m| m.header.as_str());
+            let imps = dix.lang.imports(header);
+            for r in dix.lang.references(&sym.text) {
+                let hit = match &r {
+                    Ref::Qualified(alias, member) => imps
+                        .iter()
+                        .find(|i| &i.alias == alias)
+                        .filter(|i| outside.contains_key(&(i.module.clone(), member.clone())))
+                        .map(|i| format!("{}.{member}", i.module)),
+                    Ref::Bare(b) => imps.iter().find_map(|i| {
+                        i.unqualified
+                            .iter()
+                            .find(|(o, l)| l == b && outside.contains_key(&(i.module.clone(), o.clone())))
+                            .map(|(o, _)| format!("{}.{o}", i.module))
+                    }),
+                };
+                if let Some(hit) = hit {
+                    let line = format!("{d}: {} uses {hit}", sym.qname());
+                    if !users.contains(&line) {
+                        users.push(line);
+                    }
+                }
+            }
+        }
+    }
+    if !users.is_empty() {
+        return fail(format!(
+            concat!(
+                "E5003 a project that depends on this one uses moved symbols, ",
+                "and extract rewrites another project only with --to-project when the task covers it: ",
+                "change those uses first, add the project to the task, or move less\n{}",
+            ),
+            users.join("\n")
+        ));
+    }
+    Ok((names, deps))
+}
+
+fn build_rewrite<'a>(
+    ix: &'a Index,
+    dest: &Option<Dest>,
+    to: &str,
+    test_to: &str,
+    moved: &[bool],
+    newmod: &[String],
+    names: &HashMap<(String, String), usize>,
+    carries: &[Carry],
+) -> Result<(Plan<'a>, Vec<usize>, Vec<String>), Failure> {
+    let n = ix.syms.len();
+    let mut headers: HashMap<String, String> = ix.modules.iter().map(|m| (m.path.clone(), m.header.clone())).collect();
+    let mut foreign = HashSet::new();
+    if let Some(d) = dest {
+        for m in d.ix.modules.iter().filter(|m| m.path == to || m.path == test_to) {
+            headers.insert(m.path.clone(), m.header.clone());
+        }
+        for sym in d.ix.syms.iter().filter(|s| s.module == to || s.module == test_to) {
+            foreign.insert((sym.module.clone(), sym.name.clone()));
+            if sym.kind == Kind::Type {
+                foreign.extend(d.ix.lang.constructors(&sym.text).into_iter().map(|c| (sym.module.clone(), c)));
+            }
+        }
+    }
+    let mut plan = Plan {
+        ix,
+        names: names.clone(),
+        headers,
+        foreign,
+        moved: moved.to_vec(),
+        newmod: newmod.to_vec(),
+        newtext: ix.syms.iter().map(|s| s.text.clone()).collect(),
+        needs: BTreeMap::new(),
+        upto: n,
+        edits: 0,
+        edited: BTreeSet::new(),
+        redirect: None,
+        hits: 0,
+        hit_in: BTreeSet::new(),
+    };
+    plan.rewrite()?;
+    let mut now_pub = vec![];
+    for x in 0..n {
+        if !is_pub_text(&plan.newtext[x]) && ix.used_by[x].iter().any(|&j| newmod[j] != newmod[x]) {
+            plan.newtext[x] = make_pub(&plan.newtext[x]);
+            now_pub.push(x);
+        }
+    }
+    // JavaScript FFI paths are relative to the compiled module: a move to
+    // another folder, or a carried file's new place, rewrites them
+    let mut ffi = vec![];
+    for h in (0..n).filter(|&h| moved[h]) {
+        let (was, now) = (module_dir(&ix.syms[h].module), module_dir(&newmod[h]));
+        let mut edits = vec![];
+        for (a, b, path) in ffi_spans(&plan.newtext[h]) {
+            let target = ffi_norm(&was, &path);
+            let goes = carries.iter().find(|c| c.old == target).map_or(target, |c| c.new.clone());
+            let new = ffi_rel(&now, &goes);
+            if new != path {
+                ffi.push(format!("{} {path} -> {new}", ix.syms[h].qname()));
+                edits.push((a, b, new));
+            }
+        }
+        if !edits.is_empty() {
+            plan.newtext[h] = spliced(&plan.newtext[h], edits);
+        }
+    }
+    Ok((plan, now_pub, ffi))
+}
+
+fn dependent_plan<'a>(dp: &Dependent, jx: &'a Index, moved: &[bool], newmod: &[String]) -> Result<Plan<'a>, Failure> {
+    let k = dp.ix.syms.len();
+    let mut plan = Plan {
+        ix: jx,
+        names: name_map(jx),
+        headers: dp.ix.modules.iter().map(|m| (m.path.clone(), m.header.clone())).collect(),
+        foreign: HashSet::new(),
+        moved: std::iter::repeat_n(false, k).chain(moved.iter().copied()).collect(),
+        newmod: dp.ix.syms.iter().map(|s| s.module.clone()).chain(newmod.iter().cloned()).collect(),
+        newtext: jx.syms.iter().map(|s| s.text.clone()).collect(),
+        needs: BTreeMap::new(),
+        upto: k,
+        edits: 0,
+        edited: BTreeSet::new(),
+        redirect: None,
+        hits: 0,
+        hit_in: BTreeSet::new(),
+    };
+    plan.rewrite()?;
+    Ok(plan)
+}
+
+/// A move's transaction: the plan, and what the stores held before it.
+struct MoveRun<'a> {
+    plan: &'a MovePlan<'a>,
+    before: &'a HashMap<String, String>,
+    dest_broken: &'a HashMap<String, String>,
+    deps_broken: &'a [HashMap<String, String>],
+    suites_before: &'a [(String, String)],
+}
+
+fn run_move(r: &MoveRun<'_>) -> Result<Finished, Failure> {
+    let plan = r.plan;
+    let tgt = plan.dest.as_ref().map_or(plan.s, |d| &d.store);
+
+    apply_symbols(r, tgt)?;
+    let finals = apply_headers(r, tgt)?;
+    let retired = retire_modules(r, &finals)?;
+    let carried = carry_ffi_files(plan, tgt)?;
+    let tomls = match add_dependencies(plan) {
+        Ok(tomls) => tomls,
+        Err(e) => return Err(with_put_back(e, end_all(carried, false))),
+    };
+    let checked = check_moved(r, retired);
+    // every end runs, so a failing one never leaves the rest undecided
+    let (a, b) = (end_all(tomls, checked.is_ok()), end_all(carried, checked.is_ok()));
+    a?;
+    b?;
+    checked
+}
+
+fn created_modules(
+    s: &Store,
+    dest: &Option<Dest>,
+    ix: &Index,
+    to: &str,
+    test_to: &str,
+    target_is_test: bool,
+    moved: &[bool],
+    newmod: &[String],
+    moved_tests: &[usize],
+) -> Result<Vec<(String, &'static str)>, Failure> {
+    let has = |m: &str| dest.as_ref().map_or_else(|| ix.modules.iter().any(|r| r.path == m), |d| d.has(m));
+    let mut created: Vec<(String, &'static str)> = vec![];
+    if !has(to) && (0..ix.syms.len()).any(|i| moved[i] && newmod[i] == to) {
+        created.push((to.to_string(), if target_is_test { "test" } else { "src" }));
+    }
+    if !moved_tests.is_empty() && !target_is_test && !has(test_to) && !created.iter().any(|c| c.0 == test_to) {
+        created.push((test_to.to_string(), "test"));
+    }
+    let tgt = dest.as_ref().map_or(s, |d| &d.store);
+    if created.iter().any(|(m, dir)| tgt.root.join(dir).join(format!("{m}.gleam")).exists()) {
+        return fail("E0101 the new module's file already exists outside the store; import or resolve it before creating this module");
+    }
+    Ok(created)
+}
+
+fn dependency_lines(
+    s: &Store,
+    dest: &Option<Dest>,
+    deps: &[Dependent],
+    dplans: &[Plan<'_>],
+    source_needs: bool,
+    mine: &str,
+    to: &str,
+    test_to: &str,
+) -> (Option<(String, String)>, Vec<Option<String>>) {
+    let dep = match dest {
+        Some(d) if source_needs && !path_deps(&s.root).iter().any(|p| d.store.root.canonicalize().ok().as_ref() == Some(p)) => {
+            let name = workspace::name(&d.store.root);
+            Some((name.clone(), format!("{name} = {{ path = \"{}\" }}", relative(mine, &d.dir))))
+        }
+        _ => None,
+    };
+    let dep_lines = deps
+        .iter()
+        .zip(dplans)
+        .map(|(dp, p)| {
+            let d = dest.as_ref()?;
+            let imports = p.needs.values().flatten().any(|nd| nd.module == to || nd.module == test_to);
+            let has = d.store.root.canonicalize().ok().is_some_and(|c| path_deps(&dp.store.root).contains(&c));
+            (imports && !has).then(|| format!("{} = {{ path = \"{}\" }}", workspace::name(&d.store.root), relative(&dp.dir, &d.dir)))
+        })
+        .collect();
+    (dep, dep_lines)
+}
+
+struct Baseline {
+    suites_before: Vec<(String, String)>,
+    before: HashMap<String, String>,
+    dest_broken: HashMap<String, String>,
+    deps_broken: Vec<HashMap<String, String>>,
+}
+
+fn baseline(s: &Store, ix: &Index, dest: &Option<Dest>, deps: &[Dependent]) -> Result<Baseline, Failure> {
+    let suites_before = reach::entries(s)?.into_iter().filter(|(_, e)| s.resolve(ix, e).is_ok()).collect();
+    let before = s.broken()?;
+    let dest_broken = match dest {
+        Some(d) => d.store.broken()?,
+        None => HashMap::new(),
+    };
+    let deps_broken = deps.iter().map(|dp| dp.store.broken()).collect::<Result<Vec<_>, _>>()?;
+    Ok(Baseline { suites_before, before, dest_broken, deps_broken })
+}
+
+fn apply_symbols(r: &MoveRun<'_>, tgt: &Store) -> Result<(), Failure> {
+    let (s, ix, dest, plan, moved, newmod, created, mine) =
+        (r.plan.s, r.plan.ix, &r.plan.dest, &r.plan.plan, &r.plan.moved, &r.plan.newmod, &r.plan.created, r.plan.mine);
+    for (path, dir) in created {
+        tgt.db.execute("INSERT INTO modules(path, dir, header) VALUES (?1, ?2, ?3)", params![path, dir, ""])?;
+    }
+    for i in 0..ix.syms.len() {
+        let sym = &ix.syms[i];
+        if moved[i]
+            && let Some(d) = dest
+        {
+            // the same identity in the destination; the source keeps the retired row and its history
+            let (kind, rev): (String, String) =
+                s.db.query_row("SELECT kind, revision FROM symbols WHERE id = ?1", [&sym.id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            let rev = if plan.newtext[i] != sym.text { revision(&plan.newtext[i]) } else { rev };
+            let ord: i64 =
+                tgt.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [&newmod[i]], |row| row.get(0))?;
+            tgt.db.execute(
+                "INSERT OR REPLACE INTO symbols(id,module,name,kind,text,ord,revision,live) VALUES (?1,?2,?3,?4,?5,?6,?7,1)",
+                params![sym.id, newmod[i], sym.name, kind, plan.newtext[i], ord, rev],
+            )?;
+            tgt.history(&sym.id, "move", &format!("{mine}: {}", sym.module))?;
+            s.db.execute("UPDATE symbols SET live = 0 WHERE id = ?1", [&sym.id])?;
+            s.history(&sym.id, "move", &format!("to {}: {}", d.dir, newmod[i]))?;
+            continue;
+        }
+        if moved[i] {
+            let ord: i64 =
+                s.db.query_row("SELECT COALESCE(MAX(ord), 0) + 1 FROM symbols WHERE module = ?1", [&newmod[i]], |row| row.get(0))?;
+            s.db.execute("UPDATE symbols SET module = ?2, ord = ?3 WHERE id = ?1", params![sym.id, newmod[i], ord])?;
+            s.history(&sym.id, "move", &sym.module)?;
+        }
+        if plan.newtext[i] != sym.text {
+            s.db.execute(
+                "UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1",
+                params![sym.id, plan.newtext[i], revision(&plan.newtext[i])],
+            )?;
+            if !moved[i] {
+                s.history(&sym.id, "edit", &sym.name)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn apply_headers(r: &MoveRun<'_>, tgt: &Store) -> Result<Vec<(String, String)>, Failure> {
+    let (s, ix, dest, plan, created) = (r.plan.s, r.plan.ix, &r.plan.dest, &r.plan.plan, &r.plan.created);
+    let (to, test_to, deps, dplans) = (r.plan.to.as_str(), r.plan.test_to.as_str(), &r.plan.deps, &r.plan.dplans);
+    let mut headers: Vec<(String, String, &Store)> = ix.modules.iter().map(|m| (m.path.clone(), m.header.clone(), s)).collect();
+    headers.extend(created.iter().map(|(m, _)| (m.clone(), String::new(), tgt)));
+    if let Some(d) = dest {
+        headers.extend(d.ix.modules.iter().filter(|m| m.path == to || m.path == test_to).map(|m| (m.path.clone(), m.header.clone(), tgt)));
+    }
+    let finals = write_headers(plan, &headers)?;
+    for (dp, p) in deps.iter().zip(dplans) {
+        for (i, sym) in dp.ix.syms.iter().enumerate() {
+            if p.newtext[i] != sym.text {
+                dp.store.db.execute(
+                    "UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1",
+                    params![sym.id, p.newtext[i], revision(&p.newtext[i])],
+                )?;
+                dp.store.history(&sym.id, "edit", &sym.name)?;
+            }
+        }
+        let modules: Vec<(String, String, &Store)> = dp.ix.modules.iter().map(|m| (m.path.clone(), m.header.clone(), &dp.store)).collect();
+        write_headers(p, &modules)?;
+    }
+    Ok(finals)
+}
+
+fn retire_modules(r: &MoveRun<'_>, finals: &[(String, String)]) -> Result<Vec<String>, Failure> {
+    let (s, ix, newmod, old_modules) = (r.plan.s, r.plan.ix, &r.plan.newmod, &r.plan.old_modules);
+    let mut retired = vec![];
+    for m in old_modules {
+        let empty = !(0..ix.syms.len()).any(|i| newmod[i] == *m);
+        let imported = finals.iter().any(|(o, h)| o != m && ix.lang.imports(h).iter().any(|i| i.module == *m));
+        if empty && !imported {
+            s.db.execute("DELETE FROM modules WHERE path = ?1", [m])?;
+            retired.push(m.clone());
+        }
+    }
+    Ok(retired)
+}
+
+/// The JavaScript files the moved code takes along; one that fails puts back those before it.
+fn carry_ffi_files(plan: &MovePlan<'_>, tgt: &Store) -> Result<Vec<impl FnOnce(bool) -> Result<(), Failure>>, Failure> {
+    let mut carried = vec![];
+    for c in &plan.carries {
+        match lockdown::carry_file(&plan.s.root, &c.from, &tgt.root, &c.to, c.text.clone()) {
+            Ok(end) => carried.push(end),
+            Err(e) => return Err(with_put_back(e, end_all(carried, false))),
+        }
+    }
+    Ok(carried)
+}
+
+/// The gleam.toml dependency lines the source and the dependents gain; one that fails puts back those before it.
+fn add_dependencies(plan: &MovePlan<'_>) -> Result<Vec<impl FnOnce(bool) -> Result<(), Failure>>, Failure> {
+    let mut adds: Vec<(&Path, &str)> = vec![];
+    if let Some((_, line)) = &plan.dep {
+        adds.push((plan.s.root.as_path(), line.as_str()));
+    }
+    for (dp, line) in plan.deps.iter().zip(&plan.dep_lines) {
+        if let Some(line) = line {
+            adds.push((dp.store.root.as_path(), line.as_str()));
+        }
+    }
+    let mut tomls = vec![];
+    for (root, line) in adds {
+        let changed = fs::read_to_string(root.join("gleam.toml"))
+            .map_err(Failure::from)
+            .and_then(|text| lockdown::change_file(root, "gleam.toml", &add_dependency(&text, line)));
+        match changed {
+            Ok(end) => tomls.push(end),
+            Err(e) => return Err(with_put_back(e, end_all(tomls, false))),
+        }
+    }
+    Ok(tomls)
+}
+
+/// The three stores' type checks, then the suites that stopped resolving.
+fn check_moved(r: &MoveRun<'_>, retired: Vec<String>) -> Result<Finished, Failure> {
+    let plan = r.plan;
+    let s = plan.s;
+    let mut bad: Vec<String> = vec![];
+    // the destination's files first: Gleam reads a path dependency from disk
+    if let Some(d) = &plan.dest {
+        let diags = d.store.check_all(&d.store.index()?)?;
+        bad.extend(
+            diags
+                .iter()
+                .filter(|g| g.error && g.symbol.as_ref().is_none_or(|sym| !r.dest_broken.contains_key(sym)))
+                .map(|g| format!("{}: {}", d.dir, g.text)),
+        );
+    }
+    let ix2 = s.index()?;
+    let diags = s.check_all(&ix2)?;
+    bad.extend(diags.iter().filter(|g| g.error && g.symbol.as_ref().is_none_or(|sym| !r.before.contains_key(sym))).map(|g| g.text.clone()));
+    // the dependents last: they read both from disk
+    for (dp, broken) in plan.deps.iter().zip(r.deps_broken) {
+        let diags = dp.store.check_all(&dp.store.index()?)?;
+        bad.extend(
+            diags
+                .iter()
+                .filter(|g| g.error && g.symbol.as_ref().is_none_or(|sym| !broken.contains_key(sym)))
+                .map(|g| format!("{}: {}", dp.dir, g.text)),
+        );
+    }
+    if !bad.is_empty() {
+        return fail(format!("Not moved: the result does not type-check, so nothing changed.\n\n{}", bad.join("\n\n")));
+    }
+    let gone: Vec<String> =
+        r.suites_before.iter().filter(|(_, e)| s.resolve(&ix2, e).is_err()).map(|(suite, e)| format!("suite {suite} entry {e}")).collect();
+    Ok(Finished { gone, retired })
 }

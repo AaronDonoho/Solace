@@ -379,6 +379,7 @@ test('the projects section sends only the requests its buttons make', async () =
     return Response.json(opts?.method === 'GET' && path === '/projects' ? projects : {});
   };
   let model;
+  const html = () => to_string(board.view(model));
   const noop = () => {};
   const run = effect => perform(effect, dispatch, noop, noop, noop, noop, noop, noop);
   const dispatch = msg => { let effect; [model, effect] = board.update(model, msg); run(effect); };
@@ -394,34 +395,45 @@ test('the projects section sends only the requests its buttons make', async () =
     await settle();
     expect(sent[1]).toEqual(['POST', '/projects', { dir: 'c/d' }]);
     expect(sent.length).toBe(2);
-    // The new-project form posts what it holds.
+    // The new-project form shows both languages and posts what it holds.
+    const form = html();
+    expect(form).toContain('<option value="gleam">Gleam</option>');
+    expect(form).toContain('<option value="rust">Rust</option>');
+    expect(form).toContain('Runs on');
     dispatch(new board.ProjectName('new'));
     dispatch(new board.ProjectDir('newdir'));
     dispatch(new board.ProjectTarget('javascript'));
     dispatch(new board.CreateProject());
     await settle();
-    expect(sent[2]).toEqual(['POST', '/projects/new', { name: 'new', dir: 'newdir', target: 'javascript' }]);
+    expect(sent[2]).toEqual(['POST', '/projects/new', { name: 'new', dir: 'newdir', language: 'gleam', target: 'javascript' }]);
+    // A Rust package has no target choice.
+    dispatch(new board.ProjectLanguage('rust'));
+    await settle();
+    expect(html()).not.toContain('Runs on');
+    dispatch(new board.CreateProject());
+    await settle();
+    expect(sent[3]).toEqual(['POST', '/projects/new', { name: 'new', dir: 'newdir', language: 'rust' }]);
     // Remove asks first whether to keep the files; deleting them needs the project's name.
     dispatch(new board.RemoveProject('a/b'));
     dispatch(new board.RemoveOnly());
     await settle();
-    expect(sent[3]).toEqual(['DELETE', '/projects/a%2Fb', {}]);
+    expect(sent[4]).toEqual(['DELETE', '/projects/a%2Fb', {}]);
     dispatch(new board.RemoveProject('a/b'));
     dispatch(new board.RemoveFiles());
     dispatch(new board.RemoveTyped('wrong'));
     dispatch(new board.RemoveDelete());
     await settle();
-    expect(sent.length).toBe(4);
+    expect(sent.length).toBe(5);
     dispatch(new board.RemoveTyped('a/b'));
     dispatch(new board.RemoveDelete());
     await settle();
-    expect(sent[4]).toEqual(['DELETE', '/projects/a%2Fb', { delete: true, name: 'a/b' }]);
+    expect(sent[5]).toEqual(['DELETE', '/projects/a%2Fb', { delete: true, name: 'a/b' }]);
     // Cancel closes the dialog, so RemoveOnly then sends nothing.
     dispatch(new board.RemoveProject('a/b'));
     dispatch(new board.RemoveCancel());
     dispatch(new board.RemoveOnly());
     await settle();
-    expect(sent.length).toBe(5);
+    expect(sent.length).toBe(6);
   } finally {
     for (const [key, descriptor] of Object.entries(saved)) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor); else delete globalThis[key];

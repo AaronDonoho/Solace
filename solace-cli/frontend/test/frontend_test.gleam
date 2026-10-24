@@ -22,8 +22,9 @@ pub fn routes_test() {
     #("/contracts", Contracts("")),
     #("/p/web/contracts", Contracts("/p/web")),
     #("/contracts?task=t1", Contracts("")),
-    #("/strategy", frontend.Strategy),
-    #("/strategy?tab=tasks", frontend.Strategy),
+    #("/strategy", frontend.Strategy("vision")),
+    #("/strategy?tab=tasks", frontend.Strategy("tasks")),
+    #("/strategy?tab=nope", frontend.Strategy("vision")),
     #("/settings", frontend.Settings),
     #("/knowledgebase", frontend.Knowledgebase),
     #("/guide", frontend.Knowledgebase),
@@ -50,7 +51,10 @@ pub fn page_elements_test() {
       "<solace-contracts base=\"/p/web\"></solace-contracts>",
     ),
     #(#(Board, False), "<solace-board hidden></solace-board>"),
-    #(#(frontend.Strategy, True), "<solace-strategy></solace-strategy>"),
+    #(
+      #(frontend.Strategy("vision"), True),
+      "<solace-strategy tab=\"vision\"></solace-strategy>",
+    ),
     #(#(frontend.Settings, True), "<solace-settings></solace-settings>"),
     #(#(frontend.Settings, False), "<solace-settings hidden></solace-settings>"),
     #(
@@ -68,7 +72,9 @@ pub fn page_elements_test() {
 pub fn menu_current_test() {
   let board =
     element.to_string(
-      frontend.view(frontend.Model(Board, [Board], frontend.no_focus, [], [])),
+      frontend.view(
+        frontend.Model(Board, [Board], frontend.no_focus, [], [], 0, []),
+      ),
     )
   let workspace =
     element.to_string(
@@ -78,6 +84,8 @@ pub fn menu_current_test() {
           [frontend.Workspace],
           frontend.no_focus,
           [],
+          [],
+          0,
           [],
         ),
       ),
@@ -90,6 +98,8 @@ pub fn menu_current_test() {
           [Contracts("/p/web")],
           frontend.no_focus,
           [],
+          [],
+          0,
           [],
         ),
       ),
@@ -115,10 +125,12 @@ pub fn menu_current_test() {
     element.to_string(
       frontend.view(
         frontend.Model(
-          frontend.Strategy,
-          [frontend.Strategy],
+          frontend.Strategy("vision"),
+          [frontend.Strategy("vision")],
           frontend.no_focus,
           [],
+          [],
+          0,
           [],
         ),
       ),
@@ -126,6 +138,24 @@ pub fn menu_current_test() {
   assert string.contains(
     strategy_page,
     "<a aria-current=\"page\" class=\"current\" href=\"/strategy\">Strategy</a>",
+  )
+  let strategy_elsewhere =
+    element.to_string(
+      frontend.view(
+        frontend.Model(
+          frontend.Board,
+          [frontend.Board, frontend.Strategy("tasks")],
+          frontend.no_focus,
+          [],
+          [],
+          0,
+          [],
+        ),
+      ),
+    )
+  assert string.contains(
+    strategy_elsewhere,
+    "<a href=\"/strategy?tab=tasks\">Strategy</a>",
   )
   let settings_page =
     element.to_string(
@@ -135,6 +165,8 @@ pub fn menu_current_test() {
           [frontend.Settings],
           frontend.no_focus,
           [],
+          [],
+          0,
           [],
         ),
       ),
@@ -165,9 +197,11 @@ pub fn starts_on_the_board_outside_a_browser_test() {
   assert model
     == frontend.Model(
       Board,
-      [Board, frontend.Strategy],
+      [Board, frontend.Strategy("vision")],
       frontend.no_focus,
       [],
+      [],
+      0,
       [],
     )
 }
@@ -181,8 +215,10 @@ pub fn a_route_change_shows_the_new_page_test() {
         frontend.no_focus,
         [],
         [],
+        0,
+        [],
       ),
-      RouteChanged(Contracts("/p/web")),
+      RouteChanged(Contracts("/p/web"), "{}"),
     )
   assert model
     == frontend.Model(
@@ -190,6 +226,8 @@ pub fn a_route_change_shows_the_new_page_test() {
       [frontend.Workspace, Contracts("/p/web")],
       frontend.no_focus,
       [],
+      [],
+      1,
       [],
     )
 }
@@ -380,16 +418,18 @@ pub fn copy_markdown_quote_and_numbers_test() {
 pub fn a_page_left_stays_hidden_test() {
   let #(model, _) =
     frontend.update(
-      frontend.Model(Board, [Board], frontend.no_focus, [], []),
-      RouteChanged(frontend.Workspace),
+      frontend.Model(Board, [Board], frontend.no_focus, [], [], 0, []),
+      RouteChanged(frontend.Workspace, "{}"),
     )
-  let #(model, _) = frontend.update(model, RouteChanged(Board))
+  let #(model, _) = frontend.update(model, RouteChanged(Board, "{}"))
   assert model
     == frontend.Model(
       Board,
       [Board, frontend.Workspace],
       frontend.no_focus,
       [],
+      [],
+      2,
       [],
     )
   let html = element.to_string(frontend.view(model))
@@ -408,6 +448,8 @@ pub fn a_page_not_opened_is_not_drawn_test() {
           [frontend.Workspace],
           frontend.no_focus,
           [],
+          [],
+          0,
           [],
         ),
       ),
@@ -473,37 +515,69 @@ pub fn a_task_link_opens_where_its_task_is_test() {
 pub fn a_found_task_is_focused_on_its_page_test() {
   let model =
     frontend.Model(
-      frontend.Strategy,
-      [frontend.Strategy],
+      frontend.Strategy("vision"),
+      [frontend.Strategy("vision")],
       frontend.no_focus,
       [],
+      [],
+      0,
       [],
     )
   let #(clicked, _) = frontend.update(model, frontend.Follow("task", "t1"))
   assert clicked == model
   let on_board = "{\"id\":\"t1\",\"dir\":\".\",\"archived\":false}"
   let #(model, _) =
-    frontend.update(model, frontend.Found("task", "t1", on_board, False))
+    frontend.update(
+      model,
+      frontend.Found(
+        "task",
+        "t1",
+        on_board,
+        False,
+        frontend.Strategy("vision"),
+        0,
+      ),
+    )
   assert model.focus == frontend.Focus("solace-board", "task", ".", "t1", 1)
   let archived = "{\"id\":\"t1\",\"dir\":\"a\",\"archived\":true}"
   let #(model, _) =
-    frontend.update(model, frontend.Found("task", "t1", archived, False))
+    frontend.update(
+      model,
+      frontend.Found("task", "t1", archived, False, frontend.Board, 1),
+    )
   assert model.focus == frontend.Focus("solace-strategy", "task", "a", "t1", 2)
   let #(same, _) =
     frontend.update(
       model,
-      frontend.Found("task", "t9", "{\"code\":\"E7023\"}", False),
+      frontend.Found(
+        "task",
+        "t9",
+        "{\"code\":\"E7023\"}",
+        False,
+        frontend.Board,
+        2,
+      ),
     )
   assert same == model
   let #(same, _) =
     frontend.update(
       model,
-      frontend.Found("task", "t9", "{\"message\":\"down\"}", False),
+      frontend.Found(
+        "task",
+        "t9",
+        "{\"message\":\"down\"}",
+        False,
+        frontend.Board,
+        2,
+      ),
     )
   assert same == model
   // A task link's own address, reached again, shows nothing new until the task is found.
   let #(back, _) =
-    frontend.update(model, RouteChanged(frontend.RecordLink("task", "t1")))
+    frontend.update(
+      model,
+      RouteChanged(frontend.RecordLink("task", "t1"), "{}"),
+    )
   assert back == model
 }
 
@@ -529,7 +603,15 @@ pub fn copy_markdown_of_task_links_test() {
 /// A hidden page's `attention` flashes its tab until it is shown; the page shown never flags its own.
 pub fn a_hidden_page_flags_its_tab_until_shown_test() {
   let model =
-    frontend.Model(Board, [Board, frontend.Strategy], frontend.no_focus, [], [])
+    frontend.Model(
+      Board,
+      [Board, frontend.Strategy("vision")],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      [],
+    )
   let #(same, _) = frontend.update(model, frontend.Attention("solace-board"))
   assert same == model
   let #(flagged, _) =
@@ -544,7 +626,8 @@ pub fn a_hidden_page_flags_its_tab_until_shown_test() {
     "<a class=\"attention\" href=\"/strategy\">Strategy<span class=\"attention-note\"> (needs attention)</span></a>",
   )
   assert string.contains(html, "<a href=\"/workspace\">Workspace</a>")
-  let #(shown, _) = frontend.update(flagged, RouteChanged(frontend.Strategy))
+  let #(shown, _) =
+    frontend.update(flagged, RouteChanged(frontend.Strategy("vision"), "{}"))
   assert shown.attention == []
   let html = element.to_string(frontend.view(shown))
   assert string.contains(
@@ -574,13 +657,34 @@ pub fn a_feature_or_milestone_link_opens_on_strategy_test() {
   assert frontend.failed_text("milestone")
     == "Couldn't look up the milestone. Try again."
   let model =
-    frontend.Model(frontend.Board, [frontend.Board], frontend.no_focus, [], [])
+    frontend.Model(
+      frontend.Board,
+      [frontend.Board],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      [],
+    )
   let #(model, _) =
-    frontend.update(model, frontend.Found("feature", "f1", found, False))
+    frontend.update(
+      model,
+      frontend.Found("feature", "f1", found, False, frontend.Board, 0),
+    )
   assert model.focus
     == frontend.Focus("solace-strategy", "feature", "", "f1", 1)
   let #(model, _) =
-    frontend.update(model, frontend.Found("milestone", "m1", found, True))
+    frontend.update(
+      model,
+      frontend.Found(
+        "milestone",
+        "m1",
+        found,
+        True,
+        frontend.Strategy("features"),
+        1,
+      ),
+    )
   assert model.focus
     == frontend.Focus("solace-strategy", "milestone", "", "m1", 2)
 }
@@ -635,6 +739,8 @@ pub fn the_knowledgebase_shows_the_guide_test() {
           [frontend.Knowledgebase],
           frontend.no_focus,
           [],
+          [],
+          0,
           [],
         ),
       ),
@@ -730,4 +836,224 @@ pub fn the_guide_follows_the_workflow_test() {
   let #(still, _) =
     frontend.update(loaded, frontend.WorkflowLoaded("{\"message\":\"down\"}"))
   assert still.columns == loaded.columns
+}
+
+/// D-189: a tab change moves the route, and a history move restores the tab and focus.
+pub fn a_strategy_tab_and_focus_follow_history_test() {
+  let model =
+    frontend.Model(
+      frontend.Strategy("vision"),
+      [frontend.Strategy("vision")],
+      frontend.Focus("solace-strategy", "feature", "", "f0", 1),
+      [],
+      [],
+      0,
+      [],
+    )
+  let #(model, _) = frontend.update(model, frontend.TabChanged("features"))
+  assert model.route == frontend.Strategy("features")
+  assert model.opened == [frontend.Strategy("features")]
+  assert model.focus
+    == frontend.Focus("solace-strategy", "feature", "", "f0", 1)
+  let state =
+    "{\"focus\":{\"page\":\"solace-strategy\",\"kind\":\"feature\",\"dir\":\"\",\"id\":\"f1\",\"n\":3}}"
+  let #(model, _) =
+    frontend.update(
+      model,
+      frontend.RouteChanged(frontend.Strategy("features"), state),
+    )
+  assert model.route == frontend.Strategy("features")
+  assert model.focus
+    == frontend.Focus("solace-strategy", "feature", "", "f1", 3)
+  let #(model, _) =
+    frontend.update(
+      model,
+      frontend.RouteChanged(frontend.Strategy("tasks"), "{}"),
+    )
+  assert model.route == frontend.Strategy("tasks")
+  assert model.focus == frontend.no_focus
+}
+
+/// A record link that stays on the page still gives the page a new focus.
+pub fn a_same_page_link_changes_the_focus_test() {
+  let model =
+    frontend.Model(
+      frontend.Board,
+      [frontend.Board],
+      frontend.Focus("solace-board", "task", ".", "a", 0),
+      [],
+      [],
+      0,
+      [],
+    )
+  let found = "{\"id\":\"b\",\"dir\":\".\",\"archived\":false}"
+  let #(model, _) =
+    frontend.update(
+      model,
+      frontend.Found("task", "b", found, False, frontend.Board, 0),
+    )
+  assert model.route == frontend.Board
+  assert model.focus == frontend.Focus("solace-board", "task", ".", "b", 1)
+}
+
+/// A lookup answered after the human moved to another page changes nothing.
+pub fn a_late_lookup_reply_is_ignored_test() {
+  let model =
+    frontend.Model(
+      frontend.Strategy("vision"),
+      [frontend.Strategy("vision")],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      [],
+    )
+  let #(model, _) = frontend.update(model, frontend.Follow("task", "t1"))
+  let #(away, _) =
+    frontend.update(model, frontend.RouteChanged(frontend.Board, "{}"))
+  let on_board = "{\"id\":\"t1\",\"dir\":\".\",\"archived\":false}"
+  let #(late, _) =
+    frontend.update(
+      away,
+      frontend.Found(
+        "task",
+        "t1",
+        on_board,
+        False,
+        frontend.Strategy("vision"),
+        0,
+      ),
+    )
+  assert late == away
+}
+
+/// A record link reached by history that no longer resolves is replaced by the board.
+pub fn a_failed_history_lookup_shows_the_board_test() {
+  let model =
+    frontend.Model(
+      frontend.Strategy("vision"),
+      [frontend.Strategy("vision")],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      [],
+    )
+  let #(model, _) =
+    frontend.update(
+      model,
+      frontend.Found(
+        "task",
+        "t9",
+        "{\"message\":\"down\"}",
+        True,
+        frontend.Strategy("vision"),
+        0,
+      ),
+    )
+  assert model.route == frontend.Board
+}
+
+/// A record link's click adds a history entry; a load or history move replaces it.
+pub fn a_click_pushes_and_a_load_replaces_test() {
+  assert frontend.history_move(False) == "push"
+  assert frontend.history_move(True) == "replace"
+}
+
+/// Vision has one address, whether reached from the menu, a tab change, or a route.
+pub fn a_vision_tab_has_one_address_test() {
+  assert frontend.strategy_path("vision") == "/strategy"
+  assert frontend.strategy_path("features") == "/strategy?tab=features"
+}
+
+/// A lookup asked for on Strategy still opens after a tab switch: the page has not moved on.
+pub fn a_lookup_survives_a_tab_change_test() {
+  let model =
+    frontend.Model(
+      frontend.Strategy("vision"),
+      [frontend.Strategy("vision")],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      [],
+    )
+  let #(model, _) = frontend.update(model, frontend.Follow("feature", "f1"))
+  let #(moved, _) =
+    frontend.update(
+      model,
+      frontend.RouteChanged(frontend.Strategy("features"), "{}"),
+    )
+  let found = "{\"id\":\"f1\",\"title\":\"Search\"}"
+  let #(model, _) =
+    frontend.update(
+      moved,
+      frontend.Found(
+        "feature",
+        "f1",
+        found,
+        False,
+        frontend.Strategy("vision"),
+        0,
+      ),
+    )
+  assert model.route == frontend.Strategy("features")
+  assert model.focus
+    == frontend.Focus("solace-strategy", "feature", "", "f1", 1)
+}
+
+/// A menu click's history entry holds no focus, so it clears the page's.
+pub fn a_menu_route_change_clears_the_page_focus_test() {
+  let model =
+    frontend.Model(
+      frontend.Strategy("vision"),
+      [frontend.Strategy("vision")],
+      frontend.Focus("solace-strategy", "feature", "", "f1", 2),
+      [],
+      [],
+      0,
+      [],
+    )
+  let #(model, _) =
+    frontend.update(
+      model,
+      frontend.RouteChanged(frontend.Strategy("vision"), "{}"),
+    )
+  assert model.focus == frontend.no_focus
+}
+
+/// A lookup asked on Strategy is ignored if the human left the page and came back before it answered.
+pub fn a_lookup_after_leaving_and_returning_is_ignored_test() {
+  let model =
+    frontend.Model(
+      frontend.Strategy("vision"),
+      [frontend.Strategy("vision")],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      [],
+    )
+  let #(model, _) = frontend.update(model, frontend.Follow("task", "t1"))
+  let #(away, _) =
+    frontend.update(model, frontend.RouteChanged(frontend.Board, "{}"))
+  let #(back, _) =
+    frontend.update(
+      away,
+      frontend.RouteChanged(frontend.Strategy("vision"), "{}"),
+    )
+  let on_board = "{\"id\":\"t1\",\"dir\":\".\",\"archived\":false}"
+  let #(late, _) =
+    frontend.update(
+      back,
+      frontend.Found(
+        "task",
+        "t1",
+        on_board,
+        False,
+        frontend.Strategy("vision"),
+        0,
+      ),
+    )
+  assert late == back
 }

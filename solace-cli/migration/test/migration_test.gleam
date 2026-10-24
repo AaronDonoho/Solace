@@ -255,12 +255,19 @@ pub fn removing_a_project_test() {
 pub fn typed_fields_update_the_projects_test() {
   let #(model, _) = migration.init(Nil)
   assert model.projects.target == "erlang"
+  assert model.projects.language == "gleam"
   let #(model, _) = migration.update(model, migration.ProjectName("web"))
   let #(model, _) = migration.update(model, migration.ProjectDir("apps/web"))
   let #(model, _) =
     migration.update(model, migration.ProjectTarget("javascript"))
-  assert #(model.projects.name, model.projects.dir, model.projects.target)
-    == #("web", "apps/web", "javascript")
+  let #(model, _) = migration.update(model, migration.ProjectLanguage("rust"))
+  assert #(
+      model.projects.name,
+      model.projects.dir,
+      model.projects.target,
+      model.projects.language,
+    )
+    == #("web", "apps/web", "javascript", "rust")
 }
 
 pub fn removing_needs_the_second_step_and_the_exact_name_test() {

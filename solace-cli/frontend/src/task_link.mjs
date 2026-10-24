@@ -3,6 +3,8 @@
 // `milestone:<id>` the same way), inside the page's shadow root, where modem's router doesn't see it; a plain
 // click on one is followed here, in-page. A click with a modifier key held keeps the browser's own behaviour:
 // the server serves the shell at the link's address, which resolves it on load.
+import { watch_shadow_hosts } from './shadow_watch.mjs';
+
 const RECORD_LINK = /^\/(task|feature|milestone)\/([0-9a-f]{16})$/;
 
 export function follow_links(follow) {
@@ -40,7 +42,9 @@ const title = (kind, id) => {
     .then(response => (response.ok ? response.json() : null))
     .then(record => (typeof record?.title === 'string' && record.title.trim() ? record.title : null))
     .catch(() => { titles.delete(key); return null; });
-  titles.set(key, { at: Date.now(), title: asked });
+  const entry = { at: Date.now(), title: asked };
+  titles.set(key, entry);
+  setTimeout(() => { if (titles.get(key) === entry) titles.delete(key); }, TITLE_MS);
   return asked;
 };
 
@@ -60,7 +64,7 @@ function fill(root) {
 
 export function watch_titles() {
   if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return;
-  const watched = new WeakSet(), pending = new Set();
+  const pending = new Set();
   let frame = 0;
   const later = root => {
     pending.add(root);
@@ -70,22 +74,18 @@ export function watch_titles() {
       pending.clear();
     });
   };
+  const { watch, unwatch } = watch_shadow_hosts({
+    observe: { childList: true, subtree: true, characterData: true },
+    changed: (_, shadow) => later(shadow),
+    host: (_, shadow) => later(shadow),
+  });
   const observer = new MutationObserver(records => {
     for (const r of records) {
       for (const n of r.addedNodes) if (n.nodeType === 1) watch(n);
+      for (const n of r.removedNodes) if (n.nodeType === 1 && !n.isConnected) unwatch(n);
       later(r.target.getRootNode());
     }
   });
-  const watch = node => {
-    for (const el of node.querySelectorAll ? [node, ...node.querySelectorAll('*')] : []) {
-      const shadow = el.shadowRoot;
-      if (!shadow || watched.has(shadow)) continue;
-      watched.add(shadow);
-      observer.observe(shadow, { childList: true, subtree: true, characterData: true });
-      watch(shadow);
-      later(shadow);
-    }
-  };
   observer.observe(document.body, { childList: true, subtree: true });
   watch(document.body);
 }

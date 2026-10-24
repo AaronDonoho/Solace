@@ -21,7 +21,8 @@ pub fn load(dir: &Path) -> Option<Value> {
 /// Writes `path` whole or not at all.
 fn save(dir: &Path, state: &Value) -> Result<(), Failure> {
     fs::create_dir_all(dir.join(".solace"))?;
-    // The record names the original's files: keep it out of git (a project's own `.solace/.gitignore` does already).
+    // The copy may sit outside any root, so keep its record out of git here;
+    // adopting removes this generated file.
     if !dir.join(".solace/.gitignore").exists() {
         fs::write(dir.join(".solace/.gitignore"), "*\n")?;
     }
@@ -289,17 +290,10 @@ fn relative(from: &Path, to: &Path) -> PathBuf {
     if out.as_os_str().is_empty() { PathBuf::from(".") } else { out }
 }
 
-/// Whether bubblewrap can run commands here.
+/// Whether bubblewrap can run commands here, remembered for the rest of this `serve`.
 fn bwrap() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *OK.get_or_init(|| {
-        Command::new("bwrap")
-            .args(["--dev-bind", "/", "/", "true"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    })
+    *OK.get_or_init(sandbox_works)
 }
 /// `argv` run in `dir`, seeing `protect` read-only when bubblewrap is available.
 pub fn sandboxed(argv: &[String], dir: &Path, protect: Option<&Path>) -> Command {
@@ -1343,8 +1337,8 @@ pub fn adopt(copy: &Path, step: &dyn Fn(&str)) -> Result<PathBuf, Failure> {
     }
     state["adopted"] = json!(true);
     save(&original, &state)?;
-    // The copy's store is canonical, but the root it replaced may hold an older
-    // `.solace/.gitignore`; upgrade it now that the store is in its place (D-179).
+    // The store is canonical now, but the folder may still hold a generated
+    // `.solace/.gitignore`; share_store writes the root's block and removes it (D-179).
     crate::outside::share_store(&original)?;
     fs::remove_file(journal(parent))?;
     Ok(original)
@@ -1825,4 +1819,14 @@ fn a_declared_command_drops_the_agents_task_context() {
         }
     }
     assert_eq!(removed, TASK_ENV.len());
+}
+
+/// Whether bubblewrap can run commands here, checked now instead of from the cache.
+pub(crate) fn sandbox_works() -> bool {
+    Command::new("bwrap")
+        .args(["--dev-bind", "/", "/", "true"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }

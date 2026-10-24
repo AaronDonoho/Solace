@@ -25,11 +25,19 @@ choice, the note editor and the task's actions. It is `solace_task.gleam`, with 
   family's live exact model, else its alias. A configured model whose id names a family (`claude-opus-local`)
   belongs to it; one whose id names none keeps its own entry. A remembered pick the list no longer shows
   (`remembered`), such as `claude-opus`, becomes its family's entry, and the list is fetched again with the task.
-  Under it, `unavailable_view` ("2 more models unavailable") opens the others' reasons; a usage limit
-  (`limit` in the list) has Try again, `POST /models/try-again {agent}`,
+  Under it, `unavailable_view` ("2 more models unavailable") opens the others' reasons; a mark
+  (`limit` in the list: a usage limit or an expired sign-in) has Try again, `POST /models/try-again {agent}`,
   whose reply is the list as it is now. With none that can start, `no_agents_view` shows how to install and sign
-  in to an agent, unless every model is held by a usage limit: then it says so, and the reset and Try again
-  below each clear one. Strategy's plan panel uses both; `model_styles` is their look.
+  in to an agent, unless every model is held: then it says so, and the reasons and Try again below each clear one.
+  Strategy's plan panel uses both; `model_styles` is their look. When the model offers efforts, the
+  effort choice is a segmented control of native radios with an inline "Effort" label: one rectangular
+  segment per effort in the agent's order, with short labels (Low, Med, High, X-Hi, Max) and the full
+  name in `title`. It is one shared control, `solace_task.effort_pick`, with rem-wide segments that do
+  not wrap, every segment shading on hover and the chosen one in the menu's ink-and-paper contrast.
+  Until an effort is chosen, the model's
+  default shows as chosen. It sends `""` for the model's default effort, so the task keeps following it
+  (D-149), and the effort name otherwise. `effort_pick_styles` is its look, built from the shared
+  small-control declarations.
 - `hosted`: the host already follows `/events` and hands the task's messages down in the `live`
   property, so the element opens no stream of its own. Without it, the element follows `{base}/events`.
 - `reveal` property, `{tab, id, n}`: show `tab` for task `id` and scroll it into view (a notice's button).
