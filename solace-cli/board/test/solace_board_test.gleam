@@ -1499,7 +1499,7 @@ pub fn the_bar_holds_the_heading_test() {
   none.copy |> should.equal(model.copy)
 }
 
-/// On a window wider than 1.4 times its height an open task's band sits at
+/// On a window at least 1.1 times as wide as it is tall an open task's band sits at
 /// the right edge: its width is dragged across and stepped with Left and
 /// Right, never below 32rem, and the board keeps room for its smallest
 /// columns before the band covers it. Collapsed, it is a strip holding

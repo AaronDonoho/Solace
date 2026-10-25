@@ -1724,3 +1724,64 @@ fn a_patch_adds_a_method_to_a_generic_type() {
     assert!(text.contains("impl<'a, T: Clone> X<'a, T> {"), "{text}");
     assert!(!text.contains("impl<'a, T: Clone = i32>"), "{text}");
 }
+
+/// A dead-code warning the submit leaves on another symbol is named under
+/// its own heading.
+#[test]
+fn a_submit_names_a_dead_code_warning_it_leaves_elsewhere() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = r#"const TOOLS: i32 = 1;
+
+pub fn uses_tools() -> i32 {
+    TOOLS
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tools() {
+        assert_eq!(super::TOOLS, 1);
+    }
+}
+"#;
+    let (_root, store) = rust_project(lib);
+    store.check_report(false).unwrap();
+    let out = store.submit_symbols(Some("crate.uses_tools"), None, "pub fn uses_tools() -> i32 {\n    2\n}\n").unwrap();
+    assert!(out.contains("New warnings elsewhere:"), "{out}");
+    assert!(out.contains("crate.TOOLS: warning:"), "{out}");
+}
+
+/// A warning that was there before the submit stays quiet.
+#[test]
+fn a_submit_does_not_repeat_a_warning_from_before() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "const OLD: i32 = 1;\n\npub fn value() -> i32 {\n    1\n}\n";
+    let (_root, store) = rust_project(lib);
+    store.check_report(false).unwrap();
+    let out = store.submit_symbols(Some("crate.value"), None, "pub fn value() -> i32 {\n    2\n}\n").unwrap();
+    assert!(!out.contains("New warnings elsewhere"), "{out}");
+    assert!(!out.contains("crate.OLD"), "{out}");
+}
+
+/// A whole-module Rust submit names a warning it leaves in another module.
+#[test]
+fn a_whole_module_submit_names_a_warning_it_leaves_elsewhere() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "mod other;\n\npub fn value() -> i32 {\n    other::helper()\n}\n";
+    let other = "pub fn helper() -> i32 {\n    1\n}\n";
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", lib), ("src/other.rs", other)]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    store.check_report(false).unwrap();
+    let ix = store.index().unwrap();
+    let text = super::module_text(&ix, ix.modules.iter().find(|m| m.path == "crate").unwrap()).replace("other::helper()", "2");
+    let out = store.submit(crate::Target::Module("crate"), &text).unwrap();
+    assert!(out.contains("New warnings elsewhere:"), "{out}");
+    assert!(out.contains("other.helper: warning:"), "{out}");
+}

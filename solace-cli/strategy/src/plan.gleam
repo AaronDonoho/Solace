@@ -189,9 +189,12 @@ pub fn start_body(
   )
 }
 
-/// The open run on `context`, if there is one: the server allows one.
+/// The open run on `context`, if there is one: the server allows one. A run
+/// saved on a task is a page run (D-202).
 pub fn open_on(runs: List(Run), context: Context) -> Option(Run) {
-  list.find(runs, fn(r) { r.state != "ended" && r.context == context })
+  list.find(runs, fn(r) {
+    r.state != "ended" && on_page(r.context) == on_page(context)
+  })
   |> option.from_result
 }
 
@@ -202,10 +205,11 @@ pub fn open_ids(runs: List(Run), kind: String) -> List(String) {
   |> list.map(fn(r) { r.context.id })
 }
 
-/// The runs on `context`, newest first.
+/// The runs on `context`, newest first. A run saved on a task is a page run
+/// (D-202).
 pub fn past(runs: List(Run), context: Context) -> List(Run) {
   runs
-  |> list.filter(fn(r) { r.context == context })
+  |> list.filter(fn(r) { on_page(r.context) == on_page(context) })
   |> list.sort(fn(a, b) {
     int.compare(b.started, a.started)
     |> order.lazy_break_tie(fn() { string.compare(b.id, a.id) })
@@ -244,7 +248,7 @@ pub fn state_text(run: Run, models: List(solace_task.Agent)) -> String {
 pub type Panel(msg) {
   Panel(
     runs: List(Run),
-    /// What Start plans: what is selected, else the page.
+    /// What Start plans: the whole page (D-202).
     context: Context,
     shown: Option(Run),
     entries: List(solace_task.Entry),
@@ -867,4 +871,13 @@ pub fn clear_draft() -> Nil {
 /// Saves the page's message as it is typed.
 pub fn save_draft(text: String) -> Nil {
   form_draft.save(text_id, draft_owner, text)
+}
+
+/// `context` with a task read as the page, whose runs a saved task run joins
+/// (D-202).
+fn on_page(context: Context) -> Context {
+  case context.kind {
+    "task" -> page
+    _ -> context
+  }
 }

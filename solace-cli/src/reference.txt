@@ -32,6 +32,16 @@ call is a turn that re-reads the conversation, so work in few calls:
     *** Add: pilot/checkout_test.fee_test
     +pub fn fee_test() { ... }
     *** End Patch
+   A whole call has the commands in `command` and the patch in `text`:
+    command: submit --project <folder>
+             test --project <folder>
+    text:    *** Begin Patch
+             *** Update: checkout.pay
+             @@
+             ...
+             *** End Patch
+   A patch for symbols in another project needs `--project <folder>` on both
+   `submit` and `test`.
    A new module is `*** Add: <module>`: its module comment, imports and code.
    Every line of an Add, empty ones too, starts with `+`. Imports are added
    automatically. Work out expected values from the task's numbers and the
@@ -516,8 +526,11 @@ command not listed here is refused.
                                 `Next:` line ends in --from n, its next part
   strategy show run <task> <run> [<steps>|all] [--from <n>]
                                 a task's run log: one line per step; with
-                                steps (3,7,10..12) or all, those steps in full,
-                                stopping at a whole step as notes do
+                                steps (3,7,10..12) or all, those steps in full
+                                and only a one-line run header, stopping at a
+                                whole step as notes do
+  strategy show run <task> <run> --failed
+                                failed tool steps only, each with its error
   strategy note                 reply to the human, the reply in `text`; waits
                                 for their next message. Text outside it shows
                                 only in the run's live transcript on the page

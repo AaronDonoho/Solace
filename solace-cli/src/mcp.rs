@@ -22,7 +22,7 @@ pub(crate) fn tool_schema() -> Value {
                 "`strategy list [--archived]` and `strategy show <task|feature|milestone> <id>...` ",
                 "(one id, or several in one reply) (a task's notes in full: ",
                 "`strategy show note <task> <notes>`; a task's run log: ",
-                "`strategy show run <task> <run> [<steps>|all]`); propose a change with ",
+                "`strategy show run <task> <run> [<steps>|all]`, or `--failed` alone); propose a change with ",
                 "`strategy task|feature|milestone [<id>]` or `strategy vision`, alone in its call; ",
                 "reply with `strategy note`. Several reads go in one call, one per line, and run in order."
             ),
@@ -76,7 +76,9 @@ pub(crate) fn tool_schema() -> Value {
                     "type": "string",
                     "description": concat!(
                         "For submit: a patch (`*** Begin Patch` / `*** Update: <symbol or module>` / ",
-                        "`@@` hunks) or new code; for `write` with no path: a patch of files ",
+                        "`@@` hunks) or new code in `text`; `command` holds only the command lines ",
+                        "(`submit --project <folder>` then `test --project <folder>` for another ",
+                        "project); for `write` with no path: a patch of files ",
                         "(`*** Update File: <path>`, `*** Add File: <path>`, `*** Delete File: <path>`); ",
                         "the task for `session start --task`; the record, note, summary or question for ",
                         "`work add` and `task note|done|ask`"
@@ -112,9 +114,14 @@ fn tool_call(msg: &Value, budget: usize, single_reads: &mut usize, run_reads: &m
     if let Some(run) = run_reads.as_mut() {
         run.start_call();
     }
-    // A patch belongs in `text`; `command` holds only the verb.
+    // A patch belongs in `text`; `command` holds only the commands.
     if patch_in_command(&commands) {
-        out = "the patch goes in `text`; `command` is just `submit`; nothing in this call ran.\n".to_string();
+        out = concat!(
+            "the patch goes in `text`; `command` holds only the command lines ",
+            "(`submit [--project <folder>]` then `test [--project <folder>]`); ",
+            "nothing in this call ran.\n"
+        )
+        .to_string();
         is_error = true;
     }
     // Code sent as command lines rather than in `text` (run 11): one error for the
@@ -252,7 +259,12 @@ mod tests {
         let (mut reads, mut run) = (0, None);
         let out = tool_call(&msg, 10_000, &mut reads, &mut run);
         assert_eq!(out["isError"], json!(true));
-        assert_eq!(out["content"][0]["text"], json!("the patch goes in `text`; `command` is just `submit`; nothing in this call ran.\n"));
+        let expected = concat!(
+            "the patch goes in `text`; `command` holds only the command lines ",
+            "(`submit [--project <folder>]` then `test [--project <folder>]`); ",
+            "nothing in this call ran.\n"
+        );
+        assert_eq!(out["content"][0]["text"], json!(expected));
     }
 
     #[test]

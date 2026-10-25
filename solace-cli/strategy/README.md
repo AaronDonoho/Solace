@@ -219,8 +219,8 @@ collapses it to one line: the shown run's state and model, or whether a run is o
 - **Proposals** show with `solace_task.proposal_view` (components project): what is created or changed — an
   edit shows only the fields that change, as `old → new` with the body as a line diff, and says "No change"
   when none do (D-115, D-116) — the feature or milestone Approve sets back to `upcoming`, and
-  **Approve**/**Reject**, which send `POST .../questions/{qid} {option}`; answered, the answer the server
-  recorded.
+  **Approve**/**Reject**, plus **Approve to Planning** for a new task with no feature (D-201), which send
+  `POST .../questions/{qid} {option}`; answered, the answer the server recorded.
 - One request at a time; a refusal shows in the panel's alert.
 - **Past runs.** "Runs on this" lists the runs on the context, newest first; each reopens.
 - **Markers.** A task row, a feature card and a milestone heading with an open run show a pulsing "Planning" badge.

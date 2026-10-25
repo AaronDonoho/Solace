@@ -169,12 +169,17 @@ fn tech_debt_items_are_the_sections_bullets() {
     assert_eq!(tech_debt_items("## Tech Debt:\n- one\n"), vec!["one"]);
     assert!(tech_debt_items("### Tech debt\n\n### Next\n- x\n").is_empty());
     assert!(tech_debt_items("**Assessment: Looks good**\n- x\n").is_empty());
+    // D-199: the example in the brief reads as one item in the exact shape.
+    assert_eq!(
+        tech_debt_items(TECH_DEBT_ASK),
+        vec!["`board.brief`: <what is wrong>. Change it to <what> because <why>.\n  Check: <test or command and its expected result>."]
+    );
 }
 
 /// D-112: completing a task in a feature files its last review's tech debt
 /// on the feature's open Tech Debt task: made once, appended to after, and
-/// made anew once that one is complete. No feature, a cancel, or a review
-/// with no section files nothing.
+/// made anew once that one is complete. A cancel or a review with no section
+/// files nothing.
 #[test]
 fn completing_a_task_files_its_reviews_tech_debt() {
     let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
@@ -229,8 +234,7 @@ fn completing_a_task_files_its_reviews_tech_debt() {
     let [debt] = debts().try_into().unwrap();
     assert_eq!(debt["id"], did.as_str());
     assert!(texts(&debt)[2].contains(&format!("task:{b}")));
-    // No feature, a cancel, or no section: nothing is filed.
-    act(&reviewed("C", false, two), "complete");
+    // A cancel or no section files nothing.
     act(&reviewed("D", true, two), "cancel");
     act(&reviewed("E", true, "**Assessment: Looks good**\n- fine\n"), "complete");
     let [debt] = debts().try_into().unwrap();
@@ -238,7 +242,7 @@ fn completing_a_task_files_its_reviews_tech_debt() {
     // A completed Tech Debt task is not reopened: the next finding makes a new one.
     act(&did, "complete");
     act(&reviewed("F", true, two), "complete");
-    let open: Vec<Value> = debts().into_iter().filter(|d| d["id"] != did.as_str()).collect();
+    let open: Vec<Value> = debts().into_iter().filter(|d| d["id"] != did.as_str() && d["feature"] == fid.as_str()).collect();
     assert_eq!(open.len(), 1);
     assert_eq!((open[0]["column"].as_str(), texts(&open[0]).len()), (Some("planning"), 2));
     assert_eq!(task(&s.root, &did).unwrap()["column"], "complete");
@@ -433,6 +437,7 @@ fn strategy_runs_read_the_graph() {
     assert!(brief.contains("- D-1 First thing") && !brief.contains("- Notes") && brief.contains("- human: Plan F"), "{brief}");
     // D-181: cite code by its printed symbol name.
     assert!(brief.contains("lockdown.dispatch") && !brief.contains("board.rs::within"), "{brief}");
+    assert!(brief.contains("`--in <path>`") && brief.contains("`--context n`") && brief.contains("`--failed`"), "{brief}");
     // The root is a project itself, so the decisions can be read in full.
     assert!(brief.contains("`grep D-<n>`") && !brief.contains("folder of projects"), "{brief}");
     // D-27: the root project's own skills are listed in the brief.
@@ -892,7 +897,7 @@ const DONE_IS_FINAL: &str = concat!(
 );
 
 /// D-132 point 5: in a workflow with no `planning` column, a new Tech Debt task
-/// is made in its first column.
+/// is made in its first column, whether or not the completed task has a feature.
 #[test]
 fn tech_debt_goes_to_the_first_column_without_planning() {
     let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n"), ("solace.toml", DONE_IS_FINAL)]);
@@ -905,6 +910,11 @@ fn tech_debt_goes_to_the_first_column_without_planning() {
     note(&mut t, "agent", Some("rv"), "### Tech debt\n- `app.main`: name the constant\n");
     let (debt, n) = tech_debt(&top, &t).unwrap().unwrap();
     assert_eq!((debt["column"].as_str(), n), (Some("todo"), 1));
+    let mut loose = api(&s.root, "POST", "/tasks", json!({"title":"Loose"})).unwrap();
+    loose["runs"].as_array_mut().unwrap().push(json!({"id":"rv2","kind":"review","state":"ended","outcome":"reviewed"}));
+    note(&mut loose, "agent", Some("rv2"), "### Tech debt\n- `app.other`: split it\n");
+    let (own, n) = tech_debt(&top, &loose).unwrap().unwrap();
+    assert_eq!((own["column"].as_str(), n), (Some("todo"), 1));
 }
 
 /// A `done` from a live run, applied by the server, settles: the move and the settle both happen.
@@ -1123,6 +1133,31 @@ fn strategy_show_run_outlines_and_picks_steps() {
             },
         }),
         json!({"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"All done.\nSecond line."}}),
+        json!({
+            "type": "item.completed",
+            "item": {
+                "id": "i3",
+                "type": "mcp_tool_call",
+                "tool": "solace",
+                "arguments": {"command": "inspect a\nsubmit b"},
+                "result": {"content": [{"type": "text", "text": concat!(
+                    "==== solace inspect a ====\nfn a() {}\n==== solace submit b ====\n",
+                    "E0108 unknown symbol `b`\n1 of 2 commands failed: submit b"
+                )}]},
+                "status": "failed",
+            },
+        }),
+        json!({
+            "type": "item.completed",
+            "item": {
+                "id": "i4",
+                "type": "mcp_tool_call",
+                "tool": "solace",
+                "arguments": {"command": "view b"},
+                "result": {"content": [{"type": "text", "text": "MCP error: transport closed"}]},
+                "status": "failed",
+            },
+        }),
         json!({"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":4,"output_tokens":2}}),
     ];
     fs::write(&log, lines.iter().map(|v| v.to_string()).collect::<Vec<_>>().join("\n")).unwrap();
@@ -1139,7 +1174,10 @@ fn strategy_show_run_outlines_and_picks_steps() {
             {"id": "q2", "text": "Open", "options": ["A"]},
         ],
         "conversation": [{"author": "human", "text": "the thread"}],
-        "runs": [{"id": "r1", "kind": "work", "state": "ended", "model": "fake", "log": log.to_str().unwrap()}],
+        "runs": [{
+            "id": "r1", "kind": "work", "state": "ended", "outcome": "finished", "model": "fake",
+            "reads": {"symbols": ["a"]}, "log": log.to_str().unwrap()
+        }],
     });
     let root = root.with(&[(".solace/board/t1.json", &task.to_string())]);
     adopt_tasks(&root, &root).unwrap();
@@ -1166,23 +1204,35 @@ fn strategy_show_run_outlines_and_picks_steps() {
     }
     let outline = strategy_run_show(&root, "t1", "r1", None).unwrap();
     assert_eq!(outline["run"]["id"], "r1");
+    assert_eq!(outline["run"]["reads"], json!({"symbols":["a"]}));
     assert!(outline["run"].get("log").is_none());
     assert_eq!(outline["steps"][0], "1 tool: solace view a (ok)");
     assert_eq!(outline["steps"][1], "2 message: All done.");
+    assert_eq!(outline["steps"][2], "3 tool: solace (1 of 2 failed) inspect a (failed)");
+    assert_eq!(outline["steps"][3], "4 tool: solace view b (failed)");
     // The token-usage entry is not a step.
-    assert_eq!(outline["steps"].as_array().unwrap().len(), 2);
+    assert_eq!(outline["steps"].as_array().unwrap().len(), 4);
     let picked = strategy_run_show(&root, "t1", "r1", Some("2,1")).unwrap();
+    assert_eq!(picked["run"], "r1 work fake finished");
     let numbers: Vec<_> = picked["steps"].as_array().unwrap().iter().map(|s| s["step"].clone()).collect();
     assert_eq!(numbers, [json!(2), json!(1)]);
     assert_eq!(picked["steps"][1]["output"], "pub fn a()");
     assert_eq!(picked["steps"][0]["text"], "All done.\nSecond line.");
-    assert_eq!(strategy_run_show(&root, "t1", "r1", Some("all")).unwrap()["steps"].as_array().unwrap().len(), 2);
+    let every = strategy_run_show(&root, "t1", "r1", Some("all")).unwrap();
+    assert_eq!(every["run"], "r1 work fake finished");
+    assert_eq!(every["steps"].as_array().unwrap().len(), 4);
+    let failed = strategy::strategy_run_failed(&root, "t1", "r1").unwrap();
+    assert_eq!(failed["run"], "r1 work fake finished");
+    assert_eq!(failed["steps"], json!(["3 submit b: E0108 unknown symbol `b`", "4 view b: MCP error: transport closed"]));
     // D-105: through the command, a reply of steps stops at a whole step and names the rest.
     let one = format!("{}\n", serde_json::to_string_pretty(&strategy_run_show(&root, "t1", "r1", Some("1")).unwrap()).unwrap());
     let next = "Next: strategy show run t1 r1 2\n";
     let run = |a: &[&str], budget: usize| strategy_command(&root, "s1", a, &mut || Ok(String::new()), budget);
     assert_eq!(run(&["strategy", "show", "run", "t1", "r1", "1,2"], one.len() + next.len()).unwrap(), one.clone() + next);
     assert!(!run(&["strategy", "show", "run", "t1", "r1", "1,2"], 10_000).unwrap().contains("Next:"));
+    let failed_reply = format!("{}\n", serde_json::to_string_pretty(&failed).unwrap());
+    assert_eq!(run(&["strategy", "show", "run", "t1", "r1", "--failed"], 10_000).unwrap(), failed_reply);
+    assert!(run(&["strategy", "show", "run", "t1", "r1", "--failed", "--from", "2"], 10_000).unwrap_err().0.starts_with("E7001"));
     assert!(run(&["strategy", "show", "run", "t1", "r1", "1", "--from", "x"], 10_000).unwrap_err().0.starts_with("E7001"));
     assert!(run(&["strategy", "show", "note", "t1", "2", "--from", "3"], 10_000).unwrap().contains("characters 3.."));
     // An id copied in its link form names the same record.
@@ -1195,14 +1245,18 @@ fn strategy_show_run_outlines_and_picks_steps() {
         run(&["strategy", "show", "run", "task:t1", "r1"], 10_000).unwrap(),
         run(&["strategy", "show", "run", "t1", "r1"], 10_000).unwrap()
     );
-    for bad in ["0", "3", "2..1", "x", "1,,2"] {
+    for bad in ["0", "5", "2..1", "x", "1,,2"] {
         assert!(strategy_run_show(&root, "t1", "r1", Some(bad)).unwrap_err().0.starts_with("E7001"), "{bad}");
     }
     // A run whose log holds no steps says so.
-    let task = json!({"id":"t2","column":"backlog","runs":[{"id":"r2","kind":"work","state":"ended","log":"missing.jsonl"}]});
+    let task =
+        json!({"id":"t2","column":"backlog","runs":[{"id":"r2","kind":"work","state":"running","model":"fake","log":"missing.jsonl"}]});
     fs::write(store_dir(&root).join("t2.json"), task.to_string()).unwrap();
     assert_eq!(strategy_run_show(&root, "t2", "r2", None).unwrap()["steps"], json!([]));
     assert!(strategy_run_show(&root, "t2", "r2", Some("1")).unwrap_err().0.contains("no steps"));
+    let no_failed = strategy::strategy_run_failed(&root, "t2", "r2").unwrap();
+    assert_eq!(no_failed["run"], "r2 work fake running");
+    assert_eq!(no_failed["steps"], json!([]));
     assert!(strategy_run_show(&root, "t1", "nope", None).unwrap_err().0.starts_with("E7023"));
     assert!(strategy_run_show(&root, "nope", "r1", None).unwrap_err().0.starts_with("E7023"));
 }
@@ -2120,6 +2174,26 @@ fn briefs_hold_what_the_agent_needs_as_text() {
             && !r.contains("task done")
     );
     assert!(!b.contains("Projects:"), "one project needs no Projects section");
+    assert!(review.contains(FINDINGS_ASK), "a review is asked for detailed findings");
+    for rule in [
+        "the heading is exactly `### Tech debt`",
+        "each item is one `- ` bullet at the start of a line",
+        "its details are lines indented under it",
+        "no line after the heading starts with `#`",
+        "no other heading is inside the section, and nothing follows it except a new heading",
+    ] {
+        assert!(review.contains(rule), "review: missing {rule}");
+    }
+    assert!(review.contains(TECH_DEBT_ASK), "a review is asked for tech debt");
+    for kind in ["work", "investigate", "discuss"] {
+        let prompt = brief(&t, kind);
+        assert!(!prompt.contains(FINDINGS_ASK), "{kind}: unexpected findings detail");
+        assert!(!prompt.contains(TECH_DEBT_ASK), "{kind}: unexpected tech debt ask");
+    }
+    // D-198: a review of a task with a feature is asked the same.
+    let mut featured = t.clone();
+    featured["feature"] = json!("f1");
+    assert!(brief(&featured, "review").contains(TECH_DEBT_ASK), "a featured review is asked for tech debt");
     // A task across projects (D-61) says where the agent works and how it reaches the rest.
     let mut wide = t.clone();
     wide["scope"] = json!(["a", "web"]);
@@ -3928,29 +4002,21 @@ fn a_failed_deferred_settle_is_flagged_and_resettle_clears_it() {
     let s = open(&p.root).unwrap();
     let has_before =
         || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
-    let failures = |t: &Value| {
-        t["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|n| n["text"].as_str().is_some_and(|s| s.starts_with(crate::tasks::SETTLE_FAILED_NOTE)))
-            .count()
-    };
     fs::write(s.root.join("solace.toml"), "not = [").unwrap();
     tasks::settle_later(&s.root, tid.clone());
     let t = task(&s.root, &tid).unwrap();
     assert_eq!(t["settleFailed"], true);
     assert_eq!(t["attention"]["reason"], crate::tasks::SETTLE_FAILED_REASON);
-    assert_eq!(failures(&t), 1);
+    assert_eq!(settle_failures(&t), 1);
     assert!(has_before());
     tasks::settle_later(&s.root, tid.clone());
-    assert_eq!(failures(&task(&s.root, &tid).unwrap()), 1, "a repeated failure adds no note");
+    assert_eq!(settle_failures(&task(&s.root, &tid).unwrap()), 1, "a repeated failure adds no note");
     fs::remove_file(s.root.join("solace.toml")).unwrap();
     resettle(&s.root);
     let t = task(&s.root, &tid).unwrap();
     assert!(t["settleFailed"].is_null());
     assert!(t["attention"].is_null());
-    assert_eq!(failures(&t), 0);
+    assert_eq!(settle_failures(&t), 0);
     assert!(!has_before());
     let approved = s.root.join(".solace/approved");
     assert!(approved.exists());
@@ -4320,4 +4386,172 @@ fn a_streamed_task_carries_on_board() {
     assert_eq!(planned["task"]["onBoard"], json!(true));
     tasks::strategy_api(&root, "PATCH", &["features", &fid], json!({"state": "proposed"})).unwrap();
     assert_eq!(next_task(&mut reader)["task"]["onBoard"], json!(false));
+}
+
+/// D-112: a task with no feature files its last review's tech debt on a new
+/// Tech Debt task of its own, and a review with no section files nothing.
+#[test]
+fn a_task_with_no_feature_files_its_own_tech_debt() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let top = scope::top(&s.root);
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Loose"})).unwrap();
+    t["runs"].as_array_mut().unwrap().push(json!({"id":"rv1","kind":"review","state":"ended","outcome":"reviewed"}));
+    note(&mut t, "agent", Some("rv1"), "### Tech debt\n- `app.main`: name the constant\n- `app.other`: split it\n");
+    let (debt, n) = tech_debt(&top, &t).unwrap().unwrap();
+    assert_eq!(n, 2);
+    assert_eq!(
+        (debt["title"].as_str(), debt["column"].as_str(), debt["feature"].as_str(), debt["milestone"].as_str(), debt["techDebt"].as_bool()),
+        (Some("Loose: Tech Debt"), Some("planning"), None, None, Some(true))
+    );
+    assert_eq!((&debt["scope"], &debt["home"]), (&t["scope"], &t["home"]));
+    let notes: Vec<&str> = debt["notes"].as_array().unwrap().iter().map(|n| n["text"].as_str().unwrap()).collect();
+    assert_eq!(notes.len(), 2);
+    assert!(notes[0].contains(&format!("task:{}", t["id"].as_str().unwrap())) && notes[0].contains("rv1"));
+    assert!(notes[0].ends_with("`app.main`: name the constant"));
+    assert!(notes[1].ends_with("`app.other`: split it"));
+    // A review with no section files nothing.
+    t["notes"].as_array_mut().unwrap().clear();
+    note(&mut t, "agent", Some("rv1"), "**Assessment: Looks good**\n- fine\n");
+    assert!(tech_debt(&top, &t).unwrap().is_none());
+}
+
+/// A failed batch names the command that failed, and a failure without an
+/// error code falls back to its first message line.
+#[test]
+fn failed_tool_lines_name_the_code_and_failed_command() {
+    let batch = json!({
+        "kind": "tool",
+        "title": "solace (1 of 2 failed) inspect a\nsubmit b",
+        "output": "==== solace inspect a ====\nfn a() {}\n==== solace submit b ====\nE0108 no b\n1 of 2 commands failed: submit b",
+        "status": "failed",
+    });
+    assert_eq!(super::failed_step_line(2, &batch), "3 submit b: E0108 no b");
+    let plain = json!({
+        "kind": "tool",
+        "title": "solace view b",
+        "output": "MCP error: transport closed",
+        "status": "failed",
+    });
+    assert_eq!(super::failed_step_line(0, &plain), "1 view b: MCP error: transport closed");
+    let no_code = json!({
+        "kind": "tool",
+        "title": "solace (1 of 2 failed) inspect a\ncheck",
+        "output": concat!(
+            "==== solace inspect a ====\nfn a() {}\n",
+            "==== solace check ====\nerror[E0308]: mismatched types\n1 of 2 commands failed: check"
+        ),
+        "status": "failed",
+    });
+    assert_eq!(super::failed_step_line(0, &no_code), "1 check: error[E0308]: mismatched types");
+    let earlier_code = json!({
+        "kind": "tool",
+        "title": "solace (1 of 2 failed) read a\ncheck",
+        "output": concat!(
+            "==== solace read a ====\nE1234 not this failure\n",
+            "==== solace check ====\ncargo error\n1 of 2 commands failed: check"
+        ),
+        "status": "failed",
+    });
+    assert_eq!(super::failed_step_line(1, &earlier_code), "2 check: cargo error");
+    assert_eq!(super::error_line("==== solace a ====\nE6002 panic\n"), Some("E6002 panic"));
+    assert_eq!(super::error_line("==== solace a ====\nboom\n"), Some("boom"));
+    assert!(super::error_code("E0108 x") && !super::error_code("E108 x") && !super::error_code("error"));
+}
+
+/// A batch that runs a command twice and fails the second copy reports that
+/// copy's error, not the first copy's output.
+#[test]
+fn a_repeated_command_reports_the_copy_that_failed() {
+    let mut seen = 0;
+    let (output, failed) = crate::batch(&["check", "check"], 10_000, &mut |_, _| {
+        seen += 1;
+        if seen == 2 { Err(crate::Failure("E0308 mismatched types".into(), 1)) } else { Ok("no problems\n".into()) }
+    });
+    assert!(failed);
+    assert!(output.ends_with("1 of 2 commands failed: check (copy 2)\n"), "{output}");
+    let step = json!({
+        "kind": "tool",
+        "title": "solace (1 of 2 failed) check\ncheck",
+        "output": output,
+        "status": "failed",
+    });
+    assert_eq!(super::failed_step_line(0, &step), "1 check: E0308 mismatched types");
+    let old = json!({
+        "kind": "tool",
+        "title": "solace (1 of 2 failed) check\ncheck",
+        "output": concat!(
+            "==== solace check ====\nfirst copy\n",
+            "==== solace check ====\nsecond copy\n",
+            "1 of 2 commands failed: check"
+        ),
+        "status": "failed",
+    });
+    assert_eq!(super::failed_step_line(0, &old), "1 check: first copy");
+}
+
+fn settle_failures(t: &Value) -> usize {
+    t["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|n| n["text"].as_str().is_some_and(|s| s.starts_with(crate::tasks::SETTLE_FAILED_NOTE)))
+        .count()
+}
+
+/// A root whose only project is `sub`, with a task homed and scoped there and
+/// one undo record in its store.
+fn unsettled_member_final_task() -> (testing::Scratch, Store, String) {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"sub\"]\n"),
+        ("sub/gleam.toml", "name = \"sub\"\nversion = \"1.0.0\"\n"),
+        ("sub/src/app.gleam", "pub fn main() { 1 }\n"),
+    ]);
+    crate::import(&root.join("sub")).unwrap();
+    let s = open(&root.join("sub")).unwrap();
+    let mut t = new_task("Member", "", &json!("complete"), 1.);
+    t["home"] = json!("sub");
+    t["scope"] = json!(["sub"]);
+    let tid = t["id"].as_str().unwrap().to_string();
+    tasks::put(&s, &t).unwrap();
+    s.db.execute("INSERT INTO board_before VALUES (?1,'symbol:x','null')", [&tid]).unwrap();
+    (root, s, tid)
+}
+
+#[test]
+fn a_final_task_of_a_member_project_settles() {
+    let (root, s, tid) = unsettled_member_final_task();
+    let has_before =
+        || s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+    assert!(has_before());
+    tasks::settle_later(&root, tid.clone());
+    let t = task(&root.join("sub"), &tid).unwrap();
+    assert!(t["settleFailed"].is_null(), "{t}");
+    assert!(t["attention"].is_null(), "{t}");
+    assert_eq!(settle_failures(&t), 0);
+    assert!(!has_before(), "the member project's undo record is gone");
+}
+
+#[test]
+fn a_member_projects_settle_failure_is_flagged_and_cleared() {
+    let (root, s, tid) = unsettled_member_final_task();
+    let before = root.join("sub/.solace/board").join(&tid).join("before");
+    fs::create_dir_all(before.parent().unwrap()).unwrap();
+    fs::write(&before, "").unwrap();
+    tasks::settle_later(&root, tid.clone());
+    let t = task(&root.join("sub"), &tid).unwrap();
+    assert_eq!(t["settleFailed"], true);
+    assert_eq!(t["attention"]["reason"], crate::tasks::SETTLE_FAILED_REASON);
+    assert_eq!(settle_failures(&t), 1);
+    tasks::settle_later(&root, tid.clone());
+    assert_eq!(settle_failures(&task(&root.join("sub"), &tid).unwrap()), 1, "a repeated failure adds no note");
+    fs::remove_file(&before).unwrap();
+    resettle(&root);
+    let t = task(&root.join("sub"), &tid).unwrap();
+    assert!(t["settleFailed"].is_null(), "{t}");
+    assert!(t["attention"].is_null(), "{t}");
+    assert_eq!(settle_failures(&t), 0);
+    let left: bool =
+        s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
+    assert!(!left);
 }

@@ -1152,6 +1152,70 @@ mod tests {
             "{err}"
         );
     }
+
+    /// A dead-code warning the submit leaves on another symbol is named under
+    /// its own heading.
+    #[test]
+    fn a_submit_names_a_warning_it_leaves_elsewhere() {
+        let s = project(&[("src/app.gleam", "fn tools() {\n  1\n}\n\npub fn main() {\n  tools()\n}\n")]);
+        s.check_report(false).unwrap();
+        let out = s.submit_symbols(Some("app.main"), None, "pub fn main() {\n  1\n}\n").unwrap();
+        assert!(out.contains("New warnings elsewhere:"), "{out}");
+        assert!(out.contains("app.tools: warning:"), "{out}");
+    }
+
+    /// A warning that was there before the submit stays quiet.
+    #[test]
+    fn a_submit_does_not_repeat_a_warning_from_before() {
+        let s = project(&[("src/app.gleam", "fn unused() {\n  1\n}\n\npub fn main() {\n  1\n}\n")]);
+        s.check_report(false).unwrap();
+        let out = s.submit_symbols(Some("app.main"), None, "pub fn main() {\n  2\n}\n").unwrap();
+        assert!(!out.contains("New warnings elsewhere"), "{out}");
+        assert!(!out.contains("app.unused"), "{out}");
+    }
+
+    /// A whole-module submit names a warning the compiler newly reports elsewhere.
+    #[test]
+    fn a_whole_module_submit_names_a_warning_it_leaves_elsewhere() {
+        let s = project(&[
+            ("src/app.gleam", "pub fn value() {\n  1\n}\n"),
+            ("src/other.gleam", "import app\n\npub fn use_value() {\n  app.value()\n}\n"),
+        ]);
+        s.check_report(false).unwrap();
+        let out = s.submit(crate::Target::Module("app"), "@deprecated(\"old\")\npub fn value() {\n  1\n}\n").unwrap();
+        assert!(out.contains("New warnings elsewhere:"), "{out}");
+        assert!(out.contains("other.use_value: warning:"), "{out}");
+    }
+
+    /// Before any check has run there is no baseline, so no warning is new.
+    #[test]
+    fn a_submit_before_a_check_does_not_name_a_warning_elsewhere() {
+        let s = project(&[("src/app.gleam", "fn tools() {\n  1\n}\n\npub fn main() {\n  tools()\n}\n")]);
+        let out = s.submit_symbols(Some("app.main"), None, "pub fn main() {\n  1\n}\n").unwrap();
+        assert!(!out.contains("New warnings elsewhere"), "{out}");
+    }
+
+    /// Both warning sections share one footer.
+    #[test]
+    fn a_submit_prints_the_diagnostics_footer_once() {
+        let s = project(&[("src/app.gleam", "fn tools() {\n  1\n}\n\npub fn main() {\n  tools()\n}\n")]);
+        s.check_report(false).unwrap();
+        let out = s.submit_symbols(Some("app.main"), None, "pub fn main() {\n  todo\n}\n").unwrap();
+        assert!(out.contains("\nWarnings:"), "{out}");
+        assert!(out.contains("\nNew warnings elsewhere:"), "{out}");
+        assert_eq!(out.matches("Use `check --warnings` for full diagnostics.").count(), 1, "{out}");
+    }
+
+    /// A module's warning stays in the baseline when a later check omits it.
+    #[test]
+    fn a_cached_modules_warning_is_not_new_on_a_later_submit() {
+        let s = project(&[("src/a.gleam", "fn unused() {\n  1\n}\n"), ("src/b.gleam", "pub fn main() {\n  1\n}\n")]);
+        s.check_report(false).unwrap();
+        for body in ["  2\n", "  3\n"] {
+            let out = s.submit(crate::Target::Module("b"), &format!("pub fn main() {{\n{body}}}\n")).unwrap();
+            assert!(!out.contains("a.unused"), "{out}");
+        }
+    }
 }
 
 /// The refusal for an `*** Update:` that names no symbol (E0108): a module or

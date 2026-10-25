@@ -19,13 +19,14 @@ bar is the task's only heading: its title, which collapses and expands the band,
 then **Copy ID**, its column and its status, on the title's line while there's
 room. The board sets `<solace-task>`'s `bar` attribute, so the details leave
 these out; the Strategy page sets no bar, so its details keep them. When the
-window is wider than 1.4 times its height, an open band moves to the right
+window is at least 1.1 times as wide as it is tall, an open band moves to the right
 edge. The board narrows beside it down to its columns' smallest width, then
 the band covers it. Its handle drags its width there (Left and Right step
 it), never below 32rem. Collapsed there, the band is a narrow strip holding
 only an expand button; on a narrower window it stays a line at the bottom.
-At least 90rem wide, the details show in two columns 2rem apart: what the
-human does (actions, model, message) on the left, the tabs on the right.
+At least 58.5rem wide, the details show in two columns 2rem apart: what the
+human does (actions, model, message) on the left, about a third narrower than
+it was, and the tabs on the right.
 `layout_audit board` opens a task in the band at each of these sizes and
 measures it.
 

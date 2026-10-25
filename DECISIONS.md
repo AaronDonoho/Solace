@@ -434,7 +434,7 @@ Amends D-90 point 3 and Spec 15 §1, §4 and §6 (Aaron, 2026-10-10).
 4. **Every change needs the human's approval.** `strategy task|feature|milestone|vision` proposes creating or editing a record, or a new vision text. Each proposal is a question on the run, with options Approve and Reject, and the agent waits for the answer. Approve applies it as the page's own request would be applied, with the same refusals (`E7003`, `E7004`, `E7023`–`E7027`); a refused apply changes nothing, and the answer says why. Reject changes nothing.
 5. Decisions are logged where they apply: every answer, applied or not, is on the run's transcript, and a task created or changed by an approved proposal gets a `solace` note naming the run.
 6. A feature or milestone is done when its tasks are, and can come back to planning for new tasks. A proposal that links a task to a `complete` or `canceled` feature or milestone also sets that record to `planned`; the question says so, and both are approved together. Completing a feature or milestone by itself when its tasks are done is not part of this decision.
-7. The page has no Plan tab. A planning panel, one component docked beside every tab and collapsible, holds the run: Start takes its context from what is selected (the whole page when nothing is), and the panel shows the transcript, a message box and the proposals with Approve and Reject. It stays open across tab switches. A record with an open run shows a marker, and the panel lists past runs to reopen.
+7. The page has no Plan tab. A planning panel, one component docked beside every tab and collapsible, holds the run: Start takes its context from what is selected (the whole page when nothing is), and the panel shows the transcript, a message box and the proposals with Approve and Reject, and Approve to Planning for a new task with no feature (D-201). It stays open across tab switches. A record with an open run shows a marker, and the panel lists past runs to reopen.
 Why: planning is a conversation about the page's records, not a task; the human keeps every change to the plan in their own hands, and the conversation sits beside what it is about.
 
 ## D-94 A proposed task may name projects that don't exist yet
@@ -1203,3 +1203,43 @@ Amends D-195 and Spec 15 §1 and §4 (Aaron, board task "links: open on the boar
 2. `solace_board.cards` shows a task when `onBoard` is true and the task's scope covers the lane. It no longer decides visibility from Backlog, archived state, or feature state; features still name and color their tasks.
 3. When a feature's state change can change its tasks' visibility, the server announces those tasks, so the board updates them. `active` and `complete` are both visible.
 Why: the board and a task link could disagree, and keeping the same rule in two languages invited drift.
+
+## D-197 A proposal's body diff matches unchanged lines anywhere
+Amends D-116 point 1 and Spec 15 §6 (Aaron, board task "proposals: body diff shows only changes", 2026-10-25).
+1. A changed body or vision text shows as a line diff in its order: the lines both versions share anywhere, found as a longest-common-subsequence match, stay in place; a line only in the old text takes the deletion tint and one only in the new text the addition tint; no line is struck through. Each run of unchanged lines keeps one line of context on each side of a change and collapses the rest to one muted line, "3 lines unchanged" (or "1 line unchanged"). Lines are compared as D-116 says: space around a line is ignored and blank lines are left out, so a body differing only in those is unchanged.
+2. The new body stays below the diff as an open "New body" section, as Markdown; a create, and a proposal saved before `before`, show every field as before.
+Why: changing one line of a long body showed the whole old and new bodies, and then a diff of only the shared start and end still showed everything between the first and last change.
+
+## D-198 A completed task with no feature files its review's tech debt too
+Amends D-112 points 1, 3 and 4, and Spec 15 §6 and A20 (Aaron, board task "tech debt: file for tasks with no feature", 2026-10-25).
+1. Every review is asked to put minor, non-blocking findings that should be fixed later under a `### Tech debt` heading, one finding per bullet with its location. A task with no feature is asked too, and the wording names no feature.
+2. When a completed task has no feature, its last review's findings go to a new Tech Debt task, never an open one: `techDebt: true`, in `planning` or the first column of a workflow without one (D-132), with no feature or milestone, the completed task's `scope` and `home`, and titled `<task title>: Tech Debt`.
+3. Each finding is one `solace` note naming its source as D-112 point 4 says, and the completed task gets a note naming the Tech Debt task. A task with a feature still uses its feature's open Tech Debt task as D-112 point 3 says. A cancel, a revert, or a review without the section files nothing.
+Why: the feature path left tech debt from a task with no feature in that task's own notes, where later work never saw it. The human chose the same review section and filing for every completed task, with a Tech Debt task of its own when it has no feature.
+
+## D-199 Review findings say what to change; tech debt has one exact shape
+Amends D-112 point 1, D-198 point 1, and Spec 15 §6 and A20 (Aaron, board task "reviews: detailed findings, strict Tech debt format", 2026-10-25).
+1. Every review is asked to write each finding so a worker can act on it without investigating again: it names the symbol (`module.name`) or file, what is wrong, what to change it to and why, and how to check it is done (a test to add or run, or what a command or page should show).
+2. A review's minor, non-blocking findings that should be fixed later go in a Tech debt section at the end of the feedback, each written like a finding. The heading is exactly `### Tech debt`; each item is one `- ` bullet at the start of a line; its details are lines indented under it; no line after the heading starts with `#`; no other heading is inside the section, and nothing follows it except a new heading. A section in any other shape is dropped when the task is completed.
+Why: reviewers ran stronger models than the workers following them, so vague findings sent workers back to the same code, and a Tech debt section in the wrong shape was silently dropped by `board.tech_debt_items`.
+
+## D-200 Strategy runs read steps cheaply, list failures and see worker help
+Amends D-99 points 2 and 3, D-105 point 2, D-144 and Spec 15 §6 (Aaron, board task "strategy runs: cheaper run reads, worker docs", 2026-10-25).
+1. When `strategy show run` asks for steps (`<steps>`, `all` or `--failed`), `run` is one line: `<id> <kind> <model> <outcome>`, or its `state` when it has no outcome. With no step list it stays the whole run record without `log`.
+2. `--failed` gives one line per failed `tool` step: `<step> <command head>: <first error line>`. The command is the first one the batch says failed, else the title's first line, without the tool name or failure marker; the error is the first E-code line in that command's batch section, else its first non-header line. No failed steps, or no steps, is an empty list. `--failed` takes no steps or `--from`.
+3. A strategy run's `help <command>` shows a command it may run; for a worker command it can't run, it gives the command's reference paragraph marked as a worker command. Host commands stay hidden. A row's command names split on `|` only outside `<…>` and `[…]`, so placeholder alternatives add no command.
+4. The strategy brief names `grep`'s `--in <path>` and `--context n`, and `strategy show run --failed`.
+Why: a step read repeated a run's full record, failed steps could not be found without reading the whole transcript, and strategy help both omitted worker commands and listed placeholder fragments as commands.
+
+## D-201 A new task with no feature can be approved into Planning
+Amends D-93 points 4 and 7 and Spec 15 §6 (Aaron, board task "proposals: approve a task into Planning", 2026-10-25).
+1. A strategy proposal that creates a task with no `feature` offers `Approve`, `Approve to Planning` and `Reject`. Every other proposal, including an edit, offers `Approve` and `Reject`.
+2. `Approve to Planning` applies the proposal as `Approve` does, with the same refusals. The new task is created in `planning` of its home project, or the workflow's first column when it has none (D-132). Its answer is `Approved and applied: created task:<id> (Planning)`.
+3. `Approve` still creates the task in Backlog.
+Why: a human planning new work wants it on the board at once, without approving it into Backlog and moving it by hand.
+
+## D-202 Planning runs are not tied to tasks
+Amends D-93 and Spec 15 §4 and §6 (Aaron, 2026-10-25).
+1. A strategy run is never started on a task: opening a task on the Tasks tab does not change the context of the run started next.
+2. Runs saved on a task stay as stored, keeping their ids, notes and timestamps, and are listed with the page's runs.
+Why: a run started while a task was open on the Tasks tab was filed under that task and disappeared from the planning panel, so a human believed it lost.

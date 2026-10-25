@@ -288,15 +288,15 @@ class Board(unittest.TestCase):
         self.assertEqual(t['column'], 'needs_review')
         self.assertIn('without finishing', t['attention']['reason'])
 
-    def test_completed_reviews_file_tech_debt_on_the_feature(self):  # D-112
+    def test_completed_reviews_file_tech_debt(self):  # D-112
         f = self.api('POST', '/features', {'title':'Search'})
         def reviewed(feature, finding):
             t = self.completed([])
             if feature: self.api('PATCH', '/tasks/'+t['id'], {'feature':f['id']})
             note = '**Assessment: Looks good**\n\n### Tech debt\n\n- `app.one`: '+finding+'\n\n### Verification\n\n- ok\n'
             t, prompt, _ = self.review(t, [{'command':'task note','text':note}])
-            # Only a task in a feature is asked for tech debt (the steps in its body name the heading either way).
-            self.assertEqual('This task is part of a feature' in prompt, feature)
+            # Every review is asked for tech debt.
+            self.assertIn('Put minor, non-blocking findings', prompt)
             # D-138: the prompt names the task's feature.
             self.assertEqual('\nFeature (the feature this task is part of; its latest direction):\n- Search\n' in prompt, feature)
             self.action(t, 'approve'); return self.action(t, 'complete')
@@ -314,9 +314,16 @@ class Board(unittest.TestCase):
         [again] = debts()
         self.assertEqual(again['id'], debt['id'])
         self.assertEqual([('task:'+x) in n['text'] for n, x in zip(self.get(debt)['notes'], [a['id'], b['id']])], [True, True])
-        # A review of a task with no feature files nothing.
-        reviewed(False, 'lost finding')
-        self.assertEqual(len(self.get(debt)['notes']), 2); self.assertEqual(len(debts()), 1)
+        # A review of a task with no feature makes a Tech Debt task of its own.
+        c = reviewed(False, 'own finding')
+        own = next(d for d in debts() if d['title'] == c['title']+': Tech Debt')
+        self.assertEqual((own['column'], own.get('feature'), own.get('milestone')), ('planning', None, None))
+        self.assertEqual((own['scope'], own['home']), (c['scope'], c['home']))
+        own_notes = self.get(own)['notes']
+        self.assertEqual(len(own_notes), 1)
+        self.assertIn('task:'+c['id'], own_notes[0]['text']); self.assertIn('own finding', own_notes[0]['text'])
+        self.assertIn('task:'+own['id'], c['notes'][-1]['text'])
+        self.assertEqual(len(self.get(debt)['notes']), 2); self.assertEqual(len(debts()), 2)
 
     def test_a_work_prompt_carries_the_features_assignment_note(self):  # D-138
         f = self.api('POST', '/features', {'title':'Search'})
@@ -1429,7 +1436,7 @@ class Board(unittest.TestCase):
         def asked(n):return self.wait_run(rid,lambda r:len(r['questions'])==n and r['state']=='waiting')['questions'][-1]
         # Reject creates nothing.
         q=asked(1)
-        self.assertEqual((q['options'],q['proposal']['kind'],q['answer']),(['Approve','Reject'],'task',None))
+        self.assertEqual((q['options'],q['proposal']['kind'],q['answer']),(['Approve','Approve to Planning','Reject'],'task',None))
         # D-118: a question carries when it was asked and how many notes came before it.
         self.assertIsInstance(q['time'],int);self.assertIsInstance(q['after'],int)
         first=q

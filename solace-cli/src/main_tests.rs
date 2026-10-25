@@ -1482,3 +1482,38 @@ fn a_project_with_no_command_is_refused_by_the_cli() {
     assert!(e.0.starts_with(PROJECT_ONLY.trim_end()));
     assert_eq!(e.1, 2);
 }
+
+/// A strategy run's help shows a worker command it can't run, and row names
+/// ignore the `|` inside placeholders and option lists.
+#[test]
+fn strategy_help_shows_worker_commands_and_clean_command_names() {
+    let missing = agent_help_for(Some("nosuch"), false, true);
+    assert!(missing.starts_with("No command `nosuch`"), "{missing}");
+    for bad in ["milestone>", "all]", "--tail"] {
+        assert!(!missing.contains(bad), "{bad}: {missing}");
+    }
+    let submit = agent_help_for(Some("submit"), false, true);
+    assert!(submit.starts_with("Worker command: a strategy run can't run it."), "{submit}");
+    assert!(submit.contains("submit <name> --replace [--all]") && submit.contains("draft"), "{submit}");
+    assert!(!submit.contains("probe --from"), "{submit}");
+    let feature = agent_help_for(Some("feature"), false, true);
+    assert!(feature.contains("strategy task|feature|milestone"), "{feature}");
+    let strategy = agent_help_for(Some("strategy"), false, true);
+    assert!(strategy.contains("strategy show run <task> <run> --failed"), "{strategy}");
+    let host = agent_help_for(Some("create"), false, true);
+    assert!(host.starts_with("No command `create`"), "{host}");
+}
+
+#[test]
+fn the_reference_and_worker_schema_show_the_submit_call_fields() {
+    let step = reference::REFERENCE
+        .split_once("2. Change and test in one call")
+        .and_then(|(_, rest)| rest.split_once("\n3. Fix only what the reply reports"))
+        .map(|(step, _)| step)
+        .expect("workflow step 2");
+    for part in ["command: submit --project <folder>", "test --project <folder>", "text:    *** Begin Patch"] {
+        assert!(step.contains(part), "workflow step 2: missing {part}");
+    }
+    let text = mcp::tool_schema()["inputSchema"]["properties"]["text"]["description"].as_str().unwrap().to_string();
+    assert!(text.contains("`submit --project <folder>` then `test --project <folder>`"), "{text}");
+}

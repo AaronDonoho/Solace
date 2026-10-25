@@ -1071,8 +1071,9 @@ pub fn proposal_display_test() {
   answered |> string.contains(">Approve</button>") |> should.be_false
 }
 
-/// An edit names the record it changes, by its loaded title when the fields
-/// don't hold one; the vision shows its new text; busy buttons are disabled.
+/// An edit's heading links the record by its loaded title; a create keeps its
+/// plain proposed title; the vision shows its new text; busy buttons are
+/// disabled.
 pub fn proposal_edit_and_vision_test() {
   let assert Ok(edit) =
     json.parse(
@@ -1085,9 +1086,31 @@ pub fn proposal_edit_and_vision_test() {
       o
     })
     |> element.to_string
-  shown |> string.contains("Change feature<em> Search</em>") |> should.be_true
+  let heading = between(shown, "<h4>", "</h4>")
+  heading |> string.contains("Change feature ") |> should.be_true
+  heading |> string.contains("href=\"/feature/f1\"") |> should.be_true
+  heading |> string.contains("data-feature=\"f1\"") |> should.be_true
+  heading |> string.contains(">Search</a>") |> should.be_true
   shown |> string.contains("<dt>state</dt><dd>active</dd>") |> should.be_true
   shown |> string.contains("disabled") |> should.be_true
+  let assert Ok(create) =
+    json.parse(
+      "{\"kind\":\"task\",\"fields\":{\"title\":\"Index\"}}",
+      task.proposal_decoder(),
+    )
+  let created =
+    task.proposal_view(
+      "",
+      create,
+      ["Approve", "Reject"],
+      "",
+      name,
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  between(created, "<h4>", "</h4>")
+  |> should.equal("Create task<em> Index</em>")
   let assert Ok(vision) =
     json.parse(
       "{\"kind\":\"vision\",\"fields\":{\"text\":\"For teams\"},\"base\":\"r1\"}",
@@ -1642,7 +1665,7 @@ pub fn a_vision_proposal_that_changes_nothing_says_so_test() {
 
 /// A body or vision text that differs only in the space around its lines, or
 /// in blank lines, is not a change; a changed line beside respaced ones shows
-/// the complete old and new values.
+/// only that line in the diff.
 pub fn proposal_body_that_only_changes_spacing_says_no_change_test() {
   let show = fn(json_text) {
     let assert Ok(p) = json.parse(json_text, task.proposal_decoder())
@@ -1670,14 +1693,14 @@ pub fn proposal_body_that_only_changes_spacing_says_no_change_test() {
     )
   one
   |> string.contains(
-    "<p>Old:</p><pre class=\"old-value\">One \n  Two\nFour</pre>",
+    "<p class=\"unchanged\">1 line unchanged</p>"
+    <> "<p class=\"context\">Two</p>"
+    <> "<p class=\"old-value\">Four</p>"
+    <> "<p class=\"new-value\">Three</p>",
   )
   |> should.be_true
-  one
-  |> string.contains(
-    "<p>New:</p><pre class=\"new-value\">One\nTwo\nThree</pre>",
-  )
-  |> should.be_true
+  one |> string.contains("Old:") |> should.be_false
+  one |> string.contains("New:") |> should.be_false
   one |> string.contains("<del>") |> should.be_false
   one |> string.contains("+ Three") |> should.be_false
   let vision_same =
@@ -2299,8 +2322,9 @@ pub fn the_bar_shares_copy_id_test() {
 }
 
 /// What the human does and the task's record (its tabs and their panel)
-/// are two blocks: on an element at least 90rem wide they sit side by
-/// side, 2rem apart with no border; narrower, one above the other.
+/// are two blocks: on an element at least 58.5rem wide they sit side by
+/// side, the first about 35% narrower than it was, 2rem apart with no
+/// border; narrower, one above the other.
 pub fn a_wide_detail_shows_two_columns_test() {
   let model =
     loaded(
@@ -2319,7 +2343,7 @@ pub fn a_wide_detail_shows_two_columns_test() {
   |> should.be_true
   styles
   |> string.contains(
-    "@container (min-width:90rem){.detail{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:2rem;align-items:start}",
+    "@container (min-width:58.5rem){.detail{display:grid;grid-template-columns:minmax(0,0.65fr) minmax(0,1.35fr);column-gap:2rem;align-items:start}",
   )
   |> should.be_true
   // The task element's padding and its blocks' are half the page's.
@@ -2977,16 +3001,12 @@ pub fn a_late_action_reply_from_another_task_is_dropped_test() {
   model.error |> should.equal("")
 }
 
-/// A changed body or vision text shows its complete old and new values under
-/// `Old:` and `New:`, not a line diff; the new body shows as Markdown without
-/// a click.
+/// A changed body or vision text shows a line diff: only the changed line is
+/// tinted old and new, unchanged runs keep one line of context each side and
+/// collapse the rest, and the new body shows as Markdown without a click.
 pub fn proposal_body_shows_old_and_new_test() {
-  let assert Ok(p) =
-    json.parse(
-      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"Keep me\\n\\nAdd me\"},\"before\":{\"body\":\"Keep me\\n\\nDrop me\"}}",
-      task.proposal_decoder(),
-    )
-  let shown =
+  let show = fn(json_text) {
+    let assert Ok(p) = json.parse(json_text, task.proposal_decoder())
     task.proposal_view(
       "",
       p,
@@ -2997,56 +3017,81 @@ pub fn proposal_body_shows_old_and_new_test() {
       fn(o) { o },
     )
     |> element.to_string
-  shown
+  }
+  let changed =
+    show(
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"One\\nTwo\\nThree\\nFour\\nFive edited\\nSix\\nSeven\\nEight\\nNine\\nTen\"},\"before\":{\"body\":\"One\\nTwo\\nThree\\nFour\\nFive\\nSix\\nSeven\\nEight\\nNine\\nTen\"}}",
+    )
+  changed
   |> string.contains(
-    "<p>Old:</p><pre class=\"old-value\">Keep me\n\nDrop me</pre>",
+    "<p class=\"unchanged\">3 lines unchanged</p>"
+    <> "<p class=\"context\">Four</p>"
+    <> "<p class=\"old-value\">Five</p>"
+    <> "<p class=\"new-value\">Five edited</p>"
+    <> "<p class=\"context\">Six</p>"
+    <> "<p class=\"unchanged\">4 lines unchanged</p>",
   )
   |> should.be_true
-  shown
-  |> string.contains(
-    "<p>New:</p><pre class=\"new-value\">Keep me\n\nAdd me</pre>",
-  )
-  |> should.be_true
-  shown |> string.contains("<del>") |> should.be_false
-  shown |> string.contains("+ Add me") |> should.be_false
-  shown
+  changed
+  |> string.split("<p class=\"old-value\">")
+  |> list.length
+  |> should.equal(2)
+  changed
+  |> string.split("<p class=\"new-value\">")
+  |> list.length
+  |> should.equal(2)
+  changed |> string.contains("Old:") |> should.be_false
+  changed |> string.contains("New:") |> should.be_false
+  changed |> string.contains("<del>") |> should.be_false
+  changed
   |> string.contains("<details class=\"new-body\" open>")
   |> should.be_true
-  shown |> string.contains("<summary>New body</summary>") |> should.be_true
-  let assert Ok(vision) =
-    json.parse(
-      "{\"kind\":\"vision\",\"fields\":{\"text\":\"Keep me\\n\\nAdd me\"},\"before\":{\"text\":\"Keep me\\n\\nDrop me\"}}",
-      task.proposal_decoder(),
+  changed |> string.contains("<summary>New body</summary>") |> should.be_true
+  let added =
+    show(
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"One\\nTwo\\nThree\"},\"before\":{\"body\":\"One\\nTwo\"}}",
     )
-  let shown =
-    task.proposal_view(
-      "",
-      vision,
-      ["Approve", "Reject"],
-      "",
-      fn(_, _) { "" },
-      False,
-      fn(o) { o },
-    )
-    |> element.to_string
-  shown
+  added
   |> string.contains(
-    "<p>Old:</p><pre class=\"old-value\">Keep me\n\nDrop me</pre>",
+    "<p class=\"unchanged\">1 line unchanged</p>"
+    <> "<p class=\"context\">Two</p>"
+    <> "<p class=\"new-value\">Three</p>",
   )
   |> should.be_true
-  shown
+  added |> string.contains("<p class=\"old-value\">") |> should.be_false
+  let removed =
+    show(
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"Two\\nThree\"},\"before\":{\"body\":\"One\\nTwo\\nThree\"}}",
+    )
+  removed
   |> string.contains(
-    "<p>New:</p><pre class=\"new-value\">Keep me\n\nAdd me</pre>",
+    "<p class=\"context\">Two</p>"
+    <> "<p class=\"unchanged\">1 line unchanged</p>",
   )
   |> should.be_true
-  shown |> string.contains("<del>") |> should.be_false
-  shown
+  removed |> string.contains("<p class=\"new-value\">") |> should.be_false
+  let vision =
+    show(
+      "{\"kind\":\"vision\",\"fields\":{\"text\":\"One\\nTwo edited\\nThree\\nFour\"},\"before\":{\"text\":\"One\\nTwo\\nThree\\nFour\"}}",
+    )
+  vision
+  |> string.contains(
+    "<p class=\"context\">One</p>"
+    <> "<p class=\"old-value\">Two</p>"
+    <> "<p class=\"new-value\">Two edited</p>"
+    <> "<p class=\"context\">Three</p>"
+    <> "<p class=\"unchanged\">1 line unchanged</p>",
+  )
+  |> should.be_true
+  vision |> string.contains("Old:") |> should.be_false
+  vision |> string.contains("New:") |> should.be_false
+  vision |> string.contains("<del>") |> should.be_false
+  vision
   |> string.contains("<details class=\"new-body\" open>")
   |> should.be_true
-  shown |> string.contains("<summary>New body</summary>") |> should.be_true
 }
 
-/// A change in the middle keeps both complete values in their original order.
+/// A change in the middle keeps the old and new lines in their original place.
 pub fn proposal_body_old_and_new_keep_their_order_test() {
   let assert Ok(p) =
     json.parse(
@@ -3064,41 +3109,44 @@ pub fn proposal_body_old_and_new_keep_their_order_test() {
       fn(o) { o },
     )
     |> element.to_string
-  let old = "<p>Old:</p><pre class=\"old-value\">One\n\nTwo\n\nThree</pre>"
-  let new =
-    "<p>New:</p><pre class=\"new-value\">One\n\nTwo edited\n\nThree</pre>"
-  case string.split(shown, old) {
-    [_, after_old] -> after_old |> string.contains(new) |> should.be_true
-    _ -> should.be_true(False)
-  }
+  shown
+  |> string.contains(
+    "<p class=\"context\">One</p>"
+    <> "<p class=\"old-value\">Two</p>"
+    <> "<p class=\"new-value\">Two edited</p>"
+    <> "<p class=\"context\">Three</p>",
+  )
+  |> should.be_true
   shown |> string.contains("<del>") |> should.be_false
   shown |> string.contains("+ Two edited") |> should.be_false
 }
 
-/// The proposal's long values are readable wrapped blocks, not a line diff;
-/// old and new values carry the page's deletion and addition tints while
-/// their labels stay soft.
+/// The proposal's line diff wraps long lines; removed and added lines carry
+/// the page's deletion and addition tints, a collapsed run is muted, and no
+/// line is struck through.
 pub fn proposal_styles_show_old_and_new_test() {
   task.proposal_styles
-  |> string.contains(".proposal .old-new")
+  |> string.contains(".proposal .body-diff")
   |> should.be_true
   task.proposal_styles
   |> string.contains("white-space:pre-wrap")
   |> should.be_true
   task.proposal_styles
-  |> string.contains(".proposal .old-new pre.old-value{background:var(--del)}")
+  |> string.contains(".proposal .body-diff p.old-value{background:var(--del)}")
   |> should.be_true
   task.proposal_styles
-  |> string.contains(".proposal .old-new pre.new-value{background:var(--add)}")
+  |> string.contains(".proposal .body-diff p.new-value{background:var(--add)}")
   |> should.be_true
   task.proposal_styles
-  |> string.contains(".proposal .old-new p{color:var(--soft)")
+  |> string.contains(
+    ".proposal .body-diff p.unchanged{color:var(--soft);font-style:italic}",
+  )
   |> should.be_true
   task.proposal_styles
   |> string.contains(".proposal .answer{font-weight:600}")
   |> should.be_true
   task.proposal_styles |> has_hex_color |> should.be_false
-  task.proposal_styles |> string.contains(".body-diff") |> should.be_false
+  task.proposal_styles |> string.contains(".old-new") |> should.be_false
   task.proposal_styles
   |> string.contains("text-decoration:line-through")
   |> should.be_false
@@ -3963,4 +4011,82 @@ pub fn board_visibility_decodes_test() {
   on_board(",\"onBoard\":false") |> should.be_false
   on_board("") |> should.be_true
   on_board(",\"archivedTime\":1700") |> should.be_false
+}
+
+/// An unchanged run between two changes collapses to one muted line, with one
+/// line of context on each side of it.
+pub fn proposal_body_collapses_an_unchanged_run_between_changes_test() {
+  let assert Ok(p) =
+    json.parse(
+      "{\"kind\":\"task\",\"id\":\"t1\",\"fields\":{\"body\":\"One\\nTwo edited\\nThree\\nFour\\nFive\\nSix\\nSeven\\nEight edited\\nNine\"},\"before\":{\"body\":\"One\\nTwo\\nThree\\nFour\\nFive\\nSix\\nSeven\\nEight\\nNine\"}}",
+      task.proposal_decoder(),
+    )
+  let shown =
+    task.proposal_view(
+      "",
+      p,
+      ["Approve", "Reject"],
+      "",
+      fn(_, _) { "Index" },
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  shown
+  |> string.contains(
+    "<p class=\"context\">One</p>"
+    <> "<p class=\"old-value\">Two</p>"
+    <> "<p class=\"new-value\">Two edited</p>"
+    <> "<p class=\"context\">Three</p>"
+    <> "<p class=\"unchanged\">3 lines unchanged</p>"
+    <> "<p class=\"context\">Seven</p>"
+    <> "<p class=\"old-value\">Eight</p>"
+    <> "<p class=\"new-value\">Eight edited</p>"
+    <> "<p class=\"context\">Nine</p>",
+  )
+  |> should.be_true
+  shown
+  |> string.split("<p class=\"unchanged\">")
+  |> list.length
+  |> should.equal(2)
+}
+
+/// The refresh button sits right beside the model pick: the row uses the
+/// small gap and the button gives up its right margin, while the effort
+/// pick keeps the wider distance.
+pub fn the_refresh_button_sits_beside_the_model_pick_test() {
+  let model =
+    loaded(
+      "{\"id\":\"t1\",\"title\":\"Fix\",\"body\":\"\",\"column\":\"backlog\",\"rank\":1}",
+    )
+  let styles = html(model)
+  assert string.contains(styles, ".agent{display:flex;flex-wrap:wrap;gap:4px}")
+  assert string.contains(styles, ".agent>.refresh-models{margin-right:0}")
+  assert string.contains(styles, ".agent>.effort-pick{margin-left:8px}")
+}
+
+/// A new task proposal without a feature offers Approve to Planning beside
+/// Approve and Reject.
+pub fn proposal_offers_approve_to_planning_test() {
+  let assert Ok(p) =
+    json.parse(
+      "{\"kind\":\"task\",\"fields\":{\"title\":\"Index\",\"feature\":null}}",
+      task.proposal_decoder(),
+    )
+  let shown =
+    task.proposal_view(
+      "",
+      p,
+      ["Approve", "Approve to Planning", "Reject"],
+      "",
+      fn(_, _) { "" },
+      False,
+      fn(o) { o },
+    )
+    |> element.to_string
+  shown |> string.contains(">Approve</button>") |> should.be_true
+  shown
+  |> string.contains(">Approve to Planning</button>")
+  |> should.be_true
+  shown |> string.contains(">Reject</button>") |> should.be_true
 }

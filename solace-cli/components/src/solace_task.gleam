@@ -1886,12 +1886,12 @@ const task_styles =
   <> model_styles
   <> ":host{display:block;container-type:inline-size}input,textarea,pre,code,.md,.detail > .heading > h2,.record > .panel > article > p,.record > .panel > p,.record > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}
 button,input,textarea,select{font:inherit;padding:var(--control-pad);margin:var(--space-1);border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.detail{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.muted{color:var(--soft)}.note .delete{float:right;margin:0 0 4px 8px;font-size:13px;padding:0 8px}
-.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px 16px}.agent label{display:flex;flex-direction:column}
+.meta{display:flex;gap:10px;align-items:center;color:var(--soft);margin:4px 0 12px}.agent{display:flex;flex-wrap:wrap;gap:4px}.agent>.refresh-models{margin-right:0}.agent>.effort-pick{margin-left:8px}.agent label{display:flex;flex-direction:column}
 .tabs{display:flex;flex-wrap:wrap;gap:0;border-bottom:1px solid var(--line);margin-top:16px}.tabs button{margin:0 0 -1px;border-radius:0 0 0;border-color:transparent;background:transparent}.tabs [aria-selected=true]{border-color:var(--line) var(--line) var(--sheet);background:var(--sheet);font-weight:600}.panel{padding-top:8px}.changes h4{font-size:15px;margin:12px 0 4px}.changes ul{margin:0;padding-left:20px}.changes li{white-space:normal;margin:2px 0;font:13px 'IBM Plex Mono',ui-monospace,monospace}
 details.note>summary{display:block;min-height:var(--control-h-small);cursor:pointer;list-style:none}details.note>summary>small{display:inline}details.note>summary>*+*{margin-left:8px}details.note>summary::-webkit-details-marker{display:none}details.note>summary::before{content:\"▸\";color:var(--soft);margin-right:8px}details.note[open]>summary::before{content:\"▾\"}details.note[open]>summary{margin-bottom:4px}.md img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:0}.status.finished{background:var(--add);color:var(--ok-text)}.diff{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:8px;border-radius:0;max-width:760px}
 .title{display:block;box-sizing:border-box;width:calc(100% - 8px);margin:8px 4px}
 .heading{display:flex;align-items:center;flex-wrap:wrap;gap:4px 12px}.heading h2{margin:12px 0}.copy-id{flex:none;margin:0;padding:0 10px;font-size:13px}
-@container (min-width:90rem){.detail{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);column-gap:2rem;align-items:start}.detail > .heading,.detail > .meta{grid-column:1 / -1}.record > .tabs{margin-top:0}}
+@container (min-width:58.5rem){.detail{display:grid;grid-template-columns:minmax(0,0.65fr) minmax(0,1.35fr);column-gap:2rem;align-items:start}.detail > .heading,.detail > .meta{grid-column:1 / -1}.record > .tabs{margin-top:0}}
 *{scrollbar-color:var(--line) var(--paper)}::selection{background:var(--sel);color:var(--ink)}
 h1,h2,h3{line-height:1.2;letter-spacing:-.02em}a{color:var(--focus);text-underline-offset:3px}
 button,input,textarea,select{border:1px solid var(--edge);background:var(--paper);color:var(--ink);caret-color:var(--focus)}input::placeholder,textarea::placeholder{color:var(--soft);opacity:1}
@@ -2011,16 +2011,20 @@ fn field_order(a: #(String, String), b: #(String, String)) -> order.Order {
 }
 
 /// A strategy run's proposal in human terms: what it creates or changes. An
-/// edit shows only the fields that change: a short one as `old → new`, each
-/// record id a link titled by `name`, and the body as full `Old:` and `New:`
-/// sections with the new body shown as Markdown; the vision's new text shows
-/// the same sections. A body or text that differs only in the space around its
-/// lines, or in blank lines, counts as unchanged. One that changes nothing,
-/// the vision included, says "No change". A create, and a proposal saved
-/// before `before`, show every field and each record id as a link, the vision
-/// its text as Markdown; the records Approve also sets `upcoming` follow,
-/// then its options until it is answered, and the answer after, with its
-/// record references as links.
+/// edit's heading links the record, titled by `name`; a create shows the
+/// proposed title. An edit shows only the fields that change: a short one as
+/// `old → new`, each
+/// record id a link titled by `name`, and the body as a line diff with one
+/// line of context on each side of a change and each other run of unchanged
+/// lines collapsed to one muted line, the new body shown as Markdown below;
+/// the vision's new text shows the same diff. Removed lines take the deletion
+/// tint and added lines the addition tint, with no strikethrough. A body or
+/// text that differs only in the space around its lines, or in blank lines,
+/// counts as unchanged. One that changes nothing, the vision included, says
+/// "No change". A create, and a proposal saved before `before`, show every
+/// field and each record id as a link, the vision its text as Markdown; the
+/// records Approve also sets `upcoming` follow, then its options until it is
+/// answered, and the answer after, with its record references as links.
 /// `name(kind, id)` is a record's title, "" when it isn't loaded.
 pub fn proposal_view(
   base: String,
@@ -2031,22 +2035,18 @@ pub fn proposal_view(
   busy: Bool,
   on_answer: fn(String) -> msg,
 ) -> Element(msg) {
-  let title = case list.key_find(p.fields, "title") {
-    Ok(title) -> title
-    Error(_) -> name(p.kind, p.id)
-  }
   let heading = case p.kind, p.id {
     "vision", _ -> [h.text("Replace the vision")]
-    kind, id -> [
-      h.text(case id {
-        "" -> "Create " <> kind
-        _ -> "Change " <> kind
-      }),
-      case title, id {
-        "", "" -> h.text("")
-        "", id -> h.text(" " <> id)
-        title, _ -> h.em([], [h.text(" " <> title)])
+    kind, "" -> [
+      h.text("Create " <> kind),
+      case list.key_find(p.fields, "title") {
+        Ok(title) -> h.em([], [h.text(" " <> title)])
+        Error(_) -> h.text("")
       },
+    ]
+    kind, id -> [
+      h.text("Change " <> kind <> " "),
+      record_link(kind, id, name),
     ]
   }
   // D-115: a proposal that knows the record's current values shows only the
@@ -2090,7 +2090,7 @@ pub fn proposal_view(
         "vision" ->
           case list.key_find(p.fields, "text") {
             Ok(new) -> [
-              old_and_new(dict.get(p.before, "text") |> result.unwrap(""), new),
+              text_diff(dict.get(p.before, "text") |> result.unwrap(""), new),
               new_body(base, new),
             ]
             Error(_) -> []
@@ -2105,7 +2105,7 @@ pub fn proposal_view(
                     h.dt([], [h.text(f.0)]),
                     h.dd([], case f.0 {
                       "body" -> [
-                        old_and_new(
+                        text_diff(
                           dict.get(p.before, "body") |> result.unwrap(""),
                           f.1,
                         ),
@@ -2155,10 +2155,10 @@ pub fn proposal_view(
 }
 
 /// The proposal display's look (`proposal_view`), for the pages that show
-/// it. Colors come from the page's custom properties; the old and new values
-/// take the page's deletion and addition tints.
+/// it. Colors come from the page's custom properties; removed and added lines
+/// take the page's deletion and addition tints, and a collapsed run is muted.
 pub const proposal_styles =
-  ".proposal{border:1px solid var(--edge);background:var(--paper);padding:8px 12px;margin:8px 0}.proposal h4{margin:0 0 6px;font-size:15px}.proposal dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 12px;margin:6px 0}.proposal dt{color:var(--soft);font-size:13px}.proposal dd{margin:0;overflow-wrap:anywhere}.proposal .reopens{color:var(--warn-text);font-weight:600}.proposal .actions{display:flex;gap:6px}.proposal .answer{font-weight:600}.proposal .nochange{color:var(--soft);font-style:italic}.proposal .old-new{margin:6px 0;max-width:760px}.proposal .old-new p{color:var(--soft);font-size:13px;margin:4px 0}.proposal .old-new pre{margin:0 0 8px;font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}.proposal .old-new pre.old-value{background:var(--del)}.proposal .old-new pre.new-value{background:var(--add)}.proposal .old-new pre:last-child{margin-bottom:0}.proposal details.new-body{margin:6px 0}.proposal details.new-body>summary{cursor:pointer;color:var(--soft)}\n"
+  ".proposal{border:1px solid var(--edge);background:var(--paper);padding:8px 12px;margin:8px 0}.proposal h4{margin:0 0 6px;font-size:15px}.proposal dl{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 12px;margin:6px 0}.proposal dt{color:var(--soft);font-size:13px}.proposal dd{margin:0;overflow-wrap:anywhere}.proposal .reopens{color:var(--warn-text);font-weight:600}.proposal .actions{display:flex;gap:6px}.proposal .answer{font-weight:600}.proposal .nochange{color:var(--soft);font-style:italic}.proposal .body-diff{margin:6px 0;max-width:760px}.proposal .body-diff p{margin:0;font:inherit;white-space:pre-wrap;overflow-wrap:anywhere}.proposal .body-diff p.old-value{background:var(--del)}.proposal .body-diff p.new-value{background:var(--add)}.proposal .body-diff p.unchanged{color:var(--soft);font-style:italic}.proposal .body-diff p:last-child{margin-bottom:0}.proposal details.new-body{margin:6px 0}.proposal details.new-body>summary{cursor:pointer;color:var(--soft)}\n"
 
 /// What the task's last run finished with, "" when nothing is to be looked at.
 fn outcome(t: Task) -> String {
@@ -2953,17 +2953,6 @@ pub const small_control =
 fn connection_lost(text: String) -> Bool {
   json.parse(text, decode.at(["connectionLost"], decode.bool))
   |> result.unwrap(False)
-}
-
-/// The full current and proposed values, labeled `Old:` and `New:` in their
-/// original order; their values take the page's deletion and addition tints.
-fn old_and_new(old: String, new: String) -> Element(msg) {
-  h.div([a.class("old-new")], [
-    h.p([], [h.text("Old:")]),
-    h.pre([a.class("old-value")], [h.text(old)]),
-    h.p([], [h.text("New:")]),
-    h.pre([a.class("new-value")], [h.text(new)]),
-  ])
 }
 
 /// The model and effort a fresh list chooses: the remembered model when it can
@@ -4205,5 +4194,311 @@ fn dependency_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
     FeatureLoaded(_, _) | DependentsLoaded(_, _) ->
       Some(#(model, effect.none()))
     _ -> None
+  }
+}
+
+/// A changed body or vision text as a line diff in its order: a line only in
+/// the old text takes the deletion tint and one only in the new text the
+/// addition tint; unchanged lines keep one of context on each side of a change
+/// and collapse the rest to one muted line. No line is struck through.
+fn text_diff(old: String, new: String) -> Element(msg) {
+  h.div(
+    [a.class("body-diff")],
+    list.map(diff_lines(old, new), fn(line) {
+      case line {
+        OldLine(text) -> h.p([a.class("old-value")], [h.text(text)])
+        NewLine(text) -> h.p([a.class("new-value")], [h.text(text)])
+        SameLine(text) -> h.p([a.class("context")], [h.text(text)])
+        CollapsedLines(count) ->
+          h.p([a.class("unchanged")], [
+            h.text(collapsed_text(count)),
+          ])
+      }
+    }),
+  )
+}
+
+/// A line of `text_diff`: only in the old text, only in the new, the same in
+/// both, or a run of unchanged lines left out.
+type DiffLine {
+  OldLine(String)
+  NewLine(String)
+  SameLine(String)
+  CollapsedLines(Int)
+}
+
+/// A run of the raw diff: one changed line, or consecutive unchanged ones.
+type DiffRun {
+  OneLine(DiffLine)
+  SameRun(List(String))
+}
+
+/// The lines of `text_diff`: changed lines in the text's order, with each
+/// unchanged run collapsed to a count and one line of context on each side
+/// of a change.
+fn diff_lines(old: String, new: String) -> List(DiffLine) {
+  let old_lines = text_lines(old)
+  let new_lines = text_lines(new)
+  raw_diff(old_lines, new_lines, lcs_matches(old_lines, new_lines))
+  |> collapse_unchanged
+}
+
+/// The pairs of indexes of a longest common subsequence of `old` and `new`.
+fn lcs_matches(old: List(String), new: List(String)) -> List(#(Int, Int)) {
+  case list.reverse(lcs_rows(old, new)) {
+    [current, previous, ..above] ->
+      lcs_backtrack(
+        list.reverse(old),
+        list.reverse(new),
+        current,
+        previous,
+        above,
+        list.length(old),
+        list.length(new),
+        list.length(new),
+        [],
+      )
+    _ -> []
+  }
+}
+
+/// The diff lines in order: lines before each shared one, the shared line,
+/// then the rest, with a removal before the additions that replace it.
+fn raw_diff(
+  old: List(String),
+  new: List(String),
+  matches: List(#(Int, Int)),
+) -> List(DiffLine) {
+  let #(chunks, old_end, new_end) =
+    list.fold(matches, #([], 0, 0), fn(state, match) {
+      let #(chunks, old_from, new_from) = state
+      let #(old_at, new_at) = match
+      let removed =
+        list.drop(old, old_from)
+        |> list.take(old_at - old_from)
+        |> list.map(OldLine)
+      let added =
+        list.drop(new, new_from)
+        |> list.take(new_at - new_from)
+        |> list.map(NewLine)
+      let same = case list.drop(old, old_at) {
+        [line, ..] -> [SameLine(line)]
+        [] -> []
+      }
+      #([same, added, removed, ..chunks], old_at + 1, new_at + 1)
+    })
+  let removed = list.drop(old, old_end) |> list.map(OldLine)
+  let added = list.drop(new, new_end) |> list.map(NewLine)
+  list.flatten(list.append(list.reverse(chunks), [removed, added]))
+}
+
+fn collapse_unchanged(lines: List(DiffLine)) -> List(DiffLine) {
+  let runs = group_runs(lines)
+  let last = list.length(runs) - 1
+  runs
+  |> list.index_map(fn(run, at) { collapse_run(run, at == 0, at == last) })
+  |> list.flatten
+}
+
+fn group_runs(lines: List(DiffLine)) -> List(DiffRun) {
+  case lines {
+    [] -> []
+    [SameLine(line), ..rest] -> {
+      let #(same, rest) = take_same(rest, [line])
+      [SameRun(list.reverse(same)), ..group_runs(rest)]
+    }
+    [line, ..rest] -> [OneLine(line), ..group_runs(rest)]
+  }
+}
+
+fn take_same(
+  lines: List(DiffLine),
+  acc: List(String),
+) -> #(List(String), List(DiffLine)) {
+  case lines {
+    [SameLine(line), ..rest] -> take_same(rest, [line, ..acc])
+    _ -> #(acc, lines)
+  }
+}
+
+fn collapse_run(run: DiffRun, first: Bool, last: Bool) -> List(DiffLine) {
+  case run {
+    OneLine(line) -> [line]
+    SameRun(lines) ->
+      case first, last {
+        True, True -> [CollapsedLines(list.length(lines))]
+        True, False -> collapse_start(lines)
+        False, True -> collapse_end(lines)
+        False, False -> collapse_middle(lines)
+      }
+  }
+}
+
+fn collapsed_text(count: Int) -> String {
+  case count {
+    1 -> "1 line unchanged"
+    _ -> int.to_string(count) <> " lines unchanged"
+  }
+}
+
+/// The longest-common-subsequence lengths for every prefix pair, one row per
+/// old line and one column per new line. Each row is stored from its last
+/// column back, so a backtrack can walk it from the end.
+fn lcs_rows(old: List(String), new: List(String)) -> List(List(Int)) {
+  let columns = list.length(new) + 1
+  let empty = list.repeat(0, columns)
+  old
+  |> list.fold([empty], fn(rows, old_line) {
+    [lcs_row(old_line, new, first_row(rows)), ..rows]
+  })
+  |> list.reverse
+}
+
+fn lcs_row(
+  old_line: String,
+  new: List(String),
+  previous: List(Int),
+) -> List(Int) {
+  let #(diagonal, up_rest) = case list.reverse(previous) {
+    [first, ..rest] -> #(first, rest)
+    [] -> #(0, [])
+  }
+  let #(reversed, _, _, _) =
+    list.fold(new, #([0], diagonal, up_rest, 0), fn(state, new_line) {
+      let #(reversed, diagonal, up_rest, left) = state
+      let up = row_value(up_rest, 0)
+      let value = case old_line == new_line {
+        True -> diagonal + 1
+        False ->
+          case left > up {
+            True -> left
+            False -> up
+          }
+      }
+      #([value, ..reversed], up, list.drop(up_rest, 1), value)
+    })
+  reversed
+}
+
+fn lcs_backtrack(
+  old: List(String),
+  new: List(String),
+  current: List(Int),
+  previous: List(Int),
+  above: List(List(Int)),
+  i: Int,
+  j: Int,
+  columns: Int,
+  matches: List(#(Int, Int)),
+) -> List(#(Int, Int)) {
+  case i, j {
+    _, 0 -> matches
+    0, _ -> matches
+    _, _ -> {
+      let current_at = row_value(current, 0)
+      let previous_at = row_value(previous, 0)
+      let same = case old, new {
+        [old_line, ..], [new_line, ..] -> old_line == new_line
+        _, _ -> False
+      }
+      case same && current_at == row_value(previous, 1) + 1 {
+        True ->
+          lcs_backtrack(
+            list.drop(old, 1),
+            list.drop(new, 1),
+            list.drop(previous, 1),
+            from_column(first_row(above), columns, j - 1),
+            list.drop(above, 1),
+            i - 1,
+            j - 1,
+            columns,
+            [#(i - 1, j - 1), ..matches],
+          )
+        False ->
+          case previous_at >= row_value(current, 1) {
+            True ->
+              lcs_backtrack(
+                list.drop(old, 1),
+                new,
+                previous,
+                from_column(first_row(above), columns, j),
+                list.drop(above, 1),
+                i - 1,
+                j,
+                columns,
+                matches,
+              )
+            False ->
+              lcs_backtrack(
+                old,
+                list.drop(new, 1),
+                list.drop(current, 1),
+                list.drop(previous, 1),
+                above,
+                i,
+                j - 1,
+                columns,
+                matches,
+              )
+          }
+      }
+    }
+  }
+}
+
+fn first_row(rows: List(List(Int))) -> List(Int) {
+  case rows {
+    [row, ..] -> row
+    [] -> []
+  }
+}
+
+fn from_column(row: List(Int), columns: Int, j: Int) -> List(Int) {
+  list.drop(row, columns - j)
+}
+
+fn row_value(row: List(Int), offset: Int) -> Int {
+  case list.drop(row, offset) {
+    [value, ..] -> value
+    [] -> 0
+  }
+}
+
+fn collapse_start(lines: List(String)) -> List(DiffLine) {
+  case list.reverse(lines) {
+    [] -> []
+    [only] -> [SameLine(only)]
+    [last, ..] -> [
+      CollapsedLines(list.length(lines) - 1),
+      SameLine(last),
+    ]
+  }
+}
+
+fn collapse_end(lines: List(String)) -> List(DiffLine) {
+  case lines {
+    [] -> []
+    [only] -> [SameLine(only)]
+    [first, ..] -> [
+      SameLine(first),
+      CollapsedLines(list.length(lines) - 1),
+    ]
+  }
+}
+
+fn collapse_middle(lines: List(String)) -> List(DiffLine) {
+  case lines {
+    [] -> []
+    [only] -> [SameLine(only)]
+    [first, second] -> [SameLine(first), SameLine(second)]
+    [first, ..] ->
+      case list.reverse(lines) {
+        [last, ..] -> [
+          SameLine(first),
+          CollapsedLines(list.length(lines) - 2),
+          SameLine(last),
+        ]
+        [] -> []
+      }
   }
 }

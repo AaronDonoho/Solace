@@ -608,12 +608,13 @@ fn reads_only(a: &[&str]) -> bool {
 /// Several commands, one per line, run in order; they share `budget`, since the
 /// agent cuts the reply as a whole. D-119: after a failed change the rest are
 /// skipped. D-152: after a test that failed or left a change no test reaches,
-/// a `task done` is skipped. The reply, and whether a command failed.
+/// a `task done` is skipped. A repeated failed command names its copy. The
+/// reply, and whether a command failed.
 fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize) -> Out) -> (String, bool) {
     let (mut out, mut failed, mut skipped, mut stopped) = (String::new(), vec![], vec![], false);
     let (mut waiting, mut held) = (None::<String>, false);
-    for &command in commands {
-        let command = command.strip_prefix("solace").map_or(command, |c| c.trim_start());
+    for (at, &command) in commands.iter().enumerate() {
+        let command = bare_command(command);
         if stopped {
             skipped.push(command.to_string());
             continue;
@@ -637,7 +638,7 @@ fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize)
         // `--project` names where its command runs, not a command of its own.
         if verb.is_empty() && words.iter().any(|w| w == "--project") {
             out += PROJECT_ONLY;
-            failed.push(command.to_string());
+            failed.push(failed_copy(command, commands, at));
             continue;
         }
         let test = verb.first() == Some(&"test");
@@ -651,7 +652,7 @@ fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize)
                 // it are skipped, and the next call starts clean.
                 reset_after_panic();
                 out += &panic_reply(&*p, Some(command));
-                failed.push(command.to_string());
+                failed.push(failed_copy(command, commands, at));
                 stopped = true;
                 continue;
             }
@@ -666,7 +667,7 @@ fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize)
             Ok(o) => out += &o,
             Err(Failure(msg, _)) => {
                 out += &msg;
-                failed.push(command.to_string());
+                failed.push(failed_copy(command, commands, at));
                 stopped = words.first().is_some_and(|w| STOPS.contains(&w.as_str()));
             }
         }
@@ -1162,6 +1163,9 @@ CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY, owner TEXT NOT NULL, args
 CREATE TABLE IF NOT EXISTS board_events(seq INTEGER PRIMARY KEY AUTOINCREMENT, data TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS board_before(task TEXT, entity TEXT, data TEXT NOT NULL, PRIMARY KEY(task,entity));
 CREATE TABLE IF NOT EXISTS board_touches(seq INTEGER PRIMARY KEY AUTOINCREMENT, task TEXT, entity TEXT, run TEXT, name TEXT);
+-- the warnings as of the last check, so a submit can name the new ones
+CREATE TABLE IF NOT EXISTS warnings(key TEXT PRIMARY KEY, module TEXT NOT NULL DEFAULT 'project');
+CREATE TABLE IF NOT EXISTS warning_checks(one INTEGER PRIMARY KEY CHECK (one = 1));
 ";
 
 /// Whether `table` has the column `col`.
@@ -1382,6 +1386,7 @@ impl Store {
             ("symbols", "tail", "TEXT NOT NULL DEFAULT ''"),
             ("modules", "file", "TEXT"),
             ("modules", "owns_dir", "INTEGER"),
+            ("warnings", "module", "TEXT NOT NULL DEFAULT 'project'"),
         ] {
             // A store of the root's board alone has no `symbols` or `modules`.
             let exists: bool =
@@ -1575,6 +1580,7 @@ impl Store {
                 )?;
             }
         }
+        self.record_warnings(&diags)?;
         Ok(diags)
     }
 
@@ -1586,8 +1592,6 @@ impl Store {
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?)
     }
-
-    // --- reading ---------------------------------------------------------------
 
     fn resolve(&self, ix: &Index, input: &str) -> Result<usize, Failure> {
         let mut found: Vec<usize> = store::matching(ix, input);
@@ -2509,6 +2513,7 @@ impl Store {
             };
             let ix = self.index()?;
             let before_broken = self.broken()?;
+            let before_warnings = self.warning_baseline()?;
             let diags = self.check_all(&ix)?;
             let whole_module = matches!(target, Target::Module(_));
             let own = |d: &&Diag| match &target_name {
@@ -2541,7 +2546,11 @@ impl Store {
             }
             let what = if whole_module { module.clone() } else { format!("{module} imports") };
             let mut out = format!("Saved {}.\n", target_name.as_deref().unwrap_or(&what));
-            out += &warning_summary(diags.iter().filter(|d| !d.error).filter(own));
+            out += &warnings_report(
+                before_warnings.as_ref(),
+                diags.iter().filter(|d| !d.error).filter(own),
+                diags.iter().filter(|d| !d.error).filter(|d| !own(d)),
+            );
             out += &broken_report(&before_broken, &diags);
             Ok(out)
         })?;
@@ -2753,6 +2762,7 @@ impl Store {
                 None => d.module.as_deref().is_some_and(|m| modules.contains(m)),
             };
             let before_broken = self.broken()?;
+            let before_warnings = self.warning_baseline()?;
             let mut now = self.index()?;
             let mut diags = self.check_all(&now)?;
             // Unqualified types and constructors (`Option`, `None`, a project
@@ -2799,7 +2809,11 @@ impl Store {
             if !unchanged.is_empty() {
                 out += &format!("Unchanged (the same as stored): {}.\n", unchanged.join(", "));
             }
-            out += &warning_summary(diags.iter().filter(|d| !d.error && own(d)));
+            out += &warnings_report(
+                before_warnings.as_ref(),
+                diags.iter().filter(|d| !d.error && own(d)),
+                diags.iter().filter(|d| !d.error && !own(d)),
+            );
             out += &broken_report(&before_broken, &diags);
             // The compiler stops at the first module with errors, so name the
             // other callers of a changed function, or the sites that construct a
@@ -3359,6 +3373,29 @@ impl Store {
             None => Ok(()),
         }
     }
+
+    /// The warnings of the last check; `None` before a check has ever run.
+    fn warning_baseline(&self) -> Result<Option<HashSet<String>>, Failure> {
+        let checked: i64 = self.db.query_row("SELECT COUNT(*) FROM warning_checks", [], |r| r.get(0))?;
+        if checked == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.db.prepare("SELECT key FROM warnings")?.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?))
+    }
+
+    /// Keeps this check's warnings, so a submit can name only the ones it adds.
+    fn record_warnings(&self, diags: &[Diag]) -> Result<(), Failure> {
+        let warnings: Vec<&Diag> = diags.iter().filter(|d| !d.error).collect();
+        let modules: HashSet<&str> = warnings.iter().map(|d| warning_module(d)).collect();
+        for module in modules {
+            self.db.execute("DELETE FROM warnings WHERE module = ?1", params![module])?;
+        }
+        for d in warnings {
+            self.db.execute("INSERT OR IGNORE INTO warnings(key, module) VALUES (?1, ?2)", params![warning_key(d), warning_module(d)])?;
+        }
+        self.db.execute("INSERT OR IGNORE INTO warning_checks(one) VALUES (1)", [])?;
+        Ok(())
+    }
 }
 
 /// Search terms: identifiers split at `_` and case changes, lowercased, a
@@ -3911,20 +3948,8 @@ fn locate<'a>(files: &'a [FileMap], path: &str, line: usize) -> Option<(&'a str,
 }
 
 fn warning_summary<'a>(diags: impl Iterator<Item = &'a Diag>) -> String {
-    let lines: Vec<String> = diags
-        .map(|d| {
-            format!(
-                "  {}: {}",
-                d.symbol.as_deref().or(d.module.as_deref()).unwrap_or("project"),
-                d.text.lines().find(|l| l.trim_start().starts_with("warning:")).unwrap_or("compiler warning").trim()
-            )
-        })
-        .collect();
-    if lines.is_empty() {
-        String::new()
-    } else {
-        format!("\nWarnings:\n{}\nUse `check --warnings` for full diagnostics.\n", lines.join("\n"))
-    }
+    let lines: Vec<String> = diags.map(warning_text).collect();
+    if lines.is_empty() { String::new() } else { format!("\nWarnings:\n{}\n", lines.join("\n")) }
 }
 
 /// What a change did to the broken set (D-46): `before` is the broken table
@@ -4262,4 +4287,70 @@ fn group_errors(errors: &[&Diag]) -> String {
     }
     parts.extend(plain.into_iter().map(String::from));
     parts.join("\n\n")
+}
+
+fn bare_command(command: &str) -> &str {
+    command.strip_prefix("solace").map_or(command, |c| c.trim_start())
+}
+
+/// Names a repeated command's copy (`check (copy 2)`), so its section can be
+/// found; a command that appears once is named as written.
+fn failed_copy(command: &str, commands: &[&str], at: usize) -> String {
+    if commands.iter().filter(|c| bare_command(c) == command).count() < 2 {
+        return command.to_string();
+    }
+    let copy = commands[..=at].iter().filter(|c| bare_command(c) == command).count();
+    format!("{command} (copy {copy})")
+}
+
+/// One warning as a submit prints it.
+fn warning_text(d: &Diag) -> String {
+    format!("  {}: {}", warning_place(d), warning_line(d))
+}
+
+/// A warning's place and its `warning:` line. The rendered `at` line is left
+/// out: it moves when unrelated code above changes.
+fn warning_key(d: &Diag) -> String {
+    format!("{}\n{}", warning_place(d), warning_line(d))
+}
+
+fn warning_place(d: &Diag) -> &str {
+    d.symbol.as_deref().or(d.module.as_deref()).unwrap_or("project")
+}
+
+fn warning_line(d: &Diag) -> &str {
+    d.text.lines().find(|l| l.trim_start().starts_with("warning:")).unwrap_or("compiler warning").trim()
+}
+
+/// Warnings outside the saved symbols that the last check did not have.
+fn new_warnings_summary<'a>(before: Option<&HashSet<String>>, diags: impl Iterator<Item = &'a Diag>) -> String {
+    let Some(before) = before else { return String::new() };
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut lines: Vec<String> = vec![];
+    for d in diags.filter(|d| !d.error) {
+        let key = warning_key(d);
+        if !before.contains(&key) && seen.insert(key) {
+            lines.push(warning_text(d));
+        }
+    }
+    if lines.is_empty() { String::new() } else { format!("\nNew warnings elsewhere:\n{}\n", lines.join("\n")) }
+}
+
+/// The warning sections of a submit reply, with their footer once.
+fn warnings_report<'a>(
+    before: Option<&HashSet<String>>,
+    own: impl Iterator<Item = &'a Diag>,
+    elsewhere: impl Iterator<Item = &'a Diag>,
+) -> String {
+    let own = warning_summary(own);
+    let elsewhere = new_warnings_summary(before, elsewhere);
+    if own.is_empty() && elsewhere.is_empty() {
+        String::new()
+    } else {
+        format!("{own}{elsewhere}Use `check --warnings` for full diagnostics.\n")
+    }
+}
+
+fn warning_module(d: &Diag) -> &str {
+    d.module.as_deref().unwrap_or("project")
 }

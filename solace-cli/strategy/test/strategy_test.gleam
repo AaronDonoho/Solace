@@ -706,30 +706,20 @@ fn planned() -> strategy.Model {
   )
 }
 
-/// Start plans the task open on the Tasks tab, else the whole page (D-93).
+/// Start plans the page whichever task is open; a run saved on a task is the
+/// page's open run (D-202).
 pub fn start_takes_its_context_from_the_selection_test() {
-  let model = planned()
-  assert strategy.plan_context(model) == plan.page
-  let model = step(model, strategy.Open(".", "t1"))
-  assert strategy.plan_context(model) == plan.Context("task", "t1")
-  assert strategy.plan_context(step(model, strategy.Select(strategy.Vision)))
-    == plan.page
-  assert json.to_string(plan.start_body(
-      "fake",
-      "",
-      "Plan it",
-      plan.Context("task", "t1"),
-    ))
-    == "{\"model\":\"fake\",\"text\":\"Plan it\",\"context\":{\"kind\":\"task\",\"id\":\"t1\"}}"
+  let model = step(planned(), strategy.Open(".", "t1"))
+  assert json.to_string(plan.start_body("fake", "", "Plan it", plan.page))
+    == "{\"model\":\"fake\",\"text\":\"Plan it\",\"context\":{\"kind\":\"page\"}}"
   assert json.to_string(plan.start_body("", "high", "Go", plan.page))
     == "{\"effort\":\"high\",\"text\":\"Go\",\"context\":{\"kind\":\"page\"}}"
-  // A task with an open run offers it instead of a new start: New run
-  // shows it.
+  // The task's open run is the page's open run: New run shows it, and the
+  // panel offers it instead of a start form.
   let shown = element.to_string(strategy.view(model))
   assert string.contains(shown, solace_task.ui_label("plan_open_here"))
   assert !string.contains(shown, "id=\"plan-text\"")
-  assert plan.new_run(model.runs, strategy.plan_context(model)) == "r1"
-  assert plan.new_run(model.runs, plan.page) == ""
+  assert plan.new_run(model.runs, plan.page) == "r1"
 }
 
 /// A task row, a feature and a milestone with an open run show a marker; it
@@ -786,8 +776,8 @@ pub fn open_runs_mark_their_records_until_they_end_test() {
 }
 
 /// The shown run stays in the panel across tab switches; the panel lists
-/// the runs on its context newest first under Earlier runs, and New run
-/// returns to the start form.
+/// the runs on the page newest first under Earlier runs, a run saved on a
+/// task included.
 pub fn the_panel_stays_across_tabs_and_lists_past_runs_test() {
   let model =
     planned()
@@ -815,22 +805,24 @@ pub fn the_panel_stays_across_tabs_and_lists_past_runs_test() {
   assert string.contains(shown(model), "id=\"plan-text\"")
   let model = step(model, strategy.ShowPlan(""))
   let page = shown(model)
-  assert string.contains(page, "id=\"plan-text\"")
-  assert string.contains(page, "aria-label=\"Start\"")
-  let assert Ok(#(_, plan)) = string.split_once(page, "class=\"plan-compose\"")
-  let assert Ok(#(compose, _)) = string.split_once(plan, "</aside>")
-  assert !string.contains(compose, ">Start</button>")
+  assert string.contains(page, solace_task.ui_label("plan_open_here"))
+  assert !string.contains(page, "id=\"plan-text\"")
   assert list.map(plan.past(model.runs, plan.page), fn(r) { r.id })
-    == ["r4", "r0"]
+    == ["r4", "r1", "r0"]
   let assert Ok(#(_, after)) = string.split_once(page, "Earlier runs")
+  assert string.contains(after, "Waiting for you · fake")
   assert string.contains(after, "Ended: stopped")
   assert string.contains(after, "Ended: planned")
+  // A shown run saved on a task lists the page's runs too.
+  let legacy = shown(step(model, strategy.ShowPlan("r1")))
+  assert string.contains(legacy, "Ended: stopped")
+  assert string.contains(legacy, "Ended: planned")
   // An ended run opens read-only.
   let ended = shown(step(model, strategy.ShowPlan("r4")))
   assert !string.contains(ended, "id=\"plan-text\"")
   // Collapsed, the panel keeps one line.
   let collapsed = shown(step(model, strategy.PlanCollapse))
-  assert string.contains(collapsed, "No run open")
+  assert string.contains(collapsed, "A run on this is open")
   assert !string.contains(collapsed, "id=\"plan-text\"")
 }
 
@@ -1042,6 +1034,7 @@ pub fn the_panel_is_resized_within_its_bounds_test() {
 }
 
 /// The panel says what it plans: the whole project, or the record by kind.
+/// Opening a task leaves it on the page (D-202).
 pub fn the_panel_names_its_planning_context_test() {
   let shown = fn(model) { element.to_string(strategy.view(model)) }
   let model = planned()
@@ -1052,8 +1045,9 @@ pub fn the_panel_names_its_planning_context_test() {
   let model = step(model, strategy.Open(".", "t1"))
   assert string.contains(
     shown(model),
-    solace_task.ui_label("plan_context") <> ": task <em>Index</em>",
+    solace_task.ui_label("plan_context") <> ": Whole Project",
   )
+  assert !string.contains(shown(model), "task <em>Index</em>")
   assert string.contains(
     shown(step(model, strategy.ShowPlan("r2"))),
     solace_task.ui_label("plan_context") <> ": feature <em>Search</em>",
@@ -1358,7 +1352,7 @@ pub fn the_run_bar_holds_the_run_controls_test() {
   assert !string.contains(ended, ">End</button>")
   assert !string.contains(ended, ">Stop</button>")
   assert !string.contains(ended, "id=\"plan-text\"")
-  let none = shown(planned())
+  let none = shown(workspace())
   assert in_order(none, [
     "class=\"plan-bar\"",
     "No run open",
@@ -1419,7 +1413,7 @@ pub fn shared_labels_on_the_pages_test() {
   let shown = fn(model) { element.to_string(strategy.view(model)) }
   let button = fn(name) { ">" <> solace_task.ui_label(name) <> "</button>" }
   let model =
-    planned()
+    quiet_planned()
     |> step(strategy.ModelsLoaded(
       "[{\"id\":\"m\",\"label\":\"M\",\"available\":true}]",
     ))
@@ -1444,8 +1438,8 @@ pub fn shared_labels_on_the_pages_test() {
     shown(model),
     "aria-label=\"" <> solace_task.ui_label("model") <> "\"",
   )
-  // The open run on the selection is offered by name.
-  let model = step(model, strategy.Open(".", "t1"))
+  // The open run on the page is offered by name.
+  let model = step(planned(), strategy.Open(".", "t1"))
   assert string.contains(shown(model), button("open_run"))
   // Features: New feature, its form's Create task, and the project picker.
   let model = step(model, strategy.Select(strategy.Features))
@@ -2371,7 +2365,7 @@ pub fn the_plan_offers_only_models_that_can_start_test() {
   let sol =
     "{\"id\":\"sol\",\"label\":\"Sol\",\"agent\":\"codex\",\"available\":false,\"reason\":\"Codex usage limit reached\",\"retry\":true}"
   let model =
-    planned()
+    quiet_planned()
     |> step(strategy.ModelsLoaded(
       "[{\"id\":\"m\",\"label\":\"M\",\"model\":\"gpt-6-astra\",\"available\":true},"
       <> sol
@@ -2718,7 +2712,7 @@ pub fn the_plan_models_follow_refreshes_test() {
   let shown = fn(model) { element.to_string(strategy.view(model)) }
   let initial =
     step(
-      planned(),
+      quiet_planned(),
       strategy.ModelsLoaded(
         "[{\"id\":\"a\",\"label\":\"A\",\"available\":false,\"reason\":\"not installed\"},{\"id\":\"b\",\"label\":\"B\",\"efforts\":[\"low\",\"high\"]}]",
       ),
@@ -3692,7 +3686,7 @@ pub fn record_state_labels_share_one_color_class_test() {
 /// shown until another is chosen, and the effort it sends.
 pub fn the_plan_draws_the_shared_effort_pick_test() {
   let model =
-    planned()
+    quiet_planned()
     |> step(strategy.ModelsLoaded(
       "[{\"id\":\"m\",\"label\":\"M\",\"effort\":\"medium\",\"efforts\":[\"low\",\"medium\",\"high\",\"xhigh\",\"max\"]},{\"id\":\"n\",\"label\":\"N\",\"effort\":\"high\",\"efforts\":[\"low\",\"high\"]}]",
     ))
@@ -3874,7 +3868,7 @@ pub fn the_editor_actions_send_from_the_plan_and_forms_test() {
     )
   }
 
-  let start = planned() |> step(strategy.PlanText("Plan the page"))
+  let start = quiet_planned() |> step(strategy.PlanText("Plan the page"))
   assert clicked(start, in_plan).plan_sending
 
   let send =
@@ -4063,8 +4057,8 @@ pub fn a_reload_restores_active_form_drafts_test() {
   restore_drafts()
 }
 
-/// A reply for a send made from another selection keeps the text typed
-/// since.
+/// A reply for a send made from the page keeps the text typed since,
+/// through opening a task.
 pub fn plan_reply_keeps_text_typed_after_a_switch_test() {
   install_drafts()
   let sending =
@@ -4099,7 +4093,7 @@ pub fn a_tab_switch_keeps_the_newer_plan_text_test() {
   restore_drafts()
 }
 
-/// A context switch keeps the plan text even without storage.
+/// Opening a task keeps the plan text even without storage.
 pub fn plan_text_survives_a_context_switch_without_storage_test() {
   install_drafts()
   let task =
@@ -4232,4 +4226,24 @@ pub fn an_id_search_ranks_first_test() {
   }
   assert by("t1") == ["t1", "t2"]
   assert by("task:t1") == ["t1", "t2"]
+}
+
+/// `planned` with the task's run ended, so the page has no open run and the
+/// start form shows.
+fn quiet_planned() -> strategy.Model {
+  planned()
+  |> step(
+    strategy.Live(
+      json.to_string(
+        json.object([
+          #(
+            "strategyRun",
+            run("r1", "ended", #("task", "t1"), 10, [
+              #("outcome", json.string("planned")),
+            ]),
+          ),
+        ]),
+      ),
+    ),
+  )
 }

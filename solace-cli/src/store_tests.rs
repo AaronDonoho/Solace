@@ -110,3 +110,30 @@ fn a_plain_error_keeps_not_saved() {
     let e = rust_syntax_error(Failure("Not saved: elsewhere".into(), 1), "crate.one", None, "crate", 0, 5);
     assert_eq!(e.0, "Not saved: elsewhere");
 }
+
+#[test]
+fn a_warning_stays_in_the_baseline_when_its_module_reports_nothing() {
+    let p = crate::testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    p.record_warnings(&[crate::Diag {
+        error: false,
+        module: Some("a".into()),
+        symbol: Some("a.unused".into()),
+        text: "warning: unused".into(),
+    }])
+    .unwrap();
+    p.record_warnings(&[]).unwrap();
+    let baseline = p.warning_baseline().unwrap().unwrap();
+    assert!(baseline.iter().any(|key| key.starts_with("a.unused\n")), "{baseline:?}");
+}
+
+#[test]
+fn an_older_store_gains_the_warning_module_column() {
+    let root = Scratch::new();
+    fs::create_dir_all(root.join(".solace")).unwrap();
+    let db = Connection::open(root.join(".solace/store.db")).unwrap();
+    db.execute_batch("CREATE TABLE warnings(key TEXT PRIMARY KEY);\nINSERT INTO warnings VALUES ('old');").unwrap();
+    drop(db);
+    let store = Store::at(&root).unwrap();
+    let module: String = store.db.query_row("SELECT module FROM warnings", [], |r| r.get(0)).unwrap();
+    assert_eq!(module, "project");
+}

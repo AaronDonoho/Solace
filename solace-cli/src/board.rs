@@ -45,12 +45,8 @@ fn task_dir(root: &Path, id: &str) -> Result<PathBuf, Failure> {
 /// re-homed on load (D-160); one with no project at all is opened from the
 /// root, which stores it, and says `noProject` (D-129).
 pub(super) fn task(root: &Path, id: &str) -> Result<Value, Failure> {
-    let path = task_path(root, id)?;
     let top = scope::top(root);
-    if !path.exists() {
-        return err("E7001", "unknown task");
-    }
-    let mut t = rehome_task(&top, read_task(&top, &path)?)?;
+    let mut t = stored_task(&top, id)?;
     let dir = scope::dir(&top, root);
     if t["home"] != dir {
         if dir != "." || !homeless(&top, t["home"].as_str().unwrap_or("")) {
@@ -64,7 +60,7 @@ pub(super) fn task(root: &Path, id: &str) -> Result<Value, Failure> {
 /// home is in no lane, and opening it at its home would create a store there.
 /// A project list that can't be read counts every home as a project.
 pub(super) fn homeless(top: &Path, home: &str) -> bool {
-    workspace::members(top).is_ok_and(|ms| !ms.iter().any(|m| m == home))
+    homeless_among(&workspace::members(top), home)
 }
 /// The home and scope a task whose home is no project takes (D-160): the first
 /// project of its scope, keeping only the projects of it, else the root with
@@ -94,8 +90,7 @@ fn rehome_task(top: &Path, t: Value) -> Result<Value, Failure> {
 /// The project to open task `t` from: its home, or the root when its home is
 /// no project (D-129).
 pub(super) fn task_root(top: &Path, t: &Value) -> PathBuf {
-    let home = t["home"].as_str().unwrap_or(".");
-    if homeless(top, home) { top.to_path_buf() } else { scope::path(top, home) }
+    project_home(top, t).unwrap_or_else(|| top.to_path_buf())
 }
 /// The tasks whose home is the project `root`, in rank order.
 pub(super) fn tasks(root: &Path) -> Result<Vec<Value>, Failure> {
@@ -1603,9 +1598,8 @@ fn settle(s: &Store, t: &Value) -> Result<(), Failure> {
     }
     settle_result(pending, failed)
 }
-/// The body of a feature's Tech Debt task (D-112).
-const TECH_DEBT_BODY: &str =
-    "Minor, non-blocking findings from reviews of this feature's tasks, one note each, filed when the reviewed task was completed.";
+/// The body of a Tech Debt task (D-112).
+const TECH_DEBT_BODY: &str = "Minor, non-blocking findings from reviews, one note each, filed when the reviewed task was completed.";
 /// The findings of a note's `### Tech debt` section (D-112): one per top-level
 /// bullet (`-`, `*`, `+` or `1.`), with the indented lines below it. The
 /// section ends at the next heading; no section gives none.
@@ -1647,32 +1641,29 @@ fn last_review(t: &Value) -> Option<(String, String)> {
 /// finding of the last review's `### Tech debt`, naming the task they came from.
 /// With no open one, a new one is made in Planning of `t`'s home (its first
 /// column if it has none, D-132), with its scope, titled `<feature title>: Tech
-/// Debt`. None when the task has no feature or the review lists no tech debt.
-/// Nothing is written here.
+/// Debt`. A task with no feature always gets a new one titled `<task title>:
+/// Tech Debt`, with no feature or milestone. None when the review lists no tech
+/// debt. Nothing is written here.
 pub(super) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize)>, Failure> {
-    let Some(fid) = t["feature"].as_str() else { return Ok(None) };
     let Some((rid, text)) = last_review(t) else { return Ok(None) };
     let items = tech_debt_items(&text);
-    let Some(feature) = tasks::record(top, "features", fid).filter(|_| !items.is_empty()) else { return Ok(None) };
+    if items.is_empty() {
+        return Ok(None);
+    }
     let tid = t["id"].as_str().unwrap_or("");
-    let open = |o: &Value| flow(&scope::path(top, o["home"].as_str().unwrap_or("."))).is_ok_and(|w| column(&w, o)["final"] != true);
-    let found = all_tasks(top)?.into_iter().find(|o| o["techDebt"] == true && o["feature"] == fid && o["id"] != tid && open(o));
-    let mut debt = match found {
-        Some(d) => d,
-        None => {
-            let home = scope::path(top, t["home"].as_str().unwrap_or("."));
-            let rank = tasks(&home)?.iter().filter_map(|x| x["rank"].as_f64()).fold(0., f64::max) + 1.;
-            let title = format!("{}: Tech Debt", feature["title"].as_str().unwrap_or("").trim());
-            let w = flow(&home)?;
-            let first = if has_column(&w, PLANNING) { json!(PLANNING) } else { w["columns"][0]["id"].clone() };
-            let mut d = new_task(&title, TECH_DEBT_BODY, &first, rank);
-            d["techDebt"] = json!(true);
-            d["feature"] = json!(fid);
-            d["milestone"] = feature["milestone"].clone();
-            d["scope"] = t["scope"].clone();
-            d["home"] = t["home"].clone();
-            d
+    let fid = t["feature"].as_str();
+    let feature = fid.and_then(|f| tasks::record(top, "features", f));
+    let mut debt = match (fid, feature) {
+        (Some(fid), Some(feature)) => {
+            let open = |o: &Value| flow(&scope::path(top, o["home"].as_str().unwrap_or("."))).is_ok_and(|w| column(&w, o)["final"] != true);
+            let found = all_tasks(top)?.into_iter().find(|o| o["techDebt"] == true && o["feature"] == fid && o["id"] != tid && open(o));
+            match found {
+                Some(d) => d,
+                None => new_debt(top, t, Some(&feature))?,
+            }
         }
+        (Some(_), None) => return Ok(None),
+        (None, _) => new_debt(top, t, None)?,
     };
     for item in &items {
         note(&mut debt, "solace", None, &format!("Tech debt from the review of task:{tid} (review run {rid}):\n\n{item}"));
@@ -1687,7 +1678,7 @@ pub(super) fn tech_debt(top: &Path, t: &Value) -> Result<Option<(Value, usize)>,
 pub(super) fn settle_final(top: &Path, tid: &str) -> Result<(), Failure> {
     // A task with no project (D-129) has no scope to settle, and settling it
     // at its home would create a store there.
-    let t = task(top, tid)?;
+    let t = task_at_home(top, tid)?;
     if t["noProject"] == true {
         return Ok(());
     }
@@ -2239,8 +2230,9 @@ pub(super) fn read_task_api(root: &Path, parts: &[&str]) -> Result<Value, Failur
         _ => err("E7001", "unknown route"),
     }
 }
-/// `POST /tasks`: a new task of the project `root`, not yet written.
-pub(super) fn created(root: &Path, body: &Value) -> Result<Value, Failure> {
+/// `POST /tasks`: a new task of the project `root`, not yet written, in
+/// `Column::Planning` (its first column if it has none, D-132), else `Column::First`.
+pub(super) fn created(root: &Path, body: &Value, column: Column) -> Result<Value, Failure> {
     let w = flow(root)?;
     let title = body["title"].as_str().filter(|s| !s.trim().is_empty()).ok_or_else(|| Failure("E7001 title required".into(), 1))?;
     if body.get("body").is_some_and(|x| !x.is_string()) || body.get("links").is_some_and(|x| !x.is_array()) {
@@ -2256,7 +2248,11 @@ pub(super) fn created(root: &Path, body: &Value) -> Result<Value, Failure> {
         return err("E7001", format!("a task is created in a project of its scope; post it to one of {}", scope.join(", ")));
     }
     let rank = tasks(root)?.iter().filter_map(|t| t["rank"].as_f64()).fold(0., f64::max) + 1.;
-    let mut t = new_task(title, body["body"].as_str().unwrap_or(""), &w["columns"][0]["id"], rank);
+    let column = match column {
+        Column::First => w["columns"][0]["id"].clone(),
+        Column::Planning => planning_column(&w),
+    };
+    let mut t = new_task(title, body["body"].as_str().unwrap_or(""), &column, rank);
     t["scope"] = json!(scope);
     t["links"] = body.get("links").cloned().unwrap_or(json!([]));
     t["home"] = json!(home);
@@ -2268,8 +2264,8 @@ pub(super) enum After {
     /// Launch the run `(rid, model)`.
     Start(String, Value),
     /// The task reached a final column: its conversation goes. A task
-    /// completed with its last review's tech debt carries the feature's Tech
-    /// Debt task to write with it (D-112).
+    /// completed with its last review's tech debt carries the Tech Debt task to
+    /// write with it (D-112).
     Clean(Option<Value>),
     /// The task's home left its scope; the board's lane for this one drops it (D-61).
     Removed(String),
@@ -3437,8 +3433,8 @@ fn step_line(i: usize, e: &Value) -> String {
 const START: &str = "Start with `session start --task`, with the task's title and description as `text`.";
 /// A fresh run's first step when its brief holds the session start reply (D-151).
 const HELD_START: &str = "The reply to `session start --task`, with the task's title and description, is at the end of this brief: start with the call its `Next:` line names. Send `session start --task` again only to see that reply again, for example after the conversation is compacted.";
-/// What a review of a task in a feature is asked to add (D-112).
-const TECH_DEBT_ASK: &str = "This task is part of a feature: put minor, non-blocking findings that later work in the feature should fix under a `### Tech debt` heading in the feedback, one finding per bullet with its location (`module.name` or a file). When the task is completed, Solace files each on the feature's Tech Debt task; findings that block this task belong in the findings, not there.";
+/// What every review is asked to add (D-112, D-198, D-199).
+const TECH_DEBT_ASK: &str = "Put minor, non-blocking findings that should be fixed later in a Tech debt section at the end of the feedback, each written like a finding. Findings that block this task belong in the findings, not there. When the task is completed, Solace files each item on a Tech Debt task, and a section in any other shape is dropped: the heading is exactly `### Tech debt`; each item is one `- ` bullet at the start of a line; its details are lines indented under it; no line after the heading starts with `#`; no other heading is inside the section, and nothing follows it except a new heading. For example:\n\n### Tech debt\n\n- `board.brief`: <what is wrong>. Change it to <what> because <why>.\n  Check: <test or command and its expected result>.";
 /// The task's context as a brief gives it: title, body, links, notes and
 /// questions. Its feature and dependencies are added where a brief adds them.
 fn task_sections(t: &Value) -> String {
@@ -3516,8 +3512,8 @@ fn brief(t: &Value, kind: &str) -> String {
         Some(e) => format!("{tests}; the marked test commands could not be read for: {e}"),
         None => tests,
     };
-    // A task in a feature files its review's minor findings as the feature's tech debt (D-112).
-    let debt = if t["feature"].is_string() { format!(" {TECH_DEBT_ASK}") } else { String::new() };
+    // Every review asks for detailed findings and files its minor ones as tech debt (D-112, D-198, D-199).
+    let debt = format!(" {} {}", FINDINGS_ASK, TECH_DEBT_ASK);
     let role = match kind {
         "review" => review_role(read_only, verify, &debt),
         "discuss" => discussion_role(read_only, verify),
@@ -4894,7 +4890,7 @@ impl Events {
             // A row with no project is a root record's (D-87); a row whose
             // project is no member is a task with no project (D-129), shown
             // on the root's streams and marked.
-            let homeless = !project.is_empty() && members.as_ref().is_ok_and(|ms| !ms.iter().any(|m| m == &project));
+            let homeless = !project.is_empty() && homeless_among(&members, &project);
             let shown = if project.is_empty() {
                 self.at_root()
             } else {
@@ -4911,7 +4907,7 @@ impl Events {
                 v["noProject"] = json!(true);
             }
             let home = v.get("task").and_then(|t| t.get("home")).and_then(Value::as_str).unwrap_or(".");
-            let has_project = members.as_ref().map_or(true, |ms| ms.iter().any(|m| m.as_str() == home));
+            let has_project = !homeless_among(&members, home);
             let v = stream_task_event(&self.board.top, v, has_project);
             return Ok(Some(format!("id: {}\ndata: {v}\n\n", self.id())));
         }
@@ -5273,11 +5269,11 @@ fn act(root: &Path, s: &Store, w: &Value, t: &mut Value, body: &Value) -> Result
     }
 }
 
-/// A completed task's last review files its tech debt on its feature (D-112);
-/// its conversation goes.
+/// A completed task's last review files its tech debt (D-112); its conversation
+/// goes.
 fn completed(root: &Path, tid: &str, t: &mut Value, was_final: bool, a: &Value) -> After {
     // Completed with its changes kept, not canceled: the last review's tech
-    // debt goes to the feature.
+    // debt is filed.
     let debt = if !was_final && a["revert"] != true {
         tech_debt(&scope::top(root), t).unwrap_or_else(|e| {
             eprintln!("filing tech debt of task {tid}: {}", e.0);
@@ -5398,4 +5394,143 @@ pub(super) fn stream_task_event(top: &Path, mut event: Value, has_project: bool)
         event["task"] = tasks::with_on_board(top, task, has_project, &mut HashMap::new());
     }
     event
+}
+
+/// A new Tech Debt task for completed task `t`: in Planning of its home (its
+/// first column if it has none, D-132), with its scope. A `feature` names the
+/// task it serves and supplies its milestone and title; without one, it is
+/// titled after `t` and belongs to no feature or milestone.
+fn new_debt(top: &Path, t: &Value, feature: Option<&Value>) -> Result<Value, Failure> {
+    let named = feature.unwrap_or(t);
+    let title = format!("{}: Tech Debt", named["title"].as_str().unwrap_or("").trim());
+    let home = scope::path(top, t["home"].as_str().unwrap_or("."));
+    let rank = tasks(&home)?.iter().filter_map(|x| x["rank"].as_f64()).fold(0., f64::max) + 1.;
+    let w = flow(&home)?;
+    let first = planning_column(&w);
+    let mut d = new_task(&title, TECH_DEBT_BODY, &first, rank);
+    d["techDebt"] = json!(true);
+    d["feature"] = t["feature"].clone();
+    d["milestone"] = feature.map(|f| f["milestone"].clone()).unwrap_or(Value::Null);
+    d["scope"] = t["scope"].clone();
+    d["home"] = t["home"].clone();
+    Ok(d)
+}
+
+/// What every review's findings must say (D-199).
+const FINDINGS_ASK: &str = "Write each finding so a worker can act on it without investigating again: name the symbol (`module.name`) or file, what is wrong, what to change it to and why, and how to check it is done (a test to add or run, or what a command or page should show).";
+
+/// One line for a failed tool step: its number, command head and first error line.
+fn failed_step_line(i: usize, e: &Value) -> String {
+    let title = e["title"].as_str().unwrap_or("");
+    let output = e["output"].as_str().unwrap_or("");
+    let (command, copy) = failed_command(title, output);
+    let section = failed_section(output, &command, copy);
+    let error = error_line(&section).unwrap_or("(no error text)");
+    format!("{} {}: {}", i + 1, cut_line(&command), cut_line(error))
+}
+
+/// The command a failed batch names first, with which copy of it failed, or the
+/// title's first line for one command, without the tool name or failure marker.
+fn failed_command(title: &str, output: &str) -> (String, usize) {
+    let listed = output.lines().rev().find_map(|line| line.split_once(" commands failed: ").map(|(_, rest)| rest.trim()));
+    let (command, copy) = match listed {
+        Some(listed) => command_copy(listed.split("; ").next().unwrap_or("").trim()),
+        None => (title.lines().next().unwrap_or(""), 1),
+    };
+    let command = command.strip_prefix("solace ").unwrap_or(&command);
+    match command.strip_prefix('(').and_then(|rest| rest.split_once(") ")) {
+        Some((marker, head)) if marker.ends_with(" failed") && marker.contains(" of ") => (head.to_string(), copy),
+        _ => (command.to_string(), copy),
+    }
+}
+
+/// The first error code line, else the first line that is not a batch header or summary.
+fn error_line(output: &str) -> Option<&str> {
+    output.lines().map(str::trim).find(|line| error_code(line)).or_else(|| {
+        output.lines().map(str::trim).find(|line| {
+            !line.is_empty() && !line.starts_with("==== solace ") && !line.contains(" commands failed: ") && !line.starts_with("skipped: ")
+        })
+    })
+}
+
+/// Whether a line starts with an error code such as `E0108` or `E6002`.
+fn error_code(line: &str) -> bool {
+    line.strip_prefix('E').is_some_and(|rest| {
+        let mut chars = rest.chars();
+        (0..4).all(|_| chars.next().is_some_and(|c| c.is_ascii_digit()))
+    })
+}
+
+/// A failed command's copy in a batch, up to the next header or summary; all of
+/// the output when the failure is not a batch.
+fn failed_section(output: &str, command: &str, copy: usize) -> String {
+    let header = format!("==== solace {command} ====");
+    let start = output
+        .match_indices(&header)
+        .nth(copy.saturating_sub(1))
+        .or_else(|| output.match_indices(&header).next())
+        .map(|(at, _)| at + header.len());
+    let Some(start) = start else { return output.to_string() };
+    output[start..]
+        .lines()
+        .take_while(|line| {
+            let line = line.trim_start();
+            !line.starts_with("==== solace ") && !line.contains(" commands failed: ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The column a task goes in to be planned: `planning` when the workflow has
+/// it, else its first column (D-132).
+fn planning_column(w: &Value) -> Value {
+    if has_column(w, PLANNING) { json!(PLANNING) } else { w["columns"][0]["id"].clone() }
+}
+
+/// Where a new task goes: its workflow's first column, or Planning.
+#[derive(Clone, Copy)]
+pub(super) enum Column {
+    First,
+    Planning,
+}
+
+/// A batch labels a repeated failed command's copy: `check (copy 2)`.
+fn command_copy(command: &str) -> (&str, usize) {
+    match command.rsplit_once(" (copy ") {
+        Some((command, copy)) => match copy.strip_suffix(')').and_then(|copy| copy.parse().ok()) {
+            Some(copy) => (command, copy),
+            None => (command, 1),
+        },
+        None => (command, 1),
+    }
+}
+
+/// The task `id` from the root's store, re-homed when its home is no project (D-160).
+fn stored_task(top: &Path, id: &str) -> Result<Value, Failure> {
+    let path = task_path(top, id)?;
+    if !path.exists() {
+        return err("E7001", "unknown task");
+    }
+    rehome_task(top, read_task(top, &path)?)
+}
+
+/// Task `id` read at its own home: the root's project or a member project.
+/// A task with no project (D-129) opens from the root, marked `noProject`.
+pub(super) fn task_at_home(root: &Path, id: &str) -> Result<Value, Failure> {
+    let top = scope::top(root);
+    let mut t = stored_task(&top, id)?;
+    if project_home(&top, &t).is_none() {
+        t["noProject"] = json!(true);
+    }
+    Ok(t)
+}
+
+/// The project that holds task `t`, when its home names one.
+pub(super) fn project_home(top: &Path, t: &Value) -> Option<PathBuf> {
+    let home = t["home"].as_str().unwrap_or(".");
+    (!homeless(top, home)).then(|| scope::path(top, home))
+}
+
+fn homeless_among(members: &Result<Vec<String>, Failure>, home: &str) -> bool {
+    members.as_ref().is_ok_and(|ms| !ms.iter().any(|m| m == home))
 }

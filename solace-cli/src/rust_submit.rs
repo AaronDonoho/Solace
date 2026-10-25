@@ -433,6 +433,7 @@ impl Store {
                 return Ok(out);
             }
             let before_broken = self.broken()?;
+            let before_warnings = self.warning_baseline()?;
             let diags = self.check_all(&after_ix)?;
             let own = |d: &Diag| match &d.symbol {
                 Some(s) => s.starts_with(&format!("{module}.")),
@@ -455,7 +456,11 @@ impl Store {
                 format!("Saved {module}.\nNote: {module}: changed {}; added {}\n", list(&changed), list(&added))
             };
             out += &dropped_impls_note(&dropped);
-            out += &warning_summary(diags.iter().filter(|d| !d.error && own(d)));
+            out += &warnings_report(
+                before_warnings.as_ref(),
+                diags.iter().filter(|d| !d.error && own(d)),
+                diags.iter().filter(|d| !d.error && !own(d)),
+            );
             out += &broken_report(&before_broken, &diags);
             out += &note_lines(&long_line_notes(&ix, &module, &items, max_width, formatted));
             Ok(out)
@@ -749,6 +754,7 @@ impl Store {
                 None => d.module.as_deref().is_some_and(|m| modules.contains(m)),
             };
             let before_broken = self.broken()?;
+            let before_warnings = self.warning_baseline()?;
             let ix = self.index()?;
             let diags = self.check_all(&ix)?;
             let errors: Vec<&Diag> = diags.iter().filter(|d| d.error && own(d)).collect();
@@ -769,7 +775,11 @@ impl Store {
                 out += &format!("Unchanged (the same as stored): {}.\n", unchanged.join(", "));
             }
             out += &dropped_impls_note(&dropped);
-            out += &warning_summary(diags.iter().filter(|d| !d.error && own(d)));
+            out += &warnings_report(
+                before_warnings.as_ref(),
+                diags.iter().filter(|d| !d.error && own(d)),
+                diags.iter().filter(|d| !d.error && !own(d)),
+            );
             out += &broken_report(&before_broken, &diags);
             let mut long = vec![];
             for (module, .., items) in &plan {
@@ -966,6 +976,7 @@ impl Store {
             self.set_header(&module, &header)?;
             let ix = self.index()?;
             let before_broken = self.broken()?;
+            let before_warnings = self.warning_baseline()?;
             let diags = self.check_all(&ix)?;
             // An error on one of the module's items is this submit's too, unless it
             // was already broken: removing a `use` an item needs must not save (D-168).
@@ -979,7 +990,11 @@ impl Store {
                 return fail(format!("Not saved: the submitted text has errors.\n\n{}\n{}", text.join("\n\n"), cargo::ROUND_NOTE));
             }
             let mut out = format!("Saved {saved}.\n");
-            out += &warning_summary(diags.iter().filter(|d| !d.error && own(d)));
+            out += &warnings_report(
+                before_warnings.as_ref(),
+                diags.iter().filter(|d| !d.error && own(d)),
+                diags.iter().filter(|d| !d.error && !own(d)),
+            );
             out += &broken_report(&before_broken, &diags);
             Ok(out)
         })?;

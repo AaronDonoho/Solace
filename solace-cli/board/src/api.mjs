@@ -101,12 +101,12 @@ export function resize_size(start, startSize, at) {
   return Math.round(startSize + (start - at));
 }
 
-// The band moves to the right edge when the window is wider than 1.4 times
-// its height. `send` hears whether it is, now and on every change; a root
-// that asks again replaces its listener.
+// The band moves to the right edge when the window is at least 1.1 times
+// as wide as it is tall. `send` hears whether it is, now and on every
+// change; a root that asks again replaces its listener.
 const sideWatchers = new WeakMap();
 export function watch_side(root, send) {
-  const media = globalThis.matchMedia?.('(min-aspect-ratio: 7/5)');
+  const media = globalThis.matchMedia?.('(min-aspect-ratio: 11/10)');
   if (!media || !root) return;
   const old = sideWatchers.get(root);
   if (old) old[0].removeEventListener('change', old[1]);

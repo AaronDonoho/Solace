@@ -84,8 +84,8 @@ pub type Model {
     /// The detail band's width in pixels when it sits at the right edge; 0
     /// is the CSS default.
     detail_width: Int,
-    /// Whether the window is wider than 1.4 times its height, so an open
-    /// task's band sits at the right edge instead of the bottom.
+    /// Whether the window is at least 1.1 times as wide as it is tall, so
+    /// an open task's band sits at the right edge instead of the bottom.
     side: Bool,
     /// A drag of the resize handle in progress: the pointer's start, the
     /// band's size then, and the largest size that keeps the board's
@@ -141,7 +141,7 @@ pub type Msg {
   ResizeEnd
   /// The handle's keydown: the key's name.
   ResizeKey(String)
-  /// Whether the window is wider than 1.4 times its height.
+  /// Whether the window is at least 1.1 times as wide as it is tall.
   Sided(Bool)
   /// The bar's Copy ID: the open task's reference goes to the clipboard.
   CopyId
@@ -1696,8 +1696,8 @@ fn lanes_min(model: Model) -> Int {
   lanes_width(columns)
 }
 
-/// Tells `send` whether the window is wider than 1.4 times its height, now
-/// and on every change.
+/// Tells `send` whether the window is at least 1.1 times as wide as it is
+/// tall, now and on every change.
 @external(javascript, "./api.mjs", "watch_side")
 fn watch_side(root: dynamic.Dynamic, send: fn(Bool) -> Nil) -> Nil
 

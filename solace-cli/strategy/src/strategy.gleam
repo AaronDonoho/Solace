@@ -1717,14 +1717,6 @@ fn after(ms: Int, callback: fn() -> Nil) -> Nil
 /// While the shown run's agent works, its transcript is fetched again this often.
 const refresh_ms = 1500
 
-/// What Start plans: the task open on the Tasks tab, else the whole page.
-pub fn plan_context(model: Model) -> plan.Context {
-  case model.tab, model.selected {
-    Tasks, Some(#(_, id)) -> plan.Context("task", id)
-    _, _ -> plan.page
-  }
-}
-
 /// The run shown in the planning panel.
 fn plan_shown(model: Model) -> Option(plan.Run) {
   list.find(model.runs, fn(r) { r.id == model.plan_open })
@@ -1803,7 +1795,7 @@ fn plan_view(model: Model) -> Element(Msg) {
     model.prefix,
     plan.Panel(
       runs: model.runs,
-      context: plan_context(model),
+      context: plan.page,
       shown: plan_shown(model),
       entries: model.plan_entries,
       collapsed: model.plan_collapsed,
@@ -4622,7 +4614,7 @@ fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
               model.plan_model,
               model.plan_effort,
               model.plan_text,
-              plan_context(model),
+              plan.page,
             ),
             True,
           )

@@ -90,12 +90,13 @@ pub(super) const STRATEGY_ROLE: &str = concat!(
     "`strategy show note <task> <notes>` gives those notes in full (`3,7,10..12`, or `all`); ",
     "a reply stops at the end of a note and names the rest in a `Next:` line, ",
     "and a note too long for one reply comes in parts, its `Next:` line ending in `--from <n>` to read on. ",
-    "A task's run log is `strategy show run <task> <run>` (one line per step), ",
+    "A task's run log is `strategy show run <task> <run>` (one line per step; `--failed` lists just the failed steps), ",
     "then `strategy show run <task> <run> 3,7,10..12` for those in full, or `all`, stopping the same way. ",
     "Read code with `view`, `inspect`, `refs`, `find`, `grep`, `files` and `read` (`help <command>` gives its options), ",
     "adding `--project <folder>` for a project below the root; ",
     "`grep` searches its text as written, case-insensitive ",
-    "(quotes around the whole text are dropped), with no options, regex or path filter; ",
+    "(quotes around the whole text are dropped), with `--in <path>` to choose a file or folder, ",
+    "`--context n` for lines around a match, and no regex; ",
     "`read <path> --lines 5..9` reads lines of a file. ",
     "Cite code by name (`lockdown.dispatch`, `checkout.pay`), not `file:line`: line numbers move. ",
     "In notes and proposals, name tasks, features and milestones as `task:<id>`, `feature:<id>` or `milestone:<id>`, ",
@@ -296,15 +297,9 @@ fn compact_task(t: &Value) -> Value {
 /// `strategy show run`: a task's run without its `log`, and its transcript's
 /// steps: one line each, in full for `steps` (`3,7,10..12`) or `all`.
 pub(super) fn strategy_run_show(top: &Path, tid: &str, rid: &str, steps: Option<&str>) -> Result<Value, Failure> {
-    let Some(t) = all_tasks(top)?.into_iter().find(|t| t["id"] == tid) else { return err("E7023", format!("unknown task {tid}")) };
-    let Some(mut run) = t["runs"].as_array().and_then(|rs| rs.iter().find(|r| r["id"] == rid)).cloned() else {
-        return err("E7023", format!("task {tid} has no run {rid}"));
-    };
-    // Token counts tell an agent nothing about the work, so they are not steps.
-    let entries: Vec<Value> =
-        transcript(Path::new(run["log"].as_str().unwrap_or(""))).into_iter().filter(|e| e["kind"] != "usage").collect();
-    run.as_object_mut().map(|o| o.remove("log"));
-    if entries.is_empty() && steps.is_some() {
+    let (run, entries) = run_with_steps(top, tid, rid)?;
+    let picked = steps.is_some();
+    if entries.is_empty() && picked {
         return err("E7001", format!("run {rid} has no steps"));
     }
     let numbered = |i: usize| {
@@ -317,6 +312,7 @@ pub(super) fn strategy_run_show(top: &Path, tid: &str, rid: &str, steps: Option<
         Some("all") => json!((0..entries.len()).map(numbered).collect::<Vec<_>>()),
         Some(spec) => json!(step_list(spec, entries.len())?.into_iter().map(|n| numbered(n - 1)).collect::<Vec<_>>()),
     };
+    let run = if picked { json!(run_header(&run)) } else { run };
     Ok(json!({"run": run, "steps": steps}))
 }
 /// A reply cut to `budget` bytes, saying so.
@@ -464,6 +460,13 @@ pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut
         _ => a.to_vec(),
     };
     let a = bare.as_slice();
+    if let ["strategy", "show", "run", tid, rid, "--failed", rest @ ..] = a {
+        return if rest.is_empty() {
+            Ok(pretty(strategy_run_failed(top, tid, rid)?))
+        } else {
+            err("E7001", "--failed takes no steps or --from; it lists every failed tool step")
+        };
+    }
     match a {
         ["strategy", "list"] => Ok(within(strategy_list(top, false)?, budget)),
         ["strategy", "list", "--archived"] => Ok(within(strategy_list(top, true)?, budget)),
@@ -551,7 +554,7 @@ pub fn strategy_command(top: &Path, rid: &str, a: &[&str], input: &mut dyn FnMut
         _ => usage(concat!(
             "strategy list [--archived] | strategy show <task|feature|milestone> <id>... | ",
             "strategy show note <task> <notes> [--from <n>] | ",
-            "strategy show run <task> <run> [<steps>|all] [--from <n>] | ",
+            "strategy show run <task> <run> [<steps>|all] [--from <n>] or --failed | ",
             "strategy note, with the reply in `text` | ",
             "strategy task|feature|milestone [<id>] or strategy vision, with the proposal in `text`",
         )),
@@ -636,5 +639,78 @@ mod tests {
         assert_eq!(number_list(&[3, 7, 10, 11, 12, 2]), "3,7,10..12,2");
     }
 
+    /// A step read repeats no run header, and `--failed` lists just failed tool steps.
+    #[test]
+    fn a_step_read_has_one_line_of_run_header() {
+        let root = crate::testing::Scratch::new();
+        let log = root.join("run.jsonl");
+        fs::write(
+            &log,
+            json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "i1",
+                    "type": "mcp_tool_call",
+                    "tool": "solace",
+                    "arguments": {"command": "inspect a\nsubmit b"},
+                    "result": {"content": [{"type": "text", "text": concat!(
+                        "==== solace submit b ====\nE0108 no b\n",
+                        "1 of 2 commands failed: submit b"
+                    )}]},
+                    "status": "failed",
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let task = json!({
+            "id": "t1", "column": "backlog",
+            "runs": [{"id": "r1", "kind": "work", "state": "ended", "outcome": "finished", "model": "fake", "log": log.to_str().unwrap()}],
+        });
+        let root = root.with(&[(".solace/board/t1.json", &task.to_string())]);
+        super::super::adopt_tasks(&root, &root).unwrap();
+        let (run, steps) = super::run_with_steps(&root, "t1", "r1").unwrap();
+        assert_eq!((run["id"].as_str(), steps.len()), (Some("r1"), 1));
+        let full = super::strategy_run_show(&root, "t1", "r1", None).unwrap();
+        assert_eq!(full["run"]["outcome"], "finished");
+        let one = super::strategy_run_show(&root, "t1", "r1", Some("1")).unwrap();
+        assert_eq!(one["run"], "r1 work fake finished");
+        let failed = super::strategy_run_failed(&root, "t1", "r1").unwrap();
+        assert_eq!(failed["steps"], json!(["1 submit b: E0108 no b"]));
+        assert_eq!(super::run_header(&json!({"id":"r","kind":"work","model":"m","state":"running"})), "r work m running");
+    }
 
+
+}
+
+/// A task's run without its `log`, and its transcript's steps without token usage.
+fn run_with_steps(top: &Path, tid: &str, rid: &str) -> Result<(Value, Vec<Value>), Failure> {
+    let Some(t) = all_tasks(top)?.into_iter().find(|t| t["id"] == tid) else { return err("E7023", format!("unknown task {tid}")) };
+    let Some(mut run) = t["runs"].as_array().and_then(|rs| rs.iter().find(|r| r["id"] == rid)).cloned() else {
+        return err("E7023", format!("task {tid} has no run {rid}"));
+    };
+    // Token counts tell an agent nothing about the work, so they are not steps.
+    let entries: Vec<Value> =
+        transcript(Path::new(run["log"].as_str().unwrap_or(""))).into_iter().filter(|e| e["kind"] != "usage").collect();
+    run.as_object_mut().map(|o| o.remove("log"));
+    Ok((run, entries))
+}
+
+/// `strategy show run --failed`: one line for each failed tool step, with a one-line run header.
+pub(super) fn strategy_run_failed(top: &Path, tid: &str, rid: &str) -> Result<Value, Failure> {
+    let (run, entries) = run_with_steps(top, tid, rid)?;
+    let steps: Vec<String> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e["kind"] == "tool" && e["status"] == "failed")
+        .map(|(i, e)| failed_step_line(i, e))
+        .collect();
+    Ok(json!({"run": run_header(&run), "steps": steps}))
+}
+
+/// A run in one line: id, kind, model, then its outcome, or its state before it ends.
+fn run_header(run: &Value) -> String {
+    let field = |k: &str| run[k].as_str().unwrap_or("");
+    let outcome = run["outcome"].as_str().or_else(|| run["state"].as_str()).unwrap_or("");
+    format!("{} {} {} {}", field("id"), field("kind"), field("model"), outcome)
 }

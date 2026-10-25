@@ -776,8 +776,9 @@ fn change_run(top: &Path, method: &str, parts: &[&str], req: &Value, system: Sys
             }
             let mut answer = answer.to_string();
             if !q["proposal"].is_null() {
-                if chosen && answer == "Approve" {
-                    answer = apply_proposal(top, rid, &q["proposal"]).unwrap_or_else(|e| format!("Not applied: {}", e.0));
+                if chosen && matches!(answer.as_str(), "Approve" | "Approve to Planning") {
+                    let column = if answer == "Approve to Planning" { board::Column::Planning } else { board::Column::First };
+                    answer = apply_proposal(top, rid, &q["proposal"], column).unwrap_or_else(|e| format!("Not applied: {}", e.0));
                 } else if !chosen {
                     answer = format!("Not applied; the human answered: {answer}");
                 }
@@ -800,7 +801,8 @@ fn change_run(top: &Path, method: &str, parts: &[&str], req: &Value, system: Sys
     Ok(run)
 }
 /// Starts a strategy run: its first message is its first note. One open run per
-/// context; a context names the page, or a task, feature or milestone that exists.
+/// context; a context names the page, or a feature or milestone that exists. A
+/// task context is refused: a strategy run is never started on a task (D-202).
 fn start_run(top: &Path, req: &Value, system: System, status: &mut u16) -> Result<Value, Failure> {
     *status = 400;
     let Some(text) = req["text"].as_str().filter(|t| !t.trim().is_empty()) else {
@@ -809,8 +811,7 @@ fn start_run(top: &Path, req: &Value, system: System, status: &mut u16) -> Resul
     let c = &req["context"];
     let context = match (c["kind"].as_str(), c["id"].as_str()) {
         (Some("page"), _) => json!({"kind": "page"}),
-        (Some("task"), Some(id)) if board::all_tasks(top)?.iter().any(|t| t["id"] == id) => json!({"kind": "task", "id": id}),
-        (Some("task"), Some(id)) => return board::err("E7001", format!("unknown task {id}")),
+        (Some("task"), _) => return board::err("E7001", "a strategy run starts on the page, not a task"),
         (Some(kind @ ("feature" | "milestone")), Some(id)) => {
             if record(top, &format!("{kind}s"), id).is_none() {
                 return board::err("E7023", format!("unknown {kind} {id}"));
@@ -826,7 +827,7 @@ fn start_run(top: &Path, req: &Value, system: System, status: &mut u16) -> Resul
         e
     })?;
     *status = 409;
-    if let Some(open) = stored_records(top, "runs").iter().find(|r| r["state"] != "ended" && r["context"] == context) {
+    if let Some(open) = stored_records(top, "runs").iter().find(|r| r["state"] != "ended" && on_page(&r["context"]) == context) {
         return board::err("E7003", format!("strategy run {} on this context is open", open["id"].as_str().unwrap_or("")));
     }
     let id = unique_id();
@@ -850,8 +851,8 @@ enum Built {
 /// Builds proposal `p` of strategy run `rid` against the records as they are
 /// now, writing nothing: a feature or milestone as `POST`/`PATCH` would, a task
 /// as `POST /tasks` or its `PATCH` would (with a `solace` note naming the run),
-/// or the vision's new text.
-fn build(top: &Path, rid: &str, p: &Value) -> Result<Built, Failure> {
+/// or the vision's new text. A new task goes in `column`.
+fn build(top: &Path, rid: &str, p: &Value, column: board::Column) -> Result<Built, Failure> {
     let (fields, id) = (&p["fields"], p["id"].as_str());
     let mut status = 409;
     match p["kind"].as_str().unwrap_or("") {
@@ -875,7 +876,7 @@ fn build(top: &Path, rid: &str, p: &Value) -> Result<Built, Failure> {
                 board::note(&mut t, "solace", None, &format!("Changed by strategy run {rid}"));
                 Ok(Built::Task(t, false))
             }
-            None => Ok(Built::Task(proposed_task(top, rid, fields)?, true)),
+            None => Ok(Built::Task(proposed_task(top, rid, fields, column)?, true)),
         },
         "vision" => {
             let Some(text) = fields["text"].as_str() else { return board::err("E7001", "a vision proposal needs its text") };
@@ -886,11 +887,12 @@ fn build(top: &Path, rid: &str, p: &Value) -> Result<Built, Failure> {
     }
 }
 /// The task a strategy proposal creates: `POST /tasks` in the first project of
-/// its `scope` (the root's own without one), with `feature`, `milestone` and
+/// its `scope` (the root's own without one), in `column` (Planning is its
+/// first column if it has none, D-132), with `feature`, `milestone` and
 /// `dependsOn` set as `PATCH` sets them. Every folder in `scope` must be a
 /// project (D-129): a proposal naming one that isn't is refused here, when the
 /// proposal is sent, before the human is asked.
-fn proposed_task(top: &Path, rid: &str, fields: &Value) -> Result<Value, Failure> {
+fn proposed_task(top: &Path, rid: &str, fields: &Value, column: board::Column) -> Result<Value, Failure> {
     let folders: Vec<String> = match fields.get("scope") {
         None => vec![".".into()],
         Some(v) => {
@@ -909,7 +911,7 @@ fn proposed_task(top: &Path, rid: &str, fields: &Value) -> Result<Value, Failure
     }
     let mut body = fields.clone();
     body["scope"] = json!(folders);
-    let mut t = board::created(&scope::path(top, &folders[0]), &body)?;
+    let mut t = board::created(&scope::path(top, &folders[0]), &body, column)?;
     board::note(&mut t, "solace", None, &format!("Created by strategy run {rid}"));
     board::set_links(top, &mut t, fields)?;
     Ok(t)
@@ -953,6 +955,7 @@ pub(super) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text
     };
     let fields = bare_links(fields);
     let id = id.map(bare_id);
+    let offers_planning = kind == "task" && id.is_none() && matches!(fields.get("feature"), None | Some(Value::Null));
     // D-105: a field the request doesn't take is refused, so a misspelt one isn't lost.
     if kind != "vision" {
         let allowed: &[&str] = match (kind, id.is_some()) {
@@ -992,7 +995,7 @@ pub(super) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text
     if kind == "vision" {
         p["base"] = vision(top)["revision"].clone();
     }
-    let built = build(top, rid, &p)?;
+    let built = build(top, rid, &p, board::Column::First)?;
     let mut reopens = vec![];
     let mut says = String::new();
     if let Built::Task(t, _) = &built {
@@ -1019,17 +1022,18 @@ pub(super) fn proposal(top: &Path, rid: &str, kind: &str, id: Option<&str>, text
         (_, Some(id)) => format!("Change {kind} {id}{title}\n\n```json\n{}\n```", serde_json::to_string_pretty(&fields).unwrap()),
         (_, None) => format!("Create {kind}{title}\n\n```json\n{}\n```", serde_json::to_string_pretty(&fields).unwrap()),
     };
-    Ok(json!({"id": unique_id(), "text": format!("{what}{says}"), "options": ["Approve", "Reject"], "proposal": p, "answer": null}))
+    let options = if offers_planning { json!(["Approve", "Approve to Planning", "Reject"]) } else { json!(["Approve", "Reject"]) };
+    Ok(json!({"id": unique_id(), "text": format!("{what}{says}"), "options": options, "proposal": p, "answer": null}))
 }
 /// Applies strategy run `rid`'s approved proposal `p` as its request would be
 /// applied (D-93), with the same refusals. Everything is built and checked
 /// first, the vision's base among it, so a refused apply writes nothing. The
-/// answer to record: what was applied.
-fn apply_proposal(top: &Path, rid: &str, p: &Value) -> Result<String, Failure> {
+/// answer to record: what was applied. A new task goes in `column`.
+fn apply_proposal(top: &Path, rid: &str, p: &Value, column: board::Column) -> Result<String, Failure> {
     if p["kind"] == "vision" && vision(top)["revision"] != p["base"] {
         return board::err("E7026", "the vision changed since the proposal; it was not replaced");
     }
-    let built = build(top, rid, p)?;
+    let built = build(top, rid, p, column)?;
     let mut status = 409;
     let mut reopened = vec![];
     for r in p["reopens"].as_array().into_iter().flatten() {
@@ -1049,10 +1053,16 @@ fn apply_proposal(top: &Path, rid: &str, p: &Value) -> Result<String, Failure> {
         }
         Built::Task(t, new) => {
             write(top, &t)?;
-            format!(
-                "Approved and applied{}",
-                if new { format!(": created task:{}", t["id"].as_str().unwrap_or("")) } else { String::new() }
-            )
+            let created = if new {
+                format!(
+                    ": created task:{}{}",
+                    t["id"].as_str().unwrap_or(""),
+                    if matches!(column, board::Column::Planning) { " (Planning)" } else { "" }
+                )
+            } else {
+                String::new()
+            };
+            format!("Approved and applied{created}")
         }
         Built::Vision(text) => {
             write_vision(top, &text)?;
@@ -1390,7 +1400,7 @@ fn api_with(root: &Path, method: &str, parts: &[&str], body: Value, needs: Needs
             {
                 return Ok(t);
             }
-            let mut t = board::created(&root, &body)?;
+            let mut t = board::created(&root, &body, board::Column::First)?;
             if let Some(r) = request {
                 t["request"] = json!(r);
             }
@@ -1741,8 +1751,9 @@ mod tests {
         assert_eq!(stopped["outcome"], "stopped");
     }
 
-    /// D-93: a malformed start, an unknown record, model or effort is refused
-    /// and writes nothing; an unknown run is E7023 with 404.
+    /// D-93, D-202: a malformed start, an unknown record, model or effort is
+    /// refused and writes nothing; a task context is refused naming the page;
+    /// an unknown run is E7023 with 404.
     #[test]
     fn a_strategy_run_refuses_bad_requests() {
         let root = root();
@@ -1754,7 +1765,6 @@ mod tests {
             (json!({"model": "fake", "text": "x"}), 400, "E7001"),
             (json!({"model": "fake", "text": "x", "context": {"kind": "feature", "id": "nope"}}), 400, "E7023"),
             (json!({"model": "fake", "text": "x", "context": {"kind": "milestone", "id": "nope"}}), 400, "E7023"),
-            (json!({"model": "fake", "text": "x", "context": {"kind": "task", "id": "nope"}}), 400, "E7001"),
             (json!({"model": "other", "text": "x", "context": page}), 400, "E7001"),
             (json!({"model": "fake", "effort": "high", "text": "x", "context": page}), 400, "E7001"),
             (json!({"model": "missing", "text": "x", "context": page}), 409, "E7011"),
@@ -1762,16 +1772,27 @@ mod tests {
             let e = call("POST", &[], body.clone()).unwrap_err();
             assert_eq!((e.0, &e.1.0[..5]), (status, code), "{body}: {}", e.1.0);
         }
+        for id in ["t1", "nope"] {
+            let e = call("POST", &[], json!({"model": "fake", "text": "x", "context": {"kind": "task", "id": id}})).unwrap_err();
+            assert_eq!(e.0, 400, "{id}: {}", e.1.0);
+            assert!(e.1.0.starts_with("E7001"), "{id}: {}", e.1.0);
+            assert!(e.1.0.contains("page"), "{id}: {}", e.1.0);
+        }
         assert_eq!(strategy_runs(&root), Vec::<Value>::new());
-        let on_task = call("POST", &[], json!({"model": "fake", "text": "x", "context": {"kind": "task", "id": "t1"}})).unwrap();
-        assert_eq!(on_task["context"], json!({"kind": "task", "id": "t1"}));
+        let on_page = call("POST", &[], json!({"model": "fake", "text": "x", "context": page})).unwrap();
+        assert_eq!(on_page["context"], page);
         for (m, parts) in [("GET", vec!["nope"]), ("POST", vec!["nope", "notes"]), ("POST", vec!["../x", "end"])] {
             let e = call(m, &parts, json!({"text": "x"})).unwrap_err();
             assert_eq!((e.0, e.1.0.starts_with("E7023")), (404, true), "{parts:?}: {}", e.1.0);
         }
-        let rid = on_task["id"].as_str().unwrap();
+        let rid = on_page["id"].as_str().unwrap();
         assert_eq!(call("POST", &[rid, "notes"], json!({})).unwrap_err().0, 400);
         assert_eq!(call("POST", &[rid, "questions", "q1"], json!({"option": "Approve"})).unwrap_err().0, 404);
+        // A run stored on a task is a page run: a page start is refused (D-202).
+        let legacy = self::root();
+        put_run(&legacy, &json!({"id": "old", "kind": "strategy", "state": "running", "context": {"kind": "task", "id": "t1"}})).unwrap();
+        let e = runs_api(&legacy, "POST", &[], json!({"model": "fake", "text": "x", "context": page}), models).unwrap_err();
+        assert_eq!((e.0, e.1.0.starts_with("E7003")), (409, true), "{}", e.1.0);
     }
 
     /// D-93: an answer is recorded on its question once; the option must be offered.
@@ -2018,7 +2039,7 @@ mod tests {
     fn a_refused_apply_changes_nothing() {
         let root = root();
         let rid = page_run(&root);
-        let mut t2 = board::created(&root, &json!({"title": "T2"})).unwrap();
+        let mut t2 = board::created(&root, &json!({"title": "T2"}), board::Column::First).unwrap();
         write(&root, &t2).unwrap();
         let t2_id = t2["id"].as_str().unwrap().to_string();
         let cycle = propose(&root, &rid, "task", Some("t1"), &json!({"dependsOn": [t2_id]}).to_string());
@@ -3635,6 +3656,72 @@ mod tests {
             .expect("the task is announced again");
         assert_eq!(hidden, json!(false));
     }
+
+    /// A new task with no feature offers Approve to Planning; every other
+    /// proposal and an edit offers only Approve and Reject.
+    #[test]
+    fn only_a_new_task_without_a_feature_offers_approve_to_planning() {
+        let root = root();
+        let rid = page_run(&root);
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "F"})).unwrap();
+        let fid = f["id"].as_str().unwrap();
+        let options = |kind: &str, id: Option<&str>, text: &str| proposal(&root, &rid, kind, id, text).unwrap()["options"].clone();
+        let three = json!(["Approve", "Approve to Planning", "Reject"]);
+        let two = json!(["Approve", "Reject"]);
+        assert_eq!(options("task", None, r#"{"title": "New"}"#), three);
+        assert_eq!(options("task", None, r#"{"title": "No feature", "feature": null}"#), three);
+        assert_eq!(options("task", None, &json!({"title": "With feature", "feature": fid}).to_string()), two);
+        assert_eq!(options("task", Some("t1"), r#"{"title": "Edit"}"#), two);
+        assert_eq!(options("feature", None, r#"{"title": "F2"}"#), two);
+        assert_eq!(options("feature", Some(fid), r#"{"title": "F"}"#), two);
+        assert_eq!(options("milestone", None, r#"{"title": "M"}"#), two);
+        assert_eq!(options("vision", None, "New vision"), two);
+    }
+
+    /// Approve to Planning creates a featureless task in Planning and says so;
+    /// Approve still creates it in Backlog.
+    #[test]
+    fn approving_to_planning_creates_the_task_in_planning() {
+        let root = root();
+        let rid = page_run(&root);
+        let prefix = "Approved and applied: created task:";
+        let qid = propose(&root, &rid, "task", None, r#"{"title": "Now"}"#);
+        let (said, note) = answer(&root, &rid, &qid, "Approve to Planning");
+        assert!(said.starts_with(prefix) && said.ends_with(" (Planning)"), "{said}");
+        assert!(note.contains(&said), "{note}");
+        let id = &said[prefix.len()..said.len() - " (Planning)".len()];
+        let t = board::task(&root, id).unwrap();
+        assert_eq!((t["title"].as_str(), t["home"].as_str(), t["column"].as_str()), (Some("Now"), Some("."), Some("planning")));
+        let qid = propose(&root, &rid, "task", None, r#"{"title": "Later"}"#);
+        let said = answer(&root, &rid, &qid, "Approve").0;
+        let id = &said[prefix.len()..];
+        assert_eq!(board::task(&root, id).unwrap()["column"], "backlog");
+    }
+
+    /// D-132: without a Planning column, Approve to Planning takes the
+    /// workflow's first column and still says (Planning).
+    #[test]
+    fn approving_to_planning_takes_the_first_column_without_planning() {
+        let root = root();
+        fs::write(
+            root.join("solace.toml"),
+            concat!(
+                "[board]\nevents = { finished = \"done\" }\n",
+                "[[board.columns]]\nid = \"waiting\"\n",
+                "[[board.columns]]\nid = \"backlog\"\n",
+                "[[board.columns]]\nid = \"done\"\nfinal = true\n",
+                "[board.actions]\n",
+            ),
+        )
+        .unwrap();
+        let rid = page_run(&root);
+        let prefix = "Approved and applied: created task:";
+        let qid = propose(&root, &rid, "task", None, r#"{"title": "Planned"}"#);
+        let said = answer(&root, &rid, &qid, "Approve to Planning").0;
+        assert!(said.starts_with(prefix) && said.ends_with(" (Planning)"), "{said}");
+        let id = &said[prefix.len()..said.len() - " (Planning)".len()];
+        assert_eq!(board::task(&root, id).unwrap()["column"], "waiting");
+    }
 }
 
 /// Writes task `t`, returning what to log and the features that follow it.
@@ -4158,7 +4245,7 @@ fn flag_settle_failed(top: &Path, tid: &str, why: &str) {
     let id = tid.to_string();
     let reason = why.to_string();
     let result = op(&root, move || {
-        let mut t = board::task(&call, &id)?;
+        let mut t = board::task_at_home(&call, &id)?;
         if t["settleFailed"] == true {
             return Ok(());
         }
@@ -4179,7 +4266,7 @@ fn clear_settle_failed(top: &Path, tid: &str) {
     let call = root.clone();
     let id = tid.to_string();
     let result = op(&root, move || {
-        let mut t = board::task(&call, &id)?;
+        let mut t = board::task_at_home(&call, &id)?;
         if t["settleFailed"] != true {
             return Ok(());
         }
@@ -4205,7 +4292,7 @@ pub(super) const SETTLE_FAILED_NOTE: &str = "Settling this task failed:";
 
 /// Whether task `tid` still carries the marker of a failed deferred settle.
 fn settle_failed(top: &Path, tid: &str) -> bool {
-    board::task(top, tid).is_ok_and(|t| t["settleFailed"] == true)
+    board::task_at_home(top, tid).is_ok_and(|t| t["settleFailed"] == true)
 }
 
 /// Whether the board shows task `t`, which has a project when `has_project` is
@@ -4229,12 +4316,16 @@ pub(super) fn with_on_board(top: &Path, mut t: Value, has_project: bool, waits: 
 
 /// Whether task `t`'s home names a project of the workspace (D-129).
 pub(super) fn has_project(top: &Path, t: &Value) -> bool {
-    !board::homeless(top, t["home"].as_str().unwrap_or("."))
+    board::project_home(top, t).is_some()
 }
 
 /// Whether feature `id` keeps its tasks off the board until it starts; a
-/// missing feature does not (D-128). `waits` remembers answers for a list or
-/// stream.
+/// missing feature does not (D-128). `waits` remembers answers for a list.
 pub(super) fn feature_waits(top: &Path, id: &str, waits: &mut HashMap<String, bool>) -> bool {
     *waits.entry(id.to_string()).or_insert_with(|| record(top, "features", id).is_some_and(|f| !feature_shows(&f)))
+}
+
+/// `context` with a task read as the page (D-202).
+fn on_page(context: &Value) -> Value {
+    if context["kind"] == "task" { json!({"kind": "page"}) } else { context.clone() }
 }
