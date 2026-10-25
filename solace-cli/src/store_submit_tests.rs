@@ -112,6 +112,13 @@ fn a_type_error_keeps_the_draft() {
     let err = drafts::submit(&store, &["submit", "crate.one"], &mut || Ok(text.into()), None).unwrap_err().0;
     assert!(err.contains("Not saved: the submitted text has errors."), "{err}");
     assert!(err.contains("Rust checks borrows only once types check"), "{err}");
+    assert!(
+        !err.contains("Nothing was saved.")
+            && err.contains("Fix the failing block")
+            && !err.contains("other blocks")
+            && err.contains("--replace"),
+        "{err}"
+    );
     assert_eq!(kept(&store), text);
     assert_eq!(text_of(&root, "src/lib.rs"), lib);
 }
@@ -285,7 +292,8 @@ fn imports_that_break_an_item_are_refused() {
     assert_eq!(text_of(&root, "src/lib.rs"), lib);
 }
 
-/// An `*** Update:` that names only a container is refused, as `submit` is.
+/// An `*** Update:` that names only a container is refused, as `submit` is;
+/// an `*** Add:` of a new impl block for a stored type saves.
 #[test]
 fn a_patch_naming_only_a_container_is_refused() {
     if !cargo::installed() {
@@ -299,15 +307,16 @@ impl std::fmt::Display for Other {
     }
 }
 "#;
-    let (_root, store) = rust_project(lib);
+    let (root, store) = rust_project(lib);
     let patch =
         "*** Begin Patch\n*** Update: crate.<Other as std::fmt::Display>\n@@\n-    fn fmt(&self) {\n+    fn fmt(&self) {\n*** End Patch\n";
     let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
     assert!(err.contains("submit --new <module>") && err.contains("item by item"), "{err}");
     assert!(!err.contains("task:"), "{err}");
     let add = "*** Begin Patch\n*** Add: crate\n+impl Other {\n+    fn o(&self) {}\n+}\n*** End Patch\n";
-    let err = drafts::submit(&store, &["submit"], &mut || Ok(add.into()), None).unwrap_err().0;
-    assert!(err.contains("submit --new <module>"), "{err}");
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(add.into()), None).unwrap();
+    assert!(out.contains("Saved crate.Other"), "{out}");
+    assert!(text_of(&root, "src/lib.rs").contains("impl Other {\n    fn o(&self) {}\n}"));
 }
 
 /// A `pub use` re-export in a block's header is refused, as a plain `use` is.
@@ -1069,9 +1078,9 @@ fn an_add_to_an_inline_mod_names_its_container() {
     assert!(!err.contains(".solace/format-"), "{err}");
 }
 
-/// A Rust patch rename is refused with the header that adds a new symbol.
+/// A Rust patch rename is refused with the command that renames by stored name.
 #[test]
-fn a_patch_rename_names_the_add_header() {
+fn a_patch_rename_names_submit_with_the_stored_name() {
     if !cargo::installed() {
         return;
     }
@@ -1079,7 +1088,13 @@ fn a_patch_rename_names_the_add_header() {
     let (root, store) = rust_project(lib);
     let patch = "*** Begin Patch\n*** Update: crate.one\n@@\n-pub fn one() -> i32 {\n+pub fn two() -> i32 {\n*** End Patch\n";
     let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
-    assert!(err.contains("renames crate.one") && err.contains("`*** Add:`") && !err.contains("submit crate.one"), "{err}");
+    assert!(
+        err.contains("renames crate.one")
+            && err.contains("`submit crate.one` with the new text renames it and keeps its id")
+            && err.contains("change its callers in the same submit")
+            && !err.contains("`*** Add:`"),
+        "{err}"
+    );
     assert_eq!(text_of(&root, "src/lib.rs"), lib);
 }
 
@@ -1587,4 +1602,125 @@ fn a_saved_module_keeps_a_same_named_added_type_in_its_note() {
     let written = text_of(&root, "src/lib.rs");
     assert!(written.contains("pub struct Alias {"), "{written}");
     assert!(!written.contains("impl Alias"), "{written}");
+}
+
+/// A patch header names a generic method without its generics (D-193).
+#[test]
+fn an_update_name_may_leave_out_generics() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = concat!(
+        "pub struct Refs<'a> {\n",
+        "    text: &'a str,\n",
+        "}\n\n",
+        "impl<'a> Refs<'a> {\n",
+        "    pub fn new(text: &'a str) -> Self {\n",
+        "        Refs { text }\n",
+        "    }\n",
+        "}\n"
+    );
+    let (root, store) = rust_project(lib);
+    let patch = r#"*** Begin Patch
+*** Update: crate.Refs::new
+@@
+-        Refs { text }
++        Self { text }
+*** End Patch
+"#;
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("Saved crate.Refs<'a>::new"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("Refs { text }", "Self { text }"));
+}
+
+/// A patch Add saves a type with the impl block it holds (D-194).
+#[test]
+fn a_patch_add_saves_a_type_with_its_impl() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let patch = concat!(
+        "*** Begin Patch\n",
+        "*** Add: crate.X\n",
+        "+pub struct X {\n",
+        "+    value: i32,\n",
+        "+}\n",
+        "+\n",
+        "+impl X {\n",
+        "+    pub fn new(value: i32) -> Self {\n",
+        "+        Self { value }\n",
+        "+    }\n",
+        "+}\n",
+        "*** End Patch\n",
+    );
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("Saved crate.X, crate.X::new"), "{out}");
+    assert_eq!(
+        text_of(&root, "src/lib.rs"),
+        concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub struct X {\n    value: i32,\n}\n\n",
+            "impl X {\n    pub fn new(value: i32) -> Self {\n        Self { value }\n    }\n}\n",
+        )
+    );
+}
+
+/// A method added after its type joins that type's impl, so the patch leaves
+/// one `impl` (D-194).
+#[test]
+fn a_patch_adds_methods_to_a_type_it_added() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let patch = concat!(
+        "*** Begin Patch\n",
+        "*** Add: crate.X\n",
+        "+pub struct X;\n",
+        "*** Add: crate.X::new\n",
+        "+pub fn new() -> Self {\n",
+        "+    Self\n",
+        "+}\n",
+        "*** End Patch\n",
+    );
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("Saved crate.X, crate.X::new"), "{out}");
+    let text = text_of(&root, "src/lib.rs");
+    assert_eq!(text.matches("impl X {").count(), 1, "{text}");
+    assert_eq!(
+        text,
+        concat!(
+            "pub fn one() -> i32 {\n    1\n}\n\n",
+            "pub struct X;\n\n",
+            "impl X {\n    pub fn new() -> Self {\n        Self\n    }\n}\n",
+        )
+    );
+}
+
+/// A new impl for a generic struct carries the struct's generics and drops
+/// their defaults (D-194).
+#[test]
+fn a_patch_adds_a_method_to_a_generic_type() {
+    if !cargo::installed() {
+        return;
+    }
+    let (root, store) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let patch = concat!(
+        "*** Begin Patch\n",
+        "*** Add: crate.X\n",
+        "+pub struct X<'a, T: Clone = i32> {\n",
+        "+    value: &'a T,\n",
+        "+}\n",
+        "*** Add: crate.X::new\n",
+        "+pub fn new(value: &'a T) -> Self {\n",
+        "+    Self { value }\n",
+        "+}\n",
+        "*** End Patch\n",
+    );
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("Saved crate.X"), "{out}");
+    let text = text_of(&root, "src/lib.rs");
+    assert!(text.contains("impl<'a, T: Clone> X<'a, T> {"), "{text}");
+    assert!(!text.contains("impl<'a, T: Clone = i32>"), "{text}");
 }

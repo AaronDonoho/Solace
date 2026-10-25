@@ -69,6 +69,13 @@ impl Piece {
         self.children.iter().for_each(|p| p.join(out));
         out.push_str(&self.tail);
     }
+
+    /// The item's whole text: its own, its children's, and its tail.
+    pub fn whole(&self) -> String {
+        let mut out = String::new();
+        self.join(&mut out);
+        out
+    }
 }
 
 /// The kind an item of `kind` takes its id prefix from.
@@ -794,5 +801,81 @@ pub(crate) fn import_ranges(source: &str) -> Result<Vec<(std::ops::Range<usize>,
 /// The byte range of every module-level `use` tree, an inline `mod`'s included.
 pub(crate) fn import_tree_ranges(source: &str) -> Result<Vec<std::ops::Range<usize>>, syn::Error> {
     Ok(import_ranges(source)?.into_iter().map(|(_, tree)| tree).collect())
+}
+
+/// A generic declaration without its parameters' defaults: `T: Clone = i32`
+/// becomes `T: Clone`. Only a top-level `=` starts a default; one inside a
+/// bound's arguments belongs to that bound.
+fn without_generic_defaults(open: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    let mut skip = false;
+    let mut prev = '\0';
+    for c in open.chars() {
+        let closes = matches!(c, '>' | ')' | ']' | '}') && !(c == '>' && prev == '-');
+        if skip {
+            if matches!(c, '<' | '(' | '[' | '{') {
+                depth += 1;
+            } else if closes {
+                if depth == 1 && c == '>' {
+                    depth -= 1;
+                    skip = false;
+                    out.push(c);
+                } else {
+                    depth = depth.saturating_sub(1);
+                }
+            } else if c == ',' && depth == 1 {
+                skip = false;
+                out.push(c);
+            }
+        } else if c == '=' && depth == 1 {
+            skip = true;
+        } else {
+            if matches!(c, '<' | '(' | '[' | '{') {
+                depth += 1;
+            } else if closes {
+                depth = depth.saturating_sub(1);
+            }
+            out.push(c);
+        }
+        prev = c;
+    }
+    out
+}
+
+/// The type arguments an impl names its struct with: `'a`, a type parameter's
+/// name, a const parameter's name.
+fn generic_args(generics: &syn::Generics) -> String {
+    let args: Vec<String> = generics
+        .params
+        .iter()
+        .map(|param| match param {
+            syn::GenericParam::Lifetime(p) => p.lifetime.to_string(),
+            syn::GenericParam::Type(p) => p.ident.to_string(),
+            syn::GenericParam::Const(p) => p.ident.to_string(),
+        })
+        .collect();
+    if args.is_empty() { String::new() } else { format!("<{}>", args.join(", ")) }
+}
+
+/// The opening of an inherent `impl` for the struct `text` defines, and the
+/// self type it names (D-194): defaults are dropped, and lifetimes, const
+/// parameters and the where clause stay.
+pub fn inherent_impl(text: &str) -> Result<(String, String), Failure> {
+    let item: syn::ItemStruct = syn::parse_str(text).map_err(|e| Failure(format!("line {}: {e}", e.span().start().line), 1))?;
+    let (decl, args) = match (&item.generics.lt_token, &item.generics.gt_token) {
+        (Some(lt), Some(gt)) => {
+            let open = &text[lt.span().byte_range().start..gt.span().byte_range().end];
+            (without_generic_defaults(open), generic_args(&item.generics))
+        }
+        _ => (String::new(), String::new()),
+    };
+    let ty = format!("{}{args}", item.ident);
+    let where_text = item.generics.where_clause.as_ref().map_or_else(String::new, |clause| {
+        let start = clause.where_token.span().byte_range().start;
+        let end = clause.predicates.last().map_or(start, |predicate| predicate.span().byte_range().end);
+        format!(" {}", text[start..end].trim())
+    });
+    Ok((format!("impl{decl} {ty}{where_text} {{"), ty))
 }
 

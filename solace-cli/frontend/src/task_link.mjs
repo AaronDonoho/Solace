@@ -1,21 +1,27 @@
-// Task, feature and milestone links (D-98, D-122). The decisions live in frontend.gleam (route, target, update),
-// where they are tested. A page's markdown draws `task:<id>` as a link to `/task/<id>` (and `feature:<id>`,
-// `milestone:<id>` the same way), inside the page's shadow root, where modem's router doesn't see it; a plain
-// click on one is followed here, in-page. A click with a modifier key held keeps the browser's own behaviour:
-// the server serves the shell at the link's address, which resolves it on load.
+// Links in a page's shadow root, where modem's router doesn't see them: a markdown record link (D-98, D-122),
+// the Contract view links on the board, and the contract page's Board link. A plain click is followed in-page;
+// one with a modifier key held keeps the browser's own behaviour, so it opens a new tab.
 import { watch_shadow_hosts } from './shadow_watch.mjs';
 
 const RECORD_LINK = /^\/(task|feature|milestone)\/([0-9a-f]{16})$/;
+const PAGE_LINK = /^(?:\/|(?:\/p\/[^/]+)?\/contracts)(?:\?[^#]*)?$/;
 
-export function follow_links(follow) {
+export function follow_links(follow, page) {
   if (typeof document === 'undefined') return;
   document.addEventListener('click', e => {
     if (e.defaultPrevented || e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
     for (const el of e.composedPath?.() ?? []) {
-      const found = el.tagName === 'A' && el.getAttribute('href')?.match(RECORD_LINK);
-      if (!found) continue;
+      if (el.tagName !== 'A') continue;
+      const href = el.getAttribute('href');
+      const found = href?.match(RECORD_LINK);
+      if (found) {
+        e.preventDefault();
+        follow(found[1], found[2]);
+        return;
+      }
+      if (!PAGE_LINK.test(href ?? '')) continue;
       e.preventDefault();
-      follow(found[1], found[2]);
+      page(href);
       return;
     }
   });

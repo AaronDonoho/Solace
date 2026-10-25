@@ -55,6 +55,14 @@ class Board(unittest.TestCase):
         line=self.server.stdout.readline()
         self.assertIn('listening',line)
         self.port=int(line.strip().rsplit(':',1)[1])
+    def stop(self):
+        self.server.terminate();self.server.wait(timeout=3)
+        self.server.stdout.close();self.server.stderr.close()
+    def restart(self,env=None):
+        # Restarts the server with the test's env, so the agent's Solace process gets it.
+        self.stop()
+        self.env={**self.env,**(env or {})}
+        self.serve()
     def tearDown(self):
         # End all fake processes before terminating their supervisor.
         try:
@@ -67,8 +75,7 @@ class Board(unittest.TestCase):
                     except ProcessLookupError: pass
         finally:
             for c in self.clients: c.close()
-            self.server.terminate();self.server.wait(timeout=3)
-            self.server.stdout.close();self.server.stderr.close()
+            self.stop()
             self.tmp.cleanup()
     def cli(self,*args):
         p=subprocess.run([BIN,*args],cwd=self.root,env=self.env,text=True,capture_output=True)
@@ -891,11 +898,6 @@ class Board(unittest.TestCase):
         self.action(t,'cancel')
         self.assertEqual((self.root/'priv/a').read_text(),'original');self.assertFalse((self.root/'priv/created').exists())
 
-    def restart(self,env):
-        # Restarts the server with the test's env, so the agent's Solace process gets it.
-        self.server.terminate();self.server.wait(timeout=3)
-        self.env={**self.env,**env}
-        self.serve()
     def rows(self,tid):
         db=sqlite3.connect(self.root/'.solace/store.db')
         return sorted(r[0] for r in db.execute("SELECT entity FROM board_touches WHERE task=?",[tid]))
@@ -1122,7 +1124,7 @@ class Board(unittest.TestCase):
     def test_inbox_is_applied_after_a_restart(self):
         # D-77: a message waits in the inbox while no server runs, and is applied when one starts.
         t=self.create()
-        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        self.stop()
         inbox=self.root/'.solace/tasks/inbox';inbox.mkdir(exist_ok=True)
         name=f'{time.time_ns():024}-x'
         (inbox/(name+'.json')).write_text(json.dumps({'id':name,'kind':'note','task':t['id'],'author':'solace','text':'queued'}))
@@ -1140,7 +1142,7 @@ class Board(unittest.TestCase):
         end=time.monotonic()+8
         while time.monotonic()<end and not prompt.exists():time.sleep(.05)
         self.assertTrue(prompt.exists(),'the discussion agent never started')
-        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        self.stop()
         responses=self.root/'.solace'/(rid+'.responses')
         end=time.monotonic()+4
         while time.monotonic()<end and not responses.exists():time.sleep(.1)
@@ -1161,7 +1163,7 @@ class Board(unittest.TestCase):
         end=time.monotonic()+8
         while time.monotonic()<end and not prompt.exists():time.sleep(.05)
         self.assertTrue(prompt.exists(),'the work agent never started')
-        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        self.stop()
         responses=self.root/'.solace'/(rid+'.responses')
         end=time.monotonic()+4
         while time.monotonic()<end and not responses.exists():time.sleep(.1)
@@ -1228,10 +1230,11 @@ class Board(unittest.TestCase):
 
     def test_a_task_link_finds_its_task(self):  # D-98
         t=self.completed([])
-        self.assertEqual(self.api('GET','/tasks/find/'+t['id']),{'id':t['id'],'dir':'.','archived':False,'title':t['title'],'project':True})
+        self.assertEqual(self.api('GET','/tasks/find/'+t['id']),{'id':t['id'],'dir':'.','archived':False,'title':t['title'],'project':True,'onBoard':True})
         self.action(t,'approve');self.action(t,'complete')
         self.api('POST','/tasks/'+t['id']+'/archive',{})
-        self.assertEqual(self.api('GET','/tasks/find/'+t['id'])['archived'],True)
+        found=self.api('GET','/tasks/find/'+t['id'])
+        self.assertEqual((found['archived'],found['onBoard']),(True,False))
         status,_,body=self.raw('GET','/tasks/find/0123456789abcdef')
         self.assertEqual((status,json.loads(body)['code']),(404,'E7023'))
         # The link's own address loads the shell, which resolves it.
@@ -1488,9 +1491,7 @@ class Board(unittest.TestCase):
         # A model on Codex's own sign-in (the fake codex, signed in by its key variable).
         with (self.root/'system.toml').open('a') as f:
             f.write('\n[[models]]\nid="signed-in"\nlabel="Signed in"\nagent="codex"\nmodel="fixture"\n')
-        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
-        self.env['OPENAI_API_KEY']='test-key'
-        self.serve()
+        self.restart({'OPENAI_API_KEY':'test-key'})
         models={m['id']:m for m in self.api('GET','/models')}
         self.assertTrue(models['signed-in']['available'],models['signed-in'])
         # Codex's own words (src/board/usage-limits.json), as its `exec --json` error event.
@@ -1514,8 +1515,7 @@ class Board(unittest.TestCase):
         again=self.create();self.action(again,'plan')
         e=self.action(again,'assign','E7011',model='signed-in');self.assertIn('usage limit',e['message'])
         # The mark outlasts a restart.
-        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
-        self.serve()
+        self.restart()
         self.assertFalse({m['id']:m for m in self.api('GET','/models')}['signed-in']['available'])
         # Try again clears it; the reply is the list as it is now.
         models={m['id']:m for m in self.api('POST','/models/try-again',{'agent':'codex'})}
@@ -1523,14 +1523,12 @@ class Board(unittest.TestCase):
         self.assertEqual(self.api('POST','/models/try-again',{'agent':'nobody'},'E7001')['code'],'E7001')
 
     def test_the_agents_own_sign_in_status_decides_and_refresh_rechecks(self):
-        # The status command is the truth: a key variable and a token file don't override it.
+        # Codex's status command decides: OPENAI_API_KEY alone is not a sign-in.
         status=self.root/'status';status.write_text('out')
         with (self.root/'system.toml').open('a') as f:
             f.write('\n[[models]]\nid="signed-in"\nlabel="Signed in"\nagent="codex"\nmodel="fixture"\n')
             f.write('\n[[models]]\nid="gateway"\nlabel="Gateway"\nagent="claude"\nmodel="x"\nendpoint={kind="anthropic",base_url="http://localhost:1"}\n')
-        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
-        self.env['SOLACE_FAKE_STATUS']=str(status)
-        self.serve()
+        self.restart({'SOLACE_FAKE_STATUS':str(status)})
         models={m['id']:m for m in self.api('GET','/models')}
         self.assertEqual((models['signed-in']['available'],models['signed-in']['reason']),(False,'codex is not signed in'))
         # An endpoint model needs its own key, not Claude's sign-in.
@@ -1564,11 +1562,26 @@ class Board(unittest.TestCase):
         models={m['id']:m for m in self.api('POST','/models/try-again',{})}
         self.assertTrue(models['gateway']['available'],models['gateway'])
 
+    def test_a_claude_key_overrides_a_signed_out_status(self):
+        # Claude Code's key is a sign-in even when the program answers signed out.
+        with (self.root/'system.toml').open('a') as f:
+            f.write('\n[[models]]\nid="claude-key"\nlabel="Claude key"\nagent="claude"\nmodel="fixture"\n')
+        status=self.root/'status';status.write_text('out')
+        # A key makes discovery ask Anthropic for its models; keep that call offline.
+        curl=self.root/'fake-bin/curl';curl.write_text('#!/bin/sh\nexit 1\n');curl.chmod(0o755)
+        self.restart({'SOLACE_FAKE_STATUS':str(status),'ANTHROPIC_API_KEY':'test-key'})
+        models={m['id']:m for m in self.api('GET','/models')}
+        self.assertTrue(models['claude-key']['available'],models['claude-key'])
+        # Without the key, the signed-out answer holds.
+        self.restart({'ANTHROPIC_API_KEY':''})
+        models={m['id']:m for m in self.api('GET','/models')}
+        self.assertEqual((models['claude-key']['available'],models['claude-key']['reason']),(False,'claude is not signed in'))
+
     def test_a_plain_discussion_reply_clears_a_limit_mark(self):
         # A mark whose reset has passed leaves the model available but stays until an answer.
         with (self.root/'system.toml').open('a') as f:
             f.write('\n[[models]]\nid="signed-in"\nlabel="Signed in"\nagent="codex"\nmodel="fixture"\n')
-        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        self.stop()
         limits=self.root/'agent-holds.json'
         limits.write_text(json.dumps({'codex':{'reason':'Codex usage limit reached','until':1,'time':1}}))
         self.env['OPENAI_API_KEY']='test-key'
@@ -1585,7 +1598,7 @@ class Board(unittest.TestCase):
         # A strategy agent that answers in plain text took its turn (`planned`), like a discussion.
         with (self.root/'system.toml').open('a') as f:
             f.write('\n[[models]]\nid="signed-in"\nlabel="Signed in"\nagent="codex"\nmodel="fixture"\n')
-        self.server.terminate();self.server.wait(timeout=3);self.server.stdout.close();self.server.stderr.close()
+        self.stop()
         limits=self.root/'agent-holds.json'
         limits.write_text(json.dumps({'codex':{'reason':'Codex usage limit reached','until':1,'time':1}}))
         self.env['OPENAI_API_KEY']='test-key'

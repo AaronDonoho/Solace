@@ -584,14 +584,17 @@ pub fn form(
       ]),
     ]),
     solace_task.editor(
-      text_id,
-      "",
-      base,
-      "Description",
-      draft.body,
-      editor.on_text,
-      editor.on_format,
-      editor.on_block,
+      solace_task.EditorConfig(
+        id: text_id,
+        task: "",
+        base: base,
+        label: "Description",
+        text: draft.body,
+        on_input: editor.on_text,
+        on_format: editor.on_format,
+        on_block: editor.on_block,
+        actions: [],
+      ),
     ),
     html.div([attribute.class("filters")], [
       select(

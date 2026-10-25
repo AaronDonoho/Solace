@@ -30,6 +30,7 @@ The workflow (columns, and the actions allowed in each) comes from configuration
 | `closedTime` | When the task first reached a final column; never cleared |
 | `archivedTime` | When the task was archived (`POST /tasks/{id}/archive`), otherwise null; cleared when the task leaves the final columns. The board hides an archived task; it stays in `GET /tasks` and the events (D-95) |
 | `techDebt` | True on a feature's Tech Debt task, which completed tasks' review tech debt is filed on (§6, D-112); absent otherwise. The board marks its card "Tech debt" |
+| `onBoard` | Computed, not stored: whether the board shows the task. False when archived, in Backlog, with no project (D-129), or with a feature that is proposed, upcoming or canceled (D-128); a feature that cannot be found leaves it true. Task lists and events carry it, and the board uses it (D-195, D-196) |
 
 Tasks saved before D-87 have none of `feature`, `milestone`, `dependsOn`, `closedTime` and `archivedTime`: read them as null, or `[]` for `dependsOn`. Tasks saved before D-188 with a feature take its milestone when they load; a task with no feature keeps its own. Tasks saved before D-130 get `createdTime` when they load: the earlier of their first note's time and their first run's start, or else their file's modified time.
 
@@ -160,7 +161,7 @@ Two rules hold for every workflow:
 | Request | Effect |
 | --- | --- |
 | `GET /workflow` | Columns and their actions, as configured, so a board can draw itself |
-| `GET /tasks` | All tasks, without `notes` and `changes`. `runs` are included so a board can show which tasks have an agent working |
+| `GET /tasks` | All tasks, without `notes` and `changes`, each with computed `onBoard`. `runs` are included so a board can show which tasks have an agent working |
 | `GET /tasks/{id}` | One task, in full. A task whose home is no project of the workspace is re-homed on load, its scope keeping only the projects of it (D-160); a task with a run still live is left marked until the run ends. At the root, also one with no project at all, with `noProject: true` (D-129, D-160) |
 | `GET /tasks/{id}/runs/{rid}` | The run, plus `transcript`: the agent's log read into entries `{kind, text?, title?, input?, output?, status?}`. `kind` is `message`, `thinking`, `tool` (with `status` `running`, `ok` or `failed`), `usage`, `error` or `output` (lines that aren't agent events). A board fetches it again while the run is going (§6) |
 | `POST /tasks` `{title, body, links?, scope?}` | Creates a task at the end of the first column; a task linked to an `active` feature goes to `planning` (D-134). `scope` lists the projects it may change (default: this one) and must include this project, its first lane (`E7001`). `request` is a client-chosen id: a second create with the same `request` returns the task the first made, so a double submit makes one task (D-77) |
@@ -201,11 +202,11 @@ An unknown feature or milestone id, in a path or a body, is `E7023`.
 
 | Request | Effect |
 | --- | --- |
-| `GET /tasks/find/{id}` | At the root only: `{id, dir, archived, title, project}`, the project folder the task is stored in (`.` for the root's own), whether it is archived, whichever project that is, its title, and `project`: false when its home is no project of the workspace (D-129). An unknown id is 404 with `E7023` |
+| `GET /tasks/find/{id}` | At the root only: `{id, dir, archived, title, project, onBoard}`, the project folder the task is stored in (`.` for the root's own), whether it is archived, whichever project that is, its title, `project`: false when its home is no project of the workspace (D-129), and `onBoard`: whether the board shows it, false when it is archived, in Backlog, has no project, or has a feature that is proposed, upcoming or canceled (D-128); a task whose feature cannot be found stays on the board. An unknown id is 404 with `E7023` |
 | `GET /features/find/{id}` | `{id, title}` of the feature. An unknown id is 404 with `E7023`; a malformed one is 400 with `E7001` |
 | `GET /milestones/find/{id}` | `{id, title}` of the milestone, as for a feature |
 
-The server serves the shell at `/task/{id}`, `/feature/{id}` and `/milestone/{id}`, the addresses a link (`task:<id>`, `feature:<id>` or `milestone:<id>` in markdown) points to. The shell opens a task on the board, or on the Strategy page when it is archived; a feature on the Strategy page's Features tab, a milestone on its Roadmap tab. A bare link shows the record's title.
+The server serves the shell at `/task/{id}`, `/feature/{id}` and `/milestone/{id}`, the addresses a link (`task:<id>`, `feature:<id>` or `milestone:<id>` in markdown) points to. The shell opens a task on the board when the reply says `onBoard` is true, and otherwise on the Strategy page's Tasks tab with the task focused; a reply without `onBoard` keeps the older rule, opening an archived task or one with no project on the Strategy page. A feature opens on the Strategy page's Features tab, a milestone on its Roadmap tab. A bare link shows the record's title.
 
 | Request (D-91) | Effect |
 | --- | --- |

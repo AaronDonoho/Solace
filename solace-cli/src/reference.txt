@@ -168,13 +168,18 @@ Changing (the new code is in `text`)
                                 symbol or module `*** Update: <name>` with `@@`
                                 hunks (` ` context, `-` removed, `+` added),
                                 applied in order like `apply_patch`; `*** Add:
-                                <module>.<name>` adds a symbol, `*** Add:
+                                <module>.<name>` adds a symbol, an item with
+                                its `impl` block, or a new `impl`/`trait`
+                                block; `*** Add:
+                                <module>.<Type>::<fn>` adds a method to the
+                                type added earlier in the patch; `*** Add:
                                 <module>` a new module (module comment,
                                 imports, code); every line of an Add, empty
                                 ones too, starts with `+`.
                                 A new symbol after unchanged context is an
-                                add; a real rename goes under its own
-                                `*** Add:` header. A module changes with
+                                add; `submit <stored name>` with the new text
+                                renames it and keeps its id; change its callers
+                                in the same submit. A module changes with
                                 `*** Update: <module>` (no `module:` prefix).
                                 Checked together; a hunk that doesn't match
                                 changes nothing (E0108). A patch line is a
@@ -281,7 +286,9 @@ Rust projects
 Names
   `<module>.<item>`             a free function: `testing.rust_project`
   `<module>.<Type>::<method>`   a method: `crate.Store::resolve_module`, named
-                                by the module holding the `impl`, not the type's
+                                by the module holding the `impl`, not the type's;
+                                generics may be left out (`Refs::new`) when one
+                                impl matches
   `<module>.tests::<name>`      an item in an inline `mod tests`:
                                 `drafts.tests::rejected_text_survives_and_retries_atomically`
   `crate`                       the crate root; `crate.Store::resolve_module`

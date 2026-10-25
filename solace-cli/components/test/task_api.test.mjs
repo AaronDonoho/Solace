@@ -2,6 +2,7 @@ import { test, expect } from 'bun:test';
 import * as task from '../build/dev/javascript/components/solace_task.mjs';
 import { perform } from '../build/dev/javascript/lustre/lustre/effect.mjs';
 import { to_string } from '../build/dev/javascript/lustre/lustre/element.mjs';
+import { install as installDrafts, restore as restoreDrafts } from './draft_storage.mjs';
 
 // One <solace-task>, driven as Lustre drives it; what it emits to its host is kept.
 function mount() {
@@ -19,6 +20,7 @@ const settle = () => Bun.sleep(20);
 
 // This server has no Solace store, process runner or filesystem access.
 test('A11: <solace-task> uses only the HTTP API, including live task and workflow updates', async () => {
+  installDrafts();
   const requests = [];
   let current = { id: 't1', title: 'Initial', body: 'Description', column: 'backlog', rank: 1,
     type: 'implementation', paused_from: null, notes: [], questions: [], runs: [], changes: [], stamps: {}, links: [] };
@@ -100,7 +102,10 @@ test('A11: <solace-task> uses only the HTTP API, including live task and workflo
     const actions = () => requests.filter(([method, path]) => method === 'POST' && path.endsWith('/actions')).length;
     const beforeCancel = actions();
     t.dispatch(new task.Action('cancel'));
-    await until(() => t.model.text === '');
+    await until(() => t.model.acting === '');
+    const { load_draft } = await import('../src/task_api.mjs');
+    expect(t.model.text).toBe('');
+    expect(load_draft('note-text', 't1')).toBe('');
     expect(actions()).toBe(beforeCancel + 1);
     t.dispatch(new task.Action('complete')); await until(() => t.model.error === 'Approval required');
     // A live update brings a question; its own stream tells the host in a `notice`.
@@ -132,6 +137,7 @@ test('A11: <solace-task> uses only the HTTP API, including live task and workflo
     if (confirmOriginal === undefined) delete globalThis.confirm;
     else globalThis.confirm = confirmOriginal;
     controllers.forEach(c => c.abort()); server.stop(true); globalThis.fetch = fetchOriginal; delete globalThis.EventSource;
+    restoreDrafts();
   }
 });
 
@@ -256,6 +262,36 @@ test('saved choices survive missing or throwing storage', async () => {
   }
 });
 
+test('drafts are keyed by editor and owner, and survive blocked storage', async () => {
+  const { draft_key, load_draft, save_draft, clear_draft } = await import('../src/task_api.mjs');
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  try {
+    const values = new Map();
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+      getItem: k => values.get(k) ?? null,
+      setItem: (k, v) => values.set(k, v),
+      removeItem: k => values.delete(k),
+    } });
+    expect(draft_key('note-text', 't1')).toBe('solace-draft:note-text:t1');
+    expect(draft_key('note-text', 't2')).not.toBe(draft_key('note-text', 't1'));
+    save_draft('note-text', 't1', 'half written');
+    expect(load_draft('note-text', 't1')).toBe('half written');
+    expect(load_draft('note-text', 't2')).toBe('');
+    save_draft('note-text', 't1', '');
+    expect(load_draft('note-text', 't1')).toBe('');
+    save_draft('note-text', 't1', 'again');
+    clear_draft('note-text', 't1');
+    expect(load_draft('note-text', 't1')).toBe('');
+
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, get() { throw new Error('blocked'); } });
+    expect(load_draft('note-text', 't1')).toBe('');
+    expect(() => save_draft('note-text', 't1', 'lost')).not.toThrow();
+    expect(() => clear_draft('note-text', 't1')).not.toThrow();
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'localStorage', original); else delete globalThis.localStorage;
+  }
+});
+
 test('transport uses the base it is given; explicit project paths stay absolute', async () => {
   const oldLocation = globalThis.location, oldFetch = globalThis.fetch, oldEventSource = globalThis.EventSource;
   const paths = [];
@@ -272,11 +308,12 @@ test('transport uses the base it is given; explicit project paths stay absolute'
     await new Promise(resolve => api.request('/p/shop', '/graph', 'GET', '', resolve));
     await new Promise(resolve => api.request('/p/shop', '/p/other/tasks', 'GET', '', resolve));
     await new Promise(resolve => api.request('', '/graph', 'GET', '', resolve));
-    expect(paths).toEqual(['/p/shop/graph', '/p/other/tasks', '/p/web/graph']);
+    expect(paths).toEqual(['/p/shop/graph', '/p/other/tasks', '/graph']);
     expect(api.events('/p/shop', () => {})).toBe(source);
     expect(source.path).toBe('/p/shop/events');
     api.close_events(source);
     expect(source.closed).toBe(true);
+    expect(api.events('', () => {}).path).toBe('/events');
   } finally {
     globalThis.location = oldLocation; globalThis.fetch = oldFetch; globalThis.EventSource = oldEventSource;
   }
@@ -451,11 +488,75 @@ test('a text set on the editor from outside replaces only what differs, and keep
   expect(replacement('same', 'same', 2, 2)).toEqual({ from: 4, to: 4, insert: '', anchor: 4, head: 4 });
 });
 
-test('the editor element is defined only where there is a browser', async () => {
+test('the editor element is defined once, and only where there is a browser', async () => {
   const { define_editor } = await import('../src/task_api.mjs');
   // No customElements here: CodeMirror, which this project doesn't install, is never loaded.
   expect(globalThis.customElements).toBeUndefined();
-  expect(() => define_editor()).not.toThrow();
+  let loaded = 0;
+  expect(() => define_editor(() => { loaded++; throw new Error('loaded'); })).not.toThrow();
+  expect(loaded).toBe(0);
+  // In a browser, concurrent asks share one load, and the element is defined once.
+  const defined = [];
+  const saved = globalThis.customElements;
+  let finish;
+  const done = new Promise(resolve => { finish = resolve; });
+  globalThis.customElements = {
+    get: name => defined.includes(name) ? class {} : undefined,
+    define: name => defined.push(name),
+  };
+  try {
+    const load = async () => {
+      loaded++;
+      return { define: () => {
+        if (!customElements.get('solace-md-editor')) customElements.define('solace-md-editor', class {});
+        finish();
+      }};
+    };
+    define_editor(load);
+    define_editor(load);
+    await done;
+    await settle();
+    expect(loaded).toBe(1);
+    expect(defined).toEqual(['solace-md-editor']);
+    // Once defined, another ask loads nothing.
+    define_editor(load);
+    await settle();
+    expect(loaded).toBe(1);
+  } finally {
+    globalThis.customElements = saved;
+  }
+});
+
+test('a failed editor load is reported, and a later ask tries again', async () => {
+  const { define_editor } = await import('../src/task_api.mjs');
+  const saved = globalThis.customElements;
+  const oldError = console.error;
+  const errors = [], defined = [];
+  let loaded = 0;
+  globalThis.customElements = {
+    get: name => defined.includes(name) ? class {} : undefined,
+    define: name => defined.push(name),
+  };
+  console.error = (...args) => errors.push(args);
+  try {
+    define_editor(async () => { loaded++; throw new Error('CodeMirror unavailable'); });
+    await settle();
+    expect(loaded).toBe(1);
+    expect(errors.map(([message, error]) => [message, error.message])).toEqual([
+      ['Could not load the markdown editor.', 'CodeMirror unavailable'],
+    ]);
+    // A failed ask doesn't stop a later one from trying again.
+    define_editor(async () => {
+      loaded++;
+      return { define: () => customElements.define('solace-md-editor', class {}) };
+    });
+    await settle();
+    expect(loaded).toBe(2);
+    expect(defined).toEqual(['solace-md-editor']);
+  } finally {
+    console.error = oldError;
+    globalThis.customElements = saved;
+  }
 });
 
 // A browser without a DOM: requests and event streams are recorded, and
@@ -553,6 +654,31 @@ test('a followed run stops refreshing when the element is removed and resumes in
     await fire();
     expect(fetches()).toBe(6);
   } finally { browser.restore(); }
+});
+
+test('an option answer keeps note text that was not sent', async () => {
+  installDrafts();
+  const answer = {
+    id: 't1', title: 'T', body: '', column: 'assigned', rank: 1, notes: [],
+    questions: [{ id: 'q1', text: 'Why?', options: ['Yes'], answer: 'Yes' }],
+    runs: [], changes: [], stamps: {}, links: [],
+  };
+  const before = {
+    ...answer,
+    questions: [{ ...answer.questions[0], answer: '' }],
+  };
+  const browser = fakeBrowser({ '/tasks/t1/questions/q1': answer });
+  try {
+    const t = mount();
+    t.dispatch(new task.TaskLoaded(t.model.generation, JSON.stringify(before)));
+    t.dispatch(new task.Text('Keep me'));
+    t.dispatch(new task.Answer('q1', 'Yes'));
+    await settle();
+    expect(t.model.text).toBe('Keep me');
+  } finally {
+    browser.restore();
+    restoreDrafts();
+  }
 });
 
 test('the editor sends what its buttons ask for, and wraps the selection in place', async () => {
@@ -653,17 +779,133 @@ test('a late lost change reply does not refresh the task shown now', async () =>
   } finally { browser.restore(); }
 });
 
-test('<solace-task> registers once, however many parts of the page ask', async () => {
+test('<solace-task> registers once, however many parts of the page ask', () => {
   const tags = [];
   const saved = [globalThis.document, globalThis.HTMLElement, globalThis.customElements];
   globalThis.document = { documentElement: { dataset: {} } };
   globalThis.HTMLElement = class {};
-  globalThis.customElements = { get: name => tags.includes(name) ? class {} : undefined, define: name => tags.push(name) };
+  globalThis.customElements = {
+    get: name => {
+      return name === 'solace-md-editor' || tags.includes(name) ? class {} : undefined;
+    },
+    define: name => tags.push(name),
+  };
   try {
     expect(task.register().isOk()).toBe(true);
     expect(task.register().isOk()).toBe(true);
     expect(tags).toEqual(['solace-task']);
   } finally {
     [globalThis.document, globalThis.HTMLElement, globalThis.customElements] = saved;
+  }
+});
+
+test('focus_editor focuses the named editor and tolerates no root', async () => {
+  const { focus_editor } = await import('../src/task_api.mjs');
+  let focused = 0;
+  const root = {
+    getElementById: id => id === 'note-text' ? { focus: () => { focused++; } } : null,
+  };
+  focus_editor(root, 'note-text');
+  focus_editor(root, 'other');
+  expect(focused).toBe(1);
+  expect(() => focus_editor(null, 'note-text')).not.toThrow();
+});
+
+test('the editor action pad follows the measured action row', async () => {
+  const { watchActionPad } = await import('../src/editor_actions.mjs');
+  const savedResize = globalThis.ResizeObserver, savedMutations = globalThis.MutationObserver;
+  const style = new Map(), observed = [];
+  let actions = null, mutation = null, resize = null;
+  globalThis.ResizeObserver = class {
+    constructor(callback) { resize = { callback }; }
+    observe(target) { observed.push(target); }
+    disconnect() { observed.length = 0; }
+  };
+  globalThis.MutationObserver = class {
+    constructor(callback) { mutation = callback; }
+    observe() {}
+    disconnect() {}
+  };
+  const composer = {
+    style: {
+      setProperty: (name, value) => style.set(name, value),
+      removeProperty: name => style.delete(name),
+    },
+    querySelector: () => actions,
+  };
+  try {
+    const stop = watchActionPad(composer);
+    expect(style.has('--md-action-pad')).toBe(false);
+    actions = { getBoundingClientRect: () => ({ width: 120 }), scrollWidth: 120 };
+    mutation();
+    expect(style.get('--md-action-pad')).toBe('120px');
+    expect(observed).toEqual([actions]);
+    actions.getBoundingClientRect = () => ({ width: 84 });
+    actions.scrollWidth = 84;
+    resize.callback();
+    expect(style.get('--md-action-pad')).toBe('84px');
+    actions = null;
+    mutation();
+    expect(style.has('--md-action-pad')).toBe(false);
+    stop();
+  } finally {
+    globalThis.ResizeObserver = savedResize;
+    globalThis.MutationObserver = savedMutations;
+  }
+});
+
+test('the editor action pad observes its row once', async () => {
+  const { watchActionPad } = await import('../src/editor_actions.mjs');
+  const savedResize = globalThis.ResizeObserver, savedMutations = globalThis.MutationObserver;
+  const reports = [];
+  let measures = 0;
+  globalThis.ResizeObserver = class {
+    constructor(callback) { this.callback = callback; }
+    observe() { reports.push(this.callback); }
+    disconnect() { reports.length = 0; }
+  };
+  globalThis.MutationObserver = class { observe() {} disconnect() {} };
+  const actions = {
+    getBoundingClientRect: () => { measures++; return { width: 120 }; },
+    scrollWidth: 120,
+  };
+  const composer = {
+    style: { setProperty() {}, removeProperty() {} },
+    querySelector: () => actions,
+  };
+  try {
+    const stop = watchActionPad(composer);
+    expect(measures).toBe(1);
+    expect(reports.length).toBe(1);
+    reports.shift()();
+    expect(measures).toBe(2);
+    expect(reports.length).toBe(0);
+    stop();
+  } finally {
+    globalThis.ResizeObserver = savedResize;
+    globalThis.MutationObserver = savedMutations;
+  }
+});
+
+test('the editor action pad measures without observers', async () => {
+  const { watchActionPad } = await import('../src/editor_actions.mjs');
+  const savedResize = globalThis.ResizeObserver, savedMutations = globalThis.MutationObserver;
+  const style = new Map();
+  const actions = { getBoundingClientRect: () => ({ width: 36 }), scrollWidth: 36 };
+  const composer = {
+    style: {
+      setProperty: (name, value) => style.set(name, value),
+      removeProperty: name => style.delete(name),
+    },
+    querySelector: () => actions,
+  };
+  globalThis.ResizeObserver = undefined;
+  globalThis.MutationObserver = undefined;
+  try {
+    expect(() => watchActionPad(composer)).not.toThrow();
+    expect(style.get('--md-action-pad')).toBe('36px');
+  } finally {
+    globalThis.ResizeObserver = savedResize;
+    globalThis.MutationObserver = savedMutations;
   }
 });

@@ -19,9 +19,10 @@ pub fn routes_test() {
     #("/workspace", frontend.Workspace),
     #("/migrate", frontend.Workspace),
     #("/projects", Board),
-    #("/contracts", Contracts("")),
-    #("/p/web/contracts", Contracts("/p/web")),
-    #("/contracts?task=t1", Contracts("")),
+    #("/contracts", Contracts("", "")),
+    #("/p/web/contracts", Contracts("/p/web", "")),
+    #("/contracts?task=t1", Contracts("", "t1")),
+    #("/p/web/contracts?task=t1", Contracts("/p/web", "t1")),
     #("/strategy", frontend.Strategy("vision")),
     #("/strategy?tab=tasks", frontend.Strategy("tasks")),
     #("/strategy?tab=nope", frontend.Strategy("vision")),
@@ -45,10 +46,17 @@ pub fn page_elements_test() {
   let cases = [
     #(#(Board, True), "<solace-board></solace-board>"),
     #(#(frontend.Workspace, True), "<solace-migration></solace-migration>"),
-    #(#(Contracts(""), True), "<solace-contracts></solace-contracts>"),
     #(
-      #(Contracts("/p/web"), True),
-      "<solace-contracts base=\"/p/web\"></solace-contracts>",
+      #(Contracts("", ""), True),
+      "<solace-contracts base task></solace-contracts>",
+    ),
+    #(
+      #(Contracts("/p/web", ""), True),
+      "<solace-contracts base=\"/p/web\" task></solace-contracts>",
+    ),
+    #(
+      #(Contracts("/p/web", "t1"), True),
+      "<solace-contracts base=\"/p/web\" task=\"t1\"></solace-contracts>",
     ),
     #(#(Board, False), "<solace-board hidden></solace-board>"),
     #(
@@ -58,8 +66,8 @@ pub fn page_elements_test() {
     #(#(frontend.Settings, True), "<solace-settings></solace-settings>"),
     #(#(frontend.Settings, False), "<solace-settings hidden></solace-settings>"),
     #(
-      #(Contracts("/p/web"), False),
-      "<solace-contracts base=\"/p/web\" hidden></solace-contracts>",
+      #(Contracts("/p/web", ""), False),
+      "<solace-contracts base=\"/p/web\" hidden task></solace-contracts>",
     ),
   ]
   list.each(cases, fn(entry) {
@@ -94,8 +102,8 @@ pub fn menu_current_test() {
     element.to_string(
       frontend.view(
         frontend.Model(
-          Contracts("/p/web"),
-          [Contracts("/p/web")],
+          Contracts("/p/web", ""),
+          [Contracts("/p/web", "")],
           frontend.no_focus,
           [],
           [],
@@ -218,12 +226,12 @@ pub fn a_route_change_shows_the_new_page_test() {
         0,
         [],
       ),
-      RouteChanged(Contracts("/p/web"), "{}"),
+      RouteChanged(Contracts("/p/web", ""), "{}"),
     )
   assert model
     == frontend.Model(
-      Contracts("/p/web"),
-      [frontend.Workspace, Contracts("/p/web")],
+      Contracts("/p/web", ""),
+      [frontend.Workspace, Contracts("/p/web", "")],
       frontend.no_focus,
       [],
       [],
@@ -460,8 +468,8 @@ pub fn a_page_not_opened_is_not_drawn_test() {
 
 /// A contract page opened for another project is the same element, in the same place, with the new base.
 pub fn a_reopened_page_keeps_its_place_test() {
-  assert frontend.open([Contracts(""), Board], Contracts("/p/web"))
-    == [Contracts("/p/web"), Board]
+  assert frontend.open([Contracts("", ""), Board], Contracts("/p/web", ""))
+    == [Contracts("/p/web", ""), Board]
   assert frontend.open([Board], frontend.Workspace)
     == [Board, frontend.Workspace]
 }
@@ -492,6 +500,16 @@ pub fn a_task_link_opens_where_its_task_is_test() {
       "{\"id\":\"t\",\"dir\":\".\",\"archived\":false,\"project\":true}",
     )
     == frontend.OnBoard(".")
+  assert frontend.target(
+      "task",
+      "{\"id\":\"t\",\"dir\":\"web\",\"archived\":true,\"project\":false,\"onBoard\":true}",
+    )
+    == frontend.OnBoard("web")
+  assert frontend.target(
+      "task",
+      "{\"id\":\"t\",\"dir\":\"web\",\"archived\":false,\"project\":true,\"onBoard\":false}",
+    )
+    == frontend.InStrategy("web")
   assert frontend.target(
       "task",
       "{\"code\":\"E7023\",\"message\":\"E7023 unknown task t\"}",
@@ -1056,4 +1074,44 @@ pub fn a_lookup_after_leaving_and_returning_is_ignored_test() {
       ),
     )
   assert late == back
+}
+
+/// A Contract view link inside a page follows its address in place, keeping the board mounted.
+pub fn a_page_link_changes_pages_in_place_test() {
+  let #(model, _) =
+    frontend.update(
+      frontend.Model(Board, [Board], frontend.no_focus, [], [], 0, []),
+      frontend.PageLink("/p/web/contracts?task=t1"),
+    )
+  assert model.route == Contracts("/p/web", "t1")
+  assert model.opened == [Board, Contracts("/p/web", "t1")]
+  assert model.visits == 1
+  let #(model, _) = frontend.update(model, frontend.PageLink("/"))
+  assert model.route == Board
+  assert model.opened == [Board, Contracts("/p/web", "t1")]
+  assert model.visits == 2
+}
+
+/// A task in Backlog is off the board (D-133), so its link opens the Strategy
+/// page's Tasks tab with that task focused.
+pub fn a_backlog_task_link_opens_on_strategy_test() {
+  let model =
+    frontend.Model(
+      frontend.Board,
+      [frontend.Board],
+      frontend.no_focus,
+      [],
+      [],
+      0,
+      [],
+    )
+  let reply =
+    "{\"id\":\"t1\",\"dir\":\".\",\"archived\":false,\"project\":true,\"onBoard\":false}"
+  let #(model, _) =
+    frontend.update(
+      model,
+      frontend.Found("task", "t1", reply, False, frontend.Board, 0),
+    )
+  assert model.route == frontend.Strategy("tasks")
+  assert model.focus == frontend.Focus("solace-strategy", "task", ".", "t1", 1)
 }

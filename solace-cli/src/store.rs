@@ -367,14 +367,7 @@ fn project_exact<'a>(
 /// Whether `input` names `s`: its own name, or its name behind its module, the
 /// module exact or a suffix; `.`, `::` and `/` all separate the parts (D-158).
 pub(crate) fn names(s: &Sym, input: &str) -> bool {
-    if s.name == input {
-        return true;
-    }
-    let Some(rest) = input.strip_suffix(&s.name) else { return false };
-    let Some(prefix) = rest.strip_suffix("::").or_else(|| rest.strip_suffix('.')) else { return false };
-    [prefix.replace('.', "/"), prefix.replace('.', "::")]
-        .iter()
-        .any(|m| s.module == *m || s.module.ends_with(&format!("/{m}")) || s.module.ends_with(&format!("::{m}")))
+    names_as(s, &s.name, input)
 }
 
 /// An unknown-name hint for `resolve`: the stored names nearest `input`'s leaf,
@@ -576,7 +569,14 @@ pub(crate) fn rust_brief(ix: &Index) -> String {
     let method = (0..ix.syms.len()).find(|&i| ix.syms[i].kind_text == "fn" && !ix.test[i] && in_impl(i));
     let method = method.or_else(|| (0..ix.syms.len()).find(|&i| ix.syms[i].kind_text == "fn" && in_impl(i)));
     if let Some(i) = method {
-        out += &format!("A method is `<module>.<Type>::<fn>`, e.g. `{}`; the module is the one holding the `impl`.\n", ix.syms[i].qname());
+        out += &format!(
+            concat!(
+                "A method is `<module>.<Type>::<fn>`, e.g. `{}`; ",
+                "generics may be left out (`Refs::new`) when one impl matches; ",
+                "the module is the one holding the `impl`.\n"
+            ),
+            ix.syms[i].qname()
+        );
     }
     let inline_tests = |i: usize| -> Option<usize> {
         let mut parent = ix.syms[i].parent.as_deref();
@@ -698,4 +698,62 @@ fn unparsed_drift(ix: &Index, m: &ModuleRow, disk: &str) -> Vec<String> {
         names.push(m.path.clone());
     }
     names
+}
+
+/// As `names`, with each type's generics left out (D-193): `Refs::new` names
+/// `Refs<'a>::new`.
+pub(crate) fn names_loosely(s: &Sym, input: &str) -> bool {
+    names_as(s, &without_generics(&s.name), input)
+}
+
+/// The symbols `input` names: exact names first, and generic-free names only
+/// when no exact name matches (D-193).
+pub(crate) fn matching(ix: &Index, input: &str) -> Vec<usize> {
+    let exact: Vec<usize> = (0..ix.syms.len()).filter(|&i| names(&ix.syms[i], input)).collect();
+    if !exact.is_empty() {
+        return exact;
+    }
+    (0..ix.syms.len()).filter(|&i| names_loosely(&ix.syms[i], input)).collect()
+}
+
+fn names_as(s: &Sym, name: &str, input: &str) -> bool {
+    if name == input {
+        return true;
+    }
+    let Some(rest) = input.strip_suffix(name) else { return false };
+    let Some(prefix) = rest.strip_suffix("::").or_else(|| rest.strip_suffix('.')) else { return false };
+    [prefix.replace('.', "/"), prefix.replace('.', "::")]
+        .iter()
+        .any(|m| s.module == *m || s.module.ends_with(&format!("/{m}")) || s.module.ends_with(&format!("::{m}")))
+}
+
+/// `name` without the balanced `<…>` groups that follow an identifier:
+/// `Refs<'a>::new` becomes `Refs::new`. A name starting with `<` is a trait
+/// impl, such as `<Failure as From<…>>::from`, and stays whole.
+pub(crate) fn without_generics(name: &str) -> String {
+    if name.starts_with('<') {
+        return name.to_string();
+    }
+    let mut out = String::with_capacity(name.len());
+    let mut chars = name.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '<' && out.chars().last().is_some_and(|prev| prev.is_alphanumeric() || prev == '_') {
+            let mut depth = 1;
+            let mut prev = '<';
+            while let Some(inner) = chars.next() {
+                if inner == '<' {
+                    depth += 1;
+                } else if inner == '>' && prev != '-' {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                prev = inner;
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

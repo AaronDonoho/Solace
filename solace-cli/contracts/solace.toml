@@ -10,4 +10,4 @@ unwatched = []
 
 [commands]
 install = { run = ["bun", "install"] }
-contracts-tests = { run = ["bun", "test", "test/view.test.mjs"] }
+contracts-tests = { run = ["bun", "test", "test/view.test.mjs"], allowed_in_reviews = true }

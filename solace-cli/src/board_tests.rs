@@ -411,8 +411,8 @@ fn strategy_runs_read_the_graph() {
     );
     assert!(brief.contains("in short Markdown: lead with the answer"), "{brief}");
     assert!(brief.contains(super::strategy::STRATEGY_ROLE), "{brief}");
-    // D-156: every strategy run reads the request literally, assumes rather than
-    // asks, separates its recommendation, invents no preconditions and stays conversational.
+    // Every strategy run reads the request literally, assumes rather than asks,
+    // separates its recommendation, invents no preconditions and stays conversational.
     for guidance in [
         "Read the human's message literally",
         "make the smallest grounded assumption, name it in one line",
@@ -1559,6 +1559,7 @@ fn a_model_error_names_the_offer_as_out_of_date() {
     assert!(agents::model_gone("The model gpt-6-new does not exist"));
     assert!(!agents::model_gone("You've hit your usage limit; try again at 3pm"));
     assert!(!agents::model_gone("stream disconnected before completion"));
+    assert!(!agents::model_gone("Model metadata for `commandcode-deepseek-v4.1-flash` not found. Defaulting to fallback metadata."));
 }
 
 /// The model a run used comes from its log's start event, and an alias's
@@ -3402,10 +3403,15 @@ fn a_review_with_recorded_feedback_is_not_noted_twice() {
     })
     .unwrap();
     let before = task(&p.root, &tid).unwrap()["notes"].as_array().unwrap().len();
+    let checkpoint = review_path(&p.root, &tid, "r1").unwrap();
+    fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+    fs::write(&checkpoint, br#"{"run":"r1","changed_during_review":false}"#).unwrap();
+    let saved = fs::read(&checkpoint).unwrap();
     assert!(!record_review(&Watch::Task(&p.root, &tid), "r1", assessment).unwrap());
     let t = task(&p.root, &tid).unwrap();
     assert_eq!(t["notes"].as_array().unwrap().len(), before);
     assert_eq!(t["runs"][0]["state"], "running");
+    assert_eq!(fs::read(&checkpoint).unwrap(), saved);
 }
 
 #[test]
@@ -3457,6 +3463,36 @@ fn only_a_clean_labeled_review_recovers() {
         json!({"kind":"message","text":assessment}),
     ];
     assert!(recoverable_review(&review, true, &queued).is_none());
+    let batched = [
+        json!({
+            "kind":"tool",
+            "title":"solace inspect a\ntask note",
+            "output":"==== solace inspect a ====\nfn a() {}\n==== solace task note ====\nRecorded.\n",
+            "status":"ok"
+        }),
+        json!({"kind":"message","text":assessment}),
+    ];
+    assert!(recoverable_review(&review, true, &batched).is_none());
+    let batched_queued = [
+        json!({
+            "kind":"tool",
+            "title":"solace task note\ninspect a",
+            "output":"==== solace task note ====\nRecorded; it reaches the board when `solace serve` runs.\n==== solace inspect a ====\nfn a() {}\n",
+            "status":"ok"
+        }),
+        json!({"kind":"message","text":assessment}),
+    ];
+    assert!(recoverable_review(&review, true, &batched_queued).is_none());
+    let batched_refused = [
+        json!({
+            "kind":"tool",
+            "title":"solace inspect a\ntask note",
+            "output":"==== solace inspect a ====\nRecorded in the file\n==== solace task note ====\nE7015\nnothing was sent\n",
+            "status":"failed"
+        }),
+        json!({"kind":"message","text":assessment}),
+    ];
+    assert_eq!(recoverable_review(&review, true, &batched_refused).as_deref(), Some(assessment));
     let refused = [
         json!({"kind":"tool","title":"solace task note","output":"E7015\nnothing was sent","status":"failed"}),
         json!({"kind":"message","text":assessment}),
@@ -3987,11 +4023,24 @@ fn an_agents_status_answer_is_the_sign_in() {
     // Signed in by the program's word, with no file and no key.
     assert!(local(&claude, signed_in).is_none());
     assert!(local(&codex, signed_in).is_none());
-    // A token file with a refresh token can't override a signed-out answer.
+    // A signed-out answer holds when no key is set; a token file doesn't override it.
     fs::create_dir_all(home.join(".codex")).unwrap();
     fs::write(home.join(".codex/auth.json"), json!({"tokens":{"refresh_token":"r"}}).to_string()).unwrap();
     assert!(local(&codex, unknown).is_none());
     assert_eq!(local(&codex, signed_out).unwrap(), "codex is not signed in");
+    // Claude Code's key is a sign-in even when it answers signed out; Codex's
+    // key only stands in when it answers unclearly.
+    let with_key = |m: &Value, key: &'static str, answer: Option<bool>| {
+        let var = move |v: &str| v == key;
+        let status = move |_: &agents::Kind| answer;
+        agents::local(
+            m,
+            &agents::Here { folder: &folder, status: &status, var: &var, stored: &no_key, installed: &|_| true, now: NOON * 1000 },
+        )
+    };
+    assert!(with_key(&claude, "ANTHROPIC_API_KEY", signed_out).is_none());
+    assert_eq!(with_key(&codex, "OPENAI_API_KEY", signed_out).unwrap(), "codex is not signed in");
+    assert!(with_key(&codex, "OPENAI_API_KEY", unknown).is_none());
     // Claude's file is read from its configured folder, not the home folder.
     fs::create_dir_all(home.join(".claude")).unwrap();
     fs::write(home.join(".claude/.credentials.json"), json!({"claudeAiOauth":{"refreshToken":"r"}}).to_string()).unwrap();
@@ -4024,4 +4073,251 @@ fn an_agents_refusal_of_an_endpoint_model_holds_that_model_alone() {
     fs::write(&log, json!({"type":"assistant","message":{"content":[{"type":"text","text":"Done."}]}}).to_string()).unwrap();
     agents::observe(&path, &endpoint, &log, NOON, NOON + 3650 * 86400, Some("finished"), &zones).unwrap();
     assert_eq!(agents::held(&path, "model:gw", NOON), None);
+}
+
+#[test]
+fn program_status_reads_its_command() {
+    let kind = |name: &'static str, status: &'static [&'static str]| agents::Kind {
+        name,
+        label: "Test",
+        folder: || std::path::PathBuf::new(),
+        files: &[],
+        status,
+        keys: &[],
+        keys_override_status: false,
+        keychain: None,
+        expired: |_, _| false,
+        limit: |_| None,
+        signed_out: |_| false,
+        signed_out_whole: |_| false,
+        update: None,
+        discover: || Vec::new(),
+        gone: |_| false,
+    };
+    assert_eq!(agents::program_status(&kind("sh", &[])), None);
+    assert_eq!(agents::program_status(&kind("solace-no-such-status-command", &["status"])), None);
+    assert_eq!(agents::program_status(&kind("sh", &["-c", "printf 'Logged in'"])), Some(true));
+    assert_eq!(agents::program_status(&kind("sh", &["-c", "printf 'Not logged in'; exit 1"])), Some(false));
+    assert_eq!(agents::program_status(&kind("sh", &["-c", "printf 'maybe'"])), None);
+    assert_eq!(agents::program_status_within(&kind("sh", &["-c", "sleep 1"]), std::time::Duration::from_millis(50)), None);
+}
+
+#[test]
+fn codex_folder_prefers_codex_home() {
+    let path = |home: Option<&str>| home.map(std::ffi::OsString::from);
+    assert_eq!(agents::codex_folder_from(path(Some("/tmp/codex")), path(Some("/home/me"))), std::path::PathBuf::from("/tmp/codex"));
+    assert_eq!(agents::codex_folder_from(None, path(Some("/home/me"))), std::path::PathBuf::from("/home/me").join(".codex"));
+    assert_eq!(agents::codex_folder_from(None, None), std::path::PathBuf::from(".codex"));
+}
+
+#[test]
+fn refusal_finds_the_first_matching_error_line() {
+    let codex = agents::kind("codex").unwrap();
+    assert!(agents::refusal(codex, &[json!({"kind":"message","text":"model not found"})]).is_none());
+    assert_eq!(
+        agents::refusal(codex, &[json!({"kind":"error","text":"unrelated"}), json!({"kind":"error","text":"  model not found  \nmore"})],)
+            .as_deref(),
+        Some("model not found")
+    );
+    assert_eq!(
+        agents::refusal(codex, &[json!({"kind":"error","text":"Please log out and sign in again"})]).as_deref(),
+        Some("Please log out and sign in again")
+    );
+    assert_eq!(
+        agents::refusal(
+            codex,
+            &[
+                json!({"kind":"error","text":"Model metadata for `x` not found. Defaulting to fallback metadata."}),
+                json!({"kind":"error","text":"model not found"}),
+            ],
+        )
+        .as_deref(),
+        Some("model not found")
+    );
+    let long = format!("model not found {}", "x".repeat(300));
+    assert_eq!(agents::refusal(codex, &[json!({"kind":"error","text":long})]).unwrap().chars().count(), 240);
+}
+
+#[test]
+fn try_again_keeps_a_usage_limit_that_has_not_reset() {
+    let dir = testing::Scratch::new();
+    let config = dir.join("config.toml");
+    let holds = dir.join("agent-holds.json");
+    let now = now();
+    agents::save_marks(
+        &holds,
+        &json!({
+            "codex": {"reason":"Codex usage limit reached","until":now + 3600,"time":now},
+            "claude": {"reason":"Claude Code usage limit reached","until":now - 1,"time":now},
+            "signed": {"reason":"sign-in expired","until":null,"time":now,"kind":"sign_in"},
+            "model:x": {"reason":"model not found","until":null,"time":now,"kind":"refusal"},
+        }),
+    )
+    .unwrap();
+    with_config(&config, || agents::try_again(&json!({})).unwrap());
+    assert!(agents::held_mark(&holds, "codex", now).is_some());
+    assert!(agents::held_mark(&holds, "claude", now - 2).is_none());
+    assert!(agents::held_mark(&holds, "signed", now).is_none());
+    assert!(agents::held_mark(&holds, "model:x", now).is_none());
+    with_config(&config, || agents::try_again(&json!({"agent":"codex"})).unwrap());
+    assert!(agents::held_mark(&holds, "codex", now).is_none());
+}
+
+#[test]
+fn read_pipe_reads_the_whole_output() {
+    let text = agents::read_pipe(std::io::Cursor::new(b"logged in".to_vec())).join().unwrap();
+    assert_eq!(text, "logged in");
+}
+
+#[test]
+fn codex_folder_uses_the_process_environment() {
+    let folder = agents::codex_folder();
+    match std::env::var_os("CODEX_HOME") {
+        Some(home) => assert_eq!(folder, std::path::PathBuf::from(home)),
+        None => assert!(folder.ends_with(".codex")),
+    }
+}
+
+#[test]
+fn clear_retryable_keeps_a_usage_limit_that_has_not_reset() {
+    let dir = testing::Scratch::new();
+    let holds = dir.join("agent-holds.json");
+    let now = now();
+    agents::save_marks(
+        &holds,
+        &json!({
+            "codex": {"reason":"Codex usage limit reached","until":now + 3600,"time":now},
+            "claude": {"reason":"Claude Code usage limit reached","until":now - 1,"time":now},
+            "signed": {"reason":"sign-in expired","until":null,"time":now,"kind":"sign_in"},
+        }),
+    )
+    .unwrap();
+    agents::clear_retryable(&holds).unwrap();
+    assert!(agents::held_mark(&holds, "codex", now).is_some());
+    assert!(agents::held_mark(&holds, "claude", now - 2).is_none());
+    assert!(agents::held_mark(&holds, "signed", now).is_none());
+}
+
+#[test]
+fn a_successful_command_code_run_keeps_its_model_available() {
+    let dir = testing::Scratch::new();
+    let (path, log) = (dir.join("agent-holds.json"), dir.join("log.jsonl"));
+    let cmd = json!({
+        "id": "commandcode-deepseek-v4.1-flash",
+        "agent": "codex",
+        "model": "commandcode-deepseek-v4.1-flash",
+        "endpoint": {"base_url": "http://commandcode"}
+    });
+    let warning = json!({
+        "type": "item.completed",
+        "item": {
+            "type": "error",
+            "message": "Model metadata for `commandcode-deepseek-v4.1-flash` not found. Defaulting to fallback metadata."
+        }
+    });
+    fs::write(&log, warning.to_string()).unwrap();
+    agents::observe_refusal(&path, &cmd, &log, NOON, Some("finished")).unwrap();
+    assert_eq!(agents::held(&path, "model:commandcode-deepseek-v4.1-flash", NOON), None);
+    agents::write_mark(&path, "model:commandcode-deepseek-v4.1-flash", "model not found", None, Some("refusal")).unwrap();
+    assert_eq!(agents::held(&path, "model:commandcode-deepseek-v4.1-flash", NOON).as_deref(), Some("model not found"));
+    agents::observe_refusal(&path, &cmd, &log, NOON + 3650 * 86400, Some("finished")).unwrap();
+    assert_eq!(agents::held(&path, "model:commandcode-deepseek-v4.1-flash", NOON), None);
+    agents::write_mark(&path, "model:commandcode-deepseek-v4.1-flash", "model not found", None, Some("refusal")).unwrap();
+    let answered = json!({"type": "item.completed", "item": {"type": "agent_message", "text": "Done."}});
+    fs::write(&log, format!("{warning}\n{answered}")).unwrap();
+    agents::observe(&path, &cmd, &log, NOON, NOON + 3650 * 86400, Some("finished"), &zones).unwrap();
+    assert_eq!(agents::held(&path, "model:commandcode-deepseek-v4.1-flash", NOON), None);
+    fs::write(&log, json!({"type":"error","message":"model not found"}).to_string()).unwrap();
+    agents::observe(&path, &cmd, &log, NOON, NOON + 3650 * 86400, Some("stopped"), &zones).unwrap();
+    assert_eq!(agents::held(&path, "model:commandcode-deepseek-v4.1-flash", NOON).as_deref(), Some("model not found"));
+}
+
+#[test]
+fn a_review_that_ended_before_recovery_keeps_its_checkpoint() {
+    let assessment = "**Assessment: Looks good**\n\nFine.";
+    let (p, tid, _child, _log) = exited(json!({"id":"r1","kind":"review","state":"ended"}), 0, &[agent_says(assessment)]);
+    let checkpoint = review_path(&p.root, &tid, "r1").unwrap();
+    fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+    fs::write(&checkpoint, br#"{"run":"r1","changed_during_review":false}"#).unwrap();
+    let saved = fs::read(&checkpoint).unwrap();
+    let before = task(&p.root, &tid).unwrap()["notes"].as_array().unwrap().len();
+    assert!(!record_review(&Watch::Task(&p.root, &tid), "r1", assessment).unwrap());
+    assert_eq!(fs::read(&checkpoint).unwrap(), saved);
+    assert_eq!(task(&p.root, &tid).unwrap()["notes"].as_array().unwrap().len(), before);
+}
+
+#[test]
+fn a_work_run_is_found_from_a_secondary_project() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"sub\"]\n"),
+        (".solace/store.db", ""),
+        ("sub/src/app.gleam", "pub fn main() { 1 }\n"),
+    ]);
+    let s = open(&root).unwrap();
+    let mut t = api(&root, "POST", "/tasks", json!({"title":"Work"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["home"] = json!(".");
+    t["scope"] = json!([".", "sub"]);
+    t["runs"] = json!([
+        {"id":"r1","kind":"review","state":"running"},
+        {"id":"r2","kind":"work","state":"running"}
+    ]);
+    tasks::put(&s, &t).unwrap();
+    let sub = root.join("sub");
+    assert!(!with_context(&tid, "r1", || work_run(&sub)));
+    assert_eq!(
+        with_context(&tid, "r2", || crate::next_step(None, work_run(&sub))),
+        "Next: if every part of the task is changed, finish with task done.\n"
+    );
+}
+
+#[test]
+fn a_single_reply_with_the_batch_marker_is_recorded() {
+    assert!(note_recorded("Recorded.\n==== solace read a ====\n"));
+    assert!(note_recorded("Recorded; ==== solace task note ==== was in the text\n"));
+    assert!(!note_recorded("==== solace inspect a ====\nRecorded.\n"));
+}
+
+/// D-196: the stream reads the feature state after a change commits, so a
+/// Backlog task planned by its feature becoming active arrives shown.
+#[test]
+fn a_streamed_task_carries_on_board() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let root = p.root.clone();
+    open(&root).unwrap();
+    let feature = tasks::strategy_api(&root, "POST", &["features"], json!({"title": "Waiting", "state": "proposed"})).unwrap();
+    let fid = feature["id"].as_str().unwrap().to_string();
+    let mut t = new_task("Shown", "", &json!("backlog"), 1.);
+    t["home"] = json!(".");
+    t["scope"] = json!(["."]);
+    let tid = t["id"].as_str().unwrap().to_string();
+    fs::write(store_dir(&root).join(format!("{tid}.json")), t.to_string()).unwrap();
+    let before: Option<i64> = tasks::events(&root).unwrap().query_row("SELECT MAX(seq) FROM events", [], |r| r.get(0)).unwrap();
+    api(&root, "PATCH", &format!("/tasks/{tid}"), json!({"feature": fid})).unwrap();
+    let top = scope::top(&root);
+    let last = json!({"tasks": before.unwrap_or(0), ".": 0}).to_string();
+    let mut reader = Events::new(event_board(top), Some(root.clone()), Some(&last));
+    let next_task = |reader: &mut Events| {
+        let mut buf = [0; 8192];
+        loop {
+            let n = reader.read(&mut buf).unwrap();
+            assert!(n > 0);
+            let text = std::str::from_utf8(&buf[..n]).unwrap();
+            for line in text.lines() {
+                if let Some(data) = line.strip_prefix("data: ") {
+                    let v: Value = serde_json::from_str(data).unwrap();
+                    if v.get("task").is_some() {
+                        return v;
+                    }
+                }
+            }
+        }
+    };
+    assert_eq!(next_task(&mut reader)["task"]["onBoard"], json!(false));
+    tasks::strategy_api(&root, "PATCH", &["features", &fid], json!({"state": "active"})).unwrap();
+    let planned = next_task(&mut reader);
+    assert_eq!(planned["task"]["column"], json!("planning"));
+    assert_eq!(planned["task"]["onBoard"], json!(true));
+    tasks::strategy_api(&root, "PATCH", &["features", &fid], json!({"state": "proposed"})).unwrap();
+    assert_eq!(next_task(&mut reader)["task"]["onBoard"], json!(false));
 }

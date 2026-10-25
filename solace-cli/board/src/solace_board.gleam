@@ -111,7 +111,7 @@ pub type Model {
     /// one was asked, so asking again is news to `<solace-task>`.
     reveal: #(String, String, Int),
     /// The root's features as (id, title, colorSlot, state), which name and
-    /// color their tasks' cards (D-114) and decide whether they show (D-128).
+    /// color their tasks' cards (D-114).
     features: List(#(String, String, Option(Int), String)),
   )
 }
@@ -996,23 +996,12 @@ fn scope_of(home: String, t: solace_task.Task) -> List(String) {
 }
 
 /// The tasks a lane shows, each with the project it is stored in: every task
-/// on the board whose projects include this lane's (D-61), but not an archived
-/// one (D-95), nor one in Backlog, which means not active (D-133), nor one
-/// whose feature is proposed, upcoming or canceled: its tasks show once it is
-/// active, and stay when it completes (D-128). A task whose feature isn't
-/// known (not loaded yet) shows.
+/// the server marks `onBoard` whose projects include this lane's (D-61, D-196).
 fn cards(model: Model, lane: Lane) -> List(#(String, solace_task.Task)) {
-  let waiting =
-    model.features
-    |> list.filter(fn(f) { f.3 != "active" && f.3 != "complete" })
-    |> list.map(fn(f) { Some(f.0) })
   list.flat_map(model.lanes, fn(l) {
     l.tasks
     |> list.filter(fn(t) {
-      !t.archived
-      && t.column != backlog
-      && list.contains(scope_of(l.dir, t), lane.dir)
-      && !list.contains(waiting, t.feature)
+      t.on_board && list.contains(scope_of(l.dir, t), lane.dir)
     })
     |> list.map(fn(t) { #(l.dir, t) })
   })

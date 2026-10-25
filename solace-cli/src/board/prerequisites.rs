@@ -36,8 +36,6 @@ enum Tool {
 
 const TOOLS: [Tool; 5] = [Tool::Gleam, Tool::Erlang, Tool::Agent, Tool::Bubblewrap, Tool::Git];
 
-const AGENT_RELEASE: &str = "Or download Codex from https://github.com/openai/codex/releases.";
-
 /// Every check, run now: nothing is cached, so **Check again** sees a newly installed tool.
 pub(super) fn check() -> Value {
     let platform = platform();
@@ -58,12 +56,12 @@ fn items(p: &Probe) -> Vec<Value> {
     if platform_linux(p.platform) {
         out.insert(3, item(p, Tool::Bubblewrap));
     }
-    if out.iter().any(|item| item["ok"] == false) {
+    if out.iter().any(|(_, steps)| uses_brew(steps)) {
         if let Some(item) = homebrew(p) {
-            out.insert(0, item);
+            out.insert(0, (item, Vec::new()));
         }
     }
-    out
+    out.into_iter().map(|(value, _)| value).collect()
 }
 
 fn problem(p: &Probe, tool: Tool) -> Option<String> {
@@ -113,13 +111,14 @@ fn problem(p: &Probe, tool: Tool) -> Option<String> {
     }
 }
 
-fn item(p: &Probe, tool: Tool) -> Value {
+fn item(p: &Probe, tool: Tool) -> (Value, Vec<Step>) {
     let problem = problem(p, tool);
     let steps = match problem.is_some() {
         true => steps(p, tool),
         false => Vec::new(),
     };
-    item_with(tool_id(tool), tool_label(tool), problem, steps)
+    let value = item_with(tool_id(tool), tool_label(tool), problem, steps.clone());
+    (value, steps)
 }
 
 fn tool_id(tool: Tool) -> &'static str {
@@ -133,13 +132,13 @@ fn tool_id(tool: Tool) -> &'static str {
 }
 
 fn tool_label(tool: Tool) -> &'static str {
-    match tool {
-        Tool::Gleam => "Gleam",
-        Tool::Erlang => "Erlang/OTP",
-        Tool::Agent => "An agent",
-        Tool::Bubblewrap => "bubblewrap",
-        Tool::Git => "Git",
-    }
+    install_table()["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry["id"].as_str() == Some(tool_id(tool)))
+        .and_then(|entry| entry["label"].as_str())
+        .expect("tool label")
 }
 
 fn platform_name(platform: Platform) -> &'static str {
@@ -157,57 +156,19 @@ fn platform_linux(platform: Platform) -> bool {
 }
 
 fn install(platform: Platform, tool: Tool) -> Vec<Step> {
-    match (platform, tool) {
-        (Platform::Macos, Tool::Gleam) => vec![command("brew install gleam")],
-        (Platform::Macos, Tool::Erlang) => vec![command("brew install erlang")],
-        (Platform::Macos, Tool::Agent) => vec![
-            command("brew install codex"),
-            note("Or install Claude Code:"),
-            command("curl -fsSL https://claude.ai/install.sh | bash"),
-            note("Then run it once and sign in."),
-        ],
-        (Platform::Macos, Tool::Git) => vec![command("brew install git")],
-        (Platform::Macos, Tool::Bubblewrap) => vec![note("bubblewrap is not needed on macOS.")],
-        (Platform::Debian, Tool::Gleam) => vec![
-            note(concat!(
-                "Download the x86_64-unknown-linux-musl or aarch64-unknown-linux-musl archive from ",
-                "https://github.com/gleam-lang/gleam/releases, then run:"
-            )),
-            command("tar xf gleam-*-unknown-linux-musl.tar.gz"),
-            command("sudo install -m 755 gleam /usr/local/bin/gleam"),
-        ],
-        (Platform::Debian, Tool::Erlang) => vec![
-            note("Ubuntu's and Debian's erlang package can be older than OTP 29. Build it from source:"),
-            command("sudo apt install -y build-essential curl libssl-dev libncurses-dev m4"),
-            command("cd /tmp"),
-            command("curl -LO https://github.com/erlang/otp/releases/download/OTP-29.0/otp_src_29.0.tar.gz"),
-            command("tar xf otp_src_29.0.tar.gz && cd otp_src_29.0"),
-            command("./configure --prefix=/usr/local && make && sudo make install"),
-            command("cd -"),
-        ],
-        (Platform::Debian, Tool::Agent) => {
-            vec![command("curl -fsSL https://claude.ai/install.sh | bash"), note(AGENT_RELEASE), note("Then run it once and sign in.")]
-        }
-        (Platform::Debian, Tool::Bubblewrap) => vec![command("sudo apt install -y bubblewrap")],
-        (Platform::Debian, Tool::Git) => vec![command("sudo apt install -y git")],
-        (Platform::Arch, Tool::Gleam) => vec![command("sudo pacman -S --needed gleam")],
-        (Platform::Arch, Tool::Erlang) => vec![command("sudo pacman -S --needed erlang")],
-        (Platform::Arch, Tool::Agent) => {
-            vec![command("curl -fsSL https://claude.ai/install.sh | bash"), note(AGENT_RELEASE), note("Then run it once and sign in.")]
-        }
-        (Platform::Arch, Tool::Bubblewrap) => vec![command("sudo pacman -S --needed bubblewrap")],
-        (Platform::Arch, Tool::Git) => vec![command("sudo pacman -S --needed git")],
-        (Platform::OtherLinux | Platform::Other, Tool::Gleam) => vec![note("Install it from https://gleam.run/install/")],
-        (Platform::OtherLinux | Platform::Other, Tool::Erlang) => vec![note("Install it from https://www.erlang.org/downloads")],
-        (Platform::OtherLinux | Platform::Other, Tool::Agent) => vec![
-            note("Install Codex from https://github.com/openai/codex/releases or Claude Code from https://claude.ai/install.sh."),
-            note("Then run it once and sign in."),
-        ],
-        (Platform::OtherLinux | Platform::Other, Tool::Bubblewrap) => {
-            vec![note("Install it from https://github.com/containers/bubblewrap")]
-        }
-        (Platform::OtherLinux | Platform::Other, Tool::Git) => vec![note("Install it from https://git-scm.com/downloads")],
-    }
+    install_table()["installs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|arm| {
+            let tool_matches = arm["tool"].as_str() == Some(tool_id(tool));
+            let platform_matches =
+                arm["platforms"].as_array().is_some_and(|platforms| platforms.iter().any(|p| p.as_str() == Some(platform_name(platform))));
+            tool_matches && platform_matches
+        })
+        .and_then(|arm| arm["steps"].as_array())
+        .map(|steps| steps.iter().map(step).collect())
+        .unwrap_or_default()
 }
 
 fn platform() -> Platform {
@@ -371,6 +332,7 @@ mod tests {
 
     #[test]
     fn each_system_gets_its_own_install_step() {
+        assert!(!homebrew_steps().is_empty());
         assert_eq!(install(Platform::Macos, Tool::Gleam)[0].text, "brew install gleam");
         assert!(install(Platform::Debian, Tool::Erlang).iter().any(|step| step.command && step.text.contains("otp_src_29.0.tar.gz")));
         assert_eq!(install(Platform::Arch, Tool::Bubblewrap)[0].text, "sudo pacman -S --needed bubblewrap");
@@ -489,6 +451,30 @@ mod tests {
         assert!(!items(&probe(Platform::Debian)).iter().any(|item| item["id"] == "homebrew"));
     }
 
+    #[test]
+    fn a_signed_out_agent_does_not_ask_for_homebrew() {
+        let brew_missing = |program: &str| program != "brew";
+        let p =
+            Probe { on_path: &brew_missing, output: &current, agent: &agent_signed_out, sandbox: &sandbox_yes, platform: Platform::Macos };
+        let mac = items(&p);
+        assert!(!mac.iter().any(|item| item["id"] == "homebrew"), "{mac:?}");
+    }
+
+    #[test]
+    fn the_tool_table_matches_the_checklist() {
+        let ids: Vec<&str> =
+            install_table()["tools"].as_array().unwrap().iter().map(|tool| tool["id"].as_str().unwrap()).collect();
+        let checklist: Vec<&str> = TOOLS.iter().map(|tool| tool_id(*tool)).collect();
+        assert_eq!(ids, checklist);
+    }
+
+    #[test]
+    #[should_panic(expected = "install step command")]
+    fn a_step_without_a_command_is_an_error() {
+        static STEP: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| serde_json::json!({"text": "run it"}));
+        step(&STEP);
+    }
+
 
 }
 
@@ -544,10 +530,28 @@ fn homebrew(p: &Probe) -> Option<Value> {
             "homebrew",
             "Homebrew",
             Some("Homebrew installs the tools below on macOS.".into()),
-            vec![
-                command("/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""),
-                note("Follow the installer's PATH steps, then restart Solace."),
-            ],
+            homebrew_steps(),
         )
     })
+}
+
+/// Homebrew is offered only when a failing tool's own install steps run `brew`.
+fn uses_brew(steps: &[Step]) -> bool {
+    steps.iter().any(|step| step.command && step.text.starts_with("brew "))
+}
+
+const INSTALLS: &str = include_str!("installs.json");
+
+fn install_table() -> &'static Value {
+    static TABLE: std::sync::LazyLock<Value> =
+        std::sync::LazyLock::new(|| serde_json::from_str(INSTALLS).expect("installs.json is valid"));
+    &TABLE
+}
+
+fn step(value: &'static Value) -> Step {
+    Step { text: value["text"].as_str().expect("install step text"), command: value["command"].as_bool().expect("install step command") }
+}
+
+fn homebrew_steps() -> Vec<Step> {
+    install_table()["homebrew"].as_array().map(|steps| steps.iter().map(step).collect()).unwrap_or_default()
 }

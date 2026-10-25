@@ -5,6 +5,7 @@ import { None } from '../build/dev/javascript/gleam_stdlib/gleam/option.mjs';
 import { toList } from '../build/dev/javascript/strategy/gleam.mjs';
 import { perform } from '../build/dev/javascript/lustre/lustre/effect.mjs';
 import { to_string } from '../build/dev/javascript/lustre/lustre/element.mjs';
+import { readFile } from 'node:fs/promises';
 
 const frame = (data, id = 0) => 'id: ' + id + '\ndata: ' + JSON.stringify(data) + '\n\n';
 const encode = text => new TextEncoder().encode(text);
@@ -958,4 +959,10 @@ test('transport uses the base it is given; project paths stay absolute', async (
   } finally {
     globalThis.fetch = oldFetch; globalThis.EventSource = oldEventSource;
   }
+});
+
+test('the strategy draft storage stub matches the components copy', async () => {
+  const local = await readFile(new URL('./draft_storage.mjs', import.meta.url), 'utf8');
+  const components = await readFile(new URL('../../components/test/draft_storage.mjs', import.meta.url), 'utf8');
+  expect(local.trimEnd()).toBe(components.trimEnd());
 });

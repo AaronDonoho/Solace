@@ -1,0 +1,91 @@
+{
+  "tools": [
+    {"id": "gleam", "label": "Gleam"},
+    {"id": "erlang", "label": "Erlang/OTP"},
+    {"id": "agent", "label": "An agent"},
+    {"id": "bubblewrap", "label": "bubblewrap"},
+    {"id": "git", "label": "Git"}
+  ],
+  "homebrew": [
+    {"text": "/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"", "command": true},
+    {"text": "Follow the installer's PATH steps, then restart Solace.", "command": false}
+  ],
+  "installs": [
+    {"platforms": ["macos"], "tool": "gleam", "steps": [
+      {"text": "brew install gleam", "command": true}
+    ]},
+    {"platforms": ["macos"], "tool": "erlang", "steps": [
+      {"text": "brew install erlang", "command": true}
+    ]},
+    {"platforms": ["macos"], "tool": "agent", "steps": [
+      {"text": "brew install codex", "command": true},
+      {"text": "Or install Claude Code:", "command": false},
+      {"text": "curl -fsSL https://claude.ai/install.sh | bash", "command": true},
+      {"text": "Then run it once and sign in.", "command": false}
+    ]},
+    {"platforms": ["macos"], "tool": "git", "steps": [
+      {"text": "brew install git", "command": true}
+    ]},
+    {"platforms": ["macos"], "tool": "bubblewrap", "steps": [
+      {"text": "bubblewrap is not needed on macOS.", "command": false}
+    ]},
+    {"platforms": ["debian"], "tool": "gleam", "steps": [
+      {"text": "Download the x86_64-unknown-linux-musl or aarch64-unknown-linux-musl archive from https://github.com/gleam-lang/gleam/releases, then run:", "command": false},
+      {"text": "tar xf gleam-*-unknown-linux-musl.tar.gz", "command": true},
+      {"text": "sudo install -m 755 gleam /usr/local/bin/gleam", "command": true}
+    ]},
+    {"platforms": ["debian"], "tool": "erlang", "steps": [
+      {"text": "Ubuntu's and Debian's erlang package can be older than OTP 29. Build it from source:", "command": false},
+      {"text": "sudo apt install -y build-essential curl libssl-dev libncurses-dev m4", "command": true},
+      {"text": "cd /tmp", "command": true},
+      {"text": "curl -LO https://github.com/erlang/otp/releases/download/OTP-29.0/otp_src_29.0.tar.gz", "command": true},
+      {"text": "tar xf otp_src_29.0.tar.gz && cd otp_src_29.0", "command": true},
+      {"text": "./configure --prefix=/usr/local && make && sudo make install", "command": true},
+      {"text": "cd -", "command": true}
+    ]},
+    {"platforms": ["debian"], "tool": "agent", "steps": [
+      {"text": "curl -fsSL https://claude.ai/install.sh | bash", "command": true},
+      {"text": "Or download Codex from https://github.com/openai/codex/releases.", "command": false},
+      {"text": "Then run it once and sign in.", "command": false}
+    ]},
+    {"platforms": ["debian"], "tool": "bubblewrap", "steps": [
+      {"text": "sudo apt install -y bubblewrap", "command": true}
+    ]},
+    {"platforms": ["debian"], "tool": "git", "steps": [
+      {"text": "sudo apt install -y git", "command": true}
+    ]},
+    {"platforms": ["arch"], "tool": "gleam", "steps": [
+      {"text": "sudo pacman -S --needed gleam", "command": true}
+    ]},
+    {"platforms": ["arch"], "tool": "erlang", "steps": [
+      {"text": "sudo pacman -S --needed erlang", "command": true}
+    ]},
+    {"platforms": ["arch"], "tool": "agent", "steps": [
+      {"text": "curl -fsSL https://claude.ai/install.sh | bash", "command": true},
+      {"text": "Or download Codex from https://github.com/openai/codex/releases.", "command": false},
+      {"text": "Then run it once and sign in.", "command": false}
+    ]},
+    {"platforms": ["arch"], "tool": "bubblewrap", "steps": [
+      {"text": "sudo pacman -S --needed bubblewrap", "command": true}
+    ]},
+    {"platforms": ["arch"], "tool": "git", "steps": [
+      {"text": "sudo pacman -S --needed git", "command": true}
+    ]},
+    {"platforms": ["linux", "other"], "tool": "gleam", "steps": [
+      {"text": "Install it from https://gleam.run/install/", "command": false}
+    ]},
+    {"platforms": ["linux", "other"], "tool": "erlang", "steps": [
+      {"text": "Install it from https://www.erlang.org/downloads", "command": false}
+    ]},
+    {"platforms": ["linux", "other"], "tool": "agent", "steps": [
+      {"text": "Install Codex from https://github.com/openai/codex/releases or Claude Code from https://claude.ai/install.sh.", "command": false},
+      {"text": "Then run it once and sign in.", "command": false}
+    ]},
+    {"platforms": ["linux", "other"], "tool": "bubblewrap", "steps": [
+      {"text": "Install it from https://github.com/containers/bubblewrap", "command": false}
+    ]},
+    {"platforms": ["linux", "other"], "tool": "git", "steps": [
+      {"text": "Install it from https://git-scm.com/downloads", "command": false}
+    ]}
+  ]
+}

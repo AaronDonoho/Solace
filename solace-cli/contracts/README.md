@@ -1,6 +1,6 @@
 # contracts
 
-The Contract view page of the Solace web app: a Lustre (Gleam, JavaScript target) web component, `<solace-contracts>`. It reads one attribute, `base`, the API prefix of the project it shows (`/p/<dir>` in a workspace, empty for the root project; without one, a page at `/p/<dir>/contracts` asks its own project). It carries its own styles and talks to the server's `/graph`, `/nodes`, `/files`, `/tests`, `/tasks` and `/events` endpoints.
+The Contract view page of the Solace web app: a Lustre (Gleam, JavaScript target) web component, `<solace-contracts>`. It reads `base`, the API prefix of the project it shows (`/p/<dir>` in a workspace, empty for the root project), and `task`, the task it reviews; the shell sets both before the page connects, and changing either follows the address without remounting the page. It carries its own styles and talks to the server's `/graph`, `/nodes`, `/files`, `/tests`, `/tasks` and `/events` endpoints.
 
 `contracts.register()` returns `Result(Nil, lustre.Error)` and defines the element. The shell (`solace-cli/frontend`) registers it and bundles it with the board and migration into one `app.js`, served at `/contracts` and `/p/<dir>/contracts` below the shell's menu bar. `main()` registers it on its own, for `index.html`.
 

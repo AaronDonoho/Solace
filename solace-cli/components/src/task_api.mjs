@@ -1,12 +1,10 @@
 // Browser transport for <solace-task>: state, decoding and rendering belong to Lustre.
 // `base` is the task's project prefix on this server ("" for the root's; `/p/<dir>`
 // for a workspace project). Root routes such as `/models` are asked with "".
-const fallbackBase = () => globalThis.location?.pathname.match(/^(.*)\/contracts$/)?.[1] ?? '';
-const prefix = base => base || fallbackBase();
 // A component's shadow root before it has rendered: the helpers do nothing.
 export function no_root() { return null; }
 export function request(base, path, method, body, receive) {
-  fetch((path.startsWith('/p/') ? '' : prefix(base)) + path, { method, headers: { 'Content-Type': 'application/json' },
+  fetch((path.startsWith('/p/') ? '' : base) + path, { method, headers: { 'Content-Type': 'application/json' },
     ...(method === 'GET' ? {} : { body }) })
     .then(response => response.text())
     .then(
@@ -19,7 +17,7 @@ export function request(base, path, method, body, receive) {
     .catch(error => console.error(error));
 }
 export function events(base, receive, ready = () => {}) {
-  const source = new EventSource(prefix(base) + '/events');
+  const source = new EventSource(base + '/events');
   source.onmessage = event => receive(event.data);
   source.addEventListener('ready', () => ready());
   // Native EventSource reconnects with Last-Event-ID.
@@ -43,6 +41,21 @@ export function load(key) {
 }
 export function store(key, value) {
   try { value ? localStorage.setItem(key, value) : localStorage.removeItem(key); } catch {}
+}
+
+// A draft belongs to one editor and the record or context it edits. The editor's id and that owner
+// keep two tasks, a new and an edited record, or two planning contexts apart.
+export function draft_key(editor, owner) {
+  return `solace-draft:${editor}:${owner}`;
+}
+export function load_draft(editor, owner) {
+  return load(draft_key(editor, owner));
+}
+export function save_draft(editor, owner, text) {
+  store(draft_key(editor, owner), text);
+}
+export function clear_draft(editor, owner) {
+  store(draft_key(editor, owner), '');
 }
 
 // Agent text is untrusted: everything is escaped before the few markdown forms
@@ -162,10 +175,14 @@ export function block(root, id, text, kind) {
 }
 
 // Defines <solace-md-editor> (md_editor.mjs, CodeMirror) once, in a browser. Elsewhere, as in the tests, it
-// does nothing, and CodeMirror is never loaded.
-export function define_editor() {
-  if (!globalThis.customElements || customElements.get('solace-md-editor')) return;
-  import('./md_editor.mjs').then(editor => editor.define());
+// does nothing, and CodeMirror is never loaded. Concurrent asks share one load.
+let defining;
+export function define_editor(load = () => import('./md_editor.mjs')) {
+  if (!globalThis.customElements || customElements.get('solace-md-editor') || defining) return;
+  defining = load()
+    .then(editor => editor.define())
+    .catch(error => console.error('Could not load the markdown editor.', error))
+    .finally(() => { defining = undefined; });
 }
 
 // How the markdown editor takes a text set from outside it (a tool, an image, a box cleared after a send):
@@ -265,4 +282,10 @@ export function reveal_task(root) {
   const calm = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
   detail.scrollIntoView?.({ block: 'start', behavior: calm ? 'auto' : 'smooth' });
   detail.querySelector('[role=tab][aria-selected=true]')?.focus?.({ preventScroll: true });
+}
+
+// Puts focus on the markdown editor `id`, for Add note; `root` is this
+// element's shadow root.
+export function focus_editor(root, id) {
+  root?.getElementById?.(id)?.focus?.();
 }

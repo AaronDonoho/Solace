@@ -111,11 +111,12 @@ test('transport uses the base it is given; explicit project paths stay absolute'
     await new Promise(resolve => api.request('/p/shop', '/graph', 'GET', '', resolve));
     await new Promise(resolve => api.request('/p/shop', '/p/other/tasks', 'GET', '', resolve));
     await new Promise(resolve => api.request('', '/graph', 'GET', '', resolve));
-    expect(paths).toEqual(['/p/shop/graph', '/p/other/tasks', '/p/web/graph']);
+    expect(paths).toEqual(['/p/shop/graph', '/p/other/tasks', '/graph']);
     expect(api.events('/p/shop', () => {})).toBe(source);
     expect(source.path).toBe('/p/shop/events');
     api.close_events(source);
     expect(source.closed).toBe(true);
+    expect(api.events('', () => {}).path).toBe('/events');
   } finally {
     globalThis.location = oldLocation; globalThis.fetch = oldFetch; globalThis.EventSource = oldEventSource;
   }
@@ -146,10 +147,10 @@ test('text dragged within a text box or a markdown editor moves; anything else s
 
 // A browser without a DOM for the component tests: requests and event streams
 // are recorded, and timers wait until the test fires them.
-function fakeBrowser(search = '', replies = {}) {
+function fakeBrowser(search = '', replies = {}, pathname = '/') {
   const saved = Object.fromEntries(['fetch', 'EventSource', 'location', 'setTimeout'].map(k => [k, Object.getOwnPropertyDescriptor(globalThis, k)]));
   const paths = [], sources = [], timers = [];
-  Object.defineProperty(globalThis, 'location', { configurable: true, value: { pathname: '/', search } });
+  Object.defineProperty(globalThis, 'location', { configurable: true, value: { pathname, search } });
   globalThis.fetch = async path => {
     paths.push(path);
     return Response.json(path in replies ? replies[path] : {});
@@ -212,6 +213,18 @@ test('a component removed and added again reopens one stream, which receives lat
     expect(b.model.caught_up).toBe(true);
     // One open stream.
     expect(browser.sources.filter(s => !s.closed)).toHaveLength(1);
+  } finally { browser.restore(); }
+});
+
+test('the board asks its root routes at the root on a contract page', async () => {
+  const browser = fakeBrowser('', {}, '/p/web/contracts');
+  try {
+    const b = mount(board);
+    b.dispatch(new board.Connected());
+    await settle();
+    expect(browser.paths).toContain('/projects');
+    expect(browser.paths).not.toContain('/p/web/projects');
+    expect(browser.sources.map(source => source.path)).toEqual(['/events']);
   } finally { browser.restore(); }
 });
 

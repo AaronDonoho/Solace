@@ -146,6 +146,7 @@ fn a_rust_session_lists_names_and_the_brief() {
     assert!(out.contains("Rust in Solace: every item has its own name, once per module"), "{out}");
     assert!(out.contains("a::agents.Panel::show"), "{out}");
     assert!(out.contains("the module is the one holding the `impl`"), "{out}");
+    assert!(out.contains("generics may be left out (`Refs::new`)"), "{out}");
     assert!(out.contains("`find <text>` searches Rust source; `grep` searches other files only."), "{out}");
     assert!(!out.contains("<module>.tests::<name>"), "{out}");
 }
@@ -481,4 +482,72 @@ fn a_common_leaf_lists_at_most_ten_names() {
     let ix = store.index().unwrap();
     let hint = similar_hint(&ix, "crate.item");
     assert_eq!(hint.matches("crate.item").count(), 10, "{hint}");
+}
+
+/// A generic method's name may leave out its type's generics (D-193).
+#[test]
+fn a_view_name_may_leave_out_generics() {
+    let lib = concat!(
+        "pub struct Refs<'a> {\n",
+        "    text: &'a str,\n",
+        "}\n\n",
+        "impl<'a> Refs<'a> {\n",
+        "    pub fn new(text: &'a str) -> Self {\n",
+        "        Refs { text }\n",
+        "    }\n",
+        "}\n"
+    );
+    let (_root, store) = crate::testing::rust_project(lib);
+    let out = store.view(&["crate.Refs::new"], false, usize::MAX).unwrap();
+    assert!(out.contains("crate.Refs<'a>::new (fn)"), "{out}");
+}
+
+/// An exact name beats a generic-free one, even when both are in the store.
+#[test]
+fn an_exact_name_wins_over_a_loose_match() {
+    let lib = "pub mod a;\npub mod b;\n";
+    let a =
+        "pub struct Foo<T> {\n    value: T,\n}\n\nimpl<T> Foo<T> {\n    pub fn new(value: T) -> Self {\n        Foo { value }\n    }\n}\n";
+    let b = "pub struct Foo;\n\nimpl Foo {\n    pub fn new() -> Self {\n        Foo\n    }\n}\n";
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", lib), ("src/a.rs", a), ("src/b.rs", b)]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let ix = store.index().unwrap();
+    let i = store.resolve(&ix, "Foo::new").unwrap();
+    assert_eq!(ix.syms[i].qname(), "b.Foo::new");
+}
+
+/// Two generic impls with one method are ambiguous, and E1002 lists both full
+/// names (D-193).
+#[test]
+fn an_ambiguous_generic_method_lists_both_names() {
+    let lib = concat!(
+        "pub struct Foo<T> {\n",
+        "    value: T,\n",
+        "}\n\n",
+        "impl Foo<u8> {\n",
+        "    pub fn new() -> Self {\n",
+        "        Foo { value: 0 }\n",
+        "    }\n",
+        "}\n\n",
+        "impl Foo<i32> {\n",
+        "    pub fn new() -> Self {\n",
+        "        Foo { value: 0 }\n",
+        "    }\n",
+        "}\n"
+    );
+    let (_root, store) = crate::testing::rust_project(lib);
+    let ix = store.index().unwrap();
+    let e = store.resolve(&ix, "crate.Foo::new").unwrap_err();
+    assert!(e.0.contains("E1002"), "{}", e.0);
+    assert!(e.0.contains("crate.Foo<u8>::new"), "{}", e.0);
+    assert!(e.0.contains("crate.Foo<i32>::new"), "{}", e.0);
+}
+
+/// Only a generic group after an identifier is dropped; a trait impl's name,
+/// which starts with `<`, stays whole.
+#[test]
+fn without_generics_leaves_a_trait_impl_whole() {
+    assert_eq!(without_generics("Refs<'a>::new"), "Refs::new");
+    assert_eq!(without_generics("<Failure as From<u8>>::from"), "<Failure as From<u8>>::from");
 }

@@ -1175,3 +1175,31 @@ Amends D-158 and Spec 15 §4 (Aaron, board task "setup: new Rust project", 2026-
 2. For Rust, `cargo new <dir> --name <name>` runs in the root, without a nested git repository inside one, then `setup`; the result is a binary package with `src/main.rs` and Cargo's chosen edition, added in place as D-178 does. `cargo new` checks the name and its refusal is shown as written. A failed run leaves no folder, so a refusal changes no project list. Without `cargo`, a new Rust project is refused before anything is created; unlike Add, a new Rust package can't be made without it.
 3. `solace create` stays Gleam-only. Rust libraries, multi-crate workspaces and migration of existing Rust code stay out of scope (D-178 adds Rust code in place).
 Why: the form could make only Gleam projects, so starting a Rust project needed a shell and `cargo new`; the same form should do it, with Cargo's own name checks and no half-made folder.
+
+## D-193 A Rust method name may leave out generics
+(Aaron, board task "names: Rust methods without generics", 2026-10-24). Part of the Agent Tooling Efficiency feature. Amends D-168 and Spec 3.
+1. A name-taking command matches exact names first. Only when none match does it compare a Rust symbol's name with each balanced `<…>` group after an identifier left out: `language::rust_refs.Refs::new` names `Refs<'a>::new` when one impl matches. A name starting with `<`, such as `<Failure as From<…>>::from`, matches only exactly.
+2. This covers `view`, `inspect`, `refs`, `impact` and `delete` through `Store::resolve`, and patch headers and `*** Add: <module>.<Type>::<fn>` containers through the Rust symbol and container lookup. When more than one generic-free name matches, `E1002` lists the full names; an exact match always wins.
+Why: an agent read a method as `Refs::new` and had to retype the lifetime the store showed, which cost a failed call.
+
+## D-194 A patch Add may carry a type with its impl
+(Aaron, board task "submit: a new type and its impl together", 2026-10-24). Part of the Agent Tooling Efficiency feature. Amends D-168 point 4 and Spec 3.
+1. An `*** Add: <module>` may hold a new item with its inherent `impl` block, and any new `impl` or `trait` block. A block's own text still goes through `submit --new <module>`, not `submit <name>` or `*** Update: <container>`; this is the patch form D-168 point 4 left out.
+2. An `*** Add: <module>.<Type>::<fn>` adds the method to the `impl` added earlier in the same patch, or, when only the type was added, opens one with the type's generics (defaults dropped, lifetimes and const parameters kept). The patch yields one `impl` per type and its arguments: impls with different arguments stay separate, an Add that names a method for an ambiguous type is refused with E1002, and impls from Add sections are held and rendered at the end.
+3. A patch's `*** Add: <module>` may also add an inherent impl for a type already stored; the module, not the type's name, is the block's target.
+4. `reference.txt`'s patch paragraph and Spec 3's `submit` row say so.
+Why: an agent adds a type and its methods in one patch, and a second call that names the type as a container was the friction this removes.
+
+## D-195 A task link opens on the board only while the board shows it
+Amends D-98 points 2 and 3, D-129 point 2 and Spec 15 §4 (Aaron, board task "links: open on the board only if shown", 2026-10-24).
+1. `GET /tasks/find/{id}` adds `onBoard`: true only while the board shows the task. It is false when the task is archived, is in Backlog, has no project (D-129), or has a feature that is `proposed`, `upcoming` or `canceled` (D-128). A feature that is `active` or `complete`, or that cannot be found, keeps the task on the board.
+2. A task link opens on the board when `onBoard` is true, and otherwise on the Strategy page's Tasks tab with that task focused, as an archived task's link does today. A reply without `onBoard`, from an older server, keeps D-98's rule: the board unless the task is archived or has no project.
+3. Feature and milestone links are unchanged.
+Why: a link could open the board where a hidden task had no card, leaving the human with no way to reach it.
+
+## D-196 The board takes task visibility from the server
+Amends D-195 and Spec 15 §1 and §4 (Aaron, board task "links: open on the board only if shown", 2026-10-24).
+1. Every task list and task event carries `onBoard`, computed by the same rule as `GET /tasks/find/{id}`. It is not stored on the task.
+2. `solace_board.cards` shows a task when `onBoard` is true and the task's scope covers the lane. It no longer decides visibility from Backlog, archived state, or feature state; features still name and color their tasks.
+3. When a feature's state change can change its tasks' visibility, the server announces those tasks, so the board updates them. `active` and `complete` are both visible.
+Why: the board and a task link could disagree, and keeping the same rule in two languages invited drift.

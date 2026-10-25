@@ -25,8 +25,13 @@ rust-acceptance = { run = ["cargo", "test", "--test", "acceptance", "--", "--inc
 # Layout measurements and screenshots of a fixture instance, light and dark (D-71 isolation).
 # An argument limits it to one page: board, strategy[-vision|-features|-roadmap|-tasks], settings, task.
 layout_audit = { run = ["python3", "tests/layout_audit.py"], args = true, allowed_in_reviews = true }
+# A browser leaves and returns to a task's note and description editors: their drafts come back, and
+# sending the note or saving the description clears them.
+draft_flow = { run = ["python3", "tests/draft_flow.py"], allowed_in_reviews = true }
 # The shared spacing tokens and the board's column labels, against the one place that sets them.
 spacing_parity = { run = ["python3", "tests/spacing_parity.py"], allowed_in_reviews = true, test = true }
+# The setup tools and install steps, against the README's install guide.
+setup_parity = { run = ["python3", "tests/setup_parity.py"], allowed_in_reviews = true, test = true }
 cargo-timings = { run = ["cargo", "build", "--release", "--timings"], allowed_in_reviews = true }
 # Cold build measurement in an isolated target dir (leaves the normal cache alone): clean, then build.
 cargo-cold-clean = { run = ["cargo", "clean", "--target-dir", "target/cold"] }

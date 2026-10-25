@@ -10,7 +10,7 @@ fn owner() -> String {
 /// to a callee, leave it current.
 fn base(s: &Store, ix: &Index, args: &[String], text: &str) -> Out {
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let mut names: Vec<String> = text.lines().filter_map(|l| l.strip_prefix("// ── ")).map(block_name).collect();
+    let mut names: Vec<String> = text.lines().filter_map(|l| l.strip_prefix(BLOCK_HEADER)).map(block_name).collect();
     let (mut parts, mut modules) = (vec![], vec![]);
     // a patch draft: what its sections update or add to; a module section covers the whole module
     if is_patch(text) {
@@ -138,21 +138,35 @@ fn clip(line: &str) -> String {
 pub const RESEND: &str = "Send the corrected patch again, whole, as `text`.";
 
 /// The footer of a refusal kept as draft `id`, retried with `cmd` (`submit` or
-/// `write`): `--replace` fixes a fault in one line; a fault in the whole patch
-/// is resent. The kind is read at the message's end, where a quoted patch
-/// line can't reach it.
-pub fn retry_advice(message: &str, id: &str, cmd: &str, what: &str) -> String {
-    if message.ends_with(RESEND) {
-        format!("Draft {id} retained{what}. Read: `view --draft {id}`. List: `drafts`.")
+/// `write`): it says nothing was saved unless the message already says so,
+/// `--replace` fixes a fault in one block or line, and a fault in the whole
+/// patch is resent; a draft that isn't a patch says the whole text. The kind is
+/// read at the message's end, where a quoted patch line can't reach it.
+pub fn retry_advice(message: &str, id: &str, cmd: &str, what: &str, several: bool, patch: bool) -> String {
+    let (noun, plural, nothing) =
+        if cmd == "write" { ("line", "lines", "Nothing was written.") } else { ("block", "blocks", "Nothing was saved.") };
+    let quiet = message.starts_with(if cmd == "write" { "nothing written:" } else { "Not saved:" });
+    let prefix = if quiet { String::new() } else { format!("{nothing} ") };
+    let fix = if several {
+        let whole = if patch { "patch" } else { "text" };
+        format!(
+            concat!(
+                "Fix only the failing {}: `{} --draft {} --replace` with `old` and `text`; ",
+                "the other {} stay in the draft, so don't resend the whole {}.",
+            ),
+            noun, cmd, id, plural, whole
+        )
     } else {
         format!(
             concat!(
-                "Draft {} retained{}. Read: `view --draft {}`. ",
-                "Fix and retry: `{} --draft {} --replace` with `old` and `text`. List: `drafts`.",
+                "Fix the failing {}: `{} --draft {} --replace` with `old` and `text`; ",
+                "the draft keeps your text, so don't resend the whole text.",
             ),
-            id, what, id, cmd, id
+            noun, cmd, id
         )
-    }
+    };
+    let tail = format!("Draft {id} retained{what}. Read: `view --draft {id}`. List: `drafts`.");
+    if message.ends_with(RESEND) { format!("{prefix}{tail}") } else { format!("{prefix}{tail} {fix}") }
 }
 
 /// A patch's hunk: its `@@` context line, its lines (` `, `-` or `+` first),
@@ -389,8 +403,7 @@ pub fn file_text(path: &str, current: &str, kind: Section, hunks: Vec<Hunk>) -> 
 /// One `// ── <module>.<name> ──` block: a module's imports (its header), once,
 /// before the text of the first item they go with.
 fn push_block(blocks: &mut String, header: &mut String, module: &str, name: &str, text: &str) {
-    let head = if header.is_empty() { String::new() } else { format!("{}\n\n", std::mem::take(header)) };
-    blocks.push_str(&format!("// ── {module}.{name} ──\n{head}{text}\n"));
+    push_named(blocks, header, &format!("{module}.{name}"), text);
 }
 
 /// Pushes one block per item a whole-module patch changed or added (D-168); a
@@ -434,6 +447,7 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
     let ix = s.index()?;
     let rust = language::is_rust(&s.root);
     let mut blocks = String::new();
+    let mut pending = Vec::new();
     for (kind, target, at_line, hunks) in sections {
         // A `*** Update File:` header may name a symbol; one that names no code is a file, for `write`.
         let header = raw.lines().nth(at_line - 1).unwrap_or("");
@@ -450,7 +464,16 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
                 path, at_line, RESEND
             ))
         };
-        let mut c = SectionContext { s, ix: &ix, target: &target, at_line, blocks: &mut blocks, bad: &bad, not_code: &not_code };
+        let mut c = SectionContext {
+            s,
+            ix: &ix,
+            target: &target,
+            at_line,
+            blocks: &mut blocks,
+            pending: &mut pending,
+            bad: &bad,
+            not_code: &not_code,
+        };
         if kind == Section::Add {
             add_blocks(&mut c, rust, &hunks)?;
         } else if rust {
@@ -458,6 +481,9 @@ pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
         } else {
             unit_update_blocks(&mut c, hunks)?;
         }
+    }
+    if rust {
+        render_pending_impls(&s.root, &mut blocks, &mut pending)?;
     }
     if blocks.is_empty() {
         return Err(bad(format!("the patch changes nothing. {RESEND}")));
@@ -548,7 +574,8 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
                 params![id, owner(), json!(args).to_string(), raw, base],
             )?;
             let what = if as_blocks { " (the patch applied; the draft holds the blocks it changed)" } else { "" };
-            let advice = retry_advice(&message, &id, "submit", what);
+            let several = several_blocks(s, &raw);
+            let advice = retry_advice(&message, &id, "submit", what, several, is_patch(&raw));
             Err(Failure(format!("{message}\n\n{advice}"), code))
         }
     }
@@ -746,7 +773,13 @@ mod tests {
         assert!(patch_blocks(&s, hunk).unwrap_err().0.contains("in app.main (hunk at line 3)"));
         let rename = "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n+pub fn primary() {\n*** End Patch\n";
         let e = patch_blocks(&s, rename).unwrap_err().0;
-        assert!(e.contains("renames app.main (section at line 2)") && e.contains("`*** Add:`") && !e.contains("submit app.main"), "{e}");
+        assert!(
+            e.contains("renames app.main (section at line 2)")
+                && e.contains("`submit app.main` with the new text renames it and keeps its id")
+                && e.contains("change its callers in the same submit")
+                && !e.contains("`*** Add:`"),
+            "{e}"
+        );
         let e = patch_blocks(&s, "*** Begin Patch\n*** Move: app.main\n*** End Patch\n").unwrap_err().0;
         assert!(e.contains("submit app.main") && e.contains("keeping its id"), "{e}");
         let moved = "*** Begin Patch\n*** Update: app.main\n@@\n-  let x = 1\n+  let x = 2\n*** Move to: app.primary\n*** End Patch\n";
@@ -821,7 +854,12 @@ mod tests {
         ] {
             let e = submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
             assert!(
-                e.contains("E0108") && e.contains(why) && e.contains(RESEND) && e.contains("Draft") && !e.contains("--replace"),
+                e.contains("E0108")
+                    && e.contains(why)
+                    && e.contains(RESEND)
+                    && e.contains("Draft")
+                    && e.contains("Nothing was saved.")
+                    && !e.contains("--replace"),
                 "{why}: {e}"
             );
         }
@@ -830,6 +868,10 @@ mod tests {
         let e = submit(&s, &["submit"], &mut || Ok(empty.into()), None).unwrap_err().0;
         assert!(
             e.contains("line 4 of the patch: in `*** Add: app.x` every line, empty ones too, starts with `+`")
+                && e.contains("Nothing was saved.")
+                && e.contains("Fix the failing block")
+                && e.contains("don't resend the whole text")
+                && !e.contains("other blocks")
                 && e.contains("--replace")
                 && !e.contains(RESEND),
             "{e}"
@@ -837,7 +879,7 @@ mod tests {
         // A quoted line that is the resend sentence is still a one-line fault.
         let quoted = format!("*** Begin Patch\n*** Add: app.x\n+pub fn x() {{ 1 }}\n{RESEND}\n*** End Patch\n");
         let e = submit(&s, &["submit"], &mut || Ok(quoted.clone()), None).unwrap_err().0;
-        assert!(e.contains("line 4 of the patch") && e.contains("--replace"), "{e}");
+        assert!(e.contains("line 4 of the patch") && e.contains("Nothing was saved.") && e.contains("--replace"), "{e}");
         // A new module from two Add sections keeps its module comment and both sections' imports.
         let module = concat!(
             "*** Begin Patch\n*** Add: kb.one\n+//// Knowledge.\n+import app\n+\n+pub fn one() -> Int { app.main() }\n",
@@ -922,6 +964,12 @@ mod tests {
         );
         let err = submit(&s, &["submit"], &mut || Ok(missing.into()), None).unwrap_err().0;
         assert!(err.starts_with("E0108 in app.main (hunk at line 7), these lines weren't found: `let x = calc.nope(1)`"), "{err}");
+        assert!(
+            err.contains("Fix only the failing block")
+                && err.contains("the other blocks stay")
+                && err.contains("don't resend the whole patch"),
+            "{err}"
+        );
         assert_eq!(board::snapshot(&s).unwrap(), original);
         let patch = concat!(
             "*** Begin Patch\n*** Update File: src/calc.gleam\n@@ pub fn add(\n",
@@ -945,8 +993,24 @@ mod tests {
         let err = submit(&s, &["submit"], &mut || Ok(wrong.into()), None).unwrap_err().0;
         assert!(err.contains("Draft"), "{err}");
         assert!(err.contains("the draft holds the blocks"), "{err}");
+        assert!(
+            !err.contains("Nothing was saved.")
+                && err.contains("Fix the failing block")
+                && !err.contains("other blocks")
+                && err.contains("--replace"),
+            "{err}"
+        );
         let id: String = s.db.query_row("SELECT id FROM drafts ORDER BY rowid DESC LIMIT 1", [], |r| r.get(0)).unwrap();
         assert!(view(&s, &id).unwrap().starts_with("// ── calc.sub ──\npub fn sub"));
+        // A type error after several blocks says the other blocks stay.
+        let wrong_both = concat!("*** Update: calc.add\n-  a + b\n+  a -. b\n", "*** Update: calc.sub\n-  a - 1\n+  a -. 1.0\n",);
+        let err = submit(&s, &["submit"], &mut || Ok(wrong_both.into()), None).unwrap_err().0;
+        assert!(
+            err.contains("Fix only the failing block")
+                && err.contains("the other blocks stay")
+                && err.contains("don't resend the whole text"),
+            "{err}"
+        );
     }
 
     /// D-46: E0105 names each occurrence's line; `--all` replaces every one.
@@ -1011,6 +1075,83 @@ mod tests {
         let unknown = patch_blocks(&s, "*** Begin Patch\n*** Update: crate.nope\n*** End Patch\n").unwrap_err().0;
         assert!(unknown.contains("Similar names:") && unknown.contains("crate.one"), "{unknown}");
     }
+
+    /// A type added with its impl and a later method's Add make one impl block
+    /// for the submit to save (D-194).
+    #[test]
+    fn a_patch_add_holds_one_impl() {
+        let (_root, s) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Add: crate.X\n",
+            "+pub struct X;\n",
+            "*** Add: crate.X::new\n",
+            "+pub fn new() -> Self {\n",
+            "+    Self\n",
+            "+}\n",
+            "*** End Patch\n",
+        );
+        let blocks = patch_blocks(&s, patch).unwrap();
+        assert_eq!(blocks.matches("impl X {").count(), 1, "{blocks}");
+        assert!(blocks.contains("pub fn new() -> Self"), "{blocks}");
+        assert!(!blocks.contains("// ── crate.X.new ──"), "{blocks}");
+    }
+
+    /// Impls for one type with different arguments stay separate (D-194).
+    #[test]
+    fn a_patch_keeps_impls_with_different_arguments_apart() {
+        let (_root, s) = rust_project("pub struct X<T>(T);\n");
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Add: crate\n",
+            "+impl X<i32> {\n",
+            "+    pub fn a() {}\n",
+            "+}\n",
+            "+impl X<u8> {\n",
+            "+    pub fn b() {}\n",
+            "+}\n",
+            "*** End Patch\n",
+        );
+        let blocks = patch_blocks(&s, patch).unwrap();
+        assert!(blocks.contains("impl X<i32>") && blocks.contains("impl X<u8>"), "{blocks}");
+    }
+
+    /// A method Add cannot choose between two impls of one type (D-194).
+    #[test]
+    fn a_patch_refuses_an_ambiguous_method_add() {
+        let (_root, s) = rust_project("pub struct X<T>(T);\n");
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Add: crate\n",
+            "+impl X<i32> {\n",
+            "+    pub fn a() {}\n",
+            "+}\n",
+            "+impl X<u8> {\n",
+            "+    pub fn b() {}\n",
+            "+}\n",
+            "*** Add: crate.X::new\n",
+            "+pub fn c() {}\n",
+            "*** End Patch\n",
+        );
+        let err = patch_blocks(&s, patch).unwrap_err().0;
+        assert!(err.contains("matches more than one impl") && err.contains("X<i32>") && err.contains("X<u8>"), "{err}");
+    }
+
+    /// A `submit --new` with several symbols says the other blocks stay and to
+    /// resend the whole text, not a patch.
+    #[test]
+    fn a_multi_symbol_new_submit_says_the_other_blocks_stay() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let text = "pub fn one() -> Int { 1 }\n\npub fn two() -> Int { \"two\" }\n";
+        let err = submit(&s, &["submit", "--new", "app"], &mut || Ok(text.into()), None).unwrap_err().0;
+        assert!(
+            err.contains("Fix only the failing block")
+                && err.contains("the other blocks stay")
+                && err.contains("don't resend the whole text")
+                && !err.contains("whole patch"),
+            "{err}"
+        );
+    }
 }
 
 /// The refusal for an `*** Update:` that names no symbol (E0108): a module or
@@ -1038,50 +1179,35 @@ fn nothing_left(qname: &str, at_line: usize) -> String {
     format!("the patch leaves nothing of {qname} (section at line {at_line}); use `delete <name>`.")
 }
 
-/// The refusal for an update whose stored name is not among its items.
+/// The refusal for an update that would rename its symbol.
 fn renamed(qname: &str, at_line: usize) -> String {
-    format!("the patch renames {qname} (section at line {at_line}); put the new symbol under its own `*** Add:` header.")
+    format!(
+        concat!(
+            "the patch renames {qname} (section at line {at_line}); ",
+            "`submit {qname}` with the new text renames it and keeps its id; ",
+            "change its callers in the same submit.",
+        ),
+        qname = qname,
+        at_line = at_line
+    )
 }
 
 fn add_blocks(c: &mut SectionContext<'_>, rust: bool, hunks: &[Hunk]) -> Result<(), Failure> {
-    let blocks = &mut *c.blocks;
     let text: String = hunks[0].1.iter().map(|l| format!("{}\n", &l[1..])).collect();
-    let (header, items): (String, Vec<(String, String)>) = if rust {
-        let container = c.s.rust_container_in(c.ix, c.target)?.map(|i| &c.ix.syms[i]);
-        let f = language::rust::split(&text, c.target).map_err(|e| {
-            store::rust_syntax_error(
-                e,
-                c.target,
-                container.map(|owner| (owner.name.as_str(), owner.text.as_str(), owner.kind_text.as_str())),
-                container.map_or("", |owner| owner.module.as_str()),
-                0,
-                text.lines().count().max(1),
-            )
-        })?;
-        // A block's own text is not an item: it comes in whole through
-        // `submit --new <module>` (D-168).
-        if let Some(p) = f.items.iter().find(|p| store::is_block(p)) {
-            return Err((c.bad)(format!("{}.", store::block_note(p.kind))));
-        }
-        (f.header, f.items.into_iter().map(|p| (p.name, p.text)).collect())
-    } else {
-        let m = c.s.lang().split(&text);
-        (m.header, m.items.into_iter().map(|i| (i.name, i.text)).collect())
-    };
+    if rust {
+        return add_rust_blocks(c, &text);
+    }
+    let split = c.s.lang().split(&text);
+    if split.items.is_empty() {
+        return Err(defines_nothing(c));
+    }
     let module = match c.target.rsplit_once('.') {
-        Some((m, n)) if items.iter().any(|(name, _)| name.as_str() == n) => m.to_string(),
+        Some((m, n)) if split.items.iter().any(|item| item.name == n) => m.to_string(),
         _ => c.target.to_string(),
     };
-    if items.is_empty() {
-        return Err((c.not_code)((c.bad)(format!(
-            "`*** Add: {}` (line {}) defines no function, type or constant. {RESEND}",
-            c.target, c.at_line
-        ))));
-    }
-    let mut header = header;
-    for (name, item) in &items {
-        let text = c.s.rust_block_text(c.ix, &module, name, item);
-        push_block(blocks, &mut header, &module, name, &text);
+    let mut header = split.header;
+    for item in split.items {
+        push_block(c.blocks, &mut header, &module, &item.name, &item.text);
     }
     Ok(())
 }
@@ -1167,6 +1293,7 @@ struct SectionContext<'a> {
     target: &'a str,
     at_line: usize,
     blocks: &'a mut String,
+    pending: &'a mut Vec<PendingImpl>,
     bad: &'a dyn Fn(String) -> Failure,
     not_code: &'a dyn Fn(Failure) -> Failure,
 }
@@ -1234,3 +1361,243 @@ fn rust_symbol_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Re
     }
     Ok(())
 }
+
+/// An inherent `impl` an Add section is still filling in (D-194), keyed by its
+/// module and full self type: its opening, the items inside it, and its header.
+struct PendingImpl {
+    module: String,
+    ty: String,
+    opening: String,
+    items: Vec<String>,
+    header: String,
+    added: bool,
+}
+
+/// The blocks an Add section gives (D-194): a type with its impl is one block
+/// per item, a method for a type added earlier joins that type's pending impl,
+/// and a whole new `impl` or `trait` block names its module.
+fn add_rust_blocks(c: &mut SectionContext<'_>, text: &str) -> Result<(), Failure> {
+    let container = c.s.rust_container_in(c.ix, c.target)?;
+    let file = language::rust::split(text, c.target).map_err(|e| {
+        store::rust_syntax_error(
+            e,
+            c.target,
+            container.map(|i| (c.ix.syms[i].name.as_str(), c.ix.syms[i].text.as_str(), c.ix.syms[i].kind_text.as_str())),
+            container.map_or("", |i| c.ix.syms[i].module.as_str()),
+            0,
+            text.lines().count().max(1),
+        )
+    })?;
+    if file.items.is_empty() {
+        return Err(defines_nothing(c));
+    }
+    let root = c.s.root.clone();
+    let target = c.target;
+    let mut header = file.header;
+    if container.is_none() && add_pending_method(c, target, text, &mut header)? {
+        return Ok(());
+    }
+    let module = match target.rsplit_once('.') {
+        Some((m, n)) if file.items.iter().any(|p| bare_type(&p.name) == n) => m.to_string(),
+        _ => target.to_string(),
+    };
+    for p in &file.items {
+        if store::is_block(p) {
+            if container.is_some() {
+                return Err((c.bad)(format!("{}.", store::block_note(p.kind))));
+            }
+            if p.kind == "impl" && !p.name.starts_with('<') {
+                add_pending_impl(c, &module, p, &mut header)?;
+            } else {
+                let block = formatted_block(&root, &p.whole())?;
+                push_named(c.blocks, &mut header, &module, &block);
+            }
+        } else {
+            let item = c.s.rust_block_text(c.ix, &module, &p.name, &p.text);
+            push_block(c.blocks, &mut header, &module, &p.name, &item);
+            if p.kind == "struct" {
+                add_pending_struct(c, &module, &p.whole())?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Holds an inherent impl from an Add section until the patch ends, so a later
+/// method for its type joins this block instead of opening another (D-194).
+fn add_pending_impl(c: &mut SectionContext<'_>, module: &str, block: &language::rust::Piece, header: &mut String) -> Result<(), Failure> {
+    let root = c.s.root.clone();
+    let text = formatted_block(&root, &block.whole())?;
+    let file = language::rust::split(&text, module)?;
+    let Some(one) = file.items.first() else {
+        return Err(defines_nothing(c));
+    };
+    let p = pending_mut(c.pending, module, &one.name);
+    if !p.added {
+        p.opening = one.text.clone();
+    }
+    p.items.extend(one.children.iter().map(|child| child.whole()));
+    p.added = true;
+    if p.header.is_empty() {
+        p.header = std::mem::take(header);
+    }
+    Ok(())
+}
+
+/// Remembers the impl opening a struct added in this patch would take, so a
+/// later `*** Add: <module>.<Type>::<fn>` can open it (D-194).
+fn add_pending_struct(c: &mut SectionContext<'_>, module: &str, text: &str) -> Result<(), Failure> {
+    let (opening, ty) = language::rust::inherent_impl(text)?;
+    let p = pending_mut(c.pending, module, &ty);
+    if p.opening.is_empty() {
+        p.opening = opening;
+    }
+    Ok(())
+}
+
+/// The pending impl for `module`'s type `ty`, made when this patch first needs it.
+fn pending_mut<'a>(pending: &'a mut Vec<PendingImpl>, module: &str, ty: &str) -> &'a mut PendingImpl {
+    let at = match pending.iter().position(|p| p.module == module && p.ty == ty) {
+        Some(i) => i,
+        None => {
+            pending.push(PendingImpl {
+                module: module.to_string(),
+                ty: ty.to_string(),
+                opening: String::new(),
+                items: vec![],
+                header: String::new(),
+                added: false,
+            });
+            pending.len() - 1
+        }
+    };
+    &mut pending[at]
+}
+
+/// Pushes each held impl once, at the end of the patch, so the blocks define
+/// one `impl` per type (D-194).
+fn render_pending_impls(root: &std::path::Path, blocks: &mut String, pending: &mut [PendingImpl]) -> Result<(), Failure> {
+    for p in pending {
+        if !p.added || p.opening.is_empty() {
+            continue;
+        }
+        let body = p.items.join("\n\n");
+        let mut whole = p.opening.clone();
+        if !whole.ends_with('\n') {
+            whole.push('\n');
+        }
+        whole.push_str(&body);
+        if !body.is_empty() {
+            whole.push('\n');
+        }
+        whole.push('}');
+        let text = formatted_block(root, &whole)?;
+        push_named(blocks, &mut p.header, &p.module, &text);
+    }
+    Ok(())
+}
+
+/// The module and bare type an `*** Add: <module>.<Type>::<fn>` names.
+fn pending_target(target: &str) -> Option<(&str, &str)> {
+    let (container, _) = target.rsplit_once("::")?;
+    let (module, ty) = container.rsplit_once('.')?;
+    (!module.is_empty() && !ty.is_empty()).then(|| (module, bare_type(ty)))
+}
+
+/// A type's name without its generic arguments: `X<T>` is `X`.
+fn bare_type(name: &str) -> &str {
+    name.split('<').next().unwrap_or(name)
+}
+
+/// One whole item as rustfmt writes it.
+fn formatted_block(root: &std::path::Path, text: &str) -> Result<String, Failure> {
+    crate::language::cargo::format_item(root, text, None).map(|formatted| formatted.trim_end().to_string())
+}
+
+/// An item from `submit_items` and everything nested in it, as one text.
+fn submitted_whole(item: &store::Submitted) -> String {
+    let mut out = item.text.clone();
+    for child in &item.children {
+        out.push_str(&submitted_whole(child));
+    }
+    out.push_str(&item.tail);
+    out
+}
+
+/// The refusal for an Add whose text holds no item.
+fn defines_nothing(c: &SectionContext<'_>) -> Failure {
+    (c.not_code)((c.bad)(format!("`*** Add: {}` (line {}) defines no function, type or constant. {RESEND}", c.target, c.at_line)))
+}
+
+/// One `// ── <label> ──` block, with a module's imports once before its first item.
+fn push_named(blocks: &mut String, header: &mut String, label: &str, text: &str) {
+    let head = if header.is_empty() { String::new() } else { format!("{}\n\n", std::mem::take(header)) };
+    blocks.push_str(&format!("{BLOCK_HEADER}{label} ──\n{head}{text}\n"));
+}
+
+/// The one pending impl an `*** Add: <module>.<Type>::<fn>` names, or E1002
+/// when the patch adds more than one impl for that type.
+fn pending_impl_at(pending: &[PendingImpl], module: &str, ty: &str) -> Result<Option<usize>, Failure> {
+    let found: Vec<usize> =
+        pending.iter().enumerate().filter(|(_, p)| p.module == module && bare_type(&p.ty) == ty).map(|(i, _)| i).collect();
+    match found.as_slice() {
+        [] => Ok(None),
+        [i] => Ok(Some(*i)),
+        many => {
+            let names: Vec<&str> = many.iter().map(|&i| pending[i].ty.as_str()).collect();
+            Err(Failure(
+                format!(
+                    "E1002 {module}.{ty} matches more than one impl in this patch ({}); submit its methods separately.",
+                    names.join(", ")
+                ),
+                1,
+            ))
+        }
+    }
+}
+
+/// Adds an `*** Add: <module>.<Type>::<fn>` to the impl a type or impl added
+/// earlier in this patch opened (D-194). False when this Add names no pending
+/// impl, so the caller handles it as an ordinary item.
+fn add_pending_method(c: &mut SectionContext<'_>, target: &str, text: &str, header: &mut String) -> Result<bool, Failure> {
+    let Some((module, ty)) = pending_target(target) else {
+        return Ok(false);
+    };
+    let Some(i) = pending_impl_at(c.pending, module, ty)? else {
+        return Ok(false);
+    };
+    let opening = c.pending[i].opening.trim_end().to_string();
+    if opening.is_empty() {
+        return Ok(false);
+    }
+    let root = c.s.root.clone();
+    let items = store::submit_items(&root, module, target, Some((ty, opening.as_str(), "impl")), text, false)?;
+    let p = &mut c.pending[i];
+    p.items.extend(items.iter().map(submitted_whole));
+    p.added = true;
+    if p.header.is_empty() {
+        p.header = std::mem::take(header);
+    }
+    Ok(true)
+}
+
+/// Whether a kept `submit` draft holds more than one block: an applied patch's
+/// blocks, a patch's sections, or a text that defines several items.
+fn several_blocks(s: &Store, text: &str) -> bool {
+    if text.lines().filter(|l| l.starts_with(BLOCK_HEADER)).count() > 1 {
+        return true;
+    }
+    if is_patch(text) {
+        return sections(text, false).is_ok_and(|s| s.len() > 1);
+    }
+    let items = if language::is_rust(&s.root) {
+        language::rust::split(text, "crate").map_or(1, |file| file.items.len())
+    } else {
+        s.lang().split(text).items.len()
+    };
+    items > 1
+}
+
+/// The start of every block `patch_blocks` writes; block parsers and
+/// `several_blocks` count these.
+pub(crate) const BLOCK_HEADER: &str = "// ── ";

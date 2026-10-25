@@ -3,6 +3,7 @@
 //// proposals and transcript with a message box, and lists the past runs on
 //// the same record to reopen. The page keeps the state; this draws it.
 
+import form_draft
 import gleam/dynamic
 import gleam/dynamic/decode
 import gleam/float
@@ -548,7 +549,7 @@ pub const styles =
 .plan-bar{border-bottom:1px solid var(--edge);padding:0 0 var(--space-2);margin-bottom:var(--space-1)}.plan-bar .plan-context{margin:var(--space-1) 0}.plan-bar select{"
   <> solace_task.small_control
   <> ";padding:var(--space-1) var(--space-2);max-width:100%}
-.plan-compose{border-top:1px solid var(--edge);padding:var(--space-2) 0 var(--space-3)}.plan-compose .filters{margin:0 0 var(--space-2)}.plan-compose .vision-actions{margin:var(--space-2) 0 0}
+.plan-compose{border-top:1px solid var(--edge);padding:var(--space-2) 0 var(--space-3)}.plan-compose .filters{margin:0 0 var(--space-2)}
 .plan .composer{margin:0}.plan .composer solace-md-editor{--md-min-height:5lh;--md-max-height:40dvh}
 .plan-resize{position:absolute;left:-7px;top:0;bottom:0;width:12px;cursor:col-resize;touch-action:none;z-index:1}.plan-resize:hover{background:var(--line);opacity:.6}.plan .plan-resize:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
 .plan header{display:flex;align-items:center;gap:var(--space-2)}.plan h2{margin:0;font-size:var(--h2);flex:1}.plan h3{font-size:var(--h4);margin:var(--space-4) 0 var(--space-1)}
@@ -786,11 +787,11 @@ fn bar(p: Panel(msg)) -> Element(msg) {
   ])
 }
 
-/// The message box, pinned below the conversation: the markdown editor and
-/// its button, which Ctrl or Cmd+Enter presses too. For the shown open run
-/// the button is Send and sends a message; with nothing shown and no open
-/// run on the context, the model choice sits above it and the button is
-/// Start, which starts a run. Otherwise there is none.
+/// The message box, pinned below the conversation: the markdown editor with
+/// its action at the bottom right, which Ctrl or Cmd+Enter presses too. For
+/// the shown open run the action is Send and sends a message; with nothing
+/// shown and no open run on the context, the model choice sits above it and
+/// the action is Start, which starts a run. Otherwise there is none.
 fn compose(base: String, p: Panel(msg)) -> Element(msg) {
   let box = fn(label, send, choice, text) {
     html.div(
@@ -798,25 +799,25 @@ fn compose(base: String, p: Panel(msg)) -> Element(msg) {
       [
         choice,
         solace_task.editor(
-          text_id,
-          "",
-          base,
-          label,
-          p.text,
-          p.on_text,
-          p.on_format,
-          p.on_block,
-        ),
-        html.div([attribute.class("vision-actions")], [
-          html.button(
-            [
-              attribute.type_("button"),
-              attribute.disabled(p.sending || string.trim(p.text) == ""),
-              event.on_click(send),
+          solace_task.EditorConfig(
+            id: text_id,
+            task: "",
+            base: base,
+            label: label,
+            text: p.text,
+            on_input: p.on_text,
+            on_format: p.on_format,
+            on_block: p.on_block,
+            actions: [
+              solace_task.EditorAction(
+                "",
+                text,
+                send,
+                p.sending || string.trim(p.text) == "",
+              ),
             ],
-            [html.text(text)],
           ),
-        ]),
+        ),
       ],
     )
   }
@@ -843,4 +844,27 @@ fn send_key(send: msg) -> decode.Decoder(msg) {
     True -> decode.success(send)
     False -> decode.failure(send, "not a send")
   }
+}
+
+/// The planning draft belongs to the page, whatever is selected.
+pub const draft_owner = "page:"
+
+/// The storage key of the page's planning draft.
+pub fn draft_key() -> String {
+  form_draft.key(text_id, draft_owner)
+}
+
+/// The page's saved message, "" when there is none.
+pub fn load_draft() -> String {
+  form_draft.load(text_id, draft_owner)
+}
+
+/// Removes the page's saved message.
+pub fn clear_draft() -> Nil {
+  form_draft.clear(text_id, draft_owner)
+}
+
+/// Saves the page's message as it is typed.
+pub fn save_draft(text: String) -> Nil {
+  form_draft.save(text_id, draft_owner, text)
 }

@@ -609,6 +609,34 @@ test('an instance removed and added again reopens one stream, which reloads the 
   } finally { browser.restore(); }
 });
 
+test('the contract page follows the task its address names without remounting', async () => {
+  const browser = fakeBrowser('?task=t1');
+  try {
+    const v = mount();
+    v.dispatch(new view.BaseChanged('/p/web'));
+    v.dispatch(new view.Connected());
+    await settle();
+    expect(browser.paths).toContain('/p/web/graph?task=t1');
+    v.dispatch(new view.TaskChanged('t2'));
+    await settle();
+    expect(v.model.task).toBe('t2');
+    expect(browser.paths).toContain('/p/web/graph?task=t2');
+    expect(browser.sources.map(source => [source.path, !!source.closed]))
+      .toEqual([['/p/web/events', true], ['/p/web/events', false]]);
+    // Naming the task already shown changes nothing: its graph and stream stay.
+    const graph = v.model.graph, requests = browser.paths.length;
+    v.dispatch(new view.TaskChanged('t2'));
+    await settle();
+    expect(v.model.graph).toBe(graph);
+    expect(browser.paths.length).toBe(requests);
+    v.dispatch(new view.TaskChanged(''));
+    await settle();
+    expect(v.model.task).toBe('');
+    expect(v.model.outline).toBe(true);
+    expect(browser.paths).toContain('/p/web/graph');
+  } finally { browser.restore(); }
+});
+
 test('the page registers the contract view as solace-contracts', async () => {
   const tags = [];
   const saved = [globalThis.HTMLElement, globalThis.customElements, globalThis.document];

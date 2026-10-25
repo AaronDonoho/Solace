@@ -16,6 +16,7 @@ import gleam/order
 import gleam/result
 import gleam/string
 import gleam/uri
+import handlers
 import lustre
 import lustre/attribute as a
 import lustre/component
@@ -182,6 +183,8 @@ pub type Task {
     scope: List(String),
     /// Whether the task was archived: off the board, still in the archive (D-95).
     archived: Bool,
+    /// Whether the board shows the task, as the server computes it (D-196).
+    on_board: Bool,
     /// The ids of the tasks it depends on (D-87); empty for a task saved before.
     depends: List(String),
     /// The id of the feature it belongs to, None for none (D-87).
@@ -201,7 +204,7 @@ pub type Agent {
     efforts: List(String),
     /// The agent kind whose sign-in it uses, "" when not given.
     agent: String,
-    /// Unavailable for a hold Try again clears: a usage limit or an expired sign-in.
+    /// Unavailable for a hold a run left: a usage limit or an expired sign-in.
     retry: Bool,
     /// The mark is an expired sign-in, cleared by signing in and Try again.
     sign_in: Bool,
@@ -256,6 +259,11 @@ pub type Model {
     model: String,
     effort: String,
     text: String,
+    /// Whether the Notes tab shows its editor (Add note was pressed).
+    writing: Bool,
+    /// Whether the note editor's send waits for its reply: its send is
+    /// disabled meanwhile, so one click makes one request.
+    noting: Bool,
     title: String,
     body: String,
     rank: String,
@@ -336,9 +344,15 @@ pub type Msg {
   /// A change's reply, with the task opening it was sent for: a reply for
   /// another opening is dropped.
   ChangedAt(Int, String)
+  /// A change's reply that clears `editor`'s draft for the task it carries
+  /// when the text sent is still the editor's.
+  ChangedClearing(Int, String, String, String)
   /// An action's reply, with the task opening it was sent for: a reply for
   /// another opening is dropped.
   Acted(Int, String)
+  /// An action's reply that carried text, clearing the note draft for the
+  /// task it carries when the text sent is still the editor's.
+  ActedClearing(Int, String, String, String)
   AgentSelected(String)
   EffortSelected(String)
   Text(String)
@@ -354,7 +368,13 @@ pub type Msg {
   Failed(String)
   Save
   Action(String)
+  /// Opens the Notes tab's editor, where a note is written.
+  WriteNote
+  /// The editor's send: adds its text as a note.
   AddNote
+  /// A note's reply: the task opening it was sent for, the text sent, and the
+  /// reply. A reply for another opening is dropped.
+  Noted(Int, String, String)
   DeleteNote(Int)
   Answer(String, String)
   SetScope(String, Bool)
@@ -458,6 +478,8 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       model: load(agent_key),
       effort: load(effort_key),
       text: "",
+      writing: False,
+      noting: False,
       title: "",
       body: "",
       rank: "0",
@@ -498,6 +520,7 @@ fn send(
   path: String,
   method: String,
   fields: List(#(String, json.Json)),
+  reply: fn(Int, String) -> Msg,
 ) -> Effect(Msg) {
   effect.from(fn(dispatch) {
     request(
@@ -505,7 +528,7 @@ fn send(
       path,
       method,
       json.to_string(json.object(fields)),
-      fn(text) { dispatch(ChangedAt(model.generation, text)) },
+      fn(text) { dispatch(reply(model.generation, text)) },
     )
   })
 }
@@ -546,6 +569,8 @@ fn open(model: Model) -> #(Model, Effect(Msg)) {
         copy: #(model.copy.0 + 1, model.copy.1),
         error: "",
         acting: "",
+        writing: False,
+        noting: False,
       )
     False ->
       Model(
@@ -820,571 +845,18 @@ fn field(model: Model, id: String) -> #(String, fn(String) -> Msg) {
 }
 
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
-  case msg {
-    // Added again (or for the first time): the task is asked for afresh, and a
-    // followed run's transcript refreshes in one chain.
-    Connected -> {
-      let model = Model(..model, connected: True)
-      #(
-        model,
-        effect.batch([
-          get("", "/models", ModelsLoaded),
-          get("", "/projects", ProjectsLoaded),
-          fetch(model),
-          case model.watching {
-            "" -> effect.none()
-            rid -> transcript(model, rid)
-          },
-          effect.before_paint(fn(send, root) { send(Attached(root)) }),
-        ]),
-      )
-    }
-    Attached(root) -> #(
-      Model(..model, root: root),
-      effect.from(fn(send) {
-        images(root, fn(id, image) { send(Format(id, image, "")) }, fn(text) {
-          send(Failed(text))
-        })
-      }),
-    )
-    Listening(source) -> #(Model(..model, source: Some(source)), effect.none())
-    // Replies may never come once removed: the task shown before goes, and
-    // `Connected` asks for the new one again.
-    Disconnected -> #(
-      Model(..unstage(stop(model)), connected: False),
-      effect.none(),
-    )
-    TaskChanged(id) if id == model.id -> #(model, effect.none())
-    TaskChanged(id) -> open(Model(..model, id: id))
-    BaseChanged(base) if base == model.base -> #(model, effect.none())
-    BaseChanged(base) -> open(Model(..model, base: base))
-    DirChanged(dir) -> #(Model(..model, dir: dir), effect.none())
-    WorkspaceChanged(on) -> #(Model(..model, workspace: on), effect.none())
-    StrategyChanged(on) -> #(Model(..model, strategy: on), effect.none())
-    BarChanged(on) -> #(Model(..model, bar: on), effect.none())
-    HostedChanged(True) -> #(Model(..close(model), hosted: True), effect.none())
-    HostedChanged(False) -> {
-      let model = Model(..model, hosted: False)
-      #(model, case model.connected, model.source {
-        True, None -> listen(model)
-        _, _ -> effect.none()
-      })
-    }
-    Live(text) -> live(model, text)
-    Handed(messages) -> {
-      let fresh =
-        messages
-        |> list.filter(fn(m) { m.0 > model.seen })
-        |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
-      list.fold(fresh, #(model, effect.none()), fn(acc, m) {
-        let #(so_far, fx) = acc
-        let #(next, more) =
-          live(Model(..so_far, seen: int.max(so_far.seen, m.0)), m.1)
-        #(next, effect.batch([fx, more]))
-      })
-    }
-    // Its own stream (re)connected: anything missed meanwhile is fetched.
-    CaughtUp -> #(Model(..model, caught_up: True), refresh(model))
-    Reveal("", _) -> #(model, effect.none())
-    // The host may name the task before or after it opens it: an open task
-    // shows now, another once it loads.
-    Reveal(tab, id) ->
-      case model.task {
-        Some(t) if t.id == id -> #(
-          Model(..model, tab: tab, revealing: ""),
-          reveal(),
-        )
-        _ -> #(Model(..model, tab: tab, revealing: id), effect.none())
-      }
-    TaskLoaded(generation, text) if generation == model.generation ->
-      case json.parse(text, task_decoder()) {
-        Ok(task) ->
-          case model.staged {
-            Some(#(_, w)) ->
-              settle(Model(..model, staged: Some(#(Some(task), w)), error: ""))
-            None -> show(model, task)
-          }
-        Error(_) -> #(
-          Model(..unstage(model), error: error(text)),
-          effect.none(),
-        )
-      }
-    TaskLoaded(_, _) -> #(model, effect.none())
-    // The whole task is taken; fields being edited are the model's, so they
-    // stay as typed.
-    Refetched(generation, text) ->
-      case model.task, json.parse(text, task_decoder()) {
-        Some(t), Ok(fresh)
-          if generation == model.generation && t.id == fresh.id
-        -> {
-          let #(model, deps) =
-            want_deps(Model(..model, task: Some(fresh), error: ""))
-          #(model, effect.batch([review(model, fresh), deps]))
-        }
-        _, _ ->
-          case generation == model.generation, connection_lost(text) {
-            True, True -> #(Model(..model, error: error(text)), effect.none())
-            _, _ -> #(model, effect.none())
-          }
-      }
-    WorkflowLoaded(generation, text) if generation == model.generation ->
-      case json.parse(text, workflow_decoder()) {
-        Ok(w) ->
-          case model.staged {
-            Some(#(t, _)) -> settle(Model(..model, staged: Some(#(t, Some(w)))))
-            None -> #(Model(..model, workflow: w), effect.none())
-          }
-        Error(_) -> #(
-          Model(..unstage(model), error: error(text)),
-          effect.none(),
-        )
-      }
-    WorkflowLoaded(_, _) -> #(model, effect.none())
-    TryAgain if model.refreshing -> #(model, effect.none())
-    TryAgain -> #(
-      Model(..model, refreshing: True),
-      effect.from(fn(send) {
-        request(
-          "",
-          "/models/try-again",
-          "POST",
-          json.to_string(json.object([])),
-          fn(text) { send(ModelsLoaded(text)) },
-        )
-      }),
-    )
-    ModelsLoaded(text) ->
-      case json.parse(text, decode.list(agent_decoder())) {
-        Ok(models) -> {
-          let #(id, effort) = models_chosen(models, model.model, model.effort)
-          #(
-            Model(
-              ..model,
-              models: models,
-              model: id,
-              effort: effort,
-              error: "",
-              refreshing: False,
-            ),
-            effect.none(),
-          )
-        }
-        Error(_) -> #(
-          Model(..model, error: error(text), refreshing: False),
-          effect.none(),
-        )
-      }
-    // A pick held by a usage limit stays chosen, so a limit doesn't swap the model unasked;
-    // its effort stays only while the model still offers it.
-    ModelsRefreshed(text) ->
-      case json.parse(text, decode.list(agent_decoder())) {
-        Ok(models) -> {
-          let #(id, effort) =
-            models_refreshed(models, model.model, model.effort)
-          #(
-            Model(..model, models: models, model: id, effort: effort, error: ""),
-            effect.none(),
-          )
-        }
-        Error(_) -> #(model, effect.none())
-      }
-    // The Scope tab's projects; without them it lists none.
-    ProjectsLoaded(text) ->
-      case json.parse(text, projects_decoder()) {
-        Ok(projects) -> #(Model(..model, projects: projects), effect.none())
-        Error(_) -> #(model, effect.none())
-      }
-    ReviewLoaded(text) ->
-      case json.parse(text, decode.at(["summary"], decode.string)) {
-        Ok(summary) -> #(
-          Model(..model, review_summary: summary, error: ""),
-          effect.none(),
-        )
-        Error(_) -> #(Model(..model, review_summary: ""), effect.none())
-      }
-    // The reply to an action; it may have waited for the agent's command (D-77 point 5).
-    // A lost reply doesn't mean the action failed: the task is fetched again,
-    // and the run shows if the action started one.
-    Acted(generation, _) if generation != model.generation -> #(
-      model,
-      effect.none(),
-    )
-    Acted(_, text) ->
-      case model.acting, connection_lost(text) {
-        "", _ -> #(model, effect.none())
-        _, True -> {
-          let model = Model(..model, acting: "", error: checking)
-          #(model, refresh(model))
-        }
-        _, False -> update(Model(..model, acting: ""), Changed(text))
-      }
-    ChangedAt(generation, _) if generation != model.generation -> #(
-      model,
-      effect.none(),
-    )
-    ChangedAt(_, text) -> update(model, Changed(text))
-    Changed(text) ->
-      case json.parse(text, task_decoder()) {
-        // A reply for the task shown before another opened.
-        Ok(task) if task.id != model.id -> #(model, effect.none())
-        Ok(task) -> {
-          // A reply carries no `changes` (D-77): keep the list until it is fetched again.
-          let task = case model.task {
-            Some(old) if old.id == task.id -> Task(..task, changes: old.changes)
-            _ -> task
-          }
-          // A task whose home left its projects now lives in the first one left (D-61).
-          // A task with no project (D-129) has no projects to follow.
-          let #(model, moved) = case
-            !task.no_project
-            && model.dir != ""
-            && !list.contains(scope_of(model.dir, task), model.dir),
-            task.scope
-          {
-            True, [dir, ..] -> follow(model, dir)
-            _, _ -> #(model, effect.none())
-          }
-          let model =
-            Model(
-              ..model,
-              task: Some(task),
-              title: task.title,
-              body: task.body,
-              rank: float.to_string(task.rank),
-              text: "",
-              error: "",
-              editing: False,
-            )
-          let #(model, deps) = want_deps(model)
-          #(model, effect.batch([moved, refresh(model), deps]))
-        }
-        Error(_) ->
-          case connection_lost(text) {
-            True -> #(Model(..model, error: checking), refresh(model))
-            False -> #(Model(..model, error: error(text)), effect.none())
-          }
-      }
-    Watch(rid) -> #(
-      Model(..model, watching: rid, entries: []),
-      transcript(model, rid),
-    )
-    Unwatch -> #(Model(..model, watching: "", entries: []), effect.none())
-    // One refresh chain per connection, including through a server restart: a
-    // step from an ended chain (disconnected, or restarted) fetches and
-    // schedules nothing.
-    Refresh(poll, rid) if poll == model.poll && rid == model.watching -> #(
-      model,
-      transcript(model, rid),
-    )
-    Refresh(_, _) -> #(model, effect.none())
-    TranscriptPolled(poll, rid, text) if poll == model.poll -> {
-      let #(next, _) = update(model, TranscriptLoaded(rid, text))
-      let running =
-        rid == next.watching
-        && json.parse(text, decode.at(["state"], decode.string))
-        |> result.map(fn(state) { state != "ended" })
-        |> result.unwrap(False)
-      #(next, case running {
-        True ->
-          effect.from(fn(send) {
-            after(refresh_ms, fn() { send(Refresh(poll, rid)) })
-          })
-        False -> effect.none()
-      })
-    }
-    TranscriptPolled(_, _, _) -> #(model, effect.none())
-    TranscriptLoaded(rid, text) if rid == model.watching -> {
-      let decoder = {
-        use state <- decode.field("state", decode.string)
-        use entries <- decode.field("transcript", decode.list(entry_decoder()))
-        decode.success(#(state, entries))
-      }
-      case json.parse(text, decoder) {
-        Ok(#(_, entries)) -> #(
-          Model(..model, entries: entries, error: ""),
-          effect.none(),
-        )
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
-      }
-    }
-    TranscriptLoaded(_, _) -> #(model, effect.none())
-    // Efforts differ between models, so a new model starts at its default.
-    AgentSelected(id) -> {
-      store(agent_key, id)
-      store(effort_key, "")
-      #(Model(..model, model: id, effort: ""), effect.none())
-    }
-    EffortSelected(effort) -> {
-      store(effort_key, effort)
-      #(Model(..model, effort: effort), effect.none())
-    }
-    Text(text) -> #(Model(..model, text: text), effect.none())
-    Title(text) -> #(Model(..model, title: text), effect.none())
-    Body(text) -> #(Model(..model, body: text), effect.none())
-    Rank(rank) -> #(Model(..model, rank: rank), effect.none())
-    Edit(editing) ->
-      case model.task {
-        Some(t) -> #(
-          Model(
-            ..model,
-            editing: editing,
-            title: t.title,
-            body: t.body,
-            rank: float.to_string(t.rank),
-          ),
-          effect.none(),
-        )
-        None -> #(model, effect.none())
-      }
-    Tab(tab) -> #(Model(..model, tab: tab), effect.none())
-    Format(id, before, after) -> {
-      let #(text, msg) = field(model, id)
-      #(
-        model,
-        effect.from(fn(send) {
-          send(msg(wrap(model.root, id, text, before, after)))
-        }),
-      )
-    }
-    Block(id, kind) -> {
-      let #(text, msg) = field(model, id)
-      #(
-        model,
-        effect.from(fn(send) { send(msg(block(model.root, id, text, kind))) }),
-      )
-    }
-    Failed(message) -> #(Model(..model, error: message), effect.none())
-    Save ->
-      case model.task {
-        None -> #(model, effect.none())
-        Some(t) ->
-          case float.parse(model.rank) {
-            Ok(rank) -> #(
-              model,
-              send(model, "/tasks/" <> t.id, "PATCH", [
-                #("title", json.string(model.title)),
-                #("body", json.string(model.body)),
-                #("rank", json.float(rank)),
-              ]),
-            )
-            Error(_) -> #(
-              Model(..model, error: "Rank must be a number"),
-              effect.none(),
-            )
-          }
-      }
-    Action(_) if model.acting != "" -> #(model, effect.none())
-    Action(name) ->
-      case model.task {
-        None -> #(model, effect.none())
-        Some(t) -> {
-          let fields = [#("action", json.string(name))]
-          let fields = case model.model {
-            "" -> fields
-            id -> [#("model", json.string(id)), ..fields]
-          }
-          let fields = case model.effort {
-            "" -> fields
-            effort -> [#("effort", json.string(effort)), ..fields]
-          }
-          let fields = case model.text {
-            "" -> fields
-            text -> [#("text", json.string(text)), ..fields]
-          }
-          let proceed = case name {
-            "cancel" ->
-              confirm(
-                "Cancel task \""
-                <> t.title
-                <> "\"? This stops its agents and reverts its changes. This cannot be undone.",
-              )
-            "complete" ->
-              confirm(
-                "Complete task \""
-                <> t.title
-                <> "\"? This keeps its changes and closes the task. Its undo records will be removed, so it cannot be reopened or reverted through the board.",
-              )
-            "stop" ->
-              confirm(
-                "Stop the agent working on \""
-                <> t.title
-                <> "\"? This ends its session; its changes are kept, and a later run starts a fresh agent.",
-              )
-            _ -> True
-          }
-          case proceed {
-            True -> #(
-              Model(..model, acting: name),
-              effect.from(fn(dispatch) {
-                request(
-                  model.base,
-                  "/tasks/" <> t.id <> "/actions",
-                  "POST",
-                  json.to_string(json.object(fields)),
-                  fn(text) { dispatch(Acted(model.generation, text)) },
-                )
-              }),
-            )
-            False -> #(model, effect.none())
-          }
-        }
-      }
-    AddNote ->
-      case model.task {
-        None -> #(model, effect.none())
-        Some(t) -> #(
-          Model(..model, tab: "notes"),
-          send(model, "/tasks/" <> t.id <> "/notes", "POST", [
-            #("text", json.string(model.text)),
-          ]),
-        )
-      }
-    DeleteNote(i) ->
-      case model.task {
-        None -> #(model, effect.none())
-        Some(t) ->
-          case confirm("Delete this note? It can't be restored.") {
-            False -> #(model, effect.none())
-            True -> #(
-              model,
-              send(
-                model,
-                "/tasks/" <> t.id <> "/notes/" <> int.to_string(i),
-                "DELETE",
-                [],
-              ),
-            )
-          }
-      }
-    Answer(qid, option) ->
-      case model.task {
-        None -> #(model, effect.none())
-        Some(t) -> {
-          let answer = case option {
-            "" -> #("text", json.string(model.text))
-            option -> #("option", json.string(option))
-          }
-          #(
-            model,
-            send(model, "/tasks/" <> t.id <> "/questions/" <> qid, "POST", [
-              answer,
-            ]),
-          )
-        }
-      }
-    SetScope(dir, on) ->
-      case model.task {
-        None -> #(model, effect.none())
-        Some(t) -> {
-          let current = scope_of(model.dir, t)
-          let wanted = case on {
-            True -> [dir, ..current]
-            False -> list.filter(current, fn(d) { d != dir })
-          }
-          // In the order the projects are listed, each once.
-          let ordered =
-            model.projects
-            |> list.map(fn(p) { p.dir })
-            |> list.filter(list.contains(wanted, _))
-          #(
-            model,
-            send(model, "/tasks/" <> t.id <> "/scope", "POST", [
-              #("scope", json.array(ordered, json.string)),
-            ]),
-          )
-        }
-      }
-    // Pasted into any text, the reference is a link to the task (D-98).
-    CopyId ->
-      case model.task {
-        None -> #(model, effect.none())
-        Some(t) -> {
-          let n = model.copy.0 + 1
-          #(
-            Model(..model, copy: #(n, "")),
-            effect.from(fn(send) {
-              copy_reference(t.id, fn(ok) { send(CopyDone(n, ok)) })
-            }),
-          )
-        }
-      }
-    CopyDone(n, ok) if n == model.copy.0 -> #(
-      Model(..model, copy: #(n, copy_said(ok))),
-      effect.from(fn(send) { after_copied(fn() { send(CopyReset(n)) }) }),
-    )
-    CopyReset(n) if n == model.copy.0 -> #(
-      Model(..model, copy: #(n, "")),
-      effect.none(),
-    )
-    CopyDone(_, _) | CopyReset(_) -> #(model, effect.none())
-    // A dependency that can't be found keeps None: its id shows.
-    // One with no project (D-129) is asked for at the root.
-    DepFound(generation, id, text) if generation == model.generation ->
-      case dep_base(model, text) {
-        Ok(base) -> #(
-          model,
-          get(base, "/tasks/" <> id, DepLoaded(generation, id, _)),
-        )
-        Error(_) -> #(model, effect.none())
-      }
-    DepLoaded(generation, id, text) if generation == model.generation ->
-      case json.parse(text, task_decoder()) {
-        Ok(d) if d.id == id -> #(
-          Model(
-            ..model,
-            deps: list.key_set(model.deps, id, Some(Dep(d.title, d.column))),
-          ),
-          effect.none(),
-        )
-        _ -> #(model, effect.none())
-      }
-    DepFound(_, _, _) | DepLoaded(_, _, _) -> #(model, effect.none())
-    // A feature that can't be found keeps None: its id shows.
-    FeatureLoaded(generation, text) if generation == model.generation -> {
-      let decoder = {
-        use id <- decode.field("id", decode.string)
-        use title <- decode.field("title", decode.string)
-        decode.success(#(id, title))
-      }
-      case json.parse(text, decoder), model.feature {
-        Ok(#(id, title)), Some(#(asked, _)) if id == asked -> #(
-          Model(..model, feature: Some(#(id, Some(title)))),
-          effect.none(),
-        )
-        _, _ -> #(model, effect.none())
-      }
-    }
-    // A failed reply leaves the list empty, so no **Needed by** shows.
-    DependentsLoaded(generation, text) if generation == model.generation -> {
-      let decoder =
-        decode.at(
-          ["tasks"],
-          decode.list({
-            use id <- decode.field("id", decode.string)
-            use title <- decode.field("title", decode.string)
-            use column <- decode.field("column", decode.string)
-            decode.success(#(id, Dep(title, column)))
-          }),
-        )
-      case json.parse(text, decoder) {
-        // The reply is a snapshot taken when the task opened: a dependent a
-        // live event added between the request and the reply stays until an
-        // event says otherwise.
-        Ok(dependents) -> {
-          let live =
-            model.dependents
-            |> option.unwrap([])
-            |> list.filter(fn(e) { !list.any(dependents, fn(d) { d.0 == e.0 }) })
-          #(
-            Model(..model, dependents: Some(list.append(dependents, live))),
-            effect.none(),
-          )
-        }
-        Error(_) -> #(model, effect.none())
-      }
-    }
-    FeatureLoaded(_, _) | DependentsLoaded(_, _) -> #(model, effect.none())
-  }
+  [
+    fn() { connection_events(model, msg) },
+    fn() { live_events(model, msg) },
+    fn() { opening_events(model, msg) },
+    fn() { model_events(model, msg) },
+    fn() { reply_events(model, msg) },
+    fn() { transcript_events(model, msg) },
+    fn() { editor_events(model, msg) },
+    fn() { scope_events(model, msg) },
+    fn() { dependency_events(model, msg) },
+  ]
+  |> handlers.first(#(model, effect.none()))
 }
 
 /// What the human should hear about in a live update: a run that ended, a
@@ -1514,6 +986,7 @@ pub fn task_decoder() -> decode.Decoder(Task) {
       decode.success(False),
     ]),
   )
+  use on_board <- decode.optional_field("onBoard", !archived, decode.bool)
   use depends <- decode.optional_field(
     "dependsOn",
     [],
@@ -1544,6 +1017,7 @@ pub fn task_decoder() -> decode.Decoder(Task) {
     tech_debt,
     scope,
     archived,
+    on_board,
     depends,
     feature,
     no_project,
@@ -1717,10 +1191,9 @@ fn projects_decoder() -> decode.Decoder(List(Project)) {
 
 /// `strategy`: the Strategy page shows the task (D-132).
 pub fn actions(workflow: Workflow, task: Task, strategy: Bool) -> List(String) {
-  // Discuss starts between runs; stop ends any run, and a discussion can be ended.
+  // Discuss and End Discussion sit in the notes editor; stop ends any run.
   let built_in = case list.find(task.runs, fn(r) { r.state != "ended" }) {
-    Error(_) -> ["discuss"]
-    Ok(r) if r.kind == "discuss" -> ["end_discussion", "stop"]
+    Error(_) -> []
     Ok(_) -> ["stop"]
   }
   let offered = case
@@ -1920,7 +1393,6 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
           ])
       },
       agent_choice(model),
-      composer(model),
       case model.acting {
         "" -> h.text("")
         name ->
@@ -1930,16 +1402,13 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
       },
       h.div(
         [a.class("actions")],
-        list.append(
-          list.map(actions(model.workflow, t, model.strategy), fn(name) {
-            action_button(
-              name,
-              action_label(model.workflow, name),
-              model.acting != "",
-            )
-          }),
-          [button(ui_label("add_note"), AddNote)],
-        ),
+        list.map(actions(model.workflow, t, model.strategy), fn(name) {
+          action_button(
+            name,
+            action_label(model.workflow, name),
+            model.acting != "",
+          )
+        }),
       ),
     ]),
     h.div([a.class("record")], [
@@ -1957,8 +1426,8 @@ fn detail(model: Model, t: Task) -> Element(Msg) {
         }),
       ),
       h.div([a.class("panel"), a.role("tabpanel")], case model.tab {
-        "notes" -> notes_view(model.base, model.models, t)
-        "questions" -> questions_view(model.base, t)
+        "notes" -> notes_view(model, t)
+        "questions" -> questions_view(model, t)
         "runs" -> list.map(list.reverse(t.runs), fn(r) { run_view(model, r) })
         "changes" -> [
           case t.changes {
@@ -1992,7 +1461,7 @@ fn details_view(model: Model, t: Task) -> List(Element(Msg)) {
   case model.editing {
     True -> [
       title_input(model.title, Title),
-      task_editor(model, "edit-body", "Description"),
+      task_editor(model, "edit-body", "Description", []),
       h.label([], [
         h.text("Rank (lower comes first)"),
         h.input([a.type_("number"), a.value(model.rank), e.on_input(Rank)]),
@@ -2043,23 +1512,29 @@ pub fn title_input(value: String, msg: fn(String) -> msg) -> Element(msg) {
   ])
 }
 
-fn composer(model: Model) -> Element(Msg) {
-  task_editor(model, "note-text", "Note, answer or instructions")
+fn composer(model: Model, t: Task) -> Element(Msg) {
+  task_editor(model, "note-text", "Note", note_actions(model, t))
 }
 
 /// One of the task's editors: `id` names what it edits (see `field`).
-fn task_editor(model: Model, id: String, label: String) -> Element(Msg) {
+fn task_editor(
+  model: Model,
+  id: String,
+  label: String,
+  actions: List(EditorAction(Msg)),
+) -> Element(Msg) {
   let #(text, msg) = field(model, id)
-  editor(
-    id,
-    model.id,
-    model.base,
-    label,
-    text,
-    msg,
-    fn(before, after) { Format(id, before, after) },
-    Block(id, _),
-  )
+  editor(EditorConfig(
+    id: id,
+    task: model.id,
+    base: model.base,
+    label: label,
+    text: text,
+    on_input: msg,
+    on_format: fn(before, after) { Format(id, before, after) },
+    on_block: Block(id, _),
+    actions: actions,
+  ))
 }
 
 /// A markdown editor with formatting tools, which styles the markdown as it
@@ -2067,17 +1542,21 @@ fn task_editor(model: Model, id: String, label: String) -> Element(Msg) {
 /// `id`. Its marks show on the lines being edited and hide elsewhere. Images
 /// pasted, dropped or picked here are uploaded by `task_api.mjs` to `task` in
 /// the project at `base` and inserted as markdown. A task not yet created has
-/// no image tool.
-pub fn editor(
-  id: String,
-  task: String,
-  base: String,
-  label: String,
-  text: String,
-  on_input: fn(String) -> msg,
-  on_format: fn(String, String) -> msg,
-  on_block: fn(String) -> msg,
-) -> Element(msg) {
+/// no image tool. `actions` sit inside the editor at its bottom right; each
+/// one's content is words, or the send icon when empty. The text keeps clear
+/// of them.
+pub fn editor(config: EditorConfig(msg)) -> Element(msg) {
+  let EditorConfig(
+    id,
+    task,
+    base,
+    label,
+    text,
+    on_input,
+    on_format,
+    on_block,
+    actions,
+  ) = config
   let tool = fn(label, title, before, after) {
     h.button(
       [a.type_("button"), a.title(title), e.on_click(on_format(before, after))],
@@ -2089,58 +1568,76 @@ pub fn editor(
       h.text(label),
     ])
   }
-  h.div([a.class("composer")], [
-    h.div([a.class("toolbar")], [
-      block_tool("H", "Heading", "heading"),
-      tool("B", "Bold", "**", "**"),
-      tool("`code`", "Code", "`", "`"),
-      block_tool("Code block", "Code block", "code"),
-      block_tool("• List", "List", "list"),
-      block_tool("1. List", "Numbered list", "numbered"),
-      block_tool("Quote", "Quote", "quote"),
-      tool("Link", "Link", "[", "](https://)"),
-      case task {
-        "" -> h.text("")
-        _ ->
-          h.label([a.class("button"), a.title("Add an image")], [
-            h.text("Image"),
-            h.input([
-              a.type_("file"),
-              a.class("md-image sr-only"),
-              a.attribute("data-task", task),
-              a.attribute("data-base", base),
-              a.attribute("data-for", id),
-              a.accept(["image/png", "image/jpeg", "image/gif", "image/webp"]),
-            ]),
-          ])
+  let classes = case
+    actions,
+    list.any(actions, fn(action) { action.content != "" })
+  {
+    [], _ -> "composer"
+    _, True -> "composer has-actions has-action-words"
+    _, False -> "composer has-actions"
+  }
+  h.div(
+    [
+      a.class(classes),
+    ],
+    [
+      h.div([a.class("toolbar")], [
+        block_tool("H", "Heading", "heading"),
+        tool("B", "Bold", "**", "**"),
+        tool("`code`", "Code", "`", "`"),
+        block_tool("Code block", "Code block", "code"),
+        block_tool("• List", "List", "list"),
+        block_tool("1. List", "Numbered list", "numbered"),
+        block_tool("Quote", "Quote", "quote"),
+        tool("Link", "Link", "[", "](https://)"),
+        case task {
+          "" -> h.text("")
+          _ ->
+            h.label([a.class("button"), a.title("Add an image")], [
+              h.text("Image"),
+              h.input([
+                a.type_("file"),
+                a.class("md-image sr-only"),
+                a.attribute("data-task", task),
+                a.attribute("data-base", base),
+                a.attribute("data-for", id),
+                a.accept(["image/png", "image/jpeg", "image/gif", "image/webp"]),
+              ]),
+            ])
+        },
+      ]),
+      element.element(
+        "solace-md-editor",
+        [
+          a.id(id),
+          a.class("md-editor"),
+          a.attribute("data-task", task),
+          a.attribute("data-base", base),
+          a.attribute("label", label),
+          a.attribute(
+            "placeholder",
+            label
+              <> " (markdown)."
+              <> case task {
+              "" -> ""
+              _ -> " Paste or drop images here."
+            },
+          ),
+          a.property("value", json.string(text)),
+          e.on(
+            "md-input",
+            decode.at(["detail"], decode.string) |> decode.map(on_input),
+          ),
+        ],
+        [],
+      ),
+      case actions {
+        [] -> h.text("")
+        actions ->
+          h.div([a.class("composer-actions")], list.map(actions, editor_action))
       },
-    ]),
-    element.element(
-      "solace-md-editor",
-      [
-        a.id(id),
-        a.class("md-editor"),
-        a.attribute("data-task", task),
-        a.attribute("data-base", base),
-        a.attribute("label", label),
-        a.attribute(
-          "placeholder",
-          label
-            <> " (markdown)."
-            <> case task {
-            "" -> ""
-            _ -> " Paste or drop images here."
-          },
-        ),
-        a.property("value", json.string(text)),
-        e.on(
-          "md-input",
-          decode.at(["detail"], decode.string) |> decode.map(on_input),
-        ),
-      ],
-      [],
-    ),
-  ])
+    ],
+  )
 }
 
 fn button(label: String, msg: Msg) -> Element(Msg) {
@@ -2151,61 +1648,93 @@ fn action_button(name: String, label: String, busy: Bool) -> Element(Msg) {
   h.button([e.on_click(Action(name)), a.disabled(busy)], [h.text(label)])
 }
 
-fn questions_view(base: String, t: Task) -> List(Element(Msg)) {
-  list.map(list.reverse(t.questions), fn(q) {
-    let #(diff, other) = case q.settings {
-      Some(#(current, proposed)) -> #(
-        [h.pre([a.class("diff")], [h.text(settings_diff(current, proposed))])],
-        "Reject with the editor's text",
-      )
-      None -> #([], ui_label("answer"))
-    }
-    h.article([], [
-      md(base, q.text),
-      ..list.append(diff, [
-        case q.answer {
-          "" ->
-            h.div(
-              [],
-              list.append(
-                list.map(q.options, fn(o) { button(o, Answer(q.id, o)) }),
-                [button(other, Answer(q.id, ""))],
-              ),
-            )
-          answer -> answer_view(base, answer)
-        },
+fn questions_view(model: Model, t: Task) -> List(Element(Msg)) {
+  let first = first_unanswered(t)
+  let writing = case first {
+    Some(id) -> [
+      task_editor(model, "note-text", ui_label("answer"), [
+        EditorAction(
+          "",
+          ui_label("answer"),
+          Answer(id, ""),
+          string.trim(model.text) == "",
+        ),
+      ]),
+    ]
+    None -> []
+  }
+  list.append(
+    writing,
+    list.map(list.reverse(t.questions), fn(q) {
+      let #(diff, other) = case q.settings {
+        Some(#(current, proposed)) -> #(
+          [h.pre([a.class("diff")], [h.text(settings_diff(current, proposed))])],
+          "Reject with the editor's text",
+        )
+        None -> #([], ui_label("answer"))
+      }
+      let free_text = case q.settings {
+        Some(_) -> True
+        None -> Some(q.id) != first
+      }
+      h.article([], [
+        md(model.base, q.text),
+        ..list.append(diff, [
+          case q.answer {
+            "" ->
+              h.div(
+                [],
+                list.append(
+                  list.map(q.options, fn(o) { button(o, Answer(q.id, o)) }),
+                  case free_text {
+                    True -> [button(other, Answer(q.id, ""))]
+                    False -> []
+                  },
+                ),
+              )
+            answer -> answer_view(model.base, answer)
+          },
+        ])
       ])
-    ])
-  })
+    }),
+  )
 }
 
-/// Newest first. Each keeps its position, which names it to the API.
-fn notes_view(
-  base: String,
-  models: List(Agent),
-  t: Task,
-) -> List(Element(Msg)) {
-  t.notes
-  |> list.index_map(fn(n, i) { #(n, i) })
-  |> list.reverse
-  |> list.map(fn(pair) {
-    let #(n, i) = pair
-    h.details([a.class("note"), a.open(True)], [
-      h.summary([], [
-        h.button(
-          [
-            a.class("delete"),
-            a.attribute("aria-label", ui_label("delete_note")),
-            e.on_click(DeleteNote(i)) |> e.prevent_default,
-          ],
-          [h.text(ui_label("delete"))],
-        ),
-        h.strong([], [h.text(author(models, t, n))]),
-        h.small([], [h.text(clock(n.time))]),
-      ]),
-      md(base, n.text),
-    ])
-  })
+/// Newest first, under the Add note button while the editor is closed, and
+/// under the editor once it opens. Each note keeps its position, which names
+/// it to the API.
+fn notes_view(model: Model, t: Task) -> List(Element(Msg)) {
+  let notes =
+    t.notes
+    |> list.index_map(fn(n, i) { #(n, i) })
+    |> list.reverse
+    |> list.map(fn(pair) {
+      let #(n, i) = pair
+      h.details([a.class("note"), a.open(True)], [
+        h.summary([], [
+          h.button(
+            [
+              a.class("delete"),
+              a.attribute("aria-label", ui_label("delete_note")),
+              e.on_click(DeleteNote(i)) |> e.prevent_default,
+            ],
+            [h.text(ui_label("delete"))],
+          ),
+          h.strong([], [h.text(author(model.models, t, n))]),
+          h.small([], [h.text(clock(n.time))]),
+        ]),
+        md(model.base, n.text),
+      ])
+    })
+  let note_tools = case model.writing {
+    True -> []
+    False -> [h.div([a.class("note-tools")], [add_note_button()])]
+  }
+  let note_editor = case model.writing {
+    True -> [composer(model, t)]
+    False -> []
+  }
+  list.flatten([note_tools, note_editor, notes])
 }
 
 pub fn status_badge(t: Task) -> Element(msg) {
@@ -2384,9 +1913,13 @@ article{border-bottom-color:var(--line)}.transcript{border-left:1px solid var(--
 /// The markdown editor's look (`editor`), shared with the pages that use it.
 /// Colors come from the page's custom properties. The Image tool is a `label`
 /// around a file picker, so it takes the toolbar's box model: its border-box
-/// min-height is the toolbar's small height, as a button's is.
+/// min-height is the toolbar's small height, as a button's is. An action sits
+/// at the composer's bottom right; the send icon keeps a right inset on every
+/// line, while worded actions reserve their measured room on the last line
+/// only, so the other lines keep their width. The actions stay on one line,
+/// take at most half the composer, and truncate a label too wide for it.
 pub const editor_styles =
-  ".composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}.composer solace-md-editor{display:block;border-top:1px solid var(--line)}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-flex;align-items:center;box-sizing:border-box;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}
+  ".composer{position:relative;border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}.composer solace-md-editor{display:block;border-top:1px solid var(--line)}.composer.has-actions{--md-line-pad:calc(var(--control-h-small) + var(--space-3))}.composer.has-action-words{--md-action-gap:var(--space-2);--md-line-pad:0px}.composer-actions{position:absolute;right:var(--space-2);bottom:var(--space-2);z-index:1;display:flex;flex-wrap:nowrap;justify-content:flex-end;gap:var(--space-2);max-width:calc(50% - var(--space-2))}.composer-action{display:inline-flex;align-items:center;justify-content:center;flex:0 1 auto;min-width:var(--control-h-small);min-height:var(--control-h-small);margin:0;padding:0 var(--space-2);overflow:hidden}.composer-action-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}.composer-action svg{display:block;flex:none}.note-tools{display:flex;margin:8px 4px}.add-note{display:inline-flex;align-items:center;justify-content:center;width:var(--control-h-small);height:var(--control-h-small);padding:0;margin:0}.add-note svg{display:block}.toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:2px}.toolbar button,.toolbar .button{margin:0;padding:4px 10px;font-size:14px}.sr-only{position:absolute;width:1px;height:1px;opacity:0;overflow:hidden}.toolbar .button{position:relative;display:inline-flex;align-items:center;box-sizing:border-box;border:1px solid var(--edge);border-radius:0;background:var(--paper);cursor:pointer}.toolbar .button:hover{background:var(--hover)}.toolbar .button:focus-within{outline:3px solid var(--focus)}
 .composer solace-md-editor{border-top:1px solid var(--edge)}.toolbar .button{border-color:var(--edge);background:var(--paper)}.toolbar .button:hover{background:var(--hover)}
 "
 
@@ -2924,6 +2457,8 @@ pub const ui_labels: List(#(String, String)) = [
   #("save", "Save"),
   #("edit", "Edit"),
   #("add_note", "Add note"),
+  #("discuss", "Discuss"),
+  #("end_discussion", "End Discussion"),
   #("delete", "Delete"),
   #("copy_id", "Copy ID"),
   #("answer", "Answer"),
@@ -3104,9 +2639,9 @@ pub fn no_agents_view(models: List(Agent)) -> Element(msg) {
         h.p([], [
           h.text(case list.any(models, fn(m) { m.sign_in }) {
             True ->
-              "Every model is held. Each reason is shown below; the Try again button above checks them again."
+              "Every model is held. Each reason is shown below; the ⟳ button above checks them again."
             False ->
-              "Every model is held by a usage limit. It lifts at the reset shown below; the Try again button above clears them."
+              "Every model is held by a usage limit. Each reason is shown below; the ⟳ button above checks them again."
           }),
         ]),
       ])
@@ -3259,6 +2794,8 @@ fn cleared(model: Model) -> Model {
     task: None,
     staged: None,
     text: "",
+    writing: False,
+    noting: False,
     watching: "",
     entries: [],
     review_summary: "",
@@ -3295,18 +2832,23 @@ fn unstage(model: Model) -> Model {
 /// Shows `task`, fetched whole.
 fn show(model: Model, task: Task) -> #(Model, Effect(Msg)) {
   let shown = model.revealing != "" && model.revealing == task.id
+  let keep_tab = shown && model.tab != "details"
   let model =
-    Model(
-      ..model,
-      task: Some(task),
-      title: task.title,
-      body: task.body,
-      rank: float.to_string(task.rank),
-      error: "",
-      revealing: case shown {
-        True -> ""
-        False -> model.revealing
-      },
+    resume(
+      Model(
+        ..model,
+        task: Some(task),
+        title: task.title,
+        body: task.body,
+        rank: float.to_string(task.rank),
+        error: "",
+        revealing: case shown {
+          True -> ""
+          False -> model.revealing
+        },
+      ),
+      task,
+      keep_tab,
     )
   let #(model, deps) = want_deps(model)
   #(
@@ -3667,7 +3209,8 @@ pub fn answer_view(base: String, answer: String) -> Element(msg) {
 }
 
 /// The icon button left of a model pick: it rechecks every model and clears
-/// the holds a run left, sending `on_click`.
+/// the holds a run left, except a usage limit whose reset has not come,
+/// sending `on_click`.
 pub fn refresh_button(on_click: msg, busy: Bool) -> Element(msg) {
   h.button(
     [
@@ -3680,4 +3223,987 @@ pub fn refresh_button(on_click: msg, busy: Bool) -> Element(msg) {
     ],
     [h.text("⟳")],
   )
+}
+
+/// One of the buttons at an editor's bottom right: words, or the send icon
+/// when `content` is empty, and the message its press sends.
+pub type EditorAction(msg) {
+  EditorAction(content: String, name: String, message: msg, disabled: Bool)
+}
+
+fn editor_action(action: EditorAction(msg)) -> Element(msg) {
+  let press = case action.disabled {
+    True -> []
+    False -> [e.on_click(action.message)]
+  }
+  h.button(
+    [
+      a.type_("button"),
+      a.class("composer-action"),
+      a.attribute("aria-label", action.name),
+      a.disabled(action.disabled),
+      ..press
+    ],
+    [
+      case action.content {
+        "" -> send_icon()
+        words -> h.span([a.class("composer-action-text")], [h.text(words)])
+      },
+    ],
+  )
+}
+
+fn send_icon() -> Element(msg) {
+  let svg = "http://www.w3.org/2000/svg"
+  element.namespaced(
+    svg,
+    "svg",
+    [
+      a.attribute("viewBox", "0 0 24 24"),
+      a.attribute("width", "20"),
+      a.attribute("height", "20"),
+      a.attribute("fill", "currentColor"),
+      a.attribute("aria-hidden", "true"),
+      a.attribute("focusable", "false"),
+    ],
+    [
+      element.namespaced(
+        svg,
+        "path",
+        [a.attribute("d", "M2 21L23 12 2 3v7l15 2-15 2z")],
+        [],
+      ),
+    ],
+  )
+}
+
+/// What the note editor offers: its send, then Discuss when no run is open,
+/// or End Discussion while a discussion is going.
+fn note_actions(model: Model, t: Task) -> List(EditorAction(Msg)) {
+  let active = list.find(t.runs, fn(r) { r.state != "ended" })
+  let blank = string.trim(model.text) == ""
+  let send = fn(label) {
+    EditorAction("", label, AddNote, blank || model.noting)
+  }
+  case active {
+    Ok(r) if r.kind == "discuss" -> [
+      send(ui_label("send")),
+      EditorAction(
+        ui_label("end_discussion"),
+        ui_label("end_discussion"),
+        Action("end_discussion"),
+        False,
+      ),
+    ]
+    Ok(_) -> [send(ui_label("add_note"))]
+    Error(_) -> [
+      send(ui_label("add_note")),
+      EditorAction(
+        ui_label("discuss"),
+        ui_label("discuss"),
+        Action("discuss"),
+        blank,
+      ),
+    ]
+  }
+}
+
+/// The fields of an action's request: its name, the chosen model and effort,
+/// and the editor's text when it isn't empty.
+pub fn action_body(model: Model, name: String) -> String {
+  let fields = [#("action", json.string(name))]
+  let fields = case model.model {
+    "" -> fields
+    id -> [#("model", json.string(id)), ..fields]
+  }
+  let fields = case model.effort {
+    "" -> fields
+    effort -> [#("effort", json.string(effort)), ..fields]
+  }
+  let fields = case model.text {
+    "" -> fields
+    text -> [#("text", json.string(text)), ..fields]
+  }
+  json.to_string(json.object(fields))
+}
+
+/// The plus button at the top of the Notes stack: it opens the editor and
+/// sends nothing.
+fn add_note_button() -> Element(Msg) {
+  h.button(
+    [
+      a.class("add-note"),
+      a.title(ui_label("add_note")),
+      a.attribute("aria-label", ui_label("add_note")),
+      e.on_click(WriteNote),
+    ],
+    [plus_icon()],
+  )
+}
+
+fn plus_icon() -> Element(msg) {
+  let svg = "http://www.w3.org/2000/svg"
+  element.namespaced(
+    svg,
+    "svg",
+    [
+      a.attribute("viewBox", "0 0 24 24"),
+      a.attribute("width", "20"),
+      a.attribute("height", "20"),
+      a.attribute("fill", "currentColor"),
+      a.attribute("aria-hidden", "true"),
+      a.attribute("focusable", "false"),
+    ],
+    [
+      element.namespaced(
+        svg,
+        "path",
+        [a.attribute("d", "M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z")],
+        [],
+      ),
+    ],
+  )
+}
+
+/// The oldest question no one has answered.
+pub fn first_unanswered(t: Task) -> Option(String) {
+  case list.find(t.questions, fn(q) { q.answer == "" }) {
+    Ok(q) -> Some(q.id)
+    Error(_) -> None
+  }
+}
+
+@external(javascript, "./task_api.mjs", "focus_editor")
+fn focus_editor(root: dynamic.Dynamic, id: String) -> Nil
+
+/// Everything an editor needs to draw: its identity and text, the messages
+/// its input and tools send, and the actions at its bottom right.
+pub type EditorConfig(msg) {
+  EditorConfig(
+    id: String,
+    task: String,
+    base: String,
+    label: String,
+    text: String,
+    on_input: fn(String) -> msg,
+    on_format: fn(String, String) -> msg,
+    on_block: fn(String) -> msg,
+    actions: List(EditorAction(msg)),
+  )
+}
+
+fn write_note(model: Model) -> #(Model, Effect(Msg)) {
+  let text = case model.id {
+    "" -> model.text
+    id ->
+      case draft_load("note-text", id) {
+        "" -> model.text
+        draft -> draft
+      }
+  }
+  #(
+    Model(..model, tab: "notes", writing: True, text: text),
+    effect.before_paint(fn(_, root) { focus_editor(root, "note-text") }),
+  )
+}
+
+fn add_note(model: Model) -> #(Model, Effect(Msg)) {
+  case model.task {
+    None -> #(model, effect.none())
+    Some(_) if model.noting -> #(model, effect.none())
+    Some(t) -> {
+      let text = model.text
+      #(
+        Model(..model, tab: "notes", noting: True),
+        send(
+          model,
+          "/tasks/" <> t.id <> "/notes",
+          "POST",
+          [#("text", json.string(text))],
+          fn(generation, reply) { Noted(generation, text, reply) },
+        ),
+      )
+    }
+  }
+}
+
+fn delete_note(model: Model, i: Int) -> #(Model, Effect(Msg)) {
+  case model.task {
+    None -> #(model, effect.none())
+    Some(t) ->
+      case confirm("Delete this note? It can't be restored.") {
+        False -> #(model, effect.none())
+        True -> #(
+          model,
+          send(
+            model,
+            "/tasks/" <> t.id <> "/notes/" <> int.to_string(i),
+            "DELETE",
+            [],
+            ChangedAt,
+          ),
+        )
+      }
+  }
+}
+
+fn answer_question(
+  model: Model,
+  qid: String,
+  option: String,
+) -> #(Model, Effect(Msg)) {
+  case model.task {
+    None -> #(model, effect.none())
+    Some(t) -> {
+      let answer = case option {
+        "" -> #("text", json.string(model.text))
+        option -> #("option", json.string(option))
+      }
+      let sent = case option {
+        "" -> model.text
+        _ -> ""
+      }
+      #(
+        model,
+        send(
+          model,
+          "/tasks/" <> t.id <> "/questions/" <> qid,
+          "POST",
+          [
+            answer,
+          ],
+          fn(generation, text) {
+            ChangedClearing(generation, "note-text", sent, text)
+          },
+        ),
+      )
+    }
+  }
+}
+
+/// The storage key of a draft: the editor's id and the record or context it edits.
+@external(javascript, "./task_api.mjs", "draft_key")
+pub fn draft_key(editor: String, owner: String) -> String
+
+/// A draft saved for `editor` on `owner`, "" when there is none.
+@external(javascript, "./task_api.mjs", "load_draft")
+pub fn draft_load(editor: String, owner: String) -> String
+
+/// Saves a draft, removing it when the text is blank.
+@external(javascript, "./task_api.mjs", "save_draft")
+pub fn draft_save(editor: String, owner: String, text: String) -> Nil
+
+/// Removes a draft.
+@external(javascript, "./task_api.mjs", "clear_draft")
+pub fn draft_clear(editor: String, owner: String) -> Nil
+
+/// Puts back the drafts this task has, opening the editors they belong to. A
+/// draft and the task's own text are separate: a stored draft is only there
+/// when the human typed it.
+fn resume(model: Model, task: Task, keep_tab: Bool) -> Model {
+  let note = draft_load("note-text", task.id)
+  let body = draft_load("edit-body", task.id)
+  let tab = case keep_tab {
+    True -> model.tab
+    False ->
+      case body, note {
+        "", "" -> model.tab
+        "", _ ->
+          case first_unanswered(task) {
+            Some(_) -> "questions"
+            None -> "notes"
+          }
+        _, _ -> "details"
+      }
+  }
+  Model(
+    ..model,
+    text: note,
+    writing: note != "",
+    body: case body {
+      "" -> task.body
+      body -> body
+    },
+    editing: body != "",
+    tab: tab,
+  )
+}
+
+fn changed(
+  model: Model,
+  clearing: String,
+  sent: String,
+  text: String,
+) -> #(Model, Effect(Msg)) {
+  case json.parse(text, task_decoder()) {
+    // A reply for the task shown before another opened.
+    Ok(task) if task.id != model.id -> #(model, effect.none())
+    Ok(task) -> {
+      // A reply carries no `changes` (D-77): keep the list until it is fetched again.
+      let task = case model.task {
+        Some(old) if old.id == task.id -> Task(..task, changes: old.changes)
+        _ -> task
+      }
+      // A task whose home left its projects now lives in the first one left (D-61).
+      // A task with no project (D-129) has no projects to follow.
+      let #(model, moved) = case
+        !task.no_project
+        && model.dir != ""
+        && !list.contains(scope_of(model.dir, task), model.dir),
+        task.scope
+      {
+        True, [dir, ..] -> follow(model, dir)
+        _, _ -> #(model, effect.none())
+      }
+      let clears = case clearing {
+        "note-text" -> model.text == sent
+        "edit-body" -> model.body == sent
+        _ -> False
+      }
+      case clears {
+        True -> draft_clear(clearing, task.id)
+        False -> Nil
+      }
+      let closes_edit = clearing == "edit-body" && clears
+      let editing = model.editing && !closes_edit
+      let note_cleared = clearing == "note-text" && clears
+      let model =
+        Model(
+          ..model,
+          task: Some(task),
+          title: case editing {
+            True -> model.title
+            False -> task.title
+          },
+          body: case editing {
+            True -> model.body
+            False -> task.body
+          },
+          rank: case editing {
+            True -> model.rank
+            False -> float.to_string(task.rank)
+          },
+          text: case note_cleared {
+            True -> ""
+            False -> model.text
+          },
+          writing: case note_cleared {
+            True -> False
+            False -> model.writing
+          },
+          error: "",
+          editing: editing,
+        )
+      let #(model, deps) = want_deps(model)
+      #(model, effect.batch([moved, refresh(model), deps]))
+    }
+    Error(_) ->
+      case connection_lost(text) {
+        True -> #(Model(..model, error: checking), refresh(model))
+        False -> #(Model(..model, error: error(text)), effect.none())
+      }
+  }
+}
+
+fn acted(
+  model: Model,
+  clearing: String,
+  sent: String,
+  text: String,
+) -> #(Model, Effect(Msg)) {
+  case model.acting, connection_lost(text) {
+    "", _ -> #(model, effect.none())
+    _, True -> {
+      let model = Model(..model, acting: "", error: checking)
+      #(model, refresh(model))
+    }
+    _, False -> changed(Model(..model, acting: ""), clearing, sent, text)
+  }
+}
+
+fn connection_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    // Added again (or for the first time): the task is asked for afresh, and a
+    // followed run's transcript refreshes in one chain.
+    Connected -> {
+      let model = Model(..model, connected: True)
+      Some(#(
+        model,
+        effect.batch([
+          get("", "/models", ModelsLoaded),
+          get("", "/projects", ProjectsLoaded),
+          fetch(model),
+          case model.watching {
+            "" -> effect.none()
+            rid -> transcript(model, rid)
+          },
+          effect.before_paint(fn(send, root) { send(Attached(root)) }),
+        ]),
+      ))
+    }
+    Attached(root) ->
+      Some(#(
+        Model(..model, root: root),
+        effect.from(fn(send) {
+          images(root, fn(id, image) { send(Format(id, image, "")) }, fn(text) {
+            send(Failed(text))
+          })
+        }),
+      ))
+    Listening(source) ->
+      Some(#(Model(..model, source: Some(source)), effect.none()))
+    // Replies may never come once removed: the task shown before goes, and
+    // `Connected` asks for the new one again.
+    Disconnected ->
+      Some(#(
+        Model(
+          ..unstage(stop(model)),
+          connected: False,
+          noting: False,
+          generation: model.generation + 1,
+        ),
+        effect.none(),
+      ))
+    TaskChanged(id) if id == model.id -> Some(#(model, effect.none()))
+    TaskChanged(id) -> Some(open(Model(..model, id: id)))
+    BaseChanged(base) if base == model.base -> Some(#(model, effect.none()))
+    BaseChanged(base) -> Some(open(Model(..model, base: base)))
+    DirChanged(dir) -> Some(#(Model(..model, dir: dir), effect.none()))
+    WorkspaceChanged(on) ->
+      Some(#(Model(..model, workspace: on), effect.none()))
+    StrategyChanged(on) -> Some(#(Model(..model, strategy: on), effect.none()))
+    BarChanged(on) -> Some(#(Model(..model, bar: on), effect.none()))
+    HostedChanged(True) ->
+      Some(#(Model(..close(model), hosted: True), effect.none()))
+    HostedChanged(False) -> {
+      let model = Model(..model, hosted: False)
+      Some(
+        #(model, case model.connected, model.source {
+          True, None -> listen(model)
+          _, _ -> effect.none()
+        }),
+      )
+    }
+    _ -> None
+  }
+}
+
+fn live_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    Live(text) -> Some(live(model, text))
+    Handed(messages) -> {
+      let fresh =
+        messages
+        |> list.filter(fn(m) { m.0 > model.seen })
+        |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
+      Some(
+        list.fold(fresh, #(model, effect.none()), fn(acc, m) {
+          let #(so_far, fx) = acc
+          let #(next, more) =
+            live(Model(..so_far, seen: int.max(so_far.seen, m.0)), m.1)
+          #(next, effect.batch([fx, more]))
+        }),
+      )
+    }
+    // Its own stream (re)connected: anything missed meanwhile is fetched.
+    CaughtUp -> Some(#(Model(..model, caught_up: True), refresh(model)))
+    _ -> None
+  }
+}
+
+fn opening_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    Reveal("", _) -> Some(#(model, effect.none()))
+    // The host may name the task before or after it opens it: an open task
+    // shows now, another once it loads.
+    Reveal(tab, id) ->
+      Some(case model.task {
+        Some(t) if t.id == id -> #(
+          Model(..model, tab: tab, revealing: ""),
+          reveal(),
+        )
+        _ -> #(Model(..model, tab: tab, revealing: id), effect.none())
+      })
+    TaskLoaded(generation, text) if generation == model.generation ->
+      Some(case json.parse(text, task_decoder()) {
+        Ok(task) ->
+          case model.staged {
+            Some(#(_, w)) ->
+              settle(Model(..model, staged: Some(#(Some(task), w)), error: ""))
+            None -> show(model, task)
+          }
+        Error(_) -> #(
+          Model(..unstage(model), error: error(text)),
+          effect.none(),
+        )
+      })
+    TaskLoaded(_, _) -> Some(#(model, effect.none()))
+    // The whole task is taken; fields being edited are the model's, so they
+    // stay as typed.
+    Refetched(generation, text) ->
+      Some(case model.task, json.parse(text, task_decoder()) {
+        Some(t), Ok(fresh)
+          if generation == model.generation && t.id == fresh.id
+        -> {
+          let #(model, deps) =
+            want_deps(Model(..model, task: Some(fresh), error: ""))
+          #(model, effect.batch([review(model, fresh), deps]))
+        }
+        _, _ ->
+          case generation == model.generation, connection_lost(text) {
+            True, True -> #(Model(..model, error: error(text)), effect.none())
+            _, _ -> #(model, effect.none())
+          }
+      })
+    WorkflowLoaded(generation, text) if generation == model.generation ->
+      Some(case json.parse(text, workflow_decoder()) {
+        Ok(w) ->
+          case model.staged {
+            Some(#(t, _)) -> settle(Model(..model, staged: Some(#(t, Some(w)))))
+            None -> #(Model(..model, workflow: w), effect.none())
+          }
+        Error(_) -> #(
+          Model(..unstage(model), error: error(text)),
+          effect.none(),
+        )
+      })
+    WorkflowLoaded(_, _) -> Some(#(model, effect.none()))
+    _ -> None
+  }
+}
+
+fn model_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    TryAgain if model.refreshing -> Some(#(model, effect.none()))
+    TryAgain ->
+      Some(#(
+        Model(..model, refreshing: True),
+        effect.from(fn(send) {
+          request(
+            "",
+            "/models/try-again",
+            "POST",
+            json.to_string(json.object([])),
+            fn(text) { send(ModelsLoaded(text)) },
+          )
+        }),
+      ))
+    ModelsLoaded(text) ->
+      Some(case json.parse(text, decode.list(agent_decoder())) {
+        Ok(models) -> {
+          let #(id, effort) = models_chosen(models, model.model, model.effort)
+          #(
+            Model(
+              ..model,
+              models: models,
+              model: id,
+              effort: effort,
+              error: "",
+              refreshing: False,
+            ),
+            effect.none(),
+          )
+        }
+        Error(_) -> #(
+          Model(..model, error: error(text), refreshing: False),
+          effect.none(),
+        )
+      })
+    // A pick held by a usage limit stays chosen, so a limit doesn't swap the model unasked;
+    // its effort stays only while the model still offers it.
+    ModelsRefreshed(text) ->
+      Some(case json.parse(text, decode.list(agent_decoder())) {
+        Ok(models) -> {
+          let #(id, effort) =
+            models_refreshed(models, model.model, model.effort)
+          #(
+            Model(..model, models: models, model: id, effort: effort, error: ""),
+            effect.none(),
+          )
+        }
+        Error(_) -> #(model, effect.none())
+      })
+    // The Scope tab's projects; without them it lists none.
+    ProjectsLoaded(text) ->
+      Some(case json.parse(text, projects_decoder()) {
+        Ok(projects) -> #(Model(..model, projects: projects), effect.none())
+        Error(_) -> #(model, effect.none())
+      })
+    ReviewLoaded(text) ->
+      Some(case json.parse(text, decode.at(["summary"], decode.string)) {
+        Ok(summary) -> #(
+          Model(..model, review_summary: summary, error: ""),
+          effect.none(),
+        )
+        Error(_) -> #(Model(..model, review_summary: ""), effect.none())
+      })
+    _ -> None
+  }
+}
+
+fn reply_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    // The reply to an action; it may have waited for the agent's command (D-77 point 5).
+    // A lost reply doesn't mean the action failed: the task is fetched again,
+    // and the run shows if the action started one.
+    Acted(generation, _) if generation != model.generation ->
+      Some(#(model, effect.none()))
+    Acted(_, text) -> Some(acted(model, "", "", text))
+    ActedClearing(generation, _, _, _) if generation != model.generation ->
+      Some(#(model, effect.none()))
+    ActedClearing(_, editor, sent, text) ->
+      Some(acted(model, editor, sent, text))
+    ChangedAt(generation, _) if generation != model.generation ->
+      Some(#(model, effect.none()))
+    ChangedAt(_, text) -> Some(update(model, Changed(text)))
+    Noted(generation, _, _) if generation != model.generation ->
+      Some(#(model, effect.none()))
+    Noted(_, sent, text) ->
+      Some(changed(Model(..model, noting: False), "note-text", sent, text))
+    Changed(text) -> Some(changed(model, "", "", text))
+    ChangedClearing(generation, _, _, _) if generation != model.generation ->
+      Some(#(model, effect.none()))
+    ChangedClearing(_, editor, sent, text) ->
+      Some(changed(model, editor, sent, text))
+    _ -> None
+  }
+}
+
+fn transcript_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    Watch(rid) ->
+      Some(#(Model(..model, watching: rid, entries: []), transcript(model, rid)))
+    Unwatch -> Some(#(Model(..model, watching: "", entries: []), effect.none()))
+    // One refresh chain per connection, including through a server restart: a
+    // step from an ended chain (disconnected, or restarted) fetches and
+    // schedules nothing.
+    Refresh(poll, rid) if poll == model.poll && rid == model.watching ->
+      Some(#(model, transcript(model, rid)))
+    Refresh(_, _) -> Some(#(model, effect.none()))
+    TranscriptPolled(poll, rid, text) if poll == model.poll -> {
+      let #(next, _) = update(model, TranscriptLoaded(rid, text))
+      let running =
+        rid == next.watching
+        && json.parse(text, decode.at(["state"], decode.string))
+        |> result.map(fn(state) { state != "ended" })
+        |> result.unwrap(False)
+      Some(
+        #(next, case running {
+          True ->
+            effect.from(fn(send) {
+              after(refresh_ms, fn() { send(Refresh(poll, rid)) })
+            })
+          False -> effect.none()
+        }),
+      )
+    }
+    TranscriptPolled(_, _, _) -> Some(#(model, effect.none()))
+    TranscriptLoaded(rid, text) if rid == model.watching -> {
+      let decoder = {
+        use state <- decode.field("state", decode.string)
+        use entries <- decode.field("transcript", decode.list(entry_decoder()))
+        decode.success(#(state, entries))
+      }
+      Some(case json.parse(text, decoder) {
+        Ok(#(_, entries)) -> #(
+          Model(..model, entries: entries, error: ""),
+          effect.none(),
+        )
+        Error(_) -> #(Model(..model, error: error(text)), effect.none())
+      })
+    }
+    TranscriptLoaded(_, _) -> Some(#(model, effect.none()))
+    _ -> None
+  }
+}
+
+fn editor_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    // Efforts differ between models, so a new model starts at its default.
+    AgentSelected(id) -> {
+      store(agent_key, id)
+      store(effort_key, "")
+      Some(#(Model(..model, model: id, effort: ""), effect.none()))
+    }
+    EffortSelected(effort) -> {
+      store(effort_key, effort)
+      Some(#(Model(..model, effort: effort), effect.none()))
+    }
+    Text(text) -> {
+      case model.task {
+        None -> Nil
+        Some(t) -> draft_save("note-text", t.id, text)
+      }
+      Some(#(Model(..model, text: text), effect.none()))
+    }
+    Title(text) -> Some(#(Model(..model, title: text), effect.none()))
+    Body(text) -> {
+      case model.task {
+        None -> Nil
+        Some(t) -> draft_save("edit-body", t.id, text)
+      }
+      Some(#(Model(..model, body: text), effect.none()))
+    }
+    Rank(rank) -> Some(#(Model(..model, rank: rank), effect.none()))
+    Edit(editing) ->
+      Some(case model.task {
+        Some(t) -> {
+          let body = case editing {
+            True ->
+              case draft_load("edit-body", t.id) {
+                "" -> t.body
+                draft -> draft
+              }
+            False -> t.body
+          }
+          case editing {
+            True -> Nil
+            False -> draft_clear("edit-body", t.id)
+          }
+          #(
+            Model(
+              ..model,
+              editing: editing,
+              title: t.title,
+              body: body,
+              rank: float.to_string(t.rank),
+            ),
+            effect.none(),
+          )
+        }
+        None -> #(model, effect.none())
+      })
+    Tab(tab) -> Some(#(Model(..model, tab: tab), effect.none()))
+    Format(id, before, after) -> {
+      let #(text, msg) = field(model, id)
+      Some(#(
+        model,
+        effect.from(fn(send) {
+          send(msg(wrap(model.root, id, text, before, after)))
+        }),
+      ))
+    }
+    Block(id, kind) -> {
+      let #(text, msg) = field(model, id)
+      Some(#(
+        model,
+        effect.from(fn(send) { send(msg(block(model.root, id, text, kind))) }),
+      ))
+    }
+    Failed(message) -> Some(#(Model(..model, error: message), effect.none()))
+    Save ->
+      Some(case model.task {
+        None -> #(model, effect.none())
+        Some(t) ->
+          case float.parse(model.rank) {
+            Ok(rank) -> #(
+              model,
+              send(
+                model,
+                "/tasks/" <> t.id,
+                "PATCH",
+                [
+                  #("title", json.string(model.title)),
+                  #("body", json.string(model.body)),
+                  #("rank", json.float(rank)),
+                ],
+                fn(generation, text) {
+                  ChangedClearing(generation, "edit-body", model.body, text)
+                },
+              ),
+            )
+            Error(_) -> #(
+              Model(..model, error: "Rank must be a number"),
+              effect.none(),
+            )
+          }
+      })
+    Action(_) if model.acting != "" -> Some(#(model, effect.none()))
+    Action(name) ->
+      Some(case model.task {
+        None -> #(model, effect.none())
+        Some(t) -> {
+          let proceed = case name {
+            "cancel" ->
+              confirm(
+                "Cancel task \""
+                <> t.title
+                <> "\"? This stops its agents and reverts its changes. This cannot be undone.",
+              )
+            "complete" ->
+              confirm(
+                "Complete task \""
+                <> t.title
+                <> "\"? This keeps its changes and closes the task. Its undo records will be removed, so it cannot be reopened or reverted through the board.",
+              )
+            "stop" ->
+              confirm(
+                "Stop the agent working on \""
+                <> t.title
+                <> "\"? This ends its session; its changes are kept, and a later run starts a fresh agent.",
+              )
+            _ -> True
+          }
+          case proceed {
+            True -> {
+              let sent = model.text
+              let reply = fn(text) {
+                case sent {
+                  "" -> Acted(model.generation, text)
+                  _ -> ActedClearing(model.generation, "note-text", sent, text)
+                }
+              }
+              #(
+                Model(..model, acting: name),
+                effect.from(fn(dispatch) {
+                  request(
+                    model.base,
+                    "/tasks/" <> t.id <> "/actions",
+                    "POST",
+                    action_body(model, name),
+                    fn(text) { dispatch(reply(text)) },
+                  )
+                }),
+              )
+            }
+            False -> #(model, effect.none())
+          }
+        }
+      })
+    WriteNote -> Some(write_note(model))
+    AddNote -> Some(add_note(model))
+    DeleteNote(i) -> Some(delete_note(model, i))
+    Answer(qid, option) -> Some(answer_question(model, qid, option))
+    _ -> None
+  }
+}
+
+fn scope_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    SetScope(dir, on) ->
+      Some(case model.task {
+        None -> #(model, effect.none())
+        Some(t) -> {
+          let current = scope_of(model.dir, t)
+          let wanted = case on {
+            True -> [dir, ..current]
+            False -> list.filter(current, fn(d) { d != dir })
+          }
+          // In the order the projects are listed, each once.
+          let ordered =
+            model.projects
+            |> list.map(fn(p) { p.dir })
+            |> list.filter(list.contains(wanted, _))
+          #(
+            model,
+            send(
+              model,
+              "/tasks/" <> t.id <> "/scope",
+              "POST",
+              [
+                #("scope", json.array(ordered, json.string)),
+              ],
+              ChangedAt,
+            ),
+          )
+        }
+      })
+    // Pasted into any text, the reference is a link to the task (D-98).
+    CopyId ->
+      Some(case model.task {
+        None -> #(model, effect.none())
+        Some(t) -> {
+          let n = model.copy.0 + 1
+          #(
+            Model(..model, copy: #(n, "")),
+            effect.from(fn(send) {
+              copy_reference(t.id, fn(ok) { send(CopyDone(n, ok)) })
+            }),
+          )
+        }
+      })
+    CopyDone(n, ok) if n == model.copy.0 ->
+      Some(#(
+        Model(..model, copy: #(n, copy_said(ok))),
+        effect.from(fn(send) { after_copied(fn() { send(CopyReset(n)) }) }),
+      ))
+    CopyReset(n) if n == model.copy.0 ->
+      Some(#(Model(..model, copy: #(n, "")), effect.none()))
+    CopyDone(_, _) | CopyReset(_) -> Some(#(model, effect.none()))
+    _ -> None
+  }
+}
+
+fn dependency_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    // A dependency that can't be found keeps None: its id shows.
+    // One with no project (D-129) is asked for at the root.
+    DepFound(generation, id, text) if generation == model.generation ->
+      Some(case dep_base(model, text) {
+        Ok(base) -> #(
+          model,
+          get(base, "/tasks/" <> id, DepLoaded(generation, id, _)),
+        )
+        Error(_) -> #(model, effect.none())
+      })
+    DepLoaded(generation, id, text) if generation == model.generation ->
+      Some(case json.parse(text, task_decoder()) {
+        Ok(d) if d.id == id -> #(
+          Model(
+            ..model,
+            deps: list.key_set(model.deps, id, Some(Dep(d.title, d.column))),
+          ),
+          effect.none(),
+        )
+        _ -> #(model, effect.none())
+      })
+    DepFound(_, _, _) | DepLoaded(_, _, _) -> Some(#(model, effect.none()))
+    // A feature that can't be found keeps None: its id shows.
+    FeatureLoaded(generation, text) if generation == model.generation -> {
+      let decoder = {
+        use id <- decode.field("id", decode.string)
+        use title <- decode.field("title", decode.string)
+        decode.success(#(id, title))
+      }
+      Some(case json.parse(text, decoder), model.feature {
+        Ok(#(id, title)), Some(#(asked, _)) if id == asked -> #(
+          Model(..model, feature: Some(#(id, Some(title)))),
+          effect.none(),
+        )
+        _, _ -> #(model, effect.none())
+      })
+    }
+    // A failed reply leaves the list empty, so no **Needed by** shows.
+    DependentsLoaded(generation, text) if generation == model.generation -> {
+      let decoder =
+        decode.at(
+          ["tasks"],
+          decode.list({
+            use id <- decode.field("id", decode.string)
+            use title <- decode.field("title", decode.string)
+            use column <- decode.field("column", decode.string)
+            decode.success(#(id, Dep(title, column)))
+          }),
+        )
+      Some(case json.parse(text, decoder) {
+        // The reply is a snapshot taken when the task opened: a dependent a
+        // live event added between the request and the reply stays until an
+        // event says otherwise.
+        Ok(dependents) -> {
+          let live =
+            model.dependents
+            |> option.unwrap([])
+            |> list.filter(fn(e) { !list.any(dependents, fn(d) { d.0 == e.0 }) })
+          #(
+            Model(..model, dependents: Some(list.append(dependents, live))),
+            effect.none(),
+          )
+        }
+        Error(_) -> #(model, effect.none())
+      })
+    }
+    FeatureLoaded(_, _) | DependentsLoaded(_, _) ->
+      Some(#(model, effect.none()))
+    _ -> None
+  }
 }

@@ -235,7 +235,7 @@ function find(doc) {
       else if (child.nodeType === 1) {
         if (child === bar || child === marks || SKIP.has(child.tagName)) continue;
         if (getComputedStyle(child).display === 'none') continue;
-        if (child.shadowRoot) { watchHost(child); collect(child.shadowRoot, out); }
+        if (child.shadowRoot) { watch(child); collect(child.shadowRoot, out); }
         collect(child, out);
       }
     }

@@ -3,7 +3,7 @@
 The Lustre shell registers the board, contract view, migration, strategy and
 settings components, draws its own Knowledgebase page (the guide, D-140), and
 uses modem for menu navigation and `src/history.mjs` for browser Back and
-Forward, including Strategy tabs and a record link's focus.
+Forward, including Strategy tabs, a record link's focus and Contract view links.
 
 | Page | Component |
 | --- | --- |
@@ -55,6 +55,10 @@ The `focus` property is `{kind, dir, id, n}`; `n` counts the links followed, so
 following the same one again is news to the page. A bare link shows its
 record's title once the server gives it (kept 30 s), marked `data-bare`;
 copying any of these links gives its markdown back, a bare one still bare.
+A Contract view link on a lane or a task's Changes tab, and the contract page's
+**← Board** link, are followed in-page the same way. The address is added to the
+history, so Back and Board keep the board mounted with its open task, details
+and editor text.
 The menu (Workspace, Strategy, Board, Contracts, Knowledgebase, Settings) is on every page and
 highlights the current one; a workspace project's contract page highlights
 Contracts. The menu is 56px high, and the contract page fills the rest of the
@@ -102,8 +106,9 @@ components' `md_editor.mjs`.
 gleam test --target javascript
 ```
 
-Tests cover URL routing, custom-element tags and base attributes, and the
-current menu link. Component registration and modem require a browser.
+Tests cover URL routing (including a contract page's task), custom-element tags
+and base attributes, and the current menu link. Component registration and
+modem require a browser.
 
 ## Server integration
 
@@ -116,7 +121,8 @@ project's `build-release` command before embedding it. The server must keep
 serving the board's fonts at /fonts/sans-400.woff2, /fonts/sans-700.woff2 and
 /fonts/mono-400.woff2, redirect /guide to /knowledgebase, and preserve JSON and SSE
 routes, including /migration.
-Links inside app shadow roots use full page navigation.
+Record, Contract view and Board links inside app shadow roots are followed
+in-page; other links use browser navigation.
 
 After server integration, check menu navigation and back/forward, direct
 loading of each page, and component cleanup when switching apps in a browser.

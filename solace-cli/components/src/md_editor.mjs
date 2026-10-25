@@ -11,6 +11,7 @@ import { EditorView, ViewPlugin, Decoration, WidgetType, keymap, placeholder } f
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands';
 import { syntaxTree } from '@codemirror/language';
 import { markdown } from '@codemirror/lang-markdown';
+import { watchActionPad } from './editor_actions.mjs';
 import { replacement } from './task_api.mjs';
 
 const mono = "'IBM Plex Mono',ui-monospace,monospace";
@@ -125,7 +126,8 @@ const theme = EditorView.theme({
   '&.cm-focused': { outline: '3px solid var(--focus)', outlineOffset: '-3px' },
   '.cm-scroller': { fontFamily: 'inherit', lineHeight: '1.5', overflow: 'auto' },
   '.cm-content': { minHeight: 'var(--md-min-height, 110px)', padding: '6px 0', caretColor: 'var(--ink)' },
-  '.cm-line': { padding: '0 8px' },
+  '.cm-line': { padding: '0 calc(8px + var(--md-line-pad, 0px)) 0 8px' },
+  '.cm-line:last-child': { paddingRight: 'calc(8px + max(var(--md-line-pad, 0px), var(--md-action-pad, 0px) + var(--md-action-gap, 0px)))' },
   '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--ink)' },
   '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection':
     { backgroundColor: 'var(--sel, #bfd5ce)' },
@@ -152,6 +154,7 @@ class MdEditor extends HTMLElement {
   #quiet = false;
   #label = new Compartment();
   #placeholder = new Compartment();
+  #stopActions = null;
 
   connectedCallback() {
     // A value set before this element was defined is an own property, hiding the accessor.
@@ -160,7 +163,10 @@ class MdEditor extends HTMLElement {
       delete this.value;
       this.#text = String(text ?? '');
     }
-    if (this.#view) return;
+    if (this.#view) {
+      this.#watchActions();
+      return;
+    }
     const root = this.shadowRoot ?? this.attachShadow({ mode: 'open' });
     this.#view = new EditorView({
       root,
@@ -189,15 +195,24 @@ class MdEditor extends HTMLElement {
         ],
       }),
     });
+    this.#watchActions();
   }
 
   // A move within the page reconnects at once and keeps its state; a removal frees CodeMirror's listeners.
   disconnectedCallback() {
     queueMicrotask(() => {
-      if (this.isConnected || !this.#view) return;
+      if (this.isConnected) return;
+      this.#stopActions?.();
+      this.#stopActions = null;
+      if (!this.#view) return;
       this.#view.destroy();
       this.#view = null;
     });
+  }
+
+  #watchActions() {
+    this.#stopActions?.();
+    this.#stopActions = watchActionPad(this.closest('.composer'));
   }
 
   attributeChangedCallback(name) {

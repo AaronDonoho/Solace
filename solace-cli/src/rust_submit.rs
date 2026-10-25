@@ -33,13 +33,13 @@ pub(crate) struct RustNew {
 /// (D-168): `name` and `new_in` name one target, so unless the text holds more
 /// than one header it is one block under that name.
 fn submit_blocks(name: Option<&str>, new_in: Option<&str>, raw: &str) -> Result<Vec<(Option<String>, String)>, Failure> {
-    let is_header = |l: &str| l.starts_with("// ── ");
+    let is_header = |l: &str| l.starts_with(crate::drafts::BLOCK_HEADER);
     if raw.lines().filter(|l| is_header(l)).count() <= 1 && (name.is_some() || new_in.is_some()) {
         return Ok(vec![(name.map(str::to_string), raw.lines().filter(|l| !is_header(l)).collect::<Vec<_>>().join("\n"))]);
     }
     let mut blocks: Vec<(Option<String>, String)> = vec![];
     for line in raw.lines() {
-        if let Some(h) = line.strip_prefix("// ── ") {
+        if let Some(h) = line.strip_prefix(crate::drafts::BLOCK_HEADER) {
             if h.starts_with("module ") {
                 return fail("E0101 a whole module goes through `submit <module>`.");
             }
@@ -48,7 +48,10 @@ fn submit_blocks(name: Option<&str>, new_in: Option<&str>, raw: &str) -> Result<
             text.push_str(line);
             text.push('\n');
         } else if !line.trim().is_empty() {
-            return fail("E0101 text for `submit` with no name must be blocks, each headed `// ── <module>.<name> ──`.");
+            return fail(format!(
+                "E0101 text for `submit` with no name must be blocks, each headed `{}<module>.<name> ──`.",
+                crate::drafts::BLOCK_HEADER
+            ));
         }
     }
     Ok(blocks)
@@ -254,7 +257,7 @@ fn rust_endings(ix: &Index) -> Vec<(String, String, Option<String>)> {
 /// The live symbols `input` names, as `resolve` reads a name (D-168): its own
 /// name, or its name behind its module, the module exact or a suffix.
 fn rust_named(ix: &Index, input: &str) -> Vec<usize> {
-    (0..ix.syms.len()).filter(|&i| store::names(&ix.syms[i], input)).collect()
+    store::matching(ix, input)
 }
 
 /// The one symbol `input` names, containers left out (D-168): `None` when
@@ -756,9 +759,11 @@ impl Store {
                     cargo::ROUND_NOTE
                 ));
             }
+            let mut reported = saved.clone();
+            unique(&mut reported);
             let mut out = String::new();
-            if !saved.is_empty() {
-                out += &format!("Saved {}.\n", saved.join(", "));
+            if !reported.is_empty() {
+                out += &format!("Saved {}.\n", reported.join(", "));
             }
             if !unchanged.is_empty() {
                 out += &format!("Unchanged (the same as stored): {}.\n", unchanged.join(", "));

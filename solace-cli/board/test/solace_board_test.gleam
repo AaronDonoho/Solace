@@ -703,7 +703,7 @@ pub fn archive_button_and_archived_cards_test() {
         "{\"columns\":[{\"id\":\"triage\",\"label\":\"Triage\"},{\"id\":\"complete\",\"label\":\"Complete\",\"final\":true}]}",
       ),
     )
-  let task = fn(id, title, column, archived) {
+  let task = fn(id, title, column, archived, on_board) {
     "{\"task\":{\"id\":\""
     <> id
     <> "\",\"title\":\""
@@ -712,13 +712,18 @@ pub fn archive_button_and_archived_cards_test() {
     <> column
     <> "\",\"rank\":1,\"archivedTime\":"
     <> archived
+    <> ",\"onBoard\":"
+    <> on_board
     <> "}}"
   }
   let #(model, _) = board.update(model, board.CaughtUp)
   let #(model, _) =
-    board.update(model, board.Live(task("1", "Open", "triage", "null")))
+    board.update(model, board.Live(task("1", "Open", "triage", "null", "true")))
   let #(model, _) =
-    board.update(model, board.Live(task("2", "Done", "complete", "null")))
+    board.update(
+      model,
+      board.Live(task("2", "Done", "complete", "null", "true")),
+    )
   let rendered = board.view(model) |> element.to_string
   rendered |> string.contains("aria-label=\"Archive Done\"") |> should.be_true
   rendered |> string.contains("aria-label=\"Archive Open\"") |> should.be_false
@@ -736,7 +741,10 @@ pub fn archive_button_and_archived_cards_test() {
   |> should.be_true
   let #(model, _) = board.update(model, board.Select("", "2"))
   let #(model, _) =
-    board.update(model, board.Live(task("2", "Done", "complete", "1700")))
+    board.update(
+      model,
+      board.Live(task("2", "Done", "complete", "1700", "false")),
+    )
   let rendered = board.view(model) |> element.to_string
   rendered |> string.contains(">Done") |> should.be_false
   rendered |> string.contains("1 task") |> should.be_true
@@ -1334,40 +1342,6 @@ pub fn detail_height_keys_test() {
   down.detail_height |> should.equal(336)
 }
 
-/// D-128: a task shows on the board once its feature is active, and stays
-/// when the feature completes; a proposed, upcoming or canceled feature's
-/// tasks are off the board. A task with no feature, or a feature not loaded
-/// yet, shows.
-pub fn only_active_features_show_their_tasks_test() {
-  let shown = fn(model, title) {
-    string.contains(element.to_string(board.view(model)), title)
-  }
-  let model =
-    deps_board()
-    |> board.update(board.Live(
-      "{\"features\":[{\"id\":\"f1\",\"state\":\"proposed\"},{\"id\":\"f2\",\"state\":\"upcoming\"},{\"id\":\"f3\",\"state\":\"canceled\"},{\"id\":\"f4\",\"state\":\"complete\"}]}",
-    ))
-    |> fn(r) { r.0 }
-    |> put_task("a", "1", "Idea", "planning", ",\"feature\":\"f1\"")
-    |> put_task("a", "2", "Queued", "planning", ",\"feature\":\"f2\"")
-    |> put_task("a", "3", "Dropped", "complete", ",\"feature\":\"f3\"")
-    |> put_task("a", "4", "Shipped", "planning", ",\"feature\":\"f4\"")
-    |> put_task("a", "5", "Loose", "planning", "")
-    |> put_task("a", "6", "Unknown", "planning", ",\"feature\":\"f9\"")
-  shown(model, "Idea") |> should.be_false
-  shown(model, "Queued") |> should.be_false
-  shown(model, "Dropped") |> should.be_false
-  shown(model, "Shipped") |> should.be_true
-  shown(model, "Loose") |> should.be_true
-  shown(model, "Unknown") |> should.be_true
-  let model =
-    board.update(
-      model,
-      board.Live("{\"feature\":{\"id\":\"f2\",\"state\":\"active\"}}"),
-    ).0
-  shown(model, "Queued") |> should.be_true
-}
-
 /// The board page carries the shared control styles, so its controls and
 /// the option lists of selects follow the theme.
 pub fn page_uses_the_shared_control_styles_test() {
@@ -1376,9 +1350,8 @@ pub fn page_uses_the_shared_control_styles_test() {
   |> should.be_true
 }
 
-/// D-133: Backlog means not active, so the board shows none of its tasks,
-/// with or without a feature, and doesn't count them; the same task in
-/// Planning shows.
+/// D-133, D-196: the server marks a Backlog task off the board, so neither a
+/// card nor a lane count shows it; the same task in Planning shows.
 pub fn backlog_tasks_are_off_the_board_test() {
   let shown = fn(model, title) {
     string.contains(element.to_string(board.view(model)), title)
@@ -1389,8 +1362,14 @@ pub fn backlog_tasks_are_off_the_board_test() {
       "{\"features\":[{\"id\":\"f1\",\"state\":\"active\"}]}",
     ))
     |> fn(r) { r.0 }
-    |> put_task("a", "1", "Loose", "backlog", "")
-    |> put_task("a", "2", "Featured", "backlog", ",\"feature\":\"f1\"")
+    |> put_task("a", "1", "Loose", "backlog", ",\"onBoard\":false")
+    |> put_task(
+      "a",
+      "2",
+      "Featured",
+      "backlog",
+      ",\"feature\":\"f1\",\"onBoard\":false",
+    )
   shown(model, "Loose") |> should.be_false
   shown(model, "Featured") |> should.be_false
   shown(model, "<h2>Backlog</h2>") |> should.be_false
@@ -1399,7 +1378,8 @@ pub fn backlog_tasks_are_off_the_board_test() {
   |> string.split("<small>0 tasks</small>")
   |> list.length
   |> should.equal(3)
-  let model = put_task(model, "a", "1", "Loose", "planning", "")
+  let model =
+    put_task(model, "a", "1", "Loose", "planning", ",\"onBoard\":true")
   shown(model, "Loose") |> should.be_true
   shown(model, "Featured") |> should.be_false
 }
@@ -1693,4 +1673,78 @@ pub fn lane_needs_test() {
   |> should.be_true
   rendered |> string.contains("lane-needs attention\"> \n") |> should.be_false
   string.split(rendered, "lane-needs") |> list.length |> should.equal(2)
+}
+
+/// D-196: the server's `onBoard` decides whether a card shows. A feature's
+/// state and a live feature change do not reveal a hidden task by themselves.
+pub fn the_server_decides_which_tasks_the_board_shows_test() {
+  let shown = fn(model, title) {
+    string.contains(element.to_string(board.view(model)), title)
+  }
+  let model =
+    deps_board()
+    |> board.update(board.Live(
+      "{\"features\":[{\"id\":\"f1\",\"state\":\"proposed\"},{\"id\":\"f2\",\"state\":\"upcoming\"},{\"id\":\"f3\",\"state\":\"canceled\"},{\"id\":\"f4\",\"state\":\"complete\"}]}",
+    ))
+    |> fn(r) { r.0 }
+    |> put_task(
+      "a",
+      "1",
+      "Idea",
+      "planning",
+      ",\"feature\":\"f1\",\"onBoard\":false",
+    )
+    |> put_task(
+      "a",
+      "2",
+      "Queued",
+      "planning",
+      ",\"feature\":\"f2\",\"onBoard\":false",
+    )
+    |> put_task(
+      "a",
+      "3",
+      "Dropped",
+      "complete",
+      ",\"feature\":\"f3\",\"onBoard\":false",
+    )
+    |> put_task(
+      "a",
+      "4",
+      "Shipped",
+      "planning",
+      ",\"feature\":\"f4\",\"onBoard\":true",
+    )
+    |> put_task("a", "5", "Loose", "planning", ",\"onBoard\":true")
+    |> put_task(
+      "a",
+      "6",
+      "Unknown",
+      "planning",
+      ",\"feature\":\"f9\",\"onBoard\":true",
+    )
+    |> put_task("a", "7", "Hidden", "planning", ",\"onBoard\":false")
+  shown(model, "Idea") |> should.be_false
+  shown(model, "Queued") |> should.be_false
+  shown(model, "Dropped") |> should.be_false
+  shown(model, "Shipped") |> should.be_true
+  shown(model, "Loose") |> should.be_true
+  shown(model, "Unknown") |> should.be_true
+  shown(model, "Hidden") |> should.be_false
+  let model =
+    board.update(
+      model,
+      board.Live("{\"feature\":{\"id\":\"f2\",\"state\":\"active\"}}"),
+    ).0
+  shown(model, "Queued") |> should.be_false
+  let model =
+    put_task(
+      model,
+      "a",
+      "2",
+      "Queued",
+      "planning",
+      ",\"feature\":\"f2\",\"onBoard\":true",
+    )
+  shown(model, "Queued") |> should.be_true
 }

@@ -789,6 +789,12 @@ class Root(unittest.TestCase):
             project(outside/'ext')
             (self.root/'link').symlink_to(outside/'ext')
             self.start()
+            # The board's root routes are never a project's: a contract page's own
+            # project refuses them, while the root answers.
+            status, v = self.call('GET', '/p/a/projects', None)
+            self.assertEqual((status, v['code']), (409, 'E7001'))
+            self.assertTrue(self.api('GET', '/projects')['workspace'])
+            self.assertIn('<div id="app">', self.call('GET', '/p/a/contracts')[1])
             self.api('DELETE', '/projects/a')
             self.assertEqual([p['dir'] for p in self.api('GET', '/projects')['projects']], ['.'])
             self.refused('POST', '/projects', {'dir': 'link'}, 'migrating')

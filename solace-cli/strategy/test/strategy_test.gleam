@@ -1,4 +1,5 @@
 import features
+import form_draft
 import gleam/int
 import gleam/json
 import gleam/list
@@ -104,6 +105,7 @@ pub fn row_decoder_reads_links_and_closed_time_test() {
       "",
       [],
       ["t0"],
+      True,
     )
   // A task saved before D-87 has none of the fields.
   let assert Ok(old) =
@@ -120,8 +122,9 @@ pub fn row_decoder_reads_links_and_closed_time_test() {
       old.finished,
       old.runs,
       old.depends,
+      old.on_board,
     )
-    == #(None, None, None, None, "", "", [], [])
+    == #(None, None, None, None, "", "", [], [], True)
   // The server sends null for a field it has no value for.
   let assert Ok(nulls) =
     json.parse(
@@ -148,6 +151,7 @@ pub fn closed_tasks_come_newest_first_then_open_ones_test() {
         "",
         [],
         [],
+        True,
       ),
     )
   }
@@ -177,6 +181,7 @@ pub fn filters_keep_column_project_links_and_words_test() {
       "",
       [],
       [],
+      True,
     )
   let all = strategy.Filters("", "", "", "", "")
   assert strategy.keeps(all, "web", row)
@@ -811,7 +816,10 @@ pub fn the_panel_stays_across_tabs_and_lists_past_runs_test() {
   let model = step(model, strategy.ShowPlan(""))
   let page = shown(model)
   assert string.contains(page, "id=\"plan-text\"")
-  assert string.contains(page, ">Start</button>")
+  assert string.contains(page, "aria-label=\"Start\"")
+  let assert Ok(#(_, plan)) = string.split_once(page, "class=\"plan-compose\"")
+  let assert Ok(#(compose, _)) = string.split_once(plan, "</aside>")
+  assert !string.contains(compose, ">Start</button>")
   assert list.map(plan.past(model.runs, plan.page), fn(r) { r.id })
     == ["r4", "r0"]
   let assert Ok(#(_, after)) = string.split_once(page, "Earlier runs")
@@ -1330,11 +1338,13 @@ pub fn the_run_bar_holds_the_run_controls_test() {
     ">New run</button>",
     "class=\"plan-body\"",
     "class=\"plan-compose\"",
-    "class=\"composer\"",
+    "class=\"composer has-actions\"",
     "<solace-md-editor",
     "id=\"plan-text\"",
-    ">Send</button>",
+    "aria-label=\"Send\"",
+    "class=\"composer-action\"",
   ])
+  assert !string.contains(open, ">Send</button>")
   assert !string.contains(open, ">Preview</button>")
   assert !string.contains(open, "Runs on this")
   let ended = shown(step(planned(), strategy.ShowPlan("r0")))
@@ -1355,10 +1365,13 @@ pub fn the_run_bar_holds_the_run_controls_test() {
     ">New run</button>",
     "class=\"plan-body\"",
     "class=\"plan-compose\"",
-    "class=\"composer\"",
+    "class=\"composer has-actions\"",
     "id=\"plan-text\"",
-    ">Start</button>",
+    "aria-label=\"Start\"",
+    "class=\"composer-action\"",
   ])
+  let compose = region(none, "class=\"plan-compose\"", "</aside>")
+  assert !string.contains(compose, ">Start</button>")
   assert !string.contains(none, ">End</button>")
   // The box keeps the typed message; a sent one clears it.
   let typed = planned() |> step(strategy.PlanText("**Plan** search"))
@@ -1482,7 +1495,7 @@ pub fn textareas_fill_their_container_test() {
     element.to_string(strategy.view(planned())) |> string.split("</style>")
   assert string.contains(
     css,
-    ".composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}",
+    ".composer{position:relative;border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}",
   )
   assert string.contains(
     css,
@@ -2310,6 +2323,7 @@ pub fn titles_sort_without_regard_to_case_test() {
         "",
         [],
         [],
+        True,
       ),
     )
   }
@@ -3785,4 +3799,437 @@ pub fn a_plain_question_answer_links_its_task_reference_test() {
   let page = element.to_string(strategy.view(model))
   assert string.contains(page, "href=\"/task/0123456789abcdef\"")
   assert string.contains(page, "data-task=\"0123456789abcdef\"")
+}
+
+/// Each form's Save or Create task sits on the row below the description,
+/// beside Cancel, never inside the editor.
+pub fn the_forms_save_from_the_editor_action_test() {
+  let feature =
+    features_model(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\",\"rank\":1}]}",
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\",\"milestone\":\"m1\"}]}",
+    )
+    |> step(strategy.EditFeature("f1"))
+  let feature_band = fn(page) {
+    let assert Ok(#(_, band)) =
+      string.split_once(page, "<div class=\"detail-band\"")
+    band
+  }
+  let feature_page = feature_band(features_panel(feature))
+  assert !string.contains(feature_page, "composer-action")
+  let feature_row = region(feature_page, "class=\"vision-actions\"", "</div>")
+  assert string.contains(feature_row, ">Save</button>")
+  assert string.contains(feature_row, ">Cancel</button>")
+
+  let milestone =
+    workspace()
+    |> step(strategy.Live(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"1.0\",\"targetDate\":\"2027-01-01\"}]}",
+    ))
+    |> step(strategy.EditMilestone("m1"))
+  let milestone_page = element.to_string(strategy.view(milestone))
+  let assert Ok(#(_, milestone_form)) =
+    string.split_once(milestone_page, "class=\"feature-form\"")
+  assert !string.contains(milestone_form, "composer-action")
+  let milestone_row =
+    region(milestone_form, "class=\"vision-actions\"", "</div>")
+  assert string.contains(milestone_row, ">Save</button>")
+  assert string.contains(milestone_row, ">Cancel</button>")
+
+  let new_task =
+    workspace()
+    |> step(strategy.NewTaskOpen)
+    |> step(strategy.NewTaskTitle("Index"))
+  let new_task_page = element.to_string(strategy.view(new_task))
+  let assert Ok(#(_, new_task_form)) =
+    string.split_once(new_task_page, "new-task-form")
+  assert !string.contains(new_task_form, "composer-action")
+  let new_task_row = region(new_task_form, "class=\"vision-actions\"", "</div>")
+  assert string.contains(new_task_row, ">Create task</button>")
+  assert string.contains(new_task_row, ">Cancel</button>")
+}
+
+/// The planning panel's Send and Start are live in-editor buttons; each
+/// form's Save or Create task is a live button on the row below it.
+pub fn the_editor_actions_send_from_the_plan_and_forms_test() {
+  let clicked = fn(model, on) {
+    simulate.simple(
+      init: fn(_) { model },
+      update: fn(state, message) { step(state, message) },
+      view: fn(state) { strategy.view(state) },
+    )
+    |> simulate.start(Nil)
+    |> simulate.click(on: on)
+    |> simulate.model
+  }
+  let in_plan =
+    query.descendant(
+      of: query.element(matching: query.class("plan-compose")),
+      matching: query.class("composer-action"),
+    )
+  let in_form = fn(selector, label) {
+    query.descendant(
+      of: query.element(matching: selector),
+      matching: query.text(label),
+    )
+  }
+
+  let start = planned() |> step(strategy.PlanText("Plan the page"))
+  assert clicked(start, in_plan).plan_sending
+
+  let send =
+    planned()
+    |> step(strategy.ShowPlan("r3"))
+    |> step(strategy.PlanText("Send the next step"))
+  assert clicked(send, in_plan).plan_sending
+
+  let feature =
+    features_model(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"Launch\",\"rank\":1}]}",
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\",\"milestone\":\"m1\"}]}",
+    )
+    |> step(strategy.EditFeature("f1"))
+    |> step(strategy.FeatureTitle("Export"))
+  assert clicked(feature, in_form(query.id("feature-form"), "Save")).feature_saving
+
+  let milestone =
+    workspace()
+    |> step(strategy.Live(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"1.0\",\"targetDate\":\"2027-01-01\"}]}",
+    ))
+    |> step(strategy.EditMilestone("m1"))
+    |> step(strategy.MilestoneTitle("2.0"))
+  assert clicked(milestone, in_form(query.class("feature-form"), "Save")).milestone_saving
+
+  let new_task =
+    workspace()
+    |> step(strategy.NewTaskOpen)
+    |> step(strategy.NewTaskTitle("Index"))
+  assert clicked(new_task, in_form(query.class("new-task-form"), "Create task")).task_saving
+    == Some("")
+}
+
+/// The text after the one `start` up to the next `stop`: a row or region cut
+/// out of a page for an assertion.
+fn region(page: String, start: String, stop: String) -> String {
+  let assert Ok(#(_, rest)) = string.split_once(page, start)
+  let assert Ok(#(inside, _)) = string.split_once(rest, stop)
+  inside
+}
+
+@external(javascript, "./draft_storage.mjs", "install")
+fn install_drafts() -> Nil
+
+@external(javascript, "./draft_storage.mjs", "restore")
+fn restore_drafts() -> Nil
+
+pub fn each_form_saves_and_clears_its_description_draft_test() {
+  install_drafts()
+  assert form_draft.key(features.text_id, form_draft.owner(None))
+    == "solace-draft:feature-text:new"
+  assert form_draft.key(roadmap.text_id, form_draft.owner(None))
+    == "solace-draft:milestone-text:new"
+  let features =
+    features_model("", "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\"}]}")
+  let fresh = step(features, strategy.NewFeature)
+  assert string.contains(features_panel(fresh), "id=\"feature-text\"")
+  let typed = step(fresh, strategy.FeatureText("New feature body"))
+  assert solace_task.draft_load("feature-text", "new") == "New feature body"
+  let _ = step(typed, strategy.CancelFeature)
+  assert solace_task.draft_load("feature-text", "new") == ""
+  let editing =
+    features
+    |> step(strategy.EditFeature("f1"))
+    |> step(strategy.FeatureText("Feature body"))
+  assert solace_task.draft_load("feature-text", "f1") == "Feature body"
+  let saved =
+    step(editing, strategy.FeatureSaved("{\"id\":\"f1\",\"title\":\"Search\"}"))
+  assert saved.feature_draft == None
+  assert solace_task.draft_load("feature-text", "f1") == ""
+
+  let milestones =
+    workspace()
+    |> step(strategy.Live(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"1.0\"}]}",
+    ))
+    |> step(strategy.Select(strategy.Roadmap))
+  let fresh = step(milestones, strategy.NewMilestone)
+  assert string.contains(
+    element.to_string(strategy.view(fresh)),
+    "id=\"milestone-text\"",
+  )
+  let typed = step(fresh, strategy.MilestoneText("New milestone body"))
+  assert solace_task.draft_load("milestone-text", "new") == "New milestone body"
+  let _ = step(typed, strategy.CancelMilestone)
+  assert solace_task.draft_load("milestone-text", "new") == ""
+  let editing =
+    milestones
+    |> step(strategy.EditMilestone("m1"))
+    |> step(strategy.MilestoneText("Milestone body"))
+  assert solace_task.draft_load("milestone-text", "m1") == "Milestone body"
+  let saved =
+    step(
+      editing,
+      strategy.MilestoneSaved("{\"id\":\"m1\",\"title\":\"1.0\",\"rank\":1}"),
+    )
+  assert saved.milestone_draft == None
+  assert solace_task.draft_load("milestone-text", "m1") == ""
+
+  let form = step(workspace(), strategy.NewTaskOpen)
+  assert string.contains(
+    element.to_string(strategy.view(form)),
+    "id=\"new-task-text\"",
+  )
+  let typed = step(form, strategy.NewTaskText("New task body"))
+  assert solace_task.draft_load("new-task-text", "new") == "New task body"
+  let _ = step(typed, strategy.NewTaskCancel)
+  assert solace_task.draft_load("new-task-text", "new") == ""
+  let creating =
+    form
+    |> step(strategy.NewTaskTitle("Index"))
+    |> step(strategy.NewTaskText("New task body"))
+    |> step(strategy.CreateTask)
+  let created =
+    step(
+      creating,
+      strategy.TaskCreated(
+        ".",
+        "",
+        json.to_string(task("t9", "Index", "", "backlog", "", 0)),
+      ),
+    )
+  assert created.new_task == None
+  assert solace_task.draft_load("new-task-text", "new") == ""
+  restore_drafts()
+}
+
+/// The planning message box has one draft, on the page: switching selection
+/// keeps the text, and a successful start clears only what it sent.
+pub fn the_plan_draft_belongs_to_the_page_test() {
+  install_drafts()
+  assert plan.draft_key() == "solace-draft:plan-text:page:"
+  let page = step(workspace(), strategy.PlanText("Page message"))
+  assert solace_task.draft_load("plan-text", "page:") == "Page message"
+  let task =
+    page
+    |> step(strategy.Open(".", "t1"))
+    |> step(strategy.PlanText("Task message"))
+  assert task.plan_text == "Task message"
+  assert solace_task.draft_load("plan-text", "page:") == "Task message"
+  let back = step(task, strategy.Select(strategy.Features))
+  assert back.plan_text == "Task message"
+  let sending =
+    back
+    |> step(strategy.PlanText("Page again"))
+    |> step(strategy.StartPlan)
+  let replied =
+    step(
+      sending,
+      strategy.PlanReplied(
+        True,
+        json.to_string(run("r1", "running", #("page", ""), 1, [])),
+      ),
+    )
+  assert replied.plan_text == ""
+  assert solace_task.draft_load("plan-text", "page:") == ""
+  restore_drafts()
+}
+
+pub fn a_reload_restores_active_form_drafts_test() {
+  install_drafts()
+  solace_task.draft_save("feature-text", "new", "Feature draft")
+  solace_task.draft_save("milestone-text", "new", "Milestone draft")
+  solace_task.draft_save("new-task-text", "new", "Task draft")
+  solace_task.draft_save("plan-text", "page:", "Plan draft")
+  let started = strategy.init(Nil).0
+  assert started.plan_text == "Plan draft"
+  let assert Some(form) = started.new_task
+  assert form.body == "Task draft"
+  let restored =
+    workspace()
+    |> step(strategy.Live(
+      "{\"features\":[{\"id\":\"f1\",\"title\":\"Search\"}]}",
+    ))
+    |> step(strategy.Live(
+      "{\"milestones\":[{\"id\":\"m1\",\"title\":\"1.0\"}]}",
+    ))
+    |> step(strategy.CaughtUp)
+  let assert Some(feature) = restored.feature_draft
+  assert feature.body == "Feature draft"
+  let assert Some(milestone) = restored.milestone_draft
+  assert milestone.body == "Milestone draft"
+  let assert Some(form) = restored.new_task
+  assert form.body == "Task draft"
+  restore_drafts()
+}
+
+/// A reply for a send made from another selection keeps the text typed
+/// since.
+pub fn plan_reply_keeps_text_typed_after_a_switch_test() {
+  install_drafts()
+  let sending =
+    workspace()
+    |> step(strategy.PlanText("Page message"))
+    |> step(strategy.StartPlan)
+  let switched =
+    sending
+    |> step(strategy.Open(".", "t1"))
+    |> step(strategy.PlanText("Task again"))
+  let replied =
+    step(
+      switched,
+      strategy.PlanReplied(
+        True,
+        json.to_string(run("r1", "running", #("page", ""), 1, [])),
+      ),
+    )
+  assert replied.plan_text == "Task again"
+  assert solace_task.draft_load("plan-text", "page:") == "Task again"
+  restore_drafts()
+}
+
+/// A tab switch within one plan context keeps what was typed, even when
+/// storage still holds an older message.
+pub fn a_tab_switch_keeps_the_newer_plan_text_test() {
+  install_drafts()
+  let typed = step(workspace(), strategy.PlanText("Typed now"))
+  solace_task.draft_save("plan-text", "page:", "Older")
+  let switched = step(typed, strategy.Select(strategy.Features))
+  assert switched.plan_text == "Typed now"
+  restore_drafts()
+}
+
+/// A context switch keeps the plan text even without storage.
+pub fn plan_text_survives_a_context_switch_without_storage_test() {
+  install_drafts()
+  let task =
+    workspace()
+    |> step(strategy.Open(".", "t1"))
+    |> step(strategy.PlanText("Task message"))
+  restore_drafts()
+  let there = step(task, strategy.Select(strategy.Features))
+  let back = step(there, strategy.Open(".", "t1"))
+  assert back.plan_text == "Task message"
+}
+
+/// A successful start clears what it sent, not a message typed since.
+pub fn plan_reply_keeps_text_typed_after_send_test() {
+  install_drafts()
+  let sending =
+    workspace()
+    |> step(strategy.PlanText("Page message"))
+    |> step(strategy.StartPlan)
+    |> step(strategy.PlanText("Page again"))
+  let replied =
+    step(
+      sending,
+      strategy.PlanReplied(
+        True,
+        json.to_string(run("r1", "running", #("page", ""), 1, [])),
+      ),
+    )
+  assert replied.plan_text == "Page again"
+  assert solace_task.draft_load("plan-text", "page:") == "Page again"
+  restore_drafts()
+}
+
+/// Three closed tasks: a title match and a newer and an older body match.
+fn search_rank_model() -> strategy.Model {
+  workspace()
+  |> step(
+    strategy.Live(
+      message(".", [
+        #(
+          "tasks",
+          json.array(
+            [
+              task("t1", "Fix checkout", "", "done", "", 20),
+              task(
+                "t2",
+                "A review",
+                "please fix checkout later",
+                "done",
+                "",
+                30,
+              ),
+              task("t3", "Zeta notes", "then fix checkout", "done", "", 10),
+            ],
+            fn(t) { t },
+          ),
+        ),
+      ]),
+    ),
+  )
+}
+
+/// A title match ranks above body matches, whichever was closed newer or
+/// older.
+pub fn a_title_search_ranks_above_body_matches_test() {
+  let model =
+    search_rank_model()
+    |> step(strategy.Filter(strategy.Filters("", "", "", "", "fix checkout")))
+  assert ids(model) == ["t1", "t2", "t3"]
+}
+
+/// The whole query in a title, ignoring case and surrounding spaces, ranks
+/// above a title with the words apart.
+pub fn a_whole_phrase_title_match_ranks_above_words_apart_test() {
+  let model =
+    workspace()
+    |> step(
+      strategy.Live(
+        message(".", [
+          #(
+            "tasks",
+            json.array(
+              [
+                task("t1", "Checkout fix notes", "", "backlog", "", 0),
+                task("t2", "Fix checkout", "", "backlog", "", 0),
+              ],
+              fn(t) { t },
+            ),
+          ),
+        ]),
+      ),
+    )
+    |> step(strategy.Filter(strategy.Filters("", "", "", "", " FIX CHECKOUT ")))
+  assert ids(model) == ["t2", "t1"]
+}
+
+/// A clicked heading's sort wins over the search ranking.
+pub fn a_clicked_heading_sorts_before_the_search_ranking_test() {
+  let model =
+    search_rank_model()
+    |> step(strategy.Filter(strategy.Filters("", "", "", "", "fix checkout")))
+    |> step(strategy.SortBy(strategy.ByTitle))
+  assert ids(model) == ["t2", "t1", "t3"]
+}
+
+/// A query naming a task's id, bare or as task:<id>, ranks it first.
+pub fn an_id_search_ranks_first_test() {
+  let model =
+    workspace()
+    |> step(
+      strategy.Live(
+        message(".", [
+          #(
+            "tasks",
+            json.array(
+              [
+                task("t1", "Other", "", "backlog", "", 0),
+                task("t2", "Notes", "mentions task:t1", "backlog", "", 0),
+              ],
+              fn(t) { t },
+            ),
+          ),
+        ]),
+      ),
+    )
+  let by = fn(query: String) {
+    model
+    |> step(strategy.Filter(strategy.Filters("", "", "", "", query)))
+    |> ids
+  }
+  assert by("t1") == ["t1", "t2"]
+  assert by("task:t1") == ["t1", "t2"]
 }

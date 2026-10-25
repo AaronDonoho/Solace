@@ -1709,8 +1709,8 @@ fn is_builtin_macro(name: &str) -> bool {
     )
 }
 
-/// Puts a moved top-level `use` back in its source header so the later unused
-/// import pass can keep it when staying code still needs it.
+/// Puts a moved top-level `use` back in its source header when staying code
+/// still needs it, privately so the item is re-exported only from its new module.
 fn restore_moved_use_imports(cx: &Rewrite<'_>, newheaders: &mut HashMap<String, String>) -> Result<(), Failure> {
     for (_, symbol) in cx.ix.syms.iter().enumerate().filter(|(i, s)| cx.moved[*i] && s.parent.is_none() && s.kind_text == "use") {
         let mut header = newheaders.get(&symbol.module).cloned().unwrap_or_default();
@@ -1734,7 +1734,6 @@ fn restore_moved_use_imports(cx: &Rewrite<'_>, newheaders: &mut HashMap<String, 
             if !existing.insert((site.local.clone(), site.path.clone(), site.glob)) {
                 continue;
             }
-            let visibility = use_visibility(&symbol.text, &site.range);
             let attributes = use_attributes(&symbol.text, &site.range);
             let path = site.path.join("::");
             let line = if site.glob {
@@ -1744,8 +1743,8 @@ fn restore_moved_use_imports(cx: &Rewrite<'_>, newheaders: &mut HashMap<String, 
             } else {
                 format!("use {path} as {};", site.local)
             };
-            let prefix = if attributes.is_empty() { visibility } else { format!("{attributes} {visibility}") };
-            header = add_import_line(&header, &format!("{prefix}{line}"));
+            let line = if attributes.is_empty() { line } else { format!("{attributes} {line}") };
+            header = add_import_line(&header, &line);
         }
         newheaders.insert(symbol.module.clone(), header);
     }

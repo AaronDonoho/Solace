@@ -1109,15 +1109,7 @@ fn stdin() -> Result<String, Failure> {
 
 pub(crate) type Sym = index::Sym;
 
-impl Sym {
-
-}
-
 pub(crate) type ModuleRow = index::ModuleRow;
-
-impl ModuleRow {
-
-}
 
 struct Store {
     /// Shared with the command's other stores of the same project, so they
@@ -1142,10 +1134,6 @@ thread_local! {
 }
 
 pub(crate) type Index = index::Index;
-
-impl Index {
-
-}
 
 enum Target<'a> {
     Imports(&'a str),
@@ -1602,7 +1590,7 @@ impl Store {
     // --- reading ---------------------------------------------------------------
 
     fn resolve(&self, ix: &Index, input: &str) -> Result<usize, Failure> {
-        let mut found: Vec<usize> = (0..ix.syms.len()).filter(|&i| store::names(&ix.syms[i], input)).collect();
+        let mut found: Vec<usize> = store::matching(ix, input);
         // In a Rust store a type and its `impl` share a name; the item wins (D-158).
         if ix.rust {
             let named: Vec<usize> = found.iter().copied().filter(|&i| ix.syms[i].kind_text != "impl").collect();
@@ -2437,7 +2425,7 @@ impl Store {
         if language::is_rust(&self.root) {
             return self.submit_rust(target, raw);
         }
-        let raw: String = raw.lines().filter(|l| !l.starts_with("// ── ")).collect::<Vec<_>>().join("\n");
+        let raw: String = raw.lines().filter(|l| !l.starts_with(drafts::BLOCK_HEADER)).collect::<Vec<_>>().join("\n");
         let formatted = self.lang().format(&raw)?;
         let parsed = self.lang().split(&formatted);
         let ix = self.index()?;
@@ -2598,12 +2586,12 @@ impl Store {
             return self.submit_symbols_rust(name, new_in, raw, formatted);
         }
         let ix = self.index()?;
-        let is_header = |l: &str| l.starts_with("// ── ");
+        let is_header = |l: &str| l.starts_with(drafts::BLOCK_HEADER);
         let blocks: Vec<(Option<String>, String)> =
             if raw.lines().filter(|l| is_header(l)).count() > 1 || (name.is_none() && new_in.is_none()) {
                 let mut blocks: Vec<(Option<String>, String)> = vec![];
                 for line in raw.lines() {
-                    if let Some(h) = line.strip_prefix("// ── ") {
+                    if let Some(h) = line.strip_prefix(drafts::BLOCK_HEADER) {
                         if h.starts_with("module ") {
                             return fail("E0101 a whole module goes through `submit <module>`.");
                         }
@@ -2612,7 +2600,10 @@ impl Store {
                         text.push_str(line);
                         text.push('\n');
                     } else if !line.trim().is_empty() {
-                        return fail("E0101 text for `submit` with no name must be blocks, each headed `// ── <module>.<name> ──`.");
+                        return fail(format!(
+                            "E0101 text for `submit` with no name must be blocks, each headed `{}<module>.<name> ──`.",
+                            drafts::BLOCK_HEADER
+                        ));
                     }
                 }
                 blocks

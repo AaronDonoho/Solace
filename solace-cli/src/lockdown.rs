@@ -1242,7 +1242,8 @@ fn patch_with_draft(store: &Store, v: &toml::Value, id: Option<&str>, raw: &str,
         }
         Err(Failure(message, code)) => {
             let id = drafts::keep_file_patch(store, id, raw)?;
-            let advice = drafts::retry_advice(&message, &id, "write", "");
+            let several = drafts::sections(raw, true).is_ok_and(|s| s.len() > 1);
+            let advice = drafts::retry_advice(&message, &id, "write", "", several, true);
             Err(Failure(format!("{message}\n\n{advice}"), code))
         }
     }
@@ -3409,7 +3410,7 @@ running your program.
             assert!(e.contains(why), "{why}: {e}");
             // D-141: a fault in the whole patch is resent, not fixed with `--replace`.
             if why.contains("no `+` lines") || why.contains("has no `*** Add File") {
-                assert!(e.contains(drafts::RESEND) && !e.contains("--replace"), "{e}");
+                assert!(e.contains("Nothing was written.") && e.contains(drafts::RESEND) && !e.contains("--replace"), "{e}");
             }
         }
         // With no path, `text` must be a file patch; with a list, `write` points to one.
@@ -3438,7 +3439,13 @@ running your program.
         );
         let e = call(&s, &v, &["write"], patch, None).unwrap_err().0;
         assert!(
-            e.starts_with("nothing written:\n") && e.contains("is only part of line 1: `A failed read") && e.contains("write --draft"),
+            e.starts_with("nothing written:\n")
+                && e.contains("is only part of line 1: `A failed read")
+                && !e.contains("Nothing was written.")
+                && e.contains("Fix only the failing line")
+                && e.contains("other lines")
+                && e.contains("don't resend the whole patch")
+                && e.contains("write --draft"),
             "{e}"
         );
         let id = e.split("Draft ").nth(1).and_then(|r| r.split(' ').next()).unwrap().to_string();
@@ -3459,6 +3466,17 @@ running your program.
         assert_eq!(fs::read_to_string(s.root.join("spec")).unwrap(), "A failed read does not stop the call (D-119).\n");
         // A retry that applies removes the draft.
         assert!(call(&s, &v, &["write", "--draft", &id], "", None).unwrap_err().0.contains("E0106"));
+        // A one-file patch has no other lines to keep.
+        let single = "*** Begin Patch\n*** Update File: notes\n-nope\n+one\n*** End Patch\n";
+        let e = call(&s, &v, &["write"], single, None).unwrap_err().0;
+        assert!(
+            e.starts_with("nothing written:\n")
+                && !e.contains("Nothing was written.")
+                && e.contains("Fix the failing line")
+                && e.contains("--replace")
+                && !e.contains("other lines"),
+            "{e}"
+        );
     }
     /// A file patch writes every file before it validates any; one that fails
     /// puts every file back and leaves no journal.

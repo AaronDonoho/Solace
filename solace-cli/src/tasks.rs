@@ -336,8 +336,10 @@ fn put_record(top: &Path, kind: &str, v: &Value) -> Result<(), Failure> {
     let was = if kind == "features" { record(top, kind, id) } else { None };
     let moved = was.as_ref().is_some_and(|old| old["milestone"] != v["milestone"]);
     let active = kind == "features" && v["state"] == "active";
-    if kind == "features" && (active || moved) {
-        let mut tasks = vec![];
+    let announced = kind == "features" && was.as_ref().is_some_and(|old| feature_shows(old)) != feature_shows(v);
+    if kind == "features" && (active || moved || announced) {
+        let mut writes = vec![];
+        let mut unchanged = vec![];
         for mut t in board::all_tasks(top)?.into_iter().filter(|t| t["feature"] == id) {
             let mut changed = moved;
             if moved {
@@ -347,10 +349,18 @@ fn put_record(top: &Path, kind: &str, v: &Value) -> Result<(), Failure> {
                 changed = true;
             }
             if changed {
-                tasks.push(t);
+                writes.push(t);
+            } else if announced {
+                unchanged.push(t);
             }
         }
-        write_tasks_then(top, &tasks, Some(v), || save_record_in(top, kind, v))?;
+        write_tasks_then(top, &writes, Some(v), || {
+            save_record_in(top, kind, v)?;
+            for t in &unchanged {
+                batch_log(t["home"].as_str().unwrap_or("."), &json!({"task": t}));
+            }
+            Ok(())
+        })?;
     } else {
         save_record(top, kind, v)?;
     }
@@ -413,9 +423,9 @@ fn strategy(top: &Path, method: &str, parts: &[&str], req: &Value, status: &mut 
     }
 }
 /// `GET /tasks/find/{id}` (D-98): the project that stores a task, whichever it
-/// is, and whether it is archived, so a task link opens it on the board or, off
-/// the board, on the Strategy page; and its title, which a bare link shows
-/// (D-122). 404 for no such task.
+/// is, whether it is archived, and whether the board shows it, so a task link
+/// opens it on the board or, off the board, on the Strategy page; and its title,
+/// which a bare link shows (D-122). 404 for no such task.
 pub fn find_task(top: &Path, id: &str) -> Result<Value, (u16, Failure)> {
     recover(&scope::top(top)).map_err(|e| (409, e))?;
     if !board::valid_id(id) {
@@ -426,12 +436,16 @@ pub fn find_task(top: &Path, id: &str) -> Result<Value, (u16, Failure)> {
         return board::err("E7023", format!("unknown task {id}")).map_err(|e| (404, e));
     }
     let t = board::read_task(top, &path).map_err(|e| (409, e))?;
+    let found_project = has_project(top, &t);
+    let mut waits = HashMap::new();
+    let t = with_on_board(top, t, found_project, &mut waits);
     Ok(json!({
         "id": id,
         "dir": t["home"],
         "archived": !t["archivedTime"].is_null(),
         "title": t["title"],
-        "project": !board::homeless(top, t["home"].as_str().unwrap_or(".")),
+        "project": found_project,
+        "onBoard": t["onBoard"].clone(),
     }))
 }
 /// `GET /features/find/{id}` and `GET /milestones/find/{id}` (D-122): a
@@ -2908,7 +2922,7 @@ mod tests {
         assert!(!board::tasks(&root).unwrap().iter().any(|x| x["id"] == tid), "in no lane");
         assert_eq!(board::task(&root, &tid).unwrap()["noProject"], json!(true), "opens from the root");
         let found = find_task(&root, &tid).unwrap();
-        assert_eq!((&found["dir"], &found["project"]), (&json!("web"), &json!(false)));
+        assert_eq!((&found["dir"], &found["project"], &found["onBoard"]), (&json!("web"), &json!(false), &json!(false)));
         board::settle_final(&root, &tid).unwrap();
         assert!(!root.join("web").join(".solace").exists(), "settling settles no store at its home");
         // The plan opens the root's store, so the root is a project and the task falls back to it.
@@ -3547,6 +3561,80 @@ mod tests {
         let logged = root_events(&root);
         assert!(logged.is_empty(), "{logged:?}");
     }
+
+    /// D-195: a task link opens on the board only while the board shows the task:
+    /// not in Backlog, not under a waiting feature, and not archived.
+    #[test]
+    fn a_task_link_is_on_the_board_only_when_the_board_shows_it() {
+        let root = root();
+        let feature =
+            |state: &str| strategy_api(&root, "POST", &["features"], json!({"title": state, "state": state})).unwrap()["id"].clone();
+        let proposed = feature("proposed");
+        let upcoming = feature("upcoming");
+        let canceled = feature("canceled");
+        let active = feature("active");
+        let complete = feature("complete");
+        let store = |id: &str, column: &str, feature: Value, archived: bool| {
+            let mut t = board::task(&root, "t1").unwrap();
+            t["id"] = json!(id);
+            t["title"] = json!(id);
+            t["column"] = json!(column);
+            t["feature"] = feature;
+            t["archivedTime"] = if archived { json!(1) } else { Value::Null };
+            fs::write(board::store_dir(&root).join(format!("{id}.json")), t.to_string()).unwrap();
+        };
+        store("backlog", "backlog", Value::Null, false);
+        store("proposed", "planning", proposed, false);
+        store("upcoming", "planning", upcoming, false);
+        store("canceled", "planning", canceled, false);
+        store("active", "planning", active, false);
+        store("complete", "planning", complete, false);
+        store("missing", "planning", json!("ffffffffffffffff"), false);
+        store("archived", "planning", Value::Null, true);
+        let on_board = |id: &str| find_task(&root, id).unwrap()["onBoard"].as_bool().unwrap();
+        assert!(!on_board("backlog"), "Backlog is off the board");
+        assert!(!on_board("proposed"), "a proposed feature's task is off the board");
+        assert!(!on_board("upcoming"), "an upcoming feature's task is off the board");
+        assert!(!on_board("canceled"), "a canceled feature's task is off the board");
+        assert!(on_board("active"), "an active feature's task is on the board");
+        assert!(on_board("complete"), "a complete feature's task is on the board");
+        assert!(on_board("missing"), "a task whose feature is missing is on the board");
+        assert!(!on_board("archived"), "an archived task is off the board");
+        let listed = board::read_task_api(&root, &["tasks"]).unwrap();
+        let listed = |id: &str| listed.as_array().unwrap().iter().find(|t| t["id"] == id).unwrap()["onBoard"].clone();
+        assert_eq!((listed("backlog"), listed("active")), (json!(false), json!(true)));
+    }
+
+    /// D-196: a feature state change that hides or shows its tasks logs those
+    /// tasks, so the board receives their new `onBoard`.
+    #[test]
+    fn a_feature_visibility_change_announces_its_tasks() {
+        let root = root();
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "Waiting", "state": "proposed"})).unwrap();
+        let fid = f["id"].as_str().unwrap();
+        let mut t = board::task(&root, "t1").unwrap();
+        t["id"] = json!("shown");
+        t["title"] = json!("Shown");
+        t["column"] = json!("planning");
+        t["feature"] = f["id"].clone();
+        fs::write(board::store_dir(&root).join("shown.json"), t.to_string()).unwrap();
+        let before = all_events(&root).len();
+        strategy_api(&root, "PATCH", &["features", fid], json!({"state": "active"})).unwrap();
+        let shown = all_events(&root)[before..]
+            .iter()
+            .find(|e| e["task"]["id"] == "shown")
+            .map(|e| board::stream_task_event(&root, e.clone(), true)["task"]["onBoard"].clone())
+            .expect("the task is announced");
+        assert_eq!(shown, json!(true));
+        let before = all_events(&root).len();
+        strategy_api(&root, "PATCH", &["features", fid], json!({"state": "proposed"})).unwrap();
+        let hidden = all_events(&root)[before..]
+            .iter()
+            .find(|e| e["task"]["id"] == "shown")
+            .map(|e| board::stream_task_event(&root, e.clone(), true)["task"]["onBoard"].clone())
+            .expect("the task is announced again");
+        assert_eq!(hidden, json!(false));
+    }
 }
 
 /// Writes task `t`, returning what to log and the features that follow it.
@@ -4118,4 +4206,35 @@ pub(super) const SETTLE_FAILED_NOTE: &str = "Settling this task failed:";
 /// Whether task `tid` still carries the marker of a failed deferred settle.
 fn settle_failed(top: &Path, tid: &str) -> bool {
     board::task(top, tid).is_ok_and(|t| t["settleFailed"] == true)
+}
+
+/// Whether the board shows task `t`, which has a project when `has_project` is
+/// true and waits on a feature when `waiting` is true (D-95, D-128, D-129, D-133).
+fn shows_on_board(t: &Value, has_project: bool, waiting: bool) -> bool {
+    t["archivedTime"].is_null() && t["column"] != "backlog" && has_project && !waiting
+}
+
+/// Whether a found feature is one whose tasks the board shows (D-128).
+fn feature_shows(f: &Value) -> bool {
+    matches!(f["state"].as_str(), Some("active" | "complete"))
+}
+
+/// Adds the board's computed `onBoard` to task `t`, which has a project when
+/// `has_project` is true (D-196). `waits` remembers feature states.
+pub(super) fn with_on_board(top: &Path, mut t: Value, has_project: bool, waits: &mut HashMap<String, bool>) -> Value {
+    let waiting = t["feature"].as_str().is_some_and(|id| feature_waits(top, id, waits));
+    t["onBoard"] = json!(shows_on_board(&t, has_project, waiting));
+    t
+}
+
+/// Whether task `t`'s home names a project of the workspace (D-129).
+pub(super) fn has_project(top: &Path, t: &Value) -> bool {
+    !board::homeless(top, t["home"].as_str().unwrap_or("."))
+}
+
+/// Whether feature `id` keeps its tasks off the board until it starts; a
+/// missing feature does not (D-128). `waits` remembers answers for a list or
+/// stream.
+pub(super) fn feature_waits(top: &Path, id: &str, waits: &mut HashMap<String, bool>) -> bool {
+    *waits.entry(id.to_string()).or_insert_with(|| record(top, "features", id).is_some_and(|f| !feature_shows(&f)))
 }

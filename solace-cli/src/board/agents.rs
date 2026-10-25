@@ -20,8 +20,11 @@ pub(super) struct Kind {
     /// The program's arguments that say whether it is signed in, with no
     /// model call; empty when it has none.
     pub status: &'static [&'static str],
-    /// Variables holding an API key; any one set is a sign-in.
+    /// Variables that may hold an API key.
     pub keys: &'static [&'static str],
+    /// Whether a key in `keys` is a sign-in even when the status command
+    /// says signed out.
+    pub keys_override_status: bool,
     /// The macOS keychain item that may hold the sign-in instead of a file.
     pub keychain: Option<&'static str>,
     /// Whether a sign-in file says its credentials have expired, at `now` (ms).
@@ -51,6 +54,7 @@ pub(super) const KINDS: &[Kind] = &[
         files: &["auth.json"],
         status: &["login", "status"],
         keys: &["OPENAI_API_KEY"],
+        keys_override_status: false,
         keychain: None,
         expired: codex_expired,
         limit: codex_limit,
@@ -67,6 +71,7 @@ pub(super) const KINDS: &[Kind] = &[
         files: &[".credentials.json"],
         status: &["auth", "status"],
         keys: &["ANTHROPIC_API_KEY"],
+        keys_override_status: true,
         keychain: Some("Claude Code-credentials"),
         expired: claude_expired,
         limit: claude_limit,
@@ -484,7 +489,9 @@ pub(super) fn api_page(body: &Value) -> Vec<Value> {
 /// list is out of date, so ask the program again.
 pub(super) fn model_gone(error: &str) -> bool {
     let e = error.to_ascii_lowercase();
-    e.contains("model")
+    let metadata_warning = e.contains("metadata") && e.contains("not found");
+    !metadata_warning
+        && e.contains("model")
         && ["not found", "does not exist", "no such model", "unknown model", "is not available", "not supported"]
             .iter()
             .any(|p| e.contains(p))
@@ -715,8 +722,9 @@ pub(super) struct Here<'a> {
 }
 
 /// Why model `m` can't start, from what is on this computer: its program, its
-/// endpoint's key, its sign-in (a key variable, a sign-in file that hasn't
-/// expired, or on macOS the keychain).
+/// endpoint's key, its sign-in (a sign-in file that hasn't expired, on macOS
+/// the keychain, or a key variable, which only some CLIs let override a
+/// signed-out status).
 pub(super) fn local(m: &Value, here: &Here) -> Option<String> {
     if let Some(argv) = m["run"].as_array() {
         let program = argv.first().and_then(|p| p.as_str()).unwrap_or("");
@@ -739,13 +747,18 @@ pub(super) fn local(m: &Value, here: &Here) -> Option<String> {
         };
     }
     let k = kind(agent)?;
-    match (here.status)(k) {
+    let key = k.keys.iter().any(|v| (here.var)(v));
+    if key && k.keys_override_status {
+        return None;
+    }
+    let answered = (here.status)(k);
+    if key && answered.is_none() {
+        return None;
+    }
+    match answered {
         Some(true) => return None,
         Some(false) => return Some(format!("{agent} is not signed in")),
         None => {}
-    }
-    if k.keys.iter().any(|v| (here.var)(v)) {
-        return None;
     }
     let folder = (here.folder)(k);
     let files: Vec<Value> = k
@@ -916,10 +929,11 @@ pub fn unavailable(m: &Value) -> Option<String> {
 }
 
 /// "Try again": clears the mark of the sign-in `body.agent` names, or every
-/// mark without one, and the cached availability.
+/// hold that may be retried without one, and the cached availability. A
+/// usage limit that has not reset remains in force.
 pub(super) fn try_again(body: &Value) -> Result<(), Failure> {
     match body["agent"].as_str() {
-        None => save_marks(&holds_path(), &json!({}))?,
+        None => clear_retryable(&holds_path())?,
         Some(agent) if kind(agent).is_some() => {
             clear(&holds_path(), agent)?;
         }
@@ -1071,9 +1085,8 @@ pub(super) fn mark_limit(
     mark(path, k.name, &reason, until)
 }
 
-/// The agent answered: its sign-in works again. Only a run that ended with a
-/// successful outcome says that, and only a mark set before it started is
-/// this run's.
+/// The run succeeded: its agent's sign-in works and its endpoint model ran, so
+/// a hold set before it started is stale.
 pub(super) fn clear_before(path: &Path, agent: &str, started: u64) -> Result<(), Failure> {
     let m = &marks(path)[agent];
     if m.is_object() && m["time"].as_u64().is_none_or(|t| t <= started) { clear(path, agent).map(drop) } else { Ok(()) }
@@ -1170,8 +1183,8 @@ pub(super) fn check_now() -> AgentCheck {
 }
 
 /// Codex's folder: `CODEX_HOME`, else `.codex` in the home folder.
-fn codex_folder() -> PathBuf {
-    env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".codex"))
+pub(super) fn codex_folder() -> PathBuf {
+    codex_folder_from(env::var_os("CODEX_HOME"), env::var_os("HOME"))
 }
 
 /// Whether an environment variable's value is a key: set and not blank.
@@ -1185,33 +1198,8 @@ const STATUS_DEADLINE: Duration = Duration::from_secs(5);
 /// Whether agent `k` says it is signed in, asked of its status command. None
 /// when it has none, can't run it, takes longer than `STATUS_DEADLINE`, or
 /// answers unclearly.
-fn program_status(k: &Kind) -> Option<bool> {
-    if k.status.is_empty() {
-        return None;
-    }
-    let mut child = Command::new(k.name).args(k.status).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()?;
-    let out = child.stdout.take().map(read_pipe);
-    let err = child.stderr.take().map(read_pipe);
-    let started = Instant::now();
-    let exit = loop {
-        match child.try_wait() {
-            Ok(Some(exit)) => break exit,
-            Ok(None) if started.elapsed() < STATUS_DEADLINE => std::thread::sleep(Duration::from_millis(20)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-    let mut said = String::new();
-    if let Some(part) = out.and_then(|handle| handle.join().ok()) {
-        said.push_str(&part);
-    }
-    if let Some(part) = err.and_then(|handle| handle.join().ok()) {
-        said.push_str(&part);
-    }
-    status_answer(exit.success(), &said)
+pub(super) fn program_status(k: &Kind) -> Option<bool> {
+    program_status_within(k, STATUS_DEADLINE)
 }
 
 /// What a status command's output says: JSON with `loggedIn`, or words
@@ -1228,13 +1216,14 @@ pub(super) fn status_answer(success: bool, said: &str) -> Option<bool> {
 }
 
 /// Learns from a run of a model on its own endpoint: the agent refusing the
-/// model holds that model alone; a run that answers clears it.
-fn observe_refusal(path: &Path, m: &Value, log: &Path, started: u64, outcome: Option<&str>) -> Result<(), Failure> {
+/// model holds that model alone; a run that succeeded clears it.
+pub(super) fn observe_refusal(path: &Path, m: &Value, log: &Path, started: u64, outcome: Option<&str>) -> Result<(), Failure> {
     let (Some(key), Some(k)) = (hold_key(m), kind(m["agent"].as_str().unwrap_or(""))) else { return Ok(()) };
-    let entries = transcript(log);
-    match refusal(k, &entries) {
+    if succeeded(outcome) {
+        return clear_before(path, &key, started);
+    }
+    match refusal(k, &transcript(log)) {
         Some(reason) => write_mark(path, &key, &reason, None, Some("refusal")),
-        None if succeeded(outcome) && answered(k, &entries) => clear_before(path, &key, started),
         None => Ok(()),
     }
 }
@@ -1264,10 +1253,54 @@ pub(super) fn hold_key(m: &Value) -> Option<String> {
 
 /// Reads `pipe` while its program runs, so an answer larger than the pipe
 /// buffer can't stall the program.
-fn read_pipe(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
+pub(super) fn read_pipe(mut pipe: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<String> {
     std::thread::spawn(move || {
         let mut said = String::new();
         let _ = pipe.read_to_string(&mut said);
         said
     })
+}
+
+/// `program_status` with a deadline a test can shorten.
+pub(super) fn program_status_within(k: &Kind, deadline: Duration) -> Option<bool> {
+    if k.status.is_empty() {
+        return None;
+    }
+    let mut child = Command::new(k.name).args(k.status).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()?;
+    let out = child.stdout.take().map(read_pipe);
+    let err = child.stderr.take().map(read_pipe);
+    let started = Instant::now();
+    let exit = loop {
+        match child.try_wait() {
+            Ok(Some(exit)) => break exit,
+            Ok(None) if started.elapsed() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let mut said = String::new();
+    if let Some(part) = out.and_then(|handle| handle.join().ok()) {
+        said.push_str(&part);
+    }
+    if let Some(part) = err.and_then(|handle| handle.join().ok()) {
+        said.push_str(&part);
+    }
+    status_answer(exit.success(), &said)
+}
+
+pub(super) fn codex_folder_from(codex_home: Option<std::ffi::OsString>, home: Option<std::ffi::OsString>) -> PathBuf {
+    codex_home.map(PathBuf::from).unwrap_or_else(|| PathBuf::from(home.unwrap_or_default()).join(".codex"))
+}
+
+/// Clears every hold Try again may clear, keeping a usage limit until its reset.
+pub(super) fn clear_retryable(path: &Path) -> Result<(), Failure> {
+    let now = now();
+    let mut all = marks(path);
+    all.as_object_mut()
+        .unwrap()
+        .retain(|_, m| !matches!(m["kind"].as_str(), Some("sign_in" | "refusal")) && m["until"].as_u64().is_some_and(|until| now < until));
+    save_marks(path, &all)
 }

@@ -1,21 +1,17 @@
 // Browser transport only: state, decoding and rendering belong to Lustre.
-// Each component instance passes its own `base` attribute; without one, a
-// workspace project's contract page at `/p/<dir>/contracts` asks its own
-// project (D-57). The board passes each lane's prefix itself. The open task's
-// details, with their markdown and editor helpers, are `<solace-task>` in the
-// components project.
-const fallbackBase = () => globalThis.location?.pathname.match(/^(.*)\/contracts$/)?.[1] ?? '';
-const prefix = base => base || fallbackBase();
+// `base` is the project prefix a request belongs to: "" for the root's routes,
+// and a workspace project's `/p/<dir>` (D-57). The board's own routes stay at
+// the root, even while a contract page is the one shown.
 // A component's shadow root before it has rendered: the helpers do nothing.
 export function no_root() { return null; }
 export function request(base, path, method, body, receive) {
-  fetch((path.startsWith('/p/') ? '' : prefix(base)) + path, { method, headers: { 'Content-Type': 'application/json' },
+  fetch((path.startsWith('/p/') ? '' : base) + path, { method, headers: { 'Content-Type': 'application/json' },
     ...(method === 'GET' ? {} : { body }) })
     .then(async response => receive(await response.text()))
     .catch(error => receive(JSON.stringify({ message: String(error) })));
 }
 export function events(base, receive, ready = () => {}) {
-  const source = new EventSource(prefix(base) + '/events');
+  const source = new EventSource(base + '/events');
   source.onmessage = event => receive(event.data);
   source.addEventListener('ready', () => ready());
   // Native EventSource reconnects with Last-Event-ID.

@@ -1202,3 +1202,33 @@ fn a_staying_moved_use_keeps_its_attributes() {
     let source = written(&root, "src/lib.rs");
     assert!(source.contains("#[allow(unused_imports)] use std::fmt;"), "{source}");
 }
+
+/// A moved `pub use` that staying code needs comes back without re-exporting.
+#[test]
+fn a_staying_moved_pub_use_comes_back_private() {
+    if !ready() {
+        return;
+    }
+    let (root, s) = rust_project("pub fn keep() -> fmt::Result {\n    Ok(())\n}\n\npub use std::fmt;\n");
+    extract(&s, &["crate.std::fmt", "--to", "helpers"]).unwrap();
+    let source = written(&root, "src/lib.rs");
+    assert!(source.contains("use std::fmt;"), "{source}");
+    assert!(!source.contains("pub use std::fmt;"), "{source}");
+    let destination = written(&root, "src/helpers.rs");
+    assert!(destination.contains("pub use std::fmt;"), "{destination}");
+}
+
+/// A moved attributed `pub use` that staying code needs comes back privately.
+#[test]
+fn a_staying_moved_pub_use_keeps_its_attribute_and_loses_pub() {
+    if !ready() {
+        return;
+    }
+    let (root, s) = rust_project("#[cfg(test)]\npub fn keep() -> fmt::Result {\n    Ok(())\n}\n\n#[cfg(test)]\npub use std::fmt;\n");
+    extract(&s, &["crate.std::fmt", "--to", "helpers"]).unwrap();
+    let source = written(&root, "src/lib.rs");
+    assert!(source.contains("#[cfg(test)] use std::fmt;"), "{source}");
+    assert!(!source.contains("pub use std::fmt;"), "{source}");
+    let destination = written(&root, "src/helpers.rs");
+    assert!(destination.contains("#[cfg(test)]\npub use std::fmt;"), "{destination}");
+}

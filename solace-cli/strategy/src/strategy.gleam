@@ -1,5 +1,6 @@
 import combobox
 import features
+import form_draft
 import gleam/bool
 import gleam/dict
 import gleam/dynamic
@@ -11,6 +12,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/order
 import gleam/result
 import gleam/string
+import handlers
 import lustre
 import lustre/attribute
 import lustre/component
@@ -144,6 +146,9 @@ pub type Model {
     plan_width: Int,
     /// The panel's message box: a new run's first message, or the next one.
     plan_text: String,
+    /// The message a successful start or send clears, None when none. It is
+    /// what the request was sent with.
+    plan_clearing: Option(String),
     /// A start, message, answer, end or stop sent and not yet answered.
     plan_sending: Bool,
     plan_error: String,
@@ -433,1474 +438,22 @@ fn ok_if_changed(rest: String, pair: String) -> Result(String, Nil) {
 
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   // The transport starts when the instance connects, once `base` is known.
-  #(
-    Model(..new(tab_from(tab_query())), plan_width: stored_width()),
-    effect.none(),
-  )
+  let model = Model(..new(tab_from(tab_query())), plan_width: stored_width())
+  #(restore_new_task(model), effect.none())
 }
 
 pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
-  case msg {
-    Select(tab) if tab == model.tab -> #(model, effect.none())
-    Select(tab) -> #(
-      Model(..model, tab: tab),
-      event.emit("tab", json.string(tab_name(tab))),
-    )
-    TabShown(tab) -> #(Model(..model, tab: tab), effect.none())
-    Connected -> {
-      let #(model, fx) = start(Model(..model, connected: True))
-      let #(model, plan_fx) = case model.plan_open {
-        "" -> #(model, effect.none())
-        rid -> plan_fetch(model, rid)
-      }
-      #(
-        model,
-        effect.batch([
-          fx,
-          plan_fx,
-          effect.before_paint(fn(send, root) { send(Attached(root)) }),
-        ]),
-      )
-    }
-    Attached(root) -> #(Model(..model, root: root), effect.none())
-    EditVision -> #(
-      Model(
-        ..model,
-        draft: Some(#(model.vision.text, model.vision.revision)),
-        vision_error: "",
-      ),
-      effect.none(),
-    )
-    ReloadVision -> #(
-      Model(
-        ..model,
-        draft: Some(#(model.vision.text, model.vision.revision)),
-        vision_error: "",
-      ),
-      effect.none(),
-    )
-    CancelVision -> #(
-      Model(..model, draft: None, vision_error: ""),
-      effect.none(),
-    )
-    Draft(text) ->
-      case model.draft {
-        Some(#(_, base)) -> #(
-          Model(..model, draft: Some(#(text, base))),
-          effect.none(),
-        )
-        None -> #(model, effect.none())
-      }
-    VisionFormat(before, after) ->
-      case model.draft {
-        Some(#(text, _)) -> #(
-          model,
-          effect.from(fn(send) {
-            send(
-              Draft(solace_task.wrap(model.root, vision_id, text, before, after)),
-            )
-          }),
-        )
-        None -> #(model, effect.none())
-      }
-    VisionBlock(kind) ->
-      case model.draft {
-        Some(#(text, _)) -> #(
-          model,
-          effect.from(fn(send) {
-            send(Draft(solace_task.block(model.root, vision_id, text, kind)))
-          }),
-        )
-        None -> #(model, effect.none())
-      }
-    // One save at a time, within the limit (D-92); its reply ends the edit or
-    // says why not.
-    SaveVision -> {
-      let fits = case model.draft {
-        Some(#(text, _)) -> vision_count(text) <= vision_limit
-        None -> False
-      }
-      case model.draft, model.saving, fits {
-        Some(#(text, base)), False, True -> #(
-          Model(..model, saving: True, vision_error: ""),
-          effect.from(fn(send) {
-            request(
-              model.prefix,
-              "/vision",
-              "PUT",
-              json.to_string(vision_body(text, base)),
-              fn(reply) { send(VisionSaved(reply)) },
-            )
-          }),
-        )
-        _, _, _ -> #(model, effect.none())
-      }
-    }
-    VisionSaved(text) ->
-      case json.parse(text, vision_decoder()) {
-        Ok(v) -> #(
-          Model(
-            ..model,
-            vision: v,
-            draft: None,
-            saving: False,
-            vision_error: "",
-          ),
-          effect.none(),
-        )
-        Error(_) -> #(
-          Model(..model, saving: False, vision_error: error(text)),
-          effect.none(),
-        )
-      }
-    Disconnected -> #(
-      Model(..stop(model), connected: False, plan_poll: model.plan_poll + 1),
-      effect.none(),
-    )
-    NewFeature if !model.feature_saving -> #(
-      Model(
-        ..model,
-        feature_draft: Some(features.new_draft()),
-        feature_collapsed: False,
-        feature_error: "",
-        feature_request: request_id(),
-      ),
-      effect.none(),
-    )
-    EditFeature(id) if !model.feature_saving ->
-      case list.find(model.features, fn(f) { f.id == id }) {
-        Ok(f) -> #(
-          Model(
-            ..model,
-            feature_draft: Some(features.draft_of(f)),
-            feature_collapsed: False,
-            feature_error: "",
-          ),
-          effect.none(),
-        )
-        Error(_) -> #(model, effect.none())
-      }
-    NewFeature | EditFeature(_) -> #(model, effect.none())
-    CancelFeature -> #(
-      Model(
-        ..model,
-        feature_draft: None,
-        feature_collapsed: False,
-        feature_error: "",
-      ),
-      effect.none(),
-    )
-    ToggleFeature ->
-      case model.feature_draft {
-        None -> #(model, effect.none())
-        Some(_) -> #(
-          Model(..model, feature_collapsed: !model.feature_collapsed),
-          effect.none(),
-        )
-      }
-    FeatureTitle(title) ->
-      edit_feature(model, fn(d) { features.Draft(..d, title: title) })
-    FeatureText(body) ->
-      edit_feature(model, fn(d) { features.Draft(..d, body: body) })
-    FeatureState(state) ->
-      edit_feature(model, fn(d) { features.Draft(..d, state: state) })
-    FeatureMilestone(id) ->
-      edit_feature(model, fn(d) {
-        features.Draft(..d, milestone: case id {
-          "" -> None
-          id -> Some(id)
-        })
-      })
-    FeatureFormat(before, after) ->
-      case model.feature_draft {
-        Some(d) -> #(
-          model,
-          effect.from(fn(send) {
-            send(
-              FeatureText(solace_task.wrap(
-                model.root,
-                features.text_id,
-                d.body,
-                before,
-                after,
-              )),
-            )
-          }),
-        )
-        None -> #(model, effect.none())
-      }
-    FeatureBlock(kind) ->
-      case model.feature_draft {
-        Some(d) -> #(
-          model,
-          effect.from(fn(send) {
-            send(
-              FeatureText(solace_task.block(
-                model.root,
-                features.text_id,
-                d.body,
-                kind,
-              )),
-            )
-          }),
-        )
-        None -> #(model, effect.none())
-      }
-    // One save at a time. A create names its `request`; an edit sends only
-    // what changed, and an edit that changed nothing just closes.
-    SaveFeature ->
-      case model.feature_draft, model.feature_saving {
-        Some(d), False -> {
-          let save = fn(path, method, body) {
-            #(
-              Model(..model, feature_saving: True, feature_error: ""),
-              effect.from(fn(send) {
-                request(
-                  model.prefix,
-                  path,
-                  method,
-                  json.to_string(body),
-                  fn(reply) { send(FeatureSaved(reply)) },
-                )
-              }),
-            )
-          }
-          case d.id {
-            None ->
-              save(
-                "/features",
-                "POST",
-                features.create_body(d, model.feature_request),
-              )
-            Some(id) -> {
-              // A feature removed meanwhile: the server says so (E7023).
-              let before =
-                list.find(model.features, fn(f) { f.id == id })
-                |> result.unwrap(features.Feature(
-                  id,
-                  "",
-                  "",
-                  None,
-                  0.0,
-                  "",
-                  None,
-                ))
-              case features.changes(before, d) {
-                [] -> #(
-                  Model(..model, feature_draft: None, feature_error: ""),
-                  effect.none(),
-                )
-                fields -> save("/features/" <> id, "PATCH", json.object(fields))
-              }
-            }
-          }
-        }
-        _, _ -> #(model, effect.none())
-      }
-    FeatureSaved(text) ->
-      case json.parse(text, features.decoder()) {
-        Ok(f) -> #(
-          Model(
-            ..model,
-            features: keep(model.features, f, fn(f) { f.id }),
-            feature_draft: None,
-            feature_collapsed: False,
-            feature_saving: False,
-            feature_error: "",
-          ),
-          effect.none(),
-        )
-        Error(_) -> #(
-          Model(..model, feature_saving: False, feature_error: error(text)),
-          effect.none(),
-        )
-      }
-    // An attribute set before the element is added only takes effect then.
-    // One move or save at a time: a second before the first is answered
-    // would take the one `feature_moving` slot a refusal restores from.
-    MoveFeature(id, rank) if !model.feature_saving -> #(
-      Model(..model, feature_error: "", feature_saving: True),
-      effect.from(fn(send) {
-        request(
-          model.prefix,
-          "/features/" <> id,
-          "PATCH",
-          json.to_string(json.object([#("rank", json.float(rank))])),
-          fn(reply) { send(FeatureMoved(reply)) },
-        )
-      }),
-    )
-    GrabFeature(id, y) if !model.feature_saving -> #(
-      model,
-      effect.from(fn(send) {
-        drag_card(model.root, id, y, fn(index) { send(DropFeature(id, index)) })
-      }),
-    )
-    // The new order shows at once, with no jump back while the PATCH is
-    // answered; a save waits for the same answer, so a drag and a save of one
-    // feature don't send two PATCHes at once.
-    DropFeature(id, index) if !model.feature_saving -> {
-      let group =
-        features.groups(model.milestones, model.features)
-        |> list.find(fn(g) {
-          list.any(features.group_features(g), fn(f) { f.id == id })
-        })
-        |> result.map(features.group_features)
-        |> result.unwrap([])
-      case
-        features.drop_rank(group, id, index),
-        list.find(model.features, fn(f) { f.id == id })
-      {
-        Some(rank), Ok(f) -> {
-          let #(model, fx) = update(model, MoveFeature(id, rank))
-          #(
-            Model(
-              ..model,
-              features: keep(
-                model.features,
-                features.Feature(..f, rank: rank),
-                fn(f) { f.id },
-              ),
-              feature_moving: Some(#(id, f.rank)),
-              feature_saving: True,
-            ),
-            fx,
-          )
-        }
-        _, _ -> #(model, effect.none())
-      }
-    }
-    MoveFeature(_, _) | GrabFeature(_, _) | DropFeature(_, _) -> #(
-      model,
-      effect.none(),
-    )
-    // The server keeps its start time and color and plans its Backlog tasks
-    // (D-114, D-134). Its reply answers the start alone: a start changes the
-    // state, not the order, so it never moves a feature a drag is answering.
-    StartFeature(id) -> #(
-      Model(..model, feature_error: ""),
-      effect.from(fn(send) {
-        request(
-          model.prefix,
-          "/features/" <> id,
-          "PATCH",
-          json.to_string(json.object([#("state", json.string("active"))])),
-          fn(reply) { send(FeatureStarted(reply)) },
-        )
-      }),
-    )
-    // A reply after the feature was removed doesn't bring it back.
-    FeatureMoved(text) ->
-      case json.parse(text, features.decoder()) {
-        Ok(f) -> #(
-          Model(
-            ..model,
-            features: case list.any(model.features, fn(x) { x.id == f.id }) {
-              True -> keep(model.features, f, fn(f) { f.id })
-              False -> model.features
-            },
-            feature_error: "",
-            feature_moving: None,
-            feature_saving: False,
-          ),
-          effect.none(),
-        )
-        // A refused drop goes back to where it was.
-        Error(_) -> #(
-          Model(
-            ..model,
-            features: case model.feature_moving {
-              Some(#(id, rank)) ->
-                list.map(model.features, fn(f) {
-                  case f.id == id {
-                    True -> features.Feature(..f, rank: rank)
-                    False -> f
-                  }
-                })
-              None -> model.features
-            },
-            feature_error: error(text),
-            feature_moving: None,
-            feature_saving: False,
-          ),
-          effect.none(),
-        )
-      }
-    // A start's reply: the feature as the server has it. A refused start
-    // says why and changes nothing, so the order a drag set stays as it is.
-    FeatureStarted(text) ->
-      case json.parse(text, features.decoder()) {
-        Ok(f) -> #(
-          Model(
-            ..model,
-            features: case list.any(model.features, fn(x) { x.id == f.id }) {
-              True -> keep(model.features, f, fn(f) { f.id })
-              False -> model.features
-            },
-            feature_error: "",
-          ),
-          effect.none(),
-        )
-        Error(_) -> #(Model(..model, feature_error: error(text)), effect.none())
-      }
-    // The `{removedFeature}` and `{task}` events update the page.
-    FeatureDeleted(text) ->
-      case json.parse(text, features.decoder()) {
-        Ok(_) -> #(
-          Model(..model, feature_deleting: None, feature_error: ""),
-          effect.none(),
-        )
-        Error(_) -> #(Model(..model, feature_error: error(text)), effect.none())
-      }
-    DeleteFeature(id) if model.feature_draft == None -> #(
-      Model(..model, feature_deleting: Some(id), feature_error: ""),
-      effect.none(),
-    )
-    DeleteFeature(_) -> #(model, effect.none())
-    CancelDeleteFeature -> #(
-      Model(..model, feature_deleting: None, feature_error: ""),
-      effect.none(),
-    )
-    ConfirmDeleteFeature ->
-      case model.feature_deleting {
-        Some(id) -> #(
-          model,
-          effect.from(fn(send) {
-            request(model.prefix, "/features/" <> id, "DELETE", "", fn(reply) {
-              send(FeatureDeleted(reply))
-            })
-          }),
-        )
-        None -> #(model, effect.none())
-      }
-    TaskTitle(feature, title) -> #(
-      Model(..model, task_titles: set(model.task_titles, feature, title)),
-      effect.none(),
-    )
-    TaskProject(dir) -> #(Model(..model, task_project: dir), effect.none())
-    NewMilestone if !model.milestone_saving -> #(
-      Model(
-        ..model,
-        milestone_draft: Some(roadmap.new_draft()),
-        milestone_error: "",
-        milestone_request: request_id(),
-        milestone_feature_query: "",
-      ),
-      effect.none(),
-    )
-    EditMilestone(id) if !model.milestone_saving ->
-      case list.find(model.milestones, fn(m) { m.id == id }) {
-        Ok(m) -> {
-          let model = expand_milestone(model, m.id)
-          #(
-            Model(
-              ..model,
-              milestone_draft: Some(roadmap.draft_of(m)),
-              milestone_error: "",
-              milestone_feature_query: "",
-            ),
-            effect.none(),
-          )
-        }
-        Error(_) -> #(model, effect.none())
-      }
-    NewMilestone | EditMilestone(_) -> #(model, effect.none())
-    ToggleMilestone(id) -> #(toggle_milestone(model, id), effect.none())
-    CancelMilestone -> #(
-      Model(
-        ..model,
-        milestone_draft: None,
-        milestone_error: "",
-        milestone_feature_query: "",
-      ),
-      effect.none(),
-    )
-    MilestoneTitle(title) ->
-      edit_milestone(model, fn(d) { roadmap.Draft(..d, title: title) })
-    MilestoneText(body) ->
-      edit_milestone(model, fn(d) { roadmap.Draft(..d, body: body) })
-    MilestoneState(state) ->
-      edit_milestone(model, fn(d) { roadmap.Draft(..d, state: state) })
-    MilestoneTargetDate(date) ->
-      edit_milestone(model, fn(d) {
-        roadmap.Draft(..d, target_date: case date {
-          "" -> None
-          date -> Some(date)
-        })
-      })
-    MilestoneFeatureQuery(query) -> #(
-      Model(..model, milestone_feature_query: query),
-      effect.none(),
-    )
-    MilestoneFormat(before, after) ->
-      case model.milestone_draft {
-        Some(d) -> #(
-          model,
-          effect.from(fn(send) {
-            send(
-              MilestoneText(solace_task.wrap(
-                model.root,
-                roadmap.text_id,
-                d.body,
-                before,
-                after,
-              )),
-            )
-          }),
-        )
-        None -> #(model, effect.none())
-      }
-    MilestoneBlock(kind) ->
-      case model.milestone_draft {
-        Some(d) -> #(
-          model,
-          effect.from(fn(send) {
-            send(
-              MilestoneText(solace_task.block(
-                model.root,
-                roadmap.text_id,
-                d.body,
-                kind,
-              )),
-            )
-          }),
-        )
-        None -> #(model, effect.none())
-      }
-    // As SaveFeature: one at a time, a create names its `request`, an edit
-    // sends only what changed.
-    SaveMilestone ->
-      case model.milestone_draft, model.milestone_saving {
-        Some(d), False -> {
-          let save = fn(path, method, body) {
-            #(
-              Model(..model, milestone_saving: True, milestone_error: ""),
-              effect.from(fn(send) {
-                request(
-                  model.prefix,
-                  path,
-                  method,
-                  json.to_string(body),
-                  fn(reply) { send(MilestoneSaved(reply)) },
-                )
-              }),
-            )
-          }
-          case d.id {
-            None ->
-              save(
-                "/milestones",
-                "POST",
-                roadmap.create_body(d, model.milestone_request),
-              )
-            Some(id) -> {
-              // A milestone removed meanwhile: the server says so (E7023).
-              let before =
-                list.find(model.milestones, fn(m) { m.id == id })
-                |> result.unwrap(features.Milestone(id, "", 0.0, "", None, ""))
-              case roadmap.changes(before, d) {
-                [] -> #(
-                  Model(..model, milestone_draft: None, milestone_error: ""),
-                  effect.none(),
-                )
-                fields ->
-                  save("/milestones/" <> id, "PATCH", json.object(fields))
-              }
-            }
-          }
-        }
-        _, _ -> #(model, effect.none())
-      }
-    MilestoneSaved(text) ->
-      case json.parse(text, features.milestone_decoder()) {
-        Ok(m) -> #(
-          Model(
-            ..model,
-            milestones: keep(model.milestones, m, fn(m) { m.id }),
-            milestone_draft: None,
-            milestone_saving: False,
-            milestone_error: "",
-          ),
-          effect.none(),
-        )
-        Error(_) -> #(
-          Model(..model, milestone_saving: False, milestone_error: error(text)),
-          effect.none(),
-        )
-      }
-    DeleteMilestone(id) if model.milestone_draft == None -> #(
-      Model(..model, milestone_deleting: Some(id), milestone_error: ""),
-      effect.none(),
-    )
-    DeleteMilestone(_) -> #(model, effect.none())
-    CancelDeleteMilestone -> #(
-      Model(..model, milestone_deleting: None, milestone_error: ""),
-      effect.none(),
-    )
-    ConfirmDeleteMilestone ->
-      case model.milestone_deleting {
-        Some(id) -> #(
-          model,
-          effect.from(fn(send) {
-            request(model.prefix, "/milestones/" <> id, "DELETE", "", fn(reply) {
-              send(MilestoneDeleted(reply))
-            })
-          }),
-        )
-        None -> #(model, effect.none())
-      }
-    // The `{removedMilestone}`, `{feature}` and `{task}` events update the page.
-    MilestoneDeleted(text) ->
-      case json.parse(text, features.milestone_decoder()) {
-        Ok(m) -> {
-          let model = collapse_milestone(model, m.id)
-          #(
-            Model(..model, milestone_deleting: None, milestone_error: ""),
-            effect.none(),
-          )
-        }
-        Error(_) -> #(
-          Model(..model, milestone_error: error(text)),
-          effect.none(),
-        )
-      }
-    TargetFeature(_, _) if model.milestone_targeting -> #(model, effect.none())
-    TargetFeature(id, milestone) -> #(
-      Model(..model, milestone_error: "", milestone_targeting: True),
-      effect.from(fn(send) {
-        request(
-          model.prefix,
-          "/features/" <> id,
-          "PATCH",
-          json.to_string(
-            json.object([
-              #("milestone", case milestone {
-                "" -> json.null()
-                m -> json.string(m)
-              }),
-            ]),
-          ),
-          fn(reply) { send(FeatureTargeted(reply)) },
-        )
-      }),
-    )
-    FeatureTargeted(text) ->
-      case json.parse(text, features.decoder()) {
-        Ok(f) -> #(
-          Model(
-            ..model,
-            features: case list.any(model.features, fn(x) { x.id == f.id }) {
-              True -> keep(model.features, f, fn(f) { f.id })
-              False -> model.features
-            },
-            milestone_error: "",
-            milestone_targeting: False,
-          ),
-          effect.none(),
-        )
-        Error(_) -> #(
-          Model(
-            ..model,
-            milestone_error: error(text),
-            milestone_targeting: False,
-          ),
-          effect.none(),
-        )
-      }
-    // Refused during a run (D-100, E7003), unlike the links.
-    SetDepends(dir, id, ids) -> #(
-      Model(..model, milestone_error: ""),
-      effect.from(fn(send) {
-        request(
-          model.prefix,
-          base_of(model, dir) <> "/tasks/" <> id,
-          "PATCH",
-          json.to_string(roadmap.depends_body(ids)),
-          fn(reply) { send(DependsPatched(dir, reply)) },
-        )
-      }),
-    )
-    DependsPatched(dir, text) ->
-      case json.parse(text, row_decoder()) {
-        Ok(row) -> #(
-          Model(..put(model, dir, row), milestone_error: "", depends_query: ""),
-          effect.none(),
-        )
-        Error(_) -> #(
-          Model(..model, milestone_error: error(text)),
-          effect.none(),
-        )
-      }
-    OpenDepends(dir, id) -> #(
-      Model(
-        ..model,
-        depends_open: case model.depends_open == Some(#(dir, id)) {
-          True -> None
-          False -> Some(#(dir, id))
-        },
-        depends_query: "",
-        milestone_error: "",
-      ),
-      effect.none(),
-    )
-    DependsQuery(query) -> #(
-      Model(..model, depends_query: query),
-      effect.none(),
-    )
-    // One create at a time. Then the link is one `Link`, whose `Patched`
-    // reports a refusal on the feature.
-    AddTask(feature) -> {
-      let title =
-        list.key_find(model.task_titles, feature)
-        |> result.unwrap("")
-        |> string.trim
-      case title, model.task_saving {
-        "", _ | _, Some(_) -> #(model, effect.none())
-        _, None -> {
-          let dir = task_dir(model)
-          let id = case list.key_find(model.task_requests, feature) {
-            Ok(id) -> id
-            Error(_) -> request_id()
-          }
-          #(
-            Model(
-              ..model,
-              task_saving: Some(feature),
-              task_requests: set(model.task_requests, feature, id),
-              task_errors: drop(model.task_errors, feature),
-            ),
-            effect.from(fn(send) {
-              request(
-                model.prefix,
-                base_of(model, dir) <> "/tasks",
-                "POST",
-                json.to_string(
-                  json.object([
-                    #("title", json.string(title)),
-                    #("body", json.string("")),
-                    #("request", json.string(id)),
-                  ]),
-                ),
-                fn(reply) { send(TaskCreated(dir, feature, reply)) },
-              )
-            }),
-          )
-        }
-      }
-    }
-    NewTaskOpen if model.new_task == None -> #(
-      Model(
-        ..model,
-        new_task: Some(NewTask("", "", root_dir(model), "", "")),
-        new_task_error: "",
-        new_task_request: request_id(),
-      ),
-      effect.none(),
-    )
-    NewTaskOpen -> #(model, effect.none())
-    // A create or its link in flight finishes in the form.
-    NewTaskCancel if model.task_saving != Some("") -> #(
-      Model(..model, new_task: None, new_task_error: ""),
-      effect.none(),
-    )
-    NewTaskCancel -> #(model, effect.none())
-    NewTaskTitle(title) ->
-      edit_new_task(model, fn(d) { NewTask(..d, title: title) })
-    NewTaskText(body) ->
-      edit_new_task(model, fn(d) { NewTask(..d, body: body) })
-    NewTaskProject(dir) ->
-      edit_new_task(model, fn(d) { NewTask(..d, project: dir) })
-    NewTaskFeature(id) ->
-      edit_new_task(model, fn(d) { NewTask(..d, feature: id) })
-    NewTaskMilestone(id) ->
-      edit_new_task(model, fn(d) { NewTask(..d, milestone: id) })
-    NewTaskFormat(before, after) ->
-      case model.new_task {
-        Some(d) -> #(
-          model,
-          effect.from(fn(send) {
-            send(
-              NewTaskText(solace_task.wrap(
-                model.root,
-                new_task_id,
-                d.body,
-                before,
-                after,
-              )),
-            )
-          }),
-        )
-        None -> #(model, effect.none())
-      }
-    NewTaskBlock(kind) ->
-      case model.new_task {
-        Some(d) -> #(
-          model,
-          effect.from(fn(send) {
-            send(
-              NewTaskText(solace_task.block(
-                model.root,
-                new_task_id,
-                d.body,
-                kind,
-              )),
-            )
-          }),
-        )
-        None -> #(model, effect.none())
-      }
-    // One create at a time, under the request chosen when the form opened.
-    CreateTask ->
-      case model.new_task, model.task_saving {
-        Some(d), None ->
-          case string.trim(d.title) {
-            "" -> #(model, effect.none())
-            title -> {
-              let rid = case model.new_task_request {
-                "" -> request_id()
-                rid -> rid
-              }
-              #(
-                Model(
-                  ..model,
-                  task_saving: Some(""),
-                  new_task_request: rid,
-                  new_task_error: "",
-                ),
-                effect.from(fn(send) {
-                  request(
-                    model.prefix,
-                    base_of(model, d.project) <> "/tasks",
-                    "POST",
-                    json.to_string(
-                      json.object([
-                        #("title", json.string(title)),
-                        #("body", json.string(d.body)),
-                        #("request", json.string(rid)),
-                      ]),
-                    ),
-                    fn(reply) { send(TaskCreated(d.project, "", reply)) },
-                  )
-                }),
-              )
-            }
-          }
-        _, _ -> #(model, effect.none())
-      }
-    // The Tasks tab's create: the links picked go in one `Links`, whose
-    // `Patched` reports in the form; with none the task opens now.
-    TaskCreated(dir, "", text) ->
-      case json.parse(text, row_decoder()) {
-        Ok(row) -> {
-          let model = Model(..put(model, dir, row), new_task_request: "")
-          let fields = case model.new_task {
-            Some(d) -> new_task_links(d)
-            None -> []
-          }
-          case fields {
-            [] -> #(new_task_done(model, dir, row.id), effect.none())
-            _ -> #(
-              Model(..model, task_linking: Some(#(dir, row.id, ""))),
-              effect.from(fn(send) { send(Links(dir, row.id, fields)) }),
-            )
-          }
-        }
-        Error(_) -> #(
-          Model(
-            ..model,
-            task_saving: None,
-            new_task_error: "Couldn't create the task: " <> error(text),
-          ),
-          effect.none(),
-        )
-      }
-    TaskCreated(dir, feature, text) ->
-      case json.parse(text, row_decoder()) {
-        Ok(row) -> #(
-          Model(
-            ..put(model, dir, row),
-            task_titles: drop(model.task_titles, feature),
-            task_requests: drop(model.task_requests, feature),
-            task_errors: drop(model.task_errors, feature),
-            task_linking: Some(#(dir, row.id, feature)),
-          ),
-          effect.from(fn(send) { send(Link(dir, row.id, "feature", feature)) }),
-        )
-        Error(_) -> #(
-          Model(
-            ..model,
-            task_saving: None,
-            task_errors: set(
-              model.task_errors,
-              feature,
-              "Couldn't create the task: " <> error(text),
-            ),
-          ),
-          effect.none(),
-        )
-      }
-    BaseChanged(base) -> {
-      let model = Model(..model, prefix: base)
-      case model.connected {
-        True -> start(model)
-        False -> #(model, effect.none())
-      }
-    }
-    Listening(source) -> #(Model(..model, source: Some(source)), effect.none())
-    ProjectsLoaded(text) ->
-      case json.parse(text, projects_decoder()) {
-        Ok(#(workspace, projects)) -> #(
-          settle(
-            Model(..model, projects: projects, workspace: workspace, error: ""),
-          ),
-          effect.batch(
-            list.map(projects, fn(p) {
-              get(model, p.base <> "/workflow", WorkflowLoaded(p.dir, _))
-            }),
-          ),
-        )
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
-      }
-    WorkflowLoaded(dir, text) ->
-      case json.parse(text, solace_task.workflow_decoder()) {
-        Ok(w) -> #(
-          Model(..model, workflows: set(model.workflows, dir, w)),
-          effect.none(),
-        )
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
-      }
-    // What a new connection missed is replayed, then applied at once.
-    Live(text) if !model.caught_up -> #(
-      Model(..model, replay: [text, ..model.replay]),
-      effect.none(),
-    )
-    Live(text) -> {
-      let fx =
-        effect.batch([
-          case projects_event(text) {
-            True -> get(model, "/projects", ProjectsLoaded)
-            False -> effect.none()
-          },
-          case models_event(text) {
-            True -> get(model, "/models", ModelsRefreshed)
-            False -> effect.none()
-          },
-        ])
-      case knows(model, text) {
-        True -> {
-          let #(next, more) =
-            plan_track(model, plan_follow(model, hand(live(model, text), text)))
-          let more = case needs_attention(model.runs, next.runs) {
-            True -> effect.batch([more, event.emit("attention", json.null())])
-            False -> more
-          }
-          #(next, effect.batch([fx, more]))
-        }
-        // A project not listed yet: held until the list names it.
-        False -> #(Model(..model, replay: [text, ..model.replay]), fx)
-      }
-    }
-    CaughtUp -> {
-      let model = resync(settle(Model(..model, caught_up: True)))
-      #(model, get(model, "/models", ModelsRefreshed))
-    }
-    PlanCollapse -> #(
-      Model(..model, plan_collapsed: !model.plan_collapsed),
-      effect.none(),
-    )
-    PlanDrag(x) -> #(
-      model,
-      effect.from(fn(send) {
-        drag(x, model.plan_width, fn(w) { send(PlanWidth(w)) }, fn() {
-          send(PlanWidthDone)
-        })
-      }),
-    )
-    PlanWidth(width) -> #(
-      Model(..model, plan_width: plan.clamp(width, window_width())),
-      effect.none(),
-    )
-    PlanWidthDone -> #(model, store_width(model.plan_width))
-    // The handle is the panel's left edge: Left widens it.
-    PlanKey(key) -> {
-      let window = window_width()
-      let width =
-        case key {
-          "ArrowLeft" -> model.plan_width + plan.key_step
-          "ArrowRight" -> model.plan_width - plan.key_step
-          "Home" -> plan.min_width
-          "End" -> plan.max_width(window)
-          _ -> model.plan_width
-        }
-        |> plan.clamp(window)
-      #(Model(..model, plan_width: width), store_width(width))
-    }
-    // The message box grows with its text by itself (`<solace-md-editor>`).
-    PlanText(text) -> #(Model(..model, plan_text: text), effect.none())
-    PlanFormat(before, after) -> #(
-      model,
-      effect.from(fn(send) {
-        send(
-          PlanText(solace_task.wrap(
-            model.root,
-            plan.text_id,
-            model.plan_text,
-            before,
-            after,
-          )),
-        )
-      }),
-    )
-    PlanBlock(kind) -> #(
-      model,
-      effect.from(fn(send) {
-        send(
-          PlanText(solace_task.block(
-            model.root,
-            plan.text_id,
-            model.plan_text,
-            kind,
-          )),
-        )
-      }),
-    )
-    // Efforts differ between models, so a new model starts at its default.
-    PlanModel(id) -> #(
-      Model(..model, plan_model: id, plan_effort: ""),
-      effect.none(),
-    )
-    PlanEffort(effort) -> #(Model(..model, plan_effort: effort), effect.none())
-    // The model picked stays while it is available; without the list the
-    // server takes its default.
-    TryAgainModel if model.plan_refreshing -> #(model, effect.none())
-    TryAgainModel -> #(
-      Model(..model, plan_refreshing: True),
-      effect.from(fn(send) {
-        request(
-          model.prefix,
-          "/models/try-again",
-          "POST",
-          json.to_string(json.object([])),
-          fn(text) { send(ModelsLoaded(text)) },
-        )
-      }),
-    )
-    ModelsLoaded(text) ->
-      case json.parse(text, decode.list(solace_task.agent_decoder())) {
-        Ok(models) -> {
-          let #(plan_model, plan_effort) =
-            solace_task.models_chosen(
-              models,
-              model.plan_model,
-              model.plan_effort,
-            )
-          #(
-            Model(
-              ..model,
-              models: models,
-              plan_model: plan_model,
-              plan_effort: plan_effort,
-              plan_refreshing: False,
-            ),
-            effect.none(),
-          )
-        }
-        Error(_) -> #(Model(..model, plan_refreshing: False), effect.none())
-      }
-    ModelsRefreshed(text) ->
-      case json.parse(text, decode.list(solace_task.agent_decoder())) {
-        Ok(models) -> {
-          let #(plan_model, plan_effort) =
-            solace_task.models_refreshed(
-              models,
-              model.plan_model,
-              model.plan_effort,
-            )
-          #(
-            Model(
-              ..model,
-              models: models,
-              plan_model: plan_model,
-              plan_effort: plan_effort,
-            ),
-            effect.none(),
-          )
-        }
-        Error(_) -> #(model, effect.none())
-      }
-    StartPlan ->
-      case string.trim(model.plan_text) {
-        "" -> #(model, effect.none())
-        _ ->
-          plan_send(
-            model,
-            "/strategy/runs",
-            plan.start_body(
-              model.plan_model,
-              model.plan_effort,
-              model.plan_text,
-              plan_context(model),
-            ),
-            True,
-          )
-      }
-    SendPlan ->
-      case plan_shown(model), string.trim(model.plan_text) {
-        Some(run), text if text != "" && run.state != "ended" ->
-          plan_send(
-            model,
-            "/strategy/runs/" <> run.id <> "/notes",
-            json.object([#("text", json.string(model.plan_text))]),
-            True,
-          )
-        _, _ -> #(model, effect.none())
-      }
-    AnswerPlan(qid, option) ->
-      case plan_shown(model) {
-        Some(run) ->
-          plan_send(
-            model,
-            "/strategy/runs/" <> run.id <> "/questions/" <> qid,
-            json.object([#("option", json.string(option))]),
-            False,
-          )
-        None -> #(model, effect.none())
-      }
-    EndPlan | StopPlan ->
-      case plan_shown(model) {
-        Some(run) ->
-          plan_send(
-            model,
-            "/strategy/runs/"
-              <> run.id
-              <> case msg {
-              EndPlan -> "/end"
-              _ -> "/stop"
-            },
-            json.object([]),
-            False,
-          )
-        None -> #(model, effect.none())
-      }
-    // The reply's run is shown, and its transcript fetched again.
-    PlanReplied(clears, text) ->
-      case json.parse(text, plan.decoder()) {
-        Ok(run) -> {
-          plan_track(
-            model,
-            plan_fetch(
-              Model(
-                ..model,
-                runs: keep(model.runs, run, fn(r) { r.id }),
-                plan_open: run.id,
-                plan_sending: False,
-                plan_error: "",
-                plan_text: case clears {
-                  True -> ""
-                  False -> model.plan_text
-                },
-                plan_jump: model.plan_jump || run.id != model.plan_open,
-              ),
-              run.id,
-            ),
-          )
-        }
-        Error(_) -> #(
-          Model(..model, plan_sending: False, plan_error: error(text)),
-          effect.none(),
-        )
-      }
-    ShowPlan(rid) -> {
-      let model =
-        Model(
-          ..model,
-          plan_open: rid,
-          plan_entries: [],
-          plan_error: "",
-          plan_collapsed: False,
-          plan_at_bottom: True,
-          plan_new: False,
-          plan_jump: rid != "",
-        )
-      case rid {
-        "" -> #(Model(..model, plan_poll: model.plan_poll + 1), effect.none())
-        _ -> plan_fetch(model, rid)
-      }
-    }
-    // While the agent works its transcript is fetched again, in one chain.
-    PlanLoaded(poll, rid, text)
-      if poll == model.plan_poll && rid == model.plan_open
-    -> {
-      let decoder = {
-        use run <- decode.then(plan.decoder())
-        use entries <- decode.field(
-          "transcript",
-          decode.list(solace_task.entry_decoder()),
-        )
-        decode.success(#(run, entries))
-      }
-      case json.parse(text, decoder) {
-        Ok(#(run, entries)) -> {
-          let next =
-            Model(
-              ..model,
-              runs: keep(model.runs, run, fn(r) { r.id }),
-              plan_entries: entries,
-              plan_jump: False,
-            )
-          let poll_fx = case run.state == "running" && model.connected {
-            True ->
-              effect.from(fn(send) {
-                after(refresh_ms, fn() { send(PlanRefresh(poll, rid)) })
-              })
-            False -> effect.none()
-          }
-          // An opened run starts at its newest message.
-          case model.plan_jump {
-            True -> #(
-              Model(..next, plan_at_bottom: True, plan_new: False),
-              effect.batch([poll_fx, plan_scroll()]),
-            )
-            False -> plan_track(model, #(next, poll_fx))
-          }
-        }
-        Error(_) -> #(Model(..model, plan_error: error(text)), effect.none())
-      }
-    }
-    PlanLoaded(_, _, _) -> #(model, effect.none())
-    PlanRefresh(poll, rid)
-      if poll == model.plan_poll && rid == model.plan_open
-    -> #(model, plan_get(model, poll, rid))
-    PlanRefresh(_, _) -> #(model, effect.none())
-    PlanScrolled(near) -> #(
-      Model(..model, plan_at_bottom: near, plan_new: model.plan_new && !near),
-      effect.none(),
-    )
-    PlanNewest -> #(
-      Model(..model, plan_at_bottom: True, plan_new: False),
-      plan_scroll(),
-    )
-    // From the Features tab the task shows on the Tasks tab.
-    Open(dir, id) -> #(
-      Model(
-        ..model,
-        tab: Tasks,
-        selected: Some(#(dir, id)),
-        task_collapsed: False,
-        live: [],
-      ),
-      case model.tab {
-        Tasks -> effect.none()
-        _ -> event.emit("tab", json.string(tab_name(Tasks)))
-      },
-    )
-    Focus(_, _, "") -> #(model, effect.none())
-    Focus("feature", _, id) -> {
-      let model = expand_feature_milestone(model, id)
-      show_record(
-        Model(..model, focused_feature: Some(id)),
-        Features,
-        "feature",
-        id,
-      )
-    }
-    FocusFeature(id) -> #(
-      Model(..model, focused_feature: case model.focused_feature == Some(id) {
-        True -> None
-        False -> Some(id)
-      }),
-      effect.none(),
-    )
-    Focus("milestone", _, id) ->
-      show_record(expand_milestone(model, id), Roadmap, "milestone", id)
-    // `<solace-task>` scrolls into view now, or once the task loads. A link
-    // names the task's home folder; a homeless task's row (D-129) lives in
-    // the homeless bucket.
-    Focus(_, named, id) -> {
-      let dir = bucket_of(model, named, id)
-      #(
-        Model(
-          ..model,
-          tab: Tasks,
-          selected: Some(#(dir, id)),
-          task_collapsed: False,
-          page: page_of(visible(model), dir, id, model.page),
-          live: case model.selected == Some(#(dir, id)) {
-            True -> model.live
-            False -> []
-          },
-          reveal: #(id, model.reveal.1 + 1),
-        ),
-        effect.none(),
-      )
-    }
-    TaskMoved(dir, id) ->
-      case model.selected {
-        Some(#(_, shown)) if shown == id -> #(
-          Model(..model, selected: Some(#(bucket_of(model, dir, id), id))),
-          effect.none(),
-        )
-        _ -> #(model, effect.none())
-      }
-    ToggleTask ->
-      case model.selected {
-        None -> #(model, effect.none())
-        Some(_) -> #(
-          Model(..model, task_collapsed: !model.task_collapsed),
-          effect.none(),
-        )
-      }
-    Filter(filters) -> #(
-      Model(..model, filters: filters, page: 1),
-      effect.none(),
-    )
-    FilterText(field, text) -> {
-      let f = filter(field)
-      case text {
-        "" -> {
-          let model = f.set_chosen(model, "")
-          #(
-            f.set_box(model, combobox.typing(combobox.blank(), "")),
-            effect.none(),
-          )
-        }
-        _ -> #(
-          f.set_box(model, combobox.typing(f.box(model), text)),
-          effect.none(),
-        )
-      }
-    }
-    FilterOpen(field) -> {
-      let f = filter(field)
-      let box = f.box(model)
-      case box.open {
-        True -> #(model, effect.none())
-        False -> #(
-          f.set_box(
-            model,
-            combobox.opened(box, f.items(model), f.chosen(model)),
-          ),
-          effect.none(),
-        )
-      }
-    }
-    FilterKey(field, key) -> {
-      let f = filter(field)
-      let #(box, picked) =
-        combobox.key(f.box(model), key, f.items(model), f.chosen(model))
-      let model = f.set_box(model, box)
-      case picked {
-        Some(id) -> #(f.set_chosen(model, id), effect.none())
-        None -> #(model, scroll_filter_option(f.key, key, box))
-      }
-    }
-    FilterChoose(field, id) -> {
-      let f = filter(field)
-      #(f.set_box(f.set_chosen(model, id), combobox.blank()), effect.none())
-    }
-    FilterBlur(field) -> {
-      let f = filter(field)
-      #(f.set_box(model, combobox.blank()), effect.none())
-    }
-    Page(n) -> #(Model(..model, page: n), effect.none())
-    SortBy(key) -> {
-      let ascending = case model.sort {
-        Some(#(k, asc)) if k == key -> !asc
-        _ -> True
-      }
-      #(Model(..model, sort: Some(#(key, ascending)), page: 1), effect.none())
-    }
-    // Allowed in final columns and during runs (D-87, D-100).
-    Link(dir, id, field, value) ->
-      update(model, Links(dir, id, [#(field, value)]))
-    // Through the board's actions API, as the task's details send it.
-    PlanTask(dir, id) -> #(
-      model,
-      effect.from(fn(send) {
-        request(
-          model.prefix,
-          base_of(model, dir) <> "/tasks/" <> id <> "/actions",
-          "POST",
-          json.to_string(json.object([#("action", json.string("plan"))])),
-          fn(text) { send(Planned(dir, text)) },
-        )
-      }),
-    )
-    Planned(dir, text) ->
-      case json.parse(text, row_decoder()) {
-        Ok(row) -> #(Model(..put(model, dir, row), error: ""), effect.none())
-        Error(_) -> #(Model(..model, error: error(text)), effect.none())
-      }
-    Links(dir, id, fields) -> #(
-      model,
-      effect.from(fn(send) {
-        request(
-          model.prefix,
-          base_of(model, dir) <> "/tasks/" <> id,
-          "PATCH",
-          json.to_string(links_body(fields)),
-          fn(text) { send(Patched(dir, id, text)) },
-        )
-      }),
-    )
-    // The link after a new task's create reports on its feature, or in the
-    // Tasks tab's form ("" for the feature). A refusal is matched by its
-    // task, so another task's refused PATCH isn't reported there.
-    Patched(dir, pid, text) ->
-      case json.parse(text, row_decoder()), model.task_linking {
-        Ok(row), Some(#(d, id, "")) if d == dir && row.id == id -> #(
-          new_task_done(put(model, dir, row), dir, id),
-          effect.none(),
-        )
-        // The task exists without its links: it opens, and the form stays
-        // with a fresh draft so a retry doesn't make it again.
-        Error(_), Some(#(d, id, "")) if d == dir && id == pid -> {
-          let #(picked, project) = case model.new_task {
-            Some(t) -> #(
-              case new_task_links(t) {
-                [#("feature", _)] -> "feature"
-                [#("milestone", _)] -> "milestone"
-                _ -> "feature or milestone"
-              },
-              t.project,
-            )
-            None -> #("feature or milestone", root_dir(model))
-          }
-          #(
-            Model(
-              ..new_task_done(model, dir, id),
-              new_task: Some(NewTask("", "", project, "", "")),
-              new_task_request: request_id(),
-              new_task_error: "The task was created without its "
-                <> picked
-                <> ": "
-                <> error(text),
-            ),
-            effect.none(),
-          )
-        }
-        Ok(row), Some(#(d, id, _)) if d == dir && row.id == id -> #(
-          Model(..put(model, dir, row), task_saving: None, task_linking: None),
-          effect.none(),
-        )
-        Ok(row), _ -> #(Model(..put(model, dir, row), error: ""), effect.none())
-        Error(_), Some(#(d, id, feature)) if d == dir && id == pid -> #(
-          Model(
-            ..model,
-            task_saving: None,
-            task_linking: None,
-            task_errors: set(
-              model.task_errors,
-              feature,
-              "The task was created without the link to this feature: "
-                <> error(text),
-            ),
-          ),
-          effect.none(),
-        )
-        Error(_), _ -> #(Model(..model, error: error(text)), effect.none())
-      }
-  }
+  [
+    fn() { navigation_events(model, msg) },
+    fn() { connection_events(model, msg) },
+    fn() { vision_events(model, msg) },
+    fn() { feature_events(model, msg) },
+    fn() { milestone_events(model, msg) },
+    fn() { task_events(model, msg) },
+    fn() { plan_events(model, msg) },
+    fn() { plan_reply_events(model, msg) },
+  ]
+  |> handlers.first(#(model, effect.none()))
 }
 
 pub fn view(model: Model) -> Element(Msg) {
@@ -2020,13 +573,17 @@ pub type Row {
     runs: List(#(String, String)),
     /// The ids of the tasks this one depends on (D-87).
     depends: List(String),
+    /// Whether the board shows the task (D-196).
+    on_board: Bool,
   )
 }
 
-/// What the list keeps. "" in a field keeps every task; "-" for feature or
-/// milestone keeps the tasks without one. Every word of the query is in the
-/// task's title or body, ignoring case; a word equal to a task's id, bare or
-/// as `task:<id>`, finds that task.
+/// What the list keeps and how its search ranks. "" in a field keeps every
+/// task; "-" for feature or milestone keeps the tasks without one. Every word
+/// of the query is in the task's title or body, ignoring case; a word equal
+/// to a task's id, bare or as `task:<id>`, finds that task. A query with text
+/// ranks the id or a whole title phrase first, then every word in the title,
+/// then the rest.
 pub type Filters {
   Filters(
     column: String,
@@ -2117,7 +674,8 @@ pub fn new(tab: Tab) -> Model {
     plan_open: "",
     plan_collapsed: False,
     plan_width: plan.default_width,
-    plan_text: "",
+    plan_text: plan.load_draft(),
+    plan_clearing: None,
     plan_sending: False,
     plan_error: "",
     plan_entries: [],
@@ -2472,6 +1030,7 @@ pub fn row_decoder() -> decode.Decoder(Row) {
     [],
     decode.list(decode.string),
   )
+  use on_board <- decode.optional_field("onBoard", True, decode.bool)
   decode.success(Row(
     id,
     title,
@@ -2485,6 +1044,7 @@ pub fn row_decoder() -> decode.Decoder(Row) {
     finished,
     runs,
     depends,
+    on_board,
   ))
 }
 
@@ -2501,8 +1061,8 @@ fn projects_decoder() -> decode.Decoder(#(Bool, List(Project))) {
 }
 
 /// The tasks the list shows, each with its project: those the filters keep,
-/// in the heading's sort or the default order. Tasks with no project (D-129)
-/// show too, in the homeless bucket.
+/// in the heading's sort, else the search's ranking, else the default order.
+/// Tasks with no project (D-129) show too, in the homeless bucket.
 pub fn visible(model: Model) -> List(#(String, Row)) {
   task_dirs(model)
   |> list.flat_map(fn(dir) {
@@ -2549,9 +1109,7 @@ fn linked(wanted: String, link: Option(String)) -> Bool {
 fn searched(query: String, row: Row) -> Bool {
   let text = string.lowercase(row.title <> "\n" <> row.body)
   query
-  |> string.lowercase
-  |> string.split(" ")
-  |> list.filter(fn(word) { word != "" })
+  |> query_words
   |> list.all(fn(word) {
     string.contains(text, word) || word == row.id || word == "task:" <> row.id
   })
@@ -2939,14 +1497,17 @@ fn vision_view(model: Model) -> List(Element(Msg)) {
       let over = vision_count(text) > vision_limit
       [
         solace_task.editor(
-          vision_id,
-          "",
-          model.prefix,
-          "Vision",
-          text,
-          Draft,
-          VisionFormat,
-          VisionBlock,
+          solace_task.EditorConfig(
+            id: vision_id,
+            task: "",
+            base: model.prefix,
+            label: "Vision",
+            text: text,
+            on_input: Draft,
+            on_format: VisionFormat,
+            on_block: VisionBlock,
+            actions: [],
+          ),
         ),
         ..list.flatten([
           [
@@ -3198,7 +1759,15 @@ fn plan_send(
   case model.plan_sending {
     True -> #(model, effect.none())
     False -> #(
-      Model(..model, plan_sending: True, plan_error: ""),
+      Model(
+        ..model,
+        plan_sending: True,
+        plan_error: "",
+        plan_clearing: case clears {
+          True -> Some(model.plan_text)
+          False -> None
+        },
+      ),
       effect.from(fn(send) {
         request(model.prefix, path, "POST", json.to_string(body), fn(reply) {
           send(PlanReplied(clears, reply))
@@ -3475,6 +2044,10 @@ fn edit_new_task(
 /// The Tasks tab's new task is made: the form closes and the task opens in
 /// the bottom band, as a row click does.
 fn new_task_done(model: Model, dir: String, id: String) -> Model {
+  case model.new_task {
+    Some(_) -> solace_task.draft_clear(new_task_id, "new")
+    None -> Nil
+  }
   Model(
     ..model,
     new_task: None,
@@ -3526,14 +2099,17 @@ fn new_task_view(model: Model) -> Element(Msg) {
           ]),
         ]),
         solace_task.editor(
-          new_task_id,
-          "",
-          model.prefix,
-          "Description",
-          d.body,
-          NewTaskText,
-          NewTaskFormat,
-          NewTaskBlock,
+          solace_task.EditorConfig(
+            id: new_task_id,
+            task: "",
+            base: model.prefix,
+            label: "Description",
+            text: d.body,
+            on_input: NewTaskText,
+            on_format: NewTaskFormat,
+            on_block: NewTaskBlock,
+            actions: [],
+          ),
         ),
         html.div([attribute.class("filters")], [
           case model.workspace && list.length(model.projects) > 1 {
@@ -3675,14 +2251,14 @@ type SortValue {
 }
 
 /// The rows in the Tasks tab's order: by the heading clicked, else the
-/// default. Missing values go last either way; ties fall back to the title,
-/// then the id, then the project.
+/// search's ranking, else the default. Missing values go last either way;
+/// ties fall back to the title, then the id, then the project.
 pub fn sort_rows(
   model: Model,
   rows: List(#(String, Row)),
 ) -> List(#(String, Row)) {
   case model.sort {
-    None -> sorted(rows)
+    None -> by_search(model.filters.query, rows)
     Some(#(key, ascending)) -> {
       let ranks = list.map(columns(model), fn(c) { c.id })
       list.sort(rows, fn(a, b) {
@@ -4023,6 +2599,7 @@ fn row_task(row: Row, no_project: Bool) -> solace_task.Task {
     depends: row.depends,
     feature: row.feature,
     no_project: no_project,
+    on_board: row.on_board,
   )
 }
 
@@ -4429,3 +3006,1831 @@ const state_styles =
 .state.state-complete{background:var(--state-complete);border-color:var(--state-complete);color:var(--state-ink)}
 .state.state-canceled{background:var(--state-canceled);border-color:var(--state-canceled);color:var(--state-ink)}
 "
+
+/// Shows the forms whose descriptions were saved, so a reload brings an active
+/// edit back without opening it again.
+fn restore_forms(model: Model) -> Model {
+  model
+  |> restore_feature
+  |> restore_milestone
+  |> restore_new_task
+}
+
+fn restore_feature(model: Model) -> Model {
+  let fresh = with_feature_draft(features.new_draft())
+  case
+    restored_draft(
+      model.feature_draft,
+      fresh,
+      fn(draft) { draft.body },
+      model.features,
+      features.draft_of,
+      fn(feature) {
+        form_draft.load(features.text_id, form_draft.owner(Some(feature.id)))
+        != ""
+      },
+    )
+  {
+    None -> model
+    Some(Restored(draft, fresh)) ->
+      Model(
+        ..model,
+        feature_draft: Some(draft),
+        feature_collapsed: False,
+        feature_error: "",
+        feature_request: case fresh {
+          True ->
+            case model.feature_request {
+              "" -> request_id()
+              id -> id
+            }
+          False -> model.feature_request
+        },
+      )
+  }
+}
+
+fn restore_milestone(model: Model) -> Model {
+  let fresh = with_milestone_draft(roadmap.new_draft())
+  case
+    restored_draft(
+      model.milestone_draft,
+      fresh,
+      fn(draft) { draft.body },
+      model.milestones,
+      roadmap.draft_of,
+      fn(milestone) {
+        form_draft.load(roadmap.text_id, form_draft.owner(Some(milestone.id)))
+        != ""
+      },
+    )
+  {
+    None -> model
+    Some(Restored(draft, fresh)) ->
+      Model(
+        ..model,
+        milestone_draft: Some(draft),
+        milestone_error: "",
+        milestone_feature_query: "",
+        milestone_request: case fresh {
+          True ->
+            case model.milestone_request {
+              "" -> request_id()
+              id -> id
+            }
+          False -> model.milestone_request
+        },
+      )
+  }
+}
+
+/// Opens the Tasks tab's form when its description was saved.
+fn restore_new_task(model: Model) -> Model {
+  case model.new_task {
+    Some(_) -> model
+    None ->
+      case solace_task.draft_load(new_task_id, "new") {
+        "" -> model
+        body ->
+          Model(
+            ..model,
+            new_task: Some(NewTask("", body, root_dir(model), "", "")),
+            new_task_error: "",
+            new_task_request: case model.new_task_request {
+              "" -> request_id()
+              id -> id
+            },
+          )
+      }
+  }
+}
+
+/// The new task's saved description, "" when there is none.
+fn new_task_draft_load() -> String {
+  form_draft.load(new_task_id, "new")
+}
+
+/// Saves the new task's description as it is typed.
+fn new_task_draft_save(body: String) -> Nil {
+  form_draft.save(new_task_id, "new", body)
+}
+
+/// Removes the new task's description draft.
+fn new_task_draft_clear() -> Nil {
+  form_draft.clear(new_task_id, "new")
+}
+
+fn with_feature_draft(draft: features.Draft) -> features.Draft {
+  form_draft.with_body(
+    features.text_id,
+    form_draft.owner(draft.id),
+    draft,
+    fn(d, body) { features.Draft(..d, body: body) },
+  )
+}
+
+fn with_milestone_draft(draft: roadmap.Draft) -> roadmap.Draft {
+  form_draft.with_body(
+    roadmap.text_id,
+    form_draft.owner(draft.id),
+    draft,
+    fn(d, body) { roadmap.Draft(..d, body: body) },
+  )
+}
+
+type Restored(a) {
+  Restored(draft: a, fresh: Bool)
+}
+
+fn restored_draft(
+  current: Option(a),
+  fresh: a,
+  body: fn(a) -> String,
+  records: List(b),
+  draft_of: fn(b) -> a,
+  stored: fn(b) -> Bool,
+) -> Option(Restored(a)) {
+  case current {
+    Some(_) -> None
+    None ->
+      case body(fresh) {
+        "" ->
+          case list.find(records, stored) {
+            Ok(record) -> Some(Restored(draft_of(record), False))
+            Error(_) -> None
+          }
+        _ -> Some(Restored(fresh, True))
+      }
+  }
+}
+
+fn navigation_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    Select(tab) if tab == model.tab -> Some(#(model, effect.none()))
+    Select(tab) ->
+      Some(#(
+        Model(..model, tab: tab),
+        event.emit("tab", json.string(tab_name(tab))),
+      ))
+    TabShown(tab) -> Some(#(Model(..model, tab: tab), effect.none()))
+    // From the Features tab the task shows on the Tasks tab.
+    Open(dir, id) ->
+      Some(
+        #(
+          Model(
+            ..model,
+            tab: Tasks,
+            selected: Some(#(dir, id)),
+            task_collapsed: False,
+            live: [],
+          ),
+          case model.tab {
+            Tasks -> effect.none()
+            _ -> event.emit("tab", json.string(tab_name(Tasks)))
+          },
+        ),
+      )
+    Focus(_, _, "") -> Some(#(model, effect.none()))
+    Focus("feature", _, id) -> {
+      let model = expand_feature_milestone(model, id)
+      Some(show_record(
+        Model(..model, focused_feature: Some(id)),
+        Features,
+        "feature",
+        id,
+      ))
+    }
+    FocusFeature(id) ->
+      Some(#(
+        Model(..model, focused_feature: case model.focused_feature == Some(id) {
+          True -> None
+          False -> Some(id)
+        }),
+        effect.none(),
+      ))
+    Focus("milestone", _, id) ->
+      Some(show_record(expand_milestone(model, id), Roadmap, "milestone", id))
+    // `<solace-task>` scrolls into view now, or once the task loads. A link
+    // names the task's home folder; a homeless task's row (D-129) lives in
+    // the homeless bucket.
+    Focus(_, named, id) -> {
+      let dir = bucket_of(model, named, id)
+      Some(#(
+        Model(
+          ..model,
+          tab: Tasks,
+          selected: Some(#(dir, id)),
+          task_collapsed: False,
+          page: page_of(visible(model), dir, id, model.page),
+          live: case model.selected == Some(#(dir, id)) {
+            True -> model.live
+            False -> []
+          },
+          reveal: #(id, model.reveal.1 + 1),
+        ),
+        effect.none(),
+      ))
+    }
+    TaskMoved(dir, id) ->
+      Some(case model.selected {
+        Some(#(_, shown)) if shown == id -> #(
+          Model(..model, selected: Some(#(bucket_of(model, dir, id), id))),
+          effect.none(),
+        )
+        _ -> #(model, effect.none())
+      })
+    ToggleTask ->
+      Some(case model.selected {
+        None -> #(model, effect.none())
+        Some(_) -> #(
+          Model(..model, task_collapsed: !model.task_collapsed),
+          effect.none(),
+        )
+      })
+    Filter(filters) ->
+      Some(#(Model(..model, filters: filters, page: 1), effect.none()))
+    FilterText(field, text) -> {
+      let f = filter(field)
+      Some(case text {
+        "" -> {
+          let model = f.set_chosen(model, "")
+          #(
+            f.set_box(model, combobox.typing(combobox.blank(), "")),
+            effect.none(),
+          )
+        }
+        _ -> #(
+          f.set_box(model, combobox.typing(f.box(model), text)),
+          effect.none(),
+        )
+      })
+    }
+    FilterOpen(field) -> {
+      let f = filter(field)
+      let box = f.box(model)
+      Some(case box.open {
+        True -> #(model, effect.none())
+        False -> #(
+          f.set_box(
+            model,
+            combobox.opened(box, f.items(model), f.chosen(model)),
+          ),
+          effect.none(),
+        )
+      })
+    }
+    FilterKey(field, key) -> {
+      let f = filter(field)
+      let #(box, picked) =
+        combobox.key(f.box(model), key, f.items(model), f.chosen(model))
+      let model = f.set_box(model, box)
+      Some(case picked {
+        Some(id) -> #(f.set_chosen(model, id), effect.none())
+        None -> #(model, scroll_filter_option(f.key, key, box))
+      })
+    }
+    FilterChoose(field, id) -> {
+      let f = filter(field)
+      Some(#(
+        f.set_box(f.set_chosen(model, id), combobox.blank()),
+        effect.none(),
+      ))
+    }
+    FilterBlur(field) -> {
+      let f = filter(field)
+      Some(#(f.set_box(model, combobox.blank()), effect.none()))
+    }
+    Page(n) -> Some(#(Model(..model, page: n), effect.none()))
+    SortBy(key) -> {
+      let ascending = case model.sort {
+        Some(#(k, asc)) if k == key -> !asc
+        _ -> True
+      }
+      Some(#(
+        Model(..model, sort: Some(#(key, ascending)), page: 1),
+        effect.none(),
+      ))
+    }
+    // Allowed in final columns and during runs (D-87, D-100).
+    Link(dir, id, field, value) ->
+      Some(update(model, Links(dir, id, [#(field, value)])))
+    // Through the board's actions API, as the task's details send it.
+    PlanTask(dir, id) ->
+      Some(#(
+        model,
+        effect.from(fn(send) {
+          request(
+            model.prefix,
+            base_of(model, dir) <> "/tasks/" <> id <> "/actions",
+            "POST",
+            json.to_string(json.object([#("action", json.string("plan"))])),
+            fn(text) { send(Planned(dir, text)) },
+          )
+        }),
+      ))
+    Planned(dir, text) ->
+      Some(case json.parse(text, row_decoder()) {
+        Ok(row) -> #(Model(..put(model, dir, row), error: ""), effect.none())
+        Error(_) -> #(Model(..model, error: error(text)), effect.none())
+      })
+    Links(dir, id, fields) ->
+      Some(#(
+        model,
+        effect.from(fn(send) {
+          request(
+            model.prefix,
+            base_of(model, dir) <> "/tasks/" <> id,
+            "PATCH",
+            json.to_string(links_body(fields)),
+            fn(text) { send(Patched(dir, id, text)) },
+          )
+        }),
+      ))
+    // The link after a new task's create reports on its feature, or in the
+    // Tasks tab's form ("" for the feature). A refusal is matched by its
+    // task, so another task's refused PATCH isn't reported there.
+    Patched(dir, pid, text) ->
+      Some(case json.parse(text, row_decoder()), model.task_linking {
+        Ok(row), Some(#(d, id, "")) if d == dir && row.id == id -> #(
+          new_task_done(put(model, dir, row), dir, id),
+          effect.none(),
+        )
+        // The task exists without its links: it opens, and the form stays
+        // with a fresh draft so a retry doesn't make it again.
+        Error(_), Some(#(d, id, "")) if d == dir && id == pid -> {
+          let #(picked, project) = case model.new_task {
+            Some(t) -> #(
+              case new_task_links(t) {
+                [#("feature", _)] -> "feature"
+                [#("milestone", _)] -> "milestone"
+                _ -> "feature or milestone"
+              },
+              t.project,
+            )
+            None -> #("feature or milestone", root_dir(model))
+          }
+          #(
+            Model(
+              ..new_task_done(model, dir, id),
+              new_task: Some(NewTask("", "", project, "", "")),
+              new_task_request: request_id(),
+              new_task_error: "The task was created without its "
+                <> picked
+                <> ": "
+                <> error(text),
+            ),
+            effect.none(),
+          )
+        }
+        Ok(row), Some(#(d, id, _)) if d == dir && row.id == id -> #(
+          Model(..put(model, dir, row), task_saving: None, task_linking: None),
+          effect.none(),
+        )
+        Ok(row), _ -> #(Model(..put(model, dir, row), error: ""), effect.none())
+        Error(_), Some(#(d, id, feature)) if d == dir && id == pid -> #(
+          Model(
+            ..model,
+            task_saving: None,
+            task_linking: None,
+            task_errors: set(
+              model.task_errors,
+              feature,
+              "The task was created without the link to this feature: "
+                <> error(text),
+            ),
+          ),
+          effect.none(),
+        )
+        Error(_), _ -> #(Model(..model, error: error(text)), effect.none())
+      })
+    _ -> None
+  }
+}
+
+fn connection_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    Connected -> {
+      let #(model, fx) = start(Model(..model, connected: True))
+      let #(model, plan_fx) = case model.plan_open {
+        "" -> #(model, effect.none())
+        rid -> plan_fetch(model, rid)
+      }
+      Some(#(
+        model,
+        effect.batch([
+          fx,
+          plan_fx,
+          effect.before_paint(fn(send, root) { send(Attached(root)) }),
+        ]),
+      ))
+    }
+    Attached(root) -> Some(#(Model(..model, root: root), effect.none()))
+    Disconnected ->
+      Some(#(
+        Model(
+          ..stop(model),
+          connected: False,
+          plan_poll: model.plan_poll + 1,
+          plan_clearing: None,
+        ),
+        effect.none(),
+      ))
+    BaseChanged(base) -> {
+      let model = Model(..model, prefix: base)
+      Some(case model.connected {
+        True -> start(model)
+        False -> #(model, effect.none())
+      })
+    }
+    Listening(source) ->
+      Some(#(Model(..model, source: Some(source)), effect.none()))
+    ProjectsLoaded(text) ->
+      Some(case json.parse(text, projects_decoder()) {
+        Ok(#(workspace, projects)) -> #(
+          settle(
+            Model(..model, projects: projects, workspace: workspace, error: ""),
+          ),
+          effect.batch(
+            list.map(projects, fn(p) {
+              get(model, p.base <> "/workflow", WorkflowLoaded(p.dir, _))
+            }),
+          ),
+        )
+        Error(_) -> #(Model(..model, error: error(text)), effect.none())
+      })
+    WorkflowLoaded(dir, text) ->
+      Some(case json.parse(text, solace_task.workflow_decoder()) {
+        Ok(w) -> #(
+          Model(..model, workflows: set(model.workflows, dir, w)),
+          effect.none(),
+        )
+        Error(_) -> #(Model(..model, error: error(text)), effect.none())
+      })
+    // What a new connection missed is replayed, then applied at once.
+    Live(text) if !model.caught_up ->
+      Some(#(Model(..model, replay: [text, ..model.replay]), effect.none()))
+    Live(text) -> {
+      let fx =
+        effect.batch([
+          case projects_event(text) {
+            True -> get(model, "/projects", ProjectsLoaded)
+            False -> effect.none()
+          },
+          case models_event(text) {
+            True -> get(model, "/models", ModelsRefreshed)
+            False -> effect.none()
+          },
+        ])
+      Some(case knows(model, text) {
+        True -> {
+          let #(next, more) =
+            plan_track(model, plan_follow(model, hand(live(model, text), text)))
+          let more = case needs_attention(model.runs, next.runs) {
+            True -> effect.batch([more, event.emit("attention", json.null())])
+            False -> more
+          }
+          #(next, effect.batch([fx, more]))
+        }
+        // A project not listed yet: held until the list names it.
+        False -> #(Model(..model, replay: [text, ..model.replay]), fx)
+      })
+    }
+    CaughtUp -> {
+      let model = restore_forms(resync(settle(Model(..model, caught_up: True))))
+      Some(#(model, get(model, "/models", ModelsRefreshed)))
+    }
+    _ -> None
+  }
+}
+
+fn vision_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    EditVision ->
+      Some(#(
+        Model(
+          ..model,
+          draft: Some(#(model.vision.text, model.vision.revision)),
+          vision_error: "",
+        ),
+        effect.none(),
+      ))
+    ReloadVision ->
+      Some(#(
+        Model(
+          ..model,
+          draft: Some(#(model.vision.text, model.vision.revision)),
+          vision_error: "",
+        ),
+        effect.none(),
+      ))
+    CancelVision ->
+      Some(#(Model(..model, draft: None, vision_error: ""), effect.none()))
+    Draft(text) ->
+      Some(case model.draft {
+        Some(#(_, base)) -> #(
+          Model(..model, draft: Some(#(text, base))),
+          effect.none(),
+        )
+        None -> #(model, effect.none())
+      })
+    VisionFormat(before, after) ->
+      Some(case model.draft {
+        Some(#(text, _)) -> #(
+          model,
+          effect.from(fn(send) {
+            send(
+              Draft(solace_task.wrap(model.root, vision_id, text, before, after)),
+            )
+          }),
+        )
+        None -> #(model, effect.none())
+      })
+    VisionBlock(kind) ->
+      Some(case model.draft {
+        Some(#(text, _)) -> #(
+          model,
+          effect.from(fn(send) {
+            send(Draft(solace_task.block(model.root, vision_id, text, kind)))
+          }),
+        )
+        None -> #(model, effect.none())
+      })
+    // One save at a time, within the limit (D-92); its reply ends the edit or
+    // says why not.
+    SaveVision -> {
+      let fits = case model.draft {
+        Some(#(text, _)) -> vision_count(text) <= vision_limit
+        None -> False
+      }
+      Some(case model.draft, model.saving, fits {
+        Some(#(text, base)), False, True -> #(
+          Model(..model, saving: True, vision_error: ""),
+          effect.from(fn(send) {
+            request(
+              model.prefix,
+              "/vision",
+              "PUT",
+              json.to_string(vision_body(text, base)),
+              fn(reply) { send(VisionSaved(reply)) },
+            )
+          }),
+        )
+        _, _, _ -> #(model, effect.none())
+      })
+    }
+    VisionSaved(text) ->
+      Some(case json.parse(text, vision_decoder()) {
+        Ok(v) -> #(
+          Model(
+            ..model,
+            vision: v,
+            draft: None,
+            saving: False,
+            vision_error: "",
+          ),
+          effect.none(),
+        )
+        Error(_) -> #(
+          Model(..model, saving: False, vision_error: error(text)),
+          effect.none(),
+        )
+      })
+    _ -> None
+  }
+}
+
+fn feature_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    NewFeature if !model.feature_saving ->
+      Some(#(
+        Model(
+          ..model,
+          feature_draft: Some(with_feature_draft(features.new_draft())),
+          feature_collapsed: False,
+          feature_error: "",
+          feature_request: request_id(),
+        ),
+        effect.none(),
+      ))
+    EditFeature(id) if !model.feature_saving ->
+      Some(case list.find(model.features, fn(f) { f.id == id }) {
+        Ok(f) -> #(
+          Model(
+            ..model,
+            feature_draft: Some(with_feature_draft(features.draft_of(f))),
+            feature_collapsed: False,
+            feature_error: "",
+          ),
+          effect.none(),
+        )
+        Error(_) -> #(model, effect.none())
+      })
+    NewFeature | EditFeature(_) -> Some(#(model, effect.none()))
+    CancelFeature -> {
+      case model.feature_draft {
+        Some(draft) ->
+          form_draft.clear(features.text_id, form_draft.owner(draft.id))
+        None -> Nil
+      }
+      Some(#(
+        Model(
+          ..model,
+          feature_draft: None,
+          feature_collapsed: False,
+          feature_error: "",
+        ),
+        effect.none(),
+      ))
+    }
+    ToggleFeature ->
+      Some(case model.feature_draft {
+        None -> #(model, effect.none())
+        Some(_) -> #(
+          Model(..model, feature_collapsed: !model.feature_collapsed),
+          effect.none(),
+        )
+      })
+    FeatureTitle(title) ->
+      Some(edit_feature(model, fn(d) { features.Draft(..d, title: title) }))
+    FeatureText(body) -> {
+      case model.feature_draft {
+        Some(draft) ->
+          form_draft.save(features.text_id, form_draft.owner(draft.id), body)
+        None -> Nil
+      }
+      Some(edit_feature(model, fn(d) { features.Draft(..d, body: body) }))
+    }
+    FeatureState(state) ->
+      Some(edit_feature(model, fn(d) { features.Draft(..d, state: state) }))
+    FeatureMilestone(id) ->
+      Some(
+        edit_feature(model, fn(d) {
+          features.Draft(..d, milestone: case id {
+            "" -> None
+            id -> Some(id)
+          })
+        }),
+      )
+    FeatureFormat(before, after) ->
+      Some(case model.feature_draft {
+        Some(d) -> #(
+          model,
+          effect.from(fn(send) {
+            send(
+              FeatureText(solace_task.wrap(
+                model.root,
+                features.text_id,
+                d.body,
+                before,
+                after,
+              )),
+            )
+          }),
+        )
+        None -> #(model, effect.none())
+      })
+    FeatureBlock(kind) ->
+      Some(case model.feature_draft {
+        Some(d) -> #(
+          model,
+          effect.from(fn(send) {
+            send(
+              FeatureText(solace_task.block(
+                model.root,
+                features.text_id,
+                d.body,
+                kind,
+              )),
+            )
+          }),
+        )
+        None -> #(model, effect.none())
+      })
+    // One save at a time. A create names its `request`; an edit sends only
+    // what changed, and an edit that changed nothing just closes.
+    SaveFeature ->
+      Some(case model.feature_draft, model.feature_saving {
+        Some(d), False -> {
+          let save = fn(path, method, body) {
+            #(
+              Model(..model, feature_saving: True, feature_error: ""),
+              effect.from(fn(send) {
+                request(
+                  model.prefix,
+                  path,
+                  method,
+                  json.to_string(body),
+                  fn(reply) { send(FeatureSaved(reply)) },
+                )
+              }),
+            )
+          }
+          case d.id {
+            None ->
+              save(
+                "/features",
+                "POST",
+                features.create_body(d, model.feature_request),
+              )
+            Some(id) -> {
+              // A feature removed meanwhile: the server says so (E7023).
+              let before =
+                list.find(model.features, fn(f) { f.id == id })
+                |> result.unwrap(features.Feature(
+                  id,
+                  "",
+                  "",
+                  None,
+                  0.0,
+                  "",
+                  None,
+                ))
+              case features.changes(before, d) {
+                [] -> {
+                  form_draft.clear(features.text_id, form_draft.owner(d.id))
+                  #(
+                    Model(..model, feature_draft: None, feature_error: ""),
+                    effect.none(),
+                  )
+                }
+                fields -> save("/features/" <> id, "PATCH", json.object(fields))
+              }
+            }
+          }
+        }
+        _, _ -> #(model, effect.none())
+      })
+    FeatureSaved(text) ->
+      Some(case json.parse(text, features.decoder()) {
+        Ok(f) -> {
+          case model.feature_draft {
+            Some(draft) ->
+              form_draft.clear(features.text_id, form_draft.owner(draft.id))
+            None -> Nil
+          }
+          #(
+            Model(
+              ..model,
+              features: keep(model.features, f, fn(f) { f.id }),
+              feature_draft: None,
+              feature_collapsed: False,
+              feature_saving: False,
+              feature_error: "",
+            ),
+            effect.none(),
+          )
+        }
+        Error(_) -> #(
+          Model(..model, feature_saving: False, feature_error: error(text)),
+          effect.none(),
+        )
+      })
+    // An attribute set before the element is added only takes effect then.
+    // One move or save at a time: a second before the first is answered
+    // would take the one `feature_moving` slot a refusal restores from.
+    MoveFeature(id, rank) if !model.feature_saving ->
+      Some(#(
+        Model(..model, feature_error: "", feature_saving: True),
+        effect.from(fn(send) {
+          request(
+            model.prefix,
+            "/features/" <> id,
+            "PATCH",
+            json.to_string(json.object([#("rank", json.float(rank))])),
+            fn(reply) { send(FeatureMoved(reply)) },
+          )
+        }),
+      ))
+    GrabFeature(id, y) if !model.feature_saving ->
+      Some(#(
+        model,
+        effect.from(fn(send) {
+          drag_card(model.root, id, y, fn(index) {
+            send(DropFeature(id, index))
+          })
+        }),
+      ))
+    // The new order shows at once, with no jump back while the PATCH is
+    // answered; a save waits for the same answer, so a drag and a save of one
+    // feature don't send two PATCHes at once.
+    DropFeature(id, index) if !model.feature_saving -> {
+      let group =
+        features.groups(model.milestones, model.features)
+        |> list.find(fn(g) {
+          list.any(features.group_features(g), fn(f) { f.id == id })
+        })
+        |> result.map(features.group_features)
+        |> result.unwrap([])
+      Some(
+        case
+          features.drop_rank(group, id, index),
+          list.find(model.features, fn(f) { f.id == id })
+        {
+          Some(rank), Ok(f) -> {
+            let #(model, fx) = update(model, MoveFeature(id, rank))
+            #(
+              Model(
+                ..model,
+                features: keep(
+                  model.features,
+                  features.Feature(..f, rank: rank),
+                  fn(f) { f.id },
+                ),
+                feature_moving: Some(#(id, f.rank)),
+                feature_saving: True,
+              ),
+              fx,
+            )
+          }
+          _, _ -> #(model, effect.none())
+        },
+      )
+    }
+    MoveFeature(_, _) | GrabFeature(_, _) | DropFeature(_, _) ->
+      Some(#(model, effect.none()))
+    // The server keeps its start time and color and plans its Backlog tasks
+    // (D-114, D-134). Its reply answers the start alone: a start changes the
+    // state, not the order, so it never moves a feature a drag is answering.
+    StartFeature(id) ->
+      Some(#(
+        Model(..model, feature_error: ""),
+        effect.from(fn(send) {
+          request(
+            model.prefix,
+            "/features/" <> id,
+            "PATCH",
+            json.to_string(json.object([#("state", json.string("active"))])),
+            fn(reply) { send(FeatureStarted(reply)) },
+          )
+        }),
+      ))
+    // A reply after the feature was removed doesn't bring it back.
+    FeatureMoved(text) ->
+      Some(case json.parse(text, features.decoder()) {
+        Ok(f) -> #(
+          Model(
+            ..model,
+            features: case list.any(model.features, fn(x) { x.id == f.id }) {
+              True -> keep(model.features, f, fn(f) { f.id })
+              False -> model.features
+            },
+            feature_error: "",
+            feature_moving: None,
+            feature_saving: False,
+          ),
+          effect.none(),
+        )
+        // A refused drop goes back to where it was.
+        Error(_) -> #(
+          Model(
+            ..model,
+            features: case model.feature_moving {
+              Some(#(id, rank)) ->
+                list.map(model.features, fn(f) {
+                  case f.id == id {
+                    True -> features.Feature(..f, rank: rank)
+                    False -> f
+                  }
+                })
+              None -> model.features
+            },
+            feature_error: error(text),
+            feature_moving: None,
+            feature_saving: False,
+          ),
+          effect.none(),
+        )
+      })
+    // A start's reply: the feature as the server has it. A refused start
+    // says why and changes nothing, so the order a drag set stays as it is.
+    FeatureStarted(text) ->
+      Some(case json.parse(text, features.decoder()) {
+        Ok(f) -> #(
+          Model(
+            ..model,
+            features: case list.any(model.features, fn(x) { x.id == f.id }) {
+              True -> keep(model.features, f, fn(f) { f.id })
+              False -> model.features
+            },
+            feature_error: "",
+          ),
+          effect.none(),
+        )
+        Error(_) -> #(Model(..model, feature_error: error(text)), effect.none())
+      })
+    // The `{removedFeature}` and `{task}` events update the page.
+    FeatureDeleted(text) ->
+      Some(case json.parse(text, features.decoder()) {
+        Ok(_) -> #(
+          Model(..model, feature_deleting: None, feature_error: ""),
+          effect.none(),
+        )
+        Error(_) -> #(Model(..model, feature_error: error(text)), effect.none())
+      })
+    DeleteFeature(id) if model.feature_draft == None ->
+      Some(#(
+        Model(..model, feature_deleting: Some(id), feature_error: ""),
+        effect.none(),
+      ))
+    DeleteFeature(_) -> Some(#(model, effect.none()))
+    CancelDeleteFeature ->
+      Some(#(
+        Model(..model, feature_deleting: None, feature_error: ""),
+        effect.none(),
+      ))
+    ConfirmDeleteFeature ->
+      Some(case model.feature_deleting {
+        Some(id) -> #(
+          model,
+          effect.from(fn(send) {
+            request(model.prefix, "/features/" <> id, "DELETE", "", fn(reply) {
+              send(FeatureDeleted(reply))
+            })
+          }),
+        )
+        None -> #(model, effect.none())
+      })
+    _ -> None
+  }
+}
+
+fn milestone_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    NewMilestone if !model.milestone_saving ->
+      Some(#(
+        Model(
+          ..model,
+          milestone_draft: Some(with_milestone_draft(roadmap.new_draft())),
+          milestone_error: "",
+          milestone_request: request_id(),
+          milestone_feature_query: "",
+        ),
+        effect.none(),
+      ))
+    EditMilestone(id) if !model.milestone_saving ->
+      Some(case list.find(model.milestones, fn(m) { m.id == id }) {
+        Ok(m) -> {
+          let model = expand_milestone(model, m.id)
+          #(
+            Model(
+              ..model,
+              milestone_draft: Some(with_milestone_draft(roadmap.draft_of(m))),
+              milestone_error: "",
+              milestone_feature_query: "",
+            ),
+            effect.none(),
+          )
+        }
+        Error(_) -> #(model, effect.none())
+      })
+    NewMilestone | EditMilestone(_) -> Some(#(model, effect.none()))
+    ToggleMilestone(id) -> Some(#(toggle_milestone(model, id), effect.none()))
+    CancelMilestone -> {
+      case model.milestone_draft {
+        Some(draft) ->
+          form_draft.clear(roadmap.text_id, form_draft.owner(draft.id))
+        None -> Nil
+      }
+      Some(#(
+        Model(
+          ..model,
+          milestone_draft: None,
+          milestone_error: "",
+          milestone_feature_query: "",
+        ),
+        effect.none(),
+      ))
+    }
+    MilestoneTitle(title) ->
+      Some(edit_milestone(model, fn(d) { roadmap.Draft(..d, title: title) }))
+    MilestoneText(body) -> {
+      case model.milestone_draft {
+        Some(draft) ->
+          form_draft.save(roadmap.text_id, form_draft.owner(draft.id), body)
+        None -> Nil
+      }
+      Some(edit_milestone(model, fn(d) { roadmap.Draft(..d, body: body) }))
+    }
+    MilestoneState(state) ->
+      Some(edit_milestone(model, fn(d) { roadmap.Draft(..d, state: state) }))
+    MilestoneTargetDate(date) ->
+      Some(
+        edit_milestone(model, fn(d) {
+          roadmap.Draft(..d, target_date: case date {
+            "" -> None
+            date -> Some(date)
+          })
+        }),
+      )
+    MilestoneFeatureQuery(query) ->
+      Some(#(Model(..model, milestone_feature_query: query), effect.none()))
+    MilestoneFormat(before, after) ->
+      Some(case model.milestone_draft {
+        Some(d) -> #(
+          model,
+          effect.from(fn(send) {
+            send(
+              MilestoneText(solace_task.wrap(
+                model.root,
+                roadmap.text_id,
+                d.body,
+                before,
+                after,
+              )),
+            )
+          }),
+        )
+        None -> #(model, effect.none())
+      })
+    MilestoneBlock(kind) ->
+      Some(case model.milestone_draft {
+        Some(d) -> #(
+          model,
+          effect.from(fn(send) {
+            send(
+              MilestoneText(solace_task.block(
+                model.root,
+                roadmap.text_id,
+                d.body,
+                kind,
+              )),
+            )
+          }),
+        )
+        None -> #(model, effect.none())
+      })
+    // As SaveFeature: one at a time, a create names its `request`, an edit
+    // sends only what changed.
+    SaveMilestone ->
+      Some(case model.milestone_draft, model.milestone_saving {
+        Some(d), False -> {
+          let save = fn(path, method, body) {
+            #(
+              Model(..model, milestone_saving: True, milestone_error: ""),
+              effect.from(fn(send) {
+                request(
+                  model.prefix,
+                  path,
+                  method,
+                  json.to_string(body),
+                  fn(reply) { send(MilestoneSaved(reply)) },
+                )
+              }),
+            )
+          }
+          case d.id {
+            None ->
+              save(
+                "/milestones",
+                "POST",
+                roadmap.create_body(d, model.milestone_request),
+              )
+            Some(id) -> {
+              // A milestone removed meanwhile: the server says so (E7023).
+              let before =
+                list.find(model.milestones, fn(m) { m.id == id })
+                |> result.unwrap(features.Milestone(id, "", 0.0, "", None, ""))
+              case roadmap.changes(before, d) {
+                [] -> {
+                  form_draft.clear(roadmap.text_id, form_draft.owner(d.id))
+                  #(
+                    Model(..model, milestone_draft: None, milestone_error: ""),
+                    effect.none(),
+                  )
+                }
+                fields ->
+                  save("/milestones/" <> id, "PATCH", json.object(fields))
+              }
+            }
+          }
+        }
+        _, _ -> #(model, effect.none())
+      })
+    MilestoneSaved(text) ->
+      Some(case json.parse(text, features.milestone_decoder()) {
+        Ok(m) -> {
+          case model.milestone_draft {
+            Some(draft) ->
+              form_draft.clear(roadmap.text_id, form_draft.owner(draft.id))
+            None -> Nil
+          }
+          #(
+            Model(
+              ..model,
+              milestones: keep(model.milestones, m, fn(m) { m.id }),
+              milestone_draft: None,
+              milestone_saving: False,
+              milestone_error: "",
+            ),
+            effect.none(),
+          )
+        }
+        Error(_) -> #(
+          Model(..model, milestone_saving: False, milestone_error: error(text)),
+          effect.none(),
+        )
+      })
+    DeleteMilestone(id) if model.milestone_draft == None ->
+      Some(#(
+        Model(..model, milestone_deleting: Some(id), milestone_error: ""),
+        effect.none(),
+      ))
+    DeleteMilestone(_) -> Some(#(model, effect.none()))
+    CancelDeleteMilestone ->
+      Some(#(
+        Model(..model, milestone_deleting: None, milestone_error: ""),
+        effect.none(),
+      ))
+    ConfirmDeleteMilestone ->
+      Some(case model.milestone_deleting {
+        Some(id) -> #(
+          model,
+          effect.from(fn(send) {
+            request(model.prefix, "/milestones/" <> id, "DELETE", "", fn(reply) {
+              send(MilestoneDeleted(reply))
+            })
+          }),
+        )
+        None -> #(model, effect.none())
+      })
+    // The `{removedMilestone}`, `{feature}` and `{task}` events update the page.
+    MilestoneDeleted(text) ->
+      Some(case json.parse(text, features.milestone_decoder()) {
+        Ok(m) -> {
+          let model = collapse_milestone(model, m.id)
+          #(
+            Model(..model, milestone_deleting: None, milestone_error: ""),
+            effect.none(),
+          )
+        }
+        Error(_) -> #(
+          Model(..model, milestone_error: error(text)),
+          effect.none(),
+        )
+      })
+    TargetFeature(_, _) if model.milestone_targeting ->
+      Some(#(model, effect.none()))
+    TargetFeature(id, milestone) ->
+      Some(#(
+        Model(..model, milestone_error: "", milestone_targeting: True),
+        effect.from(fn(send) {
+          request(
+            model.prefix,
+            "/features/" <> id,
+            "PATCH",
+            json.to_string(
+              json.object([
+                #("milestone", case milestone {
+                  "" -> json.null()
+                  m -> json.string(m)
+                }),
+              ]),
+            ),
+            fn(reply) { send(FeatureTargeted(reply)) },
+          )
+        }),
+      ))
+    FeatureTargeted(text) ->
+      Some(case json.parse(text, features.decoder()) {
+        Ok(f) -> #(
+          Model(
+            ..model,
+            features: case list.any(model.features, fn(x) { x.id == f.id }) {
+              True -> keep(model.features, f, fn(f) { f.id })
+              False -> model.features
+            },
+            milestone_error: "",
+            milestone_targeting: False,
+          ),
+          effect.none(),
+        )
+        Error(_) -> #(
+          Model(
+            ..model,
+            milestone_error: error(text),
+            milestone_targeting: False,
+          ),
+          effect.none(),
+        )
+      })
+    _ -> None
+  }
+}
+
+fn task_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    TaskTitle(feature, title) ->
+      Some(#(
+        Model(..model, task_titles: set(model.task_titles, feature, title)),
+        effect.none(),
+      ))
+    TaskProject(dir) ->
+      Some(#(Model(..model, task_project: dir), effect.none()))
+    // One create at a time. Then the link is one `Link`, whose `Patched`
+    // reports a refusal on the feature.
+    AddTask(feature) -> {
+      let title =
+        list.key_find(model.task_titles, feature)
+        |> result.unwrap("")
+        |> string.trim
+      Some(case title, model.task_saving {
+        "", _ | _, Some(_) -> #(model, effect.none())
+        _, None -> {
+          let dir = task_dir(model)
+          let id = case list.key_find(model.task_requests, feature) {
+            Ok(id) -> id
+            Error(_) -> request_id()
+          }
+          #(
+            Model(
+              ..model,
+              task_saving: Some(feature),
+              task_requests: set(model.task_requests, feature, id),
+              task_errors: drop(model.task_errors, feature),
+            ),
+            effect.from(fn(send) {
+              request(
+                model.prefix,
+                base_of(model, dir) <> "/tasks",
+                "POST",
+                json.to_string(
+                  json.object([
+                    #("title", json.string(title)),
+                    #("body", json.string("")),
+                    #("request", json.string(id)),
+                  ]),
+                ),
+                fn(reply) { send(TaskCreated(dir, feature, reply)) },
+              )
+            }),
+          )
+        }
+      })
+    }
+    NewTaskOpen if model.new_task == None ->
+      Some(#(
+        Model(
+          ..model,
+          new_task: Some(NewTask(
+            "",
+            new_task_draft_load(),
+            root_dir(model),
+            "",
+            "",
+          )),
+          new_task_error: "",
+          new_task_request: request_id(),
+        ),
+        effect.none(),
+      ))
+    NewTaskOpen -> Some(#(model, effect.none()))
+    // A create or its link in flight finishes in the form.
+    NewTaskCancel if model.task_saving != Some("") -> {
+      case model.new_task {
+        Some(_) -> new_task_draft_clear()
+        None -> Nil
+      }
+      Some(#(Model(..model, new_task: None, new_task_error: ""), effect.none()))
+    }
+    NewTaskCancel -> Some(#(model, effect.none()))
+    NewTaskTitle(title) ->
+      Some(edit_new_task(model, fn(d) { NewTask(..d, title: title) }))
+    NewTaskText(body) -> {
+      case model.new_task {
+        Some(_) -> new_task_draft_save(body)
+        None -> Nil
+      }
+      Some(edit_new_task(model, fn(d) { NewTask(..d, body: body) }))
+    }
+    NewTaskProject(dir) ->
+      Some(edit_new_task(model, fn(d) { NewTask(..d, project: dir) }))
+    NewTaskFeature(id) ->
+      Some(edit_new_task(model, fn(d) { NewTask(..d, feature: id) }))
+    NewTaskMilestone(id) ->
+      Some(edit_new_task(model, fn(d) { NewTask(..d, milestone: id) }))
+    NewTaskFormat(before, after) ->
+      Some(case model.new_task {
+        Some(d) -> #(
+          model,
+          effect.from(fn(send) {
+            send(
+              NewTaskText(solace_task.wrap(
+                model.root,
+                new_task_id,
+                d.body,
+                before,
+                after,
+              )),
+            )
+          }),
+        )
+        None -> #(model, effect.none())
+      })
+    NewTaskBlock(kind) ->
+      Some(case model.new_task {
+        Some(d) -> #(
+          model,
+          effect.from(fn(send) {
+            send(
+              NewTaskText(solace_task.block(
+                model.root,
+                new_task_id,
+                d.body,
+                kind,
+              )),
+            )
+          }),
+        )
+        None -> #(model, effect.none())
+      })
+    // One create at a time, under the request chosen when the form opened.
+    CreateTask ->
+      Some(case model.new_task, model.task_saving {
+        Some(d), None ->
+          case string.trim(d.title) {
+            "" -> #(model, effect.none())
+            title -> {
+              let rid = case model.new_task_request {
+                "" -> request_id()
+                rid -> rid
+              }
+              #(
+                Model(
+                  ..model,
+                  task_saving: Some(""),
+                  new_task_request: rid,
+                  new_task_error: "",
+                ),
+                effect.from(fn(send) {
+                  request(
+                    model.prefix,
+                    base_of(model, d.project) <> "/tasks",
+                    "POST",
+                    json.to_string(
+                      json.object([
+                        #("title", json.string(title)),
+                        #("body", json.string(d.body)),
+                        #("request", json.string(rid)),
+                      ]),
+                    ),
+                    fn(reply) { send(TaskCreated(d.project, "", reply)) },
+                  )
+                }),
+              )
+            }
+          }
+        _, _ -> #(model, effect.none())
+      })
+    // The Tasks tab's create: the links picked go in one `Links`, whose
+    // `Patched` reports in the form; with none the task opens now.
+    TaskCreated(dir, "", text) ->
+      Some(case json.parse(text, row_decoder()) {
+        Ok(row) -> {
+          let model = Model(..put(model, dir, row), new_task_request: "")
+          let fields = case model.new_task {
+            Some(d) -> new_task_links(d)
+            None -> []
+          }
+          case fields {
+            [] -> #(new_task_done(model, dir, row.id), effect.none())
+            _ -> #(
+              Model(..model, task_linking: Some(#(dir, row.id, ""))),
+              effect.from(fn(send) { send(Links(dir, row.id, fields)) }),
+            )
+          }
+        }
+        Error(_) -> #(
+          Model(
+            ..model,
+            task_saving: None,
+            new_task_error: "Couldn't create the task: " <> error(text),
+          ),
+          effect.none(),
+        )
+      })
+    TaskCreated(dir, feature, text) ->
+      Some(case json.parse(text, row_decoder()) {
+        Ok(row) -> #(
+          Model(
+            ..put(model, dir, row),
+            task_titles: drop(model.task_titles, feature),
+            task_requests: drop(model.task_requests, feature),
+            task_errors: drop(model.task_errors, feature),
+            task_linking: Some(#(dir, row.id, feature)),
+          ),
+          effect.from(fn(send) { send(Link(dir, row.id, "feature", feature)) }),
+        )
+        Error(_) -> #(
+          Model(
+            ..model,
+            task_saving: None,
+            task_errors: set(
+              model.task_errors,
+              feature,
+              "Couldn't create the task: " <> error(text),
+            ),
+          ),
+          effect.none(),
+        )
+      })
+    // Refused during a run (D-100, E7003), unlike the links.
+    SetDepends(dir, id, ids) ->
+      Some(#(
+        Model(..model, milestone_error: ""),
+        effect.from(fn(send) {
+          request(
+            model.prefix,
+            base_of(model, dir) <> "/tasks/" <> id,
+            "PATCH",
+            json.to_string(roadmap.depends_body(ids)),
+            fn(reply) { send(DependsPatched(dir, reply)) },
+          )
+        }),
+      ))
+    DependsPatched(dir, text) ->
+      Some(case json.parse(text, row_decoder()) {
+        Ok(row) -> #(
+          Model(..put(model, dir, row), milestone_error: "", depends_query: ""),
+          effect.none(),
+        )
+        Error(_) -> #(
+          Model(..model, milestone_error: error(text)),
+          effect.none(),
+        )
+      })
+    OpenDepends(dir, id) ->
+      Some(#(
+        Model(
+          ..model,
+          depends_open: case model.depends_open == Some(#(dir, id)) {
+            True -> None
+            False -> Some(#(dir, id))
+          },
+          depends_query: "",
+          milestone_error: "",
+        ),
+        effect.none(),
+      ))
+    DependsQuery(query) ->
+      Some(#(Model(..model, depends_query: query), effect.none()))
+    _ -> None
+  }
+}
+
+fn plan_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    PlanCollapse ->
+      Some(#(
+        Model(..model, plan_collapsed: !model.plan_collapsed),
+        effect.none(),
+      ))
+    PlanDrag(x) ->
+      Some(#(
+        model,
+        effect.from(fn(send) {
+          drag(x, model.plan_width, fn(w) { send(PlanWidth(w)) }, fn() {
+            send(PlanWidthDone)
+          })
+        }),
+      ))
+    PlanWidth(width) ->
+      Some(#(
+        Model(..model, plan_width: plan.clamp(width, window_width())),
+        effect.none(),
+      ))
+    PlanWidthDone -> Some(#(model, store_width(model.plan_width)))
+    // The handle is the panel's left edge: Left widens it.
+    PlanKey(key) -> {
+      let window = window_width()
+      let width =
+        case key {
+          "ArrowLeft" -> model.plan_width + plan.key_step
+          "ArrowRight" -> model.plan_width - plan.key_step
+          "Home" -> plan.min_width
+          "End" -> plan.max_width(window)
+          _ -> model.plan_width
+        }
+        |> plan.clamp(window)
+      Some(#(Model(..model, plan_width: width), store_width(width)))
+    }
+    // The message box grows with its text by itself (`<solace-md-editor>`).
+    PlanText(text) -> {
+      plan.save_draft(text)
+      Some(#(Model(..model, plan_text: text), effect.none()))
+    }
+    PlanFormat(before, after) ->
+      Some(#(
+        model,
+        effect.from(fn(send) {
+          send(
+            PlanText(solace_task.wrap(
+              model.root,
+              plan.text_id,
+              model.plan_text,
+              before,
+              after,
+            )),
+          )
+        }),
+      ))
+    PlanBlock(kind) ->
+      Some(#(
+        model,
+        effect.from(fn(send) {
+          send(
+            PlanText(solace_task.block(
+              model.root,
+              plan.text_id,
+              model.plan_text,
+              kind,
+            )),
+          )
+        }),
+      ))
+    // Efforts differ between models, so a new model starts at its default.
+    PlanModel(id) ->
+      Some(#(Model(..model, plan_model: id, plan_effort: ""), effect.none()))
+    PlanEffort(effort) ->
+      Some(#(Model(..model, plan_effort: effort), effect.none()))
+    // The model picked stays while it is available; without the list the
+    // server takes its default.
+    TryAgainModel if model.plan_refreshing -> Some(#(model, effect.none()))
+    TryAgainModel ->
+      Some(#(
+        Model(..model, plan_refreshing: True),
+        effect.from(fn(send) {
+          request(
+            model.prefix,
+            "/models/try-again",
+            "POST",
+            json.to_string(json.object([])),
+            fn(text) { send(ModelsLoaded(text)) },
+          )
+        }),
+      ))
+    ModelsLoaded(text) ->
+      Some(case json.parse(text, decode.list(solace_task.agent_decoder())) {
+        Ok(models) -> {
+          let #(plan_model, plan_effort) =
+            solace_task.models_chosen(
+              models,
+              model.plan_model,
+              model.plan_effort,
+            )
+          #(
+            Model(
+              ..model,
+              models: models,
+              plan_model: plan_model,
+              plan_effort: plan_effort,
+              plan_refreshing: False,
+            ),
+            effect.none(),
+          )
+        }
+        Error(_) -> #(Model(..model, plan_refreshing: False), effect.none())
+      })
+    ModelsRefreshed(text) ->
+      Some(case json.parse(text, decode.list(solace_task.agent_decoder())) {
+        Ok(models) -> {
+          let #(plan_model, plan_effort) =
+            solace_task.models_refreshed(
+              models,
+              model.plan_model,
+              model.plan_effort,
+            )
+          #(
+            Model(
+              ..model,
+              models: models,
+              plan_model: plan_model,
+              plan_effort: plan_effort,
+            ),
+            effect.none(),
+          )
+        }
+        Error(_) -> #(model, effect.none())
+      })
+    StartPlan ->
+      Some(case string.trim(model.plan_text) {
+        "" -> #(model, effect.none())
+        _ ->
+          plan_send(
+            model,
+            "/strategy/runs",
+            plan.start_body(
+              model.plan_model,
+              model.plan_effort,
+              model.plan_text,
+              plan_context(model),
+            ),
+            True,
+          )
+      })
+    SendPlan ->
+      Some(case plan_shown(model), string.trim(model.plan_text) {
+        Some(run), text if text != "" && run.state != "ended" ->
+          plan_send(
+            model,
+            "/strategy/runs/" <> run.id <> "/notes",
+            json.object([#("text", json.string(model.plan_text))]),
+            True,
+          )
+        _, _ -> #(model, effect.none())
+      })
+    AnswerPlan(qid, option) ->
+      Some(case plan_shown(model) {
+        Some(run) ->
+          plan_send(
+            model,
+            "/strategy/runs/" <> run.id <> "/questions/" <> qid,
+            json.object([#("option", json.string(option))]),
+            False,
+          )
+        None -> #(model, effect.none())
+      })
+    EndPlan | StopPlan ->
+      Some(case plan_shown(model) {
+        Some(run) ->
+          plan_send(
+            model,
+            "/strategy/runs/"
+              <> run.id
+              <> case msg {
+              EndPlan -> "/end"
+              _ -> "/stop"
+            },
+            json.object([]),
+            False,
+          )
+        None -> #(model, effect.none())
+      })
+    ShowPlan(rid) -> {
+      let model =
+        Model(
+          ..model,
+          plan_open: rid,
+          plan_entries: [],
+          plan_error: "",
+          plan_collapsed: False,
+          plan_at_bottom: True,
+          plan_new: False,
+          plan_jump: rid != "",
+        )
+      Some(case rid {
+        "" -> #(Model(..model, plan_poll: model.plan_poll + 1), effect.none())
+        _ -> plan_fetch(model, rid)
+      })
+    }
+    PlanScrolled(near) ->
+      Some(#(
+        Model(..model, plan_at_bottom: near, plan_new: model.plan_new && !near),
+        effect.none(),
+      ))
+    PlanNewest ->
+      Some(#(
+        Model(..model, plan_at_bottom: True, plan_new: False),
+        plan_scroll(),
+      ))
+    _ -> None
+  }
+}
+
+fn plan_reply_events(model: Model, msg: Msg) -> Option(#(Model, Effect(Msg))) {
+  case msg {
+    // The reply's run is shown, and its transcript fetched again.
+    PlanReplied(clears, text) ->
+      Some(case json.parse(text, plan.decoder()) {
+        Ok(run) -> {
+          let sent_text = case model.plan_clearing {
+            Some(sent_text) -> sent_text
+            None -> ""
+          }
+          let clear_text = clears && model.plan_text == sent_text
+          case clear_text {
+            True -> plan.clear_draft()
+            False -> Nil
+          }
+          plan_track(
+            model,
+            plan_fetch(
+              Model(
+                ..model,
+                runs: keep(model.runs, run, fn(r) { r.id }),
+                plan_open: run.id,
+                plan_sending: False,
+                plan_error: "",
+                plan_text: case clear_text {
+                  True -> ""
+                  False -> model.plan_text
+                },
+                plan_clearing: None,
+                plan_jump: model.plan_jump || run.id != model.plan_open,
+              ),
+              run.id,
+            ),
+          )
+        }
+        Error(_) -> #(
+          Model(
+            ..model,
+            plan_sending: False,
+            plan_error: error(text),
+            plan_clearing: None,
+          ),
+          effect.none(),
+        )
+      })
+    // While the agent works its transcript is fetched again, in one chain.
+    PlanLoaded(poll, rid, text)
+      if poll == model.plan_poll && rid == model.plan_open
+    -> {
+      let decoder = {
+        use run <- decode.then(plan.decoder())
+        use entries <- decode.field(
+          "transcript",
+          decode.list(solace_task.entry_decoder()),
+        )
+        decode.success(#(run, entries))
+      }
+      Some(case json.parse(text, decoder) {
+        Ok(#(run, entries)) -> {
+          let next =
+            Model(
+              ..model,
+              runs: keep(model.runs, run, fn(r) { r.id }),
+              plan_entries: entries,
+              plan_jump: False,
+            )
+          let poll_fx = case run.state == "running" && model.connected {
+            True ->
+              effect.from(fn(send) {
+                after(refresh_ms, fn() { send(PlanRefresh(poll, rid)) })
+              })
+            False -> effect.none()
+          }
+          // An opened run starts at its newest message.
+          case model.plan_jump {
+            True -> #(
+              Model(..next, plan_at_bottom: True, plan_new: False),
+              effect.batch([poll_fx, plan_scroll()]),
+            )
+            False -> plan_track(model, #(next, poll_fx))
+          }
+        }
+        Error(_) -> #(Model(..model, plan_error: error(text)), effect.none())
+      })
+    }
+    PlanLoaded(_, _, _) -> Some(#(model, effect.none()))
+    PlanRefresh(poll, rid)
+      if poll == model.plan_poll && rid == model.plan_open
+    -> Some(#(model, plan_get(model, poll, rid)))
+    PlanRefresh(_, _) -> Some(#(model, effect.none()))
+    _ -> None
+  }
+}
+
+/// The query's lowercased words, without empty ones from repeated or
+/// surrounding spaces.
+fn query_words(query: String) -> List(String) {
+  query
+  |> string.lowercase
+  |> string.split(" ")
+  |> list.filter(fn(word) { word != "" })
+}
+
+/// The default order, then by how well each row matches the query. The
+/// default order stays within each search group.
+fn by_search(
+  query: String,
+  rows: List(#(String, Row)),
+) -> List(#(String, Row)) {
+  let query = string.trim(query) |> string.lowercase
+  let rows = sorted(rows)
+  case query {
+    "" -> rows
+    _ ->
+      rows
+      |> list.map(fn(row) { #(search_rank(query, row.1), row) })
+      |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
+      |> list.map(fn(ranked) { ranked.1 })
+  }
+}
+
+/// A row's search group: 0 for the id or the whole phrase in the title, 1
+/// for every word in the title, 2 for the rest. `query` is trimmed and
+/// lowercased.
+fn search_rank(query: String, row: Row) -> Int {
+  let title = string.lowercase(row.title)
+  let named = query == row.id || query == "task:" <> row.id
+  case named || string.contains(title, query) {
+    True -> 0
+    False ->
+      case
+        list.all(query_words(query), fn(word) { string.contains(title, word) })
+      {
+        True -> 1
+        False -> 2
+      }
+  }
+}

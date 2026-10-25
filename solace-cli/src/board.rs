@@ -2207,11 +2207,16 @@ pub fn api(root: &Path, method: &str, url: &str, body: Value) -> Result<Value, F
 }
 /// The project `root`'s tasks as a list shows them, without their notes and changes.
 fn listed(root: &Path) -> Result<Vec<Value>, Failure> {
+    let top = scope::top(root);
     let mut ts = tasks(root)?;
+    let mut waits = HashMap::new();
     for t in &mut ts {
         for k in ["notes", "changes"] {
             t.as_object_mut().unwrap().remove(k);
         }
+        let current = std::mem::take(t);
+        let found_project = tasks::has_project(&top, &current);
+        *t = tasks::with_on_board(&top, current, found_project, &mut waits);
     }
     Ok(ts)
 }
@@ -2890,37 +2895,7 @@ fn supervise(
         }
         if let Some(status) = child.try_wait()? {
             if !ended {
-                let entries = transcript(log);
-                let error = entries.iter().rev().find(|e| e["kind"] == "error").and_then(|e| e["text"].as_str()).unwrap_or("");
-                let raw = fs::read_to_string(log).unwrap_or_default().to_lowercase();
-                // Retry only a failed session load, before any tool execution. Never retry quota or work failures.
-                if resumed
-                    && !status.success()
-                    && !entries.iter().any(|e| e["kind"] == "tool")
-                    && ["session not found", "no session found", "failed to resume", "could not find session", "unable to find session"]
-                        .iter()
-                        .any(|s| raw.contains(s))
-                {
-                    return Err(Failure("session unavailable; using a fresh handoff".into(), SESSION_GONE));
-                }
-                // A discussion or strategy agent that replied in plain text and exited
-                // cleanly has taken its turn: the reply is its note, and the run waits.
-                let reply =
-                    entries.iter().rev().find(|e| e["kind"] == "message").and_then(|e| e["text"].as_str()).map(str::trim).unwrap_or("");
-                if matches!(r["kind"].as_str(), Some("discuss" | "strategy")) && status.success() && error.is_empty() && !reply.is_empty() {
-                    watch.reply(rid, reply.to_string())?;
-                    return Err(Failure("discussion reply".into(), REPLIED));
-                }
-                if let Some(assessment) = recoverable_review(r, status.success(), &entries)
-                    && record_review(&watch, rid, &assessment)?
-                {
-                    return Ok(false);
-                }
-                let message = agents::stopped(m, &entries).unwrap_or_else(|| {
-                    let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
-                    format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default())
-                });
-                watch.fail(rid, &message)?;
+                handle_exit(&watch, rid, RunContext { run: r, log, model: m, resumed }, status)?;
             }
             return Ok(false);
         }
@@ -3544,18 +3519,10 @@ fn brief(t: &Value, kind: &str) -> String {
     // A task in a feature files its review's minor findings as the feature's tech debt (D-112).
     let debt = if t["feature"].is_string() { format!(" {TECH_DEBT_ASK}") } else { String::new() };
     let role = match kind {
-        "review" => format!(
-            "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed. A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names. Keep the concern-by-concern focus. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. Flag duplication and large modules, filing minor ones as tech debt; don't allow cross-domain concerns in the same module, and flag excessively long functions and dead code as tech debt. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. {read_only} {verify} Only a `task note` call records the feedback; a final message is not recorded. If the call is refused, resend it, and don't claim it was recorded unless the reply says `Recorded.` Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
-        ),
-        "discuss" => format!(
-            "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} {verify} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
-        ),
-        "work" => format!(
-            "Make the change this task describes. {start} {ask} {settings} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Reuse existing code before adding new code, extracting common patterns. Prefer small, stateless, self-documenting functions; keep modules and functions small and focused around one domain or component. Use clear names for new symbols. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Follow the module boundaries the refactor task:2414798176c466e4 creates: put new code in the module that owns its concern. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
-        ),
-        _ => format!(
-            "Investigate this task before any work on it: answer what it asks, or find out what the change involves. Report the required behavior, constraints, acceptance criteria and risks, and anything you didn't check. Name the symbols, modules and non-source files that need attention when that helps define the work. Don't prescribe implementation, edits, submission shape or checks. The human never edits files or runs commands; any needed change, a settings change included, is the worker's to make. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {define} {start} {ask} Finish with `task done`, the report in `text`."
-        ),
+        "review" => review_role(read_only, verify, &debt),
+        "discuss" => discussion_role(read_only, verify),
+        "work" => work_role(start, ask, settings, &tests),
+        _ => investigation_role(read_only, define, start, ask),
     };
     let mut out = format!(
         "You are working on a task from this project's task board. You work only through the Solace tool: there is no shell and no file access.\n{role}\n{common}\n{responses}\n\n{}",
@@ -4191,13 +4158,16 @@ fn apply_settings(root: &Path, q: &mut Value) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Ends runs a previous server left going, as after a restart.
-fn recover_project(root: &Path) -> Result<(), Failure> {
+/// Ends runs a previous server left going, as after a restart. `announce`
+/// logs the workflow; a project joining a served board is in its snapshot.
+fn recover_project(root: &Path, announce: bool) -> Result<(), Failure> {
     let guard = lock(root)?;
     let s = open(root)?;
     let w = flow(root)?;
     lockdown::recover(root, &s, std::slice::from_ref(&guard))?;
-    event(&s, json!({"workflow":w}))?;
+    if announce {
+        event(&s, json!({"workflow":w}))?;
+    }
     for mut t in tasks(root)? {
         if active(&t) {
             let work = t["runs"].as_array().unwrap().iter().any(|r| r["state"] != "ended" && r["kind"] == "work");
@@ -4245,8 +4215,10 @@ impl Board {
             .collect())
     }
     /// Holds the project's serve lock for this server's life: a second
-    /// server would end the first one's runs as a restart.
-    fn claim(&self, dir: &str, root: &Path) -> Result<(), Failure> {
+    /// server would end the first one's runs as a restart. `announce` says
+    /// whether recovery logs the workflow; a project joining a served board
+    /// already has it in its stream's snapshot.
+    fn claim(&self, dir: &str, root: &Path, announce: bool) -> Result<(), Failure> {
         let mut held = self.held.lock().unwrap();
         if held.contains_key(root) {
             return Ok(());
@@ -4257,7 +4229,7 @@ impl Board {
         };
         record_port(&f, self.port);
         adopt_tasks(&scope::top(root), root)?;
-        recover_project(root)?;
+        recover_project(root, announce)?;
         held.insert(root.to_path_buf(), f);
         Ok(())
     }
@@ -4273,7 +4245,7 @@ impl Board {
         let Some((dir, root)) = projects.into_iter().find(|(d, _)| *d == dir && d != ".") else {
             return err("E7001", format!("unknown project {dir}"));
         };
-        self.claim(&dir, &root)?;
+        self.claim(&dir, &root, false)?;
         let rest = &after[end..];
         Ok(Some((root, if rest.starts_with('/') { rest.to_string() } else { format!("/{rest}") })))
     }
@@ -4450,7 +4422,7 @@ impl Board {
             _ => return err("E7001", "unknown route"),
         };
         let root = scope::path(&self.top, &dir);
-        if let Err(e) = self.claim(&dir, &root) {
+        if let Err(e) = self.claim(&dir, &root, false) {
             if dir != "." {
                 workspace::remove(&self.top, &dir)?;
             }
@@ -4520,7 +4492,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
     let port = server.server_addr().to_ip().map_or(port, |a| a.port());
     let board = std::sync::Arc::new(Board::new(top, port));
     for (dir, root) in board.projects()? {
-        board.claim(&dir, &root)?;
+        board.claim(&dir, &root, true)?;
     }
     // Once every project's tasks are in the root's store, the task server
     // applies what its inbox holds and takes over (D-77).
@@ -4549,6 +4521,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
     let watcher = board.clone();
     std::thread::spawn(move || {
         let mut previous: HashMap<PathBuf, Option<Vec<u8>>> = HashMap::new();
+        let mut flows: HashMap<PathBuf, Option<Value>> = HashMap::new();
         let mut tick = 0u64;
         loop {
             tick += 1;
@@ -4567,13 +4540,23 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
                     let _ = outside::absorb(&s, outside::Mode::Notice);
                 }
                 let current = fs::read(root.join("solace.toml")).ok();
-                match previous.insert(root.clone(), current.clone()) {
-                    Some(old) if old != current => {}
-                    _ => continue,
+                let changed = match previous.insert(root.clone(), current.clone()) {
+                    None => {
+                        flows.insert(root.clone(), lockdown::settings(&root).and_then(|v| workflow(&v)).ok());
+                        continue;
+                    }
+                    Some(old) => old != current,
+                };
+                if !changed {
+                    continue;
                 }
-                if let Ok(_guard) = lock(&root)
+                let w = lockdown::settings(&root).and_then(|v| workflow(&v)).ok();
+                if flows.insert(root.clone(), w.clone()).is_some_and(|old| old == w) {
+                    continue;
+                }
+                if let Some(w) = w
+                    && let Ok(_guard) = lock(&root)
                     && let Ok(s) = open(&root)
-                    && let Ok(w) = lockdown::settings(&root).and_then(|v| workflow(&v))
                 {
                     let _ = event(&s, json!({"workflow":w}));
                 }
@@ -4927,6 +4910,9 @@ impl Events {
             if homeless {
                 v["noProject"] = json!(true);
             }
+            let home = v.get("task").and_then(|t| t.get("home")).and_then(Value::as_str).unwrap_or(".");
+            let has_project = members.as_ref().map_or(true, |ms| ms.iter().any(|m| m.as_str() == home));
+            let v = stream_task_event(&self.board.top, v, has_project);
             return Ok(Some(format!("id: {}\ndata: {v}\n\n", self.id())));
         }
     }
@@ -5192,7 +5178,7 @@ fn recoverable_review(r: &Value, success: bool, entries: &[Value]) -> Option<Str
     let recorded = entries.iter().any(|e| {
         e["kind"] == "tool"
             && e["title"].as_str().is_some_and(|title| title.contains("task note"))
-            && e["output"].as_str().is_some_and(|output| output.starts_with("Recorded"))
+            && e["output"].as_str().is_some_and(note_recorded)
     });
     if recorded {
         return None;
@@ -5206,18 +5192,18 @@ fn record_review(watch: &Watch, rid: &str, text: &str) -> Result<bool, Failure> 
     let Watch::Task(root, tid) = watch else {
         return Ok(false);
     };
-    let s = open(root)?;
-    let t = task(root, tid)?;
-    let i = run_at(&t, rid)?;
-    if t["runs"][i]["kind"] != "review" {
+    let root = root.to_path_buf();
+    let tid = tid.to_string();
+    let rid = rid.to_string();
+    let current = task(&root, &tid)?;
+    if review_recorded(&current, &rid)? {
         return Ok(false);
     }
-    let m = review_message(&s, tid, &t, rid, text)?;
-    let w = flow(root)?;
-    let rid = rid.to_string();
-    tasks::update(root, tid, move |t| {
-        let i = run_at(t, &rid)?;
-        if t["runs"][i]["state"] == "ended" || review_feedback_recorded(t, &rid) {
+    let m = review_message(&open(&root)?, &tid, &current, &rid, text)?;
+    let w = flow(&root)?;
+    let update_tid = tid.clone();
+    tasks::update(&root, &update_tid, move |t| {
+        if review_recorded(t, &rid)? {
             return Ok(false);
         }
         message(&w, t, &m)?;
@@ -5305,4 +5291,111 @@ fn completed(root: &Path, tid: &str, t: &mut Value, was_final: bool, a: &Value) 
         note(t, "solace", None, &format!("Filed {items} from the last review on task:{}.", d["id"].as_str().unwrap_or("")));
     }
     After::Clean(debt.map(|(d, _)| d))
+}
+
+/// Whether a tool reply says the task note was recorded, including in a batch.
+fn note_recorded(output: &str) -> bool {
+    fn header(line: &str) -> Option<&str> {
+        line.strip_prefix("==== solace ")?.strip_suffix(" ====")
+    }
+    let batch = output.lines().next().and_then(|line| header(line)).is_some();
+    if !batch {
+        return output.starts_with("Recorded");
+    }
+    let mut in_note = false;
+    for line in output.lines() {
+        if let Some(command) = header(line) {
+            in_note = command.trim() == "task note";
+        } else if in_note && line.starts_with("Recorded") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Handles an agent that exited before its run ended.
+fn handle_exit(watch: &Watch, rid: &str, context: RunContext<'_>, status: std::process::ExitStatus) -> Result<(), Failure> {
+    let RunContext { run: r, log, model: m, resumed } = context;
+    let entries = transcript(log);
+    let error = entries.iter().rev().find(|e| e["kind"] == "error").and_then(|e| e["text"].as_str()).unwrap_or("");
+    let raw = fs::read_to_string(log).unwrap_or_default().to_lowercase();
+    // Retry only a failed session load, before any tool execution. Never retry quota or work failures.
+    if resumed
+        && !status.success()
+        && !entries.iter().any(|e| e["kind"] == "tool")
+        && ["session not found", "no session found", "failed to resume", "could not find session", "unable to find session"]
+            .iter()
+            .any(|s| raw.contains(s))
+    {
+        return Err(Failure("session unavailable; using a fresh handoff".into(), SESSION_GONE));
+    }
+    // A discussion or strategy agent that replied in plain text and exited
+    // cleanly has taken its turn: the reply is its note, and the run waits.
+    let reply = entries.iter().rev().find(|e| e["kind"] == "message").and_then(|e| e["text"].as_str()).map(str::trim).unwrap_or("");
+    if matches!(r["kind"].as_str(), Some("discuss" | "strategy")) && status.success() && error.is_empty() && !reply.is_empty() {
+        watch.reply(rid, reply.to_string())?;
+        return Err(Failure("discussion reply".into(), REPLIED));
+    }
+    if let Some(assessment) = recoverable_review(r, status.success(), &entries)
+        && record_review(watch, rid, &assessment)?
+    {
+        return Ok(());
+    }
+    let message = agents::stopped(m, &entries).unwrap_or_else(|| {
+        let said = if !error.is_empty() { Some(error.to_string()) } else { last_words(&entries) };
+        format!("agent exited without finishing ({status}){}", said.map(|s| format!(":\n\n{s}")).unwrap_or_default())
+    });
+    watch.fail(rid, &message)
+}
+
+/// The review role's direction in a task brief.
+fn review_role(read_only: &str, verify: &str, debt: &str) -> String {
+    format!(
+        "Review the changes this task made and give feedback. The task, its notes and its changes are all in this brief (the delta since the last review, or the whole task, in the review context below), so don't send `session start --task`. Run `task diff` only when the human asks for a fresh full review, or for parts the brief left out. For each concern, inspect every symbol it needs in one call (`inspect a b c --context`); split only when the reply is trimmed. A call is a turn, so batch the symbols one concern needs; start from the changed symbols the review context names. Keep the concern-by-concern focus. Don't review generated files (build output such as a bundled `priv/app.js`, lockfiles, installed dependencies); test them instead, and rebuild them with the project's commands if a check needs them. Flag code the task didn't need, places it missed, and any validation, data-loss handling or security it removed. Flag duplication and large modules, filing minor ones as tech debt; don't allow cross-domain concerns in the same module, and flag excessively long functions and dead code as tech debt. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. {read_only} {verify} Only a `task note` call records the feedback; a final message is not recorded. If the call is refused, resend it, and don't claim it was recorded unless the reply says `Recorded.` Finish with `task note`, the feedback in `text`. Begin the feedback with exactly one assessment label: **Assessment: Looks good** or **Assessment: Needs work**. Follow it with findings and verification that explain the assessment, including any checks not performed.{debt}"
+    )
+}
+
+/// The discussion role's direction in a task brief.
+fn discussion_role(read_only: &str, verify: &str) -> String {
+    format!(
+        "Discuss this task with the human, who asks questions and works out ideas with you. Answer from the high-level context below (the task, its notes and changes); read code only when a question needs it, and briefly. {read_only} {verify} The human's message is the last note. Reply only with `task note`, the reply in `text`, never as plain text; the call waits and returns the human's next message. Keep replying until a call says the discussion has ended, then stop without further calls."
+    )
+}
+
+/// The work role's direction in a task brief.
+fn work_role(start: &str, ask: &str, settings: &str, tests: &str) -> String {
+    format!(
+        "Make the change this task describes. {start} {ask} {settings} Send every change with its check in the same call: `submit` then `test`, `write` then `run <name>`. Before `task done`, after your last change, run `test --all` in each project with symbol-held source{tests}. Fix the code where a test fails because of your changes; in the summary, report failing tests your changes don't affect and any test you could not run. Reuse existing code before adding new code, extracting common patterns. Prefer small, stateless, self-documenting functions; keep modules and functions small and focused around one domain or component. Use clear names for new symbols. Keep thoughts, decisions and directives out of code comments and the UI, and details or decisions of implementation or development out of the UI. Follow the module boundaries the refactor task:2414798176c466e4 creates: put new code in the module that owns its concern. Finish with `task done`, a summary in `text`: what you changed, how you checked it, and, if any, what you skipped and risks the human must know."
+    )
+}
+
+/// The investigation role's direction in a task brief.
+fn investigation_role(read_only: &str, define: &str, start: &str, ask: &str) -> String {
+    format!(
+        "Investigate this task before any work on it: answer what it asks, or find out what the change involves. Report the required behavior, constraints, acceptance criteria and risks, and anything you didn't check. Name the symbols, modules and non-source files that need attention when that helps define the work. Don't prescribe implementation, edits, submission shape or checks. The human never edits files or runs commands; any needed change, a settings change included, is the worker's to make. If a smaller option would change what the human gets, offer it with `task ask`. {read_only} {define} {start} {ask} Finish with `task done`, the report in `text`."
+    )
+}
+
+/// Whether review `rid`'s feedback is already on the task or its run has ended.
+fn review_recorded(t: &Value, rid: &str) -> Result<bool, Failure> {
+    let i = run_at(t, rid)?;
+    Ok(t["runs"][i]["state"] == "ended" || review_feedback_recorded(t, rid))
+}
+
+/// The run that exited, its transcript, and how it was launched.
+struct RunContext<'a> {
+    run: &'a Value,
+    log: &'a Path,
+    model: &'a Value,
+    resumed: bool,
+}
+
+/// `event` with its task's board visibility worked out, where the stream's
+/// reader expects it (D-196). `has_project` is what the stream already knows.
+pub(super) fn stream_task_event(top: &Path, mut event: Value, has_project: bool) -> Value {
+    if event.get("task").is_some_and(Value::is_object) {
+        let task = event["task"].take();
+        event["task"] = tasks::with_on_board(top, task, has_project, &mut HashMap::new());
+    }
+    event
 }

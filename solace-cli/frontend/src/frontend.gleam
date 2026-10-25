@@ -38,7 +38,7 @@ pub type Route {
   Board
   /// The Workspace page (D-146): the workspace and its migration. `/migrate` lands here.
   Workspace
-  Contracts(base: String)
+  Contracts(base: String, task: String)
   /// The Strategy page and the tab its address names.
   Strategy(tab: String)
   Settings
@@ -56,6 +56,8 @@ pub type Msg {
   TabChanged(String)
   /// A link was clicked in a page: the record's kind and id.
   Follow(String, String)
+  /// A link in a page's shadow root to the Board or a Contract page: its address.
+  PageLink(String)
   /// The reply to `GET /<kind>s/find/{id}`: the kind, the id, the reply, whether the link's own address
   /// is replaced in the history (it was loaded or reached by back or forward) rather than added to, and
   /// the route and visit count when it was asked. A reply after the page was left is ignored, even when
@@ -76,7 +78,7 @@ pub fn route(uri: Uri) -> Route {
   case uri.path_segments(uri.path) {
     [] -> Board
     ["workspace"] | ["migrate"] -> Workspace
-    ["contracts"] -> Contracts("")
+    ["contracts"] -> Contracts("", task_query(uri.query))
     ["strategy"] -> {
       let query = case uri.query {
         Some(query) -> query
@@ -86,7 +88,7 @@ pub fn route(uri: Uri) -> Route {
     }
     ["settings"] -> Settings
     ["knowledgebase"] | ["guide"] -> Knowledgebase
-    ["p", dir, "contracts"] -> Contracts("/p/" <> dir)
+    ["p", dir, "contracts"] -> Contracts("/p/" <> dir, task_query(uri.query))
     ["task" as kind, id]
     | ["feature" as kind, id]
     | ["milestone" as kind, id] -> RecordLink(kind, id)
@@ -108,7 +110,10 @@ pub fn page(
     knowledgebase.view(shown, columns)
   })
   let attributes = case route {
-    Contracts(base) if base != "" -> [attribute.attribute("base", base)]
+    Contracts(base, task) -> [
+      attribute.attribute("base", base),
+      attribute.attribute("task", task),
+    ]
     Strategy(tab) -> [attribute.attribute("tab", tab)]
     _ -> []
   }
@@ -180,7 +185,9 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
     effect.batch([
       modem.init(fn(uri) { RouteChanged(route(uri), history_state()) }),
       effect.from(fn(send) {
-        follow_links(fn(kind, id) { send(Follow(kind, id)) })
+        follow_links(fn(kind, id) { send(Follow(kind, id)) }, fn(href) {
+          send(PageLink(href))
+        })
       }),
       // A bare link shows its record's title (D-122), in every page.
       effect.from(fn(_) { watch_titles() }),
@@ -256,6 +263,23 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
       model,
       find(kind, id, False, model.route, model.visits),
     )
+    PageLink(href) ->
+      case uri.parse(href) {
+        Ok(uri) -> {
+          let route = route(uri)
+          let #(model, shown) = show(model, route)
+          #(
+            model,
+            effect.batch([
+              shown,
+              effect.from(fn(_) {
+                navigate(uri.path, query_of(route), "{}", False)
+              }),
+            ]),
+          )
+        }
+        Error(_) -> #(model, effect.none())
+      }
     Found(kind, id, reply, replace, asked, visits) ->
       case page_of(asked) == page_of(model.route) && visits == model.visits {
         False -> #(model, effect.none())
@@ -357,7 +381,7 @@ pub fn view(model: Model) -> Element(Msg) {
       link("/workspace", "Workspace", Workspace),
       link(strategy_path(tab), "Strategy", Strategy(tab)),
       link("/", "Board", Board),
-      link("/contracts", "Contracts", Contracts("")),
+      link("/contracts", "Contracts", Contracts("", "")),
       link("/knowledgebase", "Knowledgebase", Knowledgebase),
       link("/settings", "Settings", Settings),
     ]),
@@ -653,7 +677,7 @@ pub fn page_of(route: Route) -> String {
   case route {
     Board -> "solace-board"
     Workspace -> "solace-migration"
-    Contracts(_) -> "solace-contracts"
+    Contracts(_, _) -> "solace-contracts"
     Strategy(_) -> "solace-strategy"
     Settings -> "solace-settings"
     Knowledgebase -> "solace-knowledgebase"
@@ -729,26 +753,33 @@ pub type Target {
 }
 
 /// Where a link to a record of `kind` opens, from the reply to `GET /<kind>s/find/{id}`: a task's
-/// `{dir, archived, project}`, a feature's or milestone's `{id, title}`; `E7023` for no such record; any
-/// other reply (another error, or a network failure's message) leaves it unknown.
+/// `{dir, archived, project, onBoard}`, a feature's or milestone's `{id, title}`; `E7023` for no such
+/// record; any other reply (another error, or a network failure's message) leaves it unknown.
 pub fn target(kind: String, reply: String) -> Target {
   let decoder = case kind {
     "task" -> {
       use dir <- decode.field("dir", decode.string)
       use archived <- decode.field("archived", decode.bool)
       use project <- decode.optional_field("project", True, decode.bool)
-      decode.success(#(dir, archived, project))
+      use on_board <- decode.optional_field(
+        "onBoard",
+        None,
+        decode.optional(decode.bool),
+      )
+      decode.success(#(dir, archived, project, on_board))
     }
     _ -> {
       use _ <- decode.field("id", decode.string)
-      decode.success(#("", True, True))
+      decode.success(#("", False, False, None))
     }
   }
   case json.parse(reply, decoder) {
-    // A task with no project (D-129) opens on the Strategy page, like an
-    // archived one.
-    Ok(#(dir, False, True)) -> OnBoard(dir)
-    Ok(#(dir, _, _)) -> InStrategy(dir)
+    Ok(#(dir, _, _, Some(True))) -> OnBoard(dir)
+    Ok(#(dir, _, _, Some(False))) -> InStrategy(dir)
+    // An older server has no `onBoard`: a task opens on the board unless it
+    // is archived or has no project (D-98, D-129).
+    Ok(#(dir, False, True, None)) -> OnBoard(dir)
+    Ok(#(dir, _, _, None)) -> InStrategy(dir)
     Error(_) ->
       case json.parse(reply, decode.at(["code"], decode.string)) {
         Ok("E7023") -> Missing
@@ -804,7 +835,10 @@ fn find(
 }
 
 @external(javascript, "./task_link.mjs", "follow_links")
-fn follow_links(follow: fn(String, String) -> Nil) -> Nil
+fn follow_links(
+  follow: fn(String, String) -> Nil,
+  page: fn(String) -> Nil,
+) -> Nil
 
 @external(javascript, "./task_link.mjs", "toast")
 fn toast(text: String) -> Nil
@@ -886,6 +920,11 @@ pub fn strategy_path(tab: String) -> String {
 fn query_of(route: Route) -> String {
   case route {
     Strategy(tab) -> strategy_query(tab)
+    Contracts(_, task) ->
+      case task {
+        "" -> ""
+        _ -> "task=" <> task
+      }
     _ -> ""
   }
 }
@@ -967,3 +1006,16 @@ fn load_setup(receive: fn(String) -> Nil) -> Nil
 
 @external(javascript, "./setup_ffi.mjs", "recheck_setup")
 fn recheck_setup(receive: fn() -> Nil) -> Nil
+
+/// The `task` query a contract address names, "" when it names none.
+fn task_query(query: Option(String)) -> String {
+  case query {
+    None -> ""
+    Some(query) ->
+      query
+      |> string.split("&")
+      |> list.find(fn(pair) { string.starts_with(pair, "task=") })
+      |> result.map(fn(pair) { string.drop_start(pair, 5) })
+      |> result.unwrap("")
+  }
+}

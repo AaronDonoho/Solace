@@ -45,7 +45,8 @@ component per tab).
   below the list on the Tasks tab, which is selected.
 - **Create and edit.** **New feature** opens a form above the groups, and a feature's **Edit** opens it in the
   feature's place: a title, the description in `solace_task.editor` (textarea `feature-text`), a state select
-  (`proposed`, `upcoming`, `active`, `complete`, `canceled`) and a milestone select with "(none)". **Save** sends
+  (`proposed`, `upcoming`, `active`, `complete`, `canceled`) and a milestone select with "(none)". **Save** and
+  **Cancel** sit below the description. **Save** sends
   `POST /features {title, body, state, milestone?, request}`, where `request` is an id chosen when the form opened,
   so a repeated save makes one feature; an edit sends `PATCH /features/{id}` with only the changed fields (a cleared
   milestone as null), and an edit that changed nothing just closes. One save at a time. The reply ends the edit; a
@@ -91,8 +92,9 @@ The root's milestones, each with its features and their tasks, drawn by `src/roa
   it before scrolling to it; a feature link opens its target milestone, and **Edit** also opens it. The open
   milestones last for the page session only.
   **New milestone** opens a form above the groups, and **Edit** opens it in place of the heading: a title, a date
-  input for `targetDate`, the description (textarea `milestone-text`) and a state select. **Save** sends
-  `POST /milestones {title, body, state, targetDate?, request}`, or `PATCH /milestones/{id}` with only the changed
+  input for `targetDate`, the description (textarea `milestone-text`) and a state select. **Save** and **Cancel**
+  sit below the description. **Save** sends `POST /milestones {title, body, state, targetDate?, request}`, or
+  `PATCH /milestones/{id}` with only the changed
   fields (a cleared date as null), as the feature form does; a refusal shows in an alert and keeps the form. An
   **Edit** also lists the features targeting the milestone, by rank then id, each with **Remove**, then a search over
   the other features by title.
@@ -133,7 +135,9 @@ backlog**). A task's details offer **Back to planning** from Assigned, Review an
 - **Sort and filter on the client.** Filters for column, project, feature and milestone ("(none)" keeps tasks
   without one); the search needs every word in the title or the body. Notes and changes are not in `GET /tasks`,
   so they are not searched; a server search is left to the mass-edit/archive work. Filters and search apply
-  first, then the sort, then paging.
+  first, then the sort, then paging. A query with text ranks the tasks it keeps: its id or the whole phrase in
+  the title first, then every word in the title, then the rest, each group in the default order. A clicked
+  heading's sort wins over the ranking.
 - **Sort by a heading.** Until a heading is clicked: closed tasks newest first, then open ones by title. Every
   heading is a button (`SortBy`): the first click sorts ascending, the next descending, and so on; the sorted
   heading alone shows ▲ or ▼ and sets `aria-sort`. Column follows the workflow's column order; project sorts by
@@ -150,7 +154,8 @@ backlog**). A task's details offer **Back to planning** from Assigned, Review an
   `solace_task.editor` (textarea `new-task-text`, the feature form's tools), a project select in a workspace
   (defaulting to the root's own project; none with a single project), and feature and milestone selects with
   "(none)"; the milestone select hides while a feature is picked, since the task takes the feature's milestone.
-  **Create** (disabled while the title is blank) sends `POST {base}/tasks {title, body, request}`, then, when a
+  **Create**, below the description beside **Cancel** (disabled while the title is blank), sends
+  `POST {base}/tasks {title, body, request}`, then, when a
   feature or milestone is picked, one `PATCH {base}/tasks/{id}`: the feature, whose milestone it takes, or else the
   milestone, through the same `Links`/`Patched` path as a row's Feature link. `request` is chosen when the form opens
   and kept until a create succeeds, so a retry makes one task; one create at a time, shared with the Features tab's
@@ -200,6 +205,9 @@ collapses it to one line: the shown run's state and model, or whether a run is o
 - **Context.** Start plans the task open on the Tasks tab, else the whole project (`{kind: "page"}`). The panel
   says which: "Planning Context: Whole Project", or "Planning Context: task *title*" (feature and milestone the
   same way). A context with an open run offers **Open it** instead of Start (the server allows one, `E7003`).
+- **Draft.** The message box has one draft for the page, not one per task, feature or milestone. Switching
+  selection keeps what was typed. A successful Start or Send clears it only when the text is unchanged since
+  the send.
 - **Start.** The model and its effort when it offers several (an inline "Effort" label and rectangular
   segments, one per effort, with the model's default chosen until another is) sit side by side when
   they fit. Then the first message: `POST /strategy/runs {model, effort?, text, context}`. Choosing

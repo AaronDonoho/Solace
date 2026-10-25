@@ -1,3 +1,4 @@
+import editor_action_support_test as editor_action_test_support
 import gleam/dict
 import gleam/int
 import gleam/json
@@ -5,6 +6,8 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 import gleeunit/should
+import lustre/dev/query
+import lustre/dev/simulate
 import lustre/effect
 import lustre/element
 import solace_task as task
@@ -45,7 +48,7 @@ pub fn workflow_actions_and_errors_test() {
     "{\"id\":\"1\",\"title\":\"Fix checkout\",\"body\":\"Details\",\"column\":\"triage\",\"rank\":1,\"paused_from\":null,\"stamps\":{},\"notes\":[],\"questions\":[],\"runs\":[]}"
   let assert Ok(t) = json.parse(text, task.task_decoder())
   task.actions(model.workflow, t, False)
-  |> should.equal(["assign", "pause", "discuss"])
+  |> should.equal(["assign", "pause"])
   task.actions(model.workflow, task.Task(..t, column: "done"), False)
   |> should.equal([])
   task.actions(model.workflow, task.Task(..t, column: "gone"), False)
@@ -501,7 +504,7 @@ pub fn stop_and_discussion_actions_test() {
   task.actions(workflow, one("work", "running"), False)
   |> should.equal(["assign", "pause", "stop"])
   task.actions(workflow, one("discuss", "waiting"), False)
-  |> should.equal(["assign", "pause", "end_discussion", "stop"])
+  |> should.equal(["assign", "pause", "stop"])
   task.status(one("discuss", "waiting"))
   |> should.equal("Waiting for your reply")
   task.status(one("discuss", "running")) |> should.equal("Agent discussing")
@@ -653,7 +656,7 @@ pub fn live_takes_only_this_tasks_events_test() {
     )
   let assert Some(t) = model.task
   task.actions(model.workflow, t, False)
-  |> should.equal(["plan", "pause", "discuss"])
+  |> should.equal(["plan", "pause"])
 }
 
 /// A task whose home leaves its projects lives in the first one left
@@ -824,18 +827,10 @@ pub fn reveal_shows_the_tab_when_the_task_is_open_test() {
 }
 
 pub fn editor_toolbar_has_every_markdown_tool_test() {
-  let rendered =
-    task.editor(
-      "body",
-      "t1",
-      "/p/a",
-      "Description",
-      "",
-      fn(_) { Nil },
-      fn(_, _) { Nil },
-      fn(_) { Nil },
-    )
-    |> element.to_string
+  let rendered = editor_action_test_support.rendered([])
+  rendered
+  |> string.contains("class=\"composer-action\"")
+  |> should.be_false
   [
     "title=\"Heading\"", "title=\"Bold\"", "title=\"Code\"",
     "title=\"Code block\"", "title=\"List\"", "title=\"Numbered list\"",
@@ -991,7 +986,7 @@ pub fn handed_messages_apply_in_order_once_test() {
   model.seen |> should.equal(3)
   let assert Some(t) = model.task
   task.actions(model.workflow, t, False)
-  |> should.equal(["plan", "pause", "discuss"])
+  |> should.equal(["plan", "pause"])
   // The same list again changes nothing; a longer one applies only the new.
   let #(same, _) =
     task.update(model, task.Handed([#(2, flow), #(3, one("Third"))]))
@@ -1750,7 +1745,10 @@ pub fn default_workflow_buttons_show_their_labels_test() {
   |> should.be_true
   rendered |> string.contains(">Cancel</button>") |> should.be_true
   rendered |> string.contains(">assign</button>") |> should.be_false
-  rendered |> string.contains(">Add note</button>") |> should.be_true
+  let #(notes, _) = task.update(model, task.Tab("notes"))
+  body(notes)
+  |> string.contains("aria-label=\"Add note\"")
+  |> should.be_true
   rendered |> string.contains(">Copy ID</button>") |> should.be_true
   rendered |> string.contains(">Back to planning</button>") |> should.be_false
   let in_column = fn(column, feature) {
@@ -1816,6 +1814,15 @@ pub fn shared_labels_on_the_task_test() {
   body(model)
   |> string.contains("aria-label=\"" <> task.ui_label("model") <> "\"")
   |> should.be_true
+  // The Add note button and the note editor's send share its name.
+  let #(notes, _) = task.update(model, task.Tab("notes"))
+  body(notes)
+  |> string.contains("aria-label=\"" <> task.ui_label("add_note") <> "\"")
+  |> should.be_true
+  let #(writing, _) = task.update(notes, task.WriteNote)
+  between(body(writing), "class=\"composer-actions\"", "</div>")
+  |> string.contains("aria-label=\"" <> task.ui_label("add_note") <> "\"")
+  |> should.be_true
   // Editing Details saves with Save and closes with Cancel.
   let #(editing, _) = task.update(model, task.Edit(True))
   let page = body(editing)
@@ -1863,7 +1870,7 @@ pub fn textareas_fill_their_container_test() {
   css |> string.contains("min(80%") |> should.be_false
   css
   |> string.contains(
-    ".composer{border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}",
+    ".composer{position:relative;border:1px solid var(--edge);border-radius:0;margin:8px 4px;background:var(--paper)}",
   )
   |> should.be_true
   css
@@ -1917,14 +1924,17 @@ pub fn a_task_with_no_project_shows_a_marker_test() {
 pub fn editor_styles_markdown_as_it_is_written_test() {
   let rendered =
     task.editor(
-      "body",
-      "t1",
-      "/p/a",
-      "Description",
-      "**hi**",
-      fn(_) { Nil },
-      fn(_, _) { Nil },
-      fn(_) { Nil },
+      task.EditorConfig(
+        id: "body",
+        task: "t1",
+        base: "/p/a",
+        label: "Description",
+        text: "**hi**",
+        on_input: fn(_) { Nil },
+        on_format: fn(_, _) { Nil },
+        on_block: fn(_) { Nil },
+        actions: [],
+      ),
     )
     |> element.to_string
   [
@@ -1938,14 +1948,17 @@ pub fn editor_styles_markdown_as_it_is_written_test() {
   // A task not yet created has no image tool, and its placeholder no images.
   let draft =
     task.editor(
-      "body",
-      "",
-      "",
-      "Vision",
-      "",
-      fn(_) { Nil },
-      fn(_, _) { Nil },
-      fn(_) { Nil },
+      task.EditorConfig(
+        id: "body",
+        task: "",
+        base: "",
+        label: "Vision",
+        text: "",
+        on_input: fn(_) { Nil },
+        on_format: fn(_, _) { Nil },
+        on_block: fn(_) { Nil },
+        actions: [],
+      ),
     )
     |> element.to_string
   draft
@@ -2114,7 +2127,7 @@ pub fn usage_limits_can_be_tried_again_test() {
   |> should.be_true
   rendered
   |> string.contains(
-    "Every model is held. Each reason is shown below; the Try again button above checks them again.",
+    "Every model is held. Each reason is shown below; the ⟳ button above checks them again.",
   )
   |> should.be_true
 }
@@ -2170,6 +2183,11 @@ pub fn all_models_held_by_usage_limits_says_so_test() {
   rendered
   |> string.contains("Every model is held by a usage limit")
   |> should.be_true
+  rendered
+  |> string.contains(
+    "Every model is held by a usage limit. Each reason is shown below; the ⟳ button above checks them again.",
+  )
+  |> should.be_true
   rendered |> string.contains("No model can start yet") |> should.be_false
   rendered |> string.contains("claude.ai/install.sh") |> should.be_false
   rendered |> string.contains("<select") |> should.be_false
@@ -2180,7 +2198,7 @@ pub fn all_models_held_by_usage_limits_says_so_test() {
     )
   rendered
   |> string.contains(
-    "Every model is held. Each reason is shown below; the Try again button above checks them again.",
+    "Every model is held. Each reason is shown below; the ⟳ button above checks them again.",
   )
   |> should.be_true
   rendered
@@ -3079,7 +3097,7 @@ pub fn proposal_styles_show_old_and_new_test() {
   task.proposal_styles
   |> string.contains(".proposal .answer{font-weight:600}")
   |> should.be_true
-  task.proposal_styles |> string.contains("#") |> should.be_false
+  task.proposal_styles |> has_hex_color |> should.be_false
   task.proposal_styles |> string.contains(".body-diff") |> should.be_false
   task.proposal_styles
   |> string.contains("text-decoration:line-through")
@@ -3241,4 +3259,708 @@ pub fn an_answered_question_links_its_task_reference_test() {
   rendered
   |> string.contains("data-task=\"0123456789abcdef\"")
   |> should.be_true
+}
+
+/// Whether `text` names a color in hex, `#` and three, four, six or eight
+/// hex digits, so a `#` in a selector or other text isn't taken for one.
+fn has_hex_color(text: String) -> Bool {
+  text
+  |> string.split("#")
+  |> list.drop(1)
+  |> list.any(is_hex_color)
+}
+
+fn is_hex_color(after_hash: String) -> Bool {
+  let graphemes = string.to_graphemes(after_hash)
+  let digits = list.take_while(graphemes, is_hex_digit)
+  case list.length(digits) {
+    3 | 4 | 6 | 8 ->
+      case list.drop(graphemes, list.length(digits)) {
+        [] -> True
+        [next, ..] -> !is_name_char(next)
+      }
+    _ -> False
+  }
+}
+
+fn is_hex_digit(grapheme: String) -> Bool {
+  string.contains("0123456789abcdefABCDEF", grapheme)
+}
+
+fn is_name_char(grapheme: String) -> Bool {
+  string.contains(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-",
+    grapheme,
+  )
+}
+
+/// A hex color is a hash and three, four, six or eight hex digits; a hash
+/// that starts an identifier or other text is not one.
+pub fn a_hex_color_is_told_apart_from_a_hash_test() {
+  ["#abc", "#abcd", "#abcdef", "#abcdef12", "color:#fff;"]
+  |> list.each(fn(text) { has_hex_color(text) |> should.be_true })
+  [".a #section", "a#b", "#ab", "#abcde", "#abcdef123", "#abc-def"]
+  |> list.each(fn(text) { has_hex_color(text) |> should.be_false })
+}
+
+/// Add note opens the Notes editor; its send icon adds the typed text as one
+/// note, stays open while the reply is due, then a successful reply clears
+/// and hides it.
+pub fn the_note_editor_sends_from_its_composer_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}",
+    )
+  let #(model, _) = task.update(model, task.WriteNote)
+  let #(model, _) = task.update(model, task.Text("A note"))
+  let rendered = body(model)
+  between(rendered, "class=\"composer-actions\"", "</div>")
+  |> string.contains("aria-label=\"Add note\"")
+  |> should.be_true
+  rendered |> string.contains(">Add note</button>") |> should.be_false
+  let button = editor_action_test_support.action_button(rendered)
+  button |> string.contains("<svg") |> should.be_true
+  button |> string.contains("disabled") |> should.be_false
+  let #(clicked, sent) = editor_action_test_support.click_composer(model)
+  sent |> should.equal([task.AddNote])
+  #(clicked.tab, clicked.writing, clicked.text, clicked.noting)
+  |> should.equal(#("notes", True, "A note", True))
+  body(clicked) |> string.contains("id=\"note-text\"") |> should.be_true
+  // The send waits for its reply: a second click sends nothing more.
+  let #(waiting, more) = editor_action_test_support.click_composer(clicked)
+  more |> should.equal([])
+  waiting |> should.equal(clicked)
+  let #(replied, _) =
+    task.update(
+      clicked,
+      task.Noted(
+        clicked.generation,
+        "A note",
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[{\"author\":\"human\",\"run\":null,\"text\":\"A note\",\"time\":1}],\"questions\":[],\"runs\":[],\"changes\":[]}",
+      ),
+    )
+  #(replied.text, replied.writing, replied.noting, replied.tab)
+  |> should.equal(#("", False, False, "notes"))
+  body(replied) |> string.contains("id=\"note-text\"") |> should.be_false
+  body(replied) |> string.contains("class=\"add-note\"") |> should.be_true
+}
+
+/// A blank note leaves the composer's send icon disabled: a click adds nothing.
+pub fn a_blank_note_leaves_its_send_disabled_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}",
+    )
+  let #(opened, _) = task.update(model, task.WriteNote)
+  let rendered = body(opened)
+  editor_action_test_support.action_button(rendered)
+  |> string.contains("disabled")
+  |> should.be_true
+  let #(clicked, sent) = editor_action_test_support.click_composer(opened)
+  sent |> should.equal([])
+  clicked |> should.equal(opened)
+}
+
+/// The task details editor saves from its own row, where it was: the
+/// edit-body composer has no action, and Save sits under Rank, before Cancel.
+pub fn task_details_save_stays_below_the_editor_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"Body\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}",
+    )
+  let #(editing, _) = task.update(model, task.Edit(True))
+  let page = body(editing)
+  between(page, "id=\"edit-body\"", "</div>")
+  |> string.contains("composer-action")
+  |> should.be_false
+  let save = ">" <> task.ui_label("save") <> "</button>"
+  let assert [_, after_rank] = string.split(page, "Rank (lower comes first)")
+  after_rank |> string.contains(save) |> should.be_true
+  let assert [before_cancel, _] =
+    string.split(page, ">" <> task.ui_label("cancel") <> "</button>")
+  before_cancel |> string.contains(save) |> should.be_true
+}
+
+/// Notes has no editor until Add note is pressed; the plus button selects
+/// Notes, opens the editor, and sends nothing.
+pub fn add_note_opens_the_notes_editor_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}",
+    )
+  let #(notes, _) = task.update(model, task.Tab("notes"))
+  body(notes) |> string.contains("id=\"note-text\"") |> should.be_false
+  body(notes) |> string.contains("class=\"add-note\"") |> should.be_true
+  let clicked =
+    simulate.simple(
+      init: fn(_) { notes },
+      update: fn(state, message) {
+        let #(state, _) = task.update(state, message)
+        state
+      },
+      view: task.view,
+    )
+    |> simulate.start(Nil)
+    |> simulate.click(on: query.element(matching: query.class("add-note")))
+    |> simulate.model
+  #(clicked.tab, clicked.writing) |> should.equal(#("notes", True))
+  body(clicked) |> string.contains("id=\"note-text\"") |> should.be_true
+  body(clicked) |> string.contains("class=\"add-note\"") |> should.be_false
+  clicked.task |> should.equal(notes.task)
+}
+
+/// Details, Runs, Changes and Scope never show the note editor.
+pub fn other_tabs_have_no_note_editor_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}",
+    )
+  let #(model, _) = task.update(model, task.WriteNote)
+  ["details", "runs", "changes", "scope"]
+  |> list.each(fn(tab) {
+    let #(tab, _) = task.update(model, task.Tab(tab))
+    body(tab) |> string.contains("id=\"note-text\"") |> should.be_false
+  })
+}
+
+/// Questions shows the shared editor while a question has no answer, and no
+/// editor once every question is answered.
+pub fn questions_show_the_editor_only_while_unanswered_test() {
+  let open =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q1\",\"text\":\"Why?\",\"options\":[]},{\"id\":\"q2\",\"text\":\"Done?\",\"options\":[],\"answer\":\"Yes\"}]}",
+    )
+  let #(open, _) = task.update(open, task.Tab("questions"))
+  body(open) |> string.contains("id=\"note-text\"") |> should.be_true
+  let done =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q2\",\"text\":\"Done?\",\"options\":[],\"answer\":\"Yes\"}]}",
+    )
+  let #(done, _) = task.update(done, task.Tab("questions"))
+  body(done) |> string.contains("id=\"note-text\"") |> should.be_false
+}
+
+/// The editor's answer goes to the oldest unanswered question; each
+/// question's option buttons still answer that question, and only a later
+/// question keeps its own free-text Answer.
+pub fn a_typed_answer_goes_to_the_first_unanswered_question_test() {
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"questions\":[{\"id\":\"q1\",\"text\":\"Why?\",\"options\":[\"Approve\"]},{\"id\":\"q2\",\"text\":\"Done?\",\"options\":[\"Reject\"]}]}"
+  let assert Ok(t) = json.parse(text, task.task_decoder())
+  task.first_unanswered(t) |> should.equal(Some("q1"))
+  let model = task.Model(..loaded(text), text: "Because")
+  let #(model, _) = task.update(model, task.Tab("questions"))
+  let page = body(model)
+  between(page, "class=\"composer-actions\"", "</div>")
+  |> string.contains("aria-label=\"Answer\"")
+  |> should.be_true
+  page |> string.contains(">Approve</button>") |> should.be_true
+  page |> string.contains(">Reject</button>") |> should.be_true
+  page |> string.split(">Answer</button>") |> list.length |> should.equal(2)
+  let #(clicked, sent) = editor_action_test_support.click_composer(model)
+  sent |> should.equal([task.Answer("q1", "")])
+  clicked.text |> should.equal("Because")
+}
+
+/// A workflow action still carries a non-empty editor text as its
+/// instructions, and leaves it out when the text is empty.
+pub fn an_action_carries_the_typed_text_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"runs\":[]}",
+    )
+  task.action_body(task.Model(..model, text: "Please review"), "assign")
+  |> string.contains("\"text\":\"Please review\"")
+  |> should.be_true
+  task.action_body(task.Model(..model, text: ""), "assign")
+  |> string.contains("\"text\"")
+  |> should.be_false
+}
+
+/// The note editor offers Discuss between runs, End Discussion during one,
+/// and no Add note action while a discussion is going.
+pub fn the_notes_editor_offers_discuss_or_end_discussion_test() {
+  let idle =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"runs\":[]}",
+    )
+  let #(idle, _) = task.update(idle, task.WriteNote)
+  let actions = between(body(idle), "class=\"composer-actions\"", "</div>")
+  actions |> string.contains(">Discuss</span>") |> should.be_true
+  actions |> string.contains(">End Discussion</span>") |> should.be_false
+  actions
+  |> string.contains("aria-label=\"Add note\"")
+  |> should.be_true
+  let discussing =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"runs\":[{\"id\":\"r\",\"kind\":\"discuss\",\"state\":\"waiting\",\"model\":\"m\",\"started\":1,\"log\":\"\"}]}",
+    )
+  let #(discussing, _) = task.update(discussing, task.WriteNote)
+  let actions =
+    between(body(discussing), "class=\"composer-actions\"", "</div>")
+  actions
+  |> string.contains(">End Discussion</span>")
+  |> should.be_true
+  actions |> string.contains(">Discuss</span>") |> should.be_false
+  actions
+  |> string.contains("aria-label=\"Add note\"")
+  |> should.be_false
+  actions |> string.contains("aria-label=\"Send\"") |> should.be_true
+  let working =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"runs\":[{\"id\":\"r\",\"kind\":\"work\",\"state\":\"running\",\"model\":\"m\",\"started\":1,\"log\":\"\"}]}",
+    )
+  let #(working, _) = task.update(working, task.WriteNote)
+  let actions = between(body(working), "class=\"composer-actions\"", "</div>")
+  actions
+  |> string.contains("aria-label=\"Add note\"")
+  |> should.be_true
+  actions |> string.contains(">Discuss</span>") |> should.be_false
+  actions |> string.contains(">End Discussion</span>") |> should.be_false
+}
+
+/// A note send that fails keeps its editor open with the text, so it can be
+/// sent again.
+pub fn a_failed_note_send_keeps_the_editor_open_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}",
+    )
+  let #(model, _) = task.update(model, task.WriteNote)
+  let #(model, _) = task.update(model, task.Text("A note"))
+  let #(clicked, _) = editor_action_test_support.click_composer(model)
+  let #(failed, _) =
+    task.update(
+      clicked,
+      task.Noted(clicked.generation, "A note", "{\"error\":\"offline\"}"),
+    )
+  #(failed.text, failed.writing, failed.noting)
+  |> should.equal(#("A note", True, False))
+  body(failed) |> string.contains("id=\"note-text\"") |> should.be_true
+}
+
+/// A note send still waiting when another task opens is forgotten, so the
+/// next task's note editor can send.
+pub fn a_waiting_note_does_not_block_the_next_task_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[]}",
+    )
+  let #(model, _) = task.update(model, task.WriteNote)
+  let #(model, _) = task.update(model, task.Text("A note"))
+  let #(waiting, sent) = editor_action_test_support.click_composer(model)
+  sent |> should.equal([task.AddNote])
+  waiting.noting |> should.be_true
+  let #(switching, _) =
+    task.update(task.Model(..waiting, connected: True), task.TaskChanged("2"))
+  switching.noting |> should.be_false
+  let #(switching, _) =
+    task.update(
+      switching,
+      task.TaskLoaded(
+        switching.generation,
+        "{\"id\":\"2\",\"title\":\"Two\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[]}",
+      ),
+    )
+  let #(switching, _) =
+    task.update(
+      switching,
+      task.WorkflowLoaded(
+        switching.generation,
+        "{\"columns\":[{\"id\":\"triage\"}]}",
+      ),
+    )
+  let #(switching, _) = task.update(switching, task.WriteNote)
+  let #(switching, _) = task.update(switching, task.Text("Next note"))
+  editor_action_test_support.action_button(body(switching))
+  |> string.contains("disabled")
+  |> should.be_false
+  let #(clicked, sent) = editor_action_test_support.click_composer(switching)
+  sent |> should.equal([task.AddNote])
+  clicked.noting |> should.be_true
+}
+
+/// A note send still waiting when the element disconnects is forgotten, so
+/// reconnecting doesn't leave its send disabled.
+pub fn a_waiting_note_is_forgotten_when_disconnected_test() {
+  let model =
+    loaded(
+      "{\"id\":\"1\",\"title\":\"One\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[]}",
+    )
+  let #(model, _) = task.update(model, task.WriteNote)
+  let #(model, _) = task.update(model, task.Text("A note"))
+  let #(waiting, sent) = editor_action_test_support.click_composer(model)
+  sent |> should.equal([task.AddNote])
+  waiting.noting |> should.be_true
+  let #(disconnected, _) = task.update(waiting, task.Disconnected)
+  disconnected.noting |> should.be_false
+}
+
+@external(javascript, "./draft_storage.mjs", "install")
+fn install_drafts() -> Nil
+
+@external(javascript, "./draft_storage.mjs", "restore")
+fn restore_drafts() -> Nil
+
+pub fn drafts_are_saved_and_restored_per_editor_test() {
+  install_drafts()
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"Shown\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}"
+  let model = loaded(text)
+  let #(model, _) = task.update(model, task.WriteNote)
+  task.draft_key("note-text", "1")
+  |> should.equal("solace-draft:note-text:1")
+  let #(model, _) = task.update(model, task.Text("Half a note"))
+  task.draft_load("note-text", "1") |> should.equal("Half a note")
+  let #(model, _) = task.update(model, task.Edit(True))
+  let #(model, _) = task.update(model, task.Tab("details"))
+  task.draft_key("edit-body", "1")
+  |> should.equal("solace-draft:edit-body:1")
+  let #(_, _) = task.update(model, task.Body("Half a description"))
+  task.draft_load("edit-body", "1") |> should.equal("Half a description")
+  // A reload opens both editors and shows what was typed.
+  let before = fresh("1")
+  let #(reloaded, _) =
+    task.update(before, task.TaskLoaded(before.generation, text))
+  #(
+    reloaded.tab,
+    reloaded.writing,
+    reloaded.text,
+    reloaded.editing,
+    reloaded.body,
+  )
+  |> should.equal(#("details", True, "Half a note", True, "Half a description"))
+  restore_drafts()
+}
+
+pub fn saved_or_cancelled_edits_clear_their_draft_test() {
+  install_drafts()
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"Shown\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}"
+  let model = loaded(text)
+  let #(model, _) = task.update(model, task.Edit(True))
+  let #(model, _) = task.update(model, task.Body("Draft body"))
+  let #(cancelled, _) = task.update(model, task.Edit(False))
+  #(cancelled.body, task.draft_load("edit-body", "1"))
+  |> should.equal(#("Shown", ""))
+  let #(editing, _) = task.update(cancelled, task.Edit(True))
+  let #(editing, _) = task.update(editing, task.Body("Saved body"))
+  let #(saving, _) = task.update(editing, task.Save)
+  task.draft_load("edit-body", "1") |> should.equal("Saved body")
+  let #(saved, _) =
+    task.update(
+      saving,
+      task.ChangedClearing(saving.generation, "edit-body", "Saved body", text),
+    )
+  #(saved.editing, task.draft_load("edit-body", "1"))
+  |> should.equal(#(False, ""))
+  restore_drafts()
+}
+
+pub fn sent_notes_and_answers_clear_their_draft_test() {
+  install_drafts()
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}"
+  let model = loaded(text)
+  let #(model, _) = task.update(model, task.WriteNote)
+  let #(model, _) = task.update(model, task.Text("A note"))
+  let #(live, _) = task.update(model, task.Changed(text))
+  live.text |> should.equal("A note")
+  task.draft_load("note-text", "1") |> should.equal("A note")
+  let #(sending, _) = task.update(model, task.AddNote)
+  let #(sent, _) =
+    task.update(sending, task.Noted(sending.generation, "A note", text))
+  #(sent.text, sent.writing, task.draft_load("note-text", "1"))
+  |> should.equal(#("", False, ""))
+  let questions =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[{\"id\":\"q1\",\"text\":\"Why?\",\"options\":[\"Yes\"]}],\"runs\":[],\"changes\":[]}"
+  let answered = loaded(questions)
+  let #(answered, _) = task.update(answered, task.Text("Because"))
+  let #(pending, _) = task.update(answered, task.Answer("q1", ""))
+  let #(reply, _) =
+    task.update(
+      pending,
+      task.ChangedClearing(
+        pending.generation,
+        "note-text",
+        "Because",
+        questions,
+      ),
+    )
+  #(reply.text, task.draft_load("note-text", "1"))
+  |> should.equal(#("", ""))
+  restore_drafts()
+}
+
+/// Discuss carries the note editor's text: its success clears the text and
+/// its draft, leaving the editor open.
+pub fn a_sent_discussion_clears_the_note_draft_test() {
+  install_drafts()
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"runs\":[]}"
+  let model = loaded(text)
+  let #(model, _) = task.update(model, task.WriteNote)
+  let #(model, _) = task.update(model, task.Text("Please discuss"))
+  task.draft_load("note-text", "1") |> should.equal("Please discuss")
+  let #(sending, _) = task.update(model, task.Action("discuss"))
+  let #(sent, _) =
+    task.update(
+      sending,
+      task.ActedClearing(
+        sending.generation,
+        "note-text",
+        "Please discuss",
+        text,
+      ),
+    )
+  #(sent.text, sent.writing, task.draft_load("note-text", "1"))
+  |> should.equal(#("", False, ""))
+  restore_drafts()
+}
+
+/// A reply sent for another opening of the task changes nothing, so a draft
+/// typed since is kept.
+pub fn a_stale_change_reply_leaves_the_draft_test() {
+  install_drafts()
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"runs\":[]}"
+  let model = loaded(text)
+  let #(model, _) = task.update(model, task.WriteNote)
+  let #(model, _) = task.update(model, task.Text("Keep this"))
+  let #(stale, _) =
+    task.update(
+      model,
+      task.ChangedClearing(model.generation + 1, "note-text", "Keep this", text),
+    )
+  #(stale.text, stale.writing, task.draft_load("note-text", "1"))
+  |> should.equal(#("Keep this", True, "Keep this"))
+  restore_drafts()
+}
+
+/// Saves and notes reply separately: a save clears the description draft and
+/// leaves the note one, and a note's reply does the reverse.
+pub fn a_reply_clears_only_its_own_editors_draft_test() {
+  install_drafts()
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"Body\",\"column\":\"triage\",\"rank\":1,\"notes\":[],\"runs\":[]}"
+  let model = loaded(text)
+  let #(model, _) = task.update(model, task.WriteNote)
+  let #(model, _) = task.update(model, task.Text("A note"))
+  let #(model, _) = task.update(model, task.Edit(True))
+  let #(model, _) = task.update(model, task.Body("A description"))
+  let #(saved, _) =
+    task.update(
+      model,
+      task.ChangedClearing(model.generation, "edit-body", "A description", text),
+    )
+  #(
+    saved.editing,
+    task.draft_load("note-text", "1"),
+    task.draft_load("edit-body", "1"),
+  )
+  |> should.equal(#(False, "A note", ""))
+  task.draft_save("edit-body", "1", "A description")
+  let #(noted, _) =
+    task.update(model, task.Noted(model.generation, "A note", text))
+  #(
+    noted.text,
+    task.draft_load("note-text", "1"),
+    task.draft_load("edit-body", "1"),
+  )
+  |> should.equal(#("", "", "A description"))
+  restore_drafts()
+}
+
+/// A task opened by a link asks for Details, but a saved note still opens its
+/// editor unless another tab was chosen.
+pub fn a_note_draft_opens_over_a_details_reveal_test() {
+  install_drafts()
+  task.draft_save("note-text", "1", "Half a note")
+  let before = fresh("1")
+  let #(before, _) = task.update(before, task.Reveal("details", "1"))
+  let #(model, _) =
+    task.update(
+      before,
+      task.TaskLoaded(
+        before.generation,
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}",
+      ),
+    )
+  #(model.tab, model.writing, model.text)
+  |> should.equal(#("notes", True, "Half a note"))
+  restore_drafts()
+}
+
+/// A notice asking for another tab is kept, with the draft ready when the
+/// note editor is opened again.
+pub fn a_revealed_tab_keeps_its_choice_over_a_draft_test() {
+  install_drafts()
+  task.draft_save("note-text", "1", "Half a note")
+  let before = fresh("1")
+  let #(before, _) = task.update(before, task.Reveal("runs", "1"))
+  let #(model, _) =
+    task.update(
+      before,
+      task.TaskLoaded(
+        before.generation,
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}",
+      ),
+    )
+  #(model.tab, model.writing, model.text)
+  |> should.equal(#("runs", True, "Half a note"))
+  restore_drafts()
+}
+
+/// A note reply from before a disconnect is dropped, so it can't clear a
+/// note sent after reconnecting or let it send twice.
+pub fn a_reply_from_before_disconnect_is_dropped_test() {
+  install_drafts()
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[]}"
+  let model = loaded(text)
+  let #(model, _) = task.update(model, task.WriteNote)
+  let #(model, _) = task.update(model, task.Text("A note"))
+  let #(waiting, _) = task.update(model, task.AddNote)
+  let sent = waiting.generation
+  let #(disconnected, _) = task.update(waiting, task.Disconnected)
+  disconnected.generation |> should.equal(sent + 1)
+  let #(connected, _) = task.update(disconnected, task.Connected)
+  let #(connected, _) = task.update(connected, task.Text("A second note"))
+  let #(sending, _) = task.update(connected, task.AddNote)
+  sending.noting |> should.be_true
+  let #(after, _) =
+    task.update(
+      sending,
+      task.Noted(
+        sent,
+        "A note",
+        "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"notes\":[{\"author\":\"human\",\"run\":null,\"text\":\"A note\",\"time\":1}],\"questions\":[],\"runs\":[]}",
+      ),
+    )
+  #(after.noting, after.text, after.writing, task.draft_load("note-text", "1"))
+  |> should.equal(#(True, "A second note", True, "A second note"))
+  restore_drafts()
+}
+
+/// A note reply clears only the note that was sent, not text typed since.
+pub fn a_note_reply_keeps_text_typed_after_send_test() {
+  install_drafts()
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[]}"
+  let model = loaded(text)
+  let #(model, _) = task.update(model, task.WriteNote)
+  let #(model, _) = task.update(model, task.Text("A note"))
+  let #(sending, _) = task.update(model, task.AddNote)
+  let #(typing, _) = task.update(sending, task.Text("A newer note"))
+  let #(sent, _) =
+    task.update(typing, task.Noted(sending.generation, "A note", text))
+  #(sent.text, sent.writing, sent.noting, task.draft_load("note-text", "1"))
+  |> should.equal(#("A newer note", True, False, "A newer note"))
+  restore_drafts()
+}
+
+/// A discussion reply clears only the text it sent, not text typed since.
+pub fn a_discussion_reply_keeps_text_typed_after_send_test() {
+  install_drafts()
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"runs\":[]}"
+  let model = loaded(text)
+  let #(model, _) = task.update(model, task.WriteNote)
+  let #(model, _) = task.update(model, task.Text("Please discuss"))
+  let #(sending, _) = task.update(model, task.Action("discuss"))
+  let #(typing, _) = task.update(sending, task.Text("A newer note"))
+  let #(sent, _) =
+    task.update(
+      typing,
+      task.ActedClearing(
+        sending.generation,
+        "note-text",
+        "Please discuss",
+        text,
+      ),
+    )
+  #(sent.text, sent.writing, sent.acting, task.draft_load("note-text", "1"))
+  |> should.equal(#("A newer note", True, "", "A newer note"))
+  restore_drafts()
+}
+
+/// An answer clears only the text it sent, not text typed since.
+pub fn an_answer_reply_keeps_text_typed_after_send_test() {
+  install_drafts()
+  let questions =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"triage\",\"rank\":1,\"notes\":[],\"questions\":[{\"id\":\"q1\",\"text\":\"Why?\",\"options\":[\"Yes\"]}],\"runs\":[]}"
+  let model = loaded(questions)
+  let #(model, _) = task.update(model, task.Text("Because"))
+  let #(pending, _) = task.update(model, task.Answer("q1", ""))
+  let #(typing, _) = task.update(pending, task.Text("A newer answer"))
+  let #(sent, _) =
+    task.update(
+      typing,
+      task.ChangedClearing(
+        pending.generation,
+        "note-text",
+        "Because",
+        questions,
+      ),
+    )
+  #(sent.text, task.draft_load("note-text", "1"))
+  |> should.equal(#("A newer answer", "A newer answer"))
+  restore_drafts()
+}
+
+/// A save clears only the body it sent, not text typed since.
+pub fn a_save_reply_keeps_body_typed_after_save_test() {
+  install_drafts()
+  let text =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"Shown\",\"column\":\"planning\",\"rank\":1,\"notes\":[],\"questions\":[],\"runs\":[],\"changes\":[]}"
+  let model = loaded(text)
+  let #(model, _) = task.update(model, task.Edit(True))
+  let #(model, _) = task.update(model, task.Body("Saved body"))
+  let #(saving, _) = task.update(model, task.Save)
+  let #(typing, _) = task.update(saving, task.Body("A newer body"))
+  let #(saved, _) =
+    task.update(
+      typing,
+      task.ChangedClearing(saving.generation, "edit-body", "Saved body", text),
+    )
+  #(saved.editing, saved.body, task.draft_load("edit-body", "1"))
+  |> should.equal(#(True, "A newer body", "A newer body"))
+  restore_drafts()
+}
+
+/// An option answer sends no note text, so its reply leaves the typed note
+/// and its draft in place.
+pub fn an_option_answer_keeps_the_typed_note_test() {
+  install_drafts()
+  let questions =
+    "{\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"assigned\",\"rank\":1,\"notes\":[],\"questions\":[{\"id\":\"q1\",\"text\":\"Why?\",\"options\":[\"Yes\"]}],\"runs\":[]}"
+  let model = loaded(questions)
+  let #(model, _) = task.update(model, task.WriteNote)
+  let #(model, _) = task.update(model, task.Text("Because"))
+  let #(pending, _) = task.update(model, task.Answer("q1", "Yes"))
+  assert task.draft_load("note-text", "1") == "Because"
+  let #(replied, _) =
+    task.update(
+      pending,
+      task.ChangedClearing(pending.generation, "note-text", "", questions),
+    )
+  #(replied.text, replied.writing, task.draft_load("note-text", "1"))
+  |> should.equal(#("Because", True, "Because"))
+  restore_drafts()
+}
+
+/// D-196: the server's `onBoard` decides; without it, an older task reply
+/// leaves an unarchived task visible and an archived one hidden.
+pub fn board_visibility_decodes_test() {
+  let base =
+    "\"id\":\"1\",\"title\":\"T\",\"body\":\"\",\"column\":\"complete\",\"rank\":1"
+  let on_board = fn(extra) {
+    let assert Ok(t) =
+      json.parse("{" <> base <> extra <> "}", task.task_decoder())
+    t.on_board
+  }
+  on_board(",\"onBoard\":true") |> should.be_true
+  on_board(",\"onBoard\":false") |> should.be_false
+  on_board("") |> should.be_true
+  on_board(",\"archivedTime\":1700") |> should.be_false
 }

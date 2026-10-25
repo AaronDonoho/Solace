@@ -249,6 +249,7 @@ pub type Msg {
   AskForSummaries
   Asked(String)
   BaseChanged(String)
+  TaskChanged(String)
   Listening(Source)
   Attached(dynamic.Dynamic)
   Disconnected
@@ -944,6 +945,18 @@ pub fn update(model: Model, msg: Msg) -> #(Model, Effect(Msg)) {
         False -> #(model, effect.none())
       }
     }
+    // The address names another task, or none: the mounted page follows it.
+    TaskChanged(task) ->
+      case task == model.task {
+        True -> #(model, effect.none())
+        False -> {
+          let model = fresh(model, task)
+          case model.connected {
+            True -> start(model)
+            False -> #(model, effect.none())
+          }
+        }
+      }
     Loaded(text) ->
       case json.parse(text, graph_decoder()) {
         Ok(graph) -> {
@@ -2491,7 +2504,7 @@ pub fn view(model: Model) -> Element(Msg) {
 
 pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
   let task = task_id()
-  #(
+  let blank =
     Model(
       Graph([], [], None, "", "", []),
       [],
@@ -2502,10 +2515,7 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       "",
       [],
       "",
-      case task {
-        "" -> "files"
-        _ -> "review"
-      },
+      "",
       1.0,
       0.0,
       0.0,
@@ -2514,19 +2524,20 @@ pub fn init(_flags: Nil) -> #(Model, Effect(Msg)) {
       0.0,
       0.0,
       "",
-      task,
+      "",
       "",
       False,
-      task != "",
+      False,
       None,
-      // Without a task the view opens on the outline (D-55.1).
-      task == "",
+      False,
       "",
       None,
       "",
       no_root(),
       False,
-    ),
+    )
+  #(
+    fresh(blank, task),
     // Lustre runs init once for every instance, before its `base` is set:
     // the graph loads when the instance connects.
     effect.none(),
@@ -2537,10 +2548,46 @@ pub fn register() -> Result(Nil, lustre.Error) {
   lustre.register(
     lustre.component(init, update, view, [
       component.on_attribute_change("base", fn(base) { Ok(BaseChanged(base)) }),
+      component.on_attribute_change("task", fn(task) { Ok(TaskChanged(task)) }),
       component.on_disconnect(Disconnected),
       component.on_connect(Connected),
       component.adopt_styles(False),
     ]),
     "solace-contracts",
+  )
+}
+
+/// Clears the record shown, keeping the element and its transport, and opens `task`.
+fn fresh(model: Model, task: String) -> Model {
+  Model(
+    ..model,
+    graph: Graph([], [], None, "", "", []),
+    visible: [],
+    expanded: [],
+    positions: [],
+    selected: "",
+    detail: None,
+    source: "",
+    diff: [],
+    search: "",
+    tab: case task {
+      "" -> "files"
+      _ -> "review"
+    },
+    zoom: 1.0,
+    pan_x: 0.0,
+    pan_y: 0.0,
+    dragging: False,
+    drag_x: 0.0,
+    drag_y: 0.0,
+    travel: 0.0,
+    focus: "",
+    task: task,
+    error: "",
+    tests_requested: False,
+    pane: task != "",
+    file: None,
+    outline: task == "",
+    asked: "",
   )
 }

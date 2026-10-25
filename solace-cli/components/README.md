@@ -26,9 +26,10 @@ choice, the note editor and the task's actions. It is `solace_task.gleam`, with 
   belongs to it; one whose id names none keeps its own entry. A remembered pick the list no longer shows
   (`remembered`), such as `claude-opus`, becomes its family's entry, and the list is fetched again with the task.
   Under it, `unavailable_view` ("2 more models unavailable") opens the others' reasons; a mark
-  (`limit` in the list: a usage limit or an expired sign-in) has Try again, `POST /models/try-again {agent}`,
+  (`limit` in the list: a usage limit or an expired sign-in) has the ⟳ button, `POST /models/try-again`,
   whose reply is the list as it is now. With none that can start, `no_agents_view` shows how to install and sign
-  in to an agent, unless every model is held: then it says so, and the reasons and Try again below each clear one.
+  in to an agent, unless every model is held: then it says so, lists each reason below, and the ⟳ button
+  rechecks every model, clearing the holds a run left except a usage limit whose reset has not come.
   Strategy's plan panel uses both; `model_styles` is their look. When the model offers efforts, the
   effort choice is a segmented control of native radios with an inline "Effort" label: one rectangular
   segment per effort in the agent's order, with short labels (Low, Med, High, X-Hi, Max) and the full
@@ -89,6 +90,17 @@ links and the board's images are drawn as `markdown` in `task_api.mjs` draws the
 `**`, backticks, `>`, a link's `[`…`](url)`, an image's markdown) show on the lines the cursor is on and
 hide elsewhere, so the text saved is exactly what was typed.
 
+- An editor takes actions, drawn inside the text area at its bottom right; the text keeps a right inset
+  so an action never covers the last line, and no empty band sits below it. The send icon's room is kept
+  on every line; an action's words keep their measured width on the last line only, so the other lines
+  keep their width. The actions stay on one line, take at most half the composer, and truncate a label
+  too wide for it.
+  Each action's content is words, or the send icon when empty; it carries its
+  accessible name, the message it sends and whether it is disabled. The planning panel gives Send and
+  Start the icon, as does the task's note box. The feature, milestone and new-task forms keep **Save**
+  or **Create task** on their row below, beside **Cancel**. The task details' Save stands beside its
+  editor, as before. A failed note send keeps the editor open with its text; a successful one clears
+  and closes it.
 - The host sees a text box. It sets the `value` property and hears `md-input` (the text in `detail`), and
   the tools read `selectionStart` / `selectionEnd`. A text set from outside (a tool, an image, a box
   cleared after a send) replaces only the part that differs (`replacement` in `task_api.mjs`), so the

@@ -485,3 +485,32 @@ fn a_header_holds_its_imports() {
     assert!(!imports("").unwrap());
     assert!(import_texts("use a::{;").is_err());
 }
+
+/// A new impl's opening keeps lifetimes, const parameters and a where
+/// clause, and drops a generic default (D-194).
+#[test]
+fn an_impl_opening_keeps_lifetimes_and_const_generics() {
+    let opening = inherent_impl("pub struct X<'a, T: Clone, const N: usize> where T: Copy { value: &'a T }").unwrap().0;
+    assert_eq!(opening, "impl<'a, T: Clone, const N: usize> X<'a, T, N> where T: Copy {");
+    let default = inherent_impl("pub struct Y<T: Iterator<Item = u8> = std::vec::IntoIter<u8>> { value: T }").unwrap().0;
+    assert!(default.starts_with("impl<T: Iterator<Item = u8>") && !default.contains("= std::vec"), "{default}");
+}
+
+/// A tuple struct's where clause comes after its fields; the impl opening
+/// still ends at the last predicate (D-194).
+#[test]
+fn an_impl_opening_takes_a_tuple_structs_where_clause() {
+    let (opening, ty) = inherent_impl("pub struct X<T>(T) where T: Copy;").unwrap();
+    assert_eq!(ty, "X<T>");
+    assert_eq!(opening, "impl<T> X<T> where T: Copy {");
+}
+
+/// A default after a function bound's `->` is still a default (D-194).
+#[test]
+fn an_impl_opening_ignores_a_default_after_an_arrow() {
+    let (opening, ty) = inherent_impl("pub struct X<T: Fn() -> u8, U = i32> { value: T, other: U }").unwrap();
+    assert_eq!(ty, "X<T, U>");
+    assert!(opening.starts_with("impl<T: Fn() -> u8, U"), "{opening}");
+    assert!(opening.contains("> X<T, U>"), "{opening}");
+    assert!(!opening.contains("= i32"), "{opening}");
+}
