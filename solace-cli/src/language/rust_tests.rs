@@ -514,3 +514,51 @@ fn an_impl_opening_ignores_a_default_after_an_arrow() {
     assert!(opening.contains("> X<T, U>"), "{opening}");
     assert!(!opening.contains("= i32"), "{opening}");
 }
+
+#[test]
+fn a_module_shares_its_name_only_with_a_type() {
+    for source in ["mod f;\n\nfn f() {}\n", "mod f {}\n\nfn f() {}\n"] {
+        assert!(messages(source).is_empty(), "{source}");
+    }
+    for value in ["fn f() {}", "const f: u8 = 1;", "static f: u8 = 1;"] {
+        let source = format!("mod f {{}}\n\n{value}\n");
+        assert!(messages(&source).is_empty(), "{value}");
+    }
+    for ty in ["struct f;", "enum f {}", "union f { a: u8 }", "trait f {}", "type f = u8;", "mod f {}"] {
+        let source = format!("mod f {{}}\n\n{ty}\n");
+        assert_eq!(messages(&source).len(), 1, "{ty}");
+    }
+}
+
+#[test]
+fn a_braced_struct_shares_its_name_only_with_a_type() {
+    for value in ["fn S() {}", "const S: u8 = 1;", "static S: u8 = 1;"] {
+        let source = format!("struct S {{ a: u8 }}\n\n{value}\n");
+        assert!(messages(&source).is_empty(), "{value}");
+    }
+    for other in ["struct S;", "struct S(u8);", "mod S {}"] {
+        let source = format!("struct S {{ a: u8 }}\n\n{other}\n");
+        assert_eq!(messages(&source).len(), 1, "{other}");
+    }
+}
+
+#[test]
+fn a_type_kind_shares_its_name_only_with_a_type() {
+    for ty in ["enum S {}", "union S { a: u8 }", "trait S {}", "type S = u8;"] {
+        for value in ["fn S() {}", "const S: u8 = 1;", "static S: u8 = 1;"] {
+            let source = format!("{ty}\n\n{value}\n");
+            assert!(messages(&source).is_empty(), "{source}");
+        }
+    }
+    for same in ["enum S {}\n\ntrait S {}", "union S { a: u8 }\n\ntype S = u8;", "struct S { a: u8 }\n\nenum S {}"] {
+        assert_eq!(messages(same).len(), 1, "{same}");
+    }
+    for value in ["fn S() {}", "const S: u8 = 1;", "static S: u8 = 1;"] {
+        let source = format!("struct S;\n\n{value}\n");
+        assert_eq!(messages(&source).len(), 1, "{source}");
+    }
+    assert!(messages("macro_rules! S { () => {} }\n\nfn S() {}\n").is_empty());
+    assert_eq!(messages("macro_rules! S { () => {} }\n\nmacro_rules! S { () => {} }\n").len(), 1);
+    assert_eq!(messages("extern crate foo;\n\nfn foo() {}\n").len(), 1);
+    assert_eq!(messages("extern crate foo;\n\nextern crate foo;\n").len(), 1);
+}

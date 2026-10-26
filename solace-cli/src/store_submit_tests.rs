@@ -1785,3 +1785,28 @@ fn a_whole_module_submit_names_a_warning_it_leaves_elsewhere() {
     assert!(out.contains("New warnings elsewhere:"), "{out}");
     assert!(out.contains("other.helper: warning:"), "{out}");
 }
+
+/// A patch named for a function beside a module changes only the function.
+#[test]
+fn a_patch_updates_the_function_beside_a_module() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "mod g {\n    pub fn inside() {}\n}\n\npub fn g() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let update = concat!(
+        "*** Begin Patch\n",
+        "*** Update: crate.g\n",
+        "@@\n",
+        "-pub fn g() -> i32 {\n",
+        "-    1\n",
+        "-}\n",
+        "+pub fn g() -> i32 {\n",
+        "+    2\n",
+        "+}\n",
+        "*** End Patch\n"
+    );
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(update.into()), None).unwrap();
+    assert!(out.contains("Saved crate.g"), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("    1\n", "    2\n"));
+}

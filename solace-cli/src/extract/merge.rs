@@ -277,6 +277,12 @@ impl Store {
     /// `merge <survivor> <retired> [--to-project <folder>]` (D-117).
     pub(crate) fn merge(&self, args: &[&str], budget: usize) -> Out {
         let p = parse(args)?;
+        if crate::language::is_rust(&self.root) {
+            if p.to_project.is_some() {
+                return fail("E6013 `merge --to-project` is not available for Rust; merge within this project (D-207)");
+            }
+            return super::rust::merge::merge(self, &p.survivor, &p.retired, budget);
+        }
         let ix = self.index()?;
         let n = ix.syms.len();
         let top = scope::top(&self.root);
@@ -297,7 +303,7 @@ impl Store {
                     None
                 } else if crate::language::is_rust(&dir) {
                     return fail(format!(
-                        "E6013 {d} is a Rust project (Cargo.toml): `merge` is Gleam only; Rust merge is deferred (D-158 point 6)"
+                        "E6013 {d} is a Rust project (Cargo.toml): `merge` is same-project only; Rust merge stays in one project (D-207)"
                     ));
                 } else if !dir.join("gleam.toml").exists() {
                     return fail(format!("E6013 {d} has no code held as symbols to merge into"));

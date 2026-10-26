@@ -71,12 +71,7 @@ fn nested(item: &store::Submitted) -> Vec<&store::Submitted> {
 /// The namespace bits a Rust item's name lives in (D-168): a type, a value, or
 /// a macro. A type and a value of one name don't clash; two of either do.
 pub(crate) fn rust_namespace(kind: &str) -> u8 {
-    match kind {
-        "struct" | "enum" | "union" | "type" | "trait" | "mod" => TYPE_NAMESPACE,
-        "fn" | "const" | "static" => VALUE_NAMESPACE,
-        "macro_rules!" | "macro" => MACRO_NAMESPACE,
-        _ => 0,
-    }
+    language::rust::namespaces(kind, false)
 }
 
 /// Whether `text` is one Rust identifier name (D-168): letters, digits and `_`,
@@ -113,24 +108,7 @@ fn is_mod_line(line: &str) -> bool {
 /// A module header with `mod <name>;` after its last `mod` line, or at its end
 /// when it has none (D-168), keeping what followed its last line.
 pub(crate) fn add_mod(header: &str, name: &str) -> String {
-    let body = header.trim_end();
-    let end = &header[body.len()..];
-    let end = if end.is_empty() { "\n" } else { end.strip_prefix('\n').unwrap_or(end) };
-    let lines: Vec<&str> = body.lines().collect();
-    let at = lines.iter().rposition(|l| is_mod_line(l)).map_or(lines.len(), |i| i + 1);
-    let mut out = String::new();
-    for (i, line) in lines.iter().enumerate() {
-        if i == at {
-            out += &format!("mod {name};\n");
-        }
-        out += line;
-        out += "\n";
-    }
-    if at == lines.len() {
-        out += &format!("mod {name};\n");
-    }
-    out += end;
-    out
+    add_mod_lines(header, &format!("mod {name};"))
 }
 
 /// The module a `mod` declaration names (D-173): the last word of `mod x;`,
@@ -184,7 +162,7 @@ fn normalized_path(path: &str) -> String {
 /// Whether module `m` declares `own` in its header at the file `row` names, as
 /// `tests/x.rs` declares `tests/h.rs` with `mod h;` or `#[path = "other.rs"]`
 /// `mod h;` (D-173).
-fn declares_module(m: &ModuleRow, own: &str, row: &ModuleRow) -> bool {
+pub(crate) fn declares_module(m: &ModuleRow, own: &str, row: &ModuleRow) -> bool {
     let Some(file) = m.file.as_deref() else { return false };
     let Some(target) = row.file.as_deref() else { return false };
     let owns = m.owns_dir.unwrap_or_else(|| language::rust::owns_dir(&m.path, file));
@@ -653,7 +631,7 @@ impl Store {
                     if let Some(i) = clash {
                         return fail(format!("E1004 {} already exists; submit to it instead.", ix.syms[i].qname()));
                     }
-                    if rust_namespaces(item.kind, &item.text) & TYPE_NAMESPACE != 0
+                    if rust_namespaces(item.kind, &item.text) & language::rust::TYPE_NAMESPACE != 0
                         && ix.modules.iter().any(|m| module_path_named(&target.module, &item.name, &m.path))
                     {
                         return fail(format!("E1004 {}.{} already exists; submit to it instead.", target.module, item.name));
@@ -1409,21 +1387,11 @@ fn add_repair_note(e: Failure, note: Option<&str>) -> Failure {
     }
 }
 
-pub(crate) const TYPE_NAMESPACE: u8 = 1;
-
-pub(crate) const VALUE_NAMESPACE: u8 = 2;
-
-pub(crate) const MACRO_NAMESPACE: u8 = 4;
-
 /// Every namespace an item's name lives in: a unit or tuple struct also names
 /// a value constructor, so it clashes with a `fn` of the same name.
 pub(crate) fn rust_namespaces(kind: &str, text: &str) -> u8 {
-    let mut namespaces = rust_namespace(kind);
-    let braced = syn::parse_str::<syn::ItemStruct>(text).is_ok_and(|item| matches!(item.fields, syn::Fields::Named(_)));
-    if kind == "struct" && !braced {
-        namespaces |= VALUE_NAMESPACE;
-    }
-    namespaces
+    let value = kind == "struct" && syn::parse_str::<syn::ItemStruct>(text).map_or(true, |item| language::rust::struct_names_value(&item));
+    language::rust::namespaces(kind, value)
 }
 
 /// Whether two items of one module would clash by sharing a namespace.
@@ -1453,4 +1421,40 @@ struct RustEnding {
     parent: Option<String>,
     id: String,
     sep: Option<String>,
+}
+
+/// A module header with a test file declaration after its last `mod` line:
+/// `#[cfg(test)]`, its `#[path]` and `mod <name>;`.
+pub(crate) fn add_test_mod(header: &str, name: &str, path: &str) -> String {
+    add_mod_lines(header, &format!("#[cfg(test)]\n#[path = \"{path}\"]\nmod {name};"))
+}
+
+fn add_mod_lines(header: &str, declaration: &str) -> String {
+    let body = header.trim_end();
+    let end = &header[body.len()..];
+    let end = if end.is_empty() { "\n" } else { end.strip_prefix('\n').unwrap_or(end) };
+    let lines: Vec<&str> = body.lines().collect();
+    let at = lines.iter().rposition(|l| is_mod_line(l)).map_or(lines.len(), |i| i + 1);
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i == at {
+            out += &format!("{declaration}\n");
+        }
+        out += line;
+        out += "\n";
+    }
+    if at == lines.len() {
+        out += &format!("{declaration}\n");
+    }
+    out += end;
+    out
+}
+
+pub(crate) fn declares_path_test_mod(header: &str, name: &str) -> bool {
+    let lines: Vec<&str> = header.lines().collect();
+    let Some(i) = lines.iter().position(|line| is_mod_line(line) && mod_name(line) == Some(name)) else {
+        return false;
+    };
+    let attrs: Vec<&str> = lines[..i].iter().rev().take_while(|line| line.trim_start().starts_with("#[")).copied().collect();
+    attrs.iter().any(|line| path_attr(line).is_some()) && attrs.iter().any(|line| line.contains("cfg(") && line.contains("test"))
 }

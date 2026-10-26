@@ -148,3 +148,20 @@ fn a_split_error_counts_from_the_module_line() {
     let e = rust_syntax_error(Failure("line 5: x".into(), 1), "crate.one", None, "crate", 10, 2, 20);
     assert_eq!(e.0, "Not saved: E0100 syntax error in `crate.one` at line 13: x");
 }
+
+/// A file module and an inline module keep their names beside functions, and
+/// importing then writing the crate back keeps each file exactly.
+#[test]
+fn a_function_beside_a_module_imports_and_writes_back_exactly() {
+    let lib = "mod f;\n\npub fn f() {}\n\nmod g {\n    pub fn inside() {}\n}\n\npub fn g() {}\n";
+    let helper = "pub fn inside() {}\n";
+    let root = Scratch::new().with(&[("Cargo.toml", crate::testing::CARGO), ("src/lib.rs", lib), ("src/f.rs", helper)]);
+    import(&root).unwrap();
+    fs::remove_file(root.join("src/lib.rs")).unwrap();
+    fs::remove_file(root.join("src/f.rs")).unwrap();
+    let store = Store::at(&root).unwrap();
+    let ix = store.index().unwrap();
+    store.materialize(&ix).unwrap();
+    assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+    assert_eq!(fs::read_to_string(root.join("src/f.rs")).unwrap(), helper);
+}

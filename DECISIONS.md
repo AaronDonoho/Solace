@@ -1259,3 +1259,26 @@ Amends D-142 point 1 and Spec 3 (Aaron, board task "submit: code hunks match thr
 2. A loose match in two or more places is refused with D-142's `E0108` and its leading-space hint. The save reply says when a hunk matched through indentation.
 3. A file patch (`write`) keeps D-142's strict rule: leading space is part of the line.
 Why: run 00acbe40d2cf4d4d on task:3517183e01f63016 wrote one line with 12 leading spaces instead of 16, and about 30 failed draft repairs followed. Code is formatted after the check, and quoted lines keep the target's text.
+
+## D-205 Rust `extract` selects impls and methods directly
+Amends D-187 point 3 and D-185 (Aaron, board task "extract: Rust impl and method moves", 2026-10-26). Part of the Root project refactor and cleanup feature.
+1. `extract` accepts an inherent impl row named `<Type>` (`a.<Task>`, or `<Task>` where unambiguous) and a method by its stored name (`a.Task::new`, `a.<Task as Named>::name`). A set of methods comes from one impl. A missing or ambiguous impl owner is refused with `E6013`; several inherent impls for one type make `<Type>` ambiguous with `E1002`.
+2. An inherent impl row moves whole. Methods of an inherent impl move into the same type's inherent impl in the target module, which is created when needed. A trait impl moves only whole, whether named as the impl row or by selecting all its methods; selecting some of its methods is `E6013`.
+3. A top-level `use` item may still be selected directly, as it already was.
+4. Identity and revision are unchanged unless text changes; rewritten imports, references, visibility, fields and impl headers keep identity and get a new revision. Imports the moved code needs follow it, imports only staying code uses stay, and a clashing import is aliased. Private fields and methods the moved code needs become `pub(crate)`, and no trait-impl method gains a visibility qualifier. A cargo failure rolls back every row, file and history entry.
+Why: the Store, Board, Server and Index splits need to move one impl or a few methods without moving their type, and D-187's ban made that impossible.
+
+## D-206 Rust `extract` writes test containers as files
+Amends D-187 point 2 (Aaron, board task "extract: Rust test containers as files", 2026-10-26). Part of the Root project refactor and cleanup feature.
+1. When `extract` creates a test container in a Rust target, the target gains `#[cfg(test)]`, `#[path = "<module>_tests.rs"]` and `mod tests;`, and the tests go in that file beside the module's file (`src/board/reviews_tests.rs` for `board::reviews`). `use super::*` is in the file's header only when the tests need it. Tests moved from a `#[path]` container stay in a file.
+2. A target's existing `#[path]` test file takes a second move's tests; a needed `use super::*` is not repeated. An inline test container in the target is still refused with `E1004`, as is a second test whose name would collide in the file.
+3. A whole inline test container moves as it is only when the target has no test file. When the target has one, its tests append to that file and the emptied inline container is retired.
+Why: every split should keep tests in the separate files AGENTS.md asks for, and a module split in several steps must be able to add to the same test file.
+
+## D-207 Rust `merge` folds an item into its copy in one project
+Amends D-117 point 1, D-158 point 6, and Spec 1 §5 and §8 and Spec 3 §2 (Aaron, board task "merge: Rust duplicate functions", 2026-10-26). Part of the Root project refactor and cleanup feature.
+1. `merge <survivor> <retired>` works in a Rust project as it does in Gleam, within one crate. It folds top-level functions, constants and statics. The survivor keeps its identity and revision unless its text changes; the retired item stops being live, with a `merged-into <survivor id>` history entry. Every resolved reference and `use` is redirected to the survivor; an import only the retired item needed is dropped, and a private survivor that code in another module would use is refused with `E5009`.
+2. Refused before anything changes: names that don't resolve; one item named twice; a type, module, impl, method or nested item (`E6013`); items of different kinds, or whose parameters, return type or generics differ (`E5008`, naming both signatures); and a survivor that uses the retired item (`E5002`). Parameter names are not part of the signature, and bodies are not compared, so callers get the survivor's behavior.
+3. A test that reaches only the retired item moves to the survivor module's test file (D-206); a test that also reaches staying code is refused with `E5002`. `--to-project` stays refused for Rust (`E6013`, D-185).
+4. The work is one transaction gated on cargo: a failure restores every row, file and history entry. The reply is D-117 point 5's `Merged …`, `Redirected N references in M modules` and `Now unused: …`, with the moved tests named.
+Why: Rust's tools should match Gleam's, and the three helpers first named are not duplicates: two have different signatures, one uses the other, and the third has no copy. Bodies are not compared, as in Gleam, because Rust cannot decide whether two different bodies behave alike.

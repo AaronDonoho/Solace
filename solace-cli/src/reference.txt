@@ -252,10 +252,12 @@ Changing (the new code is in `text`)
                                 public symbols are rewritten with --to-project
                                 when the task covers them; others are refused
                                 (E5003).
-                                Same-project Rust (D-185): moves named
-                                items with their identity; --to-project is
-                                refused. Impls and nested test modules are
-                                deferred.
+                                Same-project Rust (D-185, D-205): moves named
+                                items with their identity. An inherent impl
+                                is `<Type>`; its methods are `Type::method`.
+                                Methods move into the type's impl in the
+                                target, and a trait impl moves only whole.
+                                --to-project is refused.
   merge <keep> <drop> [--to-project <folder>]
                                 fold a duplicate into its copy: <keep> keeps its
                                 identity, <drop> is retired (history:
@@ -272,7 +274,11 @@ Changing (the new code is in `text`)
                                   merge solace_task.Task board.Task --to-project components
                                 Private helpers only <drop> used are named as
                                 now unused, not deleted.
-                                Gleam only: Rust merge is deferred (D-158 point 6).
+                                Same-project Rust (D-207): folds top-level
+                                functions, constants and statics with the same
+                                parameters, return type and generics (E5008);
+                                --to-project is refused. A test that reaches
+                                only <drop> moves with it.
   drafts [drop <id>]            the kept drafts: rejected submits and writes,
                                 each with its id; fix and retry with `--draft`;
                                 `drafts drop <id>` discards one this task owns,
@@ -388,10 +394,6 @@ without `cargo`, those commands are refused.
 `submit` and `format` name an item and the lines rustfmt leaves longer than
 `max_width`: rustfmt left them as written, so check their indentation or split
 the long literal.
-
-Not available for Rust: `merge`.
-  submit + delete               instead of `merge`: add the item where it
-                                belongs, then delete the old one
 
 Files: every file is in one tier, by the first rule that matches, and the tier
 is what says what you may do with the file. `files` prints each file's tier. A

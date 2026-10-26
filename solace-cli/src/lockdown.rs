@@ -27,10 +27,7 @@ pub fn plain<T>(store: &Store, tid: Option<&str>, command: &str, name: Option<&s
         ""
     };
     let what = if language::is_rust(&store.root) {
-        match command {
-            "extract" | "merge" => format!("`{command}` is Gleam only: Rust `{command}` is deferred (D-158 point 6)"),
-            _ => format!("this Rust project has no code that `{command}` handles"),
-        }
+        format!("this Rust project has no code that `{command}` handles")
     } else {
         "this project has no code held as symbols".to_string()
     };

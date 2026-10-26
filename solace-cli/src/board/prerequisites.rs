@@ -34,6 +34,7 @@ enum Tool {
     Git,
 }
 
+#[cfg(test)]
 const TOOLS: [Tool; 5] = [Tool::Gleam, Tool::Erlang, Tool::Agent, Tool::Bubblewrap, Tool::Git];
 
 /// Every check, run now: nothing is cached, so **Check again** sees a newly installed tool.

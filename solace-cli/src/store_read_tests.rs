@@ -560,3 +560,13 @@ fn a_module_prefix_names_view() {
     assert!(e.contains("E1001 unknown name: module:crate"), "{e}");
     assert!(e.contains("`module:` names a module, not a symbol: use `view crate`"), "{e}");
 }
+
+/// A module and a function of one name are both named, so `view` asks by kind.
+#[test]
+fn a_module_and_a_function_of_one_name_are_named_by_kind() {
+    let root = Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", "mod g {\n    pub fn inside() {}\n}\n\npub fn g() {}\n")]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let err = store.view(&["crate.g"], false, usize::MAX).unwrap_err().0;
+    assert!(err.starts_with("E1002") && err.contains("(mod)") && err.contains("(fn)"), "{err}");
+}

@@ -982,7 +982,7 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
     let store = Store::open()?;
     let settings = lockdown::settings(&store.root)?;
     let task = board::context().map(|(tid, _)| tid);
-    if matches!(a[0], "check" | "test" | "submit" | "delete" | "probe")
+    if CARGO_TOOLS.contains(&a[0])
         && let Some(id) = language::id(&store.root)
         && let Some(why) = language::reason(id)?
     {
@@ -996,12 +996,15 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
         if !language::is_rust(&store.root) {
             return lockdown::plain(&store, task.as_deref(), a[0], a.get(1).copied());
         }
-        // A Rust project's tools are cargo's (D-158, D-168, D-173): `check` and
-        // `test` run, `submit` saves items by name and `delete` removes them,
-        // each checked with cargo; `drafts` is language-neutral.
+        // A Rust project's tools are cargo's (D-158, D-168, D-173, D-185, D-207):
+        // `check` and `test` run, `submit` saves items by name and `delete`
+        // removes them, `extract` moves items and `merge` folds duplicates, each
+        // checked with cargo; `drafts` is language-neutral.
         match a[0] {
-            "check" | "test" | "submit" | "delete" | "probe" if cargo::installed() => {}
-            "check" | "test" | "submit" | "delete" | "probe" => return lockdown::error("E6013", a[0], cargo::MISSING),
+            tool if CARGO_TOOLS.contains(&tool) && cargo::installed() => {}
+            tool if CARGO_TOOLS.contains(&tool) => {
+                return lockdown::error("E6013", a[0], cargo::MISSING);
+            }
             // Reads reach a Rust store's symbols by name, as they do Gleam's
             // (D-158); `refs` and `impact` answer from its reference graph (D-170).
             "view" | "inspect" | "find" | "refs" | "impact" => {}
@@ -4666,3 +4669,7 @@ pub(crate) const PROBE_END_RANGE: &str = "probe end";
 
 /// The indentation the probe's wrapper adds to each of its lines.
 pub(crate) const PROBE_INDENT: &str = "        ";
+
+/// The Rust project's commands that run through cargo, and that a language's
+/// unavailable toolchain refuses with E6013.
+const CARGO_TOOLS: &[&str] = &["check", "test", "submit", "delete", "probe", "extract", "merge"];

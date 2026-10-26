@@ -371,9 +371,9 @@ fn agent_reference_leaves_out_host_and_task_commands() {
     // brief as understanding it allows, and `help` keeps every option.
     assert!(r.contains("Files by tier") && r.contains("ignored or not"));
     assert!(r.contains("every part\n   of the change is made") && !r.contains("of the task is changed"));
-    // D-158 point 6: the reference names both languages and the Gleam-only commands.
+    // D-158 point 6 and D-207: the reference names both languages and their limits.
     assert!(r.contains("Files by tier: a Gleam project's src/ and test/ *.gleam, and a Rust project's"), "both languages: {r}");
-    assert!(REFERENCE.contains("Same-project Rust (D-185)") && REFERENCE.contains("Gleam only: Rust merge is deferred"), "{REFERENCE}");
+    assert!(REFERENCE.contains("Same-project Rust (D-185, D-205)") && REFERENCE.contains("Same-project Rust (D-207)"), "{REFERENCE}");
     assert!(
         r.contains("Changing a signature or adding a field")
             && r.contains("one at the level the task reports")
@@ -1230,45 +1230,6 @@ fn a_plain_task_refusal_names_the_project_to_run_in() {
 }
 
 #[test]
-fn a_rust_refusal_says_gleam_only() {
-    let (_root, store) = testing::rust_project("pub fn helper() -> i32 {\n    1\n}\n");
-    for command in ["extract", "merge"] {
-        let e = lockdown::plain::<()>(&store, None, command, None).unwrap_err().0;
-        assert!(e.contains("Gleam only") && e.contains("deferred (D-158 point 6)"), "{command}: {e}");
-        assert!(!e.contains("no Gleam code"), "{command}: {e}");
-    }
-}
-
-#[test]
-fn a_rust_destination_says_gleam_only() {
-    let root = testing::Scratch::new().with(&[
-        ("solace.toml", "projects = [\"web\", \"r\"]\n"),
-        ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
-        ("web/src/app.gleam", "pub fn main() {\n  1\n}\n"),
-        ("r/Cargo.toml", testing::CARGO),
-        ("r/src/lib.rs", "pub fn helper() -> i32 {\n    1\n}\n"),
-    ]);
-    import(&root.join("web")).unwrap();
-    import(&root.join("r")).unwrap();
-    let store = Store::at(&root.join("web")).unwrap();
-    for (command, args) in
-        [("extract", vec!["app.main", "--to", "x", "--to-project", "r"]), ("merge", vec!["app.main", "app.main", "--to-project", "r"])]
-    {
-        let e = if command == "extract" {
-            store.extract(&args, usize::MAX).unwrap_err().0
-        } else {
-            store.merge(&args, usize::MAX).unwrap_err().0
-        };
-        if command == "extract" {
-            assert!(e.contains("Rust project") && e.contains("--to-project") && e.contains("D-185"), "extract: {e}");
-        } else {
-            assert!(e.contains("Gleam only") && e.contains("deferred (D-158 point 6)"), "merge: {e}");
-        }
-        assert!(!e.contains("no Gleam code"), "{command}: {e}");
-    }
-}
-
-#[test]
 fn a_plain_refusal_omits_a_project_without_code() {
     let root = testing::Scratch::new().with(&[
         ("solace.toml", "projects = [\"r\"]\n"),
@@ -1336,7 +1297,8 @@ fn rust_reference_lists_the_names_and_what_is_missing() {
         "[graph]",
         "probe --in <module>",
         "Gleam only",
-        "Not available for Rust: `merge`.",
+        "Same-project Rust (D-207)",
+        "functions, constants and statics",
     ] {
         assert!(REFERENCE.contains(part), "{part} missing:\n{REFERENCE}");
     }
@@ -1348,7 +1310,9 @@ fn rust_reference_lists_the_names_and_what_is_missing() {
         "board.rs::within",
         "board.rs::Store::view",
         "Not available for Rust: `probe`",
+        "Not available for Rust: `merge`.",
         "Rust probe is deferred",
+        "Rust merge is deferred",
     ] {
         assert!(!REFERENCE.contains(wrong), "{wrong} still in:\n{REFERENCE}");
     }
@@ -2122,4 +2086,124 @@ fn a_rust_probe_runs_beside_a_solace_probe_mention_in_text() {
 fn probe_seconds(reply: &str) -> Option<f64> {
     let (_, time) = reply.trim_end().rsplit_once('(')?;
     time.strip_suffix("s)")?.parse().ok()
+}
+
+#[test]
+fn a_rust_destination_says_same_project_only() {
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"web\", \"r\"]\n"),
+        ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+        ("web/src/app.gleam", "pub fn main() {\n  1\n}\n"),
+        ("r/Cargo.toml", testing::CARGO),
+        ("r/src/lib.rs", "pub fn helper() -> i32 {\n    1\n}\n"),
+    ]);
+    import(&root.join("web")).unwrap();
+    import(&root.join("r")).unwrap();
+    let store = Store::at(&root.join("web")).unwrap();
+    for (command, args) in
+        [("extract", vec!["app.main", "--to", "x", "--to-project", "r"]), ("merge", vec!["app.main", "app.main", "--to-project", "r"])]
+    {
+        let e = if command == "extract" {
+            store.extract(&args, usize::MAX).unwrap_err().0
+        } else {
+            store.merge(&args, usize::MAX).unwrap_err().0
+        };
+        if command == "extract" {
+            assert!(e.contains("Rust project") && e.contains("--to-project") && e.contains("D-185"), "extract: {e}");
+        } else {
+            assert!(e.contains("same-project only") && e.contains("D-207"), "merge: {e}");
+        }
+        assert!(!e.contains("no Gleam code"), "{command}: {e}");
+    }
+}
+
+/// D-185, D-207: the command route reaches Rust `extract` and `merge`, not the
+/// plain-files refusal.
+#[test]
+fn a_rust_project_extracts_and_merges_through_the_cli() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (extract_root, _) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let extract = ["extract", "crate.one", "--to", "helpers"].map(String::from);
+    let out = with_root(&extract_root, || run_options(&extract, &mut || Ok(String::new()), None, 10_000, &[])).unwrap();
+    assert!(out.contains("Created module helpers (src/helpers.rs)"), "{out}");
+
+    let (merge_root, _) =
+        testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\npub fn go() -> i32 {\n    two()\n}\n");
+    let merge = ["merge", "crate.one", "crate.two"].map(String::from);
+    let out = with_root(&merge_root, || run_options(&merge, &mut || Ok(String::new()), None, 10_000, &[])).unwrap();
+    assert!(out.contains("Merged crate.two into crate.one"), "{out}");
+    assert!(out.contains("Redirected 1 reference in 1 module"), "{out}");
+}
+
+/// A Rust project's `extract` and `merge` need cargo, like its other tools.
+#[test]
+fn a_rust_project_needs_cargo_to_extract_and_merge() {
+    let (root, _) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n");
+    let run = |args: &[&str]| {
+        let args: Vec<String> = args.iter().copied().map(String::from).collect();
+        with_root(&root, || crate::language::cargo::with_path(&[], || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[])))
+    };
+    for args in [&["extract", "crate.one", "--to", "helpers"][..], &["merge", "crate.one", "crate.two"][..]] {
+        let err = run(args).unwrap_err().0;
+        assert!(err.contains("E6013") && err.contains(crate::language::cargo::MISSING), "{args:?}: {err}");
+    }
+}
+
+#[test]
+fn a_language_reason_refusal_covers_extract_and_merge() {
+    let (root, _) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n");
+    let off = testing::Scratch::new().with(&[("system.toml", "[languages]\nrust = false\n")]);
+    let reason = crate::language::off(crate::language::RUST);
+    for args in [&["extract", "crate.one", "--to", "helpers"][..], &["merge", "crate.one", "crate.two"][..]] {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let err = crate::with_root(&root, || {
+            crate::board::with_config(&off.join("system.toml"), || crate::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+        })
+        .unwrap_err();
+        assert!(err.0.contains("E6013") && err.0.contains(reason), "{args:?}: {}", err.0);
+    }
+}
+
+#[test]
+fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", "projects = [\"web\", \"r\"]\n"),
+        (".solace/store.db", ""),
+        ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+        ("web/src/app.gleam", "pub fn main() {\n  1\n}\n"),
+        ("r/Cargo.toml", testing::CARGO),
+        ("r/src/lib.rs", "pub fn helper() -> i32 {\n    1\n}\n"),
+    ]);
+    let web = root.join("web");
+    let rust = root.join("r");
+    import(&web).unwrap();
+    import(&rust).unwrap();
+    let s = crate::board::open(&root).unwrap();
+    let mut t = crate::board::api(&root, "POST", "/tasks", json!({"title": "Extract"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["scope"] = json!(["r", "web"]);
+    t["runs"] = json!([{"id": "run", "kind": "work", "state": "running"}]);
+    crate::tasks::put(&s, &t).unwrap();
+    let args = ["extract", "crate.helper", "--to", "helpers", "--to-project", "web"].map(String::from);
+    let e = crate::with_root(&rust, || {
+        crate::board::with_context(&tid, "run", || crate::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+    })
+    .unwrap_err();
+    assert!(e.0.contains("E6013") && e.0.contains("not available for Rust") && e.0.contains("D-185"), "{}", e.0);
+    let t = crate::board::task(&root, &tid).unwrap();
+    assert!(crate::board::changes_of(&s, &t).unwrap().is_empty(), "no change recorded");
+    for project in [&rust, &web] {
+        assert!(!crate::extract::ahead::waiting(project), "{} left an ahead record", project.display());
+        let store = crate::board::open(project).unwrap();
+        store
+            .db
+            .execute_batch("BEGIN IMMEDIATE")
+            .and_then(|_| store.db.execute_batch("ROLLBACK"))
+            .unwrap_or_else(|e| panic!("{} left an open transaction: {e}", project.display()));
+    }
 }

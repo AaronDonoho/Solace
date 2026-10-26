@@ -143,6 +143,8 @@ struct Node {
     item: Range<usize>,
     head: usize,
     file: Option<String>,
+    /// Whether a unit or tuple struct also names a value constructor.
+    value_constructor: bool,
     /// Where its name is, for a refusal's line.
     at: usize,
     cfgs: Vec<String>,
@@ -181,7 +183,17 @@ impl Cx<'_> {
         let cfgs = attrs.iter().filter(|a| a.path().is_ident("cfg")).map(|a| self.text(a)).collect();
         let item = whole.span().byte_range();
         let after = attrs.iter().map(|a| a.span().byte_range().end).fold(item.start, usize::max);
-        Node { kind, name, head: past_comments(self.source, after), item, at: at.byte_range().start, cfgs, children: None, file: None }
+        Node {
+            kind,
+            name,
+            head: past_comments(self.source, after),
+            item,
+            at: at.byte_range().start,
+            cfgs,
+            children: None,
+            file: None,
+            value_constructor: false,
+        }
     }
 
     fn node(&mut self, item: &Item, prefix: &str, module: &str) -> Node {
@@ -258,6 +270,9 @@ impl Cx<'_> {
         if let Item::Mod(i) = item {
             node.file = mod_paths(&i.attrs).into_iter().next().map(|(_, v)| v);
         }
+        if let Item::Struct(i) = item {
+            node.value_constructor = struct_names_value(i);
+        }
         node.children = match kids {
             Kids::None => None,
             Kids::Impl(items) => Some(items.iter().map(|c| self.impl_item(c, &inner)).collect()),
@@ -316,22 +331,20 @@ impl Cx<'_> {
             }
         }
         let local = |n: &str| n.strip_prefix(&format!("{prefix}::")).unwrap_or(n).to_string();
-        let mut first: HashMap<&str, &Node> = HashMap::new();
+        let mut seen: HashMap<&str, Vec<&Node>> = HashMap::new();
         let mut found = vec![];
         for d in defs.into_iter().filter(|d| !matches!(d.kind, "use" | "macro" | "item") && d.name != "_" && !d.name.ends_with("::_")) {
-            match first.get(d.name.as_str()) {
-                Some(f) => {
-                    let cfgs: Vec<String> = f.cfgs.iter().chain(&d.cfgs).map(|c| format!("`{c}`")).collect();
-                    let cfgs = if cfgs.is_empty() { String::new() } else { format!(" ({})", cfgs.join(", ")) };
-                    let name = local(&d.name);
-                    found.push((
-                        d.at,
-                        format!("Not saved: `{name}` is defined twice in `{module}`{cfgs}. Keep one `{name}` and put the platform code inside it: `#[cfg(unix)] {{ … }}` or `if cfg!(unix) {{ … }}`."),
-                    ));
-                }
-                None => {
-                    first.insert(&d.name, d);
-                }
+            let prior = seen.get(d.name.as_str()).and_then(|same| same.iter().copied().find(|f| same_name_clash(f, d)));
+            if let Some(f) = prior {
+                let cfgs: Vec<String> = f.cfgs.iter().chain(&d.cfgs).map(|c| format!("`{c}`")).collect();
+                let cfgs = if cfgs.is_empty() { String::new() } else { format!(" ({})", cfgs.join(", ")) };
+                let name = local(&d.name);
+                found.push((
+                    d.at,
+                    format!("Not saved: `{name}` is defined twice in `{module}`{cfgs}. Keep one `{name}` and put the platform code inside it: `#[cfg(unix)] {{ … }}` or `if cfg!(unix) {{ … }}`."),
+                ));
+            } else {
+                seen.entry(d.name.as_str()).or_default().push(d);
             }
         }
         found.into_iter().for_each(|(at, m)| self.refuse(at, m));
@@ -877,5 +890,46 @@ pub fn inherent_impl(text: &str) -> Result<(String, String), Failure> {
         format!(" {}", text[start..end].trim())
     });
     Ok((format!("impl{decl} {ty}{where_text} {{"), ty))
+}
+
+/// Whether an item of `kind` has a name in Rust's value namespace.
+pub(crate) fn in_value_namespace(kind: &str) -> bool {
+    matches!(kind, "fn" | "const" | "static")
+}
+
+/// Whether two same-named definitions in one module clash by sharing a name
+/// namespace. An unknown kind clashes with any item of the same name.
+fn same_name_clash(a: &Node, b: &Node) -> bool {
+    let (a, b) = (namespaces(a.kind, a.value_constructor), namespaces(b.kind, b.value_constructor));
+    a == 0 || b == 0 || a & b != 0
+}
+
+pub(crate) const TYPE_NAMESPACE: u8 = 1;
+
+pub(crate) const VALUE_NAMESPACE: u8 = 2;
+
+pub(crate) const MACRO_NAMESPACE: u8 = 4;
+
+/// Whether a unit or tuple struct also names a value constructor.
+pub(crate) fn struct_names_value(item: &syn::ItemStruct) -> bool {
+    !matches!(item.fields, syn::Fields::Named(_))
+}
+
+/// The namespace bits a Rust item's name lives in (D-168): a type, a value, or
+/// a macro. A unit or tuple struct names both a type and a value.
+pub(crate) fn namespaces(kind: &str, value_constructor: bool) -> u8 {
+    let mut bits = if in_value_namespace(kind) {
+        VALUE_NAMESPACE
+    } else if matches!(kind, "macro_rules!" | "macro") {
+        MACRO_NAMESPACE
+    } else if matches!(kind, "struct" | "enum" | "union" | "type" | "trait" | "mod") {
+        TYPE_NAMESPACE
+    } else {
+        0
+    };
+    if kind == "struct" && value_constructor {
+        bits |= VALUE_NAMESPACE;
+    }
+    bits
 }
 

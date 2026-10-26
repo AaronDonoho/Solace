@@ -8,6 +8,9 @@ use crate::language::rust_refs::{Site, Via, use_sites};
 use crate::rust_submit::{add_mod, rust_descendants, rust_namespace};
 use crate::{Failure, Index, Out, Store, fail, is_test, language, lockdown, reach, revision};
 mod tests;
+mod visibility;
+mod impls;
+pub(crate) mod merge;
 
 pub(crate) fn extract(s: &Store, p: &Args, budget: usize) -> Out {
     let ix = s.index()?;
@@ -40,13 +43,7 @@ fn module_name(input: &str) -> String {
 
 fn movable(ix: &Index, i: usize) -> Result<(), Failure> {
     let sym = &ix.syms[i];
-    if sym.kind_text == "impl" {
-        return fail(format!("E6013 {} is an impl block; select the type it implements", sym.qname()));
-    }
-    if parent_kind(ix, sym) == Some("impl") {
-        return fail(format!("E6013 {} is a nested method; select the type it belongs to", sym.qname()));
-    }
-    if sym.parent.is_some() {
+    if sym.kind_text != "impl" && parent_kind(ix, sym) != Some("impl") && sym.parent.is_some() {
         return fail(format!("E6013 {} is nested; select its container to move it", sym.qname()));
     }
     Ok(())
@@ -62,11 +59,15 @@ fn helper_kind(kind: &str) -> bool {
 }
 
 fn check_clashes(ix: &Index, moved: &[bool], target: &str) -> Result<(), Failure> {
-    for i in (0..ix.syms.len())
-        .filter(|&i| moved[i] && ix.syms[i].parent.is_none() && ix.syms[i].module != target && ix.syms[i].kind_text != "impl")
-    {
+    for i in (0..ix.syms.len()).filter(|&i| {
+        moved[i]
+            && ix.syms[i].parent.is_none()
+            && ix.syms[i].module != target
+            && ix.syms[i].kind_text != "impl"
+            && !(is_test(ix, i) && ix.syms[i].kind_text != "mod")
+    }) {
         let sym = &ix.syms[i];
-        if rust_namespace(&sym.kind_text) & crate::rust_submit::TYPE_NAMESPACE != 0
+        if rust_namespace(&sym.kind_text) & language::rust::TYPE_NAMESPACE != 0
             && ix.modules.iter().any(|m| crate::rust_submit::module_path_named(target, &sym.name, &m.path))
         {
             return fail(format!("E1004 {target}.{} already exists in {target}; {} cannot move there", sym.name, sym.qname()));
@@ -272,19 +273,8 @@ enum Visibility {
     Public,
 }
 
-fn visibility(text: &str) -> Visibility {
-    let Some((_, code)) = declaration(text) else { return Visibility::Private };
-    if code.starts_with("pub(crate)") || code.starts_with("pub ") || code.starts_with("pub\n") {
-        Visibility::Public
-    } else if code.starts_with("pub(") {
-        Visibility::Restricted
-    } else {
-        Visibility::Private
-    }
-}
-
 fn is_public(text: &str) -> bool {
-    !matches!(visibility(text), Visibility::Private | Visibility::Restricted)
+    !matches!(declaration_visibility(text), Visibility::Private | Visibility::Restricted)
 }
 
 fn declaration(text: &str) -> Option<(usize, &str)> {
@@ -320,7 +310,7 @@ fn declaration(text: &str) -> Option<(usize, &str)> {
 }
 
 fn make_visible(text: &str) -> String {
-    match visibility(text) {
+    match declaration_visibility(text) {
         Visibility::Public => text.to_string(),
         Visibility::Restricted => {
             let Some((at, code)) = declaration(text) else { return text.to_string() };
@@ -364,15 +354,7 @@ fn add_use_line(text: &str, range: &Range<usize>, line: &str) -> String {
     let Some((item, _)) = ranges.into_iter().find(|(_, tree)| tree.start <= range.start && range.end <= tree.end) else {
         return format!("{text}{line}\n");
     };
-    let start = text[..item.start].rfind('\n').map_or(0, |i| i + 1);
-    let indent: String = text[start..item.start].chars().take_while(|c| c.is_whitespace()).collect();
-    let mut out = String::with_capacity(text.len() + line.len() + indent.len() + 2);
-    out.push_str(&text[..item.end]);
-    out.push('\n');
-    out.push_str(&indent);
-    out.push_str(line);
-    out.push_str(&text[item.end..]);
-    out
+    add_use_after(text, &item, line)
 }
 
 /// Imports from another crate that the moved code uses: a named import it
@@ -418,14 +400,17 @@ fn destination(s: &Store, ix: &Index, to: &str) -> Result<(String, Option<crate:
 fn roots(s: &Store, ix: &Index, names: &[String]) -> Result<Vec<usize>, Failure> {
     let mut roots: Vec<usize> = vec![];
     for name in names {
-        let i = match s.resolve(ix, name) {
-            Ok(i) => i,
-            Err(e) => {
-                if s.resolve_module(ix, name).is_some() {
-                    return fail(super::MODULE_HINT);
+        let i = match impls::named_impl(ix, name)? {
+            Some(i) => i,
+            None => match s.resolve(ix, name) {
+                Ok(i) => i,
+                Err(e) => {
+                    if s.resolve_module(ix, name).is_some() {
+                        return fail(super::MODULE_HINT);
+                    }
+                    return Err(e);
                 }
-                return Err(e);
-            }
+            },
         };
         if !roots.contains(&i) {
             roots.push(i);
@@ -443,6 +428,7 @@ fn moving(ix: &Index, roots: &[usize]) -> Result<(Vec<bool>, Vec<usize>), Failur
     for &i in roots {
         mark(ix, &mut moved, i);
     }
+    impls::check_direct(ix, roots, &mut moved)?;
     add_impls(ix, &mut moved)?;
     let mut helpers: Vec<usize> = vec![];
     bring_helpers(ix, &mut moved, &mut helpers);
@@ -569,6 +555,23 @@ fn rewrite_mentions(cx: &Rewrite, import_ok: &HashSet<(usize, String, String)>, 
                 continue;
             }
             let mention_new = newmod[i].clone();
+            let parent_impl = ix.syms[t].parent.as_deref().and_then(|p| ix.syms.iter().position(|s| s.id == p && s.kind_text == "impl"));
+            if let Some(at) = parent_impl {
+                if matches!(&site.via, Via::Path) && site.segs.len() > 1 {
+                    if let Ok(owner) = impl_owner_symbol(ix, at) {
+                        let owner_module = &ix.syms[owner].module;
+                        if &mention_new != owner_module {
+                            if let Some(sep) = ix.syms[i].text[site.range.clone()].rfind("::") {
+                                edits
+                                    .entry(i)
+                                    .or_default()
+                                    .push((site.range.start..site.range.start + sep, full_path(owner_module, &ix.syms[owner].name)));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
             let target_new = newmod[t].clone();
             let written = &ix.syms[i].text[site.range.clone()];
             let mut replacement: Option<String> = None;
@@ -622,6 +625,7 @@ fn rewrite_mentions(cx: &Rewrite, import_ok: &HashSet<(usize, String, String)>, 
 
 struct RustMove<'a> {
     ix: &'a Index,
+    refs: language::rust_refs::References<'a>,
     target: String,
     create: Option<crate::rust_submit::RustNew>,
     moved: Vec<bool>,
@@ -631,15 +635,24 @@ struct RustMove<'a> {
     newtext: Vec<String>,
     newheaders: HashMap<String, String>,
     promote: BTreeSet<usize>,
+    placements: Vec<impls::Placement>,
 }
 
-fn apply(s: &Store, budget: usize, created_files: Vec<std::path::PathBuf>, m: RustMove<'_>) -> Out {
+fn apply(s: &Store, budget: usize, mut created_files: Vec<std::path::PathBuf>, mut m: RustMove<'_>) -> Out {
     let ix = m.ix;
     let n = ix.syms.len();
     let ids = id_indexes(ix);
     let mut moved = m.moved.clone();
     let whole = whole_test_containers(ix, &mut moved);
-    let groups = test_groups(ix, &moved, &whole);
+    let existing_tests = test_module(ix, &m.target);
+    let file_tests = existing_tests.is_some();
+    let groups = test_groups(ix, &moved, &whole, file_tests);
+    let test = plan_test_module(s, &mut m, existing_tests, &groups, &moved)?;
+    if let Some(t) = &test
+        && t.created
+    {
+        created_files.push(s.root.join(&t.file));
+    }
     let old_modules: Vec<String> = {
         let mut v: Vec<String> = (0..n).filter(|&i| moved[i] && ix.syms[i].module != m.target).map(|i| ix.syms[i].module.clone()).collect();
         v.sort();
@@ -654,6 +667,7 @@ fn apply(s: &Store, budget: usize, created_files: Vec<std::path::PathBuf>, m: Ru
             moved[i]
                 && ix.syms[i].module != m.target
                 && !groups.iter().any(|g| g.children.contains(&i))
+                && !(file_tests && whole.contains(&i))
                 && ix.syms[i].parent.as_deref().is_none_or(|p| ids.get(p).is_none_or(|&p| !moved[p]))
         })
         .collect();
@@ -661,6 +675,9 @@ fn apply(s: &Store, budget: usize, created_files: Vec<std::path::PathBuf>, m: Ru
     let mut retired: Vec<String> = vec![];
 
     check_test_containers(ix, &moved, &m.target, &whole, &groups, &ids)?;
+    if let Some(t) = &test {
+        carry_test_imports(ix, &moved, &ids, &m.refs, &groups, t, &mut m.newtext, &mut m.newheaders)?;
+    }
 
     let out = s.transaction(&created_files, || {
         if let Some(c) = &m.create {
@@ -670,6 +687,16 @@ fn apply(s: &Store, budget: usize, created_files: Vec<std::path::PathBuf>, m: Ru
                 params![c.module, c.dir, c.header, c.file, owns],
             )?;
         }
+        if let Some(t) = &test {
+            if t.created {
+                let owns = language::rust::owns_dir(&t.module, &t.file);
+                s.db.execute(
+                    "INSERT INTO modules(path, dir, header, file, owns_dir) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![t.module, t.dir, t.header, t.file, owns],
+                )?;
+            }
+        }
+        drop_super_globs(s, ix, &moved, &m.target, &whole, &m.newtext)?;
 
         let existing_target =
             ix.syms.iter().enumerate().filter(|(j, x)| x.module == m.target && x.parent.is_none() && !moved[*j]).map(|(j, _)| j).last();
@@ -678,8 +705,14 @@ fn apply(s: &Store, budget: usize, created_files: Vec<std::path::PathBuf>, m: Ru
         }
         let mut ord: i64 =
             s.db.query_row("SELECT COALESCE(MAX(ord), 0) FROM symbols WHERE live = 1 AND module = ?1", [&m.target], |r| r.get(0))?;
-        move_roots(s, ix, &moving_roots, &m.target, target_end.as_deref(), &mut ord)?;
-        move_test_groups(s, ix, &groups, &m.newtext, &m.target, target_end.as_deref(), &mut ord)?;
+        let parents = impls::place_target_impls(s, ix, &m.target, &m.placements, &mut ord)?;
+        move_roots(s, ix, &moving_roots, &m.target, target_end.as_deref(), &parents, &mut ord)?;
+        if let Some(t) = &test {
+            move_test_groups(s, ix, &groups, &t.module)?;
+        }
+        if file_tests {
+            retire_test_containers(s, ix, &whole)?;
+        }
 
         let mut touched = old_modules.clone();
         touched.push(m.target.clone());
@@ -932,8 +965,6 @@ fn move_tests(ix: &Index, moved: &mut [bool], helpers: &mut Vec<usize>) -> Resul
 }
 
 struct TestGroup {
-    source: Option<usize>,
-    name: String,
     children: Vec<usize>,
 }
 
@@ -968,44 +999,26 @@ fn whole_test_containers(ix: &Index, moved: &mut [bool]) -> HashSet<usize> {
     whole
 }
 
-fn test_container_name(module: &str) -> String {
-    let name = leaf(module);
-    if name.is_empty() || name == "crate" { "tests".to_string() } else { name.to_string() }
-}
-
-fn test_groups(ix: &Index, moved: &[bool], whole: &HashSet<usize>) -> Vec<TestGroup> {
+fn test_groups(ix: &Index, moved: &[bool], whole: &HashSet<usize>, file_tests: bool) -> Vec<TestGroup> {
     let mut groups: std::collections::BTreeMap<String, TestGroup> = std::collections::BTreeMap::new();
     let ids = id_indexes(ix);
     for i in 0..ix.syms.len() {
-        if !moved[i] || ix.syms[i].kind_text == "mod" || !is_test(ix, i) {
+        if !moved[i] || matches!(ix.syms[i].kind_text.as_str(), "mod" | "use") || !is_test(ix, i) {
             continue;
         }
         let parent = ix.syms[i].parent.as_deref().and_then(|id| ids.get(id).copied());
         match parent {
-            Some(p) if moved[p] || whole.contains(&p) => {}
+            Some(p) if whole.contains(&p) && !file_tests => {}
+            Some(p) if moved[p] && !whole.contains(&p) => {}
             Some(p) if ix.syms[p].kind_text == "mod" => {
-                let name = leaf(&ix.syms[p].name).to_string();
-                groups
-                    .entry(format!("inline:{p}"))
-                    .or_insert_with(|| TestGroup { source: Some(p), name, children: vec![] })
-                    .children
-                    .push(i);
+                groups.entry(format!("inline:{p}")).or_insert_with(|| TestGroup { children: vec![] }).children.push(i);
             }
             _ => {
-                let name = test_container_name(&ix.syms[i].module);
-                groups
-                    .entry(format!("module:{}", ix.syms[i].module))
-                    .or_insert_with(|| TestGroup { source: None, name, children: vec![] })
-                    .children
-                    .push(i);
+                groups.entry(format!("module:{}", ix.syms[i].module)).or_insert_with(|| TestGroup { children: vec![] }).children.push(i);
             }
         }
     }
     groups.into_values().collect()
-}
-
-fn fresh_test_container(name: &str) -> (String, String) {
-    (format!("#[cfg(test)]\nmod {name} {{\n    use super::*;\n\n"), "}\n".to_string())
 }
 
 fn target_has(ix: &Index, moved: &[bool], target: &str, name: &str) -> bool {
@@ -1092,7 +1105,12 @@ fn check_test_containers(
     ids: &HashMap<&str, usize>,
 ) -> Result<(), Failure> {
     let mut names = HashSet::new();
+    let declared = ix.modules.iter().find(|m| m.path == target).and_then(|m| header_mod_names(&m.header).ok()).unwrap_or_default();
+    let existing = test_module(ix, target).map(|m| m.path.clone());
     for &c in whole {
+        if existing.is_some() {
+            continue;
+        }
         if ix.syms[c].module == target {
             continue;
         }
@@ -1104,26 +1122,76 @@ fn check_test_containers(
         if !names.insert(name.clone()) {
             return fail(format!("E1004 two test containers would be named {name} in {target}"));
         }
-        if target_has(ix, moved, target, &name) {
+        if target_has(ix, moved, target, &name) || declared.contains(&name) {
             return fail(format!("E1004 {target}.{name} already exists in {target}"));
         }
     }
+    if groups.is_empty() {
+        return Ok(());
+    }
+    if target_has(ix, moved, target, "tests")
+        || (existing.is_none()
+            && (declared.iter().any(|n| n == "tests") || ix.modules.iter().any(|m| m.path == format!("{target}::tests"))))
+    {
+        return fail(format!("E1004 {target}.tests already exists in {target}"));
+    }
+    if !names.insert("tests".to_string()) {
+        return fail(format!("E1004 two test containers would be named tests in {target}"));
+    }
+    let mut tests = HashSet::new();
     for g in groups {
-        if !names.insert(g.name.clone()) {
-            return fail(format!("E1004 two test containers would be named {} in {target}", g.name));
-        }
-        if target_has(ix, moved, target, &g.name) {
-            return fail(format!("E1004 {target}.{} already exists in {target}", g.name));
+        for &i in &g.children {
+            let name = leaf(&ix.syms[i].name).to_string();
+            if !tests.insert(name.clone()) {
+                return fail(format!("E1004 two tests would be named {name} in {target}::tests"));
+            }
+            if let Some(module) = &existing
+                && ix.syms.iter().any(|s| &s.module == module && s.parent.is_none() && s.name == name)
+            {
+                return fail(format!("E1004 {target}::tests.{name} already exists in {target}::tests"));
+            }
         }
     }
     Ok(())
 }
 
-fn move_roots(s: &Store, ix: &Index, roots: &[usize], target: &str, target_end: Option<&str>, ord: &mut i64) -> Result<(), Failure> {
+fn move_roots(
+    s: &Store,
+    ix: &Index,
+    roots: &[usize],
+    target: &str,
+    target_end: Option<&str>,
+    parents: &HashMap<usize, String>,
+    ord: &mut i64,
+) -> Result<(), Failure> {
+    let mut child_ord: HashMap<String, i64> = HashMap::new();
     for (k, &i) in roots.iter().enumerate() {
+        let sym = &ix.syms[i];
+        if let Some(parent) = parents.get(&i) {
+            let next = match child_ord.get(parent) {
+                Some(next) => *next,
+                None => {
+                    let max: i64 = s.db.query_row(
+                        "SELECT COALESCE(MAX(ord), 0) FROM symbols WHERE live = 1 AND parent = ?1",
+                        [parent.as_str()],
+                        |r| r.get(0),
+                    )?;
+                    max + 1
+                }
+            };
+            child_ord.insert(parent.clone(), next + 1);
+            s.db.execute(
+                "UPDATE symbols SET module = ?2, parent = ?3, ord = ?4, sep = ?5 WHERE id = ?1",
+                params![sym.id, target, parent, next, "\n"],
+            )?;
+            for j in rust_descendants(ix, i).into_iter().filter(|&j| j != i) {
+                s.db.execute("UPDATE symbols SET module = ?2 WHERE id = ?1", params![ix.syms[j].id, target])?;
+            }
+            s.history(&sym.id, "move", &sym.module)?;
+            continue;
+        }
         *ord += 1;
         let sep = if k + 1 == roots.len() { target_end.unwrap_or("\n").to_string() } else { "\n\n".to_string() };
-        let sym = &ix.syms[i];
         let detach = sym.parent.is_some();
         let rename = is_test_container(ix, i) && detach;
         let name = if rename { leaf(&sym.name).to_string() } else { sym.name.clone() };
@@ -1143,39 +1211,24 @@ fn move_roots(s: &Store, ix: &Index, roots: &[usize], target: &str, target_end: 
     Ok(())
 }
 
-fn move_test_groups(
-    s: &Store,
-    ix: &Index,
-    groups: &[TestGroup],
-    newtext: &[String],
-    target: &str,
-    target_end: Option<&str>,
-    ord: &mut i64,
-) -> Result<(), Failure> {
+fn move_test_groups(s: &Store, ix: &Index, groups: &[TestGroup], module: &str) -> Result<(), Failure> {
+    let mut ord: i64 =
+        s.db.query_row("SELECT COALESCE(MAX(ord), 0) FROM symbols WHERE live = 1 AND module = ?1", [module], |r| r.get(0))?;
     for g in groups {
-        *ord += 1;
-        let (text, tail) = match g.source {
-            Some(p) if is_test(ix, p) && newtext[p].contains("use super::*") => (newtext[p].clone(), ix.syms[p].tail.clone()),
-            _ => fresh_test_container(&g.name),
-        };
-        let id = crate::new_id(language::rust::id_kind("mod"));
-        let sep = target_end.unwrap_or("\n").to_string();
-        s.db.execute(
-            "INSERT INTO symbols(id, module, name, kind, text, ord, revision, parent, sep, tail) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9)",
-            params![id, target, g.name, "mod", text, *ord, revision(&text), sep, tail],
-        )?;
-        s.history(&id, "create", &g.name)?;
-        for (child_ord, &i) in g.children.iter().enumerate() {
-            let name = format!("{}::{}", g.name, leaf(&ix.syms[i].name));
+        for &i in &g.children {
+            ord += 1;
+            let old = ix.syms[i].module.clone();
+            let prefix = format!("{}::", ix.syms[i].name);
+            let name = leaf(&ix.syms[i].name).to_string();
             s.db.execute(
-                "UPDATE symbols SET module = ?2, parent = ?3, name = ?4, ord = ?5 WHERE id = ?1",
-                params![ix.syms[i].id, target, id, name, child_ord as i64 + 1],
+                "UPDATE symbols SET module = ?2, parent = NULL, name = ?3, ord = ?4 WHERE id = ?1",
+                params![ix.syms[i].id, module, name, ord],
             )?;
             for j in rust_descendants(ix, i).into_iter().filter(|&j| j != i) {
-                s.db.execute("UPDATE symbols SET module = ?2 WHERE id = ?1", params![ix.syms[j].id, target])?;
+                let name = ix.syms[j].name.strip_prefix(&prefix).map_or_else(|| ix.syms[j].name.clone(), |rest| format!("{name}::{rest}"));
+                s.db.execute("UPDATE symbols SET module = ?2, name = ?3 WHERE id = ?1", params![ix.syms[j].id, module, name])?;
             }
-            s.history(&ix.syms[i].id, "move", &ix.syms[i].module)?;
+            s.history(&ix.syms[i].id, "move", &old)?;
         }
     }
     Ok(())
@@ -1524,6 +1577,7 @@ fn rewrite_move<'a>(
     let references = language::rust_refs::references(&ix.syms, &ix.modules);
     let (mut carried, external_by_module) = external_imports(&ix, &moved, &references)?;
     check_clashes(&ix, &moved, &target)?;
+    let placements = impls::placements(&ix, &target, &moved, &going)?;
 
     let newmod: Vec<String> = (0..n).map(|i| if moved[i] { target.clone() } else { ix.syms[i].module.clone() }).collect();
     let (local_carried, local_sites) = local_import_uses(&ix, &moved, &newmod, &references)?;
@@ -1534,7 +1588,7 @@ fn rewrite_move<'a>(
         newheaders.insert(c.module.clone(), c.header.clone());
     }
 
-    let (mut newtext, mut newheaders, promote) = rewrite(
+    let (mut newtext, mut newheaders, mut promote) = rewrite(
         &ix,
         &moved,
         &newmod,
@@ -1547,13 +1601,20 @@ fn rewrite_move<'a>(
         &local_sites,
         &references,
     )?;
+    visibility::promote_access(&ix, &moved, &target, &mut newtext, &mut promote);
+    for &i in &promote {
+        if !is_public(&newtext[i]) {
+            newtext[i] = make_visible(&newtext[i]);
+        }
+    }
     qualify_trait_impls(&ix, &moved, &newmod, &mut newtext);
+    qualify_impl_selfs(&ix, &moved, &target, &mut newtext);
     if let Some((parent, own)) = create.as_ref().and_then(|c| c.line.as_ref()) {
         let header = add_mod(&newheaders[parent], own);
         newheaders.insert(parent.clone(), header);
     }
 
-    Ok(RustMove { ix, target, create, moved, helpers, already, going, newtext, newheaders, promote })
+    Ok(RustMove { ix, refs: references, target, create, moved, helpers, already, going, newtext, newheaders, promote, placements })
 }
 
 fn called_names_where(ix: &Index, kind: language::rust_refs::CallKind, wanted: impl Fn(usize) -> bool) -> HashSet<String> {
@@ -1765,4 +1826,292 @@ fn use_attributes(text: &str, range: &Range<usize>) -> String {
     let head = head.trim();
     let visibility = use_visibility(text, range);
     head.strip_suffix(visibility.trim()).unwrap_or(head).trim().to_string()
+}
+
+fn module_named_like(module: &str, prefix: &str) -> bool {
+    module == prefix || module.ends_with(&format!("::{prefix}")) || prefix.ends_with(&format!("::{module}"))
+}
+
+fn impl_owner_symbol(ix: &Index, i: usize) -> Result<usize, Failure> {
+    let owners = crate::language::rust_refs::impl_owner_batch(&ix.syms, &ix.modules, &[i]);
+    match owners.into_iter().next() {
+        Some(crate::language::rust_refs::ImplOwner::One(owner)) => Ok(owner),
+        Some(crate::language::rust_refs::ImplOwner::Ambiguous(owners)) => {
+            let list: Vec<String> = owners.iter().map(|&t| ix.syms[t].qname()).collect();
+            fail(format!("E6013 {} is an impl whose type is ambiguous: {}; qualify its self type", ix.syms[i].qname(), list.join(", ")))
+        }
+        _ => fail(format!(
+            "E6013 {} has no type in this crate its self type names: {}; make its self type a path to a type in this crate",
+            ix.syms[i].qname(),
+            ix.syms[i].name
+        )),
+    }
+}
+
+fn qualify_impl_selfs(ix: &Index, moved: &[bool], target: &str, newtext: &mut [String]) {
+    for i in 0..ix.syms.len() {
+        if !moved[i] || ix.syms[i].kind_text != "impl" {
+            continue;
+        }
+        let Ok(owner) = impl_owner_symbol(ix, i) else { continue };
+        if moved[owner] || ix.syms[owner].module == target {
+            continue;
+        }
+        if let Some(range) = impl_self_range(&newtext[i]) {
+            let current = newtext[i][range.clone()].to_string();
+            let generics = current.find('<').map_or(String::new(), |at| current[at..].to_string());
+            let ty = format!("{}{generics}", full_path(&ix.syms[owner].module, &ix.syms[owner].name));
+            if current != ty {
+                newtext[i].replace_range(range, &ty);
+            }
+        }
+    }
+}
+
+fn impl_self_range(text: &str) -> Option<Range<usize>> {
+    let item = match syn::parse_str::<syn::ItemImpl>(text) {
+        Ok(item) => item,
+        Err(_) if text.trim_end().ends_with('{') => syn::parse_str::<syn::ItemImpl>(&format!("{text}\n}}")).ok()?,
+        Err(_) => return None,
+    };
+    Some(syn::spanned::Spanned::span(&item.self_ty).byte_range())
+}
+
+fn needs_super(ix: &Index, moved: &[bool], roots: &[usize], target: &str) -> bool {
+    for &root in roots {
+        for at in rust_descendants(ix, root) {
+            if matches!(ix.syms[at].kind_text.as_str(), "use" | "mod" | "impl" | "trait") {
+                continue;
+            }
+            for &used in &ix.uses[at] {
+                if is_test(ix, used) || matches!(ix.syms[used].kind_text.as_str(), "use" | "mod") {
+                    continue;
+                }
+                let method = ix.syms[used]
+                    .parent
+                    .as_deref()
+                    .is_some_and(|parent| ix.syms.iter().any(|sym| sym.id == parent && sym.kind_text == "impl"));
+                if !method && (moved[used] || ix.syms[used].module == target) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn without_super_glob(text: &str) -> String {
+    text.split_inclusive('\n').filter(|line| line.trim() != "use super::*;").collect()
+}
+
+fn declaration_visibility(text: &str) -> Visibility {
+    let Some((_, code)) = declaration(text) else { return Visibility::Private };
+    if code.starts_with("pub(crate)") || code.starts_with("pub ") || code.starts_with("pub\n") {
+        Visibility::Public
+    } else if code.starts_with("pub(") {
+        Visibility::Restricted
+    } else {
+        Visibility::Private
+    }
+}
+
+fn drop_super_globs(
+    s: &Store,
+    ix: &Index,
+    moved: &[bool],
+    target: &str,
+    whole: &HashSet<usize>,
+    newtext: &[String],
+) -> Result<(), Failure> {
+    for &container in whole {
+        if ix.syms[container].module == target || needs_super(ix, moved, &[container], target) {
+            continue;
+        }
+        let text = without_super_glob(&newtext[container]);
+        if text != ix.syms[container].text {
+            s.db.execute(
+                "UPDATE symbols SET text = ?2, revision = ?3 WHERE id = ?1",
+                params![ix.syms[container].id, text, revision(&text)],
+            )?;
+            s.history(&ix.syms[container].id, "edit", &ix.syms[container].name)?;
+        }
+        let drops: Vec<String> = ix
+            .syms
+            .iter()
+            .filter(|sym| {
+                sym.parent.as_deref() == Some(ix.syms[container].id.as_str())
+                    && sym.kind_text == "use"
+                    && sym.text.trim() == "use super::*;"
+            })
+            .map(|sym| sym.id.clone())
+            .collect();
+        for id in drops {
+            s.retire(&id, "")?;
+        }
+    }
+    Ok(())
+}
+
+struct TestModule {
+    module: String,
+    file: String,
+    dir: String,
+    header: String,
+    created: bool,
+}
+
+fn test_module<'a>(ix: &'a Index, target: &str) -> Option<&'a crate::ModuleRow> {
+    let path = format!("{target}::tests");
+    let row = ix.modules.iter().find(|m| m.path == path && m.file.is_some())?;
+    let parent = ix.modules.iter().find(|m| m.path == target)?;
+    (crate::rust_submit::declares_path_test_mod(&parent.header, "tests") && crate::rust_submit::declares_module(parent, "tests", row))
+        .then_some(row)
+}
+
+fn test_file(target: &str, target_file: &str) -> String {
+    let (dir, name) = target_file.rsplit_once('/').map_or(("", target_file), |(dir, name)| (dir, name));
+    let stem = if target == "crate" { name.strip_suffix(".rs").unwrap_or(name) } else { leaf(target) };
+    if dir.is_empty() { format!("{stem}_tests.rs") } else { format!("{dir}/{stem}_tests.rs") }
+}
+
+fn test_file_header(needs_super: bool) -> String {
+    if needs_super { "use super::*;\n".to_string() } else { String::new() }
+}
+
+fn with_super(header: &str) -> String {
+    if header.lines().any(|line| line.trim() == "use super::*;") {
+        return header.to_string();
+    }
+    if header.trim().is_empty() { "use super::*;\n".to_string() } else { format!("{}\nuse super::*;\n", header.trim_end()) }
+}
+
+fn retire_test_containers(s: &Store, ix: &Index, whole: &HashSet<usize>) -> Result<(), Failure> {
+    let ids: Vec<String> = whole.iter().map(|&c| ix.syms[c].id.clone()).collect();
+    let now = s.index()?;
+    for id in ids {
+        let children: Vec<String> =
+            now.syms.iter().filter(|sym| sym.parent.as_deref() == Some(id.as_str())).map(|sym| sym.id.clone()).collect();
+        for child in children {
+            s.retire(&child, "")?;
+        }
+        s.retire(&id, "")?;
+    }
+    Ok(())
+}
+
+fn plan_test_module(
+    s: &Store,
+    m: &mut RustMove<'_>,
+    existing: Option<&crate::ModuleRow>,
+    groups: &[TestGroup],
+    moved: &[bool],
+) -> Result<Option<TestModule>, Failure> {
+    if groups.is_empty() {
+        return Ok(None);
+    }
+    let ix = m.ix;
+    let target_file = m
+        .create
+        .as_ref()
+        .map(|c| c.file.clone())
+        .or_else(|| ix.modules.iter().find(|row| row.path == m.target).and_then(|row| row.file.clone()))
+        .ok_or_else(|| Failure(format!("E1001 {} has no file for its tests", m.target), 1))?;
+    let needs = groups.iter().any(|g| needs_super(ix, moved, &g.children, &m.target));
+    match existing {
+        Some(row) => {
+            if needs {
+                let header = m.newheaders.get(&row.path).cloned().unwrap_or_else(|| row.header.clone());
+                m.newheaders.insert(row.path.clone(), with_super(&header));
+            }
+            Ok(Some(TestModule {
+                module: row.path.clone(),
+                file: row.file.clone().unwrap(),
+                dir: row.dir.clone(),
+                header: row.header.clone(),
+                created: false,
+            }))
+        }
+        None => {
+            let file = test_file(&m.target, &target_file);
+            if s.root.join(&file).exists() {
+                return fail(format!("E1001 {file} already exists outside the store; import it before extracting tests"));
+            }
+            let path = file.rsplit_once('/').map_or(file.as_str(), |(_, name)| name).to_string();
+            let module = format!("{}::tests", m.target);
+            let header = test_file_header(needs);
+            let target_header = m.newheaders.get(&m.target).cloned().unwrap_or_default();
+            m.newheaders.insert(m.target.clone(), crate::rust_submit::add_test_mod(&target_header, "tests", &path));
+            m.newheaders.insert(module.clone(), header.clone());
+            let dir = file.split_once('/').map_or("src", |(dir, _)| dir).to_string();
+            Ok(Some(TestModule { module, file, dir, header, created: true }))
+        }
+    }
+}
+
+fn carry_test_imports(
+    ix: &Index,
+    moved: &[bool],
+    ids: &HashMap<&str, usize>,
+    refs: &language::rust_refs::References<'_>,
+    groups: &[TestGroup],
+    test: &TestModule,
+    newtext: &mut [String],
+    newheaders: &mut HashMap<String, String>,
+) -> Result<(), Failure> {
+    let tests: HashSet<usize> = groups.iter().flat_map(|g| g.children.iter().copied()).collect();
+    let mut carried: Vec<Carry> = vec![];
+    let mut seen = HashSet::new();
+    for &i in &tests {
+        let from = ix.syms[i].module.clone();
+        let mut sites = vec![];
+        if let Some(container) = test_container(ix, ids, i) {
+            sites.extend(test_container_imports(ix, container)?);
+        } else if let Some(row) = ix.modules.iter().find(|row| row.path == from) {
+            sites.extend(
+                language::rust_refs::import_sites_in(&row.header).map_err(|e| Failure(format!("imports in {from} don't parse: {e}"), 1))?,
+            );
+        }
+        for site in sites {
+            if site.path.first().is_some_and(|part| part == "super") {
+                continue;
+            }
+            let used = tests.iter().any(|&j| ix.syms[j].module == from && refs.mentioned[j].contains(&site.local));
+            if !site.glob && !used {
+                continue;
+            }
+            if seen.insert((from.clone(), site.local.clone(), site.path.clone(), site.glob)) {
+                carried.push(Carry { from: from.clone(), site, rename: true });
+            }
+        }
+    }
+    if carried.is_empty() {
+        return Ok(());
+    }
+    carry_imports(ix, moved, &test.module, &carried, refs, newtext, newheaders)
+}
+
+fn test_container_imports(ix: &Index, container: usize) -> Result<Vec<language::rust_refs::ImportSite>, Failure> {
+    let mut sites = language::rust_refs::import_sites_in(&ix.syms[container].text)
+        .map_err(|e| Failure(format!("imports in {} don't parse: {e}", ix.syms[container].qname()), 1))?;
+    let id = ix.syms[container].id.as_str();
+    for symbol in ix.syms.iter().filter(|s| s.parent.as_deref() == Some(id) && s.kind_text == "use") {
+        sites.extend(
+            language::rust_refs::import_sites_in(&symbol.text)
+                .map_err(|e| Failure(format!("imports in {} don't parse: {e}", ix.syms[container].name), 1))?,
+        );
+    }
+    Ok(sites)
+}
+
+/// Inserts `line` after the import item; keeps an inline module's braces and indentation.
+fn add_use_after(text: &str, item: &Range<usize>, line: &str) -> String {
+    let start = text[..item.start].rfind('\n').map_or(0, |i| i + 1);
+    let indent: String = text[start..item.start].chars().take_while(|c| c.is_whitespace()).collect();
+    let mut out = String::with_capacity(text.len() + line.len() + indent.len() + 2);
+    out.push_str(&text[..item.end]);
+    out.push('\n');
+    out.push_str(&indent);
+    out.push_str(line);
+    out.push_str(&text[item.end..]);
+    out
 }
