@@ -46,14 +46,15 @@ fn a_macro_error_is_located_at_its_call_site() {
         "\"expansion\":{\"span\":{\"file_name\":\"src/lib.rs\",\"line_start\":10,\"line_end\":10,",
         "\"is_primary\":false,\"expansion\":null},\"macro_decl_name\":\"assert_eq!\"}}",
     );
-    let rendered = "error: no method named `nope`\n --> src/lib.rs:10:5\n";
+    let rendered = "error: no method named `nope`\n --> src/lib.rs:3:5\n";
     let diags = diagnostics(
         &message("error", rendered, inner),
         &files("crate", "/x/src/lib.rs", vec![(2, 4, "crate::one"), (8, 12, "crate::two")]),
     );
     assert_eq!(diags.len(), 1);
     assert_eq!(diags[0].symbol.as_deref(), Some("crate::two"));
-    assert!(diags[0].text.contains("line 3"), "{}", diags[0].text);
+    assert!(diags[0].text.contains("at crate::two, line 3"), "{}", diags[0].text);
+    assert!(!diags[0].text.contains("crate::one"), "{}", diags[0].text);
 }
 
 /// A message reported once per target is shown once, a span-less one is
@@ -490,4 +491,105 @@ fn a_grouped_error_title_comes_from_cargos_output() {
     assert_eq!(diags.len(), 2);
     let causes: Vec<String> = diags.iter().map(|d| crate::error_cause(d).unwrap().1).collect();
     assert_eq!(causes, ["`helper` is private", "`open` is missing on `Store`"]);
+}
+
+/// A probe's own lines replace the scratch file's numbers, and a note in project code counts from its symbol.
+#[test]
+fn probe_lines_replace_scratch_numbers_and_notes_keep_their_symbol() {
+    let rendered = concat!(
+        "error[E0308]: mismatched types\n",
+        "  --> src/probe.rs:15:9\n",
+        "   |\n",
+        "15 |         let x: i32 = \"nope\";\n",
+        "   |         ^^^^^^^^^^^^^^\n",
+        "   |\n",
+        "note: function defined here\n",
+        "  --> src/probe.rs:8:4\n",
+        "   |\n",
+        " 8 | pub fn probe_code(text: &str) -> String {\n",
+        "   |    ^^^^^^^^^^\n",
+    );
+    let spans = format!("{},{}", span("src/probe.rs", 15, true), span("src/probe.rs", 8, false));
+    let diags = diagnostics(
+        &message("error", rendered, &spans),
+        &files("crate", "/x/src/probe.rs", vec![(8, 9, "crate.probe_code"), (15, 16, "probe")]),
+    );
+    assert_eq!(diags.len(), 1);
+    assert!(diags[0].text.contains("  at probe, line 1"), "{}", diags[0].text);
+    assert!(diags[0].text.contains("  at crate.probe_code, line 1"), "{}", diags[0].text);
+    assert!(diags[0].text.contains("\n 1 | let x: i32 = \"nope\";"), "{}", diags[0].text);
+    assert!(diags[0].text.contains("\n   | ^^^^^^^^^^^^^^"), "{}", diags[0].text);
+    assert!(diags[0].text.contains("\n 1 | pub fn probe_code"), "{}", diags[0].text);
+    assert!(diags[0].text.contains("\n   |    ^^^^^^^^^^"), "{}", diags[0].text);
+    assert!(!diags[0].text.contains("|         ^"), "{}", diags[0].text);
+    assert!(!diags[0].text.contains(" 8 |"), "{}", diags[0].text);
+    assert!(!diags[0].text.contains("15 |"), "{}", diags[0].text);
+    assert!(!diags[0].text.contains("--> "), "{}", diags[0].text);
+}
+
+/// An error on the generated wrapper names the end of the probe without a scratch gutter.
+#[test]
+fn probe_wrapper_lines_name_the_end_of_the_text() {
+    let rendered =
+        concat!("error: this file contains an unclosed delimiter\n", "  --> src/probe.rs:20:1\n", "   |\n", "20 | }\n", "   | ^\n",);
+    let diags = diagnostics(
+        &message("error", rendered, &span("src/probe.rs", 20, true)),
+        &files("crate", "/x/src/probe.rs", vec![(15, 16, "probe"), (17, 20, crate::PROBE_END_RANGE)]),
+    );
+    assert_eq!(diags.len(), 1);
+    assert!(diags[0].text.contains("  at probe, end of text"), "{}", diags[0].text);
+    assert!(!diags[0].text.contains("imports"), "{}", diags[0].text);
+    assert!(!diags[0].text.contains("20 |"), "{}", diags[0].text);
+}
+
+/// A rendered source marker needs both its line and column.
+#[test]
+fn a_rendered_location_needs_a_column() {
+    assert_eq!(source_location(" --> src/lib.rs:3:5"), Some(("src/lib.rs", 3)));
+    assert_eq!(source_location(" --> src/lib.rs:3"), None);
+}
+
+/// A multi-line span keeps its markers and carets aligned after the wrapper indent goes.
+#[test]
+fn probe_multiline_markers_lose_the_wrapper_indent() {
+    let rendered = concat!(
+        "error[E0308]: mismatched types\n",
+        "  --> src/probe.rs:15:9\n",
+        "   |\n",
+        "15 |           let x: i32 = (\n",
+        "   |  ________________---___^\n",
+        "   | |                |\n",
+        "   | |                expected due to this\n",
+        "16 | |             1,\n",
+        "17 | |         );\n",
+        "   | |_________^ expected `i32`, found `({integer},)`\n",
+    );
+    let spans = span("src/probe.rs", 15, true);
+    let diags = diagnostics(&message("error", rendered, &spans), &files("crate", "/x/src/probe.rs", vec![(15, 17, "probe")]));
+    assert_eq!(diags.len(), 1);
+    let text = &diags[0].text;
+    assert!(text.contains("\n 1 |   let x: i32 = ("), "{text}");
+    assert!(text.contains("\n   |  ________---___^"), "{text}");
+    assert!(text.contains("\n 2 | |     1,"), "{text}");
+    assert!(text.contains("\n 3 | | );"), "{text}");
+    assert!(text.contains("\n   | |_^"), "{text}");
+    assert!(!text.contains("|         "), "{text}");
+}
+
+/// A probe line with no wrapper indent keeps the spaces its code quotes.
+#[test]
+fn a_probe_line_without_indent_keeps_quoted_spaces() {
+    let rendered = concat!(
+        "error[E0308]: mismatched types\n",
+        "  --> src/probe.rs:15:9\n",
+        "   |\n",
+        "15 | let s = \"        x\";\n",
+        "   | ^^^^^^^^^^^^^^^^^^^^\n",
+    );
+    let diags = diagnostics(
+        &message("error", rendered, &span("src/probe.rs", 15, true)),
+        &files("crate", "/x/src/probe.rs", vec![(15, 16, "probe")]),
+    );
+    assert_eq!(diags.len(), 1);
+    assert!(diags[0].text.contains("\n 1 | let s = \"        x\";"), "{}", diags[0].text);
 }

@@ -10,4 +10,4 @@ unwatched = []
 
 [commands]
 # The JS tests of <solace-task>'s browser code and flows; run after `gleam build`.
-js_tests = { run = ["bun", "test", "test/task_api.test.mjs"] }
+js_tests = { run = ["bun", "test", "test/task_api.test.mjs"], allowed_in_reviews = true }

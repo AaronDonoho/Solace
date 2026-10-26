@@ -223,3 +223,62 @@ fn deleting_the_last_method_drops_its_impl() {
     assert!(!ix.syms.iter().any(|s| s.kind_text == "impl"), "{}", text_of(&root, "src/lib.rs"));
     assert!(store.resolve(&ix, "crate.Store::open").is_err());
 }
+
+/// Deleting an inline module's last test leaves no blank line before its `}`.
+#[test]
+fn deleting_the_last_test_of_an_inline_module_keeps_its_brace() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn first() {}\n\n    #[test]\n    fn last() {}\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.delete_all(&["crate.tests::last"], usize::MAX).unwrap();
+    assert!(out.starts_with("Deleted crate.tests::last."), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "#[cfg(test)]\nmod tests {\n    #[test]\n    fn first() {}\n}\n");
+}
+
+/// Deleting an `impl`'s last method leaves no blank line before its `}`.
+#[test]
+fn deleting_an_impls_last_method_keeps_its_brace() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = concat!(
+        "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        1\n    }\n\n",
+        "    pub fn close(&self) -> i32 {\n        2\n    }\n}\n",
+    );
+    let (root, store) = rust_project(lib);
+    let out = store.delete_all(&["crate.Store::close"], usize::MAX).unwrap();
+    assert!(out.starts_with("Deleted crate.Store::close."), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        1\n    }\n}\n");
+}
+
+/// Deleting a trait's last method leaves no blank line before its `}`.
+#[test]
+fn deleting_a_traits_last_item_keeps_its_brace() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = "pub trait Greet {\n    fn hello(&self);\n\n    fn bye(&self);\n}\n";
+    let (root, store) = rust_project(lib);
+    let out = store.delete_all(&["crate.Greet::bye"], usize::MAX).unwrap();
+    assert!(out.starts_with("Deleted crate.Greet::bye."), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "pub trait Greet {\n    fn hello(&self);\n}\n");
+}
+
+/// Deleting several children, including the last, leaves no blank line
+/// before the inline module's `}`.
+#[test]
+fn deleting_several_children_including_the_last_keeps_the_brace() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = concat!(
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn a() {}\n\n",
+        "    #[test]\n    fn b() {}\n\n    #[test]\n    fn c() {}\n}\n",
+    );
+    let (root, store) = rust_project(lib);
+    let out = store.delete_all(&["crate.tests::b", "crate.tests::c"], usize::MAX).unwrap();
+    assert!(out.starts_with("Deleted crate.tests::b."), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "#[cfg(test)]\nmod tests {\n    #[test]\n    fn a() {}\n}\n");
+}

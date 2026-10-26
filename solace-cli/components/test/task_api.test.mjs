@@ -184,6 +184,68 @@ test('markdown links a feature or milestone by id as it does a task (D-122)', as
   expect(markdown(`epic:${id}`)).not.toContain('<a');
 });
 
+test('markdown renders a table from a header, separator and body rows', async () => {
+  const { markdown } = await import('../src/task_api.mjs');
+  const plain = '<table><thead><tr><th>Name</th><th>Value</th></tr></thead><tbody><tr><td>a</td><td>b</td></tr></tbody></table>';
+  expect(markdown('| Name | Value |\n| --- | --- |\n| a | b |')).toBe(plain);
+  expect(markdown('Name | Value\n--- | ---\na | b')).toBe(plain);
+  // A table starts after a paragraph line and ends at a blank line.
+  expect(markdown('Before:\n| Name | Value |\n| --- | --- |\n| a | b |\n\nAfter'))
+    .toBe(`<p>Before:</p>${plain}<p>After</p>`);
+});
+
+test('markdown aligns table columns from the separator', async () => {
+  const { markdown } = await import('../src/task_api.mjs');
+  expect(markdown('| L | C | R |\n| :--- | :---: | ---: |\n| a | b | c |')).toBe(
+    '<table><thead><tr><th style="text-align:left">L</th><th style="text-align:center">C</th><th style="text-align:right">R</th></tr></thead><tbody><tr><td style="text-align:left">a</td><td style="text-align:center">b</td><td style="text-align:right">c</td></tr></tbody></table>');
+});
+
+test('markdown formats table cells and keeps escaped and code-span pipes', async () => {
+  const { markdown } = await import('../src/task_api.mjs');
+  const id = '0123456789abcdef';
+  expect(markdown(
+    '| **bold** | [docs](https://example.com/a?b=1&c=2) |\n' +
+    '| --- | --- |\n' +
+    '| `x|y` | a \\| pipe and task:' + id + ' |',
+  )).toBe(
+    '<table><thead><tr><th><strong>bold</strong></th><th><a href="https://example.com/a?b=1&amp;c=2" rel="noopener noreferrer">docs</a></th></tr></thead><tbody><tr><td><code>x|y</code></td><td>a | pipe and <a href="/task/' + id + '" data-task="' + id + '">task:' + id + '</a></td></tr></tbody></table>');
+});
+
+test('markdown fills short table rows and drops extra cells', async () => {
+  const { markdown } = await import('../src/task_api.mjs');
+  expect(markdown('| a | b | c |\n| --- | --- | --- |\n| 1 |\n| 1 | 2 | 3 | 4 |')).toBe(
+    '<table><thead><tr><th>a</th><th>b</th><th>c</th></tr></thead><tbody><tr><td>1</td><td></td><td></td></tr><tr><td>1</td><td>2</td><td>3</td></tr></tbody></table>');
+});
+
+test('markdown leaves lines that only look like a table as a paragraph', async () => {
+  const { markdown } = await import('../src/task_api.mjs');
+  expect(markdown('| a | b |\n| c | d |')).toBe('<p>| a | b |<br>| c | d |</p>');
+  expect(markdown('| a | b |\n| --- |\n| c | d |')).toBe('<p>| a | b |<br>| --- |<br>| c | d |</p>');
+});
+
+test('markdown keeps an unmatched backtick in its table cell', async () => {
+  const { markdown } = await import('../src/task_api.mjs');
+  expect(markdown('| a ` b | c |\n| --- | --- |')).toBe(
+    '<table><thead><tr><th>a ` b</th><th>c</th></tr></thead><tbody></tbody></table>');
+});
+
+test('markdown keeps a pipe inside a double-backtick code span in its cell', async () => {
+  const { markdown } = await import('../src/task_api.mjs');
+  expect(markdown('| ``a ` | b`` | c |\n| --- | --- |')).toBe(
+    '<table><thead><tr><th><code>a ` | b</code></th><th>c</th></tr></thead><tbody></tbody></table>');
+});
+
+test('markdown keeps a list whose items look like a table', async () => {
+  const { markdown } = await import('../src/task_api.mjs');
+  expect(markdown('- a | b\n- | -')).toBe('<ul><li>a | b</li><li>| -</li></ul>');
+});
+
+test('markdown reads inline code spans by their backtick run length', async () => {
+  const { markdown } = await import('../src/task_api.mjs');
+  expect(markdown('x ``a`b`` y')).toBe('<p>x <code>a`b</code> y</p>');
+  expect(markdown('a ` b')).toBe('<p>a ` b</p>');
+});
+
 test('markdown applies headings and lists mixed with other lines, nests lists, and keeps code literal', async () => {
   const { markdown } = await import('../src/task_api.mjs');
   expect(markdown('Summary:\n- fixed A\n- tested B')).toBe('<p>Summary:</p><ul><li>fixed A</li><li>tested B</li></ul>');

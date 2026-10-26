@@ -145,10 +145,10 @@ fn fetch_lock_dir(root: &Path) -> Result<PathBuf, Failure> {
     Ok(crate::workspace::enclosing(root)?.unwrap_or_else(|| root.to_path_buf()))
 }
 
-/// The `Cargo.lock` the fetch changes: a workspace member's fetch changes the
-/// workspace's lock, not one in the member (D-176). Cargo names the workspace's
+/// The `Cargo.lock` Cargo uses for `root`: a workspace member's is the
+/// workspace's, not one in the member (D-176). Cargo names the workspace's
 /// manifest; without cargo, fall back to the folder's own lock.
-fn lock_file(root: &Path) -> PathBuf {
+pub(crate) fn lock_file(root: &Path) -> PathBuf {
     let argv: Vec<String> = ["cargo", "locate-project", "--workspace", "--message-format", "plain"].iter().map(|s| s.to_string()).collect();
     match crate::lockdown::command(root, &argv, 120, 4000, false, false) {
         Ok(out) if crate::lockdown::passed(&out) => out
@@ -205,14 +205,13 @@ pub fn diagnostics(output: &str, files: &[FileMap]) -> Vec<Diag> {
         let Some(rendered) = message["rendered"].as_str() else { continue };
         let path = span["file_name"].as_str().unwrap_or("");
         let row = span["line_start"].as_u64().unwrap_or(0) as usize;
-        let (module, symbol, place) = match locate(files, path, row) {
-            Some((module, Some((name, first)))) => {
-                (Some(module.to_string()), Some(name.to_string()), format!("  at {name}, line {}", row + 1 - first))
-            }
-            Some((module, None)) => (Some(module.to_string()), None, format!("  at {module} imports")),
-            None => (None, None, String::new()),
+        let place = location(files, path, row);
+        let (module, symbol) = match locate(files, path, row) {
+            Some((module, Some((name, _)))) if !is_probe_range(name) => (Some(module.to_string()), Some(name.to_string())),
+            Some((module, _)) => (Some(module.to_string()), None),
+            None => (None, None),
         };
-        let text = rewrite(rendered, &place);
+        let text = rewrite(rendered, files, place.as_deref());
         if seen.contains(&text) {
             continue;
         }
@@ -259,17 +258,38 @@ fn primary_span(message: &Value) -> Option<Value> {
     Some(span)
 }
 
-/// `rendered` without colors, its ` --> file:line:col` line replaced by
-/// `place`, the symbol's position, as `gleam::diagnostics` rewrites Gleam's.
-fn rewrite(rendered: &str, place: &str) -> String {
+/// `rendered` without colors, its first location replaced by the message's
+/// primary span and later ones by their own spans, as `gleam::diagnostics`
+/// rewrites Gleam's.
+fn rewrite(rendered: &str, files: &[FileMap], primary: Option<&str>) -> String {
     let clean = strip_ansi(rendered);
     let mut out: Vec<String> = vec![];
+    let mut path: Option<String> = None;
+    let mut first = true;
+    let mut probe = false;
     for line in clean.lines() {
-        if !place.is_empty() && line.trim_start().starts_with("--> ") {
-            out.push(place.to_string());
-        } else {
-            out.push(line.to_string());
+        if let Some((at, row)) = source_location(line) {
+            path = Some(at.to_string());
+            let place = if first { primary.map(str::to_string) } else { None }.or_else(|| location(files, at, row));
+            first = false;
+            probe = locate(files, at, row).is_some_and(|(_, sym)| sym.is_some_and(|(name, _)| name == crate::PROBE_RANGE));
+            out.push(place.unwrap_or_else(|| line.to_string()));
+            continue;
         }
+        if let Some(current) = path.as_deref() {
+            if let Some((line, at_probe)) = probe_gutter(line, current, files) {
+                probe = at_probe;
+                out.push(line);
+                continue;
+            }
+            if probe {
+                if let Some(line) = probe_continuation(line) {
+                    out.push(line);
+                    continue;
+                }
+            }
+        }
+        out.push(line.to_string());
     }
     out.join("\n").trim_end().to_string()
 }
@@ -342,7 +362,10 @@ pub fn failures(output: &str) -> BTreeMap<String, (String, String)> {
 /// calls this.
 pub fn format_item(root: &Path, text: &str, opening: Option<&str>) -> Result<String, Failure> {
     let source = match opening {
-        Some(opening) => format!("{opening}\n{text}\n}}\n"),
+        Some(opening) => {
+            let opening = if opening.ends_with('\n') { opening.to_string() } else { format!("{opening}\n") };
+            format!("{opening}{text}\n}}\n")
+        }
         None => text.to_string(),
     };
     let edition = edition(root);
@@ -501,4 +524,100 @@ pub(crate) fn max_width(root: &Path) -> usize {
 #[cfg(test)]
 pub(crate) fn with_path<T>(dirs: &[PathBuf], f: impl FnOnce() -> T) -> T {
     crate::language::paths::with_path(dirs, f)
+}
+
+/// A rendered `-->` or `:::` `path:line:col` as its path and line.
+fn source_location(line: &str) -> Option<(&str, usize)> {
+    let line = line.trim_start();
+    let location = line.strip_prefix("--> ").or_else(|| line.strip_prefix("::: "))?;
+    let (path, row, column, _) = parse_location(location)?;
+    column?;
+    Some((path, row))
+}
+
+/// A scratch line as its line in its symbol or in the probe's text; whether
+/// it is a probe line, whose wrapper indent the quoted text loses.
+fn probe_gutter(line: &str, path: &str, files: &[FileMap]) -> Option<(String, bool)> {
+    let trimmed = line.trim_start();
+    let digits = trimmed.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digits == 0 || !trimmed[digits..].starts_with(" |") {
+        return None;
+    }
+    let row = trimmed[..digits].parse().ok()?;
+    let (_, Some((name, first))) = locate(files, path, row)? else { return None };
+    let indent = &line[..line.len() - trimmed.len()];
+    let number = match name {
+        crate::PROBE_START_RANGE | crate::PROBE_END_RANGE => String::new(),
+        _ => (row + 1 - first).to_string(),
+    };
+    let rest = &trimmed[digits..];
+    let probe = name == crate::PROBE_RANGE;
+    let rest = match rest.strip_prefix(" | ") {
+        Some(text) if probe => format!(" | {}", without_probe_indent(text).unwrap_or_else(|| text.to_string())),
+        _ => rest.to_string(),
+    };
+    Some((format!("{indent}{number:>width$}{rest}", width = digits), probe))
+}
+
+/// A rendered source position as the line shown to the agent.
+fn location(files: &[FileMap], path: &str, row: usize) -> Option<String> {
+    match locate(files, path, row) {
+        Some((_, Some((name, first)))) if name == crate::PROBE_RANGE => Some(format!("  at probe, line {}", row + 1 - first)),
+        Some((_, Some((name, _)))) if name == crate::PROBE_START_RANGE => Some("  at probe, start of text".to_string()),
+        Some((_, Some((name, _)))) if name == crate::PROBE_END_RANGE => Some("  at probe, end of text".to_string()),
+        Some((_, Some((name, first)))) => Some(format!("  at {name}, line {}", row + 1 - first)),
+        Some((module, None)) => Some(format!("  at {module} imports")),
+        None => None,
+    }
+}
+
+/// Whether a line range belongs to the generated probe rather than a project symbol.
+fn is_probe_range(name: &str) -> bool {
+    name == crate::PROBE_RANGE || name == crate::PROBE_START_RANGE || name == crate::PROBE_END_RANGE
+}
+
+/// A `path:line[:column]` at the start of `text`, as its path, line,
+/// optional column and the byte after the location.
+pub(crate) fn parse_location(text: &str) -> Option<(&str, usize, Option<usize>, usize)> {
+    for (at, c) in text.char_indices() {
+        if c != ':' {
+            continue;
+        }
+        let tail = &text[at + 1..];
+        let row_len = tail.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if row_len == 0 {
+            continue;
+        }
+        let Ok(row) = tail[..row_len].parse::<usize>() else { continue };
+        let mut end = at + 1 + row_len;
+        let mut column = None;
+        if let Some(after) = text[end..].strip_prefix(':') {
+            let col_len = after.bytes().take_while(|b| b.is_ascii_digit()).count();
+            if col_len > 0 {
+                column = Some(after[..col_len].parse().ok()?);
+                end += 1 + col_len;
+            }
+        }
+        return Some((&text[..at], row, column, end));
+    }
+    None
+}
+
+/// A `|` line under a probe's quoted line, without the wrapper's indent.
+fn probe_continuation(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let marked = trimmed.strip_prefix("| ")?;
+    let text = without_probe_indent(marked)?;
+    let indent = &line[..line.len() - trimmed.len()];
+    Some(format!("{indent}| {text}"))
+}
+
+/// `text` without the eight columns the probe wrapper adds after its leading
+/// span markers; rustc may draw them as spaces or as underscores.
+fn without_probe_indent(text: &str) -> Option<String> {
+    let indent = crate::PROBE_INDENT.len();
+    let underscores = "_".repeat(indent);
+    let prefix = text.find(|c: char| !matches!(c, '|' | '/' | '\\' | ' ' | '_')).unwrap_or(text.len());
+    let at = text[..prefix].find(crate::PROBE_INDENT).or_else(|| text[..prefix].find(&underscores))?;
+    Some(format!("{}{}", &text[..at], &text[at + indent..]))
 }

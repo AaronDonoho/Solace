@@ -239,13 +239,13 @@ pub(super) fn strategy_note_show(top: &Path, tid: &str, notes: &str) -> Result<V
     };
     let picked = match notes {
         "all" => json!((0..all.len()).map(numbered).collect::<Vec<_>>()),
-        spec => json!(step_list(spec, all.len())?.into_iter().map(|n| numbered(n - 1)).collect::<Vec<_>>()),
+        spec => json!(parse_number_list(spec, all.len(), "notes")?.into_iter().map(|n| numbered(n - 1)).collect::<Vec<_>>()),
     };
     Ok(json!({"task": tid, "notes": picked}))
 }
-/// A step list like `3,7,10..12`: numbers and ranges within `1..=n`.
-fn step_list(spec: &str, n: usize) -> Result<Vec<usize>, Failure> {
-    let bad = || Failure(format!("E7001 steps are numbers and ranges such as 3,7,10..12, within 1..{n}; or `all`"), 1);
+/// A list like `3,7,10..12`: numbers and ranges within `1..=n`; `noun` names the items in an error.
+pub(super) fn parse_number_list(spec: &str, n: usize, noun: &str) -> Result<Vec<usize>, Failure> {
+    let bad = || Failure(format!("E7001 {noun} are numbers and ranges such as 3,7,10..12, within 1..{n}; or `all`"), 1);
     let mut out = vec![];
     for part in spec.split(',') {
         let (a, b) = part.split_once("..").unwrap_or((part, part));
@@ -310,7 +310,7 @@ pub(super) fn strategy_run_show(top: &Path, tid: &str, rid: &str, steps: Option<
     let steps = match steps {
         None => json!(entries.iter().enumerate().map(|(i, e)| step_line(i, e)).collect::<Vec<_>>()),
         Some("all") => json!((0..entries.len()).map(numbered).collect::<Vec<_>>()),
-        Some(spec) => json!(step_list(spec, entries.len())?.into_iter().map(|n| numbered(n - 1)).collect::<Vec<_>>()),
+        Some(spec) => json!(parse_number_list(spec, entries.len(), "steps")?.into_iter().map(|n| numbered(n - 1)).collect::<Vec<_>>()),
     };
     let run = if picked { json!(run_header(&run)) } else { run };
     Ok(json!({"run": run, "steps": steps}))
@@ -330,7 +330,7 @@ fn within(text: String, budget: usize) -> String {
 /// limit by itself comes in parts: as much of its longest text as fits, and a
 /// `Next:` line ending in `--from <n>`. `from` starts the first one's longest
 /// text at character `from`.
-fn in_parts(mut reply: Value, key: &str, number: &str, next: &str, from: usize, budget: usize) -> Out {
+pub(super) fn in_parts(mut reply: Value, key: &str, number: &str, next: &str, from: usize, budget: usize) -> Out {
     let mut items = match reply[key].take() {
         Value::Array(a) => a,
         _ => vec![],
@@ -678,6 +678,18 @@ mod tests {
         let failed = super::strategy_run_failed(&root, "t1", "r1").unwrap();
         assert_eq!(failed["steps"], json!(["1 submit b: E0108 no b"]));
         assert_eq!(super::run_header(&json!({"id":"r","kind":"work","model":"m","state":"running"})), "r work m running");
+    }
+
+    #[test]
+    fn strategy_note_show_says_when_a_task_or_its_notes_are_missing() {
+        let root = crate::testing::Scratch::new();
+        let task = json!({"id": "t1", "column": "backlog", "notes": [], "runs": []});
+        let root = root.with(&[(".solace/board/t1.json", &task.to_string())]);
+        super::super::adopt_tasks(&root, &root).unwrap();
+        let no_notes = super::strategy_note_show(&root, "t1", "all").unwrap_err().0;
+        assert!(no_notes.starts_with("E7001") && no_notes.contains("task t1 has no notes"), "{no_notes}");
+        let unknown = super::strategy_note_show(&root, "t2", "all").unwrap_err().0;
+        assert!(unknown.starts_with("E7023") && unknown.contains("unknown task t2"), "{unknown}");
     }
 
 

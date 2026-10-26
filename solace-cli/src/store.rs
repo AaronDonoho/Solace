@@ -62,9 +62,15 @@ pub(crate) fn is_block(p: &language::rust::Piece) -> bool {
 }
 
 /// A block's own text can't be saved as an item (D-168): a new block goes
-/// through `submit --new <module>`, and an existing one changes item by item.
-pub(crate) fn block_note(kind: &str) -> String {
-    format!("a new `{kind}` block goes through `submit --new <module>`; an existing one changes item by item")
+/// through `submit --new <module>`; an existing block's code changes item by
+/// item, and its layout goes through `format <module>`.
+pub(crate) fn block_note(kind: &str, module: Option<&str>) -> String {
+    match module {
+        Some(module) => format!(
+            "an existing `{kind}` block changes item by item; its layout (blank lines, indentation) is fixed with `format {module}`"
+        ),
+        None => format!("a new `{kind}` block goes through `submit --new <module>`; an existing one changes item by item"),
+    }
 }
 
 /// Why a `mod x;` in submitted text isn't saved (D-168): Solace's modules come
@@ -87,9 +93,9 @@ pub fn submit_module(root: &Path, module: &str, text: &str, formatted: bool) -> 
     let source = if formatted {
         text.to_string()
     } else {
-        cargo::format_item(root, text, None).map_err(|e| rust_syntax_error(e, module, None, module, 0, lines))?
+        cargo::format_item(root, text, None).map_err(|e| rust_syntax_error(e, module, None, module, 0, 0, lines))?
     };
-    let file = language::rust::split(&source, module).map_err(|e| rust_syntax_error(e, module, None, module, 0, lines))?;
+    let file = language::rust::split(&source, module).map_err(|e| rust_syntax_error(e, module, None, module, 0, 0, lines))?;
     if !file.refusals.is_empty() {
         let lines: Vec<String> = file.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
         return fail(format!("Not saved: the Rust text is outside the subset Solace holds.\n{}", lines.join("\n")));
@@ -126,7 +132,7 @@ pub fn submit_items(
         if let Some(p) = file.items.iter().find(|p| is_block(p))
             && parent.is_some_and(|(_, _, kind)| kind != "mod")
         {
-            return fail(format!("Not saved: {}.", block_note(p.kind)));
+            return fail(format!("Not saved: {}.", block_note(p.kind, None)));
         }
     }
     // An empty container is stored whole, so the text before its closing brace
@@ -141,9 +147,9 @@ pub fn submit_items(
             None => text.to_string(),
         }
     } else {
-        cargo::format_item(root, text, opening.as_deref()).map_err(|e| rust_syntax_error(e, label, parent, module, 0, lines))?
+        cargo::format_item(root, text, opening.as_deref()).map_err(|e| rust_syntax_error(e, label, parent, module, 0, 0, lines))?
     };
-    let file = language::rust::split(&source, module).map_err(|e| rust_syntax_error(e, label, parent, module, offset, lines))?;
+    let file = language::rust::split(&source, module).map_err(|e| rust_syntax_error(e, label, parent, module, 0, offset, lines))?;
     if !file.refusals.is_empty() {
         let lines: Vec<String> = file.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
         return fail(format!("Not saved: the Rust text is outside the subset Solace holds.\n{}", lines.join("\n")));
@@ -526,23 +532,25 @@ mod read_tests;
 mod delete_tests;
 
 /// A Rust syntax failure `e` located in the block `label`: its line in the
-/// submitted text (the wrapper's `offset` lines are removed) and the container
-/// the item was to be added to, so a wrong placement is visible. A line from
-/// rustfmt's output is approximate once rustfmt has reflowed the text.
+/// module and the container the item was to be added to, so a wrong placement
+/// is visible. `module_line` is the line before the block; a parse error first
+/// loses the `wrapper_lines` its container added. A line from rustfmt's output
+/// is approximate once rustfmt has reflowed the text.
 pub(crate) fn rust_syntax_error(
     e: Failure,
     label: &str,
     parent: Option<(&str, &str, &str)>,
     module: &str,
-    offset: usize,
+    module_line: usize,
+    wrapper_lines: usize,
     lines: usize,
 ) -> Failure {
     let (line, what) = if let Some(rest) = e.0.strip_prefix("Not saved: E0100 syntax error at line ") {
         let (line, what) = rest.split_once(':').unwrap_or((rest, ""));
-        (line.trim().parse::<usize>().ok(), what.trim().to_string())
+        (line.trim().parse::<usize>().ok().map(|line| line + module_line), what.trim().to_string())
     } else if let Some(rest) = e.0.strip_prefix("line ") {
         let (line, what) = rest.split_once(':').unwrap_or((rest, ""));
-        let line = line.trim().parse::<usize>().ok().map(|line| line.saturating_sub(offset).max(1));
+        let line = line.trim().parse::<usize>().ok().map(|line| line.saturating_sub(wrapper_lines).max(1) + module_line);
         (line, what.trim().to_string())
     } else if e.0.starts_with("Not saved:") {
         return e;

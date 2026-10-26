@@ -45,6 +45,7 @@ use store::{projection, store_rust_file};
 mod reference;
 pub(crate) use reference::*;
 mod index;
+mod rust_probe;
 /// The largest reply, in bytes (about 8k tokens). Agents cut longer tool
 /// output (Codex at about 10k tokens), so `inspect` and `view` trim by
 /// priority to fit rather than being cut mid-document (D-14). `solace mcp
@@ -261,6 +262,9 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
         // In a task run, `impact` with no names is the task's own change list (D-102).
         if a == ["impact"] {
             return board::task_diff(&home, tid, &[], budget);
+        }
+        if a.starts_with(&["task", "peek"]) {
+            return board::task_peek(&home, tid, &a[2..], budget);
         }
         if a.first() == Some(&"task") {
             return board::task_command(&home, tid, rid, &a, input, options, guard);
@@ -599,7 +603,7 @@ const HELD: &str = "`task done` waits for a test that passes and reaches every c
 then send `task done` again with an updated summary.\n";
 /// task:da797576d0cfaaac: a line left with no command once `--project <dir>` is
 /// taken off is refused as that line's error; the rest of the call runs.
-const PROJECT_ONLY: &str = "`--project` goes on the same line as its command, e.g. `view x.y --project <dir>`\n";
+const PROJECT_ONLY: &str = "`--project` goes at the end of each command line it applies to, e.g. `view x.y --project <dir>`\n";
 /// D-131: `build plan` only reads, so it is no change, process or verification.
 fn reads_only(a: &[&str]) -> bool {
     a.starts_with(&["build", "plan"])
@@ -835,7 +839,15 @@ fn unknown_option(a: &[&str]) -> Option<Out> {
     let own = options_of(command);
     let bad = a[1..].iter().find(|x| x.starts_with("--") && !own.contains(x))?;
     let takers: Vec<&str> = READS.iter().copied().filter(|c| *c != command && options_of(c).contains(bad)).collect();
-    let elsewhere = if takers.is_empty() { String::new() } else { format!("; {} takes {bad}", takers.join(" and ")) };
+    let elsewhere = if takers.is_empty() {
+        String::new()
+    } else if *bad == "--context" && takers.contains(&"inspect") {
+        "; `--context` belongs to `inspect`: `inspect <name> --context`".to_string()
+    } else if takers.len() == 1 {
+        format!("; {} takes {bad}", takers[0])
+    } else {
+        format!("; {bad} belongs to {}", takers.join(" and "))
+    };
     let list = if own.is_empty() { format!("{command} takes no options") } else { format!("{command} takes: {}", own.join(", ")) };
     Some(usage(format!("{command} has no {bad}{elsewhere}. {list} (`help {command}`)")))
 }
@@ -937,19 +949,13 @@ fn hinted(out: Out, here: &Path) -> Out {
     }
 }
 
-/// The first project other than `here` with exactly one symbol `name`: the
-/// run's task's projects first, then the others under the Solace root (D-123).
 fn elsewhere(here: &Path, name: &str) -> Option<String> {
-    let top = workspace::enclosing(here).ok().flatten()?;
-    let mine = scope::dir(&top, here);
-    let mut order = scope::of_run(here).unwrap_or_default();
-    let rest: Vec<String> = workspace::members(&top).ok()?.into_iter().filter(|m| !order.contains(m)).collect();
-    order.extend(rest);
-    let has = |d: &str| -> Option<usize> {
-        let s = Store::peek(&scope::path(&top, d)).ok()?;
-        s.resolve(&s.index().ok()?, name).ok()
-    };
-    order.into_iter().filter(|d| *d != mine).find(|d| has(d).is_some())
+    let (top, dirs) = other_projects(here)?;
+    dirs.into_iter().find(|d| {
+        let Some(s) = Store::peek(&scope::path(&top, d)).ok() else { return false };
+        let Ok(ix) = s.index() else { return false };
+        s.resolve(&ix, name).is_ok()
+    })
 }
 
 fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>, old: Option<&str>, budget: usize) -> Out {
@@ -976,7 +982,7 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
     let store = Store::open()?;
     let settings = lockdown::settings(&store.root)?;
     let task = board::context().map(|(tid, _)| tid);
-    if matches!(a[0], "check" | "test" | "submit" | "delete")
+    if matches!(a[0], "check" | "test" | "submit" | "delete" | "probe")
         && let Some(id) = language::id(&store.root)
         && let Some(why) = language::reason(id)?
     {
@@ -985,27 +991,28 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
     if let Some(out) = lockdown::dispatch(&store, &settings, &a, input, old, budget) {
         return out;
     }
-    // drafts include kept file patches (D-120), so a plain-files project lists and reads them
-    if GLEAM.contains(&a[0]) && !matches!(a.as_slice(), ["drafts"] | ["view", "--draft", _]) && store.lang.is_none() {
+    // drafts include kept file patches (D-120), so a plain-files project lists, reads and drops them
+    if GLEAM.contains(&a[0]) && a[0] != "drafts" && !matches!(a.as_slice(), ["view", "--draft", _]) && store.lang.is_none() {
         if !language::is_rust(&store.root) {
-            return lockdown::plain(&store, task.as_deref(), a[0]);
+            return lockdown::plain(&store, task.as_deref(), a[0], a.get(1).copied());
         }
         // A Rust project's tools are cargo's (D-158, D-168, D-173): `check` and
         // `test` run, `submit` saves items by name and `delete` removes them,
         // each checked with cargo; `drafts` is language-neutral.
         match a[0] {
-            "check" | "test" | "submit" | "delete" if cargo::installed() => {}
-            "check" | "test" | "submit" | "delete" => return lockdown::error("E6013", a[0], cargo::MISSING),
+            "check" | "test" | "submit" | "delete" | "probe" if cargo::installed() => {}
+            "check" | "test" | "submit" | "delete" | "probe" => return lockdown::error("E6013", a[0], cargo::MISSING),
             // Reads reach a Rust store's symbols by name, as they do Gleam's
             // (D-158); `refs` and `impact` answer from its reference graph (D-170).
             "view" | "inspect" | "find" | "refs" | "impact" => {}
-            _ => return lockdown::plain(&store, task.as_deref(), a[0]),
+            _ => return lockdown::plain(&store, task.as_deref(), a[0], a.get(1).copied()),
         }
     }
     match a.as_slice() {
         ["session", "start", "--task"] => store.session_task(&input()?),
         ["session", "start", "--task", task @ ..] => store.session_task(&task.join(" ")),
         ["submit", ..] => drafts::submit(&store, &a, input, old),
+        ["drafts", "drop", id] => drafts::drop_one(&store, id),
         ["drafts"] => drafts::list(&store),
         ["view", "--draft", id] => drafts::view(&store, id),
         ["session", rest @ ..] => store.session(&operands(rest.strip_prefix(&["start"]).unwrap_or(rest))),
@@ -1021,10 +1028,10 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
         ["check", "--warnings"] => command_report(store.check_report(true), budget),
         ["test", rest @ ..] => command_report(store.test(rest), budget),
         ["probe", rest @ ..] => {
-            let (from, trace) = probe_args(rest)?;
+            let (from, trace, in_) = probe_args(rest)?;
             // with --from the test's body is the probe; `text` only adds to it
             let text = if from.is_some() { input().unwrap_or_default() } else { input()? };
-            command_report(store.probe(&text, from, &trace), budget)
+            command_report(store.probe(&text, from, &trace, in_), budget)
         }
         ["work", "add"] => store.work_add(&input()?),
         ["work", "add", text @ ..] => store.work_add(&text.join(" ")),
@@ -1041,22 +1048,23 @@ fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>
 /// The module name a probe runs as.
 const PROBE: &str = "solace_probe";
 
-/// `probe [--from <fn>] [--trace <fn>...]`
-fn probe_args<'a>(args: &[&'a str]) -> Result<(Option<&'a str>, Vec<&'a str>), Failure> {
-    let (mut from, mut trace, mut tracing) = (None, vec![], false);
+/// `probe [--from <fn>] [--in <module>] [--trace <fn>...]`
+fn probe_args<'a>(args: &[&'a str]) -> Result<(Option<&'a str>, Vec<&'a str>, Option<&'a str>), Failure> {
+    let (mut from, mut trace, mut module, mut tracing) = (None, vec![], None, false);
     let mut it = args.iter();
     while let Some(&a) = it.next() {
         match a {
             "--from" => from = Some(*it.next().ok_or_else(|| Failure("--from needs a function name.".into(), 2))?),
+            "--in" => module = Some(*it.next().ok_or_else(|| Failure("--in needs a module name.".into(), 2))?),
             "--trace" => tracing = true,
             _ if tracing && !a.starts_with("--") => trace.push(a),
-            _ => return usage("probe [--from <fn>] [--trace <fn>...]; the code is the tool's `text`"),
+            _ => return usage("probe [--from <fn>] [--in <module>] [--trace <fn>...]; the code is the tool's `text`"),
         }
     }
     if tracing && trace.is_empty() {
         return usage("--trace needs the functions to trace, e.g. `probe --trace pricing.quote`");
     }
-    Ok((from, trace))
+    Ok((from, trace, module))
 }
 
 fn command_report(result: Out, budget: usize) -> Out {
@@ -1126,6 +1134,9 @@ struct Store {
     /// Whether the store has `modules.owns_dir`; `false` only for an older store
     /// opened by `peek` (D-168).
     owns_dir: bool,
+    /// Direct dependency modules, scanned again only when the manifest or the
+    /// resolved package list changes.
+    deps: std::cell::RefCell<Option<(DependencyKey, Rc<Vec<DependencyModule>>)>>,
 }
 
 thread_local! {
@@ -1316,7 +1327,7 @@ fn import_with(root: &Path, has_cargo: bool) -> Out {
     if rust_imported && has_cargo {
         cargo::warm(root);
     }
-    let store = Store { db: Rc::new(db), root: root.to_path_buf(), lang: language::detect(root), nested: true, owns_dir: true };
+    let store = Store::new(Rc::new(db), root, true, true);
     outside::approve_all(&store)?;
     out += &format!("Imported {modules} modules, {symbols} symbols into .solace/store.db\n");
     out += &dependencies;
@@ -1358,7 +1369,7 @@ impl Store {
     fn at(root: &Path) -> Result<Store, Failure> {
         let shared = COMMAND_DB.with_borrow(|c| c.iter().find(|(r, _)| lockdown::same_project(r, root)).map(|(_, db)| db.clone()));
         if let Some(db) = shared {
-            return Ok(Store { db, root: root.into(), lang: language::detect(root), nested: true, owns_dir: true });
+            return Ok(Store::new(db, root, true, true));
         }
         let db = Connection::open(root.join(".solace/store.db"))?;
         // WAL and a busy timeout: readers see the last committed state while a
@@ -1367,7 +1378,7 @@ impl Store {
         db.execute_batch("PRAGMA journal_mode=WAL;")?;
         db.execute_batch(LATER_TABLES)?;
         Self::add_columns(&db)?;
-        Ok(Store { db: Rc::new(db), root: root.into(), lang: language::detect(root), nested: true, owns_dir: true })
+        Ok(Store::new(Rc::new(db), root, true, true))
     }
 
     /// The language that reads this store's code.
@@ -1415,7 +1426,7 @@ impl Store {
         // (D-158), so `index` reads its rows without touching `pragma_table_info`.
         let nested = has_column(&db, "symbols", "parent")? && has_column(&db, "modules", "file")?;
         let owns_dir = has_column(&db, "modules", "owns_dir")?;
-        Ok(Store { db: Rc::new(db), root: root.into(), lang: language::detect(root), nested, owns_dir })
+        Ok(Store::new(Rc::new(db), root, nested, owns_dir))
     }
 
     /// The project the working folder is in: the nearest folder up with a store.
@@ -1604,7 +1615,15 @@ impl Store {
         }
         match found.as_slice() {
             [i] => Ok(*i),
-            [] => fail(format!("E1001 unknown name: {input}{}", store::similar_hint(ix, input))),
+            [] => {
+                let hint = match input.strip_prefix("module:") {
+                    Some(name) if !name.is_empty() => {
+                        format!("; `module:` names a module, not a symbol: use `view {name}`")
+                    }
+                    _ => store::similar_hint(ix, input),
+                };
+                fail(format!("E1001 unknown name: {input}{hint}"))
+            }
             many => {
                 let list: Vec<String> = many.iter().map(|&i| format!("  {} ({})", ix.syms[i].qname(), ix.syms[i].kind_text)).collect();
                 fail(format!("E1002 ambiguous name: {input} could be\n{}", list.join("\n")))
@@ -1825,14 +1844,8 @@ impl Store {
     /// names the task's feature (D-138) and unfinished dependencies (D-110).
     fn session_task(&self, task: &str) -> Out {
         let tid = board::context().map(|(tid, _)| tid);
-        let deps = tid
-            .as_deref()
-            .map(|tid| {
-                let top = scope::top(&self.root);
-                board::feature_of(&top, tid) + &board::waiting_on(&top, tid)
-            })
-            .unwrap_or_default();
-        self.task_session(task, tid.as_deref(), &deps)
+        let plan = tid.as_deref().map(|tid| board::plan_reading(&scope::top(&self.root), tid)).unwrap_or_default();
+        self.task_session(task, tid.as_deref(), &plan)
     }
 
     /// `session start --task` for board run task `tid`, with `deps` before the
@@ -1988,28 +2001,31 @@ impl Store {
             let short = reach::short(pix, i);
             if store.resolve(pix, &short).ok() == Some(i) { short } else { pix.syms[i].qname() }
         };
-        let repro = code
-            .first()
-            .and_then(|_| {
-                reach::test_symbols(&ix).into_iter().map(|t| (t, reach::closure(&ix, t))).filter(|(_, r)| r.contains(&code[0])).max_by(
-                    |a, b| {
-                        let reached = |r: &HashSet<usize>| code.iter().filter(|c| r.contains(c)).count();
-                        reached(&a.1)
-                            .cmp(&reached(&b.1))
-                            .then(score[a.0].total_cmp(&score[b.0]))
-                            .then(ix.syms[b.0].text.len().cmp(&ix.syms[a.0].text.len()))
-                    },
-                )
-            })
-            .map(|(t, r)| {
-                let traced: Vec<String> = code.iter().filter(|c| r.contains(c)).map(|&c| name(0, c)).collect();
-                format!(
-                    "To reproduce the task's case: `probe --from {} --trace {}`, with statements for the case in `text`.\n",
-                    name(0, t),
-                    traced.join(" ")
-                )
-            })
-            .unwrap_or_default();
+        let repro = if rust {
+            String::new()
+        } else {
+            code.first()
+                .and_then(|_| {
+                    reach::test_symbols(&ix).into_iter().map(|t| (t, reach::closure(&ix, t))).filter(|(_, r)| r.contains(&code[0])).max_by(
+                        |a, b| {
+                            let reached = |r: &HashSet<usize>| code.iter().filter(|c| r.contains(c)).count();
+                            reached(&a.1)
+                                .cmp(&reached(&b.1))
+                                .then(score[a.0].total_cmp(&score[b.0]))
+                                .then(ix.syms[b.0].text.len().cmp(&ix.syms[a.0].text.len()))
+                        },
+                    )
+                })
+                .map(|(t, r)| {
+                    let traced: Vec<String> = code.iter().filter(|c| r.contains(c)).map(|&c| name(0, c)).collect();
+                    format!(
+                        "To reproduce the task's case: `probe --from {} --trace {}`, with statements for the case in `text`.\n",
+                        name(0, t),
+                        traced.join(" ")
+                    )
+                })
+                .unwrap_or_default()
+        };
         let mut packet = String::new();
         let mut room = BUDGET.saturating_sub(modules.len() + repro.len());
         for &(p, i) in &ranked {
@@ -2433,6 +2449,7 @@ impl Store {
         let formatted = self.lang().format(&raw)?;
         let parsed = self.lang().split(&formatted);
         let ix = self.index()?;
+        let deps = self.dependency_modules();
         let (Target::Imports(m) | Target::Module(m)) = target;
         let module = self
             .resolve_module(&ix, m)
@@ -2470,9 +2487,10 @@ impl Store {
                     let (mut changed, mut added) = (vec![], vec![]);
                     for item in &parsed.items {
                         let test = ix.modules.iter().any(|m| m.path == module && m.dir == "test");
-                        for path in missing_imports(&ix, &header, &item.text, test) {
-                            header = add_import(&header, &format!("import {path}"));
-                            notes.push(format!("added `import {path}` to {module}"));
+                        for need in missing_imports(&ix, &deps, &header, &item.text, test) {
+                            let line = need.line();
+                            header = add_import(&header, &line);
+                            notes.push(format!("added `{line}` to {module}"));
                         }
                         if test {
                             notes.extend(
@@ -2524,11 +2542,12 @@ impl Store {
             let own_errors: Vec<&Diag> = diags.iter().filter(|d| d.error).filter(own).collect();
             if !own_errors.is_empty() {
                 let text: Vec<&str> = own_errors.iter().map(|d| d.text.as_str()).collect();
-                let module_syms: Vec<String> = self.index()?.syms.iter().filter(|s| s.module == module).map(Sym::qname).collect();
+                let now = self.index()?;
+                let module_syms: Vec<String> = now.syms.iter().filter(|s| s.module == module).map(Sym::qname).collect();
                 return fail(format!(
                     "Not saved: the submitted text has errors.\n\n{}{}",
                     text.join("\n\n"),
-                    self.callee_hint(&own_errors, &module_syms)?
+                    self.callee_hint(&own_errors, &module_syms)? + &unknown_module_hint(self, &now, &deps, &own_errors)?
                 ));
             }
             if whole_module {
@@ -2595,6 +2614,7 @@ impl Store {
             return self.submit_symbols_rust(name, new_in, raw, formatted);
         }
         let ix = self.index()?;
+        let deps = self.dependency_modules();
         let is_header = |l: &str| l.starts_with(drafts::BLOCK_HEADER);
         let blocks: Vec<(Option<String>, String)> =
             if raw.lines().filter(|l| is_header(l)).count() > 1 || (name.is_none() && new_in.is_none()) {
@@ -2712,9 +2732,10 @@ impl Store {
                 }
                 let test = ix.modules.iter().any(|m| &m.path == module && m.dir == "test")
                     || created.iter().any(|(p, d, _)| p == module && *d == "test");
-                for path in missing_imports(&ix, &header, &item.text, test) {
-                    header = merge_import(&header, &path, &[]);
-                    notes.push(format!("added `import {path}` to {module}"));
+                for need in missing_imports(&ix, &deps, &header, &item.text, test) {
+                    let line = need.line();
+                    header = if need.alias.is_some() { add_import(&header, &line) } else { merge_import(&header, &need.module, &[]) };
+                    notes.push(format!("added `{line}` to {module}"));
                 }
                 if test {
                     notes.extend(weak_asserts(&item.text, &aliases(&header)).into_iter().map(|w| format!("{module}.{}: {w}", item.name)));
@@ -2793,7 +2814,9 @@ impl Store {
                 return fail(format!(
                     "Not saved: the submitted text has errors.\n\n{}{}",
                     text.join("\n\n"),
-                    self.callee_hint(&own_errors, &saved)? + &self.same_name_hint(&now, &own_errors)
+                    self.callee_hint(&own_errors, &saved)?
+                        + &self.same_name_hint(&now, &own_errors)
+                        + &unknown_module_hint(self, &now, &deps, &own_errors)?
                 ));
             }
             let after = now;
@@ -3193,11 +3216,27 @@ impl Store {
     }
 
     /// Runs throwaway code against the current project and returns its output.
-    /// The text is a module with `pub fn main()`, or statements that become
-    /// its body; project imports it uses are added. Nothing is saved: the file
-    /// exists only while it runs.
-    fn probe(&self, text: &str, from: Option<&str>, trace: &[&str]) -> Out {
+    /// A Gleam project's text is a module with `pub fn main()`, or statements
+    /// that become its body; a Rust project's text is statements in a test in a
+    /// scratch copy of the crate, placed in `module` when one is named. Project
+    /// imports it uses are added. Nothing is saved.
+    fn probe(&self, text: &str, from: Option<&str>, trace: &[&str], module: Option<&str>) -> Out {
+        if language::is_rust(&self.root) {
+            if let Some(name) = from {
+                return fail(format!(
+                    "E1006 --from is Gleam only: Rust probe runs the statements in `text`; {name} can be called from them."
+                ));
+            }
+            if !trace.is_empty() {
+                return fail("E1006 --trace is Gleam only: Rust has no call tracing at run time; print values with `println!` or `dbg!`.");
+            }
+            return rust_probe::run(self, text, module);
+        }
+        if module.is_some() {
+            return fail("E1006 --in is Rust only: a Gleam probe reaches project modules with `import`.");
+        }
         let ix = self.index()?;
+        let deps = self.dependency_modules();
         if ix.modules.iter().any(|m| m.path == PROBE) {
             return fail(format!("E0101 a project module is named {PROBE}; probe can't run."));
         }
@@ -3225,8 +3264,8 @@ impl Store {
             format!("{prelude}{}\n\npub fn main() {{\n{setup}{}\n}}\n", imports.join("\n"), body.join("\n"))
         };
         // the probe lives in test/, so test helpers such as `support` are importable
-        for path in missing_imports(&ix, &code, &code, true) {
-            code = format!("import {path}\n{code}");
+        for need in missing_imports(&ix, &deps, &code, &code, true) {
+            code = format!("{}\n{code}", need.line());
         }
         self.materialize(&ix)?;
         let traced = self.trace_sources(&ix, trace)?;
@@ -3395,6 +3434,42 @@ impl Store {
         }
         self.db.execute("INSERT OR IGNORE INTO warning_checks(one) VALUES (1)", [])?;
         Ok(())
+    }
+
+    /// The direct dependency modules, read once until `gleam.toml`, the
+    /// resolved package list, or a `.gleam` file under a path dependency's
+    /// `src` changes.
+    fn dependency_modules(&self) -> Rc<Vec<DependencyModule>> {
+        let stamp = |path: &str| fs::metadata(self.root.join(path)).and_then(|m| m.modified()).ok();
+        let mut paths = path_dependencies(&self.root);
+        paths.sort();
+        paths.dedup();
+        let mut sources: Vec<(PathBuf, Option<std::time::SystemTime>)> = vec![];
+        for path in paths {
+            let mut files = vec![];
+            if gleam::collect_gleam_files(&path.join("src"), &mut files).is_err() {
+                continue;
+            }
+            sources.extend(files.into_iter().map(|file| {
+                let stamp = fs::metadata(&file).and_then(|m| m.modified()).ok();
+                (file, stamp)
+            }));
+        }
+        sources.sort();
+        sources.dedup();
+        let key = (stamp("gleam.toml"), stamp("build/packages/packages.toml"), sources);
+        let cached = self.deps.borrow().as_ref().filter(|(cached, _)| *cached == key).map(|(_, deps)| deps.clone());
+        if let Some(deps) = cached {
+            return deps;
+        }
+        let deps = Rc::new(dependency_modules(&self.root));
+        *self.deps.borrow_mut() = Some((key, deps.clone()));
+        deps
+    }
+
+    /// A store whose shared fields are set the same way by every constructor.
+    fn new(db: Rc<Connection>, root: &Path, nested: bool, owns_dir: bool) -> Store {
+        Store { db, root: root.into(), lang: language::detect(root), nested, owns_dir, deps: std::cell::RefCell::new(None) }
     }
 }
 
@@ -3762,12 +3837,13 @@ fn weak_asserts(text: &str, aliases: &HashSet<String>) -> Vec<String> {
     out
 }
 
-/// `import` paths needed for `alias.name` references to modules the header
-/// doesn't import yet: project modules by last path segment, or the stdlib.
-/// `test`: the code is in a test module, which may also import test modules.
-fn missing_imports(ix: &Index, header: &str, text: &str, test: bool) -> Vec<String> {
+/// Imports needed for `alias.name` references the header doesn't import yet:
+/// one project module or dependency by last path segment, the stdlib, or the
+/// one module another module already imports as that alias. `test`: the code
+/// is in a test module, which may also import test modules and dev modules.
+fn missing_imports(ix: &Index, deps: &[DependencyModule], header: &str, text: &str, test: bool) -> Vec<MissingImport> {
     let aliases = aliases(header);
-    let mut out = vec![];
+    let mut out: Vec<MissingImport> = vec![];
     for r in gleam::references(text) {
         let Ref::Qualified(alias, _) = r else {
             continue;
@@ -3775,17 +3851,11 @@ fn missing_imports(ix: &Index, header: &str, text: &str, test: bool) -> Vec<Stri
         if aliases.contains(&alias) {
             continue;
         }
-        let project: Vec<&ModuleRow> =
-            ix.modules.iter().filter(|m| (m.dir == "src" || test) && m.path.rsplit('/').next() == Some(alias.as_str())).collect();
-        let path = match project.as_slice() {
-            [m] => Some(m.path.clone()),
-            _ if STDLIB.contains(&alias.as_str()) => Some(format!("gleam/{alias}")),
-            _ => None,
+        let ImportMatch::One(need) = import_match(ix, deps, &alias, test) else {
+            continue;
         };
-        if let Some(p) = path
-            && !out.contains(&p)
-        {
-            out.push(p);
+        if !out.iter().any(|n| n.module == need.module && n.alias == need.alias) {
+            out.push(need);
         }
     }
     out
@@ -4208,7 +4278,7 @@ fn read_project_in(a: &[&str], here: &Path, own: Option<&Path>, dir: &str, budge
     // other's (D-158), so only a project of plain files is refused.
     if store.lang.is_none() && !language::is_rust(&store.root) {
         let task = board::context().map(|(tid, _)| tid);
-        return lockdown::plain(&store, task.as_deref(), command);
+        return lockdown::plain(&store, task.as_deref(), command, a.get(1).copied());
     }
     let out = match a {
         ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
@@ -4354,3 +4424,245 @@ fn warnings_report<'a>(
 fn warning_module(d: &Diag) -> &str {
     d.module.as_deref().unwrap_or("project")
 }
+
+#[derive(Clone, Debug, PartialEq)]
+struct DependencyModule {
+    path: String,
+    test: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MissingImport {
+    module: String,
+    alias: Option<String>,
+}
+
+enum ImportMatch {
+    One(MissingImport),
+    Many(Vec<MissingImport>),
+    Unavailable(Vec<String>),
+    None,
+}
+
+/// The modules of the project's direct dependencies, and whether only test
+/// code may use them. Indirect packages in `build/packages` don't count.
+fn dependency_modules(root: &Path) -> Vec<DependencyModule> {
+    let Ok(text) = fs::read_to_string(root.join("gleam.toml")) else { return vec![] };
+    let Ok(v) = text.parse::<toml::Value>() else { return vec![] };
+    let mut out: Vec<DependencyModule> = vec![];
+    for (table, test) in [("dependencies", false), ("dev-dependencies", true), ("dev_dependencies", true)] {
+        let Some(deps) = v.get(table).and_then(|d| d.as_table()) else { continue };
+        for (name, spec) in deps {
+            let dir = match spec.get("path").and_then(|p| p.as_str()) {
+                Some(path) => root.join(path),
+                None => root.join("build/packages").join(name),
+            };
+            let mut files = vec![];
+            if gleam::collect_gleam_files(&dir.join("src"), &mut files).is_err() {
+                continue;
+            }
+            for file in files {
+                let Ok(rel) = file.strip_prefix(dir.join("src")) else { continue };
+                let path = rel.with_extension("").to_string_lossy().replace('\\', "/");
+                match out.iter_mut().find(|m| m.path == path) {
+                    Some(one) => one.test &= test,
+                    None => out.push(DependencyModule { path, test }),
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.path.cmp(&b.path));
+    out
+}
+
+fn last_segment(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn import_available(module: &str, ix: &Index, deps: &[DependencyModule], test: bool) -> bool {
+    if let Some(m) = ix.modules.iter().find(|m| m.path == module) {
+        return m.dir == "src" || test;
+    }
+    if let Some(d) = deps.iter().find(|d| d.path == module) {
+        return !d.test || test;
+    }
+    module.strip_prefix("gleam/").is_some_and(|name| STDLIB.contains(&name))
+}
+
+fn import_match(ix: &Index, deps: &[DependencyModule], qualifier: &str, test: bool) -> ImportMatch {
+    let project = modules_named(ix.modules.iter().filter(|m| m.dir == "src" || test).map(|m| m.path.as_str()), qualifier);
+    match project.as_slice() {
+        [need] => return ImportMatch::One(need.clone()),
+        [] => {}
+        _ if STDLIB.contains(&qualifier) => {
+            return ImportMatch::One(MissingImport { module: format!("gleam/{qualifier}"), alias: None });
+        }
+        many => return ImportMatch::Many(many.to_vec()),
+    }
+    if STDLIB.contains(&qualifier) {
+        return ImportMatch::One(MissingImport { module: format!("gleam/{qualifier}"), alias: None });
+    }
+    let dependency = modules_named(deps.iter().filter(|d| !d.test || test).map(|d| d.path.as_str()), qualifier);
+    match dependency.as_slice() {
+        [need] => return ImportMatch::One(need.clone()),
+        [] => {}
+        many => return ImportMatch::Many(many.to_vec()),
+    }
+    let mut found: Vec<MissingImport> = vec![];
+    for m in &ix.modules {
+        for import in gleam::imports(&m.header) {
+            if import.alias != qualifier || !import_available(&import.module, ix, deps, test) {
+                continue;
+            }
+            let need = MissingImport { module: import.module, alias: Some(qualifier.to_string()) };
+            if !found.iter().any(|n| n.module == need.module) {
+                found.push(need);
+            }
+        }
+    }
+    if found.len() == 1 {
+        return ImportMatch::One(found.remove(0));
+    }
+    if found.len() > 1 {
+        return ImportMatch::Many(found);
+    }
+    let mut unavailable: Vec<String> = modules_named(ix.modules.iter().map(|m| m.path.as_str()), qualifier)
+        .into_iter()
+        .chain(modules_named(deps.iter().map(|d| d.path.as_str()), qualifier))
+        .map(|need| need.module)
+        .collect();
+    unavailable.sort();
+    unavailable.dedup();
+    if unavailable.is_empty() { ImportMatch::None } else { ImportMatch::Unavailable(unavailable) }
+}
+
+fn unknown_module(text: &str) -> Option<&str> {
+    if let Some(qualifier) =
+        quoted_after(text, "No module has been found with the name `").or_else(|| quoted_after(text, "Unknown module `"))
+    {
+        return Some(qualifier);
+    }
+    let title = text.lines().any(|line| line.trim().trim_start_matches("error: ").trim() == "Unknown module");
+    if title { quoted_after(text, "The module `") } else { None }
+}
+
+fn unknown_module_hint(s: &Store, ix: &Index, deps: &[DependencyModule], errors: &[&Diag]) -> Result<String, Failure> {
+    for d in errors {
+        if d.text.contains("Unknown module value") {
+            continue;
+        }
+        let Some(qualifier) = unknown_module(&d.text) else { continue };
+        let Some(module) = d.module.as_deref() else { continue };
+        let header = s.header(module)?;
+        if aliases(&header).contains(qualifier) {
+            continue;
+        }
+        let test = ix.modules.iter().any(|m| m.path == module && m.dir == "test");
+        let current = match header.trim() {
+            "" => String::new(),
+            h => format!("\n\nIts current header is:\n\n{h}"),
+        };
+        match import_match(ix, deps, qualifier, test) {
+            ImportMatch::One(need) => {
+                return Ok(format!(
+                    "\n\nTo add it, run `submit --imports {module}` with the module's current imports plus the new line \
+                     `{}`.{current}",
+                    need.line()
+                ));
+            }
+            ImportMatch::None => {
+                return Ok(format!(
+                    "\n\nTo add it, run `submit --imports {module}` with the module's current imports plus the new line \
+                     `import {qualifier}`.{current}"
+                ));
+            }
+            ImportMatch::Unavailable(paths) => {
+                let names: Vec<String> = paths.iter().map(|p| format!("`{p}`")).collect();
+                return Ok(format!(
+                    "\n\n`{qualifier}` is only available to test code ({}), so it can't be imported into {module}.",
+                    names.join(", ")
+                ));
+            }
+            ImportMatch::Many(needs) => {
+                let lines: Vec<String> = needs.iter().map(|n| format!("`{}`", n.line())).collect();
+                return Ok(format!(
+                    "\n\n`{qualifier}` matches more than one module: {}; nothing was added. To pick one, run \
+                     `submit --imports {module}` with the module's current imports plus one of those lines.{current}",
+                    lines.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(String::new())
+}
+
+impl MissingImport {
+    fn line(&self) -> String {
+        match &self.alias {
+            Some(alias) => format!("import {} as {alias}", self.module),
+            None => format!("import {}", self.module),
+        }
+    }
+}
+
+/// When `gleam.toml`, the resolved package list, or a `.gleam` file under a
+/// path dependency's `src` last changed.
+type DependencyKey = (Option<std::time::SystemTime>, Option<std::time::SystemTime>, Vec<(PathBuf, Option<std::time::SystemTime>)>);
+
+/// Every module whose last path segment is `qualifier`.
+fn modules_named<'a>(paths: impl Iterator<Item = &'a str>, qualifier: &str) -> Vec<MissingImport> {
+    paths.filter(|path| last_segment(path) == qualifier).map(|path| MissingImport { module: path.to_string(), alias: None }).collect()
+}
+
+fn quoted_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
+    let rest = &text[text.find(marker)? + marker.len()..];
+    rest.find('`').map(|end| &rest[..end])
+}
+
+/// The Solace root and the folders of the other projects under it, the run's
+/// task's projects first, then the rest: `None` when `here` is in no Solace root.
+fn other_projects(here: &Path) -> Option<(PathBuf, Vec<String>)> {
+    let top = workspace::enclosing(here).ok().flatten()?;
+    let mine = scope::dir(&top, here);
+    let mut order = scope::of_run(here).unwrap_or_default();
+    let rest: Vec<String> = workspace::members(&top).ok()?.into_iter().filter(|m| !order.contains(m)).collect();
+    order.extend(rest);
+    let others = order.into_iter().filter(|d| *d != mine).collect();
+    Some((top, others))
+}
+
+/// The first project other than `here` with a module named `name` (D-123):
+/// the run's task's projects first, then the others under the Solace root.
+pub(crate) fn module_elsewhere(here: &Path, name: &str) -> Option<String> {
+    let (top, dirs) = other_projects(here)?;
+    dirs.into_iter().find(|d| {
+        let Some(s) = Store::peek(&scope::path(&top, d)).ok() else { return false };
+        let Ok(ix) = s.index() else { return false };
+        ix.modules.iter().any(|m| m.path == name)
+    })
+}
+
+/// The directories the manifest names as path dependencies.
+fn path_dependencies(root: &Path) -> Vec<PathBuf> {
+    let Ok(text) = fs::read_to_string(root.join("gleam.toml")) else { return vec![] };
+    let Ok(v) = text.parse::<toml::Value>() else { return vec![] };
+    ["dependencies", "dev-dependencies", "dev_dependencies"]
+        .into_iter()
+        .filter_map(|table| v.get(table).and_then(|deps| deps.as_table()))
+        .flat_map(|deps| deps.values())
+        .filter_map(|spec| spec.get("path").and_then(|p| p.as_str()))
+        .map(|path| root.join(path))
+        .collect()
+}
+
+/// The name of the probe text's line range in its generated module.
+pub(crate) const PROBE_RANGE: &str = "probe";
+
+/// The name of the generated module's lines before the probe text.
+pub(crate) const PROBE_START_RANGE: &str = "probe start";
+
+/// The name of the generated module's lines after the probe text.
+pub(crate) const PROBE_END_RANGE: &str = "probe end";
+
+/// The indentation the probe's wrapper adds to each of its lines.
+pub(crate) const PROBE_INDENT: &str = "        ";

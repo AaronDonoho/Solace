@@ -59,8 +59,8 @@ export function clear_draft(editor, owner) {
 }
 
 // Agent text is untrusted: everything is escaped before the few markdown forms
-// (code blocks, headings, blockquotes, nested lists, `code`, **bold**, images uploaded to this task
-// board, and http(s) links) are turned into HTML. Image URLs are stored
+// (code blocks, headings, blockquotes, tables, nested lists, `code`, **bold**, images uploaded to
+// this task board, and http(s) links) are turned into HTML. Image URLs are stored
 // relative to their project; `base` is the project's prefix on this server.
 // Quotes nest at most `maxQuotes` deep; a deeper `>` stays text, so untrusted
 // text can't exhaust the stack. `depth` is the quotes already open.
@@ -73,10 +73,34 @@ const taskRef = /(<a [^>]*>[\s\S]*?<\/a>)|(!?)\[([^\]]+)\]\((task|feature|milest
 const taskLink = (kind, id, label) => `<a href="/${kind}/${id}" data-${kind}="${id}">${label}</a>`;
 export function markdown(text, base = '', depth = 0) {
   const escape = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // A code span closes only at a later run of the same number of backticks.
+  const closing = (line, from, length) => {
+    for (let j = from; j < line.length;) {
+      if (line[j] !== '`') { j++; continue; }
+      let run = 1;
+      while (line[j + run] === '`') run++;
+      if (run === length) return j;
+      j += run;
+    }
+    return -1;
+  };
   // Code spans are lifted out first so bold and links leave them literal.
   const inline = s => {
     const codes = [];
-    return escape(s.replace(/\u0000/g, '')).replace(/`([^`]+)`/g, (_, c) => `\u0000${codes.push(c) - 1}\u0000`)
+    const lift = text => {
+      let out = '';
+      for (let j = 0; j < text.length; j++) {
+        if (text[j] !== '`') { out += text[j]; continue; }
+        let run = 1;
+        while (text[j + run] === '`') run++;
+        const end = closing(text, j + run, run);
+        if (end < 0) { out += text.slice(j, j + run); j += run - 1; continue; }
+        out += `\u0000${codes.push(text.slice(j + run, end)) - 1}\u0000`;
+        j = end + run - 1;
+      }
+      return out;
+    };
+    return lift(escape(s.replace(/\u0000/g, '')))
       .replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>')
       .replace(/!\[([^\]]*)\]\((\/tasks\/[\w-]+\/files\/[0-9a-f]{16}\.(?:png|jpg|gif|webp))\)/g, `<img alt="$1" src="${escape(base)}$2">`)
       .replace(/(^|[^!])\[([^\]]+)\]\((https?:\/\/[^\s)\u0000]+)\)/g, '$1<a href="$3" rel="noopener noreferrer">$2</a>')
@@ -108,6 +132,47 @@ export function markdown(text, base = '', depth = 0) {
     while (stack.length) html += `</li></${tag(stack.pop())}>`;
     return html;
   };
+  const delimiter = /^:?-+:?$/;
+  // Cells are split before `inline`, so a pipe in a code span or written `\|`
+  // stays in its cell.
+  const escapedEnd = line => {
+    let slashes = 0;
+    for (let j = line.length - 2; j >= 0 && line[j] === '\\'; j--) slashes++;
+    return slashes % 2 === 1;
+  };
+  const row = line => {
+    let rest = line.trim();
+    if (rest.startsWith('|')) rest = rest.slice(1);
+    if (rest.endsWith('|') && !escapedEnd(rest)) rest = rest.slice(0, -1);
+    const cells = [];
+    let cell = '', code = 0;
+    for (let j = 0; j < rest.length; j++) {
+      if (rest[j] === '\\' && rest[j + 1] === '|') { cell += '|'; j++; continue; }
+      if (rest[j] === '`') {
+        let run = 1;
+        while (rest[j + run] === '`') run++;
+        if (code === run) code = 0;
+        else if (!code && closing(rest, j + run, run) >= 0) code = run;
+        cell += rest.slice(j, j + run);
+        j += run - 1;
+        continue;
+      }
+      if (rest[j] === '|' && !code) { cells.push(cell.trim()); cell = ''; continue; }
+      cell += rest[j];
+    }
+    cells.push(cell.trim());
+    return cells;
+  };
+  const alignment = cell =>
+    cell.startsWith(':') && cell.endsWith(':') ? 'center'
+      : cell.startsWith(':') ? 'left' : cell.endsWith(':') ? 'right' : '';
+  const aligned = value => value ? ` style="text-align:${value}"` : '';
+  const cellsRow = (tag, cells, aligns) =>
+    `<tr>${cells.map((cell, j) => `<${tag}${aligned(aligns[j])}>${inline(cell)}</${tag}>`).join('')}</tr>`;
+  const table = (head, aligns, rows) =>
+    `<table><thead>${cellsRow('th', head, aligns)}</thead><tbody>${
+      rows.map(cells => cellsRow('td', head.map((_, j) => cells[j] ?? ''), aligns)).join('')
+    }</tbody></table>`;
   const out = [];
   const parts = text.split(/^```[^\n]*\n?/m);
   parts.forEach((part, i) => {
@@ -117,11 +182,24 @@ export function markdown(text, base = '', depth = 0) {
     const plain = l => !heading.test(l) && !item.test(l) && !quoted(l);
     // The next non-blank line at or after `from`, or lines.length.
     const skip = from => { while (from < lines.length && !lines[from].trim()) from++; return from; };
+    const tableAt = from => {
+      if (from + 1 >= lines.length || !lines[from].trim() || !plain(lines[from])) return false;
+      const head = row(lines[from]), separator = row(lines[from + 1]);
+      return (lines[from].includes('|') || lines[from + 1].includes('|'))
+        && head.length === separator.length
+        && separator.every(cell => delimiter.test(cell));
+    };
     for (let i = skip(0); i < lines.length; i = skip(i)) {
       const head = lines[i].match(heading);
       if (head) { out.push(`<h4>${inline(head[2])}</h4>`); i++; continue; }
       const run = [];
-      if (quoted(lines[i])) {
+      if (tableAt(i)) {
+        const head = row(lines[i]), aligns = row(lines[i + 1]).map(alignment);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && lines[i].trim() && plain(lines[i])) rows.push(row(lines[i++]));
+        out.push(table(head, aligns, rows));
+      } else if (quoted(lines[i])) {
         while (i < lines.length && quoted(lines[i])) run.push(lines[i++].replace(quote, ''));
         out.push(`<blockquote>${markdown(run.join('\n'), base, depth + 1)}</blockquote>`);
       } else if (item.test(lines[i])) {
@@ -129,7 +207,7 @@ export function markdown(text, base = '', depth = 0) {
         while (i < lines.length && item.test(lines[skip(i)] ?? '')) { i = skip(i); run.push(lines[i++]); }
         out.push(list(run));
       } else {
-        while (i < lines.length && lines[i].trim() && plain(lines[i])) run.push(lines[i++]);
+        while (i < lines.length && lines[i].trim() && plain(lines[i]) && !tableAt(i)) run.push(lines[i++]);
         out.push(`<p>${run.map(inline).join('<br>')}</p>`);
       }
     }

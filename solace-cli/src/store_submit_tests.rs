@@ -311,7 +311,7 @@ impl std::fmt::Display for Other {
     let patch =
         "*** Begin Patch\n*** Update: crate.<Other as std::fmt::Display>\n@@\n-    fn fmt(&self) {\n+    fn fmt(&self) {\n*** End Patch\n";
     let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
-    assert!(err.contains("submit --new <module>") && err.contains("item by item"), "{err}");
+    assert!(err.contains("format crate") && err.contains("item by item") && !err.contains("submit --new <module>"), "{err}");
     assert!(!err.contains("task:"), "{err}");
     let add = "*** Begin Patch\n*** Add: crate\n+impl Other {\n+    fn o(&self) {}\n+}\n*** End Patch\n";
     let out = drafts::submit(&store, &["submit"], &mut || Ok(add.into()), None).unwrap();

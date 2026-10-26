@@ -114,23 +114,30 @@ fn tool_call(msg: &Value, budget: usize, single_reads: &mut usize, run_reads: &m
     if let Some(run) = run_reads.as_mut() {
         run.start_call();
     }
-    // A patch belongs in `text`; `command` holds only the commands.
+    // A patch belongs in `text`; `command` holds the command that takes it.
     if patch_in_command(&commands) {
-        out = concat!(
-            "the patch goes in `text`; `command` holds only the command lines ",
-            "(`submit [--project <folder>]` then `test [--project <folder>]`); ",
-            "nothing in this call ran.\n"
-        )
-        .to_string();
+        let sent = commands
+            .iter()
+            .take_while(|c| !c.starts_with("*** Begin Patch"))
+            .copied()
+            .find(|c| matches!(c.split_whitespace().next(), Some("submit" | "write")));
+        let shape = match sent {
+            Some(c) => format!("`command`: `{c}`, `text`: the patch"),
+            None => "`command`: `submit` or `write`, `text`: the patch".to_string(),
+        };
+        out = format!("the patch goes in `text`, not in `command`: {shape}; nothing in this call ran.\n");
         is_error = true;
     }
     // Code sent as command lines rather than in `text` (run 11): one error for the
     // call, and nothing runs.
-    if !is_error && let Some(code) = commands.iter().find(|c| looks_like_code(c)) {
-        out = format!(
-            "Not a command: {code}\nThis looks like code. Code (for probe, submit) goes in `text`, \
-            not in `command`; nothing in this call ran.\n"
-        );
+    if !is_error && let Some(at) = commands.iter().position(|c| looks_like_code(c)) {
+        let code = commands[at];
+        let sent = commands[..at].iter().copied().find(|c| matches!(c.split_whitespace().next(), Some("probe" | "submit")));
+        let shape = match sent {
+            Some(c) => format!("`command`: `{c}`, `text`: the code"),
+            None => "`command`: `probe` or `submit`, `text`: the code".to_string(),
+        };
+        out = format!("Not a command: {code}\nThis looks like code: {shape}; nothing in this call ran.\n");
         is_error = true;
     }
     // A shell suffix is not part of a Solace command: name it and run nothing.
@@ -260,9 +267,8 @@ mod tests {
         let out = tool_call(&msg, 10_000, &mut reads, &mut run);
         assert_eq!(out["isError"], json!(true));
         let expected = concat!(
-            "the patch goes in `text`; `command` holds only the command lines ",
-            "(`submit [--project <folder>]` then `test [--project <folder>]`); ",
-            "nothing in this call ran.\n"
+            "the patch goes in `text`, not in `command`: ",
+            "`command`: `submit` or `write`, `text`: the patch; nothing in this call ran.\n"
         );
         assert_eq!(out["content"][0]["text"], json!(expected));
     }
@@ -320,6 +326,50 @@ mod tests {
         let (mut reads, mut run) = (0, None);
         let out = crate::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
         assert!(!out["content"][0]["text"].as_str().unwrap().contains("commands are not shell"), "{out}");
+    }
+
+    #[test]
+    fn a_patch_in_command_names_the_command_it_was_sent_with() {
+        let command = "write --project solace-cli\n*** Begin Patch\n*** Update: app.main\n*** End Patch";
+        let msg = json!({"params": {"arguments": {"command": command}}});
+        let (mut reads, mut run) = (0, None);
+        let out = tool_call(&msg, 10_000, &mut reads, &mut run);
+        assert_eq!(out["isError"], json!(true));
+        let text = out["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("`command`: `write --project solace-cli`, `text`: the patch"), "{text}");
+    }
+
+    #[test]
+    fn code_in_command_names_the_command_and_text() {
+        let msg = json!({"params": {"arguments": {"command": "probe\nlet x = 1"}}});
+        let (mut reads, mut run) = (0, None);
+        let out = tool_call(&msg, 10_000, &mut reads, &mut run);
+        assert_eq!(out["isError"], json!(true));
+        let text = out["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("`command`: `probe`, `text`: the code"), "{text}");
+    }
+
+    #[test]
+    fn a_hunk_line_is_not_named_as_the_command() {
+        let command = "*** Begin Patch\n*** Update: a.b\n@@ fn x\n-old\n+new\n*** End Patch";
+        let msg = json!({"params": {"arguments": {"command": command}}});
+        let (mut reads, mut run) = (0, None);
+        let out = tool_call(&msg, 10_000, &mut reads, &mut run);
+        assert_eq!(out["isError"], json!(true));
+        let text = out["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("`command`: `submit` or `write`, `text`: the patch"), "{text}");
+        assert!(!text.contains("@@"), "{text}");
+    }
+
+    #[test]
+    fn code_before_a_command_is_not_named_as_the_command() {
+        let msg = json!({"params": {"arguments": {"command": "let x = 1\nprobe"}}});
+        let (mut reads, mut run) = (0, None);
+        let out = tool_call(&msg, 10_000, &mut reads, &mut run);
+        assert_eq!(out["isError"], json!(true));
+        let text = out["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("`command`: `probe` or `submit`, `text`: the code"), "{text}");
+        assert!(!text.contains("`command`: `let"), "{text}");
     }
 }
 

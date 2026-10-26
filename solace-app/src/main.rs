@@ -3,12 +3,13 @@
 //! app window or the default browser.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod workspaces;
+
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
 use std::time::Duration;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -17,15 +18,6 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 /// The port `solace serve` tries first, so bookmarks and the browser's
 /// storage survive restarts.
 const PREFERRED_PORT: u16 = 3030;
-
-#[derive(Default)]
-struct Server {
-    child: Mutex<Option<Child>>,
-    port: Mutex<Option<u16>>,
-    /// Whether the board was opened in a browser, which needs the server
-    /// after every window closes.
-    browser: Mutex<bool>,
-}
 
 /// The bundled CLI, next to the app's executable (Tauri's externalBin).
 fn solace_bin() -> PathBuf {
@@ -119,6 +111,8 @@ fn spawn(root: &Path, port: u16) -> Result<(Child, u16), String> {
     // The signal follows the spawning thread, Tauri's main thread for a
     // sync command, and survives the server's `exec` restart.
     #[cfg(target_os = "linux")]
+    // SAFETY: `pre_exec` runs in the forked child; the calls below are
+    // async-signal-safe and only set the parent-death signal.
     unsafe {
         use std::os::unix::process::CommandExt;
         let parent = libc::getpid();
@@ -130,7 +124,9 @@ fn spawn(root: &Path, port: u16) -> Result<(Child, u16), String> {
             Ok(())
         });
     }
-    let mut child = cmd.spawn().map_err(|e| format!("couldn't start {}: {e}", bin.display()))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("couldn't start {}: {e}", bin.display()))?;
     let mut out = BufReader::new(child.stdout.take().unwrap());
     let mut line = String::new();
     let _ = out.read_line(&mut line);
@@ -150,7 +146,11 @@ fn spawn(root: &Path, port: u16) -> Result<(Child, u16), String> {
                 let _ = std::io::stderr().write_all(&buf[..n]);
             }
         });
-        let port = addr.rsplit(':').next().and_then(|p| p.parse().ok()).unwrap_or(port);
+        let port = addr
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(port);
         return Ok((child, port));
     }
     let _ = child.wait();
@@ -161,8 +161,10 @@ fn spawn(root: &Path, port: u16) -> Result<(Child, u16), String> {
 
 /// Ends the sidecar: SIGTERM, a moment to finish, then SIGKILL. Running
 /// agents are in their own groups; the next `serve` recovers them.
-fn stop(server: &Server) {
-    if let Some(mut child) = server.child.lock().unwrap().take() {
+fn stop(child: Option<Child>) {
+    if let Some(mut child) = child {
+        // SAFETY: `child` is a process this app spawned and has not reaped,
+        // so its id is live and SIGTERM is valid for it.
         unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
         for _ in 0..20 {
             if matches!(child.try_wait(), Ok(Some(_))) {
@@ -173,104 +175,119 @@ fn stop(server: &Server) {
         let _ = child.kill();
         let _ = child.wait();
     }
-    *server.port.lock().unwrap() = None;
 }
 
-/// Shows the board at `port` in the chosen place.
-fn show(app: &AppHandle, port: u16, mode: &str) -> Result<(), String> {
-    let url = format!("http://127.0.0.1:{port}/");
+/// Shows `root`'s board at `port`: an open window follows a changed server,
+/// a live one is brought forward, and a browser leaves windows alone.
+fn show(
+    app: &AppHandle,
+    root: &Path,
+    port: u16,
+    mode: &str,
+    switching: bool,
+) -> Result<(), String> {
     if mode == "browser" {
-        // From an AppImage, a browser started here would inherit the
-        // runtime's variables; open it with the user's environment instead.
-        if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some() {
-            let mut cmd = Command::new("xdg-open");
-            without_appimage(&mut cmd);
-            return cmd
-                .arg(&url)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()
-                .map(|_| ())
-                .map_err(|e| format!("couldn't open the browser: {e}"));
+        open_browser(&board_url(port))?;
+    }
+    let server = app.state::<workspaces::Server>();
+    let window = workspaces::workspace_window(&server, root);
+    match workspaces::board_place(window.as_deref(), mode) {
+        workspaces::BoardPlace::Browser => {}
+        workspaces::BoardPlace::Existing => {
+            match window.and_then(|label| app.get_webview_window(&label)) {
+                Some(window) => update_board(app, &window, root, port, switching)?,
+                None => open_board_window(app, root, port)?,
+            }
         }
-        return tauri_plugin_opener::open_url(&url, None::<&str>).map_err(|e| e.to_string());
+        workspaces::BoardPlace::New => open_board_window(app, root, port)?,
     }
-    if let Some(w) = app.get_webview_window("board") {
-        let _ = w.show();
-        return w.set_focus().map_err(|e| e.to_string());
-    }
-    let url = tauri::Url::parse(&url).map_err(|e| e.to_string())?;
-    WebviewWindowBuilder::new(app, "board", WebviewUrl::External(url))
-        .title("Solace")
-        .inner_size(1280.0, 820.0)
-        .build()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+    Ok(())
 }
 
 /// Opens `root`: attaches to a server already holding it, else starts one.
 /// Errors go back to the start screen as text, never a crash.
 #[tauri::command]
 fn open_project(app: AppHandle, root: String, mode: String) -> Result<u16, String> {
-    let root = PathBuf::from(root);
-    let server = app.state::<Server>();
+    let root = normalize_root(PathBuf::from(root));
+    let server = app.state::<workspaces::Server>();
+    let mut switching = false;
+    let mut fresh = false;
     let port = if let Some(port) = running_port(&root) {
+        match workspaces::workspace_port(&server, &root) {
+            Some(existing) => {
+                switching = existing != port;
+                if switching {
+                    workspaces::set_workspace_port(&server, &root, port);
+                }
+            }
+            None => {
+                workspaces::set_workspace_server(&server, &root, None, port);
+            }
+        }
         port
     } else {
-        stop(&server);
         let (child, port) = match spawn(&root, PREFERRED_PORT) {
             Err(e) if e.contains("in use") || e.contains("Address") => spawn(&root, 0)?,
             other => other?,
         };
-        *server.child.lock().unwrap() = Some(child);
+        stop(workspaces::set_workspace_server(
+            &server,
+            &root,
+            Some(child),
+            port,
+        ));
+        switching = true;
+        fresh = true;
         port
     };
-    *server.port.lock().unwrap() = Some(port);
-    *server.browser.lock().unwrap() |= mode == "browser";
-    show(&app, port, &mode)?;
+    let shown = show(&app, &root, port, &mode, switching);
+    let (shown, child) = workspaces::finish_open(&server, &root, fresh, shown);
+    stop(child);
+    shown?;
+    if mode == "browser" {
+        workspaces::mark_browser(&server, &root);
+    }
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
     Ok(port)
 }
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
+            focus_main(app);
         }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(Server::default())
+        .manage(workspaces::Server::default())
         .invoke_handler(tauri::generate_handler![open_project])
         .setup(|app| {
             let open = MenuItem::with_id(app, "open", "Open board", true, None::<&str>)?;
-            let switch = MenuItem::with_id(app, "switch", "Switch project", true, None::<&str>)?;
+            let workspace =
+                MenuItem::with_id(app, "workspace", "Open workspace", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit Solace", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &switch, &quit])?;
+            let menu = Menu::with_items(app, &[&open, &workspace, &quit])?;
             TrayIconBuilder::new()
                 .icon(app.default_window_icon().unwrap().clone())
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
-                    "open" => match *app.state::<Server>().port.lock().unwrap() {
-                        Some(port) => {
-                            let _ = show(app, port, "app");
-                        }
-                        None => {
-                            if let Some(w) = app.get_webview_window("main") {
-                                let _ = w.show();
+                    "open" => {
+                        let mut shown = false;
+                        for label in workspaces::window_labels(&app.state::<workspaces::Server>()) {
+                            if let Some(window) = app.get_webview_window(&label) {
+                                shown = true;
+                                let _ = window.show();
+                                let _ = window.set_focus();
                             }
                         }
-                    },
-                    "switch" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            let _ = w.show();
-                            let _ = w.set_focus();
+                        if !shown {
+                            focus_main(app);
                         }
                     }
+                    "workspace" => focus_main(app),
                     "quit" => {
-                        stop(&app.state::<Server>());
+                        stop_workspaces(&app.state::<workspaces::Server>());
                         app.exit(0);
                     }
                     _ => {}
@@ -278,18 +295,28 @@ fn main() {
                 .build(app)?;
             Ok(())
         })
-        // Closing the last window quits, server included, unless a browser
-        // may still use the server; then Solace keeps running in the tray.
+        // A board window really closes, stopping its server unless a browser
+        // keeps it. The last visible window quits, unless a browser remains.
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle();
-                let others = app.webview_windows().values().any(|w| w.label() != window.label() && w.is_visible().unwrap_or(false));
-                api.prevent_close();
-                if others || *app.state::<Server>().browser.lock().unwrap() {
-                    let _ = window.hide();
-                } else {
-                    stop(&app.state::<Server>());
-                    app.exit(0);
+                let label = window.label();
+                let server = app.state::<workspaces::Server>();
+                if label == "main" {
+                    if other_visible(&app, label) || workspaces::browser_open(&server) {
+                        api.prevent_close();
+                        let _ = window.hide();
+                    } else {
+                        stop_workspaces(&server);
+                        app.exit(0);
+                    }
+                } else if let Some(closed) = workspaces::close_window(&server, label) {
+                    if !closed.browser {
+                        stop(closed.child);
+                    }
+                    if !other_visible(&app, label) && !workspaces::browser_open(&server) {
+                        app.exit(0);
+                    }
                 }
             }
         })
@@ -297,7 +324,180 @@ fn main() {
         .expect("error while building Solace")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
-                stop(&app.state::<Server>());
+                stop_workspaces(&app.state::<workspaces::Server>());
             }
         });
+}
+
+/// What an open board window does to reach a chosen project.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BoardAction {
+    Focus,
+    Navigate,
+    Reload,
+}
+
+/// How an open board window reaches `port`: a window already showing it is
+/// brought forward; during a switch a matching address reloads; otherwise the
+/// window navigates to the new address.
+fn board_action(shown_port: Option<u16>, switching: bool, port: u16) -> BoardAction {
+    if !switching && shown_port == Some(port) {
+        BoardAction::Focus
+    } else if shown_port == Some(port) {
+        BoardAction::Reload
+    } else {
+        BoardAction::Navigate
+    }
+}
+
+/// Opens `url` in the user's browser.
+fn open_browser(url: &str) -> Result<(), String> {
+    // From an AppImage, a browser started here would inherit the
+    // runtime's variables; open it with the user's environment instead.
+    if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_some() {
+        let mut cmd = Command::new("xdg-open");
+        without_appimage(&mut cmd);
+        return cmd
+            .arg(url)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("couldn't open the browser: {e}"));
+    }
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
+#[test]
+fn board_action_test() {
+    assert_eq!(
+        crate::board_action(Some(3030), false, 4040),
+        crate::BoardAction::Navigate
+    );
+    assert_eq!(
+        crate::board_action(Some(3030), false, 3030),
+        crate::BoardAction::Focus
+    );
+    assert_eq!(
+        crate::board_action(Some(3030), true, 3030),
+        crate::BoardAction::Reload
+    );
+    assert_eq!(
+        crate::board_action(Some(3030), true, 4040),
+        crate::BoardAction::Navigate
+    );
+    assert_eq!(
+        crate::board_action(None, true, 3030),
+        crate::BoardAction::Navigate
+    );
+    assert_eq!(
+        crate::board_action(None, false, 5050),
+        crate::BoardAction::Navigate
+    );
+}
+
+/// Moves an open board window to `port`, or brings it forward when it already
+/// shows that project.
+fn update_board(
+    app: &AppHandle,
+    window: &tauri::WebviewWindow,
+    root: &Path,
+    port: u16,
+    switching: bool,
+) -> Result<(), String> {
+    let server = app.state::<workspaces::Server>();
+    let shown = workspaces::workspace_shown_port(&server, root);
+    let action = board_action(shown, switching, port);
+    match action {
+        BoardAction::Navigate => {
+            let url = tauri::Url::parse(&board_url(port)).map_err(|e| e.to_string())?;
+            window.navigate(url).map_err(|e| e.to_string())?;
+        }
+        BoardAction::Reload => window
+            .eval("window.location.reload()")
+            .map_err(|e| e.to_string())?,
+        BoardAction::Focus => {}
+    }
+    if action != BoardAction::Focus {
+        workspaces::set_shown_port(&server, root, Some(port));
+    }
+    let _ = window.show();
+    window.set_focus().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// The address of the board served at `port`.
+fn board_url(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/")
+}
+
+/// One spelling per workspace, so a trailing slash or symlink can't open it twice.
+fn normalize_root(root: PathBuf) -> PathBuf {
+    root.canonicalize().unwrap_or(root)
+}
+
+/// A board window's title: the workspace folder's name.
+fn workspace_title(root: &Path) -> String {
+    root.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Solace".to_string())
+}
+
+/// Opens `root`'s board in a new window labeled for its workspace.
+fn open_board_window(app: &AppHandle, root: &Path, port: u16) -> Result<(), String> {
+    let server = app.state::<workspaces::Server>();
+    let label = workspaces::next_window_label(&server);
+    let url = tauri::Url::parse(&board_url(port)).map_err(|e| e.to_string())?;
+    WebviewWindowBuilder::new(app, &label, WebviewUrl::External(url))
+        .title(workspace_title(root))
+        .inner_size(1280.0, 820.0)
+        .build()
+        .map_err(|e| e.to_string())?;
+    workspaces::set_workspace_window(&server, root, &label);
+    workspaces::set_shown_port(&server, root, Some(port));
+    Ok(())
+}
+
+/// Brings the start screen forward.
+fn focus_main(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+/// Whether another visible window remains for the app to stay open.
+fn other_visible(app: &AppHandle, label: &str) -> bool {
+    app.webview_windows()
+        .values()
+        .any(|window| window.label() != label && window.is_visible().unwrap_or(false))
+}
+
+#[test]
+fn workspace_title_test() {
+    assert_eq!(workspace_title(Path::new("/work/Project A")), "Project A");
+    assert_eq!(workspace_title(Path::new("/")), "Solace");
+}
+
+#[cfg(unix)]
+#[test]
+fn root_normalization_test() {
+    let base = std::env::temp_dir().join(format!("solace-app-root-{}", std::process::id()));
+    let root = base.join("workspace");
+    let link = base.join("link");
+    fs::create_dir_all(&root).unwrap();
+    let _ = fs::remove_file(&link);
+    std::os::unix::fs::symlink(&root, &link).unwrap();
+    assert_eq!(normalize_root(link.clone()), normalize_root(root.clone()));
+    assert_eq!(normalize_root(root.join("")), normalize_root(root.clone()));
+    let _ = fs::remove_file(&link);
+    let _ = fs::remove_dir_all(&base);
+}
+
+/// Stops every server the app started for a workspace.
+fn stop_workspaces(server: &workspaces::Server) {
+    for child in workspaces::stop_all(server) {
+        stop(child);
+    }
 }

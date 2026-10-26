@@ -16,7 +16,8 @@ fn a_split_rust_file_is_stored_nested_and_written_back_exactly() {
     for (m, text) in sources {
         store_rust_file(&db, m, "src", &format!("src/{m}.rs"), &language::rust::split(text, m).unwrap()).unwrap();
     }
-    let store = Store { db: Rc::new(db), root: root.to_path_buf(), lang: None, nested: true, owns_dir: true };
+    let store =
+        Store { db: Rc::new(db), root: root.to_path_buf(), lang: None, nested: true, owns_dir: true, deps: std::cell::RefCell::new(None) };
     let ix = store.index().unwrap();
     for (m, text) in sources {
         let row = ix.modules.iter().find(|r| r.path == m).unwrap();
@@ -104,10 +105,10 @@ fn a_copy_of_this_crate_is_imported_and_written_back_exactly() {
 
 #[test]
 fn a_plain_error_keeps_not_saved() {
-    let e = rust_syntax_error(Failure("rustfmt failed".into(), 3), "crate.one", None, "crate", 0, 5);
+    let e = rust_syntax_error(Failure("rustfmt failed".into(), 3), "crate.one", None, "crate", 0, 0, 5);
     assert_eq!(e.0, "Not saved: rustfmt failed");
     assert_eq!(e.1, 3);
-    let e = rust_syntax_error(Failure("Not saved: elsewhere".into(), 1), "crate.one", None, "crate", 0, 5);
+    let e = rust_syntax_error(Failure("Not saved: elsewhere".into(), 1), "crate.one", None, "crate", 0, 0, 5);
     assert_eq!(e.0, "Not saved: elsewhere");
 }
 
@@ -136,4 +137,14 @@ fn an_older_store_gains_the_warning_module_column() {
     let store = Store::at(&root).unwrap();
     let module: String = store.db.query_row("SELECT module FROM warnings", [], |r| r.get(0)).unwrap();
     assert_eq!(module, "project");
+}
+
+/// A split error counts from the module line and leaves out only a container's
+/// wrapper lines.
+#[test]
+fn a_split_error_counts_from_the_module_line() {
+    let e = rust_syntax_error(Failure("line 3: x".into(), 1), "crate.one", None, "crate", 10, 0, 20);
+    assert_eq!(e.0, "Not saved: E0100 syntax error in `crate.one` at line 13: x");
+    let e = rust_syntax_error(Failure("line 5: x".into(), 1), "crate.one", None, "crate", 10, 2, 20);
+    assert_eq!(e.0, "Not saved: E0100 syntax error in `crate.one` at line 13: x");
 }

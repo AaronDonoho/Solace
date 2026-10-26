@@ -8,7 +8,8 @@ the change there. A question never asks the human to change a file.
 Names: `module.name`, e.g. `pilot/checkout.pay`, or any unambiguous suffix
 (`checkout.pay`). Tests are symbols in test modules (`x_test`).
 Each line runs in one project: yours (session start names it) or its
-`--project <folder>`. Paths are relative to that project.
+`--project <folder>`. Paths are relative to that project; a path that repeats
+the project's folder is refused with the shorter path.
 
 Several commands go in one call, one per line, run in order. A change that
 fails stops the call, so the lines after it don't run: `submit` then `test`
@@ -17,8 +18,9 @@ call is a turn that re-reads the conversation, so work in few calls:
 1. Read once: `inspect checkout.pay payments.capture --context` gives each
    symbol with the signatures it uses, its callers and a test. Don't ask again
    for anything a reply showed, and read only what the change needs: once you
-   know what to change, stop exploring. To reproduce a case:
-   `probe --from checkout_test.pay_test --trace checkout.pay`.
+   know what to change, stop exploring. To reproduce a case, in Gleam:
+   `probe --from checkout_test.pay_test --trace checkout.pay`; in Rust,
+   `probe` with statements that call it.
 2. Change and test in one call, never a change alone: `submit` then `test`,
    or for other files `write` (no path) then `run <name>`. All the edits, in
    one file or several, go in one patch, one header per symbol, module or file
@@ -42,10 +44,16 @@ call is a turn that re-reads the conversation, so work in few calls:
              *** End Patch
    A patch for symbols in another project needs `--project <folder>` on both
    `submit` and `test`.
+   A patch or code always goes in `text`; `command` names the command that
+   takes it (`write`, `submit` or `probe`), never the patch or the code.
    A new module is `*** Add: <module>`: its module comment, imports and code.
-   Every line of an Add, empty ones too, starts with `+`. Imports are added
-   automatically. Work out expected values from the task's numbers and the
-   code's own rules, never from running the code.
+   Every line of an Add, empty ones too, starts with `+`. A needed import is
+   added when exactly one project or dependency module matches the qualifier's
+   last path segment (`sqlight`, `gleam/json`), when the standard library does,
+   or when another module already imports that name as the qualifier; several
+   matches are refused and listed. `submit --imports <module>` replaces a
+   header. Work out expected values from the task's numbers and the code's own
+   rules, never from running the code.
    Write code the way the code around it is written: reuse the helpers, types
    and patterns `inspect --context` shows. A comment says why code exists, only
    where the code can't say it; never restate what the code does or address the
@@ -90,7 +98,7 @@ lists them):
   test [<name>... | --all]      run the tests a change can affect
   check [--warnings]            type-check everything
   probe                         run throwaway code from `text`
-  drafts                        rejected submits and writes, to fix and retry
+  drafts [drop <id>]            rejected submits and writes, to fix and retry
   files [dir]...                trees: tiers, line counts
   read <path> [--lines a..b]    a file, or some of its lines
   write [path]                  one replacement, or no path: a patch of many edits
@@ -126,11 +134,14 @@ Reading
   view <file>                   a .py or plain-file .rs file's outline: each
                                 item (fn, struct, `Type::method`, test) with
                                 its line range, signature and first doc line;
-                                graph source is read by symbol, never by path
+                                graph source is read by symbol, never by path;
+                                its refusal names `view <module> --bodies`, and
+                                `--project <folder>` for another project's
   view <file>::<name>           one item's source with its docs, numbered for
                                 `read --lines` and `write`; stored code is read
                                 and cited by name (`lockdown.dispatch`,
-                                `checkout.pay`)
+                                `checkout.pay`); `module:<name>` names no
+                                symbol: use `view <name>`
   view --draft <id>             a kept draft's text, from `drafts`
   view | inspect <dependency>   a dependency's module (`lustre/component`): its
                                 public signatures; `<module>.<name>`: one with
@@ -151,7 +162,9 @@ Reading
                                 =>`, `-> Result`); quotes around the whole
                                 text are dropped. No regex. The options count
                                 only as the last words: --in limits it to one
-                                file or folder; --context n (1 to 5) adds n
+                                file or folder; a missing one another project
+                                has names that project's `--project`;
+                                --context n (1 to 5) adds n
                                 lines around each match, marked `12-`. Up to
                                 10 lines per file; the reply stops at a whole
                                 file and says how many it left out
@@ -160,12 +173,13 @@ Reading
   session start [--scope <module>...]
                                 every symbol, and open work records with context
                                 (up to 4,000 bytes; `work list` shows them all)
-  ... --project <folder>        this line only, in another project: its folder
-                                as session start lists it, from the Solace root,
-                                or `../x` from this project. Reads (view,
-                                inspect, refs, find, grep, files, read) reach
-                                any project there; other commands, the
-                                projects the task covers
+  ... --project <folder>        at the end of a command line, for that line
+                                only, in another project: its folder as session
+                                start lists it, from the Solace root, or `../x`
+                                from this project. Reads (view, inspect, refs,
+                                find, grep, files, read) reach any project
+                                there; other commands, the projects the task
+                                covers
 Replies have a size limit: a signature is printed once per reply, and a reply
 that would be larger says what it left out and the command that shows it.
 
@@ -192,8 +206,14 @@ Changing (the new code is in `text`)
                                 in the same submit. A module changes with
                                 `*** Update: <module>` (no `module:` prefix).
                                 Checked together; a hunk that doesn't match
-                                changes nothing (E0108). A patch line is a
-                                whole line: for part of one, use --replace.
+                                changes nothing (E0108). A code hunk also
+                                matches through indentation when it fits in
+                                exactly one place: context and `-` lines keep
+                                the target's text, `+` lines take its depth,
+                                and the reply says so. A patch line is a whole
+                                line, prefixes included: for part of one, use
+                                --replace with `old` and `text` as patch
+                                lines, prefixes included.
                                 Other files change with `write`, not here
   submit <name>                 replace one symbol (may rename it)
   submit <name> --replace [--all]
@@ -253,15 +273,28 @@ Changing (the new code is in `text`)
                                 Private helpers only <drop> used are named as
                                 now unused, not deleted.
                                 Gleam only: Rust merge is deferred (D-158 point 6).
-  drafts                        the kept drafts: rejected submits and writes,
-                                each with its id; fix and retry with `--draft`
-Every submit is type-checked. Missing imports are added and imports in `text`
-are merged. If the submitted code has errors, nothing is saved. If it breaks
-other symbols (e.g. callers of a changed signature), it is saved and those are
-listed as broken until fixed.
+  drafts [drop <id>]            the kept drafts: rejected submits and writes,
+                                each with its id; fix and retry with `--draft`;
+                                `drafts drop <id>` discards one this task owns,
+                                in this project or the one `--project` names
+Every submit is type-checked. Missing imports are added: a qualifier takes the
+one project module, dependency module (`sqlight`, `gleam/json`) or standard
+library module whose last path segment it is, or the module another module
+already imports as that qualifier. Several matches add nothing and are listed;
+an unknown module names `submit --imports <module>` with the header to use.
+Imports in `text` are merged. If the submitted code has errors, nothing is
+saved. If it breaks other symbols (e.g. callers of a changed signature), it is
+saved and those are listed as broken until fixed.
 Rejected text is kept as a draft; the error gives its id. Fix it rather than
-resending it: `submit --draft <id> --replace` (`old` and `text`) patches and
+resending it: `submit --draft <id> --replace` (`old` and `text`; in a patch,
+both are lines of the patch, prefixes included) patches and
 retries it, `submit --draft <id>` retries it as is, `view --draft <id>` reads it.
+A failed retry keeps the replacement: the next `old` must match the draft as
+it is now (`view --draft <id>`).
+A draft left behind blocks `task done` in a work run, which lists each draft
+with the `view --draft <id>`, retry and `drafts drop <id>` calls for it; add
+`--project <folder>` for a draft in another of the task's projects. Dropping a
+stale draft is the way past it.
 A draft is stale once a symbol it replaces, or its module's
 imports, changed; its retry is refused (E0107): read the current source and
 submit again. A block equal to the stored symbol is reported unchanged. A patch
@@ -269,8 +302,10 @@ that can't be applied (E0108) is kept as written. When the error names the
 patch line at fault, fix that line with `--replace` instead of resending it;
 when the fault is in the whole patch (an Add with no `+` line, no section, an
 unknown header, a file section sent to `submit`), send the corrected patch
-again, whole. A patch that applies but is rejected after is kept as the blocks
-it changed.
+again, whole. A protected file and a Cargo.toml setting change only as a whole
+text: `write <path>` alone, with the exact new text and the why in `reason`;
+there is no `--replace` for them. A patch that applies but is rejected after is
+kept as the blocks it changed.
 
 Checking
   test                          run the tests that can see a change since they
@@ -280,16 +315,23 @@ Checking
   test --all                    run every test
   check [--warnings]            type-check everything; lists broken symbols
   probe                         run throwaway code (`text`) and show its output;
-                                nothing is saved. Statements become `main`'s
-                                body, or give a module with `pub fn main()`;
-                                `echo value` prints a value, and a single
-                                expression is printed
+                                nothing is saved. In a Gleam project,
+                                statements become `main`'s body, or give a
+                                module with `pub fn main()`; `echo value`
+                                prints a value, and a single expression is
+                                printed. In a Rust project, statements run in a
+                                test in a scratch copy of the crate, so they can
+                                call its items; `println!` and `dbg!` print
+  probe --in <module>           Rust only: run the probe inside this module so
+                                it can call the module's private items; the
+                                default is the crate root
   probe --from <fn>             start from a test's (or any function without
                                 arguments) imports and body; `text` adds
                                 statements that can use its variables
+                                Gleam only
   probe --trace <fn>...         also show each call to these functions, with
                                 its arguments and result (combines with --from)
-                                Gleam only: Rust probe is deferred (D-158 point 6)
+                                Gleam only
 
 Rust projects
 
@@ -347,8 +389,7 @@ without `cargo`, those commands are refused.
 `max_width`: rustfmt left them as written, so check their indentation or split
 the long literal.
 
-Not available for Rust: `probe`, `merge`.
-  test <name>                   instead of `probe`: add a `#[test]` and run it
+Not available for Rust: `merge`.
   submit + delete               instead of `merge`: add the item where it
                                 belongs, then delete the old one
 
@@ -423,16 +464,22 @@ change with `submit`, protected ones with `write` and the human's approval.
                                   +every line of the new file
                                   *** Delete File: docs/old.md
                                   *** End Patch
-                                Update hunks match as submit's do, with no read
-                                first; added lines with no `@@` go at the end.
+                                Update hunks need no read first and match as
+                                written apart from trailing space (leading
+                                space counts); added lines with no `@@` go at
+                                the end.
                                 Whole or nothing: any refused section (graph or
                                 protected file, unmatched hunk, failed
                                 validator) writes none, and each is named.
                                 The patch is kept as a draft: fix its bad line
-                                with `write --draft <id> --replace` (`old`,
-                                `text`); a fault in the whole patch says to
-                                resend it. A patch line is a whole line; for
-                                part of one, `write <path>` with `old`
+                                with `write --draft <id> --replace` (`old` and
+                                `text`, lines of the patch with their prefixes);
+                                a fault in the whole patch says to resend it. A
+                                failed retry keeps the replacement: the next
+                                `old` must match the draft as it is now.
+                                A patch line is a whole line; for part of one,
+                                `write <path>` with `old`. A protected file is
+                                written alone, with the exact new text.
   remove <path>...              files, whole or nothing: any refused path
                                 removes none and is named
   move <from> <to> [--to-project <folder>]
@@ -478,13 +525,19 @@ Work records, kept between sessions
 
 Task runs (the note, summary or question in `text`). Reviews, investigations
 and discussions are read-only: submit, delete, extract, merge, write, remove,
-move and format are refused, and so is run, except for commands marked
-`allowed_in_reviews = true`.
+move, drafts drop and format are refused, and so is run, except for commands
+marked `allowed_in_reviews = true`.
   session remember              your task, its notes, what this run read or
                                 changed since its last change, and its steps;
                                 after a compaction
   task diff [name...]           what this task changed, against its state before;
                                 `impact` with no names is the same
+  task peek <task> [--notes [<notes>]] [--from <n>]
+                                title, column, feature, dependencies and body of
+                                a task this run may read, or one named in it;
+                                `task peek feature` gives its feature; --notes
+                                adds the notes named, or every one, in full,
+                                paging with --from n
   task note                     add a note; completes a review run
                                 Only this call records a review's feedback; a final
                                 message is not. If it is refused, resend it; claim it
@@ -499,6 +552,9 @@ move and format are refused, and so is run, except for commands marked
                                 change yourself, or ask to add a project
   task done                     finish: a work run's summary goes to human
                                 review; an investigation's report stays on the task.
+                                A work run is refused while a draft holds unsaved
+                                work in any of its projects; the refusal names
+                                `view --draft`, the retry and `drafts drop <id>`.
                                 After a `test` in the same call, it waits for that
                                 test to pass and reach every change; send it in a
                                 call of its own when the summary may need a caveat
@@ -562,8 +618,9 @@ command not listed here is refused.
   read <path>... [--lines 3,7,10..12 | --tail n]
                                 each path in order; a --lines or --tail range
                                 takes one path
-  ... --project <folder>        read in a project below the root; in a folder of
-                                projects, every read needs it
+  ... --project <folder>        at the end of the line, read in a project below
+                                the root; in a folder of projects, every read
+                                needs it
 
 In notes and proposals, cite code by name (`lockdown.dispatch`), not by
 `file:line`: line numbers move. Name tasks, features and milestones as

@@ -3051,7 +3051,7 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
         }
     }
     let mut out = brief(&packet, kind);
-    out += &feature_section(&scope::top(root), t);
+    out += &plan_sections(&scope::top(root), t);
     if resumed {
         out = out.replace(START, "Use the continuation context below.");
     }
@@ -3061,7 +3061,6 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
     if reply.is_some() {
         out = out.replace(START, HELD_START);
     }
-    out += &waiting_on(&scope::top(root), tid);
     if !matches!(kind, "review" | "discuss") && t["runs"].as_array().is_some_and(|r| r.len() > 1) {
         if resumed {
             out += "\nContinue the author's conversation. The role and permissions above replace those of earlier runs. Skip broad orientation; inspect current versions of symbols you need before editing.\n";
@@ -3105,10 +3104,13 @@ fn continuation_brief(t: &Value, run: &Value, resumed: bool, root: &Path, here: 
                 );
             }
         }
-        if let Ok(drafts) = drafts::list_for(&s, t["id"].as_str().unwrap_or(""))
+        if let Ok(drafts) = task_drafts(&s, t)
             && !drafts.is_empty()
         {
-            out += &format!("\nRetained drafts (view with `view --draft <id>`):\n{drafts}\n");
+            out += "\nRetained drafts:\n";
+            for (dir, id, args, current) in drafts {
+                out += &format!("{dir}: {id}: {} ({}): view `view --draft {id} --project {dir}`\n", json!(args), drafts::status(current));
+            }
         }
     }
     out += &vision_section(&scope::top(root), kind);
@@ -3158,14 +3160,13 @@ const VISION_CAP: usize = tasks::VISION_LIMIT;
 /// The most of a feature note a brief carries (D-138), as for the vision.
 const FEATURE_CAP: usize = VISION_CAP;
 
-/// Task `t`'s feature for its brief and `session start --task` (D-138): the
-/// feature's title, then the most recent of the task's investigation report,
-/// assignment note (the human's, outside any run) and review feedback, cut at
-/// a line end within `FEATURE_CAP` characters. Empty when the task has no
-/// feature, or its feature is gone.
+/// Task `t`'s feature for its brief and `session start --task` (D-138, D-203):
+/// the feature's title, state and whole body, then the most recent of the
+/// task's investigation report, assignment note (the human's, outside any run)
+/// and review feedback, cut at a line end within `FEATURE_CAP` characters.
+/// Empty when the task has no feature, or its feature is gone.
 pub fn feature_section(top: &Path, t: &Value) -> String {
     let Some(f) = t["feature"].as_str().and_then(|fid| tasks::record(top, "features", fid)) else { return String::new() };
-    let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
     let runs = t["runs"].as_array().cloned().unwrap_or_default();
     let kind_of = |n: &Value| runs.iter().find(|r| r["id"] == n["run"]).map(|r| text(&r["kind"])).unwrap_or_default();
     let label = |n: &Value| match (n["author"].as_str(), n["run"].as_str(), kind_of(n).as_str()) {
@@ -3174,7 +3175,15 @@ pub fn feature_section(top: &Path, t: &Value) -> String {
         (Some("human"), None, _) => Some("assignment".to_string()),
         _ => None,
     };
-    let mut out = format!("\nFeature (the feature this task is part of; its latest direction):\n- {}\n", text(&f["title"]));
+    let mut out = format!(
+        "\nFeature (the feature this task is part of; its state and body, then its latest direction):\n- {}\n- state: {}\n",
+        text(&f["title"]),
+        text(&f["state"])
+    );
+    let body = text(&f["body"]);
+    if !body.is_empty() {
+        out += &format!("\n{body}\n");
+    }
     // An empty note gives no direction, so the next one is used.
     let latest =
         t["notes"].as_array().into_iter().flatten().rev().find_map(|n| Some((label(n)?, text(&n["text"]))).filter(|(_, x)| !x.is_empty()));
@@ -3188,43 +3197,38 @@ pub fn feature_section(top: &Path, t: &Value) -> String {
             };
             shown += "\n(cut short; the whole note is in the task's notes on the board)";
         }
-        out += &format!("- {label}: {shown}\n");
+        out += &format!("\n- {label}: {shown}\n");
     }
     out
-}
-
-/// `feature_section` for task `tid` of the root `top`.
-pub fn feature_of(top: &Path, tid: &str) -> String {
-    all_tasks(top).ok().and_then(|all| all.into_iter().find(|o| o["id"] == tid)).map(|t| feature_section(top, &t)).unwrap_or_default()
 }
 
 /// What a brief says when a dependency is unfinished (D-110): advice, nothing is refused.
 const WAITING: &str = "This task depends on unfinished work. Check whether you can do your part without it. If you can't, ask the human (`task ask`) before building on code that doesn't exist yet.";
 
-/// Task `tid`'s dependencies for its brief and `session start --task` (D-110):
-/// each with its id, title and column, from any project of the root, the
-/// unfinished ones marked, then advice. Unfinished is as on the board: not in a
-/// final column, so complete and canceled are finished. Empty when no
-/// dependency is unfinished, so the brief stays short.
+/// Task `tid`'s dependencies for its brief and `session start --task` (D-110,
+/// D-203): each with its id, title and column, from any project of the root,
+/// the unfinished ones marked, then advice only when one is unfinished.
+/// Unfinished is as on the board: not in a final column, so complete and
+/// canceled are finished. Empty only when the task has no dependencies.
 pub fn waiting_on(top: &Path, tid: &str) -> String {
     let (Ok(all), Ok(w)) = (all_tasks(top), flow(top)) else { return String::new() };
     let Some(t) = all.iter().find(|o| o["id"] == tid) else { return String::new() };
-    let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
     let (mut lines, mut unfinished) = (vec![], false);
     for id in t["dependsOn"].as_array().into_iter().flatten().filter_map(Value::as_str) {
         // A deleted task is no work to wait for.
         let Some(d) = all.iter().find(|o| o["id"] == id) else { continue };
-        let c = column(&w, d);
-        let open = c["final"] != true;
+        let open = column(&w, d)["final"] != true;
         unfinished |= open;
-        let shown = c["label"].as_str().or(c["id"].as_str()).or(d["column"].as_str()).unwrap_or("");
-        let project = if d["home"] != t["home"] { format!(", in {}", text(&d["home"])) } else { String::new() };
-        lines.push(format!("- {id} {} ({shown}{project}){}", text(&d["title"]), if open { " — unfinished" } else { "" }));
+        lines.push(task_line(d, &t["home"], &w, open));
     }
-    if !unfinished {
+    if lines.is_empty() {
         return String::new();
     }
-    format!("\nDepends on:\n{}\n{WAITING}\n", lines.join("\n"))
+    let mut out = format!("\nDepends on:\n{}\n", lines.join("\n"));
+    if unfinished {
+        out += &format!("{WAITING}\n");
+    }
+    out
 }
 
 /// The root's vision for an investigate, work or discuss brief (D-91): the
@@ -3376,8 +3380,7 @@ pub(super) fn remember(top: &Path, tid: &str, rid: &str, budget: usize) -> Out {
     }
     let t = read_task(top, &task_path(top, tid)?)?;
     let mut context = task_sections(&t);
-    context += &feature_section(top, &t);
-    context += &waiting_on(top, tid);
+    context += &plan_sections(top, &t);
     let reads = reads::window_reads().unwrap_or_else(|| run_reads(top, tid, rid));
     Ok(reads::remember_reply(&context, &reads, top, &|b| run_outline(top, tid, rid, b), budget))
 }
@@ -3438,7 +3441,6 @@ const TECH_DEBT_ASK: &str = "Put minor, non-blocking findings that should be fix
 /// The task's context as a brief gives it: title, body, links, notes and
 /// questions. Its feature and dependencies are added where a brief adds them.
 fn task_sections(t: &Value) -> String {
-    let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
     let mut out = format!("Task: {}\n", text(&t["title"]));
     if !text(&t["body"]).is_empty() {
         out += &format!("\n{}\n", text(&t["body"]));
@@ -3486,7 +3488,6 @@ fn brief(t: &Value, kind: &str) -> String {
     let verify = "Use those to verify (for example test suites).";
     let define = "Probe or run tests only when needed to more thoroughly define the issue.";
     let common = "Code held as symbols is read and cited by name (`lockdown.dispatch`, `checkout.pay`), not by source path: source files are projections written by Solace.";
-    let text = |v: &Value| v.as_str().unwrap_or("").trim().to_string();
     let list = |k: &str| t[k].as_array().cloned().unwrap_or_default();
     let home = text(&t["home"]);
     let projects: Vec<String> = list("scope").iter().map(text).collect();
@@ -3799,6 +3800,9 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: &[&Path]
         if HOST.contains(&a[0]) {
             return err("E7010", "host command is unavailable in a run");
         }
+        if r["kind"] != "work" && a.starts_with(&["drafts", "drop"]) {
+            return err("E7010", "this run is read-only");
+        }
         // Every read-only run may run the commands a human marked (D-67, D-161).
         if r["kind"] != "work" && a[0] == "run" && a.len() > 1 {
             let marked = lockdown::settings(also.first().copied().unwrap_or(root))
@@ -3870,6 +3874,11 @@ pub fn task_command(
             if t["runs"][i]["kind"] == "review" {
                 return err("E7010", "reviews finish with task note");
             }
+            if t["runs"][i]["kind"] == "work"
+                && let Some(refusal) = draft_refusal(s, &t)?
+            {
+                return err("E7001", refusal);
+            }
         }
         Some("ask") => {
             if !(2..=4).contains(&options.len()) {
@@ -3890,7 +3899,13 @@ pub fn task_command(
             }
             return wait_reply(s, tid, rid);
         }
-        _ => return usage("task note | task ask | task done, with the text in `text`; task diff [--since-review] [name ...]"),
+        _ => {
+            return usage(concat!(
+                "task peek <task> [--notes [<notes>]] [--from <n>] | task peek feature | ",
+                "task note | task ask | task done, with the text in `text`; ",
+                "task diff [--since-review] [name ...]",
+            ));
+        }
     }
     // The task as the server will have it: checked here, so a refusal reaches the agent.
     let mut next = t.clone();
@@ -5533,4 +5548,283 @@ pub(super) fn project_home(top: &Path, t: &Value) -> Option<PathBuf> {
 
 fn homeless_among(members: &Result<Vec<String>, Failure>, home: &str) -> bool {
     members.as_ref().is_ok_and(|ms| !ms.iter().any(|m| m == home))
+}
+
+/// One line for a related task (D-110, D-203): `task:<id> <title> (<column>)`,
+/// with its project when it is not `home`'s, and `— unfinished` when asked.
+fn task_line(t: &Value, home: &Value, w: &Value, unfinished: bool) -> String {
+    let project = if t["home"].as_str() != home.as_str() { format!(", in {}", text(&t["home"])) } else { String::new() };
+    format!(
+        "task:{} {} ({}{}){}",
+        text(&t["id"]),
+        text(&t["title"]),
+        column_name(w, t),
+        project,
+        if unfinished { " — unfinished" } else { "" }
+    )
+}
+
+/// A task's column as its label, or its id when the workflow has no label.
+fn column_name(w: &Value, t: &Value) -> String {
+    let c = column(w, t);
+    c["label"].as_str().or(c["id"].as_str()).or(t["column"].as_str()).unwrap_or("").to_string()
+}
+
+/// The tasks whose `dependsOn` names `tid` (D-203), for its brief and
+/// `session start --task`: one line each, from any project. Empty when none.
+pub fn needed_by(top: &Path, tid: &str) -> String {
+    let (Ok(all), Ok(w)) = (all_tasks(top), flow(top)) else { return String::new() };
+    let Some(t) = all.iter().find(|o| o["id"] == tid) else { return String::new() };
+    let lines: Vec<String> = all
+        .iter()
+        .filter(|o| o["dependsOn"].as_array().is_some_and(|d| d.iter().any(|x| x.as_str() == Some(tid))))
+        .map(|o| task_line(o, &t["home"], &w, false))
+        .collect();
+    if lines.is_empty() { String::new() } else { format!("\nNeeded by:\n{}\n", lines.join("\n")) }
+}
+
+/// The plan around task `t` (D-203): its feature, dependencies, dependents,
+/// then how to read one.
+fn plan_sections(top: &Path, t: &Value) -> String {
+    let tid = t["id"].as_str().unwrap_or("");
+    let feature = feature_section(top, t);
+    let deps = waiting_on(top, tid);
+    let dependents = needed_by(top, tid);
+    let mut hints: Vec<&str> = vec![];
+    if !deps.is_empty() || !dependents.is_empty() {
+        hints.push("`task peek <id>` reads a listed task");
+    }
+    if !feature.is_empty() {
+        hints.push("`task peek feature` reads the feature");
+    }
+    let hint = if hints.is_empty() { String::new() } else { format!("\n{}.\n", hints.join("; ")) };
+    format!("{feature}{deps}{dependents}{hint}")
+}
+
+/// `plan_sections` for task `tid`, empty when it is gone.
+pub fn plan_reading(top: &Path, tid: &str) -> String {
+    let Some(t) = all_tasks(top).ok().and_then(|all| all.into_iter().find(|o| o["id"] == tid)) else { return String::new() };
+    plan_sections(top, &t)
+}
+
+/// `task peek` (D-203): a task the run may read, or its feature, as JSON.
+pub fn task_peek(s: &Store, tid: &str, args: &[&str], budget: usize) -> Out {
+    let Some(subject) = args.first().copied() else {
+        return usage("task peek <task> [--notes [<notes>]] [--from <n>] | task peek feature");
+    };
+    if tasks::bare_id(subject) == "feature" {
+        if args.len() > 1 {
+            return usage("task peek feature takes no other arguments");
+        }
+        return peek_feature(&s.root, tid);
+    }
+    peek_task(&s.root, tid, subject, &args[1..], budget)
+}
+
+/// `task peek <task>`: the target's fields, then its notes when asked.
+fn peek_task(root: &Path, tid: &str, subject: &str, rest: &[&str], budget: usize) -> Out {
+    let top = scope::top(root);
+    let t = task(root, tid)?;
+    let (Ok(all), Ok(w)) = (all_tasks(&top), flow(&top)) else {
+        return err("E7001", "the plan around this task could not be read");
+    };
+    let id = tasks::bare_id(subject);
+    let allowed = readable_tasks(&t, &all);
+    if !allowed.iter().any(|x| x.as_str() == id) {
+        let lines: Vec<String> = allowed
+            .iter()
+            .filter_map(|x| all.iter().find(|o| o["id"] == x.as_str()))
+            .map(|o| task_line(o, &t["home"], &w, false))
+            .collect();
+        return err("E7001", format!("task {id} is not one this run may read. It may read:\n{}", lines.join("\n")));
+    }
+    let Some(o) = all.iter().find(|o| o["id"] == id) else { return err("E7023", format!("unknown task {id}")) };
+    let (notes, spec, from) = peek_flags(rest)?;
+    let feature = o["feature"].as_str().and_then(|fid| {
+        tasks::record(&top, "features", fid).map(|f| {
+            json!({
+                "id": format!("feature:{fid}"),
+                "title": text(&f["title"]),
+                "state": text(&f["state"]),
+            })
+        })
+    });
+    let deps: Vec<String> = o["dependsOn"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter_map(|d| all.iter().find(|x| x["id"] == d))
+        .map(|d| task_line(d, &o["home"], &w, column(&w, d)["final"] != true))
+        .collect();
+    let mut reply = json!({
+        "task": format!("task:{id}"),
+        "title": text(&o["title"]),
+        "column": column_name(&w, o),
+        "feature": feature,
+        "dependsOn": deps,
+        "body": text(&o["body"]),
+    });
+    if notes {
+        reply["notes"] = selected_notes(o, spec.as_deref())?;
+        return strategy::in_parts(reply, "notes", "note", &format!("task peek {id} --notes"), from, budget);
+    }
+    Ok(format!("{}\n", serde_json::to_string_pretty(&reply).unwrap()))
+}
+
+/// `task peek feature`: the task's feature and its tasks.
+fn peek_feature(root: &Path, tid: &str) -> Out {
+    let top = scope::top(root);
+    let t = task(root, tid)?;
+    let Some(fid) = t["feature"].as_str() else { return err("E7001", format!("task {tid} has no feature")) };
+    let Some(f) = tasks::record(&top, "features", fid) else {
+        return err("E7001", format!("task {tid}'s feature {fid} is gone"));
+    };
+    let (Ok(all), Ok(w)) = (all_tasks(&top), flow(&top)) else {
+        return err("E7001", "the plan around this task could not be read");
+    };
+    let tasks: Vec<String> =
+        all.iter().filter(|o| o["feature"].as_str() == Some(fid)).map(|o| task_line(o, &t["home"], &w, false)).collect();
+    let reply = json!({
+        "feature": format!("feature:{fid}"),
+        "title": text(&f["title"]),
+        "state": text(&f["state"]),
+        "body": text(&f["body"]),
+        "tasks": tasks,
+    });
+    Ok(format!("{}\n", serde_json::to_string_pretty(&reply).unwrap()))
+}
+
+/// `--notes [<notes>]` and `--from <n>` after `task peek <task>`.
+fn peek_flags(rest: &[&str]) -> Result<(bool, Option<String>, usize), Failure> {
+    let (mut notes, mut spec, mut from) = (false, None, 0);
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--notes" => {
+                notes = true;
+                if let Some(given) = rest.get(i + 1).filter(|x| !x.starts_with("--")) {
+                    spec = Some((*given).to_string());
+                    i += 1;
+                }
+            }
+            "--from" => {
+                let Some(n) = rest.get(i + 1) else { return usage("--from needs a character number") };
+                from = n.parse().map_err(|_| Failure("E7001 --from takes a character number, as a `Next:` line gives it".into(), 1))?;
+                i += 1;
+            }
+            other => return usage(format!("task peek has no {other}")),
+        }
+        i += 1;
+    }
+    if from > 0 && !notes {
+        return usage("--from reads on in the notes; add `--notes`");
+    }
+    Ok((notes, spec, from))
+}
+
+/// The task ids a run working on `t` may read (D-203): its own, its
+/// dependencies, its dependents, and tasks named `task:<id>` in its body or notes.
+fn readable_tasks(t: &Value, all: &[Value]) -> Vec<String> {
+    let mut ids = vec![];
+    if let Some(id) = t["id"].as_str() {
+        add_allowed(&mut ids, all, id);
+    }
+    for id in t["dependsOn"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+        add_allowed(&mut ids, all, id);
+    }
+    for o in all {
+        if o["dependsOn"].as_array().is_some_and(|d| d.iter().any(|x| x.as_str() == t["id"].as_str())) {
+            if let Some(id) = o["id"].as_str() {
+                add_allowed(&mut ids, all, id);
+            }
+        }
+    }
+    for id in named_task_ids(t) {
+        add_allowed(&mut ids, all, &id);
+    }
+    ids
+}
+
+/// Adds `id` to an allowed list once, when the task exists.
+fn add_allowed(ids: &mut Vec<String>, all: &[Value], id: &str) {
+    if !ids.iter().any(|x| x.as_str() == id) && all.iter().any(|o| o["id"] == id) {
+        ids.push(id.to_string());
+    }
+}
+
+/// The task ids linked as `task:<id>` in a task's body or notes.
+fn named_task_ids(t: &Value) -> Vec<String> {
+    let mut ids = vec![];
+    scan_task_links(t["body"].as_str().unwrap_or(""), &mut ids);
+    for n in t["notes"].as_array().into_iter().flatten() {
+        scan_task_links(n["text"].as_str().unwrap_or(""), &mut ids);
+    }
+    ids
+}
+
+/// Adds the id after each `task:` in `text`.
+fn scan_task_links(text: &str, ids: &mut Vec<String>) {
+    for part in text.split("task:").skip(1) {
+        let id: String = part.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        if !id.is_empty() {
+            ids.push(id);
+        }
+    }
+}
+
+/// The task's notes named by `spec` (`3,7,10..12`, or `all`), each with its
+/// `note` number.
+fn selected_notes(t: &Value, spec: Option<&str>) -> Result<Value, Failure> {
+    let all = t["notes"].as_array().cloned().unwrap_or_default();
+    let picked = match spec {
+        None | Some("all") => (1..=all.len()).collect(),
+        Some(spec) => strategy::parse_number_list(spec, all.len(), "notes")?,
+    };
+    Ok(json!(
+        picked
+            .into_iter()
+            .map(|n| {
+                let mut note = all[n - 1].clone();
+                note["note"] = json!(n);
+                note
+            })
+            .collect::<Vec<_>>()
+    ))
+}
+
+fn text(v: &Value) -> String {
+    v.as_str().unwrap_or("").trim().to_string()
+}
+
+/// Why `task done` waits, if a draft of this task is open in any of its projects.
+fn draft_refusal(s: &Store, t: &Value) -> Result<Option<String>, Failure> {
+    let mut lines = vec![];
+    for (dir, id, args, current) in task_drafts(s, t)? {
+        let flag = format!(" --project {dir}");
+        let retry = if args.first().is_some_and(|a| a == "write") { "write" } else { "submit" };
+        let what = if args.is_empty() { "draft".to_string() } else { args.join(" ") };
+        let stale = if current { "" } else { ", stale" };
+        lines.push(format!(
+            "- {id} in {dir} ({what}{stale}): view `view --draft {id}{flag}`; \
+             retry `{retry} --draft {id}{flag}`; drop `drafts drop {id}{flag}`"
+        ));
+    }
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    let (noun, verb) = if lines.len() == 1 { ("draft", "holds") } else { ("drafts", "hold") };
+    Ok(Some(format!("task done is refused: {} {noun} {verb} unsaved work in the task's projects.\n{}", lines.len(), lines.join("\n"))))
+}
+
+/// The task's drafts, with their project folders, from every project in its scope.
+fn task_drafts(s: &Store, t: &Value) -> Result<Vec<(String, String, Vec<String>, bool)>, Failure> {
+    let tid = t["id"].as_str().unwrap_or("");
+    let mut out = vec![];
+    for (dir, st) in scope_stores(s, t)? {
+        for (id, args, current) in drafts::entries(&st, tid)? {
+            out.push((dir.clone(), id, args, current));
+        }
+    }
+    Ok(out)
 }

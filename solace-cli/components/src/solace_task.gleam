@@ -1883,6 +1883,7 @@ const task_styles =
   <> tool_styles
   <> projects_pick_styles
   <> editor_styles
+  <> table_styles
   <> model_styles
   <> ":host{display:block;container-type:inline-size}input,textarea,pre,code,.md,.detail > .heading > h2,.record > .panel > article > p,.record > .panel > p,.record > .panel > ul > li,.changes h4,.changes li,.run > header > strong,.run > header > .state,.run > small{user-select:text;-webkit-user-select:text}
 button,input,textarea,select{font:inherit;padding:var(--control-pad);margin:var(--space-1);border:1px solid var(--edge);border-radius:0}button{cursor:pointer;background:var(--paper)}button:hover{background:var(--hover)}button:focus-visible{outline:3px solid var(--focus)}label{display:block}textarea{display:block;width:100%;box-sizing:border-box;min-height:70px}input{width:100%;box-sizing:border-box}.detail{border:1px solid var(--line);padding:16px;border-radius:0}small{display:block;color:var(--soft);overflow-wrap:anywhere}pre{white-space:pre-wrap;font:inherit}.actions{display:flex;flex-wrap:wrap;gap:6px}[role=alert]{color:var(--revision)}article{border-bottom:1px solid var(--line);padding:8px}li{white-space:pre-wrap;margin-bottom:8px}.attention{color:var(--warn-text)}.status{display:inline-block;font-size:13px;padding:1px 8px;border-radius:0;background:var(--well);margin:4px 0}.working::before{content:\"\";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--ok-text);margin-right:6px;animation:pulse 1.2s ease-in-out infinite}@keyframes pulse{50%{opacity:.25}}@media (prefers-reduced-motion:reduce){.working::before{animation:none}}.note,.run{border:1px solid var(--line);border-radius:0;padding:8px 12px;margin:8px 0;background:var(--paper)}header{display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}header small{display:inline}.md p,.md ul,.md ol,.md blockquote{margin:6px 0}.md blockquote{padding-left:10px;border-left:3px solid var(--line);color:var(--soft)}.md pre,.transcript pre{background:var(--code);padding:8px;border-radius:0;overflow:auto;white-space:pre-wrap;font:13px 'IBM Plex Mono',ui-monospace,monospace;max-height:320px}code{font:13px 'IBM Plex Mono',ui-monospace,monospace;background:var(--code);padding:1px 4px;border-radius:0}.transcript{border-left:3px solid var(--line);padding-left:10px;margin-top:8px}.entry{margin:6px 0}details.entry>summary{cursor:pointer;color:var(--soft)}.muted{color:var(--soft)}.note .delete{float:right;margin:0 0 4px 8px;font-size:13px;padding:0 8px}
@@ -4502,3 +4503,9 @@ fn collapse_middle(lines: List(String)) -> List(DiffLine) {
       }
   }
 }
+
+/// The markdown tables' look, shared by the task detail and the Strategy page:
+/// cells in the page's lines and padding, and a wide table scrolls sideways
+/// inside its panel.
+pub const table_styles =
+  ".md table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:var(--space-2) 0}.md th,.md td{border:1px solid var(--line);padding:var(--space-1) var(--space-2);vertical-align:top}.md th{background:var(--well);font-weight:600;text-align:left}\n"

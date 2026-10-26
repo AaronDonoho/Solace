@@ -1027,3 +1027,34 @@ fn self_and_super_in_inline_modules_resolve() {
     assert!(uses(&ix, "crate.outer::inner::go", "crate.outer::inner::inner_make"));
     assert!(uses(&ix, "crate.outer::inner::go", "crate.outer::outer_make"));
 }
+
+#[test]
+fn calls_in_a_file_module_and_through_its_parents_use_resolve() {
+    let (_root, ix) = index(
+        "fn before() {}\n\nmod outer;\n",
+        &[
+            (
+                "src/outer.rs",
+                concat!(
+                    "fn before() {}\n\n",
+                    "fn local() {}\n\n",
+                    "mod inner;\n\n",
+                    "mod checks;\n\n",
+                    "use inner::{helper};\n\n",
+                    "pub fn parent_calls() {\n    helper();\n    local();\n}\n\n",
+                    "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+                    "    #[test]\n    fn test_calls() {\n        helper();\n    }\n}\n",
+                ),
+            ),
+            ("src/outer/checks.rs", "use super::*;\n\n#[test]\nfn test_calls() {\n    helper();\n}\n"),
+            ("src/outer/inner.rs", "pub fn helper() {}\n\npub fn local_calls() {\n    helper();\n}\n"),
+        ],
+    );
+    assert_eq!(ix.syms[index_of(&ix, "outer.inner")].kind_text, "mod");
+    assert!(!super::Refs::new(&ix.syms, &ix.modules).inline_modules.contains_key("crate::outer"));
+    assert!(uses(&ix, "outer::inner.local_calls", "outer::inner.helper"));
+    assert!(uses(&ix, "outer.parent_calls", "outer::inner.helper"));
+    assert!(uses(&ix, "outer.parent_calls", "outer.local"));
+    assert!(uses(&ix, "outer.tests::test_calls", "outer::inner.helper"));
+    assert!(uses(&ix, "outer::checks.test_calls", "outer::inner.helper"));
+}

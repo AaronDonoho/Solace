@@ -238,17 +238,22 @@ pub(crate) fn rust_descendants(ix: &Index, i: usize) -> Vec<usize> {
     out
 }
 
-/// Each module's last top-level row and its separator (D-173): the row a Rust
-/// file's ending hangs on, before a delete takes it.
-fn rust_endings(ix: &Index) -> Vec<(String, String, Option<String>)> {
-    let mut out: Vec<(String, String, Option<String>)> = vec![];
-    for s in ix.syms.iter().filter(|s| s.parent.is_none()) {
-        match out.iter_mut().find(|(m, ..)| *m == s.module) {
-            Some(e) => {
-                e.1 = s.id.clone();
-                e.2 = s.sep.clone();
+/// Each level's last row and its separator (D-173): the row a Rust file's or an
+/// inline container's ending hangs on, before a delete takes it.
+fn rust_endings(ix: &Index) -> Vec<RustEnding> {
+    let mut out: Vec<RustEnding> = vec![];
+    let mut at: std::collections::HashMap<(String, Option<String>), usize> = std::collections::HashMap::new();
+    for s in ix.syms.iter() {
+        let key = (s.module.clone(), s.parent.clone());
+        match at.get(&key).copied() {
+            Some(i) => {
+                out[i].id = s.id.clone();
+                out[i].sep = s.sep.clone();
             }
-            None => out.push((s.module.clone(), s.id.clone(), s.sep.clone())),
+            None => {
+                at.insert(key, out.len());
+                out.push(RustEnding { module: s.module.clone(), parent: s.parent.clone(), id: s.id.clone(), sep: s.sep.clone() });
+            }
         }
     }
     out
@@ -394,7 +399,7 @@ impl Store {
         };
         let module = row.path.clone();
         let file = language::rust::split(raw, &module)
-            .map_err(|e| store::rust_syntax_error(e, &module, None, &module, 0, raw.lines().count().max(1)))?;
+            .map_err(|e| store::rust_syntax_error(e, &module, None, &module, 0, 0, raw.lines().count().max(1)))?;
         if !file.refusals.is_empty() {
             let lines: Vec<String> = file.refusals.iter().map(|r| format!("line {} (`{}`): {}", r.line, r.quote, r.message)).collect();
             return fail(format!("Not saved: the Rust text is outside the subset Solace holds.\n{}", lines.join("\n")));
@@ -406,7 +411,7 @@ impl Store {
         }
         let mut items = rust_module_items(&ix, &module, &file.items)?;
         if !formatted {
-            self.rust_format_module(&ix, &module, None, &mut items, false)?;
+            self.rust_format_module(&ix, &module, None, &mut items, false, file.header.matches('\n').count() + 1)?;
         }
         let end = &old[old.trim_end().len()..];
         let header = if file.header.trim().is_empty() {
@@ -472,22 +477,38 @@ impl Store {
     /// item whose own text equals its stored row keeps its bytes, so the rest of
     /// the file isn't reformatted; a changed item is rustfmt's, inside its
     /// parent's opening when it is nested. `done`: this item's text came from
-    /// formatting its parent whole.
-    fn rust_format_module(
+    /// formatting its parent whole. `line`: where the first item starts in the
+    /// module.
+    pub(crate) fn rust_format_module(
         &self,
         ix: &Index,
         module: &str,
         parent: Option<(&str, &str, &str)>,
         items: &mut [RustItem],
         done: bool,
+        line: usize,
     ) -> Result<(), Failure> {
+        let mut at = line;
         for item in items {
             let same = item.stored.is_some_and(|i| ix.syms[i].text == item.text);
             let mut whole = done;
+            let child_line = at + item.text.matches('\n').count();
+            let span = item.joined().matches('\n').count() + item.sep.matches('\n').count();
             if !done && !same {
                 let text = if item.children.is_empty() { item.text.clone() } else { item.joined() };
+                let local = text.lines().count().max(1);
+                let module_line = at.saturating_sub(1);
+                let wrapper_lines = parent.map_or(0, |(_, opening, _)| opening.lines().count());
                 let one = store::format_one(&self.root, module, parent, &text).map_err(|e| {
-                    store::rust_syntax_error(e, &format!("{module}.{}", item.name), parent, module, 0, text.lines().count().max(1))
+                    store::rust_syntax_error(
+                        e,
+                        &format!("{module}.{}", item.name),
+                        parent,
+                        module,
+                        module_line,
+                        wrapper_lines,
+                        module_line + local,
+                    )
                 })?;
                 if item.stored.is_none() && !item.children.is_empty() && item.children.len() == one.children.len() {
                     // A new container arrived formatted whole, its items too;
@@ -501,7 +522,8 @@ impl Store {
             }
             let (name, opening) = (item.name.clone(), item.text.clone());
             let kind = item.kind;
-            self.rust_format_module(ix, module, Some((name.as_str(), opening.as_str(), kind)), &mut item.children, whole)?;
+            self.rust_format_module(ix, module, Some((name.as_str(), opening.as_str(), kind)), &mut item.children, whole, child_line)?;
+            at += span;
         }
         Ok(())
     }
@@ -608,7 +630,7 @@ impl Store {
                 && let [one] = items.as_slice()
                 && store::is_container(one)
             {
-                return fail(format!("Not saved: {}.", store::block_note(one.kind)));
+                return fail(format!("Not saved: {}.", store::block_note(one.kind, None)));
             }
             // A block's own text replaces nothing: a symbol's items change one
             // by one, and only a new block is saved whole (D-168).
@@ -616,7 +638,7 @@ impl Store {
                 && store::is_container(one)
                 && target.existing.is_some()
             {
-                return fail(format!("Not saved: {}.", store::block_note(one.kind)));
+                return fail(format!("Not saved: {}.", store::block_note(one.kind, None)));
             }
             for item in &items {
                 for item in nested(item) {
@@ -1057,9 +1079,10 @@ impl Store {
             let dropped = self.rust_prune_impls(&emptied)?;
             let mut retired: Vec<String> = vec![];
             self.rust_prune_modules(&mut emptied, &mut retired)?;
-            // The file's ending hangs on its last row; every row this delete
-            // took hands its separator to the new last one, so the file keeps
-            // its ending (a `mod x;` item the prune took counts too).
+            // Every level's ending, the file's or an inline container's, hangs
+            // on its last row; every row this delete took hands its separator
+            // to the new last one, so the level keeps its ending (a `mod x;`
+            // item the prune took counts too).
             self.rust_fix_endings(&endings)?;
             let ix = self.index()?;
             let diags = self.check_all(&ix)?;
@@ -1181,7 +1204,7 @@ impl Store {
                 .and_then(|line| ranges.iter().find(|(first, last, _)| *first <= line && line <= *last).map(|(.., name)| name.clone()))
                 .unwrap_or_else(|| module.clone());
             let lines = ranges.iter().map(|(_, last, _)| *last).max().unwrap_or(1);
-            add_repair_note(store::rust_syntax_error(e, &label, None, &module, 0, lines), note.as_deref())
+            add_repair_note(store::rust_syntax_error(e, &label, None, &module, 0, 0, lines), note.as_deref())
         })?;
         let out = self.submit_module_rust(m, &text, true).map_err(|e| add_repair_note(e, note.as_deref()))?;
         Ok(match note {
@@ -1239,16 +1262,17 @@ impl Store {
         Ok(dropped)
     }
 
-    /// Hands the separator of each module's former last row, if it is gone, to
-    /// the new last row, so the file keeps its ending.
-    fn rust_fix_endings(&self, endings: &[(String, String, Option<String>)]) -> Result<(), Failure> {
+    /// Hands the separator of each level's former last row, if it is gone, to
+    /// the new last row, so a file or an inline container keeps its ending.
+    fn rust_fix_endings(&self, endings: &[RustEnding]) -> Result<(), Failure> {
         let ix = self.index()?;
-        for (module, id, sep) in endings {
-            if ix.syms.iter().any(|s| &s.id == id) {
+        for ending in endings {
+            if ix.syms.iter().any(|s| s.id == ending.id) {
                 continue;
             }
-            if let Some(s) = ix.syms.iter().filter(|s| &s.module == module && s.parent.is_none()).next_back() {
-                let sep = sep.clone().unwrap_or_else(|| "\n".into());
+            let next = ix.syms.iter().filter(|s| s.module == ending.module && s.parent == ending.parent).next_back();
+            if let Some(s) = next {
+                let sep = ending.sep.clone().unwrap_or_else(|| "\n".into());
                 self.db.execute("UPDATE symbols SET sep = ?2 WHERE id = ?1", params![&s.id, sep])?;
             }
         }
@@ -1420,4 +1444,13 @@ pub(crate) fn dropped_impls_note(dropped: &[(String, String)]) -> String {
     }
     let names = dropped.iter().map(|(q, _)| q.as_str()).collect::<Vec<_>>().join(", ");
     format!("Dropped empty impl {names}.\n")
+}
+
+/// The last row under one parent and the separator that followed it (D-173):
+/// the row an ending hangs on, before a delete takes it.
+struct RustEnding {
+    module: String,
+    parent: Option<String>,
+    id: String,
+    sep: Option<String>,
 }

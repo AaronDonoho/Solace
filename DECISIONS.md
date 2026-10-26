@@ -1243,3 +1243,19 @@ Amends D-93 and Spec 15 §4 and §6 (Aaron, 2026-10-25).
 1. A strategy run is never started on a task: opening a task on the Tasks tab does not change the context of the run started next.
 2. Runs saved on a task stay as stored, keeping their ids, notes and timestamps, and are listed with the page's runs.
 Why: a run started while a task was open on the Tasks tab was filed under that task and disappeared from the planning panel, so a human believed it lost.
+
+## D-203 A brief shows the plan around its task, and `task peek` reads it
+Amends D-110 point 3, D-138 point 3 and Spec 15 §6 (Aaron, board task "briefs: surrounding plan and task peek", 2026-10-25).
+1. A task run may read its own feature, the tasks it depends on, the tasks that depend on it, and tasks named as `task:<id>` in its body or notes. It may not read any other task or feature, or any task's runs. The notes are the task's stored notes, including `solace` notes and notes a resumed run has not seen; a deleted note no longer counts.
+2. Every run kind's brief, `session start --task` in a board run, and `session remember` show the plan around the task. A **Feature** section gives the feature's title, state and whole body, then the latest direction note as D-138 says. A **Depends on** section appears whenever the task has dependencies, finished ones included: each as `task:<id> <title> (<column>)`, with `, in <project>` when it is not the task's home and `— unfinished` when it is not in a final column, then D-110's advice line only when one is unfinished. A **Needed by** section lists every task whose `dependsOn` names this one in the same one-line form. A deleted dependency or dependent is left out. One line names `task peek <id>` when a dependency or dependent is listed and `task peek feature` when the Feature section is present. No size cap applies; the brief stays as short as it can.
+3. `task peek <task>` is read-only, so every run kind may use it. It gives the task's title, column, feature, dependencies and body. `--notes [<notes>]` adds the notes named, or every one, in full, numbered, and a reply too long for its budget stops at a whole note or comes in parts, with a `Next:` line ending in `--from <n>`, as `strategy show note` does. A task outside point 1's set is refused, and the refusal lists the tasks the run can read.
+4. `task peek feature` gives the task's feature: its title, state, whole body and its tasks with their columns. A task with no feature, or whose feature is gone, is refused.
+5. The usage line, `help task` and the reference name `task peek`.
+Why: a run saw only the feature's title and latest note, so agents asked the human to paste the plan around their task.
+
+## D-204 A code hunk matches through indentation; a file hunk doesn't
+Amends D-142 point 1 and Spec 3 (Aaron, board task "submit: code hunks match through indentation", 2026-10-25). Part of the Work run friction fixes feature.
+1. For code (`submit`'s hunks, `at_end` false), when exact and trailing-space matching find nothing, a third level that ignores space at both ends applies if it matches at exactly one start position. Quoted context and `-` lines keep the target's own text, so no line is re-indented by a quoted one. `+` lines shift by the difference between the target's indentation and the patch's at the first matched line, and a line shifted past the start stays at the start.
+2. A loose match in two or more places is refused with D-142's `E0108` and its leading-space hint. The save reply says when a hunk matched through indentation.
+3. A file patch (`write`) keeps D-142's strict rule: leading space is part of the line.
+Why: run 00acbe40d2cf4d4d on task:3517183e01f63016 wrote one line with 12 leading spaces instead of 16, and about 30 failed draft repairs followed. Code is formatted after the check, and quoted lines keep the target's text.

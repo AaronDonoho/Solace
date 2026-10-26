@@ -516,6 +516,7 @@ const view_styles =
   <> roadmap_styles
   <> detail_styles
   <> vision_styles
+  <> solace_task.table_styles
   <> narrow_styles
   <> solace_task.editor_styles
   <> plan.styles

@@ -7,7 +7,7 @@ pub fn error<T>(code: &str, at: &str, message: impl std::fmt::Display) -> Result
 }
 
 /// A symbol command in a project of plain files (D-60).
-pub fn plain<T>(store: &Store, tid: Option<&str>, command: &str) -> Result<T, Failure> {
+pub fn plain<T>(store: &Store, tid: Option<&str>, command: &str, name: Option<&str>) -> Result<T, Failure> {
     if command == "format" && language::is_rust(&store.root) {
         return error(
             "E6013",
@@ -28,13 +28,21 @@ pub fn plain<T>(store: &Store, tid: Option<&str>, command: &str) -> Result<T, Fa
     };
     let what = if language::is_rust(&store.root) {
         match command {
-            "extract" | "merge" | "probe" => format!("`{command}` is Gleam only: Rust `{command}` is deferred (D-158 point 6)"),
+            "extract" | "merge" => format!("`{command}` is Gleam only: Rust `{command}` is deferred (D-158 point 6)"),
             _ => format!("this Rust project has no code that `{command}` handles"),
         }
     } else {
         "this project has no code held as symbols".to_string()
     };
     let mut out = format!("{what}; use {use_}{files}.");
+    if let Some(name) = name
+        && matches!(command, "view" | "inspect" | "refs")
+    {
+        let module = name.split_once('.').map_or(name, |(module, _)| module);
+        if let Some(project) = crate::module_elsewhere(&store.root, module) {
+            out += &format!(" Module `{module}` is in project `{project}`; add `--project {project}`.");
+        }
+    }
     if let Some(projects) = tid.and_then(|tid| scope::of_task(&store.root, tid)) {
         let top = scope::top(&store.root);
         let here = scope::dir(&top, &store.root);
@@ -277,10 +285,12 @@ pub fn settings_file(root: &Path, name: &str) -> bool {
     name == "solace.toml" || name == "AGENTS.md" || is_gitignore(name) || (crate::language::is_rust(root) && rust_setting(name))
 }
 /// Why a Cargo.toml change that touches a protected key is refused (D-158 point 4).
-fn cargo_setting_note() -> &'static str {
-    concat!(
-        "dependency, feature, workspace and build changes to Cargo.toml change only through ",
-        "a human-approved proposal: `write` it alone, with the exact new text and `reason`"
+fn cargo_setting_note() -> String {
+    format!(
+        "dependency, feature, workspace and build changes to Cargo.toml change only through \
+         a human-approved proposal: `write Cargo.toml` alone, with the exact new text in `text` and \
+         the why in `reason`. {}",
+        drafts::WHOLE
     )
 }
 /// The dependency, feature and build keys of a Cargo.toml the human approves
@@ -1122,9 +1132,10 @@ fn file_change(
         return error(
             "E6002",
             name,
-            concat!(
-                "protected files change only through a human-approved proposal: in a work run, ",
-                "`write` it alone, with the exact new text and `reason`"
+            format!(
+                "protected files change only through a human-approved proposal: in a work run, \
+                 `write {name}` alone, with the exact new text in `text` and the why in `reason`. {}",
+                drafts::WHOLE
             ),
         );
     }
@@ -1231,8 +1242,9 @@ fn write_patch(store: &Store, v: &toml::Value, raw: &str) -> Out {
 }
 /// A file patch whose refusal is kept as a draft (D-120): a bad line is fixed
 /// with `write --draft <id> --replace`; a fault in the whole patch is resent
-/// (D-141). A retry is the whole patch again, whole or nothing (D-104).
-fn patch_with_draft(store: &Store, v: &toml::Value, id: Option<&str>, raw: &str, budget: usize) -> Out {
+/// (D-141). A retry is the whole patch again, whole or nothing (D-104). A
+/// replacement kept in a refused retry is named.
+fn patch_with_draft(store: &Store, v: &toml::Value, id: Option<&str>, raw: &str, budget: usize, replaced: bool) -> Out {
     match write_patch(store, v, raw) {
         Ok(out) => {
             if let Some(id) = id {
@@ -1243,7 +1255,7 @@ fn patch_with_draft(store: &Store, v: &toml::Value, id: Option<&str>, raw: &str,
         Err(Failure(message, code)) => {
             let id = drafts::keep_file_patch(store, id, raw)?;
             let several = drafts::sections(raw, true).is_ok_and(|s| s.len() > 1);
-            let advice = drafts::retry_advice(&message, &id, "write", "", several, true);
+            let advice = drafts::retry_advice(&message, &id, "write", "", several, true, replaced);
             Err(Failure(format!("{message}\n\n{advice}"), code))
         }
     }
@@ -1402,9 +1414,25 @@ fn elsewhere(root: &Path, name: &str, exists: bool) -> Option<(String, PathBuf, 
 /// A refusal for a path that isn't there: what it was resolved against and,
 /// when another project has it, the form that reaches it.
 fn not_found(root: &Path, name: &str, what: &str) -> String {
-    let mut s = format!("{what} (paths are relative to {})", scope::dir(&scope::top(root), root));
+    let top = scope::top(root);
+    let mut s = format!("{what} (paths are relative to {})", scope::dir(&top, root));
     if let Some((dir, _, rest)) = elsewhere(root, name, true) {
         s += &format!("; it is {rest} in {dir}: add --project {dir}");
+    } else if let Some(rest) = without_project_folder(root, name) {
+        let held = Store::peek(root).ok().and_then(|s| {
+            let module = module_of_file(&s, &rest)?;
+            module_held(&s, &module).then(|| graph_hint(&s, &rest))
+        });
+        match held {
+            Some(hint) => s += &format!("; {hint}"),
+            None => s += &format!("; did you mean `{rest}`?"),
+        }
+    } else {
+        match in_one_project(root, name).as_slice() {
+            [] => {}
+            [dir] => s += &format!("; it is in project {dir}: add --project {dir}"),
+            dirs => s += &format!("; it is in projects {}: add --project <dir>", dirs.join(", ")),
+        }
     }
     s
 }
@@ -1751,12 +1779,17 @@ pub fn dispatch(
         if a[0] == "write" && a.get(1) == Some(&"--draft") {
             return Some((|| {
                 let rest: Vec<&str> = a[2..].iter().copied().filter(|x| *x != "--all").collect();
+                let mut replaced = false;
                 let (id, raw) = match rest.as_slice() {
                     [id] => (*id, drafts::file_patch(store, id)?),
-                    [id, "--replace"] => (*id, drafts::replace(&drafts::file_patch(store, id)?, old, &input()?, a.contains(&"--all"))?.0),
+                    [id, "--replace"] => {
+                        let (raw, _) = drafts::replace(&drafts::file_patch(store, id)?, old, &input()?, a.contains(&"--all"))?;
+                        replaced = true;
+                        (*id, raw)
+                    }
                     _ => return usage("write --draft <id> [--replace [--all]], with `old` and `text` for --replace"),
                 };
-                patch_with_draft(store, v, Some(id), &raw, budget)
+                patch_with_draft(store, v, Some(id), &raw, budget, replaced)
             })());
         }
         // D-102: `files` and `read` take a list of paths, answered in order;
@@ -1789,7 +1822,7 @@ pub fn dispatch(
                         "sections; `write <path>` changes one file"
                     ));
                 }
-                patch_with_draft(store, v, None, &raw, budget)
+                patch_with_draft(store, v, None, &raw, budget, false)
             })());
         }
         if paths.is_empty() {
@@ -1963,7 +1996,7 @@ pub fn dispatch(
         return Some(match a {
             ["format"] => {
                 let task = board::context().map(|(tid, _)| tid);
-                plain(store, task.as_deref(), "format")
+                plain(store, task.as_deref(), "format", None)
             }
             ["format", module] => store.format_module_rust(module),
             _ => usage("format <module>: name one module, e.g. `format crate`"),
@@ -1999,7 +2032,7 @@ pub fn dispatch(
                 (argv, 120)
             } else if !root.join("gleam.toml").exists() {
                 let task = board::context().map(|(tid, _)| tid);
-                return plain(store, task.as_deref(), a[0]);
+                return plain(store, task.as_deref(), a[0], a.get(1).copied());
             } else {
                 (vec!["gleam".into(), a[0].into()], 120)
             };
@@ -3445,9 +3478,14 @@ running your program.
                 && e.contains("Fix only the failing line")
                 && e.contains("other lines")
                 && e.contains("don't resend the whole patch")
+                && e.contains("lines of the patch, prefixes included")
                 && e.contains("write --draft"),
             "{e}"
         );
+        let bad = "*** Begin Patch\n*** Update File: notes\none\n+1\n*** End Patch\n";
+        let bad_e = call(&s, &v, &["write"], bad, None).unwrap_err().0;
+        assert!(bad_e.contains("`old` and `text` are lines of the patch, prefixes included"), "{bad_e}");
+        assert!(bad_e.contains("with `old` and `text`, which are lines of the patch, prefixes included"), "{bad_e}");
         let id = e.split("Draft ").nth(1).and_then(|r| r.split(' ').next()).unwrap().to_string();
         assert_eq!(drafts::view(&s, &id).unwrap(), patch);
         assert!(drafts::list(&s).unwrap().contains(&format!("{id}: [\"write\"] (current)")));
@@ -3458,7 +3496,12 @@ running your program.
         let (old, fix) = ("-does not stop the call (D-109).\n+does", "-A failed read does not stop the call (D-109).\n+A failed read does");
         fs::write(s.root.join("notes"), "uno\n").unwrap();
         let e = call(&s, &v, &["write", "--draft", &id, "--replace"], fix, Some(old)).unwrap_err().0;
-        assert!(e.contains("these lines weren't found: `one`") && e.contains(&format!("Draft {id} retained")), "{e}");
+        assert!(
+            e.contains("these lines weren't found: `one`")
+                && e.contains(&format!("Draft {id} retained"))
+                && e.contains("The replacement was applied: the draft now holds it"),
+            "{e}"
+        );
         assert_eq!(fs::read_to_string(s.root.join("spec")).unwrap(), "A failed read does not stop the call (D-109).\n");
         fs::write(s.root.join("notes"), "one\n").unwrap();
         assert_eq!(call(&s, &v, &["write", "--draft", &id], "", None).unwrap(), "Wrote notes\nWrote spec\n");
@@ -3913,6 +3956,7 @@ running your program.
             "*** Begin Patch\n*** Update File: Cargo.toml\n@@\n edition = \"2021\"\n+[dependencies]\n+serde = \"1\"\n*** End Patch\n";
         let e = call(&store, &v, &["write"], patch, None).unwrap_err().0;
         assert!(e.contains("E6002") && e.contains("human-approved proposal"), "{e}");
+        assert!(e.contains("`write Cargo.toml` alone") && e.contains(drafts::WHOLE) && !e.contains("--replace"), "{e}");
         assert!(!fs::read_to_string(root.join("Cargo.toml")).unwrap().contains("serde"));
     }
 
@@ -3991,7 +4035,7 @@ running your program.
         let viewed = call(&s, &v, &["view", "src/main.gleam"], "", None).unwrap_err().0;
         let read = call(&s, &v, &["read", "src/main.gleam"], "", None).unwrap_err().0;
         assert_eq!(viewed, read);
-        assert!(viewed.contains("E6001") && viewed.contains("view main") && viewed.contains("inspect main."), "{viewed}");
+        assert!(viewed.contains("E6001") && viewed.contains("view main --bodies") && viewed.contains("inspect main."), "{viewed}");
         for cmd in ["view", "read"] {
             let e = call(&s, &v, &[cmd, "src/new.gleam"], "", None).unwrap_err().0;
             assert!(e.contains("E6001") && e.contains("submit --new new"), "{cmd}: {e}");
@@ -4135,6 +4179,82 @@ running your program.
         assert_eq!(fs::read(&p).unwrap(), br#"{"id":"t1","column":"planning"}"#);
         assert!(s.root.join(".solace/pending/tasks-crash.json").exists());
     }
+
+    #[test]
+    fn a_protected_file_patch_says_to_send_the_whole_text() {
+        let (s, v) = fixture();
+        let patch = "*** Begin Patch\n*** Update File: solace.toml\n+x = 1\n*** End Patch\n";
+        let e = call(&s, &v, &["write"], patch, None).unwrap_err().0;
+        assert!(e.contains("`write solace.toml` alone"), "{e}");
+        assert!(e.contains("exact new text"), "{e}");
+        assert!(e.contains("`reason`"), "{e}");
+        assert!(e.contains(drafts::WHOLE), "{e}");
+        assert!(!e.contains("--replace"), "{e}");
+    }
+
+    #[test]
+    fn a_path_that_repeats_its_project_is_named_without_it() {
+        let root = Scratch::new().with(&[
+            ("solace.toml", "projects = [\"a\", \"b\"]\n"),
+            ("a/gleam.toml", "name = \"alpha\"\nversion = \"1.0.0\"\n"),
+            ("a/src/app.gleam", "pub fn one() { 1 }\n"),
+            ("b/gleam.toml", "name = \"beta\"\nversion = \"1.0.0\"\n"),
+        ]);
+        for d in ["a", "b"] {
+            import(&root.join(d)).unwrap();
+        }
+        let s = Store::at(&root.join("a")).unwrap();
+        let v = settings(&s.root).unwrap();
+        let e = call(&s, &v, &["read", "a/src/app.gleam"], "", None).unwrap_err().0;
+        assert!(e.contains("view app --bodies"), "{e}");
+        assert!(!e.contains("did you mean"), "{e}");
+        fs::write(s.root.join("notes"), "notes\n").unwrap();
+        let e = call(&s, &v, &["read", "a/notes"], "", None).unwrap_err().0;
+        assert!(e.contains("; did you mean `notes`?"), "{e}");
+    }
+
+    #[test]
+    fn grep_in_from_the_root_names_the_project_with_the_file() {
+        let root = Scratch::new()
+            .with(&[("solace.toml", "projects = [\"core\"]\n"), ("core/gleam.toml", "name = \"core\"\nversion = \"1.0.0\"\n")]);
+        let v = settings(&root).unwrap();
+        let e = grep(&root, &v, "needle --in gleam.toml", 10_000).unwrap_err().0;
+        assert!(e.contains("it is in project core: add --project core"), "{e}");
+    }
+
+    #[test]
+    fn a_read_from_another_project_names_its_project() {
+        let root = Scratch::new().with(&[
+            ("solace.toml", "projects = [\"a\", \"b\"]\n"),
+            ("a/gleam.toml", "name = \"alpha\"\nversion = \"1.0.0\"\n"),
+            ("a/src/app.gleam", "pub fn one() { 1 }\n"),
+            ("b/gleam.toml", "name = \"beta\"\nversion = \"1.0.0\"\n"),
+            ("b/src/plan.gleam", "pub fn answer() { 42 }\n"),
+        ]);
+        for d in ["a", "b"] {
+            import(&root.join(d)).unwrap();
+        }
+        let s = Store::at(&root.join("a")).unwrap();
+        let v = settings(&s.root).unwrap();
+        let e = crate::with_root(&s.root, || call(&s, &v, &["read", "b/src/plan.gleam"], "", None)).unwrap_err().0;
+        assert!(e.contains("view plan --bodies --project b"), "{e}");
+    }
+
+    #[test]
+    fn a_module_in_another_project_is_named_with_its_project() {
+        let root = Scratch::new().with(&[
+            ("solace.toml", "projects = [\"protocol\"]\n"),
+            ("protocol/gleam.toml", "name = \"protocol\"\nversion = \"1.0.0\"\n"),
+            ("protocol/src/protocol.gleam", "pub fn one() { 1 }\n"),
+        ]);
+        import(&root).unwrap();
+        import(&root.join("protocol")).unwrap();
+        let s = Store::at(&root).unwrap();
+        for (command, name) in [("view", "protocol"), ("inspect", "protocol.one")] {
+            let e = super::plain::<()>(&s, None, command, Some(name)).unwrap_err().0;
+            assert!(e.contains("Module `protocol` is in project `protocol`; add `--project protocol`"), "{command} {name}: {e}");
+        }
+    }
 }
 
 /// `[sandbox] read` is a list of non-empty paths, and no other sandbox key is
@@ -4193,7 +4313,10 @@ fn module_held(s: &Store, module: &str) -> bool {
 pub(crate) fn graph_hint(s: &Store, name: &str) -> String {
     match module_of_file(s, name) {
         Some(module) if module_held(s, &module) => {
-            format!("source is held as symbols; view {module} for its outline, or inspect {module}.<symbol> for one item")
+            format!(
+                "source is held as symbols; view {module} --bodies{} shows the file, or inspect {module}.<symbol> for one item",
+                project_suffix(s)
+            )
         }
         Some(module) => format!("this source file isn't in the store yet: {}", new_module_hint(&module)),
         None => concat!(
@@ -4231,4 +4354,37 @@ fn new_module_hint(module: &str) -> String {
 /// already ends in `_test`.
 fn test_module_name(module: &str) -> String {
     if module.ends_with("_test") { module.to_string() } else { format!("{module}_test") }
+}
+
+/// ` --project <dir>` when this store is another project under the same root as
+/// the one the command runs in; empty otherwise.
+fn project_suffix(s: &Store) -> String {
+    let top = scope::top(&s.root);
+    let Ok(here) = Store::root() else { return String::new() };
+    if scope::top(&here) != top {
+        return String::new();
+    }
+    let dir = scope::dir(&top, &s.root);
+    if scope::dir(&top, &here) == dir { String::new() } else { format!(" --project {dir}") }
+}
+
+/// The path with a leading copy of its project's folder removed, when that
+/// shorter path is the one that exists.
+fn without_project_folder(root: &Path, name: &str) -> Option<String> {
+    let here = scope::dir(&scope::top(root), root);
+    let last = here.rsplit('/').next().unwrap_or(here.as_str());
+    [here.as_str(), last].into_iter().filter(|p| *p != "." && !p.is_empty()).find_map(|p| {
+        let rest = name.strip_prefix(p)?.strip_prefix('/')?;
+        (!rest.is_empty() && path(root, rest).ok()?.exists()).then(|| rest.to_string())
+    })
+}
+
+/// The projects, other than the root's own, that have `name` at the same path.
+/// Only a command in the root project looks here.
+fn in_one_project(root: &Path, name: &str) -> Vec<String> {
+    let top = scope::top(root);
+    if scope::dir(&top, root) != "." {
+        return vec![];
+    }
+    workspace::members(&top).unwrap_or_default().into_iter().filter(|d| d != "." && scope::path(&top, d).join(name).exists()).collect()
 }

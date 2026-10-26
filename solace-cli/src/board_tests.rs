@@ -102,11 +102,26 @@ fn a_fresh_brief_holds_the_session_start_reply() {
         let (at, stop) = (b.find(next).expect(&b), b.find("After the call that ends the run returns, stop").unwrap());
         assert!(b.find(reply).unwrap() < at && at < stop, "{kind}: the reply's first call comes just before the stop line: {b}");
         assert!(!b.contains("Feature (the feature") && !b.contains("Depends on"), "{kind}: {b}");
+        assert!(!b.lines().any(|line| line.starts_with("`task peek")), "{kind}: {b}");
     }
     for kind in ["review", "discuss"] {
         let b = brief(kind, false);
         assert!(!b.contains(reply) && !b.contains(HELD_START), "{kind}: {b}");
     }
+    let dep = api(&s.root, "POST", "/tasks", json!({"title":"Dependency"})).unwrap();
+    let mut needs = api(&s.root, "POST", "/tasks", json!({"title":"Needs one"})).unwrap();
+    needs["dependsOn"] = json!([dep["id"]]);
+    tasks::put(&s, &needs).unwrap();
+    let b = continuation_brief(&needs, &json!({"id":"r1","kind":"work"}), false, &p.root, &p.root, false).0;
+    assert!(b.lines().any(|line| line == "`task peek <id>` reads a listed task."), "{b}");
+    assert!(!b.contains("`task peek feature` reads the feature"), "{b}");
+    let f = tasks::strategy_api(&scope::top(&p.root), "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1.0).unwrap();
+    let mut featured = api(&s.root, "POST", "/tasks", json!({"title":"Featured"})).unwrap();
+    featured["feature"] = json!(f["id"]);
+    tasks::put(&s, &featured).unwrap();
+    let b = continuation_brief(&featured, &json!({"id":"r1","kind":"work"}), false, &p.root, &p.root, false).0;
+    assert!(b.lines().any(|line| line == "`task peek feature` reads the feature."), "{b}");
+    assert!(!b.lines().any(|line| line.starts_with("`task peek <id>`")), "{b}");
     let resumed = brief("work", true);
     assert!(
         resumed.contains("Use the continuation context below.") && !resumed.contains(reply) && !resumed.contains(HELD_START),
@@ -130,25 +145,30 @@ fn a_fresh_brief_holds_the_session_start_reply() {
 #[test]
 fn a_brief_carries_the_features_latest_direction() {
     let top = testing::Scratch::new();
-    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search"})).map_err(|e| e.1.0).unwrap();
+    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search","body":"Everything, everywhere.","state":"active"}))
+        .map_err(|e| e.1.0)
+        .unwrap();
     let runs = json!([{"id":"i1","kind":"investigate"},{"id":"w1","kind":"work"},{"id":"r1","kind":"review"},{"id":"d1","kind":"discuss"}]);
     let mut t = json!({"id":"t","runs":runs,"notes":[]});
     assert_eq!(feature_section(&top, &t), "");
     t["feature"] = json!("gone");
     assert_eq!(feature_section(&top, &t), "");
     t["feature"] = f["id"].clone();
-    assert_eq!(feature_section(&top, &t), "\nFeature (the feature this task is part of; its latest direction):\n- Search\n");
+    assert_eq!(
+        feature_section(&top, &t),
+        "\nFeature (the feature this task is part of; its state and body, then its latest direction):\n- Search\n- state: active\n\nEverything, everywhere.\n"
+    );
     let note = |author: &str, run: Value, text: &str| json!({"author":author,"run":run,"text":text});
     t["notes"] = json!([note("agent", json!("i1"), "plan"), note("solace", Value::Null, "exited")]);
-    assert!(feature_section(&top, &t).ends_with("- Search\n- investigation report (run i1): plan\n"));
+    assert!(feature_section(&top, &t).ends_with("\n- investigation report (run i1): plan\n"));
     t["notes"].as_array_mut().unwrap().push(note("human", Value::Null, "go"));
     t["notes"].as_array_mut().unwrap().push(note("agent", json!("w1"), "done"));
-    assert!(feature_section(&top, &t).ends_with("- assignment: go\n"));
+    assert!(feature_section(&top, &t).ends_with("\n- assignment: go\n"));
     t["notes"].as_array_mut().unwrap().push(note("agent", json!("r1"), "looks good"));
     t["notes"].as_array_mut().unwrap().push(note("human", json!("d1"), "chat"));
-    assert!(feature_section(&top, &t).ends_with("- review feedback (run r1): looks good\n"));
+    assert!(feature_section(&top, &t).ends_with("\n- review feedback (run r1): looks good\n"));
     t["notes"].as_array_mut().unwrap().push(note("human", Value::Null, "  "));
-    assert!(feature_section(&top, &t).ends_with("- review feedback (run r1): looks good\n"), "an empty note is skipped");
+    assert!(feature_section(&top, &t).ends_with("\n- review feedback (run r1): looks good\n"), "an empty note is skipped");
     let line = format!("{}\n", "n".repeat(99));
     t["notes"].as_array_mut().unwrap().push(note("human", Value::Null, &line.repeat(12)));
     let s = feature_section(&top, &t);
@@ -324,7 +344,7 @@ fn agent_guard_follows_the_run() {
     tasks::put(&s, &t).unwrap();
     let tid = t["id"].as_str().unwrap();
     let guard = |rid: &str, a: &[&str]| agent_guard(&s.root, tid, rid, a, &[]).map(drop).map_err(|e| e.0);
-    assert!(guard("r1", &["view", "app"]).is_ok() && guard("r1", &["build"]).is_ok());
+    assert!(guard("r1", &["view", "app"]).is_ok() && guard("r1", &["build"]).is_ok() && guard("r1", &["probe"]).is_ok());
     std::fs::write(
         s.root.join("solace.toml"),
         "[commands]\nsafe = { run = [\"true\"], allowed_in_reviews = true }\ne2e = { run = [\"true\"] }\n",
@@ -340,6 +360,9 @@ fn agent_guard_follows_the_run() {
     }
     for a in [["submit", "app.main"], ["write", "x"]] {
         assert!(guard("r1", &a).unwrap_err().contains("this run is read-only"), "{a:?}");
+    }
+    for rid in ["r1", "r3", "r4"] {
+        assert!(guard(rid, &["drafts", "drop", "d1"]).unwrap_err().contains("this run is read-only"), "{rid}");
     }
     assert!(guard("r1", &["migrate", "--yes"]).unwrap_err().contains("host command"));
     assert!(guard("r2", &["view", "app"]).unwrap_err().contains("run ended"));
@@ -1200,7 +1223,8 @@ fn strategy_show_run_outlines_and_picks_steps() {
     );
     assert_eq!(strategy_note_show(&root, "t1", "all").unwrap()["notes"].as_array().unwrap().len(), 2);
     for bad in ["0", "3", "2..1", "x", "1,,2"] {
-        assert!(strategy_note_show(&root, "t1", bad).unwrap_err().0.starts_with("E7001"), "{bad}");
+        let e = strategy_note_show(&root, "t1", bad).unwrap_err().0;
+        assert!(e.starts_with("E7001") && e.contains("notes") && e.contains("1..2") && !e.contains("steps"), "{bad}: {e}");
     }
     let outline = strategy_run_show(&root, "t1", "r1", None).unwrap();
     assert_eq!(outline["run"]["id"], "r1");
@@ -1246,7 +1270,8 @@ fn strategy_show_run_outlines_and_picks_steps() {
         run(&["strategy", "show", "run", "t1", "r1"], 10_000).unwrap()
     );
     for bad in ["0", "5", "2..1", "x", "1,,2"] {
-        assert!(strategy_run_show(&root, "t1", "r1", Some(bad)).unwrap_err().0.starts_with("E7001"), "{bad}");
+        let e = strategy_run_show(&root, "t1", "r1", Some(bad)).unwrap_err().0;
+        assert!(e.starts_with("E7001") && e.contains("steps") && !e.contains("notes"), "{bad}: {e}");
     }
     // A run whose log holds no steps says so.
     let task =
@@ -1993,21 +2018,28 @@ fn briefs_name_unfinished_dependencies() {
     put("f", &home, "planning", &["b", "c"]);
     put("n", &home, "backlog", &[]);
     let w = waiting_on(&top, "t");
-    for part in
-        ["Depends on:\n", "- a Task a (Assigned, in lib) — unfinished", "- b Task b (Complete)\n", "- c Task c (Canceled)\n", WAITING]
-    {
+    for part in [
+        "Depends on:\n",
+        "task:a Task a (Assigned, in lib) — unfinished",
+        "task:b Task b (Complete)\n",
+        "task:c Task c (Canceled)\n",
+        WAITING,
+    ] {
         assert!(w.contains(part), "{part} missing from:\n{w}");
     }
-    assert_eq!((waiting_on(&top, "f"), waiting_on(&top, "n")), (String::new(), String::new()));
-    // The run prompt carries it; one with only finished dependencies doesn't.
+    // Finished dependencies are listed without the warning.
+    let f_deps = waiting_on(&top, "f");
+    assert!(f_deps.contains("Depends on:\n") && f_deps.contains("task:b Task b (Complete)") && !f_deps.contains(WAITING), "{f_deps}");
+    assert_eq!(waiting_on(&top, "n"), String::new());
+    // The run prompt carries it; one with only finished dependencies still lists them.
     let task = |id: &str| all_tasks(&top).unwrap().into_iter().find(|t| t["id"] == id).unwrap();
     let run = json!({"id":"r1","kind":"work"});
     assert!(continuation_brief(&task("t"), &run, false, &p.root, &p.root, false).0.contains(&w));
     let finished = continuation_brief(&task("f"), &run, false, &p.root, &p.root, false).0;
-    assert!(!finished.contains("Depends on:") && !finished.contains(WAITING), "{finished}");
+    assert!(finished.contains("Depends on:") && finished.contains("task:b") && !finished.contains(WAITING), "{finished}");
     // A task brought back to the backlog counts as unfinished again.
     put("b", &home, "backlog", &[]);
-    assert!(waiting_on(&top, "f").contains("- b Task b (Backlog) — unfinished"));
+    assert!(waiting_on(&top, "f").contains("task:b Task b (Backlog) — unfinished"));
 }
 
 #[test]
@@ -4554,4 +4586,276 @@ fn a_member_projects_settle_failure_is_flagged_and_cleared() {
     let left: bool =
         s.db.query_row("SELECT EXISTS(SELECT 1 FROM board_before WHERE task=?1)", params![tid], |r| r.get::<_, bool>(0)).unwrap();
     assert!(!left);
+}
+
+/// D-203: a brief lists the tasks whose `dependsOn` names it.
+#[test]
+fn briefs_name_tasks_that_need_it() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let top = scope::top(&p.root);
+    let home = scope::dir(&top, &p.root);
+    let dir = store_dir(&top);
+    fs::create_dir_all(&dir).unwrap();
+    let put = |id: &str, title: &str, column: &str, deps: &[&str]| {
+        let t = json!({"id":id,"title":title,"body":"","home":home,"column":column,"rank":1,"dependsOn":deps,
+            "runs":[],"notes":[],"questions":[],"links":[],"closedTime":null,"archivedTime":null});
+        fs::write(dir.join(format!("{id}.json")), t.to_string()).unwrap();
+    };
+    put("t", "Task t", "planning", &[]);
+    put("n", "Task n", "assigned", &["t"]);
+    put("other", "Task other", "planning", &[]);
+    let needed = needed_by(&top, "t");
+    assert!(needed.contains("Needed by:\n") && needed.contains("task:n Task n (Assigned)\n"), "{needed}");
+    assert_eq!(needed_by(&top, "other"), String::new());
+    let task = |id: &str| all_tasks(&top).unwrap().into_iter().find(|t| t["id"] == id).unwrap();
+    let brief = continuation_brief(&task("t"), &json!({"id":"r1","kind":"work"}), false, &p.root, &p.root, false).0;
+    assert!(brief.contains(&needed) && brief.contains("task peek <id>"), "{brief}");
+    assert!(!brief.contains("`task peek feature` reads the feature"), "{brief}");
+}
+
+/// D-203: `task peek` reads the task, its dependencies, its dependents and a
+/// task named in its body, and refuses any other task, naming the allowed ones.
+#[test]
+fn task_peek_reads_the_tasks_a_run_may_read() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let named = api(&s.root, "POST", "/tasks", json!({"title":"Named","body":"named body"})).unwrap();
+    let dep = api(&s.root, "POST", "/tasks", json!({"title":"Dependency","body":"dep body"})).unwrap();
+    let other = api(&s.root, "POST", "/tasks", json!({"title":"Other"})).unwrap();
+    let mut t =
+        api(&s.root, "POST", "/tasks", json!({"title":"Mine","body":format!("See task:{}.", named["id"].as_str().unwrap())})).unwrap();
+    let mut dependent = api(&s.root, "POST", "/tasks", json!({"title":"Dependent"})).unwrap();
+    dependent["dependsOn"] = json!([t["id"]]);
+    t["dependsOn"] = json!([dep["id"]]);
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+    tasks::put(&s, &t).unwrap();
+    tasks::put(&s, &dependent).unwrap();
+    let tid = t["id"].as_str().unwrap();
+    let peek = |target: &str, extra: &[&str], budget: usize| {
+        let mut args = vec!["task".to_string(), "peek".to_string(), target.to_string()];
+        args.extend(extra.iter().map(|x| x.to_string()));
+        crate::with_root(&p.root, || with_context(tid, "r1", || crate::run_options(&args, &mut || Ok(String::new()), None, budget, &[])))
+    };
+    let allowed = [
+        (dep["id"].as_str().unwrap(), "Dependency"),
+        (dependent["id"].as_str().unwrap(), "Dependent"),
+        (named["id"].as_str().unwrap(), "Named"),
+    ];
+    for (id, title) in allowed {
+        let out = peek(id, &[], 10_000).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["title"], title, "{out}");
+        assert_eq!(v["feature"], Value::Null, "{out}");
+    }
+    let own = peek(tid, &[], 10_000).unwrap();
+    assert!(own.contains(&format!("task:{}", dep["id"].as_str().unwrap())) && own.contains("See task:"), "{own}");
+    // A task outside the allowed set is refused, and the refusal names each allowed task.
+    let e = peek(other["id"].as_str().unwrap(), &[], 10_000).unwrap_err();
+    let listed: Vec<&str> = e.0.lines().filter(|l| l.starts_with("task:")).collect();
+    assert_eq!(listed.len(), 4, "{}", e.0);
+    for id in [tid, dep["id"].as_str().unwrap(), dependent["id"].as_str().unwrap(), named["id"].as_str().unwrap()] {
+        assert!(listed.iter().any(|l| l.contains(&format!("task:{id}"))), "{id} missing from {}", e.0);
+    }
+    assert!(!listed.iter().any(|l| l.contains(other["id"].as_str().unwrap())), "{}", e.0);
+}
+
+/// D-203: `--notes` adds every note in full, and a long one is paged with
+/// `--from` as `strategy show note` is.
+#[test]
+fn task_peek_notes_page() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let mut dep = api(&s.root, "POST", "/tasks", json!({"title":"Dependency"})).unwrap();
+    dep["notes"] = json!([
+        {"author":"human","text":"first","time":1,"run":null},
+        {"author":"human","text":"n".repeat(400),"time":2,"run":null}
+    ]);
+    tasks::put(&s, &dep).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Mine"})).unwrap();
+    t["dependsOn"] = json!([dep["id"]]);
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+    tasks::put(&s, &t).unwrap();
+    let tid = t["id"].as_str().unwrap();
+    let did = dep["id"].as_str().unwrap();
+    let peek = |extra: &[&str], budget: usize| {
+        let mut args = vec!["task".to_string(), "peek".to_string(), did.to_string()];
+        args.extend(extra.iter().map(|x| x.to_string()));
+        crate::with_root(&p.root, || with_context(tid, "r1", || crate::run_options(&args, &mut || Ok(String::new()), None, budget, &[])))
+    };
+    let first = peek(&["--notes"], 650).unwrap();
+    assert!(first.contains("\"note\": 1") && first.contains(&format!("Next: task peek {did} --notes 2")), "{first}");
+    let second = peek(&["--notes", "2"], 500).unwrap();
+    assert!(second.contains("\"note\": 2") && second.contains("\"part\": \"text, characters 0.."), "{second}");
+    let next = second.lines().find(|l| l.starts_with("Next: ")).expect(&second);
+    let from = next.rsplit("--from ").next().unwrap().trim();
+    let more = peek(&["--notes", "2", "--from", from], 500).unwrap();
+    assert!(more.contains("\"note\": 2") && !more.contains("characters 0.."), "{more}");
+    let bad = peek(&["--notes", "9"], 10_000).unwrap_err();
+    assert!(bad.0.contains("notes") && bad.0.contains("1..2") && !bad.0.contains("steps"), "{}", bad.0);
+}
+
+/// D-203: `task peek feature` gives the feature's state, whole body and its
+/// tasks with their columns; a task with no feature is refused.
+#[test]
+fn task_peek_feature_lists_its_tasks() {
+    let p = testing::project(&[
+        ("src/app.gleam", "pub fn main() { 1 }\n"),
+        ("solace.toml", "projects = [\"lib\"]\n"),
+        ("lib/.solace/keep", ""),
+    ]);
+    let s = open(&p.root).unwrap();
+    let top = scope::top(&p.root);
+    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search","body":"Everything.","state":"active"}))
+        .map_err(|e| e.1.0)
+        .unwrap();
+    let fid = f["id"].as_str().unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Mine"})).unwrap();
+    t["feature"] = json!(fid);
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+    tasks::put(&s, &t).unwrap();
+    let mut sibling = api(&s.root, "POST", "/tasks", json!({"title":"Sibling"})).unwrap();
+    sibling["feature"] = json!(fid);
+    sibling["home"] = json!("lib");
+    tasks::put(&s, &sibling).unwrap();
+    let tid = t["id"].as_str().unwrap();
+    let peek = |tid: &str, target: &str| {
+        let args = vec!["task".to_string(), "peek".to_string(), target.to_string()];
+        crate::with_root(&p.root, || with_context(tid, "r1", || crate::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[])))
+    };
+    let out = peek(tid, "feature").unwrap();
+    let v: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        (v["title"].as_str(), v["state"].as_str(), v["body"].as_str()),
+        (Some("Search"), Some("active"), Some("Everything.")),
+        "{out}"
+    );
+    let tasks = v["tasks"].as_array().unwrap();
+    assert!(tasks.iter().any(|x| x.as_str().unwrap().contains(t["id"].as_str().unwrap())), "{out}");
+    assert!(tasks.iter().any(|x| x.as_str().unwrap().contains(sibling["id"].as_str().unwrap())), "{out}");
+    let sibling_line = tasks.iter().map(|x| x.as_str().unwrap()).find(|l| l.contains(sibling["id"].as_str().unwrap())).unwrap();
+    assert!(sibling_line.contains(", in lib"), "{out}");
+    // A task with no feature is refused.
+    let mut plain = api(&s.root, "POST", "/tasks", json!({"title":"Plain"})).unwrap();
+    plain["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+    tasks::put(&s, &plain).unwrap();
+    let e = peek(plain["id"].as_str().unwrap(), "feature").unwrap_err();
+    assert!(e.0.contains("has no feature"), "{}", e.0);
+}
+
+/// D-203: `session remember` carries the same plan sections as the brief.
+#[test]
+fn remember_carries_the_plan_around_the_task() {
+    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+    let s = open(&p.root).unwrap();
+    let top = scope::top(&p.root);
+    let f = tasks::strategy_api(&top, "POST", &["features"], json!({"title":"Search","body":"Everything.","state":"active"}))
+        .map_err(|e| e.1.0)
+        .unwrap();
+    let dep = api(&s.root, "POST", "/tasks", json!({"title":"Dependency"})).unwrap();
+    let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Mine"})).unwrap();
+    t["feature"] = json!(f["id"]);
+    t["dependsOn"] = json!([dep["id"]]);
+    t["runs"] = json!([{"id":"r1","kind":"work","state":"running"}]);
+    tasks::put(&s, &t).unwrap();
+    let mut dependent = api(&s.root, "POST", "/tasks", json!({"title":"Dependent"})).unwrap();
+    dependent["dependsOn"] = json!([t["id"]]);
+    tasks::put(&s, &dependent).unwrap();
+    let remembered = remember(&top, t["id"].as_str().unwrap(), "r1", 10_000).unwrap();
+    for part in [
+        "Feature (the feature this task is part of",
+        "- state: active",
+        "Everything.",
+        "Depends on:",
+        "Needed by:",
+        "task peek <id>",
+        "task peek feature",
+    ] {
+        assert!(remembered.contains(part), "{part} missing from:\n{remembered}");
+    }
+}
+
+/// Two projects on one board, with a work run in the first: a draft can be
+/// open in either.
+fn draft_board() -> (testing::Scratch, Store, Store, String) {
+    let settings = "projects = [\"web\", \"components\"]\n";
+    let root = testing::Scratch::new().with(&[
+        ("solace.toml", settings),
+        ("web/gleam.toml", "name = \"web\"\nversion = \"1.0.0\"\n"),
+        ("web/src/app.gleam", "pub fn main() { 1 }\n"),
+        ("components/gleam.toml", "name = \"components\"\nversion = \"1.0.0\"\n"),
+        ("components/src/lib.gleam", "pub fn z() -> Int {\n  0\n}\n"),
+    ]);
+    for d in ["web", "components"] {
+        crate::import(&root.join(d)).unwrap();
+    }
+    let web = open(&root.join("web")).unwrap();
+    let components = open(&root.join("components")).unwrap();
+    let mut t = api(&web.root, "POST", "/tasks", json!({"title": "Drafts"})).unwrap();
+    let tid = t["id"].as_str().unwrap().to_string();
+    t["scope"] = json!(["web", "components"]);
+    t["runs"] = json!([{"id": "r1", "kind": "work", "state": "running"}]);
+    tasks::put(&web, &t).unwrap();
+    (root, web, components, tid)
+}
+
+#[test]
+fn a_draft_in_the_home_project_blocks_done() {
+    let (_root, web, _components, tid) = draft_board();
+    web.db
+        .execute(
+            "INSERT INTO drafts(id,owner,args,text,base) VALUES ('d1',?,?,?,?)",
+            params![tid, json!(["submit", "core.respond"]).to_string(), "pub fn respond() {}", ""],
+        )
+        .unwrap();
+    let done = |s: &Store| task_command(s, &tid, "r1", &["task", "done"], &mut || Ok(String::new()), &[], vec![]);
+    let e = done(&web).unwrap_err().0;
+    for part in ["task done is refused", "d1", "submit core.respond", "view --draft d1", "submit --draft d1", "drafts drop d1"] {
+        assert!(e.contains(part), "{part} missing from:\n{e}");
+    }
+}
+
+#[test]
+fn a_draft_in_another_project_blocks_done_until_dropped() {
+    let (_root, web, components, tid) = draft_board();
+    let patch = "*** Update File: src/lib.gleam\n@@\n-pub fn z() -> Int {\n-  0\n-}\n+pub fn z() -> Int {\n+  1\n+}\n*** End Patch\n";
+    components
+        .db
+        .execute("INSERT INTO drafts(id,owner,args,text,base) VALUES ('d1',?,?,?,?)", params![tid, json!(["write"]).to_string(), patch, ""])
+        .unwrap();
+    let done = |s: &Store| task_command(s, &tid, "r1", &["task", "done"], &mut || Ok(String::new()), &[], vec![]);
+    let e = done(&web).unwrap_err().0;
+    for part in ["d1", "--project components", "write --draft d1", "drafts drop d1"] {
+        assert!(e.contains(part), "{part} missing from:\n{e}");
+    }
+    let dropped = crate::with_root(&components.root, || {
+        with_context(&tid, "r1", || {
+            crate::run_options(
+                &["drafts".to_string(), "drop".to_string(), "d1".to_string(), "--project".to_string(), "components".to_string()],
+                &mut || Ok(String::new()),
+                None,
+                10_000,
+                &[],
+            )
+        })
+    })
+    .unwrap();
+    assert!(dropped.contains("Dropped draft d1"), "{dropped}");
+    let out = done(&web).unwrap();
+    assert!(out.contains(tasks::QUEUED), "{out}");
+}
+
+#[test]
+fn a_resumed_brief_names_drafts_in_every_project() {
+    let (_root, web, components, tid) = draft_board();
+    components
+        .db
+        .execute(
+            "INSERT INTO drafts(id,owner,args,text,base) VALUES ('d1',?,?,?,?)",
+            params![tid, json!(["submit", "lib.z"]).to_string(), "pub fn z() {}", ""],
+        )
+        .unwrap();
+    let t = task(&web.root, &tid).unwrap();
+    let run = json!({"id": "r1", "kind": "work", "state": "running"});
+    let brief = continuation_brief(&t, &run, true, &web.root, &web.root, false).0;
+    assert!(brief.contains("Retained drafts") && brief.contains("view --draft d1 --project components"), "{brief}");
 }

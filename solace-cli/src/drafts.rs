@@ -2,7 +2,7 @@
 use super::*;
 
 fn owner() -> String {
-    env::var("SOLACE_TASK").unwrap_or_else(|_| "cli".into())
+    crate::board::context().map(|(task, _)| task).unwrap_or_else(|| env::var("SOLACE_TASK").unwrap_or_else(|_| "cli".into()))
 }
 
 /// A draft's base (D-46): the text of the symbols it replaces and the headers
@@ -60,17 +60,9 @@ pub fn list(s: &Store) -> Out {
 }
 
 pub fn list_for(s: &Store, task: &str) -> Out {
-    let mut q = s.db.prepare("SELECT id, args, text, base FROM drafts WHERE owner=? ORDER BY rowid")?;
-    let rows: Vec<(String, String, String, String)> =
-        q.query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<_, _>>()?;
     let mut out = vec![];
-    let ix = s.index()?;
-    for (id, args, text, then) in rows {
-        let parsed = serde_json::from_str::<Vec<String>>(&args).unwrap_or_default();
-        // a kept `write` patch has no base: its hunks are matched again when it is retried (D-120)
-        let current = parsed.first().is_some_and(|c| c == "write") || base(s, &ix, &parsed, &text)? == then;
-        let status = if current { "current" } else { "stale: what it replaces changed since; check it isn't superseded" };
-        out.push(format!("{id}: {args} ({status})"));
+    for (id, args, current) in entries(s, task)? {
+        out.push(format!("{id}: {} ({})", json!(args), status(current)));
     }
     Ok(out.join("\n"))
 }
@@ -96,7 +88,7 @@ pub fn replace(text: &str, old: Option<&str>, new: &str, all: bool) -> Result<(S
     let old = old.filter(|x| !x.is_empty()).ok_or_else(|| Failure("E0104 provide nonempty exact text in `old`".into(), 2))?;
     let at: Vec<usize> = text.match_indices(old).map(|(k, _)| text[..k].matches('\n').count() + 1).collect();
     match at.len() {
-        0 => fail("E0105 `old` does not occur; read the current text and copy it exactly"),
+        0 => fail(format!("E0105 `old` does not occur; read the current text and copy it exactly.{}", miss_hint(text, old))),
         1 => Ok((text.replacen(old, new, 1), 1)),
         n if all => Ok((text.replace(old, new), n)),
         n => fail(format!(
@@ -141,32 +133,49 @@ pub const RESEND: &str = "Send the corrected patch again, whole, as `text`.";
 /// `write`): it says nothing was saved unless the message already says so,
 /// `--replace` fixes a fault in one block or line, and a fault in the whole
 /// patch is resent; a draft that isn't a patch says the whole text. The kind is
-/// read at the message's end, where a quoted patch line can't reach it.
-pub fn retry_advice(message: &str, id: &str, cmd: &str, what: &str, several: bool, patch: bool) -> String {
+/// read at the message's end, where a quoted patch line can't reach it. A
+/// replacement kept in a refused retry says the draft holds it.
+pub fn retry_advice(message: &str, id: &str, cmd: &str, what: &str, several: bool, patch: bool, replaced: bool) -> String {
     let (noun, plural, nothing) =
         if cmd == "write" { ("line", "lines", "Nothing was written.") } else { ("block", "blocks", "Nothing was saved.") };
     let quiet = message.starts_with(if cmd == "write" { "nothing written:" } else { "Not saved:" });
     let prefix = if quiet { String::new() } else { format!("{nothing} ") };
+    let lines = if patch { format!(", which are {PATCH_LINES}") } else { String::new() };
     let fix = if several {
         let whole = if patch { "patch" } else { "text" };
         format!(
             concat!(
-                "Fix only the failing {}: `{} --draft {} --replace` with `old` and `text`; ",
+                "Fix only the failing {}: `{} --draft {} --replace` with `old` and `text`{}; ",
                 "the other {} stay in the draft, so don't resend the whole {}.",
             ),
-            noun, cmd, id, plural, whole
+            noun, cmd, id, lines, plural, whole
         )
     } else {
         format!(
             concat!(
-                "Fix the failing {}: `{} --draft {} --replace` with `old` and `text`; ",
+                "Fix the failing {}: `{} --draft {} --replace` with `old` and `text`{}; ",
                 "the draft keeps your text, so don't resend the whole text.",
             ),
-            noun, cmd, id
+            noun, cmd, id, lines
         )
     };
     let tail = format!("Draft {id} retained{what}. Read: `view --draft {id}`. List: `drafts`.");
-    if message.ends_with(RESEND) { format!("{prefix}{tail}") } else { format!("{prefix}{tail} {fix}") }
+    let kept = if replaced {
+        format!(
+            concat!(
+                " The replacement was applied: the draft now holds it, so the next `old` must match ",
+                "the draft as it is now (`view --draft {}`).",
+            ),
+            id
+        )
+    } else {
+        String::new()
+    };
+    if message.trim_end().ends_with(RESEND) || message.trim_end().ends_with(WHOLE) {
+        format!("{prefix}{tail}{kept}")
+    } else {
+        format!("{prefix}{tail}{kept} {fix}")
+    }
 }
 
 /// A patch's hunk: its `@@` context line, its lines (` `, `-` or `+` first),
@@ -251,12 +260,14 @@ pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, V
                         ))));
                     }
                     return Err(here(format!(
-                        "in `*** Add{head}: {target}` every line, empty ones too, starts with `+`; this one doesn't: `{}`",
+                        "in `*** Add{head}: {target}` every line, empty ones too, starts with `+`, \
+                         and `old` and `text` are {PATCH_LINES}; this one doesn't: `{}`",
                         clip(l)
                     )));
                 } else if update && !l.is_empty() && !l.starts_with([' ', '-', '+']) {
                     return Err(here(format!(
-                        "in `*** Update{head}: {target}` each line starts with ` `, `-` or `+` (or `@@`); this one doesn't: `{}`",
+                        "in `*** Update{head}: {target}` each line starts with ` `, `-` or `+` (or `@@`), \
+                         and `old` and `text` are {PATCH_LINES}; this one doesn't: `{}`",
                         clip(l)
                     )));
                 } else {
@@ -277,19 +288,23 @@ pub fn sections(raw: &str, files: bool) -> Result<Vec<(Section, String, usize, V
 
 /// Applies a section's hunks to `lines` in order, as `apply_patch` does: each
 /// from where the last one ended, matched exactly, then ignoring trailing
-/// space. Leading space is part of the line: the first hunk line the target
-/// has only with other leading space is refused, naming that line (nearest
-/// the hunk) and how much space it has (D-142); hunk lines all present but
-/// not adjacent are refused as such, naming a blank line the target has none
-/// of. A hunk that only adds lines goes after its `@@` line; with
-/// none, it goes at the end if `at_end` (a file), else is refused (a symbol).
+/// space. A code hunk (`at_end` false) that matches neither way falls back to
+/// ignoring space at both ends, but only when it matches in exactly one place;
+/// its context and `-` lines keep the target's text, and its `+` lines take
+/// the target's indentation (D-204). Otherwise leading space is part of the
+/// line: the first hunk line the target has only with other leading space is
+/// refused, naming that line (nearest the hunk) and how much space it has
+/// (D-142); hunk lines all present but not adjacent are refused as such,
+/// naming a blank line the target has none of. A hunk that only adds lines
+/// goes after its `@@` line; with none, it goes at the end if `at_end` (a
+/// file), else is refused (a symbol).
 /// `show` is the command that shows the target's current text.
-fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hunk>, at_end: bool) -> Result<(), Failure> {
+fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hunk>, at_end: bool) -> Result<bool, Failure> {
     let bad = |m: String| Failure(format!("E0108 {m}"), 1);
     let mut cursor = 0;
+    let mut indented = false;
     for (at, hunk, hl) in hunks {
         let old: Vec<&str> = hunk.iter().filter(|l| !l.starts_with('+')).map(|l| &l[1..]).collect();
-        let new: Vec<String> = hunk.iter().filter(|l| !l.starts_with('-')).map(|l| l[1..].to_string()).collect();
         let mut from = cursor;
         if let Some(at) = &at {
             let found = (cursor..lines.len()).chain(0..cursor).find(|&k| lines[k].trim().starts_with(at.as_str()));
@@ -299,8 +314,8 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
         }
         let at_k = if old.is_empty() {
             match at {
-                Some(_) => Some(from),
-                None if at_end => Some(lines.len()),
+                Some(_) => Some((from, false)),
+                None if at_end => Some((lines.len(), false)),
                 None => {
                     return Err(bad(format!(
                         "in {target} (hunk at line {hl}), a hunk that only adds lines needs `@@ <the line before them>`."
@@ -313,9 +328,13 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
             let fits = |k: usize, eq: &dyn Fn(&str, &str) -> bool| {
                 k + old.len() <= lines.len() && old.iter().zip(&lines[k..]).all(|(o, l)| eq(o, l))
             };
-            same.iter().find_map(|eq| (from..lines.len()).chain(0..from).find(|&k| fits(k, *eq)))
+            match same.iter().find_map(|eq| (from..lines.len()).chain(0..from).find(|&k| fits(k, *eq))) {
+                Some(k) => Some((k, false)),
+                None if !at_end => loose_match(&old, lines),
+                None => None,
+            }
         };
-        let Some(k) = at_k else {
+        let Some((k, loose)) = at_k else {
             let first = old.iter().find(|l| !l.trim().is_empty()).unwrap_or(&"");
             // the first hunk line the target doesn't have exactly (trailing space aside): the line at fault
             let at_fault = old.iter().filter(|l| !l.trim().is_empty()).find(|l| !lines.iter().any(|x| x.trim_end() == l.trim_end()));
@@ -375,10 +394,12 @@ fn apply_hunks(target: &str, show: &str, lines: &mut Vec<String>, hunks: Vec<Hun
             };
             return Err(bad(format!("in {target} (hunk at line {hl}), {msg}")));
         };
+        indented |= loose;
+        let new = replacement(&hunk, &old, lines, k, loose);
         cursor = k + new.len();
         lines.splice(k..k + old.len(), new);
     }
-    Ok(())
+    Ok(indented)
 }
 
 /// A file's new text from a `write` patch section (D-104): an Add's `+` lines,
@@ -389,7 +410,7 @@ pub fn file_text(path: &str, current: &str, kind: Section, hunks: Vec<Hunk>) -> 
         Section::Add => Ok(Some(hunks[0].1.iter().map(|l| format!("{}\n", &l[1..])).collect())),
         Section::Update => {
             let mut lines: Vec<String> = current.lines().map(String::from).collect();
-            apply_hunks(path, &format!("read {path}"), &mut lines, hunks, true)?;
+            let _ = apply_hunks(path, &format!("read {path}"), &mut lines, hunks, true)?;
             let mut text = lines.join("\n");
             // the file keeps its last newline; one that had no text gets one
             if !lines.is_empty() && (current.ends_with('\n') || current.is_empty()) {
@@ -425,7 +446,7 @@ fn push_module_blocks(
             if crate::rust_submit::container_kind(item.kind) || !item.children.is_empty() {
                 let how = match item.stored {
                     Some(_) => "change it with `submit <module>`".to_string(),
-                    None => store::block_note(item.kind),
+                    None => store::block_note(item.kind, None),
                 };
                 return Err(bad(format!("the patch changes the `{}` block {} (section at line {at_line}); {how}.", item.kind, item.name,)));
             }
@@ -436,59 +457,11 @@ fn push_module_blocks(
     Ok(())
 }
 
-/// Blocks for a plain `submit` from a patch (D-47): `*** Update: <symbol or
-/// module>` sections of `@@` hunks (` ` context, `-` removed, `+` added) change
-/// stored symbols, applied in order as `apply_patch` does, each from where the
-/// last one ended; `*** Add: <module>.<name>` (or a new module) adds `+` lines.
-/// Returns one block per symbol changed or added.
+/// The blocks from a patch, without the flag that says a hunk matched through
+/// indentation.
+#[cfg(test)]
 pub fn patch_blocks(s: &Store, raw: &str) -> Result<String, Failure> {
-    let bad = |m: String| Failure(format!("E0108 {m}"), 1);
-    let sections = sections(raw, false)?;
-    let ix = s.index()?;
-    let rust = language::is_rust(&s.root);
-    let mut blocks = String::new();
-    let mut pending = Vec::new();
-    for (kind, target, at_line, hunks) in sections {
-        // A `*** Update File:` header may name a symbol; one that names no code is a file, for `write`.
-        let header = raw.lines().nth(at_line - 1).unwrap_or("");
-        let not_code = |e: Failure| {
-            if !header.contains(" File:") {
-                return if e.0.starts_with("E1001") { bad_target(s, &ix, &target, at_line) } else { e };
-            }
-            let path = header.split_once(':').map_or("", |p| p.1).trim();
-            bad(format!(
-                concat!(
-                    "`{}` (line {}) is no symbol or module; ",
-                    "a file other than code changes with `write` with no path, this patch as `text`. {}",
-                ),
-                path, at_line, RESEND
-            ))
-        };
-        let mut c = SectionContext {
-            s,
-            ix: &ix,
-            target: &target,
-            at_line,
-            blocks: &mut blocks,
-            pending: &mut pending,
-            bad: &bad,
-            not_code: &not_code,
-        };
-        if kind == Section::Add {
-            add_blocks(&mut c, rust, &hunks)?;
-        } else if rust {
-            rust_update_blocks(&mut c, hunks)?;
-        } else {
-            unit_update_blocks(&mut c, hunks)?;
-        }
-    }
-    if rust {
-        render_pending_impls(&s.root, &mut blocks, &mut pending)?;
-    }
-    if blocks.is_empty() {
-        return Err(bad(format!("the patch changes nothing. {RESEND}")));
-    }
-    Ok(blocks)
+    patch_blocks_with_indent(s, raw).map(|(blocks, _)| blocks)
 }
 
 pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option<&str>) -> Out {
@@ -498,6 +471,9 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
     let mut replaced = 0;
     let ix = s.index()?;
     let (id, args, raw) = match a.as_slice() {
+        ["submit", "--draft", id, "--imports", module, ..] | ["submit", "--imports", module, "--draft", id, ..] => {
+            return fail(format!("E0109 send these as two calls: `submit --imports {module}` first, then `submit --draft {id}`"));
+        }
         ["submit", "--draft", id] | ["submit", "--draft", id, "--replace"] => {
             let (args, text, expected) = load(s, id)?;
             if args.first().is_some_and(|c| c == "write") {
@@ -542,10 +518,12 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
     };
     let mut raw = raw;
     let mut as_blocks = false;
+    let mut indented = false;
     let refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match refs.as_slice() {
         // a patch that applies is submitted as the blocks it changes; if those are rejected, the draft keeps them
-        ["submit"] if is_patch(&raw) => patch_blocks(s, &raw).and_then(|blocks| {
+        ["submit"] if is_patch(&raw) => patch_blocks_with_indent(s, &raw).and_then(|(blocks, loose)| {
+            indented = loose;
             let result = s.submit_symbols_blocks(None, None, &blocks, true);
             if result.is_err() {
                 raw = blocks;
@@ -565,6 +543,11 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
     match result {
         Ok(out) => {
             s.db.execute("DELETE FROM drafts WHERE id=? AND owner=?", params![id, owner()])?;
+            let out = if indented {
+                format!("{out}\nA hunk matched through indentation: its added lines took the target's indentation.")
+            } else {
+                out
+            };
             Ok(if replaced > 1 { format!("Replaced {replaced} occurrences.\n{out}") } else { out })
         }
         Err(Failure(message, code)) => {
@@ -575,7 +558,7 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
             )?;
             let what = if as_blocks { " (the patch applied; the draft holds the blocks it changed)" } else { "" };
             let several = several_blocks(s, &raw);
-            let advice = retry_advice(&message, &id, "submit", what, several, is_patch(&raw));
+            let advice = retry_advice(&message, &id, "submit", what, several, is_patch(&raw), replaced > 0);
             Err(Failure(format!("{message}\n\n{advice}"), code))
         }
     }
@@ -691,7 +674,7 @@ mod tests {
             ),
         )]);
         let original = board::snapshot(&s).unwrap();
-        let cases: [(&str, &str); 23] = [
+        let cases: [(&str, &str); 18] = [
             ("*** Begin Patch\n*** Delete: app.main\n*** End Patch\n", "a patch can't delete"),
             ("*** Begin Patch\n*** Move: app.main\n*** End Patch\n", "a patch can't rename"),
             ("+pub fn x() { 1 }\n", "a patch starts with `*** Begin Patch`"),
@@ -711,24 +694,13 @@ mod tests {
                 "`x = 1` is only part of a longer line: `let x = 1`",
             ),
             (
-                "*** Begin Patch\n*** Update: app.main\n-let x = 1\n+let x = 2\n*** End Patch\n",
-                "`let x = 1` is line 2 with 2 leading spaces",
-            ),
-            (
-                "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-let x = 1\n+pub fn main() {\n+let x = 2\n*** End Patch\n",
-                "`let x = 1` is line 2 with 2 leading spaces",
-            ),
-            (
                 "*** Begin Patch\n*** Update: app.main\n-  let x = 1\n-}\n+  let x = 2\n*** End Patch\n",
                 "these lines aren't adjacent in the file",
             ),
-            ("*** Begin Patch\n*** Update: app.one\n-let x = 1\n+let x = 2\n*** End Patch\n", "`let x = 1` is line 2 with 1 leading space"),
             (
                 "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-\n-  let x = 1\n+pub fn main() {\n+  let x = 2\n*** End Patch\n",
                 "The hunk has a blank line; the target has none.",
             ),
-            ("*** Begin Patch\n*** Update: app.rep\n@@ let d\n-x\n-}\n+x\n+}\n*** End Patch\n", "`x` is line 7 with 2 leading spaces"),
-            ("*** Begin Patch\n*** Update: app.rep\n@@ let a\n-x\n-}\n+x\n+}\n*** End Patch\n", "`x` is line 2 with 2 leading spaces"),
             (
                 "*** Begin Patch\n*** Update: app.main\n-let x = 1\n-x = 1\n+let x = 2\n+x = 2\n*** End Patch\n",
                 "these lines weren't found: `x = 1` (and 1 more)",
@@ -747,13 +719,13 @@ mod tests {
         // the hint names the first hunk line with no exact match, not the hunk's first line (D-142)
         let e = patch_blocks(
             &s,
-            "*** Begin Patch\n*** Update: app.main\n-pub fn main() {\n-let x = 1\n+pub fn main() {\n+let x = 2\n*** End Patch\n",
+            "*** Begin Patch\n*** Update: app.rep\n-pub fn rep(x: Int) -> Int {\n-x\n-}\n+pub fn rep(x: Int) -> Int {\n+y\n+}\n*** End Patch\n",
         )
         .unwrap_err()
         .0;
-        assert!(e.contains("`let x = 1` is line 2 with 2 leading spaces") && !e.contains("`pub fn main() {` is line"), "{e}");
+        assert!(e.contains("`x` is line 2 with 2 leading spaces") && !e.contains("`pub fn rep(x: Int) -> Int {` is line"), "{e}");
         // the headline quotes the line at fault, not the hunk's first line
-        assert!(e.contains("these lines weren't found: `let x = 1` (and 1 more)"), "{e}");
+        assert!(e.contains("these lines weren't found: `x` (and 2 more)"), "{e}");
         // hunk lines all present but not adjacent: the refusal says so, with no indentation hint
         let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.main\n-  let x = 1\n-}\n+  let x = 2\n*** End Patch\n").unwrap_err().0;
         assert!(e.contains("aren't adjacent in the file") && !e.contains("leading space"), "{e}");
@@ -763,7 +735,7 @@ mod tests {
             .0;
         assert!(e.contains("these lines weren't found: `x = 1`") && e.contains("`x = 1` is only part of a longer line"), "{e}");
         // the search goes outward from where the hunk line belongs: an occurrence 2 lines before it beats one 3 lines after it
-        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.rep\n@@ let a\n-x\n-}\n+x\n+}\n*** End Patch\n").unwrap_err().0;
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: app.rep\n@@ let a\n-x\n+y\n*** End Patch\n").unwrap_err().0;
         assert!(e.contains("`x` is line 2 with 2 leading spaces"), "{e}");
         // Each refusal says where in the patch it is; a prefix error quotes the line before.
         let bare = "*** Begin Patch\n*** Add: app.x\n+pub fn x() {\n+  1\n}\n*** End Patch\n";
@@ -792,7 +764,13 @@ mod tests {
         let spans = "*** Begin Patch\n*** Update: app\n-}\n-\u{0}\n-pub fn other() {\n+  y\n*** End Patch\n";
         assert!(patch_blocks(&s, spans).unwrap_err().0.contains("a hunk spans two symbols"), "spans");
         let imports = "*** Begin Patch\n*** Update: app\n-import gleam/int\n+import gleam/list\n*** End Patch\n";
-        assert!(patch_blocks(&s, imports).unwrap_err().0.contains("changes only app's imports"), "imports");
+        let e = patch_blocks(&s, imports).unwrap_err().0;
+        assert!(
+            e.contains("changes only app's imports")
+                && e.contains("submit --imports app")
+                && !e.contains("imports are added automatically"),
+            "imports: {e}"
+        );
         assert_eq!(board::snapshot(&s).unwrap(), original);
     }
 
@@ -868,6 +846,7 @@ mod tests {
         let e = submit(&s, &["submit"], &mut || Ok(empty.into()), None).unwrap_err().0;
         assert!(
             e.contains("line 4 of the patch: in `*** Add: app.x` every line, empty ones too, starts with `+`")
+                && e.contains(PATCH_LINES)
                 && e.contains("Nothing was saved.")
                 && e.contains("Fix the failing block")
                 && e.contains("don't resend the whole text")
@@ -894,18 +873,18 @@ mod tests {
         assert!(e.starts_with("E1003 unknown module: nope; create it with a patch `*** Add: nope`"), "{e}");
     }
 
-    /// Hunks match through trailing whitespace, not indentation (D-142), and a
-    /// unified diff's `@@ -3,4 +3,5 @@` gives no context line.
+    /// Hunks match through trailing whitespace, and code hunks through space at
+    /// either end when the fit is unique (D-204); a unified diff's
+    /// `@@ -3,4 +3,5 @@` gives no context line.
     #[test]
     fn patch_matching_ignores_trailing_space_and_unified_headers() {
         let s = board_project(&[("src/app.gleam", "pub fn main() {\n  let x = 1\n  x\n}\n")]);
         let trailing = "*** Begin Patch\n*** Update: app.main\n-  let x = 1   \n+  let x = 2\n*** End Patch\n";
         let blocks = patch_blocks(&s, trailing).unwrap();
         assert!(blocks.starts_with("// ── app.main ──\n") && blocks.contains("let x = 2") && !blocks.contains("let x = 1"), "{blocks}");
-        // leading space is part of the line: the line is named, with its own space (D-142)
-        let indented = "*** Begin Patch\n*** Update: app.main\n-let x = 1\n+  let x = 3\n*** End Patch\n";
-        let e = patch_blocks(&s, indented).unwrap_err().0;
-        assert!(e.contains("these lines weren't found: `let x = 1`") && e.contains("is line 2 with 2 leading spaces"), "{e}");
+        // a code hunk also matches through leading space, and its additions take the target's depth (D-204)
+        let indented = "*** Begin Patch\n*** Update: app.main\n-let x = 1\n+let x = 3\n*** End Patch\n";
+        assert!(patch_blocks(&s, indented).unwrap().contains("\n  let x = 3\n"));
         let unified = "*** Begin Patch\n*** Update: app.main\n@@ -1,4 +1,4 @@\n-  let x = 1\n+  let x = 4\n*** End Patch\n";
         assert!(patch_blocks(&s, unified).unwrap().contains("let x = 4"));
         // `*** Add` of a name that is a symbol of a module goes into that module; any other name is a new module.
@@ -1216,6 +1195,356 @@ mod tests {
             assert!(!out.contains("a.unused"), "{out}");
         }
     }
+
+    /// E0105 names the line nearest `old`'s first non-blank line: the one
+    /// equal once space is trimmed, else the one sharing the longest start;
+    /// when only leading space differs, both counts are named (D-142).
+    #[test]
+    fn a_miss_names_the_nearest_line() {
+        let s = board_project(&[("src/app.gleam", "pub fn five() -> Int {\n  let a = 1\n  let b = a + 1\n  b\n}\n")]);
+        let miss = |old: &str| submit(&s, &["submit", "app.five", "--replace"], &mut || Ok("x".into()), Some(old)).unwrap_err().0;
+        let e = miss("  let b = a + 2");
+        assert!(e.contains("E0105 `old` does not occur") && e.contains("The nearest line is 3: `  let b = a + 1`"), "{e}");
+        let e = miss("   let b = a + 1");
+        assert!(e.contains("The nearest line is 3, with 2 leading spaces: `let b = a + 1`; your `old` line has 3"), "{e}");
+        let e = miss("  let a = 1\n  let b = a + 2");
+        assert!(e.contains("The nearest line is 3: `  let b = a + 1`") && !e.contains("The nearest line is 2"), "{e}");
+        // An `old` of only whitespace, like empty text, has no line to name.
+        let e = miss("   ");
+        assert!(e.contains("does not occur") && !e.contains("The nearest line"), "{e}");
+        let e = miss("zzz");
+        assert!(e.contains("does not occur") && !e.contains("The nearest line"), "{e}");
+        let e = replace("", Some("x"), "y", false).unwrap_err().0;
+        assert!(e.contains("does not occur") && !e.contains("The nearest line"), "{e}");
+    }
+
+    /// A patch draft missing its `-`, `+` or ` ` prefixes names the line and
+    /// says to include them; it never applies the loose match.
+    #[test]
+    fn a_patch_miss_says_to_include_the_prefix() {
+        let patch = "*** Begin Patch\n*** Add: app.x\n+pub fn x() -> Int {\n+  1\n+}\n*** End Patch\n";
+        let e = replace(patch, Some("pub fn x() -> Int {\n  1\n}"), "y", false).unwrap_err().0;
+        assert!(
+            e.contains("does not occur")
+                && e.contains("The nearest line is 3, but a patch line starts with `-`, `+` or ` `: include its prefix"),
+            "{e}"
+        );
+        let e = replace(patch, Some("\npub fn x() -> Int {\n  1\n}"), "y", false).unwrap_err().0;
+        assert!(e.contains("The nearest line is 3, but a patch line starts with `-`, `+` or ` `: include its prefix"), "{e}");
+    }
+
+    /// A replacement is kept even when its retry is refused: the footer says
+    /// the draft holds it and the next `old` must match that text.
+    #[test]
+    fn a_failed_retry_keeps_the_replacement() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let first = submit(&s, &["submit", "app.main"], &mut || Ok("pub fn main() { missing }".into()), None).unwrap_err().0;
+        let id = first.split("Draft ").nth(1).and_then(|rest| rest.split(' ').next()).unwrap().to_string();
+        let e = submit(&s, &["submit", "--draft", &id, "--replace"], &mut || Ok("also_missing".into()), Some("missing")).unwrap_err().0;
+        assert!(
+            e.contains("The replacement was applied: the draft now holds it")
+                && e.contains("the next `old` must match the draft as it is now")
+                && e.contains(&format!("`view --draft {id}`")),
+            "{e}"
+        );
+        assert!(view(&s, &id).unwrap().contains("also_missing"));
+    }
+
+    /// A module patch saves a changed item as rustfmt writes it, even when the
+    /// hunk's `+` line is indented and spaced wrong (D-158 point 5).
+    #[test]
+    fn a_module_patch_formats_the_item_it_changes() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n";
+        let (root, store) = rust_project(lib);
+        let patch = "*** Begin Patch\n*** Update: crate\n@@\n-        2\n+     3+4\n*** End Patch\n";
+        let out = submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+        assert!(out.contains("Saved crate.Store::open"), "{out}");
+        assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib.replace("        2\n", "        3 + 4\n"),);
+    }
+
+    /// A module patch pushes only the item it changed; an item rustfmt would
+    /// reformat but the patch didn't touch keeps its bytes (D-158 point 5).
+    #[test]
+    fn a_module_patch_pushes_only_the_changed_item() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let lib = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32{2}\n";
+        let (root, store) = rust_project(lib);
+        let patch = "*** Begin Patch\n*** Update: crate\n@@\n-    1\n+  3\n*** End Patch\n";
+        let blocks = patch_blocks(&store, patch).unwrap();
+        assert!(blocks.contains("// ── crate.one ──"), "{blocks}");
+        assert!(!blocks.contains("crate.two"), "{blocks}");
+        submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("src/lib.rs")).unwrap(),
+            "pub fn one() -> i32 {\n    3\n}\n\npub fn two() -> i32{2}\n",
+        );
+    }
+
+    /// A module patch whose text doesn't parse is refused, naming and quoting
+    /// its line in the module, and nothing is saved.
+    #[test]
+    fn a_module_patch_syntax_error_names_a_line() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let lib = concat!(
+            "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n\n",
+            "    pub fn other(&self) -> i32 {\n        3\n    }\n}\n",
+        );
+        let (root, store) = rust_project(lib);
+        let patch = "*** Begin Patch\n*** Update: crate\n@@\n-        3\n+        let = ;\n*** End Patch\n";
+        let err = submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
+        assert!(err.starts_with("E0108 line 9: "), "{err}");
+        assert!(err.contains("`let = ;`"), "{err}");
+        assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+    }
+
+    /// A crate root's `mod x;` lines don't stop a module patch: only the item
+    /// the patch changed is formatted, never the whole file.
+    #[test]
+    fn a_module_patch_changes_a_crate_root_with_mod_lines() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let lib = "mod helper;\n\npub fn one() -> i32 {\n    1\n}\n";
+        let root =
+            Scratch::new().with(&[("Cargo.toml", CARGO), ("src/lib.rs", lib), ("src/helper.rs", "pub fn two() -> i32 {\n    2\n}\n")]);
+        crate::import(&root).unwrap();
+        let store = crate::Store::at(&root).unwrap();
+        let patch = "*** Begin Patch\n*** Update: crate\n@@\n-    1\n+  3\n*** End Patch\n";
+        let out = submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+        assert!(out.contains("Saved crate.one"), "{out}");
+        assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib.replace("    1\n", "    3\n"),);
+    }
+
+    /// A rustfmt error in a module patch names the line in the module, not in
+    /// the changed item, and nothing is saved.
+    #[test]
+    fn a_module_patch_names_a_rustfmt_error_in_the_module() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let lib = "pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n";
+        let root = Scratch::new()
+            .with(&[("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2015\"\n"), ("src/lib.rs", lib)]);
+        crate::import(&root).unwrap();
+        let store = crate::Store::at(&root).unwrap();
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update: crate\n",
+            "@@ pub fn two\n",
+            " pub fn two() -> i32 {\n",
+            "-    2\n",
+            "+    3\n",
+            " }\n",
+            "+\n",
+            "+pub async fn three() -> i32 {\n",
+            "+    3\n",
+            "+}\n",
+            "*** End Patch\n",
+        );
+        let err = submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
+        assert!(err.contains("E0100 syntax error in `crate.three` at line 9"), "{err}");
+        assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+    }
+
+    /// A rustfmt error inside an `impl` names the method's line in the module,
+    /// and nothing is saved.
+    #[test]
+    fn a_nested_module_patch_names_a_rustfmt_error_in_the_module() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let lib = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        2\n    }\n}\n";
+        let root = Scratch::new()
+            .with(&[("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2015\"\n"), ("src/lib.rs", lib)]);
+        crate::import(&root).unwrap();
+        let store = crate::Store::at(&root).unwrap();
+        let patch = concat!(
+            "*** Begin Patch\n",
+            "*** Update: crate\n",
+            "@@\n",
+            "-    pub fn open(&self) -> i32 {\n",
+            "+    pub async fn open(&self) -> i32 {\n",
+            "*** End Patch\n",
+        );
+        let err = submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
+        assert!(err.contains("E0100 syntax error in `crate.Store::open` at line 4"), "{err}");
+        assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+    }
+
+    #[test]
+    fn drop_refuses_another_owners_draft() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        for (id, task) in [("mine", owner()), ("theirs", "another-task".to_string())] {
+            s.db.execute(
+                "INSERT INTO drafts(id,owner,args,text,base) VALUES (?,?,?,?,?)",
+                params![id, task, json!(["submit", "app.main"]).to_string(), "text", ""],
+            )
+            .unwrap();
+        }
+        let e = drop_one(&s, "theirs").unwrap_err().0;
+        assert!(e.contains("E0106") && e.contains("not found"), "{e}");
+        let left: i64 = s.db.query_row("SELECT COUNT(*) FROM drafts WHERE id='theirs'", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 1, "another owner's draft stays");
+        let out = drop_one(&s, "mine").unwrap();
+        assert!(out.contains("Dropped draft mine"), "{out}");
+        assert!(list(&s).unwrap().is_empty());
+    }
+
+    #[test]
+    fn draft_and_imports_are_two_calls() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        for args in [["submit", "--draft", "d1", "--imports", "app"], ["submit", "--imports", "app", "--draft", "d1"]] {
+            let e = submit(&s, &args, &mut || Ok(String::new()), None).unwrap_err().0;
+            assert!(
+                e.starts_with("E0109") && e.contains("two calls") && e.contains("`submit --imports app` first, then `submit --draft d1`"),
+                "{args:?}: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn drop_command_drops_one_owned_draft() {
+        let p = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        for (id, task) in [("mine", owner()), ("theirs", "another-task".to_string())] {
+            p.db.execute(
+                "INSERT INTO drafts(id,owner,args,text,base) VALUES (?,?,?,?,?)",
+                params![id, task, json!(["submit", "app.main"]).to_string(), "text", ""],
+            )
+            .unwrap();
+        }
+        let run = |id: &str| {
+            let args: Vec<String> = ["drafts", "drop", id].iter().map(|x| x.to_string()).collect();
+            crate::with_root(&p.root, || crate::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+        };
+        let out = run("mine").unwrap();
+        assert!(out.contains("Dropped draft mine"), "{out}");
+        let e = run("theirs").unwrap_err().0;
+        assert!(e.contains("E0106") && e.contains("not found"), "{e}");
+        let left: i64 = p.db.query_row("SELECT COUNT(*) FROM drafts WHERE id='theirs'", [], |r| r.get(0)).unwrap();
+        assert_eq!(left, 1, "another owner's draft stays");
+    }
+
+    /// A loose code hunk keeps the target's context and `-` lines, shifts its
+    /// `+` lines by the indentation difference, and refuses an ambiguous fit
+    /// (D-204).
+    #[test]
+    fn a_loose_hunk_keeps_the_targets_lines_and_shifts_additions() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() {\n  let x = 1\n  x\n}\n")]);
+        let patch = "*** Begin Patch\n*** Update: app.main\n-let x = 1\n x\n+let x = 2\n*** End Patch\n";
+        let blocks = patch_blocks(&s, patch).unwrap();
+        assert!(blocks.contains("\n  x\n  let x = 2\n"), "{blocks}");
+
+        let hunk = |lines: &[&str]| (None, lines.iter().map(|l| l.to_string()).collect(), 1);
+        let mut lines: Vec<String> = vec!["\t\tlet x = 1".into()];
+        apply_hunks("x", "view x", &mut lines, vec![hunk(&["-    let x = 1", "+    let x = 2"])], false).unwrap();
+        assert_eq!(lines, ["\t\tlet x = 2"]);
+
+        let mut lines: Vec<String> = vec!["".into(), "\t\tlet x = 1".into()];
+        apply_hunks("x", "view x", &mut lines, vec![hunk(&[" ", "-    let x = 1", "+    let x = 2"])], false).unwrap();
+        assert_eq!(lines, ["", "\t\tlet x = 2"]);
+
+        let mut lines: Vec<String> = vec!["  let x = 1".into()];
+        apply_hunks("x", "view x", &mut lines, vec![hunk(&["-    let x = 1", "+  let y = 2"])], false).unwrap();
+        assert_eq!(lines, ["let y = 2"]);
+
+        let twice = board_project(&[("src/app.gleam", "pub fn main() {\n  let a = 1\n  let a = 1\n}\n")]);
+        let e = patch_blocks(&twice, "*** Begin Patch\n*** Update: app.main\n-let a = 1\n+let a = 2\n*** End Patch\n").unwrap_err().0;
+        assert!(e.contains("E0108") && e.contains("`let a = 1`") && e.contains("leading space"), "{e}");
+    }
+
+    /// A save whose hunk matched through indentation says so (D-204).
+    #[test]
+    fn a_loose_match_says_so_in_the_save_reply() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() {\n  let x = 1\n  x\n}\n")]);
+        let patch = "*** Begin Patch\n*** Update: app.main\n-let x = 1\n+let x = 2\n*** End Patch\n";
+        let out = submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+        assert!(out.contains("matched through indentation"), "{out}");
+        assert!(s.view(&["app.main"], false, BUDGET).unwrap().contains("let x = 2"));
+    }
+
+    /// A `write` patch keeps D-142's strict leading-space rule (D-204).
+    #[test]
+    fn a_file_patch_stays_strict_about_indentation() {
+        let hunk = (None, vec!["-one".to_string(), "+1".to_string()], 1);
+        let e = file_text("notes", "  one\n", Section::Update, vec![hunk]).unwrap_err().0;
+        assert!(e.contains("E0108") && e.contains("these lines weren't found: `one`") && e.contains("with 2 leading spaces"), "{e}");
+    }
+
+    /// A patch naming an existing block refuses with `format <module>`, not a new
+    /// block's route, and changes nothing.
+    #[test]
+    fn a_patch_naming_an_existing_block_says_to_format() {
+        let lib = "pub fn one() -> i32 {\n    1\n}\n\nmod tests {\n    #[test]\n    fn two() {}\n}\n";
+        let (root, s) = rust_project(lib);
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: crate.tests\n@@\n-    fn two() {}\n+    fn three() {}\n*** End Patch\n")
+            .unwrap_err()
+            .0;
+        assert!(e.contains("E0108"), "{e}");
+        assert!(e.contains("format crate"), "{e}");
+        assert!(!e.contains("submit --new"), "{e}");
+        assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+    }
+
+    /// A draft saved in a task run is visible to the commands that view and
+    /// drop it.
+    #[test]
+    fn a_context_owns_the_drafts_it_saves() {
+        let p = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        let mut t = crate::board::api(&p.root, "POST", "/tasks", json!({"title": "Drafts"})).unwrap();
+        let tid = t["id"].as_str().unwrap().to_string();
+        t["runs"] = json!([{"id": "run-1", "kind": "work", "state": "running"}]);
+        crate::tasks::put(&p, &t).unwrap();
+        let id = crate::board::with_context(&tid, "run-1", || {
+            assert!(submit(&p, &["submit", "app.main"], &mut || Ok("pub fn main(".into()), None).is_err());
+            entries(&p, &tid).unwrap()[0].0.clone()
+        });
+        let run = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|x| x.to_string()).collect();
+            crate::with_root(&p.root, || crate::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+        };
+        let viewed = crate::board::with_context(&tid, "run-1", || run(&["view", "--draft", id.as_str()])).unwrap();
+        assert_eq!(viewed, "pub fn main(");
+        let dropped = crate::board::with_context(&tid, "run-1", || run(&["drafts", "drop", id.as_str()])).unwrap();
+        assert!(dropped.contains("Dropped draft"), "{dropped}");
+        assert!(entries(&p, &tid).unwrap().is_empty());
+    }
+
+    /// A Rust symbol patch that matches through indentation says so, and the
+    /// saved item is rustfmt's text (D-204).
+    #[test]
+    fn a_rust_symbol_patch_matches_through_indentation() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let lib = "pub fn one() -> i32 {\n    1\n}\n";
+        let (root, store) = rust_project(lib);
+        let patch = "*** Begin Patch\n*** Update: crate.one\n@@\n-  1\n+   2\n*** End Patch\n";
+        let out = submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+        assert!(out.contains("matched through indentation"), "{out}");
+        assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), "pub fn one() -> i32 {\n    2\n}\n");
+    }
+
+    /// A Rust module patch that matches through indentation says so, and the
+    /// saved item is rustfmt's text (D-204).
+    #[test]
+    fn a_rust_module_patch_matches_through_indentation() {
+        if !crate::language::cargo::installed() {
+            return;
+        }
+        let lib = "pub fn one() -> i32 {\n    1\n}\n";
+        let (root, store) = rust_project(lib);
+        let patch = "*** Begin Patch\n*** Update: crate\n@@\n-  1\n+   2\n*** End Patch\n";
+        let out = submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+        assert!(out.contains("matched through indentation"), "{out}");
+        assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), "pub fn one() -> i32 {\n    2\n}\n");
+    }
 }
 
 /// The refusal for an `*** Update:` that names no symbol (E0108): a module or
@@ -1276,7 +1605,7 @@ fn add_blocks(c: &mut SectionContext<'_>, rust: bool, hunks: &[Hunk]) -> Result<
     Ok(())
 }
 
-fn rust_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<(), Failure> {
+fn rust_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<bool, Failure> {
     if !c.target.contains('.')
         && let Some(m) = c.s.resolve_module(c.ix, c.target)
     {
@@ -1285,7 +1614,7 @@ fn rust_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<()
     rust_symbol_update_blocks(c, hunks)
 }
 
-fn unit_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<(), Failure> {
+fn unit_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<bool, Failure> {
     let blocks = &mut *c.blocks;
     // The target's text, a unit per symbol (and a module's header first).
     let (module, mut units): (String, Vec<(Option<usize>, String)>) = match c.s.resolve_module(c.ix, c.target) {
@@ -1304,7 +1633,7 @@ fn unit_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<()
     const SEP: &str = "\u{0}";
     let mut lines: Vec<String> =
         units.iter().map(|u| u.1.clone()).collect::<Vec<_>>().join(&format!("\n{SEP}\n")).lines().map(String::from).collect();
-    apply_hunks(c.target, &format!("view {}", c.target), &mut lines, hunks, false)?;
+    let indented = apply_hunks(c.target, &format!("view {}", c.target), &mut lines, hunks, false)?;
     let joined = lines.join("\n");
     let texts: Vec<&str> = joined.split(&format!("\n{SEP}\n")).collect();
     if texts.len() != units.len() {
@@ -1342,12 +1671,12 @@ fn unit_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<()
         return Err((c.bad)(format!(
             concat!(
                 "the patch changes only {}'s imports (section at line {}); ",
-                "imports are added automatically (`submit --imports {}` replaces them).",
+                "to replace them, use `submit --imports {}` with the module's imports and comment.",
             ),
             module, c.at_line, module
         )));
     }
-    Ok(())
+    Ok(indented)
 }
 
 /// What every section of a patch is turned into blocks with.
@@ -1364,12 +1693,13 @@ struct SectionContext<'a> {
 
 /// A `*** Update:` that names a module applies its hunks to the module's
 /// whole file (D-168): every changed or added item goes as one block; the
-/// header has its own commands.
-fn rust_module_update_blocks(c: &mut SectionContext<'_>, m: &ModuleRow, hunks: Vec<Hunk>) -> Result<(), Failure> {
+/// header has its own commands. Only the items the patch changed are
+/// formatted, so the rest keep their bytes, as `submit <module>` does.
+fn rust_module_update_blocks(c: &mut SectionContext<'_>, m: &ModuleRow, hunks: Vec<Hunk>) -> Result<bool, Failure> {
     let module = m.path.clone();
     let before = store::module_text(c.ix, m);
     let mut lines: Vec<String> = before.lines().map(String::from).collect();
-    apply_hunks(c.target, &format!("view {}", c.target), &mut lines, hunks, false)?;
+    let indented = apply_hunks(c.target, &format!("view {}", c.target), &mut lines, hunks, false)?;
     let after = lines.join("\n");
     let file = language::rust::split(&after, &module).map_err(|e| (c.bad)(e.0))?;
     if !file.refusals.is_empty() {
@@ -1385,23 +1715,26 @@ fn rust_module_update_blocks(c: &mut SectionContext<'_>, m: &ModuleRow, hunks: V
             module, c.at_line, module
         )));
     }
-    let items = crate::rust_submit::rust_module_items(c.ix, &module, &file.items)?;
-    push_module_blocks(c.blocks, c.ix, &module, &items, c.at_line, &c.bad)
+    let mut items = crate::rust_submit::rust_module_items(c.ix, &module, &file.items)?;
+    c.s.rust_format_module(c.ix, &module, None, &mut items, false, file.header.matches('\n').count() + 1)?;
+    push_module_blocks(c.blocks, c.ix, &module, &items, c.at_line, &c.bad)?;
+    Ok(indented)
 }
 
-fn rust_symbol_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<(), Failure> {
+fn rust_symbol_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Result<bool, Failure> {
     let blocks = &mut *c.blocks;
     let Some(i) = crate::rust_submit::rust_symbol(c.ix, c.target)? else {
         if let Some(container) = crate::rust_submit::rust_container(c.ix, c.target)? {
-            return Err((c.bad)(format!("{}.", store::block_note(&c.ix.syms[container].kind_text))));
+            let block = &c.ix.syms[container];
+            return Err((c.bad)(format!("{}.", store::block_note(&block.kind_text, Some(block.module.as_str())))));
         }
         return Err((c.not_code)(bad_target(c.s, c.ix, c.target, c.at_line)));
     };
     let mut lines: Vec<String> = c.ix.syms[i].text.lines().map(String::from).collect();
-    apply_hunks(c.target, &format!("view {}", c.target), &mut lines, hunks, false)?;
+    let indented = apply_hunks(c.target, &format!("view {}", c.target), &mut lines, hunks, false)?;
     let text = lines.join("\n");
     if text == c.ix.syms[i].text {
-        return Ok(());
+        return Ok(indented);
     }
     let parent = c.ix.syms[i]
         .parent
@@ -1423,7 +1756,7 @@ fn rust_symbol_update_blocks(c: &mut SectionContext<'_>, hunks: Vec<Hunk>) -> Re
         let text = c.s.rust_block_text(c.ix, &module, &item.name, &item.text);
         push_block(blocks, &mut String::new(), &module, &item.name, &text);
     }
-    Ok(())
+    Ok(indented)
 }
 
 /// An inherent `impl` an Add section is still filling in (D-194), keyed by its
@@ -1449,6 +1782,7 @@ fn add_rust_blocks(c: &mut SectionContext<'_>, text: &str) -> Result<(), Failure
             container.map(|i| (c.ix.syms[i].name.as_str(), c.ix.syms[i].text.as_str(), c.ix.syms[i].kind_text.as_str())),
             container.map_or("", |i| c.ix.syms[i].module.as_str()),
             0,
+            0,
             text.lines().count().max(1),
         )
     })?;
@@ -1468,7 +1802,7 @@ fn add_rust_blocks(c: &mut SectionContext<'_>, text: &str) -> Result<(), Failure
     for p in &file.items {
         if store::is_block(p) {
             if container.is_some() {
-                return Err((c.bad)(format!("{}.", store::block_note(p.kind))));
+                return Err((c.bad)(format!("{}.", store::block_note(p.kind, None))));
             }
             if p.kind == "impl" && !p.name.starts_with('<') {
                 add_pending_impl(c, &module, p, &mut header)?;
@@ -1665,3 +1999,240 @@ fn several_blocks(s: &Store, text: &str) -> bool {
 /// The start of every block `patch_blocks` writes; block parsers and
 /// `several_blocks` count these.
 pub(crate) const BLOCK_HEADER: &str = "// ── ";
+
+pub const WHOLE: &str = "Send the whole corrected text again in `text`.";
+
+/// The suffix shared by every refusal that says `old` and `text` are patch
+/// lines, prefixes included, so the wording can't drift apart.
+const PATCH_LINES: &str = "lines of the patch, prefixes included";
+
+/// The line of `text` closest to `old`'s first non-blank line: the first
+/// equal once space is trimmed, else the one sharing the longest start with
+/// it. Ties go to the first line. The flag says the trimmed lines are equal.
+/// No line when none is equal or shares a start.
+fn nearest_line(text: &str, old: &str) -> Option<(usize, bool)> {
+    let want = old.lines().find(|line| !line.trim().is_empty())?;
+    let mut best: Option<(usize, bool, usize)> = None;
+    for (k, line) in text.lines().enumerate() {
+        let same = line.trim() == want.trim();
+        let shared = line.trim_start().chars().zip(want.trim_start().chars()).take_while(|(a, b)| a == b).count();
+        if best.is_none_or(|(_, same0, shared0)| (same, shared) > (same0, shared0)) {
+            best = Some((k, same, shared));
+        }
+    }
+    best.filter(|&(_, same, shared)| same || shared > 0).map(|(k, same, _)| (k, same))
+}
+
+/// E0105's detail for a miss: the nearest line and its number, the leading
+/// spaces when only they differ (D-142), or the patch line whose prefix `old`
+/// left off. When `old`'s first line matches, the first later line that differs
+/// is the one to fix.
+fn miss_hint(text: &str, old: &str) -> String {
+    let want = match old.lines().find(|line| !line.trim().is_empty()) {
+        Some(line) => line,
+        None => return String::new(),
+    };
+    if is_patch(text) {
+        let bare: String = text
+            .split_inclusive('\n')
+            .map(|line| match line.chars().next() {
+                Some('-' | '+' | ' ') => &line[1..],
+                _ => line,
+            })
+            .collect();
+        let ats: Vec<usize> = bare.match_indices(old).map(|(at, _)| at).collect();
+        if ats.len() == 1 {
+            let at = ats[0] + old.find(want).unwrap_or(0);
+            return format!(
+                " The nearest line is {}, but a patch line starts with `-`, `+` or ` `: include its prefix.",
+                bare[..at].matches('\n').count() + 1
+            );
+        }
+    }
+    let Some((k, same)) = nearest_line(text, old) else { return String::new() };
+    let line = text.lines().nth(k).unwrap_or("");
+    if same {
+        let have = line.len() - line.trim_start().len();
+        let had = want.len() - want.trim_start().len();
+        if have != had {
+            return format!(
+                " The nearest line is {}, with {}: `{}`; your `old` line has {}.",
+                k + 1,
+                count(have, "leading space"),
+                clip(line.trim()),
+                count(had, "leading space")
+            );
+        }
+        if let Some(n) = following_miss(text, old, k) {
+            return format!(" The nearest line is {}: `{}`.", n, clip(text.lines().nth(n - 1).unwrap_or("")));
+        }
+    }
+    format!(" The nearest line is {}: `{}`.", k + 1, clip(line))
+}
+
+/// The first line after `old`'s first non-blank line that differs from `text`
+/// at `k`, as its number in `text`; `None` when every following line matches or
+/// the text ends first.
+fn following_miss(text: &str, old: &str, k: usize) -> Option<usize> {
+    let first = old.lines().position(|line| !line.trim().is_empty())?;
+    let mut text_lines = text.lines().skip(k + 1);
+    for (i, line) in old.lines().skip(first + 1).enumerate() {
+        match text_lines.next() {
+            Some(have) if have != line => return Some(k + 2 + i),
+            Some(_) => {}
+            None => return None,
+        }
+    }
+    None
+}
+
+/// The drafts `task` owns, oldest first: each id, the command that made it,
+/// and whether its base is still current.
+pub fn entries(s: &Store, task: &str) -> Result<Vec<(String, Vec<String>, bool)>, Failure> {
+    let mut q = s.db.prepare("SELECT id, args, text, base FROM drafts WHERE owner=? ORDER BY rowid")?;
+    let rows: Vec<(String, String, String, String)> =
+        q.query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<Result<_, _>>()?;
+    if rows.is_empty() {
+        return Ok(vec![]);
+    }
+    let ix = s.index()?;
+    let mut out = vec![];
+    for (id, args, text, then) in rows {
+        let parsed = serde_json::from_str::<Vec<String>>(&args).unwrap_or_default();
+        // a kept `write` patch has no base: its hunks are matched again when it is retried (D-120)
+        let current = parsed.first().is_some_and(|c| c == "write") || base(s, &ix, &parsed, &text)? == then;
+        out.push((id, parsed, current));
+    }
+    Ok(out)
+}
+
+/// Removes one draft this task owns; another owner's draft is refused, not ignored.
+pub fn drop_owned(s: &Store, task: &str, id: &str) -> Result<(), Failure> {
+    let removed = s.db.execute("DELETE FROM drafts WHERE id=? AND owner=?", params![id, task])?;
+    if removed == 0 {
+        return Err(Failure("E0106 draft not found in this task/session".into(), 1));
+    }
+    Ok(())
+}
+
+pub fn drop_one(s: &Store, id: &str) -> Out {
+    drop_owned(s, &owner(), id)?;
+    Ok(format!("Dropped draft {id}.\n"))
+}
+
+/// A listed draft's state: current, or stale because what it replaces changed.
+pub fn status(current: bool) -> &'static str {
+    if current { "current" } else { "stale: what it replaces changed since; check it isn't superseded" }
+}
+
+/// The one start position where every hunk line matches with space at both
+/// ends ignored, if there is exactly one (D-204).
+fn loose_match(old: &[&str], lines: &[String]) -> Option<(usize, bool)> {
+    let mut starts = (0..=lines.len().checked_sub(old.len())?).filter(|&k| old.iter().zip(&lines[k..]).all(|(o, l)| o.trim() == l.trim()));
+    let k = starts.next()?;
+    starts.next().is_none().then_some((k, true))
+}
+
+/// The lines that replace a hunk's `old` lines: the patch's, or for a loose
+/// match the target's for context and removals, with additions shifted to the
+/// target's indentation (D-204).
+fn replacement(hunk: &[String], old: &[&str], lines: &[String], k: usize, loose: bool) -> Vec<String> {
+    if !loose {
+        return hunk.iter().filter(|l| !l.starts_with('-')).map(|l| l[1..].to_string()).collect();
+    }
+    let anchor = old.iter().position(|line| !line.trim().is_empty()).unwrap_or(0);
+    let patch_indent = indent(&old[anchor]);
+    let target_indent = indent(&lines[k + anchor]);
+    let mut at = k;
+    let mut out = Vec::new();
+    for line in hunk {
+        match line.strip_prefix('+') {
+            Some(added) => out.push(shift_indent(added, patch_indent, target_indent)),
+            None => {
+                let target = lines[at].clone();
+                at += 1;
+                if !line.starts_with('-') {
+                    out.push(target);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn indent(line: &str) -> &str {
+    &line[..line.len() - line.trim_start().len()]
+}
+
+/// `line` with its indentation moved by the difference between the patch's
+/// and the target's indentation, never past the line's start (D-204).
+fn shift_indent(line: &str, patch_indent: &str, target_indent: &str) -> String {
+    if line.trim().is_empty() {
+        return line.to_string();
+    }
+    let own = indent(line);
+    let body = &line[own.len()..];
+    if let Some(rest) = own.strip_prefix(patch_indent) {
+        return format!("{target_indent}{rest}{body}");
+    }
+    let width = own.chars().count() as isize + target_indent.chars().count() as isize - patch_indent.chars().count() as isize;
+    let unit = if target_indent.starts_with('\t') { "\t" } else { " " };
+    format!("{}{body}", unit.repeat(width.max(0) as usize))
+}
+
+/// Blocks for a plain `submit` from a patch (D-47): `*** Update: <symbol or
+/// module>` sections of `@@` hunks (` ` context, `-` removed, `+` added) change
+/// stored symbols, applied in order as `apply_patch` does, each from where the
+/// last one ended; `*** Add: <module>.<name>` (or a new module) adds `+` lines.
+/// Returns one block per symbol changed or added, and whether a code hunk
+/// matched through indentation (D-204), which the save reply names.
+fn patch_blocks_with_indent(s: &Store, raw: &str) -> Result<(String, bool), Failure> {
+    let bad = |m: String| Failure(format!("E0108 {m}"), 1);
+    let sections = sections(raw, false)?;
+    let ix = s.index()?;
+    let rust = language::is_rust(&s.root);
+    let mut blocks = String::new();
+    let mut pending = Vec::new();
+    let mut indented = false;
+    for (kind, target, at_line, hunks) in sections {
+        // A `*** Update File:` header may name a symbol; one that names no code is a file, for `write`.
+        let header = raw.lines().nth(at_line - 1).unwrap_or("");
+        let not_code = |e: Failure| {
+            if !header.contains(" File:") {
+                return if e.0.starts_with("E1001") { bad_target(s, &ix, &target, at_line) } else { e };
+            }
+            let path = header.split_once(':').map_or("", |p| p.1).trim();
+            bad(format!(
+                concat!(
+                    "`{}` (line {}) is no symbol or module; ",
+                    "a file other than code changes with `write` with no path, this patch as `text`. {}",
+                ),
+                path, at_line, RESEND
+            ))
+        };
+        let mut c = SectionContext {
+            s,
+            ix: &ix,
+            target: &target,
+            at_line,
+            blocks: &mut blocks,
+            pending: &mut pending,
+            bad: &bad,
+            not_code: &not_code,
+        };
+        if kind == Section::Add {
+            add_blocks(&mut c, rust, &hunks)?;
+        } else if rust {
+            indented |= rust_update_blocks(&mut c, hunks)?;
+        } else {
+            indented |= unit_update_blocks(&mut c, hunks)?;
+        }
+    }
+    if rust {
+        render_pending_impls(&s.root, &mut blocks, &mut pending)?;
+    }
+    if blocks.is_empty() {
+        return Err(bad(format!("the patch changes nothing. {RESEND}")));
+    }
+    Ok((blocks, indented))
+}

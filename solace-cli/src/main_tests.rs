@@ -219,6 +219,7 @@ fn a_project_with_no_command_is_refused_and_the_call_goes_on() {
     assert!(error);
     assert_eq!(ran, ["read b.md"]);
     assert!(out.contains(PROJECT_ONLY), "{out}");
+    assert!(out.contains("at the end of each command line it applies to"), "{out}");
     assert!(out.ends_with("1 of 2 commands failed: --project solace-cli/board\n"), "{out}");
     // A line with no `--project` at all is no such line: it runs as before.
     let mut lens = vec![];
@@ -332,6 +333,8 @@ fn a_second_single_read_in_a_row_gets_the_hint() {
 fn an_option_a_command_doesnt_take_is_refused_by_name() {
     let e = unknown_option(&["view", "strategy.update", "--lines", "50..80"]).unwrap().unwrap_err().0;
     assert!(e.starts_with("view has no --lines; read takes --lines. view takes: --bodies"), "{e}");
+    let e = unknown_option(&["view", "strategy.update", "--context"]).unwrap().unwrap_err().0;
+    assert!(e.contains("`--context` belongs to `inspect`: `inspect <name> --context`"), "{e}");
     assert!(unknown_option(&["read", "a.md", "--lines", "1..2"]).is_none());
     assert!(unknown_option(&["inspect", "a.b", "--context"]).is_none());
     assert!(unknown_option(&["view", "a", "--bodies"]).is_none());
@@ -377,7 +380,7 @@ fn agent_reference_leaves_out_host_and_task_commands() {
             && r.contains("`help <command>`")
     );
     assert!(!r.contains("probe --from <fn>") && REFERENCE.contains("probe --from <fn>") && REFERENCE.contains("--replace [--all]"));
-    assert!(r.contains("Imports are added") && !r.contains("task ask"));
+    assert!(r.contains("A needed import is") && r.contains("submit --imports <module>") && !r.contains("task ask"));
     // Scope, the code's own conventions, comments that say why, and no secrets.
     assert!(r.contains("stop exploring") && r.contains("Write code the way the code around it is written"));
     assert!(r.contains("A comment says why code exists") && r.contains("Never put secrets or keys"));
@@ -463,9 +466,15 @@ fn a_name_in_another_project_says_where_it_is() {
 
 #[test]
 fn probe_args_parse() {
-    assert_eq!(probe_args(&["--from", "t", "--trace", "a.b", "c"]).unwrap(), (Some("t"), vec!["a.b", "c"]));
-    assert_eq!(probe_args(&[]).unwrap(), (None, vec![]));
-    assert!(probe_args(&["--trace"]).is_err() && probe_args(&["--from"]).is_err() && probe_args(&["x"]).is_err());
+    assert_eq!(probe_args(&["--from", "t", "--trace", "a.b", "c"]).unwrap(), (Some("t"), vec!["a.b", "c"], None));
+    assert_eq!(probe_args(&["--in", "parser"]).unwrap(), (None, vec![], Some("parser")));
+    assert_eq!(probe_args(&[]).unwrap(), (None, vec![], None));
+    assert!(
+        probe_args(&["--trace"]).is_err()
+            && probe_args(&["--from"]).is_err()
+            && probe_args(&["--in"]).is_err()
+            && probe_args(&["x"]).is_err()
+    );
 }
 
 #[test]
@@ -652,23 +661,23 @@ fn probe_project() -> Project {
 fn probe_runs_and_leaves_nothing() {
     let store = probe_project();
     let probe_file = store.root.join("test/solace_probe.gleam");
-    let out = store.probe("echo calc.add(2, 3)", None, &[]).unwrap();
+    let out = store.probe("echo calc.add(2, 3)", None, &[], None).unwrap();
     assert!(out.contains("5"), "{out}");
     assert!(!probe_file.exists());
-    let err = store.probe("echo calc.nope()", None, &[]).unwrap_err().0;
+    let err = store.probe("echo calc.nope()", None, &[], None).unwrap_err().0;
     assert!(err.contains("The probe ran as") && err.contains("import calc"), "{err}");
     // D-145: an unknown module value says how to print a value; another failure doesn't.
     assert!(err.contains("Unknown module value") && err.contains("Hint: print a value with `echo value`.\n\nThe probe ran as"), "{err}");
-    let err = store.probe("echo nope", None, &[]).unwrap_err().0;
+    let err = store.probe("echo nope", None, &[], None).unwrap_err().0;
     assert!(err.contains("The probe ran as") && !err.contains("Hint:"), "{err}");
     assert!(!probe_file.exists());
     // A probe is test-side code: it may use test helpers.
-    assert!(store.probe("echo helper.two()", None, &[]).unwrap().contains("2"));
+    assert!(store.probe("echo helper.two()", None, &[], None).unwrap().contains("2"));
     // `--from` starts from a function's body; a single expression is printed (D-43).
-    let out = store.probe("echo x + 10", Some("calc_test.sum_test"), &[]).unwrap();
+    let out = store.probe("echo x + 10", Some("calc_test.sum_test"), &[], None).unwrap();
     assert!(out.contains("13"), "{out}");
-    assert!(store.probe("", Some("calc.add"), &[]).unwrap_err().0.starts_with("E1005"));
-    let out = store.probe("calc.add(20, 3)", None, &[]).unwrap();
+    assert!(store.probe("", Some("calc.add"), &[], None).unwrap_err().0.starts_with("E1005"));
+    let out = store.probe("calc.add(20, 3)", None, &[], None).unwrap();
     assert!(out.contains("23") && !out.contains("warning"), "{out}");
 }
 
@@ -676,12 +685,12 @@ fn probe_runs_and_leaves_nothing() {
 fn probe_trace_shows_calls_and_puts_the_module_back() {
     let store = probe_project();
     let before = fs::read_to_string(store.root.join("src/calc.gleam")).unwrap();
-    let out = store.probe("calc.add(2, 3)", None, &["calc.add"]).unwrap();
+    let out = store.probe("calc.add(2, 3)", None, &["calc.add"], None).unwrap();
     assert!(out.contains("→ calc.add(2, 3)") && out.contains("← calc.add = 5"), "{out}");
     assert_eq!(fs::read_to_string(store.root.join("src/calc.gleam")).unwrap(), before);
-    let out = store.probe("calc.scale(3, by: 2)", None, &["calc.scale"]).unwrap();
+    let out = store.probe("calc.scale(3, by: 2)", None, &["calc.scale"], None).unwrap();
     assert!(out.contains("← calc.scale = 6"), "{out}");
-    assert!(store.probe("1", None, &["calc_test"]).is_err());
+    assert!(store.probe("1", None, &["calc_test"], None).is_err());
 }
 
 #[test]
@@ -1213,7 +1222,7 @@ fn a_plain_task_refusal_names_the_project_to_run_in() {
     })
     .unwrap();
     for command in ["submit", "check", "test", "delete"] {
-        let e = lockdown::plain::<()>(&store, Some(t["id"].as_str().unwrap()), command).unwrap_err().0;
+        let e = lockdown::plain::<()>(&store, Some(t["id"].as_str().unwrap()), command, None).unwrap_err().0;
         assert!(e.contains("files, grep, read, write and run. This task can change: . (the root), r."), "{command}: {e}");
         assert!(e.contains("`--project r`"), "{command}: {e}");
         assert!(!e.contains("Gleam"), "{command}: {e}");
@@ -1223,8 +1232,8 @@ fn a_plain_task_refusal_names_the_project_to_run_in() {
 #[test]
 fn a_rust_refusal_says_gleam_only() {
     let (_root, store) = testing::rust_project("pub fn helper() -> i32 {\n    1\n}\n");
-    for command in ["extract", "merge", "probe"] {
-        let e = lockdown::plain::<()>(&store, None, command).unwrap_err().0;
+    for command in ["extract", "merge"] {
+        let e = lockdown::plain::<()>(&store, None, command, None).unwrap_err().0;
         assert!(e.contains("Gleam only") && e.contains("deferred (D-158 point 6)"), "{command}: {e}");
         assert!(!e.contains("no Gleam code"), "{command}: {e}");
     }
@@ -1276,7 +1285,7 @@ fn a_plain_refusal_omits_a_project_without_code() {
         Ok(())
     })
     .unwrap();
-    let e = lockdown::plain::<()>(&store, Some(t["id"].as_str().unwrap()), "write").unwrap_err().0;
+    let e = lockdown::plain::<()>(&store, Some(t["id"].as_str().unwrap()), "write", None).unwrap_err().0;
     assert!(
         e.contains(concat!(
             "this Rust project has no code that `write` handles; use files, grep, read, write and run. ",
@@ -1325,7 +1334,9 @@ fn rust_reference_lists_the_names_and_what_is_missing() {
         "a .py or plain-file .rs file's outline",
         "`view <file>` are refused",
         "[graph]",
-        "Not available for Rust: `probe`, `merge`.",
+        "probe --in <module>",
+        "Gleam only",
+        "Not available for Rust: `merge`.",
     ] {
         assert!(REFERENCE.contains(part), "{part} missing:\n{REFERENCE}");
     }
@@ -1336,6 +1347,8 @@ fn rust_reference_lists_the_names_and_what_is_missing() {
         "submit --new <module>.tests::<test>",
         "board.rs::within",
         "board.rs::Store::view",
+        "Not available for Rust: `probe`",
+        "Rust probe is deferred",
     ] {
         assert!(!REFERENCE.contains(wrong), "{wrong} still in:\n{REFERENCE}");
     }
@@ -1516,4 +1529,597 @@ fn the_reference_and_worker_schema_show_the_submit_call_fields() {
     }
     let text = mcp::tool_schema()["inputSchema"]["properties"]["text"]["description"].as_str().unwrap().to_string();
     assert!(text.contains("`submit --project <folder>` then `test --project <folder>`"), "{text}");
+}
+
+#[test]
+fn dependency_modules_come_from_direct_manifest_entries_only() {
+    let root = Scratch::new().with(&[
+        (
+            "gleam.toml",
+            "name = \"app\"\nversion = \"1.0.0\"\n\n[dependencies]\ngleam_json = \"1.0\"\n\n[dev-dependencies]\ngleeunit = \"1.0\"\n",
+        ),
+        ("build/packages/gleam_json/src/gleam/json.gleam", ""),
+        ("build/packages/gleam_stdlib/src/gleam/list.gleam", ""),
+        ("build/packages/gleeunit/src/gleeunit.gleam", ""),
+    ]);
+    let modules = dependency_modules(&root);
+    assert_eq!(modules.iter().map(|m| (m.path.as_str(), m.test)).collect::<Vec<_>>(), vec![("gleam/json", false), ("gleeunit", true)]);
+}
+
+#[test]
+fn dependency_modules_are_imported_by_their_last_path_segment() {
+    let store = project(&[
+        (
+            "gleam.toml",
+            concat!(
+                "name = \"app\"\nversion = \"1.0.0\"\n\n[dependencies]\n",
+                "sqlight = { path = \"deps/sqlight\" }\n",
+                "gleam_json = { path = \"deps/gleam_json\" }\n",
+            ),
+        ),
+        ("deps/sqlight/gleam.toml", "name = \"sqlight\"\nversion = \"1.0.0\"\n"),
+        ("deps/sqlight/src/sqlight.gleam", "pub fn query() -> Int {\n  1\n}\n"),
+        ("deps/gleam_json/gleam.toml", "name = \"gleam_json\"\nversion = \"1.0.0\"\n"),
+        ("deps/gleam_json/src/gleam/json.gleam", "pub fn decode() -> Int {\n  2\n}\n"),
+        ("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n"),
+    ]);
+    let out = store.submit_symbols(None, Some("app"), "pub fn run_sql() -> Int { sqlight.query() }").unwrap();
+    assert!(out.contains("added `import sqlight` to app"), "{out}");
+    let out = store.submit_symbols(None, Some("app"), "pub fn run_json() -> Int { json.decode() }").unwrap();
+    assert!(out.contains("added `import gleam/json` to app"), "{out}");
+    let file = fs::read_to_string(store.root.join("src/app.gleam")).unwrap();
+    assert!(file.contains("import gleam/json") && file.contains("import sqlight"), "{file}");
+}
+
+#[test]
+fn a_dependency_module_is_not_guessed_when_two_match() {
+    let store = project(&[
+        (
+            "gleam.toml",
+            concat!(
+                "name = \"app\"\nversion = \"1.0.0\"\n\n[dependencies]\n",
+                "first = { path = \"deps/first\" }\n",
+                "second = { path = \"deps/second\" }\n",
+            ),
+        ),
+        ("deps/first/gleam.toml", "name = \"first\"\nversion = \"1.0.0\"\n"),
+        ("deps/first/src/first/json.gleam", "pub fn decode() -> Int {\n  1\n}\n"),
+        ("deps/second/gleam.toml", "name = \"second\"\nversion = \"1.0.0\"\n"),
+        ("deps/second/src/second/json.gleam", "pub fn decode() -> Int {\n  2\n}\n"),
+        ("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n"),
+    ]);
+    let err = store.submit_symbols(None, Some("app"), "pub fn run() -> Int { json.decode() }").unwrap_err().0;
+    assert!(err.contains("matches more than one module"), "{err}");
+    assert!(err.contains("import first/json") && err.contains("import second/json") && err.contains("submit --imports app"), "{err}");
+    let file = fs::read_to_string(store.root.join("src/app.gleam")).unwrap();
+    assert!(!file.contains("import first/json") && !file.contains("import second/json"), "{file}");
+}
+
+#[test]
+fn an_alias_already_used_in_the_project_is_reused() {
+    let store = project(&[
+        ("src/helper.gleam", "pub fn value() -> Int {\n  1\n}\n"),
+        ("src/caller.gleam", "import helper as values\n\npub fn call() -> Int {\n  values.value()\n}\n"),
+        ("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n"),
+    ]);
+    let out = store.submit_symbols(None, Some("app"), "pub fn call() -> Int { values.value() }").unwrap();
+    assert!(out.contains("added `import helper as values` to app"), "{out}");
+    let file = fs::read_to_string(store.root.join("src/app.gleam")).unwrap();
+    assert!(file.contains("import helper as values"), "{file}");
+}
+
+#[test]
+fn an_alias_with_two_targets_is_not_guessed() {
+    let store = project(&[
+        ("src/one.gleam", "pub fn value() -> Int {\n  1\n}\n"),
+        ("src/two.gleam", "pub fn value() -> Int {\n  2\n}\n"),
+        ("src/first.gleam", "import one as shared\n\npub fn a() -> Int {\n  shared.value()\n}\n"),
+        ("src/second.gleam", "import two as shared\n\npub fn b() -> Int {\n  shared.value()\n}\n"),
+        ("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n"),
+    ]);
+    let err = store.submit_symbols(None, Some("app"), "pub fn c() -> Int { shared.value() }").unwrap_err().0;
+    assert!(err.contains("matches more than one module"), "{err}");
+    assert!(err.contains("import one as shared") && err.contains("import two as shared") && err.contains("submit --imports app"), "{err}");
+}
+
+#[test]
+fn a_dev_dependency_is_imported_only_by_test_code() {
+    let store = project(&[
+        (
+            "gleam.toml",
+            concat!("name = \"app\"\nversion = \"1.0.0\"\n\n[dev-dependencies]\n", "dev_tool = { path = \"deps/dev_tool\" }\n",),
+        ),
+        ("deps/dev_tool/gleam.toml", "name = \"dev_tool\"\nversion = \"1.0.0\"\n"),
+        ("deps/dev_tool/src/dev_tool.gleam", "pub fn value() -> Int {\n  1\n}\n"),
+        ("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n"),
+        ("test/app_test.gleam", "pub fn existing_test() {\n  assert 1 == 1\n}\n"),
+    ]);
+    let err = store.submit_symbols(None, Some("app"), "pub fn run() -> Int { dev_tool.value() }").unwrap_err().0;
+    assert!(err.contains("only available to test code") && err.contains("dev_tool"), "{err}");
+    assert!(!fs::read_to_string(store.root.join("src/app.gleam")).unwrap().contains("import dev_tool"));
+    let out = store.submit_symbols(None, Some("app_test"), "pub fn dev_test() { assert dev_tool.value() == 1 }").unwrap();
+    assert!(out.contains("added `import dev_tool` to app_test"), "{out}");
+}
+
+#[test]
+fn an_unknown_module_names_the_imports_call() {
+    let store = project(&[
+        ("src/helper.gleam", "pub fn value() -> Int {\n  1\n}\n"),
+        ("src/app.gleam", "import helper\n\npub fn main() -> Int {\n  1\n}\n"),
+    ]);
+    let err = store.submit_symbols(None, Some("app"), "pub fn run() -> Int { sqlight.query() }").unwrap_err().0;
+    assert!(err.contains("Unknown module") && err.contains("submit --imports app"), "{err}");
+    assert!(err.contains("import sqlight") && err.contains("import helper"), "{err}");
+}
+
+#[test]
+fn a_dependency_module_does_not_shadow_the_stdlib() {
+    let store = project(&[
+        (
+            "gleam.toml",
+            concat!(
+                "name = \"app\"\nversion = \"1.0.0\"\n\n[dependencies]\n",
+                "other = { path = \"deps/other\" }\n",
+                "gleam_stdlib = { path = \"deps/gleam_stdlib\" }\n",
+            ),
+        ),
+        ("deps/other/gleam.toml", "name = \"other\"\nversion = \"1.0.0\"\n"),
+        ("deps/other/src/other/list.gleam", "pub fn length() -> Int {\n  1\n}\n"),
+        ("deps/gleam_stdlib/gleam.toml", "name = \"gleam_stdlib\"\nversion = \"1.0.0\"\n"),
+        ("deps/gleam_stdlib/src/gleam/list.gleam", "pub fn length() -> Int {\n  2\n}\n"),
+        ("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n"),
+    ]);
+    let out = store.submit_symbols(None, Some("app"), "pub fn run() -> Int { list.length() }").unwrap();
+    assert!(out.contains("added `import gleam/list` to app"), "{out}");
+}
+
+#[test]
+fn a_project_test_module_is_imported_only_by_test_code() {
+    let store =
+        project(&[("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n"), ("test/support.gleam", "pub fn helper() -> Int {\n  1\n}\n")]);
+    let err = store.submit_symbols(None, Some("app"), "pub fn run() -> Int { support.helper() }").unwrap_err().0;
+    assert!(err.contains("only available to test code") && err.contains("support"), "{err}");
+    let out = store.submit_symbols(None, Some("app_test"), "pub fn support_test() { assert support.helper() == 1 }").unwrap();
+    assert!(out.contains("added `import support` to app_test"), "{out}");
+}
+
+#[test]
+fn an_unknown_module_value_gets_no_import_hint() {
+    let store = project(&[
+        ("src/helper.gleam", "pub fn value() -> Int {\n  1\n}\n"),
+        ("src/app.gleam", "import helper\n\npub fn main() -> Int {\n  1\n}\n"),
+    ]);
+    let err = store.submit_symbols(None, Some("app"), "pub fn run() -> Int { helper.missing() }").unwrap_err().0;
+    assert!(err.contains("Unknown module value") && !err.contains("submit --imports"), "{err}");
+}
+
+#[test]
+fn an_unknown_type_in_an_imported_module_gets_no_import_hint() {
+    let store = project(&[
+        ("src/helper.gleam", "pub fn value() -> Int {\n  1\n}\n"),
+        ("src/app.gleam", "import helper\n\npub fn main() -> Int {\n  1\n}\n"),
+    ]);
+    let err = store.submit_symbols(None, Some("app"), "pub fn f() -> helper.Foo { todo }").unwrap_err().0;
+    assert!(err.contains("Unknown module type") && !err.contains("submit --imports"), "{err}");
+}
+
+#[test]
+fn an_alias_to_an_unlisted_dependency_is_not_reused() {
+    let store = project(&[
+        ("build/packages/indirect/src/indirect.gleam", "pub fn value() -> Int {\n  1\n}\n"),
+        ("src/caller.gleam", "import indirect as x\n\npub fn call() -> Int {\n  x.value()\n}\n"),
+        ("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n"),
+    ]);
+    let ix = store.index().unwrap();
+    let deps = store.dependency_modules();
+    assert!(matches!(import_match(&ix, &deps, "x", false), ImportMatch::None));
+}
+
+#[test]
+fn dependency_modules_are_read_once_until_the_manifest_changes() {
+    let store = project(&[
+        ("gleam.toml", concat!("name = \"app\"\nversion = \"1.0.0\"\n\n[dependencies]\n", "first = { path = \"deps/first\" }\n",)),
+        ("deps/first/gleam.toml", "name = \"first\"\nversion = \"1.0.0\"\n"),
+        ("deps/first/src/first.gleam", "pub fn value() -> Int {\n  1\n}\n"),
+        ("deps/second/gleam.toml", "name = \"second\"\nversion = \"1.0.0\"\n"),
+        ("deps/second/src/second.gleam", "pub fn value() -> Int {\n  2\n}\n"),
+        ("src/app.gleam", "pub fn main() -> Int {\n  1\n}\n"),
+    ]);
+    let first = store.dependency_modules();
+    let again = store.dependency_modules();
+    assert!(std::rc::Rc::ptr_eq(&first, &again), "the unchanged manifest reuses the scan");
+    assert_eq!(first.iter().map(|d| d.path.as_str()).collect::<Vec<_>>(), vec!["first"]);
+    fs::write(store.root.join("deps/first/src/extra.gleam"), "pub fn extra() -> Int {\n  3\n}\n").unwrap();
+    let with_extra = store.dependency_modules();
+    assert!(!std::rc::Rc::ptr_eq(&first, &with_extra), "a changed path dependency's src skips the cache");
+    assert!(with_extra.iter().any(|d| d.path == "extra"), "{with_extra:?}");
+    fs::create_dir(store.root.join("deps/first/src/sub")).unwrap();
+    let with_sub = store.dependency_modules();
+    assert!(std::rc::Rc::ptr_eq(&with_extra, &with_sub), "an empty nested folder changes nothing");
+    fs::write(store.root.join("deps/first/src/sub/extra.gleam"), "pub fn extra() -> Int {\n  4\n}\n").unwrap();
+    let with_nested = store.dependency_modules();
+    assert!(!std::rc::Rc::ptr_eq(&with_sub, &with_nested), "a module added under an existing nested folder skips the cache");
+    assert!(with_nested.iter().any(|d| d.path == "sub/extra"), "{with_nested:?}");
+    fs::write(
+        store.root.join("gleam.toml"),
+        concat!(
+            "name = \"app\"\nversion = \"1.0.0\"\n\n[dependencies]\n",
+            "first = { path = \"deps/first\" }\n",
+            "second = { path = \"deps/second\" }\n",
+        ),
+    )
+    .unwrap();
+    let modified = std::time::SystemTime::now() + std::time::Duration::from_secs(1);
+    fs::File::options().write(true).open(store.root.join("gleam.toml")).unwrap().set_modified(modified).unwrap();
+    let changed = store.dependency_modules();
+    assert!(!std::rc::Rc::ptr_eq(&first, &changed), "a changed manifest skips the cache");
+    assert!(changed.iter().any(|d| d.path == "second"), "{changed:?}");
+}
+
+#[test]
+fn only_gleams_unknown_module_error_names_a_qualifier() {
+    assert_eq!(unknown_module("Unknown module type\n\nThe module `helper` does not have a `Foo` type."), None);
+    assert_eq!(unknown_module("Unknown module value\n\nThe module `helper` does not have a `x` value."), None);
+    assert_eq!(unknown_module("Unknown module\n\nThe module `helper` does not exist."), Some("helper"));
+    assert_eq!(unknown_module("No module has been found with the name `sqlight`."), Some("sqlight"));
+}
+
+#[test]
+fn a_rust_project_can_drop_a_draft() {
+    let (root, s) = testing::rust_project("pub fn helper() -> i32 {\n    1\n}\n");
+    s.db.execute(
+        "INSERT INTO drafts(id,owner,args,text,base) VALUES ('d1',?,?,?,?)",
+        params!["cli", json!(["submit"]).to_string(), "text", ""],
+    )
+    .unwrap();
+    let out = crate::with_root(&root, || {
+        crate::run_options(&["drafts".to_string(), "drop".to_string(), "d1".to_string()], &mut || Ok(String::new()), None, 10_000, &[])
+    })
+    .unwrap();
+    assert!(out.contains("Dropped draft d1"), "{out}");
+}
+
+/// A Rust probe runs in a scratch copy: it sees the crate, shows its output,
+/// and leaves the project and the test records alone.
+#[test]
+fn probe_runs_rust_code_and_leaves_nothing() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let lib = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n";
+    let (root, store) = testing::rust_project(lib);
+    let out = store.probe("println!(\"{}\", crate::add(2, 3));", None, &[], None).unwrap();
+    assert!(out.contains('5'), "{out}");
+    assert!(probe_seconds(&out).is_some(), "{out}");
+    assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+    assert!(root.join("target/solace-probe/target/debug").is_dir(), "cargo builds outside the crate copy");
+    let runs: i64 = store.db.query_row("SELECT COUNT(*) FROM test_runs", [], |r| r.get(0)).unwrap();
+    let base: i64 = store.db.query_row("SELECT COUNT(*) FROM test_base", [], |r| r.get(0)).unwrap();
+    assert_eq!((runs, base), (0, 0));
+    let err = store.probe("crate::missing();", None, &[], None).unwrap_err().0;
+    assert!(err.contains("at probe, line 1"), "{err}");
+    assert!(probe_seconds(&err).is_some(), "{err}");
+    assert!(err.contains("The probe's text:\n1 | crate::missing();"), "{err}");
+    assert!(!err.contains("mod solace_probe") && !err.contains("src/lib.rs:"), "{err}");
+    let dbg = store.probe("dbg!(1);", None, &[], None).unwrap();
+    assert!(dbg.contains("[probe, line 1] 1 = 1"), "{dbg}");
+    assert!(probe_seconds(&dbg).is_some(), "{dbg}");
+    assert!(!dbg.contains("src/lib.rs:"), "{dbg}");
+    let panic = store.probe("panic!(\"boom\");", None, &[], None).unwrap_err().0;
+    assert!(panic.contains("panicked at probe, line 1:"), "{panic}");
+    assert!(probe_seconds(&panic).is_some(), "{panic}");
+    assert!(!panic.contains("src/lib.rs:"), "{panic}");
+    assert!(!panic.contains("failures:") && !panic.contains("    solace_probe::probe\n"), "{panic}");
+    assert!(!panic.contains("error: test failed") && !panic.contains("RUST_BACKTRACE"), "{panic}");
+    let note = store.probe("crate::add(2);", None, &[], None).unwrap_err().0;
+    assert!(note.contains("at crate.add, line 1"), "{note}");
+    assert!(probe_seconds(&note).is_some(), "{note}");
+    let mismatch = store.probe("let x: i32 = \"not a number\";", None, &[], None).unwrap_err().0;
+    assert!(mismatch.contains("1 | let x: i32 = \"not a number\";"), "{mismatch}");
+    assert!(!mismatch.contains("|         let x"), "{mismatch}");
+    assert!(!mismatch.contains("|         ^"), "{mismatch}");
+    assert!(probe_seconds(&mismatch).is_some(), "{mismatch}");
+    let unclosed = store.probe("let x = (;", None, &[], None).unwrap_err().0;
+    assert!(probe_seconds(&unclosed).is_some(), "{unclosed}");
+    assert!(!unclosed.contains("imports") && !unclosed.contains("src/lib.rs:"), "{unclosed}");
+    assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+    let copy = root.join("target/solace-probe/crate");
+    assert_eq!(fs::read_to_string(copy.join("src/lib.rs")).unwrap(), lib);
+    assert!(copy.is_dir(), "the crate copy is reused");
+}
+
+/// `--in` places the probe inside a module, so it calls that module's private
+/// items; a root probe that hits one names the flag.
+#[test]
+fn a_rust_probe_in_a_module_reaches_its_private_items() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let parser = "fn helper() -> i32 {\n    7\n}\n\npub fn two() -> i32 {\n    helper() + 1\n}\n";
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", testing::CARGO),
+        ("src/lib.rs", "mod parser;\n\npub fn one() -> i32 {\n    1\n}\n"),
+        ("src/parser.rs", parser),
+    ]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let err = store.probe("println!(\"{}\", parser::helper());", None, &[], None).unwrap_err().0;
+    assert!(err.contains("E0603") && err.contains("--in parser"), "{err}");
+    let out = store.probe("println!(\"{}\", helper());", None, &[], Some("parser")).unwrap();
+    assert!(out.contains('7'), "{out}");
+    assert_eq!(fs::read_to_string(root.join("src/parser.rs")).unwrap(), parser);
+}
+
+/// Rust has no `--from` or `--trace`: each says so, as Gleam only.
+#[test]
+fn a_rust_probe_refuses_from_and_trace() {
+    let (_root, store) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let e = store.probe("one()", Some("crate.one"), &[], None).unwrap_err().0;
+    assert!(e.starts_with("E1006") && e.contains("--from") && e.contains("Gleam only"), "{e}");
+    let e = store.probe("one()", None, &["crate.one"], None).unwrap_err().0;
+    assert!(e.starts_with("E1006") && e.contains("--trace") && e.contains("Gleam only"), "{e}");
+}
+
+/// The command route reaches the Rust probe instead of the plain-files refusal.
+#[test]
+fn a_rust_project_runs_a_probe_without_saving_it() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (root, _store) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let out =
+        with_root(&root, || run_inner(&["probe".to_string()], &mut || Ok("println!(\"{}\", crate::one());".to_string()), None, 10_000))
+            .unwrap();
+    assert!(out.contains("exit code: 0") && out.contains('1'), "{out}");
+    assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap(), "pub fn one() -> i32 {\n    1\n}\n");
+}
+
+/// A `[lib] path` is a target setting, not a path dependency: the probe runs.
+#[test]
+fn a_rust_probe_accepts_a_lib_path_setting() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", &format!("{}[lib]\npath = \"src/lib.rs\"\n", testing::CARGO)),
+        ("src/lib.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.probe("println!(\"{}\", crate::one());", None, &[], None).unwrap();
+    assert!(out.contains('1'), "{out}");
+}
+
+/// A scratch copy can't follow a path dependency, so the probe refuses it.
+#[test]
+fn a_rust_probe_refuses_a_path_dependency() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nx = { path = \"../x\" }\n"),
+        ("src/lib.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    import_with(&root, false).unwrap();
+    let store = Store::at(&root).unwrap();
+    let err = store.probe("println!(\"{}\", crate::one());", None, &[], None).unwrap_err().0;
+    assert!(err.contains("path dependency (`x`)"), "{err}");
+}
+
+/// Two probes share one crate copy, so the second reuses its binary and lock.
+#[test]
+fn a_second_rust_probe_reuses_the_crates_build_files() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (root, store) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
+    let artifacts = || {
+        fs::read_dir(root.join("target/solace-probe/target/debug/deps"))
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.starts_with("app-") && !name.ends_with(".d"))
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let lock = root.join("target/solace-probe/crate/Cargo.lock");
+    let first_reply = store.probe("println!(\"{}\", crate::one());", None, &[], None).unwrap();
+    let first = artifacts();
+    let first_lock = fs::read(&lock).unwrap();
+    let second_reply = store.probe("println!(\"{}\", crate::one() + 1);", None, &[], None).unwrap();
+    assert_eq!(artifacts(), first);
+    assert_eq!(fs::read(&lock).unwrap(), first_lock);
+    assert!(probe_seconds(&first_reply).is_some(), "{first_reply}");
+    assert!(probe_seconds(&second_reply).is_some(), "{second_reply}");
+}
+
+/// A crate inside a workspace above it probes without joining that workspace.
+#[test]
+fn a_rust_probe_runs_in_a_workspace_member() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", "[workspace]\nmembers = [\"app\"]\n"),
+        ("app/Cargo.toml", testing::CARGO),
+        ("app/src/lib.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    let app = root.join("app");
+    import(&app).unwrap();
+    let store = Store::at(&app).unwrap();
+    let out = store.probe("println!(\"{}\", crate::one());", None, &[], None).unwrap();
+    assert!(out.contains('1'), "{out}");
+}
+
+/// A member that inherits a package key gets E1006, not a raw cargo error.
+#[test]
+fn a_rust_probe_in_a_member_that_inherits_a_key_says_e1006() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", "[workspace]\nmembers = [\"app\"]\n[workspace.package]\nversion = \"0.1.0\"\n"),
+        ("app/Cargo.toml", "[package]\nname = \"app\"\nversion.workspace = true\nedition = \"2021\"\n"),
+        ("app/src/lib.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    let app = root.join("app");
+    import(&app).unwrap();
+    let store = Store::at(&app).unwrap();
+    let e = store.probe("println!(\"{}\", crate::one());", None, &[], None).unwrap_err().0;
+    assert!(e.starts_with("E1006") && e.contains("version"), "{e}");
+    assert!(!app.join("target/solace-probe/crate").exists());
+}
+
+/// A second probe keeps the workspace lock cargo trimmed in the copy.
+#[test]
+fn a_workspace_members_existing_lock_is_not_copied_again() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", "[workspace]\nmembers = [\"app\", \"other\"]\nresolver = \"2\"\n"),
+        (
+            "Cargo.lock",
+            concat!(
+                "# This file is automatically @generated by Cargo.\n",
+                "# It is not intended for manual editing.\n",
+                "version = 3\n\n",
+                "[[package]]\nname = \"app\"\nversion = \"0.1.0\"\n\n",
+                "[[package]]\nname = \"other\"\nversion = \"0.1.0\"\n",
+            ),
+        ),
+        ("app/Cargo.toml", testing::CARGO),
+        ("app/src/lib.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+        ("other/Cargo.toml", "[package]\nname = \"other\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        ("other/src/lib.rs", "pub fn two() -> i32 {\n    2\n}\n"),
+    ]);
+    let app = root.join("app");
+    import(&app).unwrap();
+    let store = Store::at(&app).unwrap();
+    let lock = app.join("target/solace-probe/crate/Cargo.lock");
+    store.probe("println!(\"{}\", crate::one());", None, &[], None).unwrap();
+    assert!(!fs::read_to_string(&lock).unwrap().contains("name = \"other\""));
+    let source = fs::metadata(root.join("Cargo.lock")).unwrap().modified().unwrap();
+    let newer = source + std::time::Duration::from_secs(1);
+    std::fs::OpenOptions::new().write(true).open(&lock).unwrap().set_modified(newer).unwrap();
+    let bytes = fs::read(&lock).unwrap();
+    let modified = fs::metadata(&lock).unwrap().modified().unwrap();
+    store.probe("println!(\"{}\", crate::one() + 1);", None, &[], None).unwrap();
+    assert_eq!(fs::read(&lock).unwrap(), bytes);
+    assert_eq!(fs::metadata(&lock).unwrap().modified().unwrap(), modified);
+}
+
+/// A build script and `include_bytes!` see files outside the crate's files, and
+/// the probe leaves the crate's own build artifacts alone.
+#[test]
+fn probe_reads_files_beside_the_crate_and_in_nested_projects() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let lib = concat!(
+        "pub fn icon() -> &'static [u8] {\n",
+        "    include_bytes!(\"assets/icon.bin\")\n",
+        "}\n\n",
+        "pub fn app() -> &'static str {\n",
+        "    include_str!(concat!(env!(\"OUT_DIR\"), \"/app.txt\"))\n",
+        "}\n\n",
+        "#[cfg(test)]\n",
+        "mod tests {\n",
+        "    #[test]\n",
+        "    fn app_is_current() {\n",
+        "        assert_eq!(crate::app(), \"second\\n\");\n",
+        "    }\n",
+        "}\n",
+    );
+    let (root, store) = testing::rust_project(lib);
+    std::fs::create_dir_all(root.join("frontend/.solace")).unwrap();
+    std::fs::write(root.join("frontend/.solace/store.db"), "nested").unwrap();
+    std::fs::create_dir_all(root.join("frontend/priv")).unwrap();
+    std::fs::write(root.join("frontend/priv/app.js"), "first\n").unwrap();
+    std::fs::create_dir_all(root.join("src/assets")).unwrap();
+    std::fs::write(root.join("src/assets/icon.bin"), [0, 1, 2, 3]).unwrap();
+    let build = concat!(
+        "fn main() {\n",
+        "    let app = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\"))\n",
+        "        .join(\"frontend/priv/app.js\");\n",
+        "    let text = std::fs::read_to_string(&app).unwrap();\n",
+        "    let out = std::path::Path::new(&std::env::var(\"OUT_DIR\").unwrap()).join(\"app.txt\");\n",
+        "    std::fs::write(out, text).unwrap();\n",
+        "    println!(\"cargo:rerun-if-changed={}\", app.display());\n",
+        "}\n",
+    );
+    std::fs::write(root.join("build.rs"), build).unwrap();
+    let out = store.probe("dbg!(crate::app(), crate::icon().len());", None, &[], None).unwrap();
+    assert!(out.contains("first") && out.contains("crate::icon().len() = 4"), "{out}");
+    assert!(root.join("target/solace-probe/target/debug").is_dir(), "the probe keeps its own profile");
+    assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+    assert_eq!(std::fs::read_to_string(root.join("frontend/priv/app.js")).unwrap(), "first\n");
+    assert_eq!(std::fs::read_to_string(root.join("frontend/.solace/store.db")).unwrap(), "nested");
+    let runs: i64 = store.db.query_row("SELECT COUNT(*) FROM test_runs", [], |r| r.get(0)).unwrap();
+    let base: i64 = store.db.query_row("SELECT COUNT(*) FROM test_base", [], |r| r.get(0)).unwrap();
+    assert_eq!((runs, base), (0, 0));
+    std::fs::write(root.join("frontend/priv/app.js"), "second\n").unwrap();
+    let cargo = std::process::Command::new("cargo")
+        .args(["test", "--offline", "--target-dir"])
+        .arg(root.join("target"))
+        .arg("--")
+        .arg("app_is_current")
+        .current_dir(&*root)
+        .output()
+        .unwrap();
+    assert!(cargo.status.success(), "{}\n{}", String::from_utf8_lossy(&cargo.stdout), String::from_utf8_lossy(&cargo.stderr));
+}
+
+/// A real inline `solace_probe` clashes with the module the probe adds.
+#[test]
+fn a_rust_probe_refuses_an_inline_solace_probe() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (_root, store) = testing::rust_project("mod solace_probe {\n    pub fn marker() {}\n}\n");
+    let e = store.probe("1 + 1", None, &[], None).unwrap_err().0;
+    assert!(e.starts_with("E0101 a project module is named solace_probe"), "{e}");
+}
+
+/// A file-backed `solace_probe` is a real module in the index and is refused.
+#[test]
+fn a_rust_probe_refuses_a_file_backed_solace_probe() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", testing::CARGO),
+        ("src/lib.rs", "mod solace_probe;\n\npub fn one() -> i32 {\n    1\n}\n"),
+        ("src/solace_probe.rs", "pub fn marker() -> i32 {\n    2\n}\n"),
+    ]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let e = store.probe("1 + 1", None, &[], None).unwrap_err().0;
+    assert!(e.starts_with("E0101 a project module is named solace_probe"), "{e}");
+}
+
+/// `mod solace_probe` in a string or comment is text, not a module.
+#[test]
+fn a_rust_probe_runs_beside_a_solace_probe_mention_in_text() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let parser = concat!(
+        "// mod solace_probe in a comment is not a module.\n",
+        "/// A doc comment may say mod solace_probe.\n",
+        "pub fn note() -> &'static str {\n",
+        "    \"mod solace_probe\"\n",
+        "}\n",
+    );
+    let root = testing::Scratch::new().with(&[("Cargo.toml", testing::CARGO), ("src/lib.rs", "mod parser;\n"), ("src/parser.rs", parser)]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.probe("1 + 1", None, &[], Some("parser")).unwrap();
+    assert!(out.contains("1 + 1 = 2"), "{out}");
+    assert_eq!(fs::read_to_string(root.join("src/parser.rs")).unwrap(), parser);
+}
+
+/// A probe reply's elapsed time in seconds, from its last line.
+fn probe_seconds(reply: &str) -> Option<f64> {
+    let (_, time) = reply.trim_end().rsplit_once('(')?;
+    time.strip_suffix("s)")?.parse().ok()
 }

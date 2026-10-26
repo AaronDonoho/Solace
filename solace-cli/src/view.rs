@@ -673,21 +673,8 @@ fn copy_dir(from: &Path, to: &Path) -> Result<(), Failure> {
 /// A copy of the project as it is now, for running review tests away from the real one.
 fn scratch(s: &Store, dir: &Path) -> Result<(), Failure> {
     s.materialize_to(&version(s, Version::Current)?, dir, &HashMap::new())?;
-    for name in ["gleam.toml", "manifest.toml"] {
-        if s.root.join(name).exists() {
-            fs::copy(s.root.join(name), dir.join(name))?;
-        }
-    }
     // Tests may read data and fixtures, text or binary.
-    for (name, tier) in lockdown::tree_files(&s.root, &lockdown::settings(&s.root)?)? {
-        if tier == "watched" || tier == "unwatched (binary)" {
-            let dest = dir.join(&name);
-            if let Some(parent) = dest.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(s.root.join(&name), dest)?;
-        }
-    }
+    copy_files(s, dir, |_, tier| tier == "watched" || tier == "unwatched (binary)", &["gleam.toml", "manifest.toml"])?;
     copy_dir(&s.root.join("build/packages"), &dir.join("build/packages"))?;
     copy_dir(&s.root.join("build/dev"), &dir.join("build/dev"))?;
     Ok(())
@@ -1261,4 +1248,102 @@ pub fn main_test() {
         assert_eq!(review.as_object().unwrap().len(), 1);
         assert!(board::api(&root, "GET", "/graph/review", json!({})).is_err());
     }
+
+    #[test]
+    fn a_copy_keeps_the_source_time() {
+        let dir = Scratch::new().with(&[("from", "one\n")]);
+        let (from, to) = (dir.join("from"), dir.join("to"));
+        copy_if_changed(&from, &to).unwrap();
+        assert_eq!(fs::read_to_string(&to).unwrap(), "one\n");
+        assert_eq!(fs::metadata(&to).unwrap().modified().unwrap(), fs::metadata(&from).unwrap().modified().unwrap());
+    }
+
+    #[test]
+    fn a_copy_with_the_same_contents_takes_the_source_time() {
+        let dir = Scratch::new().with(&[("from", "one\n")]);
+        let (from, to) = (dir.join("from"), dir.join("to"));
+        copy_if_changed(&from, &to).unwrap();
+        let source = fs::metadata(&from).unwrap().modified().unwrap();
+        let older = source - std::time::Duration::from_secs(3600);
+        let file = fs::OpenOptions::new().write(true).open(&to).unwrap();
+        file.set_modified(older).unwrap();
+        copy_if_changed(&from, &to).unwrap();
+        assert_eq!(fs::read_to_string(&to).unwrap(), "one\n");
+        assert_eq!(fs::metadata(&to).unwrap().modified().unwrap(), source);
+    }
+}
+
+/// Copies the project's files a test run needs into `dir`: those `wanted`
+/// names and tiers, then each existing name in `extra`.
+pub(crate) fn copy_files(s: &Store, dir: &Path, wanted: impl Fn(&str, &str) -> bool, extra: &[&str]) -> Result<Vec<String>, Failure> {
+    let mut names: Vec<String> = lockdown::tree_files(&s.root, &lockdown::settings(&s.root)?)?
+        .into_iter()
+        .filter(|(name, tier)| wanted(name, tier))
+        .map(|(name, _)| name)
+        .collect();
+    names.extend(extra.iter().map(|name| name.to_string()));
+    names.sort();
+    names.dedup();
+    let mut copied = vec![];
+    for name in names {
+        let from = s.root.join(&name);
+        if !from.is_file() {
+            continue;
+        }
+        let to = dir.join(&name);
+        copy_if_changed(&from, &to)?;
+        copied.push(name);
+    }
+    Ok(copied)
+}
+
+pub(crate) fn same_contents(a: &Path, b: &Path) -> bool {
+    let (Ok(ma), Ok(mb)) = (fs::metadata(a), fs::metadata(b)) else { return false };
+    if ma.len() != mb.len() {
+        return false;
+    }
+    let (Ok(mut a), Ok(mut b)) = (fs::File::open(a), fs::File::open(b)) else { return false };
+    let (mut one, mut two) = ([0u8; 8192], [0u8; 8192]);
+    loop {
+        let n = match std::io::Read::read(&mut a, &mut one) {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        let m = match std::io::Read::read(&mut b, &mut two) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        if n != m || one[..n] != two[..m] {
+            return false;
+        }
+        if n == 0 {
+            return true;
+        }
+    }
+}
+
+pub(crate) fn copy_if_changed(from: &Path, to: &Path) -> Result<(), Failure> {
+    if let (Ok(a), Ok(b)) = (fs::metadata(from), fs::metadata(to))
+        && a.len() == b.len()
+        && let (Ok(am), Ok(bm)) = (a.modified(), b.modified())
+        && am == bm
+    {
+        return Ok(());
+    }
+    if same_contents(from, to) {
+        copy_modified_time(from, to);
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(from, to)?;
+    copy_modified_time(from, to);
+    Ok(())
+}
+
+fn copy_modified_time(from: &Path, to: &Path) {
+    let Ok(modified) = fs::metadata(from).and_then(|meta| meta.modified()) else { return };
+    let Ok(file) = fs::OpenOptions::new().write(true).open(to) else { return };
+    let _ = file.set_modified(modified);
 }

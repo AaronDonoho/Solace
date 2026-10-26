@@ -1748,3 +1748,176 @@ pub fn the_server_decides_which_tasks_the_board_shows_test() {
     )
   shown(model, "Queued") |> should.be_true
 }
+
+/// D-196: one task the board can't read must not hide its lane. A task
+/// planned when its feature started still shows, and the unreadable one is
+/// named in a notice, even on a new connection's snapshot.
+pub fn unreadable_task_does_not_hide_its_lane_test() {
+  let planned =
+    "{\"id\":\"3517183e01f63016\",\"title\":\"Planned\",\"body\":\"\",\"column\":\"planning\",\"rank\":1,\"scope\":[\"a\"],\"feature\":\"f1\",\"onBoard\":true}"
+  let broken =
+    "{\"id\":\"broken\",\"title\":\"Broken\",\"body\":\"\",\"column\":\"planning\",\"rank\":2,\"runs\":[{\"id\":\"r\",\"kind\":\"work\",\"state\":\"running\"}],\"onBoard\":true}"
+  let #(model, _) =
+    board.update(
+      board.Model(..deps_board(), caught_up: False),
+      board.Live(
+        "{\"project\":\"a\",\"tasks\":[" <> planned <> "," <> broken <> "]}",
+      ),
+    )
+  let #(model, _) = board.update(model, board.CaughtUp)
+  let assert [a, _] = model.lanes
+  list.map(a.tasks, fn(t) { t.title }) |> should.equal(["Planned"])
+  card_of(model, "Planned") |> string.contains("Planned") |> should.be_true
+  model.notices
+  |> should.equal([
+    solace_task.Notice(
+      "a: Can't read task Broken",
+      "The board can't read this task's record, so its card is hidden.",
+      "a",
+      "broken",
+      "details",
+    ),
+  ])
+}
+
+/// A live update the board can't read names the task in a notice and leaves
+/// its lane's other cards as they were.
+pub fn unreadable_task_event_is_told_test() {
+  let model =
+    deps_board()
+    |> put_task(
+      "a",
+      "1",
+      "Kept",
+      "planning",
+      ",\"scope\":[\"a\"],\"onBoard\":true",
+    )
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live(
+        "{\"project\":\"a\",\"task\":{\"id\":\"bad\",\"title\":\"Broken\",\"body\":\"\",\"column\":\"planning\",\"rank\":2,\"runs\":[{\"id\":\"r\",\"kind\":\"work\",\"state\":\"running\"}]}}",
+      ),
+    )
+  let assert [a, _] = model.lanes
+  list.map(a.tasks, fn(t) { t.title }) |> should.equal(["Kept"])
+  card_of(model, "Kept") |> string.contains("Kept") |> should.be_true
+  model.notices
+  |> should.equal([
+    solace_task.Notice(
+      "a: Can't read task Broken",
+      "The board can't read this task's record, so its card is hidden.",
+      "a",
+      "bad",
+      "details",
+    ),
+  ])
+}
+
+/// A task whose record has no readable id is still named in a notice, which
+/// has no Show button to open an empty task.
+pub fn unreadable_task_without_an_id_has_no_show_button_test() {
+  let model =
+    board.Model(..deps_board(), notices: [
+      solace_task.Notice(
+        "Can't read a task",
+        "The board can't read this task's record, so its card is hidden.",
+        "a",
+        "",
+        "details",
+      ),
+    ])
+  let rendered = board.view(model) |> element.to_string
+  rendered |> string.contains("read a task") |> should.be_true
+  rendered |> string.contains("Show task") |> should.be_false
+}
+
+/// A live update the board can't read leaves the card it already shows, and
+/// its notice says that card is an older version.
+pub fn unreadable_update_keeps_the_card_it_already_shows_test() {
+  let model =
+    deps_board()
+    |> put_task(
+      "a",
+      "1",
+      "Kept",
+      "planning",
+      ",\"scope\":[\"a\"],\"onBoard\":true",
+    )
+  let #(model, _) =
+    board.update(
+      model,
+      board.Live(
+        "{\"project\":\"a\",\"task\":{\"id\":\"1\",\"title\":\"Kept\",\"body\":\"\",\"column\":\"planning\",\"rank\":2,\"runs\":[{\"id\":\"r\",\"kind\":\"work\",\"state\":\"running\"}]}}",
+      ),
+    )
+  let assert [a, _] = model.lanes
+  list.map(a.tasks, fn(t) { t.title }) |> should.equal(["Kept"])
+  card_of(model, "Kept") |> string.contains("Kept") |> should.be_true
+  model.notices
+  |> should.equal([
+    solace_task.Notice(
+      "a: Can't read task Kept",
+      "The board can't read this task's record, so its card shows an older version.",
+      "a",
+      "1",
+      "details",
+    ),
+  ])
+}
+
+/// A details notice about a task doesn't hide an unreadable notice about it.
+pub fn another_details_notice_does_not_hide_an_unreadable_task_test() {
+  let other =
+    solace_task.Notice(
+      "Repairing Broken",
+      "The task moved.",
+      "a",
+      "broken",
+      "details",
+    )
+  let broken =
+    "{\"id\":\"broken\",\"title\":\"Broken\",\"body\":\"\",\"column\":\"planning\",\"rank\":2,\"runs\":[{\"id\":\"r\",\"kind\":\"work\",\"state\":\"running\"}],\"onBoard\":true}"
+  let #(model, _) =
+    board.update(
+      board.Model(..deps_board(), notices: [other]),
+      board.Live("{\"project\":\"a\",\"tasks\":[" <> broken <> "]}"),
+    )
+  let assert [a, _] = model.lanes
+  list.map(a.tasks, fn(t) { t.title }) |> should.equal([])
+  model.notices
+  |> should.equal([
+    other,
+    solace_task.Notice(
+      "a: Can't read task Broken",
+      "The board can't read this task's record, so its card is hidden.",
+      "a",
+      "broken",
+      "details",
+    ),
+  ])
+}
+
+/// A task that stays unreadable under a new title keeps one notice.
+pub fn a_renamed_unreadable_task_keeps_one_notice_test() {
+  let first =
+    board.Live(
+      "{\"project\":\"a\",\"task\":{\"id\":\"1\",\"title\":\"First\",\"body\":\"\",\"column\":\"planning\",\"rank\":2,\"runs\":[{\"id\":\"r\",\"kind\":\"work\",\"state\":\"running\"}]}}",
+    )
+  let second =
+    board.Live(
+      "{\"project\":\"a\",\"task\":{\"id\":\"1\",\"title\":\"Second\",\"body\":\"\",\"column\":\"planning\",\"rank\":2,\"runs\":[{\"id\":\"r\",\"kind\":\"work\",\"state\":\"running\"}]}}",
+    )
+  let #(model, _) = board.update(deps_board(), first)
+  let #(model, _) = board.update(model, second)
+  list.filter(model.notices, fn(n) { n.dir == "a" && n.id == "1" })
+  |> should.equal([
+    solace_task.Notice(
+      "a: Can't read task First",
+      "The board can't read this task's record, so its card is hidden.",
+      "a",
+      "1",
+      "details",
+    ),
+  ])
+}

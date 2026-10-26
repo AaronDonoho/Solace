@@ -298,7 +298,7 @@ class Board(unittest.TestCase):
             # Every review is asked for tech debt.
             self.assertIn('Put minor, non-blocking findings', prompt)
             # D-138: the prompt names the task's feature.
-            self.assertEqual('\nFeature (the feature this task is part of; its latest direction):\n- Search\n' in prompt, feature)
+            self.assertEqual('\nFeature (the feature this task is part of; its state and body, then its latest direction):\n- Search\n- state: proposed\n' in prompt, feature)
             self.action(t, 'approve'); return self.action(t, 'complete')
         debts = lambda: [t for t in self.api('GET', '/tasks') if t.get('techDebt')]
         # A review's tech debt waits for completion, then makes the feature's Tech Debt task once.
@@ -332,7 +332,7 @@ class Board(unittest.TestCase):
         self.action(t, 'plan'); t = self.action(t, 'assign', model='fake', text='keep it without a shell')
         t = self.wait(t, lambda x: x['column']=='needs_review')
         prompt = (self.root/'.solace'/(t['runs'][-1]['id']+'.prompt')).read_text()
-        self.assertIn('\nFeature (the feature this task is part of; its latest direction):\n- Search\n- assignment: keep it without a shell\n', prompt)
+        self.assertIn('\nFeature (the feature this task is part of; its state and body, then its latest direction):\n- Search\n- state: proposed\n\n- assignment: keep it without a shell\n', prompt)
 
     def test_review_delta_add_remove_revert_and_context(self):
         t = self.completed([

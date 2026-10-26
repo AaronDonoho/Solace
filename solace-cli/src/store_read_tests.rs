@@ -551,3 +551,12 @@ fn without_generics_leaves_a_trait_impl_whole() {
     assert_eq!(without_generics("Refs<'a>::new"), "Refs::new");
     assert_eq!(without_generics("<Failure as From<u8>>::from"), "<Failure as From<u8>>::from");
 }
+
+#[test]
+fn a_module_prefix_names_view() {
+    let (_root, store) = sample();
+    let ix = store.index().unwrap();
+    let e = store.resolve(&ix, "module:crate").unwrap_err().0;
+    assert!(e.contains("E1001 unknown name: module:crate"), "{e}");
+    assert!(e.contains("`module:` names a module, not a symbol: use `view crate`"), "{e}");
+}

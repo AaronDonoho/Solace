@@ -3722,6 +3722,28 @@ mod tests {
         let id = &said[prefix.len()..said.len() - " (Planning)".len()];
         assert_eq!(board::task(&root, id).unwrap()["column"], "waiting");
     }
+
+    /// D-134, D-196: a task a proposal creates in Backlog under an upcoming
+    /// feature is listed in Planning with `onBoard` true once the feature starts.
+    #[test]
+    fn a_started_feature_lists_its_planned_task_on_the_board() {
+        let root = root();
+        let rid = page_run(&root);
+        let f = strategy_api(&root, "POST", &["features"], json!({"title": "Search", "state": "upcoming"})).unwrap();
+        let fid = f["id"].as_str().unwrap();
+        let qid = propose(&root, &rid, "task", None, &json!({"title": "Planned", "feature": fid}).to_string());
+        let said = answer(&root, &rid, &qid, "Approve").0;
+        let id = said.rsplit(':').next().unwrap();
+        assert_eq!(column_of(&root, id), "backlog");
+        let listed = |root: &Path| board::read_task_api(root, &["tasks"]).unwrap();
+        let task =
+            |root: &Path, id: &str| listed(root).as_array().unwrap().iter().find(|t| t["id"] == id).cloned().expect("the task is listed");
+        assert_eq!(task(&root, id)["onBoard"], json!(false), "a Backlog task is off the board");
+        strategy_api(&root, "PATCH", &["features", fid], json!({"state": "active"})).unwrap();
+        let t = task(&root, id);
+        assert_eq!((t["column"].as_str(), t["home"].as_str()), (Some("planning"), Some(".")));
+        assert_eq!(t["onBoard"], json!(true));
+    }
 }
 
 /// Writes task `t`, returning what to log and the features that follow it.

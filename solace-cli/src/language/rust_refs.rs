@@ -502,7 +502,12 @@ impl<'a> Refs<'a> {
                 r.macros.entry(leaf(&s.name)).or_default().push(i);
             }
             if s.kind_text == "mod" {
-                r.inline_modules.insert(inline_path(&s.module, &s.name), i);
+                let path = inline_path(&s.module, &s.name);
+                let file_path = if s.module == "crate" { s.name.as_str() } else { path.as_str() };
+                // A `mod x;` declaration names a file module; only `mod x { … }` is inline.
+                if !r.module_paths.contains(file_path) {
+                    r.inline_modules.insert(path, i);
+                }
             }
             r.names.entry(s.module.as_str()).or_default().entry(s.name.as_str()).or_default().push(i);
             if !s.name.contains("::") {

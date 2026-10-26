@@ -624,9 +624,13 @@ pub fn view(model: Model) -> Element(Msg) {
         list.map(model.notices, fn(n) {
           h.div([a.class("notice"), a.role("alert")], [
             h.strong([], [h.text(n.heading)]),
-            h.button([a.class("show"), e.on_click(Open(n))], [
-              h.text(solace_task.ui_label("show_task")),
-            ]),
+            case n.id {
+              "" -> h.text("")
+              _ ->
+                h.button([a.class("show"), e.on_click(Open(n))], [
+                  h.text(solace_task.ui_label("show_task")),
+                ])
+            },
             h.button(
               [
                 a.class("close"),
@@ -1371,72 +1375,14 @@ fn task_event(model: Model, text: String, notify: Bool) -> Model {
   let dir = event_dir(model, text)
   case lane_of(model, dir) {
     Error(_) -> model
-    Ok(lane) ->
-      case json.parse(text, decode.at(["task"], solace_task.task_decoder())) {
-        Ok(task) -> {
-          let new = case
-            list.find(lane.tasks, fn(t) { t.id == task.id }),
-            notify
-          {
-            Ok(old), True ->
-              solace_task.notices(old, task)
-              |> list.map(fn(n) {
-                let n = solace_task.Notice(..n, dir: dir)
-                case model.workspace {
-                  True ->
-                    solace_task.Notice(
-                      ..n,
-                      heading: lane.label <> ": " <> n.heading,
-                    )
-                  False -> n
-                }
-              })
-            _, _ -> []
-          }
-          map_lane(
-            Model(..model, notices: list.append(model.notices, new)),
-            dir,
-            fn(l) {
-              Lane(..l, tasks: [
-                task,
-                ..list.filter(l.tasks, fn(t) { t.id != task.id })
-              ])
-            },
-          )
-        }
-        Error(_) ->
-          case
-            json.parse(
-              text,
-              decode.at(["workflow"], solace_task.workflow_decoder()),
-            )
-          {
-            Ok(w) -> map_lane(model, dir, fn(l) { Lane(..l, workflow: w) })
-            Error(_) ->
-              // A new connection starts from the project's tasks as they are.
-              case
-                json.parse(
-                  text,
-                  decode.at(["tasks"], decode.list(solace_task.task_decoder())),
-                )
-              {
-                Ok(tasks) ->
-                  map_lane(model, dir, fn(l) { Lane(..l, tasks: tasks) })
-                Error(_) ->
-                  case json.parse(text, decode.at(["removed"], decode.string)) {
-                    Ok(id) ->
-                      map_lane(model, dir, fn(l) {
-                        Lane(
-                          ..l,
-                          tasks: list.filter(l.tasks, fn(t) { t.id != id }),
-                        )
-                      })
-                      |> follow_move(dir, id)
-                    Error(_) -> model
-                  }
-              }
-          }
-      }
+    Ok(_) ->
+      apply_first(model, dir, text, notify, [
+        task_update,
+        workflow_update,
+        tasks_update,
+        unreadable_update,
+        removed_update,
+      ])
   }
 }
 
@@ -1786,5 +1732,248 @@ fn card_title(title: String) -> String {
   case string.length(title) > 200 {
     True -> string.slice(title, 0, 200) <> "…"
     False -> title
+  }
+}
+
+/// A project's tasks from a new connection's snapshot, read one at a time:
+/// each task the board can read, and the id and title of each it can't, so a
+/// record it can't read hides only that task.
+fn task_list(
+  text: String,
+) -> Result(#(List(solace_task.Task), List(#(String, String))), Nil) {
+  use raw <- result.try(
+    json.parse(text, decode.at(["tasks"], decode.dynamic))
+    |> result.replace_error(Nil),
+  )
+  use items <- result.try(
+    decode.run(raw, decode.list(decode.dynamic))
+    |> result.replace_error(Nil),
+  )
+  let #(tasks, unreadable) =
+    list.fold(items, #([], []), fn(state, item) {
+      case decode.run(item, solace_task.task_decoder()) {
+        Ok(task) -> #([task, ..state.0], state.1)
+        Error(_) -> #(state.0, [task_label(item), ..state.1])
+      }
+    })
+  Ok(#(list.reverse(tasks), list.reverse(unreadable)))
+}
+
+/// The id and title a task the board can't read still names, for its notice.
+fn task_label(task: dynamic.Dynamic) -> #(String, String) {
+  let label = {
+    use id <- decode.optional_field("id", "", decode.string)
+    use title <- decode.optional_field("title", "", decode.string)
+    decode.success(#(id, title))
+  }
+  decode.run(task, label) |> result.unwrap(#("", ""))
+}
+
+/// A task from a live event the board can't read, as its notice names it.
+fn unreadable_task(text: String) -> Result(#(String, String), Nil) {
+  json.parse(text, decode.at(["task"], decode.dynamic))
+  |> result.replace_error(Nil)
+  |> result.map(task_label)
+}
+
+/// The notices for tasks a message named but the board can't read: one per
+/// task, so none is lost without the human being told.
+fn unreadable_tasks(
+  model: Model,
+  dir: String,
+  labels: List(#(String, String)),
+) -> Model {
+  list.fold(labels, model, fn(model, label) {
+    let #(id, title) = label
+    let heading = unreadable_heading(model, dir, title, id)
+    case
+      list.any(model.notices, fn(n) { is_unreadable_notice(model, dir, id, n) })
+    {
+      True -> model
+      False ->
+        Model(
+          ..model,
+          notices: list.append(model.notices, [
+            solace_task.Notice(
+              heading,
+              unreadable_text(model, dir, id),
+              dir,
+              id,
+              "details",
+            ),
+          ]),
+        )
+    }
+  })
+}
+
+fn unreadable_heading(
+  model: Model,
+  dir: String,
+  title: String,
+  id: String,
+) -> String {
+  let named = case title, id {
+    "", "" -> "a task"
+    "", _ -> "task " <> id
+    _, _ -> "task " <> title
+  }
+  unreadable_prefix(model, dir) <> named
+}
+
+/// Applies the first update that reads `text`, since one message has one shape.
+fn apply_first(
+  model: Model,
+  dir: String,
+  text: String,
+  notify: Bool,
+  updates: List(fn(Model, String, String, Bool) -> Result(Model, Nil)),
+) -> Model {
+  case updates {
+    [] -> model
+    [update, ..rest] ->
+      case update(model, dir, text, notify) {
+        Ok(model) -> model
+        Error(_) -> apply_first(model, dir, text, notify, rest)
+      }
+  }
+}
+
+fn task_update(
+  model: Model,
+  dir: String,
+  text: String,
+  notify: Bool,
+) -> Result(Model, Nil) {
+  use task <- result.try(
+    json.parse(text, decode.at(["task"], solace_task.task_decoder()))
+    |> result.replace_error(Nil),
+  )
+  let new = case lane_of(model, dir), notify {
+    Ok(lane), True -> task_notices(model, lane, task)
+    _, _ -> []
+  }
+  Ok(
+    map_lane(
+      Model(..model, notices: list.append(model.notices, new)),
+      dir,
+      fn(l) {
+        Lane(..l, tasks: [
+          task,
+          ..list.filter(l.tasks, fn(t) { t.id != task.id })
+        ])
+      },
+    ),
+  )
+}
+
+/// The notices a task's live update raises, named by its lane in a workspace.
+fn task_notices(
+  model: Model,
+  lane: Lane,
+  task: solace_task.Task,
+) -> List(solace_task.Notice) {
+  case list.find(lane.tasks, fn(t) { t.id == task.id }) {
+    Error(_) -> []
+    Ok(old) ->
+      solace_task.notices(old, task)
+      |> list.map(fn(n) {
+        let n = solace_task.Notice(..n, dir: lane.dir)
+        case model.workspace {
+          True ->
+            solace_task.Notice(..n, heading: lane.label <> ": " <> n.heading)
+          False -> n
+        }
+      })
+  }
+}
+
+fn workflow_update(
+  model: Model,
+  dir: String,
+  text: String,
+  _notify: Bool,
+) -> Result(Model, Nil) {
+  use workflow <- result.try(
+    json.parse(text, decode.at(["workflow"], solace_task.workflow_decoder()))
+    |> result.replace_error(Nil),
+  )
+  Ok(map_lane(model, dir, fn(l) { Lane(..l, workflow: workflow) }))
+}
+
+fn tasks_update(
+  model: Model,
+  dir: String,
+  text: String,
+  _notify: Bool,
+) -> Result(Model, Nil) {
+  use pair <- result.try(task_list(text))
+  let #(tasks, unreadable) = pair
+  let model = map_lane(model, dir, fn(l) { Lane(..l, tasks: tasks) })
+  Ok(unreadable_tasks(model, dir, unreadable))
+}
+
+fn unreadable_update(
+  model: Model,
+  dir: String,
+  text: String,
+  _notify: Bool,
+) -> Result(Model, Nil) {
+  use label <- result.try(unreadable_task(text))
+  Ok(unreadable_tasks(model, dir, [label]))
+}
+
+fn removed_update(
+  model: Model,
+  dir: String,
+  text: String,
+  _notify: Bool,
+) -> Result(Model, Nil) {
+  use id <- result.try(
+    json.parse(text, decode.at(["removed"], decode.string))
+    |> result.replace_error(Nil),
+  )
+  Ok(
+    map_lane(model, dir, fn(l) {
+      Lane(..l, tasks: list.filter(l.tasks, fn(t) { t.id != id }))
+    })
+    |> follow_move(dir, id),
+  )
+}
+
+/// What an unreadable task's notice says its card shows: an older version
+/// when its lane still holds the card, hidden when it does not.
+fn unreadable_text(model: Model, dir: String, id: String) -> String {
+  let shown = case lane_of(model, dir) {
+    Ok(lane) -> list.any(lane.tasks, fn(t) { t.id == id })
+    Error(_) -> False
+  }
+  case shown {
+    True ->
+      "The board can't read this task's record, so its card shows an older version."
+    False -> "The board can't read this task's record, so its card is hidden."
+  }
+}
+
+/// Whether `notice` is the unreadable notice for task `id` in `dir`, so a
+/// title change doesn't add a second one.
+fn is_unreadable_notice(
+  model: Model,
+  dir: String,
+  id: String,
+  notice: solace_task.Notice,
+) -> Bool {
+  notice.dir == dir
+  && notice.id == id
+  && notice.tab == "details"
+  && string.starts_with(notice.heading, unreadable_prefix(model, dir))
+}
+
+/// The heading start shared by every unreadable notice for `dir`: its lane's
+/// name in a workspace, then the kind.
+fn unreadable_prefix(model: Model, dir: String) -> String {
+  case model.workspace, list.find(model.lanes, fn(l) { l.dir == dir }) {
+    True, Ok(lane) -> lane.label <> ": Can't read "
+    _, _ -> "Can't read "
   }
 }
