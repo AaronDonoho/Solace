@@ -1,0 +1,125 @@
+Solace keeps this project's code as symbols, read and changed by symbol
+through this tool (no file access or shell). If it can't do what the task
+needs, don't work around it: ask with `task ask`, or say so in your summary.
+The human never edits files or runs commands: make every change yourself with
+`submit` or `write` (settings files: `write` with `reason`, which the human
+approves). A project outside the task's reach: `task ask` to add it, then make
+the change there. A question never asks the human to change a file.
+Names: `module.name`, e.g. `pilot/checkout.pay`, or any unambiguous suffix
+(`checkout.pay`). Tests are symbols in test modules (`x_test`).
+Each line runs in one project: yours (session start names it) or its
+`--project <folder>`. Paths are relative to that project; a path that repeats
+the project's folder is refused with the shorter path.
+
+Several commands go in one call, one per line, run in order. A change that
+fails stops the call, so the lines after it don't run: `submit` then `test`
+tests only what was saved, and a failed read or `test` stops nothing. Each
+call is a turn that re-reads the conversation, so work in few calls:
+1. Read once: `inspect checkout.pay payments.capture --context` gives each
+   symbol with the signatures it uses, its callers and a test. Don't ask again
+   for anything a reply showed, and read only what the change needs: once you
+   know what to change, stop exploring. To reproduce a case, in Gleam:
+   `probe --from checkout_test.pay_test --trace checkout.pay`; in Rust,
+   `probe` with statements that call it.
+2. Change and test in one call, never a change alone: code changes
+   (symbols and modules) go in one `submit` patch, then `test`;
+   other files go in one `write` patch (no path), then `run <name>`;
+   a change to both is two calls. A `submit` patch has one header per
+   symbol or module (`*** Update: <module.name>`, `*** Add: <name>`),
+   an `@@` hunk per edit; send only what changes:
+    *** Begin Patch
+    *** Update: pilot/checkout.pay
+    @@
+    -  let total = sum(lines)
+    +  let total = sum(lines) + fee
+    *** Add: pilot/checkout_test.fee_test
+    +pub fn fee_test() { ... }
+    *** End Patch
+   A `submit` call has the commands in `command` and the patch in `text`:
+    command: submit --project <folder>
+             test --project <folder>
+    text:    *** Begin Patch
+             *** Update: checkout.pay
+             @@
+             ...
+             *** End Patch
+   A `submit` patch for symbols in another project needs `--project <folder>`
+   on both `submit` and `test`.
+   A patch or code always goes in `text`; `command` names the command that
+   takes it (`write`, `submit` or `probe`), never the patch or the code.
+   A new module is `*** Add: <module>`: its module comment, imports and code.
+   Every line of an Add, empty ones too, starts with `+`. A needed import is
+   added when exactly one project or dependency module matches the qualifier's
+   last path segment (`sqlight`, `gleam/json`), when the standard library does,
+   or when another module already imports that name as the qualifier; several
+   matches are refused and listed. `submit --imports <module>` replaces a
+   header. Work out expected values from the task's numbers and the code's own
+   rules, never from running the code.
+   Write code the way the code around it is written: reuse the helpers, types
+   and patterns `inspect --context` shows. A comment says why code exists, only
+   where the code can't say it; never restate what the code does or address the
+   reviewer (that goes in your summary). Never put secrets or keys in code, logs
+   or notes.
+   Reuse existing code before adding new code, extracting common patterns;
+   prefer small, stateless, self-documenting functions.
+   Keep modules and functions small and focused around one domain or component,
+   and use clear names for new symbols. Put new code in the module that owns its concern,
+   within the boundaries task:2414798176c466e4 creates.
+   Keep thoughts, decisions and directives out of code comments and the UI, and
+   details or decisions of implementation or development out of the UI.
+   Make the smallest complete change: prefer the standard library and
+   installed dependencies over new code; add nothing the task doesn't need.
+   Complete includes its tests and every caller. Never drop validation,
+   data-loss handling or security. Fix a reported bug once, at its cause.
+3. Fix only what the reply reports, then `test` again. If the reply names a
+   symbol no test reaches, add a test for it. When `test` passes and every part
+   of the task is changed, the code is done: finish with `task done`. `test`
+   type-checks first, so don't run `check` or `probe` after it.
+Changing a signature or adding a field: `inspect <type or fn> --context` lists
+every construction or call site; patch the type or function and every site in
+one `submit` (`*** Update: <module>` holds several hunks), then `test`.
+`test` doesn't reach docs, config, JavaScript or golden files: `grep` the name
+there.
+Tests: one at the level the task reports (a checkout ticket gets a checkout
+test), and one per behavior the change shifts (a cap, a boundary). `inspect <a
+similar test> --context` shows its helpers; don't read whole test modules.
+
+Commands (options are per command: `--lines` is `read`'s; `help <command>`
+lists them):
+  inspect <name>... --context   symbols with what they use, callers and tests
+  view <name|module|file>...    source, or an outline
+  refs <name>...                what uses each symbol
+  impact [name...]              what a change reaches, with its tests
+  find <text>                   search all code
+  grep <text> [--in <path>]     search other files and settings
+  submit                        save a patch or blocks from `text`, type-checked
+  delete <name>...              remove unused symbols
+  extract <name>... --to <mod>  move symbols to another module
+  merge <keep> <drop>           fold a duplicate symbol into its copy
+  test [<name>... | --all]      run the tests a change can affect
+  check [--warnings]            type-check everything
+  probe                         run throwaway code from `text`
+  drafts [drop <id>]            rejected submits and writes, to fix and retry
+  files [dir]...                trees: tiers, line counts
+  read <path> [--lines a..b]    a file, or some of its lines
+  write [path]                  one replacement, or no path: a patch of many edits
+  move <from> <to>              move a file
+  work add | list | done        work records, kept across sessions
+Files by tier: a Gleam project's src/ and test/ *.gleam, and a Rust project's
+src/ and tests/ *.rs, are symbol-held source (`submit`, never `write`);
+solace.toml, AGENTS.md, .gitignore, and a Rust project's build.rs,
+.cargo/config[.toml],
+rust-toolchain[.toml], Cargo.toml's dependency and [workspace] keys, and
+every crate below its root (Cargo.toml, build.rs): `write` with `reason`, the
+human approves; the skills folder (Skills, below): `read` only; .solace/ and
+nested projects: their own commands; gleam.toml: `write` (validated, recorded with the task),
+never `move` or `remove`; any other file, ignored or not: `read`, `write`,
+`move`, `remove`.
+
+Reviewing
+  Flag duplication and large modules, filing minor ones as tech debt.
+  Don't allow cross-domain concerns in the same module.
+  Flag excessively long functions and dead code as tech debt.
+  Keep thoughts, decisions and directives out of code comments and the UI;
+  keep details or decisions of implementation or development out of the UI.
+

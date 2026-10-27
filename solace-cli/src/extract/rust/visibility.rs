@@ -19,13 +19,16 @@ pub(super) fn promote_access(ix: &Index, moved: &[bool], target: &str, newtext: 
             continue;
         }
         let Ok(owner) = impl_owner_symbol(ix, at) else { continue };
-        if !visible_from(&ix.syms[owner].module, target) {
+        if !moved[owner] && !visible_from(&ix.syms[owner].module, target) {
             owners.entry(owner).or_default().push(method);
             if !is_public(&newtext[owner]) {
                 promote.insert(owner);
             }
         }
-        if ix.used_by[method].iter().any(|&u| !moved[u]) && can_promote(ix, &ids, method) && !is_public(&newtext[method]) {
+        if ix.used_by[method].iter().any(|&u| !moved[u] && !visible_from(target, &ix.syms[u].module))
+            && can_promote(ix, &ids, method)
+            && !is_public(&newtext[method])
+        {
             promote.insert(method);
         }
         for &used in &ix.uses[method] {
@@ -40,15 +43,21 @@ pub(super) fn promote_access(ix: &Index, moved: &[bool], target: &str, newtext: 
         }
     }
     for (owner, methods) in owners {
-        let texts: Vec<&str> = methods.iter().map(|&m| newtext[m].as_str()).collect();
-        newtext[owner] = promote_fields(&newtext[owner], &texts);
+        let owner_name = &ix.syms[owner].name;
+        let used: HashSet<String> = methods.iter().flat_map(|&m| method_fields(&newtext[m], owner_name)).collect();
+        newtext[owner] = promote_fields(&newtext[owner], &used);
+    }
+    for owner in 0..ix.syms.len() {
+        if !moved[owner] || ix.syms[owner].kind_text != "struct" {
+            continue;
+        }
+        newtext[owner] = promote_fields(&newtext[owner], &all_fields(&newtext[owner]));
+        promote.insert(owner);
     }
 }
 
-fn promote_fields(text: &str, methods: &[&str]) -> String {
+fn promote_fields(text: &str, used: &HashSet<String>) -> String {
     let Ok(item) = syn::parse_str::<syn::ItemStruct>(text) else { return text.to_string() };
-    let owner = item.ident.to_string();
-    let used: HashSet<String> = methods.iter().flat_map(|method| method_fields(method, &owner)).collect();
     let mut edits: Vec<(Range<usize>, String)> = vec![];
     for (index, field) in item.fields.iter().enumerate() {
         let name = field.ident.as_ref().map_or_else(|| index.to_string(), |name| name.to_string());
@@ -80,15 +89,21 @@ fn promote_fields(text: &str, methods: &[&str]) -> String {
     out
 }
 
-fn visible_from(from: &str, to: &str) -> bool {
+pub(super) fn visible_from(from: &str, to: &str) -> bool {
     from == to || from == "crate" || to.starts_with(&format!("{from}::"))
 }
 
 pub(super) fn method_fields(text: &str, owner: &str) -> HashSet<String> {
-    let Ok(method) = syn::parse_str::<syn::ImplItemFn>(text) else { return HashSet::new() };
-    let (receivers, collections) = owner_receivers(&method.sig, owner);
+    let (sig, block) = if let Ok(item) = syn::parse_str::<syn::ItemFn>(text) {
+        (item.sig, *item.block)
+    } else if let Ok(method) = syn::parse_str::<syn::ImplItemFn>(text) {
+        (method.sig, method.block)
+    } else {
+        return HashSet::new();
+    };
+    let (receivers, collections) = owner_receivers(&sig, owner);
     let mut visitor = FieldVisitor { owner, receivers, collections, added: vec![], used: HashSet::new() };
-    syn::visit::Visit::visit_block(&mut visitor, &method.block);
+    syn::visit::Visit::visit_block(&mut visitor, &block);
     visitor.used
 }
 
@@ -431,4 +446,13 @@ fn token_fields(tokens: &proc_macro2::TokenStream, receivers: &HashSet<String>, 
             _ => {}
         }
     }
+}
+
+fn all_fields(text: &str) -> HashSet<String> {
+    let Ok(item) = syn::parse_str::<syn::ItemStruct>(text) else { return HashSet::new() };
+    item.fields
+        .iter()
+        .enumerate()
+        .map(|(index, field)| field.ident.as_ref().map_or_else(|| index.to_string(), |name| name.to_string()))
+        .collect()
 }

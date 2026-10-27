@@ -102,9 +102,7 @@ pub(super) fn models_path() -> PathBuf {
 }
 
 fn saved_models(path: &Path) -> Value {
-    cached(&format!("models:{}", path.display()), || {
-        fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}))
-    })
+    cached(&format!("models:{}", path.display()), || jsonx::read_opt(path).filter(Value::is_object).unwrap_or_else(|| json!({})))
 }
 
 fn save_models(path: &Path, all: &Value) -> Result<(), Failure> {
@@ -761,13 +759,8 @@ pub(super) fn local(m: &Value, here: &Here) -> Option<String> {
         None => {}
     }
     let folder = (here.folder)(k);
-    let files: Vec<Value> = k
-        .files
-        .iter()
-        .map(|f| folder.join(f))
-        .filter(|p| p.exists())
-        .map(|p| fs::read(p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null))
-        .collect();
+    let files: Vec<Value> =
+        k.files.iter().map(|f| folder.join(f)).filter(|p| p.exists()).map(|p| jsonx::read_opt(&p).unwrap_or(Value::Null)).collect();
     if files.iter().any(|f| !(k.expired)(f, here.now)) || k.keychain.is_some_and(in_keychain) {
         return None;
     }
@@ -825,9 +818,7 @@ fn now_ms() -> u64 {
 }
 
 fn marks(path: &Path) -> Value {
-    cached(&format!("marks:{}", path.display()), || {
-        fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}))
-    })
+    cached(&format!("marks:{}", path.display()), || jsonx::read_opt(path).filter(Value::is_object).unwrap_or_else(|| json!({})))
 }
 
 pub(super) fn save_marks(path: &Path, marks: &Value) -> Result<(), Failure> {

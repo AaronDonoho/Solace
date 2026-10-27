@@ -1810,3 +1810,43 @@ fn a_patch_updates_the_function_beside_a_module() {
     assert!(out.contains("Saved crate.g"), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("    1\n", "    2\n"));
 }
+
+/// A format keeps rustfmt's one blank line after the header, not the old run (D-180).
+#[test]
+fn a_format_keeps_one_blank_line_after_the_header() {
+    if !cargo::installed() || !crate::language::cargo::rustfmt_installed() {
+        return;
+    }
+    let lib = "use std::fmt;\n\n\n\npub fn one() -> i32 {\n    1\n}\n";
+    let (root, store) = rust_project(lib);
+    let ids = |s: &Store| s.index().unwrap().syms.iter().map(|x| x.id.clone()).collect::<Vec<_>>();
+    let before = ids(&store);
+    let out = store.format_module_rust("crate").unwrap();
+    assert!(out.contains("Saved crate."), "{out}");
+    assert_eq!(text_of(&root, "src/lib.rs"), "use std::fmt;\n\npub fn one() -> i32 {\n    1\n}\n");
+    assert_eq!(ids(&store), before);
+}
+
+/// `submit --new a.tests` makes a test module beside `a`, declared with
+/// `#[cfg(test)]` and `#[path]` (D-206).
+#[test]
+fn new_creates_a_test_file_with_a_path_mod_line() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod a;\n"),
+        ("src/a.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out =
+        store.submit_symbols(None, Some("a.tests"), "use super::*;\n\n#[test]\nfn one_is_one() {\n    assert_eq!(one(), 1);\n}\n").unwrap();
+    assert!(out.contains("created module a::tests (src/a_tests.rs; added mod tests; to a)"), "{out}");
+    let tests = text_of(&root, "src/a_tests.rs");
+    assert!(tests.contains("use super::*;") && tests.contains("fn one_is_one"), "{tests}");
+    let module = text_of(&root, "src/a.rs");
+    assert!(module.starts_with("#[cfg(test)]\n#[path = \"a_tests.rs\"]\nmod tests;\n"), "{module}");
+    assert!(store.index().unwrap().modules.iter().any(|m| m.path == "a::tests" && m.file.as_deref() == Some("src/a_tests.rs")));
+}

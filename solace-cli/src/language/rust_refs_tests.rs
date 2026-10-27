@@ -6,11 +6,7 @@ use crate::{Index, Store, import};
 
 /// A one-crate package with `lib` as `src/lib.rs`, read into a store.
 fn index(lib: &str, extra: &[(&str, &str)]) -> (Scratch, Index) {
-    let mut files: Vec<(&str, &str)> = vec![("Cargo.toml", CARGO), ("src/lib.rs", lib)];
-    files.extend_from_slice(extra);
-    let root = Scratch::new().with(&files);
-    import(&root).unwrap();
-    let store = Store::at(&root).unwrap();
+    let (root, store) = store_of(lib, extra);
     let ix = store.index().unwrap();
     (root, ix)
 }
@@ -43,6 +39,7 @@ fn a_call_inside_a_macro_is_a_reference() {
     let a = index_of(&ix, "crate.add");
     assert!(ix.uses[s].contains(&a));
     assert!(ix.at[s].iter().any(|&(t, _)| t == a), "the reference has a line");
+    assert!(crate::reach::closure(&ix, s).contains(&a), "the test reaches the call inside the macro");
 }
 
 /// `use … as` and `{…}` groups bind the names they rename.
@@ -1057,4 +1054,118 @@ fn calls_in_a_file_module_and_through_its_parents_use_resolve() {
     assert!(uses(&ix, "outer.parent_calls", "outer.local"));
     assert!(uses(&ix, "outer.tests::test_calls", "outer::inner.helper"));
     assert!(uses(&ix, "outer::checks.test_calls", "outer::inner.helper"));
+}
+
+#[test]
+fn a_generic_binding_after_a_comma_is_not_a_mention() {
+    let names: Vec<String> = super::scanned("fn f() -> impl Pair<Item = u8, Into = u16> { todo!() }")
+        .into_iter()
+        .filter_map(|spanned| match spanned.mention {
+            super::Mention::Path(segs) => segs.first().cloned(),
+            _ => None,
+        })
+        .collect();
+    assert!(!names.contains(&"Item".to_string()) && !names.contains(&"Into".to_string()), "{names:?}");
+}
+
+fn store_of(lib: &str, extra: &[(&str, &str)]) -> (Scratch, Store) {
+    let mut files: Vec<(&str, &str)> = vec![("Cargo.toml", CARGO), ("src/lib.rs", lib)];
+    files.extend_from_slice(extra);
+    let root = Scratch::new().with(&files);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    (root, store)
+}
+
+fn possible(ix: &Index, from: &str, to: &str) -> bool {
+    ix.possible[index_of(ix, from)].iter().any(|&(t, _)| t == index_of(ix, to))
+}
+
+#[test]
+fn a_same_named_item_in_another_module_is_not_a_use() {
+    let (_root, store) = store_of(
+        "mod other;\nuse other::*;\n\npub fn batch() -> i32 {\n    1\n}\n\npub fn go() -> i32 {\n    batch()\n}\n",
+        &[("src/other.rs", "pub fn batch() -> i32 {\n    2\n}\n")],
+    );
+    let ix = store.index().unwrap();
+    assert!(uses(&ix, "crate.go", "crate.batch"));
+    assert!(!uses(&ix, "crate.go", "other.batch"));
+    assert!(!possible(&ix, "crate.go", "other.batch"));
+    let reach = crate::reach::closure(&ix, index_of(&ix, "crate.go"));
+    assert!(!reach.contains(&index_of(&ix, "other.batch")), "test reach does not follow the other module's item");
+    let out = store.refs("other.batch").unwrap();
+    assert!(out.starts_with("Nothing uses other.batch."), "{out}");
+}
+
+#[test]
+fn a_same_named_local_variable_is_not_a_use() {
+    let (_root, store) = store_of(
+        concat!(
+            "pub fn batch() -> i32 {\n    1\n}\n\n",
+            "pub fn go() -> i32 {\n    let batch = 2;\n    batch\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    #[test]\n    fn t() {\n        let batch = 3;\n        assert_eq!(batch, 3);\n    }\n}\n",
+        ),
+        &[],
+    );
+    let ix = store.index().unwrap();
+    let batch = index_of(&ix, "crate.batch");
+    assert!(!uses(&ix, "crate.go", "crate.batch"));
+    assert!(!uses(&ix, "crate.tests::t", "crate.batch"));
+    let t = index_of(&ix, "crate.tests::t");
+    assert!(!crate::reach::closure(&ix, t).contains(&batch), "test reach does not follow a local variable");
+    let out = store.refs("crate.batch").unwrap();
+    assert!(out.starts_with("Nothing uses crate.batch."), "{out}");
+}
+
+#[test]
+fn a_method_call_through_a_value_is_a_possible_use() {
+    let (_root, store) = store_of(
+        concat!(
+            "pub struct A;\n\nimpl A {\n    pub fn show(&self) -> i32 {\n        1\n    }\n}\n\n",
+            "pub fn go(a: &A) -> i32 {\n    a.show()\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    #[test]\n    fn calls_go() {\n        assert_eq!(go(&A), 1);\n    }\n}\n",
+        ),
+        &[],
+    );
+    let ix = store.index().unwrap();
+    let show = index_of(&ix, "crate.A::show");
+    assert!(possible(&ix, "crate.go", "crate.A::show"));
+    let t = index_of(&ix, "crate.tests::calls_go");
+    assert!(crate::reach::closure(&ix, t).contains(&show), "test reach follows a possible use");
+    let out = store.refs("crate.A::show").unwrap();
+    assert!(out.contains("== Possible uses (1):"), "{out}");
+    assert!(out.contains("-- crate.go\n"), "{out}");
+}
+
+#[test]
+fn a_same_named_parameter_is_not_a_use() {
+    let (_root, store) = store_of("pub fn batch() -> i32 {\n    1\n}\n\npub fn go(batch: i32) -> i32 {\n    batch\n}\n", &[]);
+    let ix = store.index().unwrap();
+    let batch = index_of(&ix, "crate.batch");
+    assert!(!uses(&ix, "crate.go", "crate.batch"));
+    assert!(!crate::reach::closure(&ix, index_of(&ix, "crate.go")).contains(&batch), "test reach does not follow a parameter");
+    let out = store.refs("crate.batch").unwrap();
+    assert!(out.starts_with("Nothing uses crate.batch."), "{out}");
+}
+
+#[test]
+fn an_ambiguous_bare_type_still_reaches_its_trait_impls() {
+    let (_root, ix) = index(
+        concat!(
+            "use std::fmt;\n\npub struct Batch {}\n\n",
+            "impl fmt::Display for Batch {\n    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {\n",
+            "        write!(f, \"batch\")\n    }\n}\n\n",
+            "#[allow(non_snake_case)]\npub fn Batch() -> i32 {\n    1\n}\n\n",
+            "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+            "    #[test]\n    fn mentions_batch() {\n        assert_eq!(Batch(), 1);\n",
+            "        let _ = format!(\"{}\", Batch {});\n    }\n}\n",
+        ),
+        &[],
+    );
+    let t = index_of(&ix, "crate.tests::mentions_batch");
+    let fmt = index_of(&ix, "crate.<Batch as fmt::Display>::fmt");
+    assert!(possible(&ix, "crate.tests::mentions_batch", "crate.<Batch as fmt::Display>::fmt"));
+    assert!(crate::reach::closure(&ix, t).contains(&fmt), "test reach keeps the trait impl of an ambiguous bare type");
 }

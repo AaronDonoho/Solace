@@ -36,7 +36,7 @@ fn roots(record: &Value) -> Vec<PathBuf> {
 fn put(record: &Value) -> Result<(), Failure> {
     for root in roots(record) {
         fs::create_dir_all(root.join(".solace/pending"))?;
-        write_atomic(&path(&root, run(record)), record.to_string())?;
+        fsx::write_atomic(&path(&root, run(record)), record.to_string())?;
     }
     Ok(())
 }
@@ -75,7 +75,7 @@ fn hashes(root: &Path) -> Value {
 
 /// A snapshot's file bytes as text.
 fn text(v: &Value) -> String {
-    v.as_array().map(|a| String::from_utf8_lossy(&json_bytes(a)).into_owned()).unwrap_or_default()
+    v.as_array().map(|a| String::from_utf8_lossy(&jsonx::bytes(a)).into_owned()).unwrap_or_default()
 }
 
 /// The dependency lines `after` has and `before` hasn't; a table header is
@@ -97,9 +97,9 @@ pub(crate) fn created(root: &Path) -> HashSet<String> {
         if !e.file_name().to_string_lossy().starts_with("extract-") {
             continue;
         }
-        let Some(r) = fs::read(e.path()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { continue };
+        let Some(r) = jsonx::read_opt(&e.path()) else { continue };
         for p in r["extract"]["projects"].as_array().into_iter().flatten() {
-            if !p["root"].as_str().is_some_and(|x| lockdown::same_project(Path::new(x), root)) {
+            if !p["root"].as_str().is_some_and(|x| crate::project_paths::same_project(Path::new(x), root)) {
                 continue;
             }
             for (k, _) in p["files_after"].as_object().into_iter().flatten() {
@@ -166,7 +166,7 @@ pub(crate) fn recover(held: &[PathBuf]) -> Result<(), Failure> {
                 continue;
             }
             // A record is written by rename, so one that can't be read is no record.
-            match fs::read(&p).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+            match jsonx::read_opt(&p) {
                 Some(r) if is_record(&r) => found.push(r),
                 _ => fs::remove_file(&p)?,
             }
@@ -176,7 +176,7 @@ pub(crate) fn recover(held: &[PathBuf]) -> Result<(), Failure> {
                 continue;
             }
             let mut _locks = vec![];
-            for p in roots(&r).iter().filter(|p| p.exists() && !held.iter().any(|h| lockdown::same_project(h, p))) {
+            for p in roots(&r).iter().filter(|p| p.exists() && !held.iter().any(|h| crate::project_paths::same_project(h, p))) {
                 match board::try_lock(p) {
                     Some(l) => _locks.push(l),
                     None => {
@@ -312,7 +312,7 @@ fn undo(s: &Store, p: &Value, tid: &str, rid: &str, keep: &[String]) -> Result<(
 fn roll_back(s: &Store, p: &Value, rid: &str, keep: &[String]) -> Result<(), Failure> {
     let mut states = vec![];
     for e in fs::read_dir(s.root.join(".solace/pending")).into_iter().flatten().flatten() {
-        let Some(v) = fs::read(e.path()).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else { continue };
+        let Some(v) = jsonx::read_opt(&e.path()) else { continue };
         let Some(name) = v["path"].as_str().filter(|_| v["run"] == rid && !is_record(&v)) else { continue };
         if name == "gleam.toml" {
             let file = s.root.join(name);

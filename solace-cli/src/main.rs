@@ -28,6 +28,7 @@ mod tasks;
 mod view;
 mod workspace;
 
+use crate::cli::{bare_command, command_words, verb_words};
 use language::{Import, Item, Kind, Language, Ref, cargo, gleam};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -46,6 +47,12 @@ mod reference;
 pub(crate) use reference::*;
 mod index;
 mod rust_probe;
+mod fsx;
+mod jsonx;
+mod project_paths;
+mod rust_move;
+mod rust_check;
+mod cli;
 /// The largest reply, in bytes (about 8k tokens). Agents cut longer tool
 /// output (Codex at about 10k tokens), so `inspect` and `view` trim by
 /// priority to fit rather than being cut mid-document (D-14). `solace mcp
@@ -74,7 +81,7 @@ const STDLIB: &[&str] = &[
 
 /// A command's failure: its message and exit code (1 diagnostics, 2 usage).
 #[derive(Debug)]
-struct Failure(String, i32);
+pub(crate) struct Failure(String, i32);
 type Out = Result<String, Failure>;
 
 fn fail<T>(msg: impl Into<String>) -> Result<T, Failure> {
@@ -241,7 +248,7 @@ fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str
     };
     let guard = if let Some((tid, rid)) = &context {
         // Away from home, the project the agent works in is locked too.
-        let away = (cross.is_none() && !lockdown::same_project(&root, &home)).then(|| root.clone());
+        let away = (cross.is_none() && !crate::project_paths::same_project(&root, &home)).then(|| root.clone());
         let also: Vec<&Path> = cross.iter().chain(&away).chain(&dest).chain(&deps).map(PathBuf::as_path).collect();
         board::agent_guard(&home, tid, rid, if a.is_empty() { &["help"] } else { &a }, &also)?
     } else {
@@ -623,7 +630,7 @@ fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize)
             skipped.push(command.to_string());
             continue;
         }
-        let words: Vec<String> = command.split_whitespace().map(String::from).collect();
+        let words = command_words(command);
         let verb = verb_words(&words);
         if let Some(why) = &waiting
             && verb.starts_with(&["task", "done"])
@@ -696,15 +703,6 @@ fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize)
     (out, !failed.is_empty())
 }
 
-/// A command's words without `--project <folder>`, which may stand anywhere on the line.
-fn verb_words(words: &[String]) -> Vec<&str> {
-    let mut w: Vec<&str> = words.iter().map(String::as_str).collect();
-    if let Some(i) = w.iter().position(|x| *x == "--project") {
-        w.drain(i..(i + 2).min(w.len()));
-    }
-    w
-}
-
 /// What a panic replies to the agent, whatever its payload carries: the message
 /// (`&str` or `String`), and the line it happened in, if it was inside one.
 fn panic_reply(p: &(dyn Any + Send), line: Option<&str>) -> String {
@@ -762,40 +760,6 @@ fn read_hint(streak: &mut usize, commands: &[&str], failed: bool) -> &'static st
     };
     *streak = if read { *streak + 1 } else { 0 };
     if *streak >= 2 { READ_HINT } else { "" }
-}
-
-/// A project folder as `--project` takes it.
-fn project_dir(dir: &str) -> &str {
-    match dir.trim_end_matches('/') {
-        "" => ".",
-        d => d.strip_prefix("./").unwrap_or(d),
-    }
-}
-
-/// The folder `--project` names: `../x` or `./x` from the current project
-/// `here` when that is one of `members`, else the folder from the root.
-fn project_folder(top: &Path, here: Option<&Path>, dir: &str, members: &[String]) -> String {
-    if let Some(here) = here
-        && (dir.starts_with("./") || dir.starts_with("../"))
-    {
-        let mut parts: Vec<String> = match scope::dir(top, here).as_str() {
-            "." => vec![],
-            d => d.split('/').map(String::from).collect(),
-        };
-        let mut inside = true;
-        for c in dir.split('/') {
-            match c {
-                "" | "." => {}
-                ".." => inside &= parts.pop().is_some(),
-                c => parts.push(c.to_string()),
-            }
-        }
-        let found = if parts.is_empty() { ".".to_string() } else { parts.join("/") };
-        if inside && members.contains(&found) {
-            return found;
-        }
-    }
-    project_dir(dir).to_string()
 }
 
 /// Options the reference gives each command: `--x` words in its syntax lines.
@@ -863,7 +827,7 @@ fn scoped(dir: &str, args: &[String]) -> Result<Option<PathBuf>, Failure> {
     }
     let own = scope::home(&here, &tid)?;
     let top = scope::top(&own);
-    let dir = &project_folder(&top, Some(&here), dir, &workspace::members(&top)?);
+    let dir = &crate::project_paths::project_folder(&top, Some(&here), dir, &workspace::members(&top)?);
     let projects = scope::of(&board::task(&own, &tid)?, &scope::dir(&top, &own));
     if !projects.iter().any(|p| p == dir) {
         return lockdown::error(
@@ -1123,7 +1087,7 @@ pub(crate) type Sym = index::Sym;
 
 pub(crate) type ModuleRow = index::ModuleRow;
 
-struct Store {
+pub(crate) struct Store {
     /// Shared with the command's other stores of the same project, so they
     /// run inside its outer transaction (D-77 point 7).
     db: Rc<Connection>,
@@ -1370,7 +1334,8 @@ fn insert_symbol(db: &Connection, module: &str, item: &Item, ord: Option<i64>) -
 impl Store {
     /// The store of the project at `root`, with every table this version uses.
     fn at(root: &Path) -> Result<Store, Failure> {
-        let shared = COMMAND_DB.with_borrow(|c| c.iter().find(|(r, _)| lockdown::same_project(r, root)).map(|(_, db)| db.clone()));
+        let shared =
+            COMMAND_DB.with_borrow(|c| c.iter().find(|(r, _)| crate::project_paths::same_project(r, root)).map(|(_, db)| db.clone()));
         if let Some(db) = shared {
             return Ok(Store::new(db, root, true, true));
         }
@@ -2339,18 +2304,17 @@ impl Store {
             return Ok(format!("Nothing uses {}.\n", ix.syms[i].qname()));
         }
         let mut out = format!("{} is used by {}:\n", ix.syms[i].qname(), users.len());
+        let (exact, possible) = index::users_split(&ix, i);
         if ix.syms[i].kind == Kind::Type {
-            let (tests, users): (Vec<usize>, Vec<usize>) = users.into_iter().partition(|&j| is_test(&ix, j));
+            let (tests, users): (Vec<usize>, Vec<usize>) = exact.into_iter().partition(|&j| is_test(&ix, j));
             out += &type_users(&ix, i, &users, &tests, usize::MAX);
+            out += &possible_users(&ix, i, &possible);
             return Ok(out);
         }
-        for u in users {
-            let q = ix.syms[u].qname();
-            out +=
-                &if shown_earlier(&q) { format!("-- {q} (above)\n") } else { format!("-- {q}\n{}\n", index::signature(&ix, &ix.syms[u])) };
-            out += &call_lines(&ix, u, i);
-            mark_shown(q);
+        for u in exact {
+            out += &ref_entry(&ix, u, i);
         }
+        out += &possible_users(&ix, i, &possible);
         Ok(out)
     }
 
@@ -4034,28 +3998,6 @@ fn name_key(name: &str, kind: Kind) -> (String, bool) {
     (name.to_string(), kind == Kind::Type)
 }
 
-/// Holds the lock on the file at `path`, created if missing; waits for it.
-fn lock_file(path: &Path) -> Result<fs::File, Failure> {
-    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
-    f.lock()?;
-    Ok(f)
-}
-
-/// The lock on the file at `path`, or `None` while another holds it.
-/// `flock` is interruptible: a signal ending a child process interrupts the
-/// attempt, which is not a holder, so it is tried again. Reading it as one
-/// makes `serving` report a server that isn't there.
-fn try_lock_file(path: &Path) -> Result<Option<fs::File>, Failure> {
-    let f = fs::OpenOptions::new().create(true).truncate(false).write(true).open(path)?;
-    loop {
-        match f.try_lock() {
-            Ok(()) => return Ok(Some(f)),
-            Err(fs::TryLockError::Error(e)) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return Ok(None),
-        }
-    }
-}
-
 /// Writes the serving port into a lock this server holds (D-80). A reader
 /// trusts it only while the lock is held.
 fn record_port(f: &fs::File, port: u16) {
@@ -4063,24 +4005,10 @@ fn record_port(f: &fs::File, port: u16) {
     let _ = std::io::Write::write_all(&mut &*f, format!("{{\"port\":{port},\"pid\":{}}}", std::process::id()).as_bytes());
 }
 
-/// Bytes stored in JSON as an array of numbers.
-fn json_bytes(a: &[Value]) -> Vec<u8> {
-    a.iter().map(|b| b.as_u64().unwrap_or(0) as u8).collect()
-}
-
 /// A search query without the quotes, backticks or apostrophes around it
 /// (`find "Customer(.."`: the quotes delimit the query, run 18).
 fn unquoted(query: &str) -> &str {
     ['"', '\'', '`'].iter().find_map(|&c| query.strip_prefix(c)?.strip_suffix(c)).filter(|q| !q.is_empty()).unwrap_or(query)
-}
-
-/// Writes a file whole or not at all: a reader never sees half of it.
-fn write_atomic(path: &Path, bytes: impl AsRef<[u8]>) -> Result<(), Failure> {
-    let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(".tmp");
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 /// `n` and the noun, plural unless `n` is 1: "1 file", "2 files".
@@ -4255,7 +4183,7 @@ fn read_project_in(a: &[&str], here: &Path, own: Option<&Path>, dir: &str, budge
         })?,
     };
     let members = workspace::members(&root)?;
-    let dir = &project_folder(&root, own, dir, &members);
+    let dir = &crate::project_paths::project_folder(&root, own, dir, &members);
     if !members.iter().any(|m| m == dir) {
         return lockdown::error(
             "E6007",
@@ -4360,10 +4288,6 @@ fn group_errors(errors: &[&Diag]) -> String {
     }
     parts.extend(plain.into_iter().map(String::from));
     parts.join("\n\n")
-}
-
-fn bare_command(command: &str) -> &str {
-    command.strip_prefix("solace").map_or(command, |c| c.trim_start())
 }
 
 /// Names a repeated command's copy (`check (copy 2)`), so its section can be
@@ -4673,3 +4597,25 @@ pub(crate) const PROBE_INDENT: &str = "        ";
 /// The Rust project's commands that run through cargo, and that a language's
 /// unavailable toolchain refuses with E6013.
 const CARGO_TOOLS: &[&str] = &["check", "test", "submit", "delete", "probe", "extract", "merge"];
+
+/// One user's entry under `refs`, printed once per reply.
+fn ref_entry(ix: &Index, user: usize, target: usize) -> String {
+    let q = ix.syms[user].qname();
+    let mut out =
+        if shown_earlier(&q) { format!("-- {q} (above)\n") } else { format!("-- {q}\n{}\n", index::signature(ix, &ix.syms[user])) };
+    out += &call_lines(ix, user, target);
+    mark_shown(q);
+    out
+}
+
+/// The `refs` section for uses only type inference could settle.
+fn possible_users(ix: &Index, target: usize, users: &[usize]) -> String {
+    if users.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n== Possible uses ({}): only type inference could settle these ==\n", users.len());
+    for &u in users {
+        out += &ref_entry(ix, u, target);
+    }
+    out
+}

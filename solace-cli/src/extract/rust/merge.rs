@@ -4,13 +4,16 @@ use std::ops::Range;
 
 use rusqlite::params;
 
+use super::glob_reach::{reach_map, reaches};
 use super::{
-    Container, add_use_after, all_use_sites, allows_unused, apply, called_names_where, container_key, container_text, drop_import,
-    full_path, helper_kind, is_public, is_reexport, move_tests, moved_tests_reply, post_move_check, remove_member, replace_range,
-    rewrite_move, set_container_text, splice, test_file, use_visibility,
+    Container, all_use_sites, allows_unused, apply, apply_import_edits, called_names_where, container_key, container_text, full_path,
+    helper_kind, is_public, is_reexport, move_tests, moved_tests_reply, rewrite_move, set_container_text, splice, use_line_removal,
+    use_visibility,
 };
+use crate::rust_check::post_move_check;
 use crate::language::rust_refs::{Site, Via};
 use crate::{Failure, Index, Out, Store, Sym, fail, language, lockdown, revision};
+#[path = "merge_tests.rs"]
 mod tests;
 
 pub(crate) fn merge(s: &Store, survivor: &str, retired: &str, budget: usize) -> Out {
@@ -37,7 +40,7 @@ pub(crate) fn merge(s: &Store, survivor: &str, retired: &str, budget: usize) -> 
     if !moved_ids.is_empty()
         && let Some(file) = ix.modules.iter().find(|m| m.path == keep.module).and_then(|m| m.file.as_deref())
     {
-        let test_file = s.root.join(test_file(&keep.module, file));
+        let test_file = s.root.join(language::rust::test_file(&keep.module, file));
         if !test_file.exists() {
             created.push(test_file);
         }
@@ -167,10 +170,12 @@ fn drop_merge_imports(
             containers.insert((Some(i), gone.module.clone()));
         }
     }
+    let sources: BTreeSet<String> = containers.iter().map(|(_, module)| module.clone()).collect();
+    let reach = reach_map(ix, &sources)?;
     let mut unused: HashMap<String, HashSet<String>> = HashMap::new();
     for key in containers {
         let module = key.1.clone();
-        let names = unused.entry(module.clone()).or_insert_with(|| merge_unused_imports(ix, &references, gone_i, &module));
+        let names = unused.entry(module.clone()).or_insert_with(|| merge_unused_imports(ix, &references, gone_i, &module, &reach));
         if names.is_empty() {
             continue;
         }
@@ -188,16 +193,20 @@ fn drop_merge_imports(
 }
 
 fn drop_imports_not_mentioned(module: &str, text: &str, used: &HashSet<String>) -> Result<String, Failure> {
-    let mut sites = language::rust_refs::import_sites_in(text).map_err(|e| Failure(format!("imports in {module} don't parse: {e}"), 1))?;
-    sites.sort_by(|a, b| b.range.start.cmp(&a.range.start));
-    let mut out = text.to_string();
+    let sites = language::rust_refs::import_sites_in(text).map_err(|e| Failure(format!("imports in {module} don't parse: {e}"), 1))?;
+    let mut line_removals: Vec<Range<usize>> = vec![];
+    let mut members: Vec<(Range<usize>, Option<Range<usize>>)> = vec![];
     for site in sites {
-        if site.glob || used.contains(&site.local) || is_reexport(&out, &site.range) || allows_unused(&out, &site.range) {
+        if site.glob || used.contains(&site.local) || is_reexport(text, &site.range) || allows_unused(text, &site.range) {
             continue;
         }
-        out = drop_import(&out, &site.range, site.alias.as_ref(), site.outside);
+        if site.outside == 0 {
+            line_removals.extend(use_line_removal(text, &site.range));
+        } else {
+            members.push((site.range, site.alias));
+        }
     }
-    Ok(out)
+    apply_import_edits(text, vec![], line_removals, members, vec![], module)
 }
 
 /// A function signature without its parameter names, so names that differ do not block a merge.
@@ -286,18 +295,25 @@ fn without_visibility(head: &str) -> &str {
 }
 
 /// The imports in `module` that only the retired item still mentions.
-fn merge_unused_imports(ix: &Index, references: &language::rust_refs::References<'_>, gone_i: usize, module: &str) -> HashSet<String> {
+fn merge_unused_imports(
+    ix: &Index,
+    references: &language::rust_refs::References<'_>,
+    gone_i: usize,
+    module: &str,
+    reach: &HashMap<String, HashSet<String>>,
+) -> HashSet<String> {
     let mut names = references.mentioned[gone_i].clone();
     names.retain(|name| {
         !(0..ix.syms.len()).any(|i| {
             i != gone_i
-                && ix.syms[i].module == module
+                && reaches(reach, module, &ix.syms[i].module)
                 && !matches!(ix.syms[i].kind_text.as_str(), "use" | "mod")
                 && references.mentioned[i].contains(name)
         })
     });
     if !names.is_empty() {
-        let methods = called_names_where(ix, language::rust_refs::CallKind::Method, |i| i != gone_i && ix.syms[i].module == module);
+        let methods =
+            called_names_where(ix, language::rust_refs::CallKind::Method, |i| i != gone_i && reaches(reach, module, &ix.syms[i].module));
         if let Ok(traits) = language::rust_refs::imported_traits(references, module) {
             for (trait_i, site) in traits {
                 if language::rust_refs::trait_has_method(references, trait_i, &methods) {
@@ -332,7 +348,7 @@ fn select_merge_tests(ix: &Index, gone_i: usize, keep_module: &str) -> Result<Me
     let mut moving = vec![false; n];
     moving[gone_i] = true;
     let mut helpers = vec![];
-    move_tests(ix, &mut moving, &mut helpers)?;
+    move_tests(ix, &mut moving, &mut helpers);
     moving[gone_i] = false;
     let target_tests = format!("{keep_module}::tests");
     for i in 0..n {
@@ -443,14 +459,19 @@ fn rewrite_merge_imports(
     for (key, mut group) in actions {
         let module = key.1.clone();
         let original = container_text(&key, &headers, &text);
-        let mut body = original.clone();
-        let item_ranges = language::rust::import_ranges(&original).unwrap_or_default();
-        let mut additions: std::collections::BTreeMap<usize, Vec<String>> = std::collections::BTreeMap::new();
+        let mut replacements: Vec<(Range<usize>, String)> = vec![];
+        let mut line_removals: Vec<Range<usize>> = vec![];
+        let mut members: Vec<(Range<usize>, Option<Range<usize>>)> = vec![];
+        let mut additions: Vec<(Range<usize>, String)> = vec![];
         group.sort_by_key(|(s, _)| std::cmp::Reverse(s.range.start));
         for (site, redirect) in group {
             let path = full_path(&keep.module, &keep.name);
             if !redirect {
-                body = drop_import(&body, &site.range, site.alias.as_ref(), site.outside);
+                if site.outside == 0 {
+                    line_removals.extend(use_line_removal(&original, &site.range));
+                } else {
+                    members.push((site.range.clone(), site.alias.clone()));
+                }
                 continue;
             }
             if is_reexport(&original, &site.range) {
@@ -458,15 +479,13 @@ fn rewrite_merge_imports(
                 modules.insert(module.clone());
             }
             if site.outside == 0 {
-                body = replace_range(&body, site.range.clone(), &path);
+                replacements.push((site.range.clone(), path));
             } else {
-                let item =
-                    item_ranges.iter().position(|(_, tree)| tree.start <= site.range.start && site.range.end <= tree.end).unwrap_or(0);
-                body = remove_member(&body, &site.range, site.alias.as_ref());
+                members.push((site.range.clone(), site.alias.clone()));
                 let vis = use_visibility(&original, &site.range);
                 let alias = site.alias.as_ref().map(|r| original[r.clone()].to_string()).unwrap_or_default();
                 let line = if alias.is_empty() { format!("{vis}use {path};") } else { format!("{vis}use {path} {alias};") };
-                additions.entry(item).or_default().push(line);
+                additions.push((site.range.clone(), line));
             }
             if let Via::Import(local) = &site.via {
                 if site.alias.is_some() {
@@ -476,13 +495,7 @@ fn rewrite_merge_imports(
                 }
             }
         }
-        for (item, lines) in additions {
-            for line in lines {
-                let Ok(ranges) = language::rust::import_ranges(&body) else { break };
-                let Some((range, _)) = ranges.get(item) else { break };
-                body = add_use_after(&body, range, line.as_str());
-            }
-        }
+        let body = apply_import_edits(&original, replacements, line_removals, members, additions, &module)?;
         set_container_text(&key, &mut *headers, &mut *text, body);
     }
     Ok(MergeImports { rewritten, alias_kept, path_only, hits, modules })

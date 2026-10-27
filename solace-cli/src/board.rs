@@ -6,11 +6,11 @@ mod prerequisites;
 pub fn lock(root: &Path) -> Result<fs::File, Failure> {
     fs::create_dir_all(root.join(".solace"))?;
     // one project lock; use per-change store isolation if parallel work is introduced.
-    lock_file(&root.join(".solace/lock"))
+    fsx::lock_file(&root.join(".solace/lock"))
 }
 /// The project lock when it is free right now; the board's poll skips a busy project.
 pub(crate) fn try_lock(root: &Path) -> Option<fs::File> {
-    try_lock_file(&root.join(".solace/lock")).ok()?
+    fsx::try_lock_file(&root.join(".solace/lock")).ok()?
 }
 pub fn open(root: &Path) -> Result<Store, Failure> {
     let s = Store::at(root)?;
@@ -151,7 +151,7 @@ fn read_task_with(
     flows: &mut HashMap<PathBuf, Value>,
     features: &mut HashMap<String, Option<Value>>,
 ) -> Result<Value, Failure> {
-    let mut t: Value = serde_json::from_slice(&fs::read(path)?).map_err(|e| Failure(e.to_string(), 1))?;
+    let mut t: Value = jsonx::read(path)?;
     // The default workflow's `done` column is now `complete`; tasks saved before still say `done`.
     let home = scope::path(top, t["home"].as_str().unwrap_or("."));
     let mut workflow = |home: &PathBuf| -> Result<Value, Failure> {
@@ -229,11 +229,11 @@ pub(super) fn adopt_tasks(top: &Path, root: &Path) -> Result<(), Failure> {
         if !p.is_file() || p.extension().is_none_or(|x| x != "json") {
             continue;
         }
-        let mut t: Value = serde_json::from_slice(&fs::read(&p)?).map_err(|e| Failure(e.to_string(), 1))?;
+        let mut t: Value = jsonx::read(&p)?;
         let to = task_path(root, t["id"].as_str().unwrap_or(""))?;
         if to.exists() {
             // A crash between writing the store copy and removing this one: finish the move.
-            let stored: Option<Value> = fs::read(&to).ok().and_then(|b| serde_json::from_slice(&b).ok());
+            let stored: Option<Value> = jsonx::read_opt(&to);
             if stored.is_some_and(|s| s["home"] == json!(home)) {
                 fs::remove_file(&p)?;
                 continue;
@@ -271,7 +271,7 @@ pub(super) fn adopt_tasks(top: &Path, root: &Path) -> Result<(), Failure> {
             }
         }
         t["home"] = json!(home);
-        write_atomic(&to, serde_json::to_vec_pretty(&t).unwrap())?;
+        jsonx::write_pretty(&to, &t)?;
         fs::remove_file(&p)?;
     }
     Ok(())
@@ -896,7 +896,7 @@ pub fn adopt_pending(s: &Store, record: &Value) -> Result<(), Failure> {
     for (name, bytes) in files {
         let key = format!("file:{name}");
         let now = fs::read(lockdown::path(&s.root, &name)?).ok();
-        let before = bytes.as_array().map(|a| json_bytes(a.as_slice()));
+        let before = bytes.as_array().map(|a| jsonx::bytes(a.as_slice()));
         if now == before {
             continue;
         }
@@ -953,7 +953,7 @@ pub fn touch(
                 fs::create_dir_all(before_dir(&s.root, tid))?;
                 let file = before_file(&s.root, tid, name);
                 if let Some(bytes) = data.as_array() {
-                    fs::write(file, json_bytes(bytes))?;
+                    fs::write(file, jsonx::bytes(bytes))?;
                 } else {
                     fs::write(file.with_extension("absent"), b"")?;
                 }
@@ -1050,7 +1050,7 @@ fn review_checkpoint(s: &Store, t: &Value) -> Result<Value, String> {
     let r = previous_review(t).ok_or("no completed review")?;
     let checkpoint = (|| -> Result<Value, Failure> {
         let p = review_path(&s.root, t["id"].as_str().unwrap(), r["id"].as_str().unwrap())?;
-        serde_json::from_slice(&fs::read(p)?).map_err(|e| Failure(e.to_string(), 1))
+        jsonx::read(&p)
     })()
     .map_err(|_| "missing or legacy review checkpoint")?;
     if checkpoint["run"] != r["id"] || !checkpoint["projects"].is_object() {
@@ -1092,7 +1092,7 @@ pub fn task_diff(s: &Store, tid: &str, names: &[&str], budget: usize) -> Out {
             } else if key.starts_with("module:") {
                 v[2].as_str().map(|h| h.to_string())
             } else {
-                let bytes = json_bytes(v.as_array()?);
+                let bytes = jsonx::bytes(v.as_array()?);
                 Some(String::from_utf8(bytes).unwrap_or_else(|e| format!("(binary, {} bytes)", e.as_bytes().len())))
             }
         };
@@ -1369,7 +1369,7 @@ pub fn file_snapshot(root: &Path, a: &[&str]) -> Result<Value, Failure> {
     {
         let m = v.as_object_mut().unwrap();
         m.extend(files_under(root, from));
-        if lockdown::same_project(root, &dest) {
+        if crate::project_paths::same_project(root, &dest) {
             m.extend(files_under(root, to));
         }
     }
@@ -1449,7 +1449,7 @@ pub(crate) fn restore(s: &Store, states: &[(String, Value)]) -> Result<(), Failu
             let p = lockdown::path(&s.root, name)?;
             if let Some(bytes) = v.as_array() {
                 fs::create_dir_all(p.parent().unwrap())?;
-                fs::write(p, json_bytes(bytes))?;
+                fs::write(p, jsonx::bytes(bytes))?;
             } else if p.exists() {
                 fs::remove_file(&p)?;
                 // with the folders that leaves empty, such as those a carried file made (D-103),
@@ -2510,7 +2510,7 @@ fn start(root: PathBuf, t: Value, rid: String, m: Value) {
 fn conversation_lock(root: &Path, tid: &str) -> Result<fs::File, Failure> {
     let dir = task_dir(root, tid)?;
     fs::create_dir_all(&dir)?;
-    lock_file(&dir.join("agent.lock"))
+    fsx::lock_file(&dir.join("agent.lock"))
 }
 
 fn conversation_dir(root: &Path, tid: &str, home: &str) -> Result<PathBuf, Failure> {
@@ -4234,7 +4234,7 @@ impl Board {
         if held.contains_key(root) {
             return Ok(());
         }
-        let Some(f) = try_lock_file(&root.join(".solace/serve.lock"))? else {
+        let Some(f) = fsx::try_lock_file(&root.join(".solace/serve.lock"))? else {
             let name = if dir == "." { root.display().to_string() } else { dir.to_string() };
             return fail(format!("{name} is already served by another `solace serve`; stop that one first."));
         };
@@ -4516,7 +4516,7 @@ pub fn serve(top: PathBuf, port: u16) -> Out {
     // A migration's folder is held too, so a shell can't move it from under the board.
     let _migration = match migrate::load(&board.top) {
         Some(_) if !board.held.lock().unwrap().contains_key(&board.top) => {
-            let Some(f) = try_lock_file(&board.top.join(".solace/serve.lock"))? else {
+            let Some(f) = fsx::try_lock_file(&board.top.join(".solace/serve.lock"))? else {
                 return fail(format!("{} is already served by another `solace serve`; stop that one first.", board.top.display()));
             };
             record_port(&f, board.port);
@@ -5151,16 +5151,15 @@ pub(crate) fn with_config<T>(path: &Path, f: impl FnOnce() -> T) -> T {
 /// Marks whether the project or instructions changed since the run's review checkpoint.
 fn review_changed(s: &Store, t: &Value, rid: &str) -> Result<bool, Failure> {
     let path = review_path(&s.root, t["id"].as_str().unwrap(), rid)?;
-    let Ok(bytes) = fs::read(&path) else {
+    let Ok(mut checkpoint) = jsonx::read(&path) else {
         return Ok(false);
     };
-    let mut checkpoint: Value = serde_json::from_slice(&bytes).map_err(|e| Failure(e.to_string(), 1))?;
     let current = review_state(s, t)?;
     let changed = checkpoint["context"] != current["context"]
         || checkpoint["instructions"] != current["instructions"]
         || checkpoint["projects"] != current["projects"];
     checkpoint["changed_during_review"] = json!(changed);
-    write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap())?;
+    jsonx::write(&path, &checkpoint)?;
     Ok(changed)
 }
 
@@ -5251,7 +5250,7 @@ fn write_review_checkpoint(root: &Path, t: &Value, rid: &str) -> Result<(), Fail
     checkpoint["run"] = json!(rid);
     let path = review_path(root, t["id"].as_str().unwrap(), rid)?;
     fs::create_dir_all(path.parent().unwrap())?;
-    write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap())
+    jsonx::write(&path, &checkpoint)
 }
 
 /// Applies `body`'s action to `t`: launching its run, or moving it.

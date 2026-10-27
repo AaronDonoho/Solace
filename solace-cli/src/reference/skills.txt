@@ -1,0 +1,16 @@
+Skills (D-27): the `skills` key in solace.toml names the project's skills
+folder, `skills/` when the key is missing. Each skill is a subfolder with a
+`SKILL.md`, or a single `<name>.md` file at the folder's top; `name` and
+`description` are front matter between `---` lines, and a skill with no
+description is listed by its first line. Every run's brief (work, investigate,
+discuss, review, strategy) lists the skills of the project it works in, one
+line each — name, description, and the path to `read` — and never carries a
+skill's contents: `read` a skill when the task matches its description, and
+read any files it points to. The humans own the folder: agents read skills and
+change none of them. Solace never runs a skill's scripts: a skill that needs a
+tool names a `[commands]` entry the human adds to solace.toml, run with
+`run <name>` (as `layout_audit` is). A `README.md` at the folder's top is the
+folder's own note, not a skill. The key names a folder inside the project that
+holds no code: `src`, `test`, a folder inside them, `.solace`, a nested
+project (one with its own store) and a folder inside one are refused; `./x`
+names the same folder as `x`.

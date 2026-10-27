@@ -5,9 +5,10 @@
 //! Names are read from the text's tokens, not with a `syn` visitor: a call
 //! inside `assert!(…)` or `format!(…)` is a token in a macro's arguments, so a
 //! visitor over the syntax tree would miss the tests it sits in. Resolution
-//! overestimates on purpose — a method name links to every item that has it,
-//! an unresolved path start to every item with its last name — so test reach
-//! never misses a test.
+//! separates exact uses from possible ones: a method name, a macro, a field,
+//! or an unresolved path may name an item, so it stays possible. A local
+//! binding, a module's own item, or a named import that hides a glob is not a
+//! use.
 
 use crate::{ModuleRow, Sym};
 use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
@@ -15,11 +16,14 @@ use std::collections::{HashMap, HashSet};
 use syn::Meta;
 
 /// A Rust store's reference graph: what each symbol uses, its reverse, each
-/// reference's line, and which symbols are test code.
+/// reference's line, which references are only possible, and which symbols are
+/// test code.
 pub struct Graph {
     pub uses: Vec<Vec<usize>>,
     pub used_by: Vec<Vec<usize>>,
     pub at: Vec<Vec<(usize, usize)>>,
+    /// The references that need type inference: (target, line), as in `at`.
+    pub possible: Vec<Vec<(usize, usize)>>,
     pub test: Vec<bool>,
 }
 
@@ -27,6 +31,7 @@ pub struct Graph {
 pub fn graph(syms: &[Sym], modules: &[ModuleRow]) -> Graph {
     let refs = Refs::new(syms, modules);
     let mut at: Vec<Vec<(usize, usize)>> = vec![vec![]; syms.len()];
+    let mut possible: Vec<Vec<(usize, usize)>> = vec![vec![]; syms.len()];
     let mut uses: Vec<Vec<usize>> = vec![vec![]; syms.len()];
     for i in 0..syms.len() {
         // A `use` statement's own text names what it imports: that is an
@@ -35,10 +40,26 @@ pub fn graph(syms: &[Sym], modules: &[ModuleRow]) -> Graph {
             continue;
         }
         let m = syms[i].module.as_str();
-        for (mention, line) in mentions(&syms[i].text) {
-            for t in refs.resolve(m, i, &mention) {
-                if t != i && !at[i].contains(&(t, line)) {
-                    at[i].push((t, line));
+        let text = &syms[i].text;
+        let mentions = scanned(text);
+        let context = ScopeContext { refs: &refs, module: m, symbol: i, target: None };
+        let scopes = scan_scopes(text, refs.container_name(i).is_some(), &context);
+        for mention in mentions {
+            if scopes.imports.iter().any(|import| import.start <= mention.range.start && mention.range.end <= import.end) {
+                continue;
+            }
+            let (exact, maybe) = classify(&refs, m, i, &mention, &scopes);
+            for (targets, is_possible) in [(exact, false), (maybe, true)] {
+                for t in targets {
+                    if t == i {
+                        continue;
+                    }
+                    if !at[i].contains(&(t, mention.line)) {
+                        at[i].push((t, mention.line));
+                    }
+                    if is_possible && !possible[i].contains(&(t, mention.line)) {
+                        possible[i].push((t, mention.line));
+                    }
                 }
             }
         }
@@ -54,7 +75,7 @@ pub fn graph(syms: &[Sym], modules: &[ModuleRow]) -> Graph {
             used_by[u].push(j);
         }
     }
-    Graph { uses, used_by, at, test: test_flags(syms, modules) }
+    Graph { uses, used_by, at, possible, test: test_flags(syms, modules) }
 }
 
 /// Whether `text` carries a test attribute: `#[test]`, or `#[<path>::test]`
@@ -271,11 +292,6 @@ enum Mention {
     Macro(String),
 }
 
-/// The names `text` mentions, each with its 0-based line in `text`.
-fn mentions(text: &str) -> Vec<(Mention, usize)> {
-    scanned(text).into_iter().map(|m| (m.mention, m.line)).collect()
-}
-
 fn scan(stream: &TokenStream, text: &str, starts: &[usize], out: &mut Vec<Spanned>) {
     let trees: Vec<TokenTree> = stream.clone().into_iter().collect();
     let mut i = 0;
@@ -297,6 +313,11 @@ fn scan(stream: &TokenStream, text: &str, starts: &[usize], out: &mut Vec<Spanne
                 i += 1;
             }
             TokenTree::Ident(id) => {
+                if generic_binding(&trees, i) {
+                    i += 1;
+                    after_dot = false;
+                    continue;
+                }
                 let line = id.span().start().line.saturating_sub(1);
                 let start = byte_at(text, starts, id.span().start());
                 let mut end = byte_at(text, starts, id.span().end());
@@ -644,8 +665,14 @@ impl<'a> Refs<'a> {
         for imp in imps {
             if imp.glob {
                 if let Some(g) = self.resolve_use_module(m, scope, &imp.path) {
-                    out.extend(self.symbols_named(&g, name));
-                    self.import_visible_in(&g, None, name, seen, out);
+                    // The module's own item hides what its globs bring in, so
+                    // the nearer module's name stops the search there.
+                    let found = self.symbols_named(&g, name);
+                    if found.is_empty() {
+                        self.import_visible_in(&g, None, name, seen, out);
+                    } else {
+                        out.extend(found);
+                    }
                 }
             } else if imp.local == name
                 && let Some((m2, n)) = self.resolve_use(m, scope, &imp.path)
@@ -2238,18 +2265,22 @@ fn mentioned_names_in(refs: &Refs, syms: &[Sym]) -> Vec<HashSet<String>> {
             }
             let text = &symbol.text;
             let mentions = scanned(text);
+            let (attrs, rest) = attrs_and_rest(text);
+            let body_start = if attrs.is_empty() { 0 } else { text.len() - rest.len() };
             let context = ScopeContext { refs, module: symbol.module.as_str(), symbol: i, target: None };
             let scopes = scan_scopes(text, refs.container_name(i).is_some(), &context);
             let in_import =
                 |range: &std::ops::Range<usize>| scopes.imports.iter().any(|import| import.start <= range.start && range.end <= import.end);
             mentions
                 .into_iter()
+                .filter(|mention| mention.range.start >= body_start)
                 .filter_map(|mention| match mention.mention {
                     Mention::Path(segs) => {
-                        if in_import(&mention.range) || shadowed(&scopes, &segs, mention.range.start) {
+                        let name = segs.first()?.clone();
+                        if name == "_" || in_import(&mention.range) || shadowed(&scopes, &segs, mention.range.start) {
                             None
                         } else {
-                            segs.into_iter().next()
+                            Some(name)
                         }
                     }
                     Mention::Macro(name) => Some(name),
@@ -2397,4 +2428,66 @@ pub(crate) fn called_names(text: &str, kind: CallKind) -> HashSet<String> {
             _ => None,
         })
         .collect()
+}
+
+fn generic_binding(trees: &[TokenTree], i: usize) -> bool {
+    let after_open = previous_punct(trees, i, '<') || previous_punct(trees, i, ',');
+    let before_eq = matches!(trees.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '=' && p.spacing() != Spacing::Joint);
+    after_open && before_eq
+}
+
+/// The methods a standard trait provides when the trait is not a store symbol.
+pub(crate) fn std_trait_methods(path: &[String]) -> Option<&'static [&'static str]> {
+    match path.join("::").as_str() {
+        "std::io::Read" => Some(&["read", "read_to_string", "read_to_end", "read_exact"][..]),
+        "std::io::BufRead" => Some(&["fill_buf", "consume", "read_until", "read_line"][..]),
+        "std::io::Write" => Some(&["write", "write_all", "write_vectored", "write_fmt", "flush"][..]),
+        "std::fmt::Write" => Some(&["write_str", "write_char", "write_fmt"][..]),
+        "std::io::Seek" => Some(&["seek", "rewind", "stream_position", "stream_len"][..]),
+        _ => None,
+    }
+}
+
+/// A mention's exact targets and the targets only its possible reading names.
+fn classify(refs: &Refs, m: &str, i: usize, mention: &Spanned, scopes: &Scopes) -> (Vec<usize>, Vec<usize>) {
+    let (exact, mut possible) = match &mention.mention {
+        Mention::Path(segs) => {
+            if shadowed(scopes, segs, mention.range.start) {
+                return (vec![], vec![]);
+            }
+            if segs.len() == 1 {
+                let targets = bare_candidates(refs, i, m, &segs[0]);
+                if targets.len() == 1 { (targets, vec![]) } else { (vec![], targets) }
+            } else if let Some((target, _)) = resolve_exact(refs, m, i, segs) {
+                (vec![target], vec![])
+            } else {
+                (vec![], refs.resolve(m, i, &mention.mention))
+            }
+        }
+        Mention::Macro(_) | Mention::Field(_) => (vec![], refs.resolve(m, i, &mention.mention)),
+        Mention::Method(name) => (vec![], method_targets(refs, name)),
+    };
+    let mut expanded = exact.clone();
+    expanded.extend(possible.iter().copied());
+    refs.expand_types(&mut expanded);
+    for target in expanded {
+        if !exact.contains(&target) && !possible.contains(&target) {
+            possible.push(target);
+        }
+    }
+    (exact, possible)
+}
+
+/// A bare name's targets, with a test module's sibling hiding its parent's.
+fn bare_candidates(refs: &Refs, i: usize, m: &str, name: &str) -> Vec<usize> {
+    let siblings = refs.test_siblings(i, name);
+    if siblings.is_empty() { bare_targets(refs, m, i, name) } else { item_targets(refs, siblings) }
+}
+
+/// The methods and associated functions a method call `.name()` may name.
+fn method_targets(refs: &Refs, name: &str) -> Vec<usize> {
+    refs.leaves
+        .get(name)
+        .map(|items| items.iter().copied().filter(|&i| refs.syms[i].kind_text == "fn" && refs.container_name(i).is_some()).collect())
+        .unwrap_or_default()
 }

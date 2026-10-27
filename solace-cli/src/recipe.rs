@@ -468,7 +468,7 @@ fn part_hash(path: &Path) -> String {
 /// output isn't the recorded one (it was rebuilt some other way): the caller falls back to file
 /// times. `Some(None)` means the record applies and nothing changed.
 fn recorded_change(root: &Path, r: &Recipe, parts: &[(String, PathBuf)]) -> Option<Option<String>> {
-    let record: Value = serde_json::from_str(&fs::read_to_string(root.join(".solace/built.json")).ok()?).ok()?;
+    let record: Value = jsonx::read_opt(&root.join(".solace/built.json"))?;
     // The record is for the last step as it was: a recipe that now names another command
     // says nothing about this build.
     if record["command"].as_str() != r.steps.last().and_then(|s| s.command.as_deref()) {

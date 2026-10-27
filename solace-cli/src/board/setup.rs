@@ -14,7 +14,7 @@ pub(super) fn keys_path() -> PathBuf {
 }
 
 pub(super) fn read_keys(path: &Path) -> Value {
-    fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}))
+    jsonx::read_opt(path).filter(Value::is_object).unwrap_or_else(|| json!({}))
 }
 
 /// The key stored for model `id`, if any.
@@ -160,11 +160,11 @@ pub(super) fn settings_lock(config: &Path) -> Result<fs::File, Failure> {
     }
     #[cfg(test)]
     if let Some(attempt) = LOCK_ATTEMPT.lock().unwrap().as_ref() {
-        if crate::try_lock_file(&path)?.is_none() {
+        if fsx::try_lock_file(&path)?.is_none() {
             let _ = attempt.send(path.clone());
         }
     }
-    crate::lock_file(&path)
+    fsx::lock_file(&path)
 }
 
 #[cfg(test)]

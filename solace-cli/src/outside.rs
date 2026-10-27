@@ -71,7 +71,7 @@ impl Written {
             }
             text.extend(self.files.iter().map(|(p, (h, size, time))| format!("{h} {size} {time} {p}\n")));
             text.extend(self.bad.iter().map(|(p, h)| format!("! {h} {p}\n")));
-            write_atomic(&self.root.join(".solace/written"), text)?;
+            fsx::write_atomic(&self.root.join(".solace/written"), text)?;
             self.dirty = false;
         }
         Ok(())
@@ -216,7 +216,7 @@ fn save_approved(root: &Path, map: &BTreeMap<String, String>) -> Result<(), Fail
     for (k, h) in map {
         text += &format!("{h} {k}\n");
     }
-    write_atomic(&root.join(".solace/approved"), text)?;
+    fsx::write_atomic(&root.join(".solace/approved"), text)?;
     share_store(root)
 }
 
@@ -1074,7 +1074,7 @@ fn share_root_ignore(root: &Path) -> Result<(), Failure> {
     };
     let wanted = current.as_deref().map_or_else(|| STORE_IGNORE.to_string(), with_store_block);
     if current.as_deref() != Some(wanted.as_str()) {
-        crate::write_atomic(&path, wanted)?;
+        fsx::write_atomic(&path, wanted)?;
     }
     Ok(())
 }

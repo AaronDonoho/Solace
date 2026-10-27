@@ -146,23 +146,29 @@ fn an_import_is_retargeted_and_check_warnings_stays_clean() {
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
-/// A test that reaches moved and staying code is refused.
+/// A test that reaches moved and staying code stays and is rewritten.
 #[test]
-fn a_test_split_is_refused_with_e5002() {
+fn a_test_split_stays_and_is_rewritten() {
     if !ready() {
         return;
     }
     let lib = concat!(
         "fn make() -> i32 {\n    1\n}\n\n",
         "pub fn other() -> i32 {\n    2\n}\n\n",
+        "pub fn keep() -> i32 {\n    make() + other()\n}\n\n",
         "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
-        "    #[test]\n    fn make_works() {\n        assert_eq!(make(), 1);\n    }\n}\n",
+        "    #[test]\n    fn make_works() {\n        assert_eq!(make() + other(), 3);\n    }\n}\n",
     );
-    let lib = lib.replace("assert_eq!(make(), 1)", "assert_eq!(make() + other(), 3)");
     let (_root, s) = rust_project(&lib);
-    let err = extract(&s, &["crate.make", "--to", "helpers"]).unwrap_err().0;
-    assert!(err.starts_with("E5002"), "{err}");
-    assert!(err.contains("make_works") && err.contains("crate.make") && err.contains("crate.other"), "{err}");
+    extract(&s, &["crate.make", "--to", "helpers"]).unwrap();
+    let ix = s.index().unwrap();
+    assert!(s.resolve(&ix, "helpers.make").is_ok());
+    assert!(s.resolve(&ix, "crate.tests::make_works").is_ok());
+    assert!(s.resolve(&ix, "helpers.tests::make_works").is_err());
+    let test = text(&s, "crate.tests::make_works");
+    assert!(test.contains("crate::helpers::make() + other()"), "{test}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 /// Rust `--to-project` is refused while same-project extract is available.
@@ -240,8 +246,10 @@ fn a_trait_method_moving_with_its_trait_is_no_clash() {
     assert!(out.contains("Moved crate.T to helpers"), "{out}");
 }
 
+/// Code moved into a child module still sees a private item that stays in
+/// the crate root, so the item keeps its visibility.
 #[test]
-fn a_retained_private_helper_becomes_pub_crate() {
+fn a_staying_private_helper_stays_private() {
     if !ready() {
         return;
     }
@@ -249,8 +257,9 @@ fn a_retained_private_helper_becomes_pub_crate() {
         "pub fn go() -> i32 {\n    make() + helper()\n}\n\nfn make() -> i32 {\n    helper()\n}\n\nfn helper() -> i32 {\n    1\n}\n",
     );
     let out = extract(&s, &["crate.make", "--to", "helpers"]).unwrap();
-    assert!(out.contains("Now pub(crate):") && out.contains("crate.helper"), "{out}");
-    assert!(text(&s, "crate.helper").starts_with("pub(crate) fn helper"), "{}", text(&s, "crate.helper"));
+    assert!(out.contains("Now pub(crate): helpers.make"), "{out}");
+    assert!(!out.contains("crate.helper"), "{out}");
+    assert!(text(&s, "crate.helper").starts_with("fn helper"), "{}", text(&s, "crate.helper"));
     assert!(text(&s, "helpers.make").contains("crate::helper()"), "{}", text(&s, "helpers.make"));
 }
 
@@ -1383,9 +1392,9 @@ fn a_test_moves_with_the_method_it_reaches() {
     assert!(warnings.is_empty(), "{warnings:?}");
 }
 
-/// A test that reaches both moved and staying methods is E5002.
+/// A test that reaches both moved and staying methods stays and is rewritten.
 #[test]
-fn a_test_reaching_a_staying_method_is_refused() {
+fn a_test_reaching_a_staying_method_stays() {
     if !ready() {
         return;
     }
@@ -1395,9 +1404,14 @@ fn a_test_reaching_a_staying_method_is_refused() {
         "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
         "    #[test]\n    fn both_work() {\n        assert_eq!(S::value() + S::other(), 3);\n    }\n}\n",
     ));
-    let err = extract(&s, &["crate.S::value", "--to", "helpers"]).unwrap_err().0;
-    assert!(err.starts_with("E5002"), "{err}");
-    assert!(err.contains("both_work") && err.contains("crate.S::value") && err.contains("crate.S::other"), "{err}");
+    extract(&s, &["crate.S::value", "--to", "helpers"]).unwrap();
+    let ix = s.index().unwrap();
+    assert!(s.resolve(&ix, "crate.tests::both_work").is_ok());
+    assert!(s.resolve(&ix, "helpers.tests::both_work").is_err());
+    let test = text(&s, "crate.tests::both_work");
+    assert!(test.contains("S::value() + S::other()"), "{test}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 /// Several inherent impls for one type cannot be told apart by `<Type>`.
@@ -1910,6 +1924,8 @@ fn a_nested_target_writes_its_test_file_beside_it() {
     extract(&s, &["board.make", "--to", "board::reviews"]).unwrap();
     let ix = s.index().unwrap();
     assert!(s.resolve(&ix, "board::reviews.tests::make_works").is_ok());
+    let row = ix.modules.iter().find(|m| m.path == "board::reviews::tests").unwrap();
+    assert_eq!(row.dir, "src/board");
     let target = written(&root, "src/board/reviews.rs");
     assert!(target.contains("#[cfg(test)]\n#[path = \"reviews_tests.rs\"]\nmod tests;\n"), "{target}");
     let tests = written(&root, "src/board/reviews_tests.rs");
@@ -1990,15 +2006,6 @@ fn a_failed_test_move_rolls_back_its_file() {
     let ix = s.index().unwrap();
     assert!(ix.modules.iter().all(|m| m.path != "b::tests"));
     assert_eq!(s.db.query_row("SELECT COUNT(*) FROM history", [], |r| r.get::<_, i64>(0)).unwrap(), history);
-}
-
-/// A test file is named for the target module, including beside a `mod.rs`.
-#[test]
-fn test_files_take_the_targets_module_name() {
-    assert_eq!(test_file("board::reviews", "src/board/reviews.rs"), "src/board/reviews_tests.rs");
-    assert_eq!(test_file("board", "src/board/mod.rs"), "src/board/board_tests.rs");
-    assert_eq!(test_file("crate", "src/lib.rs"), "src/lib_tests.rs");
-    assert_eq!(test_file("crate", "lib.rs"), "lib_tests.rs");
 }
 
 /// A test file keeps one `use super::*`, adding it only when it is missing.
@@ -2208,4 +2215,802 @@ fn a_moved_fn_does_not_carry_an_unused_inline_test_import() {
     assert!(tests.contains("fn make_works") && tests.contains("fn other_works"), "{tests}");
     let b = written(&root, "src/b.rs");
     assert!(b.contains("use std::collections::HashMap;"), "{b}");
+}
+
+/// A helper used beside staying code by a test in a `#[path]` file moves; the
+/// test stays and its glob now names the helper's full path.
+#[test]
+fn a_path_test_that_uses_staying_code_stays() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod board;\n"),
+        (
+            "src/board.rs",
+            concat!(
+                "fn make() -> i32 {\n    1\n}\n\n",
+                "pub fn other() -> i32 {\n    2\n}\n\n",
+                "pub fn keep() -> i32 {\n    make() + other()\n}\n\n",
+                "#[cfg(test)]\n#[path = \"board_tests.rs\"]\nmod tests;\n",
+            ),
+        ),
+        ("src/board_tests.rs", "use super::*;\n\n#[test]\nfn both_work() {\n    assert_eq!(make() + other(), 3);\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["board.make", "--to", "helpers"]).unwrap();
+    let ix = s.index().unwrap();
+    assert!(s.resolve(&ix, "helpers.make").is_ok());
+    assert!(s.resolve(&ix, "board.tests::both_work").is_ok());
+    assert!(s.resolve(&ix, "helpers.tests::both_work").is_err());
+    let test = written(&root, "src/board_tests.rs");
+    assert!(test.contains("crate::helpers::make() + other()"), "{test}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// A helper a staying test uses cannot move, so the test that uses it beside
+/// moved code stays too.
+#[test]
+fn a_test_sharing_a_helper_with_a_staying_test_stays() {
+    if !ready() {
+        return;
+    }
+    let (_root, s) = rust_project(concat!(
+        "fn make() -> i32 {\n    1\n}\n\n",
+        "pub fn other() -> i32 {\n    2\n}\n\n",
+        "pub fn keep() -> i32 {\n    make() + other()\n}\n\n",
+        "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+        "    fn check(value: i32) {\n        assert!(value > 0);\n    }\n\n",
+        "    #[test]\n    fn make_works() {\n        check(make());\n    }\n\n",
+        "    #[test]\n    fn other_works() {\n        check(other());\n    }\n}\n",
+    ));
+    extract(&s, &["crate.make", "--to", "helpers"]).unwrap();
+    let ix = s.index().unwrap();
+    assert!(s.resolve(&ix, "helpers.make").is_ok());
+    assert!(s.resolve(&ix, "crate.tests::check").is_ok());
+    assert!(s.resolve(&ix, "crate.tests::make_works").is_ok());
+    assert!(s.resolve(&ix, "crate.tests::other_works").is_ok());
+    assert!(s.resolve(&ix, "helpers.tests::make_works").is_err());
+    let test = text(&s, "crate.tests::make_works");
+    assert!(test.contains("check(crate::helpers::make())"), "{test}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// A test module made by `submit --new a::tests` takes a later extract's test.
+#[test]
+fn a_test_move_appends_to_a_submit_created_test_file() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "pub mod a;\n\n",
+                "fn make() -> i32 {\n    1\n}\n\n",
+                "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
+                "    #[test]\n    fn make_works() {\n        assert_eq!(make(), 1);\n    }\n}\n",
+            ),
+        ),
+        ("src/a.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    s.submit_symbols(None, Some("a::tests"), "use super::*;\n\n#[test]\nfn a_works() {\n    assert_eq!(one(), 1);\n}\n").unwrap();
+    extract(&s, &["crate.make", "--to", "a"]).unwrap();
+    let ix = s.index().unwrap();
+    assert!(s.resolve(&ix, "a.tests::a_works").is_ok());
+    assert!(s.resolve(&ix, "a.tests::make_works").is_ok());
+    let module = written(&root, "src/a.rs");
+    assert_eq!(module.matches("#[path = \"a_tests.rs\"]").count(), 1, "{module}");
+    assert_eq!(module.matches("mod tests;").count(), 1, "{module}");
+    let tests = written(&root, "src/a_tests.rs");
+    assert!(tests.contains("fn a_works") && tests.contains("fn make_works"), "{tests}");
+    assert_eq!(tests.matches("use super::*;").count(), 1, "{tests}");
+}
+
+#[test]
+fn a_child_glob_keeps_its_parents_imports() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "pub mod parent;\npub mod store;\npub mod traits;\n\n",
+                "pub fn use_moved() {\n    parent::moved();\n}\n\n",
+                "pub fn use_parent() -> i32 {\n    parent::marker()\n}\n\n",
+                "pub fn marker() -> i32 {\n    1\n}\n\n",
+                "#[macro_export]\nmacro_rules! answer {\n    () => {\n        42\n    };\n}\n",
+            ),
+        ),
+        ("src/store.rs", "pub struct Store;\n"),
+        (
+            "src/traits.rs",
+            concat!(
+                "pub trait Speak {\n    fn speak(&self) -> i32;\n}\n\n",
+                "impl Speak for i32 {\n    fn speak(&self) -> i32 {\n        *self\n    }\n}\n",
+            ),
+        ),
+        (
+            "src/parent.rs",
+            concat!(
+                "use crate::store::Store;\n",
+                "use std::collections::HashMap;\n",
+                "use std::collections::*;\n",
+                "use crate::traits::Speak;\n",
+                "use crate::answer;\n\n",
+                "pub fn moved() -> (Store, HashMap<i32, i32>, BTreeSet<i32>, i32) {\n",
+                "    let mut map = HashMap::new();\n",
+                "    map.insert(1, 2);\n",
+                "    let mut set = BTreeSet::new();\n",
+                "    set.insert((1).speak());\n",
+                "    (Store, map, set, answer!())\n",
+                "}\n\n",
+                "pub fn marker() -> i32 {\n    mid::marker_too()\n}\n\n",
+                "#[path = \"parent_mid.rs\"]\nmod mid;\n",
+            ),
+        ),
+        (
+            "src/parent_mid.rs",
+            concat!(
+                "use super::*;\n\n",
+                "pub fn marker_too() -> i32 {\n    tests::imports_are_visible()\n}\n\n",
+                "#[path = \"parent_tests.rs\"]\nmod tests;\n",
+            ),
+        ),
+        (
+            "src/parent_tests.rs",
+            concat!(
+                "use super::*;\n\n",
+                "pub fn imports_are_visible() -> i32 {\n",
+                "    let _: Store = Store;\n",
+                "    let _: HashMap<i32, i32> = HashMap::new();\n",
+                "    let _: BTreeSet<i32> = BTreeSet::new();\n",
+                "    marker() + marker_too() + more_imports_are_visible() + answer!() + (1).speak()\n",
+                "}\n\n",
+                "pub fn more_imports_are_visible() -> i32 {\n",
+                "    let _: Store = Store;\n",
+                "    let _: HashMap<i32, i32> = HashMap::new();\n",
+                "    let _: BTreeSet<i32> = BTreeSet::new();\n",
+                "    marker() + marker_too() + answer!() + (1).speak()\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    let before = id(&s, "parent.moved");
+    extract(&s, &["parent.moved", "--to", "moved"]).unwrap();
+    assert_eq!(id(&s, "moved.moved"), before);
+    let ix = s.index().unwrap();
+    assert!(s.resolve(&ix, "parent.mid.tests::imports_are_visible").is_ok());
+    let parent = written(&root, "src/parent.rs");
+    for import in ["use crate::store::Store;", "use std::collections::HashMap;", "use crate::traits::Speak;", "use crate::answer;"] {
+        assert!(!parent.contains(import), "unused {import}: {parent}");
+    }
+    assert!(!parent.contains("use std::collections::*;"), "{parent}");
+    let tests = written(&root, "src/parent_tests.rs");
+    for import in [
+        "use crate::store::Store;",
+        "use std::collections::HashMap;",
+        "use std::collections::BTreeSet;",
+        "use crate::traits::Speak;",
+        "use crate::answer;",
+    ] {
+        assert_eq!(tests.matches(import).count(), 1, "missing or repeated {import}: {tests}");
+    }
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_child_glob_keeps_a_moved_use() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "pub mod helpers;\n\n",
+                "pub fn keep() -> i32 {\n    mid::marker_too()\n}\n\n",
+                "pub use std::collections::HashMap;\n\n",
+                "pub fn marker() -> i32 {\n    1\n}\n\n",
+                "#[path = \"mid.rs\"]\nmod mid;\n",
+            ),
+        ),
+        ("src/helpers.rs", "pub fn other() -> i32 {\n    1\n}\n"),
+        (
+            "src/mid.rs",
+            "use super::*;\n\npub fn marker_too() -> i32 {\n    tests::map_is_visible()\n}\n\n#[path = \"grand.rs\"]\nmod tests;\n",
+        ),
+        (
+            "src/grand.rs",
+            concat!(
+                "use super::*;\n\n",
+                "pub fn map_is_visible() -> i32 {\n",
+                "    let _: HashMap<i32, i32> = HashMap::new();\n",
+                "    marker() + marker_too()\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.std::collections::HashMap", "--to", "helpers"]).unwrap();
+    let source = written(&root, "src/lib.rs");
+    assert!(!source.contains("use std::collections::HashMap;"), "{source}");
+    assert!(!source.contains("allow(unused_imports)"), "{source}");
+    assert!(!source.contains("pub use std::collections::HashMap;"), "{source}");
+    let grand = written(&root, "src/grand.rs");
+    assert!(grand.contains("use std::collections::HashMap;"), "{grand}");
+    let ix = s.index().unwrap();
+    assert!(s.resolve(&ix, "mid.tests::map_is_visible").is_ok());
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// Moving one test module's helpers leaves another test module's imports alone.
+#[test]
+fn a_test_module_move_keeps_a_siblings_imports() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod a;\n\npub struct Store;\n\npub type Out = String;\n"),
+        ("src/a.rs", "pub mod more;\n\npub fn make() -> i32 {\n    1\n}\n\nmod tests;\n"),
+        (
+            "src/a/tests.rs",
+            concat!(
+                "#![cfg(test)]\n",
+                "use crate::Store;\n\n",
+                "pub fn ready() -> bool {\n    true\n}\n\n",
+                "pub fn text(_s: &Store) -> String {\n    String::new()\n}\n\n",
+                "pub fn id(_s: &Store) -> String {\n    String::new()\n}\n\n",
+                "#[test]\nfn make_works() {\n    assert_eq!(super::make(), 1);\n    assert!(ready());\n}\n",
+            ),
+        ),
+        ("src/a/more.rs", "pub fn other() -> i32 {\n    2\n}\n\nmod tests;\n"),
+        (
+            "src/a/more/tests.rs",
+            concat!(
+                "#![cfg(test)]\n",
+                "use crate::{Out, Store};\n\n",
+                "use super::super::tests::{id, ready, text};\n\n",
+                "fn fold(s: &Store) -> Out {\n    id(s)\n}\n\n",
+                "#[test]\nfn helpers_are_visible() {\n    assert!(ready());\n    let _ = text;\n    let _ = fold;\n}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["a::tests.ready", "a::tests.text", "a::tests.id", "--to", "a::parked"]).unwrap();
+    let ix = s.index().unwrap();
+    let header = &ix.modules.iter().find(|m| m.path == "a::more::tests").unwrap().header;
+    assert!(header.contains("use crate::{Out, Store};"), "{header}");
+    assert!(header.contains("use crate::a::parked::id;"), "{header}");
+    assert!(header.contains("use crate::a::parked::ready;"), "{header}");
+    assert!(header.contains("use crate::a::parked::text;"), "{header}");
+    let tests = written(&root, "src/a/more/tests.rs");
+    assert!(tests.contains("use crate::{Out, Store};"), "{tests}");
+}
+
+#[test]
+fn moved_struct_fields_used_by_staying_crate_root_code_become_pub_crate() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/main.rs",
+            concat!(
+                "struct Failure(String, i32);\n\n",
+                "pub(crate) fn report() -> Failure {\n    Failure(String::from(\"x\"), 1)\n}\n\n",
+                "pub(crate) fn code(f: &Failure) -> (&str, i32) {\n    (f.0.as_str(), f.1)\n}\n\n",
+                "fn main() {\n    println!(\"{:?}\", code(&report()));\n}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.Failure", "--to", "diagnostics"]).unwrap();
+    let target = written(&root, "src/diagnostics.rs");
+    assert!(target.contains("pub(crate) struct Failure(pub(crate) String, pub(crate) i32)"), "{target}");
+    let source = written(&root, "src/main.rs");
+    assert!(source.contains("crate::diagnostics::Failure"), "{source}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_crate_root_import_moves_to_a_child_module_as_a_crate_path() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/main.rs",
+            concat!(
+                "mod language;\n\n",
+                "use language::Language;\n\n",
+                "struct Thing;\n\n",
+                "impl Thing {\n    fn label(&self) -> &'static str {\n        1.name()\n    }\n}\n\n",
+                "fn main() {\n    println!(\"{}\", Thing.label());\n}\n",
+            ),
+        ),
+        (
+            "src/language.rs",
+            concat!(
+                "pub trait Language {\n    fn name(&self) -> &'static str;\n}\n\n",
+                "impl Language for i32 {\n    fn name(&self) -> &'static str {\n        \"one\"\n    }\n}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.Thing", "--to", "cli"]).unwrap();
+    let target = written(&root, "src/cli.rs");
+    assert!(target.contains("use crate::language::Language;"), "{target}");
+    let source = written(&root, "src/main.rs");
+    assert!(!source.contains("use language::Language;"), "{source}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn moved_code_names_a_staying_crate_root_item_by_its_crate_path() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/main.rs",
+            concat!(
+                "mod reference;\n\n",
+                "use reference::REFERENCE;\n\n",
+                "pub(crate) const ROOT_REFERENCE: &str = \"root\";\n\n",
+                "fn options_of() -> (&'static str, &'static str) {\n    (REFERENCE, ROOT_REFERENCE)\n}\n\n",
+                "fn main() {\n    println!(\"{:?}\", options_of());\n}\n",
+            ),
+        ),
+        ("src/reference.rs", "pub(crate) const REFERENCE: &str = \"x\";\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.options_of", "--to", "cli"]).unwrap();
+    let target = written(&root, "src/cli.rs");
+    assert!(target.contains("crate::reference::REFERENCE"), "{target}");
+    assert!(target.contains("crate::ROOT_REFERENCE"), "{target}");
+    let source = written(&root, "src/main.rs");
+    assert!(!source.contains("use reference::REFERENCE;"), "{source}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn moved_code_carries_the_trait_its_method_call_needs() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/main.rs",
+            concat!(
+                "use std::io::Read;\n\n",
+                "fn read_input() -> std::io::Result<String> {\n",
+                "    let mut text = String::new();\n",
+                "    std::io::stdin().read_to_string(&mut text)?;\n",
+                "    Ok(text)\n",
+                "}\n\n",
+                "fn main() {\n    let _ = read_input();\n}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.read_input", "--to", "cli"]).unwrap();
+    let target = written(&root, "src/cli.rs");
+    assert!(target.contains("use std::io::Read;"), "{target}");
+    let source = written(&root, "src/main.rs");
+    assert!(!source.contains("use std::io::Read;"), "{source}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_generic_associated_type_binding_stays_unqualified() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/main.rs",
+            concat!(
+                "mod language;\n\n",
+                "pub use language::Item;\n\n",
+                "pub struct Diag;\n\n",
+                "fn diags() -> impl Iterator<Item = &'static Diag> {\n    std::iter::empty()\n}\n\n",
+                "fn main() {\n    let _ = diags();\n}\n",
+            ),
+        ),
+        ("src/language.rs", "pub struct Item;\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.diags", "--to", "cli"]).unwrap();
+    let target = written(&root, "src/cli.rs");
+    assert!(target.contains("Iterator<Item = "), "{target}");
+    assert!(!target.contains("crate::language::Item"), "{target}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// The diagnostics types and helpers move from the crate root, and fields
+/// that staying code constructs, matches or reads become reachable.
+#[test]
+fn the_crate_root_diagnostics_types_move_to_diagnostics() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/main.rs",
+            concat!(
+                "#[derive(Debug)]\n",
+                "struct Failure(String, i32);\n\n",
+                "impl From<std::io::Error> for Failure {\n",
+                "    fn from(e: std::io::Error) -> Self {\n",
+                "        Failure(e.to_string(), 1)\n",
+                "    }\n",
+                "}\n\n",
+                "type Out = Result<String, Failure>;\n\n",
+                "struct Diag {\n",
+                "    error: bool,\n",
+                "    module: Option<String>,\n",
+                "    text: String,\n",
+                "}\n\n",
+                "struct FileMap {\n",
+                "    module: String,\n",
+                "    file: std::path::PathBuf,\n",
+                "    ranges: Vec<(usize, usize, String)>,\n",
+                "}\n\n",
+                "fn fail(message: &str) -> Failure {\n",
+                "    Failure(message.to_string(), 1)\n",
+                "}\n\n",
+                "fn place(d: &Diag) -> String {\n",
+                "    d.module.clone().unwrap_or_else(|| d.text.clone())\n",
+                "}\n\n",
+                "fn locate<'a>(files: &'a [FileMap], path: &str) -> Option<(&'a str, usize)> {\n",
+                "    let map = files.iter().find(|f| f.file.to_str() == Some(path))?;\n",
+                "    Some((map.module.as_str(), map.ranges.len()))\n",
+                "}\n\n",
+                "fn status() -> Out {\n",
+                "    Ok(\"done\".to_string())\n",
+                "}\n\n",
+                "fn read() -> Result<String, Failure> {\n",
+                "    Ok(std::fs::read_to_string(\"x\")?)\n",
+                "}\n\n",
+                "fn main() {\n",
+                "    let f = fail(\"bad\");\n",
+                "    println!(\"{} {}\", f.0, f.1);\n",
+                "    let Failure(message, code) = fail(\"worse\");\n",
+                "    println!(\"{} {}\", message, code);\n",
+                "    let d = Diag { error: true, module: None, text: \"x\".to_string() };\n",
+                "    println!(\"{} {}\", place(&d), d.error);\n",
+                "    let m = FileMap { module: \"a\".to_string(), file: \"a.rs\".into(), ranges: vec![] };\n",
+                "    let out: Out = status();\n",
+                "    println!(\"{:?} {:?}\", locate(&[m], \"a.rs\"), out);\n",
+                "    match read() {\n",
+                "        Ok(text) => println!(\"{}\", text.len()),\n",
+                "        Err(Failure(message, code)) => println!(\"{} {}\", message, code),\n",
+                "    }\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(
+        &s,
+        &[
+            "crate.Failure",
+            "crate.Out",
+            "crate.Diag",
+            "crate.FileMap",
+            "crate.fail",
+            "crate.place",
+            "crate.locate",
+            "crate.status",
+            "--to",
+            "diagnostics",
+        ],
+    )
+    .unwrap();
+    let target = written(&root, "src/diagnostics.rs");
+    for field in [
+        "pub(crate) String",
+        "pub(crate) i32",
+        "pub(crate) error: bool",
+        "pub(crate) module: Option<String>",
+        "pub(crate) text: String",
+        "pub(crate) module: String",
+        "pub(crate) file: std::path::PathBuf",
+        "pub(crate) ranges: Vec<(usize, usize, String)>",
+    ] {
+        assert!(target.contains(field), "{field} in {target}");
+    }
+    let source = written(&root, "src/main.rs");
+    assert!(source.contains("crate::diagnostics::Failure"), "{source}");
+    assert!(source.contains("crate::diagnostics::Diag"), "{source}");
+    assert!(target.contains("impl From<std::io::Error> for Failure"), "{target}");
+    assert!(!source.contains("impl From<std::io::Error> for Failure"), "{source}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// `stdin` and `options_of` move from the crate root with their trait and
+/// root imports, and staying code keeps the imports it still uses.
+#[test]
+fn the_crate_root_cli_helpers_move_to_cli() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/main.rs",
+            concat!(
+                "mod reference;\n\n",
+                "use std::io::Read;\n\n",
+                "use reference::REFERENCE;\n\n",
+                "#[derive(Debug)]\n",
+                "pub(crate) struct Failure(String, i32);\n\n",
+                "impl From<std::io::Error> for Failure {\n",
+                "    fn from(e: std::io::Error) -> Self {\n",
+                "        Failure(e.to_string(), 1)\n",
+                "    }\n",
+                "}\n\n",
+                "fn stdin() -> Result<String, Failure> {\n",
+                "    let mut text = String::new();\n",
+                "    std::io::stdin().read_to_string(&mut text)?;\n",
+                "    Ok(text)\n",
+                "}\n\n",
+                "fn options_of(command: &str) -> Vec<&'static str> {\n",
+                "    let mut out = vec![];\n",
+                "    for line in REFERENCE.lines() {\n",
+                "        if line.trim_start().starts_with(command) {\n",
+                "            out.push(\"--x\");\n",
+                "        }\n",
+                "    }\n",
+                "    out\n",
+                "}\n\n",
+                "fn main() {\n",
+                "    let _ = stdin();\n",
+                "    let failure = Failure(\"bad\".to_string(), 1);\n",
+                "    println!(\"{} {}\", failure.0, failure.1);\n",
+                "    println!(\"{:?}\", options_of(\"run\"));\n",
+                "}\n",
+            ),
+        ),
+        ("src/reference.rs", "pub(crate) const REFERENCE: &str = \"  run  --x\\n\";\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.stdin", "crate.options_of", "--to", "cli"]).unwrap();
+    let target = written(&root, "src/cli.rs");
+    assert!(target.contains("use std::io::Read;"), "{target}");
+    assert!(target.contains("crate::reference::REFERENCE"), "{target}");
+    assert!(target.contains("crate::Failure"), "{target}");
+    let source = written(&root, "src/main.rs");
+    assert!(!source.contains("use std::io::Read;"), "{source}");
+    assert!(!source.contains("use reference::REFERENCE;"), "{source}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// `str::lines` is inherent: a `BufRead` import in the source is not carried.
+#[test]
+fn a_string_lines_call_does_not_carry_buf_read() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/main.rs",
+            concat!(
+                "use std::io::BufRead;\n\n",
+                "fn count_words(text: &str) -> usize {\n",
+                "    text.lines().count()\n",
+                "}\n\n",
+                "fn read_lines(reader: &mut impl BufRead) -> usize {\n",
+                "    reader.lines().count()\n",
+                "}\n\n",
+                "fn main() {\n",
+                "    let mut cursor = std::io::Cursor::new(b\"a\\n\".to_vec());\n",
+                "    println!(\"{}\", count_words(\"a b\") + read_lines(&mut cursor));\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.count_words", "--to", "cli"]).unwrap();
+    let target = written(&root, "src/cli.rs");
+    assert!(!target.contains("BufRead"), "{target}");
+    let source = written(&root, "src/main.rs");
+    assert!(source.contains("use std::io::BufRead;"), "{source}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// A staying read through a moved constructor's return type reaches every
+/// field, even when the staying code never names the struct.
+#[test]
+fn moved_struct_fields_used_through_a_moved_constructor_become_pub_crate() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/main.rs",
+            concat!(
+                "#[derive(Debug)]\n",
+                "struct Failure(String, i32);\n\n",
+                "fn report() -> Failure {\n",
+                "    Failure(\"x\".to_string(), 1)\n",
+                "}\n\n",
+                "fn main() {\n",
+                "    let failure = report();\n",
+                "    println!(\"{} {}\", failure.0, failure.1);\n",
+                "    println!(\"{}\", report().1);\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.Failure", "crate.report", "--to", "diagnostics"]).unwrap();
+    let target = written(&root, "src/diagnostics.rs");
+    assert!(target.contains("pub(crate) struct Failure(pub(crate) String, pub(crate) i32)"), "{target}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// A trait impl named by its row moves whole.
+#[test]
+fn a_trait_impl_row_moves_whole() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod a;\npub mod b;\n"),
+        (
+            "src/a.rs",
+            concat!(
+                "pub trait Named {\n    fn name(&self) -> u8;\n}\n\n",
+                "pub struct S;\n\n",
+                "impl Named for S {\n    fn name(&self) -> u8 {\n        0\n    }\n}\n",
+            ),
+        ),
+        ("src/b.rs", "pub fn other() {}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    let out = extract(&s, &["a.<S as Named>", "--to", "b"]).unwrap();
+    assert!(out.contains("Impls moved: a.<S as Named>"), "{out}");
+    assert!(written(&root, "src/b.rs").contains("impl crate::a::Named for crate::a::S"));
+    assert!(!written(&root, "src/a.rs").contains("impl Named for S"));
+}
+
+/// A promoted moved method is named where it lands in the reply.
+#[test]
+fn a_moved_item_needing_visibility_is_named_by_its_new_path() {
+    if !ready() {
+        return;
+    }
+    let (_root, s) = rust_project(concat!(
+        "pub struct S;\n\n",
+        "impl S {\n",
+        "    fn make() -> S {\n",
+        "        S\n",
+        "    }\n",
+        "}\n\n",
+        "pub fn keep() -> S {\n",
+        "    S::make()\n",
+        "}\n",
+    ));
+    let out = extract(&s, &["crate.S::make", "--to", "helpers"]).unwrap();
+    let line = out.lines().find(|l| l.starts_with("Now pub(crate):")).unwrap_or("");
+    assert_eq!(line, "Now pub(crate): helpers.S::make", "{out}");
+}
+
+#[test]
+fn a_moved_method_stays_private_for_a_child_user() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod a;\npub mod b;\n"),
+        ("src/a.rs", "pub struct S;\n\nimpl S {\n    fn hidden(&self) -> i32 {\n        1\n    }\n}\n"),
+        ("src/b.rs", "pub mod child;\n"),
+        ("src/b/child.rs", "use crate::a::S;\n\npub fn use_it() -> i32 {\n    S.hidden()\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["a.S::hidden", "--to", "b"]).unwrap();
+    let target = written(&root, "src/b.rs");
+    assert!(target.contains("fn hidden(&self)"), "{target}");
+    assert!(!target.contains("pub(crate) fn hidden"), "{target}");
+    assert!(!target.contains("pub fn hidden"), "{target}");
+    let errors: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| d.error).map(|d| d.text).collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn two_redirected_uses_in_one_group_keep_their_order() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod a;\npub mod b;\npub mod callers;\n"),
+        (
+            "src/a.rs",
+            concat!("pub fn one() -> i32 {\n    1\n}\n\n", "pub fn two() -> i32 {\n    2\n}\n\n", "pub fn other() -> i32 {\n    3\n}\n",),
+        ),
+        ("src/b.rs", "pub fn existing() -> i32 {\n    0\n}\n"),
+        ("src/callers.rs", concat!("use crate::a::{two, one, other};\n\n", "pub fn go() -> i32 {\n    one() + two() + other()\n}\n",)),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["a.one", "a.two", "--to", "b"]).unwrap();
+    let ix = s.index().unwrap();
+    let callers = ix.modules.iter().find(|m| m.path == "callers").unwrap();
+    assert!(callers.header.contains("use crate::b::one;\nuse crate::b::two;"), "{}", callers.header);
+}
+
+#[test]
+fn a_redirected_use_follows_the_group_it_left() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod a;\npub mod b;\npub mod callers;\n"),
+        ("src/a.rs", "pub fn other() -> i32 {\n    3\n}\n\npub fn one() -> i32 {\n    1\n}\n"),
+        ("src/b.rs", "pub fn existing() -> i32 {\n    0\n}\n"),
+        (
+            "src/callers.rs",
+            concat!(
+                "use crate::a::{other, one};\nuse std::cmp::Ordering;\n\n",
+                "pub fn go() -> i32 {\n    let _ = Ordering::Less;\n    one() + other()\n}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["a.one", "--to", "b"]).unwrap();
+    let ix = s.index().unwrap();
+    let callers = ix.modules.iter().find(|m| m.path == "callers").unwrap();
+    assert!(callers.header.starts_with("use crate::a::{other};\nuse crate::b::one;\nuse std::cmp::Ordering;"), "{}", callers.header);
 }

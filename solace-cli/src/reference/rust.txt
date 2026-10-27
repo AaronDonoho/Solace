@@ -1,0 +1,66 @@
+Rust projects
+
+Names
+  `<module>.<item>`             a free function: `testing.rust_project`
+  `<module>.<Type>::<method>`   a method: `crate.Store::resolve_module`, named
+                                by the module holding the `impl`, not the type's;
+                                generics may be left out (`Refs::new`) when one
+                                impl matches
+  `<module>.<Type as Trait>`    a trait impl, such as
+                                `crate.<Failure as From<std::io::Error>>`; its
+                                method adds `::<method>`, as in
+                                `crate.<Failure as From<std::io::Error>>::from`.
+                                Spaces inside `<…>` are part of the name; a
+                                command keeps them together, so type it as shown
+  `<module>.tests::<name>`      an item in a test module, inline or a file:
+                                `drafts.tests::rejected_text_survives_and_retries_atomically`
+  `crate`                       the crate root; `crate.Store::resolve_module`
+                                is a method there
+  view <module>                 lists the real names; E1001's "Similar names"
+                                line gives the one to use
+
+Adding
+  submit --new <module>         a function, or a whole `impl`, `trait`, inline
+                                `mod` or `extern` block with its items
+  submit --new <module>.<Type>  a method: `submit --new crate.Store`
+  submit --new <module>.tests   a test module in `<module>_tests.rs`, declared
+                                with `#[cfg(test)]` and `#[path]`; also
+                                `<module>::tests`; its items come from the
+                                submitted text
+  submit --imports <module>     a module's header: imports and module comment
+  submit <module>               a whole module: keep every stored item; ids
+                                stay by name, and only changed items are reformatted
+  submit <container>            an existing block changes item by item; submit
+                                its items instead
+  submit --new <parent>::<new>  a new module: `submit --new store::notes`;
+                                `integration::x` makes `tests/x.rs`
+  *** Add: a::b::c              in a patch, creates the module
+
+Formatting
+  format <module>               rustfmt the whole module, with the project's
+                                rustfmt.toml and edition; its ids stay by name.
+                                A file that differs from the store (E0104) is
+                                replaced by the store's text; its copy is kept
+                                under .solace/outside/
+  submit                        formats only the items its text changes
+
+Searching
+  find <text>                   finds Rust source, e.g. `find resolve_module`
+  grep <text>                   does not search Rust source; it searches other
+                                files and settings, e.g. `grep rust-unit`
+
+Details: `check`, `test` and `build` run cargo and locate errors and failures
+by symbol and libtest name. `delete` removes an item with the items it holds;
+a module this empties loses its file and `mod` line; `delete` refuses a name
+cargo still uses (E5001).
+A new module's name must be an identifier `syn` reads; a keyword or `_` is
+refused. `refs` lists a method name as a possible use; `impact` and
+`inspect --context` count it. A name a local binding, a module's own item, or
+a named import hides is not a use.
+On Linux, cargo runs in a sandbox with no network and only `target/` writable,
+so dependencies are fetched after an import or an approved Cargo.toml change;
+without `cargo`, those commands are refused.
+`submit` and `format` name an item and the lines rustfmt leaves longer than
+`max_width`: rustfmt left them as written, so check their indentation or split
+the long literal.
+

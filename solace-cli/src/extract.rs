@@ -13,6 +13,7 @@ pub(crate) mod ahead;
 mod merge;
 mod rust;
 
+use std::collections::HashMap;
 const MODULE_HINT: &str = "to move a whole module, use move src/x.gleam src/y.gleam";
 
 /// An import a module needs after the move: `import <module> [as <alias>]`,
@@ -631,7 +632,7 @@ pub(crate) fn dependents(top: &Path, source: &Path, projects: &[String]) -> Vec<
 /// Whether the command holds the store of the project in `root`: a dependent
 /// the task covers, opened by `run_options` (D-103).
 fn covered(root: &Path) -> bool {
-    COMMAND_DB.with_borrow(|c| c.iter().any(|(r, _)| lockdown::same_project(r, root)))
+    COMMAND_DB.with_borrow(|c| c.iter().any(|(r, _)| crate::project_paths::same_project(r, root)))
 }
 
 /// The member folders linked to any of `dirs` through path dependencies,
@@ -2226,12 +2227,12 @@ struct MovePlan<'a> {
 fn destination(s: &Store, p: &Args, top: &Path, members: &[String]) -> Result<Option<Dest>, Failure> {
     let Some(d) = &p.to_project else { return Ok(None) };
     // `../x` and `./x` resolve against this project, as `--project` does (D-126 point 3).
-    let d = project_folder(top, Some(&s.root), d, members);
+    let d = crate::project_paths::project_folder(top, Some(&s.root), d, members);
     if !members.iter().any(|m| *m == d) {
         return fail(format!("E6007 {d} is not a project under this Solace root; its projects: {}", members.join(", ")));
     }
     let dir = scope::path(top, &d);
-    if lockdown::same_project(&dir, &s.root) {
+    if crate::project_paths::same_project(&dir, &s.root) {
         Ok(None)
     } else if crate::language::is_rust(&dir) {
         fail(format!("E6013 {d} is a Rust project: `--to-project` is not available for Rust (D-185)"))

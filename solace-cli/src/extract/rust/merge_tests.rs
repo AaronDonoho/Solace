@@ -87,7 +87,7 @@ fn a_test_that_reaches_only_the_retired_function_moves() {
 }
 
 #[test]
-fn a_test_that_reaches_staying_code_is_refused_by_merge() {
+fn a_test_that_reaches_staying_code_stays() {
     if !ready() {
         return;
     }
@@ -97,9 +97,15 @@ fn a_test_that_reaches_staying_code_is_refused_by_merge() {
         "#[cfg(test)]\nmod tests {\n    use super::*;\n\n",
         "    #[test]\n    fn both_work() {\n        assert_eq!(one() + two(), 3);\n    }\n}\n",
     ));
-    let err = fold(&s, &["crate.one", "crate.two"]).unwrap_err().0;
-    assert!(err.starts_with("E5002"), "{err}");
-    assert!(err.contains("both_work") && err.contains("crate.one") && err.contains("crate.two"), "{err}");
+    fold(&s, &["crate.one", "crate.two"]).unwrap();
+    let ix = s.index().unwrap();
+    assert!(s.resolve(&ix, "crate.one").is_ok());
+    assert!(s.resolve(&ix, "crate.two").is_err());
+    assert!(s.resolve(&ix, "crate.tests::both_work").is_ok());
+    let test = text(&s, "crate.tests::both_work");
+    assert!(test.contains("one() + one()"), "{test}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
 }
 
 #[test]
@@ -347,4 +353,92 @@ fn a_merge_ignores_parameter_names_after_generics() {
     let out = fold(&s, &["crate.one", "crate.two"]).unwrap();
     assert!(out.contains("Merged crate.two into crate.one"), "{out}");
     assert_eq!(text(&s, "crate.go"), "pub fn go() -> u32 {\n    one(|x| x + 1)\n}");
+}
+
+#[test]
+fn a_merge_keeps_an_import_a_child_reaches_through_super_glob() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "use std::cmp::Ordering;\n\n",
+                "pub fn one() -> i32 {\n    child::order()\n}\n\n",
+                "pub fn two() -> i32 {\n    let _ = Ordering::Less;\n    2\n}\n\n",
+                "#[path = \"child.rs\"]\nmod child;\n",
+            ),
+        ),
+        ("src/child.rs", "use super::*;\n\npub fn order() -> i32 {\n    let _ = Ordering::Greater;\n    1\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    let out = fold(&s, &["crate.one", "crate.two"]).unwrap();
+    assert!(out.contains("Merged crate.two into crate.one"), "{out}");
+    let ix = s.index().unwrap();
+    let header = &ix.modules.iter().find(|m| m.path == "crate").unwrap().header;
+    assert!(header.contains("use std::cmp::Ordering;"), "{header}");
+    assert!(s.resolve(&ix, "child.order").is_ok());
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_merge_places_a_redirected_use_after_its_group() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod a;\npub mod b;\npub mod callers;\n"),
+        ("src/a.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+        ("src/b.rs", "pub fn two() -> i32 {\n    2\n}\n\npub fn other() -> i32 {\n    3\n}\n"),
+        (
+            "src/callers.rs",
+            concat!(
+                "use crate::b::{other, two};\nuse std::cmp::Ordering;\n\n",
+                "pub fn go() -> i32 {\n    let _ = Ordering::Less;\n    two() + other()\n}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    let out = fold(&s, &["a.one", "b.two"]).unwrap();
+    assert!(out.contains("Merged b.two into a.one"), "{out}");
+    let ix = s.index().unwrap();
+    let callers = ix.modules.iter().find(|m| m.path == "callers").unwrap();
+    assert!(callers.header.contains("use crate::b::{other};\nuse crate::a::one;"), "{}", callers.header);
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_merge_puts_a_redirected_use_where_its_item_was() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod a;\npub mod b;\npub mod callers;\n"),
+        ("src/a.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+        ("src/b.rs", "pub fn two() -> i32 {\n    2\n}\n"),
+        (
+            "src/callers.rs",
+            concat!(
+                "use crate::b::{two};\nuse std::cmp::Ordering;\n\n",
+                "pub fn go() -> i32 {\n    let _ = Ordering::Less;\n    two()\n}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    let out = fold(&s, &["a.one", "b.two"]).unwrap();
+    assert!(out.contains("Merged b.two into a.one"), "{out}");
+    let ix = s.index().unwrap();
+    let callers = ix.modules.iter().find(|m| m.path == "callers").unwrap();
+    assert!(callers.header.starts_with("use crate::a::one;\nuse std::cmp::Ordering;"), "{}", callers.header);
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
 }

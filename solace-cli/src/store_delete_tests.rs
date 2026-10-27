@@ -282,3 +282,32 @@ fn deleting_several_children_including_the_last_keeps_the_brace() {
     assert!(out.starts_with("Deleted crate.tests::b."), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), "#[cfg(test)]\nmod tests {\n    #[test]\n    fn a() {}\n}\n");
 }
+
+/// A trait impl goes as a whole, and a defaulted trait method can go alone.
+#[test]
+fn deleting_a_trait_impl_or_its_method_removes_it() {
+    if !cargo::installed() {
+        return;
+    }
+    let lib = concat!(
+        "pub struct Failure;\n\n",
+        "impl From<std::io::Error> for Failure {\n",
+        "    fn from(_: std::io::Error) -> Self {\n        Self\n    }\n}\n",
+    );
+    let (root, store) = rust_project(lib);
+    let out = store.delete_all(&["crate.<Failure as From<std::io::Error>>"], usize::MAX).unwrap();
+    assert!(out.starts_with("Deleted crate.<Failure as From<std::io::Error>>."), "{out}");
+    let text = text_of(&root, "src/lib.rs");
+    assert!(!text.contains("impl From"), "{text}");
+
+    let lib = concat!(
+        "pub trait Named {\n    fn name(&self) -> u8 {\n        0\n    }\n}\n\n",
+        "pub struct S;\n\n",
+        "impl Named for S {\n    fn name(&self) -> u8 {\n        1\n    }\n}\n",
+    );
+    let (root, store) = rust_project(lib);
+    let out = store.delete_all(&["crate.<S as Named>::name"], usize::MAX).unwrap();
+    assert!(out.starts_with("Deleted crate.<S as Named>::name."), "{out}");
+    let text = text_of(&root, "src/lib.rs");
+    assert_eq!(text.matches("fn name").count(), 1, "{text}");
+}

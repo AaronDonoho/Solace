@@ -352,7 +352,7 @@ fn a_member_fetch_and_a_root_reopen_share_the_fetch_lock() {
     assert_eq!(fetch_lock_dir(&root.join("member")).unwrap(), root.to_path_buf(), "a member uses the root's lock");
     let held = fetch_lock(&root, true).unwrap().expect("the root has a store");
     let path = root.join(".solace/fetch.lock");
-    assert!(crate::try_lock_file(&path).unwrap().is_none(), "the root's reopen holds the member's fetch lock");
+    assert!(fsx::try_lock_file(&path).unwrap().is_none(), "the root's reopen holds the member's fetch lock");
     drop(held);
     assert!(fetch_lock(&root.join("member"), false).unwrap().is_some(), "a member's first import shares the root's lock");
 }
@@ -390,7 +390,7 @@ fn a_fetch_waits_for_the_fetch_lock() {
         (".solace/store.db", ""),
     ]);
     let path = fetch_lock_dir(&root).unwrap().join(".solace/fetch.lock");
-    let held = crate::lock_file(&path).unwrap();
+    let held = fsx::lock_file(&path).unwrap();
     let folder = root.to_path_buf();
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {

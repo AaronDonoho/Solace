@@ -562,3 +562,12 @@ fn a_type_kind_shares_its_name_only_with_a_type() {
     assert_eq!(messages("extern crate foo;\n\nfn foo() {}\n").len(), 1);
     assert_eq!(messages("extern crate foo;\n\nextern crate foo;\n").len(), 1);
 }
+
+/// A test file is named for the target module, including beside a `mod.rs`.
+#[test]
+fn test_files_take_the_targets_module_name() {
+    assert_eq!(test_file("board::reviews", "src/board/reviews.rs"), "src/board/reviews_tests.rs");
+    assert_eq!(test_file("board", "src/board/mod.rs"), "src/board/board_tests.rs");
+    assert_eq!(test_file("crate", "src/lib.rs"), "src/lib_tests.rs");
+    assert_eq!(test_file("crate", "lib.rs"), "lib_tests.rs");
+}

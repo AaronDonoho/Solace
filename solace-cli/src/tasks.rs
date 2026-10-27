@@ -50,7 +50,7 @@ pub fn start(top: &Path) -> Result<(), Failure> {
 /// has a `.solace`, applies the inbox, then runs at most one queued operation.
 fn tick(root: &Path, held: &mut Option<fs::File>, queue: &mpsc::Receiver<Job>) {
     if held.is_none() && root.join(".solace").is_dir() {
-        *held = fs::create_dir_all(board::store_dir(root)).ok().and_then(|_| try_lock_file(&server_lock(root)).ok().flatten());
+        *held = fs::create_dir_all(board::store_dir(root)).ok().and_then(|_| fsx::try_lock_file(&server_lock(root)).ok().flatten());
     }
     drain(root);
     if let Ok(job) = queue.recv_timeout(Duration::from_millis(50)) {
@@ -198,23 +198,6 @@ fn follow_tasks(top: &Path, fid: &str, saving: &Value) -> Result<Option<Value>, 
     // a complete feature's other tasks are all in a final column.
     Ok(Some(f))
 }
-/// Writes `<dir>/<id>.json` as `v`, synced like an inbox message and renamed
-/// into place, so a power loss never leaves an empty file.
-fn replace_file(dir: &Path, id: &str, v: &Value) -> Result<(), Failure> {
-    replace_bytes(dir, &format!("{id}.json"), &serde_json::to_vec_pretty(v).unwrap())
-}
-/// Writes `<dir>/<name>` as `bytes`, the same way.
-fn replace_bytes(dir: &Path, name: &str, bytes: &[u8]) -> Result<(), Failure> {
-    fs::create_dir_all(dir)?;
-    let (part, to) = (dir.join(format!("{name}.tmp")), dir.join(name));
-    let mut f = fs::File::create(&part)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    fs::rename(&part, &to)?;
-    fs::File::open(dir)?.sync_all()?;
-    Ok(())
-}
-
 /// The states of a milestone or a feature (D-87 point 8; `upcoming` was
 /// `planned` before D-128).
 const STATES: [&str; 5] = ["proposed", "upcoming", "active", "complete", "canceled"];
@@ -259,7 +242,7 @@ pub(super) fn record(top: &Path, kind: &str, id: &str) -> Option<Value> {
         return records(top, kind).into_iter().find(|v| v["id"] == id);
     }
     let path = strategy_dir(top, kind).join(format!("{id}.json"));
-    Some(stored(kind, serde_json::from_slice(&fs::read(&path).ok()?).ok()?, &path))
+    Some(stored(kind, jsonx::read_opt(&path)?, &path))
 }
 /// A record as read from `path`. A feature saved before `startTime` has none:
 /// one already active or complete takes its file's time as when it started.
@@ -635,7 +618,7 @@ fn within_limit(text: &str) -> Result<(), Failure> {
 }
 /// Writes the vision and logs it as a root event, inside the caller's operation.
 fn write_vision(top: &Path, text: &str) -> Result<Value, Failure> {
-    replace_bytes(vision_file(top).parent().unwrap(), "vision.md", text.as_bytes())?;
+    fsx::replace_bytes(vision_file(top).parent().unwrap(), "vision.md", text.as_bytes())?;
     let v = vision(top);
     log(top, "", &json!({"vision": v}));
     Ok(v)
@@ -653,7 +636,7 @@ pub fn strategy_runs(top: &Path) -> Vec<Value> {
 }
 /// Writes a strategy run and logs it in full as a root event: no project.
 fn put_run(top: &Path, run: &Value) -> Result<(), Failure> {
-    replace_file(&strategy_dir(top, "runs"), run["id"].as_str().unwrap_or(""), run)?;
+    jsonx::replace_pretty(&strategy_dir(top, "runs"), &format!("{}.json", run["id"].as_str().unwrap_or("")), run)?;
     log(top, "", &json!({"strategyRun": run}));
     Ok(())
 }
@@ -1139,7 +1122,7 @@ fn server_lock(top: &Path) -> PathBuf {
 }
 /// Whether a server is running for the root, so a message is applied soon.
 pub fn serving(top: &Path) -> bool {
-    server_for(top).is_some() || try_lock_file(&server_lock(top)).is_ok_and(|f| f.is_none())
+    server_for(top).is_some() || fsx::try_lock_file(&server_lock(top)).is_ok_and(|f| f.is_none())
 }
 /// Applies message `m` before returning, for a sender that reads the task
 /// next: as an operation where this process serves the root, through the
@@ -1152,7 +1135,7 @@ pub fn deliver(top: &Path, mut m: Value) -> Result<(), Failure> {
     // nothing is settled here: `serve` settles what is left.
     let mut _held = None;
     if server_for(top).is_none() {
-        match try_lock_file(&server_lock(top)) {
+        match fsx::try_lock_file(&server_lock(top)) {
             Ok(None) => {
                 let sent = send(top, m)?;
                 // Waits for as long as the server lives; if it stops, the message stays for the next `serve`.
@@ -1599,7 +1582,7 @@ mod tests {
     fn an_old_started_feature_takes_a_slot_after_the_kept_ones() {
         let root = root();
         let dir = strategy_dir(&root, "features");
-        let put = |v: Value| replace_file(&dir, v["id"].as_str().unwrap(), &v).unwrap();
+        let put = |v: Value| jsonx::replace_pretty(&dir, &format!("{}.json", v["id"].as_str().unwrap()), &v).unwrap();
         put(json!({"id": "old2", "title": "O2", "state": "active", "rank": 1, "startTime": 20}));
         put(json!({"id": "old1", "title": "O1", "state": "complete", "rank": 2, "startTime": 10}));
         put(json!({"id": "kept", "title": "K", "state": "active", "rank": 3, "startTime": 30, "colorSlot": 3}));
@@ -2550,7 +2533,7 @@ mod tests {
     fn serving_follows_the_server_lock() {
         let root = root();
         assert!(!serving(&root));
-        let held = try_lock_file(&server_lock(&root)).unwrap().unwrap();
+        let held = fsx::try_lock_file(&server_lock(&root)).unwrap().unwrap();
         assert!(serving(&root));
         drop(held);
         assert!(!serving(&root));
@@ -2691,7 +2674,7 @@ mod tests {
     fn deliver_hands_the_message_to_a_server_elsewhere() {
         // Taken: the "server" (another holder of the lock) removes the message.
         let root = root();
-        let held = try_lock_file(&server_lock(&root)).unwrap().unwrap();
+        let held = fsx::try_lock_file(&server_lock(&root)).unwrap().unwrap();
         let top = root.to_path_buf();
         let taker = std::thread::spawn(move || fs::remove_file(next_message(&top)).unwrap());
         let to = root.to_path_buf();
@@ -2758,7 +2741,7 @@ mod tests {
     #[test]
     fn applied_waits_while_a_server_holds_the_lock() {
         let root = root();
-        let held = try_lock_file(&server_lock(&root)).unwrap().unwrap();
+        let held = fsx::try_lock_file(&server_lock(&root)).unwrap().unwrap();
         let sent = send(&root, json!({"kind":"note","task":"t1","text":"x"})).unwrap();
         let (gone, start) = (sent.clone(), std::time::Instant::now());
         let remover = std::thread::spawn(move || {
@@ -3220,7 +3203,7 @@ mod tests {
         fs::write(dir.join("t2.json"), b"{}").unwrap();
         let record = json!({"files": [{"path": ".solace/tasks/t2.json", "bytes": null}]});
         fs::write(pending.join("tasks-live.json"), serde_json::to_vec(&record).unwrap()).unwrap();
-        let owner = try_lock_file(&pending.join("tasks-live.lock")).unwrap().unwrap();
+        let owner = fsx::try_lock_file(&pending.join("tasks-live.lock")).unwrap().unwrap();
         recover(&root).unwrap();
         assert!(dir.join("t2.json").exists());
         assert!(pending.join("tasks-live.json").exists());
@@ -3766,7 +3749,7 @@ fn write_task(top: &Path, t: &Value, feature: Option<&Value>) -> Result<(String,
         }
     }
     let path = board::store_dir(top).join(format!("{id}.json"));
-    let was: Option<Value> = fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok());
+    let was: Option<Value> = jsonx::read_opt(&path);
     // A feature follows its tasks (D-128): only a new task, a moved one or a
     // changed link can change it. It is worked out with this save in place, so
     // a save that makes its own feature active again is planned before the
@@ -3856,7 +3839,7 @@ struct WrittenTask {
 /// returns false.
 fn restore_file(dir: &Path, name: &str, before: Option<Vec<u8>>) -> bool {
     let restored = match before {
-        Some(bytes) => replace_bytes(dir, name, &bytes),
+        Some(bytes) => fsx::replace_bytes(dir, name, &bytes),
         None => fs::remove_file(dir.join(name)).map_err(Failure::from),
     };
     if let Err(e) = &restored {
@@ -3966,7 +3949,7 @@ fn batch_replace(p: &Path, v: &Value) -> Result<(), Failure> {
     batch_keep(p)?;
     let dir = p.parent().unwrap_or(Path::new("."));
     let name = p.file_name().and_then(|n| n.to_str()).ok_or_else(|| Failure("invalid task store path".into(), 1))?;
-    replace_bytes(dir, name, &serde_json::to_vec_pretty(v).unwrap())
+    jsonx::replace_pretty(dir, name, v)
 }
 
 /// Removes `p`, journaling its before bytes first.
@@ -4074,14 +4057,15 @@ fn recover_locked(top: &Path) -> Result<(), Failure> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            p.extension().is_some_and(|e| e == "json")
-                && p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("tasks-"))
+            let json = p.extension().is_some_and(|e| e == "json");
+            let tasks = p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("tasks-"));
+            json && tasks
         })
         .map(|p| p.with_extension(""))
         .collect();
     for stem in stems {
         let lock = stem.with_extension("lock");
-        let Some(owner) = try_lock_file(&lock)? else { continue };
+        let Some(owner) = fsx::try_lock_file(&lock)? else { continue };
         let recovered = recover_journal(top, &stem.with_extension("json"));
         drop(owner);
         let _ = fs::remove_file(&lock);
@@ -4098,7 +4082,7 @@ fn restore_record_locked(top: &Path, record: &Value) -> Result<(), Failure> {
         if let Some(a) = file["bytes"].as_array() {
             let dir = p.parent().unwrap_or(top);
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            replace_bytes(dir, name, &crate::json_bytes(a))?;
+            fsx::replace_bytes(dir, name, &jsonx::bytes(a))?;
         } else if p.exists() {
             fs::remove_file(&p)?;
             fs::File::open(p.parent().unwrap_or(top))?.sync_all()?;
@@ -4112,7 +4096,8 @@ fn claim_journal(top: &Path) -> Result<(PathBuf, fs::File), Failure> {
     let pending = top.join(".solace/pending");
     fs::create_dir_all(&pending)?;
     let journal = pending.join(format!("tasks-{}.json", crate::unique_id()));
-    let owner = try_lock_file(&journal.with_extension("lock"))?.ok_or_else(|| Failure("the task journal is already in use".into(), 1))?;
+    let owner =
+        fsx::try_lock_file(&journal.with_extension("lock"))?.ok_or_else(|| Failure("the task journal is already in use".into(), 1))?;
     let prepared = (|| -> Result<(), Failure> {
         fs::File::create(&journal)?.sync_all()?;
         fs::File::open(&pending)?.sync_all()?;

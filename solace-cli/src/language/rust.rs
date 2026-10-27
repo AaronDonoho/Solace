@@ -933,3 +933,12 @@ pub(crate) fn namespaces(kind: &str, value_constructor: bool) -> u8 {
     bits
 }
 
+/// The test file a module's tests take, from the project root (D-206): a crate
+/// root is named for its file, and any other module for its own name, so
+/// `board::reviews` beside `src/board/reviews.rs` gives `src/board/reviews_tests.rs`.
+pub fn test_file(target: &str, target_file: &str) -> String {
+    let (dir, name) = target_file.rsplit_once('/').map_or(("", target_file), |(dir, name)| (dir, name));
+    let stem = if target == "crate" { name.strip_suffix(".rs").unwrap_or(name) } else { target.rsplit("::").next().unwrap_or(target) };
+    if dir.is_empty() { format!("{stem}_tests.rs") } else { format!("{dir}/{stem}_tests.rs") }
+}
+

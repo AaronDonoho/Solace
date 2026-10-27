@@ -1,0 +1,100 @@
+Files: every file is in one tier, by the first rule that matches, and the tier
+is what says what you may do with the file. `files` prints each file's tier. A
+file you can't change with `write` isn't a file you can't change: graph files
+change with `submit`, protected ones with `write` and the human's approval.
+  graph     a Gleam project's src/ and test/ *.gleam, and a Rust project's
+            src/ and tests/ *.rs: the symbol-held source, read by symbol.
+            `read`, `write`, `move`, `remove` and `view <file>` are refused
+            (E6001); change it with `submit` and `delete`. `files` lists its
+            paths as `[graph]`, without contents
+  watched   every other text file within watch_limit, gleam.toml (Gleam's
+            manifest) included (new dependencies are fetched by check, test and
+            build), and Cargo.toml for a Rust project (its dependency, feature,
+            workspace and build keys are protected, above): `read`, `write`,
+            `remove` and `move` work, except that gleam.toml is never moved or
+            removed; searched by `grep`; a task's changes to them are recorded,
+            and undone if the task is canceled
+  protected solace.toml, AGENTS.md (the project's instructions for agents, shown
+            at session start), every .gitignore, the skills folder (Skills,
+            below), and a Rust project's build.rs, .cargo/config[.toml],
+            rust-toolchain[.toml], Cargo.toml's dependency, feature and [workspace] keys,
+            and every crate below its root (Cargo.toml, build.rs): the human
+            owns them. Cargo.toml stays watched, but a change to its dependency
+            tables, [features], [target.*] dependencies, [patch], [replace], package.build,
+            package.links, lib.proc-macro, or [workspace] members,
+            default-members, exclude or dependencies waits for the approval too.
+            In a work run, `write` one alone, with the exact new text and the why
+            in `reason`; it waits for the human's approval (no `task note` beside
+            it; don't ask in prose). Skills are refused outright: agents read
+            them and change none.
+  unwatched .git, the target's build and dependency output (Gleam: build,
+            manifest.toml; Rust: target), .gitignore'd files, paths in the
+            `unwatched` list, node_modules, binary files and files over
+            watch_limit: `read`, `write`, `remove` and `move` work; listed by
+            `files` (folders as one line with a count), not searched by `grep`
+  internal  .solace/ and projects nested in this one: no reading, writing or
+            searching; work in them through their own commands
+
+  files [dir]...                tree with each file's tier and line count (bytes
+                                if binary or over watch_limit); no path: the
+                                project
+  read <path>... [--lines 3,7,10..12 | --tail n]
+                                each path in order, headed by its path when
+                                several; paths past the size limit are named
+                                in a `Next: read` line. --lines takes lines and
+                                ranges, shown in file order; a --lines or --tail
+                                range takes one path. A path that doesn't exist
+                                is refused and nothing is read: `read a.rs
+                                5-9` is `read a.rs --lines 5..9`, and symbols
+                                are found with `grep` or `find`, not `read`
+  write <path> [--all]          one file: whole text, or with `old`, one
+                                replacement, `old` -> `text`, for a single
+                                edit (more edits: one patch, below); a
+                                settings file takes `reason` too.
+                                Patch text is refused here: send it with
+                                `write` and no path. A whole text that would
+                                leave under half of a file of 200+ lines is
+                                refused: change part of it, or `remove` the
+                                file first, then `write` it new. The reply
+                                gives the file's lines before and after
+  write                         several edits at once, in one file or more:
+                                `text` is a patch in submit's format, with a
+                                section per file and an `@@` hunk per edit:
+                                  *** Begin Patch
+                                  *** Update File: docs/guide.md
+                                  @@ ## Usage
+                                  -old line
+                                  +new line
+                                  *** Add File: docs/new.md
+                                  +every line of the new file
+                                  *** Delete File: docs/old.md
+                                  *** End Patch
+                                Update hunks need no read first and match as
+                                written apart from trailing space (leading
+                                space counts); added lines with no `@@` go at
+                                the end.
+                                Whole or nothing: any refused section (graph or
+                                protected file, unmatched hunk, failed
+                                validator) writes none, and each is named.
+                                The patch is kept as a draft: fix its bad line
+                                with `write --draft <id> --replace` (`old` and
+                                `text`, lines of the patch with their prefixes);
+                                a fault in the whole patch says to resend it. A
+                                failed retry keeps the replacement: the next
+                                `old` must match the draft as it is now.
+                                A patch line is a whole line; for part of one,
+                                `write <path>` with `old`. A protected file is
+                                written alone, with the exact new text.
+  remove <path>...              files, whole or nothing: any refused path
+                                removes none and is named
+  move <from> <to> [--to-project <folder>]
+                                move a file or folder, whole or not at all, never
+                                onto anything that exists; other graph,
+                                protected and internal files stay put.
+                                --to-project: another project of this task. A
+                                repeated move changes nothing. A Rust module's
+                                file moves within its parent's folder
+                                (D-209): the module keeps its name and symbol
+                                IDs, and its parent's `mod` line gets the
+                                `#[path]` the new file needs
+

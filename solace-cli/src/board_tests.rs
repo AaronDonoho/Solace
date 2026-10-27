@@ -527,7 +527,7 @@ fn review_delta_keeps_module_headers_budget_and_completed_baseline() {
     checkpoint["changed_during_review"] = json!(false);
     let path = review_path(&s.root, &tid, "review").unwrap();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    jsonx::write(&path, &checkpoint).unwrap();
     // A later interrupted run must not displace the completed review.
     t["runs"].as_array_mut().unwrap().push(json!({"id":"interrupted","kind":"review","state":"ended","outcome":"interrupted"}));
     tasks::put(&s, &t).unwrap();
@@ -596,7 +596,7 @@ fn a_review_brief_holds_the_task_diff() {
     checkpoint["changed_during_review"] = json!(false);
     let path = review_path(&s.root, &tid, "review").unwrap();
     fs::create_dir_all(path.parent().unwrap()).unwrap();
-    write_atomic(&path, serde_json::to_vec(&checkpoint).unwrap()).unwrap();
+    jsonx::write(&path, &checkpoint).unwrap();
     tasks::put(&s, &t).unwrap();
     fs::write(s.root.join("later.txt"), "later").unwrap();
     record_listed(&s, &tid, &json!({"file:later.txt":null}), &json!({"file:later.txt":b"later".to_vec()}));
@@ -1327,7 +1327,7 @@ fn agent_guard_holds_a_run_that_waits() {
     // A `task` command is not held.
     assert!(guard(&["task", "note", "x"]).recv_timeout(Duration::from_secs(2)).unwrap().is_ok());
     // A server runs: the command waits until the run is answered.
-    let _server = try_lock_file(&store_dir(&s.root).join("server.lock")).unwrap().unwrap();
+    let _server = fsx::try_lock_file(&store_dir(&s.root).join("server.lock")).unwrap().unwrap();
     let view = guard(&["view", "app"]);
     assert!(view.recv_timeout(Duration::from_millis(300)).is_err());
     t["runs"][0]["state"] = json!("running");

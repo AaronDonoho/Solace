@@ -3,6 +3,7 @@
 //! remember` reads them back after a compaction.
 
 use super::*;
+use crate::cli::verb_words;
 
 thread_local! {
     /// The symbols this MCP call printed in full, in a task run; `None`

@@ -1,0 +1,134 @@
+Changing (the new code is in `text`)
+  submit                        several symbols, checked together: a block each,
+                                headed `// ── <module>.<name> ──` as view prints
+                                them; a new name adds the symbol, and its module
+                                if needed
+  submit (a patch)              edit existing code: `*** Begin Patch`, then per
+                                symbol or module `*** Update: <name>` with `@@`
+                                hunks (` ` context, `-` removed, `+` added),
+                                applied in order like `apply_patch`; `*** Add:
+                                <module>.<name>` adds a symbol, an item with
+                                its `impl` block, or a new `impl`/`trait`
+                                block; `*** Add:
+                                <module>.<Type>::<fn>` adds a method to the
+                                type added earlier in the patch; `*** Add:
+                                <module>` a new module (module comment,
+                                imports, code); every line of an Add, empty
+                                ones too, starts with `+`.
+                                A new symbol after unchanged context is an
+                                add; `submit <stored name>` with the new text
+                                renames it and keeps its id; change its callers
+                                in the same submit. A module changes with
+                                `*** Update: <module>` (no `module:` prefix).
+                                Checked together; a hunk that doesn't match
+                                changes nothing (E0108). A code hunk also
+                                matches through indentation when it fits in
+                                exactly one place: context and `-` lines keep
+                                the target's text, `+` lines take its depth,
+                                and the reply says so. A patch line is a whole
+                                line, prefixes included: for part of one, use
+                                --replace with `old` and `text` as patch
+                                lines, prefixes included.
+                                Other files change with `write`, not here
+  submit <name>                 replace one symbol (may rename it)
+  submit <name> --replace [--all]
+                                one exact change: `old` (must occur once, or
+                                every occurrence with --all) becomes `text`;
+                                the whole symbol is checked
+  submit --new <module>         add symbols, or create the module whole (module
+                                comment, imports, symbols; under test/ if the
+                                name ends in `_test`)
+  submit <module>               replace a whole module; it must keep every symbol
+  submit --imports <module>     replace a module's imports and module comment
+  delete <name>...              removes each named symbol, in the order named; a
+                                symbol used outside the list stops the whole
+                                list, so nothing is deleted
+  extract <name>... --to <module> [--to-project <folder>]
+                                move symbols to another module of the project,
+                                keeping identity and revision. Private helpers
+                                only they use, tests that reach only them, and
+                                every reference and import come along; a test
+                                that also reaches staying code stays, with its
+                                references rewritten. The
+                                result is type-checked or nothing changes.
+                                --to-project: a module of another project of
+                                the task; this project gains a dependency on it.
+                                `--to solace_task.gleam` is read as solace_task;
+                                tests go only to a *_test module. Extract a
+                                cohesive set in one call; the refusal (E5002,
+                                a module cycle) lists everything to add:
+                                  extract board.Task --to solace_task
+                                  E5002 moved code uses 1 symbol that stays: lane_order (by Task.sort)
+                                  extract board.Task board.lane_order --to solace_task
+                                JavaScript FFI paths (`@external(javascript,
+                                "./x.mjs", …)`) follow the module to its new
+                                folder; with --to-project the .mjs goes along
+                                (E5007 names what keeps it). FFI paths are not
+                                type-checked: run the suite the reply names.
+                                Projects that depend on this one and use moved
+                                public symbols are rewritten with --to-project
+                                when the task covers them; others are refused
+                                (E5003).
+                                Same-project Rust (D-185, D-205): moves named
+                                items with their identity. An inherent impl
+                                is `<Type>`; its methods are `Type::method`.
+                                Methods move into the type's impl in the
+                                target, and a trait impl moves only whole.
+                                --to-project is refused.
+  merge <keep> <drop> [--to-project <folder>]
+                                fold a duplicate into its copy: <keep> keeps its
+                                identity, <drop> is retired (history:
+                                merged-into), and every use of it, tests and
+                                the task's dependent projects too, goes to
+                                <keep>; the result is type-checked or nothing
+                                changes. Same kind; a type's constructors match
+                                by name, arity and labels. --to-project: <keep>
+                                is in that project, which every project using
+                                <drop> must depend on. When extract finds the
+                                name taken, it says so:
+                                  extract board.Task --to solace_task --to-project components
+                                  E1004 solace_task.Task already exists in solace_task (components); … use merge solace_task.Task board.Task --to-project components
+                                  merge solace_task.Task board.Task --to-project components
+                                Private helpers only <drop> used are named as
+                                now unused, not deleted.
+                                Same-project Rust (D-207): folds top-level
+                                functions, constants and statics with the same
+                                parameters, return type and generics (E5008);
+                                --to-project is refused. A test that reaches
+                                only <drop> moves with it; one that also reaches
+                                staying code stays, with its references pointing
+                                to <keep>.
+  drafts [drop <id>]            the kept drafts: rejected submits and writes,
+                                each with its id; fix and retry with `--draft`;
+                                `drafts drop <id>` discards one this task owns,
+                                in this project or the one `--project` names
+Every submit is type-checked. Missing imports are added: a qualifier takes the
+one project module, dependency module (`sqlight`, `gleam/json`) or standard
+library module whose last path segment it is, or the module another module
+already imports as that qualifier. Several matches add nothing and are listed;
+an unknown module names `submit --imports <module>` with the header to use.
+Imports in `text` are merged. If the submitted code has errors, nothing is
+saved. If it breaks other symbols (e.g. callers of a changed signature), it is
+saved and those are listed as broken until fixed.
+Rejected text is kept as a draft; the error gives its id. Fix it rather than
+resending it: `submit --draft <id> --replace` (`old` and `text`; in a patch,
+both are lines of the patch, prefixes included) patches and
+retries it, `submit --draft <id>` retries it as is, `view --draft <id>` reads it.
+A failed retry keeps the replacement: the next `old` must match the draft as
+it is now (`view --draft <id>`).
+A draft left behind blocks `task done` in a work run, which lists each draft
+with the `view --draft <id>`, retry and `drafts drop <id>` calls for it; add
+`--project <folder>` for a draft in another of the task's projects. Dropping a
+stale draft is the way past it.
+A draft is stale once a symbol it replaces, or its module's
+imports, changed; its retry is refused (E0107): read the current source and
+submit again. A block equal to the stored symbol is reported unchanged. A patch
+that can't be applied (E0108) is kept as written. When the error names the
+patch line at fault, fix that line with `--replace` instead of resending it;
+when the fault is in the whole patch (an Add with no `+` line, no section, an
+unknown header, a file section sent to `submit`), send the corrected patch
+again, whole. A protected file and a Cargo.toml setting change only as a whole
+text: `write <path>` alone, with the exact new text and the why in `reason`;
+there is no `--replace` for them. A patch that applies but is rejected after is
+kept as the blocks it changed.
+

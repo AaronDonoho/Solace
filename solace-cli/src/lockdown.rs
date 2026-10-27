@@ -448,7 +448,7 @@ fn session_file(root: &Path) -> PathBuf {
     root.join(".solace").join(format!("reads-{}.json", sha256(session.as_bytes())))
 }
 fn reads(root: &Path) -> Value {
-    fs::read(session_file(root)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}))
+    jsonx::read_opt(&session_file(root)).unwrap_or(json!({}))
 }
 fn remember(root: &Path, name: &str, bytes: &[u8]) -> Result<(), Failure> {
     let mut r = reads(root);
@@ -500,7 +500,7 @@ pub fn recover(root: &Path, store: &Store, _held: &[fs::File]) -> Result<(), Fai
         } else {
             let target = path(root, record["path"].as_str().ok_or_else(|| Failure("invalid pending record".into(), 1))?)?;
             if let Some(a) = record["bytes"].as_array() {
-                fs::write(target, json_bytes(a))?;
+                fs::write(target, jsonx::bytes(a))?;
             } else if target.exists() {
                 fs::remove_file(target)?;
             }
@@ -515,7 +515,7 @@ pub fn recover(root: &Path, store: &Store, _held: &[fs::File]) -> Result<(), Fai
 pub fn mark(root: &Path, tid: &str, rid: &str) -> Result<(), Failure> {
     let dir = root.join(".solace/pending");
     fs::create_dir_all(&dir)?;
-    write_atomic(&dir.join(format!("command-{rid}.json")), json!({"task":tid,"run":rid}).to_string().into_bytes())?;
+    fsx::write_atomic(&dir.join(format!("command-{rid}.json")), json!({"task":tid,"run":rid}).to_string().into_bytes())?;
     Ok(())
 }
 /// Whether the project has an undo record or command marker for task `tid`
@@ -526,7 +526,7 @@ pub fn pending_for(root: &Path, tid: &str) -> bool {
     dir.filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
-        .any(|p| fs::read(&p).is_ok_and(|b| serde_json::from_slice::<Value>(&b).is_ok_and(|v| v["task"].as_str() == Some(tid))))
+        .any(|p| jsonx::read_opt(&p).is_some_and(|v| v["task"].as_str() == Some(tid)))
 }
 /// Drops the undo records a committed command wrote for run `rid`.
 pub fn drop_records(root: &Path, rid: &str) -> Result<(), Failure> {
@@ -910,7 +910,7 @@ pub fn patch_snapshot(root: &Path, patch: Option<&str>) -> serde_json::Map<Strin
 }
 /// Whether `journal` already holds an undo record from run `rid`.
 fn same_run(journal: &Path, rid: &serde_json::Value) -> bool {
-    fs::read(journal).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).is_some_and(|r| &r["run"] == rid)
+    jsonx::read_opt(journal).is_some_and(|r| &r["run"] == rid)
 }
 fn write(root: &Path, v: &toml::Value, name: &str, new: &str, replace: bool, all: bool, old: Option<&str>) -> Out {
     // D-109: patch text is for `write` with no path; here it would become the file.
@@ -1025,7 +1025,7 @@ fn journal(root: &Path, name: &str, before: &Option<Vec<u8>>) -> Result<(PathBuf
     };
     let wrote = record["task"].is_null() || !same_run(&journal, &record["run"]);
     if wrote {
-        write_atomic(&journal, record.to_string())?;
+        fsx::write_atomic(&journal, record.to_string())?;
     }
     Ok((journal, wrote))
 }
@@ -1464,16 +1464,11 @@ pub fn move_args<'a>(root: &Path, a: &[&'a str]) -> Result<(&'a str, &'a str, Pa
     let Some(dir) = project else { return Ok((from, to, root.to_path_buf())) };
     let top = scope::top(root);
     let members = workspace::members(&top)?;
-    let dir = project_folder(&top, Some(root), dir, &members);
+    let dir = crate::project_paths::project_folder(&top, Some(root), dir, &members);
     if !members.iter().any(|m| *m == dir) {
         return error("E6007", dir.as_str(), "not a project under this Solace root");
     }
     Ok((from, to, scope::path(&top, &dir)))
-}
-
-/// Whether two folders are the same project.
-pub fn same_project(a: &Path, b: &Path) -> bool {
-    a == b || fs::canonicalize(a).ok().is_some_and(|x| fs::canonicalize(b).ok() == Some(x))
 }
 
 /// `rel` below `name`; `name` itself when `rel` is empty.
@@ -1543,7 +1538,7 @@ fn undo_record(root: &Path, name: &str, bytes: Option<Vec<u8>>) -> Result<Option
     if bytes.is_none() {
         r["kept"] = board::kept_on_disk(root, name)["kept"].clone();
     }
-    write_atomic(&record, r.to_string())?;
+    fsx::write_atomic(&record, r.to_string())?;
     Ok(Some(record))
 }
 
@@ -1599,11 +1594,11 @@ pub fn move_files(src: &Path, sv: &toml::Value, from: &str, dst: &Path, dv: &tom
     let (p, q) = (reachable(src, &from)?, reachable(dst, &to)?);
     not_here(src, &from)?;
     not_here(dst, &to)?;
-    let same = same_project(src, dst);
+    let same = crate::project_paths::same_project(src, dst);
     let shown = |root: &Path, name: &str| if same { name.to_string() } else { format!("{}: {name}", scope::dir(&scope::top(root), root)) };
     let (shown_from, shown_to) = (shown(src, &from), shown(dst, &to));
     let intent = json!({"to": q.to_string_lossy()});
-    let mut moves: Value = fs::read(moves_file(src)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
+    let mut moves: Value = jsonx::read_opt(&moves_file(src)).unwrap_or(json!({}));
     if fs::symlink_metadata(&p).is_err() {
         if fs::symlink_metadata(&q).is_ok() && moves[from.as_str()] == intent {
             return Ok(format!("Already moved {shown_from} to {shown_to}; nothing changed\n"));
@@ -1631,7 +1626,7 @@ pub fn move_files(src: &Path, sv: &toml::Value, from: &str, dst: &Path, dv: &tom
         records.extend(undo_record(dst, &joined(&to, f), None)?);
     }
     moves[from.as_str()] = intent;
-    write_atomic(&moves_file(src), moves.to_string())?;
+    fsx::write_atomic(&moves_file(src), moves.to_string())?;
     // Folders made for the destination go again if the rename fails.
     let mut made = vec![];
     let mut parent = q.parent().unwrap().to_path_buf();
@@ -1647,7 +1642,7 @@ pub fn move_files(src: &Path, sv: &toml::Value, from: &str, dst: &Path, dv: &tom
             fs::remove_file(r)?;
         }
         moves.as_object_mut().unwrap().remove(&from);
-        write_atomic(&moves_file(src), moves.to_string())?;
+        fsx::write_atomic(&moves_file(src), moves.to_string())?;
         const EXDEV: i32 = 18;
         return match e.kind() {
             std::io::ErrorKind::AlreadyExists => {
@@ -1767,7 +1762,12 @@ pub fn dispatch(
     if a[0] == "move" {
         return Some((|| {
             let (from, to, dest) = move_args(root, a)?;
-            let dv = if same_project(root, &dest) { v.clone() } else { settings(&dest)? };
+            if crate::project_paths::same_project(root, &dest)
+                && let Some(out) = crate::rust_move::move_module_file(store, from, to)
+            {
+                return out;
+            }
+            let dv = if crate::project_paths::same_project(root, &dest) { v.clone() } else { settings(&dest)? };
             move_files(root, v, from, &dest, &dv, to)
         })());
     }
@@ -1964,7 +1964,7 @@ pub fn dispatch(
                     let record = root.join(".solace/pending").join(format!("{}.json", sha256(name.as_bytes())));
                     // An earlier change to this file in the command keeps its record: it holds the original bytes.
                     if !same_run(&record, &json!(rid)) {
-                        write_atomic(&record, json!({"task":tid,"run":rid,"path":name,"bytes":fs::read(&p).ok()}).to_string())?;
+                        fsx::write_atomic(&record, json!({"task":tid,"run":rid,"path":name,"bytes":fs::read(&p).ok()}).to_string())?;
                     }
                 }
                 fs::remove_file(p)?;
@@ -2042,7 +2042,7 @@ pub fn dispatch(
                     .map(|name| json!({"path": name, "bytes": fs::read(root.join(&name)).ok()}))
                     .collect();
                 let folders: Vec<String> = board::existing_folders(root).into_iter().collect();
-                write_atomic(
+                fsx::write_atomic(
                     &root.join(".solace/pending").join(format!("run-{rid}.json")),
                     json!({"task":tid,"run":rid,"files":files,"folders":folders}).to_string(),
                 )?;
@@ -4251,6 +4251,71 @@ running your program.
             let e = super::plain::<()>(&s, None, command, Some(name)).unwrap_err().0;
             assert!(e.contains("Module `protocol` is in project `protocol`; add `--project protocol`"), "{command} {name}: {e}");
         }
+    }
+
+    #[test]
+    fn a_reference_section_is_validated_on_its_own() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let v = settings(root).unwrap();
+        let clean = fs::read_to_string(root.join("src/reference/project.txt")).unwrap();
+        let dir = reference_scratch();
+        let p = dir.join("src/reference/project.txt");
+        fs::write(&p, &clean).unwrap();
+        validate(&dir, &v, "src/reference/project.txt", &p, &clean).unwrap();
+        let bad = clean.replacen("\n  build ", "\n   build ", 1);
+        fs::write(&p, &bad).unwrap();
+        let e = validate(&dir, &v, "src/reference/project.txt", &p, &bad).unwrap_err().0;
+        assert!(e.contains("E6003") && e.contains("line 2"), "{e}");
+    }
+
+    fn reference_scratch() -> Scratch {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let dir = Scratch::new();
+        fs::create_dir_all(dir.join("tests")).unwrap();
+        fs::copy(root.join("tests/reference_layout.py"), dir.join("tests/reference_layout.py")).unwrap();
+        fs::create_dir_all(dir.join("src/reference")).unwrap();
+        fs::copy(root.join("src/reference.rs"), dir.join("src/reference.rs")).unwrap();
+        for entry in fs::read_dir(root.join("src/reference")).unwrap().flatten().filter(|entry| entry.path().is_file()) {
+            fs::copy(entry.path(), dir.join("src/reference").join(entry.file_name())).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn a_reference_workflow_write_checks_its_summary_against_the_sections() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let v = settings(root).unwrap();
+        let dir = reference_scratch();
+        let workflow = dir.join("src/reference/workflow.txt");
+        let clean = fs::read_to_string(&workflow).unwrap();
+        validate(&dir, &v, "src/reference/workflow.txt", &workflow, &clean).unwrap();
+        let bad = clean.replacen("  work add | list | done", "  frobnicate  x\n  work add | list | done", 1);
+        fs::write(&workflow, &bad).unwrap();
+        let e = validate(&dir, &v, "src/reference/workflow.txt", &workflow, &bad).unwrap_err().0;
+        assert!(e.contains("E6003") && e.contains("no entry in \"Commands in full\" for `frobnicate`"), "{e}");
+    }
+
+    #[test]
+    fn a_reference_section_write_checks_the_summary_against_the_joined_sections() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let v = settings(root).unwrap();
+        let dir = reference_scratch();
+        let old = dir.join("src/reference/workflow.txt");
+        let renamed = dir.join("src/reference/start.txt");
+        fs::rename(&old, &renamed).unwrap();
+        let source = dir.join("src/reference.rs");
+        let declared = fs::read_to_string(&source).unwrap();
+        let updated = declared.replace("reference/workflow.txt", "reference/start.txt");
+        assert_ne!(declared, updated, "the replacement did not match");
+        fs::write(&source, updated).unwrap();
+        let reading = dir.join("src/reference/reading.txt");
+        let clean = fs::read_to_string(&reading).unwrap();
+        validate(&dir, &v, "src/reference/reading.txt", &reading, &clean).unwrap();
+        let bad = clean.replacen("\n  impact [name...]", "\n  impacX [name...]", 1);
+        assert_ne!(bad, clean, "the replacement did not match");
+        fs::write(&reading, &bad).unwrap();
+        let e = validate(&dir, &v, "src/reference/reading.txt", &reading, &bad).unwrap_err().0;
+        assert!(e.contains("E6003") && e.contains("no entry in \"Commands in full\" for `impact`"), "{e}");
     }
 }
 

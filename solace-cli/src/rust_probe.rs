@@ -9,7 +9,7 @@ use super::*;
 pub(crate) fn run(s: &Store, text: &str, module: Option<&str>) -> Out {
     let base = s.root.join("target").join("solace-probe");
     fs::create_dir_all(&base)?;
-    let _lock = crate::lock_file(&base.join("lock"))?;
+    let _lock = fsx::lock_file(&base.join("lock"))?;
     at(s, text, module, &base.join("crate"))
 }
 

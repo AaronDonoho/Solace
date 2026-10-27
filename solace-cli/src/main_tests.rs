@@ -164,7 +164,7 @@ fn reference_layout_refuses_a_line_after_prose_and_a_reference_without_the_secti
         reference_layout(&text),
         (false, "line 7: starts at column 19; after a blank line, a line starts at column 1 or 3\n".into())
     );
-    assert_eq!(reference_layout("Workflow only\n"), (false, "no \"Commands in full\" line\n".into()));
+    assert_eq!(reference_layout("Workflow only\n"), (true, String::new()));
     assert_eq!(
         reference_layout("Commands in full\n  grep <text>\n"),
         (false, "no command row has its description on the same line\n".into())
@@ -387,8 +387,17 @@ fn agent_reference_leaves_out_host_and_task_commands() {
     // Craft rules: the smallest complete change, and what `test` can't reach.
     assert!(r.contains("Make the smallest complete change") && r.contains("Fix a reported bug once, at its cause"));
     assert!(r.contains("`test` doesn't reach docs, config, JavaScript or golden files"));
-    // D-119 point 5: plain-file projects batch too, every edit in one patch.
-    assert!(r.contains("then `run <name>`") && r.contains("go in one patch") && r.contains("a patch of many edits"));
+    // D-119 point 5: plain-file projects batch too, in their own patch.
+    for part in [
+        "code changes",
+        "(symbols and modules) go in one `submit` patch, then `test`",
+        "other files go in one `write` patch (no path), then `run <name>`",
+        "a change to both is two calls",
+        "a patch of many edits",
+    ] {
+        assert!(r.contains(part), "workflow step 2: missing {part}");
+    }
+    assert!(!r.contains("*** Update File: <path>"), "code and file headers in one patch: {r}");
     // D-123: where a line runs, and that options belong to one command.
     assert!(
         r.contains("Each line runs in one project") && r.contains("`--lines` is `read`'s") && r.contains("`help <command>`\nlists them")
@@ -1272,6 +1281,7 @@ fn rust_reference_lists_the_names_and_what_is_missing() {
         "submit --new <module>",
         "submit --new <module>.<Type>",
         "submit --new <module>.tests",
+        "<module>_tests.rs",
         "submit --imports <module>",
         "submit <module>",
         "submit <container>",
@@ -1313,6 +1323,7 @@ fn rust_reference_lists_the_names_and_what_is_missing() {
         "Not available for Rust: `merge`.",
         "Rust probe is deferred",
         "Rust merge is deferred",
+        "a test in an inline `mod tests`",
     ] {
         assert!(!REFERENCE.contains(wrong), "{wrong} still in:\n{REFERENCE}");
     }
@@ -2206,4 +2217,85 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
             .and_then(|_| store.db.execute_batch("ROLLBACK"))
             .unwrap_or_else(|e| panic!("{} left an open transaction: {e}", project.display()));
     }
+}
+
+#[test]
+fn a_trait_impl_name_is_typed_through_a_batch_line() {
+    let (root, _) = testing::rust_project(concat!(
+        "pub struct Failure;\n\n",
+        "impl From<std::io::Error> for Failure {\n",
+        "    fn from(_: std::io::Error) -> Self {\n        Self\n    }\n}\n",
+    ));
+    let (out, error) = crate::with_root(&root, || {
+        let mut run = |w: &[String], budget| run_options(w, &mut || Ok(String::new()), None, budget, &[]);
+        batch(
+            &[
+                "view crate.<Failure as From<std::io::Error>>",
+                "inspect crate.<Failure as From<std::io::Error>>::from",
+                "refs crate.<Failure as From<std::io::Error>>",
+                "refs crate.<Failure as From<std::io::Error>>::from",
+            ],
+            20_000,
+            &mut run,
+        )
+    });
+    assert!(!error, "{out}");
+    assert!(out.contains("// ── crate.<Failure as From<std::io::Error>> (impl) ──"), "{out}");
+    assert!(out.contains("// ── crate.<Failure as From<std::io::Error>>::from (fn) ──"), "{out}");
+    assert!(out.contains("==== solace refs crate.<Failure as From<std::io::Error>> ===="), "{out}");
+    assert!(out.contains("==== solace refs crate.<Failure as From<std::io::Error>>::from ===="), "{out}");
+}
+
+#[test]
+fn reference_hash() {
+    assert_eq!(sha256(REFERENCE.as_bytes()), "f06adf46bec9287d66c9530261b64fb7fc2c340adc53553f3b42c12a68a99e51");
+}
+
+#[test]
+fn reference_section_layout_is_clean() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reference");
+    let mut files: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "txt"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no section files");
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/reference.rs");
+    let source = fs::read_to_string(source_path).unwrap();
+    let (_, reference) = source.split_once("const REFERENCE: &str = concat!(").expect("REFERENCE is not a concat");
+    let (reference, _) = reference.split_once(");").expect("REFERENCE has no end");
+    let mut listed: Vec<_> = reference
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .filter_map(|line| line.trim().strip_prefix("include_str!(\"reference/")?.strip_suffix("\"),"))
+        .collect();
+    listed.sort_unstable();
+    let mut present: Vec<_> = files.iter().map(|file| file.file_name().unwrap().to_str().unwrap()).collect();
+    present.sort_unstable();
+    assert_eq!(listed, present, "section files and REFERENCE differ");
+    for file in &files {
+        let section = fs::read_to_string(file).unwrap();
+        let (clean, out) = reference_layout(&section);
+        assert!(clean, "{}: {out}", file.display());
+    }
+    let misaligned = fs::read_to_string(dir.join("project.txt")).unwrap().replacen("\n  build ", "\n   build ", 1);
+    assert!(!reference_layout(&misaligned).0, "a misaligned section file passes");
+}
+
+#[test]
+fn reference_layout_checks_a_section_file_without_the_heading() {
+    let section = |spaces: usize| format!("Reading\n  read <path>    a file\n{}or more\n", " ".repeat(spaces));
+    assert_eq!(reference_layout(&section(17)), (true, String::new()));
+    assert_eq!(reference_layout(&section(18)), (false, "line 3: starts at column 19; the descriptions start at column 18\n".into()));
+}
+
+#[test]
+fn reference_layout_checks_a_section_file_whose_rows_wrap() {
+    let section = |second: usize| {
+        format!("Host commands\n  create <name>\n{}create a project\n  serve [--port N]\n{}serve it\n", " ".repeat(30), " ".repeat(second))
+    };
+    assert_eq!(reference_layout(&section(30)), (true, String::new()));
+    assert_eq!(reference_layout(&section(31)), (false, "line 5: starts at column 32; the descriptions start at column 31\n".into()));
 }

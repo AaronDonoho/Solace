@@ -1,0 +1,42 @@
+Task runs (the note, summary or question in `text`). Reviews, investigations
+and discussions are read-only: submit, delete, extract, merge, write, remove,
+move, drafts drop and format are refused, and so is run, except for commands
+marked `allowed_in_reviews = true`.
+  session remember              your task, its notes, what this run read or
+                                changed since its last change, and its steps;
+                                after a compaction
+  task diff [name...]           what this task changed, against its state before;
+                                `impact` with no names is the same
+  task peek <task> [--notes [<notes>]] [--from <n>]
+                                title, column, feature, dependencies and body of
+                                a task this run may read, or one named in it;
+                                `task peek feature` gives its feature; --notes
+                                adds the notes named, or every one, in full,
+                                paging with --from n
+  task note                     add a note; completes a review run
+                                Only this call records a review's feedback; a final
+                                message is not. If it is refused, resend it; claim it
+                                was recorded only when the reply says `Recorded.`
+  task ask                      a question, with 2–4 `options`; waits for the
+                                human's answer. Check the task's Questions and
+                                Notes first for what is already answered (a
+                                discussion's answers are notes).
+                                The question's `text` gives each option a
+                                short example of its outcome.
+                                Never asks the human to change a file: make the
+                                change yourself, or ask to add a project
+  task done                     finish: a work run's summary goes to human
+                                review; an investigation's report stays on the task.
+                                A work run is refused while a draft holds unsaved
+                                work in any of its projects; the refusal names
+                                `view --draft`, the retry and `drafts drop <id>`.
+                                After a `test` in the same call, it waits for that
+                                test to pass and reach every change; send it in a
+                                call of its own when the summary may need a caveat
+
+In notes, cite code by name (`lockdown.dispatch`, `checkout.pay`), not by
+`file:line`: line numbers move. Name tasks, features and milestones as
+`task:<id>`, `feature:<id>` or `milestone:<id>`, written bare and never inside
+backticks: a bare reference renders as a link with the record's title, and a
+code span stays literal.
+

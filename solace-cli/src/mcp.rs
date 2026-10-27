@@ -315,8 +315,10 @@ mod tests {
     fn shell_suffix_ignores_rust_angles() {
         assert_eq!(shell_suffix("inspect language::rust_refs.Refs<'a>::resolve"), None);
         assert_eq!(shell_suffix("inspect crate.<Failure as From<std::io::Error>>::from"), None);
+        assert_eq!(shell_suffix("view crate.<S as From<&&str>>"), None);
         assert_eq!(shell_suffix("grep ->"), None);
         assert_eq!(shell_suffix("grep Vec<u8>"), None);
+        assert_eq!(shell_suffix("grep a<b | head"), Some("| head"));
     }
 
     #[test]
@@ -371,6 +373,17 @@ mod tests {
         assert!(text.contains("`command`: `probe` or `submit`, `text`: the code"), "{text}");
         assert!(!text.contains("`command`: `let"), "{text}");
     }
+
+    #[test]
+    fn a_trait_impl_name_is_not_shell() {
+        let root = crate::testing::Scratch::new();
+        let msg = json!({"params": {"arguments": {"command": "view crate.<Failure as From<std::io::Error>>::from"}}});
+        let (mut reads, mut run) = (0, None);
+        let out = crate::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        let text = out["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("commands are not shell"), "{out}");
+        assert!(!text.contains("Not a command"), "{out}");
+    }
 }
 
 /// Whether the command lines hold a patch, which belongs in `text`.
@@ -381,8 +394,16 @@ fn patch_in_command(lines: &[&str]) -> bool {
 /// The shell part of a command line: its first unquoted redirect or operator,
 /// through the end of the line. `None` when the line is a plain Solace command.
 fn shell_suffix(line: &str) -> Option<&str> {
+    let (suffix, depth) = shell_suffix_pass(line, true);
+    if suffix.is_none() && depth > 0 { shell_suffix_pass(line, false).0 } else { suffix }
+}
+
+/// One scan for `shell_suffix`; an unbalanced `<` is retried without angle
+/// tracking, so a comparison is not mistaken for a trait impl.
+fn shell_suffix_pass(line: &str, track_angles: bool) -> (Option<&str>, usize) {
     let bytes = line.as_bytes();
     let mut quote = None;
+    let mut depth = 0usize;
     let mut i = 0;
     while i < bytes.len() {
         match quote {
@@ -391,16 +412,19 @@ fn shell_suffix(line: &str) -> Option<&str> {
             None => match bytes[i] {
                 b'"' => quote = Some(b'"'),
                 b'\'' if line[i + 1..].contains('\'') => quote = Some(b'\''),
-                b'|' => return Some(&line[i..]),
-                b'&' if bytes.get(i + 1) == Some(&b'&') => return Some(&line[i..]),
-                b'2' if bytes.get(i + 1) == Some(&b'>') && (i == 0 || bytes[i - 1].is_ascii_whitespace()) => {
-                    return Some(&line[i..]);
+                b'|' if depth == 0 => return (Some(&line[i..]), depth),
+                b'&' if depth == 0 && bytes.get(i + 1) == Some(&b'&') => return (Some(&line[i..]), depth),
+                b'2' if depth == 0 && bytes.get(i + 1) == Some(&b'>') && (i == 0 || bytes[i - 1].is_ascii_whitespace()) => {
+                    return (Some(&line[i..]), depth);
                 }
-                b'>' | b'<' if i == 0 || bytes[i - 1].is_ascii_whitespace() => return Some(&line[i..]),
+                b'<' if i == 0 || bytes[i - 1].is_ascii_whitespace() => return (Some(&line[i..]), depth),
+                b'>' if depth == 0 && (i == 0 || bytes[i - 1].is_ascii_whitespace()) => return (Some(&line[i..]), depth),
+                b'<' if track_angles => depth += 1,
+                b'>' if track_angles && depth > 0 => depth -= 1,
                 _ => {}
             },
         }
         i += 1;
     }
-    None
+    (None, depth)
 }

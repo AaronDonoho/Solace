@@ -1,0 +1,63 @@
+Strategy runs (planning with the human on the Strategy page): read only; any
+command not listed here is refused.
+  strategy list [--archived]    one line per task, feature and milestone, then
+                                the vision; --archived adds archived tasks
+  strategy show <task|feature|milestone> <id>...
+                                one id: the ids the record links to, then the
+                                record (a task in brief, its notes, questions and
+                                runs one line each; a feature or milestone in
+                                full); several ids: each record in one reply
+  strategy show note <task> <notes> [--from <n>]
+                                a task's notes in full, each with its number:
+                                3,7,10..12, or all; a reply stops at a whole
+                                note, and a `Next:` line names the rest. A note
+                                too long for one reply comes in parts: its
+                                `Next:` line ends in --from n, its next part
+  strategy show run <task> <run> [<steps>|all] [--from <n>]
+                                a task's run log: one line per step; with
+                                steps (3,7,10..12) or all, those steps in full
+                                and only a one-line run header, stopping at a
+                                whole step as notes do
+  strategy show run <task> <run> --failed
+                                failed tool steps only, each with its error
+  strategy note                 reply to the human, the reply in `text`; waits
+                                for their next message. Text outside it shows
+                                only in the run's live transcript on the page
+  strategy task|feature|milestone [<id>]
+                                propose creating one (no id) or editing one: the
+                                request's fields as a JSON object in `text`;
+                                waits for Approve or Reject. Alone in its call.
+                                task: title, body, feature, milestone,
+                                dependsOn (task ids), and scope (project folders, as
+                                the brief lists them; every one must be a project)
+                                only when creating. A task with a feature takes the
+                                feature's milestone, so name only one of the two.
+                                feature: title, body, milestone, state. milestone:
+                                title, body, targetDate, state. Any of them: rank
+                                only when editing. state: proposed|upcoming|active|
+                                complete|canceled. Other fields are refused.
+                                A title is the work in 3-7 words (`extract: JS FFI
+                                files`); details go in body. The human sees
+                                body as Markdown, the rest as
+                                text
+  strategy vision               propose a new vision, its text in `text`; waits
+                                the same way
+  view | inspect | refs | find  read code, as under Reading
+  grep <text> [--in <path>] [--context n]
+                                search watched files and settings: the text as
+                                written, already case-insensitive, no regex;
+                                the options only as the last words
+  files [dir]...                tree with each file's tier and line count
+  read <path>... [--lines 3,7,10..12 | --tail n]
+                                each path in order; a --lines or --tail range
+                                takes one path
+  ... --project <folder>        at the end of the line, read in a project below
+                                the root; in a folder of projects, every read
+                                needs it
+
+In notes and proposals, cite code by name (`lockdown.dispatch`), not by
+`file:line`: line numbers move. Name tasks, features and milestones as
+`task:<id>`, `feature:<id>` or `milestone:<id>`, written bare and never inside
+backticks: a bare reference renders as a link with the record's title, and a
+code span stays literal.
+

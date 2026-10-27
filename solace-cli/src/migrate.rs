@@ -16,7 +16,7 @@ const LOCK: &str = ".solace-migration.lock";
 /// The migration's record, kept in the copy: the original's path, the
 /// projects and smoke checks, the stage, the baseline and the report.
 pub fn load(dir: &Path) -> Option<Value> {
-    serde_json::from_slice(&fs::read(dir.join(STATE)).ok()?).ok()
+    jsonx::read_opt(&dir.join(STATE))
 }
 /// Writes `path` whole or not at all.
 fn save(dir: &Path, state: &Value) -> Result<(), Failure> {
@@ -26,11 +26,11 @@ fn save(dir: &Path, state: &Value) -> Result<(), Failure> {
     if !dir.join(".solace/.gitignore").exists() {
         fs::write(dir.join(".solace/.gitignore"), "*\n")?;
     }
-    write_atomic(&dir.join(STATE), serde_json::to_vec_pretty(state).unwrap())
+    jsonx::write_pretty(&dir.join(STATE), state)
 }
 /// The original's inventory, in a file of its own so a status read doesn't load it.
 fn recorded(dir: &Path) -> Value {
-    fs::read(dir.join(INVENTORY)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null)
+    jsonx::read_opt(&dir.join(INVENTORY)).unwrap_or(Value::Null)
 }
 fn refuse<T>(code: &str, message: impl std::fmt::Display) -> Result<T, Failure> {
     lockdown::error(code, "migrate", message)
@@ -69,7 +69,7 @@ pub fn locate(top: &Path) -> PathBuf {
 
 /// One migration operation at a time, from the board or a shell.
 fn exclusive(parent: &Path) -> Result<fs::File, Failure> {
-    try_lock_file(&parent.join(LOCK))?.map_or_else(|| refuse("E7003", "another migration step is running; wait for it to finish"), Ok)
+    fsx::try_lock_file(&parent.join(LOCK))?.map_or_else(|| refuse("E7003", "another migration step is running; wait for it to finish"), Ok)
 }
 /// Every current project's lock in `top`, refused while an agent works in one.
 fn hold(top: &Path) -> Result<Vec<fs::File>, Failure> {
@@ -82,7 +82,7 @@ fn hold(top: &Path) -> Result<Vec<fs::File>, Failure> {
         if root.join(".solace/board").exists() && board::tasks(&root)?.iter().any(board::active) {
             return refuse("E7003", format!("an agent is working in {d}; let it finish or stop it first"));
         }
-        let Some(f) = try_lock_file(&root.join(".solace/lock"))? else {
+        let Some(f) = fsx::try_lock_file(&root.join(".solace/lock"))? else {
             return refuse("E7003", format!("{d} is busy with another command; try again when it finishes"));
         };
         held.push(f);
@@ -1072,7 +1072,7 @@ pub fn start(top: &Path, projects: &[String], smoke: &[String], confirmed: bool,
     let mut state = json!({"original":top,"projects":projects,"smoke":smoke,"adopted":false,"stage":"copying"});
     save(&copy, &state)?;
     let made = (|| {
-        write_atomic(&copy.join(INVENTORY), serde_json::to_vec(&inv).unwrap())?;
+        fsx::write_atomic(&copy.join(INVENTORY), serde_json::to_vec(&inv).unwrap())?;
         step("Copying your folder to ../solace-migration");
         copy_tree(&top, &copy, &|_| false)?;
         clear_compiled(&copy, projects);
@@ -1227,7 +1227,7 @@ fn fail_point(op: &str, n: usize) {
 }
 /// Does the journal's renames; if one fails, puts back those done.
 fn forward(parent: &Path, j: &mut Value) -> Result<(), Failure> {
-    write_atomic(&journal(parent), serde_json::to_vec(j).unwrap())?;
+    jsonx::write(&journal(parent), j)?;
     let op = j["op"].as_str().unwrap_or("").to_string();
     for (n, (from, to)) in renames(j).iter().enumerate() {
         if fs::symlink_metadata(to).is_ok() {
@@ -1239,7 +1239,7 @@ fn forward(parent: &Path, j: &mut Value) -> Result<(), Failure> {
             return Err(named(from, format!("couldn't move it to {}: {e}. The folders are back where they were.", to.display())));
         }
         j["done"] = json!(n + 1);
-        write_atomic(&journal(parent), serde_json::to_vec(j).unwrap())?;
+        jsonx::write(&journal(parent), j)?;
         fail_point(&op, n + 1);
     }
     Ok(())

@@ -6,7 +6,7 @@ edce96248d0b9b43a8d22de6110273ba board.After
 3abac7f1f3b1ddb07726b94800eed0bc board.BACKLOG
 ef8f4348a996b2e8c808436629151c7b board.BODY_LIMIT
 db7d648391706e917b30f92c22a955b5 board.Board
-9042d0b27571b6a66b12d5daa7f71863 board.Board::claim
+0183945d5507e942b72ff22921500482 board.Board::claim
 4f3a367fc55e50166a3db9ae474fd8ff board.Board::explicit
 9015bb11af410d6a8c777bf46be9968b board.Board::listing
 0bd5653b4127c1329f74798edf84938e board.Board::migration
@@ -52,8 +52,8 @@ f5a7b1d0acd0dc4c21ad335387d11fb4 board.act
 8dccdaec464364a432e1a78757a7c831 board.action
 c940a8d5148db016962b6352ca867010 board.active
 78ce22c629a9d117cefe0176a70c6eaa board.add_allowed
-139445fba45c3778c4e9ed51514c0982 board.adopt_pending
-aceca56f02b136a5242b6c740003d191 board.adopt_tasks
+9fc9a51051321f40e4ad050a03e01c51 board.adopt_pending
+56c1e31d80c50f5fc6f2b336e0886896 board.adopt_tasks
 9cfa1d06310d56fb0219acded35b6503 board.after
 628b0d22fe12ff3112841d9ba98abc3b board.agent_guard
 8cedd79fda2954a181ebbc0831139820 board.agent_of
@@ -91,7 +91,7 @@ c38f101d214901000709587a79d33cfd board.continuation_brief
 fcd9e03fb07af46c83adad765f3df46a board.continue_answered
 239c996ebcbc8838b708c0f3c0cf5912 board.conversation
 cac38360a434e9f30b4254848c711920 board.conversation_dir
-5f9e597995e7df29d80674133e6e3b2f board.conversation_lock
+d55426e25165064818880114d9a6c91f board.conversation_lock
 01eb0d2fd61d36811dce4e4420b60d92 board.created
 b337d82757c8934f5210d79239654b9a board.cut_line
 e732944b86e8784551b0380f71a42db0 board.diff_ops
@@ -114,7 +114,7 @@ f2799d13d1b9c4207192e6802a1aceaa board.failed_command
 de0a47c9eb7d02368032742345b75e60 board.failed_section
 c55d0573b52f60c4f2338b9f6829c8eb board.failed_step_line
 853eab9d3e879ca15541df1e7a3fb121 board.feature_section
-635736be9e6722f53a401a60fffbfa6e board.file_snapshot
+b15a8947f565eeca4ca0248d6e89a756 board.file_snapshot
 e950b1ee37fc7210daa4c6ef542b85f1 board.files_under
 e1ac79378a320f0c5943a3bb5d2f71f0 board.fingerprint
 418565f589c1cfe9c8aaa7d9a44ac9ad board.finish
@@ -140,7 +140,7 @@ cd475e7c803f623e881b0c2595ed264d board.last_review
 bb6faf96e99bebe80348a2f7abf7ab19 board.last_words
 b38de0a9af6a24bdfa84e12d80ea9a42 board.line_diff
 96896e4ad94e0634bc2bc44be1f97b31 board.listed
-95d18f114c939af47d3c8f27fb85b1ac board.lock
+2cdc1b314a03bac45f2facbbe5aa96a7 board.lock
 7015a11519a7b18ca5738e8b6b836b1c board.marked_tests
 92ef15d70904d0d39d569bc4b1b27658 board.message
 4878dd34e536f0d8bb9bc30eb603084c board.model
@@ -182,7 +182,7 @@ e643e56da7fba962b13010f3f3966b5a board.project_home
 b4e7853d7be1bd2978d65a2d8f36f6a9 board.read_body
 023aee2af8231f295798cef281fcad55 board.read_task
 b20dbe69fd5c0cf7b92a8b812af0bed4 board.read_task_api
-135e1b97b9ea3709fee404ce1f5cc3ba board.read_task_with
+bb8d6b522d13040489b92eb4b6f671b6 board.read_task_with
 11d927cae03f966d1b2f551ec533626b board.readable_tasks
 43bb8087929c6bac6ab49302a44274c2 board.record
 72ed009c15ac0d54e8818d365384fab2 board.record_reads
@@ -196,11 +196,11 @@ c41dbd36a481501b9d1a96cf0bee3e29 board.rehome_task
 b376224e444eafeba1a117501a414463 board.resettle
 6dc5035b9950105c09e62c4c58e3105a board.respond
 46c3c2318cd0e7977a70236fc8824187 board.respond_json
-5fed7d35dcac10ad374973fb4e249314 board.restore
+9bc3d90c9852a32797e27092c2a068e1 board.restore
 81481b7b12cdde5df9c2a1923677a9bc board.revert
 6756d830c07ba9bd0ea61afaeedea56f board.review_assessment
-af39b111cdc9aefaaef78f6b0cdded07 board.review_changed
-12ec49115b927979a004ec8535d03cb9 board.review_checkpoint
+3e3dd92540fc76259253ffeee1d675e6 board.review_changed
+9aae3701c6b5272d3c55156964f82ce4 board.review_checkpoint
 5f22cd46e17852815118671951840694 board.review_context
 d26b430e6ce1287446629a4458e78650 board.review_feedback_recorded
 2dd5780a7fa1f30469f89ba763ec25e1 board.review_message
@@ -219,7 +219,7 @@ b370a950a33effcd01b88468a6520171 board.run_record
 6079218c7c0beff039fb1a70368e5e77 board.scan_task_links
 eda74471897eb7eb1629fc48a1fa38f2 board.scope_stores
 2be3e7e1bcffb42226080cc84cae89c0 board.selected_notes
-6e3a788dd8d07eacb9330e86da891969 board.serve
+9c84a424e62e3deeac8150f9abbc9dbe board.serve
 b75ff2d6a34f6f73bcdc3fd82d820b3f board.served
 429c513a88461885388899b2d0e5bd12 board.session_id
 5cc852c376c51c12ede0122038e1097f board.session_reply
@@ -247,7 +247,7 @@ e45c1d422be15b3b20fa6d212ec87300 board.strategy_context
 7588e7fa4099dadc0ebbcd49d330f704 board.task
 7d3c373a966a1ee7e203df5e756f0e21 board.task_at_home
 f61975489ad9cd76ed768ccf28af9f61 board.task_command
-05b799729d3262081509f3312a293b10 board.task_diff
+5eaaa0bf311006a0c813ceeb4adab007 board.task_diff
 6e3e21c81c71f6191cda33fe2e4b9f81 board.task_dir
 1b57597040110855807810ba7afd91d4 board.task_drafts
 50f5f9d6ea66b676d4f0ba293b9fc339 board.task_ids
@@ -265,9 +265,9 @@ b03153be4ad4688b24a61a0d9d4e0eea board.tech_debt_items
 1fa1c75bd497d2e10e31472da052341b board.text
 1c7f033293ea8315fd57a094ac42b0af board.text_of
 955b6b350056afe6665f81e77139d0f2 board.tool_input
-ecaef2b311406dfb0f0411a782228233 board.touch
+df3e444322cad18a88a6e957dbce0bea board.touch
 2207f1a077f1154386dae898256cb294 board.transcript
-a15ad08fe6752d0e44ef4616ebfd7691 board.try_lock
+4727d41d3f7674e7c47c297163f26a5f board.try_lock
 2332c976c65caebe2de6ab7b66324375 board.upload
 1c9d7b6ac8ec32ae8e15c2e2af60da36 board.used_model
 a73191880b7ca03f362b691253c28aed board.valid_id
@@ -280,7 +280,7 @@ eea2d287b85c310a01706653865a644e board.with_context
 90aba840e77a264d0dfb7682ca68c5a3 board.work_role
 8209eddfc3fbc189b6df9b5ab9e7d40c board.work_run
 6f2a41ddbafeec69d89c6eb4cf088fd3 board.workflow
-0cab78edc4113bcd348f15e3e50d412c board.write_review_checkpoint
+e4ed20ee1c12255a4aeee3d760341a66 board.write_review_checkpoint
 addbd7394d804d552b6fd17baa6817a2 board::agents (imports)
 252de037d14b795932e4478ec8051aa2 board::agents.AgentCheck
 d63265896cfa3b0b2d3e8c8e734e0241 board::agents.CACHE
@@ -345,13 +345,13 @@ c7c4af731a7ec43e5f9233789027914f board::agents.held_mark
 e1e8328dc2ed1f79f3d8a92d4740adbd board::agents.kind
 b830d81fc6ad508f9bbdf5e1e8881765 board::agents.limit_hit
 a8d36eee131114764d7020098799a4f0 board::agents.limit_message
-0b014f998869da89821f2196a8c5fdb5 board::agents.local
+5cba206ecb0efb21d8c2a56f83caa100 board::agents.local
 ed55990c8e448712241c40327911939c board::agents.local_now
 bcfdadd3ce207b847c6e9b806809da28 board::agents.mark
 e24e6e71f9d5f37ca0ba5fcfb184a39a board::agents.mark_limit
 53a2273e9ff1be142f799a5c43db2adb board::agents.mark_sign_in
 be84bca5e0078e399acaa8a3491b0114 board::agents.mark_stale
-b5e5e9a2f5cbc410af3e84f05df1131d board::agents.marks
+801e8b7c61a530262f8326a178dcbec8 board::agents.marks
 b64417436ddfbba46d350a3e08d9ecbe board::agents.merge
 3fb23fa3f08d47e58cb97127d499ff82 board::agents.merge_from
 eca43300ca163f10504c37341a466229 board::agents.missing_program
@@ -379,7 +379,7 @@ c6dc5a604508d7ad2d7a11fd3d70d056 board::agents.reset_time
 1656ab1907fb6fa4176355ce85511099 board::agents.said
 acbc143246fe0e6cb1f0716586f99681 board::agents.save_marks
 76ad275011d3ed92432d2c72d698c94a board::agents.save_models
-7a04ffaffec2c5f3e3d6bc5d4321d0af board::agents.saved_models
+0fbf1623597232f5de2d12da5826a8da board::agents.saved_models
 b7e875bbfb4fe3c798e4b466023de944 board::agents.sign_in
 cf86afdff9d8259eaa62651f00b9073e board::agents.sign_in_mark
 d6f87d5d9d487ae3d507b1f53483ca6c board::agents.sign_in_message
@@ -459,14 +459,14 @@ a49dd8618f3ed1580fdecc6b8328b186 board::setup.KEY_VAR
 0c635ca6e4c6305ec17c462c679963fb board::setup.LOCK_ATTEMPT
 5ef4eaf349ab61dd0c1d0e45e333c5d3 board::setup.endpoint_key
 9b4a2f5ceda2701912289083e3743b19 board::setup.keys_path
-7735ec9ac1754f461759309c0bac8de8 board::setup.read_keys
+88b6fcced5ca53dca9928fea65a63bab board::setup.read_keys
 455027e9346afda0513fdbbd4506ad7a board::setup.remove
 6d9cb2826c8665b2d8114e79a006d921 board::setup.replace
 1fe7b2004a29c24849b30ce6ec625a3b board::setup.save
 7772b9fbeb6effe23788104b810d0a2f board::setup.save_language
 9a9d488318a1191ae495c44a291570ea board::setup.set_key
 8b3cad28b030ac2eb66348f35cb7cedb board::setup.settings
-825986e180f4dd8e5ef56bd24c7afb86 board::setup.settings_lock
+7ea1d5f8ce05a3d11e404584e9f27226 board::setup.settings_lock
 b2287b57f0a09f7c08b4f478afaf1d28 board::setup.slug
 0cdfc31211705bae858f48ee7659133a board::setup.stored
 f41ee9745196c3be5878bc952ea60518 board::strategy (imports)
@@ -540,7 +540,7 @@ d9fb8c9f1bc620e7ffb2f4b2a31adca0 board::tests.a_proposal_takes_ids_in_their_link
 4671f7355f538b326dbbdf11e9605b4d board::tests.a_refused_review_note_still_recovers
 c6dcc00ae7bedd03e747351b18e3bd44 board::tests.a_repeated_command_reports_the_copy_that_failed
 81d5691e7d391e28adfb751f49f0c5b7 board::tests.a_resumed_brief_names_drafts_in_every_project
-f74d9331985c20cb002783ac7a87151f board::tests.a_review_brief_holds_the_task_diff
+dc800133aaebc22cce57c62eabb081ac board::tests.a_review_brief_holds_the_task_diff
 f2feda22ca16c8771dcce0397cef1863 board::tests.a_review_fallback_keeps_existing_attention
 3ad1fcc59a5471fab8ba71a38139b441 board::tests.a_review_lists_new_unsafe
 3544476681f7a8d798366f8e2ba9cf12 board::tests.a_review_run_gets_no_next_step
@@ -570,7 +570,7 @@ b7c600e2a99821f100ad80cb64984033 board::tests.a_work_run_is_found_from_a_seconda
 afaee9a3ae232c062e378c112562c3af board::tests.a_working_tasks_scope_widens_but_does_not_narrow
 d8bacbafb1ca81ca208325abdaf5dae3 board::tests.adopt_finishes_an_interrupted_move_and_refuses_a_reused_id
 b06f04def4cf73aad37c0edb0945674a board::tests.agent_guard_follows_the_run
-b9117bba38e71206bf7a266d0c107b44 board::tests.agent_guard_holds_a_run_that_waits
+dd9584aa337e5d6992cbcd4ce9fca766 board::tests.agent_guard_holds_a_run_that_waits
 958568d83c53a8187497b7c8595d4414 board::tests.agent_hold_helpers_cover_each_case
 fbf0f6ff26b00d5c4152d6dc57fb28e1 board::tests.agent_says
 44c750056ae189ced94545638ae5a53a board::tests.agents_say_when_a_usage_limit_is_reached_and_when_it_resets
@@ -650,7 +650,7 @@ e166758121c55191ae8caa618e470880 board::tests.revert_restores_every_project_befo
 34c43c51ad5b1d27bb2a14e3b2c10820 board::tests.reverting_keeps_an_empty_folder_that_was_there_before
 8de71323b0402b2253c0f5a1d0755be7 board::tests.reverting_removes_a_folder_the_task_made
 087d7bdd783e0a11709c54855a1aef7c board::tests.reverting_reports_invalid_settings
-e34d06b626ebdfcf5d21e98eba344b59 board::tests.review_delta_keeps_module_headers_budget_and_completed_baseline
+20814479e382133da473678df9f8d189 board::tests.review_delta_keeps_module_headers_budget_and_completed_baseline
 6a10595ea8118a7568bf5451bc80ee7d board::tests.reviewable_follows_the_current_tier
 497fbaf5971a84ebdc57ea63c6ede02e board::tests.session_remember_is_refused_in_a_discussion_and_for_an_unknown_run
 f1f5f530d2e71e6911bcabd6c37033b5 board::tests.session_remember_keeps_notes_a_resumed_brief_filters_out
@@ -685,7 +685,13 @@ c6a251ea118d01c76b5950a1adac51fb board::tests.unavailable_models_say_why
 ba3a28be42245e19987848150c4c8685 board::tests.unsettled_final_task
 b1bd1d997dc0e97083584552e5075317 board::tests.unsettled_member_final_task
 7f101670e983ba3bc9a2577e734bdf34 board::tests.zones
-8a192374c0dac57c88b055fab4fd8bae crate (imports)
+e4ec565de0c422c2bc315118fe419ec2 cli (imports)
+284f5116c922d12ba01f5723b0deeab7 cli.bare_command
+f4123d21c22709606bab7e0df18f398a cli.command_words
+8a44d724605161ad062be9b903ddc05b cli.verb_words
+94794ffc42c8135c1ec6efb6c70825e4 cli::tests (imports)
+cf0abaad14df46b23659d8fca3b866ee cli::tests.command_words_keep_a_trait_impl_together
+fac0e56d708701e5c5ba4ca1fe0693c5 crate (imports)
 fa524a4ffe1dd1a9a42e642c5fa08a9c crate.<Failure as From<rusqlite::Error>>
 d6693d22bb84e0e846ccc428e2bf2e32 crate.<Failure as From<rusqlite::Error>>::from
 b6c6261f38b7d84f6a8ec5a2058ff845 crate.<Failure as From<std::io::Error>>
@@ -703,7 +709,7 @@ f046ae5eea84c280cf455ab2a53865e2 crate.DependencyKey
 6e531fa7629e045be4ee3adb60087bd9 crate.DependencyModule
 19a5d16bba32ef889a2eeba4ee1d627b crate.Diag
 ca3ace25a860d655b2e6e1f7a4adeeda crate.EXAMPLE_CALL
-f01841c0b00b05b51db2983d71f944cb crate.Failure
+c2a1a06004f1abb0d49eca77508f94d6 crate.Failure
 7adc1335483b77b1da150ab1f3089751 crate.FileMap
 e085b0b45e4df57bc6b103596b500960 crate.GLEAM
 b4fec26b3977d2fdcc4adb0afc6117ba crate.HELD
@@ -729,9 +735,9 @@ be30344da1d9ebba20c4f3de61c64283 crate.SHOWN
 ea0f632f797f0c2cc671e241579b8aba crate.STARTER_SETTINGS
 bb11de90aa277931ea4f5cf5d077c0e9 crate.STDLIB
 3163176c8c8b3c940605b9c1a614504e crate.STOPS
-002be28561221219910e90ce3cb66858 crate.Store
+107f38b131d3643b9e6c94d4073fb3dc crate.Store
 eb9b80ab13a846ccbbb7ffdb401a1202 crate.Store::add_columns
-f6769221ca87c26115a946e57c972238 crate.Store::at
+c4a626d8d1a79c253c0441c8b3d78bc4 crate.Store::at
 4b3562663dcdf0d2c158add42420802f crate.Store::broken
 1b22aee2196bd4a49d28ef550d54408a crate.Store::bundle
 634eabc609c1a92c46e30e124a7051de crate.Store::callee_hint
@@ -766,7 +772,7 @@ cae637c738f4cc63d2e094b0903b3a13 crate.Store::probe
 60eb345d0ce5e50be9bd0e824e8cb3bd crate.Store::project_instructions
 8190636f12e72cf9acb6961d4bb792ec crate.Store::record_module_file
 59bc23aabf3003ccf514bf008bfc5ab3 crate.Store::record_warnings
-d6954ba0cbb1add9fb77f89e3032e10b crate.Store::refs
+f8153a0db811f827f97fba7f7c22e811 crate.Store::refs
 a8b39687e980bf3f152e706f2156fff6 crate.Store::refs_all
 191eca38c229ef03c0710e3d0e032499 crate.Store::refuse_drift
 11ba6cf1e46b3bed5fac19e4e20a0f64 crate.Store::resolve
@@ -805,8 +811,7 @@ c1b5a93e6bfc1e65ee6f41a5d978d0a8 crate.WORK_CAP
 8e0cccbda72e4c29f2654b01820bdc02 crate.Within::enter
 4e23f106cbd3902929525c1b60f8020d crate.add_import
 feee4bb77354e13f226b520e079b600b crate.aliases
-627a8955e2b487150a78918dfa5bdbcc crate.bare_command
-d9adce7d86f44c652543b02b9fe4845b crate.batch
+970a2a4dfa854fbb2cda601f49b8df6d crate.batch
 adcd50ae3863342c7f54091a296d6393 crate.block_name
 9a5291d42e51550caceec9154be1ac25 crate.broken_report
 ede086343b06d76bda456b350fc0574d crate.call_lines
@@ -840,10 +845,8 @@ b212382a5228139d2c5a227effdb325b crate.import_statements
 ded92cadbf1af6c73576ef61771a45d1 crate.is_process
 7d870341161a20264367601dd5e8f395 crate.is_question
 037081e68524a5846f5dfae710c83cc4 crate.is_test
-7293ecd2289d4072273a31cee86c80fa crate.json_bytes
 5ccc8527310019972780a88411c5680f crate.last_segment
 3c07b19390b2336a3ab0d943b6373c6b crate.locate
-7ac24875e4eb2d2f9f7c2abc471a9aac crate.lock_file
 fc7edf2d1a5182d9216effb9bd051e95 crate.looks_like_code
 635327e8c5f227c1821941cc8a5a60e5 crate.main
 3ecb86beca308bed7133d77ffa2210b0 crate.mark_shown
@@ -864,21 +867,21 @@ bfce40b9e2333ee5ac2eab0a761612e2 crate.options_of
 00e7460f64c48d9ee91ed733200c000a crate.params
 ce5896853ea618a12a0db72ce3c14e30 crate.path_dependencies
 d68185fb931cb4fefd3dd695eca3c233 crate.place
+0f3e2c3172878f6873a78d6ff61ab410 crate.possible_users
 be0de0018433812cbb26c069b9321305 crate.probe_args
-70daed366c544821d46da50dc755f3ff crate.project_dir
-fc85a3d153d946a3a97b75711e7256c5 crate.project_folder
 6d3407742a6c8e9f2cfb1402579d43c6 crate.quoted_after
 c34ff1ac2a2bbcc06acf4583b8a11c40 crate.read_hint
 6a45803531b5c46142eee8087c755c55 crate.read_project
-8972aaee73f9cf733826bd96b39c6b2b crate.read_project_in
+e7cf5fca012be25561e1c40ef54bf41c crate.read_project_in
 86083bd174a55c8f913dff1ffecb9820 crate.reads_only
 61f24ce411cf961af004f058692a5e74 crate.record_port
+9d5a520d14998666d086c398a7ca726b crate.ref_entry
 573081dbe15d4f61b9f389ba8fa90433 crate.ref_lines
 ff1ab6453fe8ba71dbd0612e6174dd20 crate.reset_after_panic
 d8162f059beb447e17bc1ff537da1d83 crate.revision
 000c48d7f11be25873988c848214b725 crate.run_inner
-455d632ee776c3383587592281074e36 crate.run_options
-2c7410c605d7464698c92ab2ca1579e7 crate.scoped
+0641ae19b4dc9d5131556022db272430 crate.run_options
+746ca1d3ba02b1255cb8eba872c4c0e3 crate.scoped
 c5bce10395c150ccc01997db3555d030 crate.script_files
 10c5f26a74309a68433675ab042d4cc8 crate.sha256
 95079e6a187c05d24ed351ad7b14a500 crate.shown_earlier
@@ -891,7 +894,6 @@ f8696dcbfb5290316fa5ab37fd9a2c55 crate.take
 c1ffbbf3a83ecbeafc7dd253fbb7d701 crate.tests
 10739d8b49bb870ea6f0d47b3592955c crate.trace_report
 be032a7781bd528c23a831396ac5bd4f crate.trace_wrap
-86a74782f7cd4528cbfa896112924fcd crate.try_lock_file
 b2af82f8269d1fe1b67912535e8575e9 crate.type_users
 0e3d9469c3e5eb28ce8f7ec698c9ac20 crate.unimported_name
 da1855b236e4205453a39440865941e0 crate.unique
@@ -901,7 +903,6 @@ da1855b236e4205453a39440865941e0 crate.unique
 f1e836d5dbcfe67a3be7c160ce08d4b8 crate.unknown_option
 9aae33a5bfcc0a172530612154aeb279 crate.unquoted
 78d98911ebc01166ce00d40291f045bc crate.usage
-5d7c56648cc4633675b0779594d17a6b crate.verb_words
 8647d08cf44a42c611c9b7223e9d4d73 crate.warning_key
 6ba8803d3512e9a2c0833eee17096a1b crate.warning_line
 343b9b43bd92be4789d76c48c2c5a954 crate.warning_module
@@ -914,7 +915,6 @@ e6e0174fffb46b7f6ec8997de86b0350 crate.with_root
 a91673f205c709bc81aaadda293003e7 crate.with_scripts
 d08a73dc4c7e1db7a19b9f1486df7917 crate.without_comment_lines
 d1c0e155e77df0f437373b601475ad4d crate.words
-06e3e91fc5e0326a22d9b2305eb57fd1 crate.write_atomic
 e01f7e82762625bca9ac2c0022ae0d92 drafts (imports)
 5b109ba26023f66510956595fc2c10ea drafts.BLOCK_HEADER
 abd4ceff93e1e09d21ad912a538725e4 drafts.Hunk
@@ -1022,7 +1022,7 @@ e0b3dbbd565cecc8be0f6d725944a6c0 drafts.tests::warnings_are_summarized_on_submit
 edf95ec56f3e1c7e0bd1842952b48206 drafts.tests::whole_patch_faults_say_to_resend
 2c3d9f0014cd289d236b52fef2484ec1 drafts.unit_update_blocks
 6efbf5db081a4b2937de4b84b36f55c9 drafts.view
-69f45b39a06254d50e6463d987ed861e extract (imports)
+a9c238d699feaf7e2137f6591483bc44 extract (imports)
 ab0a0aeed543529f0bdcb2c3471d75f8 extract.Args
 0cd8620d9778f3f7d465b17ab739b2bf extract.Baseline
 1709307ca2070c079f83ef27d08c961b extract.Carry
@@ -1063,14 +1063,14 @@ cfb8275abd0f5e4da980395dd8668fe4 extract.apply_headers
 6ca3920793ac095f40d5b51b1fc5d231 extract.check_opaque
 4784fd93e58af2511ddb0d3145c39726 extract.check_symbol_clashes
 a88be7bebdcc249e04f89915f21c95a3 extract.constructs
-ec2fe5e95c530bc60b770c0c332aa33f extract.covered
+5fd4c686ef41a38553f1122805d38e7e extract.covered
 4f09749d7c257220cc985ac7cb8e3c22 extract.created_modules
 c22c5e11e9093c14e00c96f204288660 extract.cyclic
 89211a0959da6d641064b09b14893584 extract.dependency_lines
 b9cc5d828b63df996003ebb4a9327b92 extract.dependent_plan
 14ae44f3b8f47cb347c9d570022460cc extract.dependents
 03341aeb559b7f09bf7259c62db3d23f extract.depends_on
-df62be1075547b0d1b1aefead9440734 extract.destination
+33d02c78ffa0ebbfd8a7f3e7b55eff9a extract.destination
 f4160eab2ac177892252c3f1ff841760 extract.edit_imports
 3abb8a5384231a55ef37375aa0b26e20 extract.end_all
 9ddb077c1674a72e12f57a5c92b113a4 extract.extract_javascript
@@ -1154,7 +1154,7 @@ b4315aee42784d24f24d072ca7e1fe41 extract::ahead (imports)
 c5588f70d8215327d1fb4706131a34bd extract::ahead.begin
 6fe71dfaef7f938c673bbe4c66760ab6 extract::ahead.clear
 20d36d4e1399c6a9d8d7f7de839fb49a extract::ahead.complete
-16d8dc7c6cd15c8628c68dd01f69a610 extract::ahead.created
+c95f3e165d8da1e27bb1fb09bd788f27 extract::ahead.created
 04059894415fba7ef64d75da74823436 extract::ahead.done
 c7838260c86caf13c2789b5ed1e9b487 extract::ahead.edited
 7b32a9b4cec5455872340872d516a16a extract::ahead.end
@@ -1162,9 +1162,9 @@ c7838260c86caf13c2789b5ed1e9b487 extract::ahead.edited
 012353b9bb54a11c8e7f4bbdebb32631 extract::ahead.hashes
 8d49099aa6ec4ba3c33ac794ec584ec8 extract::ahead.is_record
 8d02b67547500dec077984b86dd8aa75 extract::ahead.path
-db0105ec07a0d27b475e1f9fc501d00b extract::ahead.put
-19f7dfc1ec2d2f54c68b9f7f26373a48 extract::ahead.recover
-fff13b064361ed65f1801ae33d29d953 extract::ahead.roll_back
+86b1395c10a945d529636073c603c5c0 extract::ahead.put
+e426e4fb66b4e603e7ad3015d10f8b76 extract::ahead.recover
+1229dcffe33fc437a79ff1eb0cb0e3f7 extract::ahead.roll_back
 248da93fc1ff7c048950120cb3343ab4 extract::ahead.roots
 2c82b89f850af65c0622bf2c4254b84b extract::ahead.run
 28f2e1c38be90004103357ea8659b8a1 extract::ahead.settle
@@ -1173,7 +1173,7 @@ fff13b064361ed65f1801ae33d29d953 extract::ahead.roll_back
 f13f9dbd539ed8802eb4525f6b1c4b97 extract::ahead.tests::created_lists_only_files_the_extract_added
 c4ac83298546c25a9d6a32f53959b0cc extract::ahead.tests::gained_lines_skip_headers_and_lines_already_there
 19db30432ac2a9e0b062b6382cace837 extract::ahead.tests::tempfile_dir
-5500ee0788e0d44fb209ba7c67933308 extract::ahead.text
+c79e70d73426caf8f07a1fa8c0a72dcb extract::ahead.text
 7a87619037781ce8861ff1e7b13aeaad extract::ahead.undo
 6957cab52f6f72e01c499005a1e17dae extract::ahead.waiting
 f0c50babaaf5223cdd8ab606ad4eb35c extract::merge (imports)
@@ -1182,7 +1182,7 @@ eec8a76ee3b60acc4d46d30178fd8e11 extract::merge.FORM
 7bb9ea3ce7cc93770c5bedd668709f19 extract::merge.Store
 7c2173d0a9c4524352d0b5f12c06c4b2 extract::merge.Store::copies
 ad6ca78e962d8b676106700bcde6828d extract::merge.Store::hint_among
-dba28979389f728cc049620d3c44744f extract::merge.Store::merge
+6a62c181516f0b62ec7d08b56dba4419 extract::merge.Store::merge
 92ff8108ac913291ec21b00b8061e4d3 extract::merge.Store::merge_hint
 ad717dd3dc606bb1dbb233faa10ca1b0 extract::merge.Store::same_name_hint
 3efb0956352e7f4b1b54751af7027481 extract::merge.Store::scope_indexes
@@ -1217,44 +1217,44 @@ d4ef84024afd108be768fef2a7234936 extract::merge.tests::text
 1cd3d99414c2c95f71a97f003596a89a extract::merge.tests::the_hint_is_for_public_types_once
 8163e0280d98bf87277dfd335733be5d extract::merge.tests::two_projects
 5781db91d57b69da5e5cb51b32c900dd extract::merge.uses_list
-d992b2e5500d04ccf39ceae930e57a7f extract::rust (imports)
+e2f3d0a94d8faf76f9a181bad9f84bb3 extract::rust (imports)
 c476a63b1824f894e4355ddd84b09cc9 extract::rust.Carry
 7cd6762e7e9dd0c11930b1a3e1781c1c extract::rust.Container
-c7cc2e085388e51e5d871edd1215c5d3 extract::rust.LocalImport
-73ce57d01f5622a76002d03e4cee77a8 extract::rust.Rewrite
+12c97a86264013869d3957fb29d97312 extract::rust.LocalImport
+1891ae5cbc13918c018922a7955a74f0 extract::rust.Rewrite
 186eebf4c51028eb3bf9a24846967743 extract::rust.RustMove
 506b16f9f4c8cd505e75f73c835b80ea extract::rust.TestGroup
 83695b4051073480c47a5dfed2eb0731 extract::rust.TestModule
 98387bc7a306bba95834b6b7606cb670 extract::rust.Visibility
 edd39308e5c5dbd15353b076c3fc4bd3 extract::rust.add_impls
-12ac55b8756f01b5793f2dd62e20a7ff extract::rust.add_import_line
-dbce292b1ce9ba9ac2d319de80ea9091 extract::rust.add_use_after
-97b921441f1ef8b6f31918bd82cd99a6 extract::rust.add_use_line
+fab3d0ff0999e7271f28678de91466ce extract::rust.add_import_line
 5308f9b2078b0d3c9e1bddfcaeb1620d extract::rust.alias_of
 9c1f209c2f9822f143642bb033a28cde extract::rust.all_use_sites
+74766d007fe62986dc0779d2293e1290 extract::rust.allow_import_keys
 1d34b4e3844a9c359e15e22ce2b92dce extract::rust.allows_unused
-8c36dfe4ccf4c0865a7b2fb14a7b10b8 extract::rust.apply
+70dd3b7475fe588766561082ff1f04e0 extract::rust.apply
+fc40371d518b1cc38df2043488d01cc7 extract::rust.apply_import_edits
 03bbe496c1eeccc1d376edf40872f1bc extract::rust.bring_helpers
 bfab2267995fde0655fecfdc968b17d7 extract::rust.bring_helpers_with
 829f0f6098a8bf1cf27a0af526c06ceb extract::rust.called_names_where
 1f8237385d84afe390606c0d6a21a085 extract::rust.can_promote
-3e871bc5be90645b94566f9afbfc2219 extract::rust.carry_imports
+9f8bcadeedc65d9e78d3a6f00954176d extract::rust.carry_imports
 02b59195b4f433d5afa90ce65043bb12 extract::rust.carry_test_imports
 16d7c418b8dd3a91ee11869cddb64865 extract::rust.check_clashes
 a529ed7851449312a16e9496223eb90f extract::rust.check_test_containers
 3cbc2322aa1863b1a8d8f27b5fc3fe3e extract::rust.container_key
 bdc5d1c54052994f8dfc7434544b47ad extract::rust.container_text
+860051eea194b80a54e5221aafd24231 extract::rust.crate_root_name
 1ba4dfc3cedfa35cc17025c08f91df2b extract::rust.declaration
 a734b1a5e7b537e987185411f37b223a extract::rust.declaration_visibility
 59b9d7cd8b01bf54debade16693ebe50 extract::rust.destination
-750a072a1ce0ce6cfee194397d6534d5 extract::rust.drop_import
-ab19e40c51bdc8c800de195425d78ac0 extract::rust.drop_import_keys
+b4c2a15730414aca03cc5b2f4074e5da extract::rust.drop_import_keys
 801e8d8ad6c5b0977284afb720bee843 extract::rust.drop_super_globs
-f7ba7fddd3737beaa02fdc4f7f039bc9 extract::rust.drop_unused_external_imports
-ea8cd37829a69558ff58d261cbb0c44a extract::rust.drop_unused_imports
-cb91bb51a68a7386200482a35b758753 extract::rust.drop_unused_local_imports
+2a095a025554fe3890600e36f246a974 extract::rust.drop_unused_external_imports
+a97e84bfe8eca8b8d466a65864edf668 extract::rust.drop_unused_imports
+12bf5315bee14630795419bc4724bde6 extract::rust.drop_unused_local_imports
 9d5ee96004491d385883371c14a752e5 extract::rust.external_imports
-e5c440889ef723606cb765340064d1bc extract::rust.extract
+ca0250ae30dd042cdb23c221cf1e798d extract::rust.extract
 41ff94a900854f2c66e8c525ef6061c6 extract::rust.fresh_name
 2b78eb7bfed79d6c92cd3163fa6ca19c extract::rust.full_path
 8e011a7fed91aafe5c76cb4ff60d1de3 extract::rust.header_mod_names
@@ -1264,9 +1264,10 @@ b5d9d616d20463168a25625bb11aa9b8 extract::rust.id_indexes
 6d57afab83dac187f52af94d452b752e extract::rust.impl_self_range
 d59bc2fd240fa491efa160d00bbbbbb6 extract::rust.impl_trait_range
 193c43813878b47537d1327380ccd892 extract::rust.import_keys
+404f13da41b75638fe64e07c0b79874f extract::rust.import_needed_by
 26e2d4b339d6cc0fbccaf064f70b61db extract::rust.is_builtin_macro
 ff7d7812d3a3f8ebafed9f799d050437 extract::rust.is_import_path
-2682e1b83fca46b5a9415c21fd4053e2 extract::rust.is_known_name
+bb5cdf618532d34bee728894673d6936 extract::rust.is_known_name
 837bc4ae21a9d12b0f59b4e5b1421871 extract::rust.is_mod_declaration
 603fa394e92be1e32a672ae35786881c extract::rust.is_prelude_name
 c7592e51a498de7cafbeaef9b4c367fd extract::rust.is_primitive_type
@@ -1277,58 +1278,83 @@ b9ec606b9c7b6e7bf5a0318b977c4716 extract::rust.is_reexport
 a279aa9a6fcbc78731aa5ee7f2c46e67 extract::rust.is_std_prelude_item
 86089d02a56db26d21edf93cf06d7166 extract::rust.is_test_container
 a4efa2ac4f7938814234b26017cd0b3c extract::rust.last_root_sep
-16ddfb3bb02f921f99a6d74b808da520 extract::rust.leaf
-ef0bb770cdfb3f2eff05e9bf435cf8d3 extract::rust.local_import_uses
+4a5efaac1a1a3817bc91a3b62f37d847 extract::rust.leaf
+38a3c2a99c0a7572747457960bf5b963 extract::rust.line_indent
+a84f2f6feb5e2c234e4c1c57962aeae1 extract::rust.local_import_uses
 8b760934321925701be68058a679b34e extract::rust.make_visible
 44bf45a617d1f5993abc52469265fe0b extract::rust.mark
+a813257c02ca461b9493277647c63917 extract::rust.member_edits
+525e4d912467e36a53b11c23748ce3d1 extract::rust.member_removal
 3f8ff1d79b346db760f30f60b92a1bdb extract::rust.module_name
 e5c11d3e28feed90362fd25894f5c0bb extract::rust.module_named_like
+083b45195ab397777b786f082dddb782 extract::rust.module_needs_glob
 60da9c69d8b0f2fbd6431069d85744ba extract::rust.movable
-78015ef76822d14eb2ec8f005a80fd77 extract::rust.move_reply
+405b9ae0b72625a3f8bb42d2ec34e22a extract::rust.move_reply
 9666ec9cdb1761d1b33bd4752a3413ab extract::rust.move_roots
 68e94c8043e5ca9aa9329e098243875d extract::rust.move_test_groups
-ada6a906b49600a8572433334ea78950 extract::rust.move_tests
+a9221d287a70ad20701ed2119e97b358 extract::rust.move_tests
+d5caed821b2e2b15783aea4e2325e613 extract::rust.moved_reference
+2526b08452371ff7f4c3da862c1197ae extract::rust.moved_sources
 171ce7d7275d01bbf596c40135245e8a extract::rust.moved_tests_reply
-136f413cdc4edf579a14c3cfdd513f62 extract::rust.moving
-58d9c23920a42639a41e769f2bdc38a4 extract::rust.names_need_glob
+971d9cc4a9b80592215cd4bfd4b834ed extract::rust.moving
+f6b72f5a989dcc979e2c92ee774c6288 extract::rust.names_need_glob
 0b0aab788de25624107a8a90ec967877 extract::rust.needs_super
+58497c121b57e11e1e727db3dc9c7732 extract::rust.new_module
 1871088d8950a4ccef83fa74949442fc extract::rust.parent_kind
-6c4c21e63ac7a7cd32deb183fdcc7980 extract::rust.plan_test_module
-9f3f0879ad42f75580285d0460e9c12d extract::rust.post_move_check
+35429137e58826e7e22dd2df9cac2151 extract::rust.plan_test_module
 c3f61a1e9b5babd5c8e606ed827e0397 extract::rust.qualify_impl_selfs
 a2e483b9b8d3dd2a04c11282af905c21 extract::rust.qualify_trait_impls
-66824b155c164def9a463c763ef826a8 extract::rust.remove_member
-7b4711a1842bfe6add4a7e2fe064ef07 extract::rust.remove_use_line
+28f414e66f0defc0c860dca3348b5461 extract::rust.record_local_import
 f1af633460e86f82ee0d8800e5d0265e extract::rust.rename_subtree
 387acd2e54a722f99b9b1cc7f7b85284 extract::rust.replace_range
-a82803c34d26dd66fcd8a7112672e19b extract::rust.restore_moved_use_imports
+1be7a7f8c48d93ec3a74a5866d15139e extract::rust.restore_moved_use_imports
 b712df759832a527b4507ffe260e1b7e extract::rust.retire_test_containers
-a9bf762ce29a84d50d620ee461872484 extract::rust.rewrite
-c886d134fe988c86f47b024e9ebd45b2 extract::rust.rewrite_imports
-edd4bd9aeca039780a844d1709ff6f65 extract::rust.rewrite_mentions
-c1e4c331d784220d22fd77a078c59b45 extract::rust.rewrite_move
+60edf0e2defbaaf9f8df2a6402a88e56 extract::rust.rewrite
+a50a675a0957714be0ce1a01dea0f5d3 extract::rust.rewrite_imports
+5d4e4b9bdc8fb7c4acd99e4010db7aef extract::rust.rewrite_mentions
+b56bf7e9ae6d6e8c8f1c0132207d8a57 extract::rust.rewrite_move
 c8af24cef07050616bbae61fa199d89c extract::rust.rewrite_targets
+de792f3ab5183d956426cddd6f5fd6eb extract::rust.rooted_path
 d71169f0cf5260aace39aba44cbe5d3a extract::rust.roots
 cb2dc7c7a2047500d0ab67e63234321f extract::rust.set_container_text
 6c90dba166bcb4dbd4869e421263993b extract::rust.splice
-dbcb187aff1cf94ca7c0d88d9dd7cd3d extract::rust.staying_needs_glob
+79617f322872e91a4ff36d451102ab7b extract::rust.staying_in
+796ebe24339914d257e0f6d8b28a6cf3 extract::rust.staying_mentions
 bd6bd6e71c4945cddf14a827365c4759 extract::rust.target_has
 8bb29523d0401b2741022aee9f3a1458 extract::rust.target_names
 96d01e6af795b66edc74f344d12b416a extract::rust.test_container
 0d2751f2c3f39eb04efa9d3fc59db4a8 extract::rust.test_container_imports
 ff2c914817b6de6cd42365eb75e2ce75 extract::rust.test_covered
-ce169299afa51df883a1923d83f8da33 extract::rust.test_file
 8d3486d0f9c4f8be25003fbfb787279a extract::rust.test_file_header
 978386a1d306b602e4c7557e91f94c06 extract::rust.test_groups
 5a6b72061068f3766a28e260fa749c69 extract::rust.test_module
-c57097f36cede5480bc9d6a895191e87 extract::rust.unused_after_move
+748e67ab081f73ed9e9564cadef15581 extract::rust.unused_after_move
 fd20045cb4b01cc55d9e470c0e93d112 extract::rust.use_attributes
 a39d8b1ffedbd2257216073b6f931c31 extract::rust.use_groups
+ebb0149cf6cd1727792d52f62a40e975 extract::rust.use_item_line_range
 35fb75d584cb222e066efdc1a855f361 extract::rust.use_key
+35c81330114ad289096b9a65cada9c5e extract::rust.use_line_edit
+ad35aad84721a2bc8d1c1ece71e482e5 extract::rust.use_line_removal
 974fac26fe89cb1844887ed616042a4c extract::rust.use_visibility
 1e43d6e22f356364c2b2fc2b2e0c275e extract::rust.whole_test_containers
 7a25401e762180c815c2fe89c71a5d3e extract::rust.with_super
 dfe9cd0242e5c27074e1f6d9fff5e9c9 extract::rust.without_super_glob
+a60d6d5b411639829ec268843231ad1b extract::rust::glob_reach (imports)
+f0d034e6c9381178399026b49da3c55f extract::rust::glob_reach.add_descendant_import
+dc1ff137d7eafff623c576af0de1c82c extract::rust::glob_reach.add_glob_descendant_imports
+a512a9668e3bd97ea746ca9aa33225d4 extract::rust::glob_reach.add_module_import
+4389f5ee15b8bfbd143831755a70a49b extract::rust::glob_reach.descendant_mentions
+7326f271b868dbea2e0d132bd1df8d11 extract::rust::glob_reach.descendants_need_glob
+8603ae9b524ded4f0cffadd7d9dcd3f7 extract::rust::glob_reach.glob_names_in
+a055188700b46c41f63e860e4bd11bec extract::rust::glob_reach.import_line
+5cf9b66584978ac3163785192b1f80ea extract::rust::glob_reach.module_has_name
+27876c336d6df1f3698176be9b097b25 extract::rust::glob_reach.module_paths
+60078ff366958bd01ed96750475b1e1d extract::rust::glob_reach.named_imports
+9e1bf14e7b2808826dcded054faf209b extract::rust::glob_reach.parent_module
+3539b4c33c63317906633ae497412d08 extract::rust::glob_reach.reach_map
+04066c016c521b70075dc5ee71b9768f extract::rust::glob_reach.reaches
+f25812d5f299cf7e4abc2512d3da331f extract::rust::glob_reach.reaching_modules
+f893515ed67896034437da309f16ff38 extract::rust::glob_reach.super_glob_modules
 c0df9c17348d3ae25ca2cd670ebdfc12 extract::rust::impls (imports)
 b51223178f118c968a43e89aad755a7c extract::rust::impls.ImplTarget
 8351b574c893da6f41003da3156d137a extract::rust::impls.Placement
@@ -1340,29 +1366,29 @@ f9032d223ca246e71b8b70833d9825c4 extract::rust::impls.check_direct
 78ed3a10833b59ec813d914b74b3f3d6 extract::rust::impls.place_target_impls
 cd00f7b4fdde31077d91177c3770fd05 extract::rust::impls.placements
 0079f9bc1f5a4d1cb45574c504fe5805 extract::rust::impls.target_impl
-98d7d3e75a72b9ec774cc889e0808c38 extract::rust::merge (imports)
+8bc8fac559d905be127578111048afb9 extract::rust::merge (imports)
 10ae80d86c23d1b20d618a1db49d36a4 extract::rust::merge.MergeImports
 9ce05a048d7859f0d77602e8c638301f extract::rust::merge.MergePlan
 30191b9590c16bbbc29105c98f1b7f86 extract::rust::merge.MergeRewrite
 748f37b0912d58148dd73e5a0bac1d21 extract::rust::merge.MergeTests
 7c6fd3bbebc6f0c80a7a099395e45e1b extract::rust::merge.apply_merge
 7bc9a5008767ed3b9e916e63441eeebe extract::rust::merge.check_merge_visibility
-d21c8dbd99887ebb4e05ccb78f842b48 extract::rust::merge.drop_imports_not_mentioned
-1ff7a26863f1f2e1e91bff92700f3e74 extract::rust::merge.drop_merge_imports
+8bbf957d327bace1a64bd970e05e2cf9 extract::rust::merge.drop_imports_not_mentioned
+f07be052915c5264447afaa56c6b4fb0 extract::rust::merge.drop_merge_imports
 e833842af39ed50f274330e4aeeee971 extract::rust::merge.kind_word
-aabf4a7253fd29703fd10896c825bf77 extract::rust::merge.merge
+68c135676959d28db433d8241cdcb2a7 extract::rust::merge.merge
 c502f75081bf12e4165a962db1e92116 extract::rust::merge.merge_named_item
 6397515f1547256fa22c56dad40b241b extract::rust::merge.merge_param
 b9eb3f1abfc96e371e692053aec58ad0 extract::rust::merge.merge_params
 a7eac7316732d0cf2f4987a268f793bc extract::rust::merge.merge_reply
 53cb3aae3fb35f83d1d5ddc342943fdd extract::rust::merge.merge_signature
-cdddc0349cb4c2e9c786150c504fc7c7 extract::rust::merge.merge_unused_imports
+3b6f427c57d77fbedb8238346f45796e extract::rust::merge.merge_unused_imports
 fb0753b353d413a40606aed41d1a7f5e extract::rust::merge.mergeable
 bad075cd54abe6bb8c0dca2d5372cc98 extract::rust::merge.redirect_merge
-b5849fb02e7fb434dbeaa35c9666a352 extract::rust::merge.rewrite_merge_imports
+2917725623d114e67239968da2d02d99 extract::rust::merge.rewrite_merge_imports
 350e9fb3d499ecd039647cf2cfcc5230 extract::rust::merge.rewrite_merge_mentions
 2126a181221f4343e67f070865c5fb33 extract::rust::merge.same_signature
-78f5e91543f2ab836d2816528681d6d5 extract::rust::merge.select_merge_tests
+9fa32960e139a2e81a9f235a4ea1fc43 extract::rust::merge.select_merge_tests
 bb1d8ddba72ab8f2422d1ddc0c7e0eac extract::rust::merge.unused_in_merge
 7caabda2b84d1e665ecdac98fb4bee6f extract::rust::merge.without_visibility
 e6ccd4d64c56f44590c8046db4d31675 extract::rust::merge::tests (imports)
@@ -1375,16 +1401,19 @@ dad0c8f6abf30e2ba4a964ffc117f50a extract::rust::merge::tests.a_merge_drops_an_im
 42554720dc8acb306438eb22114a525d extract::rust::merge::tests.a_merge_ignores_visibility
 3b89bcbf27ea4316a2647c1d3ce6f945 extract::rust::merge::tests.a_merge_keeps_a_trait_import_a_staying_function_uses
 96f899dc4995abb232866900ffc12c62 extract::rust::merge::tests.a_merge_keeps_a_trait_import_elsewhere
+3016e4fc96ce28a80f70cfc0aef98b57 extract::rust::merge::tests.a_merge_keeps_an_import_a_child_reaches_through_super_glob
 211f0281437948d37b8c520a3a5588ab extract::rust::merge::tests.a_merge_of_different_kinds_is_refused
 1a43c4f719e10e8f4d2de539a1f43fa8 extract::rust::merge::tests.a_merge_of_different_signatures_is_refused
 89e14714290cb96ea88daec649ae7d5e extract::rust::merge::tests.a_merge_of_one_symbol_is_refused
+b53a73fae9759a8195b56fa458fc8e80 extract::rust::merge::tests.a_merge_places_a_redirected_use_after_its_group
+9bceeba51626800e9e4ae61244a6c57a extract::rust::merge::tests.a_merge_puts_a_redirected_use_where_its_item_was
 851b87a83254e10141d79fa41dcdd86b extract::rust::merge::tests.a_method_is_refused_by_merge
 d6c3323abd9dc92ece59e62e47265168 extract::rust::merge::tests.a_module_is_refused_by_merge
 3b74d99b4c4b9a599d52fc7ef3b1f589 extract::rust::merge::tests.a_private_survivor_used_elsewhere_is_refused
 8d6f0bb1db07e302700327cfedea5059 extract::rust::merge::tests.a_rust_merge_to_project_is_refused
 a4de9d724e497f172d64d12c767b5e7a extract::rust::merge::tests.a_survivor_that_uses_the_retired_item_is_refused
 f85ba7a2128837e57f035e920d495f12 extract::rust::merge::tests.a_test_that_reaches_only_the_retired_function_moves
-638a69554015e5933f70673f5325dea8 extract::rust::merge::tests.a_test_that_reaches_staying_code_is_refused_by_merge
+dec93a68b4384a6687cebecbba58685e extract::rust::merge::tests.a_test_that_reaches_staying_code_stays
 32682ec5d43f822efe235475349cc3d6 extract::rust::merge::tests.a_type_is_refused_by_merge
 03ad0ba6e01c99a0bfa138e84119f698 extract::rust::merge::tests.an_unresolved_name_is_refused_by_merge
 e820eb31fbe93dc10940b5fa2738ada5 extract::rust::merge::tests.constants_and_statics_merge_into_their_copies
@@ -1392,7 +1421,10 @@ be5e6d74d6fa91675e3ae90c333202e2 extract::rust::merge::tests.fold
 c16c2eff363e8c41b39f1732695266ad extract::rust::tests (imports)
 1598c32cad23ad6f875612be85743150 extract::rust::tests.a_cargo_failure_rolls_back
 93927644af973552b058cb4d476f886f extract::rust::tests.a_carried_trait_import_is_aliased
+06f4c3fa0c4603c2bff236b978aafbd5 extract::rust::tests.a_child_glob_keeps_a_moved_use
+53eb45df148c741fb70a758e3550cd25 extract::rust::tests.a_child_glob_keeps_its_parents_imports
 cb8e3801b5a268af2cb22e33908066cd extract::rust::tests.a_conflicting_import_is_aliased
+2c59652449d074a0f2a1c0f386e8a7dd extract::rust::tests.a_crate_root_import_moves_to_a_child_module_as_a_crate_path
 1215c941543238ef8fbfb19e8238315c extract::rust::tests.a_failed_method_move_rolls_back
 e3859fdac845d9feedbcf78069a8d477 extract::rust::tests.a_failed_test_move_rolls_back_its_file
 e76854bdebeb7760ca5d2be7cd2afaa3 extract::rust::tests.a_field_on_another_type_does_not_promote_the_owner
@@ -1402,6 +1434,7 @@ d79993d7eab42d81f1543b2a468474d2 extract::rust::tests.a_field_read_in_a_macro_is
 e77ebdc3f8e891dcb26b8aaba640c1cb extract::rust::tests.a_field_read_in_an_async_block_is_promoted
 6d55255cbccfd9c993f413dc0db86254 extract::rust::tests.a_fn_and_its_private_helper_move_and_callers_compile
 d015a726ff28e126d27ccbe577732cf9 extract::rust::tests.a_function_beside_a_module_moves
+cf2daa4ed9a318c529c29fca7d3f76c6 extract::rust::tests.a_generic_associated_type_binding_stays_unqualified
 9d4d196a568d1bd020b8f0dcc8311b59 extract::rust::tests.a_generic_trait_impl_path_is_qualified
 5f7d3aaae54df08e95ba8b504410b1a2 extract::rust::tests.a_grouped_external_import_loses_only_the_moved_member
 d6a2e22635c0adccc7fb1a6bcee0ad71 extract::rust::tests.a_grouped_pub_use_keeps_its_visibility
@@ -1414,20 +1447,23 @@ fbe89900f2ea8412ea22ebe6d6329b8c extract::rust::tests.a_move_drops_an_empty_inhe
 15258e9197b54de2b167855c89454ea9 extract::rust::tests.a_moved_constructor_promotes_struct_literal_fields
 5196640c870314c74e74a07e42d4f6cf extract::rust::tests.a_moved_fn_carries_a_glob_a_trait_and_a_type
 92d3f46ce9d086058e0a9cff77e04bd1 extract::rust::tests.a_moved_fn_does_not_carry_an_unused_inline_test_import
+e2587cb6ac88ff319963a8afb2f88a52 extract::rust::tests.a_moved_item_needing_visibility_is_named_by_its_new_path
 2d6122fb6013ed36e87f0ef21a2592e7 extract::rust::tests.a_moved_method_carries_an_import_and_aliases_a_clash
 cd80a5821c5cb2aea804f43ce7d69f96 extract::rust::tests.a_moved_method_promotes_a_local_alias
 3a213c47b176967cc9a2b705ad1c28a2 extract::rust::tests.a_moved_method_promotes_a_pattern_field
 5131fa3ff74c57ef26bc7e5a98477912 extract::rust::tests.a_moved_method_promotes_a_typed_local_alias
+8c374ad4a0ec0f55e3ff71f9be0e01eb extract::rust::tests.a_moved_method_stays_private_for_a_child_user
 008405b9fc23659f7ae23983b55d998e extract::rust::tests.a_moved_methods_private_field_becomes_pub_crate
 5fcb41efef212d9cdc16e841f15439ea extract::rust::tests.a_name_clash_gives_e1004
-7e48de96fe3da6b87f1ccdb0c2ee2507 extract::rust::tests.a_nested_target_writes_its_test_file_beside_it
+d8cc45804399d589dac238d9e64536dd extract::rust::tests.a_nested_target_writes_its_test_file_beside_it
 d28ff50e443608b7b9c66a833196c1c7 extract::rust::tests.a_new_target_module_is_created
 46cfe0f897bcd41e17c9b3828fb3595b extract::rust::tests.a_partial_test_move_leaves_staying_tests
 9970666ed313f8aec5883dc468ab08cb extract::rust::tests.a_path_test_file_header_import_moves_with_its_tests
+3b3acb1e6c3df41168046fd592a4e25a extract::rust::tests.a_path_test_that_uses_staying_code_stays
 e1f92ebb78532fb69bec44cc3393be8b extract::rust::tests.a_pattern_that_rebinds_an_owner_alias_is_not_an_owner_receiver
 8e41376731e64fe76300e63865be8211 extract::rust::tests.a_private_method_called_by_staying_code_becomes_pub_crate
 cbe3e08b3800d16d4262195565c3eab0 extract::rust::tests.a_pub_use_is_retargeted_and_unrelated_imports_stay
-b649a319d28b3072f9b2951d77b9323d extract::rust::tests.a_retained_private_helper_becomes_pub_crate
+b0b1ecebd1de4f400eb09f9f12ac3448 extract::rust::tests.a_redirected_use_follows_the_group_it_left
 3106164d07b55e8cc0fa7f3945231347 extract::rust::tests.a_same_leaf_impl_for_another_type_stays
 8ba67a09c431fdbb5ec5dc9be0a1060b extract::rust::tests.a_second_test_move_appends_to_the_targets_test_file
 1c766d6ea92ae1d053de64f5ea4a37bb extract::rust::tests.a_shadowed_local_alias_is_not_an_owner_receiver
@@ -1435,14 +1471,20 @@ f966e3b5f4ccf25a1dfe98fb78eefd02 extract::rust::tests.a_shadowing_pattern_restor
 106621a322deedeb17e39509dfc1ac3d extract::rust::tests.a_staying_moved_pub_use_comes_back_private
 b3b284b39ba2a47f6e464f47b99f2dd2 extract::rust::tests.a_staying_moved_pub_use_keeps_its_attribute_and_loses_pub
 992cbfe418ebc9b92d1c56cb8d5173af extract::rust::tests.a_staying_moved_use_keeps_its_attributes
+fce3db50efe89f32c8b045ea33dcde0c extract::rust::tests.a_staying_private_helper_stays_private
+e678527d2bb63dcd2868c4afb0772806 extract::rust::tests.a_string_lines_call_does_not_carry_buf_read
 f6de4b88735f3a0d0b19595a36771374 extract::rust::tests.a_struct_beside_a_module_is_refused_with_e1004
 9b3774908371100a778f3b68f1ff5bb5 extract::rust::tests.a_test_file_header_gets_one_super_glob
 662b0253eded02a203085633a3e80e9b extract::rust::tests.a_test_inside_a_moved_module_moves
+369f35c05098a880a9f40b5556998fc8 extract::rust::tests.a_test_module_move_keeps_a_siblings_imports
+74a52dd7bac32ea7747546a78ceaedb2 extract::rust::tests.a_test_move_appends_to_a_submit_created_test_file
 9fbb1172cbd88f844a1667ada4f101f3 extract::rust::tests.a_test_moves_with_the_method_it_reaches
-b9694ac3a6f5af62f6f16926417d842a extract::rust::tests.a_test_reaching_a_staying_method_is_refused
-99e76990e152e3c71efb6fb2cbaf02c0 extract::rust::tests.a_test_split_is_refused_with_e5002
+11e1883dbd05df5ed856415137775e45 extract::rust::tests.a_test_reaching_a_staying_method_stays
+fc80e0356433343b8ef62de2d968a010 extract::rust::tests.a_test_sharing_a_helper_with_a_staying_test_stays
+a0070c2106be91768234d1a7d09a9316 extract::rust::tests.a_test_split_stays_and_is_rewritten
 e0c7a4393812c891e28034335f5a3317 extract::rust::tests.a_test_using_private_helpers_moves_with_them
 7864f51474903898c5036fbbec7f2052 extract::rust::tests.a_trait_impl_moves_whole_and_a_part_is_refused
+27b78e3ffb5bc9c8551a1f83f0ffb2af extract::rust::tests.a_trait_impl_row_moves_whole
 ce9f316a2d122beb07fb99f384d80b62 extract::rust::tests.a_trait_method_moving_with_its_trait_is_no_clash
 885f999ebeda57c59910333dbf8d6fb7 extract::rust::tests.a_tuple_field_used_by_a_moved_method_becomes_pub_crate
 371f684f4c04f0be7611bc7a07e07359 extract::rust::tests.a_type_moves_with_its_inherent_and_trait_impls
@@ -1481,17 +1523,23 @@ fa9fcdc64654c2e8828d296f6a82ec99 extract::rust::tests.header_modules_in_a_trunca
 cf0ffda06c9b7e9852737d850ca2864f extract::rust::tests.header_modules_with_attributes_are_named
 cc3510f1333bcddab87c39aa7cc500cb extract::rust::tests.id
 df5076ad89e44f4d77c451fba39508fb extract::rust::tests.impl_trait_range_keeps_generic_arguments
+88a50a81ced54a4a8a8d210389da269d extract::rust::tests.moved_code_carries_the_trait_its_method_call_needs
+5407d9af49b9b7ef2d62b065692621eb extract::rust::tests.moved_code_names_a_staying_crate_root_item_by_its_crate_path
 285487a6da17b54f3ee8abc44d8db007 extract::rust::tests.moved_code_using_an_external_import_names_the_follow_up
 841d4134428b5b62ee298b2c469c7366 extract::rust::tests.moved_code_using_an_import_the_destination_has_moves
 4bae873d91b84d6aa9355053fbbcc4b7 extract::rust::tests.moved_methods_join_an_existing_target_impl
+06bae2fccc525162985caab767541a29 extract::rust::tests.moved_struct_fields_used_by_staying_crate_root_code_become_pub_crate
+03b313045b7de4f9549b052b68c29d71 extract::rust::tests.moved_struct_fields_used_through_a_moved_constructor_become_pub_crate
 cbfe34a0acf91c38c2a3983be8ca190f extract::rust::tests.prelude_derive_and_macro_names_are_known
 37e253bffd89c2c00be9596cc7ee7d13 extract::rust::tests.qualify_trait_impls_rewrites_the_header
 77fc833793bff94176fa1e3b791b0d92 extract::rust::tests.ready
-345b8982d7a0091ebd944d063fccf3a3 extract::rust::tests.test_files_take_the_targets_module_name
 5c57c8e44db6665be20b77f3837a9464 extract::rust::tests.tests_from_a_path_container_move_to_a_file
 6cd551d7a3b686c1018205a902541241 extract::rust::tests.text
+fd5c0756f74dd4658f564247d0364e45 extract::rust::tests.the_crate_root_cli_helpers_move_to_cli
+e62cbb25952d54ad030ef3f2a2122920 extract::rust::tests.the_crate_root_diagnostics_types_move_to_diagnostics
 eeec553cdfa53d160b29f19d32d3aca3 extract::rust::tests.to_project_is_refused
 2a363f3ec527dcdd144e557542cb0ab2 extract::rust::tests.two_inherent_impls_are_an_ambiguous_choice
+19b84a3fb412b78f2f0cd9de824426bf extract::rust::tests.two_redirected_uses_in_one_group_keep_their_order
 baba9c1253c6a859404c3431b8f7f005 extract::rust::tests.two_source_tests_with_the_same_name_are_refused
 fab23bbb249a7a52663c1ef73de9d9fd extract::rust::tests.vendor_make_and_a_local_let_make_are_untouched
 c70ca11c7050f512ecd2f77bf13f7f82 extract::rust::tests.written
@@ -1519,35 +1567,59 @@ ef101d759770f183718b3d99a2e3b7aa extract::rust::visibility.FieldVisitor<'a>::bin
 d0f9ac298a94b1638f0f6cc22e4e1495 extract::rust::visibility.FieldVisitor<'a>::restore
 b0982930512e7b7ced4ad37ec1ef22d8 extract::rust::visibility.FieldVisitor<'a>::shadow
 854ca8092c7d877ccf34ecb0feb24a1d extract::rust::visibility.PatternBindings
+d744b87676a4ffb0883e4a26da097bb4 extract::rust::visibility.all_fields
 c1a7ec74a395871c52d760b738bb2cf5 extract::rust::visibility.binding_name
 0049852cfd2ae000c94ca52c79c530d2 extract::rust::visibility.for_loop_name
 0d25c06b89e6cf3c0ef771371b45a1ad extract::rust::visibility.func_path
 f4d78fa0a566b377cdc58f2dcf7f7fce extract::rust::visibility.local_owner_binding
 40da329befdb1d2cfdd252a4cb94ac8f extract::rust::visibility.loop_owner_binding
 8bb471b7879ae1ef5563840648a48731 extract::rust::visibility.member_name
-ffa64052afb2f0a7fe3c4456a5780c1a extract::rust::visibility.method_fields
+52642ba30b4d719b25af92ebad71f0db extract::rust::visibility.method_fields
 7190a45f6e30adca66d34ec77de1bad1 extract::rust::visibility.owner_receivers
 639fbca4eceb4974e4e9d584c08e770e extract::rust::visibility.path_is_owner
 1022bf3b8e6dd5e20a98a59a5d3d35c4 extract::rust::visibility.pattern_bindings
-506c1744c6c6a96950febbaaeb7626cd extract::rust::visibility.promote_access
-4698e52cdedb393ad5d66c2afe6323b5 extract::rust::visibility.promote_fields
+f2c40f805d998214747c0c7b5db4cf0c extract::rust::visibility.promote_access
+8b943a4b6ed497ac5160d298f20ed939 extract::rust::visibility.promote_fields
 2bc99fbf0e2e00c724c63e62a2632e51 extract::rust::visibility.receiver_is_owner
 e19fcd44b34a7cc04cc3cee31a6d2a88 extract::rust::visibility.token_fields
 ed15af7c78db17d4683f7351af192e98 extract::rust::visibility.type_is_owner
 271bf56e0e6aaa9565858f7a16225ad0 extract::rust::visibility.type_is_owner_sequence
-faff34466013dece5874b5e7f4760146 extract::rust::visibility.visible_from
+e482334e07fb85b666f6d5f86099afe9 extract::rust::visibility.visible_from
+600b4d257aa5c2326d98a1646d359e5a fsx (imports)
+4ad924d7973c06ed83eb3236a1813a8b fsx.lock_file
+94e98d583a8d935d827ec833f324e1f6 fsx.replace_bytes
+657d2bd23fce5aba55429a8ee7f2342f fsx.try_lock_file
+e4b37f88be673d54f6947f2b840d1543 fsx.write_atomic
+94794ffc42c8135c1ec6efb6c70825e4 fsx::tests (imports)
+c5c96744e90933d679ccb3ace1643c50 fsx::tests.a_file_is_written_whole
+06a8511c2ca765369d92e722309a4828 fsx::tests.a_replaced_file_is_synced_and_renamed
+341fdfd4bcb1ed9fe1128ac6e67bab22 fsx::tests.a_try_lock_is_none_while_another_holds_it
 0c1b17f738a500e488963b0c94d17c10 index (imports)
-6be6b95ab3985175c3d999d08c93c178 index.Index
+4e811719b54f88c49a9f2bc931763187 index.Index
 a6e05a1ca558f2cf67c8437b1b4c1299 index.ModuleRow
 b995d248131ef8bcb31d2e88838593c5 index.ModuleRow::rel
 cd1fff920079945b39e0765a43f48637 index.Sym
 7d8b8946e679d123ecfca18bf373c728 index.Sym::item
 4a1ad907da3369135e8c59a61d7242fc index.Sym::qname
-84db25e5dffcf18a025383a01e6cbf60 index.build
+ff28dce42b12c04338952459c55917d3 index.build
 c0db5fa10ee8ee059d216e9f6f05b0d4 index.signature
 ce0131033bbd4eee95c22f2c7eca2ec6 index.test_index
+7f64e7412aea835b00af48d81fb31313 index.users_split
 e3b0c44298fc1c149afbf4c8996fb924 integration::acceptance (imports)
 714ee5d4c9fb9362880283c738dbeeac integration::acceptance.acceptance
+b3413fdd916e8fd03541368b8dbe1fd6 jsonx (imports)
+ef96d70c8c4e44607984018160c3f9ca jsonx.bytes
+f956eeb3aef5fd94dabb91b160c850ab jsonx.read
+1f0b52a9af77d8cae1c9b4ffa00f6a9c jsonx.read_opt
+5e97175fde19bc2b2d1763757c4f5822 jsonx.replace_pretty
+93bd5b58cef754c00fd708f239409051 jsonx.write
+6cc2c126beacfb4e30869e418fa4bbf5 jsonx.write_pretty
+94794ffc42c8135c1ec6efb6c70825e4 jsonx::tests (imports)
+98e900f306e1360a028c21b0ee3ebe2f jsonx::tests.bytes_reads_a_number_array
+0f4cc8733dbd7628e78130ba3f4ce97b jsonx::tests.read_and_read_opt_read_the_json
+7ef950c399e54f4f69e6c4a1957ae37f jsonx::tests.read_opt_accepts_missing_or_invalid_files
+fd6da28c388bf31b4236fc65cfe667fc jsonx::tests.replace_pretty_writes_a_synced_json_file
+9ab7a7c68659ab4886c77429827ff380 jsonx::tests.write_and_write_pretty_write_whole_files
 db67e6f40807cf1f4e1ec1843c93caad language (imports)
 0e63309d88b556459c2fe579078c304f language.GLEAM
 afc9a64980ba64ff7dc2b519bc5d4620 language.Import
@@ -1600,7 +1672,7 @@ ae8b0e78324e03b91af3d71e104400db language.reading
 5dc84bb50442a6a3f7e6cae806b550d0 language.repeated
 2aa47ddc012ae9254281b5f1ce573bf1 language.split_args
 9626193da45723574a96e60ecc5ba451 language.tests
-93395f1e4a41aa72da6b5c4ecc813f84 language::cargo (imports)
+d4d19db5e756b1d53714fc064d349884 language::cargo (imports)
 80dd032a67c47805152b269dcd3f4b4b language::cargo.FORMATTED
 7edf230f57f1117e69970a19a2489eb2 language::cargo.MISSING
 4d2e6c446565dd8fbc91cfe2740dad41 language::cargo.ROUND_NOTE
@@ -1615,7 +1687,7 @@ a499f1a92f53e1600c2e6e88ff5c663f language::cargo.diagnostics
 50d0f35f01ee0776efc03e7417616efe language::cargo.fetch
 4677a2475b39246c2652bcf4190c8131 language::cargo.fetch_failed
 0629cbef45a400a5af9b121bf6ca1f5d language::cargo.fetch_if_needed_now
-ddd1125d0628db731e084b4ac3fc64e2 language::cargo.fetch_lock
+ededee7965d6bc13596e688694662ba1 language::cargo.fetch_lock
 97131bf8302a89294d122b2c8576061a language::cargo.fetch_lock_dir
 bd878d28e52664ff1ae2ad0bb04e4fc6 language::cargo.fetch_online
 892757d46fac5f975153d83705934cff language::cargo.format_item
@@ -1651,11 +1723,11 @@ fbb776e3126cfbf79768e708453a8a13 language::cargo::tests.PRIVATE_CHECK
 d4609596cb2ea1998d4f128e754a1a16 language::cargo::tests.a_failed_member_fetch_keeps_the_workspace_lockfile
 4818cbdfdad204c8064bc9d4ee1b1203 language::cargo::tests.a_failed_tests_captured_output_is_kept_whole
 af03be1b1c4b554a36615c44bc0b4cc5 language::cargo::tests.a_fetch_locks_its_solace_root_above_a_cargo_workspace_member
-430f759c2ad8f0fd562682bd5b2fb3d1 language::cargo::tests.a_fetch_waits_for_the_fetch_lock
+1743851c5a202abd473a0a319969feaf language::cargo::tests.a_fetch_waits_for_the_fetch_lock
 521d37e3f3bf37663070c3aa32634471 language::cargo::tests.a_formatted_item_is_reused
 fbee6bfe1acefe25b281c61ac42efe25 language::cargo::tests.a_grouped_error_title_comes_from_cargos_output
 41e2b36830c646ba51f9597096c2ef63 language::cargo::tests.a_macro_error_is_located_at_its_call_site
-15bef075696fc9d939c6dc5b6e18cd96 language::cargo::tests.a_member_fetch_and_a_root_reopen_share_the_fetch_lock
+be09053f217e51750c5c3054e28c93e3 language::cargo::tests.a_member_fetch_and_a_root_reopen_share_the_fetch_lock
 26a7a6121e8ae73dac74687edac115d0 language::cargo::tests.a_probe_line_without_indent_keeps_quoted_spaces
 c62b152dcf471b402be2d55d0ffb6de3 language::cargo::tests.a_projects_hard_tabs_setting_is_kept
 4db85b2af65131689fbf5baae3f417f3 language::cargo::tests.a_rendered_location_needs_a_column
@@ -1813,6 +1885,7 @@ f2163ca800d9a934e453481f41ce640f language::rust.quote
 35c4bb5b37fb2790dc12ff60c3703fed language::rust.split_parsed
 fa3544377704e519ce82d4ca6b2f6495 language::rust.string_literals
 d92b6c578baa7dc9686433288a995c06 language::rust.struct_names_value
+777499f1757ea6979e69ba4e220b20f2 language::rust.test_file
 d3bb0d21fe81354a09cd2071b54ee477 language::rust.tests
 5cc2977b3cf44eb54b42d7186636da42 language::rust.walk
 c9d9d1e467bc6745f6d414f09abbcb11 language::rust.within
@@ -1848,13 +1921,14 @@ d8d6a5305b0b11d93ca0c7ccca50939d language::rust::tests.package_of
 ec0954f9c8813db0553ee8704c8a80ec language::rust::tests.pairs
 b13846e4ea4d80fcbfbfa68d23db3902 language::rust::tests.rs_files
 678473f230cf1178a8492bb51eb18912 language::rust::tests.targets_moved_from_cargos_default_places_are_refused
+345b8982d7a0091ebd944d063fccf3a3 language::rust::tests.test_files_take_the_targets_module_name
 370ac126aab3d21b4155c0ee3df8736e language::rust::tests.the_head_follows_a_nested_block_comment
 061263432d4228014d293635360163e5 language::rust::tests.the_head_follows_attributes_docs_and_comments
 21de12721f6ca2084fd1bb36684ed945 language::rust::tests.the_same_name_twice_is_refused
-0b88bed84a23dc91e612b089eb77d913 language::rust_refs (imports)
+f103218f8e68f69bf3421a289f9720ab language::rust_refs (imports)
 f53e5a7ba2a96d6dc0fae96ddfc57199 language::rust_refs.Binding
 b121ebddcd36fbceb5971138f4bfe426 language::rust_refs.CallKind
-6318dd066ab63a4dba95ac514a381d65 language::rust_refs.Graph
+5dadec99babb45beb73ba6d4593bce41 language::rust_refs.Graph
 d751e1a05e7a8d687dc5f8020b37a40f language::rust_refs.ImplOwner
 375a850dff3555f28af2180af4173e24 language::rust_refs.Import
 1074662fe63ad290ffb83f5bb95a3f28 language::rust_refs.ImportSite
@@ -1868,7 +1942,7 @@ d20526a31119e5a504920690a353c961 language::rust_refs.Refs<'a>::container_name
 f6e8a604fe92adeb379346475849e984 language::rust_refs.Refs<'a>::expand_types
 5b6d076b7fb42ef077bbc1bf91428043 language::rust_refs.Refs<'a>::fallback
 a539f9e353613419a1907a795e2e09c3 language::rust_refs.Refs<'a>::import_visible
-451c1d381b05f051d246c36430725ba8 language::rust_refs.Refs<'a>::import_visible_in
+174b8747bf35765ad3327fce9f23f795 language::rust_refs.Refs<'a>::import_visible_in
 e6bb52c5ce26a86da85c15ade311763a language::rust_refs.Refs<'a>::locals
 0088052e30f33c87daa2bf1d8c3f4ede language::rust_refs.Refs<'a>::module_exists
 a18289debb1f2dd67c743c096322230d language::rust_refs.Refs<'a>::module_named
@@ -1893,6 +1967,7 @@ e5f44ce292af8ca4ec18d95888f44300 language::rust_refs.Spanned
 ff6f3bd9cbdee76f7903f8572d345715 language::rust_refs.associated_targets
 282bd684299257a9c6445b46ff91facf language::rust_refs.attr_len
 bc934d99203b35a08dfe2205660e5687 language::rust_refs.attrs_and_rest
+14994996e7f54d0e9a8d445e96c71ff6 language::rust_refs.bare_candidates
 d0a393281cd6e98f54d6e0748a32beae language::rust_refs.bare_exact
 963ad04af693be390ca32f41f98bc426 language::rust_refs.bare_targets
 0da03ceea5d99ff324ae9d97e5a56d4f language::rust_refs.before_colon
@@ -1905,6 +1980,7 @@ a2634d797405334eeb8c7a62a47f03a5 language::rust_refs.bound
 0955841af35a507d94bf3d34464bbdb4 language::rust_refs.cfg_test
 a10dacbc1b69beffea9d3387deb5318c language::rust_refs.cfg_test_attr
 ac2149104e5aa73397897cdf535accdc language::rust_refs.cfg_test_in
+f176f3c41dd1d1b708ab375131e8df8a language::rust_refs.classify
 019a3bd3a2bf1649c362d1d15790eece language::rust_refs.closure_binding
 2a095dcd4a5d22d32179f622f7767087 language::rust_refs.closure_body
 510a7672e0fc1b481bbc0093917c1a5a language::rust_refs.closure_start
@@ -1929,7 +2005,8 @@ e8dbe9569fc367efd90d773ae6354c08 language::rust_refs.find_punct
 27524292a5c736e3822acfa00464cfc7 language::rust_refs.find_word
 43b745a83de3e3da86a3f7cd9fd2e761 language::rust_refs.fn_binding
 f45e310480c85efb26f95dbf3c65f110 language::rust_refs.for_binding
-65c1b132d816e9015a79175e2af778c3 language::rust_refs.graph
+105a29ed3f60f8cad34a1a70b674738e language::rust_refs.generic_binding
+fadb017921fea3c1ac7a215aa37a7cb0 language::rust_refs.graph
 fe35e65664482f51baa2e492d90b7ed6 language::rust_refs.group_start
 f0c856a627008a3656750df149584896 language::rust_refs.has_test_attr
 da5c815ae739aeda2df97c4c0c48c120 language::rust_refs.header_cfg_mods
@@ -1959,9 +2036,9 @@ cd38b30426d1b2ea79ad573a84eaeb59 language::rust_refs.is_colon
 fca0c67ada43f22ae052cbb94cf57cca language::rust_refs.literal_fields
 87addbada6436f1e11ac342788a943ce language::rust_refs.match_arms
 79f2e13491fdecb84f8eedc20c9f9e0c language::rust_refs.match_binding
-a1600e10c56cc0c11148e6f26f0acf0d language::rust_refs.mentioned_names_in
-eca1e9177fc99095fb339cbf8a04e57b language::rust_refs.mentions
+12ff9e20d1a856527b8dabf47874fe1c language::rust_refs.mentioned_names_in
 30d1ebcd7afd011bb7656dde107674b7 language::rust_refs.meta_of
+17ae3612c449a54ab1e7a37b42b1b5a8 language::rust_refs.method_targets
 102ed29b4108710236ab8a71b1ea253c language::rust_refs.mod_decl_name
 4c6e49967f83fbb41af5784b47ed5ae5 language::rust_refs.module_named_in
 7d941f0be6c41922025cf58254f6f7b3 language::rust_refs.name_scope
@@ -1990,7 +2067,7 @@ f0872d77082e95abeed5efef8a84f455 language::rust_refs.references_external_imports
 ffbe2c0f7322d12e9cfa268331dd7031 language::rust_refs.rewrite_sites
 8fca526c070a8a97e3ec81546bcde368 language::rust_refs.rewrite_sites_in
 540f311b2851efc3bdeca8f92a979880 language::rust_refs.rewrite_sites_refs
-223694423e92e1d4c9f77645484e537d language::rust_refs.scan
+aed7d8ad4ae68886b71af38aadace6c8 language::rust_refs.scan
 7b08209ddde8fddf28703e08f0d28052 language::rust_refs.scan_scopes
 9da3320c44fd6bfac80ad3bab6ff660d language::rust_refs.scanned
 5973253a9096214a8a81cf2829eb4fbb language::rust_refs.scope_module
@@ -1998,6 +2075,7 @@ ffbe2c0f7322d12e9cfa268331dd7031 language::rust_refs.rewrite_sites
 d1afde9c5d8f57394c9e880cbb6e10f5 language::rust_refs.shadowed
 f25bf332f1b1512c382491edcc0e122a language::rust_refs.skip_trivia
 4f9e3383e1e934c679c72e22acf31c00 language::rust_refs.split_commas
+63dc027637d009c3ba8916c2fa31274e language::rust_refs.std_trait_methods
 43fb6b68386c165876f6845a27dcebf4 language::rust_refs.struct_pattern
 aeb69f105ad1aefe6a72eea2848b239c language::rust_refs.super_module
 c0f1f289bde656c564119ed1bcaac3d0 language::rust_refs.symbol_scope
@@ -2025,11 +2103,12 @@ f6de0691d7a36b4cea6207c85de0b13e language::rust_refs.use_trees
 198fba65af6996dd9bf9d933a9ed9e3f language::rust_refs::tests.a_bracket_in_a_literal_does_not_hide_the_next_attribute
 90fa95cd55cb8f39fb71724087d591eb language::rust_refs::tests.a_bracket_in_a_string_does_not_hide_the_next_attribute
 d57fca39463d90a51cb71c1199f6687d language::rust_refs::tests.a_call_before_a_shadowing_let_and_after_its_block_is_a_site
-c20b6ae1e4f583dd2dea664f9d6e9e5b language::rust_refs::tests.a_call_inside_a_macro_is_a_reference
+fc4985f5c2a609633cacea4c2ebf6bb9 language::rust_refs::tests.a_call_inside_a_macro_is_a_reference
 83fa10a8c0990b4d17c2a37c80f91306 language::rust_refs::tests.a_call_to_an_item_in_an_inline_module_resolves
 0bd0b754cc1793cc40b800be3059254f language::rust_refs::tests.a_cfg_test_method_does_not_make_the_impl_test_code
 4dfee40e7dd6db5c68a9891345abde34 language::rust_refs::tests.a_field_mention_still_reaches_an_item_for_the_graph
 c2b7c58a2e00e380cc0a2ca4b533e5e5 language::rust_refs::tests.a_foreign_path_does_not_resolve_to_a_crate_item
+c76406cb98177657688d86e6f5c0e537 language::rust_refs::tests.a_generic_binding_after_a_comma_is_not_a_mention
 d2adf0d308bad3f2765227754e161017 language::rust_refs::tests.a_glob_import_reaches_the_parents_items
 4c55d70e72fca8f6e7479ff6f84bc3f0 language::rust_refs::tests.a_header_all_test_cfg_module_is_test_code
 42cdae2e489f0adf228fbb494aee4f05 language::rust_refs::tests.a_header_line_with_attributes_is_read
@@ -2042,6 +2121,7 @@ c575c82e668afeeb66367f263923de9d language::rust_refs::tests.a_let_initializer_is
 d5cf02f5d1bbe878b2557d189ad736df language::rust_refs::tests.a_macro_call_reaches_its_macro
 8ff37d207e60e1f8ee2545c1afd4e001 language::rust_refs::tests.a_match_binding_or_destructured_parameter_is_no_site
 906e60231e52b68a1aaade89f7a3a8f2 language::rust_refs::tests.a_mention_of_a_test_attribute_is_not_an_attribute
+f258a315992e932c41b58a810e954549 language::rust_refs::tests.a_method_call_through_a_value_is_a_possible_use
 7939cf9db011c9195f494eb6e04f8c52 language::rust_refs::tests.a_method_name_does_not_hide_a_free_fn
 9350412b3777d700fc6733ebf7356dfe language::rust_refs::tests.a_method_name_links_to_every_type_that_has_it
 26667991c5d1a7cf7653530b196de2c2 language::rust_refs::tests.a_multiline_attribute_before_test_keeps_it_a_test
@@ -2052,6 +2132,9 @@ d5cf02f5d1bbe878b2557d189ad736df language::rust_refs::tests.a_macro_call_reaches
 07f2638e6243c01c3b89cb36b30a9535 language::rust_refs::tests.a_path_test_attribute_is_a_test
 c868da2830b636abac2688270556f320 language::rust_refs::tests.a_raw_const_borrow_is_a_site
 6cbba83476cfc16fc36458fe9f6e34eb language::rust_refs::tests.a_rstest_attribute_is_a_test
+9220d0d7c28c829f5b8b75e3828a63d4 language::rust_refs::tests.a_same_named_item_in_another_module_is_not_a_use
+623f2df64329ce6f2b62205665413a19 language::rust_refs::tests.a_same_named_local_variable_is_not_a_use
+1dcada0236ff98c8a511f897da3d2250 language::rust_refs::tests.a_same_named_parameter_is_not_a_use
 71fd4b27ccbe0452be1bc056c5b527aa language::rust_refs::tests.a_test_helper_does_not_leak_to_its_enclosing_module
 909daa99fcd70d9bd49843ffdab1cdc7 language::rust_refs::tests.a_type_mention_reaches_its_trait_impls
 dc3899a6f9d9054ca73d49948d09e6a9 language::rust_refs::tests.a_type_prefix_of_a_path_is_a_site
@@ -2059,6 +2142,7 @@ dc3899a6f9d9054ca73d49948d09e6a9 language::rust_refs::tests.a_type_prefix_of_a_p
 e244f33222ec071725f837d4413c97a9 language::rust_refs::tests.a_use_symbol_inside_a_module_is_a_site
 15914471d3838c1a99094078357b14fb language::rust_refs::tests.a_use_symbol_that_does_not_parse_is_reported
 43be9ef34d54b78667f8c5bc3b4fdebc language::rust_refs::tests.an_all_test_cfg_is_test_code
+8bc7134177ee69e9692ef7e5b3fe1191 language::rust_refs::tests.an_ambiguous_bare_type_still_reaches_its_trait_impls
 63512481cd292464360f19a3ee19f347 language::rust_refs::tests.an_ambiguous_block_use_does_not_hide_the_target
 4055e1fd6bf09c9f4700e12d243f4ac8 language::rust_refs::tests.an_ambiguous_impl_owner_names_both_types
 86b727d7ad2111d655204e4110dc62e2 language::rust_refs::tests.an_impl_owner_is_resolved_by_path
@@ -2073,15 +2157,17 @@ e244f33222ec071725f837d4413c97a9 language::rust_refs::tests.a_use_symbol_inside_
 7e69aa1078392c2a8196ce84e67b504a language::rust_refs::tests.if_let_while_let_and_for_bindings_are_no_sites
 16c1361474551e87ef096705ab634163 language::rust_refs::tests.impl_headers_and_higher_ranked_types_are_no_loops
 89ba8f7fb0dd6d1ef36ccbd49f0b61ec language::rust_refs::tests.imports_aliases_and_groups_are_sites
-0bb0a497c36f23f75fb748af020965ce language::rust_refs::tests.index
+09680a40ff905aaa136a4584b14f0917 language::rust_refs::tests.index
 2874dd45f3e276c196a6732b6a470b23 language::rust_refs::tests.index_of
 6c61a20f87d83fac6ac3f7dbf439ab15 language::rust_refs::tests.keyword_types_and_struct_updates_bind_nothing
 67e3dfb4cd453933a327759b1f87f7fa language::rust_refs::tests.local_declarations_named_like_an_item_are_no_sites
 65dd7d1b5738a8345d5f8f3d6286b573 language::rust_refs::tests.module
 309f37571feda1dedc56ccf19bb5382f language::rust_refs::tests.one_line_attribute_and_inline_module_uses_are_trees
+41d459b4fc91f9f19294a2b0b231cd24 language::rust_refs::tests.possible
 ea781636d2562eef626415bb0aadd7b6 language::rust_refs::tests.qualified_self_super_and_crate_paths_resolve
 5d35953db43e199ab09bbe3293ec7b81 language::rust_refs::tests.self_and_super_in_inline_modules_resolve
 bd1661535c0579306756fca754b9d3c6 language::rust_refs::tests.self_reaches_the_impls_other_items
+14f990dc582dec4469988b7d25d81787 language::rust_refs::tests.store_of
 9186ae74c3dae0227ab22261eb9acf8e language::rust_refs::tests.sym
 2416a610e267edf0e85c0e57d90ddf00 language::rust_refs::tests.tested
 578bb5826b7c8e461ae21ad5cc2e999d language::rust_refs::tests.use_aliases_and_groups_resolve_to_their_items
@@ -2114,7 +2200,7 @@ de4547e5075a2ab7094d39d8c8d9ae5d lockdown.carry_file
 3bdebfc13df8a9d16b4b7dca60b95c54 lockdown.condense
 20fa1edda4e35012cbbebb5890c5551c lockdown.count_files
 ab0e46210e73422b2c20865aa5a0a8bd lockdown.dependencies
-5113736ff4c22aa07cdad7ea29de90c6 lockdown.dispatch
+a4147b7ded885c384b4ec27e97f6c447 lockdown.dispatch
 17be87e6c503538fe51897307847afa1 lockdown.drop_records
 0dd7168cae184c0d30a0ed44fce02b54 lockdown.edited
 93c4da3a4681d4f96f4c2532f2b4d639 lockdown.elsewhere
@@ -2134,14 +2220,14 @@ bef70d2a0a0836ebdecf113787f61a3d lockdown.in_skills
 32a6da41f9da571a3576ebd106ae28e8 lockdown.invalid_settings
 170b5ff87943c1b21512a6bc8a19defb lockdown.is_gitignore
 007f1670a91a8d860d0f451064409ae9 lockdown.joined
-58543f82533d3fe02633efe6c5aec1d5 lockdown.journal
+b30a99ff2972c18facf051460cf519e9 lockdown.journal
 d7558551908a565cd85fc72776c2b8a0 lockdown.kill_group
 3325683db3835ee204033b664ae4091b lockdown.limit
 4e2d78cc47b95bbaeec5c40881fdf6f8 lockdown.line_count
 b60a253faad39b01d96556f2caf89f5b lockdown.line_list
 d265fc39ef6674050fd9a41bcd47d578 lockdown.line_ranges
 4eafeb497d4a296962682c12d1056bb5 lockdown.listed
-e029deff69a0d829da9e8a5fe7d5f203 lockdown.mark
+ec4763e6f88920283053c0ebba115477 lockdown.mark
 4fa7c8c6e162e904c90454cfe6941386 lockdown.matches
 71f6e900304e77702f2f011537912c83 lockdown.measure
 bc29877db53f2c94b5fa399a3c9f6ad5 lockdown.missing
@@ -2149,8 +2235,8 @@ a071260058bda030ee273c99b429b729 lockdown.module_held
 ccd2200360d3b14c22645515a13c3349 lockdown.module_of_file
 e1f998de686a5da096514285233f49a4 lockdown.module_of_path
 994ed64dbc012586a68eaec0912e13f5 lockdown.movable
-654d7d674186506b3feb262a1bf99172 lockdown.move_args
-84dd8c8260f5b15ff8ac92c59f32352f lockdown.move_files
+162cd7b12c85035e821d56df957bd8cf lockdown.move_args
+bd6e757a372f20f268a0d7c07b0d5c74 lockdown.move_files
 12f48f91445b492a61299da63819ff65 lockdown.moved_files
 c720f6439aa8c93909f48fe17ca1d441 lockdown.moves_file
 5252e34d0e3daea52eede8f774d487fe lockdown.new_module_hint
@@ -2164,22 +2250,21 @@ f28ba8a07c1dfdeac7667ced88a38d6f lockdown.patch_snapshot
 7b655d92d791e2b9029e223a8a53202c lockdown.path
 0542f6880cf496194e1c0c79a6df3783 lockdown.paths
 fb00a6c7d2e15b04076412b15c3b7664 lockdown.patterns
-ea025231d00c5b6abe848b9b3dc604a4 lockdown.pending_for
+5ecf45fa1131c87c0afe06f87e7c2b5e lockdown.pending_for
 2ca774569b376ad25e33b63be20d6e93 lockdown.plain
 b5696fbea09d893d57f2be86c1d65466 lockdown.prepared
 be6c213aef07eb9b68a29fb7131f244e lockdown.project_suffix
 1153cb8b7fcaa90145ab968236695b12 lockdown.reachable
 b1902407d44063a79ebbc0cc7e601d6a lockdown.read
 580ae454e284874397fa9f6e4866c961 lockdown.read_part
-c758c2e5f66f0517f4c606ed76acdb8a lockdown.reads
-113726034339e60ff8469e5fab9f0a1b lockdown.recover
+f8f5dc96d8b73e1502be349197030719 lockdown.reads
+dc8afec07f1171838f6db148cf5df311 lockdown.recover
 626b324a1582cf845c519453a825b8f0 lockdown.remember
 91295ca486091aa3e8b2fdf94c333416 lockdown.rename_new
 4e78b8d5773535050a8472d024a281ae lockdown.rows_in
 4cfd8bffd6b8ad9bc89674cdf1f2d392 lockdown.rust_module_of_path
 01afa7e0b468422e3e4b039d3f43c199 lockdown.rust_setting
-61e54e733ee9876d59de85c0895461f6 lockdown.same_project
-b56fda8eb38dbc807d7b6e63e909c3fd lockdown.same_run
+9a1be37a34e1a711fd209fd699cf49e5 lockdown.same_run
 ed1227ba46a6bcb146ee1eefbc8d7cfe lockdown.sandbox_read_is_a_list_of_paths
 566aec423208b768489e58a9498ee97b lockdown.session_file
 6534b8b6ce2b4ff4ea3b99bb1cf00679 lockdown.settings
@@ -2213,6 +2298,9 @@ c6412ee3fd433e9e57e8cc3ba2eba480 lockdown.tests::a_both_held_test_module_prefers
 bee672957c43ce3f3fb22ca78de39853 lockdown.tests::a_path_that_repeats_its_project_is_named_without_it
 5baa6cce5584864bc8a7e7324472432a lockdown.tests::a_protected_file_patch_says_to_send_the_whole_text
 8e1d2bba288cdb4e97db7a0b0cdbebba lockdown.tests::a_read_from_another_project_names_its_project
+6fc9aaac4923503857a6851852d3d705 lockdown.tests::a_reference_section_is_validated_on_its_own
+0131c6508cff1dae387971b59108701e lockdown.tests::a_reference_section_write_checks_the_summary_against_the_joined_sections
+f2f45cc6d83c1fca321b03bfa12eb837 lockdown.tests::a_reference_workflow_write_checks_its_summary_against_the_sections
 7f1ccd89088b7a42966de4606b172227 lockdown.tests::a_refused_file_patch_is_fixed_in_its_draft
 2602238e0390091a7f75414b4f9078b0 lockdown.tests::a_root_path_reads_through_another_project
 ff6f245c0459b004a7c46a3a3e118b63 lockdown.tests::a_run_that_cannot_record_what_it_built_still_passes
@@ -2257,6 +2345,7 @@ d4db5042c04b285afe637409ff5bc716 lockdown.tests::read_and_files_take_several_pat
 0858bd9763ac8c0adc25f757b90a87b5 lockdown.tests::read_names_a_missing_path
 52c4da1539a4767fd2b6fdbcc212ab4e lockdown.tests::recovered_records_keep_the_folders_that_were_there
 77458d727bf508d4a7b2f96b8283ebf3 lockdown.tests::recovery_skips_rows_already_committed
+f1c483e6334a45723ff4c46dd524125e lockdown.tests::reference_scratch
 5645db718ac309020ab78533ca98e68e lockdown.tests::run_reply_is_condensed
 f1b1d803160dc8aa693f0b170e1d5797 lockdown.tests::same_run_matches_only_its_own_record
 237b8a9ddfb90a534df5441af7ab98b7 lockdown.tests::the_skills_folder_is_read_only_for_agents
@@ -2272,7 +2361,7 @@ aaf2d6c62d443dd9f2d6f7e98f00a653 lockdown.tree
 18370ec5f5c8182307d35022e8ec8f15 lockdown.tree_files
 9cfa7c49bc953727a23ae58aaa8a62ae lockdown.tree_rows
 f981f8071a420bdc98d74f74921524a5 lockdown.trim_output
-a59ac718b83438fb57cd2f2748639e42 lockdown.undo_record
+8577afe55f3dc21363bdcbf5f31df6ad lockdown.undo_record
 437ce90edf38c9a4e93b5e673ce7f5c8 lockdown.validate
 cceb75907624a59782653ddc5f093dad lockdown.wait_or_kill
 5563abe3cc62becfc59d959dadaf379d lockdown.watched_paths
@@ -2283,7 +2372,8 @@ fdb2c7ad5796654f0ef159f318c92c0f mcp (imports)
 f785f94222ffb77997597e7fccc72959 mcp.guarded
 f183d254a3f237691ef6f97a0646b9e8 mcp.mcp
 c62c31396072efdee7dbc82f85720bcf mcp.patch_in_command
-46eb729a15ce05a6658dc6ef980506c5 mcp.shell_suffix
+a565ffa00018281929fcb58164075088 mcp.shell_suffix
+98485fde2c5414fb1f5a38bff76fea53 mcp.shell_suffix_pass
 12645c973bba27cd240c83293d8e956c mcp.tests
 c84104830017efbe9858fdefca4d8714 mcp.tests::a_hunk_line_is_not_named_as_the_command
 ac446c67a6864af024fee7446c801a44 mcp.tests::a_panic_anywhere_in_the_call_is_an_error_reply
@@ -2292,12 +2382,13 @@ d3a0be2fccef491b3b5e633fcc405fdf mcp.tests::a_patch_in_command_names_the_command
 d9a7e97f7001a8cde62c86cdae8e0928 mcp.tests::a_quoted_pipe_in_grep_still_runs
 f5c8e6ad8bce8122d7885310410ee585 mcp.tests::a_rust_name_with_angles_is_not_shell
 00a07884211b93d46cd8c0ff54779d31 mcp.tests::a_shell_suffix_is_refused_once_with_its_text
+ec610efb3dffaa1eba4365ba6f7a1634 mcp.tests::a_trait_impl_name_is_not_shell
 9e6cb3037e0d4d0332226c6643aedd08 mcp.tests::code_before_a_command_is_not_named_as_the_command
 beb3cc73cf146212efe9714b7fdbe540 mcp.tests::code_in_command_names_the_command_and_text
 d91426fecb47761b4f0ff18e6dbacbf0 mcp.tests::no_command_is_an_error_reply
 0b89d28c9cadfb90784d68bbcb2a81b0 mcp.tests::patch_in_command_is_told_from_a_plain_command
 26721ce0fe7e29a6e3406bc814135cc7 mcp.tests::shell_suffix_ignores_a_quoted_pipe
-8da383af37054d495ab6d8a798d73ec3 mcp.tests::shell_suffix_ignores_rust_angles
+d80944dd50b82762b5a5e0c067629298 mcp.tests::shell_suffix_ignores_rust_angles
 02c550962d14edac78a21200e01fb1cf mcp.tests::shell_suffix_names_the_part_to_drop
 0903cf42b87d313e9c9f955238c0a9ea mcp.tool_call
 251dd958c34fb9b499d8c873deb53277 mcp.tool_schema
@@ -2344,16 +2435,16 @@ b351464f63259a06b570a6486ae179f9 migrate.coverage
 861bb0563227fe761592d1bf11bf3338 migrate.diff
 1360e85cf3b54c5688238f1c03b5d5bf migrate.drop_task_context
 350ef2e7c93073d00761e2a4e3023f86 migrate.entry
-6cd477d323af4789870d42ce3150dc28 migrate.exclusive
+37fed6ac2f3adbc152a077dd3d761f2a migrate.exclusive
 1498d6abc4b1380f2a42df6a3de70f82 migrate.explain
 42376251d7f0da836090fca24073f211 migrate.fail_point
 7527a2b325a0ae696fe189c16401b743 migrate.fingerprint
 8379d1ecb2def15097750befd62759eb migrate.flag
 5e0be8ae6e670b2fc0371ab70c3cb05b migrate.flagged
-ae4ccd0c8bb0d5c3db33cf96850aba41 migrate.forward
+27edc4013de823b6c751c9d6f5508449 migrate.forward
 a485103fdb3b508ba85029f633960a00 migrate.git_index
 c31d4554e3c633df909c5b0359fcd35f migrate.git_pointers
-6306d40b43e024184c96f61829e2524f migrate.hold
+f2afdcb52f48cb3ce23ad6867edff8a2 migrate.hold
 9fc57079b717d7ce024edb9c32917c90 migrate.in_git
 0880664c1e74d9e0f9a99eddc18209b5 migrate.in_temp
 dac558d16339cc04a09ec93144b6d711 migrate.inside
@@ -2362,7 +2453,7 @@ ad0151f75c54f5018497c9a127dba65b migrate.inventory
 83a51bfc9de14796b7a37c5002753cbb migrate.journal
 4423867d307febd9813c5b71daacb2bc migrate.lexical
 39c389c2465fa1aff82895c5a368e0ce migrate.links
-cb7dc93a6f656476329b333fb0b3b906 migrate.load
+ac375e1e4c077ca6c7cf9522eefb1f75 migrate.load
 cb6e10f88c60508e44408422d8352e28 migrate.locate
 79ceeec0910d050be45a882d1d62e1ca migrate.mark
 1b99acfc00695a362fa21490725cc7f4 migrate.moved
@@ -2379,7 +2470,7 @@ ed66e30dd13c316206700dfdf1eb45c9 migrate.recheck
 94d9fa8bc2a3a1be2d221ad3437be020 migrate.recheck_state
 4051ce14873b84666f23e46ee3b4eaaf migrate.reconstruction
 adcb38b688d7bade93e71625861c00a8 migrate.record
-bbf00143b9b7da325b8072cf3161a0f7 migrate.recorded
+d15961d46691c7471b1b3060c4c7d00a migrate.recorded
 4ca9682e102012064def3aa52e328616 migrate.recover
 0c961df6a715c78878fae303f1540424 migrate.recover_here
 c38dede11bbf8b5a77dd11aa8ff17c67 migrate.recovery
@@ -2392,12 +2483,12 @@ bf4126f808db5aa37cd071d605a9afff migrate.renames
 ff3d48df25b61c0eb6a990937a2ce488 migrate.sandbox_reads
 15cb8d19f6fafcbafe9e1451021ad861 migrate.sandbox_works
 26c4ac8682595adf12d328802e7e86e4 migrate.sandboxed
-435bc21c153550590aa24315763954fe migrate.save
+0a67ad1bc23dfb6ecf0ce98cfb2ffbbf migrate.save
 155b6efa7435bd150c8887d0ec5c4ea2 migrate.sha
 7033376b955ab48ace27851ed1e449d0 migrate.shown
 f623c32c71a9647e75366eca5aeffa04 migrate.smokes
 ac0f1f96ade62fdb0704fd7f6eed6eab migrate.stage
-8efb64fce22d6753621c91a8a41a15ae migrate.start
+403f3935c031fd188f423fb593e45b67 migrate.start
 226f68718ee4d5004fecfd406598a9a0 migrate.status
 1bfcf5ae1df7b923bb913fae731ae126 migrate.stopped
 2ac22256b45c8caeef852c9a45744e9a migrate.string_lines
@@ -2457,7 +2548,7 @@ e65bc81a86f55220ce7b07305fc807ae outside.OLD_COPIES_REMOVED
 75f9ba0a27c3c2324fa594d92fd8a6a4 outside.Written::load
 bd446614a21f16240ee7de497ace1427 outside.Written::prune
 d40bf63e20304d3a75b205ace6c0fedd outside.Written::record
-91eb6ae6d134314f2589bdf65f7cade8 outside.Written::save
+b12aa3f00e91fe38c5340f09ab023294 outside.Written::save
 15e9d6bd25299cc800cbcb559639defb outside.Written::unchanged
 3358c9c2d41002f4f81207e9e132215c outside.a_bare_store_directory_ignore_still_warns_for_a_nested_project
 18aa5d59b44bc4f4fb12f182e75ea978 outside.a_busy_checkpoint_is_reported
@@ -2491,8 +2582,8 @@ f4e6807c810cfb1cbbb57616ed79dc6a outside.remove_empty_dirs
 4ef043dd9f207c033ec7217be1db32c7 outside.remove_generated_store_ignore
 0c0a13c2d743fa4115d14b1aa8af9c26 outside.remove_old_copies
 08a859870bfaddff9b18848e949a92b8 outside.root_with_two_projects
-756916e5c828be622b143c76957e085d outside.save_approved
-8bb2fe75ccb3e324a4bd69b251455caf outside.share_root_ignore
+a491cba720c0f7ed45a19e3d8b2667ca outside.save_approved
+3b0079327c3ff719032fa77077ae957e outside.share_root_ignore
 45d53bde2c2708bf3243a82876688ef1 outside.share_store
 61dd50871aa848767d092478b6caaef6 outside.stat
 cc7a517c831211e47d90b7ce74b21e50 outside.store_dirs
@@ -2522,6 +2613,14 @@ b93b7016dc9dad75570bdd3001778286 outside.tests::unreadable_files_are_left_alone
 445235da27fa27e9cfa46ddb61f83fd2 outside.the_generated_store_ignore_is_pinned
 93d6bf89f7030bef208fbbd6647376cd outside.the_store_is_committed_with_the_project
 2fe4fad601c5a3c933b402478d5dfe7f outside.with_store_block
+58e9bbb8ab66a3da92d84eb03a285d16 project_paths (imports)
+70daed366c544821d46da50dc755f3ff project_paths.project_dir
+ddd1a6d1d5ecdd60832753c8834561fd project_paths.project_folder
+61e54e733ee9876d59de85c0895461f6 project_paths.same_project
+94794ffc42c8135c1ec6efb6c70825e4 project_paths::tests (imports)
+1bc90c539d2a170bd004d37e83815828 project_paths::tests.project_dir_cleans_a_folder_name
+46ca68bbf8c346b43558583f1fcab326 project_paths::tests.project_folder_resolves_a_relative_member
+f1382de0e77e228774f58b792665f8fe project_paths::tests.same_project_compares_folders
 ff88a563eaa5d9015f5dd8f5657ebb79 reach (imports)
 a4646ae61f50da15818accdc85fd254f reach.Impact
 16ebf267e833580d19eaabd4768bf9db reach.Records
@@ -2575,7 +2674,7 @@ e7212ce139e5d43a890244c58734a88f reach.tests::origins_seed_the_changed_lines_and
 e804378cfc8c71aa181eed982c86274b reach.tests::the_reach_hash_follows_revisions_headers_and_manifests
 c3e23e7fc8f0547e38a2c813b8449ceb reach.tests::unqualified_imports_count_as_writing_the_symbol
 b7ed30f5a4dd0229183dfa056672f549 reach.written
-f9a8ef7578eba99c1689a2f0efa69e26 reads (imports)
+67d3e79b7ad277008c0909e15d892585 reads (imports)
 3dfd7abf9813b516d31ae40299934b4f reads.OUTLINE_CAP
 4684c104254fe03f9e527d3239089509 reads.Reads
 39616bd85ef01f9247443fed8ec5c8f0 reads.Reads::from_json
@@ -2649,7 +2748,7 @@ b5289f8d5eec5083d1000b3be3f02fae recipe.plan
 3a9d8a754f942666dda02a66dc416895 recipe.plan_json
 5720093db2f1216698c93bfa2c73b40f recipe.plan_text
 65e8d801a1cff45255f3449d169a2c3d recipe.record_built
-41065027d3b729b237da9f0291319f9e recipe.recorded_change
+ce2008b3188e7b79d530f027584add7c recipe.recorded_change
 fa2932e0c6ae350f7877dad6e36e6f77 recipe.recording
 c5f4cadc9f49a6fbe8d3efc1081b5bc7 recipe.source_hashes
 66fc9eccf150cb8d1e8710369dde11ac recipe.source_parts
@@ -2683,13 +2782,45 @@ b9ff66506128346680bf03d1182c3791 recipe::tests.touch
 e3e30c5b3b455a2eff00443017800bf4 recipe::tests.workspace
 6cf4bb8c8941437bcf1f1d3cf394187e reference (imports)
 12f6444342117779f3b49a8ae4314901 reference.FILE_TIERS
-70185d3cfe40ff02a334ac66e6616b30 reference.REFERENCE
+bc4c57cb1f436ac7976762e75e2560e8 reference.REFERENCE
 516a84b1e2dacd2042a36854c144b1bd reference.agent_help
 524b9d11c293914018c5a3330620b414 reference.agent_help_for
 6dccfd43aca67447dedaf31ff9de902d reference.agent_reference
 951040db5aaa769f0f68fe8d7a52fbf5 reference.next_call
 d5d8b27b5cec6b19848f10ae94922f67 reference.paragraphs_naming
 69cbefeb8bcb171ed9dbccfd957a6c9e reference.row_names
+c2f5326572acc4a85a9ce1a0d77d619e rust_check (imports)
+fb46761bf10cab20f053ba6a0df8c8bc rust_check.post_move_check
+3183900995c17d32e0ef46bf833f28cb rust_move (imports)
+16122a55b47f45ec974946813be38f57 rust_move.Declaration
+26121b954011dd583994d2c3198c5b7e rust_move.attribute_end
+d58e8fbe38ce9bb0208d4d745bb8fa84 rust_move.check_destination
+8f392c7ff357cf2c06230482928aa137 rust_move.declaration
+ec0f90d37699387865abd5550e011200 rust_move.move_module
+5e3b84ef0c3443e40565df459ba1f6d1 rust_move.move_module_file
+bc89f70a55016a841a7dba35d45bf66d rust_move.parent_folder
+dbb55e245df47668d794dff98efa692a rust_move.parent_row
+79a1bbf71056bf9bace3a7eaaa824e02 rust_move.path_value
+ff52c8cb8b77b37c1e14adb313cea44b rust_move.with_path
+a1cdb79073b67d9653df43e34bce8087 rust_move.without_path
+99bddcb091f5e85042254cbae5d98c7f rust_move::tests (imports)
+dab428ca918eada47c53ac495248d7be rust_move::tests.A
+d253ca64fb7fb3d6cfbe5e08ae3745be rust_move::tests.a_cfg_attr_path_is_refused
+32e9380500f4a0ec889f9fcb790bd447 rust_move::tests.a_different_path_is_replaced
+890d1058d4af90173a50de196a701732 rust_move::tests.a_failed_check_restores_the_file_and_its_folder
+c52966b70f4e6bb6ed237e70a72dcaa3 rust_move::tests.a_header_mod_line_takes_a_path_and_drops_it_at_home
+beb394d5b4bacc11485f4d5ac6e12178 rust_move::tests.a_module_file_moves_and_keeps_its_ids
+76b7e62a853dccc092863fa66ec815d7 rust_move::tests.a_module_move_is_refused_before_anything_changes
+70b91f102647e9f582225f877dea9324 rust_move::tests.a_parent_with_no_mod_line_is_refused
+8d798fd2e1888f7eb50c410ff795bd23 rust_move::tests.a_path_like_doc_string_does_not_hide_the_mod_line
+5800a272c804c9ccc4c50d770e5fbc3e rust_move::tests.a_spaced_path_on_the_mod_line_is_replaced
+fc4b005f16055a73a6669081a75a415a rust_move::tests.a_stale_module_row_takes_the_new_path
+33ae278d354173890dc2fbb9577d1cfd rust_move::tests.an_integration_test_module_is_refused
+6d46a7be2f56549403d0cf6d7d817527 rust_move::tests.crate_with_tests
+ce776d193cb759752d81e1d79bf091b5 rust_move::tests.dir
+e7dd3e2ad88b40248e702a86d53c2122 rust_move::tests.id
+4ccad669c2c2d87af5b9aec7d55f3c6c rust_move::tests.moved
+18fd51b6d9ebb55afc05f380ce1ee581 rust_move::tests.text
 aed52a446e9cdbb117b2bcecf404229d rust_probe (imports)
 1be0cbc0cd808a702ed1928604cc3e4a rust_probe.Prepared
 ae1caf5189b4555629c7fea1914e9408 rust_probe.STATEMENT_STARTS
@@ -2723,7 +2854,7 @@ b4b9f78d403a0c783db2a05260afcf58 rust_probe.probe_skips_in_nested
 893b254c4226f7ef8b36814669b3e314 rust_probe.remove_empty_dirs
 4307173772c2fafccf606ac0e6ef4a16 rust_probe.remove_stale
 931497903509e9787bf09b8c5cb61729 rust_probe.report
-e23feddfb6f0f9fd04b22e10baa92e6b rust_probe.run
+3c58a05b2c2ea9687f3418ff9b1770f0 rust_probe.run
 ffac9d3113f6d62071e5325daaedff69 rust_probe.sync
 97a238096271b9ff01d6646a00f1a9ad rust_probe.test_runner_noise
 12645c973bba27cd240c83293d8e956c rust_probe.tests
@@ -2757,7 +2888,7 @@ c2ebbd9ca901af59b1206c68100da4af rust_probe.timed
 c4f45cb643a4f1d554125294a266ca9b rust_submit.RustEnding
 29e2507a94239a13a3780d6d45b644f6 rust_submit.RustItem
 382d4fe079b2777ac2a1ec919b50c67b rust_submit.RustItem::joined
-979d72d56d1bfa22f81dd500252be9f9 rust_submit.RustNew
+87df9a1ced283e1167424f84e9a43bf7 rust_submit.RustNew
 62096ff7aab312c364e3fabd4918295e rust_submit.RustTarget
 7bb9ea3ce7cc93770c5bedd668709f19 rust_submit.Store
 fc08732b84d2fbe5f4541d07c542761c rust_submit.Store::delete_rust
@@ -2765,7 +2896,7 @@ d1b499a89ad1c431ac23b490a068d55c rust_submit.Store::format_module_rust
 146d66272d05ec58373f3fdd913ee16a rust_submit.Store::repair_drift
 43024bf2747815e6992f76501a4d0879 rust_submit.Store::rust_block_text
 6e10cd80e2378235cf48bb499ecb5254 rust_submit.Store::rust_container_in
-2cb0dbda6002bb877087435b1713534c rust_submit.Store::rust_created
+54b944778af2ef92bd656f2aaf4dbcf5 rust_submit.Store::rust_created
 4e8f71cf26f80ce982b2fc293e6759cb rust_submit.Store::rust_fill_container
 61123f20cab82d4a97e2a1b39bedc41e rust_submit.Store::rust_fix_endings
 1fbc236312ed43184c74e02d2d962e45 rust_submit.Store::rust_format_module
@@ -2775,10 +2906,11 @@ d1b499a89ad1c431ac23b490a068d55c rust_submit.Store::format_module_rust
 8f8cf0069e3c5c0af0a08c08da77374c rust_submit.Store::rust_prune_modules
 3d0934853b09371089898df29aa2e3ba rust_submit.Store::rust_save_items
 3ff4614a94d50002213986013663f30f rust_submit.Store::rust_target
-278fa1ac0efc76d302204ea3feb3428f rust_submit.Store::submit_imports_rust
-245a78adb9e657f8c4bdb8df3848aa13 rust_submit.Store::submit_module_rust
+75cfcc4985de15392807ffab890d4b5c rust_submit.Store::submit_imports_rust
+1554d0d393418d99983b6cc60ae9b2e7 rust_submit.Store::submit_module_rust
 86e8cc966ae65520eec36379201a95e3 rust_submit.Store::submit_rust
-76eabda4f6dd9bbf1edb5cc11db03692 rust_submit.Store::submit_symbols_rust
+9a4388eadd83cef162d5c62a44974512 rust_submit.Store::submit_symbols_rust
+4df17a95c31431e07b5cd09344d1f545 rust_submit.add_created_mod
 385155ac1eba888138e2e2b6c86dc298 rust_submit.add_mod
 befe78ff032f30c2dc1e361cf1c9de09 rust_submit.add_mod_lines
 f594e9d0a0701b795df1e46fb2398e78 rust_submit.add_repair_note
@@ -2790,18 +2922,18 @@ c5384e3e6d62b8990736bc706dcbb487 rust_submit.display_width
 d771d32515c9eed5f1aef5545ead2031 rust_submit.dropped_impls_note
 81aba57ba490a068ec07a569c6481818 rust_submit.format_missing
 40df9621c199f39eccff705dbd8f662b rust_submit.identifier
-aa21c64eb0a69316aa266d035388aa0d rust_submit.is_mod_line
+1a79cdfb13d699328666d4460abafa23 rust_submit.is_mod_line
 680aa2bb54bc9e606f405d0773d39057 rust_submit.is_test_crate_root
 cb667c68a3db249e66dc0f91d582858b rust_submit.long_line_note
 96f7cb4a5591eafc4168036a09fd75ca rust_submit.long_line_note_at
 4457d83f4d8563d1487395a7ff804bf4 rust_submit.long_line_notes
 1808249a95b21fca3918d36430e66a65 rust_submit.mod_declaration
-a05a93382ed2d7774710d3062473a1cc rust_submit.mod_name
+4a2b6badd1b29a16e53c0e709db2d4d2 rust_submit.mod_name
 14d1c7e763526a35f88bcc7a8bafb146 rust_submit.module_path_named
 ac236a13556696ef22b035fa61aaa697 rust_submit.nested
 5dc8940c5c7e928a18ecaaf557ca15d1 rust_submit.normalized_path
 47a5f929f10dba9034e7f13a5f6c9a43 rust_submit.parent_of
-3cd84857cb8c184b8797f49a9a34549c rust_submit.path_attr
+2472711dd772f0cbb0a94dcbd4f3c538 rust_submit.path_attr
 b4b7c45919a4948fb98aeabed319ea12 rust_submit.remove_mod
 33db23fd81e3951bfe31834f86490848 rust_submit.reserved
 46fd569e84008d641e2aab6c26d2ef04 rust_submit.rust_adopt
@@ -2816,8 +2948,10 @@ e4f414b2b08ec609a787cb5c5069a529 rust_submit.rust_named
 64ec7032c1935e9c0a4bd8d5b03051f6 rust_submit.rust_namespaces_overlap
 65d14ae741a113005e411848cde585ab rust_submit.rust_one
 c6f8b505e85482e80827a27d700d68f2 rust_submit.rust_symbol
+2124c81073976215c843948413306dce rust_submit.string_end
 6d25bcfea71d74f768927c518df55528 rust_submit.submit_blocks
 100d93da69a251257c93867b019e89f4 rust_submit.tail_line
+ae6ab65b085710f4ed8c8e249dcb8209 rust_submit.test_mod_path
 28555a87c641ea3a1c270964a5bf3942 rust_submit.tests
 3786885f7936730da5f5e2fc48b12d7c rust_submit::tests (imports)
 8bf00177e2e82c159a7094184e22024f rust_submit::tests.a_format_refuses_a_changed_mod_list
@@ -2837,7 +2971,7 @@ af1d6bccedeed031b94122dc5107f8db scope.of_task
 76c60275395c9f8dc3275b40eed91b32 scope.tasks_in
 12645c973bba27cd240c83293d8e956c scope.tests
 922179e5ec613a3c1a93ac5b6f9ab66b scope.tests::dir_and_path_name_a_project_from_its_root
-fca5548a62f51a1b47da5aea18d3cbb8 scope.tests::lock_all_locks_each_project_once
+d6a1f4bc4d47ed480dae71d7cafbf3c7 scope.tests::lock_all_locks_each_project_once
 9edc82c451311c4264bc70f0f92d80d7 scope.tests::of_falls_back_to_the_home
 609038dcaa4eea90570a1de0a0368b79 scope.tests::of_task_finds_the_projects_from_any_of_them
 11cbcc0fbefe3524fabefea17f5460b6 scope.tests::tasks_in_finds_a_task_from_every_project_of_its_scope
@@ -2910,6 +3044,7 @@ bd4ffdca643d59fa1cc8ed2cc275bdd0 store.walk_by_parent
 bee5e780a36359126617a370b28edcbf store::delete_tests.a_type_its_impl_still_uses_is_refused
 9f5692e1cfe1a909a49007c9857df47b store::delete_tests.a_used_item_is_refused_and_nothing_changes
 150384678de29fe18e5fd462877a86ce store::delete_tests.deleting_a_method_keeps_its_impl
+4ae2f5efa22623462432e3bdc112625d store::delete_tests.deleting_a_trait_impl_or_its_method_removes_it
 c579765ef940d12a6cde5114273e550e store::delete_tests.deleting_a_traits_last_item_keeps_its_brace
 0cfe965f09b1421aab91575437b17410 store::delete_tests.deleting_an_impls_last_method_keeps_its_brace
 a0664fa7eae7b81aec37f90155b2816c store::delete_tests.deleting_an_unused_item_removes_it
@@ -2974,6 +3109,7 @@ cac1e250ca10fc907476fbd28afc857c store::submit_tests.a_block_with_a_pub_use_is_r
 1582ca312ce3aff6b14cd663b5c76077 store::submit_tests.a_block_with_imports_names_the_imports_command
 008efe37e99af37cec93f5174b6a5974 store::submit_tests.a_drift_message_names_the_symbols_and_the_repair_command
 5ff2ba21c7b4e8539512cf20c9f0059b store::submit_tests.a_format_keeps_its_repair_note_when_the_check_fails
+1f670caaa973b64731e52362058aaaa5 store::submit_tests.a_format_keeps_one_blank_line_after_the_header
 3af1feb602abaad65ede4d7310abb370 store::submit_tests.a_format_names_a_line_rustfmt_leaves_even_when_it_saves_nothing
 6dd48328dad279c2b924ffc0d0bb48b5 store::submit_tests.a_format_names_an_overlong_container_tail
 3db028a8951ac1f1874a419158f02d50 store::submit_tests.a_format_names_an_overlong_nested_method_once
@@ -3057,6 +3193,7 @@ a581a5f00e33670cf410c34a3908a29a store::submit_tests.imports_that_break_an_item_
 f5944ed34d653b84f3f1093a1791e82f store::submit_tests.new_creates_a_module_with_its_file_and_mod_line
 a06af05a2d514199fb6d203dc45574b1 store::submit_tests.new_creates_a_nested_module_beside_its_parents_file
 41ff8230b3ce47298c1f451051119a49 store::submit_tests.new_creates_a_test_crate_root
+16b02e9e7bba7b275e98e352377596c7 store::submit_tests.new_creates_a_test_file_with_a_path_mod_line
 f8197437c32825ac2346ee4dab12fb46 store::submit_tests.new_saves_a_types_first_method
 ca90ce0277e895f2c634cdcb5b6f2281 store::submit_tests.new_saves_a_whole_impl_block
 463c4a4d175a544f6062fe7cb69fa799 store::submit_tests.new_saves_an_inline_mod_and_an_extern_block
@@ -3106,19 +3243,19 @@ a9c5138c81e306e3b9775dc926bfead5 tasks.batch_commit
 b5a88d2a1109c2de9b239835c69d3d7c tasks.batch_keep
 225fddf26160c2e22d6f5809bcfea1af tasks.batch_log
 163d6364f7663daea250ee7e5ed41baa tasks.batch_remove
-866b5924d96717421007d3f89d93bf5b tasks.batch_replace
+2fbb2960e58d35c69fd9b6697739d4e9 tasks.batch_replace
 213a81a30e46776d38d1569e44a940a9 tasks.batch_rollback
 a8fd8342845d0c0fabcbe4d7b85fe9e9 tasks.batch_save
 b1cd4000a9c8b45e3a3f950a93f76dab tasks.build
 1bd0732b9f1fe090e6ceb1c27f1eeb98 tasks.change
 25991a9ea902c61ebbc7b5641d7b466a tasks.change_run
 108c8c9baa2587259a3a56e0ac6b73ce tasks.check_fields
-805293d436a3a698438cec5017748b4d tasks.claim_journal
+0f5cd6dcd5ed254234e38cf3610bb821 tasks.claim_journal
 d6eb67f7ad22c38b2b1610ab1be0efc1 tasks.clear_settle_failed
 3c46fe0fcdfd4ecb1e1bcbade6d59337 tasks.composed
 47e69f7ca641dd29da6c2aca0b6630de tasks.create_record
 ebbf8dd60cc078c430d53f3b561e62af tasks.delete_record
-a6f3ec4e3dcd5e8482257d89bdf9c182 tasks.deliver
+4e34166d4bc1690e242a39aefc301379 tasks.deliver
 10dec0d68ff79982bf78011ea999552f tasks.drain
 f58311f3772485f023423b8d64a1aaf4 tasks.drain_with
 2f17a9100c994c7616dcff85ca6da648 tasks.edit_record
@@ -3157,28 +3294,26 @@ fa3d320ea1330a873aa18bef312aa618 tasks.proposed_task
 fe8e4b16a6d99b20725605481eca411b tasks.prune_event_log
 5fce8e4becbb0afb07ff3e21dfcd40d9 tasks.put
 776c8a40a397fbe494baf3a11546e2e1 tasks.put_record
-b1a545aa92b1ed7753d664dbbd0127f8 tasks.put_run
+51367d18f113907efff01ec38e41d9aa tasks.put_run
 02f3e202f0ddd3e5878e3d45ac85ca1a tasks.rank_of
-bd01563de9398da2f48d15f51db5e8a9 tasks.record
+f8eb357498052dd5f94cc55a90a6ebdc tasks.record
 6643e93d71887c7042b5968b8f3c37d8 tasks.records
 f1a158704f52010a030e07a60efd4eef tasks.recover
 c51716f40f21d296e8456bd70ffd8c82 tasks.recover_journal
-9e6ced32a0d93bf773f4b18b1726b009 tasks.recover_locked
+0dd6a9051f36c00e29c265018ff8b2f6 tasks.recover_locked
 8992723ab31bcfee04a0b27e935c2800 tasks.rehome
 767cf7f9790524731c7f1160bf83b57a tasks.rejected
 8547b86845cd4a27fd3d9993df9a89e5 tasks.remove_record
-bbd90bfa483cccdf1b52589a0e196467 tasks.replace_bytes
-e932795e8fa01876edb82eeb0391807c tasks.replace_file
 c0ed1d89ea642f5797d4909230216a5f tasks.restore_batch
-c58f6554a7ddbb03fbcaeeb776a7977c tasks.restore_file
-a0c0e266fd8a0982a2464211970829a1 tasks.restore_record_locked
+abc39da7100f0b098886f2645b20f68b tasks.restore_file
+0b1d0251edae3d06be9ebc687ec08b09 tasks.restore_record_locked
 fd6a2740e44e6f1fc287e5a93e3a9f36 tasks.runs_api
 480eab9dd7d365f6f7becfc547a2491c tasks.save_record
 6fb0bf4eebc6445a94ed3d334aeb56d4 tasks.save_record_in
 835bc11e08a2c6f5ba9d788714e86393 tasks.send
 8a7a1bc990da816712a2dca291a75efa tasks.server_for
 73f0ff687586eba5a521aff20f911c81 tasks.server_lock
-aeb425e79484c9812bb1aa1a5720a6e4 tasks.serving
+d68624455fdf43a9905bead51097f346 tasks.serving
 b231d994087d1982e3453a0e44b7e358 tasks.settle_failed
 86c3be2e9e87715c831a9298b42fbbad tasks.settle_later
 747f7864f49c01da2670ba6664565140 tasks.shows_on_board
@@ -3214,7 +3349,7 @@ d948d7ead7de1c05f3940028de9b87e7 tasks.tests::a_failed_milestone_delete_restores
 547924052d7d8b1d1ec07fd84adcf300 tasks.tests::a_feature_that_is_not_active_leaves_its_tasks_alone
 c6338932b329ce606ea23f8404b3cf69 tasks.tests::a_feature_visibility_change_announces_its_tasks
 0a0180b3ae64bb2ed907041ad402f462 tasks.tests::a_journal_path_outside_the_root_is_refused
-f06624ed0f987e007789b3bef2222c64 tasks.tests::a_live_journal_is_not_put_back
+974b3a400fac99658ac9b38b5f79b32a tasks.tests::a_live_journal_is_not_put_back
 3ecd5c8e3f31eefcbe83790792d469dd tasks.tests::a_lock_without_a_journal_is_left_alone
 f31ce2d387e450f4c5ccc6944f20d26f tasks.tests::a_message_for_an_invalid_task_id_is_refused
 38ea0eb06a9acdde34b74e229a3601f4 tasks.tests::a_message_for_an_unparseable_task_file_is_set_aside
@@ -3255,14 +3390,14 @@ bbc84aeff798340b0ad0b54fbb0463c5 tasks.tests::an_approved_proposal_creates_the_r
 53489fccebb339e3be97f24e59496b8c tasks.tests::an_edit_proposal_carries_the_current_values
 bc74237cb5f75a3b7a42479dee57ec2c tasks.tests::an_existing_backlog_task_under_an_active_feature_is_planned
 cdbb5089f2462800eb5b650b6bac0165 tasks.tests::an_old_event_log_switches_to_full_autovacuum
-006b74a0e95531f553989c67351e92c9 tasks.tests::an_old_started_feature_takes_a_slot_after_the_kept_ones
+70f82e3b3116d8c5650fa69fd49c6b16 tasks.tests::an_old_started_feature_takes_a_slot_after_the_kept_ones
 9683db3b47fcedaa6b85cf7ba224c50b tasks.tests::an_old_task_loads_with_a_created_time
 d6d2345b6c44e93e4f2aa8a9e1a377b2 tasks.tests::an_old_task_loads_with_empty_links_and_a_closed_time
 01c2a4ccb7d8b4b2774bf5f58075700f tasks.tests::an_old_task_takes_its_features_milestone
 6e4c9e4caac280a1277b054bd523b3b8 tasks.tests::an_older_inbox_message_arriving_late_is_applied
 5f6f7b9f77e8fbbddc550a03ebcbb3c1 tasks.tests::answer
 695ddef976813e700819980541e2133f tasks.tests::api_retries_a_change_that_came_to_need_the_locks
-83111adbe624c4ad5ead89e0cfca8b3d tasks.tests::applied_waits_while_a_server_holds_the_lock
+9c69408aa11c94eba0cde9816cb5a9bc tasks.tests::applied_waits_while_a_server_holds_the_lock
 c36f1d2e80a070cf07b2c0d5a74000ab tasks.tests::approving_to_planning_creates_the_task_in_planning
 9929c85d8bc223fa1fbaf8c91b0bcdef tasks.tests::approving_to_planning_takes_the_first_column_without_planning
 7ad7038d8cf86f393fe160084d80b869 tasks.tests::archiving_takes_a_final_task_off_the_board
@@ -3271,7 +3406,7 @@ dbdfb0e690657cddc101d87b734e97ff tasks.tests::clearing_a_served_root_clears_its_
 eb532a6661db918d97c72fd764782488 tasks.tests::column_of
 b4047a3edc76e2d4f566daa5a7b95c4a tasks.tests::deleting_a_milestone_writes_each_task_once
 fbb8ae4e991c593d489640230624052a tasks.tests::deliver_applies_the_inbox_before_its_message
-6e34050f49dfdbdaf7c77575d9c416ce tasks.tests::deliver_hands_the_message_to_a_server_elsewhere
+214e53bfc938640d47c12066cc5e90c1 tasks.tests::deliver_hands_the_message_to_a_server_elsewhere
 9cbb8a8ae8e62f3f76e31682c3b9f042 tasks.tests::drain_leaves_files_that_are_not_json
 1b80ab6bab9474654afd3391bc362858 tasks.tests::drain_retries_a_brief_failure
 5c2fd8947c111bb4b38f1373183f2115 tasks.tests::dropping_a_nested_batch_fails_the_outer
@@ -3293,7 +3428,7 @@ e9c38dffac8f0132da312a04a6216fc0 tasks.tests::planned_reads_as_upcoming
 3b29da788fad5fadc7f646e200abc06c tasks.tests::root_events
 50857226d2b78bb6db1cb29b144ac3fe tasks.tests::send_leaves_whole_messages_in_order
 66ea471c23b9db6a6b7c9763ba786b7c tasks.tests::served_root
-1718642c4f8d7e0303eeeb989a45f647 tasks.tests::serving_follows_the_server_lock
+e0551fc7048943f7c4b62ab8563c2816 tasks.tests::serving_follows_the_server_lock
 0f67d3f768d26d754946aef5d5fb6f86 tasks.tests::stored
 edae2310c61f277d3aa7afe918962cc8 tasks.tests::stored_backlog_task
 89e44f3e8a79bfac4107edf83332ad87 tasks.tests::strategy_run_changes_are_root_events
@@ -3307,7 +3442,7 @@ f6a81fff4a45d5161e935442792ea962 tasks.tests::the_task_server_runs_its_operation
 20a7fe0dab34c3f6beb607f64d4dd15a tasks.tests::within
 8b63a109bacfe37d986aee8b379d7f03 tasks.tests::workspace
 40fe097aea1a6155e444a59ff9a576cb tasks.tests::write_refuses_an_id_that_is_not_a_plain_name
-eeb7bd108300cc0dc1547c754d2a50d3 tasks.tick
+494c2483abdea8aaae47202e089475d1 tasks.tick
 335386d62087699f3bcd19f71adea161 tasks.unknown_id
 7f8251588c9d8b0ea95ac77f1db87c66 tasks.update
 68810ecea444feff2624d16f50498fb9 tasks.update_run
@@ -3320,9 +3455,9 @@ eeb7bd108300cc0dc1547c754d2a50d3 tasks.tick
 7f5c3c23f60858e2479418ffeb34fc82 tasks.within_limit
 095bb30a9435b2aed91ae6902e3f4404 tasks.write
 cfdc00351c2175299121e606be0d64d4 tasks.write_features
-700ceaf04b725f62825c340b1d477af2 tasks.write_task
+c55770819e7eff84c90a755b02faa5d3 tasks.write_task
 022f00393e6fce042f02eabb56325894 tasks.write_tasks_then
-4e6cee7099e1037eae6baa0d57163383 tasks.write_vision
+5ab7353f4178227bfd42a49e16927a9f tasks.write_vision
 8a75c6766b9b95229929c39eabe26c05 testing (imports)
 efd1c8e335e7a4ed11aae2ea8f735c74 testing.<Project as std::ops::Deref>
 75208c9087332a4315f50e6511e8b6f3 testing.<Project as std::ops::Deref>::Target
@@ -3387,8 +3522,9 @@ e6979a41beaf0b4473e8cb9fe33cf693 tests.a_rust_project_runs_a_probe_without_savin
 fc12965f75ed6d2a8ec780a62184ad73 tests.a_strategy_run_gets_no_first_call
 4bd740b0165800d944fc6efcaa58e2e5 tests.a_task_of_only_plain_projects_stays_plain
 a9515aff265172dcd18184f1559fc428 tests.a_task_session_names_the_projects_of_its_task
+6ff6afcd38562a41547a192119dc5018 tests.a_trait_impl_name_is_typed_through_a_batch_line
 19a35a1f62c4324ab892ef0c0089bd67 tests.a_workspace_members_existing_lock_is_not_copied_again
-8e0b85e52e30c9d82d7bc3bd342395f4 tests.agent_reference_leaves_out_host_and_task_commands
+cb47aa5285cbc07aa823ed92b045cb2e tests.agent_reference_leaves_out_host_and_task_commands
 b755bf649575032f01f09fb8ec2d4c5e tests.an_alias_already_used_in_the_project_is_reused
 a59d1ff421a87b2d08d4066c33f22d4d tests.an_alias_to_an_unlisted_dependency_is_not_reused
 68f2b97dee0dabcbe6a3c44d212debcd tests.an_alias_with_two_targets_is_not_guessed
@@ -3430,17 +3566,21 @@ a3ed65c332cefc366340872ddac88c83 tests.only_gleams_unknown_module_error_names_a_
 f2af89919c11d3c36866522d951df16f tests.read_project_reads_a_rust_project
 66cac8b268afa7ed83029bf88f47a2ba tests.ref_line
 23a1bfca74691d638aad3792a692d309 tests.ref_row
+5d51c58c4078b1f2eb8694b87e28d46f tests.reference_hash
 52725a37b20db5560d3486ecc39bf250 tests.reference_layout
+d776e5ca828324bab5c876f91dd255a9 tests.reference_layout_checks_a_section_file_whose_rows_wrap
+3bbad3420d2547ece5862d551151bc9b tests.reference_layout_checks_a_section_file_without_the_heading
 ce9732d24e3d6584067fc5fd5291cb62 tests.reference_layout_lets_rows_next_to_each_other_share_their_own_column
 c50984d65d3044235b608f0951fbd47a tests.reference_layout_names_a_continuation_one_column_off
 ab30fee8777eb19d1f4b04f67183281d tests.reference_layout_names_a_row_whose_description_is_one_column_off
 689e3bd1e4c7f2fb77eb42d981b57e87 tests.reference_layout_needs_an_entry_for_every_summary_command
 8481d919da446f22781640ade114c1f2 tests.reference_layout_of_the_embedded_reference_is_clean
-6187f6f9f4126cce27dbc2518a366818 tests.reference_layout_refuses_a_line_after_prose_and_a_reference_without_the_section
+63c42f3d118ec46b8d24156456e58756 tests.reference_layout_refuses_a_line_after_prose_and_a_reference_without_the_section
 9d965ccf5597eea8be4e7de53b5dc203 tests.reference_layout_refuses_deeper_lines_without_a_colon_before_them
 a6503b2cc0c0fcd662583ef437d893a6 tests.reference_layout_takes_an_example_block_after_a_colon_at_one_column
+bdd89bdc5f017c38e145d300e3d4924a tests.reference_section_layout_is_clean
 0a70e47c773ee9360ecca6a5ccd5e4df tests.reimporting_a_stored_rust_package_keeps_it_even_if_a_file_is_now_refused
-bd273c025bf48a770a8dac67635bd643 tests.rust_reference_lists_the_names_and_what_is_missing
+e5edab3c713d328f1c2463e725635748 tests.rust_reference_lists_the_names_and_what_is_missing
 714fb8e79ef2cb3980b5cd701e7063c6 tests.sample
 d8a3ce9df2d241bfe24edac4c1549cfc tests.session_start_caps_the_open_work_records
 38d4403ed8427f30b703ef4e3ec2f5d9 tests.session_start_ends_with_a_first_call

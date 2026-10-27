@@ -1,0 +1,62 @@
+Commands in full
+Reading
+  inspect <name>... --context   symbols, the signatures of what they use, their
+                                callers, and the tests that use them (the
+                                smallest in full); `lockdown::dispatch` is
+                                accepted for `lockdown.dispatch`
+  view <name>...                symbols' source
+  view <module>...              outlines: signatures and doc lines
+  view <module> --bodies        whole module; only for one you will rewrite
+  view <file>                   a .py or plain-file .rs file's outline: each
+                                item (fn, struct, `Type::method`, test) with
+                                its line range, signature and first doc line;
+                                graph source is read by symbol, never by path;
+                                its refusal names `view <module> --bodies`, and
+                                `--project <folder>` for another project's
+  view <file>::<name>           one item's source with its docs, numbered for
+                                `read --lines` and `write`; stored code is read
+                                and cited by name (`lockdown.dispatch`,
+                                `checkout.pay`); `module:<name>` names no
+                                symbol: use `view <name>`
+  view --draft <id>             a kept draft's text, from `drafts`
+  view | inspect <dependency>   a dependency's module (`lustre/component`): its
+                                public signatures; `<module>.<name>`: one with
+                                its docs. Read from build/packages, never stored
+  refs <name>...                everything that uses each named symbol, in the
+                                order named; exact uses first, then possible
+                                ones under their own heading
+  refs <module>.<Type>.<field>  code that reads a record field
+  impact [name...]              what a change reaches: callers and readers of the
+                                fields it changes, nearest first, with their
+                                tests (no name: what changed since tests last
+                                passed, or in this task)
+  find <text>                   case-insensitive search of all code
+  grep <text> [--in <path>] [--context n]
+                                case-insensitive search of watched files and
+                                settings (not unwatched files); lines shown
+                                with numbers for `read --lines`. The text is
+                                searched as written, code included (`"write"
+                                =>`, `-> Result`); quotes around the whole
+                                text are dropped. No regex. The options count
+                                only as the last words: --in limits it to one
+                                file or folder; a missing one another project
+                                has names that project's `--project`;
+                                --context n (1 to 5) adds n
+                                lines around each match, marked `12-`. Up to
+                                10 lines per file; the reply stops at a whole
+                                file and says how many it left out
+  session start [--task]        this overview again (--task: for the task in `text`;
+                                a board run's brief holds its first reply)
+  session start [--scope <module>...]
+                                every symbol, and open work records with context
+                                (up to 4,000 bytes; `work list` shows them all)
+  ... --project <folder>        at the end of a command line, for that line
+                                only, in another project: its folder as session
+                                start lists it, from the Solace root, or `../x`
+                                from this project. Reads (view, inspect, refs,
+                                find, grep, files, read) reach any project
+                                there; other commands, the projects the task
+                                covers
+Replies have a size limit: a signature is printed once per reply, and a reply
+that would be larger says what it left out and the command that shows it.
+

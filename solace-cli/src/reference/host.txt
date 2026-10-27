@@ -1,0 +1,21 @@
+Host commands (humans only, refused in a run)
+  create <name> [--javascript] [--yes]
+                                create a new Gleam project below this folder;
+                                asks for confirmation unless --yes
+  migrate [--project DIR]... [--smoke CMD]... [--confirm-paths] [--yes]
+                                copy this folder to ../solace-migration, set
+                                up the chosen projects there and check them;
+                                stops first, until --confirm-paths, if anything
+                                in the copy could change this folder
+  migrate --report              what Solace checked
+  migrate --recheck             build, test and check the copy again
+  migrate --adopt [--yes]       switch to the copy; this folder moves to
+                                <name>.pre-solace
+  migrate --abandon [--yes]     delete the copy
+  migrate --undo [--yes]        switch back to <name>.pre-solace
+  serve [--port N]              local task board (default 3030); in a workspace
+                                folder, every project's
+  agent-config codex|claude <dir>
+                                isolated settings and launch.json for a runner
+From a shell, `text` is stdin, `old` is `--old <text>` and each option is
+`--option <label>`.

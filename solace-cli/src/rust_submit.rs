@@ -20,13 +20,14 @@ pub(crate) struct RustTarget {
 /// A module the store doesn't have yet (D-168): its file from the project root,
 /// its `dir`, the `mod <name>;` line its parent's header takes (`None` for a
 /// test crate root, which `integration::x` names and no line declares), and the
-/// header of the text that made it.
+/// header of the text that made it. `test` marks a file test module (D-206).
 pub(crate) struct RustNew {
     pub(crate) module: String,
     pub(crate) file: String,
     pub(crate) dir: String,
     pub(crate) line: Option<(String, String)>,
     pub(crate) header: String,
+    pub(crate) test: bool,
 }
 
 /// The `// ── <name> ──` blocks of a plain `submit`, each name and text
@@ -100,7 +101,7 @@ fn reserved(text: &str) -> bool {
 /// Whether a header line declares a module — `mod a;`, `pub mod a;` or
 /// `#[path = "a.rs"] mod a;` (D-168): the new `mod <name>;` goes after the last
 /// one.
-fn is_mod_line(line: &str) -> bool {
+pub(crate) fn is_mod_line(line: &str) -> bool {
     let line = line.trim();
     !line.starts_with("//") && line.ends_with(';') && line.split_whitespace().any(|w| w == "mod")
 }
@@ -113,7 +114,7 @@ pub(crate) fn add_mod(header: &str, name: &str) -> String {
 
 /// The module a `mod` declaration names (D-173): the last word of `mod x;`,
 /// `pub mod x;` or `#[path = "x.rs"] mod x;`.
-fn mod_name(line: &str) -> Option<&str> {
+pub(crate) fn mod_name(line: &str) -> Option<&str> {
     line.trim().strip_suffix(';')?.split_whitespace().next_back()
 }
 
@@ -136,10 +137,24 @@ fn is_test_crate_root(module: &str) -> bool {
 
 /// A `path = "..."` value on an attribute line, as `#[path = "h.rs"]` or
 /// `#[cfg_attr(unix, path = "os/h.rs")]` (D-173).
-fn path_attr(line: &str) -> Option<&str> {
+pub(crate) fn path_attr(line: &str) -> Option<&str> {
     let attr = line.trim_start().strip_prefix("#[")?;
-    let at = attr.find("path")?;
-    attr[at + 4..].trim_start().strip_prefix('=')?.trim_start().strip_prefix('"')?.split('"').next()
+    let mut i = 0usize;
+    while i < attr.len() {
+        if let Some(end) = string_end(attr, i) {
+            i = end;
+            continue;
+        }
+        if let Some(after) = attr[i..].strip_prefix("path") {
+            let whole = attr[..i].chars().next_back().is_none_or(|c| !(c.is_alphanumeric() || c == '_'))
+                && after.chars().next().is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+            if whole && let Some(value) = after.trim_start().strip_prefix('=').map(str::trim_start).and_then(|v| v.strip_prefix('"')) {
+                return value.split('"').next();
+            }
+        }
+        i += attr[i..].chars().next().map_or(1, char::len_utf8);
+    }
+    None
 }
 
 /// `path` with its `.` and `..` parts resolved lexically, so a `#[path]` that
@@ -391,7 +406,7 @@ impl Store {
         if !formatted {
             self.rust_format_module(&ix, &module, None, &mut items, false, file.header.matches('\n').count() + 1)?;
         }
-        let end = &old[old.trim_end().len()..];
+        let end = if formatted { &file.header[file.header.trim_end().len()..] } else { &old[old.trim_end().len()..] };
         let header = if file.header.trim().is_empty() {
             String::new()
         } else {
@@ -667,7 +682,7 @@ impl Store {
                 match &c.line {
                     Some((parent, own)) => {
                         let header = self.header(parent)?;
-                        self.set_header(parent, &add_mod(&header, own))?;
+                        self.set_header(parent, &add_created_mod(&header, c))?;
                         notes.push(format!("created module {} ({}; added mod {own}; to {parent})", c.module, c.file));
                     }
                     None => notes.push(format!("created module {} ({})", c.module, c.file)),
@@ -860,10 +875,14 @@ impl Store {
 
     /// The module a name the store doesn't have creates (D-168): `cache` beside
     /// the crate root, `a::b::c` beside `a::b`, and `integration::x` a new test
-    /// crate root (`tests/x.rs`, D-169). `None` when a part is no identifier or
+    /// crate root (`tests/x.rs`, D-169). A child named `tests` is a file test
+    /// module beside its parent (`a_tests.rs`, D-206), also named `a.tests`.
+    /// `None` when a part is no identifier or
     /// names a keyword, when the parent module isn't there, or when the name it
     /// would land under is a module the store already has.
     pub(crate) fn rust_created(&self, ix: &Index, name: &str) -> Option<RustNew> {
+        let dotted = name.strip_suffix(".tests").map(|module| format!("{module}::tests"));
+        let name = dotted.as_deref().unwrap_or(name);
         let parts: Vec<&str> = name.split("::").collect();
         if !parts.iter().all(|p| identifier(p)) {
             return None;
@@ -871,15 +890,26 @@ impl Store {
         let (own, parents) = parts.split_last()?;
         let parent = parents.join("::");
         let created = if parent == "integration" && self.resolve_module(ix, &parent).is_none() {
-            RustNew { module: name.to_string(), file: format!("tests/{own}.rs"), dir: "tests".into(), line: None, header: String::new() }
+            RustNew {
+                module: name.to_string(),
+                file: format!("tests/{own}.rs"),
+                dir: "tests".into(),
+                line: None,
+                header: String::new(),
+                test: false,
+            }
         } else {
             let p = self.resolve_module(ix, if parent.is_empty() { "crate" } else { &parent })?;
             let above = p.file.clone()?;
-            let dir = above.split_once('/')?.0.to_string();
             let owns = p.owns_dir.unwrap_or_else(|| language::rust::owns_dir(&p.path, &above));
-            let module = language::rust::child_module(&p.path, &above, owns, own);
-            let file = language::rust::child_file(&above, owns, own);
-            RustNew { module, file, dir, line: Some((p.path.clone(), own.to_string())), header: String::new() }
+            let test = *own == "tests";
+            let (module, file) = if test {
+                (format!("{}::tests", p.path), language::rust::test_file(&p.path, &above))
+            } else {
+                (language::rust::child_module(&p.path, &above, owns, own), language::rust::child_file(&above, owns, own))
+            };
+            let dir = file.rsplit_once('/').map_or("", |(dir, _)| dir).to_string();
+            RustNew { module, file, dir, line: Some((p.path.clone(), own.to_string())), header: String::new(), test }
         };
         // A child of a test crate root takes the `integration::` prefix every
         // `tests/*.rs` file has (D-169), so the name it lands under can differ
@@ -946,7 +976,8 @@ impl Store {
     /// `submit --imports <module>` in a Rust store (D-168): the header changes
     /// only when the text is imports and the module comment alone — no refusals,
     /// no items — and keeps the same `mod x;` list, since changing it adds or
-    /// removes a module. Then cargo checks the module.
+    /// removes a module.
+    /// Then cargo checks the module.
     fn submit_imports_rust(&self, m: &str, raw: &str) -> Out {
         let ix = self.index()?;
         self.refuse_drift(&ix)?;
@@ -1457,4 +1488,46 @@ pub(crate) fn declares_path_test_mod(header: &str, name: &str) -> bool {
     };
     let attrs: Vec<&str> = lines[..i].iter().rev().take_while(|line| line.trim_start().starts_with("#[")).copied().collect();
     attrs.iter().any(|line| path_attr(line).is_some()) && attrs.iter().any(|line| line.contains("cfg(") && line.contains("test"))
+}
+
+/// A created module's declaration in its parent: `mod <name>;`, or a test
+/// module's `#[cfg(test)]`, `#[path]` and `mod <name>;` (D-206).
+pub(crate) fn add_created_mod(header: &str, created: &RustNew) -> String {
+    let Some((_, own)) = &created.line else { return header.to_string() };
+    if created.test { add_test_mod(header, own, test_mod_path(&created.file)) } else { add_mod(header, own) }
+}
+
+pub(crate) fn test_mod_path(file: &str) -> &str {
+    file.rsplit_once('/').map_or(file, |(_, name)| name)
+}
+
+/// The byte just past the string literal starting at `start`, if any.
+pub(crate) fn string_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.get(start) == Some(&b'"') {
+        let mut i = start + 1;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i += 2,
+                b'"' => return Some(i + 1),
+                _ => i += 1,
+            }
+        }
+        return None;
+    }
+    if bytes.get(start) != Some(&b'r') {
+        return None;
+    }
+    let mut i = start + 1;
+    let mut hashes = 0usize;
+    while bytes.get(i) == Some(&b'#') {
+        hashes += 1;
+        i += 1;
+    }
+    if bytes.get(i) != Some(&b'"') {
+        return None;
+    }
+    i += 1;
+    let close = format!("\"{}", "#".repeat(hashes));
+    Some(i + text[i..].find(&close)? + close.len())
 }

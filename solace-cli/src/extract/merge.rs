@@ -294,12 +294,12 @@ impl Store {
             None => None,
             Some(d) => {
                 // `../x` and `./x` resolve against this project, as `--project` does (D-126 point 3).
-                let d = project_folder(&top, Some(&self.root), d, &members);
+                let d = crate::project_paths::project_folder(&top, Some(&self.root), d, &members);
                 if !members.iter().any(|m| *m == d) {
                     return fail(format!("E6007 {d} is not a project under this Solace root; its projects: {}", members.join(", ")));
                 }
                 let dir = scope::path(&top, &d);
-                if lockdown::same_project(&dir, &self.root) {
+                if crate::project_paths::same_project(&dir, &self.root) {
                     None
                 } else if crate::language::is_rust(&dir) {
                     return fail(format!(

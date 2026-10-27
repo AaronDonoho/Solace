@@ -3,6 +3,7 @@
 //! libtest name, rustfmt for one item at a time, and the message for a
 //! machine without the Rust toolchain.
 
+use crate::fsx;
 use crate::{Diag, Failure, FileMap, fail, locate, strip_ansi};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -136,7 +137,7 @@ fn fetch_lock(root: &Path, had_solace: bool) -> Result<Option<fs::File>, Failure
     if !dir.join(".solace").is_dir() {
         return Ok(None);
     }
-    Ok(Some(crate::lock_file(&dir.join(".solace/fetch.lock"))?))
+    Ok(Some(fsx::lock_file(&dir.join(".solace/fetch.lock"))?))
 }
 
 /// The Solace root whose fetch lock `root` takes, or `root` itself when it has

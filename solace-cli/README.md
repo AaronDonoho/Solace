@@ -5,8 +5,8 @@ The source of the `solace` executable. Installing and using it are described in 
 - `src/main.rs`: the store, the symbol commands and the MCP server.
 - `src/drafts.rs`: rejected submissions kept as drafts, `submit --replace`, and patches (`apply_patch` form) turned into submit blocks.
 - `src/reach.rs`: test reach and impact analysis (D-44).
-- `src/reference.txt`: the agent reference; the part before "Commands in full" is what `session start` shows.
-- `tests/reference_layout.py`: checks the column layout of the reference's "Commands in full" section; the root's validator for `src/reference.txt` (D-143).
+- `src/reference/`: the agent reference, one file per section; the workflow before "Commands in full" is what `session start` shows.
+- `tests/reference_layout.py`: checks the column layout of each reference section; the root's validator for `src/reference/` (D-143).
 - `src/language/gleam.rs`, `src/language/rust.rs`, `src/language/cargo.rs`: splitting Gleam and Rust source into symbols, and running cargo's check and test.
 - `src/store.rs`: the store's projection: a Rust file's items, kept nested and written back exactly, and what a Rust module's body, outline and session names are (D-158).
 - `src/lockdown.rs`: file tiers, `solace.toml`, file and run commands, `agent-config` (Spec 14).

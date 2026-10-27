@@ -1,0 +1,13 @@
+Project (commands declared in solace.toml)
+  build                         gleam build for a Gleam project, cargo build for
+                                a Rust one; new dependencies are fetched (a
+                                plain-file project has nothing to build)
+  build plan                    every project's build recipe ([build] in its
+                                solace.toml, or the default from its files), in
+                                build order, naming outputs that are out of
+                                date and the steps to run; reads only
+  format                        Gleam: gleam format for the project; Rust:
+                                name a module to rustfmt that module whole
+  run <name> [args...]          a command declared in solace.toml's [commands];
+                                extra arguments only when it allows them
+

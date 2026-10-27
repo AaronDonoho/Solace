@@ -17,6 +17,8 @@ pub(crate) struct Index {
     pub(crate) used_by: Vec<Vec<usize>>,
     /// Every resolved reference: (symbol, line in the user's text).
     pub(crate) at: Vec<Vec<(usize, usize)>>,
+    /// References that need type inference: (target, line), as in `at`.
+    pub(crate) possible: Vec<Vec<(usize, usize)>>,
     /// Whether each symbol is test code (D-170).
     pub(crate) test: Vec<bool>,
 }
@@ -71,7 +73,7 @@ pub(crate) fn build(lang: &'static dyn Language, syms: Vec<Sym>, modules: Vec<Mo
     // against the module's `use` lines and the crate's item names (D-170).
     if rust {
         let g = crate::language::rust_refs::graph(&syms, &modules);
-        return Index { lang, rust, syms, modules, uses: g.uses, used_by: g.used_by, at: g.at, test: g.test };
+        return Index { lang, rust, syms, modules, uses: g.uses, used_by: g.used_by, at: g.at, possible: g.possible, test: g.test };
     }
     // (module, name) -> symbol, for names and for type constructors
     let mut names: HashMap<(&str, &str), usize> = HashMap::new();
@@ -138,7 +140,8 @@ pub(crate) fn build(lang: &'static dyn Language, syms: Vec<Sym>, modules: Vec<Mo
         }
     }
     let test: Vec<bool> = syms.iter().map(|s| modules.iter().any(|m| m.path == s.module && crate::store::is_test(m))).collect();
-    Index { lang, rust, syms, modules, uses, used_by, at, test }
+    let possible = vec![vec![]; syms.len()];
+    Index { lang, rust, syms, modules, uses, used_by, at, possible, test }
 }
 
 pub(crate) fn signature(ix: &Index, s: &Sym) -> String {
@@ -167,4 +170,16 @@ pub(crate) fn test_index(sources: &[(&str, &str, &str)]) -> Index {
         }
     }
     build(&crate::language::gleam::Gleam, syms, modules, false)
+}
+
+/// The exact users of `i`, then the ones only a possible reference names.
+pub(crate) fn users_split(ix: &Index, i: usize) -> (Vec<usize>, Vec<usize>) {
+    let mut exact = vec![];
+    let mut possible = vec![];
+    for &j in &ix.used_by[i] {
+        let only_possible = ix.possible[j].iter().any(|&(t, _)| t == i)
+            && !ix.at[j].iter().any(|&(t, line)| t == i && !ix.possible[j].contains(&(t, line)));
+        if only_possible { possible.push(j) } else { exact.push(j) }
+    }
+    (exact, possible)
 }

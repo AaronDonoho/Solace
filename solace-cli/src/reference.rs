@@ -3,7 +3,21 @@
 
 use super::board;
 
-pub(crate) const REFERENCE: &str = include_str!("reference.txt");
+/// The reference's sections, joined at compile time in reading order.
+pub(crate) const REFERENCE: &str = concat!(
+    include_str!("reference/workflow.txt"),
+    include_str!("reference/reading.txt"),
+    include_str!("reference/changing.txt"),
+    include_str!("reference/checking.txt"),
+    include_str!("reference/rust.txt"),
+    include_str!("reference/files.txt"),
+    include_str!("reference/skills.txt"),
+    include_str!("reference/project.txt"),
+    include_str!("reference/work.txt"),
+    include_str!("reference/task-runs.txt"),
+    include_str!("reference/strategy-runs.txt"),
+    include_str!("reference/host.txt"),
+);
 
 /// The reference as agents get it at session start: the workflow and one line
 /// per command (`help` has every option, D-46), and task commands only in a

@@ -1,0 +1,5 @@
+Work records, kept between sessions
+  work add                      a record of the work so far, the note in `text`
+  work list                     the open records, as `session start` lists them
+  work done <id>                close a record
+
