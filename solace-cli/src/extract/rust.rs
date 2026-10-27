@@ -64,13 +64,13 @@ fn helper_kind(kind: &str) -> bool {
     matches!(kind, "fn" | "const" | "static")
 }
 
-fn check_clashes(ix: &Index, moved: &[bool], target: &str) -> Result<(), Failure> {
+fn check_clashes(ix: &Index, ids: &HashMap<&str, usize>, moved: &[bool], target: &str) -> Result<(), Failure> {
     for i in (0..ix.syms.len()).filter(|&i| {
         moved[i]
             && ix.syms[i].parent.is_none()
             && ix.syms[i].module != target
             && ix.syms[i].kind_text != "impl"
-            && !(is_test(ix, i) && ix.syms[i].kind_text != "mod")
+            && !(belongs_in_test_file(ix, &ids, i) && ix.syms[i].kind_text != "mod")
     }) {
         let sym = &ix.syms[i];
         if rust_namespace(&sym.kind_text) & language::rust::TYPE_NAMESPACE != 0
@@ -106,6 +106,7 @@ type Container = (Option<usize>, String);
 
 fn rewrite(
     ix: &Index,
+    ids: &HashMap<&str, usize>,
     moved: &[bool],
     newmod: &[String],
     target: &str,
@@ -137,9 +138,10 @@ fn rewrite(
         drop_unused_local_imports(&cx, module, local_sites, &mut newtext, &mut newheaders)?;
     }
     carry_imports(ix, moved, target, carried, references, &mut newtext, &mut newheaders)?;
+    check_format_capture_clashes(&cx, &newheaders)?;
+    import_format_captures(&cx, &mut newheaders);
     promote.extend(rewrite_mentions(&cx, &import_ok, &mut newtext));
-    let ids = id_indexes(ix);
-    promote.retain(|&i| can_promote(ix, &ids, i));
+    promote.retain(|&i| can_promote(ix, ids, i) && ix.syms[i].kind_text != "thread_local!");
     for &i in &promote {
         if !is_public(&newtext[i]) {
             newtext[i] = make_visible(&newtext[i]);
@@ -191,6 +193,8 @@ fn full_path(module: &str, name: &str) -> String {
         let _root = parts.next();
         let rest: Vec<&str> = parts.collect();
         if rest.is_empty() { format!("crate::{name}") } else { format!("crate::{}::{name}", rest.join("::")) }
+    } else if module.starts_with("crate::") {
+        format!("{module}::{name}")
     } else {
         format!("crate::{module}::{name}")
     }
@@ -369,15 +373,16 @@ fn roots(s: &Store, ix: &Index, names: &[String]) -> Result<Vec<usize>, Failure>
 
 fn moving(ix: &Index, roots: &[usize]) -> Result<(Vec<bool>, Vec<usize>), Failure> {
     let n = ix.syms.len();
+    let ids = id_indexes(ix);
     let mut moved = vec![false; n];
     for &i in roots {
         mark(ix, &mut moved, i);
     }
-    impls::check_direct(ix, roots, &mut moved)?;
+    impls::check_direct(ix, &ids, roots, &mut moved)?;
     add_impls(ix, &mut moved)?;
     let mut helpers: Vec<usize> = vec![];
-    bring_helpers(ix, &mut moved, &mut helpers);
-    move_tests(ix, &mut moved, &mut helpers);
+    bring_helpers(ix, &ids, &mut moved, &mut helpers);
+    move_tests(ix, &ids, &mut moved, &mut helpers);
     Ok((moved, helpers))
 }
 
@@ -513,17 +518,26 @@ fn rewrite_mentions(cx: &Rewrite, import_ok: &HashSet<(usize, String, String)>, 
                 continue;
             }
             let mention_new = newmod[i].clone();
+            if site.format {
+                if !visibility::visible_from(&newmod[t], &mention_new) {
+                    promote.insert(t);
+                }
+                continue;
+            }
             let parent_impl = ix.syms[t].parent.as_deref().and_then(|p| ix.syms.iter().position(|s| s.id == p && s.kind_text == "impl"));
             if let Some(at) = parent_impl {
                 if matches!(&site.via, Via::Path) && site.segs.len() > 1 {
                     if let Ok(owner) = impl_owner_symbol(ix, at) {
-                        let owner_module = &ix.syms[owner].module;
-                        if &mention_new != owner_module {
+                        let owner_new = newmod[owner].clone();
+                        if mention_new != owner_new {
+                            if !visibility::visible_from(&owner_new, &mention_new) {
+                                promote.insert(owner);
+                            }
                             if let Some(sep) = ix.syms[i].text[site.range.clone()].rfind("::") {
-                                edits
-                                    .entry(i)
-                                    .or_default()
-                                    .push((site.range.start..site.range.start + sep, full_path(owner_module, &ix.syms[owner].name)));
+                                edits.entry(i).or_default().push((
+                                    site.range.start..site.range.start + sep,
+                                    reference_path(ix, moved, owner, &owner_new, i, &site.segs[..site.segs.len() - 1]),
+                                ));
                             }
                         }
                     }
@@ -557,6 +571,9 @@ fn rewrite_mentions(cx: &Rewrite, import_ok: &HashSet<(usize, String, String)>, 
                 Via::Path => {
                     if target_new == mention_new {
                         replacement = Some(leaf(&ix.syms[t].name).to_string());
+                    } else if !moved[t] {
+                        replacement = Some(reference_path(ix, moved, t, &target_new, i, &site.segs));
+                        needs_visibility = !visibility::visible_from(&target_new, &mention_new);
                     } else {
                         let (path, promote) = moved_reference(&target_new, &ix.syms[t].name, &mention_new);
                         replacement = Some(path);
@@ -608,8 +625,8 @@ fn apply(s: &Store, budget: usize, mut created_files: Vec<std::path::PathBuf>, m
     let whole = whole_test_containers(ix, &mut moved);
     let existing_tests = test_module(ix, &m.target);
     let file_tests = existing_tests.is_some();
-    let groups = test_groups(ix, &moved, &whole, file_tests);
-    let test = plan_test_module(s, &mut m, existing_tests, &groups, &moved)?;
+    let groups = test_groups(ix, &ids, &moved, &whole, file_tests);
+    let test = plan_test_module(s, &mut m, &ids, existing_tests, &groups, &moved)?;
     if let Some(t) = &test
         && t.created
     {
@@ -658,7 +675,7 @@ fn apply(s: &Store, budget: usize, mut created_files: Vec<std::path::PathBuf>, m
                 )?;
             }
         }
-        drop_super_globs(s, ix, &moved, &m.target, &whole, &m.newtext)?;
+        drop_super_globs(s, ix, &ids, &moved, &m.target, &whole, &m.newtext)?;
 
         let existing_target =
             ix.syms.iter().enumerate().filter(|(j, x)| x.module == m.target && x.parent.is_none() && !moved[*j]).map(|(j, _)| j).last();
@@ -706,7 +723,7 @@ fn apply(s: &Store, budget: usize, mut created_files: Vec<std::path::PathBuf>, m
         s.rust_prune_modules(&mut emptied, &mut retired)?;
 
         crate::rust_check::post_move_check(s, &before)?;
-        Ok(move_reply(&m, &moved, &retired, budget) + &crate::rust_submit::dropped_impls_note(&dropped))
+        Ok(move_reply(&m, &ids, &moved, &retired, budget) + &crate::rust_submit::dropped_impls_note(&dropped))
     })?;
     Ok(out)
 }
@@ -834,9 +851,9 @@ fn add_impls(ix: &Index, moved: &mut [bool]) -> Result<(), Failure> {
     Ok(())
 }
 
-fn bring_helpers(ix: &Index, moved: &mut [bool], helpers: &mut Vec<usize>) {
+fn bring_helpers(ix: &Index, ids: &HashMap<&str, usize>, moved: &mut [bool], helpers: &mut Vec<usize>) {
     let mut moving = HashSet::new();
-    bring_helpers_with(ix, moved, helpers, &mut moving);
+    bring_helpers_with(ix, ids, moved, helpers, &mut moving);
 }
 
 fn test_container(ix: &Index, ids: &HashMap<&str, usize>, i: usize) -> Option<usize> {
@@ -854,7 +871,7 @@ fn test_container(ix: &Index, ids: &HashMap<&str, usize>, i: usize) -> Option<us
 fn test_covered(ix: &Index, ids: &HashMap<&str, usize>, t: usize) -> (HashSet<usize>, HashSet<usize>) {
     let container = test_container(ix, ids, t);
     let local = |j: usize| {
-        is_test(ix, j)
+        belongs_in_test_file(ix, ids, j)
             && !reach::is_test_fn(ix, j)
             && match container {
                 Some(c) => ix.syms[j].parent.as_deref() == Some(ix.syms[c].id.as_str()),
@@ -881,13 +898,12 @@ fn test_covered(ix: &Index, ids: &HashMap<&str, usize>, t: usize) -> (HashSet<us
     (out, locals)
 }
 
-fn move_tests(ix: &Index, moved: &mut [bool], helpers: &mut Vec<usize>) {
+fn move_tests(ix: &Index, ids: &HashMap<&str, usize>, moved: &mut [bool], helpers: &mut Vec<usize>) {
     let tests: Vec<usize> = reach::test_symbols(ix).into_iter().filter(|&t| !moved[t]).collect();
     if tests.is_empty() {
         return;
     }
-    let ids = id_indexes(ix);
-    let covered: HashMap<usize, (HashSet<usize>, HashSet<usize>)> = tests.iter().map(|&t| (t, test_covered(ix, &ids, t))).collect();
+    let covered: HashMap<usize, (HashSet<usize>, HashSet<usize>)> = tests.iter().map(|&t| (t, test_covered(ix, ids, t))).collect();
     let candidates: Vec<usize> = tests.iter().copied().filter(|t| covered[t].0.iter().any(|&u| moved[u])).collect();
     if candidates.is_empty() {
         return;
@@ -921,14 +937,14 @@ fn move_tests(ix: &Index, moved: &mut [bool], helpers: &mut Vec<usize>) {
         }
     }
     let mut moving: HashSet<usize> = moving_tests.iter().chain(moving_locals.iter()).copied().collect();
-    bring_helpers_with(ix, moved, helpers, &mut moving);
+    bring_helpers_with(ix, ids, moved, helpers, &mut moving);
     for &t in &moving_tests {
         mark(ix, moved, t);
         for &l in &covered[&t].1 {
             mark(ix, moved, l);
         }
     }
-    bring_helpers(ix, moved, helpers);
+    bring_helpers(ix, ids, moved, helpers);
 }
 
 struct TestGroup {
@@ -966,11 +982,10 @@ fn whole_test_containers(ix: &Index, moved: &mut [bool]) -> HashSet<usize> {
     whole
 }
 
-fn test_groups(ix: &Index, moved: &[bool], whole: &HashSet<usize>, file_tests: bool) -> Vec<TestGroup> {
+fn test_groups(ix: &Index, ids: &HashMap<&str, usize>, moved: &[bool], whole: &HashSet<usize>, file_tests: bool) -> Vec<TestGroup> {
     let mut groups: std::collections::BTreeMap<String, TestGroup> = std::collections::BTreeMap::new();
-    let ids = id_indexes(ix);
     for i in 0..ix.syms.len() {
-        if !moved[i] || matches!(ix.syms[i].kind_text.as_str(), "mod" | "use") || !is_test(ix, i) {
+        if !moved[i] || matches!(ix.syms[i].kind_text.as_str(), "mod" | "use") || !belongs_in_test_file(ix, &ids, i) {
             continue;
         }
         let parent = ix.syms[i].parent.as_deref().and_then(|id| ids.get(id).copied());
@@ -1035,12 +1050,13 @@ fn impl_trait_range(text: &str) -> Option<Range<usize>> {
     Some(first.start..last.end)
 }
 
-fn bring_helpers_with(ix: &Index, moved: &mut [bool], helpers: &mut Vec<usize>, moving: &mut HashSet<usize>) {
+fn bring_helpers_with(ix: &Index, ids: &HashMap<&str, usize>, moved: &mut [bool], helpers: &mut Vec<usize>, moving: &mut HashSet<usize>) {
     loop {
         let mut added = false;
         for i in 0..ix.syms.len() {
             let sym = &ix.syms[i];
-            if moved[i] || sym.parent.is_some() || is_test(ix, i) || !helper_kind(&sym.kind_text) || is_public(&sym.text) {
+            if moved[i] || sym.parent.is_some() || belongs_in_test_file(ix, ids, i) || !helper_kind(&sym.kind_text) || is_public(&sym.text)
+            {
                 continue;
             }
             if ix.used_by[i].is_empty() || !ix.used_by[i].iter().any(|&u| moved[u] || moving.contains(&u)) {
@@ -1498,7 +1514,7 @@ fn header_mod_names(header: &str) -> Result<Vec<String>, syn::Error> {
         .collect())
 }
 
-fn move_reply(m: &RustMove<'_>, moved: &[bool], retired: &[String], budget: usize) -> String {
+fn move_reply(m: &RustMove<'_>, ids: &HashMap<&str, usize>, moved: &[bool], retired: &[String], budget: usize) -> String {
     let ix = m.ix;
     let mut out = format!("Moved {}", m.going.iter().map(|&i| ix.syms[i].qname()).collect::<Vec<_>>().join(", "));
     if !m.helpers.is_empty() {
@@ -1519,7 +1535,7 @@ fn move_reply(m: &RustMove<'_>, moved: &[bool], retired: &[String], budget: usiz
     }
     if !m.promote.is_empty() {
         let names: Vec<String> =
-            m.promote.iter().map(|&i| format!("{}.{}", new_module(ix, moved, &m.target, i), ix.syms[i].name)).collect();
+            m.promote.iter().map(|&i| format!("{}.{}", new_module(ix, ids, moved, &m.target, i), ix.syms[i].name)).collect();
         out += &format!("Now pub(crate): {}\n", names.join(", "));
     }
     let edited = (0..ix.syms.len()).filter(|&i| m.newtext[i] != ix.syms[i].text).count();
@@ -1542,12 +1558,13 @@ fn rewrite_move<'a>(
     going: Vec<usize>,
 ) -> Result<RustMove<'a>, Failure> {
     let n = ix.syms.len();
+    let ids = id_indexes(&ix);
     let references = language::rust_refs::references(&ix.syms, &ix.modules);
     let (mut carried, external_by_module) = external_imports(&ix, &moved, &references)?;
-    check_clashes(&ix, &moved, &target)?;
-    let placements = impls::placements(&ix, &target, &moved, &going)?;
+    check_clashes(&ix, &ids, &moved, &target)?;
+    let placements = impls::placements(&ix, &ids, &target, &moved, &going)?;
 
-    let newmod: Vec<String> = (0..n).map(|i| new_module(&ix, &moved, &target, i)).collect();
+    let newmod: Vec<String> = (0..n).map(|i| new_module(&ix, &ids, &moved, &target, i)).collect();
     let sources = moved_sources(&ix, &moved);
     let reaching = reach_map(&ix, &sources)?;
     let (local_carried, local_sites) = local_import_uses(&ix, &moved, &newmod, &references, &reaching)?;
@@ -1560,6 +1577,7 @@ fn rewrite_move<'a>(
 
     let (mut newtext, mut newheaders, mut promote) = rewrite(
         &ix,
+        &ids,
         &moved,
         &newmod,
         &target,
@@ -1572,7 +1590,8 @@ fn rewrite_move<'a>(
         &reaching,
         &references,
     )?;
-    visibility::promote_access(&ix, &moved, &target, &mut newtext, &mut promote);
+    qualify_thread_locals(&ix, &ids, &moved, &newmod, &references, &mut newtext);
+    visibility::promote_access(&ix, &ids, &moved, &target, &mut newtext, &mut promote);
     for &i in &promote {
         if !is_public(&newtext[i]) {
             newtext[i] = make_visible(&newtext[i]);
@@ -1851,14 +1870,14 @@ fn impl_self_range(text: &str) -> Option<Range<usize>> {
     Some(syn::spanned::Spanned::span(&item.self_ty).byte_range())
 }
 
-fn needs_super(ix: &Index, moved: &[bool], roots: &[usize], target: &str) -> bool {
+fn needs_super(ix: &Index, ids: &HashMap<&str, usize>, moved: &[bool], roots: &[usize], target: &str) -> bool {
     for &root in roots {
         for at in rust_descendants(ix, root) {
             if matches!(ix.syms[at].kind_text.as_str(), "use" | "mod" | "impl" | "trait") {
                 continue;
             }
             for &used in &ix.uses[at] {
-                if is_test(ix, used) || matches!(ix.syms[used].kind_text.as_str(), "use" | "mod") {
+                if belongs_in_test_file(ix, ids, used) || matches!(ix.syms[used].kind_text.as_str(), "use" | "mod") {
                     continue;
                 }
                 let method = ix.syms[used]
@@ -1892,13 +1911,14 @@ fn declaration_visibility(text: &str) -> Visibility {
 fn drop_super_globs(
     s: &Store,
     ix: &Index,
+    ids: &HashMap<&str, usize>,
     moved: &[bool],
     target: &str,
     whole: &HashSet<usize>,
     newtext: &[String],
 ) -> Result<(), Failure> {
     for &container in whole {
-        if ix.syms[container].module == target || needs_super(ix, moved, &[container], target) {
+        if ix.syms[container].module == target || needs_super(ix, ids, moved, &[container], target) {
             continue;
         }
         let text = without_super_glob(&newtext[container]);
@@ -1970,6 +1990,7 @@ fn retire_test_containers(s: &Store, ix: &Index, whole: &HashSet<usize>) -> Resu
 fn plan_test_module(
     s: &Store,
     m: &mut RustMove<'_>,
+    ids: &HashMap<&str, usize>,
     existing: Option<&crate::ModuleRow>,
     groups: &[TestGroup],
     moved: &[bool],
@@ -1984,7 +2005,7 @@ fn plan_test_module(
         .map(|c| c.file.clone())
         .or_else(|| ix.modules.iter().find(|row| row.path == m.target).and_then(|row| row.file.clone()))
         .ok_or_else(|| Failure(format!("E1001 {} has no file for its tests", m.target), 1))?;
-    let needs = groups.iter().any(|g| needs_super(ix, moved, &g.children, &m.target));
+    let needs = groups.iter().any(|g| needs_super(ix, ids, moved, &g.children, &m.target));
     match existing {
         Some(row) => {
             if needs {
@@ -2266,11 +2287,11 @@ fn record_local_import(
     }
 }
 
-fn new_module(ix: &Index, moved: &[bool], target: &str, i: usize) -> String {
+fn new_module(ix: &Index, ids: &HashMap<&str, usize>, moved: &[bool], target: &str, i: usize) -> String {
     if !moved[i] {
         return ix.syms[i].module.clone();
     }
-    if crate::is_test(ix, i) && ix.syms[i].kind_text != "mod" { format!("{target}::tests") } else { target.to_string() }
+    if belongs_in_test_file(ix, ids, i) && ix.syms[i].kind_text != "mod" { format!("{target}::tests") } else { target.to_string() }
 }
 
 /// The path a moved item's mention in another module needs, and whether the
@@ -2333,4 +2354,273 @@ fn use_line_edit(
 fn line_indent(text: &str, at: usize) -> String {
     let start = text[..at].rfind('\n').map_or(0, |i| i + 1);
     text[start..at].chars().take_while(|c| c.is_whitespace()).collect()
+}
+
+/// Whether a moved item belongs in the target's test file (D-206): a test
+/// container, a `#[test]` function, code inside either, or a test module.
+fn belongs_in_test_file(ix: &Index, ids: &HashMap<&str, usize>, i: usize) -> bool {
+    if is_test_container(ix, i) || reach::is_test_fn(ix, i) {
+        return true;
+    }
+    let mut parent = ix.syms[i].parent.as_deref();
+    while let Some(id) = parent {
+        let Some(&k) = ids.get(id) else { break };
+        if is_test_container(ix, k) {
+            return true;
+        }
+        parent = ix.syms[k].parent.as_deref();
+    }
+    ix.modules.iter().any(|m| m.path == ix.syms[i].module && crate::store::is_test(m))
+}
+
+/// The statics declared inside `thread_local!` blocks that have no symbol of
+/// their own, with the module that declares them and their full path.
+fn thread_local_paths(ix: &Index, ids: &HashMap<&str, usize>, names: &HashSet<(String, String)>) -> Vec<HiddenThreadLocal> {
+    let mut paths = vec![];
+    for (block, tl) in ix.syms.iter().enumerate().filter(|(_, s)| s.kind_text == "thread_local!") {
+        let module = enclosing_module(ix, ids, block);
+        for name in language::rust_refs::thread_local_names(&tl.text) {
+            if names.contains(&(module.clone(), name.clone())) {
+                continue;
+            }
+            paths.push(HiddenThreadLocal { block, path: full_path(&module, &name), module: module.clone(), name });
+        }
+    }
+    paths
+}
+
+/// Names the hidden `thread_local!` statics a moved item uses by their full
+/// path, since the store has no symbol to carry an import for.
+fn qualify_thread_locals(
+    ix: &Index,
+    ids: &HashMap<&str, usize>,
+    moved: &[bool],
+    newmod: &[String],
+    references: &language::rust_refs::References<'_>,
+    newtext: &mut [String],
+) {
+    let names = module_names(ix, ids);
+    let paths = thread_local_paths(ix, ids, &names);
+    if paths.is_empty() {
+        return;
+    }
+    let mut imports: HashMap<String, Vec<language::rust_refs::ImportSite>> = HashMap::new();
+    for i in (0..ix.syms.len()).filter(|&i| moved[i] && ix.syms[i].kind_text != "thread_local!") {
+        let from = enclosing_module(ix, ids, i);
+        let mut renames = HashMap::new();
+        let mut used: Vec<&HiddenThreadLocal> = vec![];
+        for tl in &paths {
+            if names.contains(&(from.clone(), tl.name.clone())) {
+                continue;
+            }
+            let locals = if from == tl.module {
+                vec![tl.name.clone()]
+            } else {
+                imports_from(ix, references, ids, &from, &tl.module, &tl.name, &mut imports)
+            };
+            let target = if moved[tl.block] { &newmod[tl.block] } else { &tl.module };
+            let path = if moved[tl.block] { full_path(target, &tl.name) } else { tl.path.clone() };
+            for local in locals {
+                if !references.mentioned[i].contains(&local) {
+                    continue;
+                }
+                renames.insert(local, path.clone());
+                if !used.iter().any(|u| u.block == tl.block) {
+                    used.push(tl);
+                }
+            }
+        }
+        if renames.is_empty() {
+            continue;
+        }
+        newtext[i] = language::rust_refs::rename_names(references, i, &newtext[i], &renames);
+        for tl in used {
+            let target = if moved[tl.block] { &newmod[tl.block] } else { &tl.module };
+            if !visibility::visible_from(target, &newmod[i]) {
+                newtext[tl.block] = promote_hidden_static(&newtext[tl.block], &tl.name);
+            }
+        }
+    }
+}
+
+/// A static declared inside a `thread_local!` block that has no symbol of its
+/// own, and the module that declares it.
+struct HiddenThreadLocal {
+    block: usize,
+    module: String,
+    name: String,
+    path: String,
+}
+
+/// The module a symbol is written in, including the inline modules around it.
+fn enclosing_module(ix: &Index, ids: &HashMap<&str, usize>, i: usize) -> String {
+    let mut parent = ix.syms[i].parent.as_deref();
+    while let Some(id) = parent {
+        let Some(&k) = ids.get(id) else { break };
+        if ix.syms[k].kind_text == "mod" {
+            return format!("{}::{}", ix.syms[k].module, ix.syms[k].name);
+        }
+        parent = ix.syms[k].parent.as_deref();
+    }
+    ix.syms[i].module.clone()
+}
+
+/// Each module's own names, for telling a hidden static from a local one.
+fn module_names(ix: &Index, ids: &HashMap<&str, usize>) -> HashSet<(String, String)> {
+    (0..ix.syms.len())
+        .filter(|&i| {
+            let sym = &ix.syms[i];
+            !matches!(sym.kind_text.as_str(), "use" | "thread_local!")
+                && (sym.parent.is_none()
+                    || sym.parent.as_deref().and_then(|id| ids.get(id)).is_some_and(|&k| ix.syms[k].kind_text == "mod"))
+        })
+        .map(|i| (enclosing_module(ix, ids, i), leaf(&ix.syms[i].name).to_string()))
+        .collect()
+}
+
+/// The imports written in `module`, including an inline module's own `use`s.
+fn module_imports(ix: &Index, ids: &HashMap<&str, usize>, module: &str) -> Vec<language::rust_refs::ImportSite> {
+    if ix.modules.iter().any(|m| m.path == module) {
+        return language::rust_refs::import_sites(&ix.syms, &ix.modules, module, true).unwrap_or_default();
+    }
+    (0..ix.syms.len())
+        .filter(|&i| ix.syms[i].kind_text == "use" && enclosing_module(ix, ids, i) == module)
+        .flat_map(|i| language::rust_refs::import_sites_in(&ix.syms[i].text).unwrap_or_default())
+        .collect()
+}
+
+/// Whether `from` imports `name` from `module`.
+fn imports_from(
+    ix: &Index,
+    references: &language::rust_refs::References<'_>,
+    ids: &HashMap<&str, usize>,
+    from: &str,
+    module: &str,
+    name: &str,
+    imports: &mut HashMap<String, Vec<language::rust_refs::ImportSite>>,
+) -> Vec<String> {
+    let sites = imports.entry(from.to_string()).or_insert_with(|| module_imports(ix, ids, from));
+    sites
+        .iter()
+        .filter_map(|site| {
+            if site.glob {
+                return (visibility::visible_from(module, from)
+                    && language::rust_refs::import_module(references, from, &site.path) == Some(module.to_string()))
+                .then(|| name.to_string());
+            }
+            if site.path.last().is_none_or(|leaf| leaf != name)
+                || language::rust_refs::import_module(references, from, &site.path[..site.path.len() - 1]) != Some(module.to_string())
+            {
+                return None;
+            }
+            Some(site.local.clone())
+        })
+        .collect()
+}
+
+/// Makes a static inside a `thread_local!` block visible to a module outside
+/// the one that declares it.
+fn promote_hidden_static(text: &str, name: &str) -> String {
+    let needle = format!("static {name}:");
+    let mut at = None;
+    let mut offset = 0;
+    for line in text.split_inclusive('\n') {
+        let indent = line.len() - line.trim_start().len();
+        if line.trim_start().starts_with(&needle) {
+            at = Some(offset + indent);
+            break;
+        }
+        offset += line.len();
+    }
+    let Some(at) = at else { return text.to_string() };
+    let line = text[..at].rsplit('\n').next().unwrap_or("");
+    if line.contains("pub ") || line.contains("pub(") {
+        return text.to_string();
+    }
+    let mut out = text.to_string();
+    out.insert_str(at, "pub(crate) ");
+    out
+}
+
+/// The path to write for `target` in `mention`'s module: a path written from
+/// the crate root stays root-relative, so a re-export keeps the path that
+/// reaches it; otherwise it is the target's own module path.
+fn reference_path(ix: &Index, moved: &[bool], target: usize, target_new: &str, mention: usize, segs: &[String]) -> String {
+    if !moved[target] {
+        let path = rooted_path(ix, &ix.syms[mention].module, target_new, segs);
+        if path.first().is_some_and(|s| s == "crate") {
+            return path.join("::");
+        }
+    }
+    full_path(target_new, &ix.syms[target].name)
+}
+
+/// Imports a format capture the moved code can no longer name in scope. A
+/// capture can only be an identifier, so a path cannot stand in for it.
+fn import_format_captures(cx: &Rewrite, newheaders: &mut HashMap<String, String>) {
+    for &t in &cx.targets {
+        for site in &cx.sites[&t] {
+            let Some((module, _, line)) = format_capture_import(cx, t, site) else { continue };
+            let header = newheaders.get(&module).cloned().unwrap_or_default();
+            if !header.lines().any(|existing| existing.trim() == line) {
+                newheaders.insert(module, add_import_line(&header, &line));
+            }
+        }
+    }
+}
+
+/// The import a format capture needs in its new module, and the name it binds.
+fn format_capture_import(cx: &Rewrite, t: usize, site: &Site) -> Option<(String, String, String)> {
+    if !site.format {
+        return None;
+    }
+    let i = site.symbol?;
+    if !cx.moved[t] && !cx.moved[i] {
+        return None;
+    }
+    let mention_new = cx.newmod[i].clone();
+    let target_new = cx.newmod[t].clone();
+    if target_new == mention_new {
+        return None;
+    }
+    let local = site.segs.first().cloned().unwrap_or_else(|| cx.ix.syms[t].name.clone());
+    let path = reference_path(cx.ix, cx.moved, t, &target_new, i, &site.segs);
+    let line = if leaf(&path) == local.as_str() { format!("use {path};") } else { format!("use {path} as {local};") };
+    let line = if cx.ix.test[i] { format!("#[cfg(test)] {line}") } else { line };
+    Some((mention_new, local, line))
+}
+
+/// Refuses a format capture whose name the destination already binds.
+fn check_format_capture_clashes(cx: &Rewrite, newheaders: &HashMap<String, String>) -> Result<(), Failure> {
+    for &t in &cx.targets {
+        for site in &cx.sites[&t] {
+            let Some((module, local, line)) = format_capture_import(cx, t, site) else { continue };
+            let header = newheaders.get(&module).cloned().unwrap_or_default();
+            if header.lines().any(|existing| existing.trim() == line) {
+                continue;
+            }
+            if target_names_after_move(cx, &header, &module)?.contains(&local) {
+                return fail(format!("E1004 {module}.{local} already exists in {module}; the format capture cannot be imported there"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The names the destination module has after the move, for a format capture.
+fn target_names_after_move(cx: &Rewrite, header: &str, module: &str) -> Result<HashSet<String>, Failure> {
+    let mut names = target_names(cx.ix, header, module)?;
+    for (i, sym) in cx.ix.syms.iter().enumerate() {
+        if sym.parent.is_some() || matches!(sym.kind_text.as_str(), "impl" | "use") {
+            continue;
+        }
+        if cx.moved[i] {
+            if cx.newmod[i] == module {
+                names.insert(sym.name.clone());
+            } else {
+                names.remove(&sym.name);
+            }
+        }
+    }
+    Ok(names)
 }

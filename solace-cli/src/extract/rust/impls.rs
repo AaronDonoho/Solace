@@ -1,12 +1,16 @@
 use std::collections::BTreeSet;
 
-use super::{full_path, id_indexes, impl_owner_symbol, impl_self_range, leaf, mark, module_named_like};
+use super::{full_path, impl_owner_symbol, impl_self_range, leaf, mark, module_named_like};
 use crate::{Failure, Index, fail};
 
 
 
-pub(super) fn check_direct(ix: &Index, roots: &[usize], moved: &mut [bool]) -> Result<(), Failure> {
-    let ids = id_indexes(ix);
+pub(super) fn check_direct(
+    ix: &Index,
+    ids: &std::collections::HashMap<&str, usize>,
+    roots: &[usize],
+    moved: &mut [bool],
+) -> Result<(), Failure> {
     let children = children(ix);
     let mut chosen: BTreeSet<usize> = BTreeSet::new();
     for &root in roots {
@@ -112,8 +116,13 @@ pub(super) struct Placement {
     pub(super) target: ImplTarget,
 }
 
-pub(super) fn placements(ix: &Index, target: &str, moved: &[bool], roots: &[usize]) -> Result<Vec<Placement>, Failure> {
-    let ids = id_indexes(ix);
+pub(super) fn placements(
+    ix: &Index,
+    ids: &std::collections::HashMap<&str, usize>,
+    target: &str,
+    moved: &[bool],
+    roots: &[usize],
+) -> Result<Vec<Placement>, Failure> {
     let children = children(ix);
     let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
     for &root in roots {

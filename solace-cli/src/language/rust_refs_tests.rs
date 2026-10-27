@@ -686,6 +686,7 @@ fn a_type_prefix_of_a_path_is_a_site() {
     written.sort_unstable();
     assert_eq!(written, ["Task", "crate::a::Task"]);
     let kind = index_of(&ix, "a.Kind");
+    assert!(ix.uses[go].contains(&kind), "{:?}", ix.uses[go]);
     let kinds = super::rewrite_sites(&ix.syms, &ix.modules, kind);
     assert_eq!(kinds.iter().map(|s| &text[s.range.clone()]).collect::<Vec<_>>(), ["a::Kind"]);
     let header = ix.modules.iter().find(|m| m.path == "crate").unwrap().header.as_str();
@@ -1168,4 +1169,168 @@ fn an_ambiguous_bare_type_still_reaches_its_trait_impls() {
     let fmt = index_of(&ix, "crate.<Batch as fmt::Display>::fmt");
     assert!(possible(&ix, "crate.tests::mentions_batch", "crate.<Batch as fmt::Display>::fmt"));
     assert!(crate::reach::closure(&ix, t).contains(&fmt), "test reach keeps the trait impl of an ambiguous bare type");
+}
+
+/// A `||` condition is not a closure, even when a closure follows in the
+/// same body; the call between them is still a use.
+#[test]
+fn a_logical_or_before_a_closure_does_not_hide_a_use() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn make() -> i32 {\n    1\n}\n\n",
+            "pub fn go(text: &str) -> i32 {\n",
+            "    if text.is_empty() || text.len() > 1 {\n",
+            "        return make();\n",
+            "    }\n",
+            "    let f = |m: &str| m.len() as i32;\n",
+            "    f(text)\n",
+            "}\n",
+        ),
+        &[],
+    );
+    assert_eq!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).len(), 1);
+}
+
+/// A closure directly after another closure's closing bar still binds its
+/// parameters.
+#[test]
+fn a_closure_after_a_closure_still_binds_its_parameters() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn make() -> i32 {\n    1\n}\n\n",
+            "pub fn go() -> i32 {\n",
+            "    let f = |make: i32| |make: i32| make + 1;\n",
+            "    (f(1))(2)\n",
+            "}\n",
+        ),
+        &[],
+    );
+    assert!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).is_empty());
+}
+
+/// Every static in a `thread_local!` block is named, including ones after the
+/// first, which the item's symbol name does not expose.
+#[test]
+fn thread_local_names_read_every_static() {
+    let text = "thread_local! {\n    /// The first.\n    static FIRST: u8 = 1;\n    /// The second.\n    static SECOND: u8 = 2;\n}\n";
+    assert_eq!(super::thread_local_names(text), vec!["FIRST", "SECOND"]);
+    assert!(super::thread_local_names("pub fn one() {}").is_empty());
+}
+
+/// A format capture names the item; escaped braces and positional slots do not.
+#[test]
+fn a_format_capture_is_a_site_and_a_use() {
+    let (_root, ix) = index(
+        concat!(
+            "const PROBE: &str = \"p\";\n\n",
+            "pub fn captured() -> String {\n    format!(\"a {PROBE} b\")\n}\n\n",
+            "pub fn escaped() -> String {\n    format!(\"a {{PROBE}} b\")\n}\n\n",
+            "pub fn positional() -> String {\n    format!(\"{}\", PROBE)\n}\n",
+            "pub fn named() -> String {\n    format!(\"{PROBE}\", PROBE = 1)\n}\n",
+        ),
+        &[],
+    );
+    let probe = index_of(&ix, "crate.PROBE");
+    let captured = index_of(&ix, "crate.captured");
+    let escaped = index_of(&ix, "crate.escaped");
+    let positional = index_of(&ix, "crate.positional");
+    let named = index_of(&ix, "crate.named");
+    assert!(ix.uses[captured].contains(&probe), "{:?}", ix.uses[captured]);
+    assert!(!ix.uses[escaped].contains(&probe), "{:?}", ix.uses[escaped]);
+    assert!(!ix.uses[named].contains(&probe), "{:?}", ix.uses[named]);
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, probe);
+    assert!(sites.iter().all(|s| s.symbol != Some(named)), "{sites:?}");
+    let mut kinds: Vec<(usize, bool)> = sites.iter().map(|s| (s.symbol.unwrap(), s.format)).collect();
+    kinds.sort_unstable();
+    assert_eq!(kinds, [(captured, true), (positional, false)]);
+}
+
+/// A crate module named like the item does not turn `drafts::view` into a module path.
+#[test]
+fn a_module_name_does_not_hide_an_item() {
+    let (_root, ix) = index(
+        "mod drafts;\nmod view;\n\npub fn go() {\n    drafts::view();\n}\n",
+        &[("src/drafts.rs", "pub fn view() {}\n"), ("src/view.rs", "pub fn other() {}\n")],
+    );
+    let go = index_of(&ix, "crate.go");
+    let view = index_of(&ix, "drafts.view");
+    assert!(ix.uses[go].contains(&view), "{:?}", ix.uses[go]);
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, view);
+    assert_eq!(sites.iter().filter(|s| s.symbol == Some(go)).count(), 1);
+}
+
+/// A path through a module's named re-export names the exported item.
+#[test]
+fn a_reexport_resolves_to_its_item() {
+    let (_root, ix) = index(
+        "mod board;\n\npub fn go() {\n    board::strategy_guard();\n}\n",
+        &[
+            ("src/board.rs", "mod strategy;\n\npub use strategy::strategy_guard;\n"),
+            ("src/board/strategy.rs", "pub fn strategy_guard() {}\n"),
+        ],
+    );
+    let go = index_of(&ix, "crate.go");
+    let guard = index_of(&ix, "board::strategy.strategy_guard");
+    assert!(ix.uses[go].contains(&guard), "{:?}", ix.uses[go]);
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, guard);
+    assert_eq!(sites.iter().filter(|s| s.symbol == Some(go)).count(), 1);
+}
+
+/// A qualified type still reaches the methods its trait impls provide.
+#[test]
+fn a_qualified_type_keeps_its_trait_impl_methods_possible() {
+    let (_root, ix) = index(
+        concat!("mod a;\n\n", "pub fn go() -> a::Task {\n    a::Task::default()\n}\n",),
+        &[("src/a.rs", concat!("pub struct Task;\n\n", "impl Default for Task {\n    fn default() -> Self {\n        Task\n    }\n}\n",))],
+    );
+    assert!(uses(&ix, "crate.go", "a.Task"));
+    assert!(possible(&ix, "crate.go", "a.<Task as Default>::default"));
+    assert!(!possible(&ix, "crate.go", "a.Task"));
+}
+
+/// A missing child module does not fall back to a crate module of the same name.
+#[test]
+fn a_missing_child_module_does_not_resolve_a_crate_module() {
+    let (_root, ix) = index(
+        "mod drafts;\nmod view;\n\npub fn go() {\n    drafts::view::thing();\n}\n",
+        &[("src/drafts.rs", "pub fn other() {}\n"), ("src/view.rs", "pub fn thing() {}\n")],
+    );
+    let go = index_of(&ix, "crate.go");
+    let thing = index_of(&ix, "view.thing");
+    let sites = super::rewrite_sites(&ix.syms, &ix.modules, thing);
+    assert!(sites.iter().all(|s| s.symbol != Some(go)), "{sites:?}");
+}
+
+/// A Unicode escape's brace is not a format capture; an escaped backslash is.
+#[test]
+fn a_unicode_escape_is_not_a_format_capture() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn e9() -> i32 {\n    9\n}\n\n",
+            "pub fn unicode() -> String {\n    format!(\"\\u{e9}\")\n}\n\n",
+            "pub fn literal() -> String {\n    format!(\"\\\\u{e9}\")\n}\n",
+        ),
+        &[],
+    );
+    assert!(!uses(&ix, "crate.unicode", "crate.e9"));
+    assert!(uses(&ix, "crate.literal", "crate.e9"));
+}
+
+/// A call between two `||` operators is a use even when a closure follows.
+#[test]
+fn a_call_between_logical_ors_before_a_closure_is_a_use() {
+    let (_root, ix) = index(
+        concat!(
+            "pub fn make() -> i32 {\n    1\n}\n\n",
+            "pub fn go(a: bool, b: bool) -> i32 {\n",
+            "    if a || make() == 1 || b {\n",
+            "        return 1;\n",
+            "    }\n",
+            "    let f = |m: &str| m.len() as i32;\n",
+            "    f(\"\")\n",
+            "}\n",
+        ),
+        &[],
+    );
+    assert_eq!(super::rewrite_sites(&ix.syms, &ix.modules, index_of(&ix, "crate.make")).len(), 1);
 }

@@ -4260,9 +4260,10 @@ fn cause_fix(key: &str) -> &'static str {
     if key.starts_with("E0599") { "add the method or fix the call" } else { "make it `pub(crate)`" }
 }
 
-/// Errors of one cause print as one line naming the item and the fix, with each
-/// site below; every other error prints in full as before.
+/// Errors of one cause print as one line naming the item and the fix, with the
+/// first few sites and a count of the rest; every other error prints in full.
 fn group_errors(errors: &[&Diag]) -> String {
+    const SITE_CAP: usize = 6;
     let mut groups: Vec<(String, String, Vec<&Diag>)> = vec![];
     let mut plain: Vec<&str> = vec![];
     for d in errors {
@@ -4281,8 +4282,21 @@ fn group_errors(errors: &[&Diag]) -> String {
             continue;
         }
         let mut part = format!("{cause} ({} places): {}", ds.len(), cause_fix(&key));
-        for d in ds {
+        for &d in ds.iter().take(SITE_CAP) {
             part += &format!("\n  at {}", place(d));
+        }
+        if ds.len() > SITE_CAP {
+            let mut modules: Vec<&str> = vec![];
+            for &d in ds.iter().skip(SITE_CAP) {
+                if let Some(module) = site_module(d) {
+                    modules.push(module);
+                }
+            }
+            unique(&mut modules);
+            part += &format!("\n… and {} more", ds.len() - SITE_CAP);
+            if !modules.is_empty() {
+                part += &format!(" in {}", modules.join(", "));
+            }
         }
         parts.push(part);
     }
@@ -4618,4 +4632,9 @@ fn possible_users(ix: &Index, target: usize, users: &[usize]) -> String {
         out += &ref_entry(ix, u, target);
     }
     out
+}
+
+/// A site's module, falling back to the part of its name before the last dot.
+fn site_module(d: &Diag) -> Option<&str> {
+    d.module.as_deref().filter(|m| !m.is_empty()).or_else(|| d.symbol.as_deref()?.rsplit_once('.').map(|(m, _)| m))
 }

@@ -348,7 +348,8 @@ fn select_merge_tests(ix: &Index, gone_i: usize, keep_module: &str) -> Result<Me
     let mut moving = vec![false; n];
     moving[gone_i] = true;
     let mut helpers = vec![];
-    move_tests(ix, &mut moving, &mut helpers);
+    let ids = super::id_indexes(ix);
+    move_tests(ix, &ids, &mut moving, &mut helpers);
     moving[gone_i] = false;
     let target_tests = format!("{keep_module}::tests");
     for i in 0..n {

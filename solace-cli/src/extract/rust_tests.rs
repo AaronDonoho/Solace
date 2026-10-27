@@ -3014,3 +3014,456 @@ fn a_redirected_use_follows_the_group_it_left() {
     let callers = ix.modules.iter().find(|m| m.path == "callers").unwrap();
     assert!(callers.header.starts_with("use crate::a::{other};\nuse crate::b::one;\nuse std::cmp::Ordering;"), "{}", callers.header);
 }
+
+/// A staying call after `||`, with a later closure beside it, is a use and
+/// takes the moved function's path.
+#[test]
+fn a_staying_call_after_a_logical_or_is_rewritten() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/main.rs",
+            concat!(
+                "#[derive(Debug)]\n",
+                "pub(crate) struct Failure(String, i32);\n\n",
+                "fn fail<T>(message: String) -> Result<T, Failure> {\n",
+                "    Err(Failure(message, 1))\n",
+                "}\n\n",
+                "fn usage<T>(message: &str) -> Result<T, Failure> {\n",
+                "    fail(format!(\"{}\\n\", message))\n",
+                "}\n\n",
+                "fn check(blocks: &[String]) -> Result<(), Failure> {\n",
+                "    for text in blocks {\n",
+                "        if text.is_empty() || (text.len() > 1) {\n",
+                "            return fail(format!(\n",
+                "                \"bad block {text}\",\n",
+                "            ));\n",
+                "        }\n",
+                "        let length = |m: &str| m.len();\n",
+                "        let _ = length(text);\n",
+                "    }\n",
+                "    Ok(())\n",
+                "}\n\n",
+                "fn main() {\n",
+                "    let out: Result<(), Failure> = usage(\"go\");\n",
+                "    if let Err(Failure(message, code)) = out {\n",
+                "        println!(\"{} {}\", message, code);\n",
+                "    }\n",
+                "    let _ = check(&[]);\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.fail", "crate.usage", "--to", "diagnostics"]).unwrap();
+    let target = written(&root, "src/diagnostics.rs");
+    assert!(target.contains("fn fail"), "{target}");
+    assert!(target.contains("fn usage"), "{target}");
+    let source = written(&root, "src/main.rs");
+    assert!(source.contains("crate::diagnostics::fail(format!("), "{source}");
+    assert!(source.contains("let out: Result<(), Failure> = crate::diagnostics::usage(\"go\")"), "{source}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// A `#[cfg(test)]` helper outside a test container moves as an ordinary item,
+/// and a test in another module still reaches it through its new path.
+#[test]
+fn a_cfg_test_helper_outside_tests_moves_as_an_ordinary_item() {
+    if !ready() {
+        return;
+    }
+    let (root, s) = rust_project(concat!(
+        "#[cfg(test)]\n",
+        "pub(crate) fn helper() -> i32 {\n    1\n}\n\n",
+        "pub fn other() -> i32 {\n    2\n}\n\n",
+        "mod one {\n",
+        "    #[cfg(test)]\n",
+        "    mod tests {\n",
+        "        use super::super::*;\n\n",
+        "        #[test]\n",
+        "        fn works() {\n",
+        "            assert_eq!(helper() + other(), 3);\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    ));
+    extract(&s, &["crate.helper", "--to", "helpers"]).unwrap();
+    let ix = s.index().unwrap();
+    assert!(s.resolve(&ix, "helpers.helper").is_ok());
+    assert!(s.resolve(&ix, "helpers.tests::helper").is_err());
+    let caller = text(&s, "crate.one::tests::works");
+    assert!(caller.contains("crate::helpers::helper()"), "{caller}");
+    let errors: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| d.error).map(|d| d.text).collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(written(&root, "src/helpers.rs").contains("#[cfg(test)]"));
+}
+
+/// A moved function using a second `thread_local!` static gets its full path,
+/// since that static has no symbol the ordinary import rewrite could use.
+#[test]
+fn a_moved_fn_names_a_hidden_thread_local_static() {
+    if !ready() {
+        return;
+    }
+    let (_root, s) = rust_project(concat!(
+        "thread_local! {\n",
+        "    /// The first.\n",
+        "    static FIRST: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };\n",
+        "    /// The second.\n",
+        "    static SECOND: std::cell::Cell<u8> = const { std::cell::Cell::new(1) };\n",
+        "}\n\n",
+        "pub fn first() -> u8 {\n    FIRST.with(|v| v.get())\n}\n\n",
+        "pub fn second() -> u8 {\n    SECOND.with(|v| v.get())\n}\n",
+        "\n",
+        "pub fn use_second() -> u8 {\n    second()\n}\n",
+    ));
+    extract(&s, &["crate.second", "--to", "helpers"]).unwrap();
+    let moved = text(&s, "helpers.second");
+    assert!(moved.contains("crate::SECOND.with"), "{moved}");
+    let errors: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| d.error).map(|d| d.text).collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// A moved function keeps its own module's `SECOND`, though a hidden
+/// `thread_local!` static elsewhere has the same name.
+#[test]
+fn a_moved_fn_keeps_a_same_named_item_in_its_own_module() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "pub mod b;\n\n",
+                "thread_local! {\n",
+                "    static FIRST: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };\n",
+                "    static SECOND: std::cell::Cell<u8> = const { std::cell::Cell::new(1) };\n",
+                "}\n",
+            ),
+        ),
+        ("src/b.rs", "pub(crate) const SECOND: u8 = 7;\n\npub fn value() -> u8 {\n    SECOND\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["b.value", "--to", "helpers"]).unwrap();
+    let moved = text(&s, "helpers.value");
+    assert!(moved.contains("b::SECOND"), "{moved}");
+    assert!(!moved.contains("crate::SECOND"), "{moved}");
+    let errors: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| d.error).map(|d| d.text).collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// A moved function reaches a hidden `thread_local!` static its module imports.
+#[test]
+fn a_moved_fn_names_the_thread_local_its_module_imports() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "pub mod b;\n\n",
+                "thread_local! {\n",
+                "    static SECOND: std::cell::Cell<u8> = const { std::cell::Cell::new(1) };\n",
+                "}\n\n",
+                "pub fn use_value() -> u8 {\n",
+                "    b::value()\n",
+                "}\n",
+            ),
+        ),
+        ("src/b.rs", "use crate::SECOND;\n\npub fn value() -> u8 {\n    SECOND.with(|v| v.get())\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["b.value", "--to", "helpers"]).unwrap();
+    let moved = text(&s, "helpers.value");
+    assert!(moved.contains("crate::SECOND.with"), "{moved}");
+    let diagnostics = s.check_all(&s.index().unwrap()).unwrap();
+    let errors: Vec<String> = diagnostics.iter().filter(|d| d.error).map(|d| d.text.clone()).collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let warnings: Vec<String> = diagnostics.into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// Two modules' hidden statics of one name each get their own path, and a move
+/// to a sibling makes the static visible.
+#[test]
+fn a_moved_fn_names_its_own_modules_hidden_thread_local() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "pub mod a;\npub mod b;\n"),
+        (
+            "src/a.rs",
+            concat!(
+                "thread_local! {\n",
+                "    static FIRST: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };\n",
+                "    static SECOND: std::cell::Cell<u8> = const { std::cell::Cell::new(1) };\n",
+                "}\n\n",
+                "pub fn one() -> u8 {\n    SECOND.with(|v| v.get())\n}\n",
+            ),
+        ),
+        (
+            "src/b.rs",
+            concat!(
+                "thread_local! {\n",
+                "    static FIRST: std::cell::Cell<u8> = const { std::cell::Cell::new(2) };\n",
+                "    static SECOND: std::cell::Cell<u8> = const { std::cell::Cell::new(3) };\n",
+                "}\n\n",
+                "pub fn two() -> u8 {\n    SECOND.with(|v| v.get())\n}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["a.one", "b.two", "--to", "helpers"]).unwrap();
+    let one = text(&s, "helpers.one");
+    let two = text(&s, "helpers.two");
+    assert!(one.contains("crate::a::SECOND.with"), "{one}");
+    assert!(two.contains("crate::b::SECOND.with"), "{two}");
+    for block in ["a.FIRST", "b.FIRST"] {
+        let text = text(&s, block);
+        assert!(text.contains("pub(crate) static SECOND:"), "{block}: {text}");
+    }
+    let errors: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| d.error).map(|d| d.text).collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+#[test]
+fn paths_nested_in_a_moved_item_keep_the_crate_root() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "mod outside;\n",
+                "mod drafts;\n",
+                "mod board;\n",
+                "pub mod view;\n\n",
+                "fn run_inner() {\n",
+                "    outside::absorb(outside::Mode::Notice);\n",
+                "    drafts::view();\n",
+                "    board::strategy_guard();\n",
+                "}\n\n",
+                "pub fn entry() {\n",
+                "    run_inner();\n",
+                "}\n",
+            ),
+        ),
+        ("src/outside.rs", "pub enum Mode {\n    Notice,\n}\n\npub fn absorb(_: Mode) {}\n"),
+        ("src/drafts.rs", "pub fn view() {}\n"),
+        ("src/view.rs", "pub fn other() {}\n"),
+        ("src/board.rs", "mod strategy;\n\npub use strategy::strategy_guard;\n"),
+        ("src/board/strategy.rs", "pub fn strategy_guard() {}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.run_inner", "--to", "cli"]).unwrap();
+    let target = written(&root, "src/cli.rs");
+    assert!(target.contains("crate::outside::absorb(crate::outside::Mode::Notice)"), "{target}");
+    assert!(target.contains("crate::drafts::view()"), "{target}");
+    assert!(target.contains("crate::board::strategy_guard()"), "{target}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_format_capture_of_a_staying_constant_is_imported() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "pub(crate) const PROBE: &str = \"probe\";\n\n",
+                "fn prepare() -> String {\n",
+                "    format!(\"probe {PROBE}\")\n",
+                "}\n\n",
+                "pub fn entry() -> String {\n",
+                "    prepare()\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.prepare", "--to", "probe"]).unwrap();
+    let target = written(&root, "src/probe.rs");
+    assert!(target.contains("use crate::PROBE;"), "{target}");
+    assert!(target.contains("format!(\"probe {PROBE}\")"), "{target}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_staying_test_imports_a_moved_constant_a_format_string_names() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "pub(crate) const HELD: &str = \"held\";\n\n",
+                "pub fn held() -> &'static str {\n",
+                "    HELD\n",
+                "}\n\n",
+                "#[cfg(test)]\n",
+                "mod tests {\n",
+                "    use super::*;\n\n",
+                "    #[test]\n",
+                "    fn shows_held() {\n",
+                "        assert_eq!(held(), \"held\");\n",
+                "        assert_eq!(format!(\"{HELD}\"), \"held\");\n",
+                "    }\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.HELD", "--to", "limits"]).unwrap();
+    let source = written(&root, "src/lib.rs");
+    assert!(source.contains("use crate::limits::HELD;"), "{source}");
+    assert!(source.contains("format!(\"{HELD}\")"), "{source}");
+    let target = written(&root, "src/limits.rs");
+    assert!(target.contains("pub(crate) const HELD"), "{target}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_type_moved_with_its_caller_is_named_by_its_new_path() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "impl Within {\n",
+                "    fn enter() -> Within {\n",
+                "        Within\n",
+                "    }\n",
+                "}\n\n",
+                "pub struct Within;\n\n",
+                "pub fn run_options() -> Within {\n",
+                "    Within::enter()\n",
+                "}\n\n",
+                "pub fn entry() -> Within {\n",
+                "    run_options()\n",
+                "}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["crate.Within", "crate.run_options", "--to", "cli"]).unwrap();
+    let target = written(&root, "src/cli.rs");
+    assert!(target.contains("Within::enter()"), "{target}");
+    assert!(!target.contains("crate::Within::enter()"), "{target}");
+    let warnings: Vec<String> = s.check_all(&s.index().unwrap()).unwrap().into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+/// A format capture cannot be imported under a name the destination binds.
+#[test]
+fn a_format_capture_name_taken_in_the_target_is_refused() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        (
+            "src/lib.rs",
+            concat!(
+                "pub(crate) const PROBE: &str = \"probe\";\n\n",
+                "fn prepare() -> String {\n",
+                "    format!(\"probe {PROBE}\")\n",
+                "}\n\n",
+                "pub mod probe;\n",
+            ),
+        ),
+        ("src/probe.rs", "pub const PROBE: &str = \"taken\";\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    let err = extract(&s, &["crate.prepare", "--to", "probe"]).unwrap_err().0;
+    assert!(err.starts_with("E1004") && err.contains("probe.PROBE"), "{err}");
+    assert!(s.resolve(&s.index().unwrap(), "crate.prepare").is_ok());
+}
+
+/// A doc comment mentioning the static does not take its visibility.
+#[test]
+fn a_doc_comment_naming_the_static_is_not_promoted() {
+    let text = concat!(
+        "thread_local! {\n",
+        "    /// A static SECOND: the second value.\n",
+        "    #[cfg(test)]\n",
+        "    static SECOND: std::cell::Cell<u8> = const { std::cell::Cell::new(1) };\n",
+        "}\n",
+    );
+    let out = super::promote_hidden_static(text, "SECOND");
+    assert!(out.contains("/// A static SECOND:"), "{out}");
+    assert!(out.contains("pub(crate) static SECOND:"), "{out}");
+    assert!(!out.contains("/// A pub(crate)"), "{out}");
+}
+
+/// A moved function names an aliased hidden static, and its source keeps no
+/// unused import.
+#[test]
+fn a_moved_fn_names_an_aliased_thread_local_import() {
+    if !ready() {
+        return;
+    }
+    let root = Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", concat!("pub mod a;\npub mod b;\n\n", "pub fn run() -> u8 {\n    b::value()\n}\n",)),
+        ("src/a.rs", "thread_local! {\n    static SECOND: std::cell::Cell<u8> = const { std::cell::Cell::new(1) };\n}\n"),
+        (
+            "src/b.rs",
+            concat!(
+                "use crate::a::SECOND as S;\n\n",
+                "pub fn value() -> u8 {\n    S.with(|v| v.get())\n}\n\n",
+                "pub fn other() -> u8 {\n    2\n}\n",
+            ),
+        ),
+    ]);
+    crate::import(&root).unwrap();
+    let s = Store::at(&root).unwrap();
+    extract(&s, &["b.value", "--to", "helpers"]).unwrap();
+    let moved = text(&s, "helpers.value");
+    assert!(moved.contains("crate::a::SECOND.with"), "{moved}");
+    let block = text(&s, "a.SECOND");
+    assert!(block.contains("pub(crate) static SECOND:"), "{block}");
+    let ix = s.index().unwrap();
+    let b = ix.modules.iter().find(|m| m.path == "b").unwrap();
+    assert!(!b.header.contains("SECOND"), "{}", b.header);
+    let diagnostics = s.check_all(&ix).unwrap();
+    let errors: Vec<String> = diagnostics.iter().filter(|d| d.error).map(|d| d.text.clone()).collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let warnings: Vec<String> = diagnostics.into_iter().filter(|d| !d.error).map(|d| d.text).collect();
+    assert!(warnings.is_empty(), "{warnings:?}");
+}

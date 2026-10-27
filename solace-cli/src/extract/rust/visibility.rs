@@ -1,13 +1,19 @@
 use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
 
-use super::{can_promote, helper_kind, id_indexes, impl_owner_symbol, is_public};
+use super::{can_promote, helper_kind, impl_owner_symbol, is_public};
 use crate::Index;
 
 
 
-pub(super) fn promote_access(ix: &Index, moved: &[bool], target: &str, newtext: &mut [String], promote: &mut BTreeSet<usize>) {
-    let ids = id_indexes(ix);
+pub(super) fn promote_access(
+    ix: &Index,
+    ids: &std::collections::HashMap<&str, usize>,
+    moved: &[bool],
+    target: &str,
+    newtext: &mut [String],
+    promote: &mut BTreeSet<usize>,
+) {
     let mut owners: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
     for method in 0..ix.syms.len() {
         if !moved[method] || ix.syms[method].kind_text != "fn" {
