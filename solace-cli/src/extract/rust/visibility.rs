@@ -32,14 +32,14 @@ pub(super) fn promote_access(
             }
         }
         if ix.used_by[method].iter().any(|&u| !moved[u] && !visible_from(target, &ix.syms[u].module))
-            && can_promote(ix, &ids, method)
+            && can_promote(ix, ids, method)
             && !is_public(&newtext[method])
         {
             promote.insert(method);
         }
         for &used in &ix.uses[method] {
             if !moved[used]
-                && can_promote(ix, &ids, used)
+                && can_promote(ix, ids, used)
                 && helper_kind(&ix.syms[used].kind_text)
                 && !is_public(&newtext[used])
                 && !visible_from(&ix.syms[used].module, target)

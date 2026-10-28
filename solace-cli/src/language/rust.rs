@@ -3,7 +3,7 @@
 //! are kept and the pieces join back to the file exactly. `syn` is also the
 //! syntax check, and the split lists the code outside the subset Solace holds.
 
-use crate::Failure;
+use crate::failure::Failure;
 use crate::language::Kind;
 use proc_macro2::Span;
 use std::collections::{HashMap, HashSet};

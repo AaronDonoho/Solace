@@ -35,6 +35,9 @@ Adding
   submit --new <parent>::<new>  a new module: `submit --new store::notes`;
                                 `integration::x` makes `tests/x.rs`
   *** Add: a::b::c              in a patch, creates the module
+                                An Add whose only item has the module's own
+                                name is refused: use the dotted form, e.g.
+                                `*** Add: m.f` instead of `*** Add: m::f`.
 
 Formatting
   format <module>               rustfmt the whole module, with the project's

@@ -21,6 +21,9 @@ pub(crate) struct Index {
     pub(crate) possible: Vec<Vec<(usize, usize)>>,
     /// Whether each symbol is test code (D-170).
     pub(crate) test: Vec<bool>,
+    /// The modules that hold tests (D-170): a `tests/` folder, or a Rust
+    /// module declared under `#[cfg(test)]`, and everything below it.
+    pub(crate) test_modules: std::collections::HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -73,7 +76,18 @@ pub(crate) fn build(lang: &'static dyn Language, syms: Vec<Sym>, modules: Vec<Mo
     // against the module's `use` lines and the crate's item names (D-170).
     if rust {
         let g = crate::language::rust_refs::graph(&syms, &modules);
-        return Index { lang, rust, syms, modules, uses: g.uses, used_by: g.used_by, at: g.at, possible: g.possible, test: g.test };
+        return Index {
+            lang,
+            rust,
+            syms,
+            modules,
+            uses: g.uses,
+            used_by: g.used_by,
+            at: g.at,
+            possible: g.possible,
+            test: g.test,
+            test_modules: g.test_modules,
+        };
     }
     // (module, name) -> symbol, for names and for type constructors
     let mut names: HashMap<(&str, &str), usize> = HashMap::new();
@@ -140,8 +154,9 @@ pub(crate) fn build(lang: &'static dyn Language, syms: Vec<Sym>, modules: Vec<Mo
         }
     }
     let test: Vec<bool> = syms.iter().map(|s| modules.iter().any(|m| m.path == s.module && crate::store::is_test(m))).collect();
+    let test_modules = modules.iter().filter(|m| crate::store::is_test(m)).map(|m| m.path.clone()).collect();
     let possible = vec![vec![]; syms.len()];
-    Index { lang, rust, syms, modules, uses, used_by, at, possible, test }
+    Index { lang, rust, syms, modules, uses, used_by, at, possible, test, test_modules }
 }
 
 pub(crate) fn signature(ix: &Index, s: &Sym) -> String {

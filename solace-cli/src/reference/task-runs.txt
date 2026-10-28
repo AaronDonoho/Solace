@@ -7,7 +7,7 @@ marked `allowed_in_reviews = true`.
                                 after a compaction
   task diff [name...]           what this task changed, against its state before;
                                 `impact` with no names is the same
-  task peek <task> [--notes [<notes>]] [--from <n>]
+  task peek <task> [--notes [3,7,10..12]] [--from <n>]
                                 title, column, feature, dependencies and body of
                                 a task this run may read, or one named in it;
                                 `task peek feature` gives its feature; --notes

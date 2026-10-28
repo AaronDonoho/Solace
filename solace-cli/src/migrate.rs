@@ -6,6 +6,9 @@ use super::*;
 use std::collections::BTreeMap;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
+use serde_json::Value;
+use serde_json::json;
+use std::io::Read;
 pub const COPY: &str = "solace-migration";
 const STATE: &str = ".solace/migration.json";
 const INVENTORY: &str = ".solace/migration-inventory.json";
@@ -412,7 +415,7 @@ fn run(dir: &Path, argv: &[&str], secs: u64, protect: Option<&Path>) -> (bool, S
         let f = fs::File::create(&log)?;
         let mut child = sandboxed(&argv, dir, protect).process_group(0).stdin(Stdio::null()).stdout(f.try_clone()?).stderr(f).spawn()?;
         let ok = lockdown::wait_or_kill(&mut child, std::time::Duration::from_secs(secs))?.is_some_and(|s| s.success());
-        let text = strip_ansi(&String::from_utf8_lossy(&fs::read(&log)?));
+        let text = diagnostics::strip_ansi(&String::from_utf8_lossy(&fs::read(&log)?));
         let cut = text.char_indices().rev().nth(20_000).map_or(0, |(i, _)| i);
         Ok((ok, text[cut..].to_string()))
     })();

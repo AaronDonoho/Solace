@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use super::{Rewrite, add_import_line, is_known_name, leaf, names_need_glob, staying_in};
-use crate::{Failure, Index};
+use crate::{ Index};
+use crate::failure::Failure;
 fn parent_module(module: &str) -> &str {
     module.rsplit_once("::").map_or("crate", |(parent, _)| parent)
 }
@@ -190,4 +191,78 @@ pub(crate) fn reach_map(ix: &Index, sources: &BTreeSet<String>) -> Result<HashMa
 
 pub(crate) fn reaches(reaching: &HashMap<String, HashSet<String>>, module: &str, other: &str) -> bool {
     reaching.get(module).map_or(other == module, |modules| modules.contains(other))
+}
+
+/// The modules whose names `from` can see through its `use super::*` chain,
+/// nearest first.
+fn chain<'a>(from: &'a str, has_glob: impl Fn(&str) -> bool + 'a) -> impl Iterator<Item = &'a str> + 'a {
+    let mut next = Some(from);
+    let mut child: Option<&'a str> = None;
+    std::iter::from_fn(move || {
+        let module = next?;
+        if let Some(child) = child
+            && !has_glob(child)
+        {
+            next = None;
+            return None;
+        }
+        let parent = parent_module(module);
+        next = (parent != module).then_some(parent);
+        child = Some(module);
+        Some(module)
+    })
+}
+
+/// Whether `module` has a `use super::*;` line in its header or its own uses.
+fn has_super_glob(ix: &Index, ids: &HashMap<&str, usize>, newheaders: &HashMap<String, String>, module: &str) -> bool {
+    if let Some(header) = newheaders.get(module)
+        && let Ok(sites) = crate::language::rust_refs::import_sites_in(header)
+        && sites.iter().any(is_super_glob)
+    {
+        return true;
+    }
+    super::module_imports(ix, ids, module).iter().any(is_super_glob)
+}
+
+pub(crate) fn is_super_glob(site: &crate::language::rust_refs::ImportSite) -> bool {
+    site.glob && site.path.len() == 1 && site.path[0] == "super"
+}
+
+/// The module `name` names through `from`'s `use super::*` chain, and the
+/// module that declares it.
+pub(crate) fn super_glob_module(
+    ix: &Index,
+    ids: &HashMap<&str, usize>,
+    newheaders: &HashMap<String, String>,
+    from: &str,
+    name: &str,
+) -> Option<(String, String)> {
+    chain(from, |module| has_super_glob(ix, ids, newheaders, module)).skip(1).find_map(|at| {
+        let candidate = if at == "crate" { name.to_string() } else { format!("{at}::{name}") };
+        ix.modules.iter().any(|row| row.path == candidate).then(|| (candidate, at.to_string()))
+    })
+}
+
+/// Whether `name`, declared in `at`, reaches `module` through `use super::*`.
+pub(crate) fn sees_through_super_glob(
+    ix: &Index,
+    ids: &HashMap<&str, usize>,
+    newheaders: &HashMap<String, String>,
+    module: &str,
+    at: &str,
+) -> bool {
+    chain(module, |module| has_super_glob(ix, ids, newheaders, module)).any(|module| module == at)
+}
+
+/// The import sites `from` sees from its ancestors through `use super::*`.
+pub(crate) fn super_glob_imports(
+    ix: &Index,
+    ids: &HashMap<&str, usize>,
+    newheaders: &HashMap<String, String>,
+    from: &str,
+) -> Vec<(String, crate::language::rust_refs::ImportSite)> {
+    chain(from, |module| has_super_glob(ix, ids, newheaders, module))
+        .skip(1)
+        .flat_map(|module| super::module_imports(ix, ids, module).into_iter().map(move |site| (module.to_string(), site)))
+        .collect()
 }

@@ -1,6 +1,6 @@
 //! JSON plumbing: the bytes a JSON file holds, and reading and writing it whole.
 
-use crate::Failure;
+use crate::failure::Failure;
 use crate::fsx;
 use serde_json::Value;
 use std::fs;

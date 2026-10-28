@@ -5,6 +5,8 @@
 //! rewrite. One transaction, gated on `check_all`.
 use super::*;
 
+#[cfg(test)]
+use serde_json::Value;
 const FORM: &str = "merge <survivor> <retired> [--to-project <folder>]";
 
 struct Args {

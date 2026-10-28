@@ -2,8 +2,16 @@
 //! replies, and the D-145/D-157 hints. It keeps the agent-facing layer apart
 //! from the CLI (main.rs holds the rest).
 use crate::{
-    REASON, SHOWN, agent_reference, batch, is_question, looks_like_code, panic_reply, read_hint, reset_after_panic, run_options, usage,
+    REASON, SHOWN, agent_reference,        
 };
+use crate::cli::run_options;
+use crate::cli::reset_after_panic;
+use crate::cli::read_hint;
+use crate::cli::panic_reply;
+use crate::cli::looks_like_code;
+use crate::cli::is_question;
+use crate::cli::batch;
+use crate::failure::usage;
 use crate::{board, reads};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -287,7 +295,7 @@ mod tests {
         let root = crate::testing::Scratch::new().with(&[("notes.md", "a|b\n")]);
         let msg = json!({"params": {"arguments": {"command": "grep \"a|b\" --in notes.md"}}});
         let (mut reads, mut run) = (0, None);
-        let out = crate::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        let out = crate::cli::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
         assert!(!out["content"][0]["text"].as_str().unwrap().contains("commands are not shell"), "{out}");
     }
 
@@ -326,7 +334,7 @@ mod tests {
         let root = crate::testing::Scratch::new();
         let msg = json!({"params": {"arguments": {"command": "inspect language::rust_refs.Refs<'a>::resolve"}}});
         let (mut reads, mut run) = (0, None);
-        let out = crate::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        let out = crate::cli::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
         assert!(!out["content"][0]["text"].as_str().unwrap().contains("commands are not shell"), "{out}");
     }
 
@@ -379,7 +387,7 @@ mod tests {
         let root = crate::testing::Scratch::new();
         let msg = json!({"params": {"arguments": {"command": "view crate.<Failure as From<std::io::Error>>::from"}}});
         let (mut reads, mut run) = (0, None);
-        let out = crate::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
+        let out = crate::cli::with_root(&root, || tool_call(&msg, 10_000, &mut reads, &mut run));
         let text = out["content"][0]["text"].as_str().unwrap();
         assert!(!text.contains("commands are not shell"), "{out}");
         assert!(!text.contains("Not a command"), "{out}");

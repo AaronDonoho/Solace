@@ -1,9 +1,9 @@
-//! `solace`: the Phase 1a semantic store and agent protocol over Gleam
-//! (specs/01-identity.md, 02-projection.md, 03-protocol.md).
+//! `solace`: the semantic store and agent protocol over Gleam and Rust
+//! projects (specs/01-identity.md, 02-projection.md, 03-protocol.md).
 //!
 //! The store (`.solace/store.db`) is the source of truth. After every change
-//! it writes the Gleam files back out so `gleam` can check, test and build
-//! them; agents never touch those files.
+//! it writes the project's files back out so the language's tools can check,
+//! test and build them; agents never touch those files.
 
 // Short-lived tuples inside one function read better spelled out than named.
 #![allow(clippy::type_complexity)]
@@ -28,14 +28,12 @@ mod tasks;
 mod view;
 mod workspace;
 
-use crate::cli::{bare_command, command_words, verb_words};
+use diagnostics::{Diag, FileMap};
 use language::{Import, Item, Kind, Language, Ref, cargo, gleam};
 use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::any::Any;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -53,11 +51,11 @@ mod project_paths;
 mod rust_move;
 mod rust_check;
 mod cli;
-/// The largest reply, in bytes (about 8k tokens). Agents cut longer tool
-/// output (Codex at about 10k tokens), so `inspect` and `view` trim by
-/// priority to fit rather than being cut mid-document (D-14). `solace mcp
-/// --budget <bytes>` sets it per agent.
-const BUDGET: usize = 32_000;
+mod diagnostics;
+mod failure;
+mod command_tx;
+use crate::cli::PROBE;
+pub(crate) use failure::{Failure, Out, fail, usage};
 const STDLIB: &[&str] = &[
     "bool",
     "bit_array",
@@ -79,479 +77,8 @@ const STDLIB: &[&str] = &[
     "uri",
 ];
 
-/// A command's failure: its message and exit code (1 diagnostics, 2 usage).
-#[derive(Debug)]
-pub(crate) struct Failure(String, i32);
-type Out = Result<String, Failure>;
-
-fn fail<T>(msg: impl Into<String>) -> Result<T, Failure> {
-    Err(Failure(msg.into(), 1))
-}
-fn usage<T>(msg: impl Into<String>) -> Result<T, Failure> {
-    Err(Failure(format!("{}\n\nRun `solace help` for usage.", msg.into()), 2))
-}
-impl From<rusqlite::Error> for Failure {
-    fn from(e: rusqlite::Error) -> Self {
-        Failure(format!("store error: {e}"), 1)
-    }
-}
-impl From<std::io::Error> for Failure {
-    fn from(e: std::io::Error) -> Self {
-        Failure(format!("io error: {e}"), 1)
-    }
-}
-
-/// Removes `flag` and its value from `args`; a flag without a value is a usage error.
-fn take(args: &mut Vec<String>, flag: &str) -> Result<Option<String>, Failure> {
-    let Some(i) = args.iter().position(|a| a == flag) else { return Ok(None) };
-    if i + 1 >= args.len() {
-        return usage(format!("{flag} needs a value"));
-    }
-    args.remove(i);
-    Ok(Some(args.remove(i)))
-}
-
 fn main() {
-    let mut args: Vec<String> = env::args().skip(1).collect();
-    let result = (|| {
-        let mut options = Vec::new();
-        while let Some(option) = take(&mut args, "--option")? {
-            options.push(option);
-        }
-        let old = take(&mut args, "--old")?;
-        if args.first().map(String::as_str) == Some("mcp") {
-            let budget = match &args[1..] {
-                [] => BUDGET,
-                [flag, n] if flag == "--budget" => {
-                    n.parse().map_err(|_| Failure(format!("--budget takes a number of bytes, got {n}"), 2))?
-                }
-                _ => return usage("mcp [--budget N]"),
-            };
-            mcp::mcp(budget);
-            return Ok(String::new());
-        }
-        run_options(&args, &mut stdin, old.as_deref(), BUDGET, &options)
-    })();
-    let code = match result {
-        Ok(out) => {
-            print!("{out}");
-            0
-        }
-        Err(Failure(msg, code)) => {
-            println!("{msg}");
-            code
-        }
-    };
-    std::process::exit(code);
-}
-
-/// `input` supplies the new code for submit commands; `old`, the text that
-/// `submit <name> --replace` replaces (MCP only); `budget`, the bytes left
-/// for this reply.
-fn run_options(args: &[String], input: &mut dyn FnMut() -> Out, old: Option<&str>, budget: usize, options: &[String]) -> Out {
-    if let Some(rid) = board::strategy_context() {
-        return strategy_run(&rid, args, input, budget);
-    }
-    let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    if a.first() == Some(&"serve") {
-        if board::context().is_some() {
-            return lockdown::error("E7010", "serve", "host command");
-        }
-        let port = match a.as_slice() {
-            ["serve"] => 3030,
-            ["serve", "--port", p] => p.parse().map_err(|_| Failure("invalid port".into(), 2))?,
-            _ => return usage("serve [--port N]"),
-        };
-        return board::serve(workspace::find(&env::current_dir()?)?, port);
-    }
-    if a.first() == Some(&"migrate") {
-        if board::context().is_some() {
-            return lockdown::error("E7010", "migrate", "host command");
-        }
-        return migrate::command(&a[1..]);
-    }
-    if a.first() == Some(&"strategy") {
-        return lockdown::error("E7001", "strategy", "strategy commands work only in a strategy run started from the Strategy page");
-    }
-    if a.first() == Some(&"task") && board::context().is_none() {
-        return lockdown::error("E7010", "task", "task commands work only in a run started from the task board; this session has no task");
-    }
-    if a.as_slice() == ["session", "remember"] {
-        let Some((tid, rid)) = board::context() else {
-            return lockdown::error("E7010", "session remember", "session remember works only in a run started from the task board");
-        };
-        let top = scope::top(&Store::root()?);
-        return board::remember(&top, &tid, &rid, budget);
-    }
-    let rest;
-    let (args, cross) = match a.iter().position(|x| *x == "--project") {
-        Some(i) => {
-            let dir =
-                a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder; session start lists them".into(), 2))?;
-            rest = [&args[..i], &args[i + 2..]].concat();
-            if rest.is_empty() {
-                return usage(PROJECT_ONLY.trim_end());
-            }
-            match scoped(dir, &rest)? {
-                Some(target) => (&rest[..], Some(target)),
-                None => return read_project(dir, &rest, budget),
-            }
-        }
-        None => (args, None),
-    };
-    let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    // `move` or `extract` with `--to-project <dir>`: the destination's project,
-    // which the task must cover too (D-84, D-103); outside a board run a command
-    // changes one project. A `merge`'s is the survivor's, which it only reads (D-117).
-    let dest = match a.iter().position(|x| *x == "--to-project") {
-        Some(i) if matches!(a.first(), Some(&"move" | &"extract" | &"merge")) => {
-            let dir =
-                a.get(i + 1).copied().ok_or_else(|| Failure("--to-project needs a project folder; session start lists them".into(), 2))?;
-            let Some(p) = scoped(dir, args)? else {
-                return lockdown::error(
-                    "E6007",
-                    dir,
-                    format!("`{} --to-project` works only in a board run whose task covers both projects", a[0]),
-                );
-            };
-            let here = match &cross {
-                Some(c) => c.clone(),
-                None => Store::root()?,
-            };
-            Some(fs::canonicalize(&p)?).filter(|p| fs::canonicalize(&here).ok().as_ref() != Some(p))
-        }
-        _ => None,
-    };
-    // The task's home, where the task is stored. Its agent works in the
-    // project its run started in (D-123), which may be another of its projects.
-    let home = match (Store::root().ok(), board::context()) {
-        (Some(here), Some((tid, _))) => Some(scope::home(&here, &tid).unwrap_or(here)),
-        (here, _) => here,
-    };
-    let _within = cross.as_deref().map(Within::enter).transpose()?;
-    let Ok(root) = Store::root() else {
-        board::flow(&env::current_dir()?)?;
-        return run_inner(args, input, old, budget);
-    };
-    let context = board::context();
-    let home = home.unwrap_or_else(|| root.clone());
-    // An extract into another project, and any merge, rewrites the task's
-    // projects that depend on the source (D-103, D-117): each is locked,
-    // recorded and committed as the destination is.
-    let deps: Vec<PathBuf> = match (&context, &dest) {
-        (Some((tid, _)), d) if (a[0] == "extract" && d.is_some()) || a[0] == "merge" => {
-            let top = scope::top(&root);
-            let projects = scope::of(&board::task(&home, tid)?, &scope::dir(&top, &home));
-            extract::dependents(&top, &root, &projects).into_iter().filter(|p| Some(p) != d.as_ref()).collect()
-        }
-        _ => vec![],
-    };
-    let guard = if let Some((tid, rid)) = &context {
-        // Away from home, the project the agent works in is locked too.
-        let away = (cross.is_none() && !crate::project_paths::same_project(&root, &home)).then(|| root.clone());
-        let also: Vec<&Path> = cross.iter().chain(&away).chain(&dest).chain(&deps).map(PathBuf::as_path).collect();
-        board::agent_guard(&home, tid, rid, if a.is_empty() { &["help"] } else { &a }, &also)?
-    } else {
-        vec![board::lock(&root)?]
-    };
-    let store = board::open(&root)?;
-    let home = board::open(&home)?;
-    let dest = dest.map(|d| board::open(&d)).transpose()?;
-    let deps = deps.iter().map(|d| board::open(d)).collect::<Result<Vec<_>, _>>()?;
-    // A `task` command holds no project lock (D-77 point 5), so it runs before
-    // recovery and absorbing: those need the lock, and a live command's records
-    // must not be taken for a crashed one's. Its changes are committed rows, so
-    // it reads them without either.
-    if let Some((tid, rid)) = &context {
-        if a.starts_with(&["task", "diff"]) {
-            return board::task_diff(&home, tid, &a[2..], budget);
-        }
-        // In a task run, `impact` with no names is the task's own change list (D-102).
-        if a == ["impact"] {
-            return board::task_diff(&home, tid, &[], budget);
-        }
-        if a.starts_with(&["task", "peek"]) {
-            return board::task_peek(&home, tid, &a[2..], budget);
-        }
-        if a.first() == Some(&"task") {
-            return board::task_command(&home, tid, rid, &a, input, options, guard);
-        }
-    }
-    // Every guard here holds the lock of `store`'s project.
-    // An extract stopped between its projects' commits is undone first, under
-    // every lock of its projects (D-135).
-    let mut held = vec![store.root.clone(), home.root.clone()];
-    held.extend(dest.iter().chain(&deps).map(|d| d.root.clone()));
-    extract::ahead::recover(&held)?;
-    lockdown::recover(&store.root, &store, &guard)?;
-    if let Some(d) = &dest {
-        lockdown::recover(&d.root, d, &guard)?;
-    }
-    for d in &deps {
-        lockdown::recover(&d.root, d, &guard)?;
-    }
-    board::flow(&store.root)?;
-    let noticed = outside::absorb(&store, outside::Mode::Notice)?;
-    // A run's settings write is a proposal the human approves (D-38); a Rust
-    // project's Cargo.toml is one only when it touches a protected key (D-158
-    // point 4). Its text is read here, once, and replayed to the command.
-    let mut settings_write: Option<String> = None;
-    if let Some((tid, rid)) = &context {
-        if a.first() == Some(&"write")
-            && let Some(file) =
-                a.get(1).map(|p| file_name(Path::new(p))).filter(|p| lockdown::settings_file(&store.root, p) || *p == "Cargo.toml")
-        {
-            let current = fs::read(store.root.join(&file)).unwrap_or_default();
-            let proposed = lockdown::edited(&current, &input()?, a.contains(&"--replace"), a.contains(&"--all"), old)?;
-            if lockdown::settings_file(&store.root, &file) || lockdown::cargo_settings_changed(&current, &proposed) {
-                let reason = REASON.with(|r| r.borrow().clone());
-                return board::propose_settings(&home, &store.root, tid, rid, &file, &current, &proposed, reason.as_deref(), guard);
-            }
-            settings_write = Some(proposed);
-        }
-    }
-    // A file patch (`write` with no path, D-104) names its files in `text`: it
-    // is read once, for the snapshots and for the command.
-    let patch = if a == ["write"] && context.is_some() { Some(input()?) } else { None };
-    // A kept file patch (D-120) names its files in its draft, which a
-    // `--replace` edits first; that `text` too is read once.
-    let fix = if a.starts_with(&["write", "--draft"]) && a.contains(&"--replace") && context.is_some() { Some(input()?) } else { None };
-    // The draft before and after the replacement, each parsed alone: the
-    // replacement may name another file, or fix a line that didn't parse.
-    let files: Vec<String> = match (a.as_slice(), &patch) {
-        (_, Some(p)) => vec![p.clone()],
-        (["write", "--draft", id, ..], _) if context.is_some() => match drafts::view(&store, id) {
-            Ok(d) => {
-                let fixed = fix.as_ref().and_then(|new| drafts::replace(&d, old, new, a.contains(&"--all")).ok()).map(|r| r.0);
-                std::iter::once(d).chain(fixed).collect()
-            }
-            Err(_) => vec![],
-        },
-        _ => vec![],
-    };
-    let mut replay = || -> Out { Ok(patch.clone().or_else(|| fix.clone()).or_else(|| settings_write.clone()).unwrap_or_default()) };
-    let input: &mut dyn FnMut() -> Out = if patch.is_some() || fix.is_some() || settings_write.is_some() { &mut replay } else { input };
-    let before = if a.first().is_some_and(|c| CHANGES.contains(c)) && !reads_only(&a) && context.is_some() {
-        let mut v = board::snapshot(&store)?;
-        v.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
-        for f in &files {
-            v.as_object_mut().unwrap().extend(lockdown::patch_snapshot(&store.root, Some(f)));
-        }
-        if a[0] == "extract" && a.contains(&"--to-project") {
-            v.as_object_mut().unwrap().extend(dependency_files(&store.root));
-            v.as_object_mut().unwrap().extend(script_files(&store.root));
-        }
-        Some(v)
-    } else {
-        None
-    };
-    // A move or extract into another project changes it too, recorded in its
-    // store: a move's files there, or an extract's symbols, in a transaction of
-    // its own around the command and its undo rows (D-103).
-    let dest_before = match (&dest, &before) {
-        // a merge's survivor doesn't change
-        (Some(_), Some(_)) if a[0] == "merge" => None,
-        (Some(d), Some(_)) if a[0] == "extract" => Some((d, None, with_scripts(d)?)),
-        (Some(d), Some(_)) => {
-            let (_, to, _) = lockdown::move_args(&store.root, &a)?;
-            Some((d, Some(to), Value::Object(board::files_under(&d.root, to))))
-        }
-        _ => None,
-    };
-    let with_toml = |d: &Store| -> Result<Value, Failure> {
-        let mut v = board::snapshot(d)?;
-        v.as_object_mut().unwrap().extend(dependency_files(&d.root));
-        Ok(v)
-    };
-    let deps_before: Vec<(&Store, Value)> =
-        if dest_before.as_ref().is_some_and(|(_, to, _)| to.is_none()) || (a[0] == "merge" && before.is_some()) {
-            deps.iter().map(|d| Ok((d, with_toml(d)?))).collect::<Result<_, Failure>>()?
-        } else {
-            vec![]
-        };
-    // The folders each project had, so undo removes only those the task made (D-136).
-    let folders = before.as_ref().map(|_| board::existing_folders(&store.root));
-    let d_folders = dest_before.as_ref().map(|(d, ..)| board::existing_folders(&d.root));
-    let deps_folders: Vec<_> = deps_before.iter().map(|(d, _)| board::existing_folders(&d.root)).collect();
-    // A code change and its undo rows commit together (D-77 point 7): one outer
-    // transaction around the command and `record`. A process runs outside it, so
-    // a long `run` holds the store's write lock only for the rows; the ahead
-    // record in `.solace/pending/` covers a crash while the process runs.
-    // Rust `format` saves through the store, so it belongs inside the outer
-    // transaction; only a process that changes files behind the store stays out.
-    let processes = is_process(&a, &store.root);
-    COMMAND_DB.set(vec![(store.root.clone(), store.db.clone())]);
-    let _outer = OuterTransaction(store.db.clone());
-    let dest_tx = dest_before.as_ref().filter(|(_, to, _)| to.is_none()).map(|(d, ..)| *d);
-    if let Some(d) = dest_tx {
-        COMMAND_DB.with_borrow_mut(|c| c.push((d.root.clone(), d.db.clone())));
-    }
-    let _dest_outer = dest_tx.map(|d| OuterTransaction(d.db.clone()));
-    for (d, _) in &deps_before {
-        COMMAND_DB.with_borrow_mut(|c| c.push((d.root.clone(), d.db.clone())));
-    }
-    let _deps_outer: Vec<OuterTransaction> = deps_before.iter().map(|(d, _)| OuterTransaction(d.db.clone())).collect();
-    if let (Some(_), Some((tid, rid))) = (&before, &context) {
-        lockdown::mark(&store.root, tid, rid)?;
-        if let Some((d, ..)) = &dest_before {
-            lockdown::mark(&d.root, tid, rid)?;
-        }
-        for (d, _) in &deps_before {
-            lockdown::mark(&d.root, tid, rid)?;
-        }
-    }
-    // An extract into another project is written ahead: its record is in each of
-    // its projects before any file changes (`extract::ahead`).
-    let mut ahead = match (&context, dest_tx) {
-        (Some((tid, rid)), Some(d)) if a[0] == "extract" && before.is_some() => {
-            let mut roots: Vec<&Path> = vec![&store.root, &d.root];
-            roots.extend(deps_before.iter().map(|(d, _)| d.root.as_path()));
-            Some(extract::ahead::begin(tid, rid, &roots)?)
-        }
-        _ => None,
-    };
-    if before.is_some() && !processes {
-        store.db.execute_batch("BEGIN IMMEDIATE")?;
-        if let Some(d) = dest_tx {
-            d.db.execute_batch("BEGIN IMMEDIATE")?;
-        }
-        for (d, _) in &deps_before {
-            d.db.execute_batch("BEGIN IMMEDIATE")?;
-        }
-    }
-    // A settings write's text already applied `old`; replay it whole (D-158 point 4).
-    let whole = settings_write.is_some();
-    let replay: Vec<String> = args.iter().filter(|x| !whole || (*x != "--replace" && *x != "--all")).cloned().collect();
-    let result = run_inner(&replay, input, if whole { None } else { old }, budget);
-    if before.is_some() {
-        crash_after("command");
-    }
-    if let Some((tid, _)) = &context
-        && a.first().is_some_and(|c| VERIFIES.contains(c))
-        && !reads_only(&a)
-    {
-        board::record_verification(&home, tid, a[0], &result)?;
-    }
-    if before.is_some() && processes {
-        store.db.execute_batch("BEGIN IMMEDIATE")?;
-    }
-    // A process the command ran (`format`, a declared command) may have changed source: that's this command's change.
-    let unread = if processes { outside::absorb(&store, outside::Mode::Command)? } else { String::new() };
-    if let (Some(before), Some((tid, rid))) = (before, &context) {
-        let mut after = board::snapshot(&store)?;
-        after.as_object_mut().unwrap().extend(board::file_snapshot(&store.root, &a)?.as_object().unwrap().clone());
-        for f in &files {
-            after.as_object_mut().unwrap().extend(lockdown::patch_snapshot(&store.root, Some(f)));
-        }
-        if a[0] == "extract" && a.contains(&"--to-project") {
-            after.as_object_mut().unwrap().extend(dependency_files(&store.root));
-            after.as_object_mut().unwrap().extend(script_files(&store.root));
-        }
-        if let (Some(record), Some(d)) = (&mut ahead, dest_tx) {
-            // The computed result joins the record before the first commit; then the
-            // destination commits, then the source and the dependents, each with its
-            // undo rows; then the gleam.toml lines, and the record goes.
-            let d_before = &dest_before.as_ref().unwrap().2;
-            let d_after = with_scripts(d)?;
-            let deps_after: Vec<Value> = deps_before.iter().map(|(d, _)| with_toml(d)).collect::<Result<_, _>>()?;
-            let mut stores: Vec<(&Store, &Value, &Value)> = vec![(&store, &before, &after), (d, d_before, &d_after)];
-            stores.extend(deps_before.iter().zip(&deps_after).map(|((d, b), a)| (*d, b, a)));
-            extract::ahead::complete(record, &stores)?;
-            crash_after("complete");
-            board::record(d, tid, rid, d_before, &d_after, d_folders.as_ref())?;
-            d.db.execute_batch("COMMIT")?;
-            crash_after("destination");
-            board::record(&store, tid, rid, &before, &after, folders.as_ref())?;
-            store.db.execute_batch("COMMIT")?;
-            crash_after("source");
-            for (((d, d_before), d_after), f) in deps_before.iter().zip(&deps_after).zip(&deps_folders) {
-                board::record(d, tid, rid, d_before, d_after, Some(f))?;
-                d.db.execute_batch("COMMIT")?;
-            }
-            extract::ahead::end(record)?;
-            crash_after("commit");
-        } else {
-            // A merge's dependents commit before the source.
-            for ((d, d_before), f) in deps_before.iter().zip(&deps_folders) {
-                board::record(d, tid, rid, d_before, &with_toml(d)?, Some(f))?;
-                d.db.execute_batch("COMMIT")?;
-                lockdown::drop_records(&d.root, rid)?;
-            }
-            if !deps_before.is_empty() {
-                crash_after("others");
-            }
-            board::record(&store, &tid, &rid, &before, &after, folders.as_ref())?;
-            store.db.execute_batch("COMMIT")?;
-            crash_after("commit");
-            // The task lists its changes from the rows that committed (D-77 point 4),
-            // computed by changes_of, so there is nothing to write here.
-            lockdown::drop_records(&store.root, &rid)?;
-        }
-        if let Some((d, Some(to), files)) = dest_before {
-            d.db.execute_batch("BEGIN IMMEDIATE")?;
-            board::record(d, tid, rid, &files, &Value::Object(board::files_under(&d.root, to)), d_folders.as_ref())?;
-            d.db.execute_batch("COMMIT")?;
-            lockdown::drop_records(&d.root, rid)?;
-        }
-    }
-    match hinted(result, &store.root) {
-        Ok(out) => Ok(format!("{noticed}{out}{unread}")),
-        Err(Failure(msg, code)) => Err(Failure(format!("{noticed}{msg}{unread}"), code)),
-    }
-}
-
-/// A command in strategy run `rid` (D-93): `strategy list | show | note`, and
-/// plain reads of any project under the root, taking no project lock. Any
-/// other command is refused (`E7010`): host commands, `task` commands and those
-/// that change a project.
-fn strategy_run(rid: &str, args: &[String], input: &mut dyn FnMut() -> Out, budget: usize) -> Out {
-    let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let command = a.first().copied().unwrap_or("");
-    if command != "strategy" && !READS.contains(&command) {
-        let why = match command {
-            "task" => "a strategy run replies with `strategy note`; task commands are refused",
-            c if HOST.contains(&c) => "host command is unavailable in a run",
-            _ => {
-                "a strategy run changes no code and only reads: strategy list | show | note, and view, inspect, \
-                 refs, find, grep, files and read (with --project <folder> for another project)"
-            }
-        };
-        return lockdown::error("E7010", command, why);
-    }
-    let top = workspace::enclosing(&env::current_dir()?)?.ok_or_else(|| Failure("No Solace root here.".into(), 1))?;
-    board::strategy_guard(&top, rid, &a)?;
-    if command == "strategy" {
-        return board::strategy_command(&top, rid, &a, input, budget);
-    }
-    // A read, in the root's project or with `--project` in another.
-    match a.iter().position(|x| *x == "--project") {
-        Some(i) => {
-            let dir = a.get(i + 1).copied().ok_or_else(|| Failure("--project needs a project folder".into(), 2))?;
-            read_project(dir, &[&args[..i], &args[i + 2..]].concat(), budget)
-        }
-        None => read_project(".", args, budget),
-    }
-}
-
-/// An extract into another project may add a dependency to gleam.toml, which
-/// the build then locks in manifest.toml (D-103): the record of the source and
-/// of each dependent covers both, so undo puts both back.
-fn dependency_files(root: &Path) -> serde_json::Map<String, Value> {
-    ["gleam.toml", "manifest.toml"].iter().map(|n| (format!("file:{n}"), json!(fs::read(root.join(n)).ok()))).collect()
-}
-
-/// An extract into another project takes along the JavaScript files its code
-/// uses (D-103): the records of both sides cover every `.mjs` under src/ and
-/// test/, so undo puts a carried file back and takes away its copy.
-fn script_files(root: &Path) -> serde_json::Map<String, Value> {
-    extract::js_files(root).into_iter().map(|n| (format!("file:{n}"), json!(fs::read(root.join(&n)).ok()))).collect()
-}
-
-/// A store's snapshot with its JavaScript files.
-fn with_scripts(d: &Store) -> Result<Value, Failure> {
-    let mut v = board::snapshot(d)?;
-    v.as_object_mut().unwrap().extend(script_files(&d.root));
-    Ok(v)
+    cli::main()
 }
 
 /// Ends a command's outer transaction on every path out of `run_options`: one
@@ -567,485 +94,6 @@ impl Drop for OuterTransaction {
     }
 }
 
-/// A test-only hook: `SOLACE_FAIL_AFTER=<point>` exits after the named point,
-/// and `panic:<point>` panics there instead, so a caught panic is tested too
-/// (`command` | `complete` | `destination` | `others` | `commit`;
-/// `complete` is after an extract's record gains its result, before any commit;
-/// `destination` after its destination commits, before the source does;
-/// `source` after the source commits, before the dependents do;
-/// `others` after a merge's dependents commit, before the source does).
-/// Only in a board run, so a plain CLI call is never interrupted.
-fn crash_after(point: &str) {
-    if board::context().is_none() {
-        return;
-    }
-    let Ok(asked) = env::var("SOLACE_FAIL_AFTER") else { return };
-    if asked == point {
-        std::process::exit(1);
-    }
-    if asked.strip_prefix("panic:") == Some(point) {
-        panic!("SOLACE_FAIL_AFTER=panic:{point}");
-    }
-}
-
-// Commands by what they do. Every check that depends on the command uses these.
-/// Plain reads; with `--project`, they read another project.
-const READS: &[&str] = &["view", "inspect", "refs", "find", "grep", "files", "read"];
-/// May change the project: recorded on the task in a board run, and refused in
-/// read-only runs, except `build`, which reviews run to verify.
-const CHANGES: &[&str] = &["submit", "delete", "extract", "merge", "write", "remove", "move", "run", "format", "build"];
-/// Run a process that may change source; what it changed is read in after.
-const PROCESSES: &[&str] = &["format", "build", "run"];
-/// Results recorded as the task's verification.
-const VERIFIES: &[&str] = &["check", "test", "build"];
-/// Only for the human, never in a board run.
-const HOST: &[&str] = &["agent-config", "serve", "create", "migrate"];
-/// Need symbol-held source (Gleam or Rust): refused in a project of plain files.
-const GLEAM: &[&str] =
-    &["submit", "drafts", "view", "inspect", "refs", "impact", "find", "delete", "extract", "merge", "check", "test", "probe"];
-/// D-119: changes whose failure stops the call, so nothing after them runs on unsaved work.
-const STOPS: &[&str] = &["submit", "delete", "extract", "merge", "write", "remove", "move"];
-/// D-152: what a reply ends with when it held back a `task done`.
-const HELD: &str = "`task done` waits for a test that passes and reaches every change: fix what the test reports, \
-then send `task done` again with an updated summary.\n";
-/// task:da797576d0cfaaac: a line left with no command once `--project <dir>` is
-/// taken off is refused as that line's error; the rest of the call runs.
-const PROJECT_ONLY: &str = "`--project` goes at the end of each command line it applies to, e.g. `view x.y --project <dir>`\n";
-/// D-131: `build plan` only reads, so it is no change, process or verification.
-fn reads_only(a: &[&str]) -> bool {
-    a.starts_with(&["build", "plan"])
-}
-
-/// Several commands, one per line, run in order; they share `budget`, since the
-/// agent cuts the reply as a whole. D-119: after a failed change the rest are
-/// skipped. D-152: after a test that failed or left a change no test reaches,
-/// a `task done` is skipped. A repeated failed command names its copy. The
-/// reply, and whether a command failed.
-fn batch(commands: &[&str], budget: usize, run: &mut dyn FnMut(&[String], usize) -> Out) -> (String, bool) {
-    let (mut out, mut failed, mut skipped, mut stopped) = (String::new(), vec![], vec![], false);
-    let (mut waiting, mut held) = (None::<String>, false);
-    for (at, &command) in commands.iter().enumerate() {
-        let command = bare_command(command);
-        if stopped {
-            skipped.push(command.to_string());
-            continue;
-        }
-        let words = command_words(command);
-        let verb = verb_words(&words);
-        if let Some(why) = &waiting
-            && verb.starts_with(&["task", "done"])
-        {
-            skipped.push(format!("{command} ({why})"));
-            held = true;
-            continue;
-        }
-        if commands.len() > 1 {
-            out += &format!("==== solace {command} ====\n");
-        }
-        if words.first().is_some_and(|w| w == "help") {
-            out += &agent_help(words.get(1).map(|w| w.as_str()));
-            continue;
-        }
-        // `--project` names where its command runs, not a command of its own.
-        if verb.is_empty() && words.iter().any(|w| w == "--project") {
-            out += PROJECT_ONLY;
-            failed.push(failed_copy(command, commands, at));
-            continue;
-        }
-        let test = verb.first() == Some(&"test");
-        if test {
-            UNTESTED.with(|u| u.borrow_mut().take());
-        }
-        let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(&words, budget.saturating_sub(out.len())))) {
-            Ok(result) => result,
-            Err(p) => {
-                // A panic is this line's error, not the tool's: the lines after
-                // it are skipped, and the next call starts clean.
-                reset_after_panic();
-                out += &panic_reply(&*p, Some(command));
-                failed.push(failed_copy(command, commands, at));
-                stopped = true;
-                continue;
-            }
-        };
-        if test && waiting.is_none() {
-            waiting = match &result {
-                Err(_) => Some("the test failed".into()),
-                Ok(_) => UNTESTED.with(|u| u.borrow_mut().take()).map(|names| format!("no test reaches {names}")),
-            };
-        }
-        match result {
-            Ok(o) => out += &o,
-            Err(Failure(msg, _)) => {
-                out += &msg;
-                failed.push(failed_copy(command, commands, at));
-                stopped = words.first().is_some_and(|w| STOPS.contains(&w.as_str()));
-            }
-        }
-        if commands.len() > 1 && !out.ends_with('\n') {
-            out.push('\n');
-        }
-    }
-    // D-109, D-119: a batch names the commands that failed and those it skipped, for the agent and the run log.
-    if commands.len() > 1 && !failed.is_empty() {
-        out += &format!("{} of {} commands failed: {}", failed.len(), commands.len(), failed.join("; "));
-        if !skipped.is_empty() {
-            out += &format!("; skipped: {}", skipped.join("; "));
-        }
-        out.push('\n');
-    } else if !skipped.is_empty() {
-        out += &format!("Skipped: {}\n", skipped.join("; "));
-    }
-    if held {
-        out += HELD;
-    }
-    UNTESTED.with(|u| u.borrow_mut().take());
-    (out, !failed.is_empty())
-}
-
-/// What a panic replies to the agent, whatever its payload carries: the message
-/// (`&str` or `String`), and the line it happened in, if it was inside one.
-fn panic_reply(p: &(dyn Any + Send), line: Option<&str>) -> String {
-    let message = if let Some(s) = p.downcast_ref::<&str>() {
-        (*s).to_string()
-    } else if let Some(s) = p.downcast_ref::<String>() {
-        s.clone()
-    } else {
-        "unknown panic".to_string()
-    };
-    let at = line.map_or(String::new(), |l| format!(" running `{l}`"));
-    format!("Solace hit an internal error{at}: {message}; nothing after it ran\n")
-}
-
-/// Drops what a caught panic left with this thread — the untested changes a
-/// `test` named, and any outer transaction it held open — so the next call
-/// starts clean. A transaction's own drop guard rolls back as the panic
-/// unwinds; this covers a panic in a place without one.
-fn reset_after_panic() {
-    UNTESTED.with(|u| u.borrow_mut().take());
-    let _ = COMMAND_DB.try_with(|c| {
-        let Ok(mut dbs) = c.try_borrow_mut() else { return };
-        for (_, db) in std::mem::take(&mut *dbs) {
-            if !db.is_autocommit() {
-                let _ = db.execute_batch("ROLLBACK");
-            }
-        }
-    });
-}
-
-/// The reference's example of a first call, for a session start with no
-/// ranked symbols (D-145).
-const EXAMPLE_CALL: &str = "for example `inspect checkout.pay payments.capture --context`";
-/// D-151: the most bytes of open work records a session start shows.
-const WORK_CAP: usize = 4000;
-/// D-145: what a reply ends with from the second single read in a row.
-const READ_HINT: &str = "Hint: put independent reads in one call, one per line.\n";
-
-/// D-145: the hint a call's reply ends with, from the second call in a row
-/// that held one read and succeeded; `streak` counts those calls, and any
-/// other call starts it again.
-fn read_hint(streak: &mut usize, commands: &[&str], failed: bool) -> &'static str {
-    let read = match commands {
-        [command] if !failed => {
-            let mut words: Vec<&str> = command.split_whitespace().collect();
-            if words.first() == Some(&"solace") {
-                words.remove(0);
-            }
-            if let Some(i) = words.iter().position(|w| *w == "--project") {
-                words.drain(i..(i + 2).min(words.len()));
-            }
-            words.first().is_some_and(|w| READS.contains(w))
-        }
-        _ => false,
-    };
-    *streak = if read { *streak + 1 } else { 0 };
-    if *streak >= 2 { READ_HINT } else { "" }
-}
-
-/// Options the reference gives each command: `--x` words in its syntax lines.
-fn options_of(command: &str) -> Vec<&'static str> {
-    let mut out = vec![];
-    for line in REFERENCE.lines() {
-        let Some(syntax) = line.strip_prefix("  ").filter(|l| !l.starts_with(' ')) else { continue };
-        let syntax = syntax.split("  ").next().unwrap_or("");
-        let mut words = syntax.split_whitespace();
-        let mut names = vec![words.next().unwrap_or("")];
-        let mut rest = vec![];
-        while let Some(w) = words.next() {
-            if w == "|" && rest.is_empty() {
-                names.extend(words.next());
-            } else {
-                rest.push(w);
-            }
-        }
-        if !names.contains(&command) {
-            continue;
-        }
-        for w in rest {
-            let o = w.trim_start_matches(['[', '(', '`']).trim_end_matches([']', ')', '`', ',', '.']);
-            let o = o.split(['=', ']']).next().unwrap_or("");
-            if o.len() > 2 && o.starts_with("--") && !out.contains(&o) {
-                out.push(o);
-            }
-        }
-    }
-    out
-}
-
-/// A read command given an option it doesn't take is refused by name, rather
-/// than its value read as a name or path. `grep` and `find` search their text
-/// as written, so they are not checked.
-fn unknown_option(a: &[&str]) -> Option<Out> {
-    let command = *a.first()?;
-    if !matches!(command, "view" | "inspect" | "refs" | "files" | "read") {
-        return None;
-    }
-    let own = options_of(command);
-    let bad = a[1..].iter().find(|x| x.starts_with("--") && !own.contains(x))?;
-    let takers: Vec<&str> = READS.iter().copied().filter(|c| *c != command && options_of(c).contains(bad)).collect();
-    let elsewhere = if takers.is_empty() {
-        String::new()
-    } else if *bad == "--context" && takers.contains(&"inspect") {
-        "; `--context` belongs to `inspect`: `inspect <name> --context`".to_string()
-    } else if takers.len() == 1 {
-        format!("; {} takes {bad}", takers[0])
-    } else {
-        format!("; {bad} belongs to {}", takers.join(" and "))
-    };
-    let list = if own.is_empty() { format!("{command} takes no options") } else { format!("{command} takes: {}", own.join(", ")) };
-    Some(usage(format!("{command} has no {bad}{elsewhere}. {list} (`help {command}`)")))
-}
-
-/// `--project <dir>` on a command that isn't a plain read, in a board run whose
-/// task may change that project (D-61): the folder the command runs in. Plain
-/// reads, and commands outside a run, go to `read_project`.
-fn scoped(dir: &str, args: &[String]) -> Result<Option<PathBuf>, Failure> {
-    let command = args.first().map(String::as_str).unwrap_or("");
-    let (Some((tid, _)), Ok(here)) = (board::context(), Store::root()) else { return Ok(None) };
-    if READS.contains(&command) && !args.iter().any(|x| x == "--draft") {
-        return Ok(None);
-    }
-    let own = scope::home(&here, &tid)?;
-    let top = scope::top(&own);
-    let dir = &crate::project_paths::project_folder(&top, Some(&here), dir, &workspace::members(&top)?);
-    let projects = scope::of(&board::task(&own, &tid)?, &scope::dir(&top, &own));
-    if !projects.iter().any(|p| p == dir) {
-        return lockdown::error(
-            "E6007",
-            dir,
-            format!(
-                "not one of this task's projects ({}); if the task needs it, ask the human to add it with `task ask`",
-                projects.join(", ")
-            ),
-        );
-    }
-    if command == "task" {
-        return lockdown::error("E6007", command, "task commands belong to the task's own project; leave out --project");
-    }
-    Ok(Some(scope::path(&top, dir)))
-}
-
-/// Runs a command in another folder, and comes back after.
-// the working folder is process-wide; fine while a process serves one call at a time (CLI, MCP).
-struct Within(PathBuf);
-impl Within {
-    fn enter(dir: &Path) -> Result<Within, Failure> {
-        let back = env::current_dir()?;
-        env::set_current_dir(dir)?;
-        Ok(Within(back))
-    }
-}
-impl Drop for Within {
-    fn drop(&mut self) {
-        let _ = env::set_current_dir(&self.0);
-    }
-}
-
-/// `--project <dir>`: a read in another project under the same Solace root
-/// (D-57). It takes no lock in that project, so reading never waits on its
-/// agents. Changes go through `scoped` (D-61).
-fn read_project(dir: &str, args: &[String], budget: usize) -> Out {
-    let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let command = a.first().copied().unwrap_or("");
-    if let Some(out) = unknown_option(&a) {
-        return out;
-    }
-    if !READS.contains(&command) || a.contains(&"--draft") {
-        return lockdown::error(
-            "E6007",
-            command,
-            if board::strategy_context().is_some() {
-                "`--project` only reads (view, inspect, refs, find, grep, files, read)"
-            } else {
-                "`--project` only reads (view, inspect, refs, find, grep, files, read) here; in a board run, \
-                 it also changes the task's other projects"
-            },
-        );
-    }
-    // From a project, or from a folder of projects with none at its root.
-    let here = env::current_dir()?;
-    let own = Store::root().ok();
-    read_project_in(&a, &here, own.as_deref(), dir, budget)
-}
-
-/// Each `E1001 unknown name` line of a reply, followed by the project that
-/// has the name when another one does (D-123).
-fn hinted(out: Out, here: &Path) -> Out {
-    const MARK: &str = "E1001 unknown name: ";
-    let add = |text: String| -> String {
-        if !text.contains(MARK) {
-            return text;
-        }
-        let lines: Vec<String> = text
-            .split('\n')
-            .map(|line| {
-                match line.split_once(MARK).and_then(|(_, rest)| rest.split_whitespace().next()).and_then(|name| elsewhere(here, name)) {
-                    Some(d) => format!("{line}\nfound in {d}: add --project {d}"),
-                    None => line.to_string(),
-                }
-            })
-            .collect();
-        lines.join("\n")
-    };
-    match out {
-        Ok(text) => Ok(add(text)),
-        Err(Failure(msg, code)) => Err(Failure(add(msg), code)),
-    }
-}
-
-fn elsewhere(here: &Path, name: &str) -> Option<String> {
-    let (top, dirs) = other_projects(here)?;
-    dirs.into_iter().find(|d| {
-        let Some(s) = Store::peek(&scope::path(&top, d)).ok() else { return false };
-        let Ok(ix) = s.index() else { return false };
-        s.resolve(&ix, name).is_ok()
-    })
-}
-
-fn run_inner(args: &[String], input: &mut dyn FnMut() -> Result<String, Failure>, old: Option<&str>, budget: usize) -> Out {
-    let a: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    if matches!(a.as_slice(), [] | ["help"] | ["--help"]) {
-        return Ok(REFERENCE.to_string());
-    }
-    if let Some(out) = unknown_option(&a) {
-        return out;
-    }
-    if let ["agent-config", agent, dir] = a.as_slice() {
-        return lockdown::agent_config(
-            agent,
-            Path::new(dir),
-            &env::current_exe()?,
-            board::system()?["task_timeout"].as_u64().unwrap_or(3600),
-        );
-    }
-    if a[0] == "create" {
-        return workspace::create(&env::current_dir()?, &a[1..]);
-    }
-
-    // run_options has put back any interrupted file write (lockdown::recover).
-    let store = Store::open()?;
-    let settings = lockdown::settings(&store.root)?;
-    let task = board::context().map(|(tid, _)| tid);
-    if CARGO_TOOLS.contains(&a[0])
-        && let Some(id) = language::id(&store.root)
-        && let Some(why) = language::reason(id)?
-    {
-        return lockdown::error("E6013", a[0], why);
-    }
-    if let Some(out) = lockdown::dispatch(&store, &settings, &a, input, old, budget) {
-        return out;
-    }
-    // drafts include kept file patches (D-120), so a plain-files project lists, reads and drops them
-    if GLEAM.contains(&a[0]) && a[0] != "drafts" && !matches!(a.as_slice(), ["view", "--draft", _]) && store.lang.is_none() {
-        if !language::is_rust(&store.root) {
-            return lockdown::plain(&store, task.as_deref(), a[0], a.get(1).copied());
-        }
-        // A Rust project's tools are cargo's (D-158, D-168, D-173, D-185, D-207):
-        // `check` and `test` run, `submit` saves items by name and `delete`
-        // removes them, `extract` moves items and `merge` folds duplicates, each
-        // checked with cargo; `drafts` is language-neutral.
-        match a[0] {
-            tool if CARGO_TOOLS.contains(&tool) && cargo::installed() => {}
-            tool if CARGO_TOOLS.contains(&tool) => {
-                return lockdown::error("E6013", a[0], cargo::MISSING);
-            }
-            // Reads reach a Rust store's symbols by name, as they do Gleam's
-            // (D-158); `refs` and `impact` answer from its reference graph (D-170).
-            "view" | "inspect" | "find" | "refs" | "impact" => {}
-            _ => return lockdown::plain(&store, task.as_deref(), a[0], a.get(1).copied()),
-        }
-    }
-    match a.as_slice() {
-        ["session", "start", "--task"] => store.session_task(&input()?),
-        ["session", "start", "--task", task @ ..] => store.session_task(&task.join(" ")),
-        ["submit", ..] => drafts::submit(&store, &a, input, old),
-        ["drafts", "drop", id] => drafts::drop_one(&store, id),
-        ["drafts"] => drafts::list(&store),
-        ["view", "--draft", id] => drafts::view(&store, id),
-        ["session", rest @ ..] => store.session(&operands(rest.strip_prefix(&["start"]).unwrap_or(rest))),
-        ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
-        ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
-        ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
-        ["impact", names @ ..] => store.impact(names, budget),
-        ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
-        ["delete", names @ ..] if !names.is_empty() => store.delete_all(names, budget),
-        ["extract", rest @ ..] => store.extract(rest, budget),
-        ["merge", rest @ ..] => store.merge(rest, budget),
-        ["check"] => command_report(store.check(), budget),
-        ["check", "--warnings"] => command_report(store.check_report(true), budget),
-        ["test", rest @ ..] => command_report(store.test(rest), budget),
-        ["probe", rest @ ..] => {
-            let (from, trace, in_) = probe_args(rest)?;
-            // with --from the test's body is the probe; `text` only adds to it
-            let text = if from.is_some() { input().unwrap_or_default() } else { input()? };
-            command_report(store.probe(&text, from, &trace, in_), budget)
-        }
-        ["work", "add"] => store.work_add(&input()?),
-        ["work", "add", text @ ..] => store.work_add(&text.join(" ")),
-        ["work", "list"] | ["work"] => store.work_list(),
-        ["work", "done", id] => store.work_done(id),
-        _ => usage(format!(
-            "Unknown command: {}\nCommands: session, inspect, view, refs, impact, find, submit, drafts, delete, \
-             extract, merge, check, test, probe, work, files, read, write, remove, move, build, format, run, task.",
-            a.join(" ")
-        )),
-    }
-}
-
-/// The module name a probe runs as.
-const PROBE: &str = "solace_probe";
-
-/// `probe [--from <fn>] [--in <module>] [--trace <fn>...]`
-fn probe_args<'a>(args: &[&'a str]) -> Result<(Option<&'a str>, Vec<&'a str>, Option<&'a str>), Failure> {
-    let (mut from, mut trace, mut module, mut tracing) = (None, vec![], None, false);
-    let mut it = args.iter();
-    while let Some(&a) = it.next() {
-        match a {
-            "--from" => from = Some(*it.next().ok_or_else(|| Failure("--from needs a function name.".into(), 2))?),
-            "--in" => module = Some(*it.next().ok_or_else(|| Failure("--in needs a module name.".into(), 2))?),
-            "--trace" => tracing = true,
-            _ if tracing && !a.starts_with("--") => trace.push(a),
-            _ => return usage("probe [--from <fn>] [--in <module>] [--trace <fn>...]; the code is the tool's `text`"),
-        }
-    }
-    if tracing && trace.is_empty() {
-        return usage("--trace needs the functions to trace, e.g. `probe --trace pricing.quote`");
-    }
-    Ok((from, trace, module))
-}
-
-fn command_report(result: Out, budget: usize) -> Out {
-    match result {
-        Ok(text) => Ok(lockdown::trim_output(&("exit code: 0\n".to_string() + &text), budget)),
-        Err(Failure(text, code)) => Err(Failure(lockdown::trim_output(&format!("exit code: {code}\n{text}"), budget), code)),
-    }
-}
-
-/// Arguments that aren't flags (`--scope` just introduces them).
-fn operands<'a>(args: &[&'a str]) -> Vec<&'a str> {
-    args.iter().copied().filter(|a| !a.starts_with("--")).collect()
-}
-
 thread_local! {
     /// The `reason` argument of the current tool call, for a settings write's question.
     static REASON: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
@@ -1053,35 +101,6 @@ thread_local! {
     /// named for the reply, so the call's `task done` waits.
     static UNTESTED: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
-
-/// A command that asks the human something: `task ask`, a strategy run's
-/// proposal (D-93), or a run's write of a protected file (a settings proposal).
-/// It must be the only command in its call.
-fn is_question(line: &str) -> bool {
-    let w: Vec<&str> = line.strip_prefix("solace").unwrap_or(line).split_whitespace().collect();
-    match w.as_slice() {
-        ["task", "ask", ..] | ["strategy", "task" | "feature" | "milestone" | "vision", ..] => true,
-        ["write", rest @ ..] if board::context().is_some() => {
-            let root = Store::root().ok();
-            rest.iter().any(|p| root.as_deref().is_some_and(|r| lockdown::settings_file(r, &file_name(Path::new(p)))))
-        }
-        _ => false,
-    }
-}
-
-/// A `command` line that is Gleam or Rust code, not a Solace command.
-fn looks_like_code(line: &str) -> bool {
-    let first = line.split_whitespace().next().unwrap_or("");
-    matches!(first, "let" | "echo" | "assert" | "use" | "case" | "pub" | "fn" | "import" | "}" | "//") || first.contains('(')
-}
-
-fn stdin() -> Result<String, Failure> {
-    let mut text = String::new();
-    std::io::stdin().read_to_string(&mut text)?;
-    Ok(text)
-}
-
-// --- the store --------------------------------------------------------------
 
 pub(crate) type Sym = index::Sym;
 
@@ -1113,12 +132,6 @@ thread_local! {
 }
 
 pub(crate) type Index = index::Index;
-
-enum Target<'a> {
-    Imports(&'a str),
-    /// A whole module's text, as `view <module>` shows it.
-    Module(&'a str),
-}
 
 const SCHEMA: &str = "
 CREATE TABLE modules(path TEXT PRIMARY KEY, dir TEXT NOT NULL, header TEXT NOT NULL, file TEXT, owns_dir INTEGER);
@@ -1377,10 +390,6 @@ impl Store {
         Ok(())
     }
 
-    fn open() -> Result<Store, Failure> {
-        Store::at(&Store::root()?)
-    }
-
     /// Another project's store, only to read: a plain connection, which
     /// creates no tables and takes no lock (D-57).
     fn peek(root: &Path) -> Result<Store, Failure> {
@@ -1509,7 +518,7 @@ impl Store {
         argv.extend(args.iter().map(|s| s.to_string()));
         // whole, so every failure is parsed; the reply is trimmed later
         let text = lockdown::command(&self.root, &argv, 120, usize::MAX, false, false)?;
-        Ok((lockdown::passed(&text), strip_ansi(text.split_once('\n').map_or("", |(_, s)| s))))
+        Ok((lockdown::passed(&text), diagnostics::strip_ansi(text.split_once('\n').map_or("", |(_, s)| s))))
     }
 
     /// Runs `cargo` in the project (D-158): the exit code and its output.
@@ -1520,7 +529,7 @@ impl Store {
         let mut argv = vec!["cargo".to_string()];
         argv.extend(args.iter().map(|s| s.to_string()));
         let text = lockdown::command(&self.root, &argv, timeout, usize::MAX, false, true)?;
-        Ok((lockdown::passed(&text), strip_ansi(text.split_once('\n').map_or("", |(_, s)| s))))
+        Ok((lockdown::passed(&text), diagnostics::strip_ansi(text.split_once('\n').map_or("", |(_, s)| s))))
     }
 
     /// Type-checks the project and records which symbols are broken, with
@@ -1676,7 +685,7 @@ impl Store {
         if rust {
             out += &format!("\n{}", store::rust_brief(&ix));
         }
-        out += &self.session_end(&ix, EXAMPLE_CALL, tid.as_deref())?;
+        out += &self.session_end(&ix, crate::cli::EXAMPLE_CALL, tid.as_deref())?;
         Ok(out)
     }
 
@@ -1698,7 +707,7 @@ impl Store {
     /// board run's task; the open work records are capped (D-151).
     fn session_end(&self, ix: &Index, call: &str, tid: Option<&str>) -> Out {
         let next = next_call(call, board::strategy_context().is_some());
-        let (status, work) = self.status_within(WORK_CAP)?;
+        let (status, work) = self.status_within(crate::cli::WORK_CAP)?;
         Ok(format!("{status}{}{}\n{}{next}", self.work_context(ix, &work)?, self.other_projects(tid), agent_reference(tid.is_some())))
     }
 
@@ -2032,7 +1041,7 @@ impl Store {
             let names: Vec<String> = ranked.iter().filter(|&&(q, _)| q == p).map(|&(_, i)| name(p, i)).take(3).collect();
             format!("`inspect {} --project {} --context`", names.join(" "), projects[p].0.unwrap_or(mine.as_str()))
         } else {
-            EXAMPLE_CALL.to_string()
+            crate::cli::EXAMPLE_CALL.to_string()
         };
         out += &self.session_end(&ix, &call, tid)?;
         Ok(out)
@@ -2406,9 +1415,7 @@ impl Store {
         Ok(out)
     }
 
-    // --- changing ----------------------------------------------------------------
-
-    fn submit(&self, target: Target, raw: &str) -> Out {
+    fn submit(&self, target: crate::store::Target, raw: &str) -> Out {
         if language::is_rust(&self.root) {
             return self.submit_rust(target, raw);
         }
@@ -2417,7 +1424,7 @@ impl Store {
         let parsed = self.lang().split(&formatted);
         let ix = self.index()?;
         let deps = self.dependency_modules();
-        let (Target::Imports(m) | Target::Module(m)) = target;
+        let (crate::store::Target::Imports(m) | crate::store::Target::Module(m)) = target;
         let module = self
             .resolve_module(&ix, m)
             .ok_or_else(|| {
@@ -2435,7 +1442,7 @@ impl Store {
         let header = &ix.modules.iter().find(|m| m.path == module).unwrap().header;
         let out = self.transaction(&[], || {
             let target_name: Option<String> = match target {
-                Target::Module(_) => {
+                crate::store::Target::Module(_) => {
                     let existing: Vec<&Sym> = ix.syms.iter().filter(|s| s.module == module).collect();
                     let submitted: HashSet<(String, bool)> = parsed.items.iter().map(|i| name_key(&i.name, i.kind)).collect();
                     if submitted.len() != parsed.items.len() {
@@ -2488,7 +1495,7 @@ impl Store {
                     notes.push(format!("{module}: changed {}; added {}", list(&changed), list(&added)));
                     None
                 }
-                Target::Imports(_) => {
+                crate::store::Target::Imports(_) => {
                     if !parsed.items.is_empty() {
                         return fail("E0101 --imports text may only contain imports and the module comment.");
                     }
@@ -2500,7 +1507,7 @@ impl Store {
             let before_broken = self.broken()?;
             let before_warnings = self.warning_baseline()?;
             let diags = self.check_all(&ix)?;
-            let whole_module = matches!(target, Target::Module(_));
+            let whole_module = matches!(target, crate::store::Target::Module(_));
             let own = |d: &&Diag| match &target_name {
                 Some(q) => d.symbol.as_deref() == Some(q.as_str()),
                 None if whole_module => d.module.as_deref() == Some(module.as_str()),
@@ -2532,12 +1539,12 @@ impl Store {
             }
             let what = if whole_module { module.clone() } else { format!("{module} imports") };
             let mut out = format!("Saved {}.\n", target_name.as_deref().unwrap_or(&what));
-            out += &warnings_report(
+            out += &diagnostics::warnings_report(
                 before_warnings.as_ref(),
                 diags.iter().filter(|d| !d.error).filter(own),
                 diags.iter().filter(|d| !d.error).filter(|d| !own(d)),
             );
-            out += &broken_report(&before_broken, &diags);
+            out += &diagnostics::broken_report(&before_broken, &diags);
             Ok(out)
         })?;
         Ok(note_lines(&notes) + &out)
@@ -2799,12 +1806,12 @@ impl Store {
             if !unchanged.is_empty() {
                 out += &format!("Unchanged (the same as stored): {}.\n", unchanged.join(", "));
             }
-            out += &warnings_report(
+            out += &diagnostics::warnings_report(
                 before_warnings.as_ref(),
                 diags.iter().filter(|d| !d.error && own(d)),
                 diags.iter().filter(|d| !d.error && !own(d)),
             );
-            out += &broken_report(&before_broken, &diags);
+            out += &diagnostics::broken_report(&before_broken, &diags);
             // The compiler stops at the first module with errors, so name the
             // other callers of a changed function, or the sites that construct a
             // changed type, from the reference graph (D-46).
@@ -2849,7 +1856,7 @@ impl Store {
         let mut callees: Vec<String> = vec![];
         for d in errors {
             let title = d.text.lines().next().unwrap_or("");
-            let place = place(d);
+            let place = diagnostics::place(d);
             let Some((sym, line)) = place.rsplit_once(", line ") else { return Ok(String::new()) };
             let Some(j) = ix.syms.iter().position(|s| s.qname() == sym) else { return Ok(String::new()) };
             let called: Vec<String> = ix.at[j]
@@ -2949,7 +1956,7 @@ impl Store {
             out += &format!("Deleted {}{retired}.\n", ix.syms[i].qname());
         }
         let diags = self.check_all(&self.index()?)?;
-        Ok(lockdown::trim_output(&out, budget) + &broken_report(&before, &diags))
+        Ok(lockdown::trim_output(&out, budget) + &diagnostics::broken_report(&before, &diags))
     }
 
     #[cfg(test)]
@@ -2987,7 +1994,7 @@ impl Store {
     fn test(&self, args: &[&str]) -> Out {
         let rust = language::is_rust(&self.root);
         let ix = self.index()?;
-        let named: Vec<usize> = operands(args).iter().map(|n| self.resolve(&ix, n)).collect::<Result<_, _>>()?;
+        let named: Vec<usize> = crate::cli::operands(args).iter().map(|n| self.resolve(&ix, n)).collect::<Result<_, _>>()?;
         let all = args.contains(&"--all");
         let tests = reach::test_symbols(&ix);
         let revisions: Vec<String> = ix.syms.iter().map(|s| revision(&s.text)).collect();
@@ -3018,7 +2025,7 @@ impl Store {
         }
         let untested = self.task_untested(&ix, &reached);
         UNTESTED.with(|u| *u.borrow_mut() = untested.clone());
-        let next = next_step(untested.as_deref(), board::work_run(&self.root));
+        let next = crate::cli::next_step(untested.as_deref(), board::work_run(&self.root));
         let untested = untested.map_or(String::new(), |names| format!("No test reaches {names}.\n"));
         // Suites outside `gleam test` that reach a change since tests last passed.
         let changed: Vec<usize> =
@@ -3027,7 +2034,7 @@ impl Store {
         let head = if run.len() == tests.len() {
             format!("Ran all {} tests.\n", tests.len())
         } else if !named.is_empty() {
-            format!("Ran {} of {} tests: those that reach {}.\n", run.len(), tests.len(), operands(args).join(", "))
+            format!("Ran {} of {} tests: those that reach {}.\n", run.len(), tests.len(), crate::cli::operands(args).join(", "))
         } else {
             format!(
                 "Ran {} of {} tests; the other {} reach nothing changed since they passed (`test --all` runs every test).\n",
@@ -3185,26 +2192,24 @@ impl Store {
     /// Runs throwaway code against the current project and returns its output.
     /// A Gleam project's text is a module with `pub fn main()`, or statements
     /// that become its body; a Rust project's text is statements in a test in a
-    /// scratch copy of the crate, placed in `module` when one is named. Project
-    /// imports it uses are added. Nothing is saved.
+    /// scratch copy of the crate, placed in `module` when one is named, or after
+    /// the body of `from`'s test. Project imports it uses are added. Nothing is saved.
     fn probe(&self, text: &str, from: Option<&str>, trace: &[&str], module: Option<&str>) -> Out {
         if language::is_rust(&self.root) {
-            if let Some(name) = from {
-                return fail(format!(
-                    "E1006 --from is Gleam only: Rust probe runs the statements in `text`; {name} can be called from them."
-                ));
+            if from.is_some() && module.is_some() {
+                return fail("E1006 --from and --in can't be combined: --from places the probe in the test's module.");
             }
             if !trace.is_empty() {
                 return fail("E1006 --trace is Gleam only: Rust has no call tracing at run time; print values with `println!` or `dbg!`.");
             }
-            return rust_probe::run(self, text, module);
+            return rust_probe::run(self, text, module, from);
         }
         if module.is_some() {
             return fail("E1006 --in is Rust only: a Gleam probe reaches project modules with `import`.");
         }
         let ix = self.index()?;
         let deps = self.dependency_modules();
-        if ix.modules.iter().any(|m| m.path == PROBE) {
+        if ix.modules.iter().any(|m| m.path == crate::cli::PROBE) {
             return fail(format!("E0101 a project module is named {PROBE}; probe can't run."));
         }
         let (prelude, setup) = match from {
@@ -3243,7 +2248,7 @@ impl Store {
             }
             fs::create_dir_all(file.parent().unwrap())?;
             fs::write(&file, &code)?;
-            self.tool(&["run", "-m", PROBE])
+            self.tool(&["run", "-m", crate::cli::PROBE])
         })();
         // Remove the probe and put traced modules back in every case.
         let _ = fs::remove_file(&file);
@@ -3392,12 +2397,15 @@ impl Store {
     /// Keeps this check's warnings, so a submit can name only the ones it adds.
     fn record_warnings(&self, diags: &[Diag]) -> Result<(), Failure> {
         let warnings: Vec<&Diag> = diags.iter().filter(|d| !d.error).collect();
-        let modules: HashSet<&str> = warnings.iter().map(|d| warning_module(d)).collect();
+        let modules: HashSet<&str> = warnings.iter().map(|d| diagnostics::warning_module(d)).collect();
         for module in modules {
             self.db.execute("DELETE FROM warnings WHERE module = ?1", params![module])?;
         }
         for d in warnings {
-            self.db.execute("INSERT OR IGNORE INTO warnings(key, module) VALUES (?1, ?2)", params![warning_key(d), warning_module(d)])?;
+            self.db.execute(
+                "INSERT OR IGNORE INTO warnings(key, module) VALUES (?1, ?2)",
+                params![diagnostics::warning_key(d), diagnostics::warning_module(d)],
+            )?;
         }
         self.db.execute("INSERT OR IGNORE INTO warning_checks(one) VALUES (1)", [])?;
         Ok(())
@@ -3408,7 +2416,7 @@ impl Store {
     /// `src` changes.
     fn dependency_modules(&self) -> Rc<Vec<DependencyModule>> {
         let stamp = |path: &str| fs::metadata(self.root.join(path)).and_then(|m| m.modified()).ok();
-        let mut paths = path_dependencies(&self.root);
+        let mut paths = crate::cli::path_dependencies(&self.root);
         paths.sort();
         paths.dedup();
         let mut sources: Vec<(PathBuf, Option<std::time::SystemTime>)> = vec![];
@@ -3437,6 +2445,17 @@ impl Store {
     /// A store whose shared fields are set the same way by every constructor.
     fn new(db: Rc<Connection>, root: &Path, nested: bool, owns_dir: bool) -> Store {
         Store { db, root: root.into(), lang: language::detect(root), nested, owns_dir, deps: std::cell::RefCell::new(None) }
+    }
+
+    /// Drops warnings for source a later cleanup removed.
+    fn forget_warnings(&self, diags: &[&Diag]) -> Result<(), Failure> {
+        for d in diags {
+            self.db.execute(
+                "DELETE FROM warnings WHERE key = ?1 AND module = ?2",
+                params![diagnostics::warning_key(d), diagnostics::warning_module(d)],
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -3678,8 +2697,9 @@ fn fn_body_start(s: &Sym) -> Option<usize> {
 
 /// A function's parameters from its signature: (label if any, name).
 fn params(signature: &str, name: &str) -> Vec<(Option<String>, String)> {
-    let Some(at) = signature.find(&format!("fn {name}(")) else { return vec![] };
-    language::split_args(&signature[at + name.len() + 4..])
+    let Some((_, rest)) = fn_header(signature, name) else { return vec![] };
+    let Some(args) = fn_args(rest) else { return vec![] };
+    language::split_args(args)
         .iter()
         .map(|(_, p)| p.split(':').next().unwrap_or("").split_whitespace().collect::<Vec<_>>())
         .filter(|words| !words.is_empty())
@@ -3942,53 +2962,6 @@ fn add_import(header: &str, line: &str) -> String {
 
 // --- compiler output ---------------------------------------------------------------
 
-struct FileMap {
-    module: String,
-    file: PathBuf,
-    /// (first line, last line, qualified name)
-    ranges: Vec<(usize, usize, String)>,
-}
-
-struct Diag {
-    error: bool,
-    module: Option<String>,
-    symbol: Option<String>,
-    text: String,
-}
-
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            for c in chars.by_ref() {
-                if c.is_ascii_alphabetic() {
-                    break;
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Where a file position falls: (module, symbol and its first line). Cargo in
-/// a workspace reports a path relative to the workspace root, so more than one
-/// file can end with it; an exact match is the shallowest, and the shallowest
-/// is the project's own file.
-fn locate<'a>(files: &'a [FileMap], path: &str, line: usize) -> Option<(&'a str, Option<(&'a str, usize)>)> {
-    let f =
-        files.iter().filter(|f| f.file.to_string_lossy() == path || f.file.ends_with(path)).min_by_key(|f| f.file.components().count())?;
-    let sym = f.ranges.iter().find(|r| r.0 <= line && line <= r.1).map(|r| (r.2.as_str(), r.0));
-    Some((&f.module, sym))
-}
-
-fn warning_summary<'a>(diags: impl Iterator<Item = &'a Diag>) -> String {
-    let lines: Vec<String> = diags.map(warning_text).collect();
-    if lines.is_empty() { String::new() } else { format!("\nWarnings:\n{}\n", lines.join("\n")) }
-}
-
 /// What a change did to the broken set (D-46): `before` is the broken table
 /// as it was. Fixed symbols are named; a symbol broken with the same errors as
 /// before gets one line; new errors are printed in full, once per message, and
@@ -4059,81 +3032,6 @@ fn unique<T: PartialEq>(v: &mut Vec<T>) {
     *v = out;
 }
 
-fn broken_report(before: &HashMap<String, String>, diags: &[Diag]) -> String {
-    let errors: Vec<&Diag> = diags.iter().filter(|d| d.error).collect();
-    let mut names: Vec<String> =
-        errors.iter().map(|d| d.symbol.clone().or(d.module.clone().map(|m| m + " imports")).unwrap_or("?".into())).collect();
-    unique(&mut names);
-    let mut fixed: Vec<&str> = before.keys().map(String::as_str).filter(|k| !names.iter().any(|n| n == k)).collect();
-    fixed.sort();
-    let fixed = if fixed.is_empty() { String::new() } else { format!("Fixed: {}.\n", fixed.join(", ")) };
-    if errors.is_empty() {
-        return format!("{fixed}The project type-checks.\n");
-    }
-    let mut out = format!("\nBroken symbols ({}): {}\n{fixed}", names.len(), names.join(", "));
-    let own =
-        |sym: &str| errors.iter().filter(|d| d.symbol.as_deref() == Some(sym)).map(|d| d.text.as_str()).collect::<Vec<_>>().join("\n\n");
-    let same: Vec<&String> = names.iter().filter(|n| before.get(*n).is_some_and(|t| *t == own(n))).collect();
-    if !same.is_empty() {
-        out += "Still broken, with the errors shown before (`check` shows them again):\n";
-        for n in &same {
-            let all: Vec<&&Diag> = errors.iter().filter(|d| d.symbol.as_ref() == Some(n)).collect();
-            let more = if all.len() > 1 { format!(" (and {} more errors in it)", all.len() - 1) } else { String::new() };
-            out += &format!("  {}: {}{more}\n", place(all[0]), error_message(all[0]));
-        }
-    }
-    // new errors: one summary per shared cause, then the rest grouped by message
-    let new: Vec<&Diag> = errors.iter().copied().filter(|d| !d.symbol.as_ref().is_some_and(|s| same.contains(&s))).collect();
-    let (caused, rest): (Vec<&Diag>, Vec<&Diag>) = new.into_iter().partition(|d| error_cause(d).is_some());
-    if !caused.is_empty() {
-        out += &format!("\n{}\n", group_errors(&caused));
-    }
-    let mut groups: Vec<(String, &Diag, Vec<&Diag>)> = vec![];
-    for d in rest {
-        let m = error_message(d);
-        match groups.iter_mut().find(|g| g.0 == m) {
-            Some(g) => g.2.push(d),
-            None => groups.push((m, d, vec![])),
-        }
-    }
-    for (_, first, rest) in groups.iter().take(5) {
-        out += &format!("\n{}\n", first.text);
-        if !rest.is_empty() {
-            out += &format!("same error: {} more\n", rest.len());
-            for d in rest {
-                out += &format!("  at {}: {}\n", place(d), error_line(d));
-            }
-        }
-    }
-    let more: usize = groups.iter().skip(5).map(|g| 1 + g.2.len()).sum();
-    if more > 0 {
-        out += &format!("\n… {more} more errors (`check`)\n");
-    }
-    out
-}
-
-/// `<symbol>, line N` from a diagnostic's `at` line.
-fn place(d: &Diag) -> String {
-    d.text.lines().find_map(|l| l.trim_start().strip_prefix("at ")).unwrap_or("?").to_string()
-}
-
-/// An error's title and the compiler's note at its caret, e.g. "Incorrect
-/// arity: Expected 6 arguments, got 5".
-fn error_message(d: &Diag) -> String {
-    let title = d.text.lines().next().unwrap_or("").trim_start_matches("error:").trim();
-    let note = d.text.lines().rev().find_map(|l| l.rsplit_once('^')).map_or("", |(_, n)| n.trim());
-    if note.is_empty() { title.to_string() } else { format!("{title}: {note}") }
-}
-
-/// The source line an error is at, from its excerpt.
-fn error_line(d: &Diag) -> String {
-    let n = place(d).rsplit_once("line ").map_or(String::new(), |(_, n)| n.to_string());
-    d.text
-        .lines()
-        .find_map(|l| l.trim_start().strip_prefix(n.as_str()).and_then(|r| r.strip_prefix(" │")))
-        .map_or(String::new(), |r| r.trim_start_matches(|c: char| " │╭╰─·".contains(c)).trim_end().to_string())
-}
-
 /// Fixtures for every module's tests.
 #[cfg(test)]
 #[path = "testing.rs"]
@@ -4143,227 +3041,10 @@ mod testing;
 #[path = "main_tests.rs"]
 mod tests;
 
-/// Whether the command is a process that changes files behind the store, so it
-/// runs outside the command's outer transaction. Rust's `format` saves through
-/// the store instead (D-180).
-fn is_process(a: &[&str], root: &Path) -> bool {
-    a.first().is_some_and(|c| PROCESSES.contains(c)) && !reads_only(a) && !(a[0] == "format" && language::is_rust(root))
-}
-
 #[cfg(test)]
 thread_local! {
     /// A test's project root, in place of the working folder's.
     static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-}
-
-/// Runs `f` with `Store::root` reading `root`, so a test drives a command
-/// without changing the process's working folder.
-#[cfg(test)]
-pub(crate) fn with_root<T>(root: &Path, f: impl FnOnce() -> T) -> T {
-    let old = TEST_ROOT.with(|r| r.replace(Some(root.to_path_buf())));
-    let out = f();
-    TEST_ROOT.with(|r| *r.borrow_mut() = old);
-    out
-}
-
-/// `read_project` from an explicit working folder and owning project, so a test
-/// never changes the process-wide working folder.
-fn read_project_in(a: &[&str], here: &Path, own: Option<&Path>, dir: &str, budget: usize) -> Out {
-    let command = a.first().copied().unwrap_or("");
-    // From a project, or from a folder of projects with none at its root.
-    let root = match workspace::enclosing(own.unwrap_or(here))? {
-        Some(root) => root,
-        None => own.map(Path::to_path_buf).ok_or_else(|| {
-            Failure(
-                "No Solace root here: migrate an existing project (`solace serve`, then Migrate this project) or \
-                 make a new one with `solace create <name>`."
-                    .into(),
-                1,
-            )
-        })?,
-    };
-    let members = workspace::members(&root)?;
-    let dir = &crate::project_paths::project_folder(&root, own, dir, &members);
-    if !members.iter().any(|m| m == dir) {
-        return lockdown::error(
-            "E6007",
-            dir,
-            format!(
-                "not a project under this Solace root: `--project` takes a folder from the Solace root; its projects: {}",
-                members.join(", ")
-            ),
-        );
-    }
-    let target = scope::path(&root, dir);
-    // A board run's agent must still be running, as for any command.
-    let _guard = match (board::context(), own) {
-        (Some((tid, rid)), Some(own)) => Some(board::agent_guard(&scope::home(own, &tid)?, &tid, &rid, &a, &[])?),
-        _ => None,
-    };
-    let store = Store::peek(&target)?;
-    let settings = lockdown::settings(&store.root)?;
-    if let Some(out) = lockdown::dispatch(&store, &settings, &a, &mut || Ok(String::new()), None, budget) {
-        return out;
-    }
-    // A Rust project has no `Language`; its store's symbols are read as any
-    // other's (D-158), so only a project of plain files is refused.
-    if store.lang.is_none() && !language::is_rust(&store.root) {
-        let task = board::context().map(|(tid, _)| tid);
-        return lockdown::plain(&store, task.as_deref(), command, a.get(1).copied());
-    }
-    let out = match a {
-        ["view", rest @ ..] if !operands(rest).is_empty() => store.view(&operands(rest), rest.contains(&"--bodies"), budget),
-        ["inspect", rest @ ..] if !operands(rest).is_empty() => store.inspect(&operands(rest), rest.contains(&"--context"), budget),
-        ["refs", names @ ..] if !names.is_empty() => store.refs_all(names, budget),
-        ["find", query @ ..] if !query.is_empty() => store.find(&query.join(" ")),
-        _ => usage(format!("{} --project {dir}: give what to read", a.join(" "))),
-    };
-    hinted(out, &store.root)
-}
-
-/// D-184: the next step after a passing test in a work run.
-fn next_step(untested: Option<&str>, in_work_run: bool) -> String {
-    if !in_work_run {
-        return String::new();
-    }
-    untested.map_or_else(
-        || "Next: if every part of the task is changed, finish with task done.\n".to_string(),
-        |names| format!("Next: add a test for {names}; then, if every part of the task is changed, finish with task done.\n"),
-    )
-}
-
-/// The shared cause of a Rust error that repeats at many sites: a key to group
-/// by and the cause written for the summary, or `None` to print it in full.
-fn error_cause(d: &Diag) -> Option<(String, String)> {
-    let title = d.text.lines().next()?.trim();
-    let code = title.strip_prefix("error[")?.split_once(']')?.0;
-    if !matches!(code, "E0603" | "E0624" | "E0616" | "E0599") {
-        return None;
-    }
-    let items: Vec<&str> = title.split('`').skip(1).step_by(2).collect();
-    if items.is_empty() {
-        return None;
-    }
-    let item = items[0];
-    let cause = match code {
-        "E0603" | "E0624" => format!("`{item}` is private"),
-        "E0616" if items.len() > 1 => format!("`{item}` is private on `{}`", items[1]),
-        "E0599" if items.len() > 1 => format!("`{item}` is missing on `{}`", items[1]),
-        _ => return None,
-    };
-    let site = d.module.as_deref().unwrap_or("");
-    Some((format!("{code} {site} {}", items.join(" ")), cause))
-}
-
-/// The fix for a shared cause, named once instead of at every site.
-fn cause_fix(key: &str) -> &'static str {
-    if key.starts_with("E0599") { "add the method or fix the call" } else { "make it `pub(crate)`" }
-}
-
-/// Errors of one cause print as one line naming the item and the fix, with the
-/// first few sites and a count of the rest; every other error prints in full.
-fn group_errors(errors: &[&Diag]) -> String {
-    const SITE_CAP: usize = 6;
-    let mut groups: Vec<(String, String, Vec<&Diag>)> = vec![];
-    let mut plain: Vec<&str> = vec![];
-    for d in errors {
-        match error_cause(d) {
-            Some((key, cause)) => match groups.iter_mut().find(|g| g.0 == key) {
-                Some(g) => g.2.push(d),
-                None => groups.push((key, cause, vec![d])),
-            },
-            None => plain.push(&d.text),
-        }
-    }
-    let mut parts: Vec<String> = vec![];
-    for (key, cause, ds) in groups {
-        if ds.len() == 1 {
-            parts.push(ds[0].text.clone());
-            continue;
-        }
-        let mut part = format!("{cause} ({} places): {}", ds.len(), cause_fix(&key));
-        for &d in ds.iter().take(SITE_CAP) {
-            part += &format!("\n  at {}", place(d));
-        }
-        if ds.len() > SITE_CAP {
-            let mut modules: Vec<&str> = vec![];
-            for &d in ds.iter().skip(SITE_CAP) {
-                if let Some(module) = site_module(d) {
-                    modules.push(module);
-                }
-            }
-            unique(&mut modules);
-            part += &format!("\n… and {} more", ds.len() - SITE_CAP);
-            if !modules.is_empty() {
-                part += &format!(" in {}", modules.join(", "));
-            }
-        }
-        parts.push(part);
-    }
-    parts.extend(plain.into_iter().map(String::from));
-    parts.join("\n\n")
-}
-
-/// Names a repeated command's copy (`check (copy 2)`), so its section can be
-/// found; a command that appears once is named as written.
-fn failed_copy(command: &str, commands: &[&str], at: usize) -> String {
-    if commands.iter().filter(|c| bare_command(c) == command).count() < 2 {
-        return command.to_string();
-    }
-    let copy = commands[..=at].iter().filter(|c| bare_command(c) == command).count();
-    format!("{command} (copy {copy})")
-}
-
-/// One warning as a submit prints it.
-fn warning_text(d: &Diag) -> String {
-    format!("  {}: {}", warning_place(d), warning_line(d))
-}
-
-/// A warning's place and its `warning:` line. The rendered `at` line is left
-/// out: it moves when unrelated code above changes.
-fn warning_key(d: &Diag) -> String {
-    format!("{}\n{}", warning_place(d), warning_line(d))
-}
-
-fn warning_place(d: &Diag) -> &str {
-    d.symbol.as_deref().or(d.module.as_deref()).unwrap_or("project")
-}
-
-fn warning_line(d: &Diag) -> &str {
-    d.text.lines().find(|l| l.trim_start().starts_with("warning:")).unwrap_or("compiler warning").trim()
-}
-
-/// Warnings outside the saved symbols that the last check did not have.
-fn new_warnings_summary<'a>(before: Option<&HashSet<String>>, diags: impl Iterator<Item = &'a Diag>) -> String {
-    let Some(before) = before else { return String::new() };
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut lines: Vec<String> = vec![];
-    for d in diags.filter(|d| !d.error) {
-        let key = warning_key(d);
-        if !before.contains(&key) && seen.insert(key) {
-            lines.push(warning_text(d));
-        }
-    }
-    if lines.is_empty() { String::new() } else { format!("\nNew warnings elsewhere:\n{}\n", lines.join("\n")) }
-}
-
-/// The warning sections of a submit reply, with their footer once.
-fn warnings_report<'a>(
-    before: Option<&HashSet<String>>,
-    own: impl Iterator<Item = &'a Diag>,
-    elsewhere: impl Iterator<Item = &'a Diag>,
-) -> String {
-    let own = warning_summary(own);
-    let elsewhere = new_warnings_summary(before, elsewhere);
-    if own.is_empty() && elsewhere.is_empty() {
-        String::new()
-    } else {
-        format!("{own}{elsewhere}Use `check --warnings` for full diagnostics.\n")
-    }
-}
-
-fn warning_module(d: &Diag) -> &str {
-    d.module.as_deref().unwrap_or("project")
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -4560,42 +3241,6 @@ fn quoted_after<'a>(text: &'a str, marker: &str) -> Option<&'a str> {
     rest.find('`').map(|end| &rest[..end])
 }
 
-/// The Solace root and the folders of the other projects under it, the run's
-/// task's projects first, then the rest: `None` when `here` is in no Solace root.
-fn other_projects(here: &Path) -> Option<(PathBuf, Vec<String>)> {
-    let top = workspace::enclosing(here).ok().flatten()?;
-    let mine = scope::dir(&top, here);
-    let mut order = scope::of_run(here).unwrap_or_default();
-    let rest: Vec<String> = workspace::members(&top).ok()?.into_iter().filter(|m| !order.contains(m)).collect();
-    order.extend(rest);
-    let others = order.into_iter().filter(|d| *d != mine).collect();
-    Some((top, others))
-}
-
-/// The first project other than `here` with a module named `name` (D-123):
-/// the run's task's projects first, then the others under the Solace root.
-pub(crate) fn module_elsewhere(here: &Path, name: &str) -> Option<String> {
-    let (top, dirs) = other_projects(here)?;
-    dirs.into_iter().find(|d| {
-        let Some(s) = Store::peek(&scope::path(&top, d)).ok() else { return false };
-        let Ok(ix) = s.index() else { return false };
-        ix.modules.iter().any(|m| m.path == name)
-    })
-}
-
-/// The directories the manifest names as path dependencies.
-fn path_dependencies(root: &Path) -> Vec<PathBuf> {
-    let Ok(text) = fs::read_to_string(root.join("gleam.toml")) else { return vec![] };
-    let Ok(v) = text.parse::<toml::Value>() else { return vec![] };
-    ["dependencies", "dev-dependencies", "dev_dependencies"]
-        .into_iter()
-        .filter_map(|table| v.get(table).and_then(|deps| deps.as_table()))
-        .flat_map(|deps| deps.values())
-        .filter_map(|spec| spec.get("path").and_then(|p| p.as_str()))
-        .map(|path| root.join(path))
-        .collect()
-}
-
 /// The name of the probe text's line range in its generated module.
 pub(crate) const PROBE_RANGE: &str = "probe";
 
@@ -4607,10 +3252,6 @@ pub(crate) const PROBE_END_RANGE: &str = "probe end";
 
 /// The indentation the probe's wrapper adds to each of its lines.
 pub(crate) const PROBE_INDENT: &str = "        ";
-
-/// The Rust project's commands that run through cargo, and that a language's
-/// unavailable toolchain refuses with E6013.
-const CARGO_TOOLS: &[&str] = &["check", "test", "submit", "delete", "probe", "extract", "merge"];
 
 /// One user's entry under `refs`, printed once per reply.
 fn ref_entry(ix: &Index, user: usize, target: usize) -> String {
@@ -4634,7 +3275,26 @@ fn possible_users(ix: &Index, target: usize, users: &[usize]) -> String {
     out
 }
 
-/// A site's module, falling back to the part of its name before the last dot.
-fn site_module(d: &Diag) -> Option<&str> {
-    d.module.as_deref().filter(|m| !m.is_empty()).or_else(|| d.symbol.as_deref()?.rsplit_once('.').map(|(m, _)| m))
+/// Where a function's `fn` is in `signature`: `name`'s, and the text after
+/// its name, starting at its generic parameters or its arguments.
+pub(crate) fn fn_header<'a>(signature: &'a str, name: &str) -> Option<(usize, &'a str)> {
+    let prefix = format!("fn {name}");
+    signature.match_indices(&prefix).find_map(|(at, _)| {
+        let rest = &signature[at + prefix.len()..];
+        matches!(rest.chars().next(), Some('(' | '<')).then_some((at, rest))
+    })
+}
+
+/// A function's arguments, from just after its `(`, past its generic parameters.
+fn fn_args(rest: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' if !rest[..i].ends_with('-') => depth = depth.saturating_sub(1),
+            '(' if depth == 0 => return Some(&rest[i + 1..]),
+            _ => {}
+        }
+    }
+    None
 }

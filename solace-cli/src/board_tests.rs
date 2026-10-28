@@ -1,5 +1,8 @@
 use super::*;
 
+use serde_json::Value;
+use serde_json::json;
+use std::io::Read;
 /// A task with one run `r1` in `run`'s state, and a hung agent in its own process group.
 fn supervised(run: Value) -> (testing::Project, String, std::process::Child) {
     launched(run, Command::new("sleep").arg("45").process_group(0).spawn().unwrap())
@@ -3044,9 +3047,9 @@ fn a_whole_module_format_is_recorded_on_the_task() {
     let tid = t["id"].as_str().unwrap().to_string();
     t["runs"] = json!([{"id":"format","kind":"work","state":"running"}]);
     tasks::put(&s, &t).unwrap();
-    let out = crate::with_root(&root, || {
+    let out = crate::cli::with_root(&root, || {
         with_context(&tid, "format", || {
-            crate::run_options(&["format".to_string(), "crate".to_string()], &mut || Ok(String::new()), None, 1000, &[])
+            crate::cli::run_options(&["format".to_string(), "crate".to_string()], &mut || Ok(String::new()), None, 1000, &[])
         })
     })
     .unwrap();
@@ -3617,9 +3620,9 @@ fn a_review_run_gets_no_next_step() {
         {"id":"r2","kind":"work","state":"running"}
     ]);
     tasks::put(&s, &t).unwrap();
-    assert_eq!(with_context(&tid, "r1", || crate::next_step(Some("app.one"), work_run(&root))), "");
+    assert_eq!(with_context(&tid, "r1", || crate::cli::next_step(Some("app.one"), work_run(&root))), "");
     assert_eq!(
-        with_context(&tid, "r2", || crate::next_step(None, work_run(&root))),
+        with_context(&tid, "r2", || crate::cli::next_step(None, work_run(&root))),
         "Next: if every part of the task is changed, finish with task done.\n"
     );
 }
@@ -4364,7 +4367,7 @@ fn a_work_run_is_found_from_a_secondary_project() {
     let sub = root.join("sub");
     assert!(!with_context(&tid, "r1", || work_run(&sub)));
     assert_eq!(
-        with_context(&tid, "r2", || crate::next_step(None, work_run(&sub))),
+        with_context(&tid, "r2", || crate::cli::next_step(None, work_run(&sub))),
         "Next: if every part of the task is changed, finish with task done.\n"
     );
 }
@@ -4496,9 +4499,9 @@ fn failed_tool_lines_name_the_code_and_failed_command() {
 #[test]
 fn a_repeated_command_reports_the_copy_that_failed() {
     let mut seen = 0;
-    let (output, failed) = crate::batch(&["check", "check"], 10_000, &mut |_, _| {
+    let (output, failed) = crate::cli::batch(&["check", "check"], 10_000, &mut |_, _| {
         seen += 1;
-        if seen == 2 { Err(crate::Failure("E0308 mismatched types".into(), 1)) } else { Ok("no problems\n".into()) }
+        if seen == 2 { Err(Failure("E0308 mismatched types".into(), 1)) } else { Ok("no problems\n".into()) }
     });
     assert!(failed);
     assert!(output.ends_with("1 of 2 commands failed: check (copy 2)\n"), "{output}");
@@ -4634,7 +4637,7 @@ fn task_peek_reads_the_tasks_a_run_may_read() {
     let peek = |target: &str, extra: &[&str], budget: usize| {
         let mut args = vec!["task".to_string(), "peek".to_string(), target.to_string()];
         args.extend(extra.iter().map(|x| x.to_string()));
-        crate::with_root(&p.root, || with_context(tid, "r1", || crate::run_options(&args, &mut || Ok(String::new()), None, budget, &[])))
+        crate::cli::with_root(&p.root, || with_context(tid, "r1", || crate::cli::run_options(&args, &mut || Ok(String::new()), None, budget, &[])))
     };
     let allowed = [
         (dep["id"].as_str().unwrap(), "Dependency"),
@@ -4659,8 +4662,8 @@ fn task_peek_reads_the_tasks_a_run_may_read() {
     assert!(!listed.iter().any(|l| l.contains(other["id"].as_str().unwrap())), "{}", e.0);
 }
 
-/// D-203: `--notes` adds every note in full, and a long one is paged with
-/// `--from` as `strategy show note` is.
+/// D-203: `--notes` adds one list of notes or every one in full, and a long
+/// note is paged with `--from` as `strategy show note` is.
 #[test]
 fn task_peek_notes_page() {
     let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
@@ -4668,7 +4671,14 @@ fn task_peek_notes_page() {
     let mut dep = api(&s.root, "POST", "/tasks", json!({"title":"Dependency"})).unwrap();
     dep["notes"] = json!([
         {"author":"human","text":"first","time":1,"run":null},
-        {"author":"human","text":"n".repeat(400),"time":2,"run":null}
+        {"author":"human","text":"n".repeat(400),"time":2,"run":null},
+        {"author":"human","text":"third","time":3,"run":null},
+        {"author":"human","text":"fourth","time":4,"run":null},
+        {"author":"human","text":"fifth","time":5,"run":null},
+        {"author":"human","text":"sixth","time":6,"run":null},
+        {"author":"human","text":"seventh","time":7,"run":null},
+        {"author":"human","text":"eighth","time":8,"run":null},
+        {"author":"human","text":"ninth","time":9,"run":null}
     ]);
     tasks::put(&s, &dep).unwrap();
     let mut t = api(&s.root, "POST", "/tasks", json!({"title":"Mine"})).unwrap();
@@ -4680,7 +4690,9 @@ fn task_peek_notes_page() {
     let peek = |extra: &[&str], budget: usize| {
         let mut args = vec!["task".to_string(), "peek".to_string(), did.to_string()];
         args.extend(extra.iter().map(|x| x.to_string()));
-        crate::with_root(&p.root, || with_context(tid, "r1", || crate::run_options(&args, &mut || Ok(String::new()), None, budget, &[])))
+        crate::cli::with_root(&p.root, || {
+            with_context(tid, "r1", || crate::cli::run_options(&args, &mut || Ok(String::new()), None, budget, &[]))
+        })
     };
     let first = peek(&["--notes"], 650).unwrap();
     assert!(first.contains("\"note\": 1") && first.contains(&format!("Next: task peek {did} --notes 2")), "{first}");
@@ -4690,8 +4702,13 @@ fn task_peek_notes_page() {
     let from = next.rsplit("--from ").next().unwrap().trim();
     let more = peek(&["--notes", "2", "--from", from], 500).unwrap();
     assert!(more.contains("\"note\": 2") && !more.contains("characters 0.."), "{more}");
-    let bad = peek(&["--notes", "9"], 10_000).unwrap_err();
-    assert!(bad.0.contains("notes") && bad.0.contains("1..2") && !bad.0.contains("steps"), "{}", bad.0);
+    let bad = peek(&["--notes", "10"], 10_000).unwrap_err();
+    assert!(bad.0.contains("notes") && bad.0.contains("1..9") && !bad.0.contains("steps"), "{}", bad.0);
+    let split = peek(&["--notes", "1", "2"], 10_000).unwrap_err();
+    assert!(split.0.contains("notes take one list") && split.0.contains("--notes 1,2,8..12"), "{}", split.0);
+    let picked: Value = serde_json::from_str(&peek(&["--notes", "1,8..9"], 10_000).unwrap()).unwrap();
+    let numbers: Vec<_> = picked["notes"].as_array().unwrap().iter().filter_map(|n| n["note"].as_u64()).collect();
+    assert_eq!(numbers, vec![1, 8, 9]);
 }
 
 /// D-203: `task peek feature` gives the feature's state, whole body and its
@@ -4720,7 +4737,7 @@ fn task_peek_feature_lists_its_tasks() {
     let tid = t["id"].as_str().unwrap();
     let peek = |tid: &str, target: &str| {
         let args = vec!["task".to_string(), "peek".to_string(), target.to_string()];
-        crate::with_root(&p.root, || with_context(tid, "r1", || crate::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[])))
+        crate::cli::with_root(&p.root, || with_context(tid, "r1", || crate::cli::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[])))
     };
     let out = peek(tid, "feature").unwrap();
     let v: Value = serde_json::from_str(&out).unwrap();
@@ -4827,18 +4844,7 @@ fn a_draft_in_another_project_blocks_done_until_dropped() {
     for part in ["d1", "--project components", "write --draft d1", "drafts drop d1"] {
         assert!(e.contains(part), "{part} missing from:\n{e}");
     }
-    let dropped = crate::with_root(&components.root, || {
-        with_context(&tid, "r1", || {
-            crate::run_options(
-                &["drafts".to_string(), "drop".to_string(), "d1".to_string(), "--project".to_string(), "components".to_string()],
-                &mut || Ok(String::new()),
-                None,
-                10_000,
-                &[],
-            )
-        })
-    })
-    .unwrap();
+    let dropped = run_draft_command(&web, &tid, &["drafts", "drop", "d1", "--project", "components"], "").unwrap();
     assert!(dropped.contains("Dropped draft d1"), "{dropped}");
     let out = done(&web).unwrap();
     assert!(out.contains(tasks::QUEUED), "{out}");
@@ -4858,4 +4864,154 @@ fn a_resumed_brief_names_drafts_in_every_project() {
     let run = json!({"id": "r1", "kind": "work", "state": "running"});
     let brief = continuation_brief(&t, &run, true, &web.root, &web.root, false).0;
     assert!(brief.contains("Retained drafts") && brief.contains("view --draft d1 --project components"), "{brief}");
+}
+
+#[test]
+fn a_refused_submit_in_another_project_names_the_project_of_its_draft() {
+    let (_root, web, components, tid) = draft_board();
+    let run = |args: &[&str], text: &str| {
+        crate::cli::with_root(&web.root, || {
+            with_context(&tid, "r1", || {
+                crate::cli::run_options(
+                    &args.iter().map(|x| x.to_string()).collect::<Vec<_>>(),
+                    &mut || Ok(text.to_string()),
+                    None,
+                    10_000,
+                    &[],
+                )
+            })
+        })
+    };
+    let e = run(&["submit", "lib.z", "--project", "components"], "pub fn z() -> Int {").unwrap_err().0;
+    let id = e.split("Draft ").nth(1).and_then(|r| r.split(' ').next()).unwrap().to_string();
+    let kept = crate::drafts::entries(&components, &tid).unwrap();
+    assert!(kept.iter().any(|(draft, ..)| *draft == id), "not kept in components: {kept:?}");
+    let home_kept = crate::drafts::entries(&web, &tid).unwrap();
+    assert!(!home_kept.iter().any(|(draft, ..)| *draft == id), "kept in the wrong project: {home_kept:?}");
+    for part in [
+        format!("`view --draft {id} --project components`"),
+        format!("`submit --draft {id} --replace --project components`"),
+        "`drafts --project components`".to_string(),
+        format!("`drafts drop {id} --project components`"),
+    ] {
+        assert!(e.contains(&part), "{part} missing from:\n{e}");
+    }
+    let listed = run(&["drafts", "--project", "components"], "").unwrap();
+    assert!(listed.contains(&id), "{listed}");
+    let viewed = run(&["view", "--draft", id.as_str(), "--project", "components"], "").unwrap();
+    assert!(viewed.contains("pub fn z() -> Int {"), "{viewed}");
+    let dropped = run(&["drafts", "drop", &id, "--project", "components"], "").unwrap();
+    assert!(dropped.contains(&format!("Dropped draft {id}")), "{dropped}");
+    let home = run(&["submit", "app.main"], "pub fn main(").unwrap_err().0;
+    assert!(!home.contains("--project"), "{home}");
+}
+
+fn run_draft_command(web: &Store, tid: &str, args: &[&str], text: &str) -> Out {
+    crate::cli::with_root(&web.root, || {
+        with_context(tid, "r1", || {
+            crate::cli::run_options(
+                &args.iter().map(|x| x.to_string()).collect::<Vec<_>>(),
+                &mut || Ok(text.to_string()),
+                None,
+                10_000,
+                &[],
+            )
+        })
+    })
+}
+
+/// A refusal from another project names that project in the draft command it
+/// prints: a stale submit's `view`, and a file patch's `write`.
+#[test]
+fn a_stale_or_file_patch_draft_in_another_project_names_that_project() {
+    let (_root, web, components, tid) = draft_board();
+    let e = run_draft_command(&web, &tid, &["submit", "lib.z", "--project", "components"], "pub fn z() -> Int {").unwrap_err().0;
+    let stale = e.split("Draft ").nth(1).and_then(|r| r.split(' ').next()).unwrap().to_string();
+    assert_draft_in_components_only(&components, &web, &tid, &stale);
+    run_draft_command(&web, &tid, &["submit", "lib.z", "--project", "components"], "pub fn z() -> Int {\n  5\n}\n").unwrap();
+    let e = run_draft_command(&web, &tid, &["submit", "--draft", &stale, "--project", "components"], "").unwrap_err().0;
+    assert!(e.contains(&format!("`view --draft {stale} --project components`")), "{e}");
+    let patch = "*** Begin Patch\n*** Update File: src/lib.gleam\n-pub fn z\n+pub fn y\n*** End Patch\n";
+    let e = run_draft_command(&web, &tid, &["write", "--project", "components"], patch).unwrap_err().0;
+    let file = e.split("Draft ").nth(1).and_then(|r| r.split(' ').next()).unwrap().to_string();
+    assert_draft_in_components_only(&components, &web, &tid, &file);
+    let e = run_draft_command(&web, &tid, &["submit", "--draft", &file, "--project", "components"], "").unwrap_err().0;
+    assert!(e.contains(&format!("`write --draft {file} --project components`")), "{e}");
+}
+
+/// A refused file patch from another project names that project in the calls
+/// that retry and drop its draft.
+#[test]
+fn a_refused_file_patch_in_another_project_names_that_project() {
+    let (_root, web, components, tid) = draft_board();
+    let patch = "*** Begin Patch\n*** Update File: src/lib.gleam\n-pub fn z\n+pub fn y\n*** End Patch\n";
+    let e = run_draft_command(&web, &tid, &["write", "--project", "components"], patch).unwrap_err().0;
+    let id = e.split("Draft ").nth(1).and_then(|r| r.split(' ').next()).unwrap().to_string();
+    assert_draft_in_components_only(&components, &web, &tid, &id);
+    for part in [format!("`write --draft {id} --replace --project components`"), format!("`drafts drop {id} --project components`")] {
+        assert!(e.contains(&part), "{part} missing from:\n{e}");
+    }
+    let dropped = run_draft_command(&web, &tid, &["drafts", "drop", &id, "--project", "components"], "").unwrap();
+    assert!(dropped.contains(&format!("Dropped draft {id}")), "{dropped}");
+}
+
+/// A submit that names both a draft and imports prints both retry commands
+/// with the project, so a cross-project retry runs in the right store.
+#[test]
+fn a_submit_draft_with_imports_names_the_project_in_both_commands() {
+    let (_root, web, components, tid) = draft_board();
+    let e = run_draft_command(&web, &tid, &["submit", "lib.z", "--project", "components"], "pub fn z() -> Int {").unwrap_err().0;
+    let id = e.split("Draft ").nth(1).and_then(|r| r.split(' ').next()).unwrap().to_string();
+    let e = run_draft_command(&web, &tid, &["submit", "--draft", &id, "--imports", "lib", "--project", "components"], "").unwrap_err().0;
+    assert!(
+        e.contains(&format!("`submit --imports lib --project components` first, then `submit --draft {id} --project components`")),
+        "{e}"
+    );
+    assert_draft_in_components_only(&components, &web, &tid, &id);
+}
+
+/// A submit draft reached through `write --draft` names the project in the
+/// `submit --draft` command that retries it.
+#[test]
+fn a_submit_draft_retried_as_a_file_patch_names_the_project() {
+    let (_root, web, components, tid) = draft_board();
+    let e = run_draft_command(&web, &tid, &["submit", "lib.z", "--project", "components"], "pub fn z() -> Int {").unwrap_err().0;
+    let id = e.split("Draft ").nth(1).and_then(|r| r.split(' ').next()).unwrap().to_string();
+    let e = run_draft_command(&web, &tid, &["write", "--draft", &id, "--project", "components"], "").unwrap_err().0;
+    assert_draft_in_components_only(&components, &web, &tid, &id);
+    assert!(e.contains(&format!("`submit --draft {id} --project components`")), "{e}");
+}
+
+/// The draft is in the components store the cross-project command ran in, and not in the home store.
+fn assert_draft_in_components_only(components: &Store, web: &Store, tid: &str, id: &str) {
+    let kept = crate::drafts::entries(components, tid).unwrap();
+    assert!(kept.iter().any(|(draft, ..)| draft == id), "not kept in components: {kept:?}");
+    let home = crate::drafts::entries(web, tid).unwrap();
+    assert!(!home.iter().any(|(draft, ..)| draft == id), "kept in the wrong project: {home:?}");
+}
+
+/// A graph error in another project names that project, so the agent can
+/// retry the command there (D-123).
+#[test]
+fn a_cross_project_graph_hint_names_the_project() {
+    let (_root, web, _components, tid) = draft_board();
+    let e = run_draft_command(&web, &tid, &["read", "src/lib.gleam", "--project", "components"], "").unwrap_err().0;
+    assert!(e.contains("view lib --bodies --project components"), "{e}");
+}
+
+/// A move into another project marks its destination before changing it, so a
+/// crash before the commit can put the destination's files back (D-84).
+#[test]
+fn a_move_into_another_project_marks_its_destination() {
+    let (_root, web, components, tid) = draft_board();
+    std::fs::write(web.root.join("notes.txt"), "one\n").unwrap();
+    crate::command_tx::crash_at(Some("command"));
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_draft_command(&web, &tid, &["move", "notes.txt", "notes.txt", "--to-project", "components"], "")
+    }))
+    .is_err();
+    crate::command_tx::crash_at(None);
+    assert!(panicked, "the move did not reach its crash point");
+    let mark = components.root.join(".solace/pending/command-r1.json");
+    assert!(mark.exists(), "no destination marker at {}", mark.display());
 }

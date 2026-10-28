@@ -5,6 +5,8 @@
 use super::*;
 use std::os::unix::fs::OpenOptionsExt;
 
+use serde_json::Value;
+use serde_json::json;
 /// The variable a stored key reaches Codex through, on the agent's process only.
 pub(super) const KEY_VAR: &str = "SOLACE_ENDPOINT_KEY";
 

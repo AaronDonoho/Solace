@@ -1213,7 +1213,8 @@ fn a_closure_after_a_closure_still_binds_its_parameters() {
 #[test]
 fn thread_local_names_read_every_static() {
     let text = "thread_local! {\n    /// The first.\n    static FIRST: u8 = 1;\n    /// The second.\n    static SECOND: u8 = 2;\n}\n";
-    assert_eq!(super::thread_local_names(text), vec!["FIRST", "SECOND"]);
+    let names: Vec<String> = super::thread_local_names(text).into_iter().map(|(name, ..)| name).collect();
+    assert_eq!(names, vec!["FIRST", "SECOND"]);
     assert!(super::thread_local_names("pub fn one() {}").is_empty());
 }
 

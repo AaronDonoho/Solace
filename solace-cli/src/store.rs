@@ -765,3 +765,9 @@ pub(crate) fn without_generics(name: &str) -> String {
     }
     out
 }
+
+pub(crate) enum Target<'a> {
+    Imports(&'a str),
+    /// A whole module's text, as `view <module>` shows it.
+    Module(&'a str),
+}

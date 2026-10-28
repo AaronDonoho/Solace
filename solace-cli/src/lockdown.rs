@@ -2,6 +2,9 @@ use super::*;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
+use serde_json::json;
+use std::io::Read;
 pub fn error<T>(code: &str, at: &str, message: impl std::fmt::Display) -> Result<T, Failure> {
     fail(format!("{code} command refused\n  at {at}\n  {message}\n"))
 }
@@ -36,7 +39,7 @@ pub fn plain<T>(store: &Store, tid: Option<&str>, command: &str, name: Option<&s
         && matches!(command, "view" | "inspect" | "refs")
     {
         let module = name.split_once('.').map_or(name, |(module, _)| module);
-        if let Some(project) = crate::module_elsewhere(&store.root, module) {
+        if let Some(project) = crate::cli::module_elsewhere(&store.root, module) {
             out += &format!(" Module `{module}` is in project `{project}`; add `--project {project}`.");
         }
     }
@@ -1049,7 +1052,7 @@ fn validate(root: &Path, v: &toml::Value, name: &str, p: &Path, text: &str) -> R
             if matches(pattern, name) {
                 let argv: Vec<String> =
                     argv.as_array().unwrap().iter().map(|x| x.as_str().unwrap().replace("{file}", &p.to_string_lossy())).collect();
-                let out = command(root, &argv, 120, BUDGET, false, false)
+                let out = command(root, &argv, 120, crate::cli::BUDGET, false, false)
                     .map_err(|e| Failure(format!("E6003 validator failed\n  {}", e.0), 1))?;
                 if !passed(&out) {
                     return error("E6003", name, out);
@@ -4233,7 +4236,7 @@ running your program.
         }
         let s = Store::at(&root.join("a")).unwrap();
         let v = settings(&s.root).unwrap();
-        let e = crate::with_root(&s.root, || call(&s, &v, &["read", "b/src/plan.gleam"], "", None)).unwrap_err().0;
+        let e = crate::cli::with_root(&s.root, || call(&s, &v, &["read", "b/src/plan.gleam"], "", None)).unwrap_err().0;
         assert!(e.contains("view plan --bodies --project b"), "{e}");
     }
 

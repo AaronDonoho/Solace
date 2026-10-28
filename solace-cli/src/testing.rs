@@ -1,6 +1,8 @@
 //! Fixtures for every module's tests.
 use super::*;
 
+use serde_json::Value;
+use serde_json::json;
 /// A folder for one test, deleted when the test ends, passed or failed.
 pub(crate) struct Scratch(pub PathBuf);
 impl Scratch {

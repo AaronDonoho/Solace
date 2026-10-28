@@ -3,6 +3,7 @@
 use super::*;
 use crate::testing::*;
 
+use serde_json::Value;
 fn text_of(root: &Path, rel: &str) -> String {
     fs::read_to_string(root.join(rel)).unwrap()
 }
@@ -131,13 +132,13 @@ fn imports_replace_the_header_only() {
     }
     let lib = "use std::fmt;\n\npub fn one() -> i32 {\n    1\n}\n";
     let (root, store) = rust_project(lib);
-    let out = store.submit(Target::Imports("crate"), "use std::fmt;\nuse std::io;\n").unwrap();
+    let out = store.submit(crate::store::Target::Imports("crate"), "use std::fmt;\nuse std::io;\n").unwrap();
     assert!(out.contains("Saved crate imports"), "{out}");
     let header = "use std::fmt;\nuse std::io;\n\npub fn one() -> i32 {\n    1\n}\n";
     assert_eq!(text_of(&root, "src/lib.rs"), header);
-    let err = store.submit(Target::Imports("crate"), "use std::fmt;\n\npub fn extra() -> i32 {\n    1\n}\n").unwrap_err().0;
+    let err = store.submit(crate::store::Target::Imports("crate"), "use std::fmt;\n\npub fn extra() -> i32 {\n    1\n}\n").unwrap_err().0;
     assert!(err.contains("--imports text may only contain imports"), "{err}");
-    let err = store.submit(Target::Imports("crate"), "use std::fmt;\nmod extra;\n").unwrap_err().0;
+    let err = store.submit(crate::store::Target::Imports("crate"), "use std::fmt;\nmod extra;\n").unwrap_err().0;
     assert!(err.contains("`--imports` can't add or remove a module") && err.contains("submit --new <module>"), "{err}");
     assert_eq!(text_of(&root, "src/lib.rs"), header);
 }
@@ -287,7 +288,7 @@ fn imports_that_break_an_item_are_refused() {
     }
     let lib = "use std::collections::HashMap;\n\npub fn one() -> HashMap<u8, u8> {\n    HashMap::new()\n}\n";
     let (root, store) = rust_project(lib);
-    let err = store.submit(Target::Imports("crate"), "").unwrap_err().0;
+    let err = store.submit(crate::store::Target::Imports("crate"), "").unwrap_err().0;
     assert!(err.contains("Not saved: the submitted text has errors."), "{err}");
     assert_eq!(text_of(&root, "src/lib.rs"), lib);
 }
@@ -782,7 +783,7 @@ fn a_whole_module_submitted_unchanged_keeps_every_byte_and_id() {
     let before = ids(&store);
     let ix = store.index().unwrap();
     let text = super::module_text(&ix, &ix.modules[0]);
-    let out = store.submit(crate::Target::Module("crate"), &text).unwrap();
+    let out = store.submit(crate::store::Target::Module("crate"), &text).unwrap();
     assert!(out.contains("Unchanged: crate"), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), lib);
     assert_eq!(ids(&store), before);
@@ -802,7 +803,7 @@ fn a_whole_module_changes_one_method_and_adds_one() {
     let ix = store.index().unwrap();
     let text = super::module_text(&ix, &ix.modules[0]);
     let edited = text.replace("        2\n", "        7\n") + "\npub fn two() -> i32 {\n    3\n}\n";
-    let out = store.submit(crate::Target::Module("crate"), &edited).unwrap();
+    let out = store.submit(crate::store::Target::Module("crate"), &edited).unwrap();
     assert!(out.contains("Saved crate."), "{out}");
     assert!(out.contains("changed Store::open") && out.contains("added two"), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), lib.replace("        2\n", "        7\n") + "\npub fn two() -> i32 {\n    3\n}\n");
@@ -834,7 +835,7 @@ impl Store {
     let before = ids(&store);
     let ix = store.index().unwrap();
     let text = super::module_text(&ix, &ix.modules[0]);
-    let out = store.submit(crate::Target::Module("crate"), &text).unwrap();
+    let out = store.submit(crate::store::Target::Module("crate"), &text).unwrap();
     assert!(out.contains("Unchanged: crate"), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), lib);
     assert_eq!(ids(&store), before);
@@ -909,7 +910,7 @@ fn a_whole_module_the_store_doesnt_have_is_created() {
     }
     let lib = "pub fn one() -> i32 {\n    1\n}\n";
     let (root, store) = rust_project(lib);
-    let out = store.submit(crate::Target::Module("brand"), "pub fn side() -> i32 {\n    2\n}\n").unwrap();
+    let out = store.submit(crate::store::Target::Module("brand"), "pub fn side() -> i32 {\n    2\n}\n").unwrap();
     assert!(out.contains("Saved brand.side"), "{out}");
     assert_eq!(text_of(&root, "src/brand.rs"), "pub fn side() -> i32 {\n    2\n}\n");
     assert!(text_of(&root, "src/lib.rs").starts_with("mod brand;\n\n"), "{}", text_of(&root, "src/lib.rs"));
@@ -927,7 +928,7 @@ fn a_whole_module_formats_a_changed_container_opening() {
     let id = |s: &Store, name: &str| s.index().unwrap().syms.iter().find(|x| x.name == name).map(|x| x.id.clone()).unwrap();
     let t = id(&store, "tests::t");
     let text = "#[allow(dead_code)]\nmod tests {\n    pub fn t() -> i32 {\n        1\n    }\n}\n";
-    let out = store.submit(crate::Target::Module("crate"), text).unwrap();
+    let out = store.submit(crate::store::Target::Module("crate"), text).unwrap();
     assert!(out.contains("Saved crate."), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), text);
     assert_eq!(id(&store, "tests::t"), t);
@@ -942,7 +943,7 @@ fn a_whole_module_adds_a_new_container_with_its_items() {
     let lib = "pub struct Store;\n";
     let (root, store) = rust_project(lib);
     let text = "pub struct Store;\n\nimpl Store {\n    pub fn open(&self) -> i32 {\n        1\n    }\n}\n";
-    let out = store.submit(crate::Target::Module("crate"), text).unwrap();
+    let out = store.submit(crate::store::Target::Module("crate"), text).unwrap();
     assert!(out.contains("Saved crate."), "{out}");
     assert!(out.contains("added Store, Store::open"), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), text);
@@ -1188,7 +1189,7 @@ fn a_whole_module_format_rolls_back_with_the_command() {
     let before = ids(&store);
     let out = store.transaction::<String>(&[], || {
         store.format_module_rust("crate")?;
-        crate::fail("stop")
+        fail("stop")
     });
     assert!(out.is_err());
     assert_eq!(text_of(&root, "src/lib.rs"), lib);
@@ -1286,7 +1287,7 @@ fn a_whole_module_submit_names_an_overlong_nested_line() {
     let (_root, store) = rust_project(lib);
     let text =
         format!("pub struct Store;\n\nimpl Store {{\n    pub fn open(&self) -> &str {{\n        \"{}\"\n    }}\n}}\n", "x".repeat(120));
-    let out = store.submit(crate::Target::Module("crate"), &text).unwrap();
+    let out = store.submit(crate::store::Target::Module("crate"), &text).unwrap();
     assert!(out.contains("Saved crate."), "{out}");
     assert!(out.contains("crate.Store::open: line 2"), "{out}");
     assert!(!out.contains("Store::Store"), "{out}");
@@ -1350,7 +1351,7 @@ fn a_whole_module_submit_names_an_overlong_changed_tail() {
         "pub struct Store;\n\nimpl Store {{\n    pub fn open(&self) -> i32 {{\n        2\n    }}\n    // {}\n}}\n",
         "x".repeat(120)
     );
-    let out = store.submit(crate::Target::Module("crate"), &text).unwrap();
+    let out = store.submit(crate::store::Target::Module("crate"), &text).unwrap();
     assert!(out.contains("Saved crate."), "{out}");
     assert!(out.contains("crate.Store: line 5"), "{out}");
 }
@@ -1391,7 +1392,7 @@ fn a_whole_module_submit_keeps_a_trailing_mod_list() {
     crate::import(&root).unwrap();
     let store = Store::at(&root).unwrap();
     let text = "pub fn one() -> i32 {\n    2\n}\n\nmod tests;\n";
-    let out = store.submit(crate::Target::Module("crate"), text).unwrap();
+    let out = store.submit(crate::store::Target::Module("crate"), text).unwrap();
     assert!(out.contains("Saved crate."), "{out}");
     assert_eq!(text_of(&root, "src/lib.rs"), text);
 }
@@ -1536,7 +1537,7 @@ fn a_saved_module_drops_an_empty_inherent_impl() {
     let (root, store) = rust_project(lib);
     let ix = store.index().unwrap();
     let text = super::module_text(&ix, &ix.modules[0]);
-    let out = store.submit(crate::Target::Module("crate"), &text).unwrap();
+    let out = store.submit(crate::store::Target::Module("crate"), &text).unwrap();
     assert!(out.contains("Dropped empty impl crate.Alias."), "{out}");
     let text = text_of(&root, "src/lib.rs");
     assert!(!text.contains("impl Alias {}"), "{text}");
@@ -1579,7 +1580,7 @@ fn a_saved_module_keeps_a_same_named_type_in_its_changed_note() {
     }
     let (root, store) = rust_project("pub struct Alias {\n    pub value: i32,\n}\n\nimpl Alias {}\n");
     let text = "pub struct Alias {\n    pub value: u64,\n}\n\nimpl Alias {}\n";
-    let out = store.submit(crate::Target::Module("crate"), text).unwrap();
+    let out = store.submit(crate::store::Target::Module("crate"), text).unwrap();
     assert!(out.contains("changed Alias"), "{out}");
     assert!(out.contains("Dropped empty impl crate.Alias."), "{out}");
     let written = text_of(&root, "src/lib.rs");
@@ -1596,7 +1597,7 @@ fn a_saved_module_keeps_a_same_named_added_type_in_its_note() {
     }
     let (root, store) = rust_project("pub fn placeholder() {}\n\nimpl Alias {}\n");
     let text = concat!("pub fn placeholder() {}\n\n", "pub struct Alias {\n    pub value: i32,\n}\n\n", "impl Alias {}\n");
-    let out = store.submit(crate::Target::Module("crate"), text).unwrap();
+    let out = store.submit(crate::store::Target::Module("crate"), text).unwrap();
     assert!(out.contains("added Alias"), "{out}");
     assert!(out.contains("Dropped empty impl crate.Alias."), "{out}");
     let written = text_of(&root, "src/lib.rs");
@@ -1781,7 +1782,7 @@ fn a_whole_module_submit_names_a_warning_it_leaves_elsewhere() {
     store.check_report(false).unwrap();
     let ix = store.index().unwrap();
     let text = super::module_text(&ix, ix.modules.iter().find(|m| m.path == "crate").unwrap()).replace("other::helper()", "2");
-    let out = store.submit(crate::Target::Module("crate"), &text).unwrap();
+    let out = store.submit(crate::store::Target::Module("crate"), &text).unwrap();
     assert!(out.contains("New warnings elsewhere:"), "{out}");
     assert!(out.contains("other.helper: warning:"), "{out}");
 }
@@ -1849,4 +1850,61 @@ fn new_creates_a_test_file_with_a_path_mod_line() {
     let module = text_of(&root, "src/a.rs");
     assert!(module.starts_with("#[cfg(test)]\n#[path = \"a_tests.rs\"]\nmod tests;\n"), "{module}");
     assert!(store.index().unwrap().modules.iter().any(|m| m.path == "a::tests" && m.file.as_deref() == Some("src/a_tests.rs")));
+}
+
+/// An Add whose `::` would put its only item in a module of that name is
+/// refused; a new module with another name or several items is unchanged.
+#[test]
+fn a_patch_add_refuses_an_item_wrapped_in_its_own_module() {
+    if !cargo::installed() {
+        return;
+    }
+    let root = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "mod m;\n"),
+        ("src/m.rs", "pub fn keep() -> i32 {\n    0\n}\n"),
+    ]);
+    crate::import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let patch = "*** Begin Patch\n*** Add: m::f\n+fn f() {}\n*** End Patch\n";
+    let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
+    assert!(err.contains("would create module m::f") && err.contains("*** Add: m.f"), "{err}");
+    assert!(!root.join("src/m/f.rs").exists());
+    assert!(store.index().unwrap().modules.iter().all(|m| m.path != "m::f"));
+
+    let patch = "*** Begin Patch\n*** Add: m.f\n+fn f() {}\n*** End Patch\n";
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("Saved m.f"), "{out}");
+
+    let patch = "*** Begin Patch\n*** Add: m::helpers\n+fn f() {}\n*** End Patch\n";
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("created module m::helpers"), "{out}");
+    assert!(out.contains("Saved m::helpers.f"), "{out}");
+    assert_eq!(text_of(&root, "src/m/helpers.rs"), "fn f() {}\n");
+
+    let patch = "*** Begin Patch\n*** Add: m::f\n+fn f() {}\n+fn g() {}\n*** End Patch\n";
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("created module m::f"), "{out}");
+    assert!(out.contains("Saved m::f.f, m::f.g"), "{out}");
+
+    let patch = "*** Begin Patch\n*** Add: m::f\n+fn h() {}\n*** End Patch\n";
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("Saved m::f.h"), "{out}");
+
+    let inline = crate::testing::Scratch::new().with(&[
+        ("Cargo.toml", CARGO),
+        ("src/lib.rs", "mod m;\n"),
+        ("src/m.rs", "pub fn keep() -> i32 {\n    0\n}\n\nmod tests {\n    pub fn helper() -> i32 {\n        1\n    }\n}\n"),
+    ]);
+    crate::import(&inline).unwrap();
+    let store = Store::at(&inline).unwrap();
+    let patch = "*** Begin Patch\n*** Add: m::tests::t\n+fn t() {}\n*** End Patch\n";
+    let err = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
+    assert!(err.contains("*** Add: m::tests.t"), "{err}");
+
+    let patch = "*** Begin Patch\n*** Add: m::tests.t\n+fn t() {}\n*** End Patch\n";
+    let out = drafts::submit(&store, &["submit"], &mut || Ok(patch.into()), None).unwrap();
+    assert!(out.contains("Saved m.tests::t"), "{out}");
+    let ix = store.index().unwrap();
+    assert!(store.resolve(&ix, "m.tests::t").is_ok());
 }

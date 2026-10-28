@@ -1,6 +1,8 @@
 use super::*;
 use crate::testing::Scratch;
 
+use serde_json::Value;
+use serde_json::json;
 fn invalid(text: &str) -> String {
     lockdown::parse_settings(text).unwrap_err().0
 }
@@ -182,10 +184,10 @@ fn build_plan_is_a_command() {
     let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
     let v = lockdown::settings(&p.root).unwrap();
     let mut input = || -> Out { Ok(String::new()) };
-    let out = lockdown::dispatch(&p, &v, &["build", "plan"], &mut input, None, BUDGET).unwrap().unwrap();
+    let out = lockdown::dispatch(&p, &v, &["build", "plan"], &mut input, None, crate::cli::BUDGET).unwrap().unwrap();
     assert!(out.contains("1. . (default)") && out.contains("- gleam: gleam build --target erlang"), "{out}");
     assert!(!p.root.join("build").exists());
-    let e = lockdown::dispatch(&p, &v, &["build", "now"], &mut input, None, BUDGET).unwrap().unwrap_err().0;
+    let e = lockdown::dispatch(&p, &v, &["build", "now"], &mut input, None, crate::cli::BUDGET).unwrap().unwrap_err().0;
     assert!(e.contains("`build plan`"), "{e}");
 }
 

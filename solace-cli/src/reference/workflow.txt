@@ -20,7 +20,7 @@ call is a turn that re-reads the conversation, so work in few calls:
    for anything a reply showed, and read only what the change needs: once you
    know what to change, stop exploring. To reproduce a case, in Gleam:
    `probe --from checkout_test.pay_test --trace checkout.pay`; in Rust,
-   `probe` with statements that call it.
+   `probe --from <module>.tests::<test>`.
 2. Change and test in one call, never a change alone: code changes
    (symbols and modules) go in one `submit` patch, then `test`;
    other files go in one `write` patch (no path), then `run <name>`;

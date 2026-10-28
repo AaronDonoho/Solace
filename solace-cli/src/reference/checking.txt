@@ -19,7 +19,6 @@ Checking
   probe --from <fn>             start from a test's (or any function without
                                 arguments) imports and body; `text` adds
                                 statements that can use its variables
-                                Gleam only
   probe --trace <fn>...         also show each call to these functions, with
                                 its arguments and result (combines with --from)
                                 Gleam only

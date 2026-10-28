@@ -7,6 +7,8 @@
 use super::*;
 use std::collections::BTreeMap;
 
+use serde_json::Value;
+use serde_json::json;
 pub const TITLE: &str = "Unexpected Changes";
 
 fn digest(bytes: &[u8]) -> String {
@@ -192,7 +194,7 @@ pub fn file_of(dir: &str, module: &str) -> String {
 fn graph_files(s: &Store) -> Result<Vec<String>, Failure> {
     if let Some(lang) = language::detect(&s.root) {
         let mut out = lang.source_files(&s.root)?;
-        out.retain(|rel| *rel != file_of("test", PROBE));
+        out.retain(|rel| *rel != file_of("test", crate::cli::PROBE));
         return Ok(out);
     }
     if !language::is_rust(&s.root) {

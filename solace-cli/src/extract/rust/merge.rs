@@ -12,7 +12,11 @@ use super::{
 };
 use crate::rust_check::post_move_check;
 use crate::language::rust_refs::{Site, Via};
-use crate::{Failure, Index, Out, Store, Sym, fail, language, lockdown, revision};
+use crate::{ Index,  Store, Sym,  language, lockdown, revision};
+use crate::failure::fail;
+use crate::failure::Out;
+use crate::failure::Failure;
+use crate::failure::usage;
 #[path = "merge_tests.rs"]
 mod tests;
 
@@ -21,7 +25,7 @@ pub(crate) fn merge(s: &Store, survivor: &str, retired: &str, budget: usize) -> 
     let keep_i = s.resolve(&ix, survivor)?;
     let gone_i = s.resolve(&ix, retired)?;
     if keep_i == gone_i {
-        return crate::usage(format!("{} is one symbol; merge takes two", ix.syms[gone_i].qname()));
+        return usage(format!("{} is one symbol; merge takes two", ix.syms[gone_i].qname()));
     }
     mergeable(&ix.syms[keep_i])?;
     mergeable(&ix.syms[gone_i])?;

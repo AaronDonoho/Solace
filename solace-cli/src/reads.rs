@@ -5,6 +5,8 @@
 use super::*;
 use crate::cli::verb_words;
 
+use serde_json::Value;
+use serde_json::json;
 thread_local! {
     /// The symbols this MCP call printed in full, in a task run; `None`
     /// elsewhere, so other runs keep no reads.
@@ -209,7 +211,7 @@ fn cut_text(s: &str, room: usize) -> &str {
 
 /// Whether a command's words name a change command (D-157).
 fn is_change(words: &[String]) -> bool {
-    verb_words(words).first().is_some_and(|v| STOPS.contains(v))
+    verb_words(words).first().is_some_and(|v| crate::cli::STOPS.contains(v))
 }
 
 /// Runs `f` without recording what it prints as served: `session remember`

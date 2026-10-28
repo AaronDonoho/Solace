@@ -15,6 +15,10 @@ Changing (the new code is in `text`)
                                 <module>` a new module (module comment,
                                 imports, code); every line of an Add, empty
                                 ones too, starts with `+`.
+                                In Rust, an Add whose only item has the new
+                                module's own name is refused; use the dotted
+                                form, e.g. `*** Add: m.f` instead of
+                                `*** Add: m::f`.
                                 A new symbol after unchanged context is an
                                 add; `submit <stored name>` with the new text
                                 renames it and keeps its id; change its callers

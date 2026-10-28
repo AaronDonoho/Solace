@@ -3,6 +3,9 @@ use std::os::unix::process::CommandExt;
 use std::time::{Duration, Instant};
 mod prerequisites;
 
+use serde_json::Value;
+use serde_json::json;
+use std::io::Read;
 pub fn lock(root: &Path) -> Result<fs::File, Failure> {
     fs::create_dir_all(root.join(".solace"))?;
     // one project lock; use per-change store isolation if parallel work is introduced.
@@ -44,7 +47,7 @@ fn task_dir(root: &Path, id: &str) -> Result<PathBuf, Failure> {
 /// A task whose home is the project `root`. A task whose home is no project is
 /// re-homed on load (D-160); one with no project at all is opened from the
 /// root, which stores it, and says `noProject` (D-129).
-pub(super) fn task(root: &Path, id: &str) -> Result<Value, Failure> {
+pub(crate) fn task(root: &Path, id: &str) -> Result<Value, Failure> {
     let top = scope::top(root);
     let mut t = stored_task(&top, id)?;
     let dir = scope::dir(&top, root);
@@ -3373,7 +3376,7 @@ pub(super) fn run_outline(top: &Path, tid: &str, rid: &str, budget: usize) -> St
 /// agent that noticed its conversation was compacted. It reads only and is
 /// repeatable; a discussion's brief already holds its context, so it is
 /// refused, and so is a run that isn't there (D-157 point 7).
-pub(super) fn remember(top: &Path, tid: &str, rid: &str, budget: usize) -> Out {
+pub(crate) fn remember(top: &Path, tid: &str, rid: &str, budget: usize) -> Out {
     let Some(run) = run_record(top, tid, rid) else { return err("E7003", format!("unknown run {rid}")) };
     if run["kind"] == "discuss" {
         return err("E7010", "a discussion's brief holds its context; reply with `task note`");
@@ -3797,7 +3800,7 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: &[&Path]
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
-        if HOST.contains(&a[0]) {
+        if crate::cli::HOST.contains(&a[0]) {
             return err("E7010", "host command is unavailable in a run");
         }
         if r["kind"] != "work" && a.starts_with(&["drafts", "drop"]) {
@@ -3812,7 +3815,7 @@ pub fn agent_guard(root: &Path, tid: &str, rid: &str, a: &[&str], also: &[&Path]
             if !marked {
                 return err("E7010", "this run is read-only: run only works for commands marked allowed_in_reviews in solace.toml");
             }
-        } else if r["kind"] != "work" && CHANGES.contains(&a[0]) && a[0] != "build" {
+        } else if r["kind"] != "work" && crate::command_tx::CHANGES.contains(&a[0]) && a[0] != "build" {
             return err("E7010", "this run is read-only");
         }
         // The human may have changed the task's projects while it was paused.
@@ -3901,7 +3904,7 @@ pub fn task_command(
         }
         _ => {
             return usage(concat!(
-                "task peek <task> [--notes [<notes>]] [--from <n>] | task peek feature | ",
+                "task peek <task> [--notes [3,7,10..12]] [--from <n>] | task peek feature | ",
                 "task note | task ask | task done, with the text in `text`; ",
                 "task diff [--since-review] [name ...]",
             ));
@@ -5609,7 +5612,7 @@ pub fn plan_reading(top: &Path, tid: &str) -> String {
 /// `task peek` (D-203): a task the run may read, or its feature, as JSON.
 pub fn task_peek(s: &Store, tid: &str, args: &[&str], budget: usize) -> Out {
     let Some(subject) = args.first().copied() else {
-        return usage("task peek <task> [--notes [<notes>]] [--from <n>] | task peek feature");
+        return usage("task peek <task> [--notes [3,7,10..12]] [--from <n>] | task peek feature");
     };
     if tasks::bare_id(subject) == "feature" {
         if args.len() > 1 {
@@ -5694,7 +5697,7 @@ fn peek_feature(root: &Path, tid: &str) -> Out {
     Ok(format!("{}\n", serde_json::to_string_pretty(&reply).unwrap()))
 }
 
-/// `--notes [<notes>]` and `--from <n>` after `task peek <task>`.
+/// `--notes [3,7,10..12]` and `--from <n>` after `task peek <task>`.
 fn peek_flags(rest: &[&str]) -> Result<(bool, Option<String>, usize), Failure> {
     let (mut notes, mut spec, mut from) = (false, None, 0);
     let mut i = 0;
@@ -5705,6 +5708,9 @@ fn peek_flags(rest: &[&str]) -> Result<(bool, Option<String>, usize), Failure> {
                 if let Some(given) = rest.get(i + 1).filter(|x| !x.starts_with("--")) {
                     spec = Some((*given).to_string());
                     i += 1;
+                    if rest.get(i + 1).is_some_and(|x| !x.starts_with("--")) {
+                        return usage("notes take one list, e.g. `--notes 1,2,8..12`");
+                    }
                 }
             }
             "--from" => {

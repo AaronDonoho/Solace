@@ -6,6 +6,9 @@
 
 use super::*;
 
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 /// The Solace root that holds a project: the project itself when none does.
 pub fn top(project: &Path) -> PathBuf {
     workspace::enclosing(project).ok().flatten().unwrap_or_else(|| project.to_path_buf())

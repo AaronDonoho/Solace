@@ -1,6 +1,7 @@
 use super::testing::*;
 use super::*;
 
+use serde_json::json;
 /// Runs the reference layout check (D-143) on `text`: whether it passed, and its output.
 fn reference_layout(text: &str) -> (bool, String) {
     let dir = Scratch::new().with(&[("reference.txt", text)]);
@@ -170,91 +171,6 @@ fn reference_layout_refuses_a_line_after_prose_and_a_reference_without_the_secti
         (false, "no command row has its description on the same line\n".into())
     );
 }
-#[test]
-fn broken_symbols_counted_once() {
-    let d = |sym: &str| Diag { error: true, module: None, symbol: Some(sym.into()), text: format!("error: {sym}") };
-    let out = broken_report(&HashMap::new(), &[d("a.f"), d("a.g"), d("a.f")]);
-    assert!(out.contains("Broken symbols (2): a.f, a.g"), "{out}");
-}
-/// A batch runner that records each command and fails the one named `fail`.
-fn fake<'a>(fail: &'static str, ran: &'a mut Vec<String>) -> impl FnMut(&[String], usize) -> Out + 'a {
-    move |w: &[String], _| {
-        ran.push(w.join(" "));
-        if w[0] == fail { Err(Failure(format!("E6002 {fail} failed"), 1)) } else { Ok("fine".into()) }
-    }
-}
-#[test]
-fn a_failed_change_stops_the_call() {
-    // D-119: a failed write skips the read and the run after it.
-    let mut ran = vec![];
-    let (out, error) = batch(&["write a.md", "read b.md", "run rust-unit"], 10_000, &mut fake("write", &mut ran));
-    assert!(error);
-    assert_eq!(ran, ["write a.md"]);
-    assert!(!out.contains("==== solace read") && !out.contains("==== solace run"), "{out}");
-    assert!(out.ends_with("E6002 write failed\n1 of 3 commands failed: write a.md; skipped: read b.md; run rust-unit\n"), "{out}");
-    // A failed read does not stop the call; with nothing skipped, the line is D-109's.
-    let mut ran = vec![];
-    let (out, error) = batch(&["read b.md", "write a.md"], 10_000, &mut fake("read", &mut ran));
-    assert!(error);
-    assert_eq!(ran, ["read b.md", "write a.md"]);
-    assert!(out.ends_with("1 of 2 commands failed: read b.md\n"), "{out}");
-    // A failed change as the last command skips nothing; a failed run stops nothing.
-    let mut ran = vec![];
-    let (out, _) = batch(&["read b.md", "solace write a.md"], 10_000, &mut fake("write", &mut ran));
-    assert!(out.ends_with("1 of 2 commands failed: write a.md\n"), "{out}");
-    let mut ran = vec![];
-    let (out, _) = batch(&["run rust-unit", "read b.md"], 10_000, &mut fake("run", &mut ran));
-    assert_eq!(ran, ["run rust-unit", "read b.md"]);
-    assert!(out.ends_with("1 of 2 commands failed: run rust-unit\n"), "{out}");
-    // Nothing failed: no last line, and no error.
-    let (out, error) = batch(&["read b.md", "write a.md"], 10_000, &mut fake("none", &mut vec![]));
-    assert!(!error && !out.contains("commands failed"), "{out}");
-}
-/// task:da797576d0cfaaac: a line that is only `--project <dir>` fails
-/// alone, and the rest of the call runs.
-#[test]
-fn a_project_with_no_command_is_refused_and_the_call_goes_on() {
-    let mut ran = vec![];
-    let (out, error) = batch(&["--project solace-cli/board", "read b.md"], 10_000, &mut fake("none", &mut ran));
-    assert!(error);
-    assert_eq!(ran, ["read b.md"]);
-    assert!(out.contains(PROJECT_ONLY), "{out}");
-    assert!(out.contains("at the end of each command line it applies to"), "{out}");
-    assert!(out.ends_with("1 of 2 commands failed: --project solace-cli/board\n"), "{out}");
-    // A line with no `--project` at all is no such line: it runs as before.
-    let mut lens = vec![];
-    let (_, error) = batch(&["solace"], 10_000, &mut |w: &[String], _| -> Out {
-        lens.push(w.len());
-        Ok(String::new())
-    });
-    assert!(!error && lens == [0]);
-}
-/// task:da797576d0cfaaac: a panic is that line's error and stops the call;
-/// the tool outlives it, so the next call runs.
-#[test]
-fn a_panicking_command_is_an_error_and_stops_the_call() {
-    let mut ran = vec![];
-    let (out, error) = batch(&["read a.md", "view x", "read b.md"], 10_000, &mut |w: &[String], _| -> Out {
-        ran.push(w.join(" "));
-        if w[0] == "view" {
-            panic!("boom");
-        }
-        Ok("fine".to_string())
-    });
-    assert!(error);
-    assert_eq!(ran, ["read a.md", "view x"]);
-    assert!(out.contains("fine"), "{out}");
-    assert!(
-        out.ends_with(concat!(
-            "Solace hit an internal error running `view x`: boom; nothing after it ran\n",
-            "1 of 3 commands failed: view x; skipped: read b.md\n",
-        )),
-        "{out}"
-    );
-    let mut ran = vec![];
-    let (out, error) = batch(&["read a.md"], 10_000, &mut fake("none", &mut ran));
-    assert!(!error && ran == ["read a.md"], "{out}");
-}
 /// task:da797576d0cfaaac: a panic drops the call's thread-local state,
 /// rolling back an outer transaction it left open.
 #[test]
@@ -263,93 +179,10 @@ fn a_panic_resets_the_calls_state() {
     store.db.execute_batch("BEGIN IMMEDIATE").unwrap();
     COMMAND_DB.set(vec![(store.root.clone(), store.db.clone())]);
     UNTESTED.with(|u| *u.borrow_mut() = Some("app.main".into()));
-    reset_after_panic();
+    crate::cli::reset_after_panic();
     assert!(store.db.is_autocommit(), "the open transaction is rolled back");
     assert!(COMMAND_DB.with(|c| c.borrow().is_empty()));
     assert!(UNTESTED.with(|u| u.borrow().is_none()));
-}
-/// A batch runner whose `test` passes or fails, leaving `untested` named as
-/// the task's changes no test reaches.
-fn fake_test<'a>(pass: bool, untested: Option<&'static str>, ran: &'a mut Vec<String>) -> impl FnMut(&[String], usize) -> Out + 'a {
-    move |w: &[String], _| {
-        ran.push(w.join(" "));
-        if !w.iter().any(|x| x == "test") {
-            return Ok("fine".into());
-        }
-        UNTESTED.with(|u| *u.borrow_mut() = untested.map(String::from));
-        if pass { Ok("passed".into()) } else { Err(Failure("1 failure".into(), 1)) }
-    }
-}
-#[test]
-fn a_batched_task_done_waits_for_a_passing_test() {
-    // D-152: a failed test holds back the task done after it.
-    let mut ran = vec![];
-    let (out, error) = batch(&["submit", "test", "task done fixed"], 10_000, &mut fake_test(false, None, &mut ran));
-    assert!(error);
-    assert_eq!(ran, ["submit", "test"]);
-    assert!(!out.contains("==== solace task done"), "{out}");
-    assert!(out.ends_with(&format!("1 of 3 commands failed: test; skipped: task done fixed (the test failed)\n{HELD}")), "{out}");
-    // A pass that leaves a change no test reaches holds it back too, and is no error.
-    let mut ran = vec![];
-    let (out, error) = batch(&["submit", "test", "task done fixed"], 10_000, &mut fake_test(true, Some("app.three"), &mut ran));
-    assert!(!error);
-    assert_eq!(ran, ["submit", "test"]);
-    assert!(out.ends_with(&format!("Skipped: task done fixed (no test reaches app.three)\n{HELD}")), "{out}");
-    // A clean pass finishes, a test in another project too.
-    let mut ran = vec![];
-    let (out, error) = batch(&["submit", "--project lib test", "task done fixed"], 10_000, &mut fake_test(true, None, &mut ran));
-    assert!(!error);
-    assert_eq!(ran, ["submit", "--project lib test", "task done fixed"]);
-    assert!(!out.contains("Skipped") && !out.contains(HELD), "{out}");
-    // A task done before the test, or in a call with no test, runs.
-    let mut ran = vec![];
-    batch(&["task done fixed", "test"], 10_000, &mut fake_test(false, None, &mut ran));
-    assert_eq!(ran, ["task done fixed", "test"]);
-    let mut ran = vec![];
-    let (out, _) = batch(&["submit", "task done fixed"], 10_000, &mut fake_test(false, Some("app.three"), &mut ran));
-    assert_eq!(ran, ["submit", "task done fixed"]);
-    assert!(!out.contains("Skipped"), "{out}");
-}
-/// D-145: from the second successful single read in a row, the reply hints to batch.
-#[test]
-fn a_second_single_read_in_a_row_gets_the_hint() {
-    let mut streak = 0;
-    assert_eq!(read_hint(&mut streak, &["read a.md"], false), "");
-    assert_eq!(read_hint(&mut streak, &["solace grep x"], false), READ_HINT);
-    assert_eq!(read_hint(&mut streak, &["view a.f --project lib"], false), READ_HINT);
-    // A batch, a failed read and a change each start the count again.
-    assert_eq!(read_hint(&mut streak, &["read a.md", "read b.md"], false), "");
-    assert_eq!(read_hint(&mut streak, &["read a.md"], false), "");
-    assert_eq!(read_hint(&mut streak, &["read a.md"], true), "");
-    assert_eq!(read_hint(&mut streak, &["read a.md"], false), "");
-    assert_eq!(read_hint(&mut streak, &["write a.md"], false), "");
-    assert_eq!(read_hint(&mut streak, &["--project lib inspect a.f"], false), "");
-    assert_eq!(read_hint(&mut streak, &["--project lib inspect a.f"], false), READ_HINT);
-    assert_eq!(read_hint(&mut streak, &[], false), "");
-    assert_eq!(streak, 0);
-}
-/// A read command given an option it doesn't take is refused by name.
-#[test]
-fn an_option_a_command_doesnt_take_is_refused_by_name() {
-    let e = unknown_option(&["view", "strategy.update", "--lines", "50..80"]).unwrap().unwrap_err().0;
-    assert!(e.starts_with("view has no --lines; read takes --lines. view takes: --bodies"), "{e}");
-    let e = unknown_option(&["view", "strategy.update", "--context"]).unwrap().unwrap_err().0;
-    assert!(e.contains("`--context` belongs to `inspect`: `inspect <name> --context`"), "{e}");
-    assert!(unknown_option(&["read", "a.md", "--lines", "1..2"]).is_none());
-    assert!(unknown_option(&["inspect", "a.b", "--context"]).is_none());
-    assert!(unknown_option(&["view", "a", "--bodies"]).is_none());
-    assert!(unknown_option(&["view", "--draft", "x"]).is_none(), "view --draft is in the reference");
-    assert!(unknown_option(&["grep", "--x"]).is_none());
-}
-/// The unknown-option refusal comes before other refusals, at both entry
-/// points: `run_inner`, and `--project` through `read_project`.
-#[test]
-fn an_unknown_option_is_refused_before_other_refusals() {
-    let args = vec!["view".to_string(), "app.main".to_string(), "--lines".to_string(), "1..2".to_string()];
-    let e = run_inner(&args, &mut || Ok(String::new()), None, 10_000).unwrap_err().0;
-    assert!(e.starts_with("view has no --lines; read takes --lines"), "{e}");
-    let e = read_project("no-such-project", &args, 10_000).unwrap_err().0;
-    assert!(e.starts_with("view has no --lines; read takes --lines"), "{e}");
 }
 #[test]
 fn the_tool_asks_for_batched_reads_short_text_and_a_clean_stop() {
@@ -457,9 +290,9 @@ fn a_name_in_another_project_says_where_it_is() {
         import(&root.join(d)).unwrap();
     }
     let a = Store::at(&root.join("a")).unwrap();
-    let e = hinted(a.view(&["plan.answer"], false, BUDGET), &a.root).unwrap_err().0;
+    let e = crate::cli::hinted(a.view(&["plan.answer"], false, crate::cli::BUDGET), &a.root).unwrap_err().0;
     assert!(e.contains("E1001 unknown name: plan.answer\nfound in b: add --project b"), "{e}");
-    let e = hinted(a.view(&["plan.nope"], false, BUDGET), &a.root).unwrap_err().0;
+    let e = crate::cli::hinted(a.view(&["plan.nope"], false, crate::cli::BUDGET), &a.root).unwrap_err().0;
     assert!(e.contains("E1001") && !e.contains("found in"), "{e}");
     let s = a.other_projects(None);
     for part in [
@@ -471,19 +304,6 @@ fn a_name_in_another_project_says_where_it_is() {
     ] {
         assert!(s.contains(part), "{part} missing from:\n{s}");
     }
-}
-
-#[test]
-fn probe_args_parse() {
-    assert_eq!(probe_args(&["--from", "t", "--trace", "a.b", "c"]).unwrap(), (Some("t"), vec!["a.b", "c"], None));
-    assert_eq!(probe_args(&["--in", "parser"]).unwrap(), (None, vec![], Some("parser")));
-    assert_eq!(probe_args(&[]).unwrap(), (None, vec![], None));
-    assert!(
-        probe_args(&["--trace"]).is_err()
-            && probe_args(&["--from"]).is_err()
-            && probe_args(&["--in"]).is_err()
-            && probe_args(&["x"]).is_err()
-    );
 }
 
 #[test]
@@ -561,12 +381,6 @@ fn inspect_dedups_and_fits_budget() {
     // D-102: `refs <name>...` gives each symbol's users, in the order named
     let many = ok(store.refs_all(&["pricing.quote", "checkout.quote"], usize::MAX));
     assert!(many.starts_with("pilot/pricing.quote is used by") && many.contains("\npilot/checkout.quote is used by"), "{many}");
-}
-
-#[test]
-fn code_is_told_from_commands() {
-    assert!(looks_like_code("let assert Ok(q) = checkout.quote(db, o.id, Standard)") && looks_like_code("echo q"));
-    assert!(!looks_like_code("probe --from checkout_test.quote_test --trace pricing.quote"));
 }
 
 #[test]
@@ -885,7 +699,7 @@ fn session_start_ends_with_a_first_call() {
 fn session_start_caps_the_open_work_records() {
     let store = calc_project();
     store.work_add("Short record about calc.add").unwrap();
-    let long = "x".repeat(WORK_CAP);
+    let long = "x".repeat(crate::cli::WORK_CAP);
     store.work_add(&long).unwrap();
     let out = store.session(&[]).unwrap();
     assert!(out.contains("#1\nShort record about calc.add\n") && !out.contains(&long), "{out}");
@@ -936,35 +750,35 @@ fn whole_module_and_imports_submit() {
     let store = calc_project();
     let file = store.root.join("src/calc.gleam");
     let module = fs::read_to_string(&file).unwrap().replace("a + b", "b + a");
-    let out = store.submit(Target::Module("calc"), &module).unwrap();
+    let out = store.submit(crate::store::Target::Module("calc"), &module).unwrap();
     assert_eq!(out, "Note: calc: changed add; added none\nSaved calc.\nThe project type-checks.\n");
     assert!(fs::read_to_string(&file).unwrap().contains("b + a"));
     let without_three = module.split("pub fn three").next().unwrap();
-    assert!(store.submit(Target::Module("calc"), without_three).unwrap_err().0.contains("E0102 the module text leaves out: three"));
-    assert!(store.submit(Target::Module("calc"), &format!("{module}\npub fn one() {{ 1 }}")).unwrap_err().0.starts_with("E0103"));
+    assert!(store.submit(crate::store::Target::Module("calc"), without_three).unwrap_err().0.contains("E0102 the module text leaves out: three"));
+    assert!(store.submit(crate::store::Target::Module("calc"), &format!("{module}\npub fn one() {{ 1 }}")).unwrap_err().0.starts_with("E0103"));
     // A rejected module leaves the stored code, and its file, as they were.
     let before = fs::read_to_string(&file).unwrap();
-    let err = store.submit(Target::Module("calc"), &module.replace("b + a", "b +. a")).unwrap_err().0;
+    let err = store.submit(crate::store::Target::Module("calc"), &module.replace("b + a", "b +. a")).unwrap_err().0;
     assert!(err.starts_with("Not saved: the submitted text has errors."), "{err}");
     assert_eq!(fs::read_to_string(&file).unwrap(), before);
     store.submit_symbols(None, Some("other"), "pub fn x() { 1 }").unwrap();
-    let out = store.submit(Target::Imports("calc"), "//// Arithmetic.\nimport other").unwrap();
+    let out = store.submit(crate::store::Target::Imports("calc"), "//// Arithmetic.\nimport other").unwrap();
     assert!(out.starts_with("Saved calc imports."), "{out}");
     let text = fs::read_to_string(&file).unwrap();
     assert!(text.starts_with("//// Arithmetic.\n\nimport other\n"), "{text}");
-    assert!(store.submit(Target::Imports("calc"), "pub fn x() { 1 }").unwrap_err().0.starts_with("E0101"));
-    assert!(store.submit(Target::Imports("nope"), "").unwrap_err().0.starts_with("E1003"));
+    assert!(store.submit(crate::store::Target::Imports("calc"), "pub fn x() { 1 }").unwrap_err().0.starts_with("E0101"));
+    assert!(store.submit(crate::store::Target::Imports("nope"), "").unwrap_err().0.starts_with("E1003"));
 }
 
 /// D-44: `impact` follows a symbol's data to what uses it.
 #[test]
 fn impact_names_what_a_symbol_reaches() {
     let store = calc_project();
-    let out = store.impact(&["calc.add"], BUDGET).unwrap();
+    let out = store.impact(&["calc.add"], crate::cli::BUDGET).unwrap();
     assert!(out.starts_with("calc.add reaches 3 uses, nearest first:"), "{out}");
     assert!(out.contains("calc.one") && out.contains("calc.two") && out.contains("calc.three"), "{out}");
-    assert!(store.impact(&[], BUDGET).unwrap().starts_with("Tests haven't passed in full yet"));
-    assert!(store.impact(&["calc.nope"], BUDGET).unwrap_err().0.starts_with("E1001"));
+    assert!(store.impact(&[], crate::cli::BUDGET).unwrap().starts_with("Tests haven't passed in full yet"));
+    assert!(store.impact(&["calc.nope"], crate::cli::BUDGET).unwrap_err().0.starts_with("E1001"));
 }
 
 /// D-12: work records last between sessions; a session start shows the
@@ -1191,27 +1005,6 @@ fn a_gleam_task_with_a_rust_sibling_lists_both() {
     assert!(out.contains("crate.Store::open"), "{out}");
 }
 
-/// D-158: `--project <rust>` reads Rust items with inspect, refs and find.
-#[test]
-fn read_project_reads_a_rust_project() {
-    let root = testing::Scratch::new().with(&[
-        ("solace.toml", "projects = [\"r\"]\n"),
-        ("r/Cargo.toml", testing::CARGO),
-        ("r/src/lib.rs", "pub fn helper() -> i32 {\n    1\n}\n\npub fn caller() -> i32 {\n    helper()\n}\n"),
-    ]);
-    import(&root).unwrap();
-    import(&root.join("r")).unwrap();
-    for (args, want) in [
-        (&["inspect", "crate.helper"][..], "crate.helper (fn)"),
-        (&["refs", "crate.helper"][..], "crate.caller"),
-        (&["find", "helper"][..], "crate.helper"),
-    ] {
-        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        let got = crate::with_root(&root, || crate::read_project("r", &args, 10_000)).unwrap();
-        assert!(got.contains(want), "{args:?}: {got}");
-    }
-}
-
 /// A task in a plain root names its Rust project and how to run there.
 #[test]
 fn a_plain_task_refusal_names_the_project_to_run_in() {
@@ -1289,6 +1082,7 @@ fn rust_reference_lists_the_names_and_what_is_missing() {
         "submit --new store::notes",
         "integration::x",
         "*** Add: a::b::c",
+        "*** Add: m.f",
         "find <text>",
         "grep <text>",
         "find resolve_module",
@@ -1356,11 +1150,11 @@ fn a_rust_format_takes_one_module_the_store_holds() {
 #[test]
 fn a_rust_format_is_not_a_process() {
     let (root, _) = testing::rust_project("pub fn helper() -> i32 {\n    1\n}\n");
-    assert!(!is_process(&["format", "crate"], &root));
-    assert!(!is_process(&["format"], &root));
-    assert!(is_process(&["build"], &root));
+    assert!(!crate::cli::is_process(&["format", "crate"], &root));
+    assert!(!crate::cli::is_process(&["format"], &root));
+    assert!(crate::cli::is_process(&["build"], &root));
     let plain = testing::Scratch::new();
-    assert!(is_process(&["format", "crate"], &plain));
+    assert!(crate::cli::is_process(&["format", "crate"], &plain));
 }
 
 /// D-180: `format` names the tool a machine lacks and saves nothing.
@@ -1377,61 +1171,6 @@ fn a_rust_format_names_the_missing_tool() {
     let dir = testing::Scratch::new().with(&[("cargo", "")]);
     let no_rustfmt = crate::language::cargo::with_path(&[dir.0.clone()], &format);
     assert!(no_rustfmt.contains("E6013") && no_rustfmt.contains(crate::language::cargo::RUSTFMT_MISSING), "{no_rustfmt}");
-}
-
-/// D-57: without an owning store, a read finds the root from the working folder.
-#[test]
-fn read_project_finds_its_root_from_the_working_folder() {
-    let root = testing::Scratch::new().with(&[
-        ("solace.toml", "projects = [\"r\"]\n"),
-        ("r/Cargo.toml", testing::CARGO),
-        ("r/src/lib.rs", "pub fn helper() -> i32 {\n    1\n}\n"),
-    ]);
-    import(&root).unwrap();
-    import(&root.join("r")).unwrap();
-    let got = crate::read_project_in(&["inspect", "crate.helper"], &root.join("r"), None, "r", 10_000).unwrap();
-    assert!(got.contains("crate.helper (fn)"), "{got}");
-    let outside = testing::Scratch::new();
-    let e = crate::read_project_in(&["inspect", "crate.helper"], &outside, None, "r", 10_000).unwrap_err();
-    assert!(e.0.contains("No Solace root here"), "{}", e.0);
-}
-
-/// D-184: a pass in a work run names the next step, with a test first for a change no test reaches.
-#[test]
-fn a_pass_names_the_next_step() {
-    assert_eq!(next_step(None, true), "Next: if every part of the task is changed, finish with task done.\n");
-    assert_eq!(
-        next_step(Some("app.two"), true),
-        "Next: add a test for app.two; then, if every part of the task is changed, finish with task done.\n"
-    );
-    assert_eq!(next_step(None, false), "");
-    assert_eq!(next_step(Some("app.two"), false), "");
-}
-
-#[test]
-fn grouped_privacy_errors_name_the_fix_once() {
-    let mut diags: Vec<Diag> = (0..6)
-        .map(|n| Diag {
-            error: true,
-            module: None,
-            symbol: Some(format!("crate.site{n}")),
-            text: format!("error[E0603]: function `helper` is private\n  at crate.site{n}, line 1"),
-        })
-        .collect();
-    diags.extend((0..6).map(|n| Diag {
-        error: true,
-        module: None,
-        symbol: Some(format!("crate.call{n}")),
-        text: format!("error[E0599]: no method named `open` found for struct `Store` in the current scope\n  at crate.call{n}, line 1"),
-    }));
-    diags.push(Diag { error: true, module: None, symbol: Some("crate.other".into()), text: "error: something else".into() });
-    let out = broken_report(&HashMap::new(), &diags);
-    assert!(out.contains("`helper` is private (6 places): make it `pub(crate)`"), "{out}");
-    assert!(out.contains("`open` is missing on `Store` (6 places): add the method or fix the call"), "{out}");
-    assert_eq!(out.matches("error: something else").count(), 1, "{out}");
-    for n in 0..6 {
-        assert!(out.contains(&format!("at crate.site{n}, line 1")), "{out}");
-    }
 }
 
 /// D-180: `format` reads the store's text, so a broken file on disk is named
@@ -1453,22 +1192,6 @@ fn a_rust_format_repairs_a_broken_file_from_the_store() {
     assert_eq!(fs::read_to_string(kept).unwrap(), broken);
     let two = store.index().unwrap().syms.into_iter().find(|s| s.name == "two").unwrap();
     assert_eq!(two.text, "pub fn two() -> i32 {\n    2\n}");
-}
-
-/// A command line with only `--project <dir>` is refused, not a panic.
-#[test]
-fn a_project_with_no_command_is_refused_by_the_cli() {
-    let p = testing::project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
-    let t = board::api(&p.root, "POST", "/tasks", json!({"title":"Project"})).unwrap();
-    let tid = t["id"].as_str().unwrap();
-    let e = crate::with_root(&p.root, || {
-        board::with_context(tid, "r", || {
-            crate::run_options(&["--project".to_string(), ".".to_string()], &mut || Ok(String::new()), None, 10_000, &[])
-        })
-    })
-    .unwrap_err();
-    assert!(e.0.starts_with(PROJECT_ONLY.trim_end()));
-    assert_eq!(e.1, 2);
 }
 
 /// A strategy run's help shows a worker command it can't run, and row names
@@ -1747,8 +1470,8 @@ fn a_rust_project_can_drop_a_draft() {
         params!["cli", json!(["submit"]).to_string(), "text", ""],
     )
     .unwrap();
-    let out = crate::with_root(&root, || {
-        crate::run_options(&["drafts".to_string(), "drop".to_string(), "d1".to_string()], &mut || Ok(String::new()), None, 10_000, &[])
+    let out = crate::cli::with_root(&root, || {
+        crate::cli::run_options(&["drafts".to_string(), "drop".to_string(), "d1".to_string()], &mut || Ok(String::new()), None, 10_000, &[])
     })
     .unwrap();
     assert!(out.contains("Dropped draft d1"), "{out}");
@@ -1825,12 +1548,12 @@ fn a_rust_probe_in_a_module_reaches_its_private_items() {
     assert_eq!(fs::read_to_string(root.join("src/parser.rs")).unwrap(), parser);
 }
 
-/// Rust has no `--from` or `--trace`: each says so, as Gleam only.
+/// Rust has no `--trace`, and `--from` decides where the probe runs.
 #[test]
-fn a_rust_probe_refuses_from_and_trace() {
+fn a_rust_probe_refuses_trace_and_from_with_in() {
     let (_root, store) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
-    let e = store.probe("one()", Some("crate.one"), &[], None).unwrap_err().0;
-    assert!(e.starts_with("E1006") && e.contains("--from") && e.contains("Gleam only"), "{e}");
+    let e = store.probe("one()", Some("crate.one"), &[], Some("crate")).unwrap_err().0;
+    assert!(e.starts_with("E1006") && e.contains("--from") && e.contains("--in"), "{e}");
     let e = store.probe("one()", None, &["crate.one"], None).unwrap_err().0;
     assert!(e.starts_with("E1006") && e.contains("--trace") && e.contains("Gleam only"), "{e}");
 }
@@ -1842,9 +1565,10 @@ fn a_rust_project_runs_a_probe_without_saving_it() {
         return;
     }
     let (root, _store) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
-    let out =
-        with_root(&root, || run_inner(&["probe".to_string()], &mut || Ok("println!(\"{}\", crate::one());".to_string()), None, 10_000))
-            .unwrap();
+    let out = crate::cli::with_root(&root, || {
+        crate::cli::run_inner(&root, &root, &["probe".to_string()], &mut || Ok("println!(\"{}\", crate::one());".to_string()), None, 10_000)
+    })
+    .unwrap();
     assert!(out.contains("exit code: 0") && out.contains('1'), "{out}");
     assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap(), "pub fn one() -> i32 {\n    1\n}\n");
 }
@@ -2137,13 +1861,13 @@ fn a_rust_project_extracts_and_merges_through_the_cli() {
     }
     let (extract_root, _) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n");
     let extract = ["extract", "crate.one", "--to", "helpers"].map(String::from);
-    let out = with_root(&extract_root, || run_options(&extract, &mut || Ok(String::new()), None, 10_000, &[])).unwrap();
+    let out = crate::cli::with_root(&extract_root, || crate::cli::run_options(&extract, &mut || Ok(String::new()), None, 10_000, &[])).unwrap();
     assert!(out.contains("Created module helpers (src/helpers.rs)"), "{out}");
 
     let (merge_root, _) =
         testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n\npub fn go() -> i32 {\n    two()\n}\n");
     let merge = ["merge", "crate.one", "crate.two"].map(String::from);
-    let out = with_root(&merge_root, || run_options(&merge, &mut || Ok(String::new()), None, 10_000, &[])).unwrap();
+    let out = crate::cli::with_root(&merge_root, || crate::cli::run_options(&merge, &mut || Ok(String::new()), None, 10_000, &[])).unwrap();
     assert!(out.contains("Merged crate.two into crate.one"), "{out}");
     assert!(out.contains("Redirected 1 reference in 1 module"), "{out}");
 }
@@ -2154,7 +1878,7 @@ fn a_rust_project_needs_cargo_to_extract_and_merge() {
     let (root, _) = testing::rust_project("pub fn one() -> i32 {\n    1\n}\n\npub fn two() -> i32 {\n    2\n}\n");
     let run = |args: &[&str]| {
         let args: Vec<String> = args.iter().copied().map(String::from).collect();
-        with_root(&root, || crate::language::cargo::with_path(&[], || run_options(&args, &mut || Ok(String::new()), None, 10_000, &[])))
+        crate::cli::with_root(&root, || crate::language::cargo::with_path(&[], || crate::cli::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[])))
     };
     for args in [&["extract", "crate.one", "--to", "helpers"][..], &["merge", "crate.one", "crate.two"][..]] {
         let err = run(args).unwrap_err().0;
@@ -2169,8 +1893,8 @@ fn a_language_reason_refusal_covers_extract_and_merge() {
     let reason = crate::language::off(crate::language::RUST);
     for args in [&["extract", "crate.one", "--to", "helpers"][..], &["merge", "crate.one", "crate.two"][..]] {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-        let err = crate::with_root(&root, || {
-            crate::board::with_config(&off.join("system.toml"), || crate::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+        let err = crate::cli::with_root(&root, || {
+            crate::board::with_config(&off.join("system.toml"), || crate::cli::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
         })
         .unwrap_err();
         assert!(err.0.contains("E6013") && err.0.contains(reason), "{args:?}: {}", err.0);
@@ -2201,8 +1925,8 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
     t["runs"] = json!([{"id": "run", "kind": "work", "state": "running"}]);
     crate::tasks::put(&s, &t).unwrap();
     let args = ["extract", "crate.helper", "--to", "helpers", "--to-project", "web"].map(String::from);
-    let e = crate::with_root(&rust, || {
-        crate::board::with_context(&tid, "run", || crate::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+    let e = crate::cli::with_root(&rust, || {
+        crate::board::with_context(&tid, "run", || crate::cli::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
     })
     .unwrap_err();
     assert!(e.0.contains("E6013") && e.0.contains("not available for Rust") && e.0.contains("D-185"), "{}", e.0);
@@ -2220,35 +1944,8 @@ fn a_rust_extract_to_project_in_a_task_leaves_no_open_change() {
 }
 
 #[test]
-fn a_trait_impl_name_is_typed_through_a_batch_line() {
-    let (root, _) = testing::rust_project(concat!(
-        "pub struct Failure;\n\n",
-        "impl From<std::io::Error> for Failure {\n",
-        "    fn from(_: std::io::Error) -> Self {\n        Self\n    }\n}\n",
-    ));
-    let (out, error) = crate::with_root(&root, || {
-        let mut run = |w: &[String], budget| run_options(w, &mut || Ok(String::new()), None, budget, &[]);
-        batch(
-            &[
-                "view crate.<Failure as From<std::io::Error>>",
-                "inspect crate.<Failure as From<std::io::Error>>::from",
-                "refs crate.<Failure as From<std::io::Error>>",
-                "refs crate.<Failure as From<std::io::Error>>::from",
-            ],
-            20_000,
-            &mut run,
-        )
-    });
-    assert!(!error, "{out}");
-    assert!(out.contains("// ── crate.<Failure as From<std::io::Error>> (impl) ──"), "{out}");
-    assert!(out.contains("// ── crate.<Failure as From<std::io::Error>>::from (fn) ──"), "{out}");
-    assert!(out.contains("==== solace refs crate.<Failure as From<std::io::Error>> ===="), "{out}");
-    assert!(out.contains("==== solace refs crate.<Failure as From<std::io::Error>>::from ===="), "{out}");
-}
-
-#[test]
 fn reference_hash() {
-    assert_eq!(sha256(REFERENCE.as_bytes()), "f06adf46bec9287d66c9530261b64fb7fc2c340adc53553f3b42c12a68a99e51");
+    assert_eq!(sha256(REFERENCE.as_bytes()), "0f76622c25dde0ab3b6ad518adffa89c8a6696044e5b178e0ce6a1ec1d34fa34");
 }
 
 #[test]
@@ -2300,55 +1997,137 @@ fn reference_layout_checks_a_section_file_whose_rows_wrap() {
     assert_eq!(reference_layout(&section(31)), (false, "line 5: starts at column 32; the descriptions start at column 31\n".into()));
 }
 
-fn grouped_site(module: Option<&str>, symbol: Option<String>) -> Diag {
-    let at = symbol.as_deref().unwrap_or("?").to_string();
-    Diag {
-        error: true,
-        module: module.map(str::to_string),
-        symbol,
-        text: format!("error[E0616]: field `0` of struct `Failure` is private\n  at {at}, line 1"),
+/// `--from` runs an inline test's body in the test's own module, so its
+/// imports, helpers and locals are in scope; nothing is saved.
+#[test]
+fn a_rust_probe_from_an_inline_test_runs_its_body() {
+    if !crate::language::cargo::installed() {
+        return;
     }
+    let lib = concat!(
+        "mod tests {\n",
+        "    use std::fs;\n\n",
+        "    fn helper() -> u64 {\n",
+        "        3\n",
+        "    }\n\n",
+        "    #[test]\n",
+        "    fn probe_values() {\n",
+        "        let value = helper() + 4;\n",
+        "        assert!(fs::metadata(file!()).unwrap().len() > 0);\n",
+        "    }\n",
+        "}\n",
+    );
+    let (root, store) = testing::rust_project(lib);
+    let out = store.probe("dbg!(value);", Some("crate.tests::probe_values"), &[], None).unwrap();
+    assert!(out.contains("[probe, line 1] value = 7"), "{out}");
+    assert!(probe_seconds(&out).is_some(), "{out}");
+    assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+    let runs: i64 = store.db.query_row("SELECT COUNT(*) FROM test_runs", [], |r| r.get(0)).unwrap();
+    let base: i64 = store.db.query_row("SELECT COUNT(*) FROM test_base", [], |r| r.get(0)).unwrap();
+    assert_eq!((runs, base), (0, 0));
 }
 
+/// A file-backed test module appends the probe to that module's file.
 #[test]
-fn grouped_sites_are_capped_and_name_their_modules() {
-    let modules = ["shown", "shown", "shown", "shown", "shown", "shown", "board", "drafts", "board", "lockdown", "drafts", "lockdown"];
-    let diags: Vec<Diag> =
-        modules.iter().copied().enumerate().map(|(n, module)| grouped_site(None, Some(format!("{module}.site{n}")))).collect();
-    let out = broken_report(&HashMap::new(), &diags);
-    assert!(out.contains("`0` is private on `Failure` (12 places): make it `pub(crate)`"), "{out}");
-    for n in 0..6 {
-        assert!(out.contains(&format!("at shown.site{n}, line 1")), "{out}");
+fn a_rust_probe_from_a_file_backed_test_uses_its_module() {
+    if !crate::language::cargo::installed() {
+        return;
     }
-    assert!(!out.contains("at board.site6, line 1"), "{out}");
-    assert!(out.contains("… and 6 more in board, drafts, lockdown"), "{out}");
+    let lib = "#[path = \"lib_tests.rs\"]\nmod tests;\n\npub fn one() -> i32 {\n    1\n}\n";
+    let tests =
+        "fn helper() -> i32 {\n    5\n}\n\n#[test]\nfn probe_values() {\n    let value = helper() + 1;\n    assert_eq!(value, 6);\n}\n";
+    let root = testing::Scratch::new().with(&[("Cargo.toml", testing::CARGO), ("src/lib.rs", lib), ("src/lib_tests.rs", tests)]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let out = store.probe("dbg!(value);", Some("tests.probe_values"), &[], None).unwrap();
+    assert!(out.contains("value = 6"), "{out}");
+    assert_eq!(fs::read_to_string(root.join("src/lib.rs")).unwrap(), lib);
+    assert_eq!(fs::read_to_string(root.join("src/lib_tests.rs")).unwrap(), tests);
 }
 
+/// An integration test is its own crate, so `--from` refuses it like `--in`.
 #[test]
-fn grouped_sites_name_the_located_module_once() {
-    let diags: Vec<Diag> = (0..8).map(|n| grouped_site(Some("board"), Some(format!("crate::call{n}")))).collect();
-    let out = broken_report(&HashMap::new(), &diags);
-    assert!(out.contains("`0` is private on `Failure` (8 places): make it `pub(crate)`"), "{out}");
-    for n in 0..6 {
-        assert!(out.contains(&format!("at crate::call{n}, line 1")), "{out}");
+fn a_rust_probe_refuses_from_an_integration_test() {
+    if !crate::language::cargo::installed() {
+        return;
     }
-    assert!(!out.contains("at crate::call6, line 1"), "{out}");
-    assert!(out.contains("… and 2 more in board"), "{out}");
+    let root = testing::Scratch::new().with(&[
+        ("Cargo.toml", testing::CARGO),
+        ("src/lib.rs", "pub fn one() -> i32 {\n    1\n}\n"),
+        ("tests/acceptance.rs", "#[test]\nfn probe_values() {\n    let value = 1;\n}\n"),
+    ]);
+    import(&root).unwrap();
+    let store = Store::at(&root).unwrap();
+    let e = store.probe("dbg!(value);", Some("integration::acceptance.probe_values"), &[], None).unwrap_err().0;
+    assert!(e.starts_with("E1006") && e.contains("test crate") && e.contains("--from"), "{e}");
 }
 
+/// A generic header hides the body from `--from`; the probe says so instead
+/// of running without the test's locals.
 #[test]
-fn grouped_sites_without_a_module_still_name_the_count() {
-    let diags: Vec<Diag> = (0..7).map(|_| grouped_site(None, None)).collect();
-    let out = broken_report(&HashMap::new(), &diags);
-    assert!(out.contains("`0` is private on `Failure` (7 places): make it `pub(crate)`"), "{out}");
-    assert!(out.contains("… and 1 more"), "{out}");
-    assert!(!out.contains("… and 1 more in"), "{out}");
+fn a_rust_probe_from_a_generic_function_says_it_cant_read_the_body() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (_root, store) = testing::rust_project("fn helper<T>() -> i32 {\n    1\n}\n");
+    let e = store.probe("dbg!(1);", Some("crate.helper"), &[], None).unwrap_err().0;
+    assert_eq!(e, "E1006 can't read the body of crate.helper; --from takes a non-generic function without arguments.");
 }
 
+/// `--from` places the probe in the test's own nested inline module, not a
+/// same-named `tests` module at the top level.
 #[test]
-fn a_cause_at_the_cap_has_no_more_line() {
-    let diags: Vec<Diag> = (0..6).map(|n| grouped_site(Some("board"), Some(format!("board.site{n}")))).collect();
-    let out = broken_report(&HashMap::new(), &diags);
-    assert!(out.contains("`0` is private on `Failure` (6 places): make it `pub(crate)`"), "{out}");
-    assert!(!out.contains("… and"), "{out}");
+fn a_rust_probe_from_a_nested_inline_test_uses_its_own_module() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let lib = concat!(
+        "mod tests {\n",
+        "    fn helper() -> i32 {\n",
+        "        100\n",
+        "    }\n\n",
+        "    #[test]\n",
+        "    fn top() {\n",
+        "        assert_eq!(helper(), 100);\n",
+        "    }\n",
+        "}\n\n",
+        "mod inner {\n",
+        "    mod tests {\n",
+        "        fn helper() -> i32 {\n",
+        "            7\n",
+        "        }\n\n",
+        "        #[test]\n",
+        "        fn probe_values() {\n",
+        "            let value = helper() + 1;\n",
+        "        }\n",
+        "    }\n",
+        "}\n",
+    );
+    let (_root, store) = testing::rust_project(lib);
+    let out = store.probe("dbg!(value);", Some("crate.inner::tests::probe_values"), &[], None).unwrap();
+    assert!(out.contains("[probe, line 1] value = 8"), "{out}");
+}
+
+/// A panic in the `--from` test's own body means the probe's statements never
+/// ran; the error says so instead of leaving only the panic.
+#[test]
+fn a_rust_probe_from_a_failing_test_says_the_probe_text_did_not_run() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let lib = "#[test]\nfn fails_before_probe() {\n    assert_eq!(1, 2);\n}\n";
+    let (_root, store) = testing::rust_project(lib);
+    let e = store.probe("dbg!(1);", Some("crate.fails_before_probe"), &[], None).unwrap_err().0;
+    assert!(e.contains("crate.fails_before_probe panicked before the probe's statements ran"), "{e}");
+}
+
+/// A generic function with arguments is refused for its arguments, before its body.
+#[test]
+fn a_rust_probe_from_a_generic_function_with_arguments_says_it_takes_arguments() {
+    if !crate::language::cargo::installed() {
+        return;
+    }
+    let (_root, store) = testing::rust_project("fn helper<T>(x: T) -> T {\n    x\n}\n");
+    let e = store.probe("dbg!(1);", Some("crate.helper"), &[], None).unwrap_err().0;
+    assert_eq!(e, "E1005 crate.helper takes arguments; --from takes a test or another function without arguments.");
 }

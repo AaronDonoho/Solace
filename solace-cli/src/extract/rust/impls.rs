@@ -1,7 +1,9 @@
 use std::collections::BTreeSet;
 
 use super::{full_path, impl_owner_symbol, impl_self_range, leaf, mark, module_named_like};
-use crate::{Failure, Index, fail};
+use crate::{ Index};
+use crate::failure::fail;
+use crate::failure::Failure;
 
 
 

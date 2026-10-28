@@ -1,5 +1,7 @@
 use super::*;
 
+use serde_json::Value;
+use serde_json::json;
 /// Reads `names` in `store` in full, as an MCP call would, and records them.
 fn read_names(store: &Store, names: &[&str], reads: &mut Reads) {
     SERVED.with(|v| *v.borrow_mut() = Some(vec![]));

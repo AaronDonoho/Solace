@@ -8,7 +8,9 @@ use rusqlite::params;
 use crate::rust_check::post_move_check;
 use crate::lockdown::error;
 use crate::rust_submit::{is_mod_line, mod_name, path_attr};
-use crate::{Failure, Index, ModuleRow, Out, Store, file_name, language, revision};
+use crate::{ Index, ModuleRow,  Store, file_name, language, revision};
+use crate::failure::Out;
+use crate::failure::Failure;
 #[cfg(test)]
 #[path = "rust_move_tests.rs"]
 mod tests;

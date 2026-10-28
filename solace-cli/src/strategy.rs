@@ -4,6 +4,8 @@
 
 use super::*;
 
+use serde_json::Value;
+use serde_json::json;
 /// Launches strategy run `rid`'s agent on its own thread. A plain-text reply
 /// is its turn: a fresh agent, briefed with every note, takes the next one.
 pub(super) fn start_strategy(top: PathBuf, rid: String) {

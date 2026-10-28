@@ -369,10 +369,10 @@ fn rust_adopt(item: &mut RustItem, done: &store::Submitted) {
 impl Store {
     /// The `submit` command in a Rust store (D-168): `--imports` replaces a
     /// module's header; `submit <module>` replaces the module whole.
-    pub(crate) fn submit_rust(&self, target: Target, raw: &str) -> Out {
+    pub(crate) fn submit_rust(&self, target: crate::store::Target, raw: &str) -> Out {
         match target {
-            Target::Imports(m) => self.submit_imports_rust(m, raw),
-            Target::Module(m) => self.submit_module_rust(m, raw, false),
+            crate::store::Target::Imports(m) => self.submit_imports_rust(m, raw),
+            crate::store::Target::Module(m) => self.submit_module_rust(m, raw, false),
         }
     }
 
@@ -441,7 +441,7 @@ impl Store {
             if !errors.is_empty() {
                 return fail(format!(
                     "Not saved: the submitted text has errors.\n\n{}\n{}",
-                    crate::group_errors(&errors),
+                    diagnostics::group_errors(&errors),
                     cargo::ROUND_NOTE
                 ));
             }
@@ -454,12 +454,12 @@ impl Store {
                 format!("Saved {module}.\nNote: {module}: changed {}; added {}\n", list(&changed), list(&added))
             };
             out += &dropped_impls_note(&dropped);
-            out += &warnings_report(
+            out += &diagnostics::warnings_report(
                 before_warnings.as_ref(),
                 diags.iter().filter(|d| !d.error && own(d)),
                 diags.iter().filter(|d| !d.error && !own(d)),
             );
-            out += &broken_report(&before_broken, &diags);
+            out += &diagnostics::broken_report(&before_broken, &diags);
             out += &note_lines(&long_line_notes(&ix, &module, &items, max_width, formatted));
             Ok(out)
         })?;
@@ -776,7 +776,7 @@ impl Store {
             if !errors.is_empty() {
                 return fail(format!(
                     "Not saved: the submitted text has errors.\n\n{}\n{}",
-                    crate::group_errors(&errors),
+                    diagnostics::group_errors(&errors),
                     cargo::ROUND_NOTE
                 ));
             }
@@ -790,12 +790,12 @@ impl Store {
                 out += &format!("Unchanged (the same as stored): {}.\n", unchanged.join(", "));
             }
             out += &dropped_impls_note(&dropped);
-            out += &warnings_report(
+            out += &diagnostics::warnings_report(
                 before_warnings.as_ref(),
                 diags.iter().filter(|d| !d.error && own(d)),
                 diags.iter().filter(|d| !d.error && !own(d)),
             );
-            out += &broken_report(&before_broken, &diags);
+            out += &diagnostics::broken_report(&before_broken, &diags);
             let mut long = vec![];
             for (module, .., items) in &plan {
                 for item in items.iter().flat_map(nested) {
@@ -1021,12 +1021,12 @@ impl Store {
                 return fail(format!("Not saved: the submitted text has errors.\n\n{}\n{}", text.join("\n\n"), cargo::ROUND_NOTE));
             }
             let mut out = format!("Saved {saved}.\n");
-            out += &warnings_report(
+            out += &diagnostics::warnings_report(
                 before_warnings.as_ref(),
                 diags.iter().filter(|d| !d.error && own(d)),
                 diags.iter().filter(|d| !d.error && !own(d)),
             );
-            out += &broken_report(&before_broken, &diags);
+            out += &diagnostics::broken_report(&before_broken, &diags);
             Ok(out)
         })?;
         Ok(out)
@@ -1124,7 +1124,7 @@ impl Store {
                 text += &format!("Deleted {qname}{retired}.\n");
             }
             text += &dropped_impls_note(&dropped);
-            Ok(lockdown::trim_output(&text, budget) + &broken_report(&before, &diags))
+            Ok(lockdown::trim_output(&text, budget) + &diagnostics::broken_report(&before, &diags))
         })?;
         Ok(out)
     }

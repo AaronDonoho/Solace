@@ -1,4 +1,5 @@
 use super::*;
+use crate::diagnostics::error_cause;
 use crate::testing::Scratch;
 use std::path::PathBuf;
 
@@ -489,7 +490,7 @@ fn a_grouped_error_title_comes_from_cargos_output() {
     let output = format!("{PRIVATE_CHECK}\n{MISSING_METHOD_CHECK}");
     let diags = diagnostics(&output, &files("crate", "/x/src/lib.rs", vec![(1, 10, "crate::one")]));
     assert_eq!(diags.len(), 2);
-    let causes: Vec<String> = diags.iter().map(|d| crate::error_cause(d).unwrap().1).collect();
+    let causes: Vec<String> = diags.iter().map(|d| error_cause(d).unwrap().1).collect();
     assert_eq!(causes, ["`helper` is private", "`open` is missing on `Store`"]);
 }
 

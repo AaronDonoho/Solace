@@ -1,6 +1,7 @@
 //! Rejected submissions are scratch text, never live symbols.
 use super::*;
 
+use serde_json::json;
 fn owner() -> String {
     crate::board::context().map(|(task, _)| task).unwrap_or_else(|| env::var("SOLACE_TASK").unwrap_or_else(|_| "cli".into()))
 }
@@ -141,32 +142,33 @@ pub fn retry_advice(message: &str, id: &str, cmd: &str, what: &str, several: boo
     let quiet = message.starts_with(if cmd == "write" { "nothing written:" } else { "Not saved:" });
     let prefix = if quiet { String::new() } else { format!("{nothing} ") };
     let lines = if patch { format!(", which are {PATCH_LINES}") } else { String::new() };
+    let flag = project_flag();
     let fix = if several {
         let whole = if patch { "patch" } else { "text" };
         format!(
             concat!(
-                "Fix only the failing {}: `{} --draft {} --replace` with `old` and `text`{}; ",
+                "Fix only the failing {}: `{} --draft {} --replace{}` with `old` and `text`{}; ",
                 "the other {} stay in the draft, so don't resend the whole {}.",
             ),
-            noun, cmd, id, lines, plural, whole
+            noun, cmd, id, flag, lines, plural, whole
         )
     } else {
         format!(
             concat!(
-                "Fix the failing {}: `{} --draft {} --replace` with `old` and `text`{}; ",
+                "Fix the failing {}: `{} --draft {} --replace{}` with `old` and `text`{}; ",
                 "the draft keeps your text, so don't resend the whole text.",
             ),
-            noun, cmd, id, lines
+            noun, cmd, id, flag, lines
         )
     };
-    let tail = format!("Draft {id} retained{what}. Read: `view --draft {id}`. List: `drafts`.");
+    let tail = format!("Draft {id} retained{what}. Read: `view --draft {id}{flag}`. List: `drafts{flag}`. Drop: `drafts drop {id}{flag}`.");
     let kept = if replaced {
         format!(
             concat!(
                 " The replacement was applied: the draft now holds it, so the next `old` must match ",
-                "the draft as it is now (`view --draft {}`).",
+                "the draft as it is now (`view --draft {}{}`).",
             ),
-            id
+            id, flag
         )
     } else {
         String::new()
@@ -472,20 +474,24 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
     let ix = s.index()?;
     let (id, args, raw) = match a.as_slice() {
         ["submit", "--draft", id, "--imports", module, ..] | ["submit", "--imports", module, "--draft", id, ..] => {
-            return fail(format!("E0109 send these as two calls: `submit --imports {module}` first, then `submit --draft {id}`"));
+            let flag = project_flag();
+            return fail(format!(
+                "E0109 send these as two calls: `submit --imports {module}{flag}` first, then `submit --draft {id}{flag}`"
+            ));
         }
         ["submit", "--draft", id] | ["submit", "--draft", id, "--replace"] => {
             let (args, text, expected) = load(s, id)?;
+            let flag = project_flag();
             if args.first().is_some_and(|c| c == "write") {
-                return fail(format!("E0106 draft {id} is a file patch; retry it with `write --draft {id}`"));
+                return fail(format!("E0106 draft {id} is a file patch; retry it with `write --draft {id}{flag}`"));
             }
             if base(s, &ix, &args, &text)? != expected {
                 return fail(format!(
                     concat!(
                         "E0107 draft {} is stale: a symbol it replaces (or its module's imports) changed since it was created. ",
-                        "`view --draft {}` preserves your text; inspect current source and make a new submission.",
+                        "`view --draft {}{}` preserves your text; inspect current source and make a new submission.",
                     ),
-                    id, id
+                    id, id, flag
                 ));
             }
             let raw = if a.len() == 4 {
@@ -533,8 +539,10 @@ pub fn submit(s: &Store, a: &[&str], input: &mut dyn FnMut() -> Out, old: Option
         }),
         ["submit"] => s.submit_symbols(None, None, &raw),
         ["submit", "--new", module] => s.submit_symbols(None, Some(module), &raw),
-        ["submit", "--imports", module] => s.submit(Target::Imports(module), &raw),
-        ["submit", name] if !name.contains('.') && s.resolve_module(&ix, name).is_some() => s.submit(Target::Module(name), &raw),
+        ["submit", "--imports", module] => s.submit(crate::store::Target::Imports(module), &raw),
+        ["submit", name] if !name.contains('.') && s.resolve_module(&ix, name).is_some() => {
+            s.submit(crate::store::Target::Module(name), &raw)
+        }
         // A whole module for a module that doesn't exist yet creates it.
         ["submit", name] if !name.contains('.') && s.resolve(&ix, name).is_err() => s.submit_symbols(None, Some(name), &raw),
         ["submit", name] => s.submit_symbols(Some(name), None, &raw),
@@ -585,7 +593,8 @@ pub fn keep_file_patch(s: &Store, id: Option<&str>, raw: &str) -> Result<String,
 pub fn file_patch(s: &Store, id: &str) -> Result<String, Failure> {
     let (args, text, _) = load(s, id)?;
     if args.first().is_none_or(|c| c != "write") {
-        return fail(format!("E0106 draft {id} is a submit; retry it with `submit --draft {id}`"));
+        let flag = project_flag();
+        return fail(format!("E0106 draft {id} is a submit; retry it with `submit --draft {id}{flag}`"));
     }
     Ok(text)
 }
@@ -625,7 +634,7 @@ mod tests {
         let out = submit(&s, &["submit", "--draft", &id, "--replace"], &mut || Ok("2".into()), Some("unknown()")).unwrap();
         assert!(out.contains("Saved"));
         assert!(list(&s).unwrap().is_empty());
-        assert!(s.view(&["app.main"], false, BUDGET).unwrap().contains("helper()"));
+        assert!(s.view(&["app.main"], false, crate::cli::BUDGET).unwrap().contains("helper()"));
         // Module creation and whole-module submissions use the same draft path.
         for args in [vec!["submit", "--new", "other"], vec!["submit", "app"]] {
             assert!(submit(&s, &args, &mut || Ok("pub fn main() { absent() }".into()), None).is_err());
@@ -829,6 +838,7 @@ mod tests {
             ),
             ("*** Begin Patch\n*** Add: app.x\n+// only a comment\n*** End Patch\n", "defines no function"),
             ("*** Begin Patch\n*** Update File: notes\n-one\n+1\n*** End Patch\n", "is no symbol or module"),
+            ("*** Begin Patch\n*** Update: app.x\n*** End Patch\n", "*** Add: app.x"),
         ] {
             let e = submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap_err().0;
             assert!(
@@ -959,12 +969,12 @@ mod tests {
         );
         let out = submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap();
         assert!(out.contains("calc.add") && out.contains("app.main") && out.contains("calc.twice") && !out.contains("calc.sub"), "{out}");
-        let main = s.view(&["app.main"], false, BUDGET).unwrap();
+        let main = s.view(&["app.main"], false, crate::cli::BUDGET).unwrap();
         assert!(main.contains("calc.add(1, 1)") && main.contains("calc.add(2, 1)"), "{main}");
         // Repeated identical hunks apply in order, one occurrence each.
         let again = "*** Update: app.main\n@@ -2,1 +2,1 @@\n-  let x = calc.add(1, 1)\n+  let x = calc.add(1, 5)\n";
         submit(&s, &["submit"], &mut || Ok(again.into()), None).unwrap();
-        assert!(s.view(&["app.main"], false, BUDGET).unwrap().contains("calc.add(1, 5)"));
+        assert!(s.view(&["app.main"], false, crate::cli::BUDGET).unwrap().contains("calc.add(1, 5)"));
         let rename = "*** Update: calc.sub\n-pub fn sub(a: Int) -> Int {\n+pub fn minus(a: Int) -> Int {\n";
         assert!(submit(&s, &["submit"], &mut || Ok(rename.into()), None).unwrap_err().0.contains("renames calc.sub"));
         // A type error keeps the resulting blocks as a draft.
@@ -1009,7 +1019,7 @@ mod tests {
         );
         let out = submit(&s, &["submit", "app.five", "--replace", "--all"], &mut || Ok(" + 2".into()), Some(" + 1")).unwrap();
         assert!(out.starts_with("Replaced 4 occurrences.") && out.contains("Saved app.five"), "{out}");
-        assert_eq!(s.view(&["app.five"], false, BUDGET).unwrap().matches(" + 2").count(), 4);
+        assert_eq!(s.view(&["app.five"], false, crate::cli::BUDGET).unwrap().matches(" + 2").count(), 4);
     }
 
     /// A Rust update that adds an item after unchanged context adds it; it is
@@ -1042,8 +1052,9 @@ mod tests {
         assert!(blocks.contains("// ── crate.Store::extra ──") && blocks.contains("pub fn extra"), "{blocks}");
     }
 
-    /// A `module:` prefix and a source path name the header that works; an
-    /// unknown name lists the nearest stored names.
+    /// A `module:` prefix and a source path name the header that works; a new
+    /// name under a module points to Add; an unknown module lists the nearest
+    /// stored names.
     #[test]
     fn an_unknown_target_names_the_header_or_the_names() {
         let (_root, s) = rust_project("pub fn one() -> i32 {\n    1\n}\n");
@@ -1051,7 +1062,9 @@ mod tests {
         assert!(header.contains("`*** Update: crate`") && header.contains("help submit"), "{header}");
         let path = patch_blocks(&s, "*** Begin Patch\n*** Update: src/lib.rs\n*** End Patch\n").unwrap_err().0;
         assert!(path.contains("`*** Update: crate`"), "{path}");
-        let unknown = patch_blocks(&s, "*** Begin Patch\n*** Update: crate.nope\n*** End Patch\n").unwrap_err().0;
+        let new = patch_blocks(&s, "*** Begin Patch\n*** Update: crate.nope\n*** End Patch\n").unwrap_err().0;
+        assert!(new.contains("*** Add: crate.nope") && !new.contains("Similar names:"), "{new}");
+        let unknown = patch_blocks(&s, "*** Begin Patch\n*** Update: nope.one\n*** End Patch\n").unwrap_err().0;
         assert!(unknown.contains("Similar names:") && unknown.contains("crate.one"), "{unknown}");
     }
 
@@ -1161,7 +1174,7 @@ mod tests {
             ("src/other.gleam", "import app\n\npub fn use_value() {\n  app.value()\n}\n"),
         ]);
         s.check_report(false).unwrap();
-        let out = s.submit(crate::Target::Module("app"), "@deprecated(\"old\")\npub fn value() {\n  1\n}\n").unwrap();
+        let out = s.submit(crate::store::Target::Module("app"), "@deprecated(\"old\")\npub fn value() {\n  1\n}\n").unwrap();
         assert!(out.contains("New warnings elsewhere:"), "{out}");
         assert!(out.contains("other.use_value: warning:"), "{out}");
     }
@@ -1191,7 +1204,7 @@ mod tests {
         let s = project(&[("src/a.gleam", "fn unused() {\n  1\n}\n"), ("src/b.gleam", "pub fn main() {\n  1\n}\n")]);
         s.check_report(false).unwrap();
         for body in ["  2\n", "  3\n"] {
-            let out = s.submit(crate::Target::Module("b"), &format!("pub fn main() {{\n{body}}}\n")).unwrap();
+            let out = s.submit(crate::store::Target::Module("b"), &format!("pub fn main() {{\n{body}}}\n")).unwrap();
             assert!(!out.contains("a.unused"), "{out}");
         }
     }
@@ -1421,7 +1434,7 @@ mod tests {
         }
         let run = |id: &str| {
             let args: Vec<String> = ["drafts", "drop", id].iter().map(|x| x.to_string()).collect();
-            crate::with_root(&p.root, || crate::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+            crate::cli::with_root(&p.root, || crate::cli::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
         };
         let out = run("mine").unwrap();
         assert!(out.contains("Dropped draft mine"), "{out}");
@@ -1466,7 +1479,7 @@ mod tests {
         let patch = "*** Begin Patch\n*** Update: app.main\n-let x = 1\n+let x = 2\n*** End Patch\n";
         let out = submit(&s, &["submit"], &mut || Ok(patch.into()), None).unwrap();
         assert!(out.contains("matched through indentation"), "{out}");
-        assert!(s.view(&["app.main"], false, BUDGET).unwrap().contains("let x = 2"));
+        assert!(s.view(&["app.main"], false, crate::cli::BUDGET).unwrap().contains("let x = 2"));
     }
 
     /// A `write` patch keeps D-142's strict leading-space rule (D-204).
@@ -1507,7 +1520,7 @@ mod tests {
         });
         let run = |args: &[&str]| {
             let args: Vec<String> = args.iter().map(|x| x.to_string()).collect();
-            crate::with_root(&p.root, || crate::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
+            crate::cli::with_root(&p.root, || crate::cli::run_options(&args, &mut || Ok(String::new()), None, 10_000, &[]))
         };
         let viewed = crate::board::with_context(&tid, "run-1", || run(&["view", "--draft", id.as_str()])).unwrap();
         assert_eq!(viewed, "pub fn main(");
@@ -1545,10 +1558,75 @@ mod tests {
         assert!(out.contains("matched through indentation"), "{out}");
         assert_eq!(std::fs::read_to_string(root.join("src/lib.rs")).unwrap(), "pub fn one() -> i32 {\n    2\n}\n");
     }
+
+    /// A new name under a file-backed nested module points to Add with the dotted
+    /// module path.
+    #[test]
+    fn a_new_name_under_a_nested_module_points_to_add() {
+        let root = crate::testing::Scratch::new().with(&[
+            ("Cargo.toml", crate::testing::CARGO),
+            ("src/lib.rs", "pub mod extract;\n"),
+            ("src/extract.rs", "pub mod rust;\n"),
+            ("src/extract/rust.rs", "pub mod tests;\n"),
+            ("src/extract/rust/tests.rs", "pub fn ready() -> bool {\n    true\n}\n"),
+        ]);
+        crate::import(&root).unwrap();
+        let s = crate::Store::at(&root).unwrap();
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: extract::rust::tests.new_test\n*** End Patch\n").unwrap_err().0;
+        assert!(e.contains("*** Add: extract::rust::tests.new_test"), "{e}");
+        assert!(!e.contains("Similar names:"), "{e}");
+    }
+
+    /// A command that panics puts the project back, so a later command on this
+    /// thread prints no stale `--project`.
+    #[test]
+    fn with_project_restores_the_previous_project_even_on_panic() {
+        assert!(project_flag().is_empty());
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_project(Some("components"), || panic!("boom"));
+        }));
+        assert!(panicked.is_err());
+        assert!(project_flag().is_empty());
+        let nested = with_project(Some("web"), || {
+            let inner = with_project(Some("components"), project_flag);
+            (inner, project_flag())
+        });
+        assert_eq!(nested, (" --project components".to_string(), " --project web".to_string()));
+        assert!(project_flag().is_empty());
+    }
+
+    /// Without a project, the retry command stays bare.
+    #[test]
+    fn a_submit_draft_retried_as_a_file_patch_names_the_submit_command() {
+        let s = board_project(&[("src/app.gleam", "pub fn main() { 1 }\n")]);
+        s.db.execute(
+            "INSERT INTO drafts(id,owner,args,text,base) VALUES ('d1',?,?,?,?)",
+            params![owner(), json!(["submit", "app.main"]).to_string(), "pub fn main() { 2 }", ""],
+        )
+        .unwrap();
+        let e = file_patch(&s, "d1").unwrap_err().0;
+        assert!(e.contains("`submit --draft d1`"), "{e}");
+    }
+
+    /// A new name under a stored inline module, not a module itself, points to Add.
+    #[test]
+    fn a_new_name_under_a_container_points_to_add() {
+        let root = crate::testing::Scratch::new().with(&[
+            ("Cargo.toml", crate::testing::CARGO),
+            ("src/lib.rs", "mod other;\n"),
+            ("src/other.rs", "mod tests {\n    pub fn one() -> i32 {\n        1\n    }\n}\n"),
+        ]);
+        crate::import(&root).unwrap();
+        let s = crate::Store::at(&root).unwrap();
+        let e = patch_blocks(&s, "*** Begin Patch\n*** Update: tests.zz_probe\n*** End Patch\n").unwrap_err().0;
+        assert!(e.contains("*** Add: tests.zz_probe"), "{e}");
+        assert!(!e.contains("Similar names:"), "{e}");
+    }
 }
 
 /// The refusal for an `*** Update:` that names no symbol (E0108): a module or
-/// a source path gets the header that works, and another name the nearest names.
+/// a source path gets the header that works, a new name under a module or
+/// container gets `*** Add:`, and another name the nearest names.
 fn bad_target(s: &Store, ix: &Index, target: &str, at_line: usize) -> Failure {
     let name = target.strip_prefix("module:").unwrap_or(target);
     let module = s
@@ -1560,6 +1638,15 @@ fn bad_target(s: &Store, ix: &Index, target: &str, at_line: usize) -> Failure {
             format!(
                 "E0108 `*** Update: {target}` (line {at_line}) is no symbol; \
                  a module changes with `*** Update: {module}` (see `help submit`)."
+            ),
+            1,
+        );
+    }
+    if has_known_parent(s, ix, name) {
+        return Failure(
+            format!(
+                "E0108 `*** Update: {target}` (line {at_line}) is no symbol; \
+                 the name is new; create it with `*** Add: {name}`. {RESEND}"
             ),
             1,
         );
@@ -1788,6 +1875,16 @@ fn add_rust_blocks(c: &mut SectionContext<'_>, text: &str) -> Result<(), Failure
     })?;
     if file.items.is_empty() {
         return Err(defines_nothing(c));
+    }
+    if let Some(suggestion) = item_in_its_own_module(c.s, c.ix, c.target, container, &file.items) {
+        let item = &file.items[0].name;
+        return Err((c.bad)(format!(
+            concat!(
+                "`*** Add: {}` would create module {} with only `{}` inside it; ",
+                "use `*** Add: {}` to add `{}` to its parent module."
+            ),
+            c.target, c.target, item, suggestion, item
+        )));
     }
     let root = c.s.root.clone();
     let target = c.target;
@@ -2235,4 +2332,61 @@ fn patch_blocks_with_indent(s: &Store, raw: &str) -> Result<(String, bool), Fail
         return Err(bad(format!("the patch changes nothing. {RESEND}")));
     }
     Ok((blocks, indented))
+}
+
+thread_local! {
+    static PROJECT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `f` with the project a `--project` command selected, for the commands
+/// its retained-draft advice prints.
+pub(crate) fn with_project<T>(project: Option<&str>, f: impl FnOnce() -> T) -> T {
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            PROJECT.with(|p| *p.borrow_mut() = self.0.take());
+        }
+    }
+    let old = PROJECT.with(|p| p.replace(project.map(String::from)));
+    let _restore = Restore(old);
+    f()
+}
+
+fn project_flag() -> String {
+    PROJECT.with(|p| p.borrow().as_ref().map(|p| format!(" --project {p}")).unwrap_or_default())
+}
+
+/// The dotted header for an Add whose one item would sit in a new module of its
+/// own name, including under an inline module.
+fn item_in_its_own_module(
+    s: &Store,
+    ix: &Index,
+    target: &str,
+    container: Option<usize>,
+    items: &[language::rust::Piece],
+) -> Option<String> {
+    if target.contains('.') {
+        return None;
+    }
+    let [one] = items else { return None };
+    if s.resolve(ix, target).is_ok() || s.resolve_module(ix, target).is_some() {
+        return None;
+    }
+    let created = s.rust_created(ix, target).and_then(|created| created.line);
+    let (parent, name) = match &created {
+        Some((parent, name)) => (parent.as_str(), name.as_str()),
+        None => target.rsplit_once("::")?,
+    };
+    if bare_type(&one.name) != name {
+        return None;
+    }
+    (created.is_some() || container.is_some_and(|i| ix.syms[i].kind_text == "mod")).then(|| format!("{parent}.{name}"))
+}
+
+/// Whether the part of `name` before its last `.` is a stored module or container.
+fn has_known_parent(s: &Store, ix: &Index, name: &str) -> bool {
+    let Some((parent, _)) = name.rsplit_once('.') else {
+        return false;
+    };
+    s.resolve_module(ix, parent).is_some() || s.rust_container_in(ix, parent).is_ok_and(|c| c.is_some())
 }

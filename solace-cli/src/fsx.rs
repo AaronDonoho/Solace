@@ -1,6 +1,6 @@
 //! File primitives: writing a file whole, and holding a lock on one.
 
-use crate::Failure;
+use crate::failure::Failure;
 use std::fs;
 use std::io::Write;
 use std::path::Path;

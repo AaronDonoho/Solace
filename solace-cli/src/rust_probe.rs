@@ -4,13 +4,14 @@
 
 use super::*;
 
+use crate::cli::PROBE;
 /// Runs a Rust probe in the crate's reusable scratch copy. A lock serializes
 /// runs on it; each run refreshes it and restores only the probe text.
-pub(crate) fn run(s: &Store, text: &str, module: Option<&str>) -> Out {
+pub(crate) fn run(s: &Store, text: &str, module: Option<&str>, from: Option<&str>) -> Out {
     let base = s.root.join("target").join("solace-probe");
     fs::create_dir_all(&base)?;
     let _lock = fsx::lock_file(&base.join("lock"))?;
-    at(s, text, module, &base.join("crate"))
+    at(s, text, module, from, &base.join("crate"))
 }
 
 /// What a probe needs after its copy is ready: the index, the file and text
@@ -28,14 +29,14 @@ struct Prepared {
 /// A Rust probe: copy the store's crate to `dir`, add a test module holding
 /// `text`, run that test with output, and report compiler errors against the
 /// module.
-fn at(s: &Store, text: &str, module: Option<&str>, dir: &Path) -> Out {
-    let prepared = prepare(s, text, module, dir)?;
+fn at(s: &Store, text: &str, module: Option<&str>, from: Option<&str>, dir: &Path) -> Out {
+    let prepared = prepare(s, text, module, from, dir)?;
     let output = lockdown::command(&s.root, &prepared.argv, 600, usize::MAX, false, true);
     let _ = fs::write(&prepared.file, &prepared.before);
-    report(&prepared, module, &output?)
+    report(&prepared, module.is_none() && from.is_none(), &output?)
 }
 
-fn prepare(s: &Store, text: &str, module: Option<&str>, dir: &Path) -> Result<Prepared, Failure> {
+fn prepare(s: &Store, text: &str, module: Option<&str>, from: Option<&str>, dir: &Path) -> Result<Prepared, Failure> {
     if let Some(why) = language::reason(language::RUST)? {
         return Err(Failure(format!("E6013 {why}"), 1));
     }
@@ -56,53 +57,48 @@ fn prepare(s: &Store, text: &str, module: Option<&str>, dir: &Path) -> Result<Pr
     }
     let root =
         ix.modules.iter().find(|m| m.path == "crate").ok_or_else(|| Failure("E0101 this Rust store has no crate root.".into(), 1))?;
-    let target = match module {
-        Some(name) => match s.resolve_module(&ix, name) {
-            Some(m) => m,
-            None => {
-                return fail(format!("E1001 unknown module: {name}; `--in` takes a module, e.g. `crate` (`view <module>` lists them)."));
-            }
-        },
-        None => root,
-    };
-    if target.file.as_deref().is_some_and(|f| f.starts_with("tests/")) {
-        return fail(format!("E1006 {} is a test crate; `--in` takes a module of the crate.", target.path));
-    }
+    let (target, source) = probe_target(s, &ix, root, module, from)?;
+    let container = source
+        .and_then(|sym| sym.parent.as_deref())
+        .and_then(|id| ix.syms.iter().find(|parent| parent.id == id))
+        .filter(|parent| parent.kind_text == "mod");
+    let body = source.map(|sym| {
+        from_body(sym).ok_or_else(|| {
+            Failure(format!("E1006 can't read the body of {}; --from takes a non-generic function without arguments.", sym.qname()), 1)
+        })
+    });
+    let body = body.transpose()?;
     let rel = target.rel();
     let mut files = sync(s, &ix, &manifest, dir)?;
     let path = dir.join(&rel);
     let before = fs::read_to_string(&path)?;
-    if ix.modules.iter().any(|m| m.path == PROBE || m.path.ends_with(&format!("::{PROBE}"))) || has_inline_probe(&ix, target) {
+    if ix.modules.iter().any(|m| m.path == crate::cli::PROBE || m.path.ends_with(&format!("::{PROBE}")))
+        || has_inline_probe(&ix, target, container.map(|parent| parent.id.as_str()))
+    {
         return fail(format!("E0101 a project module is named {PROBE}; probe can't run."));
     }
-    let code = probe_code(text);
-    let separator = if before.ends_with('\n') { "\n" } else { "\n\n" };
-    let content = format!("{before}{separator}{code}");
-    let start = content[..content.len() - code.len()].matches('\n').count() + 1;
-    let wrapper_end = start + code.lines().count() - 1;
-    let (first, last) = probe_span(&code, start);
-    let mut ranges = vec![];
-    if first > start {
-        ranges.push((start, first - 1, crate::PROBE_START_RANGE.into()));
-    }
-    if last >= first {
-        ranges.push((first, last, crate::PROBE_RANGE.into()));
-    }
-    let end_start = last.saturating_add(1);
-    if wrapper_end >= end_start {
-        ranges.push((end_start, wrapper_end, crate::PROBE_END_RANGE.into()));
-    }
+    let code = probe_code_with(text, body);
+    let insert = match container {
+        Some(parent) => container_close(&before, &target.path, parent)?,
+        None => before.len(),
+    };
+    let (prefix, suffix) = before.split_at(insert);
+    let lead = if prefix.ends_with('\n') || prefix.is_empty() { "" } else { "\n" };
+    let content = format!("{prefix}{lead}{code}{suffix}");
+    let at = content.find(&code).ok_or_else(|| Failure("E1006 the probe was not placed.".into(), 1))?;
+    let start = content[..at].matches('\n').count() + 1;
+    let ranges = probe_ranges(source, start, &code, text);
     fs::write(&path, &content)?;
     match files.iter_mut().find(|f| f.file == path) {
         Some(map) => map.ranges.extend(ranges),
         None => files.push(FileMap { module: target.path.clone(), file: path.clone(), ranges }),
     }
-    let test = if target.path == "crate" { format!("{PROBE}::probe") } else { format!("{}::{PROBE}::probe", target.path) };
+    let test = probe_test(target, container);
     let argv = probe_argv(dir, &s.root.join("target/solace-probe/target"), &manifest, root, &test);
     Ok(Prepared { ix, text: text.to_string(), argv, files, file: path, before, test })
 }
 
-fn report(p: &Prepared, module: Option<&str>, output: &str) -> Out {
+fn report(p: &Prepared, private: bool, output: &str) -> Out {
     let ok = lockdown::passed(output);
     let raw = output.split_once('\n').map_or("", |(_, rest)| rest);
     let diags = cargo::diagnostics(raw, &p.files);
@@ -112,7 +108,15 @@ fn report(p: &Prepared, module: Option<&str>, output: &str) -> Out {
         if out.trim().is_empty() {
             out = clean(&cargo::failure_text(raw), &p.files, &p.test);
         }
-        if module.is_none() {
+        if errors.is_empty()
+            && let Some(test) = panicked_before_text(&p.files, raw)
+        {
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out += &format!("{test} panicked before the probe's statements ran.");
+        }
+        if private {
             out += &private_hint(&p.ix, &diags);
         }
         out += &format!("\n\nThe probe's text:\n{}", probe_echo(&p.text));
@@ -145,18 +149,10 @@ fn copy_crate(s: &Store, dir: &Path, manifest: &toml::Value) -> Result<Vec<Strin
     Ok(names)
 }
 
-/// The probe's `#[cfg(test)]` module: `text` is its test body, and a lone
-/// expression is printed with `dbg!` as Gleam prints one with `echo`.
-fn probe_code(text: &str) -> String {
-    let (body, _) = probe_body(text);
-    let body: String = body.lines().map(|line| format!("{}{line}\n", crate::PROBE_INDENT)).collect();
-    format!("#[cfg(test)]\nmod {PROBE} {{\n    use super::*;\n\n    #[test]\n    fn probe() {{\n{body}    }}\n}}\n")
-}
-
 /// A probe's own output: cargo's progress and libtest's status lines are noise.
 fn clean(output: &str, files: &[FileMap], test: &str) -> String {
     let mut out = String::new();
-    for line in strip_ansi(output).lines() {
+    for line in diagnostics::strip_ansi(output).lines() {
         let trimmed = line.trim_start();
         if trimmed.starts_with('{')
             || test_runner_noise(trimmed, test)
@@ -272,8 +268,8 @@ mod tests {
     /// A function whose name starts with `assert` is still a lone expression.
     #[test]
     fn a_lone_expression_is_printed() {
-        assert!(probe_code("assert_ok(1)").contains("dbg!(assert_ok(1));"));
-        assert!(!probe_code("assert_eq!(1, 1);").contains("dbg!("));
+        assert!(probe_code_with("assert_ok(1)", None).contains("dbg!(assert_ok(1));"));
+        assert!(!probe_code_with("assert_eq!(1, 1);", None).contains("dbg!("));
     }
 
     /// Cargo's build folder outlives the crate copy, so its dependencies are reused.
@@ -372,7 +368,7 @@ mod tests {
         let text = "[package]\nname = \"app\"\nversion.workspace = true\n";
         fs::write(root.join("Cargo.toml"), text).unwrap();
         let dir = crate::testing::Scratch::new();
-        let err = prepare(&s, "println!(\"{}\", crate::one());", None, &dir).err().unwrap().0;
+        let err = prepare(&s, "println!(\"{}\", crate::one());", None, None, &dir).err().unwrap().0;
         assert!(err.starts_with("E1006") && err.contains("version"), "{err}");
         assert!(fs::read_dir(&*dir).unwrap().next().is_none());
     }
@@ -411,7 +407,7 @@ mod tests {
             concat!("[package]\nname = \"app\"\nversion.workspace = true\n\n", "[workspace]\n[workspace.package]\nversion = \"0.1.0\"\n",);
         fs::write(root.join("Cargo.toml"), text).unwrap();
         let dir = crate::testing::Scratch::new();
-        prepare(&s, "println!(\"{}\", crate::one());", None, &dir).unwrap();
+        prepare(&s, "println!(\"{}\", crate::one());", None, None, &dir).unwrap();
         assert!(dir.join("Cargo.toml").is_file());
     }
 
@@ -512,9 +508,9 @@ mod tests {
     /// The range covers the generated body, including a lone expression but not an empty one.
     #[test]
     fn a_probes_range_is_its_text_not_the_wrapper() {
-        assert_eq!(probe_span(&probe_code("let x = 1;\nlet y = 2;\n"), 7), (13, 14));
-        assert_eq!(probe_span(&probe_code("\n1 + 1\n"), 7), (13, 13));
-        let empty = probe_span(&probe_code(""), 7);
+        assert_eq!(probe_span(&probe_code_with("let x = 1;\nlet y = 2;\n", None), 7), (13, 14));
+        assert_eq!(probe_span(&probe_code_with("\n1 + 1\n", None), 7), (13, 13));
+        let empty = probe_span(&probe_code_with("", None), 7);
         assert!(empty.1 < empty.0, "{empty:?}");
     }
 
@@ -632,14 +628,14 @@ mod tests {
             before: String::new(),
             test: "solace_probe::probe".into(),
         };
-        assert_eq!(report(&p, None, "exit code: 0 (1.2s)\n1 + 1 = 2\n").unwrap(), "1 + 1 = 2\n\n(1.2s)");
-        assert_eq!(report(&p, None, "exit code: 0 (0.4s)\n").unwrap(), "The probe produced no output.\n\n(0.4s)");
+        assert_eq!(report(&p, true, "exit code: 0 (1.2s)\n1 + 1 = 2\n").unwrap(), "1 + 1 = 2\n\n(1.2s)");
+        assert_eq!(report(&p, true, "exit code: 0 (0.4s)\n").unwrap(), "The probe produced no output.\n\n(0.4s)");
         let panic =
-            report(&p, None, "exit code: 101 (2.5s)\nthread 'solace_probe::probe' panicked at src/lib.rs:2:1:\nboom\n").unwrap_err();
+            report(&p, true, "exit code: 101 (2.5s)\nthread 'solace_probe::probe' panicked at src/lib.rs:2:1:\nboom\n").unwrap_err();
         assert!(panic.0.ends_with("\n\n(2.5s)"), "{}", panic.0);
-        let compile = report(&p, None, "exit code: 1 (3.0s)\n").unwrap_err();
+        let compile = report(&p, true, "exit code: 1 (3.0s)\n").unwrap_err();
         assert!(compile.0.ends_with("\n\n(3.0s)"), "{}", compile.0);
-        let untimed = report(&p, None, "exit code: 0\n1\n").unwrap_err().0;
+        let untimed = report(&p, true, "exit code: 0\n1\n").unwrap_err().0;
         assert!(!untimed.ends_with("()"), "{untimed}");
     }
 }
@@ -962,7 +958,7 @@ fn probe_locations(line: &str, files: &[FileMap]) -> String {
             continue;
         };
         let end = start + len;
-        match crate::locate(files, path, row) {
+        match diagnostics::locate(files, path, row) {
             Some((_, Some((name, first)))) if name == crate::PROBE_RANGE => {
                 out.push_str(&rest[..start]);
                 out.push_str(&format!("probe, line {}", row + 1 - first));
@@ -1049,9 +1045,9 @@ fn cargo_noise(line: &str) -> bool {
 }
 
 /// Whether `target` declares `solace_probe` inline; the probe adds its own
-/// module of that name beside the target's items.
-fn has_inline_probe(ix: &Index, target: &ModuleRow) -> bool {
-    ix.syms.iter().any(|s| s.module == target.path && s.parent.is_none() && s.kind_text == "mod" && s.name == PROBE)
+/// module of that name beside the target's items, or inside `parent`.
+fn has_inline_probe(ix: &Index, target: &ModuleRow, parent: Option<&str>) -> bool {
+    ix.syms.iter().any(|s| s.module == target.path && s.parent.as_deref() == parent && s.kind_text == "mod" && s.name == crate::cli::PROBE)
 }
 
 /// `out` ending with the time `lockdown::command` measured.
@@ -1061,4 +1057,178 @@ fn timed(out: &str, output: &str) -> String {
         Some(time) => format!("{}\n\n({time})", out.trim_end()),
         None => out.trim_end().to_string(),
     }
+}
+
+/// The probe's `#[cfg(test)]` module: `from`'s test body runs first, then
+/// `text`, so the statements can use its locals. A lone expression is printed
+/// with `dbg!` as Gleam prints one with `echo`.
+fn probe_code_with(text: &str, from: Option<&str>) -> String {
+    let (body, _) = probe_body(text);
+    let mut inner = String::new();
+    if let Some(from) = from {
+        let from = from.trim_matches('\n');
+        if !from.is_empty() {
+            inner.push_str(from);
+            inner.push('\n');
+        }
+    }
+    inner.push_str(&body);
+    let body: String = inner.lines().map(|line| format!("{}{line}\n", crate::PROBE_INDENT)).collect();
+    format!("#[cfg(test)]\nmod {PROBE} {{\n    use super::*;\n\n    #[test]\n    fn probe() {{\n{body}    }}\n}}\n")
+}
+
+/// The last path segment of a function's stored name, without generics.
+fn leaf_name(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name).split('<').next().unwrap_or(name)
+}
+
+/// A function's body, the part `--from` runs before the probe's text.
+/// A generic function's body may name its type parameters, so it has none to run.
+fn from_body(s: &Sym) -> Option<&str> {
+    let name = leaf_name(&s.name);
+    let (at, rest) = crate::fn_header(&s.text, name)?;
+    if rest.starts_with('<') {
+        return None;
+    }
+    let open = at + language::body_start(&s.text[at..])?;
+    let close = s.text.rfind('}')?;
+    (close > open).then(|| &s.text[open + 1..close])
+}
+
+/// Where a probe module goes inside `container`: just before its closing brace.
+fn container_close(file: &str, module: &str, container: &Sym) -> Result<usize, Failure> {
+    let name = &container.name;
+    let parsed = crate::language::rust::split(file, module)?;
+    let piece = find_piece(&parsed.items, name).ok_or_else(|| Failure(format!("E1006 can't find the module {name} in {module}."), 1))?;
+    let text = &file[piece.item.clone()];
+    let close = text.rfind('}').ok_or_else(|| Failure(format!("E1006 can't find the end of {name}."), 1))?;
+    Ok(piece.item.start + close)
+}
+
+/// The piece whose full module chain is `name`, walking down the tree rather
+/// than taking the first equal name anywhere below it.
+fn find_piece<'a>(pieces: &'a [crate::language::rust::Piece], name: &str) -> Option<&'a crate::language::rust::Piece> {
+    let mut level = pieces;
+    let mut found = None;
+    let mut path = String::new();
+    for part in name.split("::") {
+        if !path.is_empty() {
+            path.push_str("::");
+        }
+        path.push_str(part);
+        let piece = level.iter().find(|piece| piece.name == path)?;
+        found = Some(piece);
+        level = &piece.children;
+    }
+    found
+}
+
+/// The libtest name of the generated probe, including the test's module.
+fn probe_test(target: &ModuleRow, container: Option<&Sym>) -> String {
+    let path = match container {
+        Some(parent) if target.path == "crate" => parent.name.clone(),
+        Some(parent) => format!("{}::{}", target.path, parent.name),
+        None => target.path.clone(),
+    };
+    if path == "crate" { format!("{PROBE}::probe") } else { format!("{path}::{PROBE}::probe") }
+}
+
+/// Where `--from` or `--in` runs the probe: the target module and, for
+/// `--from`, the function whose body comes first.
+fn probe_target<'a>(
+    s: &Store,
+    ix: &'a Index,
+    root: &'a ModuleRow,
+    module: Option<&str>,
+    from: Option<&str>,
+) -> Result<(&'a ModuleRow, Option<&'a Sym>), Failure> {
+    let (target, source) = match from {
+        Some(name) => {
+            let i = s.resolve(ix, name)?;
+            let sym = &ix.syms[i];
+            if sym.kind != Kind::Fn {
+                return fail(format!("E1005 {} isn't a function; --from takes a test or another function without arguments.", sym.qname()));
+            }
+            if !params(&sym.text, leaf_name(&sym.name)).is_empty() {
+                return fail(format!("E1005 {} takes arguments; --from takes a test or another function without arguments.", sym.qname()));
+            }
+            let target = s
+                .resolve_module(ix, &sym.module)
+                .ok_or_else(|| Failure(format!("E1006 {} isn't in a module the probe can run in.", sym.qname()), 1))?;
+            (target, Some(sym))
+        }
+        None => {
+            let target = match module {
+                Some(name) => match s.resolve_module(ix, name) {
+                    Some(m) => m,
+                    None => {
+                        return fail(format!(
+                            "E1001 unknown module: {name}; `--in` takes a module, e.g. `crate` (`view <module>` lists them)."
+                        ));
+                    }
+                },
+                None => root,
+            };
+            (target, None)
+        }
+    };
+    if target.file.as_deref().is_some_and(|f| f.starts_with("tests/")) {
+        if source.is_some() {
+            return fail(format!("E1006 {} is a test crate; `--from` takes a test in the crate.", target.path));
+        }
+        return fail(format!("E1006 {} is a test crate; `--in` takes a module of the crate.", target.path));
+    }
+    Ok((target, source))
+}
+
+/// The probe's line ranges: the wrapper, `from`'s body, the probe text, and
+/// the wrapper's end, named so diagnostics and panics point at the right place.
+fn probe_ranges(source: Option<&Sym>, start: usize, code: &str, text: &str) -> Vec<(usize, usize, String)> {
+    let (first, last) = probe_span(code, start);
+    let wrapper_end = start + code.lines().count() - 1;
+    let text_lines = probe_body(text).0.lines().count();
+    let mut ranges = vec![];
+    if first > start {
+        ranges.push((start, first - 1, crate::PROBE_START_RANGE.into()));
+    }
+    if last >= first {
+        if text_lines == 0 {
+            if let Some(sym) = source {
+                ranges.push((first, last, sym.qname()));
+            }
+        } else {
+            let text_first = last + 1 - text_lines;
+            if text_first > first
+                && let Some(sym) = source
+            {
+                ranges.push((first, text_first - 1, sym.qname()));
+            }
+            if last >= text_first {
+                ranges.push((text_first, last, crate::PROBE_RANGE.into()));
+            }
+        }
+    }
+    let end_start = last.saturating_add(1);
+    if wrapper_end >= end_start {
+        ranges.push((end_start, wrapper_end, crate::PROBE_END_RANGE.into()));
+    }
+    ranges
+}
+
+/// The from test whose body panicked before the probe's text ran, if a panic
+/// location falls in its source range.
+fn panicked_before_text<'a>(files: &'a [FileMap], output: &str) -> Option<&'a str> {
+    output.lines().find_map(|line| {
+        let (path, row) = panic_location(line)?;
+        let (_, sym) = diagnostics::locate(files, path, row)?;
+        let (name, _) = sym?;
+        (!cargo::is_probe_range(name)).then_some(name)
+    })
+}
+
+/// A panic line's `path` and line, from `panicked at path:line:column:`.
+fn panic_location(line: &str) -> Option<(&str, usize)> {
+    let at = line.find("panicked at ")? + "panicked at ".len();
+    let (path, row, _, _) = cargo::parse_location(&line[at..])?;
+    Some((path, row))
 }

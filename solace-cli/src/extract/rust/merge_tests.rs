@@ -1,6 +1,7 @@
 #![cfg(test)]
 use crate::testing::{CARGO, Scratch, rust_project};
-use crate::{Out, Store};
+use crate::{ Store};
+use crate::failure::Out;
 
 use super::super::tests::{id, ready, text};
 

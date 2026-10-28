@@ -11,7 +11,9 @@ pub mod rust;
 pub mod rust_refs;
 mod paths;
 
-use crate::{Diag, Failure, FileMap};
+use crate::diagnostics::FileMap;
+use crate::failure::Failure;
+use crate::diagnostics::Diag;
 use gleam::Gleam;
 use std::collections::BTreeMap;
 use std::path::Path;

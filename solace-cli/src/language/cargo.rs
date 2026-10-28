@@ -4,7 +4,12 @@
 //! machine without the Rust toolchain.
 
 use crate::fsx;
-use crate::{Diag, Failure, FileMap, fail, locate, strip_ansi};
+use crate::diagnostics::strip_ansi;
+use crate::diagnostics::locate;
+use crate::failure::fail;
+use crate::diagnostics::FileMap;
+use crate::failure::Failure;
+use crate::diagnostics::Diag;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -386,7 +391,7 @@ pub fn format_item(root: &Path, text: &str, opening: Option<&str>) -> Result<Str
         argv.push(config);
     }
     argv.push(file.to_string_lossy().to_string());
-    let output = Command::new(&argv[0]).args(&argv[1..]).output();
+    let output = Command::new(&argv[0]).args(&argv[1..]).current_dir(root).output();
     let formatted = fs::read_to_string(&file).unwrap_or(source);
     fs::remove_file(&file).ok();
     let output = output?;
@@ -480,7 +485,7 @@ pub fn format_module(root: &Path, source: &str) -> Result<String, Failure> {
     argv.push("--config".into());
     argv.push("skip_children=true,reorder_modules=false".into());
     argv.push(file.to_string_lossy().to_string());
-    let output = Command::new(&argv[0]).args(&argv[1..]).output();
+    let output = Command::new(&argv[0]).args(&argv[1..]).current_dir(root).output();
     let formatted = fs::read_to_string(&file).unwrap_or_else(|_| source.to_string());
     fs::remove_file(&file).ok();
     let output = output?;
@@ -573,7 +578,7 @@ fn location(files: &[FileMap], path: &str, row: usize) -> Option<String> {
 }
 
 /// Whether a line range belongs to the generated probe rather than a project symbol.
-fn is_probe_range(name: &str) -> bool {
+pub(crate) fn is_probe_range(name: &str) -> bool {
     name == crate::PROBE_RANGE || name == crate::PROBE_START_RANGE || name == crate::PROBE_END_RANGE
 }
 

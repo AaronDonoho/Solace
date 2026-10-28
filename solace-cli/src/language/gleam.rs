@@ -4,7 +4,12 @@
 //! a line-based splitter reliable. `gleam format` itself is the syntax check.
 
 use crate::language::{Import, Item, Kind, Language, Module, Ref, body_start, split_args};
-use crate::{Diag, Failure, FileMap, fail, locate, strip_ansi};
+use crate::diagnostics::strip_ansi;
+use crate::diagnostics::locate;
+use crate::failure::fail;
+use crate::diagnostics::FileMap;
+use crate::failure::Failure;
+use crate::diagnostics::Diag;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;

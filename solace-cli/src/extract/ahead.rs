@@ -8,6 +8,8 @@
 use super::*;
 use std::collections::{BTreeSet, HashSet};
 
+use serde_json::Value;
+use serde_json::json;
 /// The record's file in project `root`.
 fn path(root: &Path, rid: &str) -> PathBuf {
     root.join(".solace/pending").join(format!("extract-{rid}.json"))

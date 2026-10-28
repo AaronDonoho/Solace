@@ -10,7 +10,7 @@
 //! binding, a module's own item, or a named import that hides a glob is not a
 //! use.
 
-use crate::{ModuleRow, Sym};
+use crate::{Failure, ModuleRow, Sym};
 use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};
 use std::collections::{HashMap, HashSet};
 use syn::Meta;
@@ -25,6 +25,8 @@ pub struct Graph {
     /// The references that need type inference: (target, line), as in `at`.
     pub possible: Vec<Vec<(usize, usize)>>,
     pub test: Vec<bool>,
+    /// The modules that hold tests (D-170).
+    pub test_modules: HashSet<String>,
 }
 
 /// Builds the graph of `syms`, named as `modules` names them.
@@ -75,7 +77,8 @@ pub fn graph(syms: &[Sym], modules: &[ModuleRow]) -> Graph {
             used_by[u].push(j);
         }
     }
-    Graph { uses, used_by, at, possible, test: test_flags(syms, modules) }
+    let test_modules = test_modules(syms, modules);
+    Graph { uses, used_by, at, possible, test: test_flags(syms, &test_modules), test_modules }
 }
 
 /// Whether `text` carries a test attribute: `#[test]`, or `#[<path>::test]`
@@ -855,35 +858,8 @@ impl<'a> Refs<'a> {
 
 /// Whether each symbol is test code (D-170): the `tests/` folder, anything
 /// under a `#[cfg(test)]` module, and `#[test]` functions.
-fn test_flags(syms: &[Sym], modules: &[ModuleRow]) -> Vec<bool> {
+fn test_flags(syms: &[Sym], test_mods: &HashSet<String>) -> Vec<bool> {
     let attrs: Vec<Vec<String>> = syms.iter().map(|s| outer_attrs(&s.text)).collect();
-    let mut declared: HashSet<(String, String)> = HashSet::new();
-    for m in modules {
-        header_cfg_mods(&m.header, &m.path, &mut declared);
-    }
-    for (i, s) in syms.iter().enumerate() {
-        if s.kind_text == "mod" && s.text.trim_end().ends_with(';') && cfg_test_in(&attrs[i]) {
-            declared.insert((s.module.clone(), leaf(&s.name).to_string()));
-        }
-    }
-    let mut test_mods: HashSet<String> = modules.iter().filter(|m| m.dir == "tests").map(|m| m.path.clone()).collect();
-    loop {
-        let mut added = false;
-        for m in modules {
-            if test_mods.contains(&m.path) {
-                continue;
-            }
-            let name = m.path.rsplit("::").next().unwrap_or(&m.path).to_string();
-            let parent = m.path.rsplit_once("::").map_or("crate", |(p, _)| p).to_string();
-            if declared.contains(&(parent.clone(), name)) || test_mods.contains(&parent) {
-                test_mods.insert(m.path.clone());
-                added = true;
-            }
-        }
-        if !added {
-            break;
-        }
-    }
     let by_id: HashMap<&str, usize> = syms.iter().enumerate().map(|(i, s)| (s.id.as_str(), i)).collect();
     syms.iter()
         .enumerate()
@@ -1509,7 +1485,7 @@ fn one_target(mut targets: Vec<usize>, via: Via) -> Option<(usize, Via)> {
 }
 
 /// The `use` tree sites of `module`: its header's lines and its `use` symbols.
-pub fn use_sites(syms: &[Sym], modules: &[ModuleRow], module: &str) -> Result<Vec<Site>, crate::Failure> {
+pub fn use_sites(syms: &[Sym], modules: &[ModuleRow], module: &str) -> Result<Vec<Site>, Failure> {
     let refs = Refs::new(syms, modules);
     let mut out = vec![];
     let unparsed = unparsed_imports(module);
@@ -1983,8 +1959,8 @@ fn use_site_target(refs: &Refs, module: &str, scope: Option<usize>, segs: &[Stri
 }
 
 /// The failure for `module`'s imports that don't parse.
-fn unparsed_imports(module: &str) -> impl Fn(syn::Error) -> crate::Failure + '_ {
-    move |e| crate::Failure(format!("imports in {module} don't parse: {e}"), 1)
+fn unparsed_imports(module: &str) -> impl Fn(syn::Error) -> Failure + '_ {
+    move |e| Failure(format!("imports in {module} don't parse: {e}"), 1)
 }
 
 /// One `use` tree's binding, and where it is written.
@@ -2001,7 +1977,7 @@ pub(crate) struct ImportSite {
 
 /// Every import binding of `module`: its header's lines, its `use` symbols and
 /// the imports an inline module holds before its first item.
-pub(crate) fn import_sites(syms: &[Sym], modules: &[ModuleRow], module: &str, root_only: bool) -> Result<Vec<ImportSite>, crate::Failure> {
+pub(crate) fn import_sites(syms: &[Sym], modules: &[ModuleRow], module: &str, root_only: bool) -> Result<Vec<ImportSite>, Failure> {
     let unparsed = unparsed_imports(module);
     let mut out = vec![];
     if let Some(row) = modules.iter().find(|m| m.path == module) {
@@ -2342,7 +2318,7 @@ pub(crate) fn references<'a>(syms: &'a [Sym], modules: &'a [ModuleRow]) -> Refer
     References { refs, modules, mentioned }
 }
 
-pub(crate) fn references_external_imports(refs: &References, module: &str) -> Result<Vec<ImportSite>, crate::Failure> {
+pub(crate) fn references_external_imports(refs: &References, module: &str) -> Result<Vec<ImportSite>, Failure> {
     Ok(import_sites(refs.refs.syms, refs.modules, module, true)?
         .into_iter()
         .filter(|site| block_use_targets(&refs.refs, module, None, &site.path).is_none())
@@ -2350,7 +2326,7 @@ pub(crate) fn references_external_imports(refs: &References, module: &str) -> Re
 }
 
 /// The traits `module` imports by name, with the import that binds each.
-pub(crate) fn imported_traits(refs: &References, module: &str) -> Result<Vec<(usize, ImportSite)>, crate::Failure> {
+pub(crate) fn imported_traits(refs: &References, module: &str) -> Result<Vec<(usize, ImportSite)>, Failure> {
     let mut out = vec![];
     for site in import_sites(refs.refs.syms, refs.modules, module, true)? {
         if site.glob {
@@ -2519,8 +2495,9 @@ fn method_targets(refs: &Refs, name: &str) -> Vec<usize> {
         .unwrap_or_default()
 }
 
-/// The statics a `thread_local!` item declares, in order.
-pub(crate) fn thread_local_names(text: &str) -> Vec<String> {
+/// The statics a `thread_local!` item declares, in order: its name, the byte
+/// range of its `static` keyword, and whether it is already visible.
+pub(crate) fn thread_local_names(text: &str) -> Vec<(String, std::ops::Range<usize>, bool)> {
     let Ok(item) = syn::parse_str::<syn::ItemMacro>(text) else { return vec![] };
     if !item.mac.path.segments.last().is_some_and(|s| s.ident == "thread_local") {
         return vec![];
@@ -2532,7 +2509,11 @@ pub(crate) fn thread_local_names(text: &str) -> Vec<String> {
         decl.extend(std::iter::once(tree));
         if end {
             if let Ok(stat) = syn::parse2::<syn::ItemStatic>(decl) {
-                names.push(stat.ident.to_string());
+                names.push((
+                    stat.ident.to_string(),
+                    syn::spanned::Spanned::span(&stat.static_token).byte_range(),
+                    !matches!(stat.vis, syn::Visibility::Inherited),
+                ));
             }
             decl = proc_macro2::TokenStream::new();
         }
@@ -2702,4 +2683,38 @@ fn follows_unicode_escape(bytes: &[u8], at: usize) -> bool {
         i -= 1;
     }
     backslashes % 2 == 1
+}
+
+/// The modules that hold test code (D-170): the `tests/` folder, and every
+/// module declared under `#[cfg(test)]`, with everything below it.
+fn test_modules(syms: &[Sym], modules: &[ModuleRow]) -> HashSet<String> {
+    let attrs: Vec<Vec<String>> = syms.iter().map(|s| outer_attrs(&s.text)).collect();
+    let mut declared: HashSet<(String, String)> = HashSet::new();
+    for m in modules {
+        header_cfg_mods(&m.header, &m.path, &mut declared);
+    }
+    for (i, s) in syms.iter().enumerate() {
+        if s.kind_text == "mod" && s.text.trim_end().ends_with(';') && cfg_test_in(&attrs[i]) {
+            declared.insert((s.module.clone(), leaf(&s.name).to_string()));
+        }
+    }
+    let mut test_mods: HashSet<String> = modules.iter().filter(|m| m.dir == "tests").map(|m| m.path.clone()).collect();
+    loop {
+        let mut added = false;
+        for m in modules {
+            if test_mods.contains(&m.path) {
+                continue;
+            }
+            let name = m.path.rsplit("::").next().unwrap_or(&m.path).to_string();
+            let parent = m.path.rsplit_once("::").map_or("crate", |(p, _)| p).to_string();
+            if declared.contains(&(parent.clone(), name)) || test_mods.contains(&parent) {
+                test_mods.insert(m.path.clone());
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    test_mods
 }
